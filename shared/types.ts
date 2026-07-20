@@ -53,6 +53,8 @@ export interface SessionMeta {
   caveman: CavemanConfig;
   status: SessionStatus;
   createdAt: number;
+  /** True until the name is either auto-generated from the first prompt or renamed by the user. */
+  nameAuto?: boolean;
   claudeSessionId?: string;
   workflow?: WorkflowState;
   lastCostUsd?: number;

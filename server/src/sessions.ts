@@ -155,6 +155,7 @@ export class SessionManager {
       caveman: params.caveman,
       status: 'idle',
       createdAt: Date.now(),
+      nameAuto: true,
     };
     store.addRecentDir(params.cwd);
     this.upsert(meta);
@@ -177,6 +178,14 @@ export class SessionManager {
     const state = this.liveState(sessionId);
 
     this.emitEvent(sessionId, 'user', { text, source });
+
+    // First real user prompt names the session from its topic. Guard flips
+    // immediately so a slow title query can't fire twice or clobber a manual rename.
+    if (source === 'user' && meta.nameAuto) {
+      meta.nameAuto = false;
+      void this.autoName(sessionId, text);
+    }
+
     this.ensureQuery(meta, state);
     state.turnSource = source;
     this.setStatus(sessionId, 'running');
@@ -187,6 +196,42 @@ export class SessionManager {
       parent_tool_use_id: null,
       session_id: meta.claudeSessionId ?? '',
     } as SDKUserMessage);
+  }
+
+  /**
+   * Generate a short session title from the first prompt via a one-shot Haiku
+   * query (no tools, no session context). Fire-and-forget; failure keeps the
+   * default name. upsert() broadcasts the rename to the UI.
+   */
+  private async autoName(sessionId: string, prompt: string) {
+    try {
+      const q = query({
+        prompt:
+          'Write a 3-6 word title summarizing this task. Only output the title: ' +
+          'no quotes, no trailing punctuation, no preamble.\n\n' +
+          prompt.slice(0, 2000),
+        options: {
+          model: 'claude-haiku-4-5-20251001',
+          maxTurns: 1,
+          allowedTools: [],
+          settingSources: [],
+        } as never,
+      });
+      let title: string | null = null;
+      for await (const message of q) {
+        const msg = message as { type: string; result?: string };
+        if (msg.type === 'result' && typeof msg.result === 'string') {
+          title = msg.result.trim().replace(/^["']|["']$/g, '').slice(0, 60);
+        }
+      }
+      if (!title) return;
+      const meta = this.sessions.get(sessionId);
+      if (!meta) return;
+      meta.name = title;
+      this.upsert(meta);
+    } catch (err) {
+      console.warn('[autoName]', err);
+    }
   }
 
   async interrupt(sessionId: string) {
