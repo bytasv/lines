@@ -1,0 +1,60 @@
+# Claude UI
+
+Local web GUI for the Claude CLI. React + Mantine frontend, thin Node bridge that drives
+Claude sessions through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk)
+and streams everything to the browser over WebSocket.
+
+## Features
+
+- **Sessions sidebar** — create sessions per project directory, live status badges
+  (running / needs permission / needs approval / error), parallel sessions.
+- **Streaming output** — token-level streaming into a markdown transcript.
+- **Modes & models** — toggle Agent / Accept edits / Plan / Bypass and switch models
+  mid-session from the composer.
+- **Tool calls** — collapsed cards per tool call; `Edit`/`Write`/`MultiEdit` show
+  +N/−N stats and zoom into a full-screen **Monaco diff editor** (pre-edit content is
+  snapshotted server-side via a PreToolUse hook, so diffs are faithful).
+- **Permission prompts** — tool permission requests appear inline with Allow / Deny.
+- **Workflows** — define multi-step run recipes (e.g. Plan → Implement MVP → Tests →
+  Refactor → Review, shipped as default). Each step has its own prompt template
+  (`{task}`, `{feedback}` placeholders), model, permission mode, and auto/manual
+  advance. Manual steps gate on your Approve / Retry-with-feedback.
+- **Caveman mode** — [caveman](https://github.com/JuliusBrussee/caveman) token-saving
+  plugin vendored automatically and enabled per session (default on, level
+  lite/full/ultra). Falls back to prompt injection if the plugin can't be cloned.
+- **Persistence** — sessions, workflows, and JSONL transcripts live in `~/.claude-ui/`;
+  transcripts replay on page load and sessions resume across server restarts via the
+  CLI session id.
+
+## Requirements
+
+- Node 20+
+- Claude Code CLI authenticated on this machine (the Agent SDK bundles the CLI binary
+  and reuses your existing login)
+- `git` (for vendoring the caveman plugin; optional)
+
+## Run
+
+```sh
+npm install
+npm run dev
+```
+
+Open http://localhost:5173. The bridge server listens on `:8787`.
+
+## Layout
+
+```
+shared/   WS protocol + shared types
+server/   Node bridge: SessionManager (Agent SDK streaming queries),
+          WorkflowEngine, JSONL/JSON persistence, caveman vendoring
+web/      Vite + React + Mantine SPA: sidebar, transcript, Monaco diffs,
+          workflow stepper/editor
+```
+
+## Notes
+
+- Each session holds one long-lived streaming SDK query; interrupts, model switches,
+  and permission-mode switches apply live. Toggling caveman restarts the query
+  (context is preserved via `resume`).
+- State is stored in `~/.claude-ui/{sessions.json,workflows.json,transcripts/*.jsonl}`.

@@ -1,0 +1,178 @@
+import {
+  ActionIcon,
+  Badge,
+  Box,
+  Button,
+  Group,
+  Indicator,
+  Loader,
+  Menu,
+  ScrollArea,
+  Stack,
+  Text,
+  Tooltip,
+  UnstyledButton,
+} from '@mantine/core';
+import { IconChevronDown, IconPlus, IconRoute, IconTrash } from '@tabler/icons-react';
+import { Link } from 'react-router-dom';
+import type { SessionMeta, SessionStatus } from '@claude-ui/shared';
+import { DEFAULT_MODEL } from '@claude-ui/shared';
+import { useStore } from '../store';
+import { send } from '../ws';
+
+const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
+  idle: { color: 'gray', label: 'idle' },
+  running: { color: 'blue', label: 'running' },
+  'waiting-permission': { color: 'yellow', label: 'needs permission' },
+  'waiting-approval': { color: 'orange', label: 'needs approval' },
+  error: { color: 'red', label: 'error' },
+};
+
+function SessionRow({ session, selected }: { session: SessionMeta; selected: boolean }) {
+  const status = STATUS_META[session.status] ?? STATUS_META.idle;
+
+  return (
+    <UnstyledButton
+      component={Link}
+      to={`/session/${session.id}`}
+      px="sm"
+      py={6}
+      style={{
+        display: 'block',
+        borderRadius: 8,
+        textDecoration: 'none',
+        color: 'inherit',
+        background: selected ? 'var(--mantine-color-default-hover)' : undefined,
+      }}
+    >
+      <Group gap="xs" wrap="nowrap" justify="space-between">
+        <Box style={{ minWidth: 0 }}>
+          <Group gap={6} wrap="nowrap">
+            {session.status === 'running' ? (
+              <Loader size={10} />
+            ) : (
+              <Indicator color={status.color} size={7} processing={session.status !== 'idle'} />
+            )}
+            <Text size="sm" fw={500} truncate>
+              {session.name}
+            </Text>
+          </Group>
+          <Group gap={6} wrap="nowrap">
+            <Text size="xs" c="dimmed">
+              {new Date(session.createdAt).toLocaleDateString()}
+            </Text>
+            {session.workflow && (
+              <Badge variant="light" color="grape" size="xs" px={5}>
+                wf
+              </Badge>
+            )}
+            {session.status !== 'idle' && session.status !== 'running' && (
+              <Badge variant="light" color={status.color} size="xs" px={5}>
+                {status.label}
+              </Badge>
+            )}
+          </Group>
+        </Box>
+        <Tooltip label="Delete session">
+          <ActionIcon
+            size="xs"
+            variant="subtle"
+            color="gray"
+            onClick={(e) => {
+              e.preventDefault(); // don't follow the row link
+              e.stopPropagation();
+              if (confirm(`Delete session "${session.name}"?`)) {
+                send({ type: 'deleteSession', sessionId: session.id });
+              }
+            }}
+          >
+            <IconTrash size={13} />
+          </ActionIcon>
+        </Tooltip>
+      </Group>
+    </UnstyledButton>
+  );
+}
+
+export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
+  const sessions = useStore((s) => s.sessions);
+  const workflows = useStore((s) => s.workflows);
+  const selectedSessionId = useStore((s) => s.selectedSessionId);
+  const activeProject = useStore((s) => s.activeProject);
+
+  const list = Object.values(sessions)
+    .filter((s) => s.cwd === activeProject)
+    .sort((a, b) => b.createdAt - a.createdAt);
+
+  // No popup: new sessions inherit settings from the project's latest session.
+  const createSession = (workflowId?: string) => {
+    if (!activeProject) return;
+    const dirName = activeProject.split('/').filter(Boolean).pop() ?? 'session';
+    const last = list[0];
+    send({
+      type: 'createSession',
+      name: `${dirName}-${list.length + 1}`,
+      cwd: activeProject,
+      model: last?.model ?? DEFAULT_MODEL,
+      permissionMode: last?.permissionMode ?? 'default',
+      caveman: last?.caveman ?? { enabled: true, level: 'full' },
+      workflowId,
+    });
+  };
+
+  return (
+    <Stack gap={0} h="100%">
+      <Group px="sm" py="xs" justify="space-between">
+        <Text size="xs" fw={600} c="dimmed" tt="uppercase">
+          Sessions
+        </Text>
+        <Tooltip label="Workflows">
+          <ActionIcon variant="subtle" color="gray" size="sm" onClick={onEditWorkflows}>
+            <IconRoute size={15} />
+          </ActionIcon>
+        </Tooltip>
+      </Group>
+      <Box px="sm" pb="xs">
+        <Group gap={4} wrap="nowrap">
+          <Button
+            style={{ flex: 1 }}
+            leftSection={<IconPlus size={14} />}
+            onClick={() => createSession()}
+            disabled={!activeProject}
+          >
+            New session
+          </Button>
+          {workflows.length > 0 && (
+            <Menu position="bottom-end" width={220}>
+              <Menu.Target>
+                <ActionIcon size={36} variant="light" disabled={!activeProject}>
+                  <IconChevronDown size={14} />
+                </ActionIcon>
+              </Menu.Target>
+              <Menu.Dropdown>
+                <Menu.Label>New session with workflow</Menu.Label>
+                {workflows.map((w) => (
+                  <Menu.Item key={w.id} onClick={() => createSession(w.id)}>
+                    {w.name}
+                  </Menu.Item>
+                ))}
+              </Menu.Dropdown>
+            </Menu>
+          )}
+        </Group>
+      </Box>
+      <ScrollArea style={{ flex: 1 }} px={6}>
+        <Stack gap={2} pb="sm">
+          {list.map((s) => (
+            <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
+          ))}
+          {list.length === 0 && (
+            <Text size="xs" c="dimmed" ta="center" pt="lg">
+              No sessions in this project yet
+            </Text>
+          )}
+        </Stack>
+      </ScrollArea>
+    </Stack>
+  );
+}
