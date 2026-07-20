@@ -8,11 +8,31 @@ export type PermissionMode = 'default' | 'auto' | 'plan' | 'acceptEdits' | 'bypa
 export type SessionStatus =
   | 'idle'
   | 'running'
+  | 'done'
   | 'waiting-permission'
   | 'waiting-approval'
   | 'error';
 
 export type CavemanLevel = 'lite' | 'full' | 'ultra';
+
+/** How an attachment is presented to the model. */
+export type AttachmentKind = 'image' | 'document' | 'text';
+
+/** An attachment sent with a prompt (client -> server). `data` is raw base64 (no data: URI prefix). */
+export interface PromptAttachment {
+  name: string;
+  mediaType: string;
+  data: string;
+}
+
+/** A persisted attachment reference, stored in the user transcript event and served over HTTP. */
+export interface Attachment {
+  name: string;
+  mediaType: string;
+  kind: AttachmentKind;
+  /** Server route to fetch the stored file, e.g. /attachments/<sessionId>/<file>. */
+  url: string;
+}
 
 export interface CavemanConfig {
   enabled: boolean;
@@ -60,6 +80,16 @@ export interface SessionMeta {
   lastCostUsd?: number;
   totalCostUsd?: number;
   errorMessage?: string;
+  /** Archived sessions move to a separate section and are hidden from the active list. */
+  archived?: boolean;
+  archivedAt?: number;
+  /** Marked done by the user; shows a special indicator and is archived. */
+  completed?: boolean;
+  /**
+   * Who initiated the turn currently in flight — drives workflow advancement.
+   * Persisted so a bridge restart mid-turn doesn't misattribute the result.
+   */
+  turnSource?: 'user' | 'workflow';
 }
 
 export interface ModelOption {
@@ -100,6 +130,12 @@ export interface PermissionRequestData {
   resolution?: 'allow' | 'deny' | 'expired';
   /** For AskUserQuestion: question text -> selected label(s) the user chose. */
   answers?: Record<string, string>;
+  /**
+   * On 'allow' resolutions: the (possibly edited) input the user approved.
+   * Recorded so a re-delivered permission request after a bridge restart can
+   * be answered from the transcript with the exact approved input.
+   */
+  updatedInput?: Record<string, unknown>;
   /** True when the auto-mode guard approved this call without asking. */
   auto?: boolean;
   /** Why the auto-mode guard flagged this call for manual review. */
@@ -130,8 +166,12 @@ export interface WorkflowMarkerData {
 export type ClientMessage =
   | { type: 'createSession'; name: string; cwd: string; model: string; permissionMode: PermissionMode; caveman: CavemanConfig; workflowId?: string }
   | { type: 'deleteSession'; sessionId: string }
-  | { type: 'prompt'; sessionId: string; text: string }
+  | { type: 'prompt'; sessionId: string; text: string; attachments?: PromptAttachment[] }
   | { type: 'interrupt'; sessionId: string }
+  | { type: 'ackSession'; sessionId: string }
+  | { type: 'archiveSession'; sessionId: string }
+  | { type: 'unarchiveSession'; sessionId: string }
+  | { type: 'completeSession'; sessionId: string }
   | { type: 'setModel'; sessionId: string; model: string }
   | { type: 'setPermissionMode'; sessionId: string; mode: PermissionMode }
   | { type: 'setCaveman'; sessionId: string; caveman: CavemanConfig }

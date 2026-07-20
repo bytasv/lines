@@ -1,11 +1,14 @@
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import type {
+  Attachment,
+  AttachmentKind,
   CavemanConfig,
   FileSnapshotData,
   PermissionMode,
   PermissionRequestData,
+  PromptAttachment,
   ServerMessage,
   SessionMeta,
   SessionStatus,
@@ -20,44 +23,14 @@ import {
   getGuardAllowlist,
   setGuardAllowlist,
 } from './autoGuard.ts';
+import type { WorkerClient, WorkerRpc } from './workerClient.ts';
+import type { LiveSessionInfo } from './workerProtocol.ts';
 
 setGuardAllowlist(store.loadGuardAllowlist([]));
 
 /** 'auto' is our guard layer on top of the SDK's acceptEdits mode. */
 function sdkPermissionMode(mode: PermissionMode): string {
   return mode === 'auto' ? 'acceptEdits' : mode;
-}
-
-/** Push-based async iterable used as the streaming-input prompt for the SDK. */
-class AsyncQueue<T> implements AsyncIterable<T> {
-  private items: T[] = [];
-  private resolvers: ((v: IteratorResult<T>) => void)[] = [];
-  private closed = false;
-
-  push(item: T) {
-    const resolve = this.resolvers.shift();
-    if (resolve) resolve({ value: item, done: false });
-    else this.items.push(item);
-  }
-
-  close() {
-    this.closed = true;
-    for (const resolve of this.resolvers.splice(0)) {
-      resolve({ value: undefined as never, done: true });
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<T> {
-    return {
-      next: () => {
-        if (this.items.length > 0) {
-          return Promise.resolve({ value: this.items.shift()!, done: false });
-        }
-        if (this.closed) return Promise.resolve({ value: undefined as never, done: true });
-        return new Promise((resolve) => this.resolvers.push(resolve));
-      },
-    };
-  }
 }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
@@ -68,13 +41,14 @@ interface PermissionAnswer {
   denyMessage?: string;
 }
 
+/** SDK PermissionResult shape returned to the worker's canUseTool rpc. */
+type PermissionResult =
+  | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
+  | { behavior: 'deny'; message: string };
+
 interface LiveState {
-  queue: AsyncQueue<SDKUserMessage> | null;
-  query: Query | null;
   seq: number;
   pendingPermissions: Map<string, (answer: PermissionAnswer) => void>;
-  /** Who initiated the turn currently in flight — drives workflow advancement. */
-  turnSource: 'user' | 'workflow' | null;
 }
 
 export type TurnCompleteListener = (sessionId: string, source: 'user' | 'workflow') => void;
@@ -83,9 +57,15 @@ export class SessionManager {
   private sessions = new Map<string, SessionMeta>();
   private live = new Map<string, LiveState>();
   private onTurnComplete: TurnCompleteListener | null = null;
+  private worker!: WorkerClient;
 
   constructor(private broadcast: (msg: ServerMessage) => void) {
     for (const meta of store.loadSessions()) this.sessions.set(meta.id, meta);
+  }
+
+  /** Wired by index.ts right after construction, before any client can prompt. */
+  attachWorker(worker: WorkerClient) {
+    this.worker = worker;
   }
 
   setTurnCompleteListener(fn: TurnCompleteListener) {
@@ -118,10 +98,45 @@ export class SessionManager {
     this.upsert(meta);
   }
 
+  /** Clears the post-turn 'done' badge once the user views the session. */
+  ackSession(id: string) {
+    const meta = this.sessions.get(id);
+    if (!meta || meta.status !== 'done') return;
+    meta.status = 'idle';
+    this.upsert(meta);
+  }
+
+  archiveSession(id: string) {
+    const meta = this.sessions.get(id);
+    if (!meta) return;
+    meta.archived = true;
+    meta.archivedAt = Date.now();
+    this.upsert(meta);
+  }
+
+  /** Mark done by the user: adds the completed indicator and archives. */
+  completeSession(id: string) {
+    const meta = this.sessions.get(id);
+    if (!meta) return;
+    meta.completed = true;
+    meta.archived = true;
+    meta.archivedAt = Date.now();
+    this.upsert(meta);
+  }
+
+  unarchiveSession(id: string) {
+    const meta = this.sessions.get(id);
+    if (!meta) return;
+    meta.archived = false;
+    meta.archivedAt = undefined;
+    meta.completed = false;
+    this.upsert(meta);
+  }
+
   private liveState(id: string): LiveState {
     let state = this.live.get(id);
     if (!state) {
-      state = { queue: null, query: null, seq: this.nextSeqFromDisk(id), pendingPermissions: new Map(), turnSource: null };
+      state = { seq: this.nextSeqFromDisk(id), pendingPermissions: new Map() };
       this.live.set(id, state);
     }
     return state;
@@ -162,8 +177,9 @@ export class SessionManager {
     return meta;
   }
 
-  async deleteSession(id: string) {
-    await this.shutdownQuery(id);
+  deleteSession(id: string) {
+    this.worker.close(id);
+    this.flushPending(id); // the session is gone with its cards
     this.sessions.delete(id);
     this.live.delete(id);
     store.deleteTranscript(id);
@@ -171,13 +187,70 @@ export class SessionManager {
     this.broadcast({ type: 'sessionDeleted', sessionId: id });
   }
 
-  /** Send a prompt into the session, starting the SDK query if needed. */
-  prompt(sessionId: string, text: string, source: 'user' | 'workflow' = 'user') {
+  /**
+   * The serializable half of the SDK query options. The worker splices in the
+   * non-serializable callbacks (canUseTool, hooks, stderr) on its side.
+   */
+  private buildQueryOptions(meta: SessionMeta): Record<string, unknown> {
+    const pluginPath = meta.caveman.enabled ? getCavemanPluginPath() : null;
+    const appendParts: string[] = [];
+    if (meta.caveman.enabled && !pluginPath) {
+      appendParts.push(cavemanPromptFallback(meta.caveman.level));
+    } else if (meta.caveman.enabled && meta.caveman.level !== 'full') {
+      appendParts.push(`Caveman level: ${meta.caveman.level}. Apply /caveman ${meta.caveman.level} intensity.`);
+    }
+
+    return {
+      cwd: meta.cwd,
+      model: meta.model,
+      permissionMode: sdkPermissionMode(meta.permissionMode),
+      includePartialMessages: true,
+      resume: meta.claudeSessionId,
+      systemPrompt: {
+        type: 'preset',
+        preset: 'claude_code',
+        ...(appendParts.length > 0 ? { append: appendParts.join('\n\n') } : {}),
+      },
+      settingSources: ['user', 'project'],
+      ...(pluginPath ? { plugins: [{ type: 'local', path: pluginPath }] } : {}),
+    };
+  }
+
+  /** Send a prompt into the session; the worker starts the SDK query if needed. */
+  prompt(
+    sessionId: string,
+    text: string,
+    source: 'user' | 'workflow' = 'user',
+    attachments: PromptAttachment[] = [],
+  ) {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`unknown session ${sessionId}`);
-    const state = this.liveState(sessionId);
 
-    this.emitEvent(sessionId, 'user', { text, source });
+    // Sending a message reactivates an archived/completed session.
+    if (meta.archived) {
+      meta.archived = false;
+      meta.archivedAt = undefined;
+      meta.completed = false;
+    }
+
+    // Persist attachments to disk and build both the transcript refs and the SDK content blocks.
+    const stored: Attachment[] = [];
+    const blocks: unknown[] = [];
+    for (const att of attachments) {
+      const kind = attachmentKind(att.mediaType);
+      const file = store.saveAttachment(sessionId, att.name, att.data);
+      stored.push({ name: att.name, mediaType: att.mediaType, kind, url: `/attachments/${sessionId}/${file}` });
+      if (kind === 'image') {
+        blocks.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.data } });
+      } else if (kind === 'document') {
+        blocks.push({ type: 'document', source: { type: 'base64', media_type: att.mediaType, data: att.data } });
+      } else {
+        const content = Buffer.from(att.data, 'base64').toString('utf8');
+        blocks.push({ type: 'text', text: `Attached file "${att.name}":\n\`\`\`\n${content}\n\`\`\`` });
+      }
+    }
+
+    this.emitEvent(sessionId, 'user', stored.length ? { text, source, attachments: stored } : { text, source });
 
     // First real user prompt names the session from its topic. Guard flips
     // immediately so a slow title query can't fire twice or clobber a manual rename.
@@ -186,22 +259,24 @@ export class SessionManager {
       void this.autoName(sessionId, text);
     }
 
-    this.ensureQuery(meta, state);
-    state.turnSource = source;
-    this.setStatus(sessionId, 'running');
+    // Persisted (not just in-memory) so a bridge restart mid-turn still
+    // attributes the eventual result to the right initiator.
+    meta.turnSource = source;
+    this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
-    state.queue!.push({
-      type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text }] },
-      parent_tool_use_id: null,
-      session_id: meta.claudeSessionId ?? '',
-    } as SDKUserMessage);
+    const content = [...blocks, ...(text ? [{ type: 'text', text }] : [])];
+    this.worker.push(
+      sessionId,
+      { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null },
+      this.buildQueryOptions(meta),
+    );
   }
 
   /**
    * Generate a short session title from the first prompt via a one-shot Haiku
    * query (no tools, no session context). Fire-and-forget; failure keeps the
-   * default name. upsert() broadcasts the rename to the UI.
+   * default name. upsert() broadcasts the rename to the UI. Runs in the
+   * bridge on purpose — losing it to a restart only costs a title.
    */
   private async autoName(sessionId: string, prompt: string) {
     try {
@@ -234,13 +309,8 @@ export class SessionManager {
     }
   }
 
-  async interrupt(sessionId: string) {
-    const state = this.live.get(sessionId);
-    try {
-      await state?.query?.interrupt();
-    } catch (err) {
-      console.warn('[interrupt]', err);
-    }
+  interrupt(sessionId: string) {
+    this.worker.interrupt(sessionId);
     // Deny anything waiting on the user so the query is not stuck; user
     // explicitly stopped, so close the cards too.
     this.flushPending(sessionId, { emitResolution: 'deny' });
@@ -248,10 +318,11 @@ export class SessionManager {
   }
 
   /**
-   * Resolve every pending permission promise as denied so the dying query is
-   * not stuck. By default the UI cards are left open: an unresolved request
-   * can still be answered later via the resume-recovery path in
-   * resolvePermission(), so the user never has to re-prompt.
+   * Resolve every pending permission promise as denied. By default the UI
+   * cards are left open: an unresolved request can still be answered later —
+   * the worker re-delivers open requests after a bridge restart, and the
+   * resume-recovery path in resolvePermission() covers truly dead queries,
+   * so the user never has to re-prompt.
    */
   private flushPending(sessionId: string, opts: { emitResolution?: 'deny' | 'expired' } = {}) {
     const state = this.live.get(sessionId);
@@ -280,11 +351,21 @@ export class SessionManager {
     return null;
   }
 
+  /** Look up a recorded resolution for a permission request in the transcript. */
+  private findPermissionResolution(sessionId: string, requestId: string): PermissionRequestData | null {
+    for (const event of store.loadTranscript(sessionId)) {
+      if (event.kind !== 'permission') continue;
+      const data = event.data as PermissionRequestData;
+      if (data.requestId === requestId && data.resolution) return data;
+    }
+    return null;
+  }
+
   /**
-   * The query that asked this permission is gone (server restart, caveman
-   * toggle, crash) — the CLI turn died with it. Recover by resuming the
-   * session and telling Claude what the user decided, so no re-prompt is
-   * needed even hours later.
+   * The query that asked this permission is gone (worker crash, caveman
+   * toggle) — the CLI turn died with it. Recover by resuming the session and
+   * telling Claude what the user decided, so no re-prompt is needed even
+   * hours later.
    */
   private recoverOrphanedPermission(
     sessionId: string,
@@ -349,45 +430,30 @@ export class SessionManager {
     this.prompt(sessionId, text, wfRunning ? 'workflow' : 'user');
   }
 
-  async setModel(sessionId: string, model: string) {
+  setModel(sessionId: string, model: string) {
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
     meta.model = model;
     this.upsert(meta);
-    const state = this.live.get(sessionId);
-    if (state?.query) {
-      try {
-        await state.query.setModel(model);
-      } catch (err) {
-        console.warn('[setModel]', err);
-      }
-    }
+    this.worker.setModel(sessionId, model);
   }
 
-  async setPermissionMode(sessionId: string, mode: PermissionMode) {
+  setPermissionMode(sessionId: string, mode: PermissionMode) {
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
     meta.permissionMode = mode;
     this.upsert(meta);
-    const state = this.live.get(sessionId);
-    if (state?.query) {
-      try {
-        await (state.query as { setPermissionMode: (m: string) => Promise<void> }).setPermissionMode(
-          sdkPermissionMode(mode),
-        );
-      } catch (err) {
-        console.warn('[setPermissionMode]', err);
-      }
-    }
+    this.worker.setPermissionMode(sessionId, sdkPermissionMode(mode));
   }
 
   /** Caveman toggling requires new query options; restart the query (resume keeps context). */
-  async setCaveman(sessionId: string, caveman: CavemanConfig) {
+  setCaveman(sessionId: string, caveman: CavemanConfig) {
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
     meta.caveman = caveman;
     this.upsert(meta);
-    await this.shutdownQuery(sessionId);
+    this.flushPending(sessionId); // cards stay open; answers recover via resume
+    this.worker.close(sessionId);
   }
 
   resolvePermission(
@@ -423,12 +489,15 @@ export class SessionManager {
       return;
     }
     state!.pendingPermissions.delete(requestId);
+    // updatedInput is recorded so a worker rpc re-send after a bridge restart
+    // can be answered from the transcript with the exact approved input.
     this.emitEvent(sessionId, 'permission', {
       requestId,
       toolName: '',
       input: {},
       resolution: allow ? 'allow' : 'deny',
       answers,
+      updatedInput,
     } satisfies PermissionRequestData);
     resolve({ allow, updatedInput, denyMessage });
 
@@ -444,149 +513,208 @@ export class SessionManager {
     }
   }
 
-  private async shutdownQuery(sessionId: string) {
-    const state = this.live.get(sessionId);
-    if (!state?.queue) return;
-    this.flushPending(sessionId); // cards stay open; answers recover via resume
-    state.queue.close();
-    state.queue = null;
-    state.query = null;
+  // ---------------------------------------------------------------------
+  // Worker event handlers (wired from index.ts via WorkerClient callbacks)
+  // ---------------------------------------------------------------------
+
+  /**
+   * On (re)connect: adopt the worker's view of what is live. A session the
+   * worker doesn't know isn't running anywhere — its in-flight status is
+   * stale (both processes restarted, or a push was lost mid-death).
+   */
+  reconcileWithWorker(live: LiveSessionInfo[]) {
+    const liveById = new Map(live.map((l) => [l.sessionId, l]));
+    for (const meta of this.sessions.values()) {
+      const info = liveById.get(meta.id);
+      let changed = false;
+      if (info?.claudeSessionId && meta.claudeSessionId !== info.claudeSessionId) {
+        meta.claudeSessionId = info.claudeSessionId;
+        changed = true;
+      }
+      if (!info && (meta.status === 'running' || meta.status === 'waiting-permission')) {
+        meta.status = 'idle';
+        meta.turnSource = undefined;
+        changed = true;
+      }
+      if (changed) this.upsert(meta);
+    }
   }
 
-  private ensureQuery(meta: SessionMeta, state: LiveState) {
-    if (state.query) return;
-
-    const queue = new AsyncQueue<SDKUserMessage>();
-    state.queue = queue;
-
-    const pluginPath = meta.caveman.enabled ? getCavemanPluginPath() : null;
-    const appendParts: string[] = [];
-    if (meta.caveman.enabled && !pluginPath) {
-      appendParts.push(cavemanPromptFallback(meta.caveman.level));
-    } else if (meta.caveman.enabled && meta.caveman.level !== 'full') {
-      appendParts.push(`Caveman level: ${meta.caveman.level}. Apply /caveman ${meta.caveman.level} intensity.`);
+  handleWorkerEvent(sessionId: string, msg: Record<string, unknown> & { type: string }) {
+    // Capture the CLI session id for resume-after-restart.
+    const claudeSessionId = msg.session_id as string | undefined;
+    const meta = this.sessions.get(sessionId);
+    if (meta && claudeSessionId && meta.claudeSessionId !== claudeSessionId) {
+      meta.claudeSessionId = claudeSessionId;
+      this.upsert(meta);
     }
 
-    const options: Record<string, unknown> = {
-      cwd: meta.cwd,
-      model: meta.model,
-      permissionMode: sdkPermissionMode(meta.permissionMode),
-      includePartialMessages: true,
-      resume: meta.claudeSessionId,
-      systemPrompt: {
-        type: 'preset',
-        preset: 'claude_code',
-        ...(appendParts.length > 0 ? { append: appendParts.join('\n\n') } : {}),
-      },
-      settingSources: ['user', 'project'],
-      ...(pluginPath ? { plugins: [{ type: 'local', path: pluginPath }] } : {}),
-      stderr: (data: string) => {
-        if (data.trim()) console.error(`[claude:${meta.id.slice(0, 8)}]`, data.trim());
-      },
-      canUseTool: this.makeCanUseTool(meta.id),
-      hooks: {
-        PreToolUse: [
-          {
-            hooks: [
-              async (input: Record<string, unknown>) => {
-                this.captureFileSnapshot(meta.id, input);
-                // Auto-mode guard lives here, NOT only in canUseTool: allow
-                // rules from user settings resolve before canUseTool, but
-                // hooks run before the whole permission flow — so this is the
-                // only place that sees every tool call.
-                const metaNow = this.sessions.get(meta.id);
-                if (metaNow?.permissionMode === 'auto') {
-                  const toolName = String(input.tool_name ?? '');
-                  const toolInput = (input.tool_input ?? {}) as Record<string, unknown>;
-                  if (!ALWAYS_ASK_TOOLS.has(toolName)) {
-                    const verdict = assessToolCall(toolName, toolInput, metaNow.cwd);
-                    if (verdict.dangerous) {
-                      // Route to a prompt (canUseTool) regardless of allowlists.
-                      return {
-                        continue: true,
-                        hookSpecificOutput: {
-                          hookEventName: 'PreToolUse',
-                          permissionDecision: 'ask',
-                          permissionDecisionReason: verdict.reason,
-                        },
-                      };
-                    }
-                    this.emitEvent(meta.id, 'permission', {
-                      requestId: randomUUID(),
-                      toolName,
-                      input: toolInput,
-                      resolution: 'allow',
-                      auto: true,
-                    } satisfies PermissionRequestData);
-                    return {
-                      continue: true,
-                      hookSpecificOutput: {
-                        hookEventName: 'PreToolUse',
-                        permissionDecision: 'allow',
-                      },
-                    };
-                  }
-                }
-                return { continue: true };
-              },
-            ],
-          },
-        ],
-      },
-    };
+    // Stream deltas are broadcast live but not written to disk;
+    // the complete assistant message that follows is the durable record.
+    const persist = msg.type !== 'stream_event';
+    this.emitEvent(sessionId, 'sdk', msg, persist);
 
-    const q = query({ prompt: queue as AsyncIterable<SDKUserMessage>, options: options as never });
-    state.query = q;
-    void this.pump(meta.id, q, state);
+    if (msg.type === 'result') {
+      const metaNow = this.sessions.get(sessionId);
+      let source: 'user' | 'workflow' = 'user';
+      if (metaNow) {
+        const cost = (msg as { total_cost_usd?: number }).total_cost_usd;
+        if (typeof cost === 'number') {
+          metaNow.lastCostUsd = cost;
+          metaNow.totalCostUsd = (metaNow.totalCostUsd ?? 0) + cost;
+        }
+        if (metaNow.status === 'running' || metaNow.status === 'waiting-permission') {
+          metaNow.status = 'done';
+        }
+        source = metaNow.turnSource ?? 'user';
+        metaNow.turnSource = undefined;
+        this.upsert(metaNow);
+      }
+      this.onTurnComplete?.(sessionId, source);
+    }
   }
 
-  /** canUseTool adapter tolerating both known SDK callback signatures. */
-  private makeCanUseTool(sessionId: string) {
-    return async (...args: unknown[]): Promise<unknown> => {
-      let toolName = 'unknown';
-      let input: Record<string, unknown> = {};
-      let legacySignature = false;
-      const first = args[0];
-      if (typeof first === 'string') {
-        // (toolName, input, {signal}) => {behavior: 'allow'|'deny'}
-        legacySignature = true;
-        toolName = first;
-        input = (args[1] as Record<string, unknown>) ?? {};
-      } else if (first && typeof first === 'object') {
-        // ({tool_name, tool_use_id, input}, {signal}) => {permitted: boolean}
-        const req = first as { tool_name?: string; input?: Record<string, unknown> };
-        toolName = req.tool_name ?? 'unknown';
-        input = req.input ?? {};
-      }
+  handleWorkerEnded(sessionId: string, error?: string) {
+    // Cards stay open; answers recover via the resume path.
+    this.flushPending(sessionId);
+    if (error) {
+      console.error(`[session ${sessionId}] query failed:`, error);
+      this.setStatus(sessionId, 'error', error);
+    }
+  }
 
-      // Planning-only workflow steps: capture the plan but never implement in
-      // this step. Auto-deny ExitPlanMode so the CLI stays read-only; the
-      // workflow's own approval gate decides what happens next.
-      if (toolName === 'ExitPlanMode') {
-        const meta = this.sessions.get(sessionId);
-        const wf = meta?.workflow;
-        const inPlanStep =
-          wf && wf.stepStatuses[wf.stepIndex] === 'running' && meta.permissionMode === 'plan';
-        if (inPlanStep) {
-          const message =
+  /** The CLI aborted a pending permission request (e.g. interrupt) — close the card. */
+  handleRpcCancel(id: string) {
+    for (const [sessionId, state] of this.live) {
+      const resolve = state.pendingPermissions.get(id);
+      if (!resolve) continue;
+      state.pendingPermissions.delete(id);
+      this.emitEvent(sessionId, 'permission', {
+        requestId: id,
+        toolName: '',
+        input: {},
+        resolution: 'expired',
+      } satisfies PermissionRequestData);
+      resolve({ allow: false });
+    }
+  }
+
+  async handleWorkerRpc(rpc: WorkerRpc) {
+    try {
+      const result =
+        rpc.kind === 'preToolUse'
+          ? this.handlePreToolUse(rpc.sessionId, rpc.payload, rpc.resend)
+          : await this.handleCanUseTool(rpc.sessionId, rpc.id, rpc.payload, rpc.resend);
+      this.worker.rpcResult(rpc.id, result);
+    } catch (err) {
+      console.error('[rpc]', err);
+      this.worker.rpcResult(
+        rpc.id,
+        rpc.kind === 'canUseTool'
+          ? { behavior: 'deny', message: `Bridge error: ${err instanceof Error ? err.message : String(err)}` }
+          : { continue: true },
+      );
+    }
+  }
+
+  /**
+   * PreToolUse hook body. The auto-mode guard lives here, NOT only in
+   * canUseTool: allow rules from user settings resolve before canUseTool,
+   * but hooks run before the whole permission flow — so this is the only
+   * place that sees every tool call.
+   */
+  private handlePreToolUse(sessionId: string, hookInput: Record<string, unknown>, resend: boolean): unknown {
+    if (!resend) this.captureFileSnapshot(sessionId, hookInput);
+
+    const meta = this.sessions.get(sessionId);
+    if (meta?.permissionMode === 'auto') {
+      const toolName = String(hookInput.tool_name ?? '');
+      const toolInput = (hookInput.tool_input ?? {}) as Record<string, unknown>;
+      if (!ALWAYS_ASK_TOOLS.has(toolName)) {
+        const verdict = assessToolCall(toolName, toolInput, meta.cwd);
+        if (verdict.dangerous) {
+          // Route to a prompt (canUseTool) regardless of allowlists.
+          return {
+            continue: true,
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'ask',
+              permissionDecisionReason: verdict.reason,
+            },
+          };
+        }
+        if (!resend) {
+          this.emitEvent(sessionId, 'permission', {
+            requestId: randomUUID(),
+            toolName,
+            input: toolInput,
+            resolution: 'allow',
+            auto: true,
+          } satisfies PermissionRequestData);
+        }
+        return {
+          continue: true,
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+          },
+        };
+      }
+    }
+    return { continue: true };
+  }
+
+  /** canUseTool body: guard verdicts, plan-step gating, then the user prompt. */
+  private async handleCanUseTool(
+    sessionId: string,
+    requestId: string,
+    payload: Record<string, unknown>,
+    resend: boolean,
+  ): Promise<PermissionResult> {
+    const toolName = String(payload.toolName ?? 'unknown');
+    const input = (payload.input ?? {}) as Record<string, unknown>;
+
+    // Re-delivered after a bridge restart: if the user already answered (the
+    // resolution is in the transcript), replay that answer instead of asking
+    // again — no resume-recovery dance needed for plain bridge restarts.
+    if (resend) {
+      const resolved = this.findPermissionResolution(sessionId, requestId);
+      if (resolved) {
+        return resolved.resolution === 'allow'
+          ? { behavior: 'allow', updatedInput: resolved.updatedInput ?? input }
+          : { behavior: 'deny', message: 'User denied this tool call in the UI.' };
+      }
+    }
+
+    // Planning-only workflow steps: capture the plan but never implement in
+    // this step. Auto-deny ExitPlanMode so the CLI stays read-only; the
+    // workflow's own approval gate decides what happens next.
+    if (toolName === 'ExitPlanMode') {
+      const meta = this.sessions.get(sessionId);
+      const wf = meta?.workflow;
+      const inPlanStep =
+        wf && wf.stepStatuses[wf.stepIndex] === 'running' && meta.permissionMode === 'plan';
+      if (inPlanStep) {
+        return {
+          behavior: 'deny',
+          message:
             'This is a planning-only workflow step — do not implement anything now. ' +
             'Write out the final plan as your response and end your turn. ' +
-            'The user will review it, and implementation happens in a later workflow step.';
-          return legacySignature
-            ? { behavior: 'deny', message }
-            : { permitted: false, reason: message };
-        }
+            'The user will review it, and implementation happens in a later workflow step.',
+        };
       }
+    }
 
-      // Auto mode: our guard classifies the call. Safe -> approve silently
-      // (recorded in the transcript); dangerous -> fall through to the prompt
-      // with the guard's reason attached.
-      let guardReason: string | undefined;
-      {
-        const meta = this.sessions.get(sessionId);
-        if (meta?.permissionMode === 'auto' && !ALWAYS_ASK_TOOLS.has(toolName)) {
-          const verdict = assessToolCall(toolName, input, meta.cwd);
-          if (!verdict.dangerous) {
+    // Auto mode: our guard classifies the call. Safe -> approve silently
+    // (recorded in the transcript); dangerous -> fall through to the prompt
+    // with the guard's reason attached.
+    let guardReason: string | undefined;
+    {
+      const meta = this.sessions.get(sessionId);
+      if (meta?.permissionMode === 'auto' && !ALWAYS_ASK_TOOLS.has(toolName)) {
+        const verdict = assessToolCall(toolName, input, meta.cwd);
+        if (!verdict.dangerous) {
+          if (!resend) {
             this.emitEvent(sessionId, 'permission', {
               requestId: randomUUID(),
               toolName,
@@ -594,38 +722,40 @@ export class SessionManager {
               resolution: 'allow',
               auto: true,
             } satisfies PermissionRequestData);
-            return legacySignature ? { behavior: 'allow', updatedInput: input } : { permitted: true };
           }
-          guardReason = verdict.reason;
+          return { behavior: 'allow', updatedInput: input };
         }
+        guardReason = verdict.reason;
       }
+    }
 
-      const answer = await this.askPermission(sessionId, toolName, input, guardReason);
-      const finalInput = answer.updatedInput ?? input;
-      const denyMessage = answer.denyMessage || 'User denied this tool call in the UI.';
-      if (legacySignature) {
-        return answer.allow
-          ? { behavior: 'allow', updatedInput: finalInput }
-          : { behavior: 'deny', message: denyMessage };
-      }
-      return answer.allow ? { permitted: true } : { permitted: false, reason: denyMessage };
-    };
+    // On a resend whose card is already in the transcript (unanswered), don't
+    // emit a duplicate request — just re-register the resolver.
+    const skipEmit = resend && this.findPermissionRequest(sessionId, requestId) !== null;
+    const answer = await this.askPermission(sessionId, requestId, toolName, input, guardReason, skipEmit);
+    const finalInput = answer.updatedInput ?? input;
+    return answer.allow
+      ? { behavior: 'allow', updatedInput: finalInput }
+      : { behavior: 'deny', message: answer.denyMessage || 'User denied this tool call in the UI.' };
   }
 
   private askPermission(
     sessionId: string,
+    requestId: string,
     toolName: string,
     input: Record<string, unknown>,
     guardReason?: string,
+    skipEmit = false,
   ): Promise<PermissionAnswer> {
     const state = this.liveState(sessionId);
-    const requestId = randomUUID();
-    this.emitEvent(sessionId, 'permission', {
-      requestId,
-      toolName,
-      input,
-      guardReason,
-    } satisfies PermissionRequestData);
+    if (!skipEmit) {
+      this.emitEvent(sessionId, 'permission', {
+        requestId,
+        toolName,
+        input,
+        guardReason,
+      } satisfies PermissionRequestData);
+    }
     this.setStatus(sessionId, 'waiting-permission');
     return new Promise<PermissionAnswer>((resolve) => {
       state.pendingPermissions.set(requestId, (answer) => {
@@ -654,52 +784,14 @@ export class SessionManager {
       console.warn('[snapshot]', err);
     }
   }
+}
 
-  private async pump(sessionId: string, q: Query, state: LiveState) {
-    try {
-      for await (const message of q) {
-        const msg = message as Record<string, unknown> & { type: string };
-
-        // Capture the CLI session id for resume-after-restart.
-        const claudeSessionId = msg.session_id as string | undefined;
-        const meta = this.sessions.get(sessionId);
-        if (meta && claudeSessionId && meta.claudeSessionId !== claudeSessionId) {
-          meta.claudeSessionId = claudeSessionId;
-          this.upsert(meta);
-        }
-
-        // Stream deltas are broadcast live but not written to disk;
-        // the complete assistant message that follows is the durable record.
-        const persist = msg.type !== 'stream_event';
-        this.emitEvent(sessionId, 'sdk', msg, persist);
-
-        if (msg.type === 'result') {
-          const metaNow = this.sessions.get(sessionId);
-          if (metaNow) {
-            const cost = (msg as { total_cost_usd?: number }).total_cost_usd;
-            if (typeof cost === 'number') {
-              metaNow.lastCostUsd = cost;
-              metaNow.totalCostUsd = (metaNow.totalCostUsd ?? 0) + cost;
-            }
-            if (metaNow.status === 'running' || metaNow.status === 'waiting-permission') {
-              metaNow.status = 'idle';
-            }
-            this.upsert(metaNow);
-          }
-          const source = state.turnSource ?? 'user';
-          state.turnSource = null;
-          this.onTurnComplete?.(sessionId, source);
-        }
-      }
-    } catch (err) {
-      console.error(`[session ${sessionId}] query failed:`, err);
-      this.setStatus(sessionId, 'error', err instanceof Error ? err.message : String(err));
-    } finally {
-      if (state.query === q) {
-        this.flushPending(sessionId); // cards stay open; answers recover via resume
-        state.query = null;
-        state.queue = null;
-      }
-    }
-  }
+/** Classify an attachment by media type for model presentation. */
+function attachmentKind(mediaType: string): AttachmentKind {
+  // The API's image blocks accept only png/jpeg/gif/webp. SVG is XML text —
+  // send it as text so the model reads the markup instead of erroring the turn.
+  if (mediaType === 'image/svg+xml') return 'text';
+  if (mediaType.startsWith('image/')) return 'image';
+  if (mediaType === 'application/pdf') return 'document';
+  return 'text';
 }

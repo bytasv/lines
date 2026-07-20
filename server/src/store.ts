@@ -1,16 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import type { SessionMeta, TranscriptEvent, WorkflowDef } from '@claude-ui/shared';
 
 const ROOT = path.join(os.homedir(), '.claude-ui');
 const TRANSCRIPTS = path.join(ROOT, 'transcripts');
+const ATTACHMENTS = path.join(ROOT, 'attachments');
 const SESSIONS_FILE = path.join(ROOT, 'sessions.json');
 const WORKFLOWS_FILE = path.join(ROOT, 'workflows.json');
 const RECENT_DIRS_FILE = path.join(ROOT, 'recent-dirs.json');
 const PROJECTS_FILE = path.join(ROOT, 'projects.json');
 
 fs.mkdirSync(TRANSCRIPTS, { recursive: true });
+fs.mkdirSync(ATTACHMENTS, { recursive: true });
 
 function readJson<T>(file: string, fallback: T): T {
   try {
@@ -26,12 +29,9 @@ function writeJson(file: string, data: unknown) {
 
 export const store = {
   loadSessions(): SessionMeta[] {
-    const sessions = readJson<SessionMeta[]>(SESSIONS_FILE, []);
-    // A restarted server has no live queries; anything mid-flight is now idle.
-    for (const s of sessions) {
-      if (s.status === 'running' || s.status === 'waiting-permission') s.status = 'idle';
-    }
-    return sessions;
+    // In-flight statuses may still be true — the worker process holds queries
+    // across bridge restarts. reconcileWithWorker() clears the stale ones.
+    return readJson<SessionMeta[]>(SESSIONS_FILE, []);
   },
 
   saveSessions(sessions: SessionMeta[]) {
@@ -87,6 +87,17 @@ export const store = {
 
   deleteTranscript(sessionId: string) {
     fs.rmSync(path.join(TRANSCRIPTS, `${sessionId}.jsonl`), { force: true });
+    fs.rmSync(path.join(ATTACHMENTS, sessionId), { recursive: true, force: true });
+  },
+
+  /** Persist an attachment's base64 to disk; returns the stored file basename. */
+  saveAttachment(sessionId: string, name: string, base64: string): string {
+    const dir = path.join(ATTACHMENTS, sessionId);
+    fs.mkdirSync(dir, { recursive: true });
+    const safe = name.replace(/[^\w.-]/g, '_') || 'file';
+    const file = `${randomUUID()}-${safe}`;
+    fs.writeFileSync(path.join(dir, file), Buffer.from(base64, 'base64'));
+    return file;
   },
 
   loadGuardAllowlist<T>(fallback: T): T {
@@ -98,4 +109,5 @@ export const store = {
   },
 
   rootDir: ROOT,
+  attachmentsRoot: ATTACHMENTS,
 };

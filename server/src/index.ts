@@ -1,10 +1,12 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { ClientMessage, ServerMessage } from '@claude-ui/shared';
 import { DEFAULT_MODELS } from '@claude-ui/shared';
 import { SessionManager } from './sessions.ts';
+import { WorkerClient } from './workerClient.ts';
 import { WorkflowEngine } from './workflows.ts';
 import { store } from './store.ts';
 
@@ -20,12 +22,66 @@ function broadcast(msg: ServerMessage) {
 }
 
 const sessions = new SessionManager(broadcast);
+// The worker owns the Claude CLI children so this process can restart freely
+// (tsx watch, dogfooding edits) without killing in-flight agent turns.
+const worker = new WorkerClient({
+  onHello: (live) => sessions.reconcileWithWorker(live),
+  onEvent: (sessionId, message) => sessions.handleWorkerEvent(sessionId, message),
+  onEnded: (sessionId, error) => sessions.handleWorkerEnded(sessionId, error),
+  onRpc: (rpc) => void sessions.handleWorkerRpc(rpc),
+  onRpcCancel: (id) => sessions.handleRpcCancel(id),
+});
+sessions.attachWorker(worker);
+// If the worker never shows up, in-flight statuses loaded from disk are stale.
+setTimeout(() => {
+  if (!worker.everConnected) {
+    console.warn('[worker] not reachable after 15s — clearing in-flight session statuses');
+    sessions.reconcileWithWorker([]);
+  }
+}, 15_000).unref();
+
 const workflows = new WorkflowEngine(sessions, broadcast);
 
+const MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.pdf': 'application/pdf',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.json': 'application/json',
+};
+
 const server = http.createServer((req, res) => {
+  if (req.url && req.url.startsWith('/attachments/')) {
+    return serveAttachment(req.url, res);
+  }
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ ok: true, sessions: sessions.list().length }));
 });
+
+/** Serve a stored attachment, guarding against path traversal outside the attachments root. */
+function serveAttachment(url: string, res: http.ServerResponse) {
+  const rel = decodeURIComponent(url.slice('/attachments/'.length).split('?')[0]);
+  const abs = path.resolve(store.attachmentsRoot, rel);
+  if (abs !== store.attachmentsRoot && !abs.startsWith(store.attachmentsRoot + path.sep)) {
+    res.writeHead(403).end();
+    return;
+  }
+  fs.readFile(abs, (err, data) => {
+    if (err) {
+      res.writeHead(404).end();
+      return;
+    }
+    res.writeHead(200, {
+      'content-type': MIME[path.extname(abs).toLowerCase()] ?? 'application/octet-stream',
+    });
+    res.end(data);
+  });
+}
 
 const wss = new WebSocketServer({ server });
 // The ws library re-emits http server errors here; without a listener they crash the process.
@@ -81,26 +137,38 @@ async function handleMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
       break;
     }
     case 'deleteSession':
-      await sessions.deleteSession(msg.sessionId);
+      sessions.deleteSession(msg.sessionId);
       break;
     case 'prompt': {
       // A workflow-attached session consumes its first prompt as the task description.
       if (!workflows.startIfPending(msg.sessionId, msg.text)) {
-        sessions.prompt(msg.sessionId, msg.text);
+        sessions.prompt(msg.sessionId, msg.text, 'user', msg.attachments);
       }
       break;
     }
     case 'interrupt':
-      await sessions.interrupt(msg.sessionId);
+      sessions.interrupt(msg.sessionId);
+      break;
+    case 'ackSession':
+      sessions.ackSession(msg.sessionId);
+      break;
+    case 'archiveSession':
+      sessions.archiveSession(msg.sessionId);
+      break;
+    case 'unarchiveSession':
+      sessions.unarchiveSession(msg.sessionId);
+      break;
+    case 'completeSession':
+      sessions.completeSession(msg.sessionId);
       break;
     case 'setModel':
-      await sessions.setModel(msg.sessionId, msg.model);
+      sessions.setModel(msg.sessionId, msg.model);
       break;
     case 'setPermissionMode':
-      await sessions.setPermissionMode(msg.sessionId, msg.mode);
+      sessions.setPermissionMode(msg.sessionId, msg.mode);
       break;
     case 'setCaveman':
-      await sessions.setCaveman(msg.sessionId, msg.caveman);
+      sessions.setCaveman(msg.sessionId, msg.caveman);
       break;
     case 'permissionResponse':
       sessions.resolvePermission(
