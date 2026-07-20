@@ -6,12 +6,22 @@ import {
   Divider,
   Group,
   Loader,
+  Modal,
   Paper,
   ScrollArea,
   Stack,
   Text,
+  Tooltip,
 } from '@mantine/core';
-import { IconArrowDown, IconRobot, IconUser, IconRoute } from '@tabler/icons-react';
+import { useHover } from '@mantine/hooks';
+import {
+  IconArrowDown,
+  IconFile,
+  IconRobot,
+  IconUser,
+  IconRoute,
+  IconZoomIn,
+} from '@tabler/icons-react';
 import type { TranscriptEvent, WorkflowMarkerData } from '@claude-ui/shared';
 import { buildTranscript, type TranscriptItem } from '../lib/transcript';
 import { Markdown } from './Markdown';
@@ -45,7 +55,49 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
   );
 }
 
-function Item({ item, sessionId }: { item: TranscriptItem; sessionId: string }) {
+/** Attachments are served by the bridge HTTP server (same host, port 8787). */
+const attachmentBase = `${location.protocol}//${location.hostname}:8787`;
+
+/** Square image thumbnail with a zoom-icon overlay on hover; click opens the lightbox. */
+function ImageThumb({ src, alt, onOpen }: { src: string; alt: string; onOpen: () => void }) {
+  const { hovered, ref } = useHover<HTMLDivElement>();
+  return (
+    <Paper
+      ref={ref}
+      withBorder
+      radius="md"
+      title={alt}
+      onClick={onOpen}
+      style={{ position: 'relative', width: 72, height: 72, overflow: 'hidden', flexShrink: 0, cursor: 'zoom-in' }}
+    >
+      <img src={src} alt={alt} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+      {hovered && (
+        <Box
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'rgba(0,0,0,0.45)',
+          }}
+        >
+          <IconZoomIn size={22} color="white" />
+        </Box>
+      )}
+    </Paper>
+  );
+}
+
+function Item({
+  item,
+  sessionId,
+  onImage,
+}: {
+  item: TranscriptItem;
+  sessionId: string;
+  onImage: (src: string) => void;
+}) {
   switch (item.kind) {
     case 'user':
       return (
@@ -57,9 +109,42 @@ function Item({ item, sessionId }: { item: TranscriptItem; sessionId: string }) 
                 workflow step prompt
               </Badge>
             )}
-            <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>
-              {item.text}
-            </Text>
+            {item.text && (
+              <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>
+                {item.text}
+              </Text>
+            )}
+            {item.attachments && item.attachments.length > 0 && (
+              <Group gap="xs" mt={item.text ? 6 : 0}>
+                {item.attachments.map((att) => {
+                  const href = `${attachmentBase}${att.url}`;
+                  // Render anything the browser shows as an image (incl. SVG, which
+                  // the model receives as text but is still a displayable image).
+                  if (att.mediaType.startsWith('image/')) {
+                    return <ImageThumb key={att.url} src={href} alt={att.name} onOpen={() => onImage(href)} />;
+                  }
+                  return (
+                    <Tooltip key={att.url} label={att.name}>
+                      <Paper
+                        withBorder
+                        radius="md"
+                        component="a"
+                        href={href}
+                        target="_blank"
+                        style={{ width: 72, height: 72, overflow: 'hidden', flexShrink: 0, display: 'block', cursor: 'pointer' }}
+                      >
+                        <Stack align="center" justify="center" gap={2} h="100%" px={4}>
+                          <IconFile size={22} opacity={0.6} />
+                          <Text size="9px" ta="center" lineClamp={1} style={{ maxWidth: '100%' }}>
+                            {att.name}
+                          </Text>
+                        </Stack>
+                      </Paper>
+                    </Tooltip>
+                  );
+                })}
+              </Group>
+            )}
           </Paper>
         </Group>
       );
@@ -135,6 +220,7 @@ export function Transcript({
   stepCount?: number;
 }) {
   const items = useMemo(() => buildTranscript(events), [events]);
+  const [lightbox, setLightbox] = useState<string | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   // Pinned = follow the stream. Scrolling up unpins; scrolling back down repins.
   const pinnedRef = useRef(true);
@@ -254,7 +340,7 @@ export function Transcript({
             </Text>
           )}
           {items.map((item) => (
-            <Item key={item.key} item={item} sessionId={sessionId} />
+            <Item key={item.key} item={item} sessionId={sessionId} onImage={setLightbox} />
           ))}
         </Stack>
       </ScrollArea>
@@ -277,6 +363,23 @@ export function Transcript({
           new content
         </Button>
       )}
+      <Modal
+        opened={lightbox !== null}
+        onClose={() => setLightbox(null)}
+        withCloseButton={false}
+        centered
+        padding={0}
+        size="auto"
+        styles={{ content: { background: 'transparent', boxShadow: 'none' } }}
+      >
+        {lightbox && (
+          <img
+            src={lightbox}
+            alt=""
+            style={{ maxWidth: '90vw', maxHeight: '90vh', display: 'block', borderRadius: 8 }}
+          />
+        )}
+      </Modal>
     </Box>
   );
 }

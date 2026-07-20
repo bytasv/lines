@@ -8,8 +8,9 @@ import { SessionView } from './components/SessionView';
 import { ProjectTabs } from './components/ProjectTabs';
 import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/WorkflowEditor';
+import { send } from './ws';
 
-const HEADER_HEIGHT = 40;
+const HEADER_HEIGHT = 56;
 
 export function App() {
   return (
@@ -47,6 +48,15 @@ function Shell() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSessionId]);
+
+  // Viewing a session clears its post-turn "done" (pulsating green) badge.
+  // Covers both clicking a done session and one finishing while already open.
+  const selectedSession = selectedSessionId ? sessions[selectedSessionId] : undefined;
+  useEffect(() => {
+    if (selectedSession?.status === 'done') {
+      send({ type: 'ackSession', sessionId: selectedSession.id });
+    }
+  }, [selectedSession?.id, selectedSession?.status]);
 
   // Selecting a session (URL, auto-select) activates its project tab.
   useEffect(() => {

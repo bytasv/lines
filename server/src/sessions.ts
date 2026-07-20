@@ -282,14 +282,21 @@ export class SessionManager {
     try {
       const q = query({
         prompt:
-          'Write a 3-6 word title summarizing this task. Only output the title: ' +
-          'no quotes, no trailing punctuation, no preamble.\n\n' +
-          prompt.slice(0, 2000),
+          'Summarize the following task in a 3-6 word title. Output only the ' +
+          'title itself: no quotes, no trailing punctuation, no preamble, no ' +
+          'commentary. If the text is empty or unclear, do your best with ' +
+          'whatever is given.\n\n<task>\n' +
+          prompt.slice(0, 2000) +
+          '\n</task>',
         options: {
           model: 'claude-haiku-4-5-20251001',
           maxTurns: 1,
           allowedTools: [],
           settingSources: [],
+          systemPrompt:
+            'You are a title generator. You receive a task description and ' +
+            'reply with a single short title. You never ask questions, never ' +
+            'refuse, and never add commentary — you only output the title.',
         } as never,
       });
       let title: string | null = null;

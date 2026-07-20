@@ -1,4 +1,5 @@
 import type {
+  Attachment,
   FileSnapshotData,
   PermissionRequestData,
   TranscriptEvent,
@@ -21,7 +22,7 @@ export type AssistantBlock =
   | ToolBlock;
 
 export type TranscriptItem =
-  | { kind: 'user'; key: string; text: string; source: 'user' | 'workflow' }
+  | { kind: 'user'; key: string; text: string; source: 'user' | 'workflow'; attachments?: Attachment[] }
   | { kind: 'assistant'; key: string; blocks: AssistantBlock[] }
   | { kind: 'streaming'; key: string; text: string }
   | { kind: 'system-init'; key: string; model: string }
@@ -81,12 +82,13 @@ export function buildTranscript(events: TranscriptEvent[]): TranscriptItem[] {
   for (const event of events) {
     switch (event.kind) {
       case 'user': {
-        const data = event.data as { text: string; source?: 'user' | 'workflow' };
+        const data = event.data as { text: string; source?: 'user' | 'workflow'; attachments?: Attachment[] };
         items.push({
           kind: 'user',
           key: `u${event.seq}`,
           text: data.text,
           source: data.source ?? 'user',
+          attachments: data.attachments,
         });
         break;
       }

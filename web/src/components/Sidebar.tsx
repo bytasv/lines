@@ -3,8 +3,8 @@ import {
   Badge,
   Box,
   Button,
+  Center,
   Group,
-  Indicator,
   Loader,
   Menu,
   ScrollArea,
@@ -13,7 +13,17 @@ import {
   Tooltip,
   UnstyledButton,
 } from '@mantine/core';
-import { IconChevronDown, IconPlus, IconRoute, IconTrash } from '@tabler/icons-react';
+import {
+  IconArchive,
+  IconArchiveOff,
+  IconCircleCheck,
+  IconChevronDown,
+  IconPlus,
+  IconRoute,
+  IconTrash,
+} from '@tabler/icons-react';
+import type { CSSProperties } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta, SessionStatus } from '@claude-ui/shared';
 import { DEFAULT_MODEL } from '@claude-ui/shared';
@@ -23,13 +33,21 @@ import { send } from '../ws';
 const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
   idle: { color: 'gray', label: 'idle' },
   running: { color: 'blue', label: 'running' },
+  done: { color: 'green', label: 'done' },
   'waiting-permission': { color: 'yellow', label: 'needs permission' },
   'waiting-approval': { color: 'orange', label: 'needs approval' },
   error: { color: 'red', label: 'error' },
 };
 
+function stop(e: { preventDefault: () => void; stopPropagation: () => void }) {
+  e.preventDefault(); // don't follow the row link
+  e.stopPropagation();
+}
+
 function SessionRow({ session, selected }: { session: SessionMeta; selected: boolean }) {
   const status = STATUS_META[session.status] ?? STATUS_META.idle;
+  // A session with no real prompt yet is safe to delete outright; others archive first.
+  const isNew = session.nameAuto === true;
 
   return (
     <UnstyledButton
@@ -47,12 +65,25 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
     >
       <Group gap="xs" wrap="nowrap" justify="space-between">
         <Box style={{ minWidth: 0 }}>
-          <Group gap={6} wrap="nowrap">
-            {session.status === 'running' ? (
-              <Loader size={10} />
-            ) : (
-              <Indicator color={status.color} size={7} processing={session.status !== 'idle'} />
-            )}
+          <Group gap={5} wrap="nowrap">
+            <Center w={session.completed ? 14 : 10} style={{ flex: session.completed ? '0 0 14px' : '0 0 10px' }}>
+              {session.completed ? (
+                <IconCircleCheck size={14} color="var(--mantine-color-green-6)" style={{ flexShrink: 0 }} />
+              ) : session.status === 'running' ? (
+                <Loader size={10} />
+              ) : (
+                <span
+                  className="status-dot"
+                  data-pulse={session.status !== 'idle' ? true : undefined}
+                  style={
+                    {
+                      '--status-dot-color': `var(--mantine-color-${status.color}-6)`,
+                      '--status-pulse-color': `var(--mantine-color-${status.color}-5)`,
+                    } as CSSProperties
+                  }
+                />
+              )}
+            </Center>
             <Text size="sm" fw={500} truncate>
               {session.name}
             </Text>
@@ -66,29 +97,92 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
                 wf
               </Badge>
             )}
-            {session.status !== 'idle' && session.status !== 'running' && (
+            {session.status !== 'idle' &&
+              session.status !== 'running' &&
+              session.status !== 'done' && (
               <Badge variant="light" color={status.color} size="xs" px={5}>
                 {status.label}
               </Badge>
             )}
           </Group>
         </Box>
-        <Tooltip label="Delete session">
-          <ActionIcon
-            size="xs"
-            variant="subtle"
-            color="gray"
-            onClick={(e) => {
-              e.preventDefault(); // don't follow the row link
-              e.stopPropagation();
-              if (confirm(`Delete session "${session.name}"?`)) {
-                send({ type: 'deleteSession', sessionId: session.id });
-              }
-            }}
-          >
-            <IconTrash size={13} />
-          </ActionIcon>
-        </Tooltip>
+        <Group gap={2} wrap="nowrap">
+          {session.archived ? (
+            <>
+              <Tooltip label="Unarchive session">
+                <ActionIcon
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  onClick={(e) => {
+                    stop(e);
+                    send({ type: 'unarchiveSession', sessionId: session.id });
+                  }}
+                >
+                  <IconArchiveOff size={13} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Delete session">
+                <ActionIcon
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  onClick={(e) => {
+                    stop(e);
+                    if (confirm(`Delete session "${session.name}"?`)) {
+                      send({ type: 'deleteSession', sessionId: session.id });
+                    }
+                  }}
+                >
+                  <IconTrash size={13} />
+                </ActionIcon>
+              </Tooltip>
+            </>
+          ) : isNew ? (
+            <Tooltip label="Delete session">
+              <ActionIcon
+                size="xs"
+                variant="subtle"
+                color="gray"
+                onClick={(e) => {
+                  stop(e);
+                  send({ type: 'deleteSession', sessionId: session.id });
+                }}
+              >
+                <IconTrash size={13} />
+              </ActionIcon>
+            </Tooltip>
+          ) : (
+            <>
+              <Tooltip label="Mark completed">
+                <ActionIcon
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  onClick={(e) => {
+                    stop(e);
+                    send({ type: 'completeSession', sessionId: session.id });
+                  }}
+                >
+                  <IconCircleCheck size={13} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Archive session">
+                <ActionIcon
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  onClick={(e) => {
+                    stop(e);
+                    send({ type: 'archiveSession', sessionId: session.id });
+                  }}
+                >
+                  <IconArchive size={13} />
+                </ActionIcon>
+              </Tooltip>
+            </>
+          )}
+        </Group>
       </Group>
     </UnstyledButton>
   );
@@ -99,10 +193,15 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
   const workflows = useStore((s) => s.workflows);
   const selectedSessionId = useStore((s) => s.selectedSessionId);
   const activeProject = useStore((s) => s.activeProject);
+  const [showArchived, setShowArchived] = useState(true);
 
-  const list = Object.values(sessions)
-    .filter((s) => s.cwd === activeProject)
+  const projectSessions = Object.values(sessions).filter((s) => s.cwd === activeProject);
+  const list = projectSessions
+    .filter((s) => !s.archived)
     .sort((a, b) => b.createdAt - a.createdAt);
+  const archived = projectSessions
+    .filter((s) => s.archived)
+    .sort((a, b) => (b.archivedAt ?? b.createdAt) - (a.archivedAt ?? a.createdAt));
 
   // No popup: new sessions inherit settings from the project's latest session.
   const createSession = (workflowId?: string) => {
@@ -166,10 +265,39 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
           {list.map((s) => (
             <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
           ))}
-          {list.length === 0 && (
+          {list.length === 0 && archived.length === 0 && (
             <Text size="xs" c="dimmed" ta="center" pt="lg">
               No sessions in this project yet
             </Text>
+          )}
+          {archived.length > 0 && (
+            <>
+              <Group gap={4} justify="space-between" wrap="nowrap" px="sm" pt="sm">
+                <Text size="xs" fw={600} c="dimmed" tt="uppercase">
+                  Archived ({archived.length})
+                </Text>
+                <Tooltip label={showArchived ? 'Hide archived' : 'Show archived'}>
+                  <ActionIcon
+                    size="xs"
+                    variant="subtle"
+                    color="gray"
+                    onClick={() => setShowArchived((v) => !v)}
+                  >
+                    <IconChevronDown
+                      size={14}
+                      style={{
+                        transform: showArchived ? undefined : 'rotate(-90deg)',
+                        transition: 'transform 120ms',
+                      }}
+                    />
+                  </ActionIcon>
+                </Tooltip>
+              </Group>
+              {showArchived &&
+                archived.map((s) => (
+                  <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
+                ))}
+            </>
           )}
         </Stack>
       </ScrollArea>

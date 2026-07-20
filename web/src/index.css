@@ -1,0 +1,26 @@
+@keyframes status-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--status-pulse-color);
+    opacity: 1;
+  }
+  70% {
+    box-shadow: 0 0 0 5px transparent;
+    opacity: 0.85;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 1;
+  }
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--status-dot-color);
+  flex: 0 0 auto;
+}
+
+.status-dot[data-pulse] {
+  animation: status-pulse 1.4s ease-out infinite;
+}

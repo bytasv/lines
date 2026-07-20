@@ -14,6 +14,7 @@ import {
 import { IconFolder, IconFolderOpen, IconMoon, IconPlus, IconSun } from '@tabler/icons-react';
 import { useStore } from '../store';
 import { send } from '../ws';
+import logoUrl from '../assets/logo.svg';
 
 function baseName(path: string) {
   return path.split('/').filter(Boolean).pop() ?? path;
@@ -75,8 +76,21 @@ export function ProjectTabs() {
   return (
     <Group h="100%" px="sm" gap="sm" wrap="nowrap">
       <Group gap={6} wrap="nowrap">
+        <Box
+          ml={4}
+          mr={4}
+          style={{
+            background: '#ffffff',
+            borderRadius: 9,
+            padding: 6,
+            display: 'flex',
+            boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
+          }}
+        >
+          <img src={logoUrl} alt="Lines" width={20} height={20} style={{ display: 'block' }} />
+        </Box>
         <Text fw={700} size="sm">
-          Claude UI
+          Lines
         </Text>
         <Indicator color={connected ? 'teal' : 'red'} size={7} />
       </Group>
