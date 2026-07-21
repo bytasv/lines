@@ -96,6 +96,8 @@ export class SessionManager {
     meta.status = status;
     meta.errorMessage = errorMessage;
     this.upsert(meta);
+    // A settled status may release a queued prompt (e.g. workflow-done -> idle).
+    if (!this.isBusy(meta)) this.maybeFlush(id);
   }
 
   /** Clears the post-turn 'done' badge once the user views the session. */
@@ -216,6 +218,112 @@ export class SessionManager {
     };
   }
 
+  /** Persist attachments to disk and return the transcript/queue refs. */
+  private stageAttachments(sessionId: string, attachments: PromptAttachment[]): Attachment[] {
+    return attachments.map((att) => {
+      const kind = attachmentKind(att.mediaType);
+      const file = store.saveAttachment(sessionId, att.name, att.data);
+      return { name: att.name, mediaType: att.mediaType, kind, url: `/attachments/${sessionId}/${file}` };
+    });
+  }
+
+  private isBusy(meta: SessionMeta) {
+    return meta.status === 'running' || meta.status === 'waiting-permission';
+  }
+
+  /**
+   * User-facing prompt entry point. If the session is busy (or a queue already
+   * exists, preserving FIFO after an interrupt), the prompt is staged and held;
+   * otherwise it goes straight through. Internal callers (workflows, recovery)
+   * keep calling prompt() directly and bypass the queue.
+   */
+  userPrompt(sessionId: string, text: string, attachments: PromptAttachment[] = []) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) throw new Error(`unknown session ${sessionId}`);
+
+    if (meta.queued?.length || this.isBusy(meta)) {
+      const staged = this.stageAttachments(sessionId, attachments);
+      (meta.queued ??= []).push({
+        id: randomUUID(),
+        ts: Date.now(),
+        text,
+        attachments: staged.length ? staged : undefined,
+      });
+      // An explicit user send is the resume gesture after an interrupt/error.
+      meta.queuePaused = undefined;
+      this.upsert(meta);
+      this.maybeFlush(sessionId);
+      return;
+    }
+
+    this.prompt(sessionId, text, 'user', attachments);
+  }
+
+  /** Send the next queued prompt if the session is settled and not paused. */
+  private maybeFlush(sessionId: string) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.queued?.length || meta.queuePaused) return;
+    if (meta.status !== 'idle' && meta.status !== 'done' && meta.status !== 'error') return;
+
+    const item = meta.queued.shift()!;
+    this.upsert(meta);
+
+    const attachments = (item.attachments ?? [])
+      .map((a) => {
+        const file = a.url.split('/').pop()!;
+        const data = store.loadAttachmentBase64(sessionId, file);
+        return data ? { name: a.name, mediaType: a.mediaType, data } : null;
+      })
+      .filter((a): a is PromptAttachment => a !== null);
+
+    this.prompt(sessionId, item.text, 'user', attachments);
+  }
+
+  /** Drop a queued prompt before it is sent. */
+  cancelQueued(sessionId: string, queuedId: string) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.queued?.length) return;
+    const item = meta.queued.find((q) => q.id === queuedId);
+    if (!item) return;
+    meta.queued = meta.queued.filter((q) => q.id !== queuedId);
+    for (const a of item.attachments ?? []) {
+      const file = a.url.split('/').pop();
+      if (file) fs.rmSync(`${store.attachmentsRoot}/${sessionId}/${file}`, { force: true });
+    }
+    if (meta.queued.length === 0) meta.queuePaused = undefined;
+    this.upsert(meta);
+  }
+
+  /**
+   * Re-send the last user prompt after a failed turn (query crash or is_error
+   * result). Goes through prompt() directly: the transcript shows the prompt
+   * again and `resume` preserves context. Attachments are reloaded from disk
+   * the same way queued prompts are (see maybeFlush).
+   */
+  retryTurn(sessionId: string) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta || this.isBusy(meta)) return;
+
+    const last = store
+      .loadTranscript(sessionId)
+      .filter((e) => e.kind === 'user')
+      .at(-1);
+    const data = last?.data as
+      | { text?: string; source?: 'user' | 'workflow'; attachments?: Attachment[] }
+      | undefined;
+    if (!data || (!data.text && !data.attachments?.length)) return;
+
+    const attachments = (data.attachments ?? [])
+      .map((a) => {
+        const file = a.url.split('/').pop()!;
+        const b64 = store.loadAttachmentBase64(sessionId, file);
+        return b64 ? { name: a.name, mediaType: a.mediaType, data: b64 } : null;
+      })
+      .filter((a): a is PromptAttachment => a !== null);
+
+    this.prompt(sessionId, data.text ?? '', data.source ?? 'user', attachments);
+  }
+
   /** Send a prompt into the session; the worker starts the SDK query if needed. */
   prompt(
     sessionId: string,
@@ -233,13 +341,11 @@ export class SessionManager {
       meta.completed = false;
     }
 
-    // Persist attachments to disk and build both the transcript refs and the SDK content blocks.
-    const stored: Attachment[] = [];
+    // Persist attachments to disk (transcript refs) and build the SDK content blocks.
+    const stored = this.stageAttachments(sessionId, attachments);
     const blocks: unknown[] = [];
     for (const att of attachments) {
       const kind = attachmentKind(att.mediaType);
-      const file = store.saveAttachment(sessionId, att.name, att.data);
-      stored.push({ name: att.name, mediaType: att.mediaType, kind, url: `/attachments/${sessionId}/${file}` });
       if (kind === 'image') {
         blocks.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.data } });
       } else if (kind === 'document') {
@@ -331,6 +437,9 @@ export class SessionManager {
     // Deny anything waiting on the user so the query is not stuck; user
     // explicitly stopped, so close the cards too.
     this.flushPending(sessionId, { emitResolution: 'deny' });
+    // Keep the queue but suspend auto-flush; the next user send resumes it.
+    const meta = this.sessions.get(sessionId);
+    if (meta?.queued?.length) meta.queuePaused = true;
     this.setStatus(sessionId, 'idle');
   }
 
@@ -551,6 +660,8 @@ export class SessionManager {
       if (!info && (meta.status === 'running' || meta.status === 'waiting-permission')) {
         meta.status = 'idle';
         meta.turnSource = undefined;
+        // The turn died with the worker; don't auto-fire followups.
+        if (meta.queued?.length) meta.queuePaused = true;
         changed = true;
       }
       if (changed) this.upsert(meta);
@@ -563,6 +674,9 @@ export class SessionManager {
         this.onTurnComplete?.(meta.id, 'workflow');
       }
     }
+    // A bridge that died between a turn's result and its flush leaves queued
+    // prompts on a settled session; release them now.
+    for (const meta of this.sessions.values()) this.maybeFlush(meta.id);
   }
 
   handleWorkerEvent(sessionId: string, msg: Record<string, unknown> & { type: string }) {
@@ -596,6 +710,7 @@ export class SessionManager {
         this.upsert(metaNow);
       }
       this.onTurnComplete?.(sessionId, source);
+      this.maybeFlush(sessionId);
     }
   }
 
@@ -604,6 +719,9 @@ export class SessionManager {
     this.flushPending(sessionId);
     if (error) {
       console.error(`[session ${sessionId}] query failed:`, error);
+      // Don't auto-fire queued prompts into a broken session; a user send resumes.
+      const meta = this.sessions.get(sessionId);
+      if (meta?.queued?.length) meta.queuePaused = true;
       this.setStatus(sessionId, 'error', error);
     }
   }

@@ -215,6 +215,15 @@ export function countAttention(sessions: Record<string, SessionMeta>): number {
   return n;
 }
 
+/** Sessions actively running — drives the favicon's blue "in progress" dot. */
+export function countRunning(sessions: Record<string, SessionMeta>): number {
+  let n = 0;
+  for (const s of Object.values(sessions)) {
+    if (!s.archived && s.status === 'running') n++;
+  }
+  return n;
+}
+
 const BASE_TITLE = document.title;
 
 /** Reflect the count of sessions needing attention on the app/dock icon and tab title. */

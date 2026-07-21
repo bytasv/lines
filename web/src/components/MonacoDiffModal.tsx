@@ -46,6 +46,21 @@ export function MonacoDiffModal({
         original={before}
         modified={after}
         theme={colorScheme === 'dark' ? 'vs-dark' : 'light'}
+        onMount={(editor) => {
+          const reveal = () => {
+            const changes = editor.getLineChanges();
+            if (!changes || changes.length === 0) return;
+            const first = changes[0];
+            const line =
+              first.modifiedStartLineNumber || first.originalStartLineNumber || 1;
+            editor.getModifiedEditor().revealLineNearTop(line);
+          };
+          // Diff is computed async; wait for it before revealing.
+          const d = editor.onDidUpdateDiff(() => {
+            reveal();
+            d.dispose();
+          });
+        }}
         options={{
           readOnly: true,
           renderSideBySide: true,

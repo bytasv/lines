@@ -59,7 +59,7 @@ function ProjectTab({ path, active }: { path: string; active: boolean }) {
 }
 
 export function ProjectTabs() {
-  const connected = useStore((s) => s.connected);
+  const connectionStatus = useStore((s) => s.connectionStatus);
   const projects = useStore((s) => s.projects);
   const activeProject = useStore((s) => s.activeProject);
   const recentDirs = useStore((s) => s.recentDirs);
@@ -95,7 +95,27 @@ export function ProjectTabs() {
         <Text fw={700} size="sm">
           Lines
         </Text>
-        <Indicator color={connected ? 'teal' : 'red'} size={7} />
+        <Tooltip
+          label={
+            connectionStatus === 'connected'
+              ? 'Connected'
+              : connectionStatus === 'offline'
+                ? 'Offline'
+                : 'Reconnecting…'
+          }
+        >
+          <Indicator
+            color={
+              connectionStatus === 'connected'
+                ? 'teal'
+                : connectionStatus === 'offline'
+                  ? 'red'
+                  : 'yellow'
+            }
+            processing={connectionStatus !== 'connected'}
+            size={7}
+          />
+        </Tooltip>
       </Group>
       <ScrollArea type="never" style={{ flex: 1 }}>
         <Group gap={4} wrap="nowrap">

@@ -34,6 +34,15 @@ export interface Attachment {
   url: string;
 }
 
+/** A prompt sent while the session was busy; held server-side and flushed after the current turn. */
+export interface QueuedPrompt {
+  id: string;
+  ts: number;
+  text: string;
+  /** Staged attachment refs; the server re-reads the files back to base64 at flush time. */
+  attachments?: Attachment[];
+}
+
 export interface CavemanConfig {
   enabled: boolean;
   level: CavemanLevel;
@@ -90,6 +99,10 @@ export interface SessionMeta {
    * Persisted so a bridge restart mid-turn doesn't misattribute the result.
    */
   turnSource?: 'user' | 'workflow';
+  /** Prompts sent while busy, held for FIFO auto-send after each turn completes. */
+  queued?: QueuedPrompt[];
+  /** Interrupt/error/crash suspended auto-flush; the next user send resumes it. */
+  queuePaused?: boolean;
 }
 
 export interface ModelOption {
@@ -184,6 +197,8 @@ export type ClientMessage =
   | { type: 'deleteSession'; sessionId: string }
   | { type: 'prompt'; sessionId: string; text: string; attachments?: PromptAttachment[] }
   | { type: 'interrupt'; sessionId: string }
+  | { type: 'retryTurn'; sessionId: string }
+  | { type: 'cancelQueued'; sessionId: string; queuedId: string }
   | { type: 'ackSession'; sessionId: string }
   | { type: 'archiveSession'; sessionId: string }
   | { type: 'unarchiveSession'; sessionId: string }
@@ -212,7 +227,8 @@ export type ClientMessage =
   | { type: 'loadTranscript'; sessionId: string }
   | { type: 'pickFolder' }
   | { type: 'openProject'; path: string }
-  | { type: 'closeProject'; path: string };
+  | { type: 'closeProject'; path: string }
+  | { type: 'ping' };
 
 /** One Claude-plan rate-limit window (5-hour session, weekly, ...) from the OAuth usage endpoint. */
 export interface UsageWindow {
@@ -245,7 +261,8 @@ export type ServerMessage =
   | { type: 'event'; sessionId: string; event: TranscriptEvent }
   | { type: 'transcript'; sessionId: string; events: TranscriptEvent[] }
   | { type: 'folderPicked'; path: string | null }
-  | { type: 'error'; sessionId?: string; message: string };
+  | { type: 'error'; sessionId?: string; message: string }
+  | { type: 'pong' };
 
 export const DEFAULT_MODELS: ModelOption[] = [
   { id: 'claude-opus-4-8', label: 'Opus 4.8' },

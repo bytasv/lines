@@ -221,7 +221,10 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
   const workflows = useStore((s) => s.workflows);
   const selectedSessionId = useStore((s) => s.selectedSessionId);
   const activeProject = useStore((s) => s.activeProject);
-  const [showArchived, setShowArchived] = useState(true);
+  const [showArchived, setShowArchived] = useLocalStorage<boolean>({
+    key: 'claude-ui.showArchived',
+    defaultValue: true,
+  });
   // '' = raw session, otherwise workflow id.
   const [lastChoice, setLastChoice] = useLocalStorage<string>({
     key: 'claude-ui.lastNewSessionChoice',

@@ -224,6 +224,10 @@ wss.on('connection', (ws) => {
 
 async function handleMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
   switch (msg.type) {
+    case 'ping':
+      // App-level heartbeat: browsers can't send WS protocol pings, so we answer this.
+      ws.send(JSON.stringify({ type: 'pong' } satisfies ServerMessage));
+      break;
     case 'createSession': {
       const meta = sessions.createSession({
         name: msg.name,
@@ -242,12 +246,18 @@ async function handleMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
     case 'prompt': {
       // A workflow-attached session consumes its first prompt as the task description.
       if (!workflows.startIfPending(msg.sessionId, msg.text)) {
-        sessions.prompt(msg.sessionId, msg.text, 'user', msg.attachments);
+        sessions.userPrompt(msg.sessionId, msg.text, msg.attachments);
       }
       break;
     }
     case 'interrupt':
       sessions.interrupt(msg.sessionId);
+      break;
+    case 'retryTurn':
+      sessions.retryTurn(msg.sessionId);
+      break;
+    case 'cancelQueued':
+      sessions.cancelQueued(msg.sessionId, msg.queuedId);
       break;
     case 'ackSession':
       sessions.ackSession(msg.sessionId);

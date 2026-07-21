@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type {
   ModelOption,
   PermissionMode,
+  PromptAttachment,
   ServerMessage,
   SessionMeta,
   TranscriptEvent,
@@ -12,6 +13,7 @@ import { DEFAULT_MODEL } from '@claude-ui/shared';
 import type { AlertSound } from './lib/alerts';
 import {
   countAttention,
+  countRunning,
   loadAlertSound,
   loadAlertsEnabled,
   maybeAlert,
@@ -22,6 +24,7 @@ import {
   requestNotifyPermission,
   setBadge,
 } from './lib/alerts';
+import { updateFavicon } from './lib/favicon';
 
 const ACTIVE_PROJECT_KEY = 'claude-ui.activeProject';
 const NEW_SESSION_DEFAULTS_KEY = 'claude-ui.newSessionDefaults';
@@ -29,6 +32,18 @@ const SIDEBAR_MODE_KEY = 'claude-ui.sidebarMode';
 const OPEN_FILES_KEY = 'claude-ui.openFiles';
 
 export type SidebarMode = 'sessions' | 'files';
+
+/** Browser<->bridge link health. 'offline' = navigator.onLine false; 'reconnecting' = socket down but network up. */
+export type ConnectionStatus = 'connected' | 'reconnecting' | 'offline';
+
+/** A prompt held locally while the socket is down, auto-sent on reconnect (session-memory only, lost on reload). */
+export interface QueuedPrompt {
+  id: string;
+  sessionId: string;
+  text: string;
+  attachments?: PromptAttachment[];
+  queuedAt: number;
+}
 
 /** Open editor tabs for one project (files mode). */
 export interface OpenFilesState {
@@ -93,7 +108,9 @@ function latestSessionIn(sessions: Record<string, SessionMeta>, cwd: string): Se
 }
 
 interface UiState {
-  connected: boolean;
+  connectionStatus: ConnectionStatus;
+  /** Prompts waiting for the socket to come back, flushed FIFO after the next `hello`. */
+  queuedPrompts: QueuedPrompt[];
   sessions: Record<string, SessionMeta>;
   workflows: WorkflowDef[];
   models: ModelOption[];
@@ -123,7 +140,10 @@ interface UiState {
   openFiles: Record<string, OpenFilesState>;
 
   applyServerMessage: (msg: ServerMessage) => void;
-  setConnected: (connected: boolean) => void;
+  setConnectionStatus: (status: ConnectionStatus) => void;
+  enqueuePrompt: (p: QueuedPrompt) => void;
+  /** Return and clear the queue atomically; caller re-sends the drained prompts. */
+  drainQueuedPrompts: () => QueuedPrompt[];
   selectSession: (id: string | null) => void;
   setActiveProject: (path: string | null) => void;
   setFolderPickPending: (pending: boolean) => void;
@@ -140,7 +160,8 @@ interface UiState {
 }
 
 export const useStore = create<UiState>((set, get) => ({
-  connected: false,
+  connectionStatus: 'reconnecting',
+  queuedPrompts: [],
   sessions: {},
   workflows: [],
   models: [],
@@ -160,7 +181,13 @@ export const useStore = create<UiState>((set, get) => ({
   sidebarMode: loadSidebarMode(),
   openFiles: loadOpenFiles(),
 
-  setConnected: (connected) => set({ connected }),
+  setConnectionStatus: (status) => set({ connectionStatus: status }),
+  enqueuePrompt: (p) => set((state) => ({ queuedPrompts: [...state.queuedPrompts, p] })),
+  drainQueuedPrompts: () => {
+    const queued = get().queuedPrompts;
+    if (queued.length) set({ queuedPrompts: [] });
+    return queued;
+  },
   selectSession: (id) => set({ selectedSessionId: id }),
   setFolderPickPending: (pending) => set({ folderPickPending: pending }),
 
@@ -372,7 +399,9 @@ export const useStore = create<UiState>((set, get) => ({
         console.error('[server]', msg.message);
         break;
     }
-    // Keep the app/dock badge in sync with sessions needing attention.
-    setBadge(countAttention(get().sessions));
+    // Keep the app/dock badge and favicon in sync with session state.
+    const sessions = get().sessions;
+    setBadge(countAttention(sessions));
+    updateFavicon({ attention: countAttention(sessions), running: countRunning(sessions) > 0 });
   },
 }));

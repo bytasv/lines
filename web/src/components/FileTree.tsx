@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Group, Loader, Text, Tree, mergeAsyncChildren, useTree } from '@mantine/core';
 import type { TreeNodeData } from '@mantine/core';
 import { IconChevronRight, IconFile, IconFolder, IconFolderOpen } from '@tabler/icons-react';
@@ -21,62 +21,104 @@ function toNodes(parent: string, entries: TreeEntry[]): TreeNodeData[] {
   }));
 }
 
+/** Whether `value`'s children have already been loaded into the tree data. */
+function hasLoadedChildren(nodes: TreeNodeData[], value: string): boolean {
+  for (const node of nodes) {
+    if (node.value === value) return Array.isArray(node.children);
+    if (node.children && value.startsWith(node.value + '/')) {
+      return hasLoadedChildren(node.children, value);
+    }
+  }
+  return false;
+}
+
 /** Lazily loading project file tree; each directory is fetched on first expand. */
 export function FileTree({ root, onFileClick, selectedPath }: FileTreeProps) {
   const [data, setData] = useState<TreeNodeData[]>([]);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchTree(root)
-      .then((entries) => {
-        if (!cancelled) setData(toNodes(root, entries));
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [root]);
+  // Controlled expanded state: reveal uses functional updates so sequential
+  // ancestor expansions accumulate instead of clobbering one another.
+  const [expandedState, setExpandedState] = useState<Record<string, boolean>>({});
+  // Mirror of `data` for synchronous reads inside the async reveal loop.
+  const dataRef = useRef<TreeNodeData[]>(data);
+  dataRef.current = data;
 
   const tree = useTree({
     selectedState: selectedPath ? [selectedPath] : [],
+    expandedState,
+    onExpandedStateChange: setExpandedState,
     onLoadChildren: async (value) => {
       const entries = await fetchTree(value);
       setData((d) => mergeAsyncChildren(d, value, toNodes(value, entries)));
     },
   });
 
-  // Auto-expand and load every ancestor directory of the selected file so a
-  // nested open file is revealed in the tree.
-  const revealedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!selectedPath || !selectedPath.startsWith(root + '/')) return;
-    if (revealedRef.current === selectedPath) return;
-    revealedRef.current = selectedPath;
-    const rel = selectedPath.slice(root.length + 1);
-    const segments = rel.split('/').slice(0, -1); // drop the file name
-    let cancelled = false;
-    (async () => {
+  // Load, merge, and expand every ancestor directory of `filePath` in order,
+  // so a nested file is revealed. Sequential so each parent exists before its
+  // child is merged.
+  const revealPath = useCallback(
+    async (filePath: string, isCancelled: () => boolean) => {
+      const segments = filePath.slice(root.length + 1).split('/').slice(0, -1);
       let dir = root;
       for (const seg of segments) {
         dir = `${dir}/${seg}`;
+        const parent = dir;
+        // Already-loaded dirs need no re-fetch/merge — that would swap `data`
+        // identity and make the whole tree flicker. Only ensure it's expanded.
+        if (hasLoadedChildren(dataRef.current, parent)) {
+          setExpandedState((e) => (e[parent] ? e : { ...e, [parent]: true }));
+          continue;
+        }
         try {
-          const entries = await fetchTree(dir);
-          if (cancelled) return;
-          setData((d) => mergeAsyncChildren(d, dir, toNodes(dir, entries)));
-          tree.expand(dir);
+          const entries = await fetchTree(parent);
+          if (isCancelled()) return;
+          setData((d) => mergeAsyncChildren(d, parent, toNodes(parent, entries)));
+          setExpandedState((e) => (e[parent] ? e : { ...e, [parent]: true }));
         } catch {
           return;
         }
+      }
+    },
+    [root],
+  );
+
+  const revealedRef = useRef<string | null>(null);
+
+  // Load the root, then reveal the initially-selected file.
+  useEffect(() => {
+    let cancelled = false;
+    const isCancelled = () => cancelled;
+    (async () => {
+      try {
+        const rootEntries = await fetchTree(root);
+        if (cancelled) return;
+        setData(toNodes(root, rootEntries));
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        return;
+      }
+      revealedRef.current = selectedPath ?? null;
+      if (selectedPath && selectedPath.startsWith(root + '/')) {
+        await revealPath(selectedPath, isCancelled);
       }
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPath, root]);
+  }, [root]);
+
+  // Reveal a newly-selected file without reloading the whole tree.
+  useEffect(() => {
+    if (!selectedPath || !selectedPath.startsWith(root + '/')) return;
+    if (revealedRef.current === selectedPath) return;
+    revealedRef.current = selectedPath;
+    let cancelled = false;
+    void revealPath(selectedPath, () => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPath, root, revealPath]);
 
   if (error) {
     return (

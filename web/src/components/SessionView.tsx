@@ -1,10 +1,11 @@
 import { useEffect } from 'react';
-import { Alert, Divider, Group, Stack, Text } from '@mantine/core';
-import { IconAlertTriangle } from '@tabler/icons-react';
+import { Alert, Button, Divider, Group, Stack, Text } from '@mantine/core';
+import { IconAlertTriangle, IconRefresh } from '@tabler/icons-react';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { Transcript } from './Transcript';
 import { Composer } from './Composer';
+import { QueuedMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
 
 export function SessionView({ sessionId }: { sessionId: string }) {
@@ -43,10 +44,23 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       {workflow && session.workflow && <WorkflowStepper session={session} workflow={workflow} />}
       {session.status === 'error' && session.errorMessage && (
         <Alert color="red" icon={<IconAlertTriangle size={16} />} m="md" py={6}>
-          <Text size="xs">{session.errorMessage}</Text>
+          <Group gap="sm" wrap="nowrap" justify="space-between">
+            <Text size="xs">{session.errorMessage}</Text>
+            <Button
+              size="compact-xs"
+              variant="light"
+              color="red"
+              leftSection={<IconRefresh size={12} />}
+              style={{ flexShrink: 0 }}
+              onClick={() => send({ type: 'retryTurn', sessionId })}
+            >
+              Retry
+            </Button>
+          </Group>
         </Alert>
       )}
       <Transcript sessionId={sessionId} events={events ?? []} stepCount={workflow?.steps.length} />
+      <QueuedMessages session={session} />
       <Composer session={session} />
     </Stack>
   );

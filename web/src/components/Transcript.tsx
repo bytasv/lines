@@ -17,12 +17,15 @@ import { useHover } from '@mantine/hooks';
 import {
   IconArrowDown,
   IconFile,
+  IconRefresh,
   IconRobot,
   IconUser,
   IconRoute,
   IconZoomIn,
 } from '@tabler/icons-react';
 import type { TranscriptEvent, WorkflowMarkerData } from '@claude-ui/shared';
+import { useStore } from '../store';
+import { send } from '../ws';
 import { buildTranscript, type TranscriptItem } from '../lib/transcript';
 import { Markdown } from './Markdown';
 import { ToolCallCard } from './ToolCallCard';
@@ -93,10 +96,13 @@ function Item({
   item,
   sessionId,
   onImage,
+  showRetry,
 }: {
   item: TranscriptItem;
   sessionId: string;
   onImage: (src: string) => void;
+  /** Render a Retry button (last transcript item is a failed result, session settled). */
+  showRetry?: boolean;
 }) {
   switch (item.kind) {
     case 'user':
@@ -183,11 +189,24 @@ function Item({
       );
     case 'result':
       return (
-        <Text size="xs" c={item.isError ? 'red' : 'dimmed'} ta="center">
-          {item.isError ? 'turn failed' : 'turn done'}
-          {item.costUsd != null ? ` · $${item.costUsd.toFixed(4)}` : ''}
-          {item.durationMs != null ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''}
-        </Text>
+        <Group gap="xs" justify="center">
+          <Text size="xs" c={item.isError ? 'red' : 'dimmed'} ta="center">
+            {item.isError ? 'turn failed' : 'turn done'}
+            {item.costUsd != null ? ` · $${item.costUsd.toFixed(4)}` : ''}
+            {item.durationMs != null ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''}
+          </Text>
+          {showRetry && (
+            <Button
+              size="compact-xs"
+              variant="light"
+              color="red"
+              leftSection={<IconRefresh size={12} />}
+              onClick={() => send({ type: 'retryTurn', sessionId })}
+            >
+              Retry
+            </Button>
+          )}
+        </Group>
       );
     case 'permission':
       // Guard-approved calls get a compact one-liner, not a full card.
@@ -220,6 +239,17 @@ export function Transcript({
   stepCount?: number;
 }) {
   const items = useMemo(() => buildTranscript(events), [events]);
+  const status = useStore((s) => s.sessions[sessionId]?.status);
+  // Retry only on the trailing failed result of a settled session — a retry
+  // button mid-history or during a running turn would be stale/confusing.
+  const lastItem = items.at(-1);
+  const retryKey =
+    lastItem?.kind === 'result' &&
+    lastItem.isError &&
+    status !== 'running' &&
+    status !== 'waiting-permission'
+      ? lastItem.key
+      : null;
   const [lightbox, setLightbox] = useState<string | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   // Pinned = follow the stream. Scrolling up unpins; scrolling back down repins.
@@ -340,7 +370,13 @@ export function Transcript({
             </Text>
           )}
           {items.map((item) => (
-            <Item key={item.key} item={item} sessionId={sessionId} onImage={setLightbox} />
+            <Item
+              key={item.key}
+              item={item}
+              sessionId={sessionId}
+              onImage={setLightbox}
+              showRetry={item.key === retryKey}
+            />
           ))}
         </Stack>
       </ScrollArea>

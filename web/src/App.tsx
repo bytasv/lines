@@ -6,6 +6,7 @@ import { useStore } from './store';
 import { Sidebar } from './components/Sidebar';
 import { SessionView } from './components/SessionView';
 import { ProjectTabs } from './components/ProjectTabs';
+import { ConnectionBanner } from './components/ConnectionBanner';
 import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/WorkflowEditor';
 import { MonacoPreviewModal } from './components/MonacoPreviewModal';
@@ -112,6 +113,7 @@ function Shell() {
       <AppShell.Header>
         <ProjectTabs />
       </AppShell.Header>
+      <ConnectionBanner headerHeight={HEADER_HEIGHT} />
       <AppShell.Navbar>
         <Sidebar onEditWorkflows={() => setWorkflowEditorOpen(true)} />
         {hasProjects && (

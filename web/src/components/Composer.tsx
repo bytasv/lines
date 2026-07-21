@@ -123,6 +123,8 @@ export const MODE_LABELS: { value: PermissionMode; label: string }[] = [
 
 export function Composer({ session }: { session: SessionMeta }) {
   const models = useStore((s) => s.models);
+  const connectionStatus = useStore((s) => s.connectionStatus);
+  const queuedCount = useStore((s) => s.queuedPrompts.filter((q) => q.sessionId === session.id).length);
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [lightbox, setLightbox] = useState<string | null>(null);
@@ -210,6 +212,12 @@ export function Composer({ session }: { session: SessionMeta }) {
             />
           ))}
         </Group>
+      )}
+      {connectionStatus !== 'connected' && (
+        <Text size="xs" c="dimmed" px={6} pb={6}>
+          Offline — messages are queued and sent on reconnect
+          {queuedCount > 0 ? ` · ${queuedCount} queued` : ''}
+        </Text>
       )}
       <input
         ref={fileInputRef}
@@ -309,11 +317,23 @@ export function Composer({ session }: { session: SessionMeta }) {
             </Text>
           )}
           {running ? (
-            <Tooltip label="Interrupt">
-              <ActionIcon color="red" variant="light" size="lg" onClick={() => send({ type: 'interrupt', sessionId: session.id })}>
-                <IconPlayerStop size={16} />
-              </ActionIcon>
-            </Tooltip>
+            <>
+              <Tooltip label="Queue message — sends after the current turn">
+                <ActionIcon
+                  variant="subtle"
+                  size="lg"
+                  onClick={submit}
+                  disabled={!text.trim() && attachments.length === 0}
+                >
+                  <IconSend size={16} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Interrupt">
+                <ActionIcon color="red" variant="light" size="lg" onClick={() => send({ type: 'interrupt', sessionId: session.id })}>
+                  <IconPlayerStop size={16} />
+                </ActionIcon>
+              </Tooltip>
+            </>
           ) : (
             <ActionIcon
               variant="filled"

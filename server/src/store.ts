@@ -100,6 +100,15 @@ export const store = {
     return file;
   },
 
+  /** Read a previously staged attachment back to base64; null if the file is gone. */
+  loadAttachmentBase64(sessionId: string, file: string): string | null {
+    try {
+      return fs.readFileSync(path.join(ATTACHMENTS, sessionId, file)).toString('base64');
+    } catch {
+      return null;
+    }
+  },
+
   loadGuardAllowlist<T>(fallback: T): T {
     return readJson(path.join(ROOT, 'guard-allowlist.json'), fallback);
   },
