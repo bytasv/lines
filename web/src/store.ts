@@ -30,8 +30,12 @@ const ACTIVE_PROJECT_KEY = 'claude-ui.activeProject';
 const NEW_SESSION_DEFAULTS_KEY = 'claude-ui.newSessionDefaults';
 const SIDEBAR_MODE_KEY = 'claude-ui.sidebarMode';
 const OPEN_FILES_KEY = 'claude-ui.openFiles';
+const COMPACTION_LEVEL_KEY = 'claude-ui.compactionLevel';
 
 export type SidebarMode = 'sessions' | 'files';
+
+/** How aggressively the transcript folds agent activity. Persisted in localStorage. */
+export type CompactionLevel = 'full' | 'grouped' | 'compact';
 
 /** Browser<->bridge link health. 'offline' = navigator.onLine false; 'reconnecting' = socket down but network up. */
 export type ConnectionStatus = 'connected' | 'reconnecting' | 'offline';
@@ -53,6 +57,11 @@ export interface OpenFilesState {
 
 function loadSidebarMode(): SidebarMode {
   return localStorage.getItem(SIDEBAR_MODE_KEY) === 'files' ? 'files' : 'sessions';
+}
+
+function loadCompactionLevel(): CompactionLevel {
+  const v = localStorage.getItem(COMPACTION_LEVEL_KEY);
+  return v === 'full' || v === 'grouped' || v === 'compact' ? v : 'compact';
 }
 
 function loadOpenFiles(): Record<string, OpenFilesState> {
@@ -136,6 +145,8 @@ interface UiState {
   usage: UsageSnapshot | null;
   /** What the left sidebar shows: session list or project file tree. */
   sidebarMode: SidebarMode;
+  /** Transcript compaction level; persisted in localStorage. */
+  compactionLevel: CompactionLevel;
   /** Open editor tabs per project path; persisted in localStorage. */
   openFiles: Record<string, OpenFilesState>;
 
@@ -154,6 +165,7 @@ interface UiState {
   openFilePreview: (raw: string) => void;
   closeFilePreview: () => void;
   setSidebarMode: (mode: SidebarMode) => void;
+  setCompactionLevel: (level: CompactionLevel) => void;
   openFileTab: (path: string) => void;
   closeFileTab: (path: string) => void;
   setActiveFileTab: (path: string) => void;
@@ -179,6 +191,7 @@ export const useStore = create<UiState>((set, get) => ({
   filePreview: null,
   usage: null,
   sidebarMode: loadSidebarMode(),
+  compactionLevel: loadCompactionLevel(),
   openFiles: loadOpenFiles(),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -214,6 +227,11 @@ export const useStore = create<UiState>((set, get) => ({
   setSidebarMode: (mode) => {
     localStorage.setItem(SIDEBAR_MODE_KEY, mode);
     set({ sidebarMode: mode });
+  },
+
+  setCompactionLevel: (level) => {
+    localStorage.setItem(COMPACTION_LEVEL_KEY, level);
+    set({ compactionLevel: level });
   },
 
   openFileTab: (path) => {

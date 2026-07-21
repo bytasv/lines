@@ -18,12 +18,26 @@ export interface ToolBlock {
 
 export type AssistantBlock =
   | { type: 'text'; text: string }
-  | { type: 'thinking'; text: string }
-  | ToolBlock;
+  | { type: 'thinking'; text: string };
+
+export interface ToolGroupItem {
+  kind: 'tool-group';
+  key: string; // `g${firstToolUseId}` — stable across rebuilds
+  tools: ToolBlock[];
+  labelText?: string; // preceding text block, trimmed
+}
+
+export interface AgentTurnItem {
+  kind: 'agent-turn';
+  key: string; // `t${firstChild.key}` — stable
+  items: TranscriptItem[]; // the agent's assistant/tool-group/permission/result items
+}
 
 export type TranscriptItem =
   | { kind: 'user'; key: string; text: string; source: 'user' | 'workflow'; attachments?: Attachment[] }
   | { kind: 'assistant'; key: string; blocks: AssistantBlock[] }
+  | ToolGroupItem
+  | AgentTurnItem
   | { kind: 'streaming'; key: string; text: string }
   | { kind: 'system-init'; key: string; model: string }
   | { kind: 'result'; key: string; costUsd?: number; durationMs?: number; isError: boolean }
@@ -60,13 +74,15 @@ function contentToString(content: unknown): string {
  * - stream_event deltas build a live "streaming" tail item, dropped once the
  *   complete assistant message lands
  */
-export function buildTranscript(events: TranscriptEvent[]): TranscriptItem[] {
+export function buildTranscript(events: TranscriptEvent[], groupTools = true): TranscriptItem[] {
   const items: TranscriptItem[] = [];
   const toolBlocks = new Map<string, ToolBlock>();
   const snapshots: FileSnapshotData[] = [];
   const permissionItems = new Map<string, { kind: 'permission' } & TranscriptItem>();
   let streamingText = '';
   let streamingActive = false;
+  let openGroup: ToolGroupItem | null = null;
+  let lastText = '';
 
   const attachSnapshot = (tool: ToolBlock) => {
     // Prefer exact tool_use_id match, fall back to file path (hook input ids can be absent).
@@ -82,6 +98,8 @@ export function buildTranscript(events: TranscriptEvent[]): TranscriptItem[] {
   for (const event of events) {
     switch (event.kind) {
       case 'user': {
+        openGroup = null;
+        lastText = '';
         const data = event.data as { text: string; source?: 'user' | 'workflow'; attachments?: Attachment[] };
         items.push({
           kind: 'user',
@@ -119,6 +137,8 @@ export function buildTranscript(events: TranscriptEvent[]): TranscriptItem[] {
         break;
       }
       case 'workflow':
+        openGroup = null;
+        lastText = '';
         items.push({ kind: 'workflow', key: `w${event.seq}`, data: event.data as WorkflowMarkerData });
         break;
       case 'sdk': {
@@ -138,13 +158,26 @@ export function buildTranscript(events: TranscriptEvent[]): TranscriptItem[] {
             streamingText = '';
             streamingActive = false;
             const message = (msg as { message?: { content?: SdkContentBlock[] } }).message;
-            const blocks: AssistantBlock[] = [];
+            let pending: AssistantBlock[] = [];
+            let flushCount = 0;
+            const flush = () => {
+              if (pending.length === 0) return;
+              const key = flushCount === 0 ? `a${event.seq}` : `a${event.seq}.${flushCount}`;
+              items.push({ kind: 'assistant', key, blocks: pending });
+              pending = [];
+              flushCount++;
+            };
             for (const block of message?.content ?? []) {
               if (block.type === 'text' && block.text) {
-                blocks.push({ type: 'text', text: block.text });
+                pending.push({ type: 'text', text: block.text });
+                lastText = block.text;
+                openGroup = null;
               } else if (block.type === 'thinking' && block.thinking) {
-                blocks.push({ type: 'thinking', text: block.thinking });
+                pending.push({ type: 'thinking', text: block.thinking });
+                lastText = '';
+                openGroup = null;
               } else if (block.type === 'tool_use' && block.id && block.name) {
+                flush();
                 const tool: ToolBlock = {
                   type: 'tool',
                   id: block.id,
@@ -153,12 +186,23 @@ export function buildTranscript(events: TranscriptEvent[]): TranscriptItem[] {
                 };
                 toolBlocks.set(block.id, tool);
                 attachSnapshot(tool);
-                blocks.push(tool);
+                // Full level (groupTools=false): each tool is its own 1-tool group,
+                // which ToolGroup renders as a bare card — i.e. ungrouped.
+                if (!groupTools) openGroup = null;
+                if (!openGroup) {
+                  openGroup = {
+                    kind: 'tool-group',
+                    key: `g${block.id}`,
+                    tools: [],
+                    labelText: lastText ? lastText.slice(0, 100) : undefined,
+                  };
+                  items.push(openGroup);
+                }
+                openGroup.tools.push(tool);
+                if (!groupTools) openGroup = null;
               }
             }
-            if (blocks.length > 0) {
-              items.push({ kind: 'assistant', key: `a${event.seq}`, blocks });
-            }
+            flush();
             break;
           }
           case 'user': {
@@ -181,6 +225,8 @@ export function buildTranscript(events: TranscriptEvent[]): TranscriptItem[] {
           case 'result': {
             streamingText = '';
             streamingActive = false;
+            openGroup = null;
+            lastText = '';
             const r = msg as { total_cost_usd?: number; duration_ms?: number; is_error?: boolean; subtype?: string };
             items.push({
               kind: 'result',
@@ -217,6 +263,52 @@ export function buildTranscript(events: TranscriptEvent[]): TranscriptItem[] {
   }
 
   return items;
+}
+
+/**
+ * Compact level: fold each agent turn (everything the agent produced between one
+ * user prompt and the next boundary) into a single collapsible `agent-turn` item.
+ * User prompts, session-init, and workflow dividers are boundaries that stay visible.
+ * A lone agent item passes through un-wrapped (avoids chrome around a single answer).
+ */
+export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
+  const out: TranscriptItem[] = [];
+  let buf: TranscriptItem[] = [];
+  const flush = () => {
+    if (buf.length === 0) return;
+    if (buf.length === 1) out.push(buf[0]);
+    else out.push({ kind: 'agent-turn', key: `t${buf[0].key}`, items: buf });
+    buf = [];
+  };
+  for (const it of items) {
+    if (it.kind === 'user' || it.kind === 'system-init' || it.kind === 'workflow') {
+      flush();
+      out.push(it);
+    } else {
+      buf.push(it);
+    }
+  }
+  flush();
+  return out;
+}
+
+/** Aggregate summary of what an agent did in a folded turn, for the collapsed header. */
+export function turnToolStats(items: TranscriptItem[]): {
+  summary: string | null;
+  totals: { added: number; removed: number } | null;
+  result?: { durationMs?: number; costUsd?: number };
+} {
+  const tools = items
+    .filter((i): i is ToolGroupItem => i.kind === 'tool-group')
+    .flatMap((g) => g.tools);
+  const result = items.find((i) => i.kind === 'result') as
+    | { durationMs?: number; costUsd?: number }
+    | undefined;
+  return {
+    summary: tools.length > 0 ? groupSummary(tools) : null,
+    totals: groupDiffTotals(tools),
+    result: result ? { durationMs: result.durationMs, costUsd: result.costUsd } : undefined,
+  };
 }
 
 /** Compute before/after file contents for an edit-type tool call, for the Monaco diff. */
@@ -270,6 +362,31 @@ export function computeDiff(tool: ToolBlock): { filePath: string; before: string
 
 export function isEditTool(name: string): boolean {
   return name === 'Edit' || name === 'Write' || name === 'MultiEdit' || name === 'NotebookEdit';
+}
+
+/** Collapsed group header, e.g. "8 actions · Read ×3, Edit ×2, Bash ×3" (first-seen order). */
+export function groupSummary(tools: ToolBlock[]): string {
+  const counts = new Map<string, number>();
+  for (const t of tools) counts.set(t.name, (counts.get(t.name) ?? 0) + 1);
+  const parts = [...counts.entries()].map(([name, n]) => `${name} ×${n}`);
+  return `${tools.length} action${tools.length === 1 ? '' : 's'} · ${parts.join(', ')}`;
+}
+
+/** Aggregate +N/−N over edit tools in a group, or null if none. */
+export function groupDiffTotals(tools: ToolBlock[]): { added: number; removed: number } | null {
+  let added = 0;
+  let removed = 0;
+  let any = false;
+  for (const t of tools) {
+    if (!isEditTool(t.name)) continue;
+    const d = computeDiff(t);
+    if (!d) continue;
+    const s = diffStats(d.before, d.after);
+    added += s.added;
+    removed += s.removed;
+    any = true;
+  }
+  return any ? { added, removed } : null;
 }
 
 /** Rough +N/−N line stats for the compact diff card. */

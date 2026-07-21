@@ -1,7 +1,7 @@
 import { ActionIcon, Group, Modal, SegmentedControl, Select, Stack, Switch, Text, Tooltip } from '@mantine/core';
 import { IconPlayerPlay } from '@tabler/icons-react';
 import type { PermissionMode } from '@claude-ui/shared';
-import { useStore } from '../store';
+import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { MODE_LABELS } from './Composer';
 
@@ -15,6 +15,8 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
   const alertSound = useStore((s) => s.alertSound);
   const setAlertSound = useStore((s) => s.setAlertSound);
   const testAlertSound = useStore((s) => s.testAlertSound);
+  const compactionLevel = useStore((s) => s.compactionLevel);
+  const setCompactionLevel = useStore((s) => s.setCompactionLevel);
 
   const alertsDescription =
     alertsEnabled && notifyPermission !== 'granted'
@@ -43,6 +45,24 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
             data={MODE_LABELS}
             value={defaults.permissionMode}
             onChange={(v) => setDefaults({ ...defaults, permissionMode: v as PermissionMode })}
+          />
+        </Stack>
+        <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
+          Transcript
+        </Text>
+        <Stack gap={4}>
+          <Text size="sm" fw={500}>
+            Compaction
+          </Text>
+          <SegmentedControl
+            size="xs"
+            data={[
+              { value: 'full', label: 'Full' },
+              { value: 'grouped', label: 'Grouped' },
+              { value: 'compact', label: 'Compact' },
+            ]}
+            value={compactionLevel}
+            onChange={(v) => setCompactionLevel(v as CompactionLevel)}
           />
         </Stack>
         <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">

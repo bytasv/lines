@@ -3,6 +3,7 @@ import {
   Badge,
   Box,
   Button,
+  Collapse,
   Divider,
   Group,
   Loader,
@@ -16,6 +17,8 @@ import {
 import { useHover } from '@mantine/hooks';
 import {
   IconArrowDown,
+  IconChevronDown,
+  IconChevronRight,
   IconFile,
   IconRefresh,
   IconRobot,
@@ -26,9 +29,15 @@ import {
 import type { TranscriptEvent, WorkflowMarkerData } from '@claude-ui/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
-import { buildTranscript, type TranscriptItem } from '../lib/transcript';
+import {
+  buildTranscript,
+  foldAgentTurns,
+  turnToolStats,
+  type AgentTurnItem,
+  type TranscriptItem,
+} from '../lib/transcript';
 import { Markdown } from './Markdown';
-import { ToolCallCard } from './ToolCallCard';
+import { ToolGroup } from './ToolGroup';
 import { PermissionPrompt } from './PermissionPrompt';
 
 function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
@@ -96,14 +105,22 @@ function Item({
   item,
   sessionId,
   onImage,
-  showRetry,
+  retryKey,
+  activeGroupKey,
+  activeTurnKey,
 }: {
   item: TranscriptItem;
   sessionId: string;
   onImage: (src: string) => void;
-  /** Render a Retry button (last transcript item is a failed result, session settled). */
-  showRetry?: boolean;
+  /** Key of the trailing failed result that should show a Retry button, if any. */
+  retryKey?: string | null;
+  /** Key of the tool-group that is the agent's current (live) work — rendered expanded. */
+  activeGroupKey?: string | null;
+  /** Key of the agent-turn that is the current (live) turn — rendered expanded (Compact). */
+  activeTurnKey?: string | null;
 }) {
+  const showRetry = item.key === retryKey;
+  const isActiveGroup = item.key === activeGroupKey;
   switch (item.kind) {
     case 'user':
       return (
@@ -161,15 +178,38 @@ function Item({
           <Stack gap={6} style={{ flex: 1, minWidth: 0 }}>
             {item.blocks.map((block, i) => {
               if (block.type === 'text') return <Markdown key={i} text={block.text} />;
-              if (block.type === 'thinking')
-                return (
-                  <Text key={i} size="xs" c="dimmed" fs="italic" style={{ whiteSpace: 'pre-wrap' }}>
-                    {block.text.length > 600 ? block.text.slice(0, 600) + '…' : block.text}
-                  </Text>
-                );
-              return <ToolCallCard key={block.id} tool={block} />;
+              return (
+                <Text key={i} size="xs" c="dimmed" fs="italic" style={{ whiteSpace: 'pre-wrap' }}>
+                  {block.text.length > 600 ? block.text.slice(0, 600) + '…' : block.text}
+                </Text>
+              );
             })}
           </Stack>
+        </Group>
+      );
+    case 'tool-group':
+      return (
+        <Group align="flex-start" gap="xs" wrap="nowrap">
+          <Box w={16} style={{ flexShrink: 0 }} />
+          <Box style={{ flex: 1, minWidth: 0 }}>
+            <ToolGroup group={item} active={!!isActiveGroup} sessionId={sessionId} />
+          </Box>
+        </Group>
+      );
+    case 'agent-turn':
+      return (
+        <Group align="flex-start" gap="xs" wrap="nowrap">
+          <IconRobot size={16} style={{ marginTop: 4, opacity: 0.5, flexShrink: 0 }} />
+          <Box style={{ flex: 1, minWidth: 0 }}>
+            <AgentTurn
+              turn={item}
+              active={item.key === activeTurnKey}
+              sessionId={sessionId}
+              onImage={onImage}
+              retryKey={retryKey}
+              activeGroupKey={activeGroupKey}
+            />
+          </Box>
         </Group>
       );
     case 'streaming':
@@ -209,23 +249,91 @@ function Item({
         </Group>
       );
     case 'permission':
-      // Guard-approved calls get a compact one-liner, not a full card.
-      if (item.data.auto) {
-        const summary =
-          typeof item.data.input.command === 'string'
-            ? item.data.input.command
-            : String(item.data.input.file_path ?? item.data.input.url ?? '');
-        return (
-          <Text size="xs" c="dimmed" ta="center" ff="monospace" truncate>
-            ⚡ auto-allowed {item.data.toolName}
-            {summary ? ` · ${summary.slice(0, 80)}` : ''}
-          </Text>
-        );
-      }
+      // Auto-allowed calls are filtered out upstream; only real prompts reach here.
       return <PermissionPrompt sessionId={sessionId} data={item.data} resolution={item.resolution} />;
     case 'workflow':
       return <WorkflowMarker data={item.data} />;
   }
+}
+
+// Sticky per-turn override (Compact level), keyed `${sessionId}:${turn.key}`. Module scope
+// so it survives Transcript remount and rebuilds; `t*` keys never collide with `g*` groups.
+const turnOverrides = new Map<string, boolean>();
+
+function AgentTurn({
+  turn,
+  active,
+  sessionId,
+  onImage,
+  retryKey,
+  activeGroupKey,
+}: {
+  turn: AgentTurnItem;
+  active: boolean;
+  sessionId: string;
+  onImage: (src: string) => void;
+  retryKey?: string | null;
+  activeGroupKey?: string | null;
+}) {
+  const k = `${sessionId}:${turn.key}`;
+  const [override, setOverride] = useState<boolean | null>(() => turnOverrides.get(k) ?? null);
+  const expanded = override ?? active;
+  const toggle = () => {
+    turnOverrides.set(k, !expanded);
+    setOverride(!expanded);
+  };
+
+  const { summary, totals, result } = turnToolStats(turn.items);
+
+  return (
+    <Paper withBorder radius="md" px="sm" py={6} bg="var(--mantine-color-default)">
+      <Group gap="xs" wrap="nowrap" justify="space-between">
+        <Group
+          gap="xs"
+          wrap="nowrap"
+          style={{ cursor: 'pointer', minWidth: 0, flex: 1 }}
+          onClick={toggle}
+        >
+          {expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+          <Text size="xs" fw={600} truncate style={{ flex: 1 }}>
+            {summary ?? 'response'}
+          </Text>
+        </Group>
+        <Group gap={6} wrap="nowrap">
+          {totals && (
+            <Text size="xs" ff="monospace">
+              <Text span c="teal">
+                +{totals.added}
+              </Text>{' '}
+              <Text span c="red">
+                −{totals.removed}
+              </Text>
+            </Text>
+          )}
+          {result?.durationMs != null && (
+            <Text size="xs" c="dimmed">
+              {(result.durationMs / 1000).toFixed(1)}s
+            </Text>
+          )}
+          {active && <Loader size={12} />}
+        </Group>
+      </Group>
+      <Collapse expanded={expanded} transitionDuration={150}>
+        <Stack gap="sm" mt={6}>
+          {turn.items.map((child) => (
+            <Item
+              key={child.key}
+              item={child}
+              sessionId={sessionId}
+              onImage={onImage}
+              retryKey={retryKey}
+              activeGroupKey={activeGroupKey}
+            />
+          ))}
+        </Stack>
+      </Collapse>
+    </Paper>
+  );
 }
 
 export function Transcript({
@@ -238,11 +346,47 @@ export function Transcript({
   /** Workflow step count — segments the scroll progress bar per step. */
   stepCount?: number;
 }) {
-  const items = useMemo(() => buildTranscript(events), [events]);
+  const compactionLevel = useStore((s) => s.compactionLevel);
+  // Flat item list. Full level ('full') leaves tools ungrouped (1-tool groups render bare);
+  // otherwise consecutive tools fold into tool-groups. Auto-allowed permission one-liners
+  // are redundant (their tool shows in the group card) so drop them; real prompts stay.
+  const built = useMemo(
+    () =>
+      buildTranscript(events, compactionLevel !== 'full').filter(
+        (it) => !(it.kind === 'permission' && it.data.auto),
+      ),
+    [events, compactionLevel],
+  );
+  // Compact level additionally folds each agent turn into a collapsible super-group.
+  const items = useMemo(
+    () => (compactionLevel === 'compact' ? foldAgentTurns(built) : built),
+    [built, compactionLevel],
+  );
   const status = useStore((s) => s.sessions[sessionId]?.status);
+  // The active group is the latest tool-group while the session is live — it renders
+  // expanded; any earlier group auto-collapses. Computed on the flat list so the key is
+  // found even when the group is nested inside a folded turn. Pending permissions belong to it.
+  const activeGroupKey = useMemo(() => {
+    if (status !== 'running' && status !== 'waiting-permission') return null;
+    for (let i = built.length - 1; i >= 0; i--) {
+      const it = built[i];
+      if (it.kind === 'permission') continue;
+      return it.kind === 'tool-group' ? it.key : null;
+    }
+    return null;
+  }, [built, status]);
+  // The active turn (Compact level) is the latest agent-turn while the session is live.
+  const activeTurnKey = useMemo(() => {
+    if (status !== 'running' && status !== 'waiting-permission') return null;
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].kind === 'agent-turn') return items[i].key;
+    }
+    return null;
+  }, [items, status]);
   // Retry only on the trailing failed result of a settled session — a retry
   // button mid-history or during a running turn would be stale/confusing.
-  const lastItem = items.at(-1);
+  // Use the flat list so it's found even when the result is folded into a turn.
+  const lastItem = built.at(-1);
   const retryKey =
     lastItem?.kind === 'result' &&
     lastItem.isError &&
@@ -375,7 +519,9 @@ export function Transcript({
               item={item}
               sessionId={sessionId}
               onImage={setLightbox}
-              showRetry={item.key === retryKey}
+              retryKey={retryKey}
+              activeGroupKey={activeGroupKey}
+              activeTurnKey={activeTurnKey}
             />
           ))}
         </Stack>
