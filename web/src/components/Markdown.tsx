@@ -1,26 +1,43 @@
+import { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
+import type { PluggableList } from 'unified';
+import rehypeHighlight from 'rehype-highlight';
 import { Typography } from '@mantine/core';
+import { rehypeFilePaths } from '../lib/rehypeFilePaths';
+import { useStore } from '../store';
 
-export function Markdown({ text }: { text: string }) {
+const rehypePlugins: PluggableList = [
+  [rehypeHighlight, { detect: false, aliases: { typescript: ['tsx', 'mts'], javascript: ['jsx', 'mjs'] } }],
+  rehypeFilePaths,
+];
+
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     <Typography fz="sm" className="md-body">
       <ReactMarkdown
+        rehypePlugins={rehypePlugins}
         components={{
-          code({ className, children, ...props }) {
-            const isBlock = String(className ?? '').includes('language-');
+          a({ className, children, href, node, ...props }) {
+            const filepath = (node?.properties?.dataFilepath as string | undefined) ?? undefined;
+            if (String(className ?? '').includes('file-link') && filepath) {
+              return (
+                <a
+                  className={className}
+                  href="#"
+                  style={{ cursor: 'pointer' }}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    useStore.getState().openFilePreview(filepath);
+                  }}
+                >
+                  {children}
+                </a>
+              );
+            }
             return (
-              <code
-                className={className}
-                style={{
-                  fontSize: 12,
-                  ...(isBlock
-                    ? { display: 'block', overflowX: 'auto', padding: 10, borderRadius: 6 }
-                    : {}),
-                }}
-                {...props}
-              >
+              <a href={href} {...props}>
                 {children}
-              </code>
+              </a>
             );
           },
         }}
@@ -29,4 +46,4 @@ export function Markdown({ text }: { text: string }) {
       </ReactMarkdown>
     </Typography>
   );
-}
+});

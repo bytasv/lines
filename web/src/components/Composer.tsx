@@ -113,7 +113,7 @@ function PreviewTile({
   );
 }
 
-const MODE_LABELS: { value: PermissionMode; label: string }[] = [
+export const MODE_LABELS: { value: PermissionMode; label: string }[] = [
   { value: 'default', label: 'Agent' },
   { value: 'auto', label: 'Auto' },
   { value: 'acceptEdits', label: 'Edits' },

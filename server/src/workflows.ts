@@ -112,6 +112,7 @@ export class WorkflowEngine {
     if (!meta?.workflow || meta.workflow.started) return false;
     meta.workflow.started = true;
     meta.workflow.task = userText;
+    this.sessions.maybeAutoName(sessionId, userText);
     void this.runStep(sessionId);
     return true;
   }

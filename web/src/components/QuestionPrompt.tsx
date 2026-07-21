@@ -145,14 +145,14 @@ export function QuestionPrompt({
         )}
         {data.answers &&
           Object.entries(data.answers).map(([q, a]) => (
-            <Group key={q} gap={6} wrap="nowrap" align="flex-start">
-              <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
+            <Stack key={q} gap={0} mt={4}>
+              <Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>
                 {q}
               </Text>
-              <Text size="xs" fw={600}>
+              <Text size="xs" fw={600} style={{ overflowWrap: 'anywhere' }}>
                 {a}
               </Text>
-            </Group>
+            </Stack>
           ))}
       </Paper>
     );

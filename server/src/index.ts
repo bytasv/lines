@@ -1,5 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -9,6 +10,7 @@ import { SessionManager } from './sessions.ts';
 import { WorkerClient } from './workerClient.ts';
 import { WorkflowEngine } from './workflows.ts';
 import { store } from './store.ts';
+import { UsagePoller } from './usage.ts';
 
 const PORT = Number(process.env.PORT ?? 8787);
 
@@ -21,7 +23,20 @@ function broadcast(msg: ServerMessage) {
   }
 }
 
-const sessions = new SessionManager(broadcast);
+const usage = new UsagePoller(broadcast);
+usage.start();
+
+const sessions = new SessionManager((msg) => {
+  broadcast(msg);
+  // A result message means plan usage just changed — refresh the poller soon.
+  if (
+    msg.type === 'event' &&
+    msg.event.kind === 'sdk' &&
+    (msg.event.data as { type?: string } | null)?.type === 'result'
+  ) {
+    usage.refreshSoon();
+  }
+});
 // The worker owns the Claude CLI children so this process can restart freely
 // (tsx watch, dogfooding edits) without killing in-flight agent turns.
 const worker = new WorkerClient({
@@ -59,9 +74,93 @@ const server = http.createServer((req, res) => {
   if (req.url && req.url.startsWith('/attachments/')) {
     return serveAttachment(req.url, res);
   }
+  if (req.url && req.url.startsWith('/file?')) {
+    return serveFile(req.url, res);
+  }
+  if (req.url && req.url.startsWith('/tree?')) {
+    return serveTree(req.url, res);
+  }
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ ok: true, sessions: sessions.list().length }));
 });
+
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+/** Resolve a ?path= query param to an absolute path, or null if outside known project/session roots. */
+function resolveWorkspacePath(url: string): string | null {
+  const raw = new URL(url, 'http://localhost').searchParams.get('path') ?? '';
+  const expanded = raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw;
+  const abs = path.resolve(expanded);
+  const roots = [...store.loadProjects(), ...sessions.list().map((s) => s.cwd)];
+  const allowed = roots.some((root) => abs === root || abs.startsWith(root + path.sep));
+  return allowed ? abs : null;
+}
+
+/** Serve a workspace file for the clickable-path preview, restricted to known project/session roots. */
+function serveFile(url: string, res: http.ServerResponse) {
+  const cors = { 'access-control-allow-origin': '*' };
+  const abs = resolveWorkspacePath(url);
+  if (!abs) {
+    res.writeHead(403, cors).end();
+    return;
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(abs);
+  } catch {
+    res.writeHead(404, cors).end();
+    return;
+  }
+  if (!stat.isFile()) {
+    res.writeHead(404, cors).end();
+    return;
+  }
+  if (stat.size > MAX_FILE_BYTES) {
+    res.writeHead(413, cors).end();
+    return;
+  }
+  let buf: Buffer;
+  try {
+    buf = fs.readFileSync(abs);
+  } catch {
+    res.writeHead(404, cors).end();
+    return;
+  }
+  // Reject binary files (NUL byte in the first 8KB).
+  if (buf.subarray(0, 8192).includes(0)) {
+    res.writeHead(415, cors).end();
+    return;
+  }
+  res.writeHead(200, { ...cors, 'content-type': 'application/json' });
+  res.end(JSON.stringify({ content: buf.toString('utf8') }));
+}
+
+/** Directory entries hidden from the file tree. */
+const TREE_IGNORE = new Set(['node_modules', '.git']);
+
+/** List one directory for the sidebar file tree, restricted to known project/session roots. */
+function serveTree(url: string, res: http.ServerResponse) {
+  const cors = { 'access-control-allow-origin': '*' };
+  const abs = resolveWorkspacePath(url);
+  if (!abs) {
+    res.writeHead(403, cors).end();
+    return;
+  }
+  let dirents: fs.Dirent[];
+  try {
+    dirents = fs.readdirSync(abs, { withFileTypes: true });
+  } catch {
+    res.writeHead(404, cors).end();
+    return;
+  }
+  const entries = dirents
+    .filter((d) => !d.name.startsWith('.') && !TREE_IGNORE.has(d.name))
+    .filter((d) => d.isDirectory() || d.isFile())
+    .map((d) => ({ name: d.name, type: d.isDirectory() ? ('dir' as const) : ('file' as const) }))
+    .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
+  res.writeHead(200, { ...cors, 'content-type': 'application/json' });
+  res.end(JSON.stringify({ entries }));
+}
 
 /** Serve a stored attachment, guarding against path traversal outside the attachments root. */
 function serveAttachment(url: string, res: http.ServerResponse) {
@@ -96,6 +195,7 @@ wss.on('connection', (ws) => {
     models: DEFAULT_MODELS,
     recentDirs: store.loadRecentDirs(),
     projects: store.loadProjects(),
+    usage: usage.snapshot,
   };
   ws.send(JSON.stringify(hello));
 

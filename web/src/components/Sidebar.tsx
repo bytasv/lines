@@ -8,6 +8,7 @@ import {
   Loader,
   Menu,
   ScrollArea,
+  SegmentedControl,
   Stack,
   Text,
   Tooltip,
@@ -22,13 +23,15 @@ import {
   IconRoute,
   IconTrash,
 } from '@tabler/icons-react';
+import { useLocalStorage } from '@mantine/hooks';
 import type { CSSProperties } from 'react';
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta, SessionStatus } from '@claude-ui/shared';
-import { DEFAULT_MODEL } from '@claude-ui/shared';
+import type { SidebarMode } from '../store';
 import { useStore } from '../store';
 import { send } from '../ws';
+import { FileTree } from './FileTree';
 
 const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
   idle: { color: 'gray', label: 'idle' },
@@ -44,8 +47,18 @@ function stop(e: { preventDefault: () => void; stopPropagation: () => void }) {
   e.stopPropagation();
 }
 
+// Tooltip only useful when the name is actually clipped; measure on hover.
+function useOverflow() {
+  const [overflowing, setOverflowing] = useState(false);
+  const check = useCallback((el: HTMLElement | null) => {
+    if (el) setOverflowing(el.scrollWidth > el.clientWidth);
+  }, []);
+  return { overflowing, check };
+}
+
 function SessionRow({ session, selected }: { session: SessionMeta; selected: boolean }) {
   const status = STATUS_META[session.status] ?? STATUS_META.idle;
+  const { overflowing, check } = useOverflow();
   // A session with no real prompt yet is safe to delete outright; others archive first.
   const isNew = session.nameAuto === true;
 
@@ -84,9 +97,24 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
                 />
               )}
             </Center>
-            <Text size="sm" fw={500} truncate>
-              {session.name}
-            </Text>
+            <Tooltip
+              label={session.name}
+              disabled={!overflowing}
+              openDelay={400}
+              withArrow
+              multiline
+              maw={280}
+            >
+              <Text
+                size="sm"
+                fw={500}
+                truncate
+                ref={check}
+                onMouseEnter={(e) => check(e.currentTarget)}
+              >
+                {session.name}
+              </Text>
+            </Tooltip>
           </Group>
           <Group gap={6} wrap="nowrap">
             <Text size="xs" c="dimmed">
@@ -194,6 +222,12 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
   const selectedSessionId = useStore((s) => s.selectedSessionId);
   const activeProject = useStore((s) => s.activeProject);
   const [showArchived, setShowArchived] = useState(true);
+  // '' = raw session, otherwise workflow id.
+  const [lastChoice, setLastChoice] = useLocalStorage<string>({
+    key: 'claude-ui.lastNewSessionChoice',
+    defaultValue: '',
+  });
+  const lastWorkflow = workflows.find((w) => w.id === lastChoice);
 
   const projectSessions = Object.values(sessions).filter((s) => s.cwd === activeProject);
   const list = projectSessions
@@ -203,104 +237,148 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
     .filter((s) => s.archived)
     .sort((a, b) => (b.archivedAt ?? b.createdAt) - (a.archivedAt ?? a.createdAt));
 
-  // No popup: new sessions inherit settings from the project's latest session.
+  // Model/mode come from the settings modal (header gear); caveman still
+  // inherits from the project's latest session.
+  const newSessionDefaults = useStore((s) => s.newSessionDefaults);
   const createSession = (workflowId?: string) => {
     if (!activeProject) return;
-    const dirName = activeProject.split('/').filter(Boolean).pop() ?? 'session';
     const last = list[0];
     send({
       type: 'createSession',
-      name: `${dirName}-${list.length + 1}`,
+      name: 'New session',
       cwd: activeProject,
-      model: last?.model ?? DEFAULT_MODEL,
-      permissionMode: last?.permissionMode ?? 'default',
+      model: newSessionDefaults.model,
+      permissionMode: newSessionDefaults.permissionMode,
       caveman: last?.caveman ?? { enabled: true, level: 'full' },
       workflowId,
     });
+    setLastChoice(workflowId ?? '');
   };
+
+  const sidebarMode = useStore((s) => s.sidebarMode);
+  const setSidebarMode = useStore((s) => s.setSidebarMode);
+  const openFileTab = useStore((s) => s.openFileTab);
+  const activeFile = useStore((s) =>
+    activeProject ? s.openFiles[activeProject]?.active ?? null : null,
+  );
 
   return (
     <Stack gap={0} h="100%">
       <Group px="sm" py="xs" justify="space-between">
         <Text size="xs" fw={600} c="dimmed" tt="uppercase">
-          Sessions
+          {sidebarMode === 'files' ? 'Files' : 'Sessions'}
         </Text>
-        <Tooltip label="Workflows">
-          <ActionIcon variant="subtle" color="gray" size="sm" onClick={onEditWorkflows}>
-            <IconRoute size={15} />
-          </ActionIcon>
-        </Tooltip>
+        {sidebarMode === 'sessions' && (
+          <Tooltip label="Workflows">
+            <ActionIcon variant="subtle" color="gray" size="sm" onClick={onEditWorkflows}>
+              <IconRoute size={15} />
+            </ActionIcon>
+          </Tooltip>
+        )}
       </Group>
-      <Box px="sm" pb="xs">
-        <Group gap={4} wrap="nowrap">
-          <Button
-            style={{ flex: 1 }}
-            leftSection={<IconPlus size={14} />}
-            onClick={() => createSession()}
-            disabled={!activeProject}
-          >
-            New session
-          </Button>
-          {workflows.length > 0 && (
-            <Menu position="bottom-end" width={220}>
-              <Menu.Target>
-                <ActionIcon size={36} variant="light" disabled={!activeProject}>
-                  <IconChevronDown size={14} />
-                </ActionIcon>
-              </Menu.Target>
-              <Menu.Dropdown>
-                <Menu.Label>New session with workflow</Menu.Label>
-                {workflows.map((w) => (
-                  <Menu.Item key={w.id} onClick={() => createSession(w.id)}>
-                    {w.name}
-                  </Menu.Item>
-                ))}
-              </Menu.Dropdown>
-            </Menu>
-          )}
-        </Group>
-      </Box>
+      {sidebarMode === 'sessions' && (
+        <Box px="sm" pb="xs">
+          <Button.Group style={{ width: '100%' }}>
+            <Button
+              style={{ flex: 1 }}
+              leftSection={<IconPlus size={14} />}
+              onClick={() => createSession(lastWorkflow?.id)}
+              disabled={!activeProject}
+            >
+              {lastWorkflow ? lastWorkflow.name : 'New session'}
+            </Button>
+            {workflows.length > 0 && (
+              <Menu position="bottom-end" width={220}>
+                <Menu.Target>
+                  <Button px={6} disabled={!activeProject}>
+                    <IconChevronDown size={14} />
+                  </Button>
+                </Menu.Target>
+                <Menu.Dropdown>
+                  <Menu.Item onClick={() => createSession()}>New session</Menu.Item>
+                  <Menu.Divider />
+                  <Menu.Label>With workflow</Menu.Label>
+                  {workflows.map((w) => (
+                    <Menu.Item key={w.id} onClick={() => createSession(w.id)}>
+                      {w.name}
+                    </Menu.Item>
+                  ))}
+                </Menu.Dropdown>
+              </Menu>
+            )}
+          </Button.Group>
+        </Box>
+      )}
       <ScrollArea style={{ flex: 1 }} px={6}>
-        <Stack gap={2} pb="sm">
-          {list.map((s) => (
-            <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
-          ))}
-          {list.length === 0 && archived.length === 0 && (
+        {sidebarMode === 'files' ? (
+          activeProject ? (
+            <Box pb="sm">
+              <FileTree
+                key={activeProject}
+                root={activeProject}
+                onFileClick={openFileTab}
+                selectedPath={activeFile}
+              />
+            </Box>
+          ) : (
             <Text size="xs" c="dimmed" ta="center" pt="lg">
-              No sessions in this project yet
+              No active project
             </Text>
-          )}
-          {archived.length > 0 && (
-            <>
-              <Group gap={4} justify="space-between" wrap="nowrap" px="sm" pt="sm">
-                <Text size="xs" fw={600} c="dimmed" tt="uppercase">
-                  Archived ({archived.length})
-                </Text>
-                <Tooltip label={showArchived ? 'Hide archived' : 'Show archived'}>
-                  <ActionIcon
-                    size="xs"
-                    variant="subtle"
-                    color="gray"
-                    onClick={() => setShowArchived((v) => !v)}
-                  >
-                    <IconChevronDown
-                      size={14}
-                      style={{
-                        transform: showArchived ? undefined : 'rotate(-90deg)',
-                        transition: 'transform 120ms',
-                      }}
-                    />
-                  </ActionIcon>
-                </Tooltip>
-              </Group>
-              {showArchived &&
-                archived.map((s) => (
-                  <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
-                ))}
-            </>
-          )}
-        </Stack>
+          )
+        ) : (
+          <Stack gap={2} pb="sm">
+            {list.map((s) => (
+              <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
+            ))}
+            {list.length === 0 && archived.length === 0 && (
+              <Text size="xs" c="dimmed" ta="center" pt="lg">
+                No sessions in this project yet
+              </Text>
+            )}
+            {archived.length > 0 && (
+              <>
+                <Group gap={4} justify="space-between" wrap="nowrap" px="sm" pt="sm">
+                  <Text size="xs" fw={600} c="dimmed" tt="uppercase">
+                    Archived ({archived.length})
+                  </Text>
+                  <Tooltip label={showArchived ? 'Hide archived' : 'Show archived'}>
+                    <ActionIcon
+                      size="xs"
+                      variant="subtle"
+                      color="gray"
+                      onClick={() => setShowArchived((v) => !v)}
+                    >
+                      <IconChevronDown
+                        size={14}
+                        style={{
+                          transform: showArchived ? undefined : 'rotate(-90deg)',
+                          transition: 'transform 120ms',
+                        }}
+                      />
+                    </ActionIcon>
+                  </Tooltip>
+                </Group>
+                {showArchived &&
+                  archived.map((s) => (
+                    <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
+                  ))}
+              </>
+            )}
+          </Stack>
+        )}
       </ScrollArea>
+      <Box px="sm" py={6} style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}>
+        <SegmentedControl
+          fullWidth
+          size="xs"
+          value={sidebarMode}
+          onChange={(v) => setSidebarMode(v as SidebarMode)}
+          data={[
+            { value: 'sessions', label: 'Sessions' },
+            { value: 'files', label: 'Files' },
+          ]}
+        />
+      </Box>
     </Stack>
   );
 }

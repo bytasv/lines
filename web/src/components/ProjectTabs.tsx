@@ -11,10 +11,13 @@ import {
   Tooltip,
   useMantineColorScheme,
 } from '@mantine/core';
-import { IconFolder, IconFolderOpen, IconMoon, IconPlus, IconSun } from '@tabler/icons-react';
+import { IconFolder, IconFolderOpen, IconMoon, IconPlus, IconSettings, IconSun } from '@tabler/icons-react';
+import { useState } from 'react';
 import { useStore } from '../store';
 import { send } from '../ws';
 import logoUrl from '../assets/logo.svg';
+import { SettingsModal } from './SettingsModal';
+import { UsageIndicator } from './UsageIndicator';
 
 function baseName(path: string) {
   return path.split('/').filter(Boolean).pop() ?? path;
@@ -123,8 +126,30 @@ export function ProjectTabs() {
           </Menu>
         </Group>
       </ScrollArea>
+      <UsageIndicator />
       <ThemeToggle />
+      <SettingsButton />
     </Group>
+  );
+}
+
+function SettingsButton() {
+  const [opened, setOpened] = useState(false);
+  return (
+    <>
+      <Tooltip label="Settings">
+        <ActionIcon
+          variant="subtle"
+          color="gray"
+          size="sm"
+          aria-label="Settings"
+          onClick={() => setOpened(true)}
+        >
+          <IconSettings size={14} />
+        </ActionIcon>
+      </Tooltip>
+      <SettingsModal opened={opened} onClose={() => setOpened(false)} />
+    </>
   );
 }
 

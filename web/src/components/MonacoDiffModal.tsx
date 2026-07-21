@@ -2,42 +2,7 @@ import { Modal, Text, Group, Badge } from '@mantine/core';
 import { DiffEditor } from '@monaco-editor/react';
 import { useComputedColorScheme } from '@mantine/core';
 import { diffStats } from '../lib/transcript';
-
-const EXT_LANG: Record<string, string> = {
-  ts: 'typescript',
-  tsx: 'typescript',
-  js: 'javascript',
-  jsx: 'javascript',
-  py: 'python',
-  rb: 'ruby',
-  go: 'go',
-  rs: 'rust',
-  java: 'java',
-  kt: 'kotlin',
-  c: 'c',
-  h: 'c',
-  cpp: 'cpp',
-  cs: 'csharp',
-  php: 'php',
-  sh: 'shell',
-  bash: 'shell',
-  zsh: 'shell',
-  json: 'json',
-  yaml: 'yaml',
-  yml: 'yaml',
-  toml: 'ini',
-  md: 'markdown',
-  html: 'html',
-  css: 'css',
-  scss: 'scss',
-  sql: 'sql',
-  swift: 'swift',
-};
-
-function languageFor(filePath: string): string {
-  const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
-  return EXT_LANG[ext] ?? 'plaintext';
-}
+import { languageFor } from '../lib/language';
 
 export function MonacoDiffModal({
   opened,

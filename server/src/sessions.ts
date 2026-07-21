@@ -254,10 +254,7 @@ export class SessionManager {
 
     // First real user prompt names the session from its topic. Guard flips
     // immediately so a slow title query can't fire twice or clobber a manual rename.
-    if (source === 'user' && meta.nameAuto) {
-      meta.nameAuto = false;
-      void this.autoName(sessionId, text);
-    }
+    if (source === 'user') this.maybeAutoName(sessionId, text);
 
     // Persisted (not just in-memory) so a bridge restart mid-turn still
     // attributes the eventual result to the right initiator.
@@ -270,6 +267,19 @@ export class SessionManager {
       { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null },
       this.buildQueryOptions(meta),
     );
+  }
+
+  /**
+   * Title the session from `text` if it hasn't been auto-named yet. Guard flips
+   * immediately so a slow title query can't fire twice or clobber a manual rename.
+   * Workflow sessions call this with the task description (their prompts arrive
+   * with source 'workflow', which skips the auto-name path in prompt()).
+   */
+  maybeAutoName(sessionId: string, text: string) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.nameAuto) return;
+    meta.nameAuto = false;
+    void this.autoName(sessionId, text);
   }
 
   /**
@@ -544,6 +554,14 @@ export class SessionManager {
         changed = true;
       }
       if (changed) this.upsert(meta);
+      // A workflow step left 'running' by a lost result event (both processes
+      // died mid-turn) is a dead end: the session settles to idle but the step
+      // never reaches waiting-approval, so there is no way to approve/retry.
+      // Recover it by replaying the workflow turn-complete once we know the
+      // worker isn't running it.
+      if (!info && meta.workflow?.started && meta.workflow.stepStatuses[meta.workflow.stepIndex] === 'running') {
+        this.onTurnComplete?.(meta.id, 'workflow');
+      }
     }
   }
 

@@ -159,6 +159,22 @@ export interface WorkflowMarkerData {
   feedback?: string;
 }
 
+/** Response body of the bridge's GET /file endpoint (clickable file-path preview). */
+export interface FileContentResponse {
+  content: string;
+}
+
+/** One entry in a directory listing from the bridge's GET /tree endpoint. */
+export interface TreeEntry {
+  name: string;
+  type: 'file' | 'dir';
+}
+
+/** Response body of the bridge's GET /tree endpoint (project file tree). */
+export interface TreeResponse {
+  entries: TreeEntry[];
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Server
 // ---------------------------------------------------------------------------
@@ -198,12 +214,30 @@ export type ClientMessage =
   | { type: 'openProject'; path: string }
   | { type: 'closeProject'; path: string };
 
+/** One Claude-plan rate-limit window (5-hour session, weekly, ...) from the OAuth usage endpoint. */
+export interface UsageWindow {
+  /** Raw key from the API, e.g. 'five_hour' | 'seven_day' | 'seven_day_opus'. */
+  id: string;
+  /** Percent of the window consumed, 0-100. */
+  utilization: number;
+  /** ISO timestamp when the window resets, or null if the API omitted it. */
+  resetsAt: string | null;
+}
+
+/** Snapshot of Claude-plan usage, polled by the bridge and mirrored to browsers. */
+export interface UsageSnapshot {
+  windows: UsageWindow[];
+  /** ms epoch of the successful fetch (drives the staleness footer). */
+  fetchedAt: number;
+}
+
 // ---------------------------------------------------------------------------
 // Server -> Client
 // ---------------------------------------------------------------------------
 
 export type ServerMessage =
-  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[] }
+  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; usage: UsageSnapshot | null }
+  | { type: 'usage'; usage: UsageSnapshot | null }
   | { type: 'projects'; projects: string[] }
   | { type: 'sessionUpsert'; session: SessionMeta }
   | { type: 'sessionDeleted'; sessionId: string }

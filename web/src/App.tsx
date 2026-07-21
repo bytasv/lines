@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { AppShell, Box, Center, Stack, Text, Title } from '@mantine/core';
 import { IconMessageChatbot } from '@tabler/icons-react';
@@ -8,9 +8,18 @@ import { SessionView } from './components/SessionView';
 import { ProjectTabs } from './components/ProjectTabs';
 import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/WorkflowEditor';
+import { MonacoPreviewModal } from './components/MonacoPreviewModal';
+import { FilesView } from './components/FilesView';
 import { send } from './ws';
 
 const HEADER_HEIGHT = 56;
+const SIDEBAR_MIN = 280;
+const SIDEBAR_MAX = 560;
+const SIDEBAR_STORAGE_KEY = 'sidebarWidth';
+
+function clampSidebar(w: number) {
+  return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, w));
+}
 
 export function App() {
   return (
@@ -30,7 +39,30 @@ function Shell() {
   const projects = useStore((s) => s.projects);
   const activeProject = useStore((s) => s.activeProject);
   const setActiveProject = useStore((s) => s.setActiveProject);
+  const sidebarMode = useStore((s) => s.sidebarMode);
   const [workflowEditorOpen, setWorkflowEditorOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(SIDEBAR_STORAGE_KEY));
+    return saved ? clampSidebar(saved) : SIDEBAR_MIN;
+  });
+  const [resizing, setResizing] = useState(false);
+
+  const startResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setResizing(true);
+    const onMove = (ev: MouseEvent) => setSidebarWidth(clampSidebar(ev.clientX));
+    const onUp = () => {
+      setResizing(false);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      setSidebarWidth((w) => {
+        localStorage.setItem(SIDEBAR_STORAGE_KEY, String(w));
+        return w;
+      });
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, []);
 
   const hasProjects = projects.length > 0;
 
@@ -71,7 +103,7 @@ function Shell() {
     <AppShell
       header={{ height: HEADER_HEIGHT }}
       navbar={{
-        width: 280,
+        width: sidebarWidth,
         breakpoint: 'xs',
         collapsed: { desktop: !hasProjects, mobile: !hasProjects },
       }}
@@ -82,11 +114,20 @@ function Shell() {
       </AppShell.Header>
       <AppShell.Navbar>
         <Sidebar onEditWorkflows={() => setWorkflowEditorOpen(true)} />
+        {hasProjects && (
+          <Box
+            onMouseDown={startResize}
+            className="sidebar-resize-handle"
+            data-resizing={resizing || undefined}
+          />
+        )}
       </AppShell.Navbar>
       <AppShell.Main>
         <Box h={`calc(100vh - ${HEADER_HEIGHT}px)`}>
           {!hasProjects ? (
             <ProjectPicker />
+          ) : sidebarMode === 'files' ? (
+            <FilesView />
           ) : selectedSessionId && sessions[selectedSessionId] ? (
             <SessionView key={selectedSessionId} sessionId={selectedSessionId} />
           ) : (
@@ -106,6 +147,7 @@ function Shell() {
         </Box>
       </AppShell.Main>
       <WorkflowEditor opened={workflowEditorOpen} onClose={() => setWorkflowEditorOpen(false)} />
+      <MonacoPreviewModal />
     </AppShell>
   );
 }
