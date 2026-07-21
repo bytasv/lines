@@ -4,11 +4,14 @@ import type { PluggableList } from 'unified';
 import rehypeHighlight from 'rehype-highlight';
 import { Typography } from '@mantine/core';
 import { rehypeFilePaths } from '../lib/rehypeFilePaths';
+import { rehypeColorSwatches } from '../lib/rehypeColorSwatches';
+import { InlineColorSwatch } from './InlineColorSwatch';
 import { useStore } from '../store';
 
 const rehypePlugins: PluggableList = [
   [rehypeHighlight, { detect: false, aliases: { typescript: ['tsx', 'mts'], javascript: ['jsx', 'mjs'] } }],
   rehypeFilePaths,
+  rehypeColorSwatches,
 ];
 
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
@@ -38,6 +41,17 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
               <a href={href} {...props}>
                 {children}
               </a>
+            );
+          },
+          span({ className, children, node, ...props }) {
+            const color = (node?.properties?.dataColor as string | undefined) ?? undefined;
+            if (String(className ?? '').includes('color-chip') && color) {
+              return <InlineColorSwatch color={color} />;
+            }
+            return (
+              <span className={className} {...props}>
+                {children}
+              </span>
             );
           },
         }}

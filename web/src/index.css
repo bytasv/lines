@@ -52,6 +52,19 @@
   animation: status-pulse 1.4s ease-out infinite;
 }
 
+/* Inline color swatch appended after detected color literals */
+.color-chip {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: -1px;
+  margin-left: 3px;
+  cursor: default;
+}
+
+.color-chip .mantine-ColorSwatch-root {
+  outline: 1px solid var(--mantine-color-default-border);
+}
+
 /* Markdown code blocks */
 .md-body code {
   font-size: 12px;

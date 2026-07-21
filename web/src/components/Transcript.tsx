@@ -37,6 +37,7 @@ import {
   type TranscriptItem,
 } from '../lib/transcript';
 import { Markdown } from './Markdown';
+import { ColorizedText } from './ColorizedText';
 import { ToolGroup } from './ToolGroup';
 import { PermissionPrompt } from './PermissionPrompt';
 
@@ -134,7 +135,7 @@ function Item({
             )}
             {item.text && (
               <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>
-                {item.text}
+                <ColorizedText text={item.text} />
               </Text>
             )}
             {item.attachments && item.attachments.length > 0 && (
