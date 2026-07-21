@@ -185,10 +185,10 @@ function PlanApproval({
 
   const actions = (
     <Group gap="xs">
-      <Button size="xs" color="teal" onClick={approve}>
+      <Button size="xs" onClick={approve}>
         Approve plan &amp; start
       </Button>
-      <Button size="xs" color="orange" variant="light" onClick={keepPlanning}>
+      <Button size="xs" variant="default" onClick={keepPlanning}>
         Keep planning
       </Button>
     </Group>
@@ -200,11 +200,11 @@ function PlanApproval({
         withBorder
         radius="md"
         p="sm"
-        style={{ borderColor: resolution ? undefined : 'var(--mantine-color-teal-6)' }}
+        style={{ borderColor: resolution ? undefined : 'var(--mantine-color-sandstone-6)' }}
       >
         <Group gap="xs" justify="space-between" mb={resolution ? 0 : 8}>
           <Group gap="xs">
-            <IconMap size={16} color="var(--mantine-color-teal-5)" />
+            <IconMap size={16} color="var(--mantine-color-sandstone-5)" />
             <Text size="sm" fw={600}>
               Claude finished planning
             </Text>
@@ -243,7 +243,7 @@ function PlanApproval({
         <Box h="100vh" style={{ display: 'flex', flexDirection: 'column' }}>
           <Group px="xl" py="md" justify="space-between">
             <Group gap="xs">
-              <IconMap size={18} color="var(--mantine-color-teal-5)" />
+              <IconMap size={18} color="var(--mantine-color-sandstone-5)" />
               <Text fw={700}>Plan review</Text>
             </Group>
             <Button variant="subtle" color="gray" size="xs" onClick={() => setFocus(false)}>
@@ -260,10 +260,10 @@ function PlanApproval({
             py="md"
             style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}
           >
-            <Button color="teal" size="sm" onClick={approve}>
+            <Button size="sm" onClick={approve}>
               Approve plan &amp; start
             </Button>
-            <Button color="orange" variant="light" size="sm" onClick={keepPlanning}>
+            <Button variant="default" size="sm" onClick={keepPlanning}>
               Keep planning
             </Button>
           </Group>
@@ -328,7 +328,6 @@ export function PermissionPrompt({
           <Group gap="xs" mt="sm">
             <Button
               size="xs"
-              color="teal"
               onClick={() => respond(sessionId, data.requestId, true)}
             >
               {p.allowLabel}
@@ -337,7 +336,6 @@ export function PermissionPrompt({
               <Tooltip label="Allow now and add this pattern to the auto-mode allowlist">
                 <Button
                   size="xs"
-                  color="teal"
                   variant="light"
                   onClick={() =>
                     send({

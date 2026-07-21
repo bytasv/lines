@@ -329,7 +329,7 @@ export function Composer({ session }: { session: SessionMeta }) {
                 </ActionIcon>
               </Tooltip>
               <Tooltip label="Interrupt">
-                <ActionIcon color="red" variant="light" size="lg" onClick={() => send({ type: 'interrupt', sessionId: session.id })}>
+                <ActionIcon color="gray" variant="default" size="lg" onClick={() => send({ type: 'interrupt', sessionId: session.id })}>
                   <IconPlayerStop size={16} />
                 </ActionIcon>
               </Tooltip>

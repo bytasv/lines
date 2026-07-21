@@ -63,7 +63,7 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
         </Group>
       }
       labelPosition="center"
-      color={data.event === 'workflow-done' ? 'teal' : 'grape'}
+      color={data.event === 'workflow-done' ? 'teal' : 'slate'}
     />
   );
 }
@@ -129,7 +129,7 @@ function Item({
           <IconUser size={16} style={{ marginTop: 4, opacity: 0.5, flexShrink: 0 }} />
           <Paper radius="md" px="sm" py={6} bg="var(--mantine-color-default-hover)" style={{ flex: 1 }}>
             {item.source === 'workflow' && (
-              <Badge variant="light" color="grape" mb={4}>
+              <Badge variant="light" color="slate" mb={4}>
                 workflow step prompt
               </Badge>
             )}
@@ -503,7 +503,7 @@ export function Transcript({
         >
           <Box
             data-progress-fill
-            style={{ height: '100%', width: 0, background: 'var(--mantine-color-grape-5)' }}
+            style={{ height: '100%', width: 0, background: 'var(--mantine-color-sandstone-6)' }}
           />
         </Box>
       )}

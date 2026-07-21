@@ -1,3 +1,10 @@
+/* Sandstone brand: paper body + mist-tinted borders in light scheme
+   (cards/Paper stay --brand-surface white via Mantine defaults) */
+:root[data-mantine-color-scheme='light'] {
+  --mantine-color-body: #f7f5f0;
+  --mantine-color-default-border: #c8d2d1;
+}
+
 @keyframes status-pulse {
   0% {
     box-shadow: 0 0 0 0 var(--status-pulse-color);

@@ -11,7 +11,6 @@ function StepIcon({ status, index }: { status: WorkflowStepStatus; index: number
       size={22}
       radius="xl"
       variant={status === 'pending' ? 'default' : 'filled'}
-      color={status === 'waiting-approval' ? 'orange' : undefined}
     >
       {status === 'done' ? <IconCheck size={13} /> : <Text fz={11}>{index + 1}</Text>}
     </ThemeIcon>
@@ -74,7 +73,7 @@ export function WorkflowStepper({
                     height: '100%',
                     width: 0,
                     borderRadius: 2,
-                    background: 'var(--mantine-color-grape-5)',
+                    background: 'var(--mantine-color-sandstone-6)',
                   }}
                 />
               </Box>
@@ -83,16 +82,16 @@ export function WorkflowStepper({
         })}
       </Group>
       {waiting && (
-        <Paper withBorder radius="md" p="sm" mt="xs" style={{ borderColor: 'var(--mantine-color-orange-6)' }}>
+        <Paper withBorder radius="md" p="sm" mt="xs" style={{ borderColor: 'var(--mantine-color-sandstone-6)' }}>
           <Group justify="space-between" wrap="wrap" gap="xs">
             <Text size="sm" fw={600}>
               “{workflow.steps[state.stepIndex]?.name}” finished — approve to continue?
             </Text>
             <Group gap="xs">
-              <Button size="xs" color="teal" onClick={() => send({ type: 'workflowApprove', sessionId: session.id })}>
+              <Button size="xs" onClick={() => send({ type: 'workflowApprove', sessionId: session.id })}>
                 Approve → next step
               </Button>
-              <Button size="xs" variant="light" color="orange" onClick={() => setShowRetry((v) => !v)}>
+              <Button size="xs" variant="default" onClick={() => setShowRetry((v) => !v)}>
                 Retry with feedback
               </Button>
             </Group>

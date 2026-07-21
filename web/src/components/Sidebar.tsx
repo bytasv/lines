@@ -38,7 +38,7 @@ const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
   running: { color: 'blue', label: 'running' },
   done: { color: 'green', label: 'done' },
   'waiting-permission': { color: 'yellow', label: 'needs permission' },
-  'waiting-approval': { color: 'orange', label: 'needs approval' },
+  'waiting-approval': { color: 'sandstone', label: 'needs approval' },
   error: { color: 'red', label: 'error' },
 };
 
@@ -121,7 +121,7 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
               {new Date(session.createdAt).toLocaleDateString()}
             </Text>
             {session.workflow && (
-              <Badge variant="light" color="grape" size="xs" px={5}>
+              <Badge variant="light" color="slate" size="xs" px={5}>
                 wf
               </Badge>
             )}
