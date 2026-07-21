@@ -9,6 +9,12 @@ import type {
 
 const ACTIVE_PROJECT_KEY = 'claude-ui.activeProject';
 
+/** Selected session from the current URL, so a reload keeps its route. */
+function sessionIdFromUrl(): string | null {
+  const m = window.location.pathname.match(/^\/session\/([^/]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
 function pickActive(projects: string[], current: string | null): string | null {
   if (current && projects.includes(current)) return current;
   return projects[0] ?? null;
@@ -54,7 +60,7 @@ export const useStore = create<UiState>((set, get) => ({
   activeProject: localStorage.getItem(ACTIVE_PROJECT_KEY),
   transcripts: {},
   transcriptLoaded: {},
-  selectedSessionId: null,
+  selectedSessionId: sessionIdFromUrl(),
   folderPickPending: false,
 
   setConnected: (connected) => set({ connected }),
