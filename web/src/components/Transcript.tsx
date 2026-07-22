@@ -284,21 +284,33 @@ function AgentTurn({
     setOverride(!expanded);
   };
 
-  const { summary, totals, result } = turnToolStats(turn.items);
+  const turnSummariesEnabled = useStore((s) => s.turnSummariesEnabled);
+  const { narrative, narration, summary, totals, result } = turnToolStats(turn.items);
+  // AI narrative (if enabled) > the agent's own narration > tool tally > generic fallback.
+  const headline = (turnSummariesEnabled ? narrative : null) ?? narration ?? summary ?? 'response';
+  const isHeadlineSentence = headline !== summary || headline === 'response';
 
   return (
     <Paper withBorder radius="md" px="sm" py={6} bg="var(--mantine-color-default)">
-      <Group gap="xs" wrap="nowrap" justify="space-between">
+      <Group gap="xs" wrap="nowrap" justify="space-between" align="flex-start">
         <Group
           gap="xs"
           wrap="nowrap"
+          align="flex-start"
           style={{ cursor: 'pointer', minWidth: 0, flex: 1 }}
           onClick={toggle}
         >
-          {expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
-          <Text size="xs" fw={600} truncate style={{ flex: 1 }}>
-            {summary ?? 'response'}
-          </Text>
+          <Box mt={2}>{expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</Box>
+          <Stack gap={0} style={{ flex: 1, minWidth: 0 }}>
+            <Text size="xs" fw={isHeadlineSentence ? 400 : 600} lineClamp={2}>
+              {headline}
+            </Text>
+            {summary && headline !== summary && (
+              <Text size="xs" c="dimmed" truncate>
+                {summary}
+              </Text>
+            )}
+          </Stack>
         </Group>
         <Group gap={6} wrap="nowrap">
           {totals && (

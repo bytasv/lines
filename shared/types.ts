@@ -122,9 +122,16 @@ export interface TranscriptEvent {
    * - 'file-snapshot': pre-edit file content captured for a tool_use (for diffs)
    * - 'permission': permission request / resolution
    * - 'workflow'  : workflow step transition marker
+   * - 'turn-summary': one-line summary of a completed turn's tool activity
    */
-  kind: 'user' | 'sdk' | 'file-snapshot' | 'permission' | 'workflow';
+  kind: 'user' | 'sdk' | 'file-snapshot' | 'permission' | 'workflow' | 'turn-summary';
   data: unknown;
+}
+
+export interface TurnSummaryData {
+  /** seq of the sdk 'result' event this summarizes. */
+  resultSeq: number;
+  summary: string;
 }
 
 export interface FileSnapshotData {

@@ -31,6 +31,7 @@ const NEW_SESSION_DEFAULTS_KEY = 'claude-ui.newSessionDefaults';
 const SIDEBAR_MODE_KEY = 'claude-ui.sidebarMode';
 const OPEN_FILES_KEY = 'claude-ui.openFiles';
 const COMPACTION_LEVEL_KEY = 'claude-ui.compactionLevel';
+const TURN_SUMMARIES_ENABLED_KEY = 'claude-ui.turnSummariesEnabled';
 
 export type SidebarMode = 'sessions' | 'files';
 
@@ -62,6 +63,10 @@ function loadSidebarMode(): SidebarMode {
 function loadCompactionLevel(): CompactionLevel {
   const v = localStorage.getItem(COMPACTION_LEVEL_KEY);
   return v === 'full' || v === 'grouped' || v === 'compact' ? v : 'compact';
+}
+
+function loadTurnSummariesEnabled(): boolean {
+  return localStorage.getItem(TURN_SUMMARIES_ENABLED_KEY) !== 'false';
 }
 
 function loadOpenFiles(): Record<string, OpenFilesState> {
@@ -147,6 +152,8 @@ interface UiState {
   sidebarMode: SidebarMode;
   /** Transcript compaction level; persisted in localStorage. */
   compactionLevel: CompactionLevel;
+  /** Show server-generated 1-2 sentence turn summaries in Compact view; off shows agent narration instead. */
+  turnSummariesEnabled: boolean;
   /** Open editor tabs per project path; persisted in localStorage. */
   openFiles: Record<string, OpenFilesState>;
 
@@ -166,6 +173,7 @@ interface UiState {
   closeFilePreview: () => void;
   setSidebarMode: (mode: SidebarMode) => void;
   setCompactionLevel: (level: CompactionLevel) => void;
+  setTurnSummariesEnabled: (on: boolean) => void;
   openFileTab: (path: string) => void;
   closeFileTab: (path: string) => void;
   setActiveFileTab: (path: string) => void;
@@ -192,6 +200,7 @@ export const useStore = create<UiState>((set, get) => ({
   usage: null,
   sidebarMode: loadSidebarMode(),
   compactionLevel: loadCompactionLevel(),
+  turnSummariesEnabled: loadTurnSummariesEnabled(),
   openFiles: loadOpenFiles(),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -232,6 +241,11 @@ export const useStore = create<UiState>((set, get) => ({
   setCompactionLevel: (level) => {
     localStorage.setItem(COMPACTION_LEVEL_KEY, level);
     set({ compactionLevel: level });
+  },
+
+  setTurnSummariesEnabled: (on) => {
+    localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(on));
+    set({ turnSummariesEnabled: on });
   },
 
   openFileTab: (path) => {

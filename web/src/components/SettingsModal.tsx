@@ -17,6 +17,8 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
   const testAlertSound = useStore((s) => s.testAlertSound);
   const compactionLevel = useStore((s) => s.compactionLevel);
   const setCompactionLevel = useStore((s) => s.setCompactionLevel);
+  const turnSummariesEnabled = useStore((s) => s.turnSummariesEnabled);
+  const setTurnSummariesEnabled = useStore((s) => s.setTurnSummariesEnabled);
 
   const alertsDescription =
     alertsEnabled && notifyPermission !== 'granted'
@@ -65,6 +67,12 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
             onChange={(v) => setCompactionLevel(v as CompactionLevel)}
           />
         </Stack>
+        <Switch
+          checked={turnSummariesEnabled}
+          onChange={(e) => setTurnSummariesEnabled(e.currentTarget.checked)}
+          label="AI turn summaries"
+          description="Summarize each turn's actions in a sentence; off shows the agent's own narration instead"
+        />
         <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
           Notifications
         </Text>

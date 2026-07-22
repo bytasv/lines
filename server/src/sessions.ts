@@ -149,11 +149,12 @@ export class SessionManager {
     return events.length > 0 ? events[events.length - 1].seq + 1 : 0;
   }
 
-  emitEvent(sessionId: string, kind: TranscriptEvent['kind'], data: unknown, persistToDisk = true) {
+  emitEvent(sessionId: string, kind: TranscriptEvent['kind'], data: unknown, persistToDisk = true): number {
     const state = this.liveState(sessionId);
     const event: TranscriptEvent = { seq: state.seq++, ts: Date.now(), kind, data };
     if (persistToDisk) store.appendTranscript(sessionId, event);
     this.broadcast({ type: 'event', sessionId, event });
+    return event.seq;
   }
 
   createSession(params: {
@@ -432,6 +433,89 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Summarize a just-finished turn's tool activity in 1-2 sentences via a
+   * one-shot Haiku query (same non-agentic shape as autoName), so the Compact
+   * transcript view can show what the agent did instead of a bare tool tally.
+   * Fire-and-forget; skipped entirely if the turn made no tool calls. Persisted
+   * as a 'turn-summary' event keyed by the result event's seq, so it survives
+   * reload via the normal transcript replay path.
+   */
+  private async summarizeTurn(sessionId: string, resultSeq: number) {
+    try {
+      const events = store.loadTranscript(sessionId);
+      const lastUserIdx = (() => {
+        for (let i = events.length - 1; i >= 0; i--) if (events[i].kind === 'user') return i;
+        return -1;
+      })();
+      const turnEvents = events.slice(Math.max(lastUserIdx, 0));
+
+      const toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
+      const toolErrors = new Set<string>();
+      let finalText = '';
+      for (const ev of turnEvents) {
+        if (ev.kind !== 'sdk') continue;
+        const msg = ev.data as { type?: string; message?: { content?: unknown } };
+        if (msg.type === 'assistant') {
+          const content = msg.message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content as Record<string, unknown>[]) {
+              if (block.type === 'text' && typeof block.text === 'string') finalText = block.text;
+              if (block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
+                toolCalls.push({ id: block.id, name: block.name, input: (block.input as Record<string, unknown>) ?? {} });
+              }
+            }
+          }
+        } else if (msg.type === 'user') {
+          const content = msg.message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content as Record<string, unknown>[]) {
+              if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.is_error) {
+                toolErrors.add(block.tool_use_id);
+              }
+            }
+          }
+        }
+      }
+      if (toolCalls.length === 0) return; // plain text answer — nothing to summarize
+
+      const lines = toolCalls.map((t) => {
+        const input = t.input.file_path ?? t.input.command ?? t.input.pattern ?? t.input.url ?? '';
+        const failed = toolErrors.has(t.id) ? ' (failed)' : '';
+        return `- ${t.name}${input ? `: ${String(input).slice(0, 150)}` : ''}${failed}`;
+      });
+      const prompt =
+        `A coding agent just finished a turn. Tool calls made, in order:\n${lines.join('\n')}\n\n` +
+        (finalText ? `Its final message to the user:\n${finalText.slice(0, 500)}\n\n` : '') +
+        'Summarize what it did in 1-2 concise sentences, for a developer glancing at a ' +
+        'collapsed activity card. Be specific about files/commands touched. No preamble.';
+
+      const q = query({
+        prompt,
+        options: {
+          model: 'claude-haiku-4-5-20251001',
+          maxTurns: 1,
+          allowedTools: [],
+          settingSources: [],
+          systemPrompt:
+            'You summarize a coding agent\'s completed turn in 1-2 plain sentences. ' +
+            'You never ask questions, never refuse, and never add commentary or preamble.',
+        } as never,
+      });
+      let summary: string | null = null;
+      for await (const message of q) {
+        const msg = message as { type: string; result?: string };
+        if (msg.type === 'result' && typeof msg.result === 'string') {
+          summary = msg.result.trim().slice(0, 400);
+        }
+      }
+      if (!summary) return;
+      this.emitEvent(sessionId, 'turn-summary', { resultSeq, summary });
+    } catch (err) {
+      console.warn('[summarizeTurn]', err);
+    }
+  }
+
   interrupt(sessionId: string) {
     this.worker.interrupt(sessionId);
     // Deny anything waiting on the user so the query is not stuck; user
@@ -691,7 +775,7 @@ export class SessionManager {
     // Stream deltas are broadcast live but not written to disk;
     // the complete assistant message that follows is the durable record.
     const persist = msg.type !== 'stream_event';
-    this.emitEvent(sessionId, 'sdk', msg, persist);
+    const resultSeq = this.emitEvent(sessionId, 'sdk', msg, persist);
 
     if (msg.type === 'result') {
       const metaNow = this.sessions.get(sessionId);
@@ -711,6 +795,7 @@ export class SessionManager {
       }
       this.onTurnComplete?.(sessionId, source);
       this.maybeFlush(sessionId);
+      void this.summarizeTurn(sessionId, resultSeq);
     }
   }
 

@@ -3,6 +3,7 @@ import type {
   FileSnapshotData,
   PermissionRequestData,
   TranscriptEvent,
+  TurnSummaryData,
   WorkflowMarkerData,
 } from '@claude-ui/shared';
 
@@ -33,6 +34,16 @@ export interface AgentTurnItem {
   items: TranscriptItem[]; // the agent's assistant/tool-group/permission/result items
 }
 
+export interface ResultItem {
+  kind: 'result';
+  key: string;
+  costUsd?: number;
+  durationMs?: number;
+  isError: boolean;
+  /** 1-2 sentence summary of the turn's tool activity, filled in async by the server. */
+  summary?: string;
+}
+
 export type TranscriptItem =
   | { kind: 'user'; key: string; text: string; source: 'user' | 'workflow'; attachments?: Attachment[] }
   | { kind: 'assistant'; key: string; blocks: AssistantBlock[] }
@@ -40,7 +51,7 @@ export type TranscriptItem =
   | AgentTurnItem
   | { kind: 'streaming'; key: string; text: string }
   | { kind: 'system-init'; key: string; model: string }
-  | { kind: 'result'; key: string; costUsd?: number; durationMs?: number; isError: boolean }
+  | ResultItem
   | { kind: 'permission'; key: string; data: PermissionRequestData; resolution?: 'allow' | 'deny' | 'expired' }
   | { kind: 'workflow'; key: string; data: WorkflowMarkerData };
 
@@ -79,6 +90,7 @@ export function buildTranscript(events: TranscriptEvent[], groupTools = true): T
   const toolBlocks = new Map<string, ToolBlock>();
   const snapshots: FileSnapshotData[] = [];
   const permissionItems = new Map<string, { kind: 'permission' } & TranscriptItem>();
+  const resultItems = new Map<number, ResultItem>();
   let streamingText = '';
   let streamingActive = false;
   let openGroup: ToolGroupItem | null = null;
@@ -134,6 +146,12 @@ export function buildTranscript(events: TranscriptEvent[], groupTools = true): T
           permissionItems.set(data.requestId, item as never);
           items.push(item);
         }
+        break;
+      }
+      case 'turn-summary': {
+        const data = event.data as TurnSummaryData;
+        const item = resultItems.get(data.resultSeq);
+        if (item) item.summary = data.summary;
         break;
       }
       case 'workflow':
@@ -228,13 +246,15 @@ export function buildTranscript(events: TranscriptEvent[], groupTools = true): T
             openGroup = null;
             lastText = '';
             const r = msg as { total_cost_usd?: number; duration_ms?: number; is_error?: boolean; subtype?: string };
-            items.push({
+            const resultItem: ResultItem = {
               kind: 'result',
               key: `r${event.seq}`,
               costUsd: r.total_cost_usd,
               durationMs: r.duration_ms,
               isError: Boolean(r.is_error) || (r.subtype != null && r.subtype !== 'success'),
-            });
+            };
+            resultItems.set(event.seq, resultItem);
+            items.push(resultItem);
             break;
           }
           case 'stream_event': {
@@ -292,8 +312,25 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
   return out;
 }
 
+/** The agent's own text, in order, across a folded turn — free (no LLM call). */
+function turnNarration(items: TranscriptItem[]): string | null {
+  const text = items
+    .filter((i): i is Extract<TranscriptItem, { kind: 'assistant' }> => i.kind === 'assistant')
+    .flatMap((a) => a.blocks)
+    .filter((b): b is Extract<AssistantBlock, { type: 'text' }> => b.type === 'text')
+    .map((b) => b.text)
+    .join(' ')
+    .trim();
+  return text ? (text.length > 200 ? text.slice(0, 200) + '…' : text) : null;
+}
+
 /** Aggregate summary of what an agent did in a folded turn, for the collapsed header. */
 export function turnToolStats(items: TranscriptItem[]): {
+  /** 1-2 sentence LLM summary, once the server has produced it; null until then. */
+  narrative: string | null;
+  /** The agent's own text from the turn — free fallback when summaries are disabled/pending. */
+  narration: string | null;
+  /** Tool tally fallback, e.g. "8 actions · Read ×3, Edit ×2" — shown when neither is available. */
   summary: string | null;
   totals: { added: number; removed: number } | null;
   result?: { durationMs?: number; costUsd?: number };
@@ -301,10 +338,11 @@ export function turnToolStats(items: TranscriptItem[]): {
   const tools = items
     .filter((i): i is ToolGroupItem => i.kind === 'tool-group')
     .flatMap((g) => g.tools);
-  const result = items.find((i) => i.kind === 'result') as
-    | { durationMs?: number; costUsd?: number }
-    | undefined;
+  const result = items.find((i): i is ResultItem => i.kind === 'result');
+  const narrative = result?.summary ?? null;
   return {
+    narrative,
+    narration: turnNarration(items),
     summary: tools.length > 0 ? groupSummary(tools) : null,
     totals: groupDiffTotals(tools),
     result: result ? { durationMs: result.durationMs, costUsd: result.costUsd } : undefined,
