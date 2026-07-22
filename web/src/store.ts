@@ -137,6 +137,8 @@ interface UiState {
   transcripts: Record<string, TranscriptEvent[]>;
   /** Sessions whose on-disk transcript has been requested/loaded. */
   transcriptLoaded: Record<string, boolean>;
+  /** ms epoch of the last event seen per session (not persisted) — wedged-agent detection. */
+  lastEventAt: Record<string, number>;
   selectedSessionId: string | null;
   folderPickPending: boolean;
   /** Model/mode applied to newly created sessions; persisted in localStorage. */
@@ -189,7 +191,8 @@ interface UiState {
   setActiveFileTab: (path: string) => void;
 }
 
-export const useStore = create<UiState>((set, get) => ({
+export const useStore = create<UiState>((set, get) => {
+  return {
   connectionStatus: 'reconnecting',
   queuedPrompts: [],
   sessions: {},
@@ -200,6 +203,7 @@ export const useStore = create<UiState>((set, get) => ({
   activeProject: localStorage.getItem(ACTIVE_PROJECT_KEY),
   transcripts: {},
   transcriptLoaded: {},
+  lastEventAt: {},
   selectedSessionId: sessionIdFromUrl(),
   folderPickPending: false,
   newSessionDefaults: loadNewSessionDefaults(),
@@ -409,9 +413,12 @@ export const useStore = create<UiState>((set, get) => ({
           delete sessions[msg.sessionId];
           const transcripts = { ...state.transcripts };
           delete transcripts[msg.sessionId];
+          const lastEventAt = { ...state.lastEventAt };
+          delete lastEventAt[msg.sessionId];
           return {
             sessions,
             transcripts,
+            lastEventAt,
             selectedSessionId:
               state.selectedSessionId === msg.sessionId ? null : state.selectedSessionId,
           };
@@ -425,8 +432,15 @@ export const useStore = create<UiState>((set, get) => ({
           const existing = state.transcripts[msg.sessionId] ?? [];
           // Drop duplicates (e.g. history replay racing live events).
           if (existing.some((e) => e.seq === msg.event.seq)) return state;
+          // A complete (non-stream) SDK message supersedes the deltas that built
+          // up to it — drop them so long turns don't accumulate stream events.
+          const isSdkStream = (e: TranscriptEvent) =>
+            e.kind === 'sdk' && (e.data as { type?: string } | null)?.type === 'stream_event';
+          const base =
+            msg.event.kind === 'sdk' && !isSdkStream(msg.event) ? existing.filter((e) => !isSdkStream(e)) : existing;
           return {
-            transcripts: { ...state.transcripts, [msg.sessionId]: [...existing, msg.event] },
+            transcripts: { ...state.transcripts, [msg.sessionId]: [...base, msg.event] },
+            lastEventAt: { ...state.lastEventAt, [msg.sessionId]: Date.now() },
           };
         });
         break;
@@ -437,9 +451,15 @@ export const useStore = create<UiState>((set, get) => ({
           const seen = new Set(merged.map((e) => e.seq));
           for (const e of live) if (!seen.has(e.seq)) merged.push(e);
           merged.sort((a, b) => a.seq - b.seq);
+          // Seed the last-activity clock from history, but never move it backwards.
+          const lastTs = merged.length > 0 ? merged[merged.length - 1].ts : 0;
+          const lastEventAt = Math.max(state.lastEventAt[msg.sessionId] ?? 0, lastTs);
           return {
             transcripts: { ...state.transcripts, [msg.sessionId]: merged },
             transcriptLoaded: { ...state.transcriptLoaded, [msg.sessionId]: true },
+            ...(lastEventAt > 0
+              ? { lastEventAt: { ...state.lastEventAt, [msg.sessionId]: lastEventAt } }
+              : {}),
           };
         });
         break;
@@ -472,4 +492,5 @@ export const useStore = create<UiState>((set, get) => ({
     setBadge(countAttention(sessions));
     updateFavicon({ attention: countAttention(sessions), running: countRunning(sessions) > 0 });
   },
-}));
+  };
+});

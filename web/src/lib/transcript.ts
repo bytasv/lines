@@ -44,6 +44,19 @@ export interface ResultItem {
   summary?: string;
 }
 
+/** What the agent is doing right now, derived from unconsumed stream events. */
+export interface LiveActivity {
+  phase: 'responding' | 'thinking' | 'writing' | 'tool-prep';
+  /** Tool being prepared (tool-prep). */
+  toolName?: string;
+  /** Bounded tail (~200 chars) of streamed thinking. */
+  thinkingPreview?: string;
+  /** Accumulated input_json_delta length — proxy for tool-arg size (e.g. a plan). */
+  inputBytes?: number;
+  /** The activity belongs to a subagent (parent_tool_use_id set). */
+  subagent?: boolean;
+}
+
 export type TranscriptItem =
   | { kind: 'user'; key: string; text: string; source: 'user' | 'workflow'; attachments?: Attachment[] }
   | { kind: 'assistant'; key: string; blocks: AssistantBlock[]; isAnswer?: boolean }
@@ -84,8 +97,13 @@ function contentToString(content: unknown): string {
  * - file snapshots attach to their tool blocks by tool_use_id / file path
  * - stream_event deltas build a live "streaming" tail item, dropped once the
  *   complete assistant message lands
+ * - stream events also drive `live`, the agent's current phase (thinking,
+ *   preparing a tool, writing) for the standalone activity row
  */
-export function buildTranscript(events: TranscriptEvent[], groupTools = true): TranscriptItem[] {
+export function buildTranscript(
+  events: TranscriptEvent[],
+  groupTools = true,
+): { items: TranscriptItem[]; live: LiveActivity | null } {
   const items: TranscriptItem[] = [];
   const toolBlocks = new Map<string, ToolBlock>();
   const snapshots: FileSnapshotData[] = [];
@@ -93,6 +111,11 @@ export function buildTranscript(events: TranscriptEvent[], groupTools = true): T
   const resultItems = new Map<number, ResultItem>();
   let streamingText = '';
   let streamingActive = false;
+  let live: LiveActivity | null = null;
+  // Live-phase accumulators, reset when a new content block starts.
+  let liveThinking = '';
+  let liveInputBytes = 0;
+  let liveToolName: string | undefined;
   let openGroup: ToolGroupItem | null = null;
   let lastText = '';
 
@@ -175,6 +198,7 @@ export function buildTranscript(events: TranscriptEvent[], groupTools = true): T
           case 'assistant': {
             streamingText = '';
             streamingActive = false;
+            live = null;
             const message = (msg as { message?: { content?: SdkContentBlock[] } }).message;
             let pending: AssistantBlock[] = [];
             let flushCount = 0;
@@ -243,6 +267,7 @@ export function buildTranscript(events: TranscriptEvent[], groupTools = true): T
           case 'result': {
             streamingText = '';
             streamingActive = false;
+            live = null;
             openGroup = null;
             lastText = '';
             const r = msg as { total_cost_usd?: number; duration_ms?: number; is_error?: boolean; subtype?: string };
@@ -258,17 +283,52 @@ export function buildTranscript(events: TranscriptEvent[], groupTools = true): T
             break;
           }
           case 'stream_event': {
-            const streamEvent = (msg as { event?: { type?: string; delta?: { type?: string; text?: string } } }).event;
+            // Subagent deltas (parent_tool_use_id set) drive `live` but must not
+            // clobber the main agent's streaming tail.
+            const subagent = ((msg as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null) !== null;
+            const streamEvent = (
+              msg as {
+                event?: {
+                  type?: string;
+                  content_block?: { type?: string; name?: string };
+                  delta?: { type?: string; text?: string; thinking?: string; partial_json?: string };
+                };
+              }
+            ).event;
             if (streamEvent?.type === 'message_start') {
-              streamingText = '';
-              streamingActive = true;
-            } else if (
-              streamEvent?.type === 'content_block_delta' &&
-              streamEvent.delta?.type === 'text_delta' &&
-              typeof streamEvent.delta.text === 'string'
-            ) {
-              streamingText += streamEvent.delta.text;
-              streamingActive = true;
+              if (!subagent) {
+                streamingText = '';
+                streamingActive = true;
+              }
+              liveThinking = '';
+              liveInputBytes = 0;
+              liveToolName = undefined;
+              live = { phase: 'responding', subagent };
+            } else if (streamEvent?.type === 'content_block_start') {
+              const block = streamEvent.content_block;
+              liveThinking = '';
+              liveInputBytes = 0;
+              liveToolName = undefined;
+              if (block?.type === 'thinking') live = { phase: 'thinking', subagent };
+              else if (block?.type === 'tool_use') {
+                liveToolName = block.name;
+                live = { phase: 'tool-prep', toolName: liveToolName, subagent };
+              } else if (block?.type === 'text') live = { phase: 'writing', subagent };
+            } else if (streamEvent?.type === 'content_block_delta') {
+              const delta = streamEvent.delta;
+              if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+                if (!subagent) {
+                  streamingText += delta.text;
+                  streamingActive = true;
+                }
+                live = { phase: 'writing', subagent };
+              } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+                liveThinking = (liveThinking + delta.thinking).slice(-200);
+                live = { phase: 'thinking', thinkingPreview: liveThinking, subagent };
+              } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+                liveInputBytes += delta.partial_json.length;
+                live = { phase: 'tool-prep', toolName: liveToolName, inputBytes: liveInputBytes, subagent };
+              }
             }
             break;
           }
@@ -282,7 +342,7 @@ export function buildTranscript(events: TranscriptEvent[], groupTools = true): T
     items.push({ kind: 'streaming', key: 'streaming', text: streamingText });
   }
 
-  return items;
+  return { items, live };
 }
 
 /**

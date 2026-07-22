@@ -40,6 +40,7 @@ import { Markdown } from './Markdown';
 import { ColorizedText } from './ColorizedText';
 import { ToolGroup } from './ToolGroup';
 import { PermissionPrompt } from './PermissionPrompt';
+import { ActivityRow } from './ActivityRow';
 
 function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
   const label =
@@ -380,19 +381,18 @@ export function Transcript({
   // Flat item list. Full level ('full') leaves tools ungrouped (1-tool groups render bare);
   // otherwise consecutive tools fold into tool-groups. Auto-allowed permission one-liners
   // are redundant (their tool shows in the group card) so drop them; real prompts stay.
-  const built = useMemo(
-    () =>
-      buildTranscript(events, compactionLevel !== 'full').filter(
-        (it) => !(it.kind === 'permission' && it.data.auto),
-      ),
-    [events, compactionLevel],
-  );
+  const { built, live } = useMemo(() => {
+    const { items, live } = buildTranscript(events, compactionLevel !== 'full');
+    return { built: items.filter((it) => !(it.kind === 'permission' && it.data.auto)), live };
+  }, [events, compactionLevel]);
   // Compact level additionally folds each agent turn into a collapsible super-group.
   const items = useMemo(
     () => (compactionLevel === 'compact' ? foldAgentTurns(built) : built),
     [built, compactionLevel],
   );
   const status = useStore((s) => s.sessions[sessionId]?.status);
+  const turnStartedAt = useStore((s) => s.sessions[sessionId]?.turnStartedAt);
+  const lastEventAt = useStore((s) => s.lastEventAt[sessionId]);
   // The active group is the latest tool-group while the session is live — it renders
   // expanded; any earlier group auto-collapses. Computed on the flat list so the key is
   // found even when the group is nested inside a folded turn. Pending permissions belong to it.
@@ -413,6 +413,29 @@ export function Transcript({
     }
     return null;
   }, [items, status]);
+  // Standalone activity row: shown while running unless the transcript tail
+  // already carries a live indicator (streaming text, active group/turn loader,
+  // or an open permission card). A live thinking/tool-prep phase overrides the
+  // group/turn loaders — a stale previous-call spinner must not mask
+  // "Writing plan…" — but never the streaming-text tail.
+  const showActivity = useMemo(() => {
+    if (status !== 'running') return false;
+    const last = items.at(-1);
+    if (!last) return true;
+    if (last.kind === 'streaming') return false;
+    if (last.kind === 'permission' && !last.resolution) return false;
+    const phaseOverride = live?.phase === 'thinking' || live?.phase === 'tool-prep';
+    if (!phaseOverride && (last.key === activeGroupKey || last.key === activeTurnKey)) return false;
+    return true;
+  }, [items, status, live, activeGroupKey, activeTurnKey]);
+  // Fallback for sessions that predate turnStartedAt: the last user prompt's ts.
+  const activityStartedAt = useMemo(() => {
+    if (turnStartedAt != null) return turnStartedAt;
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].kind === 'user') return events[i].ts;
+    }
+    return undefined;
+  }, [turnStartedAt, events]);
   // Retry only on the trailing failed result of a settled session — a retry
   // button mid-history or during a running turn would be stale/confusing.
   // Use the flat list so it's found even when the result is folded into a turn.
@@ -589,6 +612,9 @@ export function Transcript({
               activeTurnKey={activeTurnKey}
             />
           ))}
+          {showActivity && (
+            <ActivityRow startedAt={activityStartedAt} live={live} lastEventAt={lastEventAt} />
+          )}
         </Stack>
       </ScrollArea>
       {hasNewContent && (
