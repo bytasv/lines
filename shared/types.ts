@@ -72,6 +72,8 @@ export interface WorkflowDef {
   id: string;
   name: string;
   steps: WorkflowStep[];
+  /** ms epoch of the last save — last-write-wins key for cross-instance sync. */
+  updatedAt?: number;
 }
 
 export type WorkflowStepStatus = 'pending' | 'running' | 'waiting-approval' | 'done';
@@ -113,6 +115,10 @@ export interface SessionMeta {
    * Persisted so a bridge restart mid-turn doesn't misattribute the result.
    */
   turnSource?: 'user' | 'workflow';
+  /** ms epoch when the in-flight turn started; cleared when the turn settles. */
+  turnStartedAt?: number;
+  /** ms epoch of the last upsert — last-write-wins key for cross-instance sync. */
+  updatedAt?: number;
   /** Prompts sent while busy, held for FIFO auto-send after each turn completes. */
   queued?: QueuedPrompt[];
   /** Interrupt/error/crash suspended auto-flush; the next user send resumes it. */
@@ -252,6 +258,9 @@ export type ClientMessage =
   | { type: 'authStartLogin' }
   | { type: 'authCompleteLogin'; code: string }
   | { type: 'authLogout' }
+  /** Fresh Clerk token relay (~50s cadence) so the bridge's per-connection token never expires. */
+  | { type: 'auth'; token: string }
+  | { type: 'saveSettings'; settings: UserUiSettings }
   | { type: 'ping' };
 
 /** One Claude-plan rate-limit window (5-hour session, weekly, ...) from the OAuth usage endpoint. */
@@ -281,8 +290,21 @@ export interface AuthStatus {
 // Server -> Client
 // ---------------------------------------------------------------------------
 
+/** Per-user UI settings mirrored to the storage server; localStorage stays the offline cache. */
+export interface UserUiSettings {
+  newSessionDefaults?: { model: string; permissionMode: PermissionMode };
+  sidebarMode?: 'sessions' | 'files';
+  compactionLevel?: 'full' | 'grouped' | 'compact';
+  turnSummariesEnabled?: boolean;
+  alertsEnabled?: boolean;
+  alertSound?: string;
+  /** ms epoch of the last change — last-write-wins key. */
+  updatedAt?: number;
+}
+
 export type ServerMessage =
-  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; usage: UsageSnapshot | null; auth: AuthStatus }
+  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; usage: UsageSnapshot | null; auth: AuthStatus; settings?: UserUiSettings | null }
+  | { type: 'settings'; settings: UserUiSettings }
   | { type: 'usage'; usage: UsageSnapshot | null }
   | { type: 'authStatus'; auth: AuthStatus }
   | { type: 'authLoginStarted'; authorizeUrl: string }

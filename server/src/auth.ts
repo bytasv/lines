@@ -13,7 +13,7 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import type { AuthStatus } from '@claude-ui/shared';
-import { store, type StoredAuth } from './store.ts';
+import type { Store, StoredAuth } from './store.ts';
 
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize';
@@ -48,7 +48,7 @@ interface TokenResponse {
 }
 
 export class AuthManager {
-  private auth: StoredAuth | null = store.loadAuth();
+  private auth: StoredAuth | null;
   private pendingLogin: { verifier: string; state: string } | null = null;
   private refreshInFlight: Promise<string> | null = null;
   private proactiveTimer: NodeJS.Timeout | null = null;
@@ -58,7 +58,8 @@ export class AuthManager {
   /** Wired by index.ts: fires after a token refresh so idle worker queries can be recycled. */
   onRefresh: (() => void) | null = null;
 
-  constructor() {
+  constructor(private store: Store) {
+    this.auth = store.loadAuth();
     if (this.auth) this.scheduleProactiveRefresh();
   }
 
@@ -120,7 +121,7 @@ export class AuthManager {
 
   logout(): void {
     this.auth = null;
-    store.deleteAuth();
+    this.store.deleteAuth();
     if (this.proactiveTimer) clearTimeout(this.proactiveTimer);
     this.proactiveTimer = null;
     this.emitChange();
@@ -191,7 +192,7 @@ export class AuthManager {
       scopes: body.scope ? body.scope.split(' ') : (prev?.scopes ?? []),
       account: extractAccount(body) ?? prev?.account,
     };
-    store.saveAuth(this.auth);
+    this.store.saveAuth(this.auth);
     this.scheduleProactiveRefresh();
   }
 

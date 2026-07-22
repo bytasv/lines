@@ -1,0 +1,149 @@
+import { WebSocket } from 'ws';
+import type { ServerMessage, UserUiSettings } from '@claude-ui/shared';
+import { createStore, type Store } from './store.ts';
+import { AuthManager } from './auth.ts';
+import { GuardAllowlist } from './autoGuard.ts';
+import { SessionManager } from './sessions.ts';
+import { UsagePoller } from './usage.ts';
+import { WorkflowEngine } from './workflows.ts';
+import { StorageSyncClient } from './sync.ts';
+import type { WorkerClient } from './workerClient.ts';
+
+const STORAGE_URL = process.env.STORAGE_URL ?? 'http://localhost:8790';
+
+/**
+ * Everything the bridge holds for one user. Isolation is structural: each
+ * context's SessionManager/WorkflowEngine only ever contain the owner's
+ * state, so a client-supplied sessionId from another user no-ops for free.
+ */
+export interface UserContext {
+  userId: string;
+  store: Store;
+  auth: AuthManager;
+  guard: GuardAllowlist;
+  sessions: SessionManager;
+  workflows: WorkflowEngine;
+  usage: UsagePoller;
+  /** This user's live browser connections; broadcast fans out to these only. */
+  sockets: Set<WebSocket>;
+  broadcast: (msg: ServerMessage) => void;
+  /** Freshest verified Clerk token (handshake or relay); null in local no-auth mode. */
+  clerkToken: string | null;
+  /** Storage-server sync; inert until clerkToken is set. */
+  sync: StorageSyncClient;
+  /** Pull remote state and LWW-merge it in, then push local state up. Fire-and-forget. */
+  syncNow: () => Promise<void>;
+  touchedAt: number;
+}
+
+/**
+ * Construct one user's full stack and wire the same crosslinks the bridge
+ * previously wired for its singletons (auth change/refresh handlers, the
+ * usage-refresh-on-result hook, worker attachment).
+ *
+ * `observe` sees every broadcast before the socket fan-out — the registry
+ * uses it to track session ownership from upsert/delete messages.
+ */
+export function buildUserContext(
+  userId: string,
+  storeRoot: string,
+  worker: WorkerClient,
+  observe?: (msg: ServerMessage) => void,
+): UserContext {
+  const store = createStore(storeRoot);
+  const guard = new GuardAllowlist(store);
+  const sockets = new Set<WebSocket>();
+  const sync = new StorageSyncClient(STORAGE_URL, () => ctx.clerkToken);
+
+  const broadcast = (msg: ServerMessage) => {
+    observe?.(msg);
+    // Push-on-persist: every state change surfaces as a broadcast, so this one
+    // hook covers all persist paths. No-ops while pulled state is applied.
+    if (msg.type === 'sessionUpsert') sync.pushSession(msg.session);
+    else if (msg.type === 'sessionDeleted') sync.deleteSession(msg.sessionId);
+    else if (msg.type === 'workflows') sync.pushWorkflows(msg.workflows);
+    const payload = JSON.stringify(msg);
+    for (const ws of sockets) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    }
+  };
+
+  const auth = new AuthManager(store);
+  const usage = new UsagePoller(broadcast, auth);
+
+  const sessions = new SessionManager(
+    store,
+    guard,
+    (msg) => {
+      broadcast(msg);
+      // A result message means plan usage just changed — refresh the poller soon.
+      if (
+        msg.type === 'event' &&
+        msg.event.kind === 'sdk' &&
+        (msg.event.data as { type?: string } | null)?.type === 'result'
+      ) {
+        usage.refreshSoon();
+      }
+    },
+    auth,
+  );
+  sessions.attachWorker(worker);
+
+  const workflows = new WorkflowEngine(store, sessions, broadcast);
+
+  // Login/logout: tell this user's browsers, restart idle queries so their next
+  // turn uses (or drops) the app-managed token, and re-check plan usage.
+  auth.onChange = (status) => {
+    broadcast({ type: 'authStatus', auth: status });
+    sessions.recycleIdleQueries();
+    usage.refreshSoon();
+  };
+  // Token refresh: idle queries hold the old token in their spawn env.
+  auth.onRefresh = () => sessions.recycleIdleQueries();
+
+  const syncNow = async () => {
+    const pulled = await sync.pullAll();
+    if (pulled) {
+      sync.applying = true;
+      try {
+        for (const wf of pulled.workflows) workflows.applySynced(wf);
+        for (const meta of pulled.sessions) sessions.adoptSynced(meta);
+        const remote = pulled.settings as UserUiSettings | null;
+        const local = store.loadSettings();
+        if (remote && (remote.updatedAt ?? 0) > (local?.updatedAt ?? 0)) {
+          store.saveSettings(remote);
+          broadcast({ type: 'settings', settings: remote });
+        }
+      } finally {
+        sync.applying = false;
+      }
+    }
+    // Push local state up so a fresh storage server (or a migrated install)
+    // becomes complete without waiting for each item to change locally.
+    if (sync.enabled) {
+      sync.pushWorkflows(workflows.list());
+      sync.pushSessions(sessions.list());
+      const local = store.loadSettings();
+      if (local) sync.pushSettings(local);
+    }
+  };
+
+  const ctx: UserContext = {
+    userId,
+    store,
+    auth,
+    guard,
+    sessions,
+    workflows,
+    usage,
+    sockets,
+    broadcast,
+    clerkToken: null,
+    sync,
+    syncNow,
+    touchedAt: Date.now(),
+  };
+  // After ctx exists — its async broadcasts reference ctx-bound state (sync token).
+  usage.start();
+  return ctx;
+}

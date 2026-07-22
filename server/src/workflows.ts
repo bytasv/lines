@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { PromptAttachment, ServerMessage, WorkflowDef, WorkflowMarkerData, WorkflowState } from '@claude-ui/shared';
-import { store } from './store.ts';
+import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
 
 export const DEFAULT_WORKFLOW: WorkflowDef = {
@@ -54,10 +54,11 @@ export class WorkflowEngine {
   private workflows = new Map<string, WorkflowDef>();
 
   constructor(
+    private store: Store,
     private sessions: SessionManager,
     private broadcast: (msg: ServerMessage) => void,
   ) {
-    for (const wf of store.loadWorkflows()) this.workflows.set(wf.id, wf);
+    for (const wf of this.store.loadWorkflows()) this.workflows.set(wf.id, wf);
     if (!this.workflows.has(DEFAULT_WORKFLOW.id)) {
       this.workflows.set(DEFAULT_WORKFLOW.id, DEFAULT_WORKFLOW);
       this.persist();
@@ -73,10 +74,20 @@ export class WorkflowEngine {
 
   save(workflow: WorkflowDef): WorkflowDef {
     if (!workflow.id) workflow.id = randomUUID();
+    workflow.updatedAt = Date.now(); // LWW key for cross-instance sync
     this.workflows.set(workflow.id, workflow);
     this.persist();
     this.broadcast({ type: 'workflows', workflows: this.list() });
     return workflow;
+  }
+
+  /** Adopt a workflow pulled from the storage server — LWW on updatedAt, no restamp. */
+  applySynced(workflow: WorkflowDef) {
+    const cur = this.workflows.get(workflow.id);
+    if (cur && (workflow.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) return;
+    this.workflows.set(workflow.id, workflow);
+    this.persist();
+    this.broadcast({ type: 'workflows', workflows: this.list() });
   }
 
   delete(workflowId: string) {
@@ -86,7 +97,7 @@ export class WorkflowEngine {
   }
 
   private persist() {
-    store.saveWorkflows(this.list());
+    this.store.saveWorkflows(this.list());
   }
 
   /** Attach a workflow to a session; it starts on the user's first prompt (the task description). */

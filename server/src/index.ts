@@ -3,71 +3,114 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import dotenv from 'dotenv';
+
+// Env comes from the repo-root .env (single file for all workspaces); real
+// environment variables win over .env entries.
+dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
 import { WebSocketServer, WebSocket } from 'ws';
 import type { ClientMessage, ServerMessage } from '@claude-ui/shared';
 import { DEFAULT_MODELS } from '@claude-ui/shared';
-import { SessionManager } from './sessions.ts';
+import { verifyToken } from '@clerk/backend';
 import { WorkerClient } from './workerClient.ts';
-import { WorkflowEngine } from './workflows.ts';
-import { store } from './store.ts';
-import { AuthManager } from './auth.ts';
-import { UsagePoller } from './usage.ts';
+import { CLAUDE_UI_ROOT, userStoreRoot } from './store.ts';
+import { UserRegistry } from './userRegistry.ts';
+import type { UserContext } from './userContext.ts';
 
 const PORT = Number(process.env.PORT ?? 8787);
 
-const clients = new Set<WebSocket>();
+/**
+ * Phase 3 auth gate. Enabled only when a Clerk secret key is configured and
+ * BRIDGE_AUTH_DISABLED isn't set — otherwise every socket binds to the
+ * implicit 'local' user, which is the single-tenant dev behavior.
+ */
+const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY;
+const AUTH_ENABLED = Boolean(CLERK_SECRET_KEY) && process.env.BRIDGE_AUTH_DISABLED !== '1';
+if (!AUTH_ENABLED) {
+  console.warn(
+    `[auth] bridge auth disabled (${CLERK_SECRET_KEY ? 'BRIDGE_AUTH_DISABLED=1' : 'no CLERK_SECRET_KEY'}) — all sockets bind to user "local"`,
+  );
+}
 
-function broadcast(msg: ServerMessage) {
-  const payload = JSON.stringify(msg);
-  for (const ws of clients) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+/** Verify a Clerk session token; returns the user id or null. */
+async function verifyClerkUserId(token: string): Promise<string | null> {
+  try {
+    const claims = await verifyToken(token, { secretKey: CLERK_SECRET_KEY! });
+    return claims.sub ?? null;
+  } catch {
+    return null;
   }
 }
 
-const auth = new AuthManager();
-const usage = new UsagePoller(broadcast, auth);
-usage.start();
+interface ConnState {
+  userId: string;
+  /** Freshest verified Clerk token from this connection (handshake or relay). */
+  clerkToken: string | null;
+}
+const conns = new WeakMap<WebSocket, ConnState>();
 
-const sessions = new SessionManager((msg) => {
-  broadcast(msg);
-  // A result message means plan usage just changed — refresh the poller soon.
-  if (
-    msg.type === 'event' &&
-    msg.event.kind === 'sdk' &&
-    (msg.event.data as { type?: string } | null)?.type === 'result'
-  ) {
-    usage.refreshSoon();
-  }
-}, auth);
+/**
+ * Phase 2 of the multi-user plan: all state lives in per-user contexts held by
+ * the registry, but every connection still binds to the implicit 'local' user
+ * (the Clerk auth gate arrives in Phase 3). 'local' keeps the legacy flat
+ * `~/.claude-ui` layout so an existing install carries over untouched; real
+ * user ids get `~/.claude-ui/users/{id}` (migration ships with the auth gate).
+ */
+const LOCAL_USER = 'local';
+
 // The worker owns the Claude CLI children so this process can restart freely
 // (tsx watch, dogfooding edits) without killing in-flight agent turns.
+// Callbacks close over `registry` (created right after) and only fire once the
+// worker socket connects.
 const worker = new WorkerClient({
-  onHello: (live) => sessions.reconcileWithWorker(live),
-  onEvent: (sessionId, message) => sessions.handleWorkerEvent(sessionId, message),
-  onEnded: (sessionId, error) => sessions.handleWorkerEnded(sessionId, error),
-  onRpc: (rpc) => void sessions.handleWorkerRpc(rpc),
-  onRpcCancel: (id) => sessions.handleRpcCancel(id),
+  onHello: (live) => registry.onWorkerLive(live),
+  onEvent: (sessionId, message) =>
+    registry.forSession(sessionId).sessions.handleWorkerEvent(sessionId, message),
+  onEnded: (sessionId, error) => registry.forSession(sessionId).sessions.handleWorkerEnded(sessionId, error),
+  onRpc: (rpc) => void registry.forSession(rpc.sessionId).sessions.handleWorkerRpc(rpc),
+  // No sessionId on a cancel — only the owner's live map has the pending rpc, the rest no-op.
+  onRpcCancel: (id) => {
+    for (const ctx of registry.all()) ctx.sessions.handleRpcCancel(id);
+  },
 });
-sessions.attachWorker(worker);
+// Legacy-state adoption is a manual step: server/scripts/migrate-user.ts.
+const registry = new UserRegistry(
+  worker,
+  (userId) => (userId === LOCAL_USER ? CLAUDE_UI_ROOT : userStoreRoot(userId)),
+  LOCAL_USER,
+);
+// Eager local context in single-tenant mode: workflows keep advancing and
+// worker events keep landing even before (or without) any browser connecting.
+// With auth on, contexts build lazily per verified user instead — but seed the
+// ownership index from disk so a restarted bridge routes worker events for a
+// not-yet-reconnected user to the right context, not the local fallback.
+if (!AUTH_ENABLED) {
+  registry.get(LOCAL_USER);
+} else {
+  try {
+    const usersDir = path.join(CLAUDE_UI_ROOT, 'users');
+    for (const entry of fs.existsSync(usersDir) ? fs.readdirSync(usersDir) : []) {
+      try {
+        const raw = fs.readFileSync(path.join(usersDir, entry, 'sessions.json'), 'utf8');
+        for (const meta of JSON.parse(raw) as { id?: string }[]) {
+          if (meta.id) registry.seedOwnership(meta.id, entry);
+        }
+      } catch {
+        // no sessions.json for that user yet
+      }
+    }
+  } catch (err) {
+    console.warn('[auth] ownership seed scan failed:', err);
+  }
+}
+
 // If the worker never shows up, in-flight statuses loaded from disk are stale.
 setTimeout(() => {
   if (!worker.everConnected) {
     console.warn('[worker] not reachable after 15s — clearing in-flight session statuses');
-    sessions.reconcileWithWorker([]);
+    registry.onWorkerLive([]);
   }
 }, 15_000).unref();
-
-const workflows = new WorkflowEngine(sessions, broadcast);
-
-// Login/logout: tell every browser, restart idle queries so their next turn
-// uses (or drops) the app-managed token, and re-check plan usage.
-auth.onChange = (status) => {
-  broadcast({ type: 'authStatus', auth: status });
-  sessions.recycleIdleQueries();
-  usage.refreshSoon();
-};
-// Token refresh: idle queries hold the old token in their spawn env.
-auth.onRefresh = () => sessions.recycleIdleQueries();
 
 const MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -82,36 +125,58 @@ const MIME: Record<string, string> = {
   '.json': 'application/json',
 };
 
+/** Browsers may only call the file routes from the web app's origin. */
+const WEB_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:5173';
+const CORS = { 'access-control-allow-origin': WEB_ORIGIN };
+
+/** Resolve the requesting user for a plain-HTTP route from its ?token= param. */
+async function httpUserId(url: string): Promise<string | null> {
+  if (!AUTH_ENABLED) return LOCAL_USER;
+  const token = new URL(url, 'http://localhost').searchParams.get('token');
+  return token ? verifyClerkUserId(token) : null;
+}
+
 const server = http.createServer((req, res) => {
-  if (req.url && req.url.startsWith('/attachments/')) {
-    return serveAttachment(req.url, res);
-  }
-  if (req.url && req.url.startsWith('/file?')) {
-    return serveFile(req.url, res);
-  }
-  if (req.url && req.url.startsWith('/tree?')) {
-    return serveTree(req.url, res);
+  const url = req.url ?? '';
+  const isFileRoute = url.startsWith('/attachments/') || url.startsWith('/file?') || url.startsWith('/tree?');
+  if (isFileRoute) {
+    void (async () => {
+      // These routes read workspace files and attachments — same gate as the WS.
+      const userId = await httpUserId(url);
+      if (!userId) {
+        res.writeHead(401, CORS).end();
+        return;
+      }
+      const ctx = registry.get(userId);
+      if (url.startsWith('/attachments/')) serveAttachment(ctx, url, res);
+      else if (url.startsWith('/file?')) serveFile(ctx, url, res);
+      else serveTree(ctx, url, res);
+    })().catch((err) => {
+      console.error('[http]', err);
+      if (!res.headersSent) res.writeHead(500, CORS).end();
+    });
+    return;
   }
   res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ ok: true, sessions: sessions.list().length }));
+  res.end(JSON.stringify({ ok: true, sessions: registry.get(LOCAL_USER).sessions.list().length }));
 });
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
-/** Resolve a ?path= query param to an absolute path, or null if outside known project/session roots. */
-function resolveWorkspacePath(url: string): string | null {
+/** Resolve a ?path= query param to an absolute path, or null if outside the user's project/session roots. */
+function resolveWorkspacePath(ctx: UserContext, url: string): string | null {
   const raw = new URL(url, 'http://localhost').searchParams.get('path') ?? '';
   const expanded = raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw;
   const abs = path.resolve(expanded);
-  const roots = [...store.loadProjects(), ...sessions.list().map((s) => s.cwd)];
+  const roots = [...ctx.store.loadProjects(), ...ctx.sessions.list().map((s) => s.cwd)];
   const allowed = roots.some((root) => abs === root || abs.startsWith(root + path.sep));
   return allowed ? abs : null;
 }
 
-/** Serve a workspace file for the clickable-path preview, restricted to known project/session roots. */
-function serveFile(url: string, res: http.ServerResponse) {
-  const cors = { 'access-control-allow-origin': '*' };
-  const abs = resolveWorkspacePath(url);
+/** Serve a workspace file for the clickable-path preview, restricted to the user's project/session roots. */
+function serveFile(ctx: UserContext, url: string, res: http.ServerResponse) {
+  const cors = CORS;
+  const abs = resolveWorkspacePath(ctx, url);
   if (!abs) {
     res.writeHead(403, cors).end();
     return;
@@ -150,10 +215,10 @@ function serveFile(url: string, res: http.ServerResponse) {
 /** Directory entries hidden from the file tree. */
 const TREE_IGNORE = new Set(['node_modules', '.git']);
 
-/** List one directory for the sidebar file tree, restricted to known project/session roots. */
-function serveTree(url: string, res: http.ServerResponse) {
-  const cors = { 'access-control-allow-origin': '*' };
-  const abs = resolveWorkspacePath(url);
+/** List one directory for the sidebar file tree, restricted to the user's project/session roots. */
+function serveTree(ctx: UserContext, url: string, res: http.ServerResponse) {
+  const cors = CORS;
+  const abs = resolveWorkspacePath(ctx, url);
   if (!abs) {
     res.writeHead(403, cors).end();
     return;
@@ -174,11 +239,16 @@ function serveTree(url: string, res: http.ServerResponse) {
   res.end(JSON.stringify({ entries }));
 }
 
-/** Serve a stored attachment, guarding against path traversal outside the attachments root. */
-function serveAttachment(url: string, res: http.ServerResponse) {
+/**
+ * Serve a stored attachment, guarding against path traversal. Only the
+ * requesting user's own attachments root is searched, so another user's
+ * sessionId in the URL simply 404s.
+ */
+function serveAttachment(ctx: UserContext, url: string, res: http.ServerResponse) {
   const rel = decodeURIComponent(url.slice('/attachments/'.length).split('?')[0]);
-  const abs = path.resolve(store.attachmentsRoot, rel);
-  if (abs !== store.attachmentsRoot && !abs.startsWith(store.attachmentsRoot + path.sep)) {
+  const attachmentsRoot = ctx.store.attachmentsRoot;
+  const abs = path.resolve(attachmentsRoot, rel);
+  if (abs !== attachmentsRoot && !abs.startsWith(attachmentsRoot + path.sep)) {
     res.writeHead(403).end();
     return;
   }
@@ -198,21 +268,46 @@ const wss = new WebSocketServer({ server });
 // The ws library re-emits http server errors here; without a listener they crash the process.
 wss.on('error', (err) => console.warn('[wss]', (err as Error).message));
 
-wss.on('connection', (ws) => {
-  clients.add(ws);
+wss.on('connection', (ws, req) => {
+  void handleConnection(ws, req);
+});
+
+async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
+  let userId = LOCAL_USER;
+  let clerkToken: string | null = null;
+  if (AUTH_ENABLED) {
+    // Hard gate: no valid Clerk token in the handshake query → close, no hello.
+    const token = new URL(req.url ?? '/', 'http://localhost').searchParams.get('token');
+    const verified = token ? await verifyClerkUserId(token) : null;
+    if (!verified) {
+      ws.close(1008, 'unauthorized');
+      return;
+    }
+    userId = verified;
+    clerkToken = token;
+  }
+  const ctx = registry.get(userId);
+  conns.set(ws, { userId, clerkToken });
+  if (clerkToken) {
+    ctx.clerkToken = clerkToken;
+    // Pull remote state (rate-limited inside) and push local state up.
+    void ctx.syncNow();
+  }
+  ctx.sockets.add(ws);
   const hello: ServerMessage = {
     type: 'hello',
-    sessions: sessions.list(),
-    workflows: workflows.list(),
+    sessions: ctx.sessions.list(),
+    workflows: ctx.workflows.list(),
     models: DEFAULT_MODELS,
-    recentDirs: store.loadRecentDirs(),
-    projects: store.loadProjects(),
-    usage: usage.snapshot,
-    auth: auth.getStatus(),
+    recentDirs: ctx.store.loadRecentDirs(),
+    projects: ctx.store.loadProjects(),
+    usage: ctx.usage.snapshot,
+    auth: ctx.auth.getStatus(),
+    settings: ctx.store.loadSettings(),
   };
   ws.send(JSON.stringify(hello));
 
-  ws.on('close', () => clients.delete(ws));
+  ws.on('close', () => ctx.sockets.delete(ws));
 
   ws.on('message', (raw) => {
     let msg: ClientMessage;
@@ -221,7 +316,7 @@ wss.on('connection', (ws) => {
     } catch {
       return;
     }
-    handleMessage(ws, msg).catch((err) => {
+    handleMessage(ctx, ws, msg).catch((err) => {
       console.error('[ws] handler error:', err);
       const sessionId = 'sessionId' in msg ? (msg as { sessionId?: string }).sessionId : undefined;
       ws.send(
@@ -233,14 +328,29 @@ wss.on('connection', (ws) => {
       );
     });
   });
-});
+}
 
-async function handleMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
+async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage): Promise<void> {
+  const { sessions, workflows, store, auth, broadcast } = ctx;
   switch (msg.type) {
     case 'ping':
       // App-level heartbeat: browsers can't send WS protocol pings, so we answer this.
       ws.send(JSON.stringify({ type: 'pong' } satisfies ServerMessage));
       break;
+    case 'auth': {
+      // Fresh-token relay. Re-verifying catches a revoked Clerk session within
+      // one relay cycle; failure closes the socket like a failed handshake.
+      if (!AUTH_ENABLED) break;
+      const conn = conns.get(ws);
+      const verified = await verifyClerkUserId(msg.token);
+      if (!conn || verified !== conn.userId) {
+        ws.close(1008, 'unauthorized');
+        break;
+      }
+      conn.clerkToken = msg.token;
+      ctx.clerkToken = msg.token;
+      break;
+    }
     case 'createSession': {
       const meta = sessions.createSession({
         name: msg.name,
@@ -316,6 +426,8 @@ async function handleMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
       break;
     case 'deleteWorkflow':
       workflows.delete(msg.workflowId);
+      // The 'workflows' broadcast only upserts what's left; remove the row too.
+      ctx.sync.deleteWorkflow(msg.workflowId);
       break;
     case 'openProject': {
       const dir = msg.path.replace(/\/+$/, '') || '/';
@@ -363,6 +475,17 @@ async function handleMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
     case 'authLogout':
       auth.logout();
       break;
+    case 'saveSettings': {
+      // LWW: an out-of-order save from a stale tab must not clobber newer state.
+      const local = store.loadSettings();
+      const incoming = { ...msg.settings, updatedAt: msg.settings.updatedAt ?? Date.now() };
+      if ((incoming.updatedAt ?? 0) <= (local?.updatedAt ?? 0)) break;
+      store.saveSettings(incoming);
+      ctx.sync.pushSettings(incoming);
+      // Other tabs of this user follow along; the sender applies idempotently.
+      broadcast({ type: 'settings', settings: incoming });
+      break;
+    }
     case 'loadTranscript': {
       const events = store.loadTranscript(msg.sessionId);
       ws.send(
@@ -416,7 +539,9 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 
 // Release the port promptly when tsx watch restarts us (SIGTERM) or on Ctrl-C.
 function shutdown() {
-  for (const ws of clients) ws.terminate();
+  for (const ctx of registry.all()) {
+    for (const ws of ctx.sockets) ws.terminate();
+  }
   wss.close();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500).unref();

@@ -1,5 +1,6 @@
 import path from 'node:path';
 import os from 'node:os';
+import type { Store } from './store.ts';
 
 /**
  * Local replica of Claude Code CLI's auto-mode boundaries, without the
@@ -86,14 +87,25 @@ export interface GuardAllowEntry {
   prefix?: string;
 }
 
-let allowlist: GuardAllowEntry[] = [];
+/** Per-store allowlist of user-approved exceptions, persisted via the injected Store. */
+export class GuardAllowlist {
+  private entries: GuardAllowEntry[];
 
-export function setGuardAllowlist(entries: GuardAllowEntry[]) {
-  allowlist = entries;
-}
+  constructor(private store: Store) {
+    this.entries = store.loadGuardAllowlist<GuardAllowEntry[]>([]);
+  }
 
-export function getGuardAllowlist(): GuardAllowEntry[] {
-  return allowlist;
+  list(): GuardAllowEntry[] {
+    return this.entries;
+  }
+
+  /** Add an entry if absent; persists and returns true when it was new. */
+  add(entry: GuardAllowEntry): boolean {
+    if (this.entries.some((e) => e.tool === entry.tool && e.prefix === entry.prefix)) return false;
+    this.entries = [...this.entries, entry];
+    this.store.saveGuardAllowlist(this.entries);
+    return true;
+  }
 }
 
 /** Derive the allowlist entry an approved request should create. */
@@ -106,7 +118,7 @@ export function allowEntryFor(toolName: string, input: Record<string, unknown>):
   return { tool: toolName };
 }
 
-function segmentAllowed(segment: string): boolean {
+function segmentAllowed(segment: string, allowlist: GuardAllowEntry[]): boolean {
   return allowlist.some(
     (e) =>
       e.tool === 'Bash' &&
@@ -126,6 +138,7 @@ export function assessToolCall(
   toolName: string,
   input: Record<string, unknown>,
   cwd: string,
+  allowlist: GuardAllowEntry[],
 ): GuardVerdict {
   if (toolName === 'Bash') {
     const command = String(input.command ?? '');
@@ -134,7 +147,7 @@ export function assessToolCall(
     // inside their segment so pipe-based rules (curl | bash) still match.
     const segments = command.split(/&&|\|\||;/).map((s) => s.trim()).filter(Boolean);
     for (const segment of segments) {
-      if (segmentAllowed(segment)) continue;
+      if (segmentAllowed(segment, allowlist)) continue;
       for (const rule of BASH_RULES) {
         if (rule.pattern.test(segment)) return { dangerous: true, reason: rule.reason };
       }

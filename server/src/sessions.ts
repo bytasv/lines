@@ -15,20 +15,12 @@ import type {
   TranscriptEvent,
 } from '@claude-ui/shared';
 import { isSessionActive } from '@claude-ui/shared';
-import { store } from './store.ts';
+import type { Store } from './store.ts';
 import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
-import {
-  ALWAYS_ASK_TOOLS,
-  allowEntryFor,
-  assessToolCall,
-  getGuardAllowlist,
-  setGuardAllowlist,
-} from './autoGuard.ts';
+import { ALWAYS_ASK_TOOLS, allowEntryFor, assessToolCall, type GuardAllowlist } from './autoGuard.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
 import type { AuthManager } from './auth.ts';
-
-setGuardAllowlist(store.loadGuardAllowlist([]));
 
 /** 'auto' is our guard layer on top of the SDK's acceptEdits mode. */
 function sdkPermissionMode(mode: PermissionMode): string {
@@ -62,10 +54,12 @@ export class SessionManager {
   private worker!: WorkerClient;
 
   constructor(
+    private store: Store,
+    private guard: GuardAllowlist,
     private broadcast: (msg: ServerMessage) => void,
     private auth?: AuthManager,
   ) {
-    for (const meta of store.loadSessions()) this.sessions.set(meta.id, meta);
+    for (const meta of this.store.loadSessions()) this.sessions.set(meta.id, meta);
   }
 
   /** Wired by index.ts right after construction, before any client can prompt. */
@@ -86,10 +80,25 @@ export class SessionManager {
   }
 
   private persist() {
-    store.saveSessions([...this.sessions.values()]);
+    this.store.saveSessions([...this.sessions.values()]);
   }
 
   private upsert(meta: SessionMeta) {
+    meta.updatedAt = Date.now(); // LWW key for cross-instance sync
+    this.sessions.set(meta.id, meta);
+    this.persist();
+    this.broadcast({ type: 'sessionUpsert', session: meta });
+  }
+
+  /**
+   * Adopt a session pulled from the storage server. LWW on updatedAt (no
+   * restamp — the remote timestamp is the point). In-flight statuses belong
+   * to whichever instance is actually running the turn, not this one.
+   */
+  adoptSynced(meta: SessionMeta) {
+    const cur = this.sessions.get(meta.id);
+    if (cur && (meta.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) return;
+    if (isSessionActive(meta.status)) meta.status = 'idle';
     this.sessions.set(meta.id, meta);
     this.persist();
     this.broadcast({ type: 'sessionUpsert', session: meta });
@@ -150,14 +159,14 @@ export class SessionManager {
   }
 
   private nextSeqFromDisk(id: string): number {
-    const events = store.loadTranscript(id);
+    const events = this.store.loadTranscript(id);
     return events.length > 0 ? events[events.length - 1].seq + 1 : 0;
   }
 
   emitEvent(sessionId: string, kind: TranscriptEvent['kind'], data: unknown, persistToDisk = true): number {
     const state = this.liveState(sessionId);
     const event: TranscriptEvent = { seq: state.seq++, ts: Date.now(), kind, data };
-    if (persistToDisk) store.appendTranscript(sessionId, event);
+    if (persistToDisk) this.store.appendTranscript(sessionId, event);
     this.broadcast({ type: 'event', sessionId, event });
     return event.seq;
   }
@@ -180,7 +189,7 @@ export class SessionManager {
       createdAt: Date.now(),
       nameAuto: true,
     };
-    store.addRecentDir(params.cwd);
+    this.store.addRecentDir(params.cwd);
     this.upsert(meta);
     return meta;
   }
@@ -190,7 +199,7 @@ export class SessionManager {
     this.flushPending(id); // the session is gone with its cards
     this.sessions.delete(id);
     this.live.delete(id);
-    store.deleteTranscript(id);
+    this.store.deleteTranscript(id);
     this.persist();
     this.broadcast({ type: 'sessionDeleted', sessionId: id });
   }
@@ -243,7 +252,7 @@ export class SessionManager {
   private stageAttachments(sessionId: string, attachments: PromptAttachment[]): Attachment[] {
     return attachments.map((att) => {
       const kind = attachmentKind(att.mediaType);
-      const file = store.saveAttachment(sessionId, att.name, att.data);
+      const file = this.store.saveAttachment(sessionId, att.name, att.data);
       return { name: att.name, mediaType: att.mediaType, kind, url: `/attachments/${sessionId}/${file}` };
     });
   }
@@ -292,7 +301,7 @@ export class SessionManager {
     const attachments = (item.attachments ?? [])
       .map((a) => {
         const file = a.url.split('/').pop()!;
-        const data = store.loadAttachmentBase64(sessionId, file);
+        const data = this.store.loadAttachmentBase64(sessionId, file);
         return data ? { name: a.name, mediaType: a.mediaType, data } : null;
       })
       .filter((a): a is PromptAttachment => a !== null);
@@ -313,7 +322,7 @@ export class SessionManager {
     const attachments = (item.attachments ?? [])
       .map((a) => {
         const file = a.url.split('/').pop()!;
-        const data = store.loadAttachmentBase64(sessionId, file);
+        const data = this.store.loadAttachmentBase64(sessionId, file);
         return data ? { name: a.name, mediaType: a.mediaType, data } : null;
       })
       .filter((a): a is PromptAttachment => a !== null);
@@ -329,7 +338,7 @@ export class SessionManager {
     meta.queued = meta.queued.filter((q) => q.id !== queuedId);
     for (const a of item.attachments ?? []) {
       const file = a.url.split('/').pop();
-      if (file) fs.rmSync(`${store.attachmentsRoot}/${sessionId}/${file}`, { force: true });
+      if (file) fs.rmSync(`${this.store.attachmentsRoot}/${sessionId}/${file}`, { force: true });
     }
     if (meta.queued.length === 0) meta.queuePaused = undefined;
     this.upsert(meta);
@@ -345,7 +354,7 @@ export class SessionManager {
     const meta = this.sessions.get(sessionId);
     if (!meta || this.isBusy(meta)) return;
 
-    const last = store
+    const last = this.store
       .loadTranscript(sessionId)
       .filter((e) => e.kind === 'user')
       .at(-1);
@@ -357,7 +366,7 @@ export class SessionManager {
     const attachments = (data.attachments ?? [])
       .map((a) => {
         const file = a.url.split('/').pop()!;
-        const b64 = store.loadAttachmentBase64(sessionId, file);
+        const b64 = this.store.loadAttachmentBase64(sessionId, file);
         return b64 ? { name: a.name, mediaType: a.mediaType, data: b64 } : null;
       })
       .filter((a): a is PromptAttachment => a !== null);
@@ -404,8 +413,10 @@ export class SessionManager {
     if (source === 'user') this.maybeAutoName(sessionId, text);
 
     // Persisted (not just in-memory) so a bridge restart mid-turn still
-    // attributes the eventual result to the right initiator.
+    // attributes the eventual result to the right initiator, and the activity
+    // row's elapsed time survives reloads.
     meta.turnSource = source;
+    meta.turnStartedAt = Date.now();
     this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
     const content = [...blocks, ...(text ? [{ type: 'text', text }] : [])];
@@ -414,6 +425,16 @@ export class SessionManager {
       { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null },
       this.buildQueryOptions(meta),
     );
+  }
+
+  /**
+   * Env for the bridge-side helper queries (autoName/summarizeTurn): they run
+   * outside the worker, so hand them the owner's OAuth token explicitly — a
+   * remote multi-user host has no ambient CLI login to fall back on.
+   */
+  private ownerTokenEnv(): { env?: Record<string, string | undefined> } {
+    const token = this.auth?.getAccessTokenSync() ?? null;
+    return token ? { env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token } } : {};
   }
 
   /**
@@ -454,6 +475,7 @@ export class SessionManager {
             'You are a title generator. You receive a task description and ' +
             'reply with a single short title. You never ask questions, never ' +
             'refuse, and never add commentary — you only output the title.',
+          ...this.ownerTokenEnv(),
         } as never,
       });
       let title: string | null = null;
@@ -483,7 +505,7 @@ export class SessionManager {
    */
   private async summarizeTurn(sessionId: string, resultSeq: number) {
     try {
-      const events = store.loadTranscript(sessionId);
+      const events = this.store.loadTranscript(sessionId);
       const lastUserIdx = (() => {
         for (let i = events.length - 1; i >= 0; i--) if (events[i].kind === 'user') return i;
         return -1;
@@ -540,6 +562,7 @@ export class SessionManager {
           systemPrompt:
             'You summarize a coding agent\'s completed turn in 1-2 plain sentences. ' +
             'You never ask questions, never refuse, and never add commentary or preamble.',
+          ...this.ownerTokenEnv(),
         } as never,
       });
       let summary: string | null = null;
@@ -564,6 +587,7 @@ export class SessionManager {
     // Keep the queue but suspend auto-flush; the next user send resumes it.
     const meta = this.sessions.get(sessionId);
     if (meta?.queued?.length) meta.queuePaused = true;
+    if (meta) meta.turnStartedAt = undefined;
     this.setStatus(sessionId, 'idle');
   }
 
@@ -593,7 +617,7 @@ export class SessionManager {
 
   /** Look up the original (unresolved) permission request in the transcript. */
   private findPermissionRequest(sessionId: string, requestId: string): PermissionRequestData | null {
-    for (const event of store.loadTranscript(sessionId)) {
+    for (const event of this.store.loadTranscript(sessionId)) {
       if (event.kind !== 'permission') continue;
       const data = event.data as PermissionRequestData;
       if (data.requestId === requestId && data.toolName) return data;
@@ -603,7 +627,7 @@ export class SessionManager {
 
   /** Look up a recorded resolution for a permission request in the transcript. */
   private findPermissionResolution(sessionId: string, requestId: string): PermissionRequestData | null {
-    for (const event of store.loadTranscript(sessionId)) {
+    for (const event of this.store.loadTranscript(sessionId)) {
       if (event.kind !== 'permission') continue;
       const data = event.data as PermissionRequestData;
       if (data.requestId === requestId && data.resolution) return data;
@@ -720,12 +744,7 @@ export class SessionManager {
       const original = this.findPermissionRequest(sessionId, requestId);
       if (original) {
         const entry = allowEntryFor(original.toolName, original.input);
-        const list = getGuardAllowlist();
-        const exists = list.some((e) => e.tool === entry.tool && e.prefix === entry.prefix);
-        if (!exists) {
-          const next = [...list, entry];
-          setGuardAllowlist(next);
-          store.saveGuardAllowlist(next);
+        if (this.guard.add(entry)) {
           console.log('[guard] allowlisted:', entry.tool, entry.prefix ?? '');
         }
       }
@@ -808,6 +827,7 @@ export class SessionManager {
       if (!info && (meta.status === 'running' || meta.status === 'waiting-permission')) {
         meta.status = 'idle';
         meta.turnSource = undefined;
+        meta.turnStartedAt = undefined;
         // The turn died with the worker; don't auto-fire followups.
         if (meta.queued?.length) meta.queuePaused = true;
         changed = true;
@@ -855,6 +875,7 @@ export class SessionManager {
         }
         source = metaNow.turnSource ?? 'user';
         metaNow.turnSource = undefined;
+        metaNow.turnStartedAt = undefined;
         this.upsert(metaNow);
       }
       this.onTurnComplete?.(sessionId, source);
@@ -871,6 +892,7 @@ export class SessionManager {
       // Don't auto-fire queued prompts into a broken session; a user send resumes.
       const meta = this.sessions.get(sessionId);
       if (meta?.queued?.length) meta.queuePaused = true;
+      if (meta) meta.turnStartedAt = undefined;
       this.setStatus(sessionId, 'error', error);
     }
   }
@@ -923,7 +945,7 @@ export class SessionManager {
       const toolName = String(hookInput.tool_name ?? '');
       const toolInput = (hookInput.tool_input ?? {}) as Record<string, unknown>;
       if (!ALWAYS_ASK_TOOLS.has(toolName)) {
-        const verdict = assessToolCall(toolName, toolInput, meta.cwd);
+        const verdict = assessToolCall(toolName, toolInput, meta.cwd, this.guard.list());
         if (verdict.dangerous) {
           // Route to a prompt (canUseTool) regardless of allowlists.
           return {
@@ -990,7 +1012,7 @@ export class SessionManager {
     {
       const meta = this.sessions.get(sessionId);
       if (meta?.permissionMode === 'auto' && !ALWAYS_ASK_TOOLS.has(toolName)) {
-        const verdict = assessToolCall(toolName, input, meta.cwd);
+        const verdict = assessToolCall(toolName, input, meta.cwd, this.guard.list());
         if (!verdict.dangerous) {
           if (!resend) {
             this.emitEvent(sessionId, 'permission', {
