@@ -46,7 +46,7 @@ export interface ResultItem {
 
 export type TranscriptItem =
   | { kind: 'user'; key: string; text: string; source: 'user' | 'workflow'; attachments?: Attachment[] }
-  | { kind: 'assistant'; key: string; blocks: AssistantBlock[] }
+  | { kind: 'assistant'; key: string; blocks: AssistantBlock[]; isAnswer?: boolean }
   | ToolGroupItem
   | AgentTurnItem
   | { kind: 'streaming'; key: string; text: string }
@@ -296,10 +296,32 @@ export function buildTranscript(events: TranscriptEvent[], groupTools = true): T
 export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
   const out: TranscriptItem[] = [];
   let buf: TranscriptItem[] = [];
+  const emitFolded = (turn: TranscriptItem[]) => {
+    if (turn.length === 0) return;
+    if (turn.length === 1) out.push(turn[0]);
+    else out.push({ kind: 'agent-turn', key: `t${turn[0].key}`, items: turn });
+  };
   const flush = () => {
     if (buf.length === 0) return;
-    if (buf.length === 1) out.push(buf[0]);
-    else out.push({ kind: 'agent-turn', key: `t${buf[0].key}`, items: buf });
+    // A turn's terminal answer (last assistant text not followed by a tool call) always shows
+    // standalone — folding it away hides the analysis/conclusion. Scan from the end, skipping
+    // trailing non-text items (e.g. result); stop at the first tool-group (then no answer).
+    let splitIdx = -1;
+    for (let i = buf.length - 1; i >= 0; i--) {
+      const it = buf[i];
+      if (it.kind === 'tool-group') break;
+      if (it.kind === 'assistant' && hasText(it)) {
+        splitIdx = i;
+        break;
+      }
+    }
+    if (splitIdx >= 0) {
+      const answer = buf[splitIdx] as Extract<TranscriptItem, { kind: 'assistant' }>;
+      emitFolded(buf.filter((_, i) => i !== splitIdx));
+      out.push({ ...answer, isAnswer: true });
+    } else {
+      emitFolded(buf);
+    }
     buf = [];
   };
   for (const it of items) {
@@ -317,6 +339,11 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
   }
   flush();
   return out;
+}
+
+/** True when an assistant item carries a non-empty text block (not thinking-only). */
+function hasText(item: Extract<TranscriptItem, { kind: 'assistant' }>): boolean {
+  return item.blocks.some((b) => b.type === 'text' && b.text.trim().length > 0);
 }
 
 /** The agent's own text, in order, across a folded turn — free (no LLM call). */

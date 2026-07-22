@@ -172,22 +172,39 @@ function Item({
           </Paper>
         </Group>
       );
-    case 'assistant':
+    case 'assistant': {
+      const blocks = (
+        <Stack gap={6} style={{ flex: 1, minWidth: 0 }}>
+          {item.blocks.map((block, i) => {
+            if (block.type === 'text') return <Markdown key={i} text={block.text} />;
+            return (
+              <Text key={i} size="xs" c="dimmed" fs="italic" style={{ whiteSpace: 'pre-wrap' }}>
+                {block.text.length > 600 ? block.text.slice(0, 600) + '…' : block.text}
+              </Text>
+            );
+          })}
+        </Stack>
+      );
       return (
         <Group align="flex-start" gap="xs" wrap="nowrap">
           <IconRobot size={16} style={{ marginTop: 4, opacity: 0.5, flexShrink: 0 }} />
-          <Stack gap={6} style={{ flex: 1, minWidth: 0 }}>
-            {item.blocks.map((block, i) => {
-              if (block.type === 'text') return <Markdown key={i} text={block.text} />;
-              return (
-                <Text key={i} size="xs" c="dimmed" fs="italic" style={{ whiteSpace: 'pre-wrap' }}>
-                  {block.text.length > 600 ? block.text.slice(0, 600) + '…' : block.text}
-                </Text>
-              );
-            })}
-          </Stack>
+          {item.isAnswer ? (
+            <Paper
+              withBorder
+              radius="md"
+              px="sm"
+              py={6}
+              bg="var(--mantine-color-default)"
+              style={{ flex: 1, minWidth: 0 }}
+            >
+              {blocks}
+            </Paper>
+          ) : (
+            blocks
+          )}
         </Group>
       );
+    }
     case 'tool-group':
       return (
         <Group align="flex-start" gap="xs" wrap="nowrap">
