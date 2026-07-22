@@ -432,6 +432,12 @@ export function Transcript({
   // Progress bar is updated imperatively — state here would re-render the whole
   // transcript on every scroll frame.
   const progressTrackRef = useRef<HTMLDivElement>(null);
+  // Content element — observed for size changes so we re-pin on height shifts
+  // that add no items (e.g. a turn's Collapse expanding on a status change).
+  const contentRef = useRef<HTMLDivElement>(null);
+  // While > now, onScroll ignores unpin — set right after a reflow-driven scroll
+  // so a collapse/expand doesn't get mistaken for a user scrolling up.
+  const suppressUnpinUntilRef = useRef(0);
 
   const updateProgress = () => {
     const el = viewportRef.current;
@@ -499,8 +505,15 @@ export function Transcript({
     const el = viewportRef.current;
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-    pinnedRef.current = nearBottom;
-    if (nearBottom) setHasNewContent(false);
+    if (nearBottom) {
+      pinnedRef.current = true;
+      setHasNewContent(false);
+    } else if (Date.now() >= suppressUnpinUntilRef.current) {
+      // A reflow (a turn collapsing/expanding on a step change) can move the
+      // bottom away and fire a scroll event that mimics a user scroll-up. Only
+      // honor the unpin outside the brief window after such a reflow.
+      pinnedRef.current = false;
+    }
     updateProgress();
   };
 
@@ -513,6 +526,28 @@ export function Transcript({
     updateProgress();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items]);
+
+  // Layout can change height without changing items — a turn's Collapse
+  // animating open on a status change, the approval panel unmounting, or late
+  // content streaming in. Re-pin on any such resize so we stay at the bottom.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const content = contentRef.current;
+    if (!viewport || !content) return;
+    const observer = new ResizeObserver(() => {
+      if (pinnedRef.current) {
+        // Keep following through the resize burst (collapse/expand animation)
+        // and hold off the scroll-driven unpin it would otherwise trigger.
+        suppressUnpinUntilRef.current = Date.now() + 200;
+        scrollToBottom();
+      }
+      updateProgress();
+    });
+    observer.observe(viewport);
+    observer.observe(content);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <Box style={{ flex: 1, position: 'relative', minHeight: 0 }}>
@@ -537,7 +572,7 @@ export function Transcript({
         </Box>
       )}
       <ScrollArea h="100%" viewportRef={viewportRef} px="md" onScrollPositionChange={onScroll}>
-        <Stack gap="sm" py="md" maw={920} mx="auto">
+        <Stack gap="sm" py="md" maw={920} mx="auto" ref={contentRef}>
           {items.length === 0 && (
             <Text size="sm" c="dimmed" ta="center" pt="xl">
               Send a prompt to start.
