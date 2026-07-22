@@ -290,6 +290,8 @@ export function buildTranscript(events: TranscriptEvent[], groupTools = true): T
  * user prompt and the next boundary) into a single collapsible `agent-turn` item.
  * User prompts, session-init, and workflow dividers are boundaries that stay visible.
  * A lone agent item passes through un-wrapped (avoids chrome around a single answer).
+ * The plan-review card is also a boundary so a pending plan is always presented
+ * as its own item — exploration folds away, the plan stays visible.
  */
 export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
   const out: TranscriptItem[] = [];
@@ -301,7 +303,12 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
     buf = [];
   };
   for (const it of items) {
-    if (it.kind === 'user' || it.kind === 'system-init' || it.kind === 'workflow') {
+    const isBoundary =
+      it.kind === 'user' ||
+      it.kind === 'system-init' ||
+      it.kind === 'workflow' ||
+      (it.kind === 'permission' && it.data.toolName === 'ExitPlanMode');
+    if (isBoundary) {
       flush();
       out.push(it);
     } else {
