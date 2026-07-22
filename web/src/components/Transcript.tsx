@@ -28,7 +28,7 @@ import {
 } from '@tabler/icons-react';
 import type { TranscriptEvent, WorkflowMarkerData } from '@claude-ui/shared';
 import { useStore } from '../store';
-import { send } from '../ws';
+import { send, withAuthToken } from '../ws';
 import {
   buildTranscript,
   foldAgentTurns,
@@ -142,7 +142,7 @@ function Item({
             {item.attachments && item.attachments.length > 0 && (
               <Group gap="xs" mt={item.text ? 6 : 0}>
                 {item.attachments.map((att) => {
-                  const href = `${attachmentBase}${att.url}`;
+                  const href = withAuthToken(`${attachmentBase}${att.url}`);
                   // Render anything the browser shows as an image (incl. SVG, which
                   // the model receives as text but is still a displayable image).
                   if (att.mediaType.startsWith('image/')) {

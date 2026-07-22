@@ -8,9 +8,11 @@ import type {
   SessionMeta,
   TranscriptEvent,
   UsageSnapshot,
+  UserUiSettings,
   WorkflowDef,
 } from '@claude-ui/shared';
 import { DEFAULT_MODEL } from '@claude-ui/shared';
+import { send } from './ws';
 import type { AlertSound } from './lib/alerts';
 import {
   countAttention,
@@ -192,6 +194,42 @@ interface UiState {
 }
 
 export const useStore = create<UiState>((set, get) => {
+  /** Mirror the current UI settings to the bridge (and through it, the storage server). */
+  const pushSettings = () => {
+    const s = get();
+    send({
+      type: 'saveSettings',
+      settings: {
+        newSessionDefaults: s.newSessionDefaults,
+        sidebarMode: s.sidebarMode,
+        compactionLevel: s.compactionLevel,
+        turnSummariesEnabled: s.turnSummariesEnabled,
+        alertsEnabled: s.alertsEnabled,
+        alertSound: s.alertSound,
+        updatedAt: Date.now(),
+      },
+    });
+  };
+
+  /** Apply settings from the server (hello or another tab/instance) without re-sending. */
+  const applySettings = (s: UserUiSettings) => {
+    set((state) => ({
+      newSessionDefaults: s.newSessionDefaults ?? state.newSessionDefaults,
+      sidebarMode: s.sidebarMode ?? state.sidebarMode,
+      compactionLevel: s.compactionLevel ?? state.compactionLevel,
+      turnSummariesEnabled: s.turnSummariesEnabled ?? state.turnSummariesEnabled,
+      alertsEnabled: s.alertsEnabled ?? state.alertsEnabled,
+      alertSound: (s.alertSound as AlertSound | undefined) ?? state.alertSound,
+    }));
+    // Keep the offline caches current so a cold start matches the server.
+    if (s.newSessionDefaults) localStorage.setItem(NEW_SESSION_DEFAULTS_KEY, JSON.stringify(s.newSessionDefaults));
+    if (s.sidebarMode) localStorage.setItem(SIDEBAR_MODE_KEY, s.sidebarMode);
+    if (s.compactionLevel) localStorage.setItem(COMPACTION_LEVEL_KEY, s.compactionLevel);
+    if (s.turnSummariesEnabled != null) localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(s.turnSummariesEnabled));
+    if (s.alertsEnabled != null) persistAlertsEnabled(s.alertsEnabled);
+    if (s.alertSound) persistAlertSound(s.alertSound as AlertSound);
+  };
+
   return {
   connectionStatus: 'reconnecting',
   queuedPrompts: [],
@@ -257,16 +295,19 @@ export const useStore = create<UiState>((set, get) => {
   setSidebarMode: (mode) => {
     localStorage.setItem(SIDEBAR_MODE_KEY, mode);
     set({ sidebarMode: mode });
+    pushSettings();
   },
 
   setCompactionLevel: (level) => {
     localStorage.setItem(COMPACTION_LEVEL_KEY, level);
     set({ compactionLevel: level });
+    pushSettings();
   },
 
   setTurnSummariesEnabled: (on) => {
     localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(on));
     set({ turnSummariesEnabled: on });
+    pushSettings();
   },
 
   openFileTab: (path) => {
@@ -320,11 +361,13 @@ export const useStore = create<UiState>((set, get) => {
     } else {
       set({ alertsEnabled: false });
     }
+    pushSettings();
   },
 
   setAlertSound: (sound) => {
     persistAlertSound(sound);
     set({ alertSound: sound });
+    pushSettings();
   },
 
   testAlertSound: () => {
@@ -335,6 +378,7 @@ export const useStore = create<UiState>((set, get) => {
   setNewSessionDefaults: (defaults) => {
     localStorage.setItem(NEW_SESSION_DEFAULTS_KEY, JSON.stringify(defaults));
     set({ newSessionDefaults: defaults });
+    pushSettings();
   },
 
   setActiveProject: (path) => {
@@ -379,8 +423,12 @@ export const useStore = create<UiState>((set, get) => {
         if (selectedSessionId && !sessions[selectedSessionId]) {
           set({ selectedSessionId: null });
         }
+        if (msg.settings) applySettings(msg.settings);
         break;
       }
+      case 'settings':
+        applySettings(msg.settings);
+        break;
       case 'projects': {
         set({ projects: msg.projects });
         // Re-validate the active tab (it may have just been closed).

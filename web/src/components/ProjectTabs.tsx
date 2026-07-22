@@ -18,6 +18,7 @@ import { send } from '../ws';
 import logoUrl from '../assets/logo.svg';
 import { SettingsModal } from './SettingsModal';
 import { UsageIndicator } from './UsageIndicator';
+import { UserMenu } from './UserMenu';
 
 function baseName(path: string) {
   return path.split('/').filter(Boolean).pop() ?? path;
@@ -149,6 +150,7 @@ export function ProjectTabs() {
       <UsageIndicator />
       <ThemeToggle />
       <SettingsButton />
+      <UserMenu />
     </Group>
   );
 }

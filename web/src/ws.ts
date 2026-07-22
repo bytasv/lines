@@ -6,12 +6,51 @@ const PING_INTERVAL_MS = 1000;
 // Declare the link dead after this long without a pong (~3 missed pings).
 const PONG_TIMEOUT_MS = 3000;
 const RECONNECT_DELAY_MS = 1500;
+// Re-send a fresh Clerk token before its ~60s expiry.
+const AUTH_RELAY_INTERVAL_MS = 50_000;
 
 let socket: WebSocket | null = null;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let authRelayTimer: ReturnType<typeof setInterval> | null = null;
 let lastPongAt = 0;
 let connectivityWired = false;
+
+/** Set by main.tsx once Clerk is active; null means local no-auth mode. */
+let tokenProvider: (() => Promise<string | null>) | null = null;
+/** Latest minted token — kept fresh by connect() and the ~50s relay, for HTTP URLs. */
+let lastToken: string | null = null;
+
+export function setTokenProvider(fn: () => Promise<string | null>) {
+  tokenProvider = fn;
+}
+
+/**
+ * Append the current auth token to a bridge HTTP URL (file/tree/attachment
+ * routes verify it like the WS handshake). No-op in local no-auth mode.
+ */
+export function withAuthToken(url: string): string {
+  if (!lastToken) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(lastToken)}`;
+}
+
+function stopAuthRelay() {
+  if (authRelayTimer) clearInterval(authRelayTimer);
+  authRelayTimer = null;
+}
+
+function startAuthRelay() {
+  stopAuthRelay();
+  if (!tokenProvider) return;
+  authRelayTimer = setInterval(async () => {
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    const token = await tokenProvider?.().catch(() => null);
+    if (token) {
+      lastToken = token;
+      socket.send(JSON.stringify({ type: 'auth', token } satisfies ClientMessage));
+    }
+  }, AUTH_RELAY_INTERVAL_MS);
+}
 
 function stopHeartbeat() {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -41,14 +80,19 @@ function flushQueue() {
   }
 }
 
-export function connect() {
+export async function connect() {
   if (socket && socket.readyState !== WebSocket.CLOSED) return;
   wireConnectivity();
-  socket = new WebSocket(WS_URL);
+  // Mint a fresh token for every (re)connect — a stale one fails the handshake.
+  const token = tokenProvider ? await tokenProvider().catch(() => null) : null;
+  if (token) lastToken = token;
+  if (socket && socket.readyState !== WebSocket.CLOSED) return; // raced a parallel connect
+  socket = new WebSocket(token ? `${WS_URL}/?token=${encodeURIComponent(token)}` : WS_URL);
 
   socket.onopen = () => {
     useStore.getState().setConnectionStatus('connected');
     startHeartbeat();
+    startAuthRelay();
   };
 
   socket.onmessage = (e) => {
@@ -75,11 +119,19 @@ export function connect() {
     }
   };
 
-  socket.onclose = () => {
+  socket.onclose = (e) => {
     stopHeartbeat();
+    stopAuthRelay();
+    // 1008 = bridge rejected the token. Blind reconnects would spam the gate;
+    // Clerk's session state (sign-in redirect) is what recovers from here.
+    if (e.code === 1008) {
+      console.warn('[ws] unauthorized (1008) — waiting for sign-in');
+      useStore.getState().setConnectionStatus('reconnecting');
+      return;
+    }
     useStore.getState().setConnectionStatus(navigator.onLine ? 'reconnecting' : 'offline');
     if (retryTimer) clearTimeout(retryTimer);
-    retryTimer = setTimeout(connect, RECONNECT_DELAY_MS);
+    retryTimer = setTimeout(() => void connect(), RECONNECT_DELAY_MS);
   };
 
   socket.onerror = () => socket?.close();
@@ -96,7 +148,7 @@ function wireConnectivity() {
   window.addEventListener('online', () => {
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = null;
-    connect();
+    void connect();
   });
 }
 

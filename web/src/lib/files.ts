@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { FileContentResponse, TreeEntry, TreeResponse } from '@claude-ui/shared';
+import { withAuthToken } from '../ws';
 
 /** The bridge HTTP server (same host, port 8787) serves file contents and directory listings. */
 export const fileBase = `${location.protocol}//${location.hostname}:8787`;
@@ -12,7 +13,7 @@ const ERROR_MESSAGES: Record<number, string> = {
 };
 
 export async function fetchTree(dir: string): Promise<TreeEntry[]> {
-  const res = await fetch(`${fileBase}/tree?path=${encodeURIComponent(dir)}`);
+  const res = await fetch(withAuthToken(`${fileBase}/tree?path=${encodeURIComponent(dir)}`));
   if (!res.ok) throw new Error(`Failed to list directory (${res.status}).`);
   const data = (await res.json()) as TreeResponse;
   return data.entries;
@@ -28,7 +29,7 @@ export function useFileContent(path: string | undefined) {
     setContent(null);
     setError(null);
     let cancelled = false;
-    fetch(`${fileBase}/file?path=${encodeURIComponent(path)}`)
+    fetch(withAuthToken(`${fileBase}/file?path=${encodeURIComponent(path)}`))
       .then(async (res) => {
         if (cancelled) return;
         if (!res.ok) {
