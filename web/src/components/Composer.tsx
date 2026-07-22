@@ -24,6 +24,7 @@ import {
   IconZoomIn,
 } from '@tabler/icons-react';
 import type { CavemanLevel, PermissionMode, PromptAttachment, SessionMeta } from '@claude-ui/shared';
+import { isSessionInterruptible } from '@claude-ui/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
 
@@ -131,7 +132,8 @@ export function Composer({ session }: { session: SessionMeta }) {
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const running = session.status === 'running' || session.status === 'waiting-permission';
+  const interruptible = isSessionInterruptible(session.status);
+  const awaitingApproval = session.status === 'waiting-approval';
 
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files);
@@ -316,7 +318,7 @@ export function Composer({ session }: { session: SessionMeta }) {
               ${session.totalCostUsd.toFixed(3)}
             </Text>
           )}
-          {running ? (
+          {interruptible ? (
             <>
               <Tooltip label="Queue message — sends after the current turn">
                 <ActionIcon
@@ -334,6 +336,17 @@ export function Composer({ session }: { session: SessionMeta }) {
                 </ActionIcon>
               </Tooltip>
             </>
+          ) : awaitingApproval ? (
+            <Tooltip label="Send — keeps iterating on this step (won't advance the workflow)">
+              <ActionIcon
+                variant="filled"
+                size="lg"
+                onClick={submit}
+                disabled={!text.trim() && attachments.length === 0}
+              >
+                <IconSend size={16} />
+              </ActionIcon>
+            </Tooltip>
           ) : (
             <ActionIcon
               variant="filled"

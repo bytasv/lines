@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ServerMessage, WorkflowDef, WorkflowMarkerData, WorkflowState } from '@claude-ui/shared';
+import type { PromptAttachment, ServerMessage, WorkflowDef, WorkflowMarkerData, WorkflowState } from '@claude-ui/shared';
 import { store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
 
@@ -169,13 +169,59 @@ export class WorkflowEngine {
     const step = wf.steps[i];
     if (!step || meta.workflow.stepStatuses[i] !== 'running') return;
 
+    // A plan approved mid-step advances straight to the next step.
+    if (meta.workflow.advanceOnComplete) {
+      meta.workflow.advanceOnComplete = undefined;
+      this.marker(sessionId, { stepIndex: i, stepName: step.name, event: 'approved' });
+      this.advance(sessionId);
+      return;
+    }
+
     if (step.autoAdvance) {
       this.advance(sessionId);
-    } else {
-      meta.workflow.stepStatuses[i] = 'waiting-approval';
-      this.sessions.setStatus(sessionId, 'waiting-approval');
-      this.marker(sessionId, { stepIndex: i, stepName: step.name, event: 'waiting-approval' });
+      return;
     }
+
+    // A follow-up the user sent while the step was still running supersedes the
+    // park: re-run the same step with it instead of stranding it in the queue.
+    const queued = this.sessions.takeQueuedText(sessionId);
+    if (queued) {
+      this.iterateStep(sessionId, queued.text, queued.attachments);
+      return;
+    }
+
+    meta.workflow.stepStatuses[i] = 'waiting-approval';
+    this.sessions.setStatus(sessionId, 'waiting-approval');
+    this.marker(sessionId, { stepIndex: i, stepName: step.name, event: 'waiting-approval' });
+  }
+
+  /**
+   * A free-text prompt sent while a step is parked at waiting-approval iterates
+   * on the SAME step (never advances). Returns true if it consumed the prompt.
+   */
+  iterateIfWaiting(sessionId: string, text: string, attachments?: PromptAttachment[]): boolean {
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.workflow) return false;
+    const i = meta.workflow.stepIndex;
+    if (meta.workflow.stepStatuses[i] !== 'waiting-approval') return false;
+    this.iterateStep(sessionId, text, attachments);
+    return true;
+  }
+
+  /** Re-run the current step as a plain follow-up turn (same conversation, no advance). */
+  private iterateStep(sessionId: string, text: string, attachments?: PromptAttachment[]) {
+    const meta = this.sessions.get(sessionId);
+    const wf = meta?.workflow && this.workflows.get(meta.workflow.workflowId);
+    if (!meta || !meta.workflow || !wf) return;
+    const i = meta.workflow.stepIndex;
+    meta.workflow.stepStatuses[i] = 'running';
+    this.sessions.setStatus(sessionId, 'running');
+    this.marker(sessionId, {
+      stepIndex: i,
+      stepName: wf.steps[i]?.name ?? '',
+      event: 'retried',
+    });
+    this.sessions.prompt(sessionId, text, 'workflow', attachments);
   }
 
   approve(sessionId: string) {

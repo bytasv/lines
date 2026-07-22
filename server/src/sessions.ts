@@ -14,6 +14,7 @@ import type {
   SessionStatus,
   TranscriptEvent,
 } from '@claude-ui/shared';
+import { isSessionActive } from '@claude-ui/shared';
 import { store } from './store.ts';
 import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
 import {
@@ -229,7 +230,7 @@ export class SessionManager {
   }
 
   private isBusy(meta: SessionMeta) {
-    return meta.status === 'running' || meta.status === 'waiting-permission';
+    return isSessionActive(meta.status);
   }
 
   /**
@@ -278,6 +279,26 @@ export class SessionManager {
       .filter((a): a is PromptAttachment => a !== null);
 
     this.prompt(sessionId, item.text, 'user', attachments);
+  }
+
+  /**
+   * Pull the next queued user prompt off the head of the queue so the workflow
+   * engine can re-run the current step with it instead of stranding it at
+   * waiting-approval. Returns undefined when nothing is queued or the queue is paused.
+   */
+  takeQueuedText(sessionId: string): { text: string; attachments: PromptAttachment[] } | undefined {
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.queued?.length || meta.queuePaused) return undefined;
+    const item = meta.queued.shift()!;
+    this.upsert(meta);
+    const attachments = (item.attachments ?? [])
+      .map((a) => {
+        const file = a.url.split('/').pop()!;
+        const data = store.loadAttachmentBase64(sessionId, file);
+        return data ? { name: a.name, mediaType: a.mediaType, data } : null;
+      })
+      .filter((a): a is PromptAttachment => a !== null);
+    return { text: item.text, attachments };
   }
 
   /** Drop a queued prompt before it is sent. */
@@ -709,6 +730,30 @@ export class SessionManager {
       answers,
       updatedInput,
     } satisfies PermissionRequestData);
+
+    // Approving a plan inside a workflow plan step advances the workflow instead
+    // of implementing in-place: deny ExitPlanMode so the step stays read-only and
+    // ends its turn, then flag the workflow to advance when that turn completes.
+    const original = this.findPermissionRequest(sessionId, requestId);
+    const meta0 = this.sessions.get(sessionId);
+    if (
+      allow &&
+      original?.toolName === 'ExitPlanMode' &&
+      meta0?.workflow &&
+      meta0.workflow.stepStatuses[meta0.workflow.stepIndex] === 'running' &&
+      meta0.permissionMode === 'plan'
+    ) {
+      meta0.workflow.advanceOnComplete = true;
+      this.upsert(meta0);
+      resolve({
+        allow: false,
+        denyMessage:
+          'The user approved this plan. Do not implement anything now — end your turn. ' +
+          'The workflow will proceed to the next step.',
+      });
+      return;
+    }
+
     resolve({ allow, updatedInput, denyMessage });
 
     // Approving a plan exits plan mode inside the CLI — mirror that in our
@@ -914,24 +959,10 @@ export class SessionManager {
       }
     }
 
-    // Planning-only workflow steps: capture the plan but never implement in
-    // this step. Auto-deny ExitPlanMode so the CLI stays read-only; the
-    // workflow's own approval gate decides what happens next.
-    if (toolName === 'ExitPlanMode') {
-      const meta = this.sessions.get(sessionId);
-      const wf = meta?.workflow;
-      const inPlanStep =
-        wf && wf.stepStatuses[wf.stepIndex] === 'running' && meta.permissionMode === 'plan';
-      if (inPlanStep) {
-        return {
-          behavior: 'deny',
-          message:
-            'This is a planning-only workflow step — do not implement anything now. ' +
-            'Write out the final plan as your response and end your turn. ' +
-            'The user will review it, and implementation happens in a later workflow step.',
-        };
-      }
-    }
+    // In a workflow plan step the plan-review card is the gate: it surfaces via
+    // askPermission below, and approving it advances the workflow (see
+    // resolvePermission) rather than implementing in-place, so the step stays
+    // read-only (SDK plan mode already blocks edits until ExitPlanMode).
 
     // Auto mode: our guard classifies the call. Safe -> approve silently
     // (recorded in the transcript); dangerous -> fall through to the prompt

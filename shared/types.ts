@@ -13,6 +13,18 @@ export type SessionStatus =
   | 'waiting-approval'
   | 'error';
 
+/** A live SDK turn is running and can be stopped via `interrupt`. */
+export const isSessionInterruptible = (s: SessionStatus) =>
+  s === 'running' || s === 'waiting-permission';
+
+/**
+ * The session is not free to take a new prompt straight through — it is either
+ * interruptible or paused awaiting a workflow-step approval. Sends should be
+ * staged/queued rather than injected.
+ */
+export const isSessionActive = (s: SessionStatus) =>
+  isSessionInterruptible(s) || s === 'waiting-approval';
+
 export type CavemanLevel = 'lite' | 'full' | 'ultra';
 
 /** How an attachment is presented to the model. */
@@ -71,6 +83,8 @@ export interface WorkflowState {
   /** The user's task description, captured from the first prompt; substituted into step templates as {task}. */
   task?: string;
   started: boolean;
+  /** Set when a plan is approved mid-step: advance to the next step once the current turn ends. */
+  advanceOnComplete?: boolean;
 }
 
 export interface SessionMeta {

@@ -1,5 +1,4 @@
-import { useState } from 'react';
-import { Box, Button, Group, Loader, Paper, Text, Textarea, ThemeIcon } from '@mantine/core';
+import { Box, Button, Group, Loader, Paper, Text, ThemeIcon } from '@mantine/core';
 import { IconCheck } from '@tabler/icons-react';
 import type { SessionMeta, WorkflowDef, WorkflowStepStatus } from '@claude-ui/shared';
 import { send } from '../ws';
@@ -25,8 +24,6 @@ export function WorkflowStepper({
   workflow: WorkflowDef;
 }) {
   const state = session.workflow!;
-  const [feedback, setFeedback] = useState('');
-  const [showRetry, setShowRetry] = useState(false);
 
   const waiting = state.stepStatuses[state.stepIndex] === 'waiting-approval';
 
@@ -85,41 +82,12 @@ export function WorkflowStepper({
         <Paper withBorder radius="md" p="sm" mt="xs" style={{ borderColor: 'var(--mantine-color-sandstone-6)' }}>
           <Group justify="space-between" wrap="wrap" gap="xs">
             <Text size="sm" fw={600}>
-              “{workflow.steps[state.stepIndex]?.name}” finished — approve to continue?
+              “{workflow.steps[state.stepIndex]?.name}” finished — approve to continue, or send a message to keep iterating.
             </Text>
-            <Group gap="xs">
-              <Button size="xs" onClick={() => send({ type: 'workflowApprove', sessionId: session.id })}>
-                Approve → next step
-              </Button>
-              <Button size="xs" variant="default" onClick={() => setShowRetry((v) => !v)}>
-                Retry with feedback
-              </Button>
-            </Group>
+            <Button size="xs" onClick={() => send({ type: 'workflowApprove', sessionId: session.id })}>
+              Approve → next step
+            </Button>
           </Group>
-          {showRetry && (
-            <Group mt="xs" gap="xs" align="flex-end">
-              <Textarea
-                style={{ flex: 1 }}
-                autosize
-                minRows={1}
-                maxRows={4}
-                placeholder="What should change?"
-                value={feedback}
-                onChange={(e) => setFeedback(e.currentTarget.value)}
-              />
-              <Button
-                size="xs"
-                disabled={!feedback.trim()}
-                onClick={() => {
-                  send({ type: 'workflowRetry', sessionId: session.id, feedback: feedback.trim() });
-                  setFeedback('');
-                  setShowRetry(false);
-                }}
-              >
-                Retry step
-              </Button>
-            </Group>
-          )}
         </Paper>
       )}
     </Paper>

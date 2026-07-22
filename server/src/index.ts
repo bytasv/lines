@@ -245,9 +245,10 @@ async function handleMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
       break;
     case 'prompt': {
       // A workflow-attached session consumes its first prompt as the task description.
-      if (!workflows.startIfPending(msg.sessionId, msg.text)) {
-        sessions.userPrompt(msg.sessionId, msg.text, msg.attachments);
-      }
+      if (workflows.startIfPending(msg.sessionId, msg.text)) break;
+      // A prompt sent while a step is parked iterates on that same step.
+      if (workflows.iterateIfWaiting(msg.sessionId, msg.text, msg.attachments)) break;
+      sessions.userPrompt(msg.sessionId, msg.text, msg.attachments);
       break;
     }
     case 'interrupt':
