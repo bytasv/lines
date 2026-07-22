@@ -249,6 +249,9 @@ export type ClientMessage =
   | { type: 'pickFolder' }
   | { type: 'openProject'; path: string }
   | { type: 'closeProject'; path: string }
+  | { type: 'authStartLogin' }
+  | { type: 'authCompleteLogin'; code: string }
+  | { type: 'authLogout' }
   | { type: 'ping' };
 
 /** One Claude-plan rate-limit window (5-hour session, weekly, ...) from the OAuth usage endpoint. */
@@ -268,13 +271,22 @@ export interface UsageSnapshot {
   fetchedAt: number;
 }
 
+/** Whether the app is logged in to Claude, plus the account it's using (from the OAuth token response). */
+export interface AuthStatus {
+  loggedIn: boolean;
+  account?: { email?: string; organization?: string };
+}
+
 // ---------------------------------------------------------------------------
 // Server -> Client
 // ---------------------------------------------------------------------------
 
 export type ServerMessage =
-  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; usage: UsageSnapshot | null }
+  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; usage: UsageSnapshot | null; auth: AuthStatus }
   | { type: 'usage'; usage: UsageSnapshot | null }
+  | { type: 'authStatus'; auth: AuthStatus }
+  | { type: 'authLoginStarted'; authorizeUrl: string }
+  | { type: 'authError'; message: string }
   | { type: 'projects'; projects: string[] }
   | { type: 'sessionUpsert'; session: SessionMeta }
   | { type: 'sessionDeleted'; sessionId: string }

@@ -1,5 +1,16 @@
-import { Group, HoverCard, Progress, RingProgress, Stack, Text, UnstyledButton } from '@mantine/core';
+import {
+  Anchor,
+  Divider,
+  Group,
+  HoverCard,
+  Progress,
+  RingProgress,
+  Stack,
+  Text,
+  UnstyledButton,
+} from '@mantine/core';
 import { useStore } from '../store';
+import { send } from '../ws';
 
 /** Green under 50%, amber to 80%, red above — mirrors ClaudeUsageBar's thresholds. */
 function usageColor(pct: number): string {
@@ -36,6 +47,7 @@ function formatAgo(ts: number): string {
 
 export function UsageIndicator() {
   const usage = useStore((s) => s.usage);
+  const auth = useStore((s) => s.auth);
   if (!usage || usage.windows.length === 0) return null;
 
   const worst = usage.windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), usage.windows[0]);
@@ -87,6 +99,19 @@ export function UsageIndicator() {
           <Text size="xs" c="dimmed">
             {formatAgo(usage.fetchedAt)}
           </Text>
+          {auth?.loggedIn && (
+            <>
+              <Divider />
+              <Group justify="space-between" gap="xs">
+                <Text size="xs" c="dimmed" truncate>
+                  {auth.account?.email ?? 'Signed in'}
+                </Text>
+                <Anchor component="button" type="button" size="xs" c="red" onClick={() => send({ type: 'authLogout' })}>
+                  Log out
+                </Anchor>
+              </Group>
+            </>
+          )}
         </Stack>
       </HoverCard.Dropdown>
     </HoverCard>

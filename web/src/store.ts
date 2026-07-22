@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type {
+  AuthStatus,
   ModelOption,
   PermissionMode,
   PromptAttachment,
@@ -148,6 +149,13 @@ interface UiState {
   filePreview: { path: string; display: string; line?: number; col?: number } | null;
   /** Claude-plan usage snapshot from the bridge; null when unavailable (API-key users). */
   usage: UsageSnapshot | null;
+  /** App login state from the bridge; null until the first `hello`. */
+  auth: AuthStatus | null;
+  /** Authorize URL of the in-progress login, set once the server answers authStartLogin. */
+  authorizeUrl: string | null;
+  /** Last login failure, shown inline in the login modal. */
+  authError: string | null;
+  loginModalOpen: boolean;
   /** What the left sidebar shows: session list or project file tree. */
   sidebarMode: SidebarMode;
   /** Transcript compaction level; persisted in localStorage. */
@@ -171,6 +179,8 @@ interface UiState {
   testAlertSound: () => void;
   openFilePreview: (raw: string) => void;
   closeFilePreview: () => void;
+  openLoginModal: () => void;
+  closeLoginModal: () => void;
   setSidebarMode: (mode: SidebarMode) => void;
   setCompactionLevel: (level: CompactionLevel) => void;
   setTurnSummariesEnabled: (on: boolean) => void;
@@ -198,6 +208,10 @@ export const useStore = create<UiState>((set, get) => ({
   notifyPermission: 'Notification' in window ? Notification.permission : 'denied',
   filePreview: null,
   usage: null,
+  auth: null,
+  authorizeUrl: null,
+  authError: null,
+  loginModalOpen: false,
   sidebarMode: loadSidebarMode(),
   compactionLevel: loadCompactionLevel(),
   turnSummariesEnabled: loadTurnSummariesEnabled(),
@@ -232,6 +246,9 @@ export const useStore = create<UiState>((set, get) => ({
     set({ filePreview: { path: resolved, display: rawPath, line, col } });
   },
   closeFilePreview: () => set({ filePreview: null }),
+
+  openLoginModal: () => set({ loginModalOpen: true, authError: null }),
+  closeLoginModal: () => set({ loginModalOpen: false, authorizeUrl: null, authError: null }),
 
   setSidebarMode: (mode) => {
     localStorage.setItem(SIDEBAR_MODE_KEY, mode);
@@ -344,6 +361,11 @@ export const useStore = create<UiState>((set, get) => ({
           recentDirs: msg.recentDirs,
           projects: msg.projects,
           usage: msg.usage,
+          auth: msg.auth,
+          // Logged out? Open the login flow — but only on the first hello with
+          // that news, so reconnects don't reopen a dismissed modal.
+          loginModalOpen:
+            state.loginModalOpen || (!msg.auth.loggedIn && state.auth?.loggedIn !== false),
           activeProject: pickActive(msg.projects, state.activeProject),
           // Live transcripts are stale after a reconnect; force reloads.
           transcripts: {},
@@ -423,6 +445,20 @@ export const useStore = create<UiState>((set, get) => ({
         break;
       case 'usage':
         set({ usage: msg.usage });
+        break;
+      case 'authStatus':
+        // Success closes the modal; a logout (or dead refresh token) reopens it.
+        set(
+          msg.auth.loggedIn
+            ? { auth: msg.auth, loginModalOpen: false, authorizeUrl: null, authError: null }
+            : { auth: msg.auth, loginModalOpen: true },
+        );
+        break;
+      case 'authLoginStarted':
+        set({ authorizeUrl: msg.authorizeUrl, authError: null });
+        break;
+      case 'authError':
+        set({ authError: msg.message });
         break;
       case 'folderPicked':
         set({ folderPickPending: false });

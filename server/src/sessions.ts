@@ -26,6 +26,7 @@ import {
 } from './autoGuard.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
+import type { AuthManager } from './auth.ts';
 
 setGuardAllowlist(store.loadGuardAllowlist([]));
 
@@ -60,7 +61,10 @@ export class SessionManager {
   private onTurnComplete: TurnCompleteListener | null = null;
   private worker!: WorkerClient;
 
-  constructor(private broadcast: (msg: ServerMessage) => void) {
+  constructor(
+    private broadcast: (msg: ServerMessage) => void,
+    private auth?: AuthManager,
+  ) {
     for (const meta of store.loadSessions()) this.sessions.set(meta.id, meta);
   }
 
@@ -196,6 +200,7 @@ export class SessionManager {
    * non-serializable callbacks (canUseTool, hooks, stderr) on its side.
    */
   private buildQueryOptions(meta: SessionMeta): Record<string, unknown> {
+    const accessToken = this.auth?.getAccessTokenSync() ?? null;
     const pluginPath = meta.caveman.enabled ? getCavemanPluginPath() : null;
     const appendParts: string[] = [];
     if (meta.caveman.enabled && !pluginPath) {
@@ -217,7 +222,21 @@ export class SessionManager {
       },
       settingSources: ['user', 'project'],
       ...(pluginPath ? { plugins: [{ type: 'local', path: pluginPath }] } : {}),
+      // App-managed login: hand the OAuth token to the CLI child. Absent (logged
+      // out or mid-refresh), the CLI falls back to its ambient credentials.
+      ...(accessToken ? { env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: accessToken } } : {}),
     };
+  }
+
+  /**
+   * Restart queries that aren't mid-turn so their next prompt rebuilds options
+   * with the current token (resume keeps context). Called on login/logout and
+   * after token refresh; busy sessions finish their turn on the old token.
+   */
+  recycleIdleQueries() {
+    for (const meta of this.sessions.values()) {
+      if (!isSessionActive(meta.status)) this.worker.close(meta.id);
+    }
   }
 
   /** Persist attachments to disk and return the transcript/queue refs. */

@@ -1,9 +1,10 @@
-import { ActionIcon, Group, Modal, SegmentedControl, Select, Stack, Switch, Text, Tooltip } from '@mantine/core';
+import { ActionIcon, Button, Group, Modal, SegmentedControl, Select, Stack, Switch, Text, Tooltip } from '@mantine/core';
 import { IconPlayerPlay } from '@tabler/icons-react';
 import type { PermissionMode } from '@claude-ui/shared';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { MODE_LABELS } from './Composer';
+import { send } from '../ws';
 
 export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: () => void }) {
   const models = useStore((s) => s.models);
@@ -19,6 +20,8 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
   const setCompactionLevel = useStore((s) => s.setCompactionLevel);
   const turnSummariesEnabled = useStore((s) => s.turnSummariesEnabled);
   const setTurnSummariesEnabled = useStore((s) => s.setTurnSummariesEnabled);
+  const auth = useStore((s) => s.auth);
+  const openLoginModal = useStore((s) => s.openLoginModal);
 
   const alertsDescription =
     alertsEnabled && notifyPermission !== 'granted'
@@ -29,6 +32,35 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
     <Modal opened={opened} onClose={onClose} title="Settings" size="sm" centered>
       <Stack gap="xs">
         <Text size="xs" fw={600} c="dimmed" tt="uppercase">
+          Account
+        </Text>
+        {auth?.loggedIn ? (
+          <Group justify="space-between" wrap="nowrap">
+            <Text size="sm" truncate>
+              {auth.account?.email ?? 'Signed in'}
+              {auth.account?.organization ? ` · ${auth.account.organization}` : ''}
+            </Text>
+            <Button size="xs" variant="default" onClick={() => send({ type: 'authLogout' })}>
+              Log out
+            </Button>
+          </Group>
+        ) : (
+          <Group justify="space-between" wrap="nowrap">
+            <Text size="sm" c="dimmed">
+              Not signed in to Claude
+            </Text>
+            <Button
+              size="xs"
+              onClick={() => {
+                onClose();
+                openLoginModal();
+              }}
+            >
+              Sign in…
+            </Button>
+          </Group>
+        )}
+        <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
           New session defaults
         </Text>
         <Select

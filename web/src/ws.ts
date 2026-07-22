@@ -61,6 +61,10 @@ export function connect() {
       useStore.getState().applyServerMessage(msg);
       // Flush only after the hello reducer ran: sessions are fresh and transcripts reset.
       if (msg.type === 'hello') flushQueue();
+      // Pop the Claude approval page; the login modal keeps a link as the popup-blocked fallback.
+      if (msg.type === 'authLoginStarted') {
+        window.open(msg.authorizeUrl, '_blank', 'noopener');
+      }
       // The native folder picker's only job is opening projects now.
       if (msg.type === 'folderPicked' && msg.path) {
         send({ type: 'openProject', path: msg.path });

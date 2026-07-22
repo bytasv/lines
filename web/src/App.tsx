@@ -10,6 +10,7 @@ import { ConnectionBanner } from './components/ConnectionBanner';
 import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/WorkflowEditor';
 import { MonacoPreviewModal } from './components/MonacoPreviewModal';
+import { LoginModal } from './components/LoginModal';
 import { FilesView } from './components/FilesView';
 import { send } from './ws';
 
@@ -150,6 +151,7 @@ function Shell() {
       </AppShell.Main>
       <WorkflowEditor opened={workflowEditorOpen} onClose={() => setWorkflowEditorOpen(false)} />
       <MonacoPreviewModal />
+      <LoginModal />
     </AppShell>
   );
 }

@@ -11,6 +11,7 @@ const SESSIONS_FILE = path.join(ROOT, 'sessions.json');
 const WORKFLOWS_FILE = path.join(ROOT, 'workflows.json');
 const RECENT_DIRS_FILE = path.join(ROOT, 'recent-dirs.json');
 const PROJECTS_FILE = path.join(ROOT, 'projects.json');
+const AUTH_FILE = path.join(ROOT, 'auth.json');
 
 fs.mkdirSync(TRANSCRIPTS, { recursive: true });
 fs.mkdirSync(ATTACHMENTS, { recursive: true });
@@ -25,6 +26,17 @@ function readJson<T>(file: string, fallback: T): T {
 
 function writeJson(file: string, data: unknown) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
+}
+
+/** Persisted app-managed Claude OAuth credentials. Written 0600 (tokens are secrets). */
+export interface StoredAuth {
+  version: 1;
+  accessToken: string;
+  refreshToken: string;
+  /** ms epoch when the access token expires. */
+  expiresAt: number;
+  scopes: string[];
+  account?: { email?: string; organization?: string };
 }
 
 export const store = {
@@ -107,6 +119,25 @@ export const store = {
     } catch {
       return null;
     }
+  },
+
+  loadAuth(): StoredAuth | null {
+    const auth = readJson<StoredAuth | null>(AUTH_FILE, null);
+    return auth && auth.accessToken && auth.refreshToken ? auth : null;
+  },
+
+  saveAuth(auth: StoredAuth) {
+    // mode only applies at creation, so chmod too in case the file already exists.
+    fs.writeFileSync(AUTH_FILE, JSON.stringify(auth, null, 2), { mode: 0o600 });
+    try {
+      fs.chmodSync(AUTH_FILE, 0o600);
+    } catch {
+      // best-effort on platforms without POSIX perms
+    }
+  },
+
+  deleteAuth() {
+    fs.rmSync(AUTH_FILE, { force: true });
   },
 
   loadGuardAllowlist<T>(fallback: T): T {

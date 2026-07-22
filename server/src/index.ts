@@ -10,6 +10,7 @@ import { SessionManager } from './sessions.ts';
 import { WorkerClient } from './workerClient.ts';
 import { WorkflowEngine } from './workflows.ts';
 import { store } from './store.ts';
+import { AuthManager } from './auth.ts';
 import { UsagePoller } from './usage.ts';
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -23,7 +24,8 @@ function broadcast(msg: ServerMessage) {
   }
 }
 
-const usage = new UsagePoller(broadcast);
+const auth = new AuthManager();
+const usage = new UsagePoller(broadcast, auth);
 usage.start();
 
 const sessions = new SessionManager((msg) => {
@@ -36,7 +38,7 @@ const sessions = new SessionManager((msg) => {
   ) {
     usage.refreshSoon();
   }
-});
+}, auth);
 // The worker owns the Claude CLI children so this process can restart freely
 // (tsx watch, dogfooding edits) without killing in-flight agent turns.
 const worker = new WorkerClient({
@@ -56,6 +58,16 @@ setTimeout(() => {
 }, 15_000).unref();
 
 const workflows = new WorkflowEngine(sessions, broadcast);
+
+// Login/logout: tell every browser, restart idle queries so their next turn
+// uses (or drops) the app-managed token, and re-check plan usage.
+auth.onChange = (status) => {
+  broadcast({ type: 'authStatus', auth: status });
+  sessions.recycleIdleQueries();
+  usage.refreshSoon();
+};
+// Token refresh: idle queries hold the old token in their spawn env.
+auth.onRefresh = () => sessions.recycleIdleQueries();
 
 const MIME: Record<string, string> = {
   '.png': 'image/png',
@@ -196,6 +208,7 @@ wss.on('connection', (ws) => {
     recentDirs: store.loadRecentDirs(),
     projects: store.loadProjects(),
     usage: usage.snapshot,
+    auth: auth.getStatus(),
   };
   ws.send(JSON.stringify(hello));
 
@@ -329,6 +342,27 @@ async function handleMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
       ws.send(JSON.stringify({ type: 'folderPicked', path } satisfies ServerMessage));
       break;
     }
+    case 'authStartLogin': {
+      const { authorizeUrl } = auth.startLogin();
+      ws.send(JSON.stringify({ type: 'authLoginStarted', authorizeUrl } satisfies ServerMessage));
+      break;
+    }
+    case 'authCompleteLogin':
+      try {
+        await auth.completeLogin(msg.code);
+      } catch (err) {
+        // Dedicated message (not the generic 'error') so the login modal can show it inline.
+        ws.send(
+          JSON.stringify({
+            type: 'authError',
+            message: err instanceof Error ? err.message : String(err),
+          } satisfies ServerMessage),
+        );
+      }
+      break;
+    case 'authLogout':
+      auth.logout();
+      break;
     case 'loadTranscript': {
       const events = store.loadTranscript(msg.sessionId);
       ws.send(
