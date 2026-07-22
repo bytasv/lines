@@ -241,8 +241,8 @@ export type ClientMessage =
       /** Add this request's pattern to the auto-mode guard allowlist. */
       alwaysAllow?: boolean;
     }
-  | { type: 'workflowApprove'; sessionId: string }
-  | { type: 'workflowRetry'; sessionId: string; feedback: string }
+  | { type: 'workflowApprove'; sessionId: string; stepIndex: number }
+  | { type: 'workflowRetry'; sessionId: string; stepIndex: number; feedback: string }
   | { type: 'saveWorkflow'; workflow: WorkflowDef }
   | { type: 'deleteWorkflow'; workflowId: string }
   | { type: 'loadTranscript'; sessionId: string }

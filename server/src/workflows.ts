@@ -224,10 +224,13 @@ export class WorkflowEngine {
     this.sessions.prompt(sessionId, text, 'workflow', attachments);
   }
 
-  approve(sessionId: string) {
+  approve(sessionId: string, stepIndex: number) {
     const meta = this.sessions.get(sessionId);
     if (!meta?.workflow) return;
     const i = meta.workflow.stepIndex;
+    // Ignore a stale approve (e.g. a duplicate or a second tab showing an old
+    // card): only act when it targets the step that is actually parked now.
+    if (stepIndex !== i) return;
     if (meta.workflow.stepStatuses[i] !== 'waiting-approval') return;
     const wf = this.workflows.get(meta.workflow.workflowId);
     this.marker(sessionId, {
@@ -238,10 +241,11 @@ export class WorkflowEngine {
     this.advance(sessionId);
   }
 
-  retry(sessionId: string, feedback: string) {
+  retry(sessionId: string, stepIndex: number, feedback: string) {
     const meta = this.sessions.get(sessionId);
     if (!meta?.workflow) return;
     const i = meta.workflow.stepIndex;
+    if (stepIndex !== i) return;
     if (meta.workflow.stepStatuses[i] !== 'waiting-approval') return;
     void this.runStep(sessionId, feedback);
   }

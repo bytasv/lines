@@ -84,7 +84,12 @@ export function WorkflowStepper({
             <Text size="sm" fw={600}>
               “{workflow.steps[state.stepIndex]?.name}” finished — approve to continue, or send a message to keep iterating.
             </Text>
-            <Button size="xs" onClick={() => send({ type: 'workflowApprove', sessionId: session.id })}>
+            <Button
+              size="xs"
+              onClick={() =>
+                send({ type: 'workflowApprove', sessionId: session.id, stepIndex: state.stepIndex })
+              }
+            >
               Approve → next step
             </Button>
           </Group>

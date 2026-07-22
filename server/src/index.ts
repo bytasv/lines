@@ -293,10 +293,10 @@ async function handleMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
       );
       break;
     case 'workflowApprove':
-      workflows.approve(msg.sessionId);
+      workflows.approve(msg.sessionId, msg.stepIndex);
       break;
     case 'workflowRetry':
-      workflows.retry(msg.sessionId, msg.feedback);
+      workflows.retry(msg.sessionId, msg.stepIndex, msg.feedback);
       break;
     case 'saveWorkflow':
       workflows.save(msg.workflow);
