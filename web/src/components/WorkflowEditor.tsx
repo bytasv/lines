@@ -46,11 +46,13 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
 
   useEffect(() => {
     if (!opened) return;
-    const source = workflows.find((w) => w.id === selectedId) ?? workflows[0] ?? null;
-    setSelectedId(source?.id ?? null);
-    setDraft(source ? structuredClone(source) : null);
+    setSelectedId((prev) => {
+      const source = workflows.find((w) => w.id === prev) ?? workflows[0] ?? null;
+      setDraft(source ? structuredClone(source) : null);
+      return source?.id ?? null;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opened, selectedId, workflows.length]);
+  }, [opened, workflows.length]);
 
   const newWorkflow = () => {
     const wf: WorkflowDef = { id: '', name: 'New workflow', steps: [emptyStep()] };
