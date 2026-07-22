@@ -120,11 +120,6 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
             <Text size="xs" c="dimmed">
               {new Date(session.createdAt).toLocaleDateString()}
             </Text>
-            {session.workflow && (
-              <Badge variant="light" color="slate" size="xs" px={5}>
-                wf
-              </Badge>
-            )}
             {session.status !== 'idle' &&
               session.status !== 'running' &&
               session.status !== 'done' && (
