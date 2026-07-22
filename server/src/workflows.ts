@@ -100,6 +100,13 @@ export class WorkflowEngine {
       stepStatuses: wf.steps.map(() => 'pending'),
       started: false,
     } satisfies WorkflowState;
+    // Reflect step 0's mode/model on the session up front so the composer pill is
+    // correct before the first prompt. runStep re-applies these (via the worker) on start.
+    const step0 = wf.steps[0];
+    if (step0) {
+      meta.permissionMode = step0.permissionMode;
+      meta.model = step0.model;
+    }
     this.sessions.setStatus(sessionId, meta.status); // persist + broadcast the attached workflow
   }
 
