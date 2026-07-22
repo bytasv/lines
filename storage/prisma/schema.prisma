@@ -1,0 +1,40 @@
+// Storage-only schema: per-user workflows, settings, and session metadata.
+// Access is always through the app (Prisma queries filtered by the verified
+// Clerk userId); RLS is a hardening follow-up.
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // Supabase pooled (pgbouncer) URL for the app
+  directUrl = env("DIRECT_URL") // Supabase direct URL for prisma migrate
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Workflow {
+  userId    String   @map("user_id")
+  id        String
+  data      Json // WorkflowDef (wire shape = DB shape)
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@id([userId, id])
+  @@map("workflows")
+}
+
+model UserSettings {
+  userId    String   @id @map("user_id")
+  data      Json // per-user UI settings blob
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("user_settings")
+}
+
+model Session {
+  userId    String   @map("user_id")
+  id        String   @db.Uuid
+  data      Json // SessionMeta (metadata only; transcripts stay host-local)
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@id([userId, id])
+  @@map("sessions")
+}

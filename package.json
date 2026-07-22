@@ -5,11 +5,13 @@
   "workspaces": [
     "shared",
     "server",
-    "web"
+    "web",
+    "storage"
   ],
   "scripts": {
-    "dev": "concurrently -n worker,server,web -c magenta,blue,green \"npm run dev:worker -w server\" \"npm run dev -w server\" \"npm run dev -w web\"",
-    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
+    "dev": "concurrently -n worker,server,web,storage -c magenta,blue,green,yellow \"npm run dev:worker -w server\" \"npm run dev -w server\" \"npm run dev -w web\" \"npm run dev -w storage\"",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web && npm run typecheck -w storage",
+    "dev:storage": "npm run dev -w storage"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
