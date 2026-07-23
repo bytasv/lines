@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
+    "postinstall": "prisma generate",
     "generate": "prisma generate",
     "migrate": "dotenv -e ../.env -- prisma migrate deploy",
     "studio": "dotenv -e ../.env -- prisma studio"
