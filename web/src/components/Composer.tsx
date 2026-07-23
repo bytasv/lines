@@ -26,6 +26,7 @@ import {
 import type { CavemanLevel, PermissionMode, PromptAttachment, SessionMeta } from '@claude-ui/shared';
 import { isSessionInterruptible } from '@claude-ui/shared';
 import { useStore } from '../store';
+import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { send } from '../ws';
 
 /** Read a File into a raw-base64 PromptAttachment (strips the data: URI prefix). */
@@ -275,7 +276,9 @@ export function Composer({ session }: { session: SessionMeta }) {
           />
           <Select
             w={130}
-            data={models.map((m) => ({ value: m.id, label: m.label }))}
+            comboboxProps={modelComboboxProps}
+            data={modelSelectData(models)}
+            renderOption={renderModelOption}
             value={session.model}
             onChange={(v) => v && send({ type: 'setModel', sessionId: session.id, model: v })}
             allowDeselect={false}

@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "features": [
+    {
+      "id": "model-selector",
+      "name": "Model selector",
+      "doc": "features/model-selector.md",
+      "purpose": "Pick which Claude model a session or workflow step runs with, shown with a one-line description per option.",
+      "entryPoints": [
+        "web/src/components/Composer.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/workflow/StepLibrary.tsx",
+        "web/src/components/workflow/StepCard.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "web/src/lib/modelSelect.tsx",
+        "web/src/store.ts",
+        "server/src/index.ts"
+      ],
+      "symbols": [
+        "ModelOption",
+        "DEFAULT_MODELS",
+        "modelSelectData",
+        "renderModelOption",
+        "modelComboboxProps"
+      ],
+      "tests": [],
+      "businessRules": [
+        "description is optional on ModelOption; missing description renders label-only"
+      ],
+      "architecturalRules": [
+        "all model Selects must use modelSelectData()/renderModelOption instead of inlining data mapping"
+      ],
+      "relatedDecisions": []
+    }
+  ]
+}

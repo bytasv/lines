@@ -136,6 +136,8 @@ export interface SessionMeta {
 export interface ModelOption {
   id: string;
   label: string;
+  /** One-line summary shown under the label in model dropdowns. */
+  description?: string;
 }
 
 /** A single entry in a session transcript, persisted as JSONL and streamed live. */
@@ -351,10 +353,10 @@ export type ServerMessage =
   | { type: 'pong' };
 
 export const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'claude-opus-4-8', label: 'Opus 4.8' },
-  { id: 'claude-fable-5', label: 'Fable 5' },
-  { id: 'claude-sonnet-5', label: 'Sonnet 5' },
-  { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8', description: 'Powerful model for complex work' },
+  { id: 'claude-fable-5', label: 'Fable 5', description: 'Most intelligent, Mythos-class tier' },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability' },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, for lightweight tasks' },
 ];
 
 export const DEFAULT_MODEL = 'claude-opus-4-8';

@@ -3,6 +3,7 @@ import { IconPlayerPlay } from '@tabler/icons-react';
 import type { PermissionMode } from '@claude-ui/shared';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
+import { modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { MODE_LABELS } from './Composer';
 import { send } from '../ws';
 
@@ -65,7 +66,8 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
         </Text>
         <Select
           label="Model"
-          data={models.map((m) => ({ value: m.id, label: m.label }))}
+          data={modelSelectData(models)}
+          renderOption={renderModelOption}
           value={defaults.model}
           onChange={(v) => v && setDefaults({ ...defaults, model: v })}
           allowDeselect={false}
