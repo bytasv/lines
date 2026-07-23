@@ -11,9 +11,18 @@ import { buildUserContext, type UserContext } from './userContext.ts';
  * fall back to `defaultUserId` — with the auth gate off everything runs as
  * the implicit 'local' user, which is exactly the old single-tenant behavior.
  */
+/**
+ * Delay before re-pulling shared workflows after a user's workflow change.
+ * Longer than the sync client's push debounce (2s) so the storage server has
+ * already stored the published change by the time other contexts re-pull it.
+ */
+const SHARED_REFRESH_DELAY_MS = 3_000;
+
 export class UserRegistry {
   private contexts = new Map<string, UserContext>();
   private sessionOwner = new Map<string, string>();
+  /** Per-context debounce timers coalescing a burst of workflow changes into one re-pull. */
+  private sharedRefreshTimers = new Map<string, NodeJS.Timeout>();
   /** Worker's live sessions from its last hello, kept so a context built later can reconcile its slice. */
   private lastWorkerLive: LiveSessionInfo[] | null = null;
 
@@ -69,6 +78,23 @@ export class UserRegistry {
   private observe(userId: string, msg: ServerMessage) {
     if (msg.type === 'sessionUpsert') this.sessionOwner.set(msg.session.id, userId);
     else if (msg.type === 'sessionDeleted') this.sessionOwner.delete(msg.sessionId);
+    // A user saved/published/deleted a workflow: their published set may have
+    // changed, so every other live context re-pulls its shared view.
+    else if (msg.type === 'workflows') this.fanoutSharedRefresh(userId);
+  }
+
+  /** Schedule a debounced shared-workflow re-pull on every context except the source. */
+  private fanoutSharedRefresh(sourceUserId: string) {
+    for (const [otherId, ctx] of this.contexts) {
+      if (otherId === sourceUserId) continue;
+      clearTimeout(this.sharedRefreshTimers.get(otherId));
+      const timer = setTimeout(() => {
+        this.sharedRefreshTimers.delete(otherId);
+        void ctx.refreshShared();
+      }, SHARED_REFRESH_DELAY_MS);
+      timer.unref?.();
+      this.sharedRefreshTimers.set(otherId, timer);
+    }
   }
 
   private sliceFor(userId: string): LiveSessionInfo[] {

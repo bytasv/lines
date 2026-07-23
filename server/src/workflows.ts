@@ -52,11 +52,15 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
 
 export class WorkflowEngine {
   private workflows = new Map<string, WorkflowDef>();
+  /** Other users' published workflows — read-only, never persisted or pushed. */
+  private shared = new Map<string, WorkflowDef>();
 
   constructor(
     private store: Store,
     private sessions: SessionManager,
     private broadcast: (msg: ServerMessage) => void,
+    /** Owner's Clerk userId, stamped onto workflows this user saves. */
+    private userId: string,
   ) {
     for (const wf of this.store.loadWorkflows()) this.workflows.set(wf.id, wf);
     if (!this.workflows.has(DEFAULT_WORKFLOW.id)) {
@@ -72,9 +76,38 @@ export class WorkflowEngine {
     return [...this.workflows.values()];
   }
 
+  /** This user's view of other users' published workflows. */
+  listShared(): WorkflowDef[] {
+    return [...this.shared.values()];
+  }
+
+  /** Owned first, then shared — resolves a session's attached workflow either way. */
+  private resolve(id: string): WorkflowDef | undefined {
+    return this.workflows.get(id) ?? this.shared.get(id);
+  }
+
+  /** Replace the shared set from a storage pull; returns true if it changed. */
+  setShared(list: WorkflowDef[]): boolean {
+    const next = new Map(list.filter((w) => w.id).map((w) => [w.id, w] as const));
+    if (next.size === this.shared.size && [...next].every(([id, w]) => {
+      const cur = this.shared.get(id);
+      return cur && (cur.updatedAt ?? 0) === (w.updatedAt ?? 0);
+    })) {
+      return false;
+    }
+    this.shared = next;
+    return true;
+  }
+
   save(workflow: WorkflowDef): WorkflowDef {
+    // A shared (foreign) workflow is read-only: saving its id would fork it under
+    // this user silently. Duplicating instead arrives with a fresh (empty) id.
+    if (workflow.id && !this.workflows.has(workflow.id) && this.shared.has(workflow.id)) {
+      return workflow;
+    }
     if (!workflow.id) workflow.id = randomUUID();
     workflow.updatedAt = Date.now(); // LWW key for cross-instance sync
+    workflow.ownerId = this.userId; // authoritative — never trust a client-sent owner
     this.workflows.set(workflow.id, workflow);
     this.persist();
     this.broadcast({ type: 'workflows', workflows: this.list() });
@@ -103,7 +136,7 @@ export class WorkflowEngine {
   /** Attach a workflow to a session; it starts on the user's first prompt (the task description). */
   attach(sessionId: string, workflowId: string) {
     const meta = this.sessions.get(sessionId);
-    const wf = this.workflows.get(workflowId);
+    const wf = this.resolve(workflowId);
     if (!meta || !wf) return;
     meta.workflow = {
       workflowId,
@@ -141,7 +174,7 @@ export class WorkflowEngine {
 
   private async runStep(sessionId: string, feedback?: string) {
     const meta = this.sessions.get(sessionId);
-    const wf = meta?.workflow && this.workflows.get(meta.workflow.workflowId);
+    const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     const step = wf.steps[i];
@@ -174,7 +207,7 @@ export class WorkflowEngine {
 
   private onWorkflowTurnComplete(sessionId: string) {
     const meta = this.sessions.get(sessionId);
-    const wf = meta?.workflow && this.workflows.get(meta.workflow.workflowId);
+    const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     const step = wf.steps[i];
@@ -222,7 +255,7 @@ export class WorkflowEngine {
   /** Re-run the current step as a plain follow-up turn (same conversation, no advance). */
   private iterateStep(sessionId: string, text: string, attachments?: PromptAttachment[]) {
     const meta = this.sessions.get(sessionId);
-    const wf = meta?.workflow && this.workflows.get(meta.workflow.workflowId);
+    const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'running';
@@ -243,7 +276,7 @@ export class WorkflowEngine {
     // card): only act when it targets the step that is actually parked now.
     if (stepIndex !== i) return;
     if (meta.workflow.stepStatuses[i] !== 'waiting-approval') return;
-    const wf = this.workflows.get(meta.workflow.workflowId);
+    const wf = this.resolve(meta.workflow.workflowId);
     this.marker(sessionId, {
       stepIndex: i,
       stepName: wf?.steps[i]?.name ?? '',
@@ -263,7 +296,7 @@ export class WorkflowEngine {
 
   private advance(sessionId: string) {
     const meta = this.sessions.get(sessionId);
-    const wf = meta?.workflow && this.workflows.get(meta.workflow.workflowId);
+    const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'done';

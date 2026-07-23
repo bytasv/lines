@@ -298,6 +298,7 @@ async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
     type: 'hello',
     sessions: ctx.sessions.list(),
     workflows: ctx.workflows.list(),
+    sharedWorkflows: ctx.workflows.listShared(),
     models: DEFAULT_MODELS,
     recentDirs: ctx.store.loadRecentDirs(),
     projects: ctx.store.loadProjects(),
@@ -426,6 +427,8 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       workflows.retry(msg.sessionId, msg.stepIndex, msg.feedback);
       break;
     case 'saveWorkflow':
+      // ownerName is cosmetic (owner's display label); ownerId is stamped in save().
+      if (msg.ownerName !== undefined) msg.workflow.ownerName = msg.ownerName;
       workflows.save(msg.workflow);
       break;
     case 'deleteWorkflow':

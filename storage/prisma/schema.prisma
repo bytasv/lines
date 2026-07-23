@@ -15,9 +15,13 @@ model Workflow {
   userId    String   @map("user_id")
   id        String
   data      Json // WorkflowDef (wire shape = DB shape)
+  // Mirror of data.published, promoted to a column so the cross-user "shared"
+  // query can index on it instead of filtering a JSON path.
+  published Boolean  @default(false)
   updatedAt DateTime @default(now()) @map("updated_at")
 
   @@id([userId, id])
+  @@index([published])
   @@map("workflows")
 }
 

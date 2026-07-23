@@ -2,21 +2,25 @@ import React, { useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { MantineProvider } from '@mantine/core';
-import { ClerkProvider, RedirectToSignIn, SignedIn, SignedOut, useAuth } from '@clerk/clerk-react';
+import { ClerkProvider, RedirectToSignIn, SignedIn, SignedOut, useAuth, useUser } from '@clerk/clerk-react';
 import '@mantine/core/styles.css';
 import './index.css';
 import { theme } from './theme';
 import { App } from './App';
 import { connect, setTokenProvider } from './ws';
-import { CLERK_ENABLED, CLERK_PUBLISHABLE_KEY } from './lib/clerk';
+import { CLERK_ENABLED, CLERK_PUBLISHABLE_KEY, setOwnerName } from './lib/clerk';
 
 /** Rendered only when signed in: register the token source, then open the socket. */
 function AuthedConnect() {
   const { getToken } = useAuth();
+  const { user } = useUser();
   useEffect(() => {
     setTokenProvider(() => getToken());
     void connect();
   }, [getToken]);
+  useEffect(() => {
+    setOwnerName(user?.fullName || user?.username || user?.primaryEmailAddress?.emailAddress || null);
+  }, [user]);
   return <App />;
 }
 

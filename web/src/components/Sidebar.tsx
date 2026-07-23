@@ -335,6 +335,7 @@ function UnlinkedCheckouts({ activeKey }: { activeKey: string }) {
 export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
   const sessions = useStore((s) => s.sessions);
   const workflows = useStore((s) => s.workflows);
+  const sharedWorkflows = useStore((s) => s.sharedWorkflows);
   const selectedSessionId = useStore((s) => s.selectedSessionId);
   const activeProject = useStore((s) => s.activeProject);
   const [showArchived, setShowArchived] = useLocalStorage<boolean>({
@@ -346,7 +347,7 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
     key: 'claude-ui.lastNewSessionChoice',
     defaultValue: '',
   });
-  const lastWorkflow = workflows.find((w) => w.id === lastChoice);
+  const lastWorkflow = [...workflows, ...sharedWorkflows].find((w) => w.id === lastChoice);
 
   const projectKeys = useStore((s) => s.projectKeys);
   const activeProjectKey = activeProject ? projectKeys[activeProject] ?? null : null;
@@ -408,8 +409,8 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
             >
               {lastWorkflow ? lastWorkflow.name : 'New session'}
             </Button>
-            {workflows.length > 0 && (
-              <Menu position="bottom-end" width={220}>
+            {(workflows.length > 0 || sharedWorkflows.length > 0) && (
+              <Menu position="bottom-end" width={240}>
                 <Menu.Target>
                   <Button px={6} disabled={!activeProject}>
                     <IconChevronDown size={14} />
@@ -417,13 +418,36 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
                 </Menu.Target>
                 <Menu.Dropdown>
                   <Menu.Item onClick={() => createSession()}>New session</Menu.Item>
-                  <Menu.Divider />
-                  <Menu.Label>With workflow</Menu.Label>
-                  {workflows.map((w) => (
-                    <Menu.Item key={w.id} onClick={() => createSession(w.id)}>
-                      {w.name}
-                    </Menu.Item>
-                  ))}
+                  {workflows.length > 0 && (
+                    <>
+                      <Menu.Divider />
+                      <Menu.Label>With workflow</Menu.Label>
+                      {workflows.map((w) => (
+                        <Menu.Item key={w.id} onClick={() => createSession(w.id)}>
+                          {w.name}
+                        </Menu.Item>
+                      ))}
+                    </>
+                  )}
+                  {sharedWorkflows.length > 0 && (
+                    <>
+                      <Menu.Divider />
+                      <Menu.Label>Shared by others</Menu.Label>
+                      {sharedWorkflows.map((w) => (
+                        <Menu.Item
+                          key={w.id}
+                          onClick={() => createSession(w.id)}
+                          rightSection={
+                            <Text size="xs" c="dimmed" truncate maw={90}>
+                              {w.ownerName ?? 'Unknown'}
+                            </Text>
+                          }
+                        >
+                          {w.name}
+                        </Menu.Item>
+                      ))}
+                    </>
+                  )}
                 </Menu.Dropdown>
               </Menu>
             )}

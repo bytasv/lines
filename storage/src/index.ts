@@ -70,15 +70,26 @@ app.get('/workflows', async (req, res) => {
   res.json(rows.map((r) => r.data));
 });
 
+/** Every other user's published workflows — the cross-user read path. */
+app.get('/workflows/shared', async (req, res) => {
+  const userId = userIdOf(req);
+  const rows = await prisma.workflow.findMany({
+    where: { published: true, NOT: { userId } },
+  });
+  // Guarantee ownerId even for blobs saved before the column existed.
+  res.json(rows.map((r) => ({ ...(r.data as object), ownerId: (r.data as { ownerId?: string }).ownerId ?? r.userId })));
+});
+
 app.put('/workflows', async (req, res) => {
   const userId = userIdOf(req);
-  const list = Array.isArray(req.body) ? (req.body as { id?: string }[]) : [];
+  const list = Array.isArray(req.body) ? (req.body as { id?: string; published?: boolean }[]) : [];
   for (const wf of list) {
     if (!wf?.id) continue;
+    const published = wf.published === true;
     await prisma.workflow.upsert({
       where: { userId_id: { userId, id: wf.id } },
-      create: { userId, id: wf.id, data: wf as object, updatedAt: updatedAtOf(wf) },
-      update: { data: wf as object, updatedAt: updatedAtOf(wf) },
+      create: { userId, id: wf.id, data: wf as object, published, updatedAt: updatedAtOf(wf) },
+      update: { data: wf as object, published, updatedAt: updatedAtOf(wf) },
     });
   }
   res.json({ ok: true, count: list.length });

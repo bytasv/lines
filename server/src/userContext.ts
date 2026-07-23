@@ -36,6 +36,8 @@ export interface UserContext {
   sync: StorageSyncClient;
   /** Pull remote state and LWW-merge it in, then push local state up. Fire-and-forget. */
   syncNow: () => Promise<void>;
+  /** Re-pull other users' published workflows and broadcast if they changed. */
+  refreshShared: () => Promise<void>;
   touchedAt: number;
 }
 
@@ -97,7 +99,7 @@ export function buildUserContext(
   );
   sessions.attachWorker(worker);
 
-  const workflows = new WorkflowEngine(store, sessions, broadcast);
+  const workflows = new WorkflowEngine(store, sessions, broadcast, userId);
 
   // Backfill: sessions that predate project keys (and any checkout opened while
   // the feature was off) get resolved once, from whatever exists on this disk.
@@ -112,6 +114,13 @@ export function buildUserContext(
   };
   // Token refresh: idle queries hold the old token in their spawn env.
   auth.onRefresh = () => sessions.recycleIdleQueries();
+
+  const refreshShared = async () => {
+    const list = await sync.pullShared();
+    if (list && workflows.setShared(list)) {
+      broadcast({ type: 'sharedWorkflows', workflows: list });
+    }
+  };
 
   const syncNow = async () => {
     const pulled = await sync.pullAll();
@@ -143,6 +152,8 @@ export function buildUserContext(
       const local = store.loadSettings();
       if (local) sync.pushSettings(local);
     }
+    // Populate other users' published workflows on connect/reconnect.
+    await refreshShared();
   };
 
   const ctx: UserContext = {
@@ -159,6 +170,7 @@ export function buildUserContext(
     clerkToken: null,
     sync,
     syncNow,
+    refreshShared,
     touchedAt: Date.now(),
   };
   // After ctx exists — its async broadcasts reference ctx-bound state (sync token).

@@ -74,6 +74,12 @@ export interface WorkflowDef {
   steps: WorkflowStep[];
   /** ms epoch of the last save — last-write-wins key for cross-instance sync. */
   updatedAt?: number;
+  /** Owner opted in to sharing this workflow with every other user on the instance. */
+  published?: boolean;
+  /** Clerk userId of the owner — authoritative, stamped server-side on save. */
+  ownerId?: string;
+  /** Display label for the owner (name→email), cosmetic, supplied by the client. */
+  ownerName?: string;
 }
 
 export type WorkflowStepStatus = 'pending' | 'running' | 'waiting-approval' | 'done';
@@ -252,7 +258,7 @@ export type ClientMessage =
     }
   | { type: 'workflowApprove'; sessionId: string; stepIndex: number }
   | { type: 'workflowRetry'; sessionId: string; stepIndex: number; feedback: string }
-  | { type: 'saveWorkflow'; workflow: WorkflowDef }
+  | { type: 'saveWorkflow'; workflow: WorkflowDef; ownerName?: string }
   | { type: 'deleteWorkflow'; workflowId: string }
   | { type: 'loadTranscript'; sessionId: string }
   | { type: 'pickFolder' }
@@ -326,7 +332,7 @@ export interface UserUiSettings {
 export type ProjectKeyMap = Record<string, string>;
 
 export type ServerMessage =
-  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; settings?: UserUiSettings | null }
+  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; settings?: UserUiSettings | null }
   | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
   | { type: 'usage'; usage: UsageSnapshot | null }
@@ -337,6 +343,7 @@ export type ServerMessage =
   | { type: 'sessionUpsert'; session: SessionMeta }
   | { type: 'sessionDeleted'; sessionId: string }
   | { type: 'workflows'; workflows: WorkflowDef[] }
+  | { type: 'sharedWorkflows'; workflows: WorkflowDef[] }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }
   | { type: 'transcript'; sessionId: string; events: TranscriptEvent[] }
   | { type: 'folderPicked'; path: string | null }

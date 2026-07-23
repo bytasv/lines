@@ -63,6 +63,18 @@ export class StorageSyncClient {
     }
   }
 
+  /** Other users' published workflows. Not rate-limited — small payload, needs to be near-live. */
+  async pullShared(): Promise<WorkflowDef[] | null> {
+    if (!this.enabled) return null;
+    try {
+      const shared = await this.req('GET', '/workflows/shared');
+      return (shared ?? []) as WorkflowDef[];
+    } catch (err) {
+      this.warnOnce('pull shared', err);
+      return null;
+    }
+  }
+
   pushWorkflows(list: WorkflowDef[]): void {
     if (!this.enabled || this.applying) return;
     this.pendingWorkflows = list;

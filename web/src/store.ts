@@ -161,6 +161,8 @@ interface UiState {
   queuedPrompts: QueuedPrompt[];
   sessions: Record<string, SessionMeta>;
   workflows: WorkflowDef[];
+  /** Other users' published workflows — read-only, runnable/duplicable but not editable. */
+  sharedWorkflows: WorkflowDef[];
   models: ModelOption[];
   recentDirs: string[];
   /** Open project folders, shown as tabs. */
@@ -277,6 +279,7 @@ export const useStore = create<UiState>((set, get) => {
   queuedPrompts: [],
   sessions: {},
   workflows: [],
+  sharedWorkflows: [],
   models: [],
   recentDirs: [],
   projects: [],
@@ -457,6 +460,7 @@ export const useStore = create<UiState>((set, get) => {
         set((state) => ({
           sessions,
           workflows: msg.workflows,
+          sharedWorkflows: msg.sharedWorkflows ?? [],
           models: msg.models,
           recentDirs: msg.recentDirs,
           projects: msg.projects,
@@ -530,6 +534,9 @@ export const useStore = create<UiState>((set, get) => {
         break;
       case 'workflows':
         set({ workflows: msg.workflows });
+        break;
+      case 'sharedWorkflows':
+        set({ sharedWorkflows: msg.workflows });
         break;
       case 'event':
         set((state) => {
