@@ -8,7 +8,7 @@ import { SessionView } from './components/SessionView';
 import { ProjectTabs } from './components/ProjectTabs';
 import { ConnectionBanner } from './components/ConnectionBanner';
 import { ProjectPicker } from './components/ProjectPicker';
-import { WorkflowEditor } from './components/WorkflowEditor';
+import { WorkflowEditor } from './components/workflow/WorkflowEditor';
 import { MonacoPreviewModal } from './components/MonacoPreviewModal';
 import { LoginModal } from './components/LoginModal';
 import { FilesView } from './components/FilesView';
