@@ -21,6 +21,7 @@ import {
   IconArchiveOff,
   IconCircleCheck,
   IconChevronDown,
+  IconCoins,
   IconEye,
   IconEyeOff,
   IconLink,
@@ -123,8 +124,24 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
           </Group>
           <Group gap={6} wrap="nowrap">
             <Text size="xs" c="dimmed">
-              {new Date(session.createdAt).toLocaleDateString()}
+              {new Date(session.createdAt).toLocaleDateString('en-GB')}
             </Text>
+            {session.totalCostUsd != null && (
+              <Text size="xs" c="dimmed">
+                ${session.totalCostUsd.toFixed(2)}
+              </Text>
+            )}
+            {session.totalTokens != null && (
+              <Tooltip
+                label={`${session.totalTokens.toLocaleString()} tokens spent`}
+                withArrow
+                fz="xs"
+              >
+                <Center c="dimmed">
+                  <IconCoins size={11} />
+                </Center>
+              </Tooltip>
+            )}
             {session.status !== 'idle' &&
               session.status !== 'running' &&
               session.status !== 'done' && (

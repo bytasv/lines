@@ -110,6 +110,8 @@ export interface SessionMeta {
   workflow?: WorkflowState;
   lastCostUsd?: number;
   totalCostUsd?: number;
+  /** Cumulative tokens spent across the session (input + output + cache). */
+  totalTokens?: number;
   errorMessage?: string;
   /** Archived sessions move to a separate section and are hidden from the active list. */
   archived?: boolean;

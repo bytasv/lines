@@ -913,6 +913,22 @@ export class SessionManager {
           metaNow.lastCostUsd = cost;
           metaNow.totalCostUsd = (metaNow.totalCostUsd ?? 0) + cost;
         }
+        const usage = (msg as {
+          usage?: {
+            input_tokens?: number;
+            output_tokens?: number;
+            cache_creation_input_tokens?: number;
+            cache_read_input_tokens?: number;
+          };
+        }).usage;
+        if (usage) {
+          const turnTokens =
+            (usage.input_tokens ?? 0) +
+            (usage.output_tokens ?? 0) +
+            (usage.cache_creation_input_tokens ?? 0) +
+            (usage.cache_read_input_tokens ?? 0);
+          metaNow.totalTokens = (metaNow.totalTokens ?? 0) + turnTokens;
+        }
         if (metaNow.status === 'running' || metaNow.status === 'waiting-permission') {
           metaNow.status = 'done';
         }

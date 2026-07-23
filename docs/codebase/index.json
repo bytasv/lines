@@ -33,6 +33,34 @@
         "all model Selects must use modelSelectData()/renderModelOption instead of inlining data mapping"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "session-sidebar-usage",
+      "name": "Session sidebar usage display",
+      "doc": "features/session-sidebar-usage.md",
+      "purpose": "Show per-session cost, token spend, and EU-formatted date in the sidebar session list.",
+      "entryPoints": [
+        "web/src/components/Sidebar.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/sessions.ts",
+        "web/src/components/Sidebar.tsx"
+      ],
+      "symbols": [
+        "SessionMeta.totalCostUsd",
+        "SessionMeta.totalTokens"
+      ],
+      "tests": [],
+      "businessRules": [
+        "cost rendered as $X.XX, hidden when totalCostUsd is unset",
+        "token icon/tooltip hidden when totalTokens is unset",
+        "date rendered en-GB (dd/mm/yyyy) instead of browser-default locale"
+      ],
+      "architecturalRules": [
+        "totalTokens accumulates on the SDK result message the same way totalCostUsd already does, rather than introducing a separate tracking mechanism"
+      ],
+      "relatedDecisions": []
     }
   ]
 }
