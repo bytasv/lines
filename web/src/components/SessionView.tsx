@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Alert, Button, Divider, Group, Stack, Text } from '@mantine/core';
-import { IconAlertTriangle, IconRefresh } from '@tabler/icons-react';
+import { IconAlertTriangle, IconPlayerPlay, IconRefresh } from '@tabler/icons-react';
+import { isSessionActive } from '@claude-ui/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { Transcript } from './Transcript';
@@ -55,6 +56,24 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               onClick={() => send({ type: 'retryTurn', sessionId })}
             >
               Retry
+            </Button>
+          </Group>
+        </Alert>
+      )}
+      {session.interruptedAt && !isSessionActive(session.status) && session.status !== 'error' && (
+        <Alert color="yellow" icon={<IconPlayerPlay size={16} />} m="md" py={6}>
+          <Group gap="sm" wrap="nowrap" justify="space-between">
+            <Text size="xs">
+              This session was interrupted mid-task when the app closed. The agent can pick up where it left off.
+            </Text>
+            <Button
+              size="compact-xs"
+              variant="light"
+              color="yellow"
+              style={{ flexShrink: 0 }}
+              onClick={() => send({ type: 'continueTurn', sessionId })}
+            >
+              Continue
             </Button>
           </Group>
         </Alert>

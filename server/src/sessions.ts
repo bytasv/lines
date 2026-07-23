@@ -374,6 +374,51 @@ export class SessionManager {
     this.prompt(sessionId, data.text ?? '', data.source ?? 'user', attachments);
   }
 
+  /**
+   * Resume a session whose turn died with the app (see reconcileWithWorker).
+   * Resumes via claudeSessionId with a synthetic nudge and releases the queue.
+   */
+  continueTurn(sessionId: string) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.interruptedAt || this.isBusy(meta)) return;
+
+    // Close permission cards orphaned by the dead turn so a later click on one
+    // can't inject a recovery prompt into the now-running query.
+    this.expireUnresolvedPermissions(sessionId);
+
+    meta.queuePaused = undefined; // let queued follow-ups flow after this turn
+    // Resume a mid-step workflow turn AS a workflow turn so its completion still
+    // routes through onWorkflowTurnComplete and parks the step for approve/retry.
+    const wfStepRunning =
+      meta.workflow?.started &&
+      meta.workflow.stepStatuses[meta.workflow.stepIndex] === 'running';
+    this.prompt(
+      sessionId,
+      'You were interrupted mid-task (the app was closed while you were working). ' +
+        'Review where you left off and continue the task from there.',
+      wfStepRunning ? 'workflow' : 'user',
+    );
+  }
+
+  /** Emit an 'expired' resolution for every unresolved permission request. */
+  private expireUnresolvedPermissions(sessionId: string) {
+    const seen = new Set<string>();
+    for (const event of this.store.loadTranscript(sessionId)) {
+      if (event.kind !== 'permission') continue;
+      const data = event.data as PermissionRequestData;
+      if (data.toolName && data.requestId) seen.add(data.requestId);
+    }
+    for (const requestId of seen) {
+      if (this.findPermissionResolution(sessionId, requestId)) continue;
+      this.emitEvent(sessionId, 'permission', {
+        requestId,
+        toolName: '',
+        input: {},
+        resolution: 'expired',
+      } satisfies PermissionRequestData);
+    }
+  }
+
   /** Send a prompt into the session; the worker starts the SDK query if needed. */
   prompt(
     sessionId: string,
@@ -417,6 +462,7 @@ export class SessionManager {
     // row's elapsed time survives reloads.
     meta.turnSource = source;
     meta.turnStartedAt = Date.now();
+    meta.interruptedAt = undefined; // any prompt clears the crash-interrupted flag
     this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
     const content = [...blocks, ...(text ? [{ type: 'text', text }] : [])];
@@ -830,17 +876,14 @@ export class SessionManager {
         meta.turnStartedAt = undefined;
         // The turn died with the worker; don't auto-fire followups.
         if (meta.queued?.length) meta.queuePaused = true;
+        // Flag for the Continue banner. A workflow step left 'running' here is
+        // kept 'running' (not false-parked at waiting-approval as if it had
+        // finished) — Continue resumes it as a workflow turn, and its eventual
+        // result parks the step for approve/retry the normal way.
+        meta.interruptedAt = Date.now();
         changed = true;
       }
       if (changed) this.upsert(meta);
-      // A workflow step left 'running' by a lost result event (both processes
-      // died mid-turn) is a dead end: the session settles to idle but the step
-      // never reaches waiting-approval, so there is no way to approve/retry.
-      // Recover it by replaying the workflow turn-complete once we know the
-      // worker isn't running it.
-      if (!info && meta.workflow?.started && meta.workflow.stepStatuses[meta.workflow.stepIndex] === 'running') {
-        this.onTurnComplete?.(meta.id, 'workflow');
-      }
     }
     // A bridge that died between a turn's result and its flush leaves queued
     // prompts on a settled session; release them now.

@@ -123,6 +123,8 @@ export interface SessionMeta {
   queued?: QueuedPrompt[];
   /** Interrupt/error/crash suspended auto-flush; the next user send resumes it. */
   queuePaused?: boolean;
+  /** ms epoch when a crash/restart killed an in-flight turn; cleared by the next prompt. */
+  interruptedAt?: number;
 }
 
 export interface ModelOption {
@@ -225,6 +227,7 @@ export type ClientMessage =
   | { type: 'prompt'; sessionId: string; text: string; attachments?: PromptAttachment[] }
   | { type: 'interrupt'; sessionId: string }
   | { type: 'retryTurn'; sessionId: string }
+  | { type: 'continueTurn'; sessionId: string }
   | { type: 'cancelQueued'; sessionId: string; queuedId: string }
   | { type: 'ackSession'; sessionId: string }
   | { type: 'archiveSession'; sessionId: string }

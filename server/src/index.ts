@@ -381,6 +381,9 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
     case 'retryTurn':
       sessions.retryTurn(msg.sessionId);
       break;
+    case 'continueTurn':
+      sessions.continueTurn(msg.sessionId);
+      break;
     case 'cancelQueued':
       sessions.cancelQueued(msg.sessionId, msg.queuedId);
       break;
