@@ -122,32 +122,41 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
               </Text>
             </Tooltip>
           </Group>
-          <Group gap={6} wrap="nowrap">
-            <Text size="xs" c="dimmed">
-              {new Date(session.createdAt).toLocaleDateString('en-GB')}
-            </Text>
-            {session.totalCostUsd != null && (
-              <Text size="xs" c="dimmed">
-                ${session.totalCostUsd.toFixed(2)}
-              </Text>
-            )}
-            {session.totalTokens != null && (
-              <Tooltip
-                label={`${session.totalTokens.toLocaleString()} tokens spent`}
-                withArrow
-                fz="xs"
-              >
-                <Center c="dimmed">
-                  <IconCoins size={11} />
-                </Center>
-              </Tooltip>
-            )}
+          <Group gap={6} wrap="nowrap" mt={3}>
             {session.status !== 'idle' &&
-              session.status !== 'running' &&
-              session.status !== 'done' && (
-              <Badge variant="light" color={status.color} size="xs" px={5}>
+            session.status !== 'running' &&
+            session.status !== 'done' ? (
+              <Badge
+                variant="light"
+                color={status.color}
+                px={4}
+                h={12}
+                style={{ fontSize: 8 }}
+              >
                 {status.label}
               </Badge>
+            ) : (
+              <>
+                <Text size="xs" c="dimmed">
+                  {new Date(session.createdAt).toLocaleDateString('en-GB')}
+                </Text>
+                {session.totalCostUsd != null && (
+                  <Text size="xs" c="dimmed">
+                    ${session.totalCostUsd.toFixed(2)}
+                  </Text>
+                )}
+                {session.totalTokens != null && (
+                  <Tooltip
+                    label={`${session.totalTokens.toLocaleString()} tokens spent`}
+                    withArrow
+                    fz="xs"
+                  >
+                    <Center c="dimmed">
+                      <IconCoins size={11} />
+                    </Center>
+                  </Tooltip>
+                )}
+              </>
             )}
           </Group>
         </Box>
