@@ -7,6 +7,7 @@ import { SessionManager } from './sessions.ts';
 import { UsagePoller } from './usage.ts';
 import { WorkflowEngine } from './workflows.ts';
 import { StorageSyncClient } from './sync.ts';
+import { ProjectKeyRegistry } from './projectKeys.ts';
 import type { WorkerClient } from './workerClient.ts';
 
 const STORAGE_URL = process.env.STORAGE_URL ?? 'http://localhost:8790';
@@ -24,6 +25,8 @@ export interface UserContext {
   sessions: SessionManager;
   workflows: WorkflowEngine;
   usage: UsagePoller;
+  /** cwd -> machine-independent project identity; groups sessions across installs. */
+  projectKeys: ProjectKeyRegistry;
   /** This user's live browser connections; broadcast fans out to these only. */
   sockets: Set<WebSocket>;
   broadcast: (msg: ServerMessage) => void;
@@ -68,6 +71,11 @@ export function buildUserContext(
     }
   };
 
+  const projectKeys = new ProjectKeyRegistry(store, (keys) => {
+    sync.pushProjectKeys(keys);
+    broadcast({ type: 'projectKeys', projectKeys: keys });
+  });
+
   const auth = new AuthManager(store);
   const usage = new UsagePoller(broadcast, auth);
 
@@ -91,6 +99,10 @@ export function buildUserContext(
 
   const workflows = new WorkflowEngine(store, sessions, broadcast);
 
+  // Backfill: sessions that predate project keys (and any checkout opened while
+  // the feature was off) get resolved once, from whatever exists on this disk.
+  projectKeys.learnAll([...store.loadProjects(), ...sessions.list().map((s) => s.cwd)]);
+
   // Login/logout: tell this user's browsers, restart idle queries so their next
   // turn uses (or drops) the app-managed token, and re-check plan usage.
   auth.onChange = (status) => {
@@ -109,11 +121,15 @@ export function buildUserContext(
         for (const wf of pulled.workflows) workflows.applySynced(wf);
         for (const meta of pulled.sessions) sessions.adoptSynced(meta);
         const remote = pulled.settings as UserUiSettings | null;
+        // Merged before the applying flag drops, so the union is pushed once below.
         const local = store.loadSettings();
         if (remote && (remote.updatedAt ?? 0) > (local?.updatedAt ?? 0)) {
           store.saveSettings(remote);
           broadcast({ type: 'settings', settings: remote });
         }
+        projectKeys.merge(pulled.projectKeys);
+        // Adopted sessions may name checkouts this machine has but has never opened.
+        projectKeys.learnAll(sessions.list().map((s) => s.cwd));
       } finally {
         sync.applying = false;
       }
@@ -123,6 +139,7 @@ export function buildUserContext(
     if (sync.enabled) {
       sync.pushWorkflows(workflows.list());
       sync.pushSessions(sessions.list());
+      sync.pushProjectKeys(projectKeys.all());
       const local = store.loadSettings();
       if (local) sync.pushSettings(local);
     }
@@ -136,6 +153,7 @@ export function buildUserContext(
     sessions,
     workflows,
     usage,
+    projectKeys,
     sockets,
     broadcast,
     clerkToken: null,

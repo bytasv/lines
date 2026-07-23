@@ -2,7 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
-import type { SessionMeta, TranscriptEvent, UserUiSettings, WorkflowDef } from '@claude-ui/shared';
+import type {
+  ProjectKeyMap,
+  SessionMeta,
+  TranscriptEvent,
+  UserUiSettings,
+  WorkflowDef,
+} from '@claude-ui/shared';
 
 /** Machine-global app root. Per-user stores live under `${CLAUDE_UI_ROOT}/users/{userId}`;
  * machine-wide assets (vendored plugins) stay directly under this root. */
@@ -43,6 +49,7 @@ export function createStore(root: string) {
   const WORKFLOWS_FILE = path.join(root, 'workflows.json');
   const RECENT_DIRS_FILE = path.join(root, 'recent-dirs.json');
   const PROJECTS_FILE = path.join(root, 'projects.json');
+  const PROJECT_KEYS_FILE = path.join(root, 'project-keys.json');
   const AUTH_FILE = path.join(root, 'auth.json');
   const GUARD_FILE = path.join(root, 'guard-allowlist.json');
   const SETTINGS_FILE = path.join(root, 'settings.json');
@@ -85,6 +92,17 @@ export function createStore(root: string) {
 
     saveProjects(projects: string[]) {
       writeJson(PROJECTS_FILE, projects);
+    },
+
+    // `projects` is this machine's open paths (never synced — paths are local).
+    // `project-keys` maps those paths to machine-independent identities and IS
+    // synced, so other installs can group sessions by repo.
+    loadProjectKeys(): ProjectKeyMap {
+      return readJson<ProjectKeyMap>(PROJECT_KEYS_FILE, {});
+    },
+
+    saveProjectKeys(keys: ProjectKeyMap) {
+      writeJson(PROJECT_KEYS_FILE, keys);
     },
 
     appendTranscript(sessionId: string, event: TranscriptEvent) {

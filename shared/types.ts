@@ -255,6 +255,8 @@ export type ClientMessage =
   | { type: 'pickFolder' }
   | { type: 'openProject'; path: string }
   | { type: 'closeProject'; path: string }
+  /** Manually bind a path to a project key — for a cwd that doesn't exist on this machine. */
+  | { type: 'linkProjectPath'; path: string; key: string }
   | { type: 'authStartLogin' }
   | { type: 'authCompleteLogin'; code: string }
   | { type: 'authLogout' }
@@ -298,12 +300,31 @@ export interface UserUiSettings {
   turnSummariesEnabled?: boolean;
   alertsEnabled?: boolean;
   alertSound?: string;
+  /**
+   * Working directories the user has marked as "not one of my projects", so the
+   * unlinked-checkout hint stops offering them. Purely a UI dismissal — it never
+   * claims an identity for the path, so a real key arriving later still wins.
+   */
+  dismissedCheckouts?: string[];
   /** ms epoch of the last change — last-write-wins key. */
   updatedAt?: number;
 }
 
+/**
+ * Machine-independent project identity, keyed by working directory.
+ *
+ * A session's `cwd` is an absolute path on the machine that created it, so the
+ * same repo checked out at `~/Projects/lines` and `~/Projects/claude-ui` looks
+ * like two projects. Each bridge resolves the checkouts it can see to a stable
+ * key (`<normalized git remote>#<path within the repo>`) and the map is synced,
+ * so every machine can group sessions by repo even for paths it doesn't have.
+ * A cwd with no resolvable key is absent here and falls back to path equality.
+ */
+export type ProjectKeyMap = Record<string, string>;
+
 export type ServerMessage =
-  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; usage: UsageSnapshot | null; auth: AuthStatus; settings?: UserUiSettings | null }
+  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; settings?: UserUiSettings | null }
+  | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
   | { type: 'usage'; usage: UsageSnapshot | null }
   | { type: 'authStatus'; auth: AuthStatus }

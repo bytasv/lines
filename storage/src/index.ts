@@ -134,6 +134,38 @@ app.delete('/sessions/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- project keys ------------------------------------------------------------
+
+app.get('/project-keys', async (req, res) => {
+  const row = await prisma.projectKeys.findUnique({ where: { userId: userIdOf(req) } });
+  res.json(row?.data ?? {});
+});
+
+/**
+ * Union, not replace. Each machine only knows the checkouts it can see, so a
+ * plain overwrite would let the last install to sync drop every other one's
+ * paths. Entries are effectively immutable, so first-write-wins is safe.
+ */
+app.put('/project-keys', async (req, res) => {
+  const userId = userIdOf(req);
+  const incoming = req.body as Record<string, unknown> | null;
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+    res.status(400).json({ error: 'body must be an object' });
+    return;
+  }
+  const row = await prisma.projectKeys.findUnique({ where: { userId } });
+  const merged = { ...((row?.data as Record<string, string>) ?? {}) };
+  for (const [cwd, key] of Object.entries(incoming)) {
+    if (typeof key === 'string' && key && !merged[cwd]) merged[cwd] = key;
+  }
+  await prisma.projectKeys.upsert({
+    where: { userId },
+    create: { userId, data: merged, updatedAt: new Date() },
+    update: { data: merged, updatedAt: new Date() },
+  });
+  res.json({ ok: true, count: Object.keys(merged).length });
+});
+
 // --- settings ----------------------------------------------------------------
 
 app.get('/settings', async (req, res) => {

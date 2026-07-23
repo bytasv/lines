@@ -38,3 +38,14 @@ model Session {
   @@id([userId, id])
   @@map("sessions")
 }
+
+// cwd -> project key, one blob per user. Absolute paths are machine-local, so
+// this is what lets a second install recognise a session's checkout as the same
+// repo it has at a different path.
+model ProjectKeys {
+  userId    String   @id @map("user_id")
+  data      Json // Record<cwd, projectKey>
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("project_keys")
+}

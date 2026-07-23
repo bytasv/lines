@@ -4,9 +4,11 @@ import {
   Box,
   Button,
   Center,
+  Divider,
   Group,
   Loader,
   Menu,
+  Popover,
   ScrollArea,
   SegmentedControl,
   Stack,
@@ -19,17 +21,20 @@ import {
   IconArchiveOff,
   IconCircleCheck,
   IconChevronDown,
+  IconEye,
+  IconEyeOff,
+  IconLink,
   IconPlus,
   IconRoute,
   IconTrash,
 } from '@tabler/icons-react';
 import { useLocalStorage } from '@mantine/hooks';
 import type { CSSProperties } from 'react';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta, SessionStatus } from '@claude-ui/shared';
 import type { SidebarMode } from '../store';
-import { useStore } from '../store';
+import { sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
 import { FileTree } from './FileTree';
 
@@ -211,6 +216,122 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
   );
 }
 
+/**
+ * Directories that hold sessions but have no project key — checkouts that live
+ * only on another machine, so this bridge could never resolve them. Offering an
+ * explicit bind is the one case automatic identification can't cover.
+ */
+function UnlinkedCheckouts({ activeKey }: { activeKey: string }) {
+  const sessions = useStore((s) => s.sessions);
+  const projectKeys = useStore((s) => s.projectKeys);
+  const activeProject = useStore((s) => s.activeProject);
+
+  const dismissedCheckouts = useStore((s) => s.dismissedCheckouts);
+  const setCheckoutDismissed = useStore((s) => s.setCheckoutDismissed);
+
+  const { unlinked, dismissed } = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const s of Object.values(sessions)) {
+      if (!s.cwd || s.cwd === activeProject || projectKeys[s.cwd]) continue;
+      counts.set(s.cwd, (counts.get(s.cwd) ?? 0) + 1);
+    }
+    const byCount = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const hidden = new Set(dismissedCheckouts);
+    return {
+      unlinked: byCount.filter(([cwd]) => !hidden.has(cwd)),
+      dismissed: byCount.filter(([cwd]) => hidden.has(cwd)),
+    };
+  }, [sessions, projectKeys, activeProject, dismissedCheckouts]);
+
+  const total = unlinked.reduce((n, [, count]) => n + count, 0);
+  // Dismissing every candidate removes the hint entirely — the point of marking
+  // them is that there's nothing left to decide.
+  if (unlinked.length === 0) return null;
+
+  // Collapsed to a single dimmed line: this is an occasional one-time fixup,
+  // not something worth standing between the user and their session list.
+  return (
+    <Popover width={320} position="top" withArrow shadow="md">
+      <Popover.Target>
+        <UnstyledButton px="sm" py={6} mt={4} style={{ opacity: 0.55 }}>
+          <Group gap={5} wrap="nowrap">
+            <IconLink size={12} />
+            <Text size="xs" c="dimmed">
+              {total} session{total === 1 ? '' : 's'} in another checkout
+            </Text>
+          </Group>
+        </UnstyledButton>
+      </Popover.Target>
+      <Popover.Dropdown>
+        <Stack gap={8}>
+          <Text size="xs" c="dimmed">
+            These ran in a directory this machine doesn't have — most likely the same repo on
+            another computer. Link one to fold its sessions into this project.
+          </Text>
+          {unlinked.map(([cwd, count]) => (
+            <Group key={cwd} gap={6} wrap="nowrap">
+              <Text size="xs" ff="monospace" truncate style={{ flex: 1 }} title={cwd}>
+                {cwd}
+              </Text>
+              <Badge size="xs" variant="default">
+                {count}
+              </Badge>
+              <Tooltip label="Link to this project">
+                <ActionIcon
+                  size="sm"
+                  variant="subtle"
+                  color="gray"
+                  onClick={() => send({ type: 'linkProjectPath', path: cwd, key: activeKey })}
+                >
+                  <IconLink size={13} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Not one of my projects — hide it">
+                <ActionIcon
+                  size="sm"
+                  variant="subtle"
+                  color="gray"
+                  onClick={() => setCheckoutDismissed(cwd, true)}
+                >
+                  <IconEyeOff size={13} />
+                </ActionIcon>
+              </Tooltip>
+            </Group>
+          ))}
+          {dismissed.length > 0 && (
+            <>
+              <Divider />
+              <Text size="xs" c="dimmed">
+                Hidden
+              </Text>
+              {dismissed.map(([cwd, count]) => (
+                <Group key={cwd} gap={6} wrap="nowrap" opacity={0.6}>
+                  <Text size="xs" ff="monospace" truncate style={{ flex: 1 }} title={cwd}>
+                    {cwd}
+                  </Text>
+                  <Badge size="xs" variant="default">
+                    {count}
+                  </Badge>
+                  <Tooltip label="Show again">
+                    <ActionIcon
+                      size="sm"
+                      variant="subtle"
+                      color="gray"
+                      onClick={() => setCheckoutDismissed(cwd, false)}
+                    >
+                      <IconEye size={13} />
+                    </ActionIcon>
+                  </Tooltip>
+                </Group>
+              ))}
+            </>
+          )}
+        </Stack>
+      </Popover.Dropdown>
+    </Popover>
+  );
+}
+
 export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
   const sessions = useStore((s) => s.sessions);
   const workflows = useStore((s) => s.workflows);
@@ -227,7 +348,9 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
   });
   const lastWorkflow = workflows.find((w) => w.id === lastChoice);
 
-  const projectSessions = Object.values(sessions).filter((s) => s.cwd === activeProject);
+  const projectKeys = useStore((s) => s.projectKeys);
+  const activeProjectKey = activeProject ? projectKeys[activeProject] ?? null : null;
+  const projectSessions = sessionsInProject(sessions, projectKeys, activeProject);
   const list = projectSessions
     .filter((s) => !s.archived)
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -362,6 +485,7 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
                   ))}
               </>
             )}
+            {activeProjectKey && <UnlinkedCheckouts activeKey={activeProjectKey} />}
           </Stack>
         )}
       </ScrollArea>

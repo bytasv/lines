@@ -3,6 +3,7 @@ import type {
   AuthStatus,
   ModelOption,
   PermissionMode,
+  ProjectKeyMap,
   PromptAttachment,
   ServerMessage,
   SessionMeta,
@@ -35,6 +36,7 @@ const SIDEBAR_MODE_KEY = 'claude-ui.sidebarMode';
 const OPEN_FILES_KEY = 'claude-ui.openFiles';
 const COMPACTION_LEVEL_KEY = 'claude-ui.compactionLevel';
 const TURN_SUMMARIES_ENABLED_KEY = 'claude-ui.turnSummariesEnabled';
+const DISMISSED_CHECKOUTS_KEY = 'claude-ui.dismissedCheckouts';
 
 export type SidebarMode = 'sessions' | 'files';
 
@@ -112,9 +114,38 @@ function sessionIdFromUrl(): string | null {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
+function loadDismissedCheckouts(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DISMISSED_CHECKOUTS_KEY) ?? '[]') as unknown;
+    return Array.isArray(raw) ? raw.filter((p): p is string => typeof p === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 function pickActive(projects: string[], current: string | null): string | null {
   if (current && projects.includes(current)) return current;
   return projects[0] ?? null;
+}
+
+/**
+ * Sessions that belong to the active project.
+ *
+ * Matching is by project key when the active checkout has one, so a session
+ * created on another machine — where the same repo sits at a different absolute
+ * path — still lands in this project. Unkeyed checkouts (no git remote) fall
+ * back to exact path equality, which is the old behaviour.
+ */
+export function sessionsInProject(
+  sessions: Record<string, SessionMeta>,
+  projectKeys: ProjectKeyMap,
+  activeProject: string | null,
+): SessionMeta[] {
+  if (!activeProject) return [];
+  const activeKey = projectKeys[activeProject];
+  return Object.values(sessions).filter(
+    (s) => s.cwd === activeProject || (activeKey != null && projectKeys[s.cwd] === activeKey),
+  );
 }
 
 /** Most recently created session in the given directory, if any. */
@@ -134,6 +165,10 @@ interface UiState {
   recentDirs: string[];
   /** Open project folders, shown as tabs. */
   projects: string[];
+  /** cwd -> machine-independent project identity; see ProjectKeyMap. */
+  projectKeys: ProjectKeyMap;
+  /** Unresolvable cwds the user marked as "not my project"; hidden from the link hint. */
+  dismissedCheckouts: string[];
   /** Project whose sessions are shown; new sessions run here. */
   activeProject: string | null;
   transcripts: Record<string, TranscriptEvent[]>;
@@ -178,6 +213,8 @@ interface UiState {
   setActiveProject: (path: string | null) => void;
   setFolderPickPending: (pending: boolean) => void;
   setNewSessionDefaults: (defaults: NewSessionDefaults) => void;
+  /** Hide (or restore) an unresolvable checkout in the link hint. */
+  setCheckoutDismissed: (cwd: string, dismissed: boolean) => void;
   setAlertsEnabled: (on: boolean) => Promise<void>;
   setAlertSound: (sound: AlertSound) => void;
   testAlertSound: () => void;
@@ -206,6 +243,7 @@ export const useStore = create<UiState>((set, get) => {
         turnSummariesEnabled: s.turnSummariesEnabled,
         alertsEnabled: s.alertsEnabled,
         alertSound: s.alertSound,
+        dismissedCheckouts: s.dismissedCheckouts,
         updatedAt: Date.now(),
       },
     });
@@ -220,6 +258,7 @@ export const useStore = create<UiState>((set, get) => {
       turnSummariesEnabled: s.turnSummariesEnabled ?? state.turnSummariesEnabled,
       alertsEnabled: s.alertsEnabled ?? state.alertsEnabled,
       alertSound: (s.alertSound as AlertSound | undefined) ?? state.alertSound,
+      dismissedCheckouts: s.dismissedCheckouts ?? state.dismissedCheckouts,
     }));
     // Keep the offline caches current so a cold start matches the server.
     if (s.newSessionDefaults) localStorage.setItem(NEW_SESSION_DEFAULTS_KEY, JSON.stringify(s.newSessionDefaults));
@@ -228,6 +267,9 @@ export const useStore = create<UiState>((set, get) => {
     if (s.turnSummariesEnabled != null) localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(s.turnSummariesEnabled));
     if (s.alertsEnabled != null) persistAlertsEnabled(s.alertsEnabled);
     if (s.alertSound) persistAlertSound(s.alertSound as AlertSound);
+    if (s.dismissedCheckouts) {
+      localStorage.setItem(DISMISSED_CHECKOUTS_KEY, JSON.stringify(s.dismissedCheckouts));
+    }
   };
 
   return {
@@ -238,6 +280,8 @@ export const useStore = create<UiState>((set, get) => {
   models: [],
   recentDirs: [],
   projects: [],
+  projectKeys: {},
+  dismissedCheckouts: loadDismissedCheckouts(),
   activeProject: localStorage.getItem(ACTIVE_PROJECT_KEY),
   transcripts: {},
   transcriptLoaded: {},
@@ -381,6 +425,14 @@ export const useStore = create<UiState>((set, get) => {
     pushSettings();
   },
 
+  setCheckoutDismissed: (cwd, dismissed) => {
+    const next = get().dismissedCheckouts.filter((p) => p !== cwd);
+    if (dismissed) next.push(cwd);
+    localStorage.setItem(DISMISSED_CHECKOUTS_KEY, JSON.stringify(next));
+    set({ dismissedCheckouts: next });
+    pushSettings();
+  },
+
   setActiveProject: (path) => {
     if (path) localStorage.setItem(ACTIVE_PROJECT_KEY, path);
     else localStorage.removeItem(ACTIVE_PROJECT_KEY);
@@ -408,6 +460,7 @@ export const useStore = create<UiState>((set, get) => {
           models: msg.models,
           recentDirs: msg.recentDirs,
           projects: msg.projects,
+          projectKeys: msg.projectKeys ?? {},
           usage: msg.usage,
           auth: msg.auth,
           // Logged out? Open the login flow — but only on the first hello with
@@ -428,6 +481,9 @@ export const useStore = create<UiState>((set, get) => {
       }
       case 'settings':
         applySettings(msg.settings);
+        break;
+      case 'projectKeys':
+        set({ projectKeys: msg.projectKeys });
         break;
       case 'projects': {
         set({ projects: msg.projects });

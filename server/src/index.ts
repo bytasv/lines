@@ -301,6 +301,7 @@ async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
     models: DEFAULT_MODELS,
     recentDirs: ctx.store.loadRecentDirs(),
     projects: ctx.store.loadProjects(),
+    projectKeys: ctx.projectKeys.all(),
     usage: ctx.usage.snapshot,
     auth: ctx.auth.getStatus(),
     settings: ctx.store.loadSettings(),
@@ -440,6 +441,8 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
         store.saveProjects(projects);
       }
       store.addRecentDir(dir);
+      // Broadcasts the key map itself when this checkout is newly identified.
+      ctx.projectKeys.learn(dir);
       broadcast({ type: 'projects', projects });
       break;
     }
@@ -447,6 +450,13 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       const projects = store.loadProjects().filter((p) => p !== msg.path);
       store.saveProjects(projects);
       broadcast({ type: 'projects', projects });
+      break;
+    }
+    case 'linkProjectPath': {
+      // Binds a path this machine can't resolve (a checkout that lives only on
+      // another install) to a known key, so its sessions group with the rest.
+      const dir = msg.path.replace(/\/+$/, '') || '/';
+      if (msg.key) ctx.projectKeys.set(dir, msg.key);
       break;
     }
     case 'pickFolder': {

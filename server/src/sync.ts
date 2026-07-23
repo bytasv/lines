@@ -1,4 +1,4 @@
-import type { SessionMeta, WorkflowDef } from '@claude-ui/shared';
+import type { ProjectKeyMap, SessionMeta, WorkflowDef } from '@claude-ui/shared';
 
 const PUSH_DEBOUNCE_MS = 2_000;
 const PULL_MIN_SPACING_MS = 30_000;
@@ -8,6 +8,7 @@ export interface PulledState {
   workflows: WorkflowDef[];
   sessions: SessionMeta[];
   settings: unknown;
+  projectKeys: ProjectKeyMap;
 }
 
 /**
@@ -43,16 +44,18 @@ export class StorageSyncClient {
     if (Date.now() - this.lastPullAt < PULL_MIN_SPACING_MS) return null;
     this.lastPullAt = Date.now();
     try {
-      const [workflows, sessions, settings] = await Promise.all([
+      const [workflows, sessions, settings, projectKeys] = await Promise.all([
         this.req('GET', '/workflows'),
         this.req('GET', '/sessions'),
         this.req('GET', '/settings'),
+        this.req('GET', '/project-keys'),
       ]);
       this.warned = false;
       return {
         workflows: (workflows ?? []) as WorkflowDef[],
         sessions: (sessions ?? []) as SessionMeta[],
         settings,
+        projectKeys: (projectKeys ?? {}) as ProjectKeyMap,
       };
     } catch (err) {
       this.warnOnce('pull', err);
@@ -100,6 +103,13 @@ export class StorageSyncClient {
   pushSettings(blob: unknown): void {
     if (!this.enabled || this.applying) return;
     void this.req('PUT', '/settings', blob).catch((err) => this.warnOnce('push settings', err));
+  }
+
+  /** Whole-map push; the server unions it into the stored map rather than replacing. */
+  pushProjectKeys(keys: ProjectKeyMap): void {
+    if (!this.enabled || this.applying) return;
+    if (Object.keys(keys).length === 0) return;
+    void this.req('PUT', '/project-keys', keys).catch((err) => this.warnOnce('push project keys', err));
   }
 
   private async req(method: string, path: string, body?: unknown): Promise<unknown> {
