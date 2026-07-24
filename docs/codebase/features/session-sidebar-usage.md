@@ -23,15 +23,18 @@ without opening them.
 - `SessionMeta.totalTokens` — cumulative tokens across the session (input + output + cache
   creation + cache read), summed from `result.usage` per turn
 - `SessionMeta.totalDurationMs` — cumulative active-turn duration across the session in ms,
-  summed from `result.duration_ms` per turn; excludes idle wait between turns
+  summed from `result.duration_ms` per turn minus that turn's permission-wait time; excludes
+  idle wait between turns and human approval wait within a turn
 - `SessionsStore` result handler in `server/src/sessions.ts` — where all three totals accumulate
 - `formatDuration` — renders ms as `Xs` / `Xm Ys` / `Xh Ym`
 
 ## Data flow
 
 SDK `result` message (`total_cost_usd`, `usage`, `duration_ms`) → `SessionMeta.totalCostUsd` /
-`totalTokens` / `totalDurationMs` accumulated per turn → persisted via `SessionMeta` upsert →
-sidebar reads from session store and renders `totalDurationMs` via `formatDuration`.
+`totalTokens` accumulated per turn; `duration_ms` minus the turn's accumulated
+`LiveState.permissionWaitMs` (tracked from `askPermission` start to resolution, across every
+permission prompt in the turn) → `SessionMeta.totalDurationMs` → persisted via `SessionMeta`
+upsert → sidebar reads from session store and renders `totalDurationMs` via `formatDuration`.
 
 ## Dependencies
 
@@ -46,7 +49,8 @@ None. No test infrastructure covers Sidebar/SessionMeta display at time of writi
 - Cost shown as `$X.XX` (2 decimals); hidden entirely when `totalCostUsd` is unset.
 - Token icon + tooltip (`"N tokens spent"`) hidden entirely when `totalTokens` is unset.
 - Duration shown via `formatDuration`; hidden entirely when `totalDurationMs` is unset. Counts
-  only active SDK turn time, not idle wait for the user between turns.
+  only active SDK turn time: excludes idle wait between turns AND any time spent waiting on a
+  permission-prompt approval (e.g. plan-mode review) within a turn.
 - Date rendered EU style (`en-GB`, dd/mm/yyyy), not browser-default locale.
 - Existing sessions show no token icon or duration until their next turn completes (fields are
   additive, not backfilled).
@@ -56,11 +60,18 @@ None. No test infrastructure covers Sidebar/SessionMeta display at time of writi
 
 ## Architectural rules
 
-None beyond reusing the existing per-session accumulation pattern already used for
-`totalCostUsd` — `totalTokens` and `totalDurationMs` follow the same accumulate-on-`result`
-approach rather than introducing a new tracking mechanism. Duration is sourced from the SDK
-`result` event's `duration_ms` rather than clock math against `turnStartedAt`, so it excludes
-idle time by construction.
+Reuses the existing per-session accumulation pattern already used for `totalCostUsd` —
+`totalTokens` and `totalDurationMs` follow the same accumulate-on-`result` approach rather than
+introducing a new tracking mechanism. Duration is sourced from the SDK `result` event's
+`duration_ms` rather than clock math against `turnStartedAt`, so it excludes idle time by
+construction. Permission-wait deduction lives in `LiveState.permissionWaitMs` (transient,
+in-memory, not persisted) rather than `duration_api_ms` (the SDK's own API-only-time field),
+because `duration_api_ms` would also strip real tool-execution time (bash runs, file I/O), not
+just human approval wait — deducting only the measured prompt-to-resolution span keeps
+`totalDurationMs` "active work" without discarding genuine tool time. The accumulator is reset
+to 0 both when a turn's `result` consumes it and whenever a turn dies without a `result`
+(worker crash/error, interrupt, or reconcile-on-reconnect), so stale wait time from a dead turn
+never leaks into the next turn's deduction.
 
 ## Related decisions
 

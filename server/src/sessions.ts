@@ -43,6 +43,10 @@ type PermissionResult =
 interface LiveState {
   seq: number;
   pendingPermissions: Map<string, (answer: PermissionAnswer) => void>;
+  /** Wall-clock ms spent waiting on the user across this turn's permission
+   *  prompts so far — subtracted from the SDK's duration_ms, which otherwise
+   *  counts human approval wait as "active" time. Reset once read. */
+  permissionWaitMs: number;
 }
 
 export type TurnCompleteListener = (sessionId: string, source: 'user' | 'workflow') => void;
@@ -155,7 +159,7 @@ export class SessionManager {
   private liveState(id: string): LiveState {
     let state = this.live.get(id);
     if (!state) {
-      state = { seq: this.nextSeqFromDisk(id), pendingPermissions: new Map() };
+      state = { seq: this.nextSeqFromDisk(id), pendingPermissions: new Map(), permissionWaitMs: 0 };
       this.live.set(id, state);
     }
     return state;
@@ -1053,6 +1057,7 @@ export class SessionManager {
         meta.status = 'idle';
         meta.turnSource = undefined;
         meta.turnStartedAt = undefined;
+        this.liveState(meta.id).permissionWaitMs = 0;
         // The turn died with the worker; don't auto-fire followups.
         if (meta.queued?.length) meta.queuePaused = true;
         // Flag for the Continue banner. A workflow step left 'running' here is
@@ -1109,8 +1114,11 @@ export class SessionManager {
           metaNow.lastTokens = turnTokens;
           metaNow.totalTokens = (metaNow.totalTokens ?? 0) + turnTokens;
         }
-        const durationMs = (msg as { duration_ms?: number }).duration_ms;
-        if (typeof durationMs === 'number') {
+        const rawDurationMs = (msg as { duration_ms?: number }).duration_ms;
+        if (typeof rawDurationMs === 'number') {
+          const state = this.liveState(sessionId);
+          const durationMs = Math.max(0, rawDurationMs - state.permissionWaitMs);
+          state.permissionWaitMs = 0;
           metaNow.lastDurationMs = durationMs;
           metaNow.totalDurationMs = (metaNow.totalDurationMs ?? 0) + durationMs;
         }
@@ -1138,6 +1146,7 @@ export class SessionManager {
       const meta = this.sessions.get(sessionId);
       if (meta?.queued?.length) meta.queuePaused = true;
       if (meta) meta.turnStartedAt = undefined;
+      this.liveState(sessionId).permissionWaitMs = 0;
       this.setStatus(sessionId, 'error', error);
       return;
     }
@@ -1151,6 +1160,7 @@ export class SessionManager {
         const source = meta.turnSource;
         meta.turnSource = undefined;
         meta.turnStartedAt = undefined;
+        this.liveState(sessionId).permissionWaitMs = 0;
         this.upsert(meta);
         this.onTurnComplete?.(sessionId, source);
         this.maybeFlush(sessionId);
@@ -1318,8 +1328,10 @@ export class SessionManager {
       } satisfies PermissionRequestData);
     }
     this.setStatus(sessionId, 'waiting-permission');
+    const waitStart = Date.now();
     return new Promise<PermissionAnswer>((resolve) => {
       state.pendingPermissions.set(requestId, (answer) => {
+        state.permissionWaitMs += Date.now() - waitStart;
         const meta = this.sessions.get(sessionId);
         if (meta && meta.status === 'waiting-permission') this.setStatus(sessionId, 'running');
         resolve(answer);

@@ -59,11 +59,12 @@
         "token icon/tooltip hidden when totalTokens is unset",
         "date rendered en-GB (dd/mm/yyyy) instead of browser-default locale",
         "hovering a badge-state row swaps the status badge for date/cost/tokens meta; row min-height is fixed to prevent layout jump",
-        "duration rendered via formatDuration, hidden when totalDurationMs is unset; excludes idle wait between turns"
+        "duration rendered via formatDuration, hidden when totalDurationMs is unset; excludes idle wait between turns and permission-prompt approval wait within a turn"
       ],
       "architecturalRules": [
         "totalTokens and totalDurationMs accumulate on the SDK result message the same way totalCostUsd already does, rather than introducing a separate tracking mechanism",
-        "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction"
+        "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction",
+        "permission-wait time is deducted via LiveState.permissionWaitMs (measured from askPermission call to resolution) rather than switching to the SDK's duration_api_ms, which would also strip genuine tool-execution time"
       ],
       "relatedDecisions": []
     },
@@ -212,12 +213,13 @@
         "cost rendered as $X.XX next to the step name, hidden when that step's accumulated cost is zero or unset",
         "token icon with a tooltip ('N tokens spent') shown next to the cost label, hidden when that step's accumulated tokens are zero or unset",
         "retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it, for both cost and tokens",
-        "duration shown next to the token icon via formatDuration, hidden when that step's accumulated duration is zero or unset"
+        "duration shown next to the token icon via formatDuration, hidden when that step's accumulated duration is zero or unset; excludes permission-prompt approval wait within the turn"
       ],
       "architecturalRules": [
         "reuses the existing per-turn SessionMeta.lastCostUsd accumulation instead of adding a new cost-tracking path",
         "tokens mirror the same pattern via a new SessionMeta.lastTokens field rather than a separate tracking mechanism",
-        "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction"
+        "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction",
+        "permission-wait time is deducted via LiveState.permissionWaitMs rather than the SDK's duration_api_ms, which would also strip genuine tool-execution time"
       ],
       "relatedDecisions": []
     },
