@@ -18,3 +18,12 @@ export function setOwnerName(name: string | null): void {
 export function getOwnerName(): string | null {
   return ownerName;
 }
+
+/** Current user's Clerk id, used to tag steps this user publishes. Null in no-auth mode. */
+let ownerId: string | null = null;
+export function setOwnerId(id: string | null): void {
+  ownerId = id;
+}
+export function getOwnerId(): string | null {
+  return ownerId;
+}

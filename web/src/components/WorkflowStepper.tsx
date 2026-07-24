@@ -1,6 +1,8 @@
 import { Box, Button, Group, Loader, Paper, Text, ThemeIcon } from '@mantine/core';
 import { IconCheck } from '@tabler/icons-react';
-import type { SessionMeta, WorkflowDef, WorkflowStepStatus } from '@claude-ui/shared';
+import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@claude-ui/shared';
+import { isStepRef } from '@claude-ui/shared';
+import { useStore } from '../store';
 import { send } from '../ws';
 
 function StepIcon({ status, index }: { status: WorkflowStepStatus; index: number }) {
@@ -24,6 +26,19 @@ export function WorkflowStepper({
   workflow: WorkflowDef;
 }) {
   const state = session.workflow!;
+  const pinnedSteps = useStore((s) => s.pinnedSteps);
+  const sharedSteps = useStore((s) => s.sharedSteps);
+  const steps = useStore((s) => s.steps);
+
+  /** Display name for a step, resolving pinned references through the step library. */
+  const nameOf = (step: WorkflowStep): string => {
+    if (!isStepRef(step)) return step.name;
+    const all = [...pinnedSteps, ...steps, ...sharedSteps];
+    const found =
+      all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId && d.version === step.version) ??
+      all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId);
+    return found?.name ?? 'Shared step';
+  };
 
   const waiting = state.stepStatuses[state.stepIndex] === 'waiting-approval';
 
@@ -51,7 +66,7 @@ export function WorkflowStepper({
             >
               <StepIcon status={status} index={i} />
               <Text size="xs" fw={i === state.stepIndex ? 600 : 500} truncate>
-                {step.name}
+                {nameOf(step)}
               </Text>
               {/* Connector doubles as this step's scroll-progress track,
                   filled imperatively by Transcript. */}
@@ -82,7 +97,7 @@ export function WorkflowStepper({
         <Paper withBorder radius="md" p="sm" mt="xs" style={{ borderColor: 'var(--mantine-color-sandstone-6)' }}>
           <Group justify="space-between" wrap="wrap" gap="xs">
             <Text size="sm" fw={600}>
-              “{workflow.steps[state.stepIndex]?.name}” finished — approve to continue, or send a message to keep iterating.
+              “{workflow.steps[state.stepIndex] && nameOf(workflow.steps[state.stepIndex])}” finished — approve to continue, or send a message to keep iterating.
             </Text>
             <Button
               size="xs"

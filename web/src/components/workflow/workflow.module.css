@@ -1,0 +1,135 @@
+/* Workflow / step editor visual language — elevated cards, inset fields,
+   accent-tinted chrome. Uses the sandstone brand palette from theme.ts. */
+
+.card {
+  background: var(--mantine-color-dark-6);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 14px;
+  overflow: hidden;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+.card:hover {
+  border-color: rgba(255, 255, 255, 0.11);
+}
+.cardExpanded {
+  border-color: color-mix(in srgb, var(--mantine-color-sandstone-6) 40%, transparent);
+  box-shadow:
+    inset 3px 0 0 var(--mantine-color-sandstone-6),
+    0 2px 10px rgba(0, 0, 0, 0.25);
+}
+.cardInvalid {
+  border-color: var(--mantine-color-red-7) !important;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.grip {
+  display: flex;
+  align-items: center;
+  color: var(--mantine-color-dark-3);
+  cursor: grab;
+}
+.grip:hover {
+  color: var(--mantine-color-dark-1);
+}
+
+.num {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--mantine-color-sandstone-3);
+  background: color-mix(in srgb, var(--mantine-color-sandstone-6) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mantine-color-sandstone-6) 32%, transparent);
+}
+.numInvalid {
+  color: var(--mantine-color-red-4);
+  background: color-mix(in srgb, var(--mantine-color-red-6) 16%, transparent);
+  border-color: color-mix(in srgb, var(--mantine-color-red-6) 40%, transparent);
+}
+
+/* borderless title that reads as a heading */
+.titleInput {
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  padding: 0 !important;
+  min-height: 0 !important;
+  height: auto !important;
+  line-height: 1.4 !important;
+  color: var(--mantine-color-dark-0) !important;
+}
+.titleInput::placeholder {
+  color: var(--mantine-color-dark-3) !important;
+  font-weight: 500 !important;
+}
+
+.body {
+  padding: 2px 14px 14px;
+}
+
+.label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  color: var(--mantine-color-dark-2);
+  margin-bottom: 6px;
+}
+
+/* prompt textarea: recessed, mono, high-contrast text */
+.promptInput {
+  background: var(--mantine-color-dark-8) !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  border-radius: 10px !important;
+  color: var(--mantine-color-dark-0) !important;
+  font-family: var(--mantine-font-family-monospace) !important;
+  font-size: 12.5px !important;
+  line-height: 1.6 !important;
+  padding: 10px 12px !important;
+}
+.promptInput:focus {
+  border-color: var(--mantine-color-sandstone-6) !important;
+}
+.promptInput::placeholder {
+  color: var(--mantine-color-dark-3) !important;
+}
+
+/* settings row: inset strip, clearly distinct from the card surface */
+.settings {
+  display: flex;
+  gap: 22px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding: 12px 14px;
+  background: var(--mantine-color-dark-8);
+  border-radius: 10px;
+}
+
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.controlLabel {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  color: var(--mantine-color-dark-2);
+}
+.fieldInput {
+  background: var(--mantine-color-dark-6) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}

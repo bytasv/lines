@@ -78,22 +78,24 @@ export class UserRegistry {
   private observe(userId: string, msg: ServerMessage) {
     if (msg.type === 'sessionUpsert') this.sessionOwner.set(msg.session.id, userId);
     else if (msg.type === 'sessionDeleted') this.sessionOwner.delete(msg.sessionId);
-    // A user saved/published/deleted a workflow: their published set may have
-    // changed, so every other live context re-pulls its shared view.
-    else if (msg.type === 'workflows') this.fanoutSharedRefresh(userId);
+    // A user saved/published/deleted a workflow or step: their published set may
+    // have changed, so every other live context re-pulls its shared view.
+    else if (msg.type === 'workflows') this.fanoutSharedRefresh(userId, 'wf', (ctx) => ctx.refreshShared());
+    else if (msg.type === 'steps') this.fanoutSharedRefresh(userId, 'step', (ctx) => ctx.refreshSharedSteps());
   }
 
-  /** Schedule a debounced shared-workflow re-pull on every context except the source. */
-  private fanoutSharedRefresh(sourceUserId: string) {
+  /** Schedule a debounced shared re-pull on every context except the source. */
+  private fanoutSharedRefresh(sourceUserId: string, tag: string, refresh: (ctx: UserContext) => Promise<void>) {
     for (const [otherId, ctx] of this.contexts) {
       if (otherId === sourceUserId) continue;
-      clearTimeout(this.sharedRefreshTimers.get(otherId));
+      const key = `${otherId}:${tag}`;
+      clearTimeout(this.sharedRefreshTimers.get(key));
       const timer = setTimeout(() => {
-        this.sharedRefreshTimers.delete(otherId);
-        void ctx.refreshShared();
+        this.sharedRefreshTimers.delete(key);
+        void refresh(ctx);
       }, SHARED_REFRESH_DELAY_MS);
       timer.unref?.();
-      this.sharedRefreshTimers.set(otherId, timer);
+      this.sharedRefreshTimers.set(key, timer);
     }
   }
 

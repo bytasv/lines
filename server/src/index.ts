@@ -299,6 +299,9 @@ async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
     sessions: ctx.sessions.list(),
     workflows: ctx.workflows.list(),
     sharedWorkflows: ctx.workflows.listShared(),
+    steps: ctx.workflows.listSteps(),
+    sharedSteps: ctx.workflows.listSharedSteps(),
+    pinnedSteps: ctx.workflows.listPinnedSteps(),
     models: DEFAULT_MODELS,
     recentDirs: ctx.store.loadRecentDirs(),
     projects: ctx.store.loadProjects(),
@@ -435,6 +438,13 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       workflows.delete(msg.workflowId);
       // The 'workflows' broadcast only upserts what's left; remove the row too.
       ctx.sync.deleteWorkflow(msg.workflowId);
+      break;
+    case 'saveStep':
+      workflows.saveStep(msg.step, msg.stepId, msg.published, msg.ownerName);
+      break;
+    case 'deleteStep':
+      workflows.deleteStep(msg.stepId);
+      ctx.sync.deleteStep(msg.stepId);
       break;
     case 'openProject': {
       const dir = msg.path.replace(/\/+$/, '') || '/';

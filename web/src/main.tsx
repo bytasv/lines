@@ -8,7 +8,7 @@ import './index.css';
 import { theme } from './theme';
 import { App } from './App';
 import { connect, setTokenProvider } from './ws';
-import { CLERK_ENABLED, CLERK_PUBLISHABLE_KEY, setOwnerName } from './lib/clerk';
+import { CLERK_ENABLED, CLERK_PUBLISHABLE_KEY, setOwnerId, setOwnerName } from './lib/clerk';
 
 /** Rendered only when signed in: register the token source, then open the socket. */
 function AuthedConnect() {
@@ -20,6 +20,7 @@ function AuthedConnect() {
   }, [getToken]);
   useEffect(() => {
     setOwnerName(user?.fullName || user?.username || user?.primaryEmailAddress?.emailAddress || null);
+    setOwnerId(user?.id ?? null);
   }, [user]);
   return <App />;
 }

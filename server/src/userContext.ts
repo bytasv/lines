@@ -38,6 +38,8 @@ export interface UserContext {
   syncNow: () => Promise<void>;
   /** Re-pull other users' published workflows and broadcast if they changed. */
   refreshShared: () => Promise<void>;
+  /** Re-pull the shared step library, resolve pins, and broadcast if changed. */
+  refreshSharedSteps: () => Promise<void>;
   touchedAt: number;
 }
 
@@ -67,6 +69,7 @@ export function buildUserContext(
     if (msg.type === 'sessionUpsert') sync.pushSession(msg.session);
     else if (msg.type === 'sessionDeleted') sync.deleteSession(msg.sessionId);
     else if (msg.type === 'workflows') sync.pushWorkflows(msg.workflows);
+    else if (msg.type === 'steps') sync.pushSteps(msg.steps);
     const payload = JSON.stringify(msg);
     for (const ws of sockets) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload);
@@ -122,12 +125,32 @@ export function buildUserContext(
     }
   };
 
+  /** Re-pull the shared step library, resolve any pins not yet cached, and broadcast. */
+  const refreshSharedSteps = async () => {
+    const shared = await sync.pullSharedSteps();
+    // Resolve any pinned versions this bridge hasn't cached (foreign pins, older versions).
+    const missing = workflows.unresolvedRefs();
+    if (missing.length) {
+      const resolved = await sync.resolveSteps(missing);
+      if (resolved) workflows.addStepVersions(resolved);
+    }
+    if (shared) {
+      workflows.setSharedSteps(shared);
+      broadcast({
+        type: 'sharedSteps',
+        sharedSteps: workflows.listSharedSteps(),
+        pinnedSteps: workflows.listPinnedSteps(),
+      });
+    }
+  };
+
   const syncNow = async () => {
     const pulled = await sync.pullAll();
     if (pulled) {
       sync.applying = true;
       try {
         for (const wf of pulled.workflows) workflows.applySynced(wf);
+        workflows.applySyncedSteps(pulled.steps);
         for (const meta of pulled.sessions) sessions.adoptSynced(meta);
         const remote = pulled.settings as UserUiSettings | null;
         // Merged before the applying flag drops, so the union is pushed once below.
@@ -147,13 +170,15 @@ export function buildUserContext(
     // becomes complete without waiting for each item to change locally.
     if (sync.enabled) {
       sync.pushWorkflows(workflows.list());
+      sync.pushSteps(workflows.listSteps());
       sync.pushSessions(sessions.list());
       sync.pushProjectKeys(projectKeys.all());
       const local = store.loadSettings();
       if (local) sync.pushSettings(local);
     }
-    // Populate other users' published workflows on connect/reconnect.
+    // Populate other users' published workflows + step library on connect/reconnect.
     await refreshShared();
+    await refreshSharedSteps();
   };
 
   const ctx: UserContext = {
@@ -171,6 +196,7 @@ export function buildUserContext(
     sync,
     syncNow,
     refreshShared,
+    refreshSharedSteps,
     touchedAt: Date.now(),
   };
   // After ctx exists — its async broadcasts reference ctx-bound state (sync token).

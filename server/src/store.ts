@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   ProjectKeyMap,
   SessionMeta,
+  StepDef,
   TranscriptEvent,
   UserUiSettings,
   WorkflowDef,
@@ -47,6 +48,7 @@ export function createStore(root: string) {
   const ATTACHMENTS = path.join(root, 'attachments');
   const SESSIONS_FILE = path.join(root, 'sessions.json');
   const WORKFLOWS_FILE = path.join(root, 'workflows.json');
+  const STEPS_FILE = path.join(root, 'steps.json');
   const RECENT_DIRS_FILE = path.join(root, 'recent-dirs.json');
   const PROJECTS_FILE = path.join(root, 'projects.json');
   const PROJECT_KEYS_FILE = path.join(root, 'project-keys.json');
@@ -74,6 +76,14 @@ export function createStore(root: string) {
 
     saveWorkflows(workflows: WorkflowDef[]) {
       writeJson(WORKFLOWS_FILE, workflows);
+    },
+
+    loadSteps(): StepDef[] {
+      return readJson<StepDef[]>(STEPS_FILE, []);
+    },
+
+    saveSteps(steps: StepDef[]) {
+      writeJson(STEPS_FILE, steps);
     },
 
     loadRecentDirs(): string[] {

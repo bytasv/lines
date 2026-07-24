@@ -1,4 +1,4 @@
-import type { ProjectKeyMap, SessionMeta, WorkflowDef } from '@claude-ui/shared';
+import type { ProjectKeyMap, SessionMeta, StepDef, StepRef, WorkflowDef } from '@claude-ui/shared';
 
 const PUSH_DEBOUNCE_MS = 2_000;
 const PULL_MIN_SPACING_MS = 30_000;
@@ -6,6 +6,7 @@ const FETCH_TIMEOUT_MS = 10_000;
 
 export interface PulledState {
   workflows: WorkflowDef[];
+  steps: StepDef[];
   sessions: SessionMeta[];
   settings: unknown;
   projectKeys: ProjectKeyMap;
@@ -25,8 +26,10 @@ export class StorageSyncClient {
   private warned = false;
   private lastPullAt = 0;
   private pendingWorkflows: WorkflowDef[] | null = null;
+  private pendingSteps: StepDef[] | null = null;
   private pendingSessions = new Map<string, SessionMeta>();
   private wfTimer: NodeJS.Timeout | null = null;
+  private stepTimer: NodeJS.Timeout | null = null;
   private sessTimer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -44,8 +47,9 @@ export class StorageSyncClient {
     if (Date.now() - this.lastPullAt < PULL_MIN_SPACING_MS) return null;
     this.lastPullAt = Date.now();
     try {
-      const [workflows, sessions, settings, projectKeys] = await Promise.all([
+      const [workflows, steps, sessions, settings, projectKeys] = await Promise.all([
         this.req('GET', '/workflows'),
+        this.req('GET', '/steps'),
         this.req('GET', '/sessions'),
         this.req('GET', '/settings'),
         this.req('GET', '/project-keys'),
@@ -53,6 +57,7 @@ export class StorageSyncClient {
       this.warned = false;
       return {
         workflows: (workflows ?? []) as WorkflowDef[],
+        steps: (steps ?? []) as StepDef[],
         sessions: (sessions ?? []) as SessionMeta[],
         settings,
         projectKeys: (projectKeys ?? {}) as ProjectKeyMap,
@@ -84,6 +89,45 @@ export class StorageSyncClient {
       this.pendingWorkflows = null;
       void this.req('PUT', '/workflows', body).catch((err) => this.warnOnce('push workflows', err));
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
+  }
+
+  /** Other users' published steps — the library. Not rate-limited (small, near-live). */
+  async pullSharedSteps(): Promise<StepDef[] | null> {
+    if (!this.enabled) return null;
+    try {
+      return ((await this.req('GET', '/steps/shared')) ?? []) as StepDef[];
+    } catch (err) {
+      this.warnOnce('pull shared steps', err);
+      return null;
+    }
+  }
+
+  /** Resolve the immutable versions a set of refs pin (any author). */
+  async resolveSteps(refs: Pick<StepRef, 'ownerId' | 'stepId' | 'version'>[]): Promise<StepDef[] | null> {
+    if (!this.enabled || refs.length === 0) return refs.length === 0 ? [] : null;
+    try {
+      const body = refs.map((r) => ({ ownerId: r.ownerId, id: r.stepId, version: r.version }));
+      return ((await this.req('POST', '/steps/resolve', body)) ?? []) as StepDef[];
+    } catch (err) {
+      this.warnOnce('resolve steps', err);
+      return null;
+    }
+  }
+
+  pushSteps(list: StepDef[]): void {
+    if (!this.enabled || this.applying) return;
+    this.pendingSteps = list;
+    this.stepTimer ??= setTimeout(() => {
+      this.stepTimer = null;
+      const body = this.pendingSteps;
+      this.pendingSteps = null;
+      void this.req('PUT', '/steps', body).catch((err) => this.warnOnce('push steps', err));
+    }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
+  }
+
+  deleteStep(id: string): void {
+    if (!this.enabled || this.applying) return;
+    void this.req('DELETE', `/steps/${id}`).catch((err) => this.warnOnce('delete step', err));
   }
 
   pushSession(meta: SessionMeta): void {

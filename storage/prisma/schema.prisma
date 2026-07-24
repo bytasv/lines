@@ -25,6 +25,22 @@ model Workflow {
   @@map("workflows")
 }
 
+// One immutable row per (owner, step, version). The head (max version) is the
+// author's editable step; older versions stay so workflows pinned to them keep
+// resolving the exact content — a republish can never rewrite history.
+model StepVersion {
+  userId    String   @map("user_id")
+  id        String
+  version   Int
+  data      Json // StepDef
+  published Boolean  @default(false)
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@id([userId, id, version])
+  @@index([published])
+  @@map("step_versions")
+}
+
 model UserSettings {
   userId    String   @id @map("user_id")
   data      Json // per-user UI settings blob

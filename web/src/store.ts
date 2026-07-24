@@ -7,6 +7,7 @@ import type {
   PromptAttachment,
   ServerMessage,
   SessionMeta,
+  StepDef,
   TranscriptEvent,
   UsageSnapshot,
   UserUiSettings,
@@ -163,6 +164,12 @@ interface UiState {
   workflows: WorkflowDef[];
   /** Other users' published workflows — read-only, runnable/duplicable but not editable. */
   sharedWorkflows: WorkflowDef[];
+  /** This user's own published steps (library heads). */
+  steps: StepDef[];
+  /** Other users' published steps — the library to compose from. */
+  sharedSteps: StepDef[];
+  /** Exact immutable step versions this user's workflows pin (for display/diff). */
+  pinnedSteps: StepDef[];
   models: ModelOption[];
   recentDirs: string[];
   /** Open project folders, shown as tabs. */
@@ -280,6 +287,9 @@ export const useStore = create<UiState>((set, get) => {
   sessions: {},
   workflows: [],
   sharedWorkflows: [],
+  steps: [],
+  sharedSteps: [],
+  pinnedSteps: [],
   models: [],
   recentDirs: [],
   projects: [],
@@ -461,6 +471,9 @@ export const useStore = create<UiState>((set, get) => {
           sessions,
           workflows: msg.workflows,
           sharedWorkflows: msg.sharedWorkflows ?? [],
+          steps: msg.steps ?? [],
+          sharedSteps: msg.sharedSteps ?? [],
+          pinnedSteps: msg.pinnedSteps ?? [],
           models: msg.models,
           recentDirs: msg.recentDirs,
           projects: msg.projects,
@@ -537,6 +550,12 @@ export const useStore = create<UiState>((set, get) => {
         break;
       case 'sharedWorkflows':
         set({ sharedWorkflows: msg.workflows });
+        break;
+      case 'steps':
+        set({ steps: msg.steps });
+        break;
+      case 'sharedSteps':
+        set({ sharedSteps: msg.sharedSteps, pinnedSteps: msg.pinnedSteps });
         break;
       case 'event':
         set((state) => {

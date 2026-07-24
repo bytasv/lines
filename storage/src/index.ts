@@ -102,6 +102,68 @@ app.delete('/workflows/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- steps (versioned, shareable) ------------------------------------------
+
+/** Reduce version rows to the head (highest version) per step id. */
+function heads(rows: { id: string; version: number; data: unknown }[]): unknown[] {
+  const byId = new Map<string, { version: number; data: unknown }>();
+  for (const r of rows) {
+    const cur = byId.get(r.id);
+    if (!cur || r.version > cur.version) byId.set(r.id, { version: r.version, data: r.data });
+  }
+  return [...byId.values()].map((v) => v.data);
+}
+
+app.get('/steps', async (req, res) => {
+  // All of the caller's own steps (published or not) — their private library.
+  const rows = await prisma.stepVersion.findMany({ where: { userId: userIdOf(req) } });
+  res.json(heads(rows));
+});
+
+/** Every other user's published steps, head version only — the library. */
+app.get('/steps/shared', async (req, res) => {
+  const rows = await prisma.stepVersion.findMany({ where: { published: true, NOT: { userId: userIdOf(req) } } });
+  res.json(heads(rows));
+});
+
+app.put('/steps', async (req, res) => {
+  const userId = userIdOf(req);
+  const list = Array.isArray(req.body) ? (req.body as { id?: string; version?: number; published?: boolean }[]) : [];
+  for (const step of list) {
+    if (!step?.id || typeof step.version !== 'number') continue;
+    const published = step.published !== false;
+    await prisma.stepVersion.upsert({
+      where: { userId_id_version: { userId, id: step.id, version: step.version } },
+      create: { userId, id: step.id, version: step.version, data: step as object, published, updatedAt: updatedAtOf(step) },
+      update: { data: step as object, published, updatedAt: updatedAtOf(step) },
+    });
+  }
+  res.json({ ok: true, count: list.length });
+});
+
+/** Resolve specific immutable versions a workflow pins (any author). */
+app.post('/steps/resolve', async (req, res) => {
+  userIdOf(req); // auth only
+  const refs = Array.isArray(req.body) ? (req.body as { ownerId?: string; id?: string; version?: number }[]) : [];
+  const valid = refs.filter((r) => r?.ownerId && r?.id && typeof r.version === 'number');
+  if (valid.length === 0) {
+    res.json([]);
+    return;
+  }
+  const rows = await prisma.stepVersion.findMany({
+    where: { OR: valid.map((r) => ({ userId: r.ownerId!, id: r.id!, version: r.version! })) },
+  });
+  res.json(rows.map((r) => r.data));
+});
+
+/** Drop a step from the library — flip every version's published flag off; rows stay so pins resolve. */
+app.delete('/steps/:id', async (req, res) => {
+  await prisma.stepVersion
+    .updateMany({ where: { userId: userIdOf(req), id: req.params.id }, data: { published: false } })
+    .catch(() => undefined);
+  res.json({ ok: true });
+});
+
 // --- sessions (metadata only) ----------------------------------------------
 
 app.get('/sessions', async (req, res) => {
