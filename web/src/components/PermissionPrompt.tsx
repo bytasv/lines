@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActionIcon,
   Badge,
@@ -177,8 +177,27 @@ function PlanApproval({
   data: PermissionRequestData;
   resolution?: Resolution;
 }) {
-  const [focus, setFocus] = useState(true);
+  // Auto-open fullscreen only if this tab is focused now; a background tab must not steal focus
+  // when the user later switches to it (precedent: alerts.ts document.hasFocus() guard).
+  const [focus, setFocus] = useState(() => document.hasFocus());
   const plan = String(data.input.plan ?? '');
+
+  // If the plan arrived while this tab was in the background, open focus mode once when the tab
+  // regains focus — unless the user has already dismissed it.
+  const dismissed = useRef(false);
+  useEffect(() => {
+    if (focus || resolution) return;
+    const onFocus = () => {
+      if (!dismissed.current) setFocus(true);
+    };
+    window.addEventListener('focus', onFocus, { once: true });
+    return () => window.removeEventListener('focus', onFocus);
+  }, [focus, resolution]);
+
+  const dismissFocus = () => {
+    dismissed.current = true;
+    setFocus(false);
+  };
 
   const approve = () => respond(sessionId, data.requestId, true);
   const keepPlanning = () => respond(sessionId, data.requestId, false, KEEP_PLANNING_MESSAGE);
@@ -215,7 +234,14 @@ function PlanApproval({
             )}
           </Group>
           <Tooltip label="Focus mode">
-            <ActionIcon size="sm" variant="light" onClick={() => setFocus(true)}>
+            <ActionIcon
+              size="sm"
+              variant="light"
+              onClick={() => {
+                dismissed.current = false;
+                setFocus(true);
+              }}
+            >
               <IconArrowsMaximize size={14} />
             </ActionIcon>
           </Tooltip>
@@ -234,7 +260,7 @@ function PlanApproval({
 
       <Modal
         opened={focus && !resolution}
-        onClose={() => setFocus(false)}
+        onClose={dismissFocus}
         fullScreen
         padding={0}
         withCloseButton={false}
@@ -246,7 +272,7 @@ function PlanApproval({
               <IconMap size={18} color="var(--mantine-color-sandstone-5)" />
               <Text fw={700}>Plan review</Text>
             </Group>
-            <Button variant="subtle" color="gray" size="xs" onClick={() => setFocus(false)}>
+            <Button variant="subtle" color="gray" size="xs" onClick={dismissFocus}>
               Exit focus (Esc)
             </Button>
           </Group>
