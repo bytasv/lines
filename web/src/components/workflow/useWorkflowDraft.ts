@@ -137,7 +137,7 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
       setDraft(d);
       setSelectedId(id);
       setBaseline(d ? JSON.stringify(toWire(d)) : null);
-      setCollapsed(new Set());
+      setCollapsed(new Set(d?.steps.map((s) => s._uid) ?? []));
       setSubmitAttempted(false);
     },
     [toDraft],
@@ -241,6 +241,21 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
           if (s._uid !== u || !s.ref) return s;
           const head = headMap.get(`${s.ref.ownerId}/${s.ref.stepId}`);
           if (!head) return s;
+          return { ...contentOf(head), _uid: s._uid, ref: { ...s.ref, ownerName: head.ownerName, version: head.version } };
+        }),
+      };
+    });
+
+  /** Re-pin every ref that has a newer published version. */
+  const updateAllToLatest = () =>
+    setDraft((d) => {
+      if (!d) return d;
+      return {
+        ...d,
+        steps: d.steps.map((s) => {
+          if (!s.ref) return s;
+          const head = headMap.get(`${s.ref.ownerId}/${s.ref.stepId}`);
+          if (!head || head.version <= s.ref.version) return s;
           return { ...contentOf(head), _uid: s._uid, ref: { ...s.ref, ownerName: head.ownerName, version: head.version } };
         }),
       };
@@ -407,6 +422,7 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
     publishStep,
     editStep,
     updateStepToLatest,
+    updateAllToLatest,
     toggleCollapsed,
     expandStep,
     collapseAll,

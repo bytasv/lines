@@ -185,9 +185,14 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
                   icon={<IconAlertTriangle size={16} />}
                   p="xs"
                 >
-                  <Text size="xs">
-                    {updatesAvailable} shared step{updatesAvailable === 1 ? '' : 's'} {updatesAvailable === 1 ? 'has' : 'have'} a newer version — open the step to review and update.
-                  </Text>
+                  <Group justify="space-between" wrap="nowrap" gap="xs">
+                    <Text size="xs">
+                      {updatesAvailable} shared step{updatesAvailable === 1 ? '' : 's'} {updatesAvailable === 1 ? 'has' : 'have'} a newer version.
+                    </Text>
+                    <Button size="xs" variant="light" color="yellow" onClick={wf.updateAllToLatest}>
+                      Update all
+                    </Button>
+                  </Group>
                 </Alert>
               )}
 
