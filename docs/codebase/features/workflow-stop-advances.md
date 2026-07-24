@@ -38,7 +38,7 @@ None (repo has typecheck only). Manual verification via the `verify` skill.
 
 - Plain Stop during a running workflow step always advances; there is no toggle or separate button.
 - A user prompt sent after Stop but before the interrupted turn settles clears the `'interrupted'` flag (the user chose to keep working on the step).
-- The step's output hand-off (`{previous}`, `outputName`) is whatever the model last said before the stop — partial by design.
+- The step's output hand-off (`{previous}`, `outputName`) goes through the same consolidation as a normal advance (see [workflow-step-output-consolidation](workflow-step-output-consolidation.md)) — only a single-turn interrupted step still hands off the raw last-said text verbatim, since consolidation is a no-op there.
 - Deny-pending-permissions and queue-pause semantics of interrupt are unchanged; queued messages stay held until the next explicit user send.
 
 ## Architectural rules

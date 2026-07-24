@@ -286,6 +286,35 @@
         "the storage route enforces the foreign-publish filter server-side; client-side version union never bypasses it"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "workflow-step-output-consolidation",
+      "name": "Workflow step output consolidation",
+      "doc": "features/workflow-step-output-consolidation.md",
+      "purpose": "Ensure the output handed to the next workflow step is the step's full definitive deliverable rather than a short delta reply left over from an iterated step.",
+      "entryPoints": [
+        "server/src/workflows.ts"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/sessions.ts",
+        "server/src/workflows.ts"
+      ],
+      "symbols": [
+        "WorkflowState.lastStepOutput",
+        "SessionManager.consolidateStepOutput",
+        "WorkflowEngine.advance"
+      ],
+      "tests": [],
+      "businessRules": [
+        "consolidation only fires when a step ran more than one turn; single-turn steps incur no extra query or latency",
+        "on query failure or empty result, falls back to lastAssistantText rather than blocking the workflow"
+      ],
+      "architecturalRules": [
+        "reuses the transcript-walking pattern from lastAssistantText/summarizeTurn and the one-shot non-agentic query shape from summarizeTurn/autoName",
+        "advance() is async; callers fire it with void this.advance(sessionId)"
+      ],
+      "relatedDecisions": []
     }
   ]
 }

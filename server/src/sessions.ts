@@ -524,6 +524,104 @@ export class SessionManager {
   }
 
   /**
+   * Reconstruct the definitive output of the just-finished workflow step. When
+   * the step ran a single turn its final text is the deliverable (returned as-is,
+   * zero cost). But an iterated step (feedback retry / follow-up) usually ends on
+   * a short delta reply ("fixed X"); passing that to the next step corrupts the
+   * hand-off. So for multi-turn steps, run a one-shot Sonnet query (same
+   * non-agentic shape as summarizeTurn) that folds every turn's output plus the
+   * user's feedback into the single final deliverable. Falls back to
+   * lastAssistantText on any failure — never blocks the workflow.
+   */
+  async consolidateStepOutput(sessionId: string): Promise<string> {
+    try {
+      const events = this.store.loadTranscript(sessionId);
+      // Find this step's entry marker: the last 'workflow' event with
+      // event === 'started' (retried/approved markers come after it in-step).
+      let startIdx = -1;
+      for (let i = events.length - 1; i >= 0; i--) {
+        const ev = events[i];
+        if (ev.kind !== 'workflow') continue;
+        const data = ev.data as { event?: string };
+        if (data.event === 'started') {
+          startIdx = i;
+          break;
+        }
+      }
+      if (startIdx === -1) return this.lastAssistantText(sessionId);
+
+      // Walk the slice: each 'user' event opens a turn (its text is the initial
+      // prompt or iteration feedback); capture that turn's final assistant text.
+      const turns: { user: string; output: string }[] = [];
+      for (const ev of events.slice(startIdx)) {
+        if (ev.kind === 'user') {
+          const text = (ev.data as { text?: string }).text ?? '';
+          turns.push({ user: text, output: '' });
+        } else if (ev.kind === 'sdk' && turns.length) {
+          const msg = ev.data as { type?: string; message?: { content?: unknown } };
+          if (msg.type !== 'assistant') continue;
+          const content = msg.message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content as Record<string, unknown>[]) {
+              if (block.type === 'text' && typeof block.text === 'string') {
+                turns[turns.length - 1].output = block.text;
+              }
+            }
+          }
+        }
+      }
+
+      // Single-turn step: its final text is the deliverable — no query, no latency.
+      if (turns.length <= 1) return turns[0]?.output ?? this.lastAssistantText(sessionId);
+
+      const initialPrompt = turns[0].user.slice(0, 4000);
+      const attempts = turns
+        .map((t, n) => {
+          const parts = [`### Attempt ${n + 1} output\n${t.output.slice(0, 8000)}`];
+          // The feedback that produced attempt n+1 is the user text opening it.
+          if (n > 0 && t.user) parts.unshift(`### User feedback ${n}\n${t.user.slice(0, 2000)}`);
+          return parts.join('\n\n');
+        })
+        .join('\n\n');
+      const prompt =
+        `A workflow step was iterated across ${turns.length} attempts. Its initial ` +
+        `instruction:\n\n<instruction>\n${initialPrompt}\n</instruction>\n\n` +
+        `The attempts and the user's feedback between them, in order:\n\n${attempts}\n\n` +
+        'Produce the single definitive final output of this step, incorporating every ' +
+        'revision. Preserve the exact format and full detail the initial instruction ' +
+        'requested. Where a later attempt only describes changes, apply them to the ' +
+        'earlier full output. Output only the deliverable itself — no preamble, no ' +
+        'commentary about what changed.';
+
+      const q = query({
+        prompt,
+        options: {
+          model: 'claude-sonnet-5',
+          maxTurns: 1,
+          allowedTools: [],
+          settingSources: [],
+          systemPrompt:
+            'You consolidate an iterated workflow step into its single final ' +
+            'deliverable. You never ask questions, never refuse, and never add ' +
+            'commentary or preamble — you output only the deliverable.',
+          ...this.ownerTokenEnv(),
+        } as never,
+      });
+      let output: string | null = null;
+      for await (const message of q) {
+        const msg = message as { type: string; result?: string };
+        if (msg.type === 'result' && typeof msg.result === 'string') {
+          output = msg.result.trim();
+        }
+      }
+      return output || this.lastAssistantText(sessionId);
+    } catch (err) {
+      console.warn('[consolidateStepOutput]', err);
+      return this.lastAssistantText(sessionId);
+    }
+  }
+
+  /**
    * Env for the bridge-side helper queries (autoName/summarizeTurn): they run
    * outside the worker, so hand them the owner's OAuth token explicitly — a
    * remote multi-user host has no ambient CLI login to fall back on.

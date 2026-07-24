@@ -409,7 +409,7 @@ export class WorkflowEngine {
     // "diff" would just be the repo's pre-existing dirty state. Retries stay in
     // the fresh session already established for this step.
     if (content.freshStart && entry && i > 0) {
-      const previous = this.sessions.lastAssistantText(sessionId);
+      const previous = meta.workflow.lastStepOutput ?? this.sessions.lastAssistantText(sessionId);
       const diff = await workingTreeDiff(meta.cwd, meta.workflow.diffBaseline);
       const usesTokens = prompt.includes('{previous}') || prompt.includes('{diff}');
       prompt = prompt.replaceAll('{previous}', previous).replaceAll('{diff}', diff);
@@ -462,12 +462,12 @@ export class WorkflowEngine {
       const event = meta.workflow.advanceOnComplete === 'interrupted' ? 'interrupted' : 'approved';
       meta.workflow.advanceOnComplete = undefined;
       this.marker(sessionId, { stepIndex: i, stepName: this.stepName(step), event });
-      this.advance(sessionId);
+      void this.advance(sessionId);
       return;
     }
 
     if (this.stepContent(step)?.autoAdvance) {
-      this.advance(sessionId);
+      void this.advance(sessionId);
       return;
     }
 
@@ -527,7 +527,7 @@ export class WorkflowEngine {
       stepName: this.stepName(wf?.steps[i]),
       event: 'approved',
     });
-    this.advance(sessionId);
+    void this.advance(sessionId);
   }
 
   retry(sessionId: string, stepIndex: number, feedback: string) {
@@ -539,19 +539,22 @@ export class WorkflowEngine {
     void this.runStep(sessionId, feedback);
   }
 
-  private advance(sessionId: string) {
+  private async advance(sessionId: string) {
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'done';
 
-    // Publish this step's final output under its name so later steps can pull it
-    // via {outputs.<name>}. Captured here, right after the step's turn completed,
-    // so lastAssistantText() still points at this step's concluding message.
+    // Consolidate this step's final output (single-turn steps return their last
+    // text as-is; iterated steps fold every attempt into one deliverable). Kept
+    // for the {previous} hand-off, and published under the step's name so later
+    // steps can pull it via {outputs.<name>}.
+    const output = await this.sessions.consolidateStepOutput(sessionId);
+    meta.workflow.lastStepOutput = output;
     const outName = this.stepContent(wf.steps[i])?.outputName?.trim();
     if (outName) {
-      (meta.workflow.outputs ??= {})[outName] = this.sessions.lastAssistantText(sessionId);
+      (meta.workflow.outputs ??= {})[outName] = output;
     }
 
     if (i + 1 < wf.steps.length) {

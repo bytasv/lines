@@ -174,6 +174,9 @@ export interface WorkflowState {
   /** Working-tree snapshot taken when the workflow starts, so a fresh step's
    *  {diff} shows only what the workflow changed, not pre-existing dirty state. */
   diffBaseline?: { ref: string; untracked: string[] };
+  /** Consolidated final output of the last-completed step; consumed as {previous}
+   *  by the next fresh-start step. Falls back to lastAssistantText when absent. */
+  lastStepOutput?: string;
 }
 
 export interface SessionMeta {
