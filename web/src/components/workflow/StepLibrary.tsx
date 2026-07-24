@@ -192,7 +192,6 @@ export function StepLibrary() {
                 </Text>
               ) : (
                 <Switch
-                  size="sm"
                   mb={7}
                   label="Published"
                   description="Share with everyone"
@@ -241,7 +240,6 @@ export function StepLibrary() {
                 />
               </div>
               <Switch
-                size="md"
                 label="Auto-advance"
                 description="Skip approval; run the next step automatically"
                 checked={draft.autoAdvance}
@@ -249,7 +247,6 @@ export function StepLibrary() {
                 onChange={(e) => patch({ autoAdvance: e.currentTarget.checked })}
               />
               <Switch
-                size="md"
                 label="Fresh start"
                 description="Run in a clean session; seed with prior step's output + diff, not the full conversation"
                 checked={draft.freshStart}

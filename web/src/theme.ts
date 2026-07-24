@@ -72,5 +72,6 @@ export const theme = createTheme({
     TextInput: { defaultProps: { size: 'xs' } },
     Textarea: { defaultProps: { size: 'xs' } },
     Badge: { defaultProps: { size: 'xs' } },
+    Switch: { defaultProps: { size: 'xs' } },
   },
 });

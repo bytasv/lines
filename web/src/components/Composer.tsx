@@ -285,7 +285,6 @@ export function Composer({ session }: { session: SessionMeta }) {
           />
           <Tooltip label="Caveman mode — compressed replies, fewer tokens">
             <Switch
-              size="xs"
               label="🦴"
               checked={session.caveman.enabled}
               onChange={(e) =>

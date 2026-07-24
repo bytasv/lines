@@ -170,7 +170,6 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
                   </Text>
                 ) : (
                   <Switch
-                    size="sm"
                     pb={8}
                     label="Published"
                     checked={draft.published ?? false}

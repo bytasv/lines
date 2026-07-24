@@ -260,7 +260,6 @@ export function StepCard({
               />
             </div>
             <Switch
-              size="md"
               label="Auto-advance"
               description="Skip approval; run the next step automatically"
               checked={step.autoAdvance}
@@ -268,7 +267,6 @@ export function StepCard({
               onChange={(e) => onPatch({ autoAdvance: e.currentTarget.checked })}
             />
             <Switch
-              size="md"
               label="Fresh start"
               description="Run in a clean session; seed with prior step's output + diff, not the full conversation"
               checked={step.freshStart}
