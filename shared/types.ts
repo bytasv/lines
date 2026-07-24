@@ -352,6 +352,8 @@ export type ClientMessage =
   | { type: 'saveStep'; step: StepContent; stepId?: string; published: boolean; ownerName?: string }
   /** Remove a step from the library (existing pins keep resolving the immutable versions). */
   | { type: 'deleteStep'; stepId: string }
+  /** Request the full version history of a step (for preview + re-pin). Keys are echoed back. */
+  | { type: 'stepVersions'; ownerId: string; stepId: string }
   | { type: 'loadTranscript'; sessionId: string }
   | { type: 'pickFolder' }
   | { type: 'openProject'; path: string }
@@ -440,6 +442,8 @@ export type ServerMessage =
   | { type: 'steps'; steps: StepDef[] }
   /** Other users' published steps (library) plus any versions this user's workflows pin. */
   | { type: 'sharedSteps'; sharedSteps: StepDef[]; pinnedSteps: StepDef[] }
+  /** Version history for one step, newest first. Echoes the request keys so the store can slot it. */
+  | { type: 'stepVersions'; ownerId: string; stepId: string; versions: StepDef[] }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }
   | { type: 'transcript'; sessionId: string; events: TranscriptEvent[] }
   | { type: 'folderPicked'; path: string | null }

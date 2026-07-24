@@ -228,6 +228,9 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
                                   onPublish={() => wf.publishStep(step._uid)}
                                   onEdit={() => wf.editStep(step._uid)}
                                   onUpdateToLatest={() => wf.updateStepToLatest(step._uid)}
+                                  versions={wf.versionsFor(step)}
+                                  onShowVersions={() => wf.requestStepVersions(step)}
+                                  onPinVersion={(def) => wf.pinStepToVersion(step._uid, def)}
                                 />
                               </div>
                             )}

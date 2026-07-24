@@ -104,6 +104,10 @@ export class WorkflowEngine {
       this.steps.set(s.id, s);
       this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
     }
+    // Restore the full immutable history (heads are already in above; older versions add on).
+    for (const s of this.store.loadStepVersions()) {
+      this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
+    }
     if (!this.workflows.has(DEFAULT_WORKFLOW.id)) {
       this.workflows.set(DEFAULT_WORKFLOW.id, DEFAULT_WORKFLOW);
       this.persist();
@@ -150,6 +154,11 @@ export class WorkflowEngine {
     return [...this.sharedSteps.values()];
   }
 
+  /** Every immutable version this user owns — the durable history (not just heads). */
+  listOwnStepVersions(): StepDef[] {
+    return [...this.stepVersions.values()].filter((s) => s.ownerId === this.userId);
+  }
+
   /** Every pin referenced by this user's own workflows, resolved to its immutable version. */
   listPinnedSteps(): StepDef[] {
     const out: StepDef[] = [];
@@ -179,6 +188,13 @@ export class WorkflowEngine {
   /** Adopt resolved immutable versions (own history from a pull, or foreign pins). */
   addStepVersions(list: StepDef[]): void {
     for (const s of list) this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
+  }
+
+  /** Cached versions of one step, newest first (best-effort local view). */
+  listStepVersions(ownerId: string, stepId: string): StepDef[] {
+    return [...this.stepVersions.values()]
+      .filter((s) => s.ownerId === ownerId && s.id === stepId)
+      .sort((a, b) => b.version - a.version);
   }
 
   /** Replace the shared-step library; returns true if it changed. */
@@ -241,6 +257,8 @@ export class WorkflowEngine {
 
   private persistSteps() {
     this.store.saveSteps(this.listSteps());
+    // Heads alone would lose intermediate versions across a restart; persist the full history too.
+    this.store.saveStepVersions(this.listOwnStepVersions());
   }
 
   /** Resolve a workflow step to its runnable content (refs → pinned immutable version). */

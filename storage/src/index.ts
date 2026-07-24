@@ -156,6 +156,18 @@ app.post('/steps/resolve', async (req, res) => {
   res.json(rows.map((r) => r.data));
 });
 
+/** Full version history for one step, newest first. Own steps: all versions; foreign: published only. */
+app.get('/steps/:ownerId/:id/versions', async (req, res) => {
+  const requester = userIdOf(req);
+  const { ownerId, id } = req.params;
+  const rows = await prisma.stepVersion.findMany({
+    where: { userId: ownerId, id, ...(requester === ownerId ? {} : { published: true }) },
+    orderBy: { version: 'desc' },
+    take: 200,
+  });
+  res.json(rows.map((r) => r.data));
+});
+
 /** Drop a step from the library — flip every version's published flag off; rows stay so pins resolve. */
 app.delete('/steps/:id', async (req, res) => {
   await prisma.stepVersion

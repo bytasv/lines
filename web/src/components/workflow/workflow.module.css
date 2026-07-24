@@ -40,6 +40,26 @@
   color: var(--mantine-color-dark-1);
 }
 
+/* One row in the version-history popover — compact, single line, hover/active feedback. */
+.versionRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+.versionRow:hover {
+  background: var(--mantine-color-dark-5);
+}
+.versionRowActive,
+.versionRowActive:hover {
+  background: var(--mantine-color-dark-4);
+}
+
 .num {
   flex: 0 0 auto;
   width: 26px;

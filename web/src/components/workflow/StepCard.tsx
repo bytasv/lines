@@ -14,13 +14,17 @@ import {
   Text,
   TextInput,
   Tooltip,
+  UnstyledButton,
 } from '@mantine/core';
+import { useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   IconAlertTriangle,
   IconChevronDown,
   IconCopy,
   IconDots,
   IconGripVertical,
+  IconHistory,
   IconLock,
   IconPencil,
   IconTrash,
@@ -50,8 +54,38 @@ function changedFields(a: StepContent, b: StepContent): (keyof StepContent)[] {
   return (Object.keys(FIELD_LABELS) as (keyof StepContent)[]).filter((k) => String(a[k]) !== String(b[k]));
 }
 
+/** Compact relative time ("3d ago"); falls back to empty when no timestamp. */
+export function relTime(ms?: number): string {
+  if (!ms) return '';
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return 'just now';
+  const units: [number, string][] = [[86400, 'd'], [3600, 'h'], [60, 'm']];
+  for (const [secs, label] of units) {
+    if (s >= secs) return `${Math.floor(s / secs)}${label} ago`;
+  }
+  return 'just now';
+}
+
+/** Per-field diff of two step contents (red − / teal +), or an empty-state note. */
+export function FieldDiffList({ from, to }: { from: StepContent; to: StepContent }) {
+  const fields = changedFields(from, to);
+  if (fields.length === 0) return <Text size="xs" c="dimmed">No field changes.</Text>;
+  return (
+    <ScrollArea.Autosize mah={280} type="auto">
+      <Stack gap={10}>
+        {fields.map((f) => (
+          <Stack key={f} gap={2}>
+            <Text size="xs" fw={600} c="dimmed">{FIELD_LABELS[f]}</Text>
+            <Text size="xs" c="red" style={{ whiteSpace: 'pre-wrap' }}>- {String(from[f]) || '(empty)'}</Text>
+            <Text size="xs" c="teal" style={{ whiteSpace: 'pre-wrap' }}>+ {String(to[f]) || '(empty)'}</Text>
+          </Stack>
+        ))}
+      </Stack>
+    </ScrollArea.Autosize>
+  );
+}
+
 function UpdatePopover({ pinned, head, onUpdate }: { pinned: StepContent; head: StepDef; onUpdate: () => void }) {
-  const fields = changedFields(pinned, head);
   return (
     <Popover width={360} position="bottom-end" withArrow shadow="md">
       <Popover.Target>
@@ -66,22 +100,98 @@ function UpdatePopover({ pinned, head, onUpdate }: { pinned: StepContent; head: 
           <Text size="xs" fw={600}>
             {head.ownerName ?? 'The owner'} published v{head.version}
           </Text>
-          {fields.length === 0 ? (
-            <Text size="xs" c="dimmed">No field changes.</Text>
-          ) : (
-            <ScrollArea.Autosize mah={280} type="auto">
-              <Stack gap={10}>
-                {fields.map((f) => (
-                  <Stack key={f} gap={2}>
-                    <Text size="xs" fw={600} c="dimmed">{FIELD_LABELS[f]}</Text>
-                    <Text size="xs" c="red" style={{ whiteSpace: 'pre-wrap' }}>- {String(pinned[f]) || '(empty)'}</Text>
-                    <Text size="xs" c="teal" style={{ whiteSpace: 'pre-wrap' }}>+ {String(head[f]) || '(empty)'}</Text>
-                  </Stack>
-                ))}
-              </Stack>
-            </ScrollArea.Autosize>
-          )}
+          <FieldDiffList from={pinned} to={head} />
           <Button size="xs" onClick={onUpdate}>Update to v{head.version}</Button>
+        </Stack>
+      </Popover.Dropdown>
+    </Popover>
+  );
+}
+
+/**
+ * Browse a step's version history and re-pin. Rows are newest-first and gap-tolerant. Selecting a
+ * row previews a diff of the pinned content vs that version and offers "Pin to vN" (disabled for the
+ * current pin). `versions === undefined` = still loading. `onOpen` triggers the fetch.
+ */
+function VersionHistoryPopover({
+  step,
+  versions,
+  opened,
+  onOpenChange,
+  onPin,
+  children,
+}: {
+  step: DraftStep;
+  versions?: StepDef[];
+  opened: boolean;
+  onOpenChange: (open: boolean) => void;
+  onPin: (def: StepDef) => void;
+  children: ReactNode;
+}) {
+  const [selected, setSelected] = useState<number | null>(null);
+  const pinnedVersion = step.ref?.version;
+  const preview = versions?.find((v) => v.version === selected);
+
+  return (
+    <Popover
+      width={360}
+      position="bottom-end"
+      withArrow
+      shadow="md"
+      opened={opened}
+      onChange={(o) => {
+        if (o) setSelected(null);
+        onOpenChange(o);
+      }}
+    >
+      <Popover.Target>
+        <Box data-no-toggle onClick={(e) => e.stopPropagation()} style={{ display: 'inline-flex' }}>
+          {children}
+        </Box>
+      </Popover.Target>
+      <Popover.Dropdown>
+        <Stack gap={10}>
+          <Text size="xs" fw={600}>Version history</Text>
+          {versions === undefined ? (
+            <Text size="xs" c="dimmed">Loading versions…</Text>
+          ) : (
+            <>
+              <ScrollArea.Autosize mah={220} type="auto">
+                <Stack gap={1}>
+                  {versions.map((v) => (
+                    <UnstyledButton
+                      key={v.version}
+                      className={cn(styles.versionRow, selected === v.version && styles.versionRowActive)}
+                      onClick={() => setSelected(v.version)}
+                    >
+                      <Text size="sm" fw={600}>v{v.version}</Text>
+                      <Text size="xs" c="dimmed" style={{ flex: 1, minWidth: 0 }} truncate>
+                        {relTime(v.updatedAt)}{v.ownerName ? ` · ${v.ownerName}` : ''}
+                      </Text>
+                      {v.version === pinnedVersion && (
+                        <Badge size="xs" variant="light" color="sandstone">pinned</Badge>
+                      )}
+                    </UnstyledButton>
+                  ))}
+                </Stack>
+              </ScrollArea.Autosize>
+              {preview && (
+                <>
+                  <FieldDiffList from={step} to={preview} />
+                  <Button
+                    size="xs"
+                    disabled={preview.version === pinnedVersion}
+                    onClick={() => {
+                      onPin(preview);
+                      onOpenChange(false);
+                    }}
+                  >
+                    Pin to v{preview.version}
+                  </Button>
+                </>
+              )}
+            </>
+          )}
         </Stack>
       </Popover.Dropdown>
     </Popover>
@@ -106,6 +216,9 @@ export function StepCard({
   onPublish,
   onEdit,
   onUpdateToLatest,
+  versions,
+  onShowVersions,
+  onPinVersion,
   availableOutputs,
 }: {
   step: DraftStep;
@@ -118,6 +231,8 @@ export function StepCard({
   models: ModelOption[];
   ownsRef: boolean;
   updateDef?: StepDef;
+  /** Fetched version history for this ref; undefined while loading. */
+  versions?: StepDef[];
   dragHandleProps?: DraggableProvidedDragHandleProps | null;
   onPatch: (patch: Partial<StepContent>) => void;
   onToggle: () => void;
@@ -127,12 +242,20 @@ export function StepCard({
   onPublish: () => void;
   onEdit: () => void;
   onUpdateToLatest: () => void;
+  onShowVersions: () => void;
+  onPinVersion: (def: StepDef) => void;
 }) {
   const isRef = !!step.ref;
   const contentReadOnly = readOnly || isRef;
   const modeLabel = MODE_OPTIONS.find((m) => m.value === step.permissionMode)?.label ?? step.permissionMode;
   const modelLabel = models.find((m) => m.id === step.model)?.label ?? step.model;
   const invalid = !!errors;
+  const canBrowseHistory = isRef && !readOnly;
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const openHistory = () => {
+    onShowVersions();
+    setHistoryOpen(true);
+  };
 
   return (
     <Box
@@ -166,11 +289,31 @@ export function StepCard({
         />
 
         <Group gap={8} wrap="nowrap" data-no-toggle>
-          {isRef && (
-            <Badge size="sm" variant="light" color={ownsRef ? 'sandstone' : 'grape'} leftSection={<IconLock size={10} />}>
-              {ownsRef ? `v${step.ref!.version}` : `${step.ref!.ownerName ?? 'shared'} · v${step.ref!.version}`}
-            </Badge>
-          )}
+          {isRef &&
+            (canBrowseHistory ? (
+              <VersionHistoryPopover
+                step={step}
+                versions={versions}
+                opened={historyOpen}
+                onOpenChange={(o) => (o ? openHistory() : setHistoryOpen(false))}
+                onPin={onPinVersion}
+              >
+                <Badge
+                  size="sm"
+                  variant="light"
+                  color={ownsRef ? 'sandstone' : 'grape'}
+                  leftSection={<IconLock size={10} />}
+                  style={{ cursor: 'pointer' }}
+                  onClick={openHistory}
+                >
+                  {ownsRef ? `v${step.ref!.version}` : `${step.ref!.ownerName ?? 'shared'} · v${step.ref!.version}`}
+                </Badge>
+              </VersionHistoryPopover>
+            ) : (
+              <Badge size="sm" variant="light" color={ownsRef ? 'sandstone' : 'grape'} leftSection={<IconLock size={10} />}>
+                {ownsRef ? `v${step.ref!.version}` : `${step.ref!.ownerName ?? 'shared'} · v${step.ref!.version}`}
+              </Badge>
+            ))}
           {isRef && updateDef && <UpdatePopover pinned={step} head={updateDef} onUpdate={onUpdateToLatest} />}
           {collapsed && !isRef && (
             <Group gap={6} wrap="nowrap" visibleFrom="md">
@@ -191,6 +334,11 @@ export function StepCard({
                 {isRef && ownsRef && (
                   <Menu.Item leftSection={<IconPencil size={14} />} onClick={onEdit}>
                     Edit (new version)
+                  </Menu.Item>
+                )}
+                {canBrowseHistory && (
+                  <Menu.Item leftSection={<IconHistory size={14} />} onClick={openHistory}>
+                    Version history
                   </Menu.Item>
                 )}
                 {!isRef && (

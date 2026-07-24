@@ -84,6 +84,7 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
   const steps = useStore((s) => s.steps);
   const sharedSteps = useStore((s) => s.sharedSteps);
   const pinnedSteps = useStore((s) => s.pinnedSteps);
+  const stepVersions = useStore((s) => s.stepVersions);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<DraftWorkflow | null>(null);
@@ -94,13 +95,14 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Exact immutable versions available for resolving a ref, keyed `${ownerId}/${id}/${version}`.
+  // Fetched histories are folded in so a re-pin to an older version resolves before any round-trip.
   const versionMap = useMemo(() => {
     const m = new Map<string, StepDef>();
-    for (const s of [...pinnedSteps, ...steps, ...sharedSteps]) {
+    for (const s of [...pinnedSteps, ...steps, ...sharedSteps, ...Object.values(stepVersions).flat()]) {
       m.set(`${s.ownerId}/${s.id}/${s.version}`, s);
     }
     return m;
-  }, [pinnedSteps, steps, sharedSteps]);
+  }, [pinnedSteps, steps, sharedSteps, stepVersions]);
 
   // Latest published head per (owner, id) — for update-available detection + diffs.
   const headMap = useMemo(() => {
@@ -260,6 +262,48 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
         }),
       };
     });
+
+  /** Ask the bridge for a ref's full version history; the reply lands in the store slice. */
+  const requestStepVersions = (s: DraftStep) => {
+    if (!s.ref) return;
+    send({ type: 'stepVersions', ownerId: s.ref.ownerId, stepId: s.ref.stepId });
+  };
+
+  /**
+   * Versions available for a ref, newest first. Unions the fetched history with any versions already
+   * in `versionMap` (guarantees the pinned version always appears — in-flight fetch, storage offline,
+   * or foreign publish-filter). `undefined` = nothing known yet → loading state.
+   */
+  const versionsFor = (s: DraftStep): StepDef[] | undefined => {
+    if (!s.ref) return undefined;
+    const fetched = stepVersions[`${s.ref.ownerId}/${s.ref.stepId}`];
+    const local = [...versionMap.values()].filter(
+      (d) => d.ownerId === s.ref!.ownerId && d.id === s.ref!.stepId,
+    );
+    if (!fetched && local.length === 0) return undefined;
+    const byVersion = new Map<number, StepDef>();
+    for (const d of [...(fetched ?? []), ...local]) if (!byVersion.has(d.version)) byVersion.set(d.version, d);
+    return [...byVersion.values()].sort((a, b) => b.version - a.version);
+  };
+
+  /** Re-pin a ref to a specific (possibly older) version. Draft-only until save; dirty guard covers cancel. */
+  const pinStepToVersion = (u: string, def: StepDef) =>
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            steps: d.steps.map((s) =>
+              s._uid === u && s.ref
+                ? {
+                    ...contentOf(def),
+                    _uid: s._uid,
+                    ref: { ...s.ref, ownerName: def.ownerName ?? s.ref.ownerName, version: def.version },
+                  }
+                : s,
+            ),
+          }
+        : d,
+    );
 
   /** Save an inline step to the library (private by default); convert it to an owned ref. */
   const publishStep = (u: string) => {
@@ -423,6 +467,9 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
     editStep,
     updateStepToLatest,
     updateAllToLatest,
+    requestStepVersions,
+    versionsFor,
+    pinStepToVersion,
     toggleCollapsed,
     expandStep,
     collapseAll,

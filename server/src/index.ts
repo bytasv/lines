@@ -446,6 +446,20 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       workflows.deleteStep(msg.stepId);
       ctx.sync.deleteStep(msg.stepId);
       break;
+    case 'stepVersions': {
+      // Ping→pong: pull remote history (if online), adopt it so re-pins resolve, reply to this socket.
+      const remote = await ctx.sync.pullStepVersions(msg.ownerId, msg.stepId);
+      if (remote) workflows.addStepVersions(remote);
+      ws.send(
+        JSON.stringify({
+          type: 'stepVersions',
+          ownerId: msg.ownerId,
+          stepId: msg.stepId,
+          versions: workflows.listStepVersions(msg.ownerId, msg.stepId),
+        } satisfies ServerMessage),
+      );
+      break;
+    }
     case 'openProject': {
       const dir = msg.path.replace(/\/+$/, '') || '/';
       if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {

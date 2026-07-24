@@ -10,3 +10,4 @@
 | `workflow-draft-selection` | Governs which workflow the editor draft reflects across open/broadcast/save-reconciliation races | [features/workflow-draft-selection.md](features/workflow-draft-selection.md) |
 | `workflow-step-cost` | Per-step USD spend shown in the workflow stepper | [features/workflow-step-cost.md](features/workflow-step-cost.md) |
 | `transcript-markdown-rendering` | User transcript bubbles render markdown via the shared renderer; code blocks wrap instead of scrolling | [features/transcript-markdown-rendering.md](features/transcript-markdown-rendering.md) |
+| `workflow-step-version-history` | Browse a step's version history, preview a per-field diff, re-pin a workflow ref or restore old content as a new library version | [features/workflow-step-version-history.md](features/workflow-step-version-history.md) |

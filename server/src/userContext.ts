@@ -69,7 +69,9 @@ export function buildUserContext(
     if (msg.type === 'sessionUpsert') sync.pushSession(msg.session);
     else if (msg.type === 'sessionDeleted') sync.deleteSession(msg.sessionId);
     else if (msg.type === 'workflows') sync.pushWorkflows(msg.workflows);
-    else if (msg.type === 'steps') sync.pushSteps(msg.steps);
+    // Push the full own history, not just the heads in msg.steps — else the debounce
+    // coalesces intermediate versions away and storage never records them.
+    else if (msg.type === 'steps') sync.pushSteps(workflows.listOwnStepVersions());
     const payload = JSON.stringify(msg);
     for (const ws of sockets) {
       if (ws.readyState === WebSocket.OPEN) ws.send(payload);
@@ -170,7 +172,7 @@ export function buildUserContext(
     // becomes complete without waiting for each item to change locally.
     if (sync.enabled) {
       sync.pushWorkflows(workflows.list());
-      sync.pushSteps(workflows.listSteps());
+      sync.pushSteps(workflows.listOwnStepVersions());
       sync.pushSessions(sessions.list());
       sync.pushProjectKeys(projectKeys.all());
       const local = store.loadSettings();

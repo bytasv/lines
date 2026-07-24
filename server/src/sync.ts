@@ -114,6 +114,18 @@ export class StorageSyncClient {
     }
   }
 
+  /** Full version history for one step (any author). null = storage offline/disabled. */
+  async pullStepVersions(ownerId: string, stepId: string): Promise<StepDef[] | null> {
+    if (!this.enabled) return null;
+    try {
+      const path = `/steps/${encodeURIComponent(ownerId)}/${encodeURIComponent(stepId)}/versions`;
+      return ((await this.req('GET', path)) ?? []) as StepDef[];
+    } catch (err) {
+      this.warnOnce('pull step versions', err);
+      return null;
+    }
+  }
+
   pushSteps(list: StepDef[]): void {
     if (!this.enabled || this.applying) return;
     this.pendingSteps = list;

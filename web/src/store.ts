@@ -170,6 +170,8 @@ interface UiState {
   sharedSteps: StepDef[];
   /** Exact immutable step versions this user's workflows pin (for display/diff). */
   pinnedSteps: StepDef[];
+  /** Fetched version histories, keyed `${ownerId}/${stepId}`; populated on demand per popover open. */
+  stepVersions: Record<string, StepDef[]>;
   models: ModelOption[];
   recentDirs: string[];
   /** Open project folders, shown as tabs. */
@@ -290,6 +292,7 @@ export const useStore = create<UiState>((set, get) => {
   steps: [],
   sharedSteps: [],
   pinnedSteps: [],
+  stepVersions: {},
   models: [],
   recentDirs: [],
   projects: [],
@@ -556,6 +559,11 @@ export const useStore = create<UiState>((set, get) => {
         break;
       case 'sharedSteps':
         set({ sharedSteps: msg.sharedSteps, pinnedSteps: msg.pinnedSteps });
+        break;
+      case 'stepVersions':
+        set((state) => ({
+          stepVersions: { ...state.stepVersions, [`${msg.ownerId}/${msg.stepId}`]: msg.versions },
+        }));
         break;
       case 'event':
         set((state) => {

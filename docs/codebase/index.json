@@ -79,6 +79,7 @@
       ],
       "symbols": [
         "UpdatePopover",
+        "FieldDiffList",
         "changedFields",
         "useWorkflowDraft.updateFor",
         "useWorkflowDraft.updateStepToLatest",
@@ -122,7 +123,7 @@
         "step output hand-off after Stop is whatever the model last said (partial by design)"
       ],
       "architecturalRules": [
-        "never advance synchronously on interrupt — flag advanceOnComplete and wait for the turn to settle",
+        "never advance synchronously on interrupt \u2014 flag advanceOnComplete and wait for the turn to settle",
         "the handleWorkerEnded settle fallback must stay gated on the interrupting set (routine non-error ended events exist)"
       ],
       "relatedDecisions": []
@@ -235,6 +236,54 @@
       "architecturalRules": [
         "user and agent transcript bubbles share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
         "user bubble Paper needs minWidth: 0 alongside flex: 1 so wide content (e.g. a code block) can't grow the flex child past the column width"
+      ],
+      "relatedDecisions": []
+    },
+    {
+      "id": "workflow-step-version-history",
+      "name": "Workflow step version history",
+      "doc": "features/workflow-step-version-history.md",
+      "purpose": "Browse a step's full immutable version history, preview a per-field diff of any past version, and either re-pin a workflow ref to it or restore its content into the step-library draft as a new head version.",
+      "entryPoints": [
+        "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/workflow/StepLibrary.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "storage/src/index.ts",
+        "server/src/sync.ts",
+        "server/src/store.ts",
+        "server/src/workflows.ts",
+        "server/src/index.ts",
+        "web/src/store.ts",
+        "web/src/components/workflow/useWorkflowDraft.ts",
+        "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/workflow/StepLibrary.tsx",
+        "web/src/components/workflow/WorkflowEditor.tsx"
+      ],
+      "symbols": [
+        "VersionHistoryPopover",
+        "RestoreHistoryPopover",
+        "FieldDiffList",
+        "relTime",
+        "useWorkflowDraft.requestStepVersions",
+        "useWorkflowDraft.versionsFor",
+        "useWorkflowDraft.pinStepToVersion",
+        "WorkflowEngine.listStepVersions",
+        "WorkflowEngine.listOwnStepVersions",
+        "StorageSyncClient.pullStepVersions"
+      ],
+      "tests": [],
+      "businessRules": [
+        "newest-first, gap-tolerant version list",
+        "own steps show full history; foreign steps show published versions only, with the exact pinned version always unioned in",
+        "pin/restore is disabled for the currently active version",
+        "workflow re-pin changes only which immutable version a ref points to; step-library restore creates a brand-new head version with old content \u2014 history is never rewritten",
+        "both popovers fetch history on open, not on mount, and re-fetch on every reopen"
+      ],
+      "architecturalRules": [
+        "immutable step versions are never deleted or edited, on disk or in storage \u2014 only the head list and published flag change",
+        "the storage route enforces the foreign-publish filter server-side; client-side version union never bypasses it"
       ],
       "relatedDecisions": []
     }

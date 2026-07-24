@@ -18,6 +18,7 @@ When a workflow step is pinned (`ref`) to a published step definition and a newe
 ## Symbols
 
 - `UpdatePopover`
+- `FieldDiffList` (extracted for reuse — see `workflow-step-version-history`)
 - `changedFields`
 - `FIELD_LABELS`
 - `useWorkflowDraft.updateFor`

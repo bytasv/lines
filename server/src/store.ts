@@ -49,6 +49,7 @@ export function createStore(root: string) {
   const SESSIONS_FILE = path.join(root, 'sessions.json');
   const WORKFLOWS_FILE = path.join(root, 'workflows.json');
   const STEPS_FILE = path.join(root, 'steps.json');
+  const STEP_VERSIONS_FILE = path.join(root, 'step-versions.json');
   const RECENT_DIRS_FILE = path.join(root, 'recent-dirs.json');
   const PROJECTS_FILE = path.join(root, 'projects.json');
   const PROJECT_KEYS_FILE = path.join(root, 'project-keys.json');
@@ -84,6 +85,16 @@ export function createStore(root: string) {
 
     saveSteps(steps: StepDef[]) {
       writeJson(STEPS_FILE, steps);
+    },
+
+    // Own steps' full immutable history — heads live in steps.json; this keeps
+    // older versions resolvable across restarts when storage is offline.
+    loadStepVersions(): StepDef[] {
+      return readJson<StepDef[]>(STEP_VERSIONS_FILE, []);
+    },
+
+    saveStepVersions(versions: StepDef[]) {
+      writeJson(STEP_VERSIONS_FILE, versions);
     },
 
     loadRecentDirs(): string[] {

@@ -1,26 +1,31 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
   Divider,
   Group,
+  Popover,
   ScrollArea,
   Select,
   Stack,
   Switch,
   Text,
   TextInput,
+  Tooltip,
+  UnstyledButton,
 } from '@mantine/core';
-import { IconCopy, IconPlus, IconTrash } from '@tabler/icons-react';
+import { IconCopy, IconHistory, IconPlus, IconTrash } from '@tabler/icons-react';
 import type { PermissionMode, StepContent, StepDef } from '@claude-ui/shared';
 import { DEFAULT_MODEL } from '@claude-ui/shared';
 import { useStore } from '../../store';
-import { getOwnerName } from '../../lib/clerk';
+import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../../lib/modelSelect';
 import { send } from '../../ws';
 import { ConfirmModal } from '../ConfirmModal';
 import { MODE_OPTIONS } from './useWorkflowDraft';
+import { FieldDiffList, relTime } from './StepCard';
 import { PromptEditor } from './PromptEditor';
 import styles from './workflow.module.css';
 
@@ -60,9 +65,107 @@ function content(d: Draft): StepContent {
   };
 }
 
+/**
+ * Browse an owned step's version history and restore one. Restoring loads that version's content into
+ * the draft (leaving it dirty); Save republishes it as a *new* head version — history is never rewritten.
+ * `versions === undefined` = still loading; `onOpen` triggers the fetch.
+ */
+function RestoreHistoryPopover({
+  current,
+  currentVersion,
+  versions,
+  onOpen,
+  onRestore,
+}: {
+  current: StepContent;
+  currentVersion?: number;
+  versions?: StepDef[];
+  onOpen: () => void;
+  onRestore: (def: StepDef) => void;
+}) {
+  const [opened, setOpened] = useState(false);
+  const [selected, setSelected] = useState<number | null>(null);
+  const preview = versions?.find((v) => v.version === selected);
+
+  return (
+    <Popover
+      width={340}
+      position="bottom-end"
+      withArrow
+      shadow="md"
+      opened={opened}
+      onChange={setOpened}
+    >
+      <Popover.Target>
+        <Tooltip label="Version history">
+          <ActionIcon
+            variant="subtle"
+            color="gray"
+            mb={4}
+            onClick={() => {
+              // Fire the fetch here — Mantine's onChange doesn't fire when we drive `opened` ourselves.
+              if (!opened) {
+                setSelected(null);
+                onOpen();
+              }
+              setOpened((o) => !o);
+            }}
+          >
+            <IconHistory size={16} />
+          </ActionIcon>
+        </Tooltip>
+      </Popover.Target>
+      <Popover.Dropdown>
+        <Stack gap={10}>
+          <Text size="xs" fw={600}>Version history</Text>
+          {versions === undefined ? (
+            <Text size="xs" c="dimmed">Loading versions…</Text>
+          ) : (
+            <>
+              <ScrollArea.Autosize mah={220} type="auto">
+                <Stack gap={1}>
+                  {versions.map((v) => (
+                    <UnstyledButton
+                      key={v.version}
+                      className={`${styles.versionRow} ${selected === v.version ? styles.versionRowActive : ''}`}
+                      onClick={() => setSelected(v.version)}
+                    >
+                      <Text size="sm" fw={600}>v{v.version}</Text>
+                      <Text size="xs" c="dimmed" style={{ flex: 1, minWidth: 0 }} truncate>{relTime(v.updatedAt)}</Text>
+                      {v.version === currentVersion && (
+                        <Badge size="xs" variant="light" color="sandstone">current</Badge>
+                      )}
+                    </UnstyledButton>
+                  ))}
+                </Stack>
+              </ScrollArea.Autosize>
+              {preview && (
+                <>
+                  <FieldDiffList from={current} to={preview} />
+                  <Button
+                    size="xs"
+                    disabled={preview.version === currentVersion}
+                    onClick={() => {
+                      onRestore(preview);
+                      setOpened(false);
+                    }}
+                  >
+                    Restore v{preview.version}
+                  </Button>
+                </>
+              )}
+            </>
+          )}
+        </Stack>
+      </Popover.Dropdown>
+    </Popover>
+  );
+}
+
 export function StepLibrary() {
   const steps = useStore((s) => s.steps);
   const sharedSteps = useStore((s) => s.sharedSteps);
+  const stepVersions = useStore((s) => s.stepVersions);
   const models = useStore((s) => s.models);
 
   // Selected key: `own:<id>` | `shared:<ownerId>/<id>` | null (creating new).
@@ -92,6 +195,30 @@ export function StepLibrary() {
   const valid = !!draft && draft.name.trim() !== '' && draft.promptTemplate.trim() !== '';
 
   const patch = (p: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...p } : d));
+
+  // ---- version history (own steps only) ----
+  const ownerIdOf = (d: Draft) => d.ownerId ?? getOwnerId() ?? '';
+
+  const requestVersions = () => {
+    if (!draft?.id) return;
+    send({ type: 'stepVersions', ownerId: ownerIdOf(draft), stepId: draft.id });
+  };
+
+  /** Fetched history unioned with the local head, newest first; undefined = nothing known yet. */
+  const versionsFor = (d: Draft): StepDef[] | undefined => {
+    if (!d.id) return undefined;
+    const fetched = stepVersions[`${ownerIdOf(d)}/${d.id}`];
+    const head = steps.find((s) => s.id === d.id);
+    if (!fetched && !head) return undefined;
+    const byVersion = new Map<number, StepDef>();
+    for (const v of [...(fetched ?? []), ...(head ? [head] : [])]) {
+      if (!byVersion.has(v.version)) byVersion.set(v.version, v);
+    }
+    return [...byVersion.values()].sort((a, b) => b.version - a.version);
+  };
+
+  /** Load an older version's content into the draft; Save republishes it as a new head version. */
+  const restore = (def: StepDef) => patch(content(def));
 
   const newStep = () => load({ ...BLANK }, null);
 
@@ -185,6 +312,15 @@ export function StepLibrary() {
                 <Badge variant="default" mb={6} style={{ whiteSpace: 'nowrap' }}>
                   v{draft.version ?? 1}
                 </Badge>
+              )}
+              {draft.id && !readOnly && (
+                <RestoreHistoryPopover
+                  current={content(draft)}
+                  currentVersion={draft.version}
+                  versions={versionsFor(draft)}
+                  onOpen={requestVersions}
+                  onRestore={restore}
+                />
               )}
               {readOnly ? (
                 <Text size="xs" c="dimmed" pb={8} style={{ whiteSpace: 'nowrap' }}>
