@@ -61,6 +61,32 @@
         "totalTokens accumulates on the SDK result message the same way totalCostUsd already does, rather than introducing a separate tracking mechanism"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "workflow-step-update-popover",
+      "name": "Workflow step update popover",
+      "doc": "features/workflow-step-update-popover.md",
+      "purpose": "Warn when a pinned workflow step is behind its published version, show a field diff, and let the user update to the latest version.",
+      "entryPoints": [
+        "web/src/components/workflow/StepCard.tsx"
+      ],
+      "files": [
+        "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/workflow/useWorkflowDraft.ts",
+        "web/src/components/workflow/WorkflowEditor.tsx"
+      ],
+      "symbols": [
+        "UpdatePopover",
+        "changedFields",
+        "useWorkflowDraft.updateFor",
+        "useWorkflowDraft.updateStepToLatest"
+      ],
+      "tests": [],
+      "businessRules": [
+        "diff list scrolls independently (ScrollArea.Autosize, mah 280) once it exceeds popover height, so the Update button stays reachable regardless of diff length"
+      ],
+      "architecturalRules": [],
+      "relatedDecisions": []
     }
   ]
 }
