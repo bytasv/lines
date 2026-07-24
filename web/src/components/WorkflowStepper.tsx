@@ -43,7 +43,7 @@ export function WorkflowStepper({
   const waiting = state.stepStatuses[state.stepIndex] === 'waiting-approval';
 
   return (
-    <Paper withBorder={false} px="md" pt="xs" pb={waiting ? 'xs' : 4}>
+    <Paper withBorder={false} px="md" pt="xs" pb="xs">
       <Group gap="sm" wrap="nowrap" align="center">
         {workflow.steps.map((step, i) => {
           const status = state.stepStatuses[i];
