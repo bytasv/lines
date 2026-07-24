@@ -371,7 +371,7 @@
       "id": "app-data-root",
       "name": "App data root",
       "doc": "features/app-data-root.md",
-      "purpose": "Machine-global directory (~/.lines-app) holding all server-side app state, with one-time adoption of the legacy ~/.claude-ui directory.",
+      "purpose": "Machine-global directory (~/.lines-app) holding all server-side app state.",
       "entryPoints": [
         "server/src/store.ts"
       ],
@@ -388,7 +388,6 @@
       "tests": [],
       "businessRules": [
         "app data root is ~/.lines-app",
-        "existing ~/.claude-ui is renamed to ~/.lines-app once, when the new root does not exist yet",
         "'local' user uses the flat root; real user ids live under ~/.lines-app/users/{id}",
         "machine-wide assets (vendored plugins) live directly under the root, shared across users"
       ],

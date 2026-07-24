@@ -15,14 +15,6 @@ import type {
  * machine-wide assets (vendored plugins) stay directly under this root. */
 export const APP_ROOT = path.join(os.homedir(), '.lines-app');
 
-// One-time carry-over from the pre-rename layout: adopt an existing
-// ~/.claude-ui directory as ~/.lines-app so installs keep their sessions,
-// auth, and settings across the rename.
-const LEGACY_APP_ROOT = path.join(os.homedir(), '.claude-ui');
-if (!fs.existsSync(APP_ROOT) && fs.existsSync(LEGACY_APP_ROOT)) {
-  fs.renameSync(LEGACY_APP_ROOT, APP_ROOT);
-}
-
 function readJson<T>(file: string, fallback: T): T {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
