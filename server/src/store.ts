@@ -11,9 +11,17 @@ import type {
   WorkflowDef,
 } from '@claude-ui/shared';
 
-/** Machine-global app root. Per-user stores live under `${CLAUDE_UI_ROOT}/users/{userId}`;
+/** Machine-global app root. Per-user stores live under `${APP_ROOT}/users/{userId}`;
  * machine-wide assets (vendored plugins) stay directly under this root. */
-export const CLAUDE_UI_ROOT = path.join(os.homedir(), '.claude-ui');
+export const APP_ROOT = path.join(os.homedir(), '.lines-app');
+
+// One-time carry-over from the pre-rename layout: adopt an existing
+// ~/.claude-ui directory as ~/.lines-app so installs keep their sessions,
+// auth, and settings across the rename.
+const LEGACY_APP_ROOT = path.join(os.homedir(), '.claude-ui');
+if (!fs.existsSync(APP_ROOT) && fs.existsSync(LEGACY_APP_ROOT)) {
+  fs.renameSync(LEGACY_APP_ROOT, APP_ROOT);
+}
 
 function readJson<T>(file: string, fallback: T): T {
   try {
@@ -217,6 +225,6 @@ export type Store = ReturnType<typeof createStore>;
 
 /** Directory holding a single user's flat-JSON state. */
 export function userStoreRoot(userId: string): string {
-  return path.join(CLAUDE_UI_ROOT, 'users', userId);
+  return path.join(APP_ROOT, 'users', userId);
 }
 

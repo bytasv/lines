@@ -1,12 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { CLAUDE_UI_ROOT } from './store.ts';
+import { APP_ROOT } from './store.ts';
 import type { CavemanLevel } from '@claude-ui/shared';
 
 const REPO_URL = 'https://github.com/JuliusBrussee/caveman.git';
 // Machine-global on purpose: the vendored plugin checkout is shared by all users.
-const VENDOR_DIR = path.join(CLAUDE_UI_ROOT, 'plugins', 'caveman-repo');
+const VENDOR_DIR = path.join(APP_ROOT, 'plugins', 'caveman-repo');
 
 let resolvedPluginPath: string | null | undefined;
 

@@ -327,6 +327,36 @@
         "advance() is async; callers fire it with void this.advance(sessionId)"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "app-data-root",
+      "name": "App data root",
+      "doc": "features/app-data-root.md",
+      "purpose": "Machine-global directory (~/.lines-app) holding all server-side app state, with one-time adoption of the legacy ~/.claude-ui directory.",
+      "entryPoints": [
+        "server/src/store.ts"
+      ],
+      "files": [
+        "server/src/store.ts",
+        "server/src/index.ts",
+        "server/src/caveman.ts"
+      ],
+      "symbols": [
+        "APP_ROOT",
+        "userStoreRoot",
+        "createStore"
+      ],
+      "tests": [],
+      "businessRules": [
+        "app data root is ~/.lines-app",
+        "existing ~/.claude-ui is renamed to ~/.lines-app once, when the new root does not exist yet",
+        "'local' user uses the flat root; real user ids live under ~/.lines-app/users/{id}",
+        "machine-wide assets (vendored plugins) live directly under the root, shared across users"
+      ],
+      "architecturalRules": [
+        "all persistent paths derive from APP_ROOT / userStoreRoot; never hardcode the home-directory path elsewhere"
+      ],
+      "relatedDecisions": []
     }
   ]
 }

@@ -13,7 +13,7 @@ import type { ClientMessage, ServerMessage } from '@claude-ui/shared';
 import { DEFAULT_MODELS } from '@claude-ui/shared';
 import { verifyToken } from '@clerk/backend';
 import { WorkerClient } from './workerClient.ts';
-import { CLAUDE_UI_ROOT, userStoreRoot } from './store.ts';
+import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
 import type { UserContext } from './userContext.ts';
 
@@ -76,7 +76,7 @@ const worker = new WorkerClient({
 // Legacy-state adoption is a manual step: server/scripts/migrate-user.ts.
 const registry = new UserRegistry(
   worker,
-  (userId) => (userId === LOCAL_USER ? CLAUDE_UI_ROOT : userStoreRoot(userId)),
+  (userId) => (userId === LOCAL_USER ? APP_ROOT : userStoreRoot(userId)),
   LOCAL_USER,
 );
 // Eager local context in single-tenant mode: workflows keep advancing and
@@ -88,7 +88,7 @@ if (!AUTH_ENABLED) {
   registry.get(LOCAL_USER);
 } else {
   try {
-    const usersDir = path.join(CLAUDE_UI_ROOT, 'users');
+    const usersDir = path.join(APP_ROOT, 'users');
     for (const entry of fs.existsSync(usersDir) ? fs.readdirSync(usersDir) : []) {
       try {
         const raw = fs.readFileSync(path.join(usersDir, entry, 'sessions.json'), 'utf8');
