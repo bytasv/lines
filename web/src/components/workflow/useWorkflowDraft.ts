@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PermissionMode, StepContent, StepDef, WorkflowDef, WorkflowStep } from '@claude-ui/shared';
 import { DEFAULT_MODEL, isStepRef } from '@claude-ui/shared';
 import { useStore } from '../../store';
@@ -143,9 +143,16 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
     [toDraft],
   );
 
-  // On open, pick the previously-selected workflow or the first owned one.
+  // On open, pick the previously-selected workflow or the first owned one. Must
+  // not re-run its fallback while the modal stays open with a live draft — a
+  // workflows broadcast (e.g. right after saving a new workflow) would otherwise
+  // clobber the draft with workflows[0] before id reconciliation runs.
+  const prevOpened = useRef(false);
   useEffect(() => {
+    const justOpened = opened && !prevOpened.current;
+    prevOpened.current = opened;
     if (!opened) return;
+    if (!justOpened && draft) return;
     const all = [...workflows, ...sharedWorkflows];
     const source = all.find((w) => w.id === selectedId) ?? workflows[0] ?? null;
     loadFrom(source, source?.id ?? null);
@@ -343,8 +350,9 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
   useEffect(() => {
     if (!draft || selectedId !== null || draft.id || baseline === null) return;
     if (JSON.stringify(toWire(draft)) !== baseline) return;
+    const draftSteps = JSON.stringify(toWire(draft).steps);
     const match = workflows
-      .filter((w) => w.name === draft.name && w.steps.length === draft.steps.length)
+      .filter((w) => w.name === draft.name && JSON.stringify(w.steps) === draftSteps)
       .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0];
     if (match) {
       setSelectedId(match.id);

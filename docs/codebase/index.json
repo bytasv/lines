@@ -123,6 +123,56 @@
         "the handleWorkerEnded settle fallback must stay gated on the interrupting set (routine non-error ended events exist)"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "composer-focus-new-session",
+      "name": "Composer focus on new session",
+      "doc": "features/composer-focus-new-session.md",
+      "purpose": "Auto-focus the prompt textarea when a brand-new session is created so the user can type immediately.",
+      "entryPoints": [
+        "web/src/components/Composer.tsx"
+      ],
+      "files": [
+        "web/src/components/Composer.tsx",
+        "web/src/store.ts",
+        "shared/types.ts"
+      ],
+      "symbols": [
+        "Composer"
+      ],
+      "tests": [],
+      "businessRules": [
+        "focus fires only when session.createdAt is under 5s old, same threshold as the store's auto-select-on-create logic",
+        "switching to an older existing session does not steal focus"
+      ],
+      "architecturalRules": [
+        "reuses the store's existing justCreated 5s threshold instead of adding a new is-new flag or protocol field"
+      ],
+      "relatedDecisions": []
+    },
+    {
+      "id": "workflow-draft-selection",
+      "name": "Workflow editor draft selection",
+      "doc": "features/workflow-draft-selection.md",
+      "purpose": "Govern which workflow the editor draft reflects across modal-open, workflows-broadcast, and new-workflow id-reconciliation triggers, so a live draft is never silently replaced by an unrelated workflow.",
+      "entryPoints": [
+        "web/src/components/workflow/WorkflowEditor.tsx"
+      ],
+      "files": [
+        "web/src/components/workflow/useWorkflowDraft.ts"
+      ],
+      "symbols": [
+        "useWorkflowDraft"
+      ],
+      "tests": [],
+      "businessRules": [
+        "a workflows/sharedWorkflows length change while the modal is already open with a live draft must not re-trigger the pick-a-workflow fallback"
+      ],
+      "architecturalRules": [
+        "init effect tracks the open transition via a prevOpened ref and skips its workflows[0] fallback whenever a draft already exists and this isn't the open transition, to avoid racing the id-reconciliation effect after a new-workflow save",
+        "new-workflow id reconciliation matches by name plus deep step equality, not step count alone"
+      ],
+      "relatedDecisions": []
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActionIcon,
   Box,
@@ -133,8 +133,14 @@ export function Composer({ session }: { session: SessionMeta }) {
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const interruptible = isSessionInterruptible(session.status);
   const awaitingApproval = session.status === 'waiting-approval';
+
+  // Focus the prompt on a freshly created session (reuses the store's 5s justCreated heuristic).
+  useEffect(() => {
+    if (Date.now() - session.createdAt < 5000) textareaRef.current?.focus();
+  }, [session.id]);
 
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files);
@@ -233,6 +239,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         }}
       />
       <Textarea
+        ref={textareaRef}
         placeholder={
           session.workflow && !session.workflow.started
             ? 'Describe the task — this kicks off the workflow…'
