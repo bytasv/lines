@@ -23,6 +23,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: 'claude-opus-4-8',
         permissionMode: 'plan',
         autoAdvance: false,
+        freshStart: false,
       },
       {
         name: 'Implement MVP',
@@ -31,6 +32,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: 'claude-opus-4-8',
         permissionMode: 'acceptEdits',
         autoAdvance: false,
+        freshStart: true,
       },
       {
         name: 'Add tests',
@@ -39,6 +41,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: 'claude-sonnet-5',
         permissionMode: 'acceptEdits',
         autoAdvance: false,
+        freshStart: true,
       },
       {
         name: 'Refactor',
@@ -47,6 +50,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: 'claude-sonnet-5',
         permissionMode: 'acceptEdits',
         autoAdvance: false,
+        freshStart: true,
       },
       {
         name: 'Review',
@@ -55,6 +59,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: 'claude-opus-4-8',
         permissionMode: 'plan',
         autoAdvance: false,
+        freshStart: true,
       },
     ],
   },
@@ -70,6 +75,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: DEFAULT_MODEL,
         permissionMode: 'plan',
         autoAdvance: false,
+        freshStart: false,
       },
       {
         name: 'Fix',
@@ -78,6 +84,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: DEFAULT_MODEL,
         permissionMode: 'acceptEdits',
         autoAdvance: false,
+        freshStart: true,
       },
       {
         name: 'Regression test',
@@ -86,6 +93,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: 'claude-sonnet-5',
         permissionMode: 'acceptEdits',
         autoAdvance: false,
+        freshStart: true,
       },
       {
         name: 'Review',
@@ -94,6 +102,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: DEFAULT_MODEL,
         permissionMode: 'plan',
         autoAdvance: false,
+        freshStart: true,
       },
     ],
   },
@@ -109,6 +118,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: DEFAULT_MODEL,
         permissionMode: 'plan',
         autoAdvance: false,
+        freshStart: false,
       },
       {
         name: 'Write docs',
@@ -117,6 +127,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         model: 'claude-sonnet-5',
         permissionMode: 'acceptEdits',
         autoAdvance: false,
+        freshStart: true,
       },
     ],
   },

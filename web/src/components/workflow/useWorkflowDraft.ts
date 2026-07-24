@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { PermissionMode, WorkflowDef, WorkflowStep } from '@claude-ui/shared';
-import { DEFAULT_MODEL } from '@claude-ui/shared';
+import type { PermissionMode, StepContent, StepDef, WorkflowDef, WorkflowStep } from '@claude-ui/shared';
+import { DEFAULT_MODEL, isStepRef } from '@claude-ui/shared';
 import { useStore } from '../../store';
-import { getOwnerName } from '../../lib/clerk';
+import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { send } from '../../ws';
 import type { WorkflowPreset } from '../../lib/workflowPresets';
 
@@ -14,14 +14,34 @@ export const MODE_OPTIONS: { value: PermissionMode; label: string }[] = [
   { value: 'bypassPermissions', label: 'Bypass' },
 ];
 
-export type DraftStep = WorkflowStep & { _uid: string };
-export interface Draft extends Omit<WorkflowDef, 'steps'> {
+/** A pinned reference to a published step (present ⇒ this entry is read-only content). */
+export interface DraftRef {
+  stepId: string;
+  ownerId: string;
+  ownerName?: string;
+  version: number;
+}
+
+/**
+ * Editor step: always carries resolved content for display/validation. `ref`
+ * marks it as a pinned reference (content is read-only). `publishStepId` is set
+ * when an inline step was detached from an owned published step to be edited and
+ * re-published under the same id.
+ */
+export type DraftStep = StepContent & {
+  _uid: string;
+  ref?: DraftRef;
+  publishStepId?: string;
+};
+
+export interface DraftWorkflow extends Omit<WorkflowDef, 'steps'> {
   steps: DraftStep[];
 }
 
 export interface StepErrors {
   name?: string;
   prompt?: string;
+  ref?: string;
 }
 export interface ValidationResult {
   name?: string;
@@ -32,71 +52,96 @@ export interface ValidationResult {
 
 let uidSeq = 0;
 function uid(): string {
-  // crypto.randomUUID is fine but a counter keeps snapshots deterministic in tests.
   uidSeq += 1;
   return `s${uidSeq}`;
 }
 
-function emptyStep(): DraftStep {
+const EMPTY_CONTENT: StepContent = {
+  name: 'New step',
+  promptTemplate: '',
+  model: DEFAULT_MODEL,
+  permissionMode: 'default',
+  autoAdvance: false,
+  freshStart: false,
+  outputName: '',
+};
+
+function contentOf(s: StepContent): StepContent {
   return {
-    _uid: uid(),
-    name: 'New step',
-    promptTemplate: '',
-    model: DEFAULT_MODEL,
-    permissionMode: 'default',
-    autoAdvance: false,
+    name: s.name,
+    promptTemplate: s.promptTemplate,
+    model: s.model,
+    permissionMode: s.permissionMode,
+    autoAdvance: s.autoAdvance,
+    freshStart: s.freshStart,
+    outputName: s.outputName ?? '',
   };
 }
-
-function toDraft(w: WorkflowDef): Draft {
-  return { ...w, steps: w.steps.map((s) => ({ ...s, _uid: uid() })) };
-}
-
-function stripUids(d: Draft): WorkflowDef {
-  return { ...d, steps: d.steps.map(({ _uid, ...s }) => s) };
-}
-
-export function validateDraft(d: Draft): ValidationResult {
-  const steps: Record<string, StepErrors> = {};
-  for (const s of d.steps) {
-    const e: StepErrors = {};
-    if (!s.name.trim()) e.name = 'Required';
-    if (!s.promptTemplate.trim()) e.prompt = 'Prompt is required';
-    if (e.name || e.prompt) steps[s._uid] = e;
-  }
-  const name = d.name.trim() ? undefined : 'Workflow name is required';
-  const noSteps = d.steps.length === 0 ? 'Add at least one step' : undefined;
-  const ok = !name && !noSteps && Object.keys(steps).length === 0;
-  return { name, noSteps, steps, ok };
-}
-
-type PendingAction =
-  | { kind: 'close' }
-  | { kind: 'select'; target: WorkflowDef }
-  | { kind: 'new'; preset: WorkflowPreset | null }
-  | null;
 
 export function useWorkflowDraft(opened: boolean, onClose: () => void) {
   const workflows = useStore((s) => s.workflows);
   const sharedWorkflows = useStore((s) => s.sharedWorkflows);
+  const steps = useStore((s) => s.steps);
+  const sharedSteps = useStore((s) => s.sharedSteps);
+  const pinnedSteps = useStore((s) => s.pinnedSteps);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [draft, setDraft] = useState<DraftWorkflow | null>(null);
   const [baseline, setBaseline] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [submitAttempted, setSubmitAttempted] = useState(false);
-  const [sampleTask, setSampleTask] = useState('Add a dark-mode toggle to the settings page');
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const loadFrom = useCallback((w: WorkflowDef | null, id: string | null) => {
-    const d = w ? toDraft(w) : null;
-    setDraft(d);
-    setSelectedId(id);
-    setBaseline(d ? JSON.stringify(stripUids(d)) : null);
-    setCollapsed(new Set());
-    setSubmitAttempted(false);
-  }, []);
+  // Exact immutable versions available for resolving a ref, keyed `${ownerId}/${id}/${version}`.
+  const versionMap = useMemo(() => {
+    const m = new Map<string, StepDef>();
+    for (const s of [...pinnedSteps, ...steps, ...sharedSteps]) {
+      m.set(`${s.ownerId}/${s.id}/${s.version}`, s);
+    }
+    return m;
+  }, [pinnedSteps, steps, sharedSteps]);
+
+  // Latest published head per (owner, id) — for update-available detection + diffs.
+  const headMap = useMemo(() => {
+    const m = new Map<string, StepDef>();
+    for (const s of [...steps, ...sharedSteps]) m.set(`${s.ownerId}/${s.id}`, s);
+    return m;
+  }, [steps, sharedSteps]);
+
+  const resolveRef = useCallback(
+    (r: DraftRef): StepContent | undefined => versionMap.get(`${r.ownerId}/${r.stepId}/${r.version}`),
+    [versionMap],
+  );
+
+  const toDraftStep = useCallback(
+    (s: WorkflowStep): DraftStep => {
+      if (isStepRef(s)) {
+        const ref: DraftRef = { stepId: s.stepId, ownerId: s.ownerId, ownerName: s.ownerName, version: s.version };
+        const content = resolveRef(ref) ?? { ...EMPTY_CONTENT, name: `(unavailable step)` };
+        return { ...contentOf(content), _uid: uid(), ref };
+      }
+      return { ...contentOf(s), _uid: uid() };
+    },
+    [resolveRef],
+  );
+
+  const toDraft = useCallback(
+    (w: WorkflowDef): DraftWorkflow => ({ ...w, steps: w.steps.map(toDraftStep) }),
+    [toDraftStep],
+  );
+
+  const loadFrom = useCallback(
+    (w: WorkflowDef | null, id: string | null) => {
+      const d = w ? toDraft(w) : null;
+      setDraft(d);
+      setSelectedId(id);
+      setBaseline(d ? JSON.stringify(toWire(d)) : null);
+      setCollapsed(new Set());
+      setSubmitAttempted(false);
+    },
+    [toDraft],
+  );
 
   // On open, pick the previously-selected workflow or the first owned one.
   useEffect(() => {
@@ -110,21 +155,32 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
   const readOnly = !!draft?.id && sharedWorkflows.some((w) => w.id === draft.id);
 
   const dirty = useMemo(
-    () => (draft && baseline ? JSON.stringify(stripUids(draft)) !== baseline : false),
+    () => (draft && baseline ? JSON.stringify(toWire(draft)) !== baseline : false),
     [draft, baseline],
   );
 
-  const validation = useMemo(() => (draft ? validateDraft(draft) : null), [draft]);
+  const validation = useMemo(() => (draft ? validate(draft, resolveRef) : null), [draft, resolveRef]);
 
-  const patchDraft = (patch: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...patch } : d));
+  const patchDraft = (patch: Partial<DraftWorkflow>) => setDraft((d) => (d ? { ...d, ...patch } : d));
 
-  const updateStep = (u: string, patch: Partial<WorkflowStep>) =>
+  const updateStep = (u: string, patch: Partial<StepContent>) =>
     setDraft((d) =>
-      d ? { ...d, steps: d.steps.map((s) => (s._uid === u ? { ...s, ...patch } : s)) } : d,
+      d ? { ...d, steps: d.steps.map((s) => (s._uid === u && !s.ref ? { ...s, ...patch } : s)) } : d,
     );
 
   const addStep = () => {
-    const step = emptyStep();
+    const step: DraftStep = { ...EMPTY_CONTENT, _uid: uid() };
+    setDraft((d) => (d ? { ...d, steps: [...d.steps, step] } : d));
+    return step._uid;
+  };
+
+  /** Insert a pinned reference to a shared/own published step, at its latest version. */
+  const addSharedStep = (def: StepDef) => {
+    const step: DraftStep = {
+      ...contentOf(def),
+      _uid: uid(),
+      ref: { stepId: def.id, ownerId: def.ownerId, ownerName: def.ownerName, version: def.version },
+    };
     setDraft((d) => (d ? { ...d, steps: [...d.steps, step] } : d));
     return step._uid;
   };
@@ -134,7 +190,9 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
       if (!d) return d;
       const i = d.steps.findIndex((s) => s._uid === u);
       if (i < 0) return d;
-      const copy: DraftStep = { ...d.steps[i], _uid: uid(), name: `${d.steps[i].name} (copy)` };
+      // Duplicating a ref detaches it into an editable inline copy.
+      const src = d.steps[i];
+      const copy: DraftStep = { ...contentOf(src), _uid: uid(), name: `${src.name} (copy)` };
       const steps = [...d.steps];
       steps.splice(i + 1, 0, copy);
       return { ...d, steps };
@@ -142,17 +200,6 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
 
   const removeStep = (u: string) =>
     setDraft((d) => (d ? { ...d, steps: d.steps.filter((s) => s._uid !== u) } : d));
-
-  const moveStep = (u: string, dir: -1 | 1) =>
-    setDraft((d) => {
-      if (!d) return d;
-      const i = d.steps.findIndex((s) => s._uid === u);
-      const j = i + dir;
-      if (i < 0 || j < 0 || j >= d.steps.length) return d;
-      const steps = [...d.steps];
-      [steps[i], steps[j]] = [steps[j], steps[i]];
-      return { ...d, steps };
-    });
 
   const reorder = (from: number, to: number) =>
     setDraft((d) => {
@@ -163,6 +210,71 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
       return { ...d, steps };
     });
 
+  // ---- publishing + versioning ----
+
+  const myId = getOwnerId();
+
+  /** Is this ref owned by the current user (so it can be edited/re-published)? */
+  const ownsRef = (s: DraftStep) => !!s.ref && steps.some((st) => st.id === s.ref!.stepId);
+
+  /** Head version available for a ref, if newer than the pinned one. */
+  const updateFor = (s: DraftStep): StepDef | undefined => {
+    if (!s.ref) return undefined;
+    const head = headMap.get(`${s.ref.ownerId}/${s.ref.stepId}`);
+    return head && head.version > s.ref.version ? head : undefined;
+  };
+
+  /** Re-pin a ref to the latest published version. */
+  const updateStepToLatest = (u: string) =>
+    setDraft((d) => {
+      if (!d) return d;
+      return {
+        ...d,
+        steps: d.steps.map((s) => {
+          if (s._uid !== u || !s.ref) return s;
+          const head = headMap.get(`${s.ref.ownerId}/${s.ref.stepId}`);
+          if (!head) return s;
+          return { ...contentOf(head), _uid: s._uid, ref: { ...s.ref, ownerName: head.ownerName, version: head.version } };
+        }),
+      };
+    });
+
+  /** Save an inline step to the library (private by default); convert it to an owned ref. */
+  const publishStep = (u: string) => {
+    const step = draft?.steps.find((s) => s._uid === u);
+    if (!step || step.ref) return;
+    const stepId = step.publishStepId ?? crypto.randomUUID();
+    const prevHead = steps.find((s) => s.id === stepId);
+    const version = prevHead ? prevHead.version + 1 : 1;
+    send({ type: 'saveStep', step: contentOf(step), stepId, published: prevHead?.published ?? false, ownerName: getOwnerName() ?? undefined });
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            steps: d.steps.map((s) =>
+              s._uid === u
+                ? { ...contentOf(s), _uid: u, ref: { stepId, ownerId: myId ?? '', ownerName: getOwnerName() ?? undefined, version } }
+                : s,
+            ),
+          }
+        : d,
+    );
+  };
+
+  /** Detach an owned ref into an editable inline step; re-publishing bumps its version. */
+  const editStep = (u: string) =>
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            steps: d.steps.map((s) =>
+              s._uid === u && s.ref ? { ...contentOf(s), _uid: u, publishStepId: s.ref.stepId } : s,
+            ),
+          }
+        : d,
+    );
+
+  // ---- collapse/expand ----
   const toggleCollapsed = (u: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -182,17 +294,10 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
 
   // ---- guarded navigation ----
   const doNew = (preset: WorkflowPreset | null) => {
-    const blankStep: WorkflowStep = {
-      name: 'New step',
-      promptTemplate: '',
-      model: DEFAULT_MODEL,
-      permissionMode: 'default',
-      autoAdvance: false,
-    };
     const wf: WorkflowDef = {
       id: '',
       name: preset ? preset.name : 'New workflow',
-      steps: preset ? preset.steps.map((s) => ({ ...s })) : [blankStep],
+      steps: preset ? preset.steps.map((s) => ({ ...s })) : [{ ...EMPTY_CONTENT }],
     };
     loadFrom(wf, null);
   };
@@ -226,41 +331,32 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
   const save = (): boolean => {
     if (!draft || readOnly) return false;
     setSubmitAttempted(true);
-    const v = validateDraft(draft);
+    const v = validate(draft, resolveRef);
     if (!v.ok) return false;
-    send({ type: 'saveWorkflow', workflow: stripUids(draft), ownerName: getOwnerName() ?? undefined });
-    // Existing workflow: reset baseline in place. New workflow: adopt id from the
-    // broadcast reconciliation effect below.
-    setBaseline(JSON.stringify(stripUids(draft)));
+    send({ type: 'saveWorkflow', workflow: toWire(draft), ownerName: getOwnerName() ?? undefined });
+    setBaseline(JSON.stringify(toWire(draft)));
     setSubmitAttempted(false);
     return true;
   };
 
-  // Reconcile a just-saved NEW workflow (id:'') with the server-assigned id once
-  // it arrives in the broadcast: match on name + step count, newest updatedAt.
+  // Reconcile a just-saved NEW workflow (id:'') with the server-assigned id.
   useEffect(() => {
     if (!draft || selectedId !== null || draft.id || baseline === null) return;
-    // Only reconcile right after a save (baseline equals current draft = not dirty).
-    if (JSON.stringify(stripUids(draft)) !== baseline) return;
+    if (JSON.stringify(toWire(draft)) !== baseline) return;
     const match = workflows
       .filter((w) => w.name === draft.name && w.steps.length === draft.steps.length)
       .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0];
     if (match) {
       setSelectedId(match.id);
       setDraft((d) => (d ? { ...d, id: match.id, updatedAt: match.updatedAt } : d));
-      setBaseline(JSON.stringify(stripUids({ ...draft, id: match.id, updatedAt: match.updatedAt })));
+      setBaseline(JSON.stringify(toWire({ ...draft, id: match.id, updatedAt: match.updatedAt })));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflows]);
 
   const duplicate = () => {
     if (!draft) return;
-    const copy: WorkflowDef = {
-      id: '',
-      name: `${draft.name} (copy)`,
-      steps: draft.steps.map(({ _uid, ...s }) => ({ ...s })),
-      published: false,
-    };
+    const copy: WorkflowDef = { ...toWire(draft), id: '', name: `${draft.name} (copy)`, published: false };
     loadFrom(copy, null);
   };
 
@@ -276,25 +372,33 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
   return {
     workflows,
     sharedWorkflows,
+    steps,
+    sharedSteps,
     selectedId,
     draft,
     readOnly,
     dirty,
     validation,
     submitAttempted,
-    sampleTask,
-    setSampleTask,
     collapsed,
     pendingAction,
     confirmDelete,
+    // step helpers
+    ownsRef,
+    updateFor,
+    resolveRef,
+    headMap,
     // actions
     patchDraft,
     updateStep,
     addStep,
+    addSharedStep,
     duplicateStep,
     removeStep,
-    moveStep,
     reorder,
+    publishStep,
+    editStep,
+    updateStepToLatest,
     toggleCollapsed,
     expandStep,
     collapseAll,
@@ -309,4 +413,51 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
     cancelDelete,
     deleteSelected,
   };
+}
+
+type PendingAction =
+  | { kind: 'close' }
+  | { kind: 'select'; target: WorkflowDef }
+  | { kind: 'new'; preset: WorkflowPreset | null }
+  | null;
+
+/** Serialize a draft to the wire shape: refs → StepRef, inline → StepContent. */
+function toWire(d: DraftWorkflow): WorkflowDef {
+  const steps: WorkflowStep[] = d.steps.map((s) =>
+    s.ref
+      ? { kind: 'ref', stepId: s.ref.stepId, ownerId: s.ref.ownerId, ownerName: s.ref.ownerName, version: s.ref.version }
+      : {
+          name: s.name,
+          promptTemplate: s.promptTemplate,
+          model: s.model,
+          permissionMode: s.permissionMode,
+          autoAdvance: s.autoAdvance,
+          freshStart: s.freshStart,
+          outputName: s.outputName ?? '',
+        },
+  );
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { steps: _drop, ...rest } = d;
+  return { ...rest, steps };
+}
+
+export function validate(
+  d: DraftWorkflow,
+  resolveRef: (r: DraftRef) => StepContent | undefined,
+): ValidationResult {
+  const steps: Record<string, StepErrors> = {};
+  for (const s of d.steps) {
+    const e: StepErrors = {};
+    if (s.ref) {
+      if (!resolveRef(s.ref)) e.ref = 'Shared step unavailable';
+    } else {
+      if (!s.name.trim()) e.name = 'Required';
+      if (!s.promptTemplate.trim()) e.prompt = 'Prompt is required';
+    }
+    if (e.name || e.prompt || e.ref) steps[s._uid] = e;
+  }
+  const name = d.name.trim() ? undefined : 'Workflow name is required';
+  const noSteps = d.steps.length === 0 ? 'Add at least one step' : undefined;
+  const ok = !name && !noSteps && Object.keys(steps).length === 0;
+  return { name, noSteps, steps, ok };
 }

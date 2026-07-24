@@ -474,6 +474,47 @@ export class SessionManager {
   }
 
   /**
+   * Drop the resumed CLI context so this session's next prompt starts a brand-new
+   * Claude session (no memory of prior turns). Used by fresh-start workflow steps.
+   * The next SDK message re-captures a fresh claudeSessionId (see handleSdkMessage).
+   */
+  resetClaudeSession(sessionId: string) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    meta.claudeSessionId = undefined;
+    this.worker.close(sessionId);
+  }
+
+  /**
+   * The final assistant text block of the most recent turn ('' if none). Reused
+   * as the `{previous}` hand-off when a fresh step needs the prior step's output
+   * (e.g. a plan). Same transcript walk as {@link summarizeTurn}.
+   */
+  lastAssistantText(sessionId: string): string {
+    const events = this.store.loadTranscript(sessionId);
+    let lastUserIdx = -1;
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].kind === 'user') {
+        lastUserIdx = i;
+        break;
+      }
+    }
+    let finalText = '';
+    for (const ev of events.slice(Math.max(lastUserIdx, 0))) {
+      if (ev.kind !== 'sdk') continue;
+      const msg = ev.data as { type?: string; message?: { content?: unknown } };
+      if (msg.type !== 'assistant') continue;
+      const content = msg.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content as Record<string, unknown>[]) {
+          if (block.type === 'text' && typeof block.text === 'string') finalText = block.text;
+        }
+      }
+    }
+    return finalText;
+  }
+
+  /**
    * Env for the bridge-side helper queries (autoName/summarizeTurn): they run
    * outside the worker, so hand them the owner's OAuth token explicitly — a
    * remote multi-user host has no ambient CLI login to fall back on.
@@ -716,14 +757,28 @@ export class SessionManager {
 
     let text: string;
     if (original.toolName === 'ExitPlanMode' && allow) {
-      // Resume outside plan mode so the approved plan gets implemented.
-      if (meta.permissionMode === 'plan') {
-        meta.permissionMode = 'default';
+      const wf = meta.workflow;
+      const stepRunning = !!wf && wf.stepStatuses[wf.stepIndex] === 'running';
+      if (stepRunning && (wf!.stepPermissionMode ?? meta.permissionMode) === 'plan') {
+        // Configured plan step: advance the workflow instead of implementing in place.
+        wf!.advanceOnComplete = true;
         this.upsert(meta);
+        text =
+          'I approved your plan (the session was interrupted before the approval reached you). ' +
+          'Do not implement anything now — end your turn. The workflow will proceed to the next step.';
+      } else {
+        // Resume outside plan mode so the approved plan gets implemented in place.
+        if (meta.permissionMode === 'plan') {
+          meta.permissionMode =
+            stepRunning && wf!.stepPermissionMode && wf!.stepPermissionMode !== 'plan'
+              ? wf!.stepPermissionMode // manual override: resume in the step's configured mode
+              : 'default';
+          this.upsert(meta);
+        }
+        text =
+          'I approved your plan (the session was interrupted before the approval reached you). ' +
+          'Proceed with the implementation now.';
       }
-      text =
-        'I approved your plan (the session was interrupted before the approval reached you). ' +
-        'Proceed with the implementation now.';
     } else if (original.toolName === 'AskUserQuestion' && allow && answers) {
       const lines = Object.entries(answers).map(([q, a]) => `- ${q}\n  Answer: ${a}`);
       text =
@@ -825,7 +880,7 @@ export class SessionManager {
       original?.toolName === 'ExitPlanMode' &&
       meta0?.workflow &&
       meta0.workflow.stepStatuses[meta0.workflow.stepIndex] === 'running' &&
-      meta0.permissionMode === 'plan'
+      (meta0.workflow.stepPermissionMode ?? meta0.permissionMode) === 'plan'
     ) {
       meta0.workflow.advanceOnComplete = true;
       this.upsert(meta0);
@@ -846,8 +901,17 @@ export class SessionManager {
       const original = this.findPermissionRequest(sessionId, requestId);
       const meta = this.sessions.get(sessionId);
       if (meta && original?.toolName === 'ExitPlanMode' && meta.permissionMode === 'plan') {
-        meta.permissionMode = 'default';
-        this.upsert(meta);
+        const wf = meta.workflow;
+        const stepMode =
+          wf && wf.stepStatuses[wf.stepIndex] === 'running' ? wf.stepPermissionMode : undefined;
+        if (stepMode && stepMode !== 'plan') {
+          // Manual plan override mid-workflow-step: the CLI reverts to 'default' on
+          // approval, so push the step's configured mode back to the worker too.
+          this.setPermissionMode(sessionId, stepMode);
+        } else {
+          meta.permissionMode = 'default';
+          this.upsert(meta);
+        }
       }
     }
   }

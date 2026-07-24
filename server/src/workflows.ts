@@ -1,7 +1,33 @@
 import { randomUUID } from 'node:crypto';
-import type { PromptAttachment, ServerMessage, WorkflowDef, WorkflowMarkerData, WorkflowState } from '@claude-ui/shared';
+import type {
+  PromptAttachment,
+  ServerMessage,
+  StepContent,
+  StepDef,
+  StepRef,
+  WorkflowDef,
+  WorkflowMarkerData,
+  WorkflowState,
+} from '@claude-ui/shared';
+import { isStepRef } from '@claude-ui/shared';
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
+import { captureBaseline, workingTreeDiff } from './git.ts';
+
+const stepKey = (ownerId: string, id: string, version: number) => `${ownerId}/${id}/${version}`;
+
+/** True when two step contents are identical (version bumps only on content change). */
+function sameContent(a: StepContent, b: StepContent): boolean {
+  return (
+    a.name === b.name &&
+    a.promptTemplate === b.promptTemplate &&
+    a.model === b.model &&
+    a.permissionMode === b.permissionMode &&
+    a.autoAdvance === b.autoAdvance &&
+    a.freshStart === b.freshStart &&
+    (a.outputName ?? '') === (b.outputName ?? '')
+  );
+}
 
 export const DEFAULT_WORKFLOW: WorkflowDef = {
   id: 'default-feature-flow',
@@ -14,6 +40,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       model: 'claude-opus-4-8',
       permissionMode: 'plan',
       autoAdvance: false,
+      freshStart: false,
     },
     {
       name: 'Implement MVP',
@@ -22,6 +49,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       model: 'claude-opus-4-8',
       permissionMode: 'acceptEdits',
       autoAdvance: false,
+      freshStart: true,
     },
     {
       name: 'Add tests',
@@ -30,6 +58,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       model: 'claude-sonnet-5',
       permissionMode: 'acceptEdits',
       autoAdvance: false,
+      freshStart: true,
     },
     {
       name: 'Refactor',
@@ -38,6 +67,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       model: 'claude-sonnet-5',
       permissionMode: 'acceptEdits',
       autoAdvance: false,
+      freshStart: true,
     },
     {
       name: 'Review',
@@ -46,6 +76,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       model: 'claude-opus-4-8',
       permissionMode: 'plan',
       autoAdvance: false,
+      freshStart: true,
     },
   ],
 };
@@ -54,6 +85,12 @@ export class WorkflowEngine {
   private workflows = new Map<string, WorkflowDef>();
   /** Other users' published workflows — read-only, never persisted or pushed. */
   private shared = new Map<string, WorkflowDef>();
+  /** This user's own published step heads, keyed by step id. */
+  private steps = new Map<string, StepDef>();
+  /** Other users' published step heads (the library), keyed `${ownerId}/${id}`. */
+  private sharedSteps = new Map<string, StepDef>();
+  /** Every resolved immutable version (own history + resolved foreign pins), keyed by stepKey. */
+  private stepVersions = new Map<string, StepDef>();
 
   constructor(
     private store: Store,
@@ -63,6 +100,10 @@ export class WorkflowEngine {
     private userId: string,
   ) {
     for (const wf of this.store.loadWorkflows()) this.workflows.set(wf.id, wf);
+    for (const s of this.store.loadSteps()) {
+      this.steps.set(s.id, s);
+      this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
+    }
     if (!this.workflows.has(DEFAULT_WORKFLOW.id)) {
       this.workflows.set(DEFAULT_WORKFLOW.id, DEFAULT_WORKFLOW);
       this.persist();
@@ -97,6 +138,115 @@ export class WorkflowEngine {
     }
     this.shared = next;
     return true;
+  }
+
+  // ---- steps (versioned, shareable) ----
+
+  listSteps(): StepDef[] {
+    return [...this.steps.values()];
+  }
+
+  listSharedSteps(): StepDef[] {
+    return [...this.sharedSteps.values()];
+  }
+
+  /** Every pin referenced by this user's own workflows, resolved to its immutable version. */
+  listPinnedSteps(): StepDef[] {
+    const out: StepDef[] = [];
+    for (const ref of this.refs()) {
+      const s = this.stepVersions.get(stepKey(ref.ownerId, ref.stepId, ref.version));
+      if (s) out.push(s);
+    }
+    return out;
+  }
+
+  /** Distinct step refs across all owned workflows. */
+  private refs(): StepRef[] {
+    const seen = new Map<string, StepRef>();
+    for (const wf of this.workflows.values()) {
+      for (const step of wf.steps) {
+        if (isStepRef(step)) seen.set(stepKey(step.ownerId, step.stepId, step.version), step);
+      }
+    }
+    return [...seen.values()];
+  }
+
+  /** Refs whose pinned version isn't cached yet — userContext resolves these from storage. */
+  unresolvedRefs(): StepRef[] {
+    return this.refs().filter((r) => !this.stepVersions.has(stepKey(r.ownerId, r.stepId, r.version)));
+  }
+
+  /** Adopt resolved immutable versions (own history from a pull, or foreign pins). */
+  addStepVersions(list: StepDef[]): void {
+    for (const s of list) this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
+  }
+
+  /** Replace the shared-step library; returns true if it changed. */
+  setSharedSteps(list: StepDef[]): boolean {
+    const next = new Map(list.filter((s) => s.id && s.ownerId).map((s) => [`${s.ownerId}/${s.id}`, s] as const));
+    const changed =
+      next.size !== this.sharedSteps.size ||
+      [...next].some(([k, s]) => (this.sharedSteps.get(k)?.version ?? -1) !== s.version);
+    this.sharedSteps = next;
+    // Library heads are resolvable versions too.
+    for (const s of next.values()) this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
+    return changed;
+  }
+
+  /** Adopt own steps pulled from storage (LWW on version). */
+  applySyncedSteps(list: StepDef[]): void {
+    let changed = false;
+    for (const s of list) {
+      const cur = this.steps.get(s.id);
+      if (!cur || s.version >= cur.version) {
+        this.steps.set(s.id, s);
+        this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
+        changed = true;
+      }
+    }
+    if (changed) this.persistSteps();
+  }
+
+  /**
+   * Save or update a step. A content change bumps the (immutable) version;
+   * toggling `published` alone keeps the version and just re-flags the head.
+   */
+  saveStep(content: StepContent, stepId: string | undefined, published: boolean, ownerName: string | undefined): StepDef {
+    const id = stepId && this.steps.has(stepId) ? stepId : stepId || randomUUID();
+    const head = this.steps.get(id);
+    const contentChanged = !head || !sameContent(head, content);
+    const version = head ? (contentChanged ? head.version + 1 : head.version) : 1;
+    const step: StepDef = {
+      ...content,
+      id,
+      ownerId: this.userId,
+      ownerName,
+      version,
+      published,
+      updatedAt: Date.now(),
+    };
+    this.steps.set(id, step);
+    this.stepVersions.set(stepKey(step.ownerId, id, version), step);
+    this.persistSteps();
+    this.broadcast({ type: 'steps', steps: this.listSteps() });
+    return step;
+  }
+
+  /** Drop a step from this user's library; immutable versions stay cached for existing pins. */
+  deleteStep(stepId: string): void {
+    if (!this.steps.delete(stepId)) return;
+    this.persistSteps();
+    this.broadcast({ type: 'steps', steps: this.listSteps() });
+  }
+
+  private persistSteps() {
+    this.store.saveSteps(this.listSteps());
+  }
+
+  /** Resolve a workflow step to its runnable content (refs → pinned immutable version). */
+  private stepContent(step: WorkflowDef['steps'][number]): StepContent | undefined {
+    if (!isStepRef(step)) return step;
+    return this.stepVersions.get(stepKey(step.ownerId, step.stepId, step.version));
   }
 
   save(workflow: WorkflowDef): WorkflowDef {
@@ -146,10 +296,11 @@ export class WorkflowEngine {
     } satisfies WorkflowState;
     // Reflect step 0's mode/model on the session up front so the composer pill is
     // correct before the first prompt. runStep re-applies these (via the worker) on start.
-    const step0 = wf.steps[0];
+    const step0 = wf.steps[0] && this.stepContent(wf.steps[0]);
     if (step0) {
       meta.permissionMode = step0.permissionMode;
       meta.model = step0.model;
+      meta.workflow.stepPermissionMode = step0.permissionMode;
     }
     this.sessions.setStatus(sessionId, meta.status); // persist + broadcast the attached workflow
   }
@@ -164,45 +315,106 @@ export class WorkflowEngine {
     meta.workflow.started = true;
     meta.workflow.task = userText;
     this.sessions.maybeAutoName(sessionId, userText);
-    void this.runStep(sessionId);
+    // Snapshot the working tree now so later steps' {diff} excludes pre-existing
+    // dirty state. Fire-and-forget: the first fresh step is at least one approval
+    // gap away, long after this resolves.
+    void this.captureDiffBaseline(sessionId);
+    void this.runStep(sessionId, undefined, true);
     return true;
+  }
+
+  private async captureDiffBaseline(sessionId: string) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.workflow) return;
+    meta.workflow.diffBaseline = await captureBaseline(meta.cwd);
   }
 
   private marker(sessionId: string, data: WorkflowMarkerData) {
     this.sessions.emitEvent(sessionId, 'workflow', data);
   }
 
-  private async runStep(sessionId: string, feedback?: string) {
+  /**
+   * @param entry True when first entering the step (start/advance/approve) — the
+   *   point where a fresh-start step resets its session and gets the hand-off.
+   *   False on retry/iterate, which stay in the step's existing (fresh or
+   *   inherited) conversation so feedback lands on the same context.
+   */
+  private async runStep(sessionId: string, feedback?: string, entry = false) {
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     const step = wf.steps[i];
-    if (!step) return;
+    const content = step && this.stepContent(step);
+    if (!step || !content) {
+      // Unresolved reference (e.g. a shared step version this bridge couldn't fetch).
+      if (step) {
+        this.sessions.setStatus(sessionId, 'error');
+        meta.workflow.stepStatuses[i] = 'waiting-approval';
+      }
+      return;
+    }
 
     meta.workflow.stepStatuses[i] = 'running';
+    meta.workflow.stepPermissionMode = content.permissionMode;
     // Clear any stale waiting-approval status before the async model/mode setup below.
     this.sessions.setStatus(sessionId, 'running');
     this.marker(sessionId, {
       stepIndex: i,
-      stepName: step.name,
+      stepName: content.name,
       event: feedback !== undefined ? 'retried' : 'started',
       feedback,
     });
 
     // Per-step model + permission mode take effect before the prompt is queued.
-    await this.sessions.setModel(sessionId, step.model);
-    await this.sessions.setPermissionMode(sessionId, step.permissionMode);
+    await this.sessions.setModel(sessionId, content.model);
+    await this.sessions.setPermissionMode(sessionId, content.permissionMode);
 
     const feedbackText = feedback
       ? `\n\nThe user reviewed the previous attempt at this step and asked for changes: ${feedback}`
       : '';
-    let prompt = step.promptTemplate.includes('{feedback}')
-      ? step.promptTemplate.replaceAll('{feedback}', feedbackText)
-      : step.promptTemplate + feedbackText;
+    let prompt = content.promptTemplate.includes('{feedback}')
+      ? content.promptTemplate.replaceAll('{feedback}', feedbackText)
+      : content.promptTemplate + feedbackText;
     prompt = prompt.replaceAll('{task}', meta.workflow.task ?? '');
 
+    // Named outputs from earlier steps: {outputs.<name>} → the captured text
+    // (empty string if that step hasn't run yet or wasn't named). Works for
+    // both fresh and inherited steps.
+    const outputs = meta.workflow.outputs ?? {};
+    prompt = prompt.replace(/\{outputs\.([\w-]+)\}/g, (_m, name: string) => outputs[name] ?? '');
+
+    // Fresh start: drop the accumulated conversation and seed a clean session
+    // with a compact hand-off — the previous step's final output ({previous},
+    // e.g. a plan) and the working-tree diff ({diff}). Only when entering a step
+    // that actually has predecessors (i > 0); step 0 has no prior output and its
+    // "diff" would just be the repo's pre-existing dirty state. Retries stay in
+    // the fresh session already established for this step.
+    if (content.freshStart && entry && i > 0) {
+      const previous = this.sessions.lastAssistantText(sessionId);
+      const diff = await workingTreeDiff(meta.cwd, meta.workflow.diffBaseline);
+      const usesTokens = prompt.includes('{previous}') || prompt.includes('{diff}');
+      prompt = prompt.replaceAll('{previous}', previous).replaceAll('{diff}', diff);
+      if (!usesTokens) {
+        const parts: string[] = [];
+        if (previous) parts.push(`## Context from the previous step\n\n${previous}`);
+        if (diff) parts.push(`## Changes so far (git diff)\n\n\`\`\`diff\n${diff}\n\`\`\``);
+        if (parts.length) prompt = `${parts.join('\n\n')}\n\n---\n\n${prompt}`;
+      }
+      this.sessions.resetClaudeSession(sessionId);
+    } else {
+      // No hand-off to fill (non-fresh, a retry, or the first step): strip the
+      // tokens. A fresh first step still gets a clean session below.
+      prompt = prompt.replaceAll('{previous}', '').replaceAll('{diff}', '');
+      if (content.freshStart && entry) this.sessions.resetClaudeSession(sessionId);
+    }
+
     this.sessions.prompt(sessionId, prompt, 'workflow');
+  }
+
+  /** Resolved step name for transcript markers ('' if a ref couldn't be resolved). */
+  private stepName(step?: WorkflowDef['steps'][number]): string {
+    return (step && this.stepContent(step)?.name) || '';
   }
 
   private onWorkflowTurnComplete(sessionId: string) {
@@ -216,12 +428,12 @@ export class WorkflowEngine {
     // A plan approved mid-step advances straight to the next step.
     if (meta.workflow.advanceOnComplete) {
       meta.workflow.advanceOnComplete = undefined;
-      this.marker(sessionId, { stepIndex: i, stepName: step.name, event: 'approved' });
+      this.marker(sessionId, { stepIndex: i, stepName: this.stepName(step), event: 'approved' });
       this.advance(sessionId);
       return;
     }
 
-    if (step.autoAdvance) {
+    if (this.stepContent(step)?.autoAdvance) {
       this.advance(sessionId);
       return;
     }
@@ -236,7 +448,7 @@ export class WorkflowEngine {
 
     meta.workflow.stepStatuses[i] = 'waiting-approval';
     this.sessions.setStatus(sessionId, 'waiting-approval');
-    this.marker(sessionId, { stepIndex: i, stepName: step.name, event: 'waiting-approval' });
+    this.marker(sessionId, { stepIndex: i, stepName: this.stepName(step), event: 'waiting-approval' });
   }
 
   /**
@@ -262,7 +474,7 @@ export class WorkflowEngine {
     this.sessions.setStatus(sessionId, 'running');
     this.marker(sessionId, {
       stepIndex: i,
-      stepName: wf.steps[i]?.name ?? '',
+      stepName: this.stepName(wf.steps[i]),
       event: 'retried',
     });
     this.sessions.prompt(sessionId, text, 'workflow', attachments);
@@ -279,7 +491,7 @@ export class WorkflowEngine {
     const wf = this.resolve(meta.workflow.workflowId);
     this.marker(sessionId, {
       stepIndex: i,
-      stepName: wf?.steps[i]?.name ?? '',
+      stepName: this.stepName(wf?.steps[i]),
       event: 'approved',
     });
     this.advance(sessionId);
@@ -301,14 +513,22 @@ export class WorkflowEngine {
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'done';
 
+    // Publish this step's final output under its name so later steps can pull it
+    // via {outputs.<name>}. Captured here, right after the step's turn completed,
+    // so lastAssistantText() still points at this step's concluding message.
+    const outName = this.stepContent(wf.steps[i])?.outputName?.trim();
+    if (outName) {
+      (meta.workflow.outputs ??= {})[outName] = this.sessions.lastAssistantText(sessionId);
+    }
+
     if (i + 1 < wf.steps.length) {
       meta.workflow.stepIndex = i + 1;
-      void this.runStep(sessionId);
+      void this.runStep(sessionId, undefined, true);
     } else {
       this.sessions.setStatus(sessionId, 'idle');
       this.marker(sessionId, {
         stepIndex: i,
-        stepName: wf.steps[i].name,
+        stepName: this.stepName(wf.steps[i]),
         event: 'workflow-done',
       });
     }

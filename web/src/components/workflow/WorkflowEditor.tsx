@@ -1,31 +1,96 @@
+import { useState } from 'react';
 import {
+  Alert,
   Badge,
   Box,
   Button,
   Divider,
   Group,
+  Menu,
   Modal,
   Paper,
   ScrollArea,
+  SegmentedControl,
   SimpleGrid,
   Stack,
   Switch,
   Text,
   TextInput,
 } from '@mantine/core';
-import { IconCopy, IconPlus, IconTrash } from '@tabler/icons-react';
+import { IconAlertTriangle, IconChevronDown, IconCopy, IconPlus, IconTrash } from '@tabler/icons-react';
 import { DragDropContext, Draggable, Droppable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
+import type { StepDef } from '@claude-ui/shared';
 import { useStore } from '../../store';
 import { ConfirmModal } from '../ConfirmModal';
 import { WORKFLOW_PRESETS } from '../../lib/workflowPresets';
 import { useWorkflowDraft } from './useWorkflowDraft';
 import { WorkflowList } from './WorkflowList';
-import { WorkflowPipeline } from './WorkflowPipeline';
+import { StepLibrary } from './StepLibrary';
 import { StepCard } from './StepCard';
+
+/** "Add step" with a blank option plus my own steps and the shared library. */
+function AddStepMenu({
+  ownSteps,
+  sharedSteps,
+  onBlank,
+  onPick,
+}: {
+  ownSteps: StepDef[];
+  sharedSteps: StepDef[];
+  onBlank: () => void;
+  onPick: (def: StepDef) => void;
+}) {
+  const byOwner = new Map<string, StepDef[]>();
+  for (const s of sharedSteps) {
+    const key = s.ownerName ?? 'Unknown';
+    (byOwner.get(key) ?? byOwner.set(key, []).get(key)!).push(s);
+  }
+  const StepItem = (s: StepDef) => (
+    <Menu.Item
+      key={`${s.ownerId}/${s.id}`}
+      onClick={() => onPick(s)}
+      rightSection={
+        <Badge size="xs" variant="light" color={s.published ? 'sandstone' : 'gray'}>
+          v{s.version}
+        </Badge>
+      }
+    >
+      <Text size="sm" truncate>{s.name}</Text>
+    </Menu.Item>
+  );
+  return (
+    <Menu position="top-start" width={280} withinPortal>
+      <Menu.Target>
+        <Button variant="default" leftSection={<IconPlus size={13} />} rightSection={<IconChevronDown size={13} />}>
+          Add step
+        </Button>
+      </Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Item onClick={onBlank}>Blank step</Menu.Item>
+        {ownSteps.length > 0 && (
+          <>
+            <Menu.Label>My steps</Menu.Label>
+            {ownSteps.map(StepItem)}
+          </>
+        )}
+        {byOwner.size > 0 && <Menu.Label>Shared steps</Menu.Label>}
+        {[...byOwner.entries()].map(([owner, list]) => (
+          <Box key={owner}>
+            <Text size="10px" c="dimmed" px="sm" pt={4} tt="uppercase" fw={600}>
+              {owner}
+            </Text>
+            {list.map(StepItem)}
+          </Box>
+        ))}
+      </Menu.Dropdown>
+    </Menu>
+  );
+}
 
 export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: () => void }) {
   const models = useStore((s) => s.models);
+  const [view, setView] = useState<'workflows' | 'steps'>('workflows');
   const wf = useWorkflowDraft(opened, onClose);
   const { draft, readOnly, validation, submitAttempted, collapsed } = wf;
 
@@ -41,12 +106,14 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
     wf.reorder(result.source.index, result.destination.index);
   };
 
+  const updatesAvailable = draft?.steps.filter((s) => wf.updateFor(s)).length ?? 0;
+
   return (
     <>
       <Modal
         opened={opened}
         onClose={wf.requestClose}
-        title="Workflows"
+        title="Workflows & steps"
         size="90%"
         centered
         padding={0}
@@ -57,6 +124,21 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
           header: { padding: 'var(--mantine-spacing-md)', paddingBottom: 'var(--mantine-spacing-xs)' },
         }}
       >
+        <Stack gap={0} style={{ flex: 1, minHeight: 0, width: '100%' }}>
+          <Box px="md" pt={4} pb="xs">
+            <SegmentedControl
+              size="xs"
+              value={view}
+              onChange={(v) => setView(v as 'workflows' | 'steps')}
+              data={[
+                { value: 'workflows', label: 'Workflows' },
+                { value: 'steps', label: 'Steps' },
+              ]}
+            />
+          </Box>
+          {view === 'steps' ? (
+            <StepLibrary />
+          ) : (
         <Group align="stretch" gap={0} wrap="nowrap" style={{ flex: 1, minHeight: 0 }}>
           <Box p="md" style={{ display: 'flex' }}>
             <WorkflowList
@@ -70,23 +152,17 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
           </Box>
           <Divider orientation="vertical" />
           {draft ? (
-            <Stack gap="sm" p="md" style={{ flex: 1, minWidth: 0 }}>
+            <Stack gap="xs" p="md" style={{ flex: 1, minWidth: 0 }}>
               {/* Header */}
               <Group justify="space-between" align="flex-end" wrap="nowrap">
                 <TextInput
                   label="Workflow name"
+                  size="sm"
                   style={{ flex: 1 }}
                   value={draft.name}
                   disabled={readOnly}
                   error={submitAttempted ? validation?.name : undefined}
                   onChange={(e) => wf.patchDraft({ name: e.currentTarget.value })}
-                />
-                <TextInput
-                  label="Preview task"
-                  w={240}
-                  value={wf.sampleTask}
-                  placeholder="Sample task for prompt preview…"
-                  onChange={(e) => wf.setSampleTask(e.currentTarget.value)}
                 />
                 {readOnly ? (
                   <Text size="xs" c="dimmed" pb={8} style={{ whiteSpace: 'nowrap' }}>
@@ -94,6 +170,7 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
                   </Text>
                 ) : (
                   <Switch
+                    size="sm"
                     pb={8}
                     label="Published"
                     checked={draft.published ?? false}
@@ -102,47 +179,51 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
                 )}
               </Group>
 
-              <WorkflowPipeline
-                draft={draft}
-                collapsed={collapsed}
-                validation={validation}
-                submitAttempted={submitAttempted}
-                readOnly={readOnly}
-                onSelectStep={selectStep}
-                onAddStep={() => selectStep(wf.addStep())}
-              />
+              {updatesAvailable > 0 && (
+                <Alert
+                  variant="light"
+                  color="yellow"
+                  icon={<IconAlertTriangle size={16} />}
+                  p="xs"
+                >
+                  <Text size="xs">
+                    {updatesAvailable} shared step{updatesAvailable === 1 ? '' : 's'} {updatesAvailable === 1 ? 'has' : 'have'} a newer version — open the step to review and update.
+                  </Text>
+                </Alert>
+              )}
 
               {/* Steps */}
               <ScrollArea style={{ flex: 1 }} type="hover">
                 <DragDropContext onDragStart={wf.collapseAll} onDragEnd={onDragEnd}>
                   <Droppable droppableId="steps">
                     {(dropProvided) => (
-                      <Stack gap="sm" ref={dropProvided.innerRef} {...dropProvided.droppableProps} pr="xs">
+                      <Stack gap="xs" ref={dropProvided.innerRef} {...dropProvided.droppableProps} pr="xs">
                         {draft.steps.map((step, i) => (
-                          <Draggable
-                            key={step._uid}
-                            draggableId={step._uid}
-                            index={i}
-                            isDragDisabled={readOnly}
-                          >
+                          <Draggable key={step._uid} draggableId={step._uid} index={i} isDragDisabled={readOnly}>
                             {(dragProvided) => (
                               <div ref={dragProvided.innerRef} {...dragProvided.draggableProps}>
                                 <StepCard
                                   step={step}
                                   index={i}
+                                  availableOutputs={draft.steps
+                                    .slice(0, i)
+                                    .map((s) => s.outputName?.trim())
+                                    .filter((n): n is string => !!n)}
                                   collapsed={collapsed.has(step._uid)}
                                   errors={submitAttempted ? validation?.steps[step._uid] : undefined}
                                   readOnly={readOnly}
                                   models={models}
-                                  sampleTask={wf.sampleTask}
-                                  canMoveUp={i > 0}
-                                  canMoveDown={i < draft.steps.length - 1}
+                                  ownsRef={wf.ownsRef(step)}
+                                  updateDef={wf.updateFor(step)}
                                   dragHandleProps={dragProvided.dragHandleProps}
                                   onPatch={(patch) => wf.updateStep(step._uid, patch)}
                                   onToggle={() => wf.toggleCollapsed(step._uid)}
+                                  onExpand={() => wf.expandStep(step._uid)}
                                   onDuplicate={() => wf.duplicateStep(step._uid)}
                                   onRemove={() => wf.removeStep(step._uid)}
-                                  onMove={(dir) => wf.moveStep(step._uid, dir)}
+                                  onPublish={() => wf.publishStep(step._uid)}
+                                  onEdit={() => wf.editStep(step._uid)}
+                                  onUpdateToLatest={() => wf.updateStepToLatest(step._uid)}
                                 />
                               </div>
                             )}
@@ -172,9 +253,12 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
               ) : (
                 <Group justify="space-between">
                   <Group gap="xs">
-                    <Button variant="default" leftSection={<IconPlus size={13} />} onClick={() => selectStep(wf.addStep())}>
-                      Add step
-                    </Button>
+                    <AddStepMenu
+                      ownSteps={wf.steps}
+                      sharedSteps={wf.sharedSteps}
+                      onBlank={() => selectStep(wf.addStep())}
+                      onPick={(def) => selectStep(wf.addSharedStep(def))}
+                    />
                     <Button variant="default" leftSection={<IconCopy size={13} />} onClick={wf.duplicate}>
                       Duplicate
                     </Button>
@@ -209,16 +293,10 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
                       onClick={() => wf.newFromPreset(p)}
                     >
                       <Group justify="space-between">
-                        <Text size="sm" fw={600}>
-                          {p.name}
-                        </Text>
-                        <Badge size="xs" variant="light" color="gray">
-                          {p.steps.length} steps
-                        </Badge>
+                        <Text size="sm" fw={600}>{p.name}</Text>
+                        <Badge size="xs" variant="light" color="gray">{p.steps.length} steps</Badge>
                       </Group>
-                      <Text size="xs" c="dimmed" mt={4}>
-                        {p.description}
-                      </Text>
+                      <Text size="xs" c="dimmed" mt={4}>{p.description}</Text>
                     </Paper>
                   ))}
                   <Paper
@@ -228,18 +306,16 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
                     style={{ cursor: 'pointer', borderStyle: 'dashed' }}
                     onClick={() => wf.newFromPreset(null)}
                   >
-                    <Text size="sm" fw={600}>
-                      Blank workflow
-                    </Text>
-                    <Text size="xs" c="dimmed" mt={4}>
-                      Start from a single empty step.
-                    </Text>
+                    <Text size="sm" fw={600}>Blank workflow</Text>
+                    <Text size="xs" c="dimmed" mt={4}>Start from a single empty step.</Text>
                   </Paper>
                 </SimpleGrid>
               </Stack>
             </ScrollArea>
           )}
         </Group>
+          )}
+        </Stack>
       </Modal>
 
       <ConfirmModal

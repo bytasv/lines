@@ -60,12 +60,77 @@ export interface CavemanConfig {
   level: CavemanLevel;
 }
 
-export interface WorkflowStep {
+/** The runnable/editable fields of a step. */
+export interface StepContent {
   name: string;
   promptTemplate: string;
   model: string;
   permissionMode: PermissionMode;
   autoAdvance: boolean;
+  /**
+   * When true, the step runs in a fresh Claude CLI session instead of inheriting
+   * the running conversation. It is seeded with a compact hand-off (the previous
+   * step's final output via `{previous}` and the working-tree `git diff` via
+   * `{diff}`) rather than the full accumulated transcript. Default false = inherit.
+   */
+  freshStart: boolean;
+  /**
+   * Optional label under which this step's final output is stored in the workflow
+   * run, so any later step can pull it via `{outputs.<name>}` — not just the
+   * immediately previous step. Empty/undefined = the output isn't published.
+   */
+  outputName?: string;
+}
+
+/**
+ * A standalone, versioned, shareable step. The author's editable "head" lives in
+ * the step store; every version is immutable once written, so a workflow pinned
+ * to an older version keeps running that exact content even after a republish.
+ */
+export interface StepDef extends StepContent {
+  id: string;
+  ownerId: string;
+  ownerName?: string;
+  version: number;
+  published: boolean;
+  updatedAt?: number;
+}
+
+/** A consumer's pinned reference to another author's published step version. */
+export interface StepRef {
+  kind: 'ref';
+  stepId: string;
+  ownerId: string;
+  ownerName?: string;
+  version: number;
+}
+
+/**
+ * An inline step: private content embedded in the workflow. Optionally carries
+ * its own published identity once the owner publishes it to the library — the
+ * owner keeps editing this inline head; consumers get a {@link StepRef} instead.
+ */
+export interface InlineStep extends StepContent {
+  kind?: 'inline';
+  stepId?: string;
+  ownerId?: string;
+  ownerName?: string;
+  version?: number;
+  published?: boolean;
+}
+
+export type WorkflowStep = InlineStep | StepRef;
+
+export function isStepRef(s: WorkflowStep): s is StepRef {
+  return (s as StepRef).kind === 'ref';
+}
+
+/** Resolve a workflow step to its runnable content via a version lookup for refs. */
+export function resolveStepContent(
+  step: WorkflowStep,
+  lookup: (ownerId: string, stepId: string, version: number) => StepContent | undefined,
+): StepContent | undefined {
+  return isStepRef(step) ? lookup(step.ownerId, step.stepId, step.version) : step;
 }
 
 export interface WorkflowDef {
@@ -93,6 +158,15 @@ export interface WorkflowState {
   started: boolean;
   /** Set when a plan is approved mid-step: advance to the next step once the current turn ends. */
   advanceOnComplete?: boolean;
+  /** Current step's configured permission mode, snapshotted at step start.
+   *  Distinguishes a workflow-mandated 'plan' from a manual mid-step override. */
+  stepPermissionMode?: PermissionMode;
+  /** Named step outputs captured as each step completes, keyed by its `outputName`.
+   *  Referenced from later step templates via `{outputs.<name>}`. */
+  outputs?: Record<string, string>;
+  /** Working-tree snapshot taken when the workflow starts, so a fresh step's
+   *  {diff} shows only what the workflow changed, not pre-existing dirty state. */
+  diffBaseline?: { ref: string; untracked: string[] };
 }
 
 export interface SessionMeta {
@@ -264,6 +338,10 @@ export type ClientMessage =
   | { type: 'workflowRetry'; sessionId: string; stepIndex: number; feedback: string }
   | { type: 'saveWorkflow'; workflow: WorkflowDef; ownerName?: string }
   | { type: 'deleteWorkflow'; workflowId: string }
+  /** Save or update a step. Content changes bump the version; `published` shares it instance-wide. Server stamps ownerId. */
+  | { type: 'saveStep'; step: StepContent; stepId?: string; published: boolean; ownerName?: string }
+  /** Remove a step from the library (existing pins keep resolving the immutable versions). */
+  | { type: 'deleteStep'; stepId: string }
   | { type: 'loadTranscript'; sessionId: string }
   | { type: 'pickFolder' }
   | { type: 'openProject'; path: string }
@@ -336,7 +414,7 @@ export interface UserUiSettings {
 export type ProjectKeyMap = Record<string, string>;
 
 export type ServerMessage =
-  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; settings?: UserUiSettings | null }
+  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; settings?: UserUiSettings | null }
   | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
   | { type: 'usage'; usage: UsageSnapshot | null }
@@ -348,6 +426,10 @@ export type ServerMessage =
   | { type: 'sessionDeleted'; sessionId: string }
   | { type: 'workflows'; workflows: WorkflowDef[] }
   | { type: 'sharedWorkflows'; workflows: WorkflowDef[] }
+  /** This user's own published steps (library heads). */
+  | { type: 'steps'; steps: StepDef[] }
+  /** Other users' published steps (library) plus any versions this user's workflows pin. */
+  | { type: 'sharedSteps'; sharedSteps: StepDef[]; pinnedSteps: StepDef[] }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }
   | { type: 'transcript'; sessionId: string; events: TranscriptEvent[] }
   | { type: 'folderPicked'; path: string | null }
