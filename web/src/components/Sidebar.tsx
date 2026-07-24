@@ -65,6 +65,7 @@ function useOverflow() {
 function SessionRow({ session, selected }: { session: SessionMeta; selected: boolean }) {
   const status = STATUS_META[session.status] ?? STATUS_META.idle;
   const { overflowing, check } = useOverflow();
+  const [hovered, setHovered] = useState(false);
   // A session with no real prompt yet is safe to delete outright; others archive first.
   const isNew = session.nameAuto === true;
 
@@ -72,6 +73,8 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
     <UnstyledButton
       component={Link}
       to={`/session/${session.id}`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       px="sm"
       py={6}
       style={{
@@ -122,8 +125,9 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
               </Text>
             </Tooltip>
           </Group>
-          <Group gap={6} wrap="nowrap" mt={3}>
-            {session.status !== 'idle' &&
+          <Group gap={6} wrap="nowrap" align="center" mih={17} mt={3}>
+            {!hovered &&
+            session.status !== 'idle' &&
             session.status !== 'running' &&
             session.status !== 'done' ? (
               <Badge

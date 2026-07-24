@@ -55,7 +55,8 @@
       "businessRules": [
         "cost rendered as $X.XX, hidden when totalCostUsd is unset",
         "token icon/tooltip hidden when totalTokens is unset",
-        "date rendered en-GB (dd/mm/yyyy) instead of browser-default locale"
+        "date rendered en-GB (dd/mm/yyyy) instead of browser-default locale",
+        "hovering a badge-state row swaps the status badge for date/cost/tokens meta; row min-height is fixed to prevent layout jump"
       ],
       "architecturalRules": [
         "totalTokens accumulates on the SDK result message the same way totalCostUsd already does, rather than introducing a separate tracking mechanism"

@@ -43,6 +43,9 @@ None. No test infrastructure covers Sidebar/SessionMeta display at time of writi
 - Date rendered EU style (`en-GB`, dd/mm/yyyy), not browser-default locale.
 - Existing sessions show no token icon until their next turn completes (field is additive,
   not backfilled).
+- Hovering a row whose status shows a badge (not idle/running/done) swaps the badge for the
+  date/cost/token meta for the duration of the hover; the meta row reserves a fixed min-height
+  so this swap doesn't shift row height.
 
 ## Architectural rules
 
