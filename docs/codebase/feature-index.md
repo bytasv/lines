@@ -8,3 +8,4 @@
 | `workflow-stop-advances` | Manual Stop during a running workflow step marks it done and auto-advances to the next step | [features/workflow-stop-advances.md](features/workflow-stop-advances.md) |
 | `composer-focus-new-session` | Auto-focus the prompt textarea when a brand-new session is created | [features/composer-focus-new-session.md](features/composer-focus-new-session.md) |
 | `workflow-draft-selection` | Governs which workflow the editor draft reflects across open/broadcast/save-reconciliation races | [features/workflow-draft-selection.md](features/workflow-draft-selection.md) |
+| `workflow-step-cost` | Per-step USD spend shown in the workflow stepper | [features/workflow-step-cost.md](features/workflow-step-cost.md) |

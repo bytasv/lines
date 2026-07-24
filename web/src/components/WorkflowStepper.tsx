@@ -68,6 +68,11 @@ export function WorkflowStepper({
               <Text size="xs" fw={i === state.stepIndex ? 600 : 500} truncate>
                 {nameOf(step)}
               </Text>
+              {(state.stepCostsUsd?.[i] ?? 0) > 0 && (
+                <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
+                  ${state.stepCostsUsd![i].toFixed(2)}
+                </Text>
+              )}
               {/* Connector doubles as this step's scroll-progress track,
                   filled imperatively by Transcript. */}
               <Box

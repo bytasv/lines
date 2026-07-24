@@ -425,6 +425,13 @@ export class WorkflowEngine {
     const step = wf.steps[i];
     if (!step || meta.workflow.stepStatuses[i] !== 'running') return;
 
+    // Accumulate this turn's cost onto the step (retries add to the same slot).
+    const cost = meta.lastCostUsd;
+    if (typeof cost === 'number') {
+      const costs = (meta.workflow.stepCostsUsd ??= []);
+      costs[i] = (costs[i] ?? 0) + cost;
+    }
+
     // A plan approved mid-step — or a manual Stop — advances straight to the next step.
     if (meta.workflow.advanceOnComplete) {
       const event = meta.workflow.advanceOnComplete === 'interrupted' ? 'interrupted' : 'approved';

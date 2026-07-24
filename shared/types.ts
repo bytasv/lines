@@ -165,6 +165,9 @@ export interface WorkflowState {
   /** Named step outputs captured as each step completes, keyed by its `outputName`.
    *  Referenced from later step templates via `{outputs.<name>}`. */
   outputs?: Record<string, string>;
+  /** Per-step accumulated cost in USD, indexed by step position. Summed across
+   *  every turn a step runs (retries included); shown in the stepper. */
+  stepCostsUsd?: number[];
   /** Working-tree snapshot taken when the workflow starts, so a fresh step's
    *  {diff} shows only what the workflow changed, not pre-existing dirty state. */
   diffBaseline?: { ref: string; untracked: string[] };
