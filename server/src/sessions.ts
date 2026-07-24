@@ -50,6 +50,9 @@ export type TurnCompleteListener = (sessionId: string, source: 'user' | 'workflo
 export class SessionManager {
   private sessions = new Map<string, SessionMeta>();
   private live = new Map<string, LiveState>();
+  /** Sessions with a manual interrupt in flight — lets an `ended` without a
+   *  `result` still settle the turn (see handleWorkerEnded). */
+  private interrupting = new Set<string>();
   private onTurnComplete: TurnCompleteListener | null = null;
   private worker!: WorkerClient;
 
@@ -463,6 +466,12 @@ export class SessionManager {
     meta.turnSource = source;
     meta.turnStartedAt = Date.now();
     meta.interruptedAt = undefined; // any prompt clears the crash-interrupted flag
+    this.interrupting.delete(sessionId); // a new turn supersedes any in-flight interrupt
+    // A user prompt after Stop (before the interrupted turn settled) means they
+    // want to keep working here — don't let the stale flag advance a later turn.
+    if (source === 'user' && meta.workflow?.advanceOnComplete === 'interrupted') {
+      meta.workflow.advanceOnComplete = undefined;
+    }
     this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
     const content = [...blocks, ...(text ? [{ type: 'text', text }] : [])];
@@ -667,12 +676,20 @@ export class SessionManager {
   }
 
   interrupt(sessionId: string) {
+    const meta = this.sessions.get(sessionId);
+    // Stopping a running workflow step means "done with this step, move on":
+    // advance once the interrupted turn settles (result or ended). The step's
+    // output hand-off is whatever the model last said — the user cut it short.
+    const wf = meta?.workflow;
+    if (wf?.started && wf.stepStatuses[wf.stepIndex] === 'running' && meta?.turnSource === 'workflow') {
+      wf.advanceOnComplete = 'interrupted';
+    }
+    this.interrupting.add(sessionId);
     this.worker.interrupt(sessionId);
     // Deny anything waiting on the user so the query is not stuck; user
     // explicitly stopped, so close the cards too.
     this.flushPending(sessionId, { emitResolution: 'deny' });
     // Keep the queue but suspend auto-flush; the next user send resumes it.
-    const meta = this.sessions.get(sessionId);
     if (meta?.queued?.length) meta.queuePaused = true;
     if (meta) meta.turnStartedAt = undefined;
     this.setStatus(sessionId, 'idle');
@@ -1001,6 +1018,7 @@ export class SessionManager {
         metaNow.turnStartedAt = undefined;
         this.upsert(metaNow);
       }
+      this.interrupting.delete(sessionId); // turn settled normally
       this.onTurnComplete?.(sessionId, source);
       this.maybeFlush(sessionId);
       void this.summarizeTurn(sessionId, resultSeq);
@@ -1017,6 +1035,22 @@ export class SessionManager {
       if (meta?.queued?.length) meta.queuePaused = true;
       if (meta) meta.turnStartedAt = undefined;
       this.setStatus(sessionId, 'error', error);
+      return;
+    }
+    // An interrupted query sometimes dies without emitting a final `result`;
+    // settle the turn here so a stopped workflow step doesn't dangle at
+    // 'running'. Gated on the interrupt flag — routine `ended` events (e.g.
+    // fresh-start step boundaries closing the old query) must not misfire.
+    if (this.interrupting.delete(sessionId)) {
+      const meta = this.sessions.get(sessionId);
+      if (meta?.turnSource) {
+        const source = meta.turnSource;
+        meta.turnSource = undefined;
+        meta.turnStartedAt = undefined;
+        this.upsert(meta);
+        this.onTurnComplete?.(sessionId, source);
+        this.maybeFlush(sessionId);
+      }
     }
   }
 

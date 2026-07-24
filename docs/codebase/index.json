@@ -87,6 +87,41 @@
       ],
       "architecturalRules": [],
       "relatedDecisions": []
+    },
+    {
+      "id": "workflow-stop-advances",
+      "name": "Workflow stop advances",
+      "doc": "features/workflow-stop-advances.md",
+      "purpose": "Pressing Stop while a workflow step is running marks it done and auto-advances to the next step instead of parking at waiting-approval.",
+      "entryPoints": [
+        "web/src/components/Composer.tsx",
+        "server/src/sessions.ts",
+        "server/src/workflows.ts"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/sessions.ts",
+        "server/src/workflows.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/components/Composer.tsx"
+      ],
+      "symbols": [
+        "SessionManager.interrupt",
+        "SessionManager.handleWorkerEnded",
+        "WorkflowState.advanceOnComplete",
+        "WorkflowEngine.onWorkflowTurnComplete"
+      ],
+      "tests": [],
+      "businessRules": [
+        "plain Stop during a running workflow step always advances; no toggle",
+        "a user prompt sent before the interrupted turn settles clears the 'interrupted' flag",
+        "step output hand-off after Stop is whatever the model last said (partial by design)"
+      ],
+      "architecturalRules": [
+        "never advance synchronously on interrupt — flag advanceOnComplete and wait for the turn to settle",
+        "the handleWorkerEnded settle fallback must stay gated on the interrupting set (routine non-error ended events exist)"
+      ],
+      "relatedDecisions": []
     }
   ]
 }

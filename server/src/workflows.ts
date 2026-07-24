@@ -425,10 +425,11 @@ export class WorkflowEngine {
     const step = wf.steps[i];
     if (!step || meta.workflow.stepStatuses[i] !== 'running') return;
 
-    // A plan approved mid-step advances straight to the next step.
+    // A plan approved mid-step — or a manual Stop — advances straight to the next step.
     if (meta.workflow.advanceOnComplete) {
+      const event = meta.workflow.advanceOnComplete === 'interrupted' ? 'interrupted' : 'approved';
       meta.workflow.advanceOnComplete = undefined;
-      this.marker(sessionId, { stepIndex: i, stepName: this.stepName(step), event: 'approved' });
+      this.marker(sessionId, { stepIndex: i, stepName: this.stepName(step), event });
       this.advance(sessionId);
       return;
     }

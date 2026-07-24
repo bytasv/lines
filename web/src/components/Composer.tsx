@@ -333,7 +333,14 @@ export function Composer({ session }: { session: SessionMeta }) {
                   <IconSend size={16} />
                 </ActionIcon>
               </Tooltip>
-              <Tooltip label="Interrupt">
+              <Tooltip
+                label={
+                  session.workflow?.started &&
+                  session.workflow.stepStatuses[session.workflow.stepIndex] === 'running'
+                    ? 'Stop — workflow will continue to the next step'
+                    : 'Interrupt'
+                }
+              >
                 <ActionIcon color="gray" variant="default" size="lg" onClick={() => send({ type: 'interrupt', sessionId: session.id })}>
                   <IconPlayerStop size={16} />
                 </ActionIcon>

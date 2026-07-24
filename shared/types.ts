@@ -156,8 +156,9 @@ export interface WorkflowState {
   /** The user's task description, captured from the first prompt; substituted into step templates as {task}. */
   task?: string;
   started: boolean;
-  /** Set when a plan is approved mid-step: advance to the next step once the current turn ends. */
-  advanceOnComplete?: boolean;
+  /** Set when a plan is approved (true) or the step was manually stopped
+   *  ('interrupted') mid-step: advance to the next step once the current turn ends. */
+  advanceOnComplete?: boolean | 'interrupted';
   /** Current step's configured permission mode, snapshotted at step start.
    *  Distinguishes a workflow-mandated 'plan' from a manual mid-step override. */
   stepPermissionMode?: PermissionMode;
@@ -281,7 +282,7 @@ export interface AskUserQuestionInput {
 export interface WorkflowMarkerData {
   stepIndex: number;
   stepName: string;
-  event: 'started' | 'waiting-approval' | 'approved' | 'retried' | 'workflow-done';
+  event: 'started' | 'waiting-approval' | 'approved' | 'interrupted' | 'retried' | 'workflow-done';
   feedback?: string;
 }
 

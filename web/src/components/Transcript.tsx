@@ -52,7 +52,9 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
           ? `${data.stepName} — waiting for your approval`
           : data.event === 'approved'
             ? `${data.stepName} — approved`
-            : 'Workflow complete';
+            : data.event === 'interrupted'
+              ? `${data.stepName} — stopped, moving to next step`
+              : 'Workflow complete';
   return (
     <Divider
       // Anchor for the stepper's click-to-scroll; first 'started' marker is the step's start.
