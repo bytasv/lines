@@ -27,6 +27,7 @@ None.
 ## Business rules
 
 - A `workflows`/`sharedWorkflows` length change while the modal is already open with a live draft must not re-trigger the "pick a workflow" fallback — only the open transition (or no-draft state) does.
+- `loadFrom` collapses every step of the loaded workflow by default; a step only opens later via explicit selection (`selectStep`), keeping the editor compact for workflows with many steps.
 
 ## Architectural rules
 
