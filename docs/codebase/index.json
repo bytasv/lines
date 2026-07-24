@@ -178,26 +178,31 @@
       "id": "workflow-step-cost",
       "name": "Workflow step cost",
       "doc": "features/workflow-step-cost.md",
-      "purpose": "Show per-step USD spend in the workflow stepper so users can see which step of a running workflow is expensive without opening the transcript.",
+      "purpose": "Show per-step USD spend and token spend in the workflow stepper so users can see which step of a running workflow is expensive without opening the transcript.",
       "entryPoints": [
         "web/src/components/WorkflowStepper.tsx"
       ],
       "files": [
         "shared/types.ts",
+        "server/src/sessions.ts",
         "server/src/workflows.ts",
         "web/src/components/WorkflowStepper.tsx"
       ],
       "symbols": [
         "WorkflowState.stepCostsUsd",
+        "WorkflowState.stepTokens",
+        "SessionMeta.lastTokens",
         "WorkflowEngine.onWorkflowTurnComplete"
       ],
       "tests": [],
       "businessRules": [
         "cost rendered as $X.XX next to the step name, hidden when that step's accumulated cost is zero or unset",
-        "retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it"
+        "token icon with a tooltip ('N tokens spent') shown next to the cost label, hidden when that step's accumulated tokens are zero or unset",
+        "retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it, for both cost and tokens"
       ],
       "architecturalRules": [
-        "reuses the existing per-turn SessionMeta.lastCostUsd accumulation instead of adding a new cost-tracking path"
+        "reuses the existing per-turn SessionMeta.lastCostUsd accumulation instead of adding a new cost-tracking path",
+        "tokens mirror the same pattern via a new SessionMeta.lastTokens field rather than a separate tracking mechanism"
       ],
       "relatedDecisions": []
     },

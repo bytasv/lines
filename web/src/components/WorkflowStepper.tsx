@@ -1,5 +1,5 @@
-import { Box, Button, Group, Loader, Paper, Text, ThemeIcon } from '@mantine/core';
-import { IconCheck } from '@tabler/icons-react';
+import { Box, Button, Center, Group, Loader, Paper, Text, ThemeIcon, Tooltip } from '@mantine/core';
+import { IconCheck, IconCoins } from '@tabler/icons-react';
 import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@claude-ui/shared';
 import { isStepRef } from '@claude-ui/shared';
 import { useStore } from '../store';
@@ -72,6 +72,13 @@ export function WorkflowStepper({
                 <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
                   ${state.stepCostsUsd![i].toFixed(2)}
                 </Text>
+              )}
+              {(state.stepTokens?.[i] ?? 0) > 0 && (
+                <Tooltip label={`${state.stepTokens![i].toLocaleString()} tokens spent`} withArrow fz="xs">
+                  <Center c="dimmed" style={{ flexShrink: 0 }}>
+                    <IconCoins size={11} />
+                  </Center>
+                </Tooltip>
               )}
               {/* Connector doubles as this step's scroll-progress track,
                   filled imperatively by Transcript. */}

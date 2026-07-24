@@ -1008,6 +1008,7 @@ export class SessionManager {
             (usage.output_tokens ?? 0) +
             (usage.cache_creation_input_tokens ?? 0) +
             (usage.cache_read_input_tokens ?? 0);
+          metaNow.lastTokens = turnTokens;
           metaNow.totalTokens = (metaNow.totalTokens ?? 0) + turnTokens;
         }
         if (metaNow.status === 'running' || metaNow.status === 'waiting-permission') {

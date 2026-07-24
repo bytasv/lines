@@ -168,6 +168,9 @@ export interface WorkflowState {
   /** Per-step accumulated cost in USD, indexed by step position. Summed across
    *  every turn a step runs (retries included); shown in the stepper. */
   stepCostsUsd?: number[];
+  /** Per-step accumulated tokens (input + output + cache), indexed by step
+   *  position. Summed across every turn a step runs (retries included). */
+  stepTokens?: number[];
   /** Working-tree snapshot taken when the workflow starts, so a fresh step's
    *  {diff} shows only what the workflow changed, not pre-existing dirty state. */
   diffBaseline?: { ref: string; untracked: string[] };
@@ -188,6 +191,9 @@ export interface SessionMeta {
   workflow?: WorkflowState;
   lastCostUsd?: number;
   totalCostUsd?: number;
+  /** Tokens spent by the most recent turn (input + output + cache), matching
+   *  the `totalTokens` composition. */
+  lastTokens?: number;
   /** Cumulative tokens spent across the session (input + output + cache). */
   totalTokens?: number;
   errorMessage?: string;

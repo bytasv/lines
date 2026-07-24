@@ -432,6 +432,13 @@ export class WorkflowEngine {
       costs[i] = (costs[i] ?? 0) + cost;
     }
 
+    // Same accumulation for tokens (retries add to the same slot).
+    const tokens = meta.lastTokens;
+    if (typeof tokens === 'number') {
+      const stepTokens = (meta.workflow.stepTokens ??= []);
+      stepTokens[i] = (stepTokens[i] ?? 0) + tokens;
+    }
+
     // A plan approved mid-step — or a manual Stop — advances straight to the next step.
     if (meta.workflow.advanceOnComplete) {
       const event = meta.workflow.advanceOnComplete === 'interrupted' ? 'interrupted' : 'approved';
