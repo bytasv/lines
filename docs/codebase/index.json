@@ -38,28 +38,32 @@
       "id": "session-sidebar-usage",
       "name": "Session sidebar usage display",
       "doc": "features/session-sidebar-usage.md",
-      "purpose": "Show per-session cost, token spend, and EU-formatted date in the sidebar session list.",
+      "purpose": "Show per-session cost, token spend, active-turn duration, and EU-formatted date in the sidebar session list.",
       "entryPoints": [
         "web/src/components/Sidebar.tsx"
       ],
       "files": [
         "shared/types.ts",
         "server/src/sessions.ts",
-        "web/src/components/Sidebar.tsx"
+        "web/src/components/Sidebar.tsx",
+        "web/src/lib/format.ts"
       ],
       "symbols": [
         "SessionMeta.totalCostUsd",
-        "SessionMeta.totalTokens"
+        "SessionMeta.totalTokens",
+        "SessionMeta.totalDurationMs"
       ],
       "tests": [],
       "businessRules": [
         "cost rendered as $X.XX, hidden when totalCostUsd is unset",
         "token icon/tooltip hidden when totalTokens is unset",
         "date rendered en-GB (dd/mm/yyyy) instead of browser-default locale",
-        "hovering a badge-state row swaps the status badge for date/cost/tokens meta; row min-height is fixed to prevent layout jump"
+        "hovering a badge-state row swaps the status badge for date/cost/tokens meta; row min-height is fixed to prevent layout jump",
+        "duration rendered via formatDuration, hidden when totalDurationMs is unset; excludes idle wait between turns"
       ],
       "architecturalRules": [
-        "totalTokens accumulates on the SDK result message the same way totalCostUsd already does, rather than introducing a separate tracking mechanism"
+        "totalTokens and totalDurationMs accumulate on the SDK result message the same way totalCostUsd already does, rather than introducing a separate tracking mechanism",
+        "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction"
       ],
       "relatedDecisions": []
     },
@@ -183,7 +187,7 @@
       "id": "workflow-step-cost",
       "name": "Workflow step cost",
       "doc": "features/workflow-step-cost.md",
-      "purpose": "Show per-step USD spend and token spend in the workflow stepper so users can see which step of a running workflow is expensive without opening the transcript.",
+      "purpose": "Show per-step USD spend, token spend, and active-turn duration in the workflow stepper so users can see which step of a running workflow is expensive or slow without opening the transcript.",
       "entryPoints": [
         "web/src/components/WorkflowStepper.tsx"
       ],
@@ -191,23 +195,29 @@
         "shared/types.ts",
         "server/src/sessions.ts",
         "server/src/workflows.ts",
-        "web/src/components/WorkflowStepper.tsx"
+        "web/src/components/WorkflowStepper.tsx",
+        "web/src/lib/format.ts"
       ],
       "symbols": [
         "WorkflowState.stepCostsUsd",
         "WorkflowState.stepTokens",
         "SessionMeta.lastTokens",
-        "WorkflowEngine.onWorkflowTurnComplete"
+        "WorkflowEngine.onWorkflowTurnComplete",
+        "WorkflowState.stepDurationsMs",
+        "SessionMeta.lastDurationMs",
+        "formatDuration"
       ],
       "tests": [],
       "businessRules": [
         "cost rendered as $X.XX next to the step name, hidden when that step's accumulated cost is zero or unset",
         "token icon with a tooltip ('N tokens spent') shown next to the cost label, hidden when that step's accumulated tokens are zero or unset",
-        "retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it, for both cost and tokens"
+        "retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it, for both cost and tokens",
+        "duration shown next to the token icon via formatDuration, hidden when that step's accumulated duration is zero or unset"
       ],
       "architecturalRules": [
         "reuses the existing per-turn SessionMeta.lastCostUsd accumulation instead of adding a new cost-tracking path",
-        "tokens mirror the same pattern via a new SessionMeta.lastTokens field rather than a separate tracking mechanism"
+        "tokens mirror the same pattern via a new SessionMeta.lastTokens field rather than a separate tracking mechanism",
+        "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction"
       ],
       "relatedDecisions": []
     },

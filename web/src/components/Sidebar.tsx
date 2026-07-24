@@ -34,6 +34,7 @@ import type { CSSProperties } from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta, SessionStatus } from '@claude-ui/shared';
+import { formatDuration } from '../lib/format';
 import type { SidebarMode } from '../store';
 import { sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
@@ -159,6 +160,11 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
                       <IconCoins size={11} />
                     </Center>
                   </Tooltip>
+                )}
+                {session.totalDurationMs != null && (
+                  <Text size="xs" c="dimmed">
+                    {formatDuration(session.totalDurationMs)}
+                  </Text>
                 )}
               </>
             )}

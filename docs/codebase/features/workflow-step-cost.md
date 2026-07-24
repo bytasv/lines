@@ -2,33 +2,37 @@
 
 ## Purpose
 
-Shows per-step USD spend and token spend in the workflow stepper, so users can see which step of a running workflow is expensive without opening the transcript.
+Shows per-step USD spend, token spend, and active-turn duration in the workflow stepper, so users can see which step of a running workflow is expensive or slow without opening the transcript.
 
 ## Entry points
 
-- `web/src/components/WorkflowStepper.tsx` (cost label and token icon next to each step name)
+- `web/src/components/WorkflowStepper.tsx` (cost label, token icon, and duration label next to each step name)
 
 ## Important files
 
-- `shared/types.ts` — `WorkflowState.stepCostsUsd`, `WorkflowState.stepTokens`
-- `server/src/sessions.ts` — sets `SessionMeta.lastTokens` per turn
-- `server/src/workflows.ts` — `WorkflowEngine.onWorkflowTurnComplete` (accumulates both)
-- `web/src/components/WorkflowStepper.tsx` — renders the amount and the token tooltip
+- `shared/types.ts` — `WorkflowState.stepCostsUsd`, `WorkflowState.stepTokens`, `WorkflowState.stepDurationsMs`
+- `server/src/sessions.ts` — sets `SessionMeta.lastTokens` / `SessionMeta.lastDurationMs` per turn
+- `server/src/workflows.ts` — `WorkflowEngine.onWorkflowTurnComplete` (accumulates all three)
+- `web/src/components/WorkflowStepper.tsx` — renders the amount, the token tooltip, and the duration
+- `web/src/lib/format.ts` — `formatDuration`
 
 ## Important symbols
 
 - `WorkflowState.stepCostsUsd` — `number[]` indexed by step position, cumulative across retries
 - `WorkflowState.stepTokens` — `number[]` indexed by step position, cumulative across retries
+- `WorkflowState.stepDurationsMs` — `number[]` indexed by step position, cumulative active-turn duration across retries; excludes idle wait between turns
 - `SessionMeta.lastTokens` — tokens spent by the most recent turn (input + output + cache), same composition as `totalTokens`
-- `WorkflowEngine.onWorkflowTurnComplete` — adds `meta.lastCostUsd` onto `stepCostsUsd[stepIndex]` and `meta.lastTokens` onto `stepTokens[stepIndex]` each time a workflow turn completes
+- `SessionMeta.lastDurationMs` — active-turn duration of the most recent turn, from the SDK `result` message's `duration_ms`
+- `WorkflowEngine.onWorkflowTurnComplete` — adds `meta.lastCostUsd` onto `stepCostsUsd[stepIndex]`, `meta.lastTokens` onto `stepTokens[stepIndex]`, and `meta.lastDurationMs` onto `stepDurationsMs[stepIndex]` each time a workflow turn completes
+- `formatDuration` — renders ms as `Xs` / `Xm Ys` / `Xh Ym`
 
 ## Data flow
 
-SDK `result` message → `SessionMeta.lastCostUsd` / `SessionMeta.lastTokens` (existing accumulation in `server/src/sessions.ts`) → read by `onWorkflowTurnComplete` and added onto `WorkflowState.stepCostsUsd[stepIndex]` / `WorkflowState.stepTokens[stepIndex]` → persisted on `SessionMeta` upsert → `WorkflowStepper` renders `stepCostsUsd[i]` as a `$X.XX` label and `stepTokens[i]` as a coin icon with a "N tokens spent" tooltip.
+SDK `result` message → `SessionMeta.lastCostUsd` / `SessionMeta.lastTokens` / `SessionMeta.lastDurationMs` (existing accumulation in `server/src/sessions.ts`) → read by `onWorkflowTurnComplete` and added onto `WorkflowState.stepCostsUsd[stepIndex]` / `stepTokens[stepIndex]` / `stepDurationsMs[stepIndex]` → persisted on `SessionMeta` upsert → `WorkflowStepper` renders `stepCostsUsd[i]` as a `$X.XX` label, `stepTokens[i]` as a coin icon with a "N tokens spent" tooltip, and `stepDurationsMs[i]` via `formatDuration`.
 
 ## Dependencies
 
-None beyond the existing `SessionMeta.lastCostUsd` / `totalTokens` accumulation ([[session-sidebar-usage]] uses the sibling `totalCostUsd`/`totalTokens` fields the same way).
+None beyond the existing `SessionMeta.lastCostUsd` / `totalTokens` / `totalDurationMs` accumulation ([[session-sidebar-usage]] uses the sibling `totalCostUsd`/`totalTokens`/`totalDurationMs` fields the same way).
 
 ## Tests
 
@@ -38,12 +42,14 @@ None. No test infrastructure covers `WorkflowStepper` rendering at time of writi
 
 - Cost shown as `$X.XX` (2 decimals) next to the step name; hidden entirely for a step whose accumulated cost is zero or unset.
 - Token icon (coin) shown next to the cost label with a "N tokens spent" tooltip (locale-formatted); hidden entirely for a step whose accumulated tokens are zero or unset.
-- Retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it, for both cost and tokens.
+- Duration shown next to the token icon via `formatDuration`; hidden entirely for a step whose accumulated duration is zero or unset. Counts only active SDK turn time, not idle wait for the user between turns.
+- Retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it, for cost, tokens, and duration.
 
 ## Architectural rules
 
 - Reuses the existing per-turn `lastCostUsd` accumulation on `SessionMeta` (same source `onWorkflowTurnComplete` already reads for step logic) instead of adding a new cost-tracking path.
-- Tokens follow the identical pattern via a new `SessionMeta.lastTokens` field, mirroring `lastCostUsd` rather than introducing a separate tracking mechanism.
+- Tokens and duration follow the identical pattern via `SessionMeta.lastTokens` / `lastDurationMs`, mirroring `lastCostUsd` rather than introducing a separate tracking mechanism.
+- Duration is sourced from the SDK `result` event's `duration_ms`, not clock math against `turnStartedAt`, so it excludes idle time by construction.
 
 ## Related decisions
 

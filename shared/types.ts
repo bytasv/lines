@@ -171,6 +171,9 @@ export interface WorkflowState {
   /** Per-step accumulated tokens (input + output + cache), indexed by step
    *  position. Summed across every turn a step runs (retries included). */
   stepTokens?: number[];
+  /** Per-step accumulated active-turn duration in ms, indexed by step position.
+   *  Summed across every turn a step runs (retries included); excludes idle wait. */
+  stepDurationsMs?: number[];
   /** Working-tree snapshot taken when the workflow starts, so a fresh step's
    *  {diff} shows only what the workflow changed, not pre-existing dirty state. */
   diffBaseline?: { ref: string; untracked: string[] };
@@ -199,6 +202,10 @@ export interface SessionMeta {
   lastTokens?: number;
   /** Cumulative tokens spent across the session (input + output + cache). */
   totalTokens?: number;
+  /** Active-turn duration of the most recent turn in ms (SDK result duration_ms). */
+  lastDurationMs?: number;
+  /** Cumulative active-turn duration across the session in ms; excludes idle wait. */
+  totalDurationMs?: number;
   errorMessage?: string;
   /** Archived sessions move to a separate section and are hidden from the active list. */
   archived?: boolean;

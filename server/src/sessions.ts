@@ -1109,6 +1109,11 @@ export class SessionManager {
           metaNow.lastTokens = turnTokens;
           metaNow.totalTokens = (metaNow.totalTokens ?? 0) + turnTokens;
         }
+        const durationMs = (msg as { duration_ms?: number }).duration_ms;
+        if (typeof durationMs === 'number') {
+          metaNow.lastDurationMs = durationMs;
+          metaNow.totalDurationMs = (metaNow.totalDurationMs ?? 0) + durationMs;
+        }
         if (metaNow.status === 'running' || metaNow.status === 'waiting-permission') {
           metaNow.status = 'done';
         }

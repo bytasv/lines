@@ -457,6 +457,13 @@ export class WorkflowEngine {
       stepTokens[i] = (stepTokens[i] ?? 0) + tokens;
     }
 
+    // Same accumulation for active-turn duration (retries add to the same slot).
+    const durationMs = meta.lastDurationMs;
+    if (typeof durationMs === 'number') {
+      const durations = (meta.workflow.stepDurationsMs ??= []);
+      durations[i] = (durations[i] ?? 0) + durationMs;
+    }
+
     // A plan approved mid-step — or a manual Stop — advances straight to the next step.
     if (meta.workflow.advanceOnComplete) {
       const event = meta.workflow.advanceOnComplete === 'interrupted' ? 'interrupted' : 'approved';

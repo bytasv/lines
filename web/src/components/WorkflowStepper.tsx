@@ -2,6 +2,7 @@ import { Box, Button, Center, Group, Loader, Paper, Text, ThemeIcon, Tooltip } f
 import { IconCheck, IconCoins } from '@tabler/icons-react';
 import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@claude-ui/shared';
 import { isStepRef } from '@claude-ui/shared';
+import { formatDuration } from '../lib/format';
 import { useStore } from '../store';
 import { send } from '../ws';
 
@@ -79,6 +80,11 @@ export function WorkflowStepper({
                     <IconCoins size={11} />
                   </Center>
                 </Tooltip>
+              )}
+              {(state.stepDurationsMs?.[i] ?? 0) > 0 && (
+                <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
+                  {formatDuration(state.stepDurationsMs![i])}
+                </Text>
               )}
               {/* Connector doubles as this step's scroll-progress track,
                   filled imperatively by Transcript. */}
