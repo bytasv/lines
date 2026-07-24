@@ -79,7 +79,8 @@
 
 .md-body pre code {
   display: block;
-  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   padding: 10px;
   border-radius: 6px;
   background: var(--mantine-color-gray-0);

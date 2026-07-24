@@ -37,7 +37,6 @@ import {
   type TranscriptItem,
 } from '../lib/transcript';
 import { Markdown } from './Markdown';
-import { ColorizedText } from './ColorizedText';
 import { ToolGroup } from './ToolGroup';
 import { PermissionPrompt } from './PermissionPrompt';
 import { ActivityRow } from './ActivityRow';
@@ -130,17 +129,13 @@ function Item({
       return (
         <Group align="flex-start" gap="xs" wrap="nowrap">
           <IconUser size={16} style={{ marginTop: 4, opacity: 0.5, flexShrink: 0 }} />
-          <Paper radius="md" px="sm" py={6} bg="var(--mantine-color-default-hover)" style={{ flex: 1 }}>
+          <Paper radius="md" px="sm" py={6} bg="var(--mantine-color-default-hover)" style={{ flex: 1, minWidth: 0 }}>
             {item.source === 'workflow' && (
               <Badge variant="light" color="slate" mb={4}>
                 workflow step prompt
               </Badge>
             )}
-            {item.text && (
-              <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>
-                <ColorizedText text={item.text} />
-              </Text>
-            )}
+            {item.text && <Markdown text={item.text} />}
             {item.attachments && item.attachments.length > 0 && (
               <Group gap="xs" mt={item.text ? 6 : 0}>
                 {item.attachments.map((att) => {

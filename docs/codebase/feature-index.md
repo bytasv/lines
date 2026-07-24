@@ -9,3 +9,4 @@
 | `composer-focus-new-session` | Auto-focus the prompt textarea when a brand-new session is created | [features/composer-focus-new-session.md](features/composer-focus-new-session.md) |
 | `workflow-draft-selection` | Governs which workflow the editor draft reflects across open/broadcast/save-reconciliation races | [features/workflow-draft-selection.md](features/workflow-draft-selection.md) |
 | `workflow-step-cost` | Per-step USD spend shown in the workflow stepper | [features/workflow-step-cost.md](features/workflow-step-cost.md) |
+| `transcript-markdown-rendering` | User transcript bubbles render markdown via the shared renderer; code blocks wrap instead of scrolling | [features/transcript-markdown-rendering.md](features/transcript-markdown-rendering.md) |

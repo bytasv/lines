@@ -200,6 +200,34 @@
         "reuses the existing per-turn SessionMeta.lastCostUsd accumulation instead of adding a new cost-tracking path"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "transcript-markdown-rendering",
+      "name": "Transcript markdown rendering",
+      "doc": "features/transcript-markdown-rendering.md",
+      "purpose": "Render user and agent transcript bubbles through the same Markdown component, and keep long unbroken content (diffs, paths) inside the conversation column instead of overflowing it.",
+      "entryPoints": [
+        "web/src/components/Transcript.tsx"
+      ],
+      "files": [
+        "web/src/components/Transcript.tsx",
+        "web/src/components/Markdown.tsx",
+        "web/src/index.css"
+      ],
+      "symbols": [
+        "Markdown",
+        ".md-body pre code"
+      ],
+      "tests": [],
+      "businessRules": [
+        "user bubbles render markdown instead of plain preformatted text; single newlines collapse and raw HTML tags are dropped, matching agent-side behavior",
+        "code blocks wrap long lines (white-space: pre-wrap, overflow-wrap: anywhere) instead of scrolling horizontally"
+      ],
+      "architecturalRules": [
+        "user and agent transcript bubbles share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
+        "user bubble Paper needs minWidth: 0 alongside flex: 1 so wide content (e.g. a code block) can't grow the flex child past the column width"
+      ],
+      "relatedDecisions": []
     }
   ]
 }
