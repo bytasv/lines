@@ -17,8 +17,8 @@ import {
   UnstyledButton,
 } from '@mantine/core';
 import { IconCopy, IconHistory, IconPlus, IconTrash } from '@tabler/icons-react';
-import type { PermissionMode, StepContent, StepDef } from '@claude-ui/shared';
-import { DEFAULT_MODEL } from '@claude-ui/shared';
+import type { PermissionMode, StepContent, StepDef } from '@lines/shared';
+import { DEFAULT_MODEL } from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../../lib/modelSelect';

@@ -9,7 +9,7 @@ import type {
   TranscriptEvent,
   UserUiSettings,
   WorkflowDef,
-} from '@claude-ui/shared';
+} from '@lines/shared';
 
 /** Machine-global app root. Per-user stores live under `${APP_ROOT}/users/{userId}`;
  * machine-wide assets (vendored plugins) stay directly under this root. */
@@ -34,6 +34,9 @@ function readJson<T>(file: string, fallback: T): T {
 function writeJson(file: string, data: unknown) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
+
+/** Last-synced fingerprint per memory file (absolute path -> state). */
+export type MemoryManifest = Record<string, { key: string; mtimeMs: number; size: number }>;
 
 /** Persisted app-managed Claude OAuth credentials. Written 0600 (tokens are secrets). */
 export interface StoredAuth {
@@ -64,6 +67,7 @@ export function createStore(root: string) {
   const AUTH_FILE = path.join(root, 'auth.json');
   const GUARD_FILE = path.join(root, 'guard-allowlist.json');
   const SETTINGS_FILE = path.join(root, 'settings.json');
+  const MEMORY_MANIFEST_FILE = path.join(root, 'memory-manifest.json');
 
   fs.mkdirSync(TRANSCRIPTS, { recursive: true });
   fs.mkdirSync(ATTACHMENTS, { recursive: true });
@@ -212,6 +216,16 @@ export function createStore(root: string) {
 
     saveGuardAllowlist(entries: unknown) {
       writeJson(GUARD_FILE, entries);
+    },
+
+    // Last-synced state of every memory file, keyed by absolute path, so the
+    // syncer can mtime-diff to find local changes without re-reading everything.
+    loadMemoryManifest(): MemoryManifest {
+      return readJson<MemoryManifest>(MEMORY_MANIFEST_FILE, {});
+    },
+
+    saveMemoryManifest(manifest: MemoryManifest) {
+      writeJson(MEMORY_MANIFEST_FILE, manifest);
     },
 
     rootDir: root,

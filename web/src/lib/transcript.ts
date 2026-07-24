@@ -5,7 +5,7 @@ import type {
   TranscriptEvent,
   TurnSummaryData,
   WorkflowMarkerData,
-} from '@claude-ui/shared';
+} from '@lines/shared';
 
 export interface ToolBlock {
   type: 'tool';

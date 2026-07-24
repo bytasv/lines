@@ -1,6 +1,6 @@
 import { ActionIcon, Badge, Group, Paper, Stack, Text } from '@mantine/core';
 import { IconX } from '@tabler/icons-react';
-import type { SessionMeta } from '@claude-ui/shared';
+import type { SessionMeta } from '@lines/shared';
 import { send } from '../ws';
 
 /** Prompts held server-side while the session is busy; sent FIFO after each turn. */

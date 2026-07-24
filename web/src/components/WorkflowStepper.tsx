@@ -1,7 +1,7 @@
 import { Box, Button, Center, Group, Loader, Paper, Text, ThemeIcon, Tooltip } from '@mantine/core';
 import { IconCheck, IconCoins } from '@tabler/icons-react';
-import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@claude-ui/shared';
-import { isStepRef } from '@claude-ui/shared';
+import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@lines/shared';
+import { isStepRef } from '@lines/shared';
 import { formatDuration } from '../lib/format';
 import { useStore } from '../store';
 import { send } from '../ws';

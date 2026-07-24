@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import type { ProjectKeyMap } from '@claude-ui/shared';
+import type { ProjectKeyMap } from '@lines/shared';
 import type { Store } from './store.ts';
 
 /**

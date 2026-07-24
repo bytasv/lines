@@ -1,6 +1,6 @@
 import { ActionIcon, Button, Group, Modal, SegmentedControl, Select, Stack, Switch, Text, Tooltip } from '@mantine/core';
 import { IconPlayerPlay } from '@tabler/icons-react';
-import type { PermissionMode } from '@claude-ui/shared';
+import type { PermissionMode } from '@lines/shared';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { modelSelectData, renderModelOption } from '../lib/modelSelect';

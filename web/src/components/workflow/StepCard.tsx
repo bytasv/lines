@@ -31,7 +31,7 @@ import {
   IconWorld,
 } from '@tabler/icons-react';
 import type { DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
-import type { PermissionMode, ModelOption, StepContent, StepDef } from '@claude-ui/shared';
+import type { PermissionMode, ModelOption, StepContent, StepDef } from '@lines/shared';
 import type { DraftStep, StepErrors } from './useWorkflowDraft';
 import { MODE_OPTIONS } from './useWorkflowDraft';
 import { PromptEditor } from './PromptEditor';

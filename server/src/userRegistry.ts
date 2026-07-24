@@ -1,4 +1,4 @@
-import type { ServerMessage } from '@claude-ui/shared';
+import type { ServerMessage } from '@lines/shared';
 import type { LiveSessionInfo } from './workerProtocol.ts';
 import type { WorkerClient } from './workerClient.ts';
 import { buildUserContext, type UserContext } from './userContext.ts';

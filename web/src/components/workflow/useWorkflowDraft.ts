@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { PermissionMode, StepContent, StepDef, WorkflowDef, WorkflowStep } from '@claude-ui/shared';
-import { DEFAULT_MODEL, isStepRef } from '@claude-ui/shared';
+import type { PermissionMode, StepContent, StepDef, WorkflowDef, WorkflowStep } from '@lines/shared';
+import { DEFAULT_MODEL, isStepRef } from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { send } from '../../ws';

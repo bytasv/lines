@@ -13,8 +13,8 @@ import type {
   SessionMeta,
   SessionStatus,
   TranscriptEvent,
-} from '@claude-ui/shared';
-import { isSessionActive } from '@claude-ui/shared';
+} from '@lines/shared';
+import { isSessionActive } from '@lines/shared';
 import type { Store } from './store.ts';
 import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
 import { ALWAYS_ASK_TOOLS, allowEntryFor, assessToolCall, type GuardAllowlist } from './autoGuard.ts';

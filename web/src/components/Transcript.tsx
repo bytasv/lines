@@ -26,7 +26,7 @@ import {
   IconRoute,
   IconZoomIn,
 } from '@tabler/icons-react';
-import type { TranscriptEvent, WorkflowMarkerData } from '@claude-ui/shared';
+import type { TranscriptEvent, WorkflowMarkerData } from '@lines/shared';
 import { useStore } from '../store';
 import { send, withAuthToken } from '../ws';
 import {

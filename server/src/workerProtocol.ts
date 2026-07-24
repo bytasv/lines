@@ -6,7 +6,7 @@
  * KEEP THIS FILE MINIMAL AND STABLE. The worker's runtime import graph is
  * worker.ts + this file + the SDK — nothing else — so tsx watch only restarts
  * the worker (killing in-flight agent turns) when the protocol itself changes.
- * Import from '@claude-ui/shared' with `import type` only, if at all.
+ * Import from '@lines/shared' with `import type` only, if at all.
  */
 
 export const PROTOCOL_VERSION = 1;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { FileContentResponse, TreeEntry, TreeResponse } from '@claude-ui/shared';
+import type { FileContentResponse, TreeEntry, TreeResponse } from '@lines/shared';
 import { withAuthToken } from '../ws';
 
 /** The bridge HTTP server (same host, port 8787) serves file contents and directory listings. */

@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { Alert, Button, Divider, Group, Stack, Text } from '@mantine/core';
 import { IconAlertTriangle, IconPlayerPlay, IconRefresh } from '@tabler/icons-react';
-import { isSessionActive } from '@claude-ui/shared';
+import { isSessionActive } from '@lines/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { Transcript } from './Transcript';

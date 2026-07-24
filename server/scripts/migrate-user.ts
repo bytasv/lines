@@ -1,11 +1,11 @@
 /**
- * Merge a legacy flat claude-ui store into a user's namespaced store.
+ * Merge a legacy flat lines store into a user's namespaced store.
  *
  *   npm run migrate -w server -- <clerk-user-id> [--from <dir>]
  *
- * <dir> defaults to ~/.claude-ui (this machine's legacy store). Point --from
- * at another environment's copied .claude-ui to migrate a second install —
- * every run APPENDS into ~/.claude-ui/users/<id>:
+ * <dir> defaults to ~/.lines-app (this machine's flat store). Point --from
+ * at another environment's copied store to migrate a second install —
+ * every run APPENDS into ~/.lines-app/users/<id>:
  *   - sessions/workflows: union by id (existing target entries win)
  *   - recent-dirs/projects/guard-allowlist: set union
  *   - transcripts/attachments: copied unless already present
@@ -23,15 +23,15 @@ const args = process.argv.slice(2);
 const userId = args[0];
 const fromIdx = args.indexOf('--from');
 const sourceRoot = path.resolve(
-  fromIdx >= 0 && args[fromIdx + 1] ? args[fromIdx + 1] : path.join(os.homedir(), '.claude-ui'),
+  fromIdx >= 0 && args[fromIdx + 1] ? args[fromIdx + 1] : path.join(os.homedir(), '.lines-app'),
 );
 
 if (!userId || userId.startsWith('--')) {
-  console.error('usage: migrate-user.ts <clerk-user-id> [--from <legacy .claude-ui dir>]');
+  console.error('usage: migrate-user.ts <clerk-user-id> [--from <legacy store dir>]');
   process.exit(1);
 }
 
-const targetRoot = path.join(os.homedir(), '.claude-ui', 'users', userId);
+const targetRoot = path.join(os.homedir(), '.lines-app', 'users', userId);
 if (path.resolve(targetRoot) === sourceRoot) {
   console.error('source and target are the same directory');
   process.exit(1);

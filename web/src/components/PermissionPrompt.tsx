@@ -21,7 +21,7 @@ import {
   IconWorld,
   IconZoomScan,
 } from '@tabler/icons-react';
-import type { PermissionRequestData } from '@claude-ui/shared';
+import type { PermissionRequestData } from '@lines/shared';
 import { send } from '../ws';
 import { QuestionPrompt } from './QuestionPrompt';
 import { Markdown } from './Markdown';

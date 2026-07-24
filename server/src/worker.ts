@@ -288,7 +288,7 @@ let listenAttempts = 0;
 function listen() {
   const wss = new WebSocketServer({ host: '127.0.0.1', port: WORKER_PORT });
   wss.on('listening', () => {
-    console.log(`claude-ui worker listening on ws://127.0.0.1:${WORKER_PORT}`);
+    console.log(`lines worker listening on ws://127.0.0.1:${WORKER_PORT}`);
   });
   wss.on('connection', handleConnection);
   wss.on('error', (err: NodeJS.ErrnoException) => {

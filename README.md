@@ -1,4 +1,4 @@
-# Claude UI
+# Lines
 
 Local web GUI for the Claude CLI. React + Mantine frontend, thin Node bridge that drives
 Claude sessions through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk)
@@ -22,7 +22,7 @@ and streams everything to the browser over WebSocket.
 - **Caveman mode** — [caveman](https://github.com/JuliusBrussee/caveman) token-saving
   plugin vendored automatically and enabled per session (default on, level
   lite/full/ultra). Falls back to prompt injection if the plugin can't be cloned.
-- **Persistence** — sessions, workflows, and JSONL transcripts live in `~/.claude-ui/`;
+- **Persistence** — sessions, workflows, and JSONL transcripts live in `~/.lines-app/`;
   transcripts replay on page load and sessions resume across server restarts via the
   CLI session id.
 
@@ -67,4 +67,4 @@ web/      Vite + React + Mantine SPA: sidebar, transcript, Monaco diffs,
 - Each session holds one long-lived streaming SDK query; interrupts, model switches,
   and permission-mode switches apply live. Toggling caveman restarts the query
   (context is preserved via `resume`).
-- State is stored in `~/.claude-ui/{sessions.json,workflows.json,transcripts/*.jsonl}`.
+- State is stored in `~/.lines-app/{sessions.json,workflows.json,transcripts/*.jsonl}`.

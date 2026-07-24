@@ -12,8 +12,8 @@ import type {
   UsageSnapshot,
   UserUiSettings,
   WorkflowDef,
-} from '@claude-ui/shared';
-import { DEFAULT_MODEL } from '@claude-ui/shared';
+} from '@lines/shared';
+import { DEFAULT_MODEL } from '@lines/shared';
 import { send } from './ws';
 import type { AlertSound } from './lib/alerts';
 import {
@@ -31,13 +31,13 @@ import {
 } from './lib/alerts';
 import { updateFavicon } from './lib/favicon';
 
-const ACTIVE_PROJECT_KEY = 'claude-ui.activeProject';
-const NEW_SESSION_DEFAULTS_KEY = 'claude-ui.newSessionDefaults';
-const SIDEBAR_MODE_KEY = 'claude-ui.sidebarMode';
-const OPEN_FILES_KEY = 'claude-ui.openFiles';
-const COMPACTION_LEVEL_KEY = 'claude-ui.compactionLevel';
-const TURN_SUMMARIES_ENABLED_KEY = 'claude-ui.turnSummariesEnabled';
-const DISMISSED_CHECKOUTS_KEY = 'claude-ui.dismissedCheckouts';
+const ACTIVE_PROJECT_KEY = 'lines.activeProject';
+const NEW_SESSION_DEFAULTS_KEY = 'lines.newSessionDefaults';
+const SIDEBAR_MODE_KEY = 'lines.sidebarMode';
+const OPEN_FILES_KEY = 'lines.openFiles';
+const COMPACTION_LEVEL_KEY = 'lines.compactionLevel';
+const TURN_SUMMARIES_ENABLED_KEY = 'lines.turnSummariesEnabled';
+const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
 
 export type SidebarMode = 'sessions' | 'files';
 

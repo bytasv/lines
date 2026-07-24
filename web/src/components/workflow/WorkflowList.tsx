@@ -1,6 +1,6 @@
 import { Box, Button, Group, Menu, ScrollArea, Stack, Text } from '@mantine/core';
 import { IconChevronDown, IconPlus } from '@tabler/icons-react';
-import type { WorkflowDef } from '@claude-ui/shared';
+import type { WorkflowDef } from '@lines/shared';
 import { WORKFLOW_PRESETS } from '../../lib/workflowPresets';
 import type { WorkflowPreset } from '../../lib/workflowPresets';
 

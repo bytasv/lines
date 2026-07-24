@@ -1,4 +1,4 @@
-import type { ProjectKeyMap, SessionMeta, StepDef, StepRef, WorkflowDef } from '@claude-ui/shared';
+import type { MemoryFileMap, ProjectKeyMap, SessionMeta, StepDef, StepRef, WorkflowDef } from '@lines/shared';
 
 const PUSH_DEBOUNCE_MS = 2_000;
 const PULL_MIN_SPACING_MS = 30_000;
@@ -10,6 +10,7 @@ export interface PulledState {
   sessions: SessionMeta[];
   settings: unknown;
   projectKeys: ProjectKeyMap;
+  memory: MemoryFileMap | null;
 }
 
 /**
@@ -28,9 +29,11 @@ export class StorageSyncClient {
   private pendingWorkflows: WorkflowDef[] | null = null;
   private pendingSteps: StepDef[] | null = null;
   private pendingSessions = new Map<string, SessionMeta>();
+  private pendingMemory: MemoryFileMap | null = null;
   private wfTimer: NodeJS.Timeout | null = null;
   private stepTimer: NodeJS.Timeout | null = null;
   private sessTimer: NodeJS.Timeout | null = null;
+  private memTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private base: string,
@@ -47,12 +50,13 @@ export class StorageSyncClient {
     if (Date.now() - this.lastPullAt < PULL_MIN_SPACING_MS) return null;
     this.lastPullAt = Date.now();
     try {
-      const [workflows, steps, sessions, settings, projectKeys] = await Promise.all([
+      const [workflows, steps, sessions, settings, projectKeys, memory] = await Promise.all([
         this.req('GET', '/workflows'),
         this.req('GET', '/steps'),
         this.req('GET', '/sessions'),
         this.req('GET', '/settings'),
         this.req('GET', '/project-keys'),
+        this.req('GET', '/memory'),
       ]);
       this.warned = false;
       return {
@@ -61,6 +65,7 @@ export class StorageSyncClient {
         sessions: (sessions ?? []) as SessionMeta[],
         settings,
         projectKeys: (projectKeys ?? {}) as ProjectKeyMap,
+        memory: (memory ?? null) as MemoryFileMap | null,
       };
     } catch (err) {
       this.warnOnce('pull', err);
@@ -171,6 +176,23 @@ export class StorageSyncClient {
   pushSettings(blob: unknown): void {
     if (!this.enabled || this.applying) return;
     void this.req('PUT', '/settings', blob).catch((err) => this.warnOnce('push settings', err));
+  }
+
+  /**
+   * Debounced memory push. Pending maps are *merged* (not replaced), so quick
+   * consecutive turns each contributing different files can't drop one another;
+   * the server then per-file LWW-merges into the stored blob.
+   */
+  pushMemory(map: MemoryFileMap): void {
+    if (!this.enabled || this.applying) return;
+    if (Object.keys(map).length === 0) return;
+    this.pendingMemory = Object.assign(this.pendingMemory ?? {}, map);
+    this.memTimer ??= setTimeout(() => {
+      this.memTimer = null;
+      const body = this.pendingMemory;
+      this.pendingMemory = null;
+      void this.req('PUT', '/memory', body).catch((err) => this.warnOnce('push memory', err));
+    }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
   }
 
   /** Whole-map push; the server unions it into the stored map rather than replacing. */

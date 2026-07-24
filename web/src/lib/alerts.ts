@@ -1,8 +1,8 @@
-import type { SessionMeta, SessionStatus } from '@claude-ui/shared';
+import type { SessionMeta, SessionStatus } from '@lines/shared';
 import logoUrl from '../assets/logo.svg';
 
-const ALERTS_KEY = 'claude-ui.alerts';
-const ALERT_SOUND_KEY = 'claude-ui.alertSound';
+const ALERTS_KEY = 'lines.alerts';
+const ALERT_SOUND_KEY = 'lines.alertSound';
 
 const ALERT_STATUSES: SessionStatus[] = ['done', 'waiting-permission', 'waiting-approval'];
 

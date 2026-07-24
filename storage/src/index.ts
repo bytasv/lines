@@ -268,6 +268,56 @@ app.put('/settings', async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- agent memory ------------------------------------------------------------
+
+const MEMORY_KEY_RE = /^(user|project|slug)\//;
+const MEMORY_ENTRY_MAX_BYTES = 256 * 1024;
+const MEMORY_TOMBSTONE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+app.get('/memory', async (req, res) => {
+  const row = await prisma.agentMemory.findUnique({ where: { userId: userIdOf(req) } });
+  res.json(row?.data ?? {});
+});
+
+/**
+ * Per-file last-write-wins merge (never a replace). Each machine only sees the
+ * files on its own disk, so an overwrite would drop the others' entries. An
+ * incoming entry wins iff its updatedAt is newer; stale tombstones are pruned.
+ */
+app.put('/memory', async (req, res) => {
+  const userId = userIdOf(req);
+  const incoming = req.body as Record<string, unknown> | null;
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+    res.status(400).json({ error: 'body must be an object' });
+    return;
+  }
+  const row = await prisma.agentMemory.findUnique({ where: { userId } });
+  const merged: Record<string, { content: string; updatedAt: number; deleted?: true }> = {
+    ...((row?.data as Record<string, { content: string; updatedAt: number; deleted?: true }>) ?? {}),
+  };
+  for (const [key, raw] of Object.entries(incoming)) {
+    if (!MEMORY_KEY_RE.test(key)) continue;
+    const entry = raw as { content?: unknown; updatedAt?: unknown; deleted?: unknown } | null;
+    if (!entry || typeof entry.updatedAt !== 'number') continue;
+    const content = typeof entry.content === 'string' ? entry.content : '';
+    if (Buffer.byteLength(content, 'utf8') > MEMORY_ENTRY_MAX_BYTES) continue;
+    const existing = merged[key];
+    if (existing && existing.updatedAt >= entry.updatedAt) continue;
+    merged[key] = entry.deleted === true ? { content: '', updatedAt: entry.updatedAt, deleted: true } : { content, updatedAt: entry.updatedAt };
+  }
+  // Prune long-dead tombstones so the blob doesn't grow unbounded.
+  const cutoff = Date.now() - MEMORY_TOMBSTONE_MAX_AGE_MS;
+  for (const [key, entry] of Object.entries(merged)) {
+    if (entry.deleted && entry.updatedAt < cutoff) delete merged[key];
+  }
+  await prisma.agentMemory.upsert({
+    where: { userId },
+    create: { userId, data: merged, updatedAt: new Date() },
+    update: { data: merged, updatedAt: new Date() },
+  });
+  res.json({ ok: true, count: Object.keys(merged).length });
+});
+
 // Express 5 forwards async route rejections here.
 const onError: ErrorRequestHandler = (err, _req, res, _next) => {
   console.error('[storage]', err);
@@ -276,5 +326,5 @@ const onError: ErrorRequestHandler = (err, _req, res, _next) => {
 app.use(onError);
 
 app.listen(PORT, () => {
-  console.log(`claude-ui storage listening on http://localhost:${PORT}`);
+  console.log(`lines storage listening on http://localhost:${PORT}`);
 });

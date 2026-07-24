@@ -427,13 +427,32 @@ export interface UserUiSettings {
  * Machine-independent project identity, keyed by working directory.
  *
  * A session's `cwd` is an absolute path on the machine that created it, so the
- * same repo checked out at `~/Projects/lines` and `~/Projects/claude-ui` looks
+ * same repo checked out at `~/Projects/lines` and `~/Projects/lines-clone` looks
  * like two projects. Each bridge resolves the checkouts it can see to a stable
  * key (`<normalized git remote>#<path within the repo>`) and the map is synced,
  * so every machine can group sessions by repo even for paths it doesn't have.
  * A cwd with no resolvable key is absent here and falls back to path equality.
  */
 export type ProjectKeyMap = Record<string, string>;
+
+/**
+ * One synced agent-memory file. The SDK reads memory only off disk, so disk
+ * stays the SDK-facing cache and this map is the cross-machine source of truth,
+ * merged per-file last-write-wins on the storage server.
+ */
+export interface MemoryFileEntry {
+  content: string; // utf8
+  updatedAt: number; // ms epoch from file mtime — per-file LWW
+  deleted?: true; // tombstone
+}
+
+/**
+ * Keys are one of:
+ *   "user/CLAUDE.md"                        — user-level memory
+ *   "project/<projectKey>/memory/<rel>"     — per-repo auto-memory (machine-independent)
+ *   "slug/<slug>/memory/<rel>"              — fallback for a dir with no resolvable key
+ */
+export type MemoryFileMap = Record<string, MemoryFileEntry>;
 
 export type ServerMessage =
   | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; settings?: UserUiSettings | null }

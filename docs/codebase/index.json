@@ -329,6 +329,45 @@
       "relatedDecisions": []
     },
     {
+      "id": "agent-memory-sync",
+      "name": "Agent memory sync",
+      "doc": "features/agent-memory-sync.md",
+      "purpose": "Sync ~/.claude agent memory (user CLAUDE.md and per-project auto-memory) across a user's machines via the storage server, keeping disk as the SDK-facing cache and Postgres as the cross-machine source of truth.",
+      "entryPoints": [],
+      "files": [
+        "shared/types.ts",
+        "storage/prisma/schema.prisma",
+        "storage/src/index.ts",
+        "server/src/store.ts",
+        "server/src/memory.ts",
+        "server/src/sync.ts",
+        "server/src/userContext.ts"
+      ],
+      "symbols": [
+        "MemoryFileEntry",
+        "MemoryFileMap",
+        "MemorySyncer.collectChanged",
+        "MemorySyncer.collectAll",
+        "MemorySyncer.applyRemote",
+        "slugForPath",
+        "StorageSyncClient.pushMemory"
+      ],
+      "tests": [],
+      "businessRules": [
+        "only ~/.claude/CLAUDE.md and ~/.claude/projects/<slug>/memory/** are synced; cwd-local CLAUDE.md/.claude, settings.json, and credentials are never touched",
+        "per-file entry cap 256 KB; full-snapshot push additionally caps total payload at ~1.5 MB, dropping largest files first",
+        "server prunes tombstones older than ~30 days",
+        "conflict resolution is per-file last-write-wins by file mtime; the losing side's edit is silently dropped"
+      ],
+      "architecturalRules": [
+        "reuses the existing StorageSyncClient debounce-and-push pattern and syncNow pull-then-push cycle instead of a new sync mechanism",
+        "push is triggered from the SessionManager result-sniffing callback in userContext.ts, not sessions.ts or worker.ts, keeping the worker thin",
+        "project-scoped files are keyed by the machine-independent ProjectKeyRegistry key, falling back to a raw slug key when unresolved",
+        "the ~/.claude/projects/<slug>/memory/ layout and path-to-slug derivation are Claude CLI/SDK-internal, not a published contract"
+      ],
+      "relatedDecisions": []
+    },
+    {
       "id": "app-data-root",
       "name": "App data root",
       "doc": "features/app-data-root.md",

@@ -11,4 +11,5 @@
 | `workflow-step-cost` | Per-step USD spend shown in the workflow stepper | [features/workflow-step-cost.md](features/workflow-step-cost.md) |
 | `transcript-markdown-rendering` | User transcript bubbles render markdown via the shared renderer; code blocks wrap instead of scrolling | [features/transcript-markdown-rendering.md](features/transcript-markdown-rendering.md) |
 | `workflow-step-version-history` | Browse a step's version history, preview a per-field diff, re-pin a workflow ref or restore old content as a new library version | [features/workflow-step-version-history.md](features/workflow-step-version-history.md) |
+| `agent-memory-sync` | Sync `~/.claude` agent memory (user CLAUDE.md + per-project auto-memory) across machines via the storage server, disk-cached for the SDK | [features/agent-memory-sync.md](features/agent-memory-sync.md) |
 | `app-data-root` | Machine-global app state root at `~/.lines-app`, with one-time adoption of legacy `~/.claude-ui` | [features/app-data-root.md](features/app-data-root.md) |

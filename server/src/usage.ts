@@ -5,7 +5,7 @@
  * Auth uses the app's own login: the shared AuthManager supplies (and refreshes)
  * the OAuth access token. No login → no chip.
  */
-import type { ServerMessage, UsageSnapshot, UsageWindow } from '@claude-ui/shared';
+import type { ServerMessage, UsageSnapshot, UsageWindow } from '@lines/shared';
 import { AuthRequiredError, type AuthManager } from './auth.ts';
 
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';

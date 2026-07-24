@@ -1,6 +1,6 @@
 import { Text } from '@mantine/core';
 import type { ComboboxItem, SelectProps } from '@mantine/core';
-import type { ModelOption } from '@claude-ui/shared';
+import type { ModelOption } from '@lines/shared';
 
 interface ModelItem extends ComboboxItem {
   description?: string;

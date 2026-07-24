@@ -1,5 +1,5 @@
 {
-  "name": "@claude-ui/web",
+  "name": "@lines/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@claude-ui/shared": "*",
+    "@lines/shared": "*",
     "@clerk/clerk-react": "^5.61.9",
     "@hello-pangea/dnd": "^18.0.1",
     "@mantine/core": "^9.4.1",

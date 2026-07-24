@@ -1,4 +1,4 @@
-import type { ClientMessage, ServerMessage } from '@claude-ui/shared';
+import type { ClientMessage, ServerMessage } from '@lines/shared';
 import { useStore } from './store';
 
 const WS_URL = `ws://${location.hostname}:8787`;

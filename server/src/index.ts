@@ -9,8 +9,8 @@ import dotenv from 'dotenv';
 // environment variables win over .env entries.
 dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
 import { WebSocketServer, WebSocket } from 'ws';
-import type { ClientMessage, ServerMessage } from '@claude-ui/shared';
-import { DEFAULT_MODELS } from '@claude-ui/shared';
+import type { ClientMessage, ServerMessage } from '@lines/shared';
+import { DEFAULT_MODELS } from '@lines/shared';
 import { verifyToken } from '@clerk/backend';
 import { WorkerClient } from './workerClient.ts';
 import { APP_ROOT, userStoreRoot } from './store.ts';
@@ -53,8 +53,8 @@ const conns = new WeakMap<WebSocket, ConnState>();
  * Phase 2 of the multi-user plan: all state lives in per-user contexts held by
  * the registry, but every connection still binds to the implicit 'local' user
  * (the Clerk auth gate arrives in Phase 3). 'local' keeps the legacy flat
- * `~/.claude-ui` layout so an existing install carries over untouched; real
- * user ids get `~/.claude-ui/users/{id}` (migration ships with the auth gate).
+ * `~/.lines-app` layout so an existing install carries over untouched; real
+ * user ids get `~/.lines-app/users/{id}` (migration ships with the auth gate).
  */
 const LOCAL_USER = 'local';
 
@@ -560,7 +560,7 @@ function pickFolderNative(): Promise<string | null> {
 let listenAttempts = 0;
 function listen() {
   server.listen(PORT, () => {
-    console.log(`claude-ui bridge listening on http://localhost:${PORT}`);
+    console.log(`lines bridge listening on http://localhost:${PORT}`);
   });
 }
 server.on('error', (err: NodeJS.ErrnoException) => {

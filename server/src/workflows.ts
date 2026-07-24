@@ -8,8 +8,8 @@ import type {
   WorkflowDef,
   WorkflowMarkerData,
   WorkflowState,
-} from '@claude-ui/shared';
-import { isStepRef } from '@claude-ui/shared';
+} from '@lines/shared';
+import { isStepRef } from '@lines/shared';
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
 import { captureBaseline, workingTreeDiff } from './git.ts';

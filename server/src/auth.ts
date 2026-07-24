@@ -1,7 +1,7 @@
 /**
  * App-managed Claude login via OAuth 2.0 (PKCE). Replaces the previous model of
  * inheriting the ambient Claude Code CLI login: the app runs its own authorize
- * flow, stores its own tokens under ~/.claude-ui/auth.json, refreshes them, and
+ * flow, stores its own tokens under ~/.lines-app/auth.json, refreshes them, and
  * hands the access token to the SDK (worker queries) and the usage poller.
  *
  * Uses Claude Code's public OAuth client. The manual code-paste redirect
@@ -12,7 +12,7 @@
  * third-party use; Anthropic can change or block them.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import type { AuthStatus } from '@claude-ui/shared';
+import type { AuthStatus } from '@lines/shared';
 import type { Store, StoredAuth } from './store.ts';
 
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';

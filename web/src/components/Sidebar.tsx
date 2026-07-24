@@ -33,7 +33,7 @@ import { useLocalStorage } from '@mantine/hooks';
 import type { CSSProperties } from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { SessionMeta, SessionStatus } from '@claude-ui/shared';
+import type { SessionMeta, SessionStatus } from '@lines/shared';
 import { formatDuration } from '../lib/format';
 import type { SidebarMode } from '../store';
 import { sessionsInProject, useStore } from '../store';
@@ -375,12 +375,12 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
   const selectedSessionId = useStore((s) => s.selectedSessionId);
   const activeProject = useStore((s) => s.activeProject);
   const [showArchived, setShowArchived] = useLocalStorage<boolean>({
-    key: 'claude-ui.showArchived',
+    key: 'lines.showArchived',
     defaultValue: true,
   });
   // '' = raw session, otherwise workflow id.
   const [lastChoice, setLastChoice] = useLocalStorage<string>({
-    key: 'claude-ui.lastNewSessionChoice',
+    key: 'lines.lastNewSessionChoice',
     defaultValue: '',
   });
   const lastWorkflow = [...workflows, ...sharedWorkflows].find((w) => w.id === lastChoice);

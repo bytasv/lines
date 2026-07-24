@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Group, Loader, Text, Tree, mergeAsyncChildren, useTree } from '@mantine/core';
 import type { TreeNodeData } from '@mantine/core';
 import { IconChevronRight, IconFile, IconFolder, IconFolderOpen } from '@tabler/icons-react';
-import type { TreeEntry } from '@claude-ui/shared';
+import type { TreeEntry } from '@lines/shared';
 import { fetchTree } from '../lib/files';
 
 interface FileTreeProps {

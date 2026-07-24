@@ -1,5 +1,5 @@
 {
-  "name": "@claude-ui/storage-server",
+  "name": "@lines/storage-server",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,7 +13,7 @@
     "studio": "dotenv -e ../.env -- prisma studio"
   },
   "dependencies": {
-    "@claude-ui/shared": "*",
+    "@lines/shared": "*",
     "@clerk/express": "^1.7.41",
     "@prisma/client": "^6.19.0",
     "dotenv": "^17.4.2",

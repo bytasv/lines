@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import type { ServerMessage, UserUiSettings } from '@claude-ui/shared';
+import type { ServerMessage, UserUiSettings } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
 import { AuthManager } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
@@ -8,6 +8,7 @@ import { UsagePoller } from './usage.ts';
 import { WorkflowEngine } from './workflows.ts';
 import { StorageSyncClient } from './sync.ts';
 import { ProjectKeyRegistry } from './projectKeys.ts';
+import { MemorySyncer } from './memory.ts';
 import type { WorkerClient } from './workerClient.ts';
 
 const STORAGE_URL = process.env.STORAGE_URL ?? 'http://localhost:8790';
@@ -83,6 +84,10 @@ export function buildUserContext(
     broadcast({ type: 'projectKeys', projectKeys: keys });
   });
 
+  // Cross-machine agent memory: disk is the SDK-facing cache, storage is the
+  // shared source of truth. Pushed on turn end (below) and on connect (syncNow).
+  const memory = new MemorySyncer(store, projectKeys);
+
   const auth = new AuthManager(store);
   const usage = new UsagePoller(broadcast, auth);
 
@@ -98,6 +103,10 @@ export function buildUserContext(
         (msg.event.data as { type?: string } | null)?.type === 'result'
       ) {
         usage.refreshSoon();
+        // Turn end is when the agent may have written memory; the mtime-diff also
+        // catches hand-edits made outside a turn for free.
+        const changed = memory.collectChanged();
+        if (changed) sync.pushMemory(changed);
       }
     },
     auth,
@@ -164,6 +173,8 @@ export function buildUserContext(
         projectKeys.merge(pulled.projectKeys);
         // Adopted sessions may name checkouts this machine has but has never opened.
         projectKeys.learnAll(sessions.list().map((s) => s.cwd));
+        // Apply after key merge/learn so slug->key resolution is as complete as possible.
+        if (pulled.memory) memory.applyRemote(pulled.memory);
       } finally {
         sync.applying = false;
       }
@@ -175,6 +186,7 @@ export function buildUserContext(
       sync.pushSteps(workflows.listOwnStepVersions());
       sync.pushSessions(sessions.list());
       sync.pushProjectKeys(projectKeys.all());
+      sync.pushMemory(memory.collectAll());
       const local = store.loadSettings();
       if (local) sync.pushSettings(local);
     }

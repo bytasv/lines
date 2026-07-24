@@ -20,7 +20,7 @@ import {
 import { IconAlertTriangle, IconChevronDown, IconCopy, IconPlus, IconTrash } from '@tabler/icons-react';
 import { DragDropContext, Draggable, Droppable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
-import type { StepDef } from '@claude-ui/shared';
+import type { StepDef } from '@lines/shared';
 import { useStore } from '../../store';
 import { ConfirmModal } from '../ConfirmModal';
 import { WORKFLOW_PRESETS } from '../../lib/workflowPresets';

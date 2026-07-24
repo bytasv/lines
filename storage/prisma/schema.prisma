@@ -69,3 +69,14 @@ model ProjectKeys {
 
   @@map("project_keys")
 }
+
+// Cross-machine agent memory (allowlisted ~/.claude locations only). One blob
+// per user; the SDK still reads the disk copy — this is the shared source of
+// truth, merged per-file last-write-wins server-side.
+model AgentMemory {
+  userId    String   @id @map("user_id")
+  data      Json // MemoryFileMap
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("agent_memory")
+}

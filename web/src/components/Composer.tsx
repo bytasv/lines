@@ -23,8 +23,8 @@ import {
   IconX,
   IconZoomIn,
 } from '@tabler/icons-react';
-import type { CavemanLevel, PermissionMode, PromptAttachment, SessionMeta } from '@claude-ui/shared';
-import { isSessionInterruptible } from '@claude-ui/shared';
+import type { CavemanLevel, PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
+import { isSessionInterruptible } from '@lines/shared';
 import { useStore } from '../store';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { send } from '../ws';

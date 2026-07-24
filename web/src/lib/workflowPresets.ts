@@ -1,5 +1,5 @@
-import type { WorkflowStep } from '@claude-ui/shared';
-import { DEFAULT_MODEL } from '@claude-ui/shared';
+import type { WorkflowStep } from '@lines/shared';
+import { DEFAULT_MODEL } from '@lines/shared';
 
 export interface WorkflowPreset {
   id: string;

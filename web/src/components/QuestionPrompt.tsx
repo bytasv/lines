@@ -12,7 +12,7 @@ import {
   UnstyledButton,
 } from '@mantine/core';
 import { IconHelpCircle } from '@tabler/icons-react';
-import type { AskUserQuestionInput, PermissionRequestData } from '@claude-ui/shared';
+import type { AskUserQuestionInput, PermissionRequestData } from '@lines/shared';
 import { send } from '../ws';
 
 const OTHER = '__other__';
