@@ -8,6 +8,7 @@ import type {
   ServerMessage,
   SessionMeta,
   StepDef,
+  StorageStatus,
   TranscriptEvent,
   UsageSnapshot,
   UserUiSettings,
@@ -201,6 +202,8 @@ interface UiState {
   usage: UsageSnapshot | null;
   /** App login state from the bridge; null until the first `hello`. */
   auth: AuthStatus | null;
+  /** Bridge->storage/Supabase link health; null until first `hello`. `available: false` shows the sync-degraded banner. */
+  storageStatus: StorageStatus | null;
   /** Authorize URL of the in-progress login, set once the server answers authStartLogin. */
   authorizeUrl: string | null;
   /** Last login failure, shown inline in the login modal. */
@@ -311,6 +314,7 @@ export const useStore = create<UiState>((set, get) => {
   filePreview: null,
   usage: null,
   auth: null,
+  storageStatus: null,
   authorizeUrl: null,
   authError: null,
   loginModalOpen: false,
@@ -483,6 +487,7 @@ export const useStore = create<UiState>((set, get) => {
           projectKeys: msg.projectKeys ?? {},
           usage: msg.usage,
           auth: msg.auth,
+          storageStatus: msg.storage ?? null,
           // Logged out? Open the login flow — but only on the first hello with
           // that news, so reconnects don't reopen a dismissed modal.
           loginModalOpen:
@@ -611,6 +616,9 @@ export const useStore = create<UiState>((set, get) => {
             ? { auth: msg.auth, loginModalOpen: false, authorizeUrl: null, authError: null }
             : { auth: msg.auth, loginModalOpen: true },
         );
+        break;
+      case 'storageStatus':
+        set({ storageStatus: msg.storage });
         break;
       case 'authLoginStarted':
         set({ authorizeUrl: msg.authorizeUrl, authError: null });

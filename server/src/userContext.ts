@@ -62,6 +62,9 @@ export function buildUserContext(
   const guard = new GuardAllowlist(store);
   const sockets = new Set<WebSocket>();
   const sync = new StorageSyncClient(STORAGE_URL, () => ctx.clerkToken);
+  // Storage/Supabase reachability flips → tell this user's browsers so they can
+  // show the "cloud sync unavailable" notice (local persistence still works).
+  sync.onStatusChange = (storage) => broadcast({ type: 'storageStatus', storage });
 
   const broadcast = (msg: ServerMessage) => {
     observe?.(msg);

@@ -401,6 +401,13 @@ export interface AuthStatus {
   account?: { email?: string; organization?: string };
 }
 
+/** Bridge -> storage-server link health. `available: false` = the storage server / Supabase is unreachable. */
+export interface StorageStatus {
+  available: boolean;
+  /** Underlying error (Prisma/DB message or transport failure), when known. */
+  reason?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Server -> Client
 // ---------------------------------------------------------------------------
@@ -455,11 +462,12 @@ export interface MemoryFileEntry {
 export type MemoryFileMap = Record<string, MemoryFileEntry>;
 
 export type ServerMessage =
-  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; settings?: UserUiSettings | null }
+  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; storage: StorageStatus; settings?: UserUiSettings | null }
   | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
   | { type: 'usage'; usage: UsageSnapshot | null }
   | { type: 'authStatus'; auth: AuthStatus }
+  | { type: 'storageStatus'; storage: StorageStatus }
   | { type: 'authLoginStarted'; authorizeUrl: string }
   | { type: 'authError'; message: string }
   | { type: 'projects'; projects: string[] }

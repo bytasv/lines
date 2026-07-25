@@ -7,6 +7,7 @@ import { Sidebar } from './components/Sidebar';
 import { SessionView } from './components/SessionView';
 import { ProjectTabs } from './components/ProjectTabs';
 import { ConnectionBanner } from './components/ConnectionBanner';
+import { StorageBanner } from './components/StorageBanner';
 import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/workflow/WorkflowEditor';
 import { MonacoPreviewModal } from './components/MonacoPreviewModal';
@@ -115,6 +116,7 @@ function Shell() {
         <ProjectTabs />
       </AppShell.Header>
       <ConnectionBanner headerHeight={HEADER_HEIGHT} />
+      <StorageBanner headerHeight={HEADER_HEIGHT} />
       <AppShell.Navbar>
         <Sidebar onEditWorkflows={() => setWorkflowEditorOpen(true)} />
         {hasProjects && (

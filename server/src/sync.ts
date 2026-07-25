@@ -1,4 +1,4 @@
-import type { MemoryFileMap, ProjectKeyMap, SessionMeta, StepDef, StepRef, WorkflowDef } from '@lines/shared';
+import type { MemoryFileMap, ProjectKeyMap, SessionMeta, StepDef, StepRef, StorageStatus, WorkflowDef } from '@lines/shared';
 
 const PUSH_DEBOUNCE_MS = 2_000;
 const PULL_MIN_SPACING_MS = 30_000;
@@ -24,7 +24,13 @@ export class StorageSyncClient {
   /** True while pulled state is being applied, so the resulting broadcasts don't push back up. */
   applying = false;
 
+  /** Fired on every availability transition, so the bridge can broadcast a storageStatus. */
+  onStatusChange?: (status: StorageStatus) => void;
+
   private warned = false;
+  /** null = never contacted (unknown/disabled); true/false = last request outcome. */
+  private available: boolean | null = null;
+  private reason?: string;
   private lastPullAt = 0;
   private pendingWorkflows: WorkflowDef[] | null = null;
   private pendingSteps: StepDef[] | null = null;
@@ -204,18 +210,45 @@ export class StorageSyncClient {
 
   private async req(method: string, path: string, body?: unknown): Promise<unknown> {
     const token = this.tokenFn();
-    if (!token) throw new Error('no token');
-    const res = await fetch(`${this.base}${path}`, {
-      method,
-      headers: {
-        authorization: `Bearer ${token}`,
-        ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`storage ${method} ${path} → ${res.status}`);
+    if (!token) throw new Error('no token'); // disabled, not an outage — leave status untouched
+    let res: Response;
+    try {
+      res = await fetch(`${this.base}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+    } catch (err) {
+      // Transport failure: storage process down, connection refused, or timeout.
+      this.setAvailable(false, err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    if (!res.ok) {
+      // A 500 carries the storage server's error body (Prisma/DB message) — surface it as the reason.
+      const reason = await res.json().then((b) => (b as { error?: string })?.error).catch(() => undefined);
+      this.setAvailable(false, reason ?? `storage ${method} ${path} → ${res.status}`);
+      throw new Error(`storage ${method} ${path} → ${res.status}`);
+    }
+    this.setAvailable(true);
     return res.json();
+  }
+
+  /** Current bridge->storage link health for a fresh client's hello (null before first contact). */
+  get status(): StorageStatus {
+    return { available: this.available !== false, ...(this.reason ? { reason: this.reason } : {}) };
+  }
+
+  /** Flip availability and notify only on a transition, so the client sees one banner per outage. */
+  private setAvailable(ok: boolean, reason?: string): void {
+    if (this.available === ok) return;
+    this.available = ok;
+    this.reason = ok ? undefined : reason;
+    if (ok) this.warned = false; // allow one fresh warn on the next outage
+    this.onStatusChange?.(this.status);
   }
 
   /** One warning per outage, not one per debounced push. */

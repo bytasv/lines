@@ -308,6 +308,7 @@ async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
     projectKeys: ctx.projectKeys.all(),
     usage: ctx.usage.snapshot,
     auth: ctx.auth.getStatus(),
+    storage: ctx.sync.status,
     settings: ctx.store.loadSettings(),
   };
   ws.send(JSON.stringify(hello));

@@ -25,6 +25,20 @@ const [{ default: express }, { clerkMiddleware, getAuth }, { prisma }] = await P
   import('./db.ts'),
 ]);
 
+// Fail fast with one actionable line instead of a raw code-frame trace. Catches
+// a missing Prisma client (postinstall skipped by `ignore-scripts`) and an
+// unreachable Supabase at boot; a mid-run outage surfaces via 500s to the bridge.
+try {
+  await prisma.$connect();
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(
+    '[storage] cannot reach database — run `npm run generate -w storage` and check DATABASE_URL:',
+    msg,
+  );
+  process.exit(1);
+}
+
 const PORT = Number(process.env.PORT ?? 8790);
 
 const app = express();
