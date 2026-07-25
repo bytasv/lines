@@ -249,6 +249,10 @@ export function StepCard({
   const contentReadOnly = readOnly || isRef;
   const modeLabel = MODE_OPTIONS.find((m) => m.value === step.permissionMode)?.label ?? step.permissionMode;
   const modelLabel = models.find((m) => m.id === step.model)?.label ?? step.model;
+  const modelKnown = models.some((m) => m.id === step.model);
+  const modelWarning = contentReadOnly
+    ? `Model "${step.model}" is no longer available — update, re-pin, or duplicate this step to pick a current model`
+    : `Model "${step.model}" is no longer available — pick a current model`;
   const invalid = !!errors;
   const canBrowseHistory = isRef && !readOnly;
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -315,6 +319,13 @@ export function StepCard({
               </Badge>
             ))}
           {isRef && updateDef && <UpdatePopover pinned={step} head={updateDef} onUpdate={onUpdateToLatest} />}
+          {!modelKnown && (
+            <Tooltip label={modelWarning} multiline w={240} withArrow>
+              <ActionIcon size="sm" variant="light" color="yellow" radius="xl">
+                <IconAlertTriangle size={14} />
+              </ActionIcon>
+            </Tooltip>
+          )}
           {collapsed && !isRef && (
             <Group gap={6} wrap="nowrap" visibleFrom="md">
               <Badge size="sm" variant="default">{modelLabel}</Badge>
@@ -386,7 +397,7 @@ export function StepCard({
               <Select
                 w={168}
                 comboboxProps={modelComboboxProps}
-                data={modelSelectData(models)}
+                data={modelSelectData(models, step.model)}
                 renderOption={renderModelOption}
                 value={step.model}
                 disabled={contentReadOnly}

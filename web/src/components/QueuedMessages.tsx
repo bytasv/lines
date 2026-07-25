@@ -1,6 +1,7 @@
 import { ActionIcon, Badge, Group, Paper, Stack, Text } from '@mantine/core';
 import { IconX } from '@tabler/icons-react';
 import type { SessionMeta } from '@lines/shared';
+import { mentionKindMeta } from '../lib/mentions';
 import { send } from '../ws';
 
 /** Prompts held server-side while the session is busy; sent FIFO after each turn. */
@@ -32,6 +33,26 @@ export function QueuedMessages({ session }: { session: SessionMeta }) {
               <Text size="sm" c="dimmed" lineClamp={2}>
                 {item.text}
               </Text>
+              {!!item.mentions?.length && (
+                <Group gap={4}>
+                  {item.mentions.map((m) => {
+                    const meta = mentionKindMeta[m.kind];
+                    const Icon = meta?.icon;
+                    return (
+                      <Badge
+                        key={`${m.kind}:${m.id}`}
+                        size="xs"
+                        variant="light"
+                        color={meta?.color ?? 'gray'}
+                        leftSection={Icon ? <Icon size={10} /> : undefined}
+                        style={{ textTransform: 'none' }}
+                      >
+                        {m.label}
+                      </Badge>
+                    );
+                  })}
+                </Group>
+              )}
               {!!item.attachments?.length && (
                 <Group gap={4}>
                   {item.attachments.map((att) => (

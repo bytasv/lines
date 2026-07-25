@@ -2,6 +2,7 @@ import type {
   Attachment,
   FileSnapshotData,
   PermissionRequestData,
+  PromptMention,
   TranscriptEvent,
   TurnSummaryData,
   WorkflowMarkerData,
@@ -58,7 +59,7 @@ export interface LiveActivity {
 }
 
 export type TranscriptItem =
-  | { kind: 'user'; key: string; text: string; source: 'user' | 'workflow'; attachments?: Attachment[] }
+  | { kind: 'user'; key: string; text: string; source: 'user' | 'workflow'; attachments?: Attachment[]; mentions?: PromptMention[] }
   | { kind: 'assistant'; key: string; blocks: AssistantBlock[]; isAnswer?: boolean }
   | ToolGroupItem
   | AgentTurnItem
@@ -135,13 +136,19 @@ export function buildTranscript(
       case 'user': {
         openGroup = null;
         lastText = '';
-        const data = event.data as { text: string; source?: 'user' | 'workflow'; attachments?: Attachment[] };
+        const data = event.data as {
+          text: string;
+          source?: 'user' | 'workflow';
+          attachments?: Attachment[];
+          mentions?: PromptMention[];
+        };
         items.push({
           kind: 'user',
           key: `u${event.seq}`,
           text: data.text,
           source: data.source ?? 'user',
           attachments: data.attachments,
+          mentions: data.mentions,
         });
         break;
       }

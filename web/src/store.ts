@@ -5,6 +5,7 @@ import type {
   PermissionMode,
   ProjectKeyMap,
   PromptAttachment,
+  PromptMention,
   ServerMessage,
   SessionMeta,
   StepDef,
@@ -14,7 +15,7 @@ import type {
   UserUiSettings,
   WorkflowDef,
 } from '@lines/shared';
-import { DEFAULT_MODEL } from '@lines/shared';
+import { DEFAULT_MODEL, resolveModelId } from '@lines/shared';
 import { send } from './ws';
 import type { AlertSound } from './lib/alerts';
 import {
@@ -54,6 +55,8 @@ export interface QueuedPrompt {
   sessionId: string;
   text: string;
   attachments?: PromptAttachment[];
+  /** Display-only @mention badges; the expansion is already baked into `text`. */
+  mentions?: PromptMention[];
   queuedAt: number;
 }
 
@@ -101,7 +104,7 @@ function loadNewSessionDefaults(): NewSessionDefaults {
     if (!raw) return fallback;
     const parsed = JSON.parse(raw);
     return {
-      model: typeof parsed.model === 'string' ? parsed.model : fallback.model,
+      model: typeof parsed.model === 'string' ? resolveModelId(parsed.model) : fallback.model,
       permissionMode:
         typeof parsed.permissionMode === 'string' ? parsed.permissionMode : fallback.permissionMode,
     };

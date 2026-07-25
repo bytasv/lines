@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ActionIcon,
+  Badge,
   Box,
   Group,
   Modal,
   Paper,
+  Popover,
   SegmentedControl,
   Select,
   Stack,
@@ -27,6 +29,13 @@ import type { CavemanLevel, PermissionMode, PromptAttachment, SessionMeta } from
 import { isSessionInterruptible } from '@lines/shared';
 import { useStore } from '../store';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
+import {
+  buildExpandedPrompt,
+  findMentionToken,
+  mentionKindMeta,
+  type MentionCandidate,
+} from '../lib/mentions';
+import { MentionDropdown, useMentionSearch } from './MentionAutocomplete';
 import { send } from '../ws';
 
 /** Read a File into a raw-base64 PromptAttachment (strips the data: URI prefix). */
@@ -131,11 +140,70 @@ export function Composer({ session }: { session: SessionMeta }) {
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  // @mention autocomplete: the token the caret sits in, chosen chips, active row,
+  // and a "dismissed" token start so Escape keeps the popover shut for that token.
+  const [mentionToken, setMentionToken] = useState<{ start: number; query: string } | null>(null);
+  const [mentions, setMentions] = useState<MentionCandidate[]>([]);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [dismissedStart, setDismissedStart] = useState<number | null>(null);
   const dragDepth = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const interruptible = isSessionInterruptible(session.status);
   const awaitingApproval = session.status === 'waiting-approval';
+
+  const results = useMentionSearch(mentionToken?.query ?? null, session.cwd);
+  const activeCandidate = results[Math.min(activeIndex, results.length - 1)];
+  const nothingToSend = !text.trim() && attachments.length === 0 && mentions.length === 0;
+
+  /** Recompute the active mention token after any text/caret change. */
+  const syncToken = (value: string, caret: number) => {
+    const token = findMentionToken(value, caret);
+    if (token && token.start === dismissedStart) {
+      setMentionToken(null);
+      return;
+    }
+    if (!token || token.start !== dismissedStart) setDismissedStart(null);
+    setMentionToken(token);
+    setActiveIndex(0);
+  };
+
+  /** Commit a candidate: drill into a dir, or splice the token out and add a chip. */
+  const applyMention = (c: MentionCandidate) => {
+    if (!mentionToken) return;
+    const before = text.slice(0, mentionToken.start);
+    const after = text.slice(mentionToken.start + 1 + mentionToken.query.length);
+    const ta = textareaRef.current;
+
+    // A directory keeps the popover open, drilling one level deeper.
+    if (c.kind === 'file' && c.label.endsWith('/')) {
+      const inserted = `@${c.id}/`;
+      const next = before + inserted + after;
+      const caret = before.length + inserted.length;
+      setText(next);
+      setMentionToken({ start: mentionToken.start, query: `${c.id}/` });
+      setActiveIndex(0);
+      requestAnimationFrame(() => {
+        ta?.focus();
+        ta?.setSelectionRange(caret, caret);
+      });
+      return;
+    }
+
+    setText(before + after);
+    setMentions((m) => (m.some((x) => x.kind === c.kind && x.id === c.id) ? m : [...m, c]));
+    setMentionToken(null);
+    const caret = before.length;
+    requestAnimationFrame(() => {
+      ta?.focus();
+      ta?.setSelectionRange(caret, caret);
+    });
+  };
+
+  const dismissMention = () => {
+    if (mentionToken) setDismissedStart(mentionToken.start);
+    setMentionToken(null);
+  };
 
   // Focus the prompt on a freshly created session (reuses the store's 5s justCreated heuristic).
   useEffect(() => {
@@ -151,10 +219,22 @@ export function Composer({ session }: { session: SessionMeta }) {
 
   const submit = () => {
     const trimmed = text.trim();
-    if (!trimmed && attachments.length === 0) return;
-    send({ type: 'prompt', sessionId: session.id, text: trimmed, attachments });
+    if (nothingToSend) return;
+    // Bake the @mention expansions into the text (so workflow-first-prompt and
+    // offline queueing see it too); `mentions` rides along display-only.
+    const expanded = buildExpandedPrompt(trimmed, mentions);
+    const wireMentions = mentions.map(({ kind, id, label, detail }) => ({ kind, id, label, detail }));
+    send({
+      type: 'prompt',
+      sessionId: session.id,
+      text: expanded,
+      attachments,
+      mentions: wireMentions.length ? wireMentions : undefined,
+    });
     setText('');
     setAttachments([]);
+    setMentions([]);
+    setMentionToken(null);
   };
 
   return (
@@ -222,6 +302,35 @@ export function Composer({ session }: { session: SessionMeta }) {
           ))}
         </Group>
       )}
+      {mentions.length > 0 && (
+        <Group gap={6} px={6} pb={6}>
+          {mentions.map((m) => {
+            const meta = mentionKindMeta[m.kind];
+            const Icon = meta?.icon;
+            return (
+              <Tooltip key={`${m.kind}:${m.id}`} label={m.detail ?? m.id} disabled={!m.detail && !m.id}>
+                <Badge
+                  variant="light"
+                  color={meta?.color ?? 'gray'}
+                  leftSection={Icon ? <Icon size={11} /> : undefined}
+                  rightSection={
+                    <IconX
+                      size={11}
+                      style={{ cursor: 'pointer' }}
+                      onClick={() =>
+                        setMentions((list) => list.filter((x) => !(x.kind === m.kind && x.id === m.id)))
+                      }
+                    />
+                  }
+                  style={{ textTransform: 'none' }}
+                >
+                  {m.label}
+                </Badge>
+              </Tooltip>
+            );
+          })}
+        </Group>
+      )}
       {connectionStatus !== 'connected' && (
         <Text size="xs" c="dimmed" px={6} pb={6}>
           Offline — messages are queued and sent on reconnect
@@ -238,34 +347,78 @@ export function Composer({ session }: { session: SessionMeta }) {
           e.currentTarget.value = '';
         }}
       />
-      <Textarea
-        ref={textareaRef}
-        placeholder={
-          session.workflow && !session.workflow.started
-            ? 'Describe the task — this kicks off the workflow…'
-            : 'Message Claude… (↵ to send, ⇧↵ for newline)'
-        }
-        autosize
-        minRows={2}
-        maxRows={10}
-        variant="unstyled"
-        px={6}
-        value={text}
-        onChange={(e) => setText(e.currentTarget.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !e.nativeEvent.isComposing) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-        onPaste={(e) => {
-          const files = Array.from(e.clipboardData.files);
-          if (files.length) {
-            e.preventDefault();
-            void addFiles(files);
-          }
-        }}
-      />
+      <Popover
+        opened={mentionToken !== null}
+        position="top-start"
+        width="target"
+        trapFocus={false}
+        shadow="md"
+        withinPortal
+      >
+        <Popover.Target>
+          <Textarea
+            ref={textareaRef}
+            placeholder={
+              session.workflow && !session.workflow.started
+                ? 'Describe the task — this kicks off the workflow…'
+                : 'Message Claude… (↵ to send, ⇧↵ for newline)'
+            }
+            autosize
+            minRows={2}
+            maxRows={10}
+            variant="unstyled"
+            px={6}
+            value={text}
+            onChange={(e) => syncToken(e.currentTarget.value, e.currentTarget.selectionStart)}
+            onClick={(e) => syncToken(text, e.currentTarget.selectionStart)}
+            onKeyUp={(e) => {
+              // Caret moves that aren't already handled by onKeyDown/onChange.
+              if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End') {
+                syncToken(text, e.currentTarget.selectionStart);
+              }
+            }}
+            onKeyDown={(e) => {
+              // Mention navigation runs before the Enter-to-send branch.
+              if (mentionToken && results.length > 0) {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setActiveIndex((i) => (i + 1) % results.length);
+                  return;
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setActiveIndex((i) => (i - 1 + results.length) % results.length);
+                  return;
+                }
+                if ((e.key === 'Enter' || e.key === 'Tab') && activeCandidate) {
+                  e.preventDefault();
+                  applyMention(activeCandidate);
+                  return;
+                }
+              }
+              if (mentionToken && e.key === 'Escape') {
+                e.preventDefault();
+                dismissMention();
+                return;
+              }
+              if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            onPaste={(e) => {
+              const files = Array.from(e.clipboardData.files);
+              if (files.length) {
+                e.preventDefault();
+                void addFiles(files);
+              }
+            }}
+          />
+        </Popover.Target>
+        <Popover.Dropdown p={4}>
+          <MentionDropdown results={results} activeIndex={activeIndex} onSelect={applyMention} />
+        </Popover.Dropdown>
+      </Popover>
       <Group justify="space-between" px={4} pt={4}>
         <Group gap="xs">
           <Tooltip label="Attach files">
@@ -284,7 +437,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           <Select
             w={130}
             comboboxProps={modelComboboxProps}
-            data={modelSelectData(models)}
+            data={modelSelectData(models, session.model)}
             renderOption={renderModelOption}
             value={session.model}
             onChange={(v) => v && send({ type: 'setModel', sessionId: session.id, model: v })}
@@ -334,7 +487,7 @@ export function Composer({ session }: { session: SessionMeta }) {
                   variant="subtle"
                   size="lg"
                   onClick={submit}
-                  disabled={!text.trim() && attachments.length === 0}
+                  disabled={nothingToSend}
                 >
                   <IconSend size={16} />
                 </ActionIcon>
@@ -358,7 +511,7 @@ export function Composer({ session }: { session: SessionMeta }) {
                 variant="filled"
                 size="lg"
                 onClick={submit}
-                disabled={!text.trim() && attachments.length === 0}
+                disabled={nothingToSend}
               >
                 <IconSend size={16} />
               </ActionIcon>
@@ -368,7 +521,7 @@ export function Composer({ session }: { session: SessionMeta }) {
               variant="filled"
               size="lg"
               onClick={submit}
-              disabled={!text.trim() && attachments.length === 0}
+              disabled={nothingToSend}
             >
               <IconSend size={16} />
             </ActionIcon>

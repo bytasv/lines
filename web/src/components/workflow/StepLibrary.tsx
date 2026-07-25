@@ -354,7 +354,7 @@ export function StepLibrary() {
                 <Select
                   w={168}
                   comboboxProps={modelComboboxProps}
-                  data={modelSelectData(models)}
+                  data={modelSelectData(models, draft.model)}
                   renderOption={renderModelOption}
                   value={draft.model}
                   disabled={readOnly}

@@ -16,21 +16,30 @@
         "shared/types.ts",
         "web/src/lib/modelSelect.tsx",
         "web/src/store.ts",
-        "server/src/index.ts"
+        "server/src/index.ts",
+        "server/src/sessions.ts",
+        "server/src/workflows.ts"
       ],
       "symbols": [
         "ModelOption",
         "DEFAULT_MODELS",
         "modelSelectData",
         "renderModelOption",
-        "modelComboboxProps"
+        "modelComboboxProps",
+        "LEGACY_MODEL_MAP",
+        "resolveModelId",
+        "isKnownModel"
       ],
       "tests": [],
       "businessRules": [
-        "description is optional on ModelOption; missing description renders label-only"
+        "description is optional on ModelOption; missing description renders label-only",
+        "a step/session keeps a retired model id in storage (no migration); resolveModelId() substitutes the mapped replacement at query time so it still runs, and a warning badge on the step card flags it for the user to update",
+        "an unmapped unknown model id passes through resolveModelId() unchanged rather than being forced to a default"
       ],
       "architecturalRules": [
-        "all model Selects must use modelSelectData()/renderModelOption instead of inlining data mapping"
+        "all model Selects must use modelSelectData()/renderModelOption instead of inlining data mapping",
+        "modelSelectData() takes the current stored id as ensureId so a stale/unknown id renders disabled instead of leaving the Select blank",
+        "legacy-model resolution is a static explicit map (LEGACY_MODEL_MAP), not a tier-prefix heuristic or live Models-API lookup"
       ],
       "relatedDecisions": []
     },

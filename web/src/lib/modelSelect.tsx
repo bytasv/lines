@@ -9,8 +9,12 @@ interface ModelItem extends ComboboxItem {
 /** Widen the dropdown for narrow model Selects without widening the input. */
 export const modelComboboxProps = { width: 240, position: 'bottom-start' as const };
 
-export function modelSelectData(models: ModelOption[]): ModelItem[] {
-  return models.map((m) => ({ value: m.id, label: m.label, description: m.description }));
+export function modelSelectData(models: ModelOption[], ensureId?: string): ModelItem[] {
+  const data: ModelItem[] = models.map((m) => ({ value: m.id, label: m.label, description: m.description }));
+  if (ensureId && !models.some((m) => m.id === ensureId)) {
+    data.push({ value: ensureId, label: ensureId, description: 'No longer available', disabled: true });
+  }
+  return data;
 }
 
 export const renderModelOption: SelectProps['renderOption'] = ({ option }) => (

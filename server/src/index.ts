@@ -377,7 +377,7 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       if (workflows.startIfPending(msg.sessionId, msg.text)) break;
       // A prompt sent while a step is parked iterates on that same step.
       if (workflows.iterateIfWaiting(msg.sessionId, msg.text, msg.attachments)) break;
-      sessions.userPrompt(msg.sessionId, msg.text, msg.attachments);
+      sessions.userPrompt(msg.sessionId, msg.text, msg.attachments, msg.mentions);
       break;
     }
     case 'interrupt':

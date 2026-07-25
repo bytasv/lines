@@ -46,6 +46,19 @@ export interface Attachment {
   url: string;
 }
 
+/**
+ * A user @mention of a project entity (feature, file, …), carried alongside a
+ * prompt as display-only metadata. The agent-facing expansion is baked into the
+ * prompt text before send, so `mentions` never drives what the model sees — only
+ * how the reference renders as a badge in the transcript. `kind` is an open set.
+ */
+export interface PromptMention {
+  kind: string; // 'feature' | 'file' | future kinds
+  id: string; // feature id, or repo-relative file path
+  label: string; // chip text
+  detail?: string; // feature purpose / secondary line
+}
+
 /** A prompt sent while the session was busy; held server-side and flushed after the current turn. */
 export interface QueuedPrompt {
   id: string;
@@ -53,6 +66,8 @@ export interface QueuedPrompt {
   text: string;
   /** Staged attachment refs; the server re-reads the files back to base64 at flush time. */
   attachments?: Attachment[];
+  /** Display-only @mention badges; the expansion is already baked into `text`. */
+  mentions?: PromptMention[];
 }
 
 export interface CavemanConfig {
@@ -331,7 +346,7 @@ export interface TreeResponse {
 export type ClientMessage =
   | { type: 'createSession'; name: string; cwd: string; model: string; permissionMode: PermissionMode; caveman: CavemanConfig; workflowId?: string }
   | { type: 'deleteSession'; sessionId: string }
-  | { type: 'prompt'; sessionId: string; text: string; attachments?: PromptAttachment[] }
+  | { type: 'prompt'; sessionId: string; text: string; attachments?: PromptAttachment[]; mentions?: PromptMention[] }
   | { type: 'interrupt'; sessionId: string }
   | { type: 'retryTurn'; sessionId: string }
   | { type: 'continueTurn'; sessionId: string }
@@ -491,10 +506,30 @@ export type ServerMessage =
   | { type: 'pong' };
 
 export const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'claude-opus-4-8', label: 'Opus 4.8', description: 'Powerful model for complex work' },
+  { id: 'claude-opus-5', label: 'Opus 5', description: 'Powerful model for complex work' },
   { id: 'claude-fable-5', label: 'Fable 5', description: 'Most intelligent, Mythos-class tier' },
   { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability' },
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, for lightweight tasks' },
 ];
 
-export const DEFAULT_MODEL = 'claude-opus-4-8';
+export const DEFAULT_MODEL = 'claude-opus-5';
+
+/**
+ * Maps removed/retired model ids to their logical current replacement. Only
+ * explicit, deliberate remaps belong here — unknown ids pass through unchanged
+ * so valid dated snapshots (e.g. claude-haiku-4-5-20251001) are never downgraded.
+ */
+export const LEGACY_MODEL_MAP: Record<string, string> = {
+  'claude-opus-4-8': 'claude-opus-5',
+};
+
+/** True when `id` is one of the currently offered models. */
+export function isKnownModel(id: string): boolean {
+  return DEFAULT_MODELS.some((m) => m.id === id);
+}
+
+/** Known ids pass through; otherwise apply the legacy map, else return as-is. */
+export function resolveModelId(id: string): string {
+  if (isKnownModel(id)) return id;
+  return LEGACY_MODEL_MAP[id] ?? id;
+}

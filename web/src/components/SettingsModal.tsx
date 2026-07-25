@@ -66,7 +66,7 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
         </Text>
         <Select
           label="Model"
-          data={modelSelectData(models)}
+          data={modelSelectData(models, defaults.model)}
           renderOption={renderModelOption}
           value={defaults.model}
           onChange={(v) => v && setDefaults({ ...defaults, model: v })}

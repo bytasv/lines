@@ -73,7 +73,7 @@ function flushQueue() {
   const queued = useStore.getState().drainQueuedPrompts();
   for (const p of queued) {
     if (useStore.getState().sessions[p.sessionId]) {
-      send({ type: 'prompt', sessionId: p.sessionId, text: p.text, attachments: p.attachments });
+      send({ type: 'prompt', sessionId: p.sessionId, text: p.text, attachments: p.attachments, mentions: p.mentions });
     } else {
       console.warn('dropped queued prompt, session gone', p.sessionId);
     }
@@ -162,6 +162,7 @@ export function send(msg: ClientMessage) {
       sessionId: msg.sessionId,
       text: msg.text,
       attachments: msg.attachments,
+      mentions: msg.mentions,
       queuedAt: Date.now(),
     });
   } else {

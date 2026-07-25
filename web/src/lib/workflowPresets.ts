@@ -20,7 +20,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         name: 'Plan',
         promptTemplate:
           'We are starting a new feature: {task}\n\nFirst, explore the codebase and produce a concise implementation plan. Do not write any code yet — plan only. Ask clarifying questions if the goal is ambiguous.{feedback}',
-        model: 'claude-opus-4-8',
+        model: 'claude-opus-5',
         permissionMode: 'plan',
         autoAdvance: false,
         freshStart: false,
@@ -29,7 +29,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         name: 'Implement MVP',
         promptTemplate:
           'Implement the MVP of the planned feature now. Follow the approved plan. Keep the change minimal — no extras beyond the plan.{feedback}',
-        model: 'claude-opus-4-8',
+        model: 'claude-opus-5',
         permissionMode: 'acceptEdits',
         autoAdvance: false,
         freshStart: true,
@@ -56,7 +56,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         name: 'Review',
         promptTemplate:
           'Do a final review of everything changed in this session. Look for correctness bugs, missed edge cases, and quality issues. Report findings; do not change code.{feedback}',
-        model: 'claude-opus-4-8',
+        model: 'claude-opus-5',
         permissionMode: 'plan',
         autoAdvance: false,
         freshStart: true,

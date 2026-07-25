@@ -36,6 +36,7 @@ import {
   type AgentTurnItem,
   type TranscriptItem,
 } from '../lib/transcript';
+import { mentionKindMeta } from '../lib/mentions';
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
 import { PermissionPrompt } from './PermissionPrompt';
@@ -136,6 +137,25 @@ function Item({
               </Badge>
             )}
             {item.text && <Markdown text={item.text} />}
+            {item.mentions && item.mentions.length > 0 && (
+              <Group gap={6} mt={item.text ? 6 : 0}>
+                {item.mentions.map((m) => {
+                  const meta = mentionKindMeta[m.kind];
+                  const Icon = meta?.icon;
+                  return (
+                    <Badge
+                      key={`${m.kind}:${m.id}`}
+                      variant="light"
+                      color={meta?.color ?? 'gray'}
+                      leftSection={Icon ? <Icon size={11} /> : undefined}
+                      style={{ textTransform: 'none' }}
+                    >
+                      {m.label}
+                    </Badge>
+                  );
+                })}
+              </Group>
+            )}
             {item.attachments && item.attachments.length > 0 && (
               <Group gap="xs" mt={item.text ? 6 : 0}>
                 {item.attachments.map((att) => {

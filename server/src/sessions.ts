@@ -9,12 +9,13 @@ import type {
   PermissionMode,
   PermissionRequestData,
   PromptAttachment,
+  PromptMention,
   ServerMessage,
   SessionMeta,
   SessionStatus,
   TranscriptEvent,
 } from '@lines/shared';
-import { isSessionActive } from '@lines/shared';
+import { isSessionActive, resolveModelId } from '@lines/shared';
 import type { Store } from './store.ts';
 import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
 import {
@@ -237,7 +238,7 @@ export class SessionManager {
 
     return {
       cwd: meta.cwd,
-      model: meta.model,
+      model: resolveModelId(meta.model),
       permissionMode: sdkPermissionMode(meta.permissionMode),
       includePartialMessages: true,
       resume: meta.claudeSessionId,
@@ -284,7 +285,12 @@ export class SessionManager {
    * otherwise it goes straight through. Internal callers (workflows, recovery)
    * keep calling prompt() directly and bypass the queue.
    */
-  userPrompt(sessionId: string, text: string, attachments: PromptAttachment[] = []) {
+  userPrompt(
+    sessionId: string,
+    text: string,
+    attachments: PromptAttachment[] = [],
+    mentions: PromptMention[] = [],
+  ) {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`unknown session ${sessionId}`);
 
@@ -295,6 +301,7 @@ export class SessionManager {
         ts: Date.now(),
         text,
         attachments: staged.length ? staged : undefined,
+        mentions: mentions.length ? mentions : undefined,
       });
       // An explicit user send is the resume gesture after an interrupt/error.
       meta.queuePaused = undefined;
@@ -303,7 +310,7 @@ export class SessionManager {
       return;
     }
 
-    this.prompt(sessionId, text, 'user', attachments);
+    this.prompt(sessionId, text, 'user', attachments, mentions);
   }
 
   /** Send the next queued prompt if the session is settled and not paused. */
@@ -323,7 +330,7 @@ export class SessionManager {
       })
       .filter((a): a is PromptAttachment => a !== null);
 
-    this.prompt(sessionId, item.text, 'user', attachments);
+    this.prompt(sessionId, item.text, 'user', attachments, item.mentions ?? []);
   }
 
   /**
@@ -442,6 +449,7 @@ export class SessionManager {
     text: string,
     source: 'user' | 'workflow' = 'user',
     attachments: PromptAttachment[] = [],
+    mentions: PromptMention[] = [],
   ) {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`unknown session ${sessionId}`);
@@ -468,7 +476,12 @@ export class SessionManager {
       }
     }
 
-    this.emitEvent(sessionId, 'user', stored.length ? { text, source, attachments: stored } : { text, source });
+    this.emitEvent(sessionId, 'user', {
+      text,
+      source,
+      ...(stored.length ? { attachments: stored } : {}),
+      ...(mentions.length ? { mentions } : {}),
+    });
 
     // First real user prompt names the session from its topic. Guard flips
     // immediately so a slow title query can't fire twice or clobber a manual rename.
@@ -937,9 +950,13 @@ export class SessionManager {
   setModel(sessionId: string, model: string) {
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
-    meta.model = model;
+    const resolved = resolveModelId(model);
+    if (resolved !== model) {
+      console.warn(`legacy model "${model}" resolved to "${resolved}"`);
+    }
+    meta.model = resolved;
     this.upsert(meta);
-    this.worker.setModel(sessionId, model);
+    this.worker.setModel(sessionId, resolved);
   }
 
   setPermissionMode(sessionId: string, mode: PermissionMode) {
