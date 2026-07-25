@@ -17,6 +17,24 @@ export interface MentionCandidate extends PromptMention {
 }
 
 /**
+ * A committed mention pinned to the `[start, end)` span of the prompt text it
+ * renders as an inline pill for — the span covers the display token
+ * (`@Model selector`), excluding the trailing space. The text stays
+ * authoritative; ranges are a derived view {@link remapRanges} realigns on every
+ * edit. Sorted and non-overlapping.
+ */
+export interface MentionRange extends MentionCandidate {
+  start: number;
+  end: number;
+}
+
+/** Prompt text plus the mention ranges painted over it — the composer's draft state. */
+export interface MentionValue {
+  text: string;
+  ranges: MentionRange[];
+}
+
+/**
  * A source of mentionable entities for one `kind`. New kinds slot in by adding a
  * provider object to {@link mentionProviders} plus a {@link mentionKindMeta}
  * entry — there is no switch-over-kind anywhere else in the codebase.
@@ -27,7 +45,7 @@ export interface MentionProvider {
   search(query: string, ctx: { cwd: string }): Promise<MentionCandidate[]>;
 }
 
-/** Per-kind display metadata for chips and transcript badges. */
+/** Per-kind display metadata for inline pills and transcript badges. */
 export const mentionKindMeta: Record<string, { label: string; color: string; icon: Icon }> = {
   feature: { label: 'Feature', color: 'grape', icon: IconPuzzle },
   file: { label: 'File', color: 'blue', icon: IconFile },
@@ -43,16 +61,22 @@ const MAX_PER_KIND = 8;
  * Find the `@mention` token the caret currently sits in, or null. Scans back
  * from the caret to the nearest `@` that starts a token (preceded by whitespace
  * or start-of-text, so emails like `a@b` don't trigger). The token body allows
- * word characters plus `/.-_` (paths, ids); whitespace ends it.
+ * word characters plus `/.-_` (paths, ids); whitespace ends it. Committed
+ * mention ranges are inert — a caret inside one, or an `@` belonging to one,
+ * never reopens the popover.
  */
 export function findMentionToken(
   text: string,
   caret: number,
+  ranges: MentionRange[] = [],
 ): { start: number; query: string } | null {
+  if (ranges.some((r) => caret > r.start && caret < r.end)) return null;
   let i = caret - 1;
   while (i >= 0) {
     const ch = text[i];
     if (ch === '@') {
+      // The '@' of a committed pill (caret parked right after it) isn't a token.
+      if (ranges.some((r) => i >= r.start && i < r.end)) return null;
       const before = i === 0 ? '' : text[i - 1];
       if (before === '' || /\s/.test(before)) {
         return { start: i, query: text.slice(i + 1, caret) };
@@ -66,12 +90,73 @@ export function findMentionToken(
 }
 
 /**
+ * Describe the single contiguous edit between two textarea values as
+ * `{ start, removed, inserted }` (common-prefix / common-suffix diff). One input
+ * event is always one contiguous edit, which is what makes {@link remapRanges}
+ * sufficient — paste and cut go through the same path.
+ */
+export function diffEdit(
+  prev: string,
+  next: string,
+): { start: number; removed: number; inserted: number } {
+  const max = Math.min(prev.length, next.length);
+  let start = 0;
+  while (start < max && prev[start] === next[start]) start++;
+  let endPrev = prev.length;
+  let endNext = next.length;
+  while (endPrev > start && endNext > start && prev[endPrev - 1] === next[endNext - 1]) {
+    endPrev--;
+    endNext--;
+  }
+  return { start, removed: endPrev - start, inserted: endNext - start };
+}
+
+/**
+ * Shift mention ranges across one contiguous edit. Ranges wholly before the edit
+ * are untouched, ranges after it slide by the length delta, and a range the edit
+ * cuts into is dropped — its text stays but degrades to plain text, which is the
+ * safe failure mode (never a range pointing at the wrong characters).
+ */
+export function remapRanges(
+  ranges: MentionRange[],
+  editStart: number,
+  removed: number,
+  inserted: number,
+): MentionRange[] {
+  const editEnd = editStart + removed;
+  const delta = inserted - removed;
+  const out: MentionRange[] = [];
+  for (const r of ranges) {
+    if (r.end <= editStart) out.push(r);
+    else if (r.start >= editEnd) out.push({ ...r, start: r.start + delta, end: r.end + delta });
+    // else: the edit intersects the token — dissolve it
+  }
+  return out;
+}
+
+/**
+ * Collapse repeated mentions of the same entity (legal inline — the same pill can
+ * appear twice in a sentence) to one entry, keeping first-seen order.
+ */
+export function uniqueMentions<T extends PromptMention>(mentions: T[]): T[] {
+  const seen = new Set<string>();
+  return mentions.filter((m) => {
+    const key = `${m.kind}:${m.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
  * Append the agent-facing expansion block for the given mentions to the prompt
  * text. Returns `text` unchanged when there are no mentions.
  */
 export function buildExpandedPrompt(text: string, mentions: MentionCandidate[]): string {
   if (mentions.length === 0) return text;
-  const body = mentions.map((m) => m.expansion).join('\n\n');
+  const body = uniqueMentions(mentions)
+    .map((m) => m.expansion)
+    .join('\n\n');
   const header =
     'Referenced by the user via @mentions (docs may be stale; source is authoritative):';
   return `${text}\n\n---\n${header}\n\n${body}`;

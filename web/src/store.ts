@@ -32,6 +32,7 @@ import {
   setBadge,
 } from './lib/alerts';
 import { updateFavicon } from './lib/favicon';
+import type { MentionValue } from './lib/mentions';
 
 const ACTIVE_PROJECT_KEY = 'lines.activeProject';
 const NEW_SESSION_DEFAULTS_KEY = 'lines.newSessionDefaults';
@@ -40,6 +41,7 @@ const OPEN_FILES_KEY = 'lines.openFiles';
 const COMPACTION_LEVEL_KEY = 'lines.compactionLevel';
 const TURN_SUMMARIES_ENABLED_KEY = 'lines.turnSummariesEnabled';
 const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
+const DRAFTS_KEY = 'lines.drafts';
 
 export type SidebarMode = 'sessions' | 'files';
 
@@ -90,6 +92,52 @@ function loadOpenFiles(): Record<string, OpenFilesState> {
 
 function persistOpenFiles(openFiles: Record<string, OpenFilesState>) {
   localStorage.setItem(OPEN_FILES_KEY, JSON.stringify(openFiles));
+}
+
+// ---------------------------------------------------------------------------
+// Composer drafts — unsent prompt text (plus its @mention pills) per session, so
+// a reload or a bridge restart never eats what the user was typing.
+// ---------------------------------------------------------------------------
+
+function loadDrafts(): Record<string, MentionValue> {
+  try {
+    const raw = localStorage.getItem(DRAFTS_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    const out: Record<string, MentionValue> = {};
+    for (const [id, v] of Object.entries(parsed)) {
+      const d = v as Partial<MentionValue>;
+      if (typeof d?.text === 'string') out[id] = { text: d.text, ranges: Array.isArray(d.ranges) ? d.ranges : [] };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** The stored draft for a session, or an empty one. */
+export function readDraft(sessionId: string): MentionValue {
+  return loadDrafts()[sessionId] ?? { text: '', ranges: [] };
+}
+
+/** Persist a draft; an empty one is removed rather than stored. */
+export function writeDraft(sessionId: string, value: MentionValue) {
+  const drafts = loadDrafts();
+  if (value.text) drafts[sessionId] = value;
+  else delete drafts[sessionId];
+  localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+}
+
+/** Drop drafts for sessions that no longer exist (called on each `hello`). */
+function pruneDrafts(liveSessionIds: Set<string>) {
+  const drafts = loadDrafts();
+  let changed = false;
+  for (const id of Object.keys(drafts)) {
+    if (!liveSessionIds.has(id)) {
+      delete drafts[id];
+      changed = true;
+    }
+  }
+  if (changed) localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
 }
 
 export interface NewSessionDefaults {
@@ -504,6 +552,7 @@ export const useStore = create<UiState>((set, get) => {
         if (selectedSessionId && !sessions[selectedSessionId]) {
           set({ selectedSessionId: null });
         }
+        pruneDrafts(new Set(Object.keys(sessions)));
         if (msg.settings) applySettings(msg.settings);
         break;
       }

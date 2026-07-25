@@ -137,7 +137,7 @@
         "step output hand-off after Stop is whatever the model last said (partial by design)"
       ],
       "architecturalRules": [
-        "never advance synchronously on interrupt \u2014 flag advanceOnComplete and wait for the turn to settle",
+        "never advance synchronously on interrupt — flag advanceOnComplete and wait for the turn to settle",
         "the handleWorkerEnded settle fallback must stay gated on the interrupting set (routine non-error ended events exist)"
       ],
       "relatedDecisions": []
@@ -299,11 +299,11 @@
         "newest-first, gap-tolerant version list",
         "own steps show full history; foreign steps show published versions only, with the exact pinned version always unioned in",
         "pin/restore is disabled for the currently active version",
-        "workflow re-pin changes only which immutable version a ref points to; step-library restore creates a brand-new head version with old content \u2014 history is never rewritten",
+        "workflow re-pin changes only which immutable version a ref points to; step-library restore creates a brand-new head version with old content — history is never rewritten",
         "both popovers fetch history on open, not on mount, and re-fetch on every reopen"
       ],
       "architecturalRules": [
-        "immutable step versions are never deleted or edited, on disk or in storage \u2014 only the head list and published flag change",
+        "immutable step versions are never deleted or edited, on disk or in storage — only the head list and published flag change",
         "the storage route enforces the foreign-publish filter server-side; client-side version union never bypasses it"
       ],
       "relatedDecisions": []
@@ -409,7 +409,7 @@
       "id": "session-status-badge",
       "name": "Tool-aware waiting-permission status badge",
       "doc": "features/session-status-badge.md",
-      "purpose": "Vary the sidebar waiting-permission badge label/color (and matching notification text) by which tool triggered the pause \u2014 plan approval, a question, or a plain permission ask.",
+      "purpose": "Vary the sidebar waiting-permission badge label/color (and matching notification text) by which tool triggered the pause — plan approval, a question, or a plain permission ask.",
       "entryPoints": [
         "web/src/components/Sidebar.tsx",
         "web/src/lib/alerts.ts"
@@ -436,6 +436,36 @@
         "pendingPermissionTool rides the existing sessionUpsert broadcast, no new message type",
         "cleared centrally in setStatus for any non-waiting-permission status, plus the worker-reconcile and sync-adopt paths that can force waiting-permission back to idle out from under a live turn",
         "concurrent permission asks on the same session: last askPermission call wins the label/color, consistent with pre-existing status-overwrite behavior"
+      ],
+      "relatedDecisions": []
+    },
+    {
+      "id": "composer-draft-persistence",
+      "name": "Composer draft persistence",
+      "purpose": "Persist unsent prompt text (and its @mention pills) per session in localStorage so a reload or bridge restart never loses it.",
+      "doc": "features/composer-draft-persistence.md",
+      "entryPoints": [
+        "web/src/components/Composer.tsx"
+      ],
+      "files": [
+        "web/src/store.ts",
+        "web/src/components/Composer.tsx",
+        "web/src/lib/mentions.ts"
+      ],
+      "symbols": [
+        "readDraft",
+        "writeDraft",
+        "pruneDrafts",
+        "Composer"
+      ],
+      "tests": [],
+      "businessRules": [
+        "persisted draft is the full MentionValue (text + ranges), not plain text, so restored pills/expansions stay intact",
+        "attachments are never persisted (base64 too large for localStorage)",
+        "an empty draft is deleted from storage rather than stored empty"
+      ],
+      "architecturalRules": [
+        "drafts use a single lines.drafts JSON map keyed by session id, following the existing store.ts convention (e.g. lines.openFiles) rather than one key per session"
       ],
       "relatedDecisions": []
     }
