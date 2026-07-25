@@ -106,6 +106,8 @@ export class SessionManager {
     const cur = this.sessions.get(meta.id);
     if (cur && (meta.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) return;
     if (isSessionActive(meta.status)) meta.status = 'idle';
+    // In-flight statuses were just reset, so no pause is owned by this instance.
+    meta.pendingPermissionTool = undefined;
     this.sessions.set(meta.id, meta);
     this.persist();
     this.broadcast({ type: 'sessionUpsert', session: meta });
@@ -116,6 +118,8 @@ export class SessionManager {
     if (!meta) return;
     meta.status = status;
     meta.errorMessage = errorMessage;
+    // The pending tool only means anything while paused for permission.
+    if (status !== 'waiting-permission') meta.pendingPermissionTool = undefined;
     this.upsert(meta);
     // A settled status may release a queued prompt (e.g. workflow-done -> idle).
     if (!this.isBusy(meta)) this.maybeFlush(id);
@@ -1057,6 +1061,7 @@ export class SessionManager {
         meta.status = 'idle';
         meta.turnSource = undefined;
         meta.turnStartedAt = undefined;
+        meta.pendingPermissionTool = undefined;
         this.liveState(meta.id).permissionWaitMs = 0;
         // The turn died with the worker; don't auto-fire followups.
         if (meta.queued?.length) meta.queuePaused = true;
@@ -1327,6 +1332,8 @@ export class SessionManager {
         guardReason,
       } satisfies PermissionRequestData);
     }
+    const pendingMeta = this.sessions.get(sessionId);
+    if (pendingMeta) pendingMeta.pendingPermissionTool = toolName;
     this.setStatus(sessionId, 'waiting-permission');
     const waitStart = Date.now();
     return new Promise<PermissionAnswer>((resolve) => {

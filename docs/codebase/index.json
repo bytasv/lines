@@ -395,6 +395,40 @@
         "all persistent paths derive from APP_ROOT / userStoreRoot; never hardcode the home-directory path elsewhere"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "session-status-badge",
+      "name": "Tool-aware waiting-permission status badge",
+      "doc": "features/session-status-badge.md",
+      "purpose": "Vary the sidebar waiting-permission badge label/color (and matching notification text) by which tool triggered the pause \u2014 plan approval, a question, or a plain permission ask.",
+      "entryPoints": [
+        "web/src/components/Sidebar.tsx",
+        "web/src/lib/alerts.ts"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/sessions.ts",
+        "web/src/lib/format.ts",
+        "web/src/components/Sidebar.tsx",
+        "web/src/lib/alerts.ts"
+      ],
+      "symbols": [
+        "SessionMeta.pendingPermissionTool",
+        "waitingPermissionMeta"
+      ],
+      "tests": [],
+      "businessRules": [
+        "ExitPlanMode -> label 'plan ready', violet badge",
+        "AskUserQuestion -> label 'needs answer', teal badge",
+        "any other tool -> label 'needs permission', yellow badge (unchanged default)",
+        "notification body mirrors the sidebar label (capitalized) for waiting-permission sessions"
+      ],
+      "architecturalRules": [
+        "pendingPermissionTool rides the existing sessionUpsert broadcast, no new message type",
+        "cleared centrally in setStatus for any non-waiting-permission status, plus the worker-reconcile and sync-adopt paths that can force waiting-permission back to idle out from under a live turn",
+        "concurrent permission asks on the same session: last askPermission call wins the label/color, consistent with pre-existing status-overwrite behavior"
+      ],
+      "relatedDecisions": []
     }
   ]
 }

@@ -34,7 +34,7 @@ import type { CSSProperties } from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta, SessionStatus } from '@lines/shared';
-import { formatDuration } from '../lib/format';
+import { formatDuration, waitingPermissionMeta } from '../lib/format';
 import type { SidebarMode } from '../store';
 import { sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
@@ -64,7 +64,10 @@ function useOverflow() {
 }
 
 function SessionRow({ session, selected }: { session: SessionMeta; selected: boolean }) {
-  const status = STATUS_META[session.status] ?? STATUS_META.idle;
+  const status =
+    session.status === 'waiting-permission'
+      ? waitingPermissionMeta(session.pendingPermissionTool)
+      : STATUS_META[session.status] ?? STATUS_META.idle;
   const { overflowing, check } = useOverflow();
   const [hovered, setHovered] = useState(false);
   // A session with no real prompt yet is safe to delete outright; others archive first.

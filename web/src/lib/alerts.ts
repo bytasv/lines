@@ -1,5 +1,6 @@
 import type { SessionMeta, SessionStatus } from '@lines/shared';
 import logoUrl from '../assets/logo.svg';
+import { waitingPermissionMeta } from './format';
 
 const ALERTS_KEY = 'lines.alerts';
 const ALERT_SOUND_KEY = 'lines.alertSound';
@@ -123,6 +124,8 @@ const STATUS_BODY: Partial<Record<SessionStatus, string>> = {
   'waiting-approval': 'Needs approval',
 };
 
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
 export function loadAlertsEnabled(): boolean {
   return localStorage.getItem(ALERTS_KEY) === 'on';
 }
@@ -188,7 +191,10 @@ export async function requestNotifyPermission(): Promise<NotificationPermission>
 
 function notify(session: SessionMeta, onClick: () => void): void {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const body = STATUS_BODY[session.status];
+  const body =
+    session.status === 'waiting-permission'
+      ? capitalize(waitingPermissionMeta(session.pendingPermissionTool).label)
+      : STATUS_BODY[session.status];
   if (!body) return;
   try {
     const n = new Notification(session.name, {

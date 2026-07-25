@@ -207,6 +207,9 @@ export interface SessionMeta {
   /** Cumulative active-turn duration across the session in ms; excludes idle wait. */
   totalDurationMs?: number;
   errorMessage?: string;
+  /** Tool that triggered the current `waiting-permission` pause (e.g. `AskUserQuestion`,
+   *  `ExitPlanMode`), so the UI can vary the badge label/color. Cleared on any other status. */
+  pendingPermissionTool?: string;
   /** Archived sessions move to a separate section and are hidden from the active list. */
   archived?: boolean;
   archivedAt?: number;
