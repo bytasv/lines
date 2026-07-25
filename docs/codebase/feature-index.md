@@ -13,3 +13,4 @@
 | `workflow-step-version-history` | Browse a step's version history, preview a per-field diff, re-pin a workflow ref or restore old content as a new library version | [features/workflow-step-version-history.md](features/workflow-step-version-history.md) |
 | `agent-memory-sync` | Sync `~/.claude` agent memory (user CLAUDE.md + per-project auto-memory) across machines via the storage server, disk-cached for the SDK | [features/agent-memory-sync.md](features/agent-memory-sync.md) |
 | `app-data-root` | Machine-global app state root at `~/.lines-app` | [features/app-data-root.md](features/app-data-root.md) |
+| `plan-file-auto-approve` | Plan-mode file reads/writes under `.claude/plans/` auto-approve instead of prompting | [features/plan-file-auto-approve.md](features/plan-file-auto-approve.md) |

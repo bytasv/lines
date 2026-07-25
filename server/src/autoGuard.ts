@@ -128,10 +128,27 @@ function segmentAllowed(segment: string, allowlist: GuardAllowEntry[]): boolean 
 }
 
 const FILE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Read']);
+const PLAN_WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+/** Harness convention for where plan mode parks its plan file. */
+export const PLAN_DIR_MARKER = '/.claude/plans/';
 
 function isInside(dir: string, target: string): boolean {
   const rel = path.relative(dir, target);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * True when the target resolves inside a plan directory (~/.claude/plans or
+ * <cwd>/.claude/plans). Anchored to real directories rather than a substring
+ * match on PLAN_DIR_MARKER, so `.../plans/../../../.ssh/id_rsa` cannot pass.
+ */
+function isPlanPath(filePath: string, cwd: string): boolean {
+  const resolved = path.resolve(filePath);
+  return (
+    isInside(path.join(os.homedir(), '.claude', 'plans'), resolved) ||
+    isInside(path.join(cwd, '.claude', 'plans'), resolved)
+  );
 }
 
 export function assessToolCall(
@@ -166,6 +183,9 @@ export function assessToolCall(
         isInside(path.join(home, '.ssh'), filePath) ||
         isInside(path.join(home, '.aws'), filePath) ||
         filePath.includes('.env');
+      // Plan mode's deliverable lives outside cwd by design; reading or
+      // authoring it shouldn't prompt.
+      if (!sensitive && isPlanPath(filePath, cwd)) return { dangerous: false };
       return {
         dangerous: true,
         reason: sensitive
@@ -208,4 +228,19 @@ export function isSafeReadOnly(
 ): boolean {
   if (ALWAYS_ASK_TOOLS.has(toolName) || !READ_ONLY_TOOLS.has(toolName)) return false;
   return !assessToolCall(toolName, input, cwd, allowlist).dangerous;
+}
+
+/**
+ * True when a call authors the plan file itself. Separate from isSafeReadOnly,
+ * which gates on READ_ONLY_TOOLS and so can never cover a write: without this,
+ * every incremental Write/Edit while drafting a plan raises a permission card.
+ */
+export function isSafePlanWrite(
+  toolName: string,
+  input: Record<string, unknown>,
+  cwd: string,
+): boolean {
+  if (!PLAN_WRITE_TOOLS.has(toolName)) return false;
+  const filePath = String(input.file_path ?? input.notebook_path ?? '');
+  return Boolean(filePath) && isPlanPath(filePath, cwd);
 }

@@ -377,9 +377,7 @@
       ],
       "architecturalRules": [
         "reuses the transcript-walking pattern from lastAssistantText/summarizeTurn and the one-shot non-agentic query shape from summarizeTurn/autoName",
-        "advance() is async; callers fire it with void this.advance(sessionId)",
-        "collectTurns, findStepStart, substituteOutputs, and usesHandoffTokens are pure functions (no this.store/network), enabling direct unit tests with synthetic transcript events",
-        "shipped step templates (DEFAULT_WORKFLOW's \"Implement MVP\") tell the model to work only from the plan text supplied in the prompt and never read ~/.claude/plans/; user-authored shared steps need the same edit made by hand in the UI, since they live in per-user storage, not the repo"
+        "advance() is async; callers fire it with void this.advance(sessionId)"
       ],
       "relatedDecisions": []
     },
@@ -563,6 +561,41 @@
         "pill ranges are a derived view synced to the authoritative plain-text string by prefix/suffix diffing, not a second source of truth",
         "no contenteditable/rich-text dependency; pills are a cosmetic mirror-div overlay behind a plain textarea",
         "/find, /file, /tree share one corsFor() helper and one resolveWorkspacePath() root restriction"
+      ],
+      "relatedDecisions": []
+    },
+    {
+      "id": "plan-file-auto-approve",
+      "name": "Plan-file auto-approve",
+      "doc": "features/plan-file-auto-approve.md",
+      "purpose": "Auto-approve reads and writes of plan mode's deliverable file under .claude/plans/ instead of prompting on every call, even though it lives outside the session cwd.",
+      "entryPoints": [
+        "server/src/autoGuard.ts",
+        "server/src/sessions.ts"
+      ],
+      "files": [
+        "server/src/autoGuard.ts",
+        "server/src/sessions.ts"
+      ],
+      "symbols": [
+        "isPlanPath",
+        "isSafeReadOnly",
+        "isSafePlanWrite",
+        "assessToolCall"
+      ],
+      "tests": [
+        "server/src/autoGuard.plan.test.ts"
+      ],
+      "businessRules": [
+        "plan-directory reads and writes (~/.claude/plans/** or <cwd>/.claude/plans/**) auto-approve in every permission mode",
+        "ExitPlanMode and AskUserQuestion always still prompt the user regardless of target path",
+        "credential paths (~/.ssh, ~/.aws, .env) always escalate even if nested under a plans directory",
+        "any other out-of-cwd file access is unaffected and still escalates"
+      ],
+      "architecturalRules": [
+        "isPlanPath resolves the path and anchors containment checks to real directories, not a substring match on the plan-dir marker, so path traversal cannot pass as a plan path",
+        "isInside does not resolve symlinks; a symlink planted inside a plan directory pointing elsewhere is accepted as a pre-existing limitation",
+        "auto-approved plan writes remain visible as tool_use blocks in the transcript, but the auto-approval permission event is filtered from the UI like other auto-approved calls"
       ],
       "relatedDecisions": []
     }

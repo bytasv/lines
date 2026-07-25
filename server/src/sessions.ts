@@ -22,7 +22,9 @@ import {
   ALWAYS_ASK_TOOLS,
   allowEntryFor,
   assessToolCall,
+  isSafePlanWrite,
   isSafeReadOnly,
+  PLAN_DIR_MARKER,
   type GuardAllowlist,
 } from './autoGuard.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
@@ -44,8 +46,6 @@ interface PermissionAnswer {
 
 /** Tools whose write to a plan file can carry a plan-mode deliverable. */
 const PLAN_WRITE_TOOLS = new Set(['Write', 'Edit']);
-/** Harness convention for where plan mode parks its plan file. */
-const PLAN_DIR_MARKER = '/.claude/plans/';
 
 interface TurnScan {
   user: string;
@@ -1339,10 +1339,15 @@ export class SessionManager {
           },
         };
       }
-    } else if (meta && isSafeReadOnly(toolName, toolInput, meta.cwd, this.guard.list())) {
+    } else if (
+      meta &&
+      (isSafeReadOnly(toolName, toolInput, meta.cwd, this.guard.list()) ||
+        isSafePlanWrite(toolName, toolInput, meta.cwd))
+    ) {
       // Outside auto mode every call reaches the user, including plain reads —
       // so an approved plan re-prompts on each Read/Grep. Let observation-only
-      // calls through silently (still recorded); Bash/Edit/Write are untouched.
+      // calls and plan-file authoring through silently (still recorded);
+      // Bash and edits to project files are untouched.
       if (!resend) {
         this.emitEvent(sessionId, 'permission', {
           requestId: randomUUID(),
@@ -1411,9 +1416,13 @@ export class SessionManager {
           return { behavior: 'allow', updatedInput: input };
         }
         guardReason = verdict.reason;
-      } else if (meta && isSafeReadOnly(toolName, input, meta.cwd, this.guard.list())) {
-        // Other modes: observation-only calls still auto-approve (see
-        // handlePreToolUse) so post-plan reads don't ask again.
+      } else if (
+        meta &&
+        (isSafeReadOnly(toolName, input, meta.cwd, this.guard.list()) ||
+          isSafePlanWrite(toolName, input, meta.cwd))
+      ) {
+        // Other modes: observation-only calls and plan-file writes still
+        // auto-approve (see handlePreToolUse) so post-plan reads don't ask again.
         if (!resend) {
           this.emitEvent(sessionId, 'permission', {
             requestId: randomUUID(),
