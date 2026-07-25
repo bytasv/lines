@@ -607,7 +607,9 @@ export const useStore = create<UiState>((set, get) => {
           recentDirs: msg.recentDirs,
           projects: msg.projects,
           projectKeys: msg.projectKeys ?? {},
-          usage: msg.usage,
+          // Server restarts send hello before the first usage fetch completes;
+          // keep the last good snapshot rather than flickering the chip away.
+          usage: msg.usage ?? (msg.auth.loggedIn ? state.usage : null),
           auth: msg.auth,
           storageStatus: msg.storage ?? null,
           // Logged out? Open the login flow — but only on the first hello with

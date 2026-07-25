@@ -44,6 +44,35 @@
       "relatedDecisions": []
     },
     {
+      "id": "usage-indicator",
+      "name": "Plan usage indicator",
+      "doc": "features/usage-indicator.md",
+      "purpose": "Show the logged-in user's Claude-plan usage (5-hour / weekly windows) as a ring-progress chip with a hover-card breakdown.",
+      "entryPoints": [
+        "web/src/components/UsageIndicator.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/usage.ts",
+        "web/src/store.ts",
+        "web/src/components/UsageIndicator.tsx"
+      ],
+      "symbols": [
+        "UsagePoller",
+        "UsageSnapshot",
+        "UsageIndicator"
+      ],
+      "tests": [],
+      "businessRules": [
+        "no login, no chip - enforced server-side (poller never fetches, logout nulls snapshot) and client-side (auth.loggedIn gate)",
+        "{type: 'usage', usage: null} means auth is gone (logout or revoked/expired OAuth session), nothing else",
+        "a stale snapshot survives transient fetch failures; staleness is shown via 'Updated Xm ago', never by hiding the chip",
+        "hello may carry usage: null before the poller's first fetch completes (e.g. after a server restart); a logged-in client keeps its previously held snapshot instead of clearing it"
+      ],
+      "architecturalRules": [],
+      "relatedDecisions": []
+    },
+    {
       "id": "session-sidebar-usage",
       "name": "Session sidebar usage display",
       "doc": "features/session-sidebar-usage.md",

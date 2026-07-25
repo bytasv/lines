@@ -15,7 +15,6 @@ const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes, like ClaudeUsageBar
 const REFRESH_DEBOUNCE_MS = 5_000; // coalesce bursts of turn-complete refreshes
 const REFRESH_MIN_SPACING_MS = 30_000; // never hit the endpoint more than this often
 const FETCH_TIMEOUT_MS = 10_000;
-const MAX_FAILURES = 3; // consecutive failures before hiding a stale snapshot
 
 /** Known window keys in display order; the parser also picks up unknown ones defensively. */
 const KNOWN_WINDOWS = ['five_hour', 'seven_day', 'seven_day_sonnet', 'seven_day_opus'];
@@ -48,7 +47,6 @@ function parseSnapshot(body: unknown): UsageSnapshot {
 
 export class UsagePoller {
   private snapshotValue: UsageSnapshot | null = null;
-  private failures = 0;
   private inFlight = false;
   private lastFetchAt = 0;
   private available: boolean | null = null; // for logging state transitions only
@@ -102,7 +100,6 @@ export class UsagePoller {
       }
       if (!res.ok) throw new Error(`usage endpoint ${res.status}`);
       const snapshot = parseSnapshot(await res.json());
-      this.failures = 0;
       this.snapshotValue = snapshot;
       this.setAvailable(true);
       this.broadcast({ type: 'usage', usage: snapshot });
@@ -114,13 +111,10 @@ export class UsagePoller {
         this.inFlight = false;
         return;
       }
-      this.failures++;
+      // A stale snapshot survives transient failures — the UI shows staleness via
+      // `fetchedAt` ("Updated Xm ago"). Only logout / AuthRequiredError hides the chip,
+      // so a `usage: null` broadcast always means "auth gone", never "network hiccup".
       this.setAvailable(false, err);
-      // Keep a stale snapshot through transient blips; hide it once clearly broken.
-      if (this.snapshotValue && this.failures >= MAX_FAILURES) {
-        this.snapshotValue = null;
-        this.broadcast({ type: 'usage', usage: null });
-      }
     } finally {
       this.inFlight = false;
     }

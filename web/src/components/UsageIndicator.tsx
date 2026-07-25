@@ -48,7 +48,8 @@ function formatAgo(ts: number): string {
 export function UsageIndicator() {
   const usage = useStore((s) => s.usage);
   const auth = useStore((s) => s.auth);
-  if (!usage || usage.windows.length === 0) return null;
+  // No login → no chip, independent of usage-message timing (also covers API-key users).
+  if (!auth?.loggedIn || !usage || usage.windows.length === 0) return null;
 
   const worst = usage.windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), usage.windows[0]);
   const primary = usage.windows.find((w) => w.id === 'five_hour') ?? worst;
