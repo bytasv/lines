@@ -24,7 +24,7 @@ import {
 } from '@tabler/icons-react';
 import type { CavemanLevel, PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
 import { isSessionInterruptible } from '@lines/shared';
-import { readDraft, useStore, writeDraft } from '../store';
+import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { buildExpandedPrompt, uniqueMentions } from '../lib/mentions';
 import { MentionInput } from './MentionInput';
@@ -133,6 +133,11 @@ export function Composer({ session }: { session: SessionMeta }) {
   // remounts per session and the lazy initializer is enough to restore.
   const [prompt, setPrompt] = useState(() => readDraft(session.id));
   const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
+  // Staged attachments load from IndexedDB asynchronously (unlike the text
+  // draft, which reads synchronously in the initializer above) — this guards
+  // the mirror-to-storage effect below from firing with an empty array and
+  // wiping the stored attachment draft before the load resolves.
+  const attachmentsLoaded = useRef(false);
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
@@ -152,6 +157,22 @@ export function Composer({ session }: { session: SessionMeta }) {
   useEffect(() => {
     writeDraft(session.id, prompt);
   }, [session.id, prompt]);
+
+  // Restore staged attachments once on mount (SessionView remounts Composer per
+  // session via `key`), then mirror every change back to IndexedDB.
+  useEffect(() => {
+    readDraftAttachments(session.id).then((loaded) => {
+      attachmentsLoaded.current = true;
+      // Guard the (unlikely) race where the user attaches a file before this
+      // load resolves — never clobber attachments already staged in state.
+      if (loaded.length) setAttachments((prev) => (prev.length ? prev : loaded));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (attachmentsLoaded.current) void writeDraftAttachments(session.id, attachments);
+  }, [session.id, attachments]);
 
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files);

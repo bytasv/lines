@@ -140,6 +140,77 @@ function pruneDrafts(liveSessionIds: Set<string>) {
   if (changed) localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
 }
 
+// ---------------------------------------------------------------------------
+// Draft attachments — staged but unsent files, per session. IndexedDB (not
+// localStorage) because base64 file/image data routinely runs tens of MB,
+// well past typical 5-10MB localStorage quotas.
+// ---------------------------------------------------------------------------
+
+const DRAFT_ATTACHMENTS_DB = 'lines-drafts';
+const DRAFT_ATTACHMENTS_STORE = 'attachments';
+
+function openDraftAttachmentsDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DRAFT_ATTACHMENTS_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(DRAFT_ATTACHMENTS_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/** The staged attachments for a session, or none. */
+export async function readDraftAttachments(sessionId: string): Promise<PromptAttachment[]> {
+  try {
+    const db = await openDraftAttachmentsDb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(DRAFT_ATTACHMENTS_STORE, 'readonly');
+      const req = tx.objectStore(DRAFT_ATTACHMENTS_STORE).get(sessionId);
+      req.onsuccess = () => resolve((req.result as PromptAttachment[] | undefined) ?? []);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** Persist staged attachments; an empty list deletes the entry rather than storing one. */
+export async function writeDraftAttachments(sessionId: string, attachments: PromptAttachment[]): Promise<void> {
+  try {
+    const db = await openDraftAttachmentsDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(DRAFT_ATTACHMENTS_STORE, 'readwrite');
+      const store = tx.objectStore(DRAFT_ATTACHMENTS_STORE);
+      if (attachments.length) store.put(attachments, sessionId);
+      else store.delete(sessionId);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // best-effort — losing a staged attachment on a write failure isn't fatal
+  }
+}
+
+/** Drop staged attachments for sessions that no longer exist (called on each `hello`). */
+async function pruneDraftAttachments(liveSessionIds: Set<string>): Promise<void> {
+  try {
+    const db = await openDraftAttachmentsDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(DRAFT_ATTACHMENTS_STORE, 'readwrite');
+      const store = tx.objectStore(DRAFT_ATTACHMENTS_STORE);
+      const req = store.getAllKeys();
+      req.onsuccess = () => {
+        for (const key of req.result as string[]) {
+          if (!liveSessionIds.has(key)) store.delete(key);
+        }
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // best-effort
+  }
+}
+
 export interface NewSessionDefaults {
   model: string;
   permissionMode: PermissionMode;
@@ -553,6 +624,7 @@ export const useStore = create<UiState>((set, get) => {
           set({ selectedSessionId: null });
         }
         pruneDrafts(new Set(Object.keys(sessions)));
+        void pruneDraftAttachments(new Set(Object.keys(sessions)));
         if (msg.settings) applySettings(msg.settings);
         break;
       }
