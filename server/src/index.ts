@@ -16,6 +16,7 @@ import { WorkerClient } from './workerClient.ts';
 import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
 import type { UserContext } from './userContext.ts';
+import { searchFiles } from './fileSearch.ts';
 
 const PORT = Number(process.env.PORT ?? 8787);
 
@@ -125,9 +126,24 @@ const MIME: Record<string, string> = {
   '.json': 'application/json',
 };
 
-/** Browsers may only call the file routes from the web app's origin. */
-const WEB_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:5173';
-const CORS = { 'access-control-allow-origin': WEB_ORIGIN };
+/**
+ * Browsers may only call the file routes from the web app's origin. `WEB_ORIGIN`
+ * (comma-separated) pins the allowlist in deployments; with it unset any loopback
+ * origin passes, because the vite dev server drifts to 5174/5175 when 5173 is taken.
+ */
+const WEB_ORIGINS = (process.env.WEB_ORIGIN ?? '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+
+/** The response CORS headers for one request: the caller's own origin, echoed back if allowed. */
+function corsFor(req: http.IncomingMessage): Record<string, string> {
+  const origin = req.headers.origin;
+  if (!origin) return {}; // non-browser caller (curl, <img>) — nothing to grant
+  const allowed = WEB_ORIGINS.length ? WEB_ORIGINS.includes(origin) : LOOPBACK_ORIGIN.test(origin);
+  return allowed ? { 'access-control-allow-origin': origin, vary: 'Origin' } : {};
+}
 
 /** Resolve the requesting user for a plain-HTTP route from its ?token= param. */
 async function httpUserId(url: string): Promise<string | null> {
@@ -138,22 +154,28 @@ async function httpUserId(url: string): Promise<string | null> {
 
 const server = http.createServer((req, res) => {
   const url = req.url ?? '';
-  const isFileRoute = url.startsWith('/attachments/') || url.startsWith('/file?') || url.startsWith('/tree?');
+  const isFileRoute =
+    url.startsWith('/attachments/') ||
+    url.startsWith('/file?') ||
+    url.startsWith('/tree?') ||
+    url.startsWith('/find?');
   if (isFileRoute) {
+    const cors = corsFor(req);
     void (async () => {
       // These routes read workspace files and attachments — same gate as the WS.
       const userId = await httpUserId(url);
       if (!userId) {
-        res.writeHead(401, CORS).end();
+        res.writeHead(401, cors).end();
         return;
       }
       const ctx = registry.get(userId);
       if (url.startsWith('/attachments/')) serveAttachment(ctx, url, res);
-      else if (url.startsWith('/file?')) serveFile(ctx, url, res);
-      else serveTree(ctx, url, res);
+      else if (url.startsWith('/file?')) serveFile(ctx, url, res, cors);
+      else if (url.startsWith('/find?')) serveFind(ctx, url, res, cors);
+      else serveTree(ctx, url, res, cors);
     })().catch((err) => {
       console.error('[http]', err);
-      if (!res.headersSent) res.writeHead(500, CORS).end();
+      if (!res.headersSent) res.writeHead(500, cors).end();
     });
     return;
   }
@@ -174,8 +196,12 @@ function resolveWorkspacePath(ctx: UserContext, url: string): string | null {
 }
 
 /** Serve a workspace file for the clickable-path preview, restricted to the user's project/session roots. */
-function serveFile(ctx: UserContext, url: string, res: http.ServerResponse) {
-  const cors = CORS;
+function serveFile(
+  ctx: UserContext,
+  url: string,
+  res: http.ServerResponse,
+  cors: Record<string, string>,
+) {
   const abs = resolveWorkspacePath(ctx, url);
   if (!abs) {
     res.writeHead(403, cors).end();
@@ -216,8 +242,12 @@ function serveFile(ctx: UserContext, url: string, res: http.ServerResponse) {
 const TREE_IGNORE = new Set(['node_modules', '.git']);
 
 /** List one directory for the sidebar file tree, restricted to the user's project/session roots. */
-function serveTree(ctx: UserContext, url: string, res: http.ServerResponse) {
-  const cors = CORS;
+function serveTree(
+  ctx: UserContext,
+  url: string,
+  res: http.ServerResponse,
+  cors: Record<string, string>,
+) {
   const abs = resolveWorkspacePath(ctx, url);
   if (!abs) {
     res.writeHead(403, cors).end();
@@ -237,6 +267,30 @@ function serveTree(ctx: UserContext, url: string, res: http.ServerResponse) {
     .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
   res.writeHead(200, { ...cors, 'content-type': 'application/json' });
   res.end(JSON.stringify({ entries }));
+}
+
+const FIND_MAX_LIMIT = 25;
+
+/**
+ * Rank project files by name for the composer's `@mention` search, restricted to
+ * the user's project/session roots exactly like /tree and /file.
+ */
+function serveFind(
+  ctx: UserContext,
+  url: string,
+  res: http.ServerResponse,
+  cors: Record<string, string>,
+) {
+  const root = resolveWorkspacePath(ctx, url);
+  if (!root) {
+    res.writeHead(403, cors).end();
+    return;
+  }
+  const params = new URL(url, 'http://localhost').searchParams;
+  const limit = Math.min(Number(params.get('limit')) || FIND_MAX_LIMIT, FIND_MAX_LIMIT);
+  const files = searchFiles(root, params.get('q') ?? '', limit);
+  res.writeHead(200, { ...cors, 'content-type': 'application/json' });
+  res.end(JSON.stringify({ files }));
 }
 
 /**

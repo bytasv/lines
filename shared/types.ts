@@ -339,6 +339,12 @@ export interface TreeResponse {
   entries: TreeEntry[];
 }
 
+/** Response body of the bridge's GET /find endpoint (@mention file-name search). */
+export interface FindResponse {
+  /** Ranked matches, as paths relative to the searched root. */
+  files: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Client -> Server
 // ---------------------------------------------------------------------------

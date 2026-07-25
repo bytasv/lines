@@ -4,7 +4,7 @@ import {
   type Icon,
 } from '@tabler/icons-react';
 import type { PromptMention } from '@lines/shared';
-import { fetchTree, fileBase } from './files';
+import { fetchTree, fileBase, searchFiles } from './files';
 import { withAuthToken } from '../ws';
 
 /**
@@ -135,6 +135,20 @@ export function remapRanges(
 }
 
 /**
+ * Push a collapsed caret out of any mention range — pills are atomic, so the caret
+ * may rest at either edge but never between their glyphs. The previous caret gives
+ * the direction of travel: leftward motion lands before the pill, rightward after
+ * it, and a jump in from outside (a click) snaps to the nearer edge.
+ */
+export function snapCaretOut(caret: number, ranges: MentionRange[], prevCaret: number): number {
+  const hit = ranges.find((r) => caret > r.start && caret < r.end);
+  if (!hit) return caret;
+  if (prevCaret >= hit.end) return hit.start;
+  if (prevCaret <= hit.start) return hit.end;
+  return caret - hit.start < hit.end - caret ? hit.start : hit.end;
+}
+
+/**
  * Collapse repeated mentions of the same entity (legal inline — the same pill can
  * appear twice in a sentence) to one entry, keeping first-seen order.
  */
@@ -237,41 +251,48 @@ const featureProvider: MentionProvider = {
 };
 
 // ---------------------------------------------------------------------------
-// File provider — path-segment completion via the /tree endpoint
+// File provider — browse one directory (/tree), or search the project (/find)
 // ---------------------------------------------------------------------------
+
+function fileCandidate(rel: string, isDir = false): MentionCandidate {
+  const name = rel.slice(rel.lastIndexOf('/') + 1);
+  return {
+    kind: 'file',
+    id: rel,
+    label: isDir ? `${name}/` : name,
+    detail: rel,
+    // A dir selection drills down (handled in MentionInput); its expansion is
+    // unused because dirs are never committed as mentions.
+    expansion: `- File: ${rel}`,
+  };
+}
+
+/** List one directory relative to `cwd` — the browse mode behind `@` and `@dir/`. */
+async function browseDir(cwd: string, dirPart: string): Promise<MentionCandidate[]> {
+  try {
+    const entries = await fetchTree(dirPart ? `${cwd}/${dirPart}` : cwd);
+    return entries
+      .slice(0, MAX_PER_KIND)
+      .map((e) => fileCandidate(dirPart ? `${dirPart}/${e.name}` : e.name, e.type === 'dir'));
+  } catch {
+    return [];
+  }
+}
 
 const fileProvider: MentionProvider = {
   kind: 'file',
   kindLabel: 'File',
   async search(query, { cwd }) {
-    // Split the query at the last '/': everything before it is the directory to
-    // list (relative to cwd), the remainder filters that dir's entries.
-    const slash = query.lastIndexOf('/');
-    const dirPart = slash >= 0 ? query.slice(0, slash) : '';
-    const namePart = (slash >= 0 ? query.slice(slash + 1) : query).toLowerCase();
-    const dir = dirPart ? `${cwd}/${dirPart}` : cwd;
-    let entries;
+    // A bare '@' or a trailing '/' means "show me what's in here" — keep browsing
+    // by directory so drilling down still works. Anything else is a name search
+    // across the whole project, so `@types` finds `shared/types.ts`.
+    if (query === '' || query.endsWith('/')) return browseDir(cwd, query.replace(/\/$/, ''));
     try {
-      entries = await fetchTree(dir);
+      const files = await searchFiles(cwd, query, MAX_PER_KIND);
+      return files.map((rel) => fileCandidate(rel));
     } catch {
       return [];
     }
-    return entries
-      .filter((e) => e.name.toLowerCase().includes(namePart))
-      .slice(0, MAX_PER_KIND)
-      .map((e) => {
-        const rel = dirPart ? `${dirPart}/${e.name}` : e.name;
-        const isDir = e.type === 'dir';
-        return {
-          kind: 'file',
-          id: rel,
-          label: isDir ? `${e.name}/` : e.name,
-          detail: rel,
-          // A dir selection drills down (handled in the composer); its expansion
-          // is unused because dirs aren't committed as mentions.
-          expansion: `- File: ${rel}`,
-        };
-      });
   },
 };
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { FileContentResponse, TreeEntry, TreeResponse } from '@lines/shared';
+import type { FileContentResponse, FindResponse, TreeEntry, TreeResponse } from '@lines/shared';
 import { withAuthToken } from '../ws';
 
 /** The bridge HTTP server (same host, port 8787) serves file contents and directory listings. */
@@ -17,6 +17,15 @@ export async function fetchTree(dir: string): Promise<TreeEntry[]> {
   if (!res.ok) throw new Error(`Failed to list directory (${res.status}).`);
   const data = (await res.json()) as TreeResponse;
   return data.entries;
+}
+
+/** Ranked project-wide file-name matches for `query`, as paths relative to `root`. */
+export async function searchFiles(root: string, query: string, limit: number): Promise<string[]> {
+  const params = new URLSearchParams({ path: root, q: query, limit: String(limit) });
+  const res = await fetch(withAuthToken(`${fileBase}/find?${params}`));
+  if (!res.ok) throw new Error(`Failed to search files (${res.status}).`);
+  const data = (await res.json()) as FindResponse;
+  return data.files;
 }
 
 /** Fetch a file's contents from the bridge; returns loading/error/content states. */

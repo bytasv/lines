@@ -472,6 +472,53 @@
         "attachment drafts use IndexedDB (db lines-drafts, store attachments, keyed by session id) instead of localStorage, since size is the reason attachments are staged as raw base64 in the first place"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "prompt-mentions",
+      "name": "@mention support in prompts",
+      "doc": "features/prompt-mentions.md",
+      "purpose": "Reference a documented feature or project file inline in the composer prompt via @mention, expanded to context text at send time.",
+      "entryPoints": [
+        "web/src/components/Composer.tsx",
+        "web/src/components/MentionInput.tsx"
+      ],
+      "files": [
+        "web/src/components/MentionInput.tsx",
+        "web/src/components/MentionAutocomplete.tsx",
+        "web/src/lib/mentions.ts",
+        "web/src/lib/files.ts",
+        "server/src/fileSearch.ts",
+        "server/src/index.ts",
+        "shared/types.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/components/QueuedMessages.tsx"
+      ],
+      "symbols": [
+        "MentionInput",
+        "MentionValue",
+        "MentionRange",
+        "findMentionToken",
+        "diffEdit",
+        "remapRanges",
+        "snapCaretOut",
+        "buildExpandedPrompt",
+        "uniqueMentions",
+        "mentionProviders",
+        "searchFiles"
+      ],
+      "tests": [],
+      "businessRules": [
+        "mentions are expanded into plain prompt text client-side before send; server and worker never resolve mentions[], only the sidecar for display",
+        "a stale feature/file reference degrades to a harmless stale text block rather than blocking send",
+        "/find respects .gitignore via git ls-files, falls back to a bounded walk outside a repo, capped at 20000 files"
+      ],
+      "architecturalRules": [
+        "new mention kinds are added as one more MentionProvider entry, no switch-over-kind elsewhere",
+        "pill ranges are a derived view synced to the authoritative plain-text string by prefix/suffix diffing, not a second source of truth",
+        "no contenteditable/rich-text dependency; pills are a cosmetic mirror-div overlay behind a plain textarea",
+        "/find, /file, /tree share one corsFor() helper and one resolveWorkspacePath() root restriction"
+      ],
+      "relatedDecisions": []
     }
   ]
 }

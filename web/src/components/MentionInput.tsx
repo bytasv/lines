@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
-import { Box, Popover, Textarea } from '@mantine/core';
+import { Box, Group, Paper, Popover, Text, Textarea } from '@mantine/core';
 import {
   diffEdit,
   findMentionToken,
   mentionKindMeta,
   remapRanges,
+  snapCaretOut,
   type MentionCandidate,
   type MentionRange,
   type MentionValue,
@@ -70,7 +71,14 @@ export function MentionInput({
   const [token, setToken] = useState<{ start: number; query: string } | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [dismissedStart, setDismissedStart] = useState<number | null>(null);
+  // The pill the pointer is over, with its box offsets inside the wrapper.
+  const [hovered, setHovered] = useState<{ index: number; left: number; bottom: number } | null>(
+    null,
+  );
   const mirrorRef = useRef<HTMLDivElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  /** Caret before the current key/click — gives {@link snapCaretOut} its direction. */
+  const prevCaretRef = useRef(0);
 
   const results = useMentionSearch(token?.query ?? null, cwd);
   const activeCandidate = results[Math.min(activeIndex, results.length - 1)];
@@ -97,11 +105,24 @@ export function MentionInput({
   }, [text, token]);
 
   const focusCaret = (caret: number) => {
+    prevCaretRef.current = caret;
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       ta?.focus();
       ta?.setSelectionRange(caret, caret);
     });
+  };
+
+  /**
+   * Settle the caret after a move: bounce it out of any pill it landed inside
+   * (pills are atomic — no editing between their glyphs), then resync the token.
+   */
+  const syncCaret = (ta: HTMLTextAreaElement) => {
+    if (ta.selectionStart !== ta.selectionEnd) return; // a real selection — leave it alone
+    const caret = snapCaretOut(ta.selectionStart, ranges, prevCaretRef.current);
+    if (caret !== ta.selectionStart) ta.setSelectionRange(caret, caret);
+    prevCaretRef.current = caret;
+    syncToken(text, caret, ranges);
   };
 
   /** Recompute the active token after any text or caret change. */
@@ -152,18 +173,56 @@ export function MentionInput({
     focusCaret(r.start);
   };
 
-  // Split the text into plain and mention segments for the mirror.
+  // Split the text into plain and mention segments for the mirror. Pill segments
+  // carry their index in `ranges` so pointer hit-testing can name the mention.
   const segments = useMemo(() => {
-    const out: { text: string; kind?: string }[] = [];
+    const out: { text: string; kind?: string; rangeIndex?: number }[] = [];
     let pos = 0;
-    for (const r of ranges) {
+    ranges.forEach((r, rangeIndex) => {
       if (r.start > pos) out.push({ text: text.slice(pos, r.start) });
-      out.push({ text: text.slice(r.start, r.end), kind: r.kind });
+      out.push({ text: text.slice(r.start, r.end), kind: r.kind, rangeIndex });
       pos = r.end;
-    }
+    });
     out.push({ text: text.slice(pos) });
     return out;
   }, [text, ranges]);
+
+  /**
+   * Hit-test the pointer against the mirror's pill spans. The mirror is
+   * `pointer-events: none` (the textarea owns all interaction), so hovering is
+   * resolved geometrically off its client rects — one rect per wrapped line.
+   */
+  const trackPillHover = (clientX: number, clientY: number) => {
+    const mirror = mirrorRef.current;
+    const wrap = wrapRef.current;
+    if (!mirror || !wrap) return;
+    const wrapRect = wrap.getBoundingClientRect();
+    for (const el of mirror.querySelectorAll<HTMLElement>('[data-pill]')) {
+      for (const rect of el.getClientRects()) {
+        if (
+          clientX >= rect.left &&
+          clientX <= rect.right &&
+          clientY >= rect.top &&
+          clientY <= rect.bottom
+        ) {
+          const index = Number(el.dataset.pill);
+          const left = rect.left - wrapRect.left;
+          const bottom = wrapRect.bottom - rect.top + 4;
+          setHovered((h) =>
+            h && h.index === index && h.left === left && h.bottom === bottom
+              ? h
+              : { index, left, bottom },
+          );
+          return;
+        }
+      }
+    }
+    setHovered((h) => (h === null ? h : null));
+  };
+
+  const hoveredRange = hovered ? ranges[hovered.index] : undefined;
+  const hoveredMeta = hoveredRange ? mentionKindMeta[hoveredRange.kind] : undefined;
+  const HoveredIcon = hoveredMeta?.icon;
 
   return (
     <Popover
@@ -175,7 +234,12 @@ export function MentionInput({
       withinPortal
     >
       <Popover.Target>
-        <Box style={{ position: 'relative' }}>
+        <Box
+          ref={wrapRef}
+          style={{ position: 'relative' }}
+          onMouseMove={(e) => trackPillHover(e.clientX, e.clientY)}
+          onMouseLeave={() => setHovered(null)}
+        >
           <Box
             ref={mirrorRef}
             aria-hidden
@@ -194,6 +258,7 @@ export function MentionInput({
               s.kind ? (
                 <span
                   key={i}
+                  data-pill={s.rangeIndex}
                   style={{
                     background: pillColor(s.kind),
                     borderRadius: 3,
@@ -207,6 +272,46 @@ export function MentionInput({
               ),
             )}
           </Box>
+          {hoveredRange && hovered && (
+            <Paper
+              withBorder
+              shadow="md"
+              radius="sm"
+              p={6}
+              style={{
+                position: 'absolute',
+                left: hovered.left,
+                bottom: hovered.bottom,
+                zIndex: 4,
+                maxWidth: 340,
+                pointerEvents: 'none', // never steals the click that places the caret
+              }}
+            >
+              <Group gap={6} wrap="nowrap">
+                {HoveredIcon && (
+                  <HoveredIcon
+                    size={13}
+                    color={`var(--mantine-color-${hoveredMeta?.color}-6)`}
+                    style={{ flexShrink: 0 }}
+                  />
+                )}
+                <Text size="xs" fw={600}>
+                  {hoveredRange.label}
+                </Text>
+                <Text size="10px" c="dimmed" tt="uppercase" fw={600}>
+                  {hoveredMeta?.label ?? hoveredRange.kind}
+                </Text>
+              </Group>
+              {hoveredRange.detail && (
+                <Text size="xs" c="dimmed" mt={2}>
+                  {hoveredRange.detail}
+                </Text>
+              )}
+              <Text size="10px" c="dimmed" mt={4} style={{ whiteSpace: 'pre-wrap' }}>
+                {hoveredRange.expansion}
+              </Text>
+            </Paper>
+          )}
           <Textarea
             ref={textareaRef}
             placeholder={placeholder}
@@ -228,16 +333,24 @@ export function MentionInput({
               onChange({ text: next, ranges: nextRanges });
               // Mid-composition text is provisional — don't pop the menu open.
               if ((e.nativeEvent as InputEvent).isComposing) setToken(null);
-              else syncToken(next, caret, nextRanges);
+              else {
+                prevCaretRef.current = caret;
+                syncToken(next, caret, nextRanges);
+              }
             }}
-            onClick={(e) => syncToken(text, e.currentTarget.selectionStart, ranges)}
+            onClick={(e) => syncCaret(e.currentTarget)}
             onScroll={(e) => {
               if (mirrorRef.current) mirrorRef.current.scrollTop = e.currentTarget.scrollTop;
             }}
             onKeyUp={(e) => {
+              // Arrow keys steer the open menu, not the caret — resyncing here would
+              // reset the highlighted row to the top on every press.
+              if (token && results.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                return;
+              }
               // Caret moves not already covered by onChange/onClick.
               if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End') {
-                syncToken(text, e.currentTarget.selectionStart, ranges);
+                syncCaret(e.currentTarget);
               }
             }}
             onKeyDown={(e) => {
@@ -266,11 +379,25 @@ export function MentionInput({
                 return;
               }
               const ta = e.currentTarget;
-              if (
-                (e.key === 'Backspace' || e.key === 'Delete') &&
-                ta.selectionStart === ta.selectionEnd
-              ) {
-                const caret = ta.selectionStart;
+              const caret = ta.selectionStart;
+              const collapsed = caret === ta.selectionEnd;
+              prevCaretRef.current = caret;
+              // Horizontal motion clears a pill in a single press, so the caret never
+              // comes to rest inside one.
+              if (collapsed && !e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+                const hit = ranges.find((r) =>
+                  e.key === 'ArrowLeft' ? caret === r.end : caret === r.start,
+                );
+                if (hit) {
+                  e.preventDefault();
+                  const to = e.key === 'ArrowLeft' ? hit.start : hit.end;
+                  ta.setSelectionRange(to, to);
+                  prevCaretRef.current = to;
+                  syncToken(text, to, ranges);
+                  return;
+                }
+              }
+              if ((e.key === 'Backspace' || e.key === 'Delete') && collapsed) {
                 const hit = ranges.find((r) =>
                   e.key === 'Backspace'
                     ? caret > r.start && caret <= r.end
