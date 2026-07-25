@@ -321,6 +321,9 @@ export interface WorkflowMarkerData {
   stepName: string;
   event: 'started' | 'waiting-approval' | 'approved' | 'interrupted' | 'retried' | 'workflow-done';
   feedback?: string;
+  /** Set on a 'waiting-approval' the step was parked with *before* running: the
+   *  `{outputs.<name>}` names its template referenced but no earlier step published. */
+  missingOutputs?: string[];
 }
 
 /** Response body of the bridge's GET /file endpoint (clickable file-path preview). */

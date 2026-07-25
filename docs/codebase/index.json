@@ -341,28 +341,45 @@
       "id": "workflow-step-output-consolidation",
       "name": "Workflow step output consolidation",
       "doc": "features/workflow-step-output-consolidation.md",
-      "purpose": "Ensure the output handed to the next workflow step is the step's full definitive deliverable rather than a short delta reply left over from an iterated step.",
+      "purpose": "Ensure the output handed to the next workflow step is the step's full definitive deliverable (including a plan-mode step's ExitPlanMode plan) rather than a short delta reply or trailing chat text, and that a step never runs with a silently-empty {outputs.<name>} reference.",
       "entryPoints": [
         "server/src/workflows.ts"
       ],
       "files": [
-        "shared/types.ts",
         "server/src/sessions.ts",
-        "server/src/workflows.ts"
+        "server/src/sessions.turns.test.ts",
+        "server/src/workflows.substitution.test.ts",
+        "server/src/workflows.ts",
+        "shared/types.ts"
       ],
       "symbols": [
         "WorkflowState.lastStepOutput",
         "SessionManager.consolidateStepOutput",
-        "WorkflowEngine.advance"
+        "SessionManager.collectTurns",
+        "SessionManager.findStepStart",
+        "WorkflowEngine.advance",
+        "WorkflowEngine.runStep",
+        "substituteOutputs",
+        "usesHandoffTokens"
       ],
-      "tests": [],
+      "tests": [
+        "server/src/sessions.turns.test.ts",
+        "server/src/workflows.substitution.test.ts"
+      ],
       "businessRules": [
         "consolidation only fires when a step ran more than one turn; single-turn steps incur no extra query or latency",
-        "on query failure or empty result, falls back to lastAssistantText rather than blocking the workflow"
+        "on query failure or empty result, falls back to lastAssistantText (per-step-scoped) rather than blocking the workflow",
+        "an empty consolidated output is never published, so it cannot overwrite a previously captured value",
+        "consolidation is scoped to the stepIndex that just finished, not merely the newest started marker",
+        "a step whose template references an {outputs.<name>} that is absent or blank parks at waiting-approval with an error marker instead of running with a silently blank substitution",
+        "a step deliverable captured during plan mode comes from the ExitPlanMode plan (inline argument or written plan file), not the turn's trailing chat text",
+        "outputs are strictly per-session (WorkflowState.outputs); there is no cross-session write path"
       ],
       "architecturalRules": [
         "reuses the transcript-walking pattern from lastAssistantText/summarizeTurn and the one-shot non-agentic query shape from summarizeTurn/autoName",
-        "advance() is async; callers fire it with void this.advance(sessionId)"
+        "advance() is async; callers fire it with void this.advance(sessionId)",
+        "collectTurns, findStepStart, substituteOutputs, and usesHandoffTokens are pure functions (no this.store/network), enabling direct unit tests with synthetic transcript events",
+        "shipped step templates (DEFAULT_WORKFLOW's \"Implement MVP\") tell the model to work only from the plan text supplied in the prompt and never read ~/.claude/plans/; user-authored shared steps need the same edit made by hand in the UI, since they live in per-user storage, not the repo"
       ],
       "relatedDecisions": []
     },

@@ -42,7 +42,12 @@ export interface StepErrors {
   name?: string;
   prompt?: string;
   ref?: string;
+  outputName?: string;
 }
+
+/** The server reads `{outputs.<name>}` with `[\w-]+`, so anything else is unreferenceable. */
+export const OUTPUT_NAME_RE = /^[A-Za-z0-9_-]+$/;
+export const OUTPUT_NAME_HINT = 'Letters, digits, - and _ only';
 export interface ValidationResult {
   name?: string;
   noSteps?: string;
@@ -517,15 +522,37 @@ export function validate(
   resolveRef: (r: DraftRef) => StepContent | undefined,
 ): ValidationResult {
   const steps: Record<string, StepErrors> = {};
+  // Two steps publishing the same name silently overwrite each other at runtime
+  // (last writer wins), so count them up front and flag both.
+  const counts = new Map<string, number>();
+  for (const s of d.steps) {
+    const out = (s.ref ? resolveRef(s.ref)?.outputName : s.outputName)?.trim();
+    if (out) counts.set(out, (counts.get(out) ?? 0) + 1);
+  }
+  // Names published by the steps *before* the one being checked — a template can
+  // only pull an output that already exists by the time it runs.
+  const published = new Set<string>();
   for (const s of d.steps) {
     const e: StepErrors = {};
+    const content = s.ref ? resolveRef(s.ref) : s;
     if (s.ref) {
-      if (!resolveRef(s.ref)) e.ref = 'Shared step unavailable';
+      if (!content) e.ref = 'Shared step unavailable';
     } else {
       if (!s.name.trim()) e.name = 'Required';
       if (!s.promptTemplate.trim()) e.prompt = 'Prompt is required';
     }
-    if (e.name || e.prompt || e.ref) steps[s._uid] = e;
+    const unknown = [...(content?.promptTemplate ?? '').matchAll(/\{outputs\.([\w-]+)\}/g)]
+      .map((m) => m[1])
+      .filter((n, idx, all) => !published.has(n) && all.indexOf(n) === idx);
+    // The step would park at runtime rather than run — say so here instead.
+    if (!e.prompt && unknown.length) {
+      e.prompt = `No earlier step publishes ${unknown.map((n) => `{outputs.${n}}`).join(', ')}`;
+    }
+    const out = (content?.outputName ?? '').trim();
+    if (out && !OUTPUT_NAME_RE.test(out)) e.outputName = OUTPUT_NAME_HINT;
+    else if (out && (counts.get(out) ?? 0) > 1) e.outputName = 'Another step already publishes this name';
+    if (out) published.add(out);
+    if (e.name || e.prompt || e.ref || e.outputName) steps[s._uid] = e;
   }
   const name = d.name.trim() ? undefined : 'Workflow name is required';
   const noSteps = d.steps.length === 0 ? 'Add at least one step' : undefined;

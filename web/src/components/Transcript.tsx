@@ -49,7 +49,11 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
       : data.event === 'retried'
         ? `Step ${data.stepIndex + 1}: ${data.stepName} — retry`
         : data.event === 'waiting-approval'
-          ? `${data.stepName} — waiting for your approval`
+          ? data.missingOutputs?.length
+            ? `${data.stepName} — not run: nothing published for ${data.missingOutputs
+                .map((n) => `{outputs.${n}}`)
+                .join(', ')}`
+            : `${data.stepName} — waiting for your approval`
           : data.event === 'approved'
             ? `${data.stepName} — approved`
             : data.event === 'interrupted'

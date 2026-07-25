@@ -24,7 +24,7 @@ import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../../lib/modelSelect';
 import { send } from '../../ws';
 import { ConfirmModal } from '../ConfirmModal';
-import { MODE_OPTIONS } from './useWorkflowDraft';
+import { MODE_OPTIONS, OUTPUT_NAME_HINT, OUTPUT_NAME_RE } from './useWorkflowDraft';
 import { FieldDiffList, relTime } from './StepCard';
 import { PromptEditor } from './PromptEditor';
 import styles from './workflow.module.css';
@@ -192,7 +192,13 @@ export function StepLibrary() {
     () => (draft && baseline ? snapshot(draft) !== baseline : false),
     [draft, baseline],
   );
-  const valid = !!draft && draft.name.trim() !== '' && draft.promptTemplate.trim() !== '';
+  // A name outside the read regex can never be referenced as {outputs.<name>}.
+  const outputNameError =
+    draft && (draft.outputName ?? '').trim() && !OUTPUT_NAME_RE.test((draft.outputName ?? '').trim())
+      ? OUTPUT_NAME_HINT
+      : undefined;
+  const valid =
+    !!draft && draft.name.trim() !== '' && draft.promptTemplate.trim() !== '' && !outputNameError;
 
   const patch = (p: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...p } : d));
 
@@ -396,6 +402,7 @@ export function StepLibrary() {
                   placeholder="e.g. plan"
                   value={draft.outputName ?? ''}
                   disabled={readOnly}
+                  error={outputNameError}
                   classNames={{ input: styles.fieldInput }}
                   onChange={(e) => patch({ outputName: e.currentTarget.value })}
                 />

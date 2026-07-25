@@ -42,6 +42,98 @@ interface PermissionAnswer {
   denyMessage?: string;
 }
 
+/** Tools whose write to a plan file can carry a plan-mode deliverable. */
+const PLAN_WRITE_TOOLS = new Set(['Write', 'Edit']);
+/** Harness convention for where plan mode parks its plan file. */
+const PLAN_DIR_MARKER = '/.claude/plans/';
+
+interface TurnScan {
+  user: string;
+  lastText: string;
+  /** ExitPlanMode's inline `plan` argument (older harness shape). */
+  planArg?: string;
+  /** Content of a plan file written in this turn (current harness shape). */
+  planFileText?: string;
+  sawExitPlan: boolean;
+}
+
+/**
+ * Split a transcript slice into turns: each `user` event opens one. A turn's output
+ * is the plan it exited plan mode with, when it produced one — plan mode puts the
+ * deliverable in the `ExitPlanMode` tool input (or in the plan file it wrote, since
+ * the current harness passes no `plan` argument), and the turn's last *text* block is
+ * then only trailing chatter. Otherwise the last text block, as before.
+ *
+ * Pure and transcript-local: nothing here reads the filesystem, so a plan file's
+ * content only counts when the `Write` that produced it is in this slice.
+ */
+export function collectTurns(events: TranscriptEvent[], from: number): { user: string; output: string }[] {
+  const turns: TurnScan[] = [];
+  for (const ev of events.slice(Math.max(from, 0))) {
+    if (ev.kind === 'user') {
+      turns.push({ user: (ev.data as { text?: string }).text ?? '', lastText: '', sawExitPlan: false });
+      continue;
+    }
+    if (ev.kind !== 'sdk') continue;
+    const msg = ev.data as { type?: string; message?: { content?: unknown } };
+    if (msg.type !== 'assistant') continue;
+    const content = msg.message?.content;
+    if (!Array.isArray(content)) continue;
+    // A slice that opens on assistant output (no user event yet) still has one turn.
+    if (turns.length === 0) turns.push({ user: '', lastText: '', sawExitPlan: false });
+    const turn = turns[turns.length - 1];
+    for (const block of content as Record<string, unknown>[]) {
+      if (block.type === 'text' && typeof block.text === 'string') {
+        turn.lastText = block.text;
+        continue;
+      }
+      if (block.type !== 'tool_use') continue;
+      const input = (block.input ?? {}) as { plan?: unknown; file_path?: unknown; content?: unknown };
+      if (block.name === 'ExitPlanMode') {
+        turn.sawExitPlan = true;
+        if (typeof input.plan === 'string' && input.plan.trim()) turn.planArg = input.plan;
+        continue;
+      }
+      if (
+        typeof block.name === 'string' &&
+        PLAN_WRITE_TOOLS.has(block.name) &&
+        typeof input.file_path === 'string' &&
+        input.file_path.includes(PLAN_DIR_MARKER) &&
+        typeof input.content === 'string' &&
+        input.content.trim()
+      ) {
+        turn.planFileText = input.content;
+      }
+    }
+  }
+  // Later blocks overwrite earlier ones, so a revised plan resolves to the final one.
+  // The plan file only counts when the turn actually exited plan mode — an ordinary
+  // step that happens to write into the plans directory keeps its text output.
+  return turns.map((t) => ({
+    user: t.user,
+    output: t.planArg ?? (t.sawExitPlan ? t.planFileText : undefined) ?? t.lastText,
+  }));
+}
+
+/**
+ * Index of the `started` marker that opened `stepIndex`, scanning backwards so a
+ * re-entered step resolves to its latest pass. Falls back to the newest `started`
+ * marker of any step (and -1 when there is none), which is the pre-scoping
+ * behaviour — used when the caller can't name a step.
+ */
+export function findStepStart(events: TranscriptEvent[], stepIndex?: number): number {
+  let newestStarted = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.kind !== 'workflow') continue;
+    const data = ev.data as { event?: string; stepIndex?: number };
+    if (data.event !== 'started') continue;
+    if (stepIndex === undefined || data.stepIndex === stepIndex) return i;
+    if (newestStarted === -1) newestStarted = i;
+  }
+  return newestStarted;
+}
+
 /** SDK PermissionResult shape returned to the worker's canUseTool rpc. */
 type PermissionResult =
   | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
@@ -130,6 +222,17 @@ export class SessionManager {
     this.upsert(meta);
     // A settled status may release a queued prompt (e.g. workflow-done -> idle).
     if (!this.isBusy(meta)) this.maybeFlush(id);
+  }
+
+  /**
+   * Persist + broadcast a session's metadata as it stands — no status change, so
+   * no error-message reset and no queue flush. For fields written outside a status
+   * transition (a workflow step's captured output) that must survive a crash
+   * before the next transition writes them out.
+   */
+  persistMeta(id: string) {
+    const meta = this.sessions.get(id);
+    if (meta) this.upsert(meta);
   }
 
   /** Clears the post-turn 'done' badge once the user views the session. */
@@ -522,9 +625,9 @@ export class SessionManager {
   }
 
   /**
-   * The final assistant text block of the most recent turn ('' if none). Reused
-   * as the `{previous}` hand-off when a fresh step needs the prior step's output
-   * (e.g. a plan). Same transcript walk as {@link summarizeTurn}.
+   * The deliverable of the most recent turn ('' if none) — its plan when it ended
+   * in plan mode, else its final assistant text block. Reused as the `{previous}`
+   * hand-off when a fresh step needs the prior step's output (e.g. a plan).
    */
   lastAssistantText(sessionId: string): string {
     const events = this.store.loadTranscript(sessionId);
@@ -535,19 +638,7 @@ export class SessionManager {
         break;
       }
     }
-    let finalText = '';
-    for (const ev of events.slice(Math.max(lastUserIdx, 0))) {
-      if (ev.kind !== 'sdk') continue;
-      const msg = ev.data as { type?: string; message?: { content?: unknown } };
-      if (msg.type !== 'assistant') continue;
-      const content = msg.message?.content;
-      if (Array.isArray(content)) {
-        for (const block of content as Record<string, unknown>[]) {
-          if (block.type === 'text' && typeof block.text === 'string') finalText = block.text;
-        }
-      }
-    }
-    return finalText;
+    return collectTurns(events, lastUserIdx).at(-1)?.output ?? '';
   }
 
   /**
@@ -560,43 +651,18 @@ export class SessionManager {
    * user's feedback into the single final deliverable. Falls back to
    * lastAssistantText on any failure — never blocks the workflow.
    */
-  async consolidateStepOutput(sessionId: string): Promise<string> {
+  async consolidateStepOutput(sessionId: string, stepIndex?: number): Promise<string> {
     try {
       const events = this.store.loadTranscript(sessionId);
-      // Find this step's entry marker: the last 'workflow' event with
-      // event === 'started' (retried/approved markers come after it in-step).
-      let startIdx = -1;
-      for (let i = events.length - 1; i >= 0; i--) {
-        const ev = events[i];
-        if (ev.kind !== 'workflow') continue;
-        const data = ev.data as { event?: string };
-        if (data.event === 'started') {
-          startIdx = i;
-          break;
-        }
-      }
+      // Slice from the marker that opened *this* step, not merely the newest
+      // 'started' one: with a step queued while the previous one consolidates,
+      // the newest marker can already belong to the next step.
+      const startIdx = findStepStart(events, stepIndex);
       if (startIdx === -1) return this.lastAssistantText(sessionId);
 
-      // Walk the slice: each 'user' event opens a turn (its text is the initial
-      // prompt or iteration feedback); capture that turn's final assistant text.
-      const turns: { user: string; output: string }[] = [];
-      for (const ev of events.slice(startIdx)) {
-        if (ev.kind === 'user') {
-          const text = (ev.data as { text?: string }).text ?? '';
-          turns.push({ user: text, output: '' });
-        } else if (ev.kind === 'sdk' && turns.length) {
-          const msg = ev.data as { type?: string; message?: { content?: unknown } };
-          if (msg.type !== 'assistant') continue;
-          const content = msg.message?.content;
-          if (Array.isArray(content)) {
-            for (const block of content as Record<string, unknown>[]) {
-              if (block.type === 'text' && typeof block.text === 'string') {
-                turns[turns.length - 1].output = block.text;
-              }
-            }
-          }
-        }
-      }
+      // Each 'user' event in the slice opens a turn (its text is the initial
+      // prompt or the iteration feedback); its output is that turn's deliverable.
+      const turns = collectTurns(events, startIdx);
 
       // Single-turn step: its final text is the deliverable — no query, no latency.
       if (turns.length <= 1) return turns[0]?.output ?? this.lastAssistantText(sessionId);

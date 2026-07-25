@@ -439,6 +439,7 @@ export function StepCard({
                 placeholder="e.g. plan"
                 value={step.outputName ?? ''}
                 disabled={contentReadOnly}
+                error={errors?.outputName}
                 classNames={{ input: styles.fieldInput }}
                 onChange={(e) => onPatch({ outputName: e.currentTarget.value })}
               />

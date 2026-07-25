@@ -29,6 +29,37 @@ function sameContent(a: StepContent, b: StepContent): boolean {
   );
 }
 
+/**
+ * Substitute `{outputs.<name>}` from the outputs earlier steps published, and report
+ * the names that resolved to nothing — absent, or present but blank. Those used to
+ * collapse to '' silently, which is how a step ends up running without the plan it
+ * asked for and improvising from whatever it can find on disk.
+ */
+export function substituteOutputs(
+  prompt: string,
+  outputs: Record<string, string>,
+): { prompt: string; missing: string[] } {
+  const missing: string[] = [];
+  const substituted = prompt.replace(/\{outputs\.([\w-]+)\}/g, (_m, name: string) => {
+    const value = outputs[name];
+    if (!value || !value.trim()) {
+      if (!missing.includes(name)) missing.push(name);
+      return '';
+    }
+    return value;
+  });
+  return { prompt: substituted, missing };
+}
+
+/**
+ * True when a template threads the hand-off in itself — via `{previous}`/`{diff}` or
+ * any `{outputs.*}` — so `runStep` must not also auto-prepend it. Tested against the
+ * template: after substitution the tokens are gone.
+ */
+export function usesHandoffTokens(template: string): boolean {
+  return /\{previous\}|\{diff\}|\{outputs\./.test(template);
+}
+
 export const DEFAULT_WORKFLOW: WorkflowDef = {
   id: 'default-feature-flow',
   name: 'Plan → MVP → Tests → Refactor → Review',
@@ -45,7 +76,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
     {
       name: 'Implement MVP',
       promptTemplate:
-        'Implement the MVP of the planned feature now. Follow the approved plan. Keep the change minimal — no extras beyond the plan.{feedback}',
+        'Implement the MVP of the planned feature now. Follow the approved plan as supplied in this prompt — that text is the whole plan; never go looking for plan files under ~/.claude/plans/ (they belong to other sessions). Keep the change minimal — no extras beyond the plan.{feedback}',
       model: 'claude-opus-5',
       permissionMode: 'acceptEdits',
       autoAdvance: false,
@@ -391,16 +422,31 @@ export class WorkflowEngine {
     const feedbackText = feedback
       ? `\n\nThe user reviewed the previous attempt at this step and asked for changes: ${feedback}`
       : '';
+    // Hand-off tokens are looked for in the *template*: after substitution they are
+    // gone, and substituted output text can itself contain a literal {previous}.
+    // A template pulling {outputs.*} already carries its context, so the
+    // auto-prepend below must not inject the same text a second time.
+    const usesTokens = usesHandoffTokens(content.promptTemplate);
     let prompt = content.promptTemplate.includes('{feedback}')
       ? content.promptTemplate.replaceAll('{feedback}', feedbackText)
       : content.promptTemplate + feedbackText;
     prompt = prompt.replaceAll('{task}', meta.workflow.task ?? '');
 
-    // Named outputs from earlier steps: {outputs.<name>} → the captured text
-    // (empty string if that step hasn't run yet or wasn't named). Works for
-    // both fresh and inherited steps.
-    const outputs = meta.workflow.outputs ?? {};
-    prompt = prompt.replace(/\{outputs\.([\w-]+)\}/g, (_m, name: string) => outputs[name] ?? '');
+    // Named outputs from earlier steps: {outputs.<name>} → the captured text. An
+    // unresolved name parks the step instead of running it blind.
+    const resolved = substituteOutputs(prompt, meta.workflow.outputs ?? {});
+    prompt = resolved.prompt;
+    if (resolved.missing.length) {
+      meta.workflow.stepStatuses[i] = 'waiting-approval';
+      this.sessions.setStatus(sessionId, 'error');
+      this.marker(sessionId, {
+        stepIndex: i,
+        stepName: content.name,
+        event: 'waiting-approval',
+        missingOutputs: resolved.missing,
+      });
+      return;
+    }
 
     // Fresh start: drop the accumulated conversation and seed a clean session
     // with a compact hand-off — the previous step's final output ({previous},
@@ -411,7 +457,6 @@ export class WorkflowEngine {
     if (content.freshStart && entry && i > 0) {
       const previous = meta.workflow.lastStepOutput ?? this.sessions.lastAssistantText(sessionId);
       const diff = await workingTreeDiff(meta.cwd, meta.workflow.diffBaseline);
-      const usesTokens = prompt.includes('{previous}') || prompt.includes('{diff}');
       prompt = prompt.replaceAll('{previous}', previous).replaceAll('{diff}', diff);
       if (!usesTokens) {
         const parts: string[] = [];
@@ -557,11 +602,18 @@ export class WorkflowEngine {
     // text as-is; iterated steps fold every attempt into one deliverable). Kept
     // for the {previous} hand-off, and published under the step's name so later
     // steps can pull it via {outputs.<name>}.
-    const output = await this.sessions.consolidateStepOutput(sessionId);
-    meta.workflow.lastStepOutput = output;
-    const outName = this.stepContent(wf.steps[i])?.outputName?.trim();
-    if (outName) {
-      (meta.workflow.outputs ??= {})[outName] = output;
+    const output = await this.sessions.consolidateStepOutput(sessionId, i);
+    // An empty capture is not a deliverable — publishing it would clobber a
+    // previous non-empty value and hand the next step nothing.
+    if (output.trim()) {
+      meta.workflow.lastStepOutput = output;
+      const outName = this.stepContent(wf.steps[i])?.outputName?.trim();
+      if (outName) {
+        (meta.workflow.outputs ??= {})[outName] = output;
+      }
+      // Persist the capture before the next step is queued: otherwise it rides on
+      // whatever setStatus happens next and is lost if the bridge dies in between.
+      this.sessions.persistMeta(sessionId);
     }
 
     if (i + 1 < wf.steps.length) {

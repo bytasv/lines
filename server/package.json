@@ -9,6 +9,7 @@
     "start": "tsx src/index.ts",
     "start:worker": "tsx src/worker.ts",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/*.test.ts",
     "migrate": "tsx scripts/migrate-user.ts"
   },
   "dependencies": {
