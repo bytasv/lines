@@ -185,3 +185,27 @@ export function assessToolCall(
   if (/read|list|get|search|view/i.test(toolName)) return { dangerous: false };
   return { dangerous: true, reason: `Unrecognized tool "${toolName}" — review before running` };
 }
+
+/**
+ * Tools that only observe state (or track the agent's own todo list). Nothing
+ * here mutates the repo, the network, or the machine.
+ */
+const READ_ONLY_TOOLS = new Set(['Read', 'Glob', 'Grep', 'NotebookRead', 'TodoWrite', 'TaskOutput']);
+
+/**
+ * True when a call is a plain observation of project state. Used outside auto
+ * mode, where the CLI otherwise prompts for every single call: after a plan is
+ * approved the session drops to 'default' and each Read/Grep would ask again.
+ *
+ * Reuses assessToolCall, so reads escaping the working directory or touching
+ * credential files still escalate, and allowlist entries are still honoured.
+ */
+export function isSafeReadOnly(
+  toolName: string,
+  input: Record<string, unknown>,
+  cwd: string,
+  allowlist: GuardAllowEntry[],
+): boolean {
+  if (ALWAYS_ASK_TOOLS.has(toolName) || !READ_ONLY_TOOLS.has(toolName)) return false;
+  return !assessToolCall(toolName, input, cwd, allowlist).dangerous;
+}

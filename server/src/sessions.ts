@@ -17,7 +17,13 @@ import type {
 import { isSessionActive } from '@lines/shared';
 import type { Store } from './store.ts';
 import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
-import { ALWAYS_ASK_TOOLS, allowEntryFor, assessToolCall, type GuardAllowlist } from './autoGuard.ts';
+import {
+  ALWAYS_ASK_TOOLS,
+  allowEntryFor,
+  assessToolCall,
+  isSafeReadOnly,
+  type GuardAllowlist,
+} from './autoGuard.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
 import type { AuthManager } from './auth.ts';
@@ -1217,9 +1223,9 @@ export class SessionManager {
     if (!resend) this.captureFileSnapshot(sessionId, hookInput);
 
     const meta = this.sessions.get(sessionId);
+    const toolName = String(hookInput.tool_name ?? '');
+    const toolInput = (hookInput.tool_input ?? {}) as Record<string, unknown>;
     if (meta?.permissionMode === 'auto') {
-      const toolName = String(hookInput.tool_name ?? '');
-      const toolInput = (hookInput.tool_input ?? {}) as Record<string, unknown>;
       if (!ALWAYS_ASK_TOOLS.has(toolName)) {
         const verdict = assessToolCall(toolName, toolInput, meta.cwd, this.guard.list());
         if (verdict.dangerous) {
@@ -1250,6 +1256,26 @@ export class SessionManager {
           },
         };
       }
+    } else if (meta && isSafeReadOnly(toolName, toolInput, meta.cwd, this.guard.list())) {
+      // Outside auto mode every call reaches the user, including plain reads —
+      // so an approved plan re-prompts on each Read/Grep. Let observation-only
+      // calls through silently (still recorded); Bash/Edit/Write are untouched.
+      if (!resend) {
+        this.emitEvent(sessionId, 'permission', {
+          requestId: randomUUID(),
+          toolName,
+          input: toolInput,
+          resolution: 'allow',
+          auto: true,
+        } satisfies PermissionRequestData);
+      }
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+        },
+      };
     }
     return { continue: true };
   }
@@ -1302,6 +1328,19 @@ export class SessionManager {
           return { behavior: 'allow', updatedInput: input };
         }
         guardReason = verdict.reason;
+      } else if (meta && isSafeReadOnly(toolName, input, meta.cwd, this.guard.list())) {
+        // Other modes: observation-only calls still auto-approve (see
+        // handlePreToolUse) so post-plan reads don't ask again.
+        if (!resend) {
+          this.emitEvent(sessionId, 'permission', {
+            requestId: randomUUID(),
+            toolName,
+            input,
+            resolution: 'allow',
+            auto: true,
+          } satisfies PermissionRequestData);
+        }
+        return { behavior: 'allow', updatedInput: input };
       }
     }
 
