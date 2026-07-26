@@ -6,7 +6,7 @@ Shows per-step USD spend, token spend, and active-turn duration in the workflow 
 
 ## Entry points
 
-- `web/src/components/WorkflowStepper.tsx` (cost label, token icon, and duration label next to each step name)
+- `web/src/components/WorkflowStepper.tsx` (cost label, token icon, and duration label in a metrics row below each step name)
 
 ## Important files
 
@@ -28,7 +28,7 @@ Shows per-step USD spend, token spend, and active-turn duration in the workflow 
 
 ## Data flow
 
-SDK `result` message → `SessionMeta.lastCostUsd` / `SessionMeta.lastTokens` / `SessionMeta.lastDurationMs` (existing accumulation in `server/src/sessions.ts`) → read by `onWorkflowTurnComplete` and added onto `WorkflowState.stepCostsUsd[stepIndex]` / `stepTokens[stepIndex]` / `stepDurationsMs[stepIndex]` → persisted on `SessionMeta` upsert → `WorkflowStepper` renders `stepCostsUsd[i]` as a `$X.XX` label, `stepTokens[i]` as a coin icon with a "N tokens spent" tooltip, and `stepDurationsMs[i]` via `formatDuration`.
+SDK `result` message → `SessionMeta.lastCostUsd` / `SessionMeta.lastTokens` / `SessionMeta.lastDurationMs` (existing accumulation in `server/src/sessions.ts`) → read by `onWorkflowTurnComplete` and added onto `WorkflowState.stepCostsUsd[stepIndex]` / `stepTokens[stepIndex]` / `stepDurationsMs[stepIndex]` → persisted on `SessionMeta` upsert → `WorkflowStepper` renders `stepCostsUsd[i]` as a `$X.XX` label, `stepTokens[i]` as a coin icon with a "N tokens spent" tooltip, and `stepDurationsMs[i]` via `formatDuration`, all in a metrics row below the step name.
 
 ## Dependencies
 
@@ -40,9 +40,10 @@ None. No test infrastructure covers `WorkflowStepper` rendering at time of writi
 
 ## Business rules
 
-- Cost shown as `$X.XX` (2 decimals) next to the step name; hidden entirely for a step whose accumulated cost is zero or unset.
-- Token icon (coin) shown next to the cost label with a "N tokens spent" tooltip (locale-formatted); hidden entirely for a step whose accumulated tokens are zero or unset.
-- Duration shown next to the token icon via `formatDuration`; hidden entirely for a step whose accumulated duration is zero or unset. Counts only active SDK turn time: excludes idle wait between turns AND permission-prompt approval wait within a turn (e.g. a plan-mode review card left open) — so a step blocked on a slow approval doesn't read as an expensive step.
+- Cost, tokens, and duration render in a metrics row below the step name (not inline with it), so the name has the full column width to itself.
+- Cost shown as `$X.XX` (2 decimals); hidden (rendered invisible, not removed) for a step whose accumulated cost is zero or unset, so the metrics row keeps a fixed height and other steps' rows don't jump when a value later appears.
+- Token icon (coin) shown with a "N tokens spent" tooltip (locale-formatted); hidden under the same zero/unset rule as cost.
+- Duration shown via `formatDuration`; hidden under the same zero/unset rule as cost. Counts only active SDK turn time: excludes idle wait between turns AND permission-prompt approval wait within a turn (e.g. a plan-mode review card left open) — so a step blocked on a slow approval doesn't read as an expensive step.
 - Retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it, for cost, tokens, and duration.
 
 ## Architectural rules

@@ -1,4 +1,4 @@
-import { Box, Button, Center, Group, Loader, Paper, Text, ThemeIcon, Tooltip } from '@mantine/core';
+import { Box, Button, Center, Group, Loader, Paper, Stack, Text, ThemeIcon, Tooltip } from '@mantine/core';
 import { IconCheck, IconCoins } from '@tabler/icons-react';
 import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@lines/shared';
 import { isStepRef } from '@lines/shared';
@@ -7,15 +7,18 @@ import { useStore } from '../store';
 import { send } from '../ws';
 
 function StepIcon({ status, index }: { status: WorkflowStepStatus; index: number }) {
-  if (status === 'running') return <Loader size={20} />;
+  // Fixed width so the title (and the metrics row indented under it) never shifts
+  // when a step flips between the 20px loader and the 22px icon.
   return (
-    <ThemeIcon
-      size={22}
-      radius="xl"
-      variant={status === 'pending' ? 'default' : 'filled'}
-    >
-      {status === 'done' ? <IconCheck size={13} /> : <Text fz={11}>{index + 1}</Text>}
-    </ThemeIcon>
+    <Center w={22} style={{ flexShrink: 0 }}>
+      {status === 'running' ? (
+        <Loader size={20} />
+      ) : (
+        <ThemeIcon size={22} radius="xl" variant={status === 'pending' ? 'default' : 'filled'}>
+          {status === 'done' ? <IconCheck size={13} /> : <Text fz={11}>{index + 1}</Text>}
+        </ThemeIcon>
+      )}
+    </Center>
   );
 }
 
@@ -45,15 +48,21 @@ export function WorkflowStepper({
 
   return (
     <Paper withBorder={false} px="md" pt="xs" pb="xs">
-      <Group gap="sm" wrap="nowrap" align="center">
+      <Group gap="sm" wrap="nowrap" align="stretch">
         {workflow.steps.map((step, i) => {
           const status = state.stepStatuses[i];
           const clickable = status !== 'pending';
+          const cost = state.stepCostsUsd?.[i] ?? 0;
+          const tokens = state.stepTokens?.[i] ?? 0;
+          const durationMs = state.stepDurationsMs?.[i] ?? 0;
           return (
             <Group
               key={i}
               gap={8}
               wrap="nowrap"
+              // Title row and metrics row are the same height (18px), so centering the
+              // icon against the column lands it exactly on the progress track.
+              align="center"
               style={{ flex: 1, minWidth: 0, cursor: clickable ? 'pointer' : undefined }}
               onClick={
                 clickable
@@ -66,47 +75,58 @@ export function WorkflowStepper({
               }
             >
               <StepIcon status={status} index={i} />
-              <Text size="xs" fw={i === state.stepIndex ? 600 : 500} truncate>
-                {nameOf(step)}
-              </Text>
-              {(state.stepCostsUsd?.[i] ?? 0) > 0 && (
-                <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
-                  ${state.stepCostsUsd![i].toFixed(2)}
+              <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
+                <Text size="xs" lh="18px" fw={i === state.stepIndex ? 600 : 500} truncate>
+                  {nameOf(step)}
                 </Text>
-              )}
-              {(state.stepTokens?.[i] ?? 0) > 0 && (
-                <Tooltip label={`${state.stepTokens![i].toLocaleString()} tokens spent`} withArrow fz="xs">
-                  <Center c="dimmed" style={{ flexShrink: 0 }}>
-                    <IconCoins size={11} />
-                  </Center>
-                </Tooltip>
-              )}
-              {(state.stepDurationsMs?.[i] ?? 0) > 0 && (
-                <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
-                  {formatDuration(state.stepDurationsMs![i])}
-                </Text>
-              )}
-              {/* Connector doubles as this step's scroll-progress track,
-                  filled imperatively by Transcript. */}
-              <Box
-                style={{
-                  flex: 1,
-                  minWidth: 12,
-                  height: 3,
-                  borderRadius: 2,
-                  background: 'var(--mantine-color-default-hover)',
-                }}
-              >
+                {/* Underline doubles as this step's scroll-progress track,
+                    filled imperatively by Transcript. */}
                 <Box
-                  data-progress-fill
                   style={{
-                    height: '100%',
-                    width: 0,
+                    width: '100%',
+                    minWidth: 12,
+                    height: 3,
                     borderRadius: 2,
-                    background: 'var(--mantine-color-sandstone-6)',
+                    background: 'var(--mantine-color-default-hover)',
                   }}
-                />
-              </Box>
+                >
+                  <Box
+                    data-progress-fill
+                    style={{
+                      height: '100%',
+                      width: 0,
+                      borderRadius: 2,
+                      background: 'var(--mantine-color-sandstone-6)',
+                    }}
+                  />
+                </Box>
+                {/* Always rendered — an invisible placeholder holds the row's height so
+                    steps don't jump as metrics arrive. */}
+                <Group gap={6} wrap="nowrap" h={18}>
+                  {cost === 0 && tokens === 0 && durationMs === 0 && (
+                    <Text fz={11} c="dimmed" style={{ visibility: 'hidden' }} aria-hidden>
+                      $0.00
+                    </Text>
+                  )}
+                  {cost > 0 && (
+                    <Text fz={11} c="dimmed" style={{ flexShrink: 0 }}>
+                      ${cost.toFixed(2)}
+                    </Text>
+                  )}
+                  {tokens > 0 && (
+                    <Tooltip label={`${tokens.toLocaleString()} tokens spent`} withArrow fz="xs">
+                      <Center c="dimmed" style={{ flexShrink: 0 }}>
+                        <IconCoins size={11} />
+                      </Center>
+                    </Tooltip>
+                  )}
+                  {durationMs > 0 && (
+                    <Text fz={11} c="dimmed" style={{ flexShrink: 0 }}>
+                      {formatDuration(durationMs)}
+                    </Text>
+                  )}
+                </Group>
+              </Stack>
             </Group>
           );
         })}
