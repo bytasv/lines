@@ -249,7 +249,8 @@ function PlanApproval({
         {!resolution && (
           <>
             <ScrollArea.Autosize mah={320} type="auto">
-              <Paper bg="var(--mantine-color-default-hover)" radius="md" px="sm" py={4}>
+              {/* Not default-hover: that shade now reads as a user bubble. */}
+              <Paper bg="var(--mantine-color-default)" radius="md" px="sm" py={4}>
                 <Markdown text={plan} />
               </Paper>
             </ScrollArea.Autosize>

@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Badge, Collapse, Group, Loader, Paper, Stack, Text } from '@mantine/core';
-import { IconChevronDown, IconChevronRight, IconTools } from '@tabler/icons-react';
+import { Badge, Box, Collapse, Group, Loader, Stack, Text } from '@mantine/core';
+import { IconChevronDown, IconChevronRight } from '@tabler/icons-react';
 import type { ToolGroupItem } from '../lib/transcript';
 import { groupDiffTotals, groupSummary } from '../lib/transcript';
 import { ToolCallCard } from './ToolCallCard';
@@ -34,16 +34,24 @@ export function ToolGroup({
   const totals = groupDiffTotals(group.tools);
 
   return (
-    <Paper withBorder radius="md" px="sm" py={6} bg="var(--mantine-color-default)">
-      <Group gap="xs" wrap="nowrap" justify="space-between">
-        <Group
-          gap="xs"
-          wrap="nowrap"
-          style={{ cursor: 'pointer', minWidth: 0, flex: 1 }}
-          onClick={toggle}
-        >
+    <Box>
+      <Group
+        className="tx-row"
+        gap="xs"
+        wrap="nowrap"
+        justify="space-between"
+        onClick={toggle}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggle();
+          }
+        }}
+      >
+        <Group gap="xs" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
           {expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
-          <IconTools size={13} opacity={0.6} />
           <Text size="xs" fw={600} style={{ flexShrink: 0 }}>
             {groupSummary(group.tools)}
           </Text>
@@ -73,12 +81,12 @@ export function ToolGroup({
         </Group>
       </Group>
       <Collapse expanded={expanded} transitionDuration={150}>
-        <Stack gap={6} mt={6}>
+        <Stack gap={2} mt={2}>
           {group.tools.map((t) => (
             <ToolCallCard key={t.id} tool={t} />
           ))}
         </Stack>
       </Collapse>
-    </Paper>
+    </Box>
   );
 }

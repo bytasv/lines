@@ -1,21 +1,6 @@
 import { useState } from 'react';
-import {
-  ActionIcon,
-  Badge,
-  Box,
-  Code,
-  Collapse,
-  Group,
-  Paper,
-  Text,
-  Tooltip,
-} from '@mantine/core';
-import {
-  IconChevronDown,
-  IconChevronRight,
-  IconTool,
-  IconZoomScan,
-} from '@tabler/icons-react';
+import { ActionIcon, Badge, Box, Code, Collapse, Group, Text, Tooltip } from '@mantine/core';
+import { IconChevronDown, IconChevronRight, IconZoomScan } from '@tabler/icons-react';
 import type { ToolBlock } from '../lib/transcript';
 import { computeDiff, diffStats, isEditTool } from '../lib/transcript';
 import { MonacoDiffModal } from './MonacoDiffModal';
@@ -41,16 +26,24 @@ export function ToolCallCard({ tool }: { tool: ToolBlock }) {
   const pending = tool.result === undefined && !editTool;
 
   return (
-    <Paper withBorder radius="md" px="sm" py={6} bg="var(--mantine-color-default)">
-      <Group gap="xs" wrap="nowrap" justify="space-between">
-        <Group
-          gap="xs"
-          wrap="nowrap"
-          style={{ cursor: 'pointer', minWidth: 0, flex: 1 }}
-          onClick={() => setExpanded((v) => !v)}
-        >
+    <Box>
+      <Group
+        className="tx-row"
+        gap="xs"
+        wrap="nowrap"
+        justify="space-between"
+        onClick={() => setExpanded((v) => !v)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setExpanded((v) => !v);
+          }
+        }}
+      >
+        <Group gap="xs" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
           {expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
-          <IconTool size={13} opacity={0.6} />
           <Badge variant="light" color={tool.isError ? 'red' : editTool ? 'teal' : 'blue'} tt="none">
             {tool.name}
           </Badge>
@@ -76,7 +69,15 @@ export function ToolCallCard({ tool }: { tool: ToolBlock }) {
               </Text>
             )}
             <Tooltip label="Open diff in Monaco">
-              <ActionIcon size="sm" variant="light" onClick={() => setDiffOpen(true)}>
+              <ActionIcon
+                size="sm"
+                variant="light"
+                // Sits inside the row's click target — don't toggle the row too.
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDiffOpen(true);
+                }}
+              >
                 <IconZoomScan size={14} />
               </ActionIcon>
             </Tooltip>
@@ -84,7 +85,7 @@ export function ToolCallCard({ tool }: { tool: ToolBlock }) {
         )}
       </Group>
       <Collapse expanded={expanded}>
-        <Box mt={6}>
+        <Box mt={4}>
           <Text size="xs" c="dimmed" fw={600}>
             Input
           </Text>
@@ -116,6 +117,6 @@ export function ToolCallCard({ tool }: { tool: ToolBlock }) {
           after={diff.after}
         />
       )}
-    </Paper>
+    </Box>
   );
 }

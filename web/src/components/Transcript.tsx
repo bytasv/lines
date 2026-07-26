@@ -21,8 +21,6 @@ import {
   IconChevronRight,
   IconFile,
   IconRefresh,
-  IconRobot,
-  IconUser,
   IconRoute,
   IconZoomIn,
 } from '@tabler/icons-react';
@@ -131,15 +129,20 @@ function Item({
   const isActiveGroup = item.key === activeGroupKey;
   switch (item.kind) {
     case 'user':
+      // The only bubble in the transcript: a bubble means "a human said this".
       return (
-        <Group align="flex-start" gap="xs" wrap="nowrap">
-          <IconUser size={16} style={{ marginTop: 4, opacity: 0.5, flexShrink: 0 }} />
-          <Paper radius="md" px="sm" py={6} bg="var(--mantine-color-default-hover)" style={{ flex: 1, minWidth: 0 }}>
-            {item.source === 'workflow' && (
-              <Badge variant="light" color="slate" mb={4}>
-                workflow step prompt
-              </Badge>
-            )}
+        <Box style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <Paper
+            radius="md"
+            px="sm"
+            py={6}
+            bg="var(--mantine-color-default-hover)"
+            // minWidth: 0 is load-bearing twice — it stops a wide code block from
+            // growing the flex item, and since used width is
+            // max(min-width, min(max-width, width)), a default min-width: auto
+            // (min-content) would beat maxWidth: 80% for one long unbreakable token.
+            style={{ maxWidth: '80%', minWidth: 0, overflowWrap: 'anywhere' }}
+          >
             {item.text && <Markdown text={item.text} />}
             {item.mentions && item.mentions.length > 0 && (
               <Group gap={6} mt={item.text ? 6 : 0}>
@@ -192,11 +195,12 @@ function Item({
               </Group>
             )}
           </Paper>
-        </Group>
+        </Box>
       );
-    case 'assistant': {
-      const blocks = (
-        <Stack gap={6} style={{ flex: 1, minWidth: 0 }}>
+    case 'assistant':
+      // Agent output is unwrapped and flush-left — no bubble, no icon gutter.
+      return (
+        <Stack gap={6} style={{ minWidth: 0 }}>
           {item.blocks.map((block, i) => {
             if (block.type === 'text') return <Markdown key={i} text={block.text} />;
             return (
@@ -207,59 +211,26 @@ function Item({
           })}
         </Stack>
       );
-      return (
-        <Group align="flex-start" gap="xs" wrap="nowrap">
-          <IconRobot size={16} style={{ marginTop: 4, opacity: 0.5, flexShrink: 0 }} />
-          {item.isAnswer ? (
-            <Paper
-              withBorder
-              radius="md"
-              px="sm"
-              py={6}
-              bg="var(--mantine-color-default)"
-              style={{ flex: 1, minWidth: 0 }}
-            >
-              {blocks}
-            </Paper>
-          ) : (
-            blocks
-          )}
-        </Group>
-      );
-    }
     case 'tool-group':
-      return (
-        <Group align="flex-start" gap="xs" wrap="nowrap">
-          <Box w={16} style={{ flexShrink: 0 }} />
-          <Box style={{ flex: 1, minWidth: 0 }}>
-            <ToolGroup group={item} active={!!isActiveGroup} sessionId={sessionId} />
-          </Box>
-        </Group>
-      );
+      return <ToolGroup group={item} active={!!isActiveGroup} sessionId={sessionId} />;
     case 'agent-turn':
       return (
-        <Group align="flex-start" gap="xs" wrap="nowrap">
-          <IconRobot size={16} style={{ marginTop: 4, opacity: 0.5, flexShrink: 0 }} />
-          <Box style={{ flex: 1, minWidth: 0 }}>
-            <AgentTurn
-              turn={item}
-              active={item.key === activeTurnKey}
-              sessionId={sessionId}
-              onImage={onImage}
-              retryKey={retryKey}
-              activeGroupKey={activeGroupKey}
-            />
-          </Box>
-        </Group>
+        <AgentTurn
+          turn={item}
+          active={item.key === activeTurnKey}
+          sessionId={sessionId}
+          onImage={onImage}
+          retryKey={retryKey}
+          activeGroupKey={activeGroupKey}
+        />
       );
     case 'streaming':
+      // Liveness is the CSS caret, not a gutter Loader — an indent here would make
+      // the text jump left the moment it settles into an 'assistant' item.
       return (
-        <Group align="flex-start" gap="xs" wrap="nowrap">
-          <Loader size={14} style={{ marginTop: 5, flexShrink: 0 }} />
-          <Box style={{ flex: 1, minWidth: 0 }}>
-            <Markdown text={item.text} />
-          </Box>
-        </Group>
+        <Box className="tx-streaming" style={{ minWidth: 0 }}>
+          <Markdown text={item.text} />
+        </Box>
       );
     case 'system-init':
       return (
@@ -330,16 +301,24 @@ function AgentTurn({
   const isHeadlineSentence = headline !== summary || headline === 'response';
 
   return (
-    <Paper withBorder radius="md" px="sm" py={6} bg="var(--mantine-color-default)">
-      <Group gap="xs" wrap="nowrap" justify="space-between" align="flex-start">
-        <Group
-          gap="xs"
-          wrap="nowrap"
-          align="flex-start"
-          style={{ cursor: 'pointer', minWidth: 0, flex: 1 }}
-          onClick={toggle}
-        >
-          <Box mt={2}>{expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</Box>
+    <Box>
+      <Group
+        className="tx-row"
+        gap="xs"
+        wrap="nowrap"
+        justify="space-between"
+        onClick={toggle}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggle();
+          }
+        }}
+      >
+        <Group gap="xs" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
+          {expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
           <Stack gap={0} style={{ flex: 1, minWidth: 0 }}>
             <Text size="xs" fw={isHeadlineSentence ? 400 : 600} lineClamp={2}>
               {headline}
@@ -371,7 +350,7 @@ function AgentTurn({
         </Group>
       </Group>
       <Collapse expanded={expanded} transitionDuration={150}>
-        <Stack gap="sm" mt={6}>
+        <Stack gap={6} mt={4}>
           {turn.items.map((child) => (
             <Item
               key={child.key}
@@ -384,7 +363,7 @@ function AgentTurn({
           ))}
         </Stack>
       </Collapse>
-    </Paper>
+    </Box>
   );
 }
 

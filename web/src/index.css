@@ -72,16 +72,112 @@
   outline: 1px solid var(--mantine-color-default-border);
 }
 
+/* Borderless transcript rows: chevron + text, hover pill, no indentation.
+   Every row — top-level or nested inside an expanded body — sits at the same left
+   edge, so all chevrons line up in one column. Nesting reads from order and the
+   expand affordance alone; there is deliberately no depth guide or left margin.
+   Hover lives in CSS (not useHover) because the transcript re-renders on every
+   event — per-row hover state would add churn on long transcripts. */
+.tx-row {
+  padding: 3px 6px;
+  /* Negative inline margin puts the chevron flush with the prose column while the
+     hover pill bleeds into the ScrollArea's 16px padding. */
+  margin-inline: -6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+/* No display/gap here — Mantine's Group owns those via --group-gap at the same specificity. */
+.tx-row:hover {
+  background: var(--mantine-color-default-hover);
+}
+
+.tx-row:focus-visible {
+  outline: 2px solid var(--mantine-color-blue-5);
+  outline-offset: -2px;
+}
+
+@keyframes tx-caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Liveness signal for streaming text — replaces the gutter Loader. */
+.tx-streaming .md-body > *:last-child::after {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 0.95em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  animation: tx-caret 1s step-end infinite;
+}
+
+/* Compact markdown rhythm, shared by every consumer of <Markdown>.
+   Implemented as scoped Mantine spacing VARS, not selector overrides: Typography's
+   list rule is `:where(ul, ol):not([data-type='taskList'])` = specificity (0,2,0),
+   which beats `.md-body ul` (0,1,1) regardless of import order. Overriding the vars
+   sidesteps that and leaves Typography's :first-child/:last-child margin zeroing intact.
+   Caveat: these vars leak to any Mantine component rendered inside markdown — a future
+   custom renderer dropping a Button/Paper in here would inherit shrunken padding. */
+.md-body {
+  --mantine-spacing-xs: 4px; /* heading margin-bottom, table cell padding */
+  --mantine-spacing-sm: 6px; /* table cell padding */
+  --mantine-spacing-md: 8px; /* pre/hr/table/list/blockquote block margins */
+  --mantine-spacing-lg: 6px; /* paragraph margin-bottom (was 16px) */
+  --mantine-spacing-xl: 18px; /* list indent; heading margin-top base */
+  --mantine-line-height: 1.45;
+  --mantine-h1-font-size: 1.25rem;
+  --mantine-h2-font-size: 1.125rem;
+  --mantine-h3-font-size: 1rem;
+  --mantine-h4-font-size: 0.9375rem;
+  --mantine-h5-font-size: 0.875rem;
+  --mantine-h6-font-size: 0.8125rem;
+  --mantine-h1-line-height: 1.3;
+  --mantine-h2-line-height: 1.3;
+  --mantine-h3-line-height: 1.35;
+  --mantine-h4-line-height: 1.4;
+  line-height: 1.5;
+}
+
+.md-body li {
+  margin-top: 2px;
+}
+
+/* Mantine ships fz=lg on blockquote — reset to inherit. */
+.md-body blockquote {
+  font-size: inherit;
+  padding: 6px 10px;
+  border-radius: 0;
+  border-left: 2px solid var(--mantine-color-default-border);
+}
+
 /* Markdown code blocks */
 .md-body code {
   font-size: 12px;
+  padding: 0 3px;
+}
+
+/* Mantine's :where(pre) adds its own padding + background around the already-boxed
+   `pre code`, producing a double frame. Specificity 0,1,1 beats its 0,1,0. */
+.md-body pre {
+  padding: 0;
+  background: transparent;
 }
 
 .md-body pre code {
   display: block;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  padding: 10px;
+  padding: 8px 10px;
   border-radius: 6px;
   background: var(--mantine-color-gray-0);
 }
