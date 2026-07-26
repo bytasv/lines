@@ -6,7 +6,7 @@ import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { UsagePoller } from './usage.ts';
 import { WorkflowEngine } from './workflows.ts';
-import { StorageSyncClient } from './sync.ts';
+import { StorageSyncClient, THROTTLED } from './sync.ts';
 import { ProjectKeyRegistry } from './projectKeys.ts';
 import { MemorySyncer } from './memory.ts';
 import type { WorkerClient } from './workerClient.ts';
@@ -61,7 +61,12 @@ export function buildUserContext(
   const store = createStore(storeRoot);
   const guard = new GuardAllowlist(store);
   const sockets = new Set<WebSocket>();
-  const sync = new StorageSyncClient(STORAGE_URL, () => ctx.clerkToken);
+  const sync = new StorageSyncClient(
+    STORAGE_URL,
+    () => ctx.clerkToken,
+    (marks) => store.saveSyncWatermarks(marks),
+    store.loadSyncWatermarks(),
+  );
   // Storage/Supabase reachability flips → tell this user's browsers so they can
   // show the "cloud sync unavailable" notice (local persistence still works).
   sync.onStatusChange = (storage) => broadcast({ type: 'storageStatus', storage });
@@ -160,10 +165,14 @@ export function buildUserContext(
 
   const syncNow = async () => {
     const pulled = await sync.pullAll();
+    // A pull this recent already ran the whole routine — pushing and re-pulling
+    // the shared views again would just burn egress. The browser reconnects
+    // every 1.5s while a link is flapping, so this is the common path.
+    if (pulled === THROTTLED) return;
     if (pulled) {
       sync.applying = true;
       try {
-        for (const wf of pulled.workflows) workflows.applySynced(wf);
+        workflows.applySyncedAll(pulled.workflows);
         workflows.applySyncedSteps(pulled.steps);
         for (const meta of pulled.sessions) sessions.adoptSynced(meta);
         const remote = pulled.settings as UserUiSettings | null;
@@ -181,6 +190,9 @@ export function buildUserContext(
       } finally {
         sync.applying = false;
       }
+      // Everything pulled is now on disk, so the delta cursors it advanced are
+      // safe to keep across a restart.
+      sync.commitCursors();
     }
     // Push local state up so a fresh storage server (or a migrated install)
     // becomes complete without waiting for each item to change locally.

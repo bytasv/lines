@@ -1,8 +1,22 @@
 import type { MemoryFileMap, ProjectKeyMap, SessionMeta, StepDef, StepRef, StorageStatus, WorkflowDef } from '@lines/shared';
+import type { SyncWatermarks } from './store.ts';
 
 const PUSH_DEBOUNCE_MS = 2_000;
 const PULL_MIN_SPACING_MS = 30_000;
 const FETCH_TIMEOUT_MS = 10_000;
+
+/** `pullAll` skipped this call because a pull happened less than PULL_MIN_SPACING_MS ago. */
+export const THROTTLED = Symbol('throttled');
+/** The server answered 304 — the caller's cached view is still current. */
+const NOT_MODIFIED = Symbol('not-modified');
+
+/** Endpoints that return an `x-sync-cursor`, mapped to the watermark they advance. */
+const CURSOR_KEYS: Record<string, keyof SyncWatermarks> = {
+  '/workflows': 'workflows',
+  '/steps': 'steps',
+  '/sessions': 'sessions',
+  '/memory': 'memory',
+};
 
 export interface PulledState {
   workflows: WorkflowDef[];
@@ -32,6 +46,10 @@ export class StorageSyncClient {
   private available: boolean | null = null;
   private reason?: string;
   private lastPullAt = 0;
+  /** Per-path spacing for the two cross-user scans, which are the most expensive queries we make. */
+  private lastSharedPullAt = new Map<string, number>();
+  /** Last ETag seen per path, so an unchanged shared view costs a 304 instead of a full scan. */
+  private etags = new Map<string, string>();
   private pendingWorkflows: WorkflowDef[] | null = null;
   private pendingSteps: StepDef[] | null = null;
   private pendingSessions = new Map<string, SessionMeta>();
@@ -41,37 +59,49 @@ export class StorageSyncClient {
   private sessTimer: NodeJS.Timeout | null = null;
   private memTimer: NodeJS.Timeout | null = null;
 
+  /** Delta cursors, loaded from disk so a restart resumes instead of re-pulling everything. */
+  private marks: SyncWatermarks;
+  private marksDirty = false;
+
   constructor(
     private base: string,
     private tokenFn: () => string | null,
-  ) {}
+    private persistMarks: (marks: SyncWatermarks) => void = () => {},
+    marks: SyncWatermarks = {},
+  ) {
+    this.marks = { ...marks };
+  }
 
   get enabled(): boolean {
     return Boolean(this.base && this.tokenFn());
   }
 
-  /** Pull everything for a context build / reconnect; rate-limited; null on failure. */
-  async pullAll(): Promise<PulledState | null> {
+  /** Pull everything for a context build / reconnect; null on failure, THROTTLED if too soon. */
+  async pullAll(): Promise<PulledState | typeof THROTTLED | null> {
     if (!this.enabled) return null;
-    if (Date.now() - this.lastPullAt < PULL_MIN_SPACING_MS) return null;
+    if (Date.now() - this.lastPullAt < PULL_MIN_SPACING_MS) return THROTTLED;
     this.lastPullAt = Date.now();
     try {
       const [workflows, steps, sessions, settings, projectKeys, memory] = await Promise.all([
-        this.req('GET', '/workflows'),
-        this.req('GET', '/steps'),
-        this.req('GET', '/sessions'),
+        this.req('GET', this.delta('/workflows', 'workflows')),
+        this.req('GET', this.delta('/steps', 'steps')),
+        this.req('GET', this.delta('/sessions', 'sessions')),
         this.req('GET', '/settings'),
         this.req('GET', '/project-keys'),
-        this.req('GET', '/memory'),
+        this.req('GET', this.delta('/memory', 'memory')),
       ]);
       this.warned = false;
+      // `body` guards against a 304 leaking into the applied state: only the two
+      // shared routes are ETag-guarded today, but a symbol reaching applySyncedAll
+      // would be an iteration crash rather than a no-op.
+      const body = (v: unknown) => (v === NOT_MODIFIED ? null : v);
       return {
-        workflows: (workflows ?? []) as WorkflowDef[],
-        steps: (steps ?? []) as StepDef[],
-        sessions: (sessions ?? []) as SessionMeta[],
-        settings,
-        projectKeys: (projectKeys ?? {}) as ProjectKeyMap,
-        memory: (memory ?? null) as MemoryFileMap | null,
+        workflows: (body(workflows) ?? []) as WorkflowDef[],
+        steps: (body(steps) ?? []) as StepDef[],
+        sessions: (body(sessions) ?? []) as SessionMeta[],
+        settings: body(settings),
+        projectKeys: (body(projectKeys) ?? {}) as ProjectKeyMap,
+        memory: (body(memory) ?? null) as MemoryFileMap | null,
       };
     } catch (err) {
       this.warnOnce('pull', err);
@@ -79,11 +109,18 @@ export class StorageSyncClient {
     }
   }
 
-  /** Other users' published workflows. Not rate-limited — small payload, needs to be near-live. */
+  /**
+   * Other users' published workflows — a cross-user scan, so it is rate-limited
+   * like `pullAll` and ETag-guarded on top: the common case (nothing published
+   * since last time) is a 304 with no body. `null` = no new data to apply,
+   * whether that was a throttle, a 304, or a failure; the caller only needs to
+   * know whether it has something fresh to broadcast.
+   */
   async pullShared(): Promise<WorkflowDef[] | null> {
-    if (!this.enabled) return null;
+    if (!this.enabled || this.throttleShared('/workflows/shared')) return null;
     try {
       const shared = await this.req('GET', '/workflows/shared');
+      if (shared === NOT_MODIFIED) return null;
       return (shared ?? []) as WorkflowDef[];
     } catch (err) {
       this.warnOnce('pull shared', err);
@@ -102,15 +139,42 @@ export class StorageSyncClient {
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
   }
 
-  /** Other users' published steps — the library. Not rate-limited (small, near-live). */
+  /** Other users' published steps — the library. Rate-limited and ETag-guarded, as pullShared. */
   async pullSharedSteps(): Promise<StepDef[] | null> {
-    if (!this.enabled) return null;
+    if (!this.enabled || this.throttleShared('/steps/shared')) return null;
     try {
-      return ((await this.req('GET', '/steps/shared')) ?? []) as StepDef[];
+      const shared = await this.req('GET', '/steps/shared');
+      if (shared === NOT_MODIFIED) return null;
+      return (shared ?? []) as StepDef[];
     } catch (err) {
       this.warnOnce('pull shared steps', err);
       return null;
     }
+  }
+
+  /**
+   * Persist the cursors advanced by the last pull. Called by the caller *after*
+   * it has applied that pull, never before: a crash between advancing a cursor
+   * and writing the rows it covered would otherwise skip them for good.
+   */
+  commitCursors(): void {
+    if (!this.marksDirty) return;
+    this.marksDirty = false;
+    this.persistMarks(this.marks);
+  }
+
+  /** Append the stored delta cursor for a resource, if we have one. */
+  private delta(path: string, key: keyof SyncWatermarks): string {
+    const since = this.marks[key];
+    return since ? `${path}?since=${encodeURIComponent(since)}` : path;
+  }
+
+  /** True when this path was pulled less than PULL_MIN_SPACING_MS ago; stamps the clock otherwise. */
+  private throttleShared(path: string): boolean {
+    const now = Date.now();
+    if (now - (this.lastSharedPullAt.get(path) ?? 0) < PULL_MIN_SPACING_MS) return true;
+    this.lastSharedPullAt.set(path, now);
+    return false;
   }
 
   /** Resolve the immutable versions a set of refs pin (any author). */
@@ -211,6 +275,10 @@ export class StorageSyncClient {
   private async req(method: string, path: string, body?: unknown): Promise<unknown> {
     const token = this.tokenFn();
     if (!token) throw new Error('no token'); // disabled, not an outage — leave status untouched
+    // Cursor/ETag bookkeeping is per resource, not per URL — `?since=` changes
+    // every pull and would otherwise defeat both caches.
+    const basePath = path.split('?')[0];
+    const knownEtag = this.etags.get(basePath);
     let res: Response;
     try {
       res = await fetch(`${this.base}${path}`, {
@@ -218,6 +286,7 @@ export class StorageSyncClient {
         headers: {
           authorization: `Bearer ${token}`,
           ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+          ...(knownEtag ? { 'if-none-match': knownEtag } : {}),
         },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -227,6 +296,11 @@ export class StorageSyncClient {
       this.setAvailable(false, err instanceof Error ? err.message : String(err));
       throw err;
     }
+    // 304: our cached view is current and the server sent no body at all.
+    if (res.status === 304) {
+      this.setAvailable(true);
+      return NOT_MODIFIED;
+    }
     if (!res.ok) {
       // A 500 carries the storage server's error body (Prisma/DB message) — surface it as the reason.
       const reason = await res.json().then((b) => (b as { error?: string })?.error).catch(() => undefined);
@@ -234,6 +308,15 @@ export class StorageSyncClient {
       throw new Error(`storage ${method} ${path} → ${res.status}`);
     }
     this.setAvailable(true);
+    const etag = res.headers.get('etag');
+    if (etag) this.etags.set(basePath, etag);
+    const cursorKey = CURSOR_KEYS[basePath];
+    const cursor = res.headers.get('x-sync-cursor');
+    // Absent header = the response held no rows, so the cursor we have still stands.
+    if (cursorKey && cursor) {
+      this.marks[cursorKey] = cursor;
+      this.marksDirty = true;
+    }
     return res.json();
   }
 

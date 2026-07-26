@@ -30,6 +30,14 @@ function writeJson(file: string, data: unknown) {
 /** Last-synced fingerprint per memory file (absolute path -> state). */
 export type MemoryManifest = Record<string, { key: string; mtimeMs: number; size: number }>;
 
+/**
+ * Storage-server clock reading at the last successful pull, per resource. Sent
+ * back as `?since=` so a pull transfers only rows changed since then. These are
+ * *server* timestamps, never local ones — the bridge's clock may differ from the
+ * database's, and a fast local clock would silently skip rows.
+ */
+export type SyncWatermarks = Partial<Record<'workflows' | 'steps' | 'sessions' | 'memory', string>>;
+
 /** Persisted app-managed Claude OAuth credentials. Written 0600 (tokens are secrets). */
 export interface StoredAuth {
   version: 1;
@@ -60,6 +68,7 @@ export function createStore(root: string) {
   const GUARD_FILE = path.join(root, 'guard-allowlist.json');
   const SETTINGS_FILE = path.join(root, 'settings.json');
   const MEMORY_MANIFEST_FILE = path.join(root, 'memory-manifest.json');
+  const WATERMARKS_FILE = path.join(root, 'sync-watermarks.json');
 
   fs.mkdirSync(TRANSCRIPTS, { recursive: true });
   fs.mkdirSync(ATTACHMENTS, { recursive: true });
@@ -218,6 +227,16 @@ export function createStore(root: string) {
 
     saveMemoryManifest(manifest: MemoryManifest) {
       writeJson(MEMORY_MANIFEST_FILE, manifest);
+    },
+
+    // Per-resource delta-sync cursors. Persisted so a bridge restart resumes
+    // where it left off instead of re-pulling every row.
+    loadSyncWatermarks(): SyncWatermarks {
+      return readJson<SyncWatermarks>(WATERMARKS_FILE, {});
+    },
+
+    saveSyncWatermarks(marks: SyncWatermarks) {
+      writeJson(WATERMARKS_FILE, marks);
     },
 
     rootDir: root,

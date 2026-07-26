@@ -313,11 +313,21 @@ export class WorkflowEngine {
     return workflow;
   }
 
-  /** Adopt a workflow pulled from the storage server — LWW on updatedAt, no restamp. */
-  applySynced(workflow: WorkflowDef) {
-    const cur = this.workflows.get(workflow.id);
-    if (cur && (workflow.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) return;
-    this.workflows.set(workflow.id, workflow);
+  /**
+   * Adopt a batch of workflows pulled from the storage server — LWW on
+   * updatedAt, no restamp. One persist and one broadcast for the whole batch:
+   * a per-workflow broadcast made a sync fan a shared re-pull out to every
+   * other live user context once per adopted row.
+   */
+  applySyncedAll(list: WorkflowDef[]) {
+    let changed = false;
+    for (const workflow of list) {
+      const cur = this.workflows.get(workflow.id);
+      if (cur && (workflow.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) continue;
+      this.workflows.set(workflow.id, workflow);
+      changed = true;
+    }
+    if (!changed) return;
     this.persist();
     this.broadcast({ type: 'workflows', workflows: this.list() });
   }

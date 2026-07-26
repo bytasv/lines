@@ -80,8 +80,15 @@ export class UserRegistry {
     else if (msg.type === 'sessionDeleted') this.sessionOwner.delete(msg.sessionId);
     // A user saved/published/deleted a workflow or step: their published set may
     // have changed, so every other live context re-pulls its shared view.
-    else if (msg.type === 'workflows') this.fanoutSharedRefresh(userId, 'wf', (ctx) => ctx.refreshShared());
-    else if (msg.type === 'steps') this.fanoutSharedRefresh(userId, 'step', (ctx) => ctx.refreshSharedSteps());
+    //
+    // Not while that context is applying a pull, though: those broadcasts merely
+    // replay state that *came from* storage, so nobody's published set changed.
+    // Without this guard one user connecting makes every other context re-scan.
+    else if (msg.type === 'workflows' && !this.contexts.get(userId)?.sync.applying) {
+      this.fanoutSharedRefresh(userId, 'wf', (ctx) => ctx.refreshShared());
+    } else if (msg.type === 'steps' && !this.contexts.get(userId)?.sync.applying) {
+      this.fanoutSharedRefresh(userId, 'step', (ctx) => ctx.refreshSharedSteps());
+    }
   }
 
   /** Schedule a debounced shared re-pull on every context except the source. */

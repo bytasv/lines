@@ -22,6 +22,7 @@ model Workflow {
 
   @@id([userId, id])
   @@index([published])
+  @@index([userId, updatedAt(sort: Desc)]) // delta pulls: `?since=`
   @@map("workflows")
 }
 
@@ -37,7 +38,11 @@ model StepVersion {
   updatedAt DateTime @default(now()) @map("updated_at")
 
   @@id([userId, id, version])
-  @@index([published])
+  // Both reads are `DISTINCT ON (user_id, id) … ORDER BY user_id, id, version DESC`,
+  // so the trailing column has to be descending — the ascending primary key can't
+  // serve that ordering and would force a sort over every version row.
+  @@index([userId, id, version(sort: Desc)])
+  @@index([published, userId, id, version(sort: Desc)])
   @@map("step_versions")
 }
 
@@ -56,6 +61,7 @@ model Session {
   updatedAt DateTime @default(now()) @map("updated_at")
 
   @@id([userId, id])
+  @@index([userId, updatedAt(sort: Desc)]) // delta pulls + the newest-500 bound
   @@map("sessions")
 }
 
@@ -70,13 +76,32 @@ model ProjectKeys {
   @@map("project_keys")
 }
 
-// Cross-machine agent memory (allowlisted ~/.claude locations only). One blob
-// per user; the SDK still reads the disk copy — this is the shared source of
-// truth, merged per-file last-write-wins server-side.
+// Superseded by AgentMemoryFile. Kept (unread) for one release so a rollback
+// still has its data; drop once the row-per-file table has proven itself.
 model AgentMemory {
   userId    String   @id @map("user_id")
   data      Json // MemoryFileMap
   updatedAt DateTime @default(now()) @map("updated_at")
 
   @@map("agent_memory")
+}
+
+// Cross-machine agent memory (allowlisted ~/.claude locations only). The SDK
+// still reads the disk copy — this is the shared source of truth, merged
+// per-file last-write-wins server-side.
+//
+// One row per file rather than one blob per user: as a blob, every push had to
+// read the whole map, merge in JS, write it back and echo it, so a one-line
+// memory edit moved the entire map three times.
+model AgentMemoryFile {
+  userId String @map("user_id")
+  key    String
+  /** Empty for a tombstone; `deleted` is the flag that matters. */
+  content   String
+  deleted   Boolean  @default(false)
+  updatedAt DateTime @map("updated_at")
+
+  @@id([userId, key])
+  @@index([userId, updatedAt(sort: Desc)]) // delta pulls
+  @@map("agent_memory_files")
 }
