@@ -1,18 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { PermissionMode, StepContent, StepDef, WorkflowDef, WorkflowStep } from '@lines/shared';
+import type { StepContent, StepDef, WorkflowDef, WorkflowStep } from '@lines/shared';
 import { DEFAULT_MODEL, isStepRef } from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { send } from '../../ws';
 import type { WorkflowPreset } from '../../lib/workflowPresets';
-
-export const MODE_OPTIONS: { value: PermissionMode; label: string }[] = [
-  { value: 'default', label: 'Agent' },
-  { value: 'auto', label: 'Auto (guarded)' },
-  { value: 'acceptEdits', label: 'Accept edits' },
-  { value: 'plan', label: 'Plan' },
-  { value: 'bypassPermissions', label: 'Bypass' },
-];
 
 /** A pinned reference to a published step (present ⇒ this entry is read-only content). */
 export interface DraftRef {

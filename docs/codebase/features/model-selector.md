@@ -27,8 +27,8 @@ shows the model name plus a one-line description to help users pick between mode
 
 - `ModelOption` — `{ id, label, description? }`
 - `modelSelectData()` — maps `ModelOption[]` to Mantine `Select` data with descriptions; given `ensureId`, appends a disabled "No longer available" entry if that id isn't in `models`
-- `renderModelOption` — Mantine `renderOption` renderer (label + dimmed description)
-- `modelComboboxProps` — widens the dropdown popover for narrow inputs without widening the input itself
+- `renderModelOption` — alias of `renderOptionWithDescription` (Mantine `renderOption` renderer: label + dimmed description), shared with the [permission-mode-selector](permission-mode-selector.md) dropdowns
+- `modelComboboxProps` — widens the dropdown popover for narrow inputs without widening the input itself; also reused by the permission-mode workflow Selects
 - `LEGACY_MODEL_MAP` — explicit map of retired model ids to their replacement
 - `resolveModelId()` — known ids pass through; otherwise applies `LEGACY_MODEL_MAP`; unmapped unknown ids pass through unchanged
 - `isKnownModel()` — true if an id is in `DEFAULT_MODELS`

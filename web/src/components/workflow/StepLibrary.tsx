@@ -24,7 +24,8 @@ import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../../lib/modelSelect';
 import { send } from '../../ws';
 import { ConfirmModal } from '../ConfirmModal';
-import { MODE_OPTIONS, OUTPUT_NAME_HINT, OUTPUT_NAME_RE } from './useWorkflowDraft';
+import { OUTPUT_NAME_HINT, OUTPUT_NAME_RE } from './useWorkflowDraft';
+import { PERMISSION_MODES, renderPermissionModeOption } from '../../lib/permissionModes';
 import { FieldDiffList, relTime } from './StepCard';
 import { PromptEditor } from './PromptEditor';
 import styles from './workflow.module.css';
@@ -373,7 +374,9 @@ export function StepLibrary() {
                 <span className={styles.controlLabel}>Permission mode</span>
                 <Select
                   w={158}
-                  data={MODE_OPTIONS}
+                  comboboxProps={modelComboboxProps}
+                  data={PERMISSION_MODES}
+                  renderOption={renderPermissionModeOption}
                   value={draft.permissionMode}
                   disabled={readOnly}
                   allowDeselect={false}

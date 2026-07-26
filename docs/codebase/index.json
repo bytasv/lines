@@ -44,6 +44,41 @@
       "relatedDecisions": []
     },
     {
+      "id": "permission-mode-selector",
+      "name": "Permission mode selector",
+      "doc": "features/permission-mode-selector.md",
+      "purpose": "Pick how much a session or workflow step's tool calls are gated by the permission guard, with a shared label/description per mode across all pickers.",
+      "entryPoints": [
+        "web/src/components/Composer.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/workflow/StepLibrary.tsx",
+        "web/src/components/workflow/StepCard.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "web/src/lib/permissionModes.tsx",
+        "web/src/lib/modelSelect.tsx",
+        "server/src/sessions.ts"
+      ],
+      "symbols": [
+        "PermissionMode",
+        "PERMISSION_MODES",
+        "PERMISSION_MODE_SEGMENTS",
+        "permissionModeLabel",
+        "renderPermissionModeOption"
+      ],
+      "tests": [],
+      "businessRules": [
+        "all five PermissionMode values stay selectable, including acceptEdits, because preset workflows ship steps with permissionMode: 'acceptEdits'",
+        "'default' displays as Manual; the stored value is unchanged"
+      ],
+      "architecturalRules": [
+        "single shared PERMISSION_MODES list — no component defines its own label/description array",
+        "SegmentedControl has no per-segment tooltip prop, so per-item tooltips wrap each segment's label in a Tooltip-wrapped full-width span"
+      ],
+      "relatedDecisions": []
+    },
+    {
       "id": "usage-indicator",
       "name": "Plan usage indicator",
       "doc": "features/usage-indicator.md",

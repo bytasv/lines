@@ -33,7 +33,11 @@ import {
 import type { DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import type { PermissionMode, ModelOption, StepContent, StepDef } from '@lines/shared';
 import type { DraftStep, StepErrors } from './useWorkflowDraft';
-import { MODE_OPTIONS } from './useWorkflowDraft';
+import {
+  PERMISSION_MODES,
+  permissionModeLabel,
+  renderPermissionModeOption,
+} from '../../lib/permissionModes';
 import { PromptEditor } from './PromptEditor';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../../lib/modelSelect';
 import styles from './workflow.module.css';
@@ -247,7 +251,7 @@ export function StepCard({
 }) {
   const isRef = !!step.ref;
   const contentReadOnly = readOnly || isRef;
-  const modeLabel = MODE_OPTIONS.find((m) => m.value === step.permissionMode)?.label ?? step.permissionMode;
+  const modeLabel = permissionModeLabel(step.permissionMode);
   const modelLabel = models.find((m) => m.id === step.model)?.label ?? step.model;
   const modelKnown = models.some((m) => m.id === step.model);
   const modelWarning = contentReadOnly
@@ -410,7 +414,9 @@ export function StepCard({
               <span className={styles.controlLabel}>Permission mode</span>
               <Select
                 w={158}
-                data={MODE_OPTIONS}
+                comboboxProps={modelComboboxProps}
+                data={PERMISSION_MODES}
+                renderOption={renderPermissionModeOption}
                 value={step.permissionMode}
                 disabled={contentReadOnly}
                 allowDeselect={false}

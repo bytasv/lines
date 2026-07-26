@@ -4,7 +4,7 @@ import type { PermissionMode } from '@lines/shared';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { modelSelectData, renderModelOption } from '../lib/modelSelect';
-import { MODE_LABELS } from './Composer';
+import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { send } from '../ws';
 
 export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: () => void }) {
@@ -78,7 +78,7 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
           </Text>
           <SegmentedControl
             size="xs"
-            data={MODE_LABELS}
+            data={PERMISSION_MODE_SEGMENTS}
             value={defaults.permissionMode}
             onChange={(v) => setDefaults({ ...defaults, permissionMode: v as PermissionMode })}
           />

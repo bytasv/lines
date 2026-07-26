@@ -26,6 +26,7 @@ import type { CavemanLevel, PermissionMode, PromptAttachment, SessionMeta } from
 import { isSessionInterruptible } from '@lines/shared';
 import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
+import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { buildExpandedPrompt, uniqueMentions } from '../lib/mentions';
 import { MentionInput } from './MentionInput';
 import { send } from '../ws';
@@ -115,14 +116,6 @@ function PreviewTile({
     </Paper>
   );
 }
-
-export const MODE_LABELS: { value: PermissionMode; label: string }[] = [
-  { value: 'default', label: 'Agent' },
-  { value: 'auto', label: 'Auto' },
-  { value: 'acceptEdits', label: 'Edits' },
-  { value: 'plan', label: 'Plan' },
-  { value: 'bypassPermissions', label: 'Bypass' },
-];
 
 export function Composer({ session }: { session: SessionMeta }) {
   const models = useStore((s) => s.models);
@@ -306,7 +299,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           </Tooltip>
           <SegmentedControl
             size="xs"
-            data={MODE_LABELS}
+            data={PERMISSION_MODE_SEGMENTS}
             value={session.permissionMode}
             onChange={(v) =>
               send({ type: 'setPermissionMode', sessionId: session.id, mode: v as PermissionMode })
