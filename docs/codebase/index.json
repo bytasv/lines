@@ -633,6 +633,47 @@
         "auto-approved plan writes remain visible as tool_use blocks in the transcript, but the auto-approval permission event is filtered from the UI like other auto-approved calls"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "auth-failure-recovery",
+      "name": "Auth-failure recovery",
+      "doc": "features/auth-failure-recovery.md",
+      "purpose": "Recover in the same turn when the OAuth token is rejected: refresh it, or log out so the login modal opens immediately, and leave the failed turn showing the usual Retry button.",
+      "entryPoints": [
+        "server/src/sessions.ts"
+      ],
+      "files": [
+        "server/src/auth.ts",
+        "server/src/sessions.ts",
+        "web/src/lib/transcript.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/store.ts"
+      ],
+      "symbols": [
+        "isAuthFailureMessage",
+        "AuthManager.handleTokenRejected",
+        "SessionManager.handleWorkerEnded",
+        "SessionManager.retryTurn"
+      ],
+      "tests": [
+        "server/src/auth.failure.test.ts",
+        "server/src/sessions.ended.test.ts"
+      ],
+      "businessRules": [
+        "an auth-classified turn failure attempts exactly one token refresh before logging out; a successful refresh means no login prompt at all",
+        "the login modal opens off the existing authStatus broadcast, not a new message type, and unlike the hello auto-open it is not deduped",
+        "every query crash (auth-related or not) writes a synthetic result event, so the transcript shows 'turn failed' and a Retry button",
+        "retry after re-login is manual; nothing auto-resumes the failed turn",
+        "a clean ended (no error) writes no synthetic result"
+      ],
+      "architecturalRules": [
+        "classification lives in auth.ts and is called from sessions.ts; worker.ts stays thin and does no error interpretation",
+        "handleTokenRejected goes through the single-flight refresh() rather than logout() directly, so N simultaneous failures cause one token request and a merely-expired token recovers silently",
+        "the pattern list is narrow and biased toward false negatives: a miss degrades to the old behavior, a false positive would force a refresh on a healthy session",
+        "the synthetic result is emitted via emitEvent directly, never routed through handleWorkerEvent, so it cannot re-run turn-settle bookkeeping (cost/token accumulation, onTurnComplete, workflow advance)",
+        "SDK/CLI error wording is not a published contract; isAuthFailureMessage can silently stop matching after an upstream change"
+      ],
+      "relatedDecisions": []
     }
   ]
 }

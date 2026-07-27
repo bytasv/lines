@@ -34,6 +34,28 @@ export class AuthRequiredError extends Error {
   }
 }
 
+/**
+ * Error text that means "the API rejected our token", as opposed to a network
+ * blip or an ordinary tool failure. Matched against SDK/CLI error strings, which
+ * are not a published contract — a wording change degrades this to today's
+ * behaviour (no login prompt until the usage poller notices), never to worse.
+ * Kept deliberately narrow: a false positive forces a refresh on a healthy session.
+ */
+const AUTH_FAILURE_PATTERNS = [
+  /invalid_grant/i,
+  /authentication_error/i,
+  /invalid bearer token/i,
+  /oauth authentication failed/i,
+  /\boauth token\b[^.\n]*\bexpired\b/i,
+  /\b401\b[^\n]*\bunauthorized\b/i,
+  /\bunauthorized\b[^\n]*\b401\b/i,
+  /please run \/login/i,
+];
+
+export function isAuthFailureMessage(message: string): boolean {
+  return AUTH_FAILURE_PATTERNS.some((re) => re.test(message));
+}
+
 function base64url(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
@@ -139,6 +161,19 @@ export class AuthManager {
     if (!this.auth) throw new AuthRequiredError();
     if (this.auth.expiresAt - Date.now() >= REFRESH_MARGIN_MS) return this.auth.accessToken;
     return this.refresh();
+  }
+
+  /**
+   * A turn was rejected by the API. Try exactly one refresh: a merely-expired
+   * access token recovers silently (onRefresh recycles idle queries), while a
+   * dead refresh token makes refresh() self-logout, which broadcasts
+   * `authStatus { loggedIn: false }` and opens the browser's login modal.
+   * Single-flight comes free from refresh(), so N sessions failing at once
+   * cause one token request.
+   */
+  async handleTokenRejected(): Promise<void> {
+    if (!this.isLoggedIn()) return;
+    await this.forceRefresh().catch(() => {});
   }
 
   /** Force a refresh regardless of expiry (used after a 401 from the usage endpoint). */
