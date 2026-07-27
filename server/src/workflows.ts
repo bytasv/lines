@@ -368,7 +368,7 @@ export class WorkflowEngine {
    * Returns true if this prompt was consumed as the workflow's task description
    * (i.e. it kicked off step 0); false means the caller should treat it as normal chat.
    */
-  startIfPending(sessionId: string, userText: string): boolean {
+  startIfPending(sessionId: string, userText: string, attachments?: PromptAttachment[]): boolean {
     const meta = this.sessions.get(sessionId);
     if (!meta?.workflow || meta.workflow.started) return false;
     meta.workflow.started = true;
@@ -378,7 +378,7 @@ export class WorkflowEngine {
     // dirty state. Fire-and-forget: the first fresh step is at least one approval
     // gap away, long after this resolves.
     void this.captureDiffBaseline(sessionId);
-    void this.runStep(sessionId, undefined, true);
+    void this.runStep(sessionId, undefined, true, attachments);
     return true;
   }
 
@@ -398,7 +398,13 @@ export class WorkflowEngine {
    *   False on retry/iterate, which stay in the step's existing (fresh or
    *   inherited) conversation so feedback lands on the same context.
    */
-  private async runStep(sessionId: string, feedback?: string, entry = false) {
+  private async runStep(
+    sessionId: string,
+    feedback?: string,
+    entry = false,
+    /** Attachments the user sent with the task description — entry step only. */
+    attachments?: PromptAttachment[],
+  ) {
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
@@ -482,7 +488,7 @@ export class WorkflowEngine {
       if (content.freshStart && entry) this.sessions.resetClaudeSession(sessionId);
     }
 
-    this.sessions.prompt(sessionId, prompt, 'workflow');
+    this.sessions.prompt(sessionId, prompt, 'workflow', attachments);
   }
 
   /** Resolved step name for transcript markers ('' if a ref couldn't be resolved). */
