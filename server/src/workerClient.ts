@@ -16,6 +16,17 @@ export interface WorkerRpc {
   payload: Record<string, unknown>;
 }
 
+/**
+ * The worker's hello snapshot plus the sessions whose `push` is still sitting in
+ * our queue: the snapshot was taken before the flush, so those turns are about
+ * to run and must not be reconciled as dead.
+ */
+export function withQueuedPushes(live: LiveSessionInfo[], pending: BridgeToWorker[]): LiveSessionInfo[] {
+  const queued = new Set(pending.flatMap((m) => (m.type === 'push' ? [m.sessionId] : [])));
+  for (const l of live) queued.delete(l.sessionId);
+  return [...live, ...[...queued].map((sessionId) => ({ sessionId, busy: true }))];
+}
+
 export interface WorkerClientCallbacks {
   /** Fired on every (re)connect with the worker's live sessions. */
   onHello(live: LiveSessionInfo[]): void;
@@ -37,6 +48,10 @@ export class WorkerClient {
   private pending: BridgeToWorker[] = [];
   private warnedVersion: number | null = null;
   everConnected = false;
+  /** A worker answered hello but on an incompatible protocol version. It is
+   *  demonstrably alive and may be running turns, so in-flight statuses are
+   *  *not* stale — see the blind-clear timer in index.ts. */
+  sawIncompatibleWorker = false;
 
   constructor(private callbacks: WorkerClientCallbacks) {
     this.connect();
@@ -77,6 +92,7 @@ export class WorkerClient {
         if (msg.version !== PROTOCOL_VERSION) {
           // A stale worker (started before a protocol change, outside tsx
           // watch) — keep retrying and tell the user what to do, once.
+          this.sawIncompatibleWorker = true;
           if (this.warnedVersion !== msg.version) {
             this.warnedVersion = msg.version;
             console.error(
@@ -88,8 +104,11 @@ export class WorkerClient {
         }
         this.ready = true;
         this.everConnected = true;
-        // Reconcile first so command handlers see fresh session statuses.
-        this.callbacks.onHello(msg.live);
+        this.sawIncompatibleWorker = false;
+        // Reconcile first so command handlers see fresh session statuses, and
+        // count queued pushes as live — otherwise reconcile idles a session
+        // milliseconds before its turn actually starts.
+        this.callbacks.onHello(withQueuedPushes(msg.live, this.pending));
         for (const queued of this.pending.splice(0)) ws.send(JSON.stringify(queued));
         break;
       }

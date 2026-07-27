@@ -59,6 +59,9 @@ interface SessionState {
   queue: AsyncQueue<SDKUserMessage>;
   query: Query;
   claudeSessionId?: string;
+  /** A pushed turn has not produced its `result` yet. Reported in hello so the
+   *  bridge can reconcile a status in either direction, not just demote. */
+  busy: boolean;
 }
 
 interface PendingRpc {
@@ -176,7 +179,7 @@ function ensureSession(sessionId: string, options: Record<string, unknown>): Ses
   };
 
   const q = query({ prompt: queue as AsyncIterable<SDKUserMessage>, options: fullOptions as never });
-  state = { queue, query: q };
+  state = { queue, query: q, busy: false };
   sessions.set(sessionId, state);
   void pump(sessionId, state, q);
   return state;
@@ -187,6 +190,7 @@ async function pump(sessionId: string, state: SessionState, q: Query) {
     for await (const message of q) {
       const msg = message as Record<string, unknown> & { type: string; session_id?: string };
       if (typeof msg.session_id === 'string') state.claudeSessionId = msg.session_id;
+      if (msg.type === 'result') state.busy = false; // turn settled; query stays open
       send({ type: 'event', sessionId, message: msg });
     }
     send({ type: 'ended', sessionId });
@@ -194,6 +198,7 @@ async function pump(sessionId: string, state: SessionState, q: Query) {
     console.error(`[worker] session ${sessionId} query failed:`, err);
     send({ type: 'ended', sessionId, error: err instanceof Error ? err.message : String(err) });
   } finally {
+    state.busy = false;
     if (sessions.get(sessionId) === state) sessions.delete(sessionId);
     // Settle rpcs still waiting on this dead query so their promises resolve.
     for (const [, p] of [...pendingRpcs]) {
@@ -209,6 +214,7 @@ function handleBridgeMessage(msg: BridgeToWorker) {
   switch (msg.type) {
     case 'push': {
       const state = ensureSession(msg.sessionId, msg.options);
+      state.busy = true;
       state.queue.push(msg.message as SDKUserMessage);
       break;
     }
@@ -264,7 +270,11 @@ function handleConnection(ws: WebSocket) {
       type: 'hello',
       version: PROTOCOL_VERSION,
       startedAt,
-      live: [...sessions].map(([sessionId, s]) => ({ sessionId, claudeSessionId: s.claudeSessionId })),
+      live: [...sessions].map(([sessionId, s]) => ({
+        sessionId,
+        claudeSessionId: s.claudeSessionId,
+        busy: s.busy,
+      })),
     } satisfies WorkerToBridge),
   );
   for (const msg of outbox.splice(0)) ws.send(JSON.stringify(msg));

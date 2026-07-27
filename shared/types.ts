@@ -418,6 +418,8 @@ export type ClientMessage =
       alwaysAllow?: boolean;
     }
   | { type: 'workflowApprove'; sessionId: string; stepIndex: number }
+  /** Mark the current step done from the stepper, whether it is parked or still running. */
+  | { type: 'workflowForceAdvance'; sessionId: string; stepIndex: number }
   | { type: 'workflowRetry'; sessionId: string; stepIndex: number; feedback: string }
   | { type: 'saveWorkflow'; workflow: WorkflowDef; ownerName?: string }
   | { type: 'deleteWorkflow'; workflowId: string }
@@ -481,6 +483,15 @@ export interface UserUiSettings {
   sidebarMode?: 'sessions' | 'files';
   compactionLevel?: 'full' | 'grouped' | 'compact';
   turnSummariesEnabled?: boolean;
+  /**
+   * Resume a turn that died with the app instead of waiting for the Continue
+   * banner to be clicked. On unless explicitly `false` — absent means enabled,
+   * so a fresh install recovers without configuration. Only sessions flagged by
+   * the reconcile that just ran are resumed: a flag left over from an earlier
+   * crash still needs the click, so a restart can't fan out into a pile of
+   * unattended turns.
+   */
+  autoContinueInterrupted?: boolean;
   alertsEnabled?: boolean;
   alertSound?: string;
   /**
@@ -549,6 +560,18 @@ export type ServerMessage =
   | { type: 'folderPicked'; path: string | null }
   | { type: 'error'; sessionId?: string; message: string }
   | { type: 'pong' };
+
+/** Path fragment shared by both plan directories. Cheap hint only — the server's
+ *  permission decisions go through autoGuard's `isPlanPath`, which anchors to the
+ *  real directories. Lives here because the web transcript needs the same hint and
+ *  cannot import from `server/`. */
+export const PLAN_DIR_MARKER = '.claude/plans/';
+
+/** True when a tool's raw file path points inside a plan directory. Separator-insensitive
+ *  so Windows backslash paths match too (`path` is not importable in the browser). */
+export function isPlanFilePath(filePath: string): boolean {
+  return filePath.replace(/\\/g, '/').includes(PLAN_DIR_MARKER);
+}
 
 export const DEFAULT_MODELS: ModelOption[] = [
   { id: 'claude-opus-5', label: 'Opus 5', description: 'Powerful model for complex work', contextWindow: 200_000 },

@@ -16,7 +16,12 @@ import type {
   SessionStatus,
   TranscriptEvent,
 } from '@lines/shared';
-import { isSessionActive, KEEP_PLANNING_MESSAGE, resolveModelId } from '@lines/shared';
+import {
+  isPlanFilePath,
+  isSessionActive,
+  KEEP_PLANNING_MESSAGE,
+  resolveModelId,
+} from '@lines/shared';
 import type { Store } from './store.ts';
 import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
 import {
@@ -25,7 +30,6 @@ import {
   assessToolCall,
   isSafePlanWrite,
   isSafeReadOnly,
-  PLAN_DIR_MARKER,
   type GuardAllowlist,
 } from './autoGuard.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
@@ -133,7 +137,7 @@ export function collectTurns(events: TranscriptEvent[], from: number): { user: s
         typeof block.name === 'string' &&
         PLAN_WRITE_TOOLS.has(block.name) &&
         typeof input.file_path === 'string' &&
-        input.file_path.includes(PLAN_DIR_MARKER) &&
+        isPlanFilePath(input.file_path) &&
         typeof input.content === 'string' &&
         input.content.trim()
       ) {
@@ -394,6 +398,8 @@ export class SessionManager {
     if (!meta) return;
     meta.archived = true;
     meta.archivedAt = Date.now();
+    // Putting a session away answers the Continue banner; nothing to resume.
+    meta.interruptedAt = undefined;
     this.upsert(meta);
   }
 
@@ -404,6 +410,7 @@ export class SessionManager {
     meta.completed = true;
     meta.archived = true;
     meta.archivedAt = Date.now();
+    meta.interruptedAt = undefined;
     this.upsert(meta);
   }
 
@@ -477,11 +484,13 @@ export class SessionManager {
    */
   private buildQueryOptions(meta: SessionMeta): Record<string, unknown> {
     const accessToken = this.auth?.getAccessTokenSync() ?? null;
-    const pluginPath = meta.caveman.enabled ? getCavemanPluginPath() : null;
+    // Optional-chained throughout: a meta written before `caveman` existed, or
+    // adopted wholesale from storage by adoptSynced, has no such object.
+    const pluginPath = meta.caveman?.enabled ? getCavemanPluginPath() : null;
     const appendParts: string[] = [];
-    if (meta.caveman.enabled && !pluginPath) {
+    if (meta.caveman?.enabled && !pluginPath) {
       appendParts.push(cavemanPromptFallback(meta.caveman.level));
-    } else if (meta.caveman.enabled && meta.caveman.level !== 'full') {
+    } else if (meta.caveman?.enabled && meta.caveman.level !== 'full') {
       appendParts.push(`Caveman level: ${meta.caveman.level}. Apply /caveman ${meta.caveman.level} intensity.`);
     }
 
@@ -1302,12 +1311,35 @@ export class SessionManager {
   // ---------------------------------------------------------------------
 
   /**
-   * On (re)connect: adopt the worker's view of what is live. A session the
-   * worker doesn't know isn't running anywhere — its in-flight status is
-   * stale (both processes restarted, or a push was lost mid-death).
+   * The turn is demonstrably running in the worker while our status says it
+   * isn't — a push queued past the worker's hello snapshot, a blind status
+   * clear, a mis-attributed owner, or synced meta adopted from another
+   * instance. Converge to 'running'; mutates meta, the caller upserts.
+   *
+   * Keep the workflow/user re-derivation in step with continueTurn(), which
+   * decides a resumed turn's source with the same test.
+   */
+  private markTurnLive(meta: SessionMeta) {
+    const wfStepRunning =
+      meta.workflow?.started &&
+      meta.workflow.stepStatuses[meta.workflow.stepIndex] === 'running';
+    meta.status = 'running';
+    meta.errorMessage = undefined;
+    meta.turnSource = wfStepRunning ? 'workflow' : 'user';
+    meta.turnStartedAt ??= Date.now(); // keep the real start if we still know it
+    meta.interruptedAt = undefined; // not dead after all — no Continue banner
+  }
+
+  /**
+   * On (re)connect: adopt the worker's view of what is live, in both
+   * directions. A session the worker doesn't know (or knows as finished) isn't
+   * running anywhere — its in-flight status is stale (both processes restarted,
+   * or a push was lost mid-death). A session the worker reports busy is running
+   * regardless of what our status says.
    */
   reconcileWithWorker(live: LiveSessionInfo[]) {
     const liveById = new Map(live.map((l) => [l.sessionId, l]));
+    const flagged: string[] = [];
     for (const meta of this.sessions.values()) {
       const info = liveById.get(meta.id);
       let changed = false;
@@ -1315,7 +1347,13 @@ export class SessionManager {
         meta.claudeSessionId = info.claudeSessionId;
         changed = true;
       }
-      if (!info && (meta.status === 'running' || meta.status === 'waiting-permission')) {
+      if (info?.busy === true && !isSessionActive(meta.status)) {
+        this.markTurnLive(meta);
+        changed = true;
+      }
+      // `busy: undefined` = a worker too old to report it; demote-only, as before.
+      const noTurn = !info || info.busy === false;
+      if (noTurn && (meta.status === 'running' || meta.status === 'waiting-permission')) {
         meta.status = 'idle';
         meta.turnSource = undefined;
         meta.turnStartedAt = undefined;
@@ -1328,6 +1366,7 @@ export class SessionManager {
         // finished) — Continue resumes it as a workflow turn, and its eventual
         // result parks the step for approve/retry the normal way.
         meta.interruptedAt = Date.now();
+        flagged.push(meta.id);
         changed = true;
       }
       if (changed) this.upsert(meta);
@@ -1335,16 +1374,58 @@ export class SessionManager {
     // A bridge that died between a turn's result and its flush leaves queued
     // prompts on a settled session; release them now.
     for (const meta of this.sessions.values()) this.maybeFlush(meta.id);
+    // Resume what this pass just flagged, without waiting for a click. On unless
+    // explicitly disabled, so a fresh install recovers with no configuration.
+    // Scoped to `flagged` on purpose — a stale flag from an older crash keeps its
+    // banner rather than firing an unattended turn on every boot. Per-session
+    // try/catch: a meta that can't build query options must not take the bridge
+    // down (nothing up the stack catches) or skip the sessions after it.
+    if (flagged.length && this.store.loadSettings()?.autoContinueInterrupted !== false) {
+      for (const id of flagged) {
+        try {
+          this.continueTurn(id);
+        } catch (err) {
+          console.error(`[session ${id}] auto-continue failed:`, err);
+          // prompt() clears the flag and sets 'running' before it pushes, so a
+          // throw there leaves the session mid-mutation: live-looking, with no
+          // banner and no turn. Put it back the way reconcile left it.
+          const failed = this.sessions.get(id);
+          if (failed) {
+            failed.status = 'idle';
+            failed.turnSource = undefined;
+            failed.turnStartedAt = undefined;
+            failed.interruptedAt = Date.now();
+            this.upsert(failed);
+          }
+        }
+      }
+    }
   }
 
   handleWorkerEvent(sessionId: string, msg: Record<string, unknown> & { type: string }) {
     // Capture the CLI session id for resume-after-restart.
     const claudeSessionId = msg.session_id as string | undefined;
     const meta = this.sessions.get(sessionId);
+    let metaChanged = false;
     if (meta && claudeSessionId && meta.claudeSessionId !== claudeSessionId) {
       meta.claudeSessionId = claudeSessionId;
-      this.upsert(meta);
+      metaChanged = true;
     }
+    // Any message but the turn's own result proves a turn is live, so a status
+    // that says otherwise is stale (see markTurnLive) — heal it. A `result` on
+    // an inactive session means the turn is over; let it settle below instead.
+    // `interrupting` is read live, not snapshotted: an event racing a Stop must
+    // not resurrect the turn the user just killed.
+    if (
+      meta &&
+      !isSessionActive(meta.status) &&
+      msg.type !== 'result' &&
+      !this.interrupting.has(sessionId)
+    ) {
+      this.markTurnLive(meta);
+      metaChanged = true;
+    }
+    if (meta && metaChanged) this.upsert(meta);
 
     // Stream deltas are broadcast live but not written to disk;
     // the complete assistant message that follows is the durable record.
@@ -1409,6 +1490,10 @@ export class SessionManager {
         if (metaNow.status === 'running' || metaNow.status === 'waiting-permission') {
           metaNow.status = 'done';
         }
+        // A result proves the turn reached its end, so any Continue banner we
+        // stamped for it was wrong — a result buffered while the bridge was away
+        // can land after the reconcile that flagged its session.
+        metaNow.interruptedAt = undefined;
         source = metaNow.turnSource ?? 'user';
         metaNow.turnSource = undefined;
         metaNow.turnStartedAt = undefined;

@@ -35,6 +35,12 @@ export interface LiveSessionInfo {
   sessionId: string;
   /** CLI session id, so the bridge can repair its persisted resume pointer. */
   claudeSessionId?: string;
+  /**
+   * A turn is in flight (pushed, no `result` yet). `undefined` = a worker too
+   * old to report it; the bridge then only demotes, as it always did. Additive,
+   * so no protocol bump.
+   */
+  busy?: boolean;
 }
 
 export type WorkerToBridge =

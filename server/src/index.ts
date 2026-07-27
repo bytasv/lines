@@ -126,11 +126,16 @@ if (!AUTH_ENABLED) {
 }
 
 // If the worker never shows up, in-flight statuses loaded from disk are stale.
+// Unless it did show up and we hung up on it over a protocol mismatch: that
+// worker is alive and still running turns, so clearing would falsely idle them.
 setTimeout(() => {
-  if (!worker.everConnected) {
-    console.warn('[worker] not reachable after 15s — clearing in-flight session statuses');
-    registry.onWorkerLive([]);
+  if (worker.everConnected) return;
+  if (worker.sawIncompatibleWorker) {
+    console.warn('[worker] alive but incompatible — leaving in-flight session statuses alone');
+    return;
   }
+  console.warn('[worker] not reachable after 15s — clearing in-flight session statuses');
+  registry.onWorkerLive([]);
 }, 15_000).unref();
 
 const MIME: Record<string, string> = {
@@ -500,6 +505,9 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       break;
     case 'workflowApprove':
       workflows.approve(msg.sessionId, msg.stepIndex);
+      break;
+    case 'workflowForceAdvance':
+      workflows.forceAdvance(msg.sessionId, msg.stepIndex);
       break;
     case 'workflowRetry':
       workflows.retry(msg.sessionId, msg.stepIndex, msg.feedback);

@@ -1,0 +1,244 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { test } from 'node:test';
+import type { SessionMeta, SessionStatus, UserUiSettings } from '@lines/shared';
+import { GuardAllowlist } from './autoGuard.ts';
+import { SessionManager } from './sessions.ts';
+import { createStore } from './store.ts';
+import { withQueuedPushes } from './workerClient.ts';
+
+const meta = (status: SessionStatus, extra: Partial<SessionMeta> = {}): SessionMeta =>
+  ({
+    id: 's1',
+    name: 's1',
+    cwd: '/tmp',
+    model: 'claude-opus-5',
+    permissionMode: 'default',
+    caveman: { enabled: false, level: 'full' },
+    status,
+    createdAt: 1,
+    ...extra,
+  }) as SessionMeta;
+
+/**
+ * A manager over a throwaway store seeded with `metas`. `throwFor` makes the
+ * worker push throw for that session, standing in for any per-session failure
+ * on the resume path.
+ */
+function managerOver(metas: SessionMeta[], settings?: UserUiSettings, throwFor?: string) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-reconcile-'));
+  fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify(metas));
+  if (settings) fs.writeFileSync(path.join(root, 'settings.json'), JSON.stringify(settings));
+  const store = createStore(root);
+  const sessions = new SessionManager(store, new GuardAllowlist(store), () => {});
+  const pushed: string[] = [];
+  sessions.attachWorker({
+    push: (id: string) => {
+      if (id === throwFor) throw new Error('cannot build query options');
+      pushed.push(id);
+    },
+    interrupt: () => {},
+  } as never);
+  return { sessions, pushed, get: (id: string) => sessions.get(id)! };
+}
+
+/** A manager over a throwaway store seeded with one session in `status`. */
+function harness(status: SessionStatus, extra: Partial<SessionMeta> = {}, settings?: UserUiSettings) {
+  const m = managerOver([meta(status, extra)], settings);
+  return { ...m, s1: () => m.get('s1') };
+}
+
+test('a busy session is promoted back to running from a stale idle', () => {
+  const h = harness('idle', { interruptedAt: 5 });
+  h.sessions.reconcileWithWorker([{ sessionId: 's1', busy: true }]);
+
+  const m = h.s1();
+  assert.equal(m.status, 'running');
+  assert.equal(m.turnSource, 'user');
+  assert.equal(m.interruptedAt, undefined);
+  assert.ok((m.turnStartedAt ?? 0) > 0);
+});
+
+test('promotion keeps a known turn start rather than restamping it', () => {
+  const h = harness('idle', { turnStartedAt: 1234 });
+  h.sessions.reconcileWithWorker([{ sessionId: 's1', busy: true }]);
+  assert.equal(h.s1().turnStartedAt, 1234);
+});
+
+test('a busy session mid-workflow-step is promoted as a workflow turn', () => {
+  const h = harness('idle', {
+    workflow: {
+      workflowId: 'wf1',
+      started: true,
+      stepIndex: 1,
+      stepStatuses: ['done', 'running'],
+    },
+  });
+  h.sessions.reconcileWithWorker([{ sessionId: 's1', busy: true }]);
+  assert.equal(h.s1().turnSource, 'workflow');
+});
+
+test('an already-active session is left alone by a busy report', () => {
+  const h = harness('waiting-permission', { pendingPermissionTool: 'Bash', turnSource: 'workflow' });
+  h.sessions.reconcileWithWorker([{ sessionId: 's1', busy: true }]);
+
+  const m = h.s1();
+  assert.equal(m.status, 'waiting-permission');
+  assert.equal(m.pendingPermissionTool, 'Bash');
+  assert.equal(m.turnSource, 'workflow');
+});
+
+// Demotion in isolation: auto-continue off, or it would resume these right back.
+const noAutoContinue: UserUiSettings = { autoContinueInterrupted: false };
+
+test('a live-but-finished query demotes a running session to idle', () => {
+  const h = harness('running', { turnSource: 'user', turnStartedAt: 9 }, noAutoContinue);
+  h.sessions.reconcileWithWorker([{ sessionId: 's1', busy: false }]);
+
+  const m = h.s1();
+  assert.equal(m.status, 'idle');
+  assert.equal(m.turnSource, undefined);
+  assert.equal(m.turnStartedAt, undefined);
+  assert.ok((m.interruptedAt ?? 0) > 0);
+});
+
+test('a session missing from the live list is still demoted', () => {
+  const h = harness('running', {}, noAutoContinue);
+  h.sessions.reconcileWithWorker([]);
+  assert.equal(h.s1().status, 'idle');
+});
+
+test('an old worker (no busy field) demotes only, never promotes', () => {
+  const running = harness('running');
+  running.sessions.reconcileWithWorker([{ sessionId: 's1' }]);
+  assert.equal(running.s1().status, 'running', 'present in live => left alone, as before');
+
+  const idle = harness('idle');
+  idle.sessions.reconcileWithWorker([{ sessionId: 's1' }]);
+  assert.equal(idle.s1().status, 'idle', 'no busy flag is not proof of a live turn');
+});
+
+test('an SDK event on an idle session heals the status', () => {
+  for (const type of ['assistant', 'user', 'stream_event', 'system']) {
+    const h = harness('idle');
+    h.sessions.handleWorkerEvent('s1', { type });
+    assert.equal(h.s1().status, 'running', `${type} should heal`);
+  }
+});
+
+test('a result on an idle session does not resurrect the turn', () => {
+  const h = harness('idle');
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  assert.equal(h.s1().status, 'idle');
+});
+
+test('events trailing a Stop do not undo the interrupt', () => {
+  const h = harness('running');
+  h.sessions.interrupt('s1');
+  assert.equal(h.s1().status, 'idle');
+
+  h.sessions.handleWorkerEvent('s1', { type: 'assistant', message: {} });
+  assert.equal(h.s1().status, 'idle');
+});
+
+const autoContinue: UserUiSettings = { autoContinueInterrupted: true };
+
+test('auto-continue resumes a turn that this pass flagged', () => {
+  const h = harness('running', { claudeSessionId: 'c1' }, autoContinue);
+  h.sessions.reconcileWithWorker([]);
+
+  const m = h.s1();
+  assert.deepEqual(h.pushed, ['s1'], 'exactly one resume push');
+  assert.equal(m.status, 'running');
+  assert.equal(m.interruptedAt, undefined, 'resumed, so no banner');
+});
+
+test('auto-continue is on with no settings file at all', () => {
+  const h = harness('running');
+  h.sessions.reconcileWithWorker([]);
+
+  assert.deepEqual(h.pushed, ['s1'], 'absent setting means enabled');
+  assert.equal(h.s1().interruptedAt, undefined);
+});
+
+test('an explicit false leaves the turn for the Continue button', () => {
+  const h = harness('running', {}, { autoContinueInterrupted: false });
+  h.sessions.reconcileWithWorker([]);
+
+  assert.deepEqual(h.pushed, [], 'only `false` turns it off');
+  assert.ok((h.s1().interruptedAt ?? 0) > 0);
+});
+
+test('auto-continue ignores a flag left over from an earlier crash', () => {
+  const h = harness('idle', { interruptedAt: 5 });
+  h.sessions.reconcileWithWorker([]);
+
+  assert.deepEqual(h.pushed, [], 'a stale flag still waits for the click');
+  assert.equal(h.s1().interruptedAt, 5);
+});
+
+test('auto-continue resumes a mid-workflow-step turn as a workflow turn', () => {
+  const h = harness(
+    'running',
+    {
+      turnSource: 'workflow',
+      workflow: { workflowId: 'wf1', started: true, stepIndex: 1, stepStatuses: ['done', 'running'] },
+    },
+    autoContinue,
+  );
+  h.sessions.reconcileWithWorker([]);
+
+  assert.deepEqual(h.pushed, ['s1']);
+  assert.equal(h.s1().turnSource, 'workflow', 'so its result still parks the step');
+});
+
+test('a session meta with no caveman field resumes without throwing', () => {
+  const h = harness('running', { caveman: undefined });
+  assert.doesNotThrow(() => h.sessions.reconcileWithWorker([]));
+  assert.deepEqual(h.pushed, ['s1']);
+});
+
+test('one session failing to resume does not stop the others', () => {
+  const m = managerOver(
+    [meta('running', { id: 'bad', name: 'bad' }), meta('running', { id: 'good', name: 'good' })],
+    undefined,
+    'bad',
+  );
+  assert.doesNotThrow(() => m.sessions.reconcileWithWorker([]));
+
+  assert.deepEqual(m.pushed, ['good']);
+  assert.ok((m.get('bad').interruptedAt ?? 0) > 0, 'the failed one keeps its banner');
+});
+
+test('a result clears a Continue flag stamped for a turn that had finished', () => {
+  const h = harness('idle', { interruptedAt: 5 });
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  assert.equal(h.s1().interruptedAt, undefined);
+});
+
+test('putting a session away answers the Continue banner', () => {
+  const archived = harness('idle', { interruptedAt: 5 });
+  archived.sessions.archiveSession('s1');
+  assert.equal(archived.s1().interruptedAt, undefined);
+
+  const completed = harness('idle', { interruptedAt: 5 });
+  completed.sessions.completeSession('s1');
+  assert.equal(completed.s1().interruptedAt, undefined);
+});
+
+test('a queued push counts as live so its session survives reconcile', () => {
+  const live = withQueuedPushes(
+    [{ sessionId: 'a', claudeSessionId: 'c-a', busy: true }],
+    [
+      { type: 'push', sessionId: 'b', message: {}, options: {} },
+      { type: 'push', sessionId: 'a', message: {}, options: {} },
+      { type: 'interrupt', sessionId: 'z' },
+    ],
+  );
+  assert.deepEqual(live, [
+    { sessionId: 'a', claudeSessionId: 'c-a', busy: true },
+    { sessionId: 'b', busy: true },
+  ]);
+});
