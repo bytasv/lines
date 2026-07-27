@@ -22,6 +22,7 @@ import {
   IconZoomScan,
 } from '@tabler/icons-react';
 import type { PermissionRequestData } from '@lines/shared';
+import { KEEP_PLANNING_MESSAGE } from '@lines/shared';
 import { send } from '../ws';
 import { QuestionPrompt } from './QuestionPrompt';
 import { Markdown } from './Markdown';
@@ -164,8 +165,17 @@ function EditPreview({ data }: { data: PermissionRequestData }) {
   );
 }
 
-const KEEP_PLANNING_MESSAGE =
-  'The user is not ready to proceed — stay in plan mode and refine the plan based on their next message.';
+/**
+ * The typed-reply path wraps the user's own words after the shared prefix; show
+ * only those words back, so the card reads as what the user actually said.
+ */
+function planReplyText(data: PermissionRequestData): string | undefined {
+  const msg = data.denyMessage;
+  if (!msg || !msg.startsWith(KEEP_PLANNING_MESSAGE)) return undefined;
+  const marker = "The user's message:\n";
+  const at = msg.indexOf(marker);
+  return at === -1 ? undefined : msg.slice(at + marker.length).trim() || undefined;
+}
 
 /** Plan review with a distraction-free full-screen focus mode (auto-opens while pending). */
 function PlanApproval({
@@ -201,6 +211,7 @@ function PlanApproval({
 
   const approve = () => respond(sessionId, data.requestId, true);
   const keepPlanning = () => respond(sessionId, data.requestId, false, KEEP_PLANNING_MESSAGE);
+  const reply = planReplyText(data);
 
   const actions = (
     <Group gap="xs">
@@ -228,8 +239,14 @@ function PlanApproval({
               Claude finished planning
             </Text>
             {resolution && (
-              <Badge color={RESOLUTION_BADGE[resolution].color} variant="light">
-                {resolution === 'allow' ? 'plan approved' : RESOLUTION_BADGE[resolution].label}
+              <Badge
+                color={resolution === 'deny' ? 'sandstone' : RESOLUTION_BADGE[resolution].color}
+                variant="light"
+              >
+                {resolution === 'allow' ? 'plan approved' : null}
+                {/* A denied plan is not a rejection — the session stayed in plan mode. */}
+                {resolution === 'deny' ? 'kept planning' : null}
+                {resolution === 'expired' ? RESOLUTION_BADGE[resolution].label : null}
               </Badge>
             )}
           </Group>
@@ -246,6 +263,20 @@ function PlanApproval({
             </ActionIcon>
           </Tooltip>
         </Group>
+        {resolution && reply && (
+          <Text
+            size="xs"
+            c="dimmed"
+            mt={8}
+            pl="sm"
+            style={{
+              whiteSpace: 'pre-wrap',
+              borderLeft: '2px solid var(--mantine-color-default-border)',
+            }}
+          >
+            You: {reply}
+          </Text>
+        )}
         {!resolution && (
           <>
             <ScrollArea.Autosize mah={320} type="auto">

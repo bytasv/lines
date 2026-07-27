@@ -16,7 +16,7 @@ import type {
   SessionStatus,
   TranscriptEvent,
 } from '@lines/shared';
-import { isSessionActive, resolveModelId } from '@lines/shared';
+import { isSessionActive, KEEP_PLANNING_MESSAGE, resolveModelId } from '@lines/shared';
 import type { Store } from './store.ts';
 import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
 import {
@@ -185,6 +185,75 @@ export function unresolvedPermissionIds(events: TranscriptEvent[]): string[] {
     else if (data.toolName) requested.add(data.requestId);
   }
   return [...requested].filter((id) => !resolved.has(id));
+}
+
+/**
+ * A plan is up for review and the user typed into the composer instead of
+ * clicking: that message *is* the "Keep planning" gesture. Decides which
+ * pending request to deny and with what reason, or null to fall through to the
+ * ordinary queue/prompt path.
+ *
+ * Pure: the caller supplies live pending ids and the transcript. The status gate
+ * matters — flushPending deliberately leaves stale cards open, so an ancient
+ * unresolved ExitPlanMode must not hijack an ordinary prompt.
+ */
+export function planReplyDecision(input: {
+  status: SessionStatus;
+  pendingPermissionTool?: string;
+  text: string;
+  hasAttachments: boolean;
+  livePendingIds: string[];
+  events: TranscriptEvent[];
+}): { requestId: string; denyMessage: string; alsoQueue: boolean } | null {
+  const text = input.text.trim();
+  if (!text) return null;
+  if (input.status !== 'waiting-permission') return null;
+  if (input.pendingPermissionTool !== 'ExitPlanMode') return null;
+
+  const requestId = exitPlanRequestId(input.events, input.livePendingIds);
+  if (!requestId) return null;
+
+  // Attachments can't ride a tool_result (plain string), so the deny only
+  // unblocks the query and the real payload follows through the queue — the
+  // reason must not repeat the text the queued turn will carry.
+  return input.hasAttachments
+    ? {
+        requestId,
+        denyMessage: `${KEEP_PLANNING_MESSAGE}\n\nTheir message and its attachments follow as the next turn.`,
+        alsoQueue: true,
+      }
+    : {
+        requestId,
+        // Raw user text alone reads to the model as a rejection reason, not as
+        // "stay in plan mode" — hence the wrapper.
+        denyMessage: `${KEEP_PLANNING_MESSAGE}\n\nThe user's message:\n${text}`,
+        alsoQueue: false,
+      };
+}
+
+/**
+ * The ExitPlanMode request to answer: a live pending one when the query is
+ * still up, else the newest unresolved one in the transcript (orphan case —
+ * resolvePermission routes that to recoverOrphanedPermission).
+ */
+function exitPlanRequestId(events: TranscriptEvent[], livePendingIds: string[]): string | undefined {
+  const live = new Set(livePendingIds);
+  const resolved = new Set<string>();
+  let newestUnresolved: string | undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind !== 'permission') continue;
+    const data = event.data as PermissionRequestData;
+    if (!data.requestId) continue;
+    if (data.resolution) {
+      resolved.add(data.requestId);
+      continue;
+    }
+    if (data.toolName !== 'ExitPlanMode' || resolved.has(data.requestId)) continue;
+    if (live.has(data.requestId)) return data.requestId;
+    newestUnresolved ??= data.requestId;
+  }
+  return newestUnresolved;
 }
 
 /** SDK PermissionResult shape returned to the worker's canUseTool rpc. */
@@ -475,17 +544,30 @@ export class SessionManager {
     if (!meta) throw new Error(`unknown session ${sessionId}`);
 
     // A plan is up for review and the user typed a reply instead of clicking a
-    // button: treat it as "keep planning" — deny ExitPlanMode with the user's
-    // own text as the reason, same tool-result channel the button uses, rather
-    // than silently queuing behind a permission promise nothing will resolve.
-    if (
-      text.trim() &&
-      attachments.length === 0 &&
-      meta.status === 'waiting-permission' &&
-      meta.pendingPermissionTool === 'ExitPlanMode'
-    ) {
-      this.flushPending(sessionId, { emitResolution: 'deny', denyMessage: text });
-      return;
+    // button: treat it as "keep planning" — deny ExitPlanMode through the same
+    // per-request path the button uses, rather than silently queuing behind a
+    // permission promise nothing will resolve.
+    const planReply = planReplyDecision({
+      status: meta.status,
+      pendingPermissionTool: meta.pendingPermissionTool,
+      text,
+      hasAttachments: attachments.length > 0,
+      livePendingIds: [...(this.live.get(sessionId)?.pendingPermissions.keys() ?? [])],
+      events: this.store.loadTranscript(sessionId),
+    });
+    if (planReply) {
+      this.resolvePermission(
+        sessionId,
+        planReply.requestId,
+        false,
+        undefined,
+        undefined,
+        planReply.denyMessage,
+      );
+      // With attachments the deny only unblocks the query; fall through so the
+      // queue branch stages text + attachments and maybeFlush delivers them as
+      // a real user turn once the denied turn settles.
+      if (!planReply.alsoQueue) return;
     }
 
     if (meta.queued?.length || this.isBusy(meta)) {
@@ -978,10 +1060,7 @@ export class SessionManager {
    * resume-recovery path in resolvePermission() covers truly dead queries,
    * so the user never has to re-prompt.
    */
-  private flushPending(
-    sessionId: string,
-    opts: { emitResolution?: 'deny' | 'expired'; denyMessage?: string } = {},
-  ) {
+  private flushPending(sessionId: string, opts: { emitResolution?: 'deny' | 'expired' } = {}) {
     const state = this.live.get(sessionId);
     if (!state) return;
     for (const [requestId, resolve] of state.pendingPermissions) {
@@ -993,7 +1072,7 @@ export class SessionManager {
           resolution: opts.emitResolution,
         } satisfies PermissionRequestData);
       }
-      resolve({ allow: false, denyMessage: opts.denyMessage });
+      resolve({ allow: false });
     }
     state.pendingPermissions.clear();
   }
@@ -1049,6 +1128,7 @@ export class SessionManager {
       input: {},
       resolution: allow ? 'allow' : 'deny',
       answers,
+      denyMessage: allow ? undefined : denyMessage,
     } satisfies PermissionRequestData);
 
     let text: string;
@@ -1168,6 +1248,7 @@ export class SessionManager {
       resolution: allow ? 'allow' : 'deny',
       answers,
       updatedInput,
+      denyMessage: allow ? undefined : denyMessage,
     } satisfies PermissionRequestData);
 
     // Approving a plan inside a workflow plan step advances the workflow instead
@@ -1508,7 +1589,10 @@ export class SessionManager {
       if (resolved) {
         return resolved.resolution === 'allow'
           ? { behavior: 'allow', updatedInput: resolved.updatedInput ?? input }
-          : { behavior: 'deny', message: 'User denied this tool call in the UI.' };
+          : {
+              behavior: 'deny',
+              message: resolved.denyMessage || 'User denied this tool call in the UI.',
+            };
       }
     }
 

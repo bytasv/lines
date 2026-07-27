@@ -166,6 +166,8 @@ export function buildTranscript(
         if (existing) {
           existing.resolution = data.resolution;
           if (data.answers) existing.data = { ...existing.data, answers: data.answers };
+          // The deny reason arrives on the resolution event, not the request.
+          if (data.denyMessage) existing.data = { ...existing.data, denyMessage: data.denyMessage };
         } else {
           const item: TranscriptItem = {
             kind: 'permission',

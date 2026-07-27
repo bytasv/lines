@@ -197,6 +197,23 @@ export interface WorkflowState {
   lastStepOutput?: string;
 }
 
+/**
+ * Prompt composition of the most recent API call in the last turn — context
+ * occupancy, NOT cumulative spend. Sourced from the final `assistant` message,
+ * whose usage describes a single API call; a result's usage is turn-cumulative.
+ */
+export interface ContextUsage {
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  outputTokens: number;
+  /** SDK-reported prompt total when it disagrees with the component sum. */
+  reportedTotal?: number;
+  /** Model that produced this reading; the window limit is keyed off it. */
+  model: string;
+  at: number;
+}
+
 export interface SessionMeta {
   id: string;
   name: string;
@@ -217,6 +234,9 @@ export interface SessionMeta {
   lastTokens?: number;
   /** Cumulative tokens spent across the session (input + output + cache). */
   totalTokens?: number;
+  /** Context occupancy after the most recent turn; distinct from the cumulative
+   *  spend above. See ContextUsage. */
+  contextUsage?: ContextUsage;
   /** Active-turn duration of the most recent turn in ms (SDK result duration_ms). */
   lastDurationMs?: number;
   /** Cumulative active-turn duration across the session in ms; excludes idle wait. */
@@ -252,6 +272,8 @@ export interface ModelOption {
   label: string;
   /** One-line summary shown under the label in model dropdowns. */
   description?: string;
+  /** Max context window in tokens; omitted when unknown (chip hides its ring). */
+  contextWindow?: number;
 }
 
 /** A single entry in a session transcript, persisted as JSONL and streamed live. */
@@ -304,7 +326,21 @@ export interface PermissionRequestData {
   auto?: boolean;
   /** Why the auto-mode guard flagged this call for manual review. */
   guardReason?: string;
+  /**
+   * On 'deny' resolutions: the reason shown back to the model. Persisted so the
+   * card can render it and a re-delivered request after a bridge restart replays
+   * the same reason instead of a generic one.
+   */
+  denyMessage?: string;
 }
+
+/**
+ * Deny reason that keeps a session in plan mode. Sent by the "Keep planning"
+ * button and by a typed composer reply while a plan is up for review, so both
+ * gestures read identically to the model.
+ */
+export const KEEP_PLANNING_MESSAGE =
+  'The user is not ready to proceed — stay in plan mode and refine the plan based on their next message.';
 
 /** AskUserQuestion tool input shape (subset we render). */
 export interface AskUserQuestionInput {
@@ -515,10 +551,10 @@ export type ServerMessage =
   | { type: 'pong' };
 
 export const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'claude-opus-5', label: 'Opus 5', description: 'Powerful model for complex work' },
-  { id: 'claude-fable-5', label: 'Fable 5', description: 'Most intelligent, Mythos-class tier' },
-  { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability' },
-  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, for lightweight tasks' },
+  { id: 'claude-opus-5', label: 'Opus 5', description: 'Powerful model for complex work', contextWindow: 200_000 },
+  { id: 'claude-fable-5', label: 'Fable 5', description: 'Most intelligent, Mythos-class tier', contextWindow: 200_000 },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability', contextWindow: 200_000 },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, for lightweight tasks', contextWindow: 200_000 },
 ];
 
 export const DEFAULT_MODEL = 'claude-opus-5';
@@ -541,4 +577,14 @@ export function isKnownModel(id: string): boolean {
 export function resolveModelId(id: string): string {
   if (isKnownModel(id)) return id;
   return LEGACY_MODEL_MAP[id] ?? id;
+}
+
+/**
+ * Context window of `modelId` in tokens, or undefined when the model isn't
+ * listed or carries no window. Callers must not guess a denominator from
+ * undefined — show raw counts instead.
+ */
+export function contextWindowFor(modelId: string, models: ModelOption[]): number | undefined {
+  const resolved = resolveModelId(modelId);
+  return models.find((m) => m.id === resolved)?.contextWindow;
 }
