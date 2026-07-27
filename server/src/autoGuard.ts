@@ -130,10 +130,6 @@ function segmentAllowed(segment: string, allowlist: GuardAllowEntry[]): boolean 
 const FILE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Read']);
 const PLAN_WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
-/** Path fragment shared by both plan directories. Cheap hint only — permission
- *  decisions go through `isPlanPath`, which anchors to the real directories. */
-export const PLAN_DIR_MARKER = `${path.join('.claude', 'plans')}${path.sep}`;
-
 function isInside(dir: string, target: string): boolean {
   const rel = path.relative(dir, target);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
@@ -142,7 +138,8 @@ function isInside(dir: string, target: string): boolean {
 /**
  * True when the target resolves inside a plan directory (~/.claude/plans or
  * <cwd>/.claude/plans). Anchored to real directories rather than a substring
- * match on PLAN_DIR_MARKER, so `.../plans/../../../.ssh/id_rsa` cannot pass.
+ * match on the shared PLAN_DIR_MARKER, so `.../plans/../../../.ssh/id_rsa`
+ * cannot pass.
  */
 function isPlanPath(filePath: string, cwd: string): boolean {
   const resolved = path.resolve(filePath);

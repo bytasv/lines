@@ -7,6 +7,7 @@ import type {
   TurnSummaryData,
   WorkflowMarkerData,
 } from '@lines/shared';
+import { isPlanFilePath } from '@lines/shared';
 
 export interface ToolBlock {
   type: 'tool';
@@ -92,6 +93,22 @@ function contentToString(content: unknown): string {
 }
 
 /**
+ * An ExitPlanMode request with no inline `plan` argument gets the text of the turn's
+ * last plan-file write, resolved through computeDiff so an Edit-revised plan
+ * reconstructs from its snapshot. A real inline plan always wins.
+ */
+function withPlanFileText(
+  data: PermissionRequestData,
+  planWrite: ToolBlock | null,
+): PermissionRequestData {
+  if (data.toolName !== 'ExitPlanMode' || !planWrite) return data;
+  if (String(data.input.plan ?? '').trim()) return data;
+  const text = computeDiff(planWrite)?.after ?? '';
+  if (!text.trim()) return data;
+  return { ...data, input: { ...data.input, plan: text } };
+}
+
+/**
  * Single pass over the event log:
  * - complete assistant messages become items with text/thinking/tool blocks
  * - tool_result blocks (arriving as SDK user messages) attach to their tool blocks
@@ -119,6 +136,10 @@ export function buildTranscript(
   let liveToolName: string | undefined;
   let openGroup: ToolGroupItem | null = null;
   let lastText = '';
+  // The current harness passes no `plan` argument to ExitPlanMode — it writes the plan
+  // to a file under .claude/plans/ instead. Keep the turn's last such write (the block,
+  // not its text: its file snapshot can still be arriving) to stitch onto the card.
+  let lastPlanWrite: ToolBlock | null = null;
 
   const attachSnapshot = (tool: ToolBlock) => {
     // Prefer exact tool_use_id match, fall back to file path (hook input ids can be absent).
@@ -136,6 +157,7 @@ export function buildTranscript(
       case 'user': {
         openGroup = null;
         lastText = '';
+        lastPlanWrite = null;
         const data = event.data as {
           text: string;
           source?: 'user' | 'workflow';
@@ -172,7 +194,7 @@ export function buildTranscript(
           const item: TranscriptItem = {
             kind: 'permission',
             key: `p${event.seq}`,
-            data,
+            data: withPlanFileText(data, lastPlanWrite),
             resolution: data.resolution,
           };
           permissionItems.set(data.requestId, item as never);
@@ -189,6 +211,7 @@ export function buildTranscript(
       case 'workflow':
         openGroup = null;
         lastText = '';
+        lastPlanWrite = null;
         items.push({ kind: 'workflow', key: `w${event.seq}`, data: event.data as WorkflowMarkerData });
         break;
       case 'sdk': {
@@ -237,6 +260,13 @@ export function buildTranscript(
                 };
                 toolBlocks.set(block.id, tool);
                 attachSnapshot(tool);
+                if (
+                  isEditTool(tool.name) &&
+                  isPlanFilePath(String(tool.input.file_path ?? tool.input.notebook_path ?? ''))
+                ) {
+                  // A revised plan resolves to the final write, matching the server's turn scan.
+                  lastPlanWrite = tool;
+                }
                 // Full level (groupTools=false): each tool is its own 1-tool group,
                 // which ToolGroup renders as a bare card — i.e. ungrouped.
                 if (!groupTools) openGroup = null;

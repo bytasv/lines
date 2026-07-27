@@ -5,6 +5,7 @@ import {
   Box,
   Button,
   Code,
+  Collapse,
   Group,
   Modal,
   Paper,
@@ -14,6 +15,8 @@ import {
 } from '@mantine/core';
 import {
   IconArrowsMaximize,
+  IconChevronDown,
+  IconChevronRight,
   IconFilePencil,
   IconMap,
   IconShieldQuestion,
@@ -177,7 +180,17 @@ function planReplyText(data: PermissionRequestData): string | undefined {
   return at === -1 ? undefined : msg.slice(at + marker.length).trim() || undefined;
 }
 
-/** Plan review with a distraction-free full-screen focus mode (auto-opens while pending). */
+/** First non-empty plan line, markdown decoration stripped — the collapsed card's headline. */
+function planHeadline(plan: string): string {
+  const line = plan.split('\n').find((l) => l.trim().length > 0)?.replace(/^[#*\s>-]+/, '').trim() ?? '';
+  return line.length > 100 ? line.slice(0, 100) + '…' : line;
+}
+
+/**
+ * Plan review with a distraction-free full-screen focus mode (auto-opens while pending).
+ * A resolved plan stays readable: collapsed by default, one click from full text, but
+ * with no action buttons — its requestId is dead.
+ */
 function PlanApproval({
   sessionId,
   data,
@@ -190,7 +203,10 @@ function PlanApproval({
   // Auto-open fullscreen only if this tab is focused now; a background tab must not steal focus
   // when the user later switches to it (precedent: alerts.ts document.hasFocus() guard).
   const [focus, setFocus] = useState(() => document.hasFocus());
+  // Pending cards render open as before; one loaded from history renders collapsed.
+  const [expanded, setExpanded] = useState(!resolution);
   const plan = String(data.input.plan ?? '');
+  const hasPlan = plan.trim().length > 0;
 
   // If the plan arrived while this tab was in the background, open focus mode once when the tab
   // regains focus — unless the user has already dismissed it.
@@ -204,9 +220,22 @@ function PlanApproval({
     return () => window.removeEventListener('focus', onFocus);
   }, [focus, resolution]);
 
+  // Resolving closes focus mode and collapses the card in place, so an approved plan stops
+  // dominating live scrollback. Also fires when another client resolves it. Deps are
+  // [resolution] only, so re-expanding a resolved card does not re-collapse it.
+  useEffect(() => {
+    if (!resolution) return;
+    setFocus(false);
+    setExpanded(false);
+  }, [resolution]);
+
   const dismissFocus = () => {
     dismissed.current = true;
     setFocus(false);
+  };
+
+  const toggle = () => {
+    if (hasPlan) setExpanded((v) => !v);
   };
 
   const approve = () => respond(sessionId, data.requestId, true);
@@ -232,8 +261,23 @@ function PlanApproval({
         p="sm"
         style={{ borderColor: resolution ? undefined : 'var(--mantine-color-sandstone-6)' }}
       >
-        <Group gap="xs" justify="space-between" mb={resolution ? 0 : 8}>
-          <Group gap="xs">
+        <Group
+          className="tx-row"
+          gap="xs"
+          justify="space-between"
+          mb={expanded ? 8 : 0}
+          onClick={toggle}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              toggle();
+            }
+          }}
+        >
+          <Group gap="xs" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
+            {hasPlan && (expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />)}
             <IconMap size={16} color="var(--mantine-color-sandstone-5)" />
             <Text size="sm" fw={600}>
               Claude finished planning
@@ -249,12 +293,20 @@ function PlanApproval({
                 {resolution === 'expired' ? RESOLUTION_BADGE[resolution].label : null}
               </Badge>
             )}
+            {!expanded && hasPlan && (
+              <Text size="xs" c="dimmed" truncate style={{ flex: 1 }}>
+                {planHeadline(plan)}
+              </Text>
+            )}
           </Group>
-          <Tooltip label="Focus mode">
+          <Tooltip label={hasPlan ? 'Focus mode' : 'Plan text unavailable'}>
             <ActionIcon
               size="sm"
               variant="light"
-              onClick={() => {
+              disabled={!hasPlan}
+              // Sits inside the header's click target — don't toggle the card too.
+              onClick={(e) => {
+                e.stopPropagation();
                 dismissed.current = false;
                 setFocus(true);
               }}
@@ -277,21 +329,20 @@ function PlanApproval({
             You: {reply}
           </Text>
         )}
-        {!resolution && (
-          <>
-            <ScrollArea.Autosize mah={320} type="auto">
-              {/* Not default-hover: that shade now reads as a user bubble. */}
-              <Paper bg="var(--mantine-color-default)" radius="md" px="sm" py={4}>
-                <Markdown text={plan} />
-              </Paper>
-            </ScrollArea.Autosize>
-            <Box mt="sm">{actions}</Box>
-          </>
-        )}
+        <Collapse expanded={expanded} transitionDuration={150}>
+          <ScrollArea.Autosize mah={320} type="auto">
+            {/* Not default-hover: that shade now reads as a user bubble. */}
+            <Paper bg="var(--mantine-color-default)" radius="md" px="sm" py={4}>
+              <Markdown text={plan} />
+            </Paper>
+          </ScrollArea.Autosize>
+          {/* Buttons never render for a dead requestId. */}
+          {!resolution && <Box mt="sm">{actions}</Box>}
+        </Collapse>
       </Paper>
 
       <Modal
-        opened={focus && !resolution}
+        opened={focus}
         onClose={dismissFocus}
         fullScreen
         padding={0}
@@ -313,18 +364,21 @@ function PlanApproval({
               <Markdown text={plan} />
             </Box>
           </ScrollArea>
-          <Group
-            justify="center"
-            py="md"
-            style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}
-          >
-            <Button size="sm" onClick={approve}>
-              Approve plan &amp; start
-            </Button>
-            <Button variant="default" size="sm" onClick={keepPlanning}>
-              Keep planning
-            </Button>
-          </Group>
+          {/* A resolved plan opens read-only — the footer and its border go with the buttons. */}
+          {!resolution && (
+            <Group
+              justify="center"
+              py="md"
+              style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}
+            >
+              <Button size="sm" onClick={approve}>
+                Approve plan &amp; start
+              </Button>
+              <Button variant="default" size="sm" onClick={keepPlanning}>
+                Keep planning
+              </Button>
+            </Group>
+          )}
         </Box>
       </Modal>
     </>
