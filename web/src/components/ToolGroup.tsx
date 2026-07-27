@@ -80,12 +80,17 @@ export function ToolGroup({
           {active && <Loader size={12} />}
         </Group>
       </Group>
+      {/* Cards are mounted only while the group is open — a collapsed group must
+          not pay for rendering the tool calls it is hiding. Their own expansion
+          is kept in ToolCallCard's sticky map, so it survives the unmount. */}
       <Collapse expanded={expanded} transitionDuration={150}>
-        <Stack gap={2} mt={2}>
-          {group.tools.map((t) => (
-            <ToolCallCard key={t.id} tool={t} />
-          ))}
-        </Stack>
+        {expanded && (
+          <Stack gap={2} mt={2}>
+            {group.tools.map((t) => (
+              <ToolCallCard key={t.id} tool={t} />
+            ))}
+          </Stack>
+        )}
       </Collapse>
     </Box>
   );

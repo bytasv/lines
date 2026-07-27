@@ -27,6 +27,38 @@ function writeJson(file: string, data: unknown) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
+/** Cached form of one transcript file. `parsed` is built lazily — most reads
+ *  (the wire frame) only ever need the raw lines. */
+interface TranscriptEntry {
+  /** Whole JSONL lines, each a complete JSON object. */
+  lines: string[];
+  parsed: TranscriptEvent[] | null;
+  mtimeMs: number;
+  size: number;
+}
+
+/** Cache bounds. The largest transcripts seen in practice are a few MB, so the
+ *  byte cap is what actually binds; the count cap keeps the map small. */
+const MAX_CACHED_TRANSCRIPTS = 12;
+const MAX_CACHED_TRANSCRIPT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Tolerant JSONL split. Keeps only whole JSON objects: a crash mid-append can
+ * leave a torn final line, and the raw lines go on the wire unparsed, so a torn
+ * line would make the entire frame unparseable for the client (which drops the
+ * whole message and never retries). Mirrors loadTranscript's historic
+ * parse-and-drop behavior.
+ */
+function splitJsonl(text: string): string[] {
+  const lines: string[] = [];
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    if (line[0] !== '{' || line[line.length - 1] !== '}') continue;
+    lines.push(line);
+  }
+  return lines;
+}
+
 /** Last-synced fingerprint per memory file (absolute path -> state). */
 export type MemoryManifest = Record<string, { key: string; mtimeMs: number; size: number }>;
 
@@ -73,6 +105,56 @@ export function createStore(root: string) {
   fs.mkdirSync(TRANSCRIPTS, { recursive: true });
   fs.mkdirSync(ATTACHMENTS, { recursive: true });
 
+  // Per-session transcript cache. Lives inside createStore so it is per-user,
+  // matching the isolation model. This process is the only writer of
+  // transcripts/*.jsonl, so appends update the entry in place; the stat
+  // revalidation below still covers the offline migrate script and hand-edits.
+  const transcriptCache = new Map<string, TranscriptEntry>();
+
+  const transcriptFile = (sessionId: string) => path.join(TRANSCRIPTS, `${sessionId}.jsonl`);
+
+  /** Insertion order is the LRU order: re-insert on hit, evict from the front. */
+  function touchEntry(sessionId: string, entry: TranscriptEntry) {
+    transcriptCache.delete(sessionId);
+    transcriptCache.set(sessionId, entry);
+    let bytes = 0;
+    for (const e of transcriptCache.values()) bytes += e.size;
+    while (
+      transcriptCache.size > 1 &&
+      (transcriptCache.size > MAX_CACHED_TRANSCRIPTS || bytes > MAX_CACHED_TRANSCRIPT_BYTES)
+    ) {
+      const oldest = transcriptCache.keys().next();
+      if (oldest.done) break;
+      bytes -= transcriptCache.get(oldest.value)!.size;
+      transcriptCache.delete(oldest.value);
+    }
+  }
+
+  /** Cached entry for a session, revalidated against the file's mtime/size. */
+  function transcriptEntry(sessionId: string): TranscriptEntry | null {
+    const file = transcriptFile(sessionId);
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      transcriptCache.delete(sessionId);
+      return null;
+    }
+    const cached = transcriptCache.get(sessionId);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      touchEntry(sessionId, cached);
+      return cached;
+    }
+    const entry: TranscriptEntry = {
+      lines: splitJsonl(fs.readFileSync(file, 'utf8')),
+      parsed: null,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+    };
+    touchEntry(sessionId, entry);
+    return entry;
+  }
+
   const store = {
     loadSessions(): SessionMeta[] {
       // In-flight statuses may still be true — the worker process holds queries
@@ -81,7 +163,10 @@ export function createStore(root: string) {
     },
 
     saveSessions(sessions: SessionMeta[]) {
-      writeJson(SESSIONS_FILE, sessions);
+      // Not pretty-printed: this is the largest and by far the most frequently
+      // rewritten state file (every status transition), and nothing reads it by
+      // hand. The indentation alone was roughly half the bytes written.
+      fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions));
     },
 
     loadWorkflows(): WorkflowDef[] {
@@ -140,28 +225,55 @@ export function createStore(root: string) {
     },
 
     appendTranscript(sessionId: string, event: TranscriptEvent) {
-      fs.appendFileSync(path.join(TRANSCRIPTS, `${sessionId}.jsonl`), JSON.stringify(event) + '\n');
+      const line = JSON.stringify(event);
+      const file = transcriptFile(sessionId);
+      fs.appendFileSync(file, line + '\n');
+      // Extend the cached entry rather than invalidating it — re-reading a
+      // multi-MB transcript on every appended event is exactly the cost the
+      // cache exists to remove.
+      const entry = transcriptCache.get(sessionId);
+      if (!entry) return;
+      entry.lines.push(line);
+      entry.parsed?.push(event);
+      try {
+        const stat = fs.statSync(file);
+        entry.mtimeMs = stat.mtimeMs;
+        entry.size = stat.size;
+      } catch {
+        transcriptCache.delete(sessionId);
+      }
+    },
+
+    /**
+     * The transcript's raw JSONL lines, unparsed. Lets the wire frame be built
+     * by joining them instead of round-tripping the whole file through
+     * JSON.parse + JSON.stringify on the bridge's only thread.
+     */
+    loadTranscriptRaw(sessionId: string): string[] {
+      return transcriptEntry(sessionId)?.lines ?? [];
     },
 
     loadTranscript(sessionId: string): TranscriptEvent[] {
-      const file = path.join(TRANSCRIPTS, `${sessionId}.jsonl`);
-      if (!fs.existsSync(file)) return [];
-      return fs
-        .readFileSync(file, 'utf8')
-        .split('\n')
-        .filter(Boolean)
-        .map((line) => {
+      const entry = transcriptEntry(sessionId);
+      if (!entry) return [];
+      if (!entry.parsed) {
+        const parsed: TranscriptEvent[] = [];
+        for (const line of entry.lines) {
           try {
-            return JSON.parse(line) as TranscriptEvent;
+            parsed.push(JSON.parse(line) as TranscriptEvent);
           } catch {
-            return null;
+            // Unparseable line — dropped, as it always has been.
           }
-        })
-        .filter((e): e is TranscriptEvent => e !== null);
+        }
+        entry.parsed = parsed;
+      }
+      // Shared, not copied: every caller only ever reads.
+      return entry.parsed;
     },
 
     deleteTranscript(sessionId: string) {
-      fs.rmSync(path.join(TRANSCRIPTS, `${sessionId}.jsonl`), { force: true });
+      transcriptCache.delete(sessionId);
+      fs.rmSync(transcriptFile(sessionId), { force: true });
       fs.rmSync(path.join(ATTACHMENTS, sessionId), { recursive: true, force: true });
     },
 

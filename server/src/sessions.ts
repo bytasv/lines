@@ -5,6 +5,7 @@ import type {
   Attachment,
   AttachmentKind,
   CavemanConfig,
+  ContextUsage,
   FileSnapshotData,
   PermissionMode,
   PermissionRequestData,
@@ -29,14 +30,48 @@ import {
 } from './autoGuard.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
-import type { AuthManager } from './auth.ts';
+import { isAuthFailureMessage, type AuthManager } from './auth.ts';
 
 /** 'auto' is our guard layer on top of the SDK's acceptEdits mode. */
 function sdkPermissionMode(mode: PermissionMode): string {
   return mode === 'auto' ? 'acceptEdits' : mode;
 }
 
+/**
+ * Context occupancy from a single `assistant` SDK message. Its usage covers one
+ * API call, so the input components are the actual prompt size — unlike a
+ * `result`'s usage, which aggregates every call in the turn (spend, not size).
+ * Returns undefined when the message carries no usage.
+ */
+export function extractContextUsage(
+  msg: Record<string, unknown>,
+  model: string,
+  at: number,
+): ContextUsage | undefined {
+  const usage = (msg.message as { usage?: Record<string, unknown> } | undefined)?.usage;
+  if (!usage || typeof usage !== 'object') return undefined;
+  const num = (key: string): number => {
+    const v = usage[key];
+    return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+  };
+  const inputTokens = num('input_tokens');
+  const cacheReadTokens = num('cache_read_input_tokens');
+  const cacheCreationTokens = num('cache_creation_input_tokens');
+  const outputTokens = num('output_tokens');
+  // Newer betas split cache creation into ephemeral 5m/1h buckets, so the
+  // reported prompt total can exceed the components. Surface the gap, don't hide it.
+  const reported = usage.prompt_tokens ?? usage.total_input_tokens;
+  const sum = inputTokens + cacheReadTokens + cacheCreationTokens;
+  const reportedTotal =
+    typeof reported === 'number' && Number.isFinite(reported) && reported !== sum ? reported : undefined;
+  return { inputTokens, cacheReadTokens, cacheCreationTokens, outputTokens, reportedTotal, model, at };
+}
+
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+/** How long persist() waits to coalesce a burst of session writes. Short enough
+ *  that a crash can only ever lose the tail of one turn's transitions. */
+const PERSIST_DEBOUNCE_MS = 250;
 
 interface PermissionAnswer {
   allow: boolean;
@@ -134,6 +169,24 @@ export function findStepStart(events: TranscriptEvent[], stepIndex?: number): nu
   return newestStarted;
 }
 
+/**
+ * Request ids that have a permission request recorded but no resolution. One
+ * pass: a busy session can hold hundreds of permission events, and resolving
+ * each one against its own scan of the transcript was quadratic.
+ */
+export function unresolvedPermissionIds(events: TranscriptEvent[]): string[] {
+  const requested = new Set<string>();
+  const resolved = new Set<string>();
+  for (const event of events) {
+    if (event.kind !== 'permission') continue;
+    const data = event.data as PermissionRequestData;
+    if (!data.requestId) continue;
+    if (data.resolution) resolved.add(data.requestId);
+    else if (data.toolName) requested.add(data.requestId);
+  }
+  return [...requested].filter((id) => !resolved.has(id));
+}
+
 /** SDK PermissionResult shape returned to the worker's canUseTool rpc. */
 type PermissionResult =
   | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
@@ -146,6 +199,9 @@ interface LiveState {
    *  prompts so far — subtracted from the SDK's duration_ms, which otherwise
    *  counts human approval wait as "active" time. Reset once read. */
   permissionWaitMs: number;
+  /** Reading from the latest `assistant` message of the in-flight turn; committed
+   *  to the meta when the turn settles, so the sidebar isn't re-rendered per message. */
+  contextUsage?: ContextUsage;
 }
 
 export type TurnCompleteListener = (sessionId: string, source: 'user' | 'workflow') => void;
@@ -158,6 +214,8 @@ export class SessionManager {
   private interrupting = new Set<string>();
   private onTurnComplete: TurnCompleteListener | null = null;
   private worker!: WorkerClient;
+  /** Pending debounced sessions.json write, if any (see persist/flushPersist). */
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private store: Store,
@@ -185,7 +243,26 @@ export class SessionManager {
     return this.sessions.get(id);
   }
 
+  /**
+   * Coalesce bursts of status transitions into one write. sessions.json holds
+   * every session's metadata (workflow state included) and is rewritten whole,
+   * synchronously, on the bridge's only thread — so a turn's worth of
+   * transitions used to stall every other session that many times over.
+   */
   private persist() {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.store.saveSessions([...this.sessions.values()]);
+    }, PERSIST_DEBOUNCE_MS);
+  }
+
+  /** Write pending session state out now. Called on shutdown — the debounce
+   *  must never be the reason a status transition is lost. */
+  flushPersist() {
+    if (!this.persistTimer) return;
+    clearTimeout(this.persistTimer);
+    this.persistTimer = null;
     this.store.saveSessions([...this.sessions.values()]);
   }
 
@@ -397,6 +474,20 @@ export class SessionManager {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`unknown session ${sessionId}`);
 
+    // A plan is up for review and the user typed a reply instead of clicking a
+    // button: treat it as "keep planning" — deny ExitPlanMode with the user's
+    // own text as the reason, same tool-result channel the button uses, rather
+    // than silently queuing behind a permission promise nothing will resolve.
+    if (
+      text.trim() &&
+      attachments.length === 0 &&
+      meta.status === 'waiting-permission' &&
+      meta.pendingPermissionTool === 'ExitPlanMode'
+    ) {
+      this.flushPending(sessionId, { emitResolution: 'deny', denyMessage: text });
+      return;
+    }
+
     if (meta.queued?.length || this.isBusy(meta)) {
       const staged = this.stageAttachments(sessionId, attachments);
       (meta.queued ??= []).push({
@@ -529,14 +620,8 @@ export class SessionManager {
 
   /** Emit an 'expired' resolution for every unresolved permission request. */
   private expireUnresolvedPermissions(sessionId: string) {
-    const seen = new Set<string>();
-    for (const event of this.store.loadTranscript(sessionId)) {
-      if (event.kind !== 'permission') continue;
-      const data = event.data as PermissionRequestData;
-      if (data.toolName && data.requestId) seen.add(data.requestId);
-    }
-    for (const requestId of seen) {
-      if (this.findPermissionResolution(sessionId, requestId)) continue;
+    const events = this.store.loadTranscript(sessionId);
+    for (const requestId of unresolvedPermissionIds(events)) {
       this.emitEvent(sessionId, 'permission', {
         requestId,
         toolName: '',
@@ -893,7 +978,10 @@ export class SessionManager {
    * resume-recovery path in resolvePermission() covers truly dead queries,
    * so the user never has to re-prompt.
    */
-  private flushPending(sessionId: string, opts: { emitResolution?: 'deny' | 'expired' } = {}) {
+  private flushPending(
+    sessionId: string,
+    opts: { emitResolution?: 'deny' | 'expired'; denyMessage?: string } = {},
+  ) {
     const state = this.live.get(sessionId);
     if (!state) return;
     for (const [requestId, resolve] of state.pendingPermissions) {
@@ -905,7 +993,7 @@ export class SessionManager {
           resolution: opts.emitResolution,
         } satisfies PermissionRequestData);
       }
-      resolve({ allow: false });
+      resolve({ allow: false, denyMessage: opts.denyMessage });
     }
     state.pendingPermissions.clear();
   }
@@ -1182,7 +1270,21 @@ export class SessionManager {
     const persist = msg.type !== 'stream_event';
     const resultSeq = this.emitEvent(sessionId, 'sdk', msg, persist);
 
+    // Each assistant message overwrites the reading; the last one before the
+    // result describes the turn's final prompt. Held live rather than upserted
+    // per message, which would broadcast a sidebar re-render 10-20x a turn.
+    if (msg.type === 'assistant' && meta) {
+      const reading = extractContextUsage(msg, meta.model, Date.now());
+      if (reading) this.liveState(sessionId).contextUsage = reading;
+    }
+
     if (msg.type === 'result') {
+      // The SDK can surface a rejected token as an error result instead of throwing;
+      // Retry already renders for these, only the login prompt is missing.
+      const failed = msg.is_error === true || (msg.subtype != null && msg.subtype !== 'success');
+      const resultText = typeof msg.result === 'string' ? msg.result : '';
+      if (failed && isAuthFailureMessage(resultText)) void this.auth?.handleTokenRejected();
+
       const metaNow = this.sessions.get(sessionId);
       let source: 'user' | 'workflow' = 'user';
       if (metaNow) {
@@ -1207,6 +1309,13 @@ export class SessionManager {
             (usage.cache_read_input_tokens ?? 0);
           metaNow.lastTokens = turnTokens;
           metaNow.totalTokens = (metaNow.totalTokens ?? 0) + turnTokens;
+        }
+        // Occupancy settles here, from the turn's last assistant message —
+        // never from the usage above, which is cumulative across API calls.
+        const live = this.liveState(sessionId);
+        if (live.contextUsage) {
+          metaNow.contextUsage = live.contextUsage;
+          live.contextUsage = undefined;
         }
         const rawDurationMs = (msg as { duration_ms?: number }).duration_ms;
         if (typeof rawDurationMs === 'number') {
@@ -1241,7 +1350,20 @@ export class SessionManager {
       if (meta?.queued?.length) meta.queuePaused = true;
       if (meta) meta.turnStartedAt = undefined;
       this.liveState(sessionId).permissionWaitMs = 0;
+      // A crashed query emits no SDK `result`, so the transcript would end on a
+      // half-finished turn with no failure row and no Retry button. Synthesize one
+      // (before the status flip, so it is the trailing item) — this is the "query
+      // crash" half of what retryTurn already documents itself as covering.
+      this.emitEvent(sessionId, 'sdk', {
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        result: error,
+      });
       this.setStatus(sessionId, 'error', error);
+      // A dead token surfaces here as a query crash; recover (or log out, which
+      // opens the login modal) now rather than waiting for the usage poller.
+      if (isAuthFailureMessage(error)) void this.auth?.handleTokenRejected();
       return;
     }
     // An interrupted query sometimes dies without emitting a final `result`;

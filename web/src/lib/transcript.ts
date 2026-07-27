@@ -503,6 +503,29 @@ export function isEditTool(name: string): boolean {
   return name === 'Edit' || name === 'Write' || name === 'MultiEdit' || name === 'NotebookEdit';
 }
 
+export interface ToolDiff {
+  diff: { filePath: string; before: string; after: string };
+  stats: { added: number; removed: number };
+}
+
+/**
+ * Diff + line stats for one edit tool call, memoized per ToolBlock. The same
+ * block is asked for its diff several times per commit — the card, its group's
+ * +N/−N total, and the folded turn's total — and every one of those recomputes
+ * a whole-file diff. Keyed on the object, so a rebuilt transcript produces
+ * fresh blocks and can never serve a stale diff.
+ */
+const toolDiffCache = new WeakMap<ToolBlock, ToolDiff | null>();
+
+export function toolDiff(tool: ToolBlock): ToolDiff | null {
+  const cached = toolDiffCache.get(tool);
+  if (cached !== undefined) return cached;
+  const diff = isEditTool(tool.name) ? computeDiff(tool) : null;
+  const entry = diff ? { diff, stats: diffStats(diff.before, diff.after) } : null;
+  toolDiffCache.set(tool, entry);
+  return entry;
+}
+
 /** Collapsed group header, e.g. "8 actions · Read ×3, Edit ×2, Bash ×3" (first-seen order). */
 export function groupSummary(tools: ToolBlock[]): string {
   const counts = new Map<string, number>();
@@ -517,12 +540,10 @@ export function groupDiffTotals(tools: ToolBlock[]): { added: number; removed: n
   let removed = 0;
   let any = false;
   for (const t of tools) {
-    if (!isEditTool(t.name)) continue;
-    const d = computeDiff(t);
-    if (!d) continue;
-    const s = diffStats(d.before, d.after);
-    added += s.added;
-    removed += s.removed;
+    const entry = toolDiff(t);
+    if (!entry) continue;
+    added += entry.stats.added;
+    removed += entry.stats.removed;
     any = true;
   }
   return any ? { added, removed } : null;

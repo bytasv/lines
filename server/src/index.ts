@@ -21,6 +21,26 @@ import { searchFiles } from './fileSearch.ts';
 const PORT = Number(process.env.PORT ?? 8787);
 
 /**
+ * Opt-in perf instrumentation (LINES_PERF=1). Everything it guards — the timer
+ * below, the performance.now() calls at the transcript path — is skipped
+ * entirely when unset, not merely silenced.
+ */
+const PERF = process.env.LINES_PERF === '1';
+
+if (PERF) {
+  // The bridge is single-threaded: any synchronous burst (a transcript read and
+  // parse, a whole-file sessions.json write) stalls every other session's
+  // stream. Timer drift is the direct measure of that.
+  let lastTick = performance.now();
+  setInterval(() => {
+    const now = performance.now();
+    const drift = now - lastTick - 100;
+    if (drift > 50) console.warn(`[perf] event-loop lag ${drift.toFixed(0)}ms`);
+    lastTick = now;
+  }, 100).unref();
+}
+
+/**
  * Phase 3 auth gate. Enabled only when a Clerk secret key is configured and
  * BRIDGE_AUTH_DISABLED isn't set — otherwise every socket binds to the
  * implicit 'local' user, which is the single-tenant dev behavior.
@@ -582,13 +602,30 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       break;
     }
     case 'loadTranscript': {
-      const events = store.loadTranscript(msg.sessionId);
-      ws.send(
-        JSON.stringify({ type: 'transcript', sessionId: msg.sessionId, events } satisfies ServerMessage),
-      );
+      const started = PERF ? performance.now() : 0;
+      const lines = store.loadTranscriptRaw(msg.sessionId);
+      const frame = transcriptFrame(msg.sessionId, lines);
+      ws.send(frame);
+      if (PERF) {
+        console.log(
+          `[perf] transcript ${msg.sessionId} ${lines.length} events ${frame.length}B ` +
+            `${(performance.now() - started).toFixed(1)}ms`,
+        );
+      }
       break;
     }
   }
+}
+
+/**
+ * Hand-built `transcript` frame. Each JSONL line already *is* the JSON of one
+ * event, so joining them skips parsing and re-serializing the whole file —
+ * ~100ms of blocked event loop on a multi-MB transcript. Built as a string, so
+ * it can't be checked with `satisfies ServerMessage`: keep the shape in sync
+ * with the `transcript` variant in shared/types.ts by hand.
+ */
+function transcriptFrame(sessionId: string, lines: string[]): string {
+  return `{"type":"transcript","sessionId":${JSON.stringify(sessionId)},"events":[${lines.join(',')}]}`;
 }
 
 /** Native folder picker. macOS: Finder choose-folder dialog. Returns null on cancel/unsupported. */
@@ -635,6 +672,8 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 // Release the port promptly when tsx watch restarts us (SIGTERM) or on Ctrl-C.
 function shutdown() {
   for (const ctx of registry.all()) {
+    // persist() is debounced — land any pending session state before we exit.
+    ctx.sessions.flushPersist();
     for (const ws of ctx.sockets) ws.terminate();
   }
   wss.close();

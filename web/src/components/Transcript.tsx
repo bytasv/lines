@@ -295,7 +295,13 @@ function AgentTurn({
   };
 
   const turnSummariesEnabled = useStore((s) => s.turnSummariesEnabled);
-  const { narrative, narration, summary, totals, result } = turnToolStats(turn.items);
+  // Walks every tool call in the turn (and diffs the edits) — recomputing it on
+  // an unrelated re-render is pure waste; `turn.items` is rebuilt only when the
+  // transcript itself changes.
+  const { narrative, narration, summary, totals, result } = useMemo(
+    () => turnToolStats(turn.items),
+    [turn.items],
+  );
   // AI narrative (if enabled) > the agent's own narration > tool tally > generic fallback.
   const headline = (turnSummariesEnabled ? narrative : null) ?? narration ?? summary ?? 'response';
   const isHeadlineSentence = headline !== summary || headline === 'response';
@@ -349,19 +355,24 @@ function AgentTurn({
           {active && <Loader size={12} />}
         </Group>
       </Group>
+      {/* Only the open turn renders its children. A folded turn holds the whole
+          turn — assistant markdown, tool groups, results — and on a long
+          transcript nearly every turn is folded on first paint. */}
       <Collapse expanded={expanded} transitionDuration={150}>
-        <Stack gap={6} mt={4}>
-          {turn.items.map((child) => (
-            <Item
-              key={child.key}
-              item={child}
-              sessionId={sessionId}
-              onImage={onImage}
-              retryKey={retryKey}
-              activeGroupKey={activeGroupKey}
-            />
-          ))}
-        </Stack>
+        {expanded && (
+          <Stack gap={6} mt={4}>
+            {turn.items.map((child) => (
+              <Item
+                key={child.key}
+                item={child}
+                sessionId={sessionId}
+                onImage={onImage}
+                retryKey={retryKey}
+                activeGroupKey={activeGroupKey}
+              />
+            ))}
+          </Stack>
+        )}
       </Collapse>
     </Box>
   );

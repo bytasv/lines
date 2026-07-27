@@ -38,7 +38,9 @@ function Shell() {
   const navigate = useNavigate();
   const selectedSessionId = useStore((s) => s.selectedSessionId);
   const selectSession = useStore((s) => s.selectSession);
-  const sessions = useStore((s) => s.sessions);
+  // Per-key, not the whole dict: subscribing to `sessions` re-renders the shell
+  // (and everything under it) whenever any other session's metadata changes.
+  const selectedSession = useStore((s) => (s.selectedSessionId ? s.sessions[s.selectedSessionId] : undefined));
   const projects = useStore((s) => s.projects);
   const activeProject = useStore((s) => s.activeProject);
   const setActiveProject = useStore((s) => s.setActiveProject);
@@ -86,7 +88,6 @@ function Shell() {
 
   // Viewing a session clears its post-turn "done" (pulsating green) badge.
   // Covers both clicking a done session and one finishing while already open.
-  const selectedSession = selectedSessionId ? sessions[selectedSessionId] : undefined;
   useEffect(() => {
     if (selectedSession?.status === 'done') {
       send({ type: 'ackSession', sessionId: selectedSession.id });
@@ -95,12 +96,12 @@ function Shell() {
 
   // Selecting a session (URL, auto-select) activates its project tab.
   useEffect(() => {
-    const session = selectedSessionId ? sessions[selectedSessionId] : undefined;
-    if (session && session.cwd !== activeProject && projects.includes(session.cwd)) {
-      setActiveProject(session.cwd);
+    const cwd = selectedSession?.cwd;
+    if (cwd && cwd !== activeProject && projects.includes(cwd)) {
+      setActiveProject(cwd);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSessionId, sessions, projects]);
+  }, [selectedSessionId, selectedSession?.cwd, projects]);
 
   return (
     <AppShell
@@ -133,7 +134,7 @@ function Shell() {
             <ProjectPicker />
           ) : sidebarMode === 'files' ? (
             <FilesView />
-          ) : selectedSessionId && sessions[selectedSessionId] ? (
+          ) : selectedSessionId && selectedSession ? (
             <SessionView key={selectedSessionId} sessionId={selectedSessionId} />
           ) : (
             <Center h="100%">

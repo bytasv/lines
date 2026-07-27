@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ActionIcon, Badge, Box, Code, Collapse, Group, Text, Tooltip } from '@mantine/core';
 import { IconChevronDown, IconChevronRight, IconZoomScan } from '@tabler/icons-react';
 import type { ToolBlock } from '../lib/transcript';
-import { computeDiff, diffStats, isEditTool } from '../lib/transcript';
+import { isEditTool, toolDiff } from '../lib/transcript';
 import { MonacoDiffModal } from './MonacoDiffModal';
 
 function summarizeInput(tool: ToolBlock): string {
@@ -16,13 +16,26 @@ function summarizeInput(tool: ToolBlock): string {
   return json.length > 120 ? json.slice(0, 120) + '…' : json;
 }
 
+// Sticky per-card expansion, keyed by tool_use id. Module scope so it survives
+// the card unmounting — which now happens whenever its group collapses.
+const stickyExpanded = new Map<string, boolean>();
+
 export function ToolCallCard({ tool }: { tool: ToolBlock }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => stickyExpanded.get(tool.id) ?? false);
   const [diffOpen, setDiffOpen] = useState(false);
 
+  const toggle = () =>
+    setExpanded((v) => {
+      stickyExpanded.set(tool.id, !v);
+      return !v;
+    });
+
   const editTool = isEditTool(tool.name);
-  const diff = editTool ? computeDiff(tool) : null;
-  const stats = diff ? diffStats(diff.before, diff.after) : null;
+  // Memoized per tool block — the same diff is also asked for by the group
+  // header and the folded turn's totals.
+  const entry = toolDiff(tool);
+  const diff = entry?.diff ?? null;
+  const stats = entry?.stats ?? null;
   const pending = tool.result === undefined && !editTool;
 
   return (
@@ -32,13 +45,13 @@ export function ToolCallCard({ tool }: { tool: ToolBlock }) {
         gap="xs"
         wrap="nowrap"
         justify="space-between"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={toggle}
         role="button"
         tabIndex={0}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
-            setExpanded((v) => !v);
+            toggle();
           }
         }}
       >
@@ -84,29 +97,34 @@ export function ToolCallCard({ tool }: { tool: ToolBlock }) {
           </Group>
         )}
       </Group>
+      {/* Body is rendered only while open: on a long transcript most cards are
+          collapsed, and serializing every tool input and result just to hide it
+          with CSS is most of the transcript's first-paint cost. */}
       <Collapse expanded={expanded}>
-        <Box mt={4}>
-          <Text size="xs" c="dimmed" fw={600}>
-            Input
-          </Text>
-          <Code block style={{ fontSize: 11, maxHeight: 200, overflow: 'auto' }}>
-            {JSON.stringify(tool.input, null, 2)}
-          </Code>
-          {tool.result !== undefined && (
-            <>
-              <Text size="xs" c="dimmed" fw={600} mt={6}>
-                Result {tool.isError ? '(error)' : ''}
-              </Text>
-              <Code
-                block
-                color={tool.isError ? 'red' : undefined}
-                style={{ fontSize: 11, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}
-              >
-                {tool.result.length > 6000 ? tool.result.slice(0, 6000) + '\n…(truncated)' : tool.result}
-              </Code>
-            </>
-          )}
-        </Box>
+        {expanded && (
+          <Box mt={4}>
+            <Text size="xs" c="dimmed" fw={600}>
+              Input
+            </Text>
+            <Code block style={{ fontSize: 11, maxHeight: 200, overflow: 'auto' }}>
+              {JSON.stringify(tool.input, null, 2)}
+            </Code>
+            {tool.result !== undefined && (
+              <>
+                <Text size="xs" c="dimmed" fw={600} mt={6}>
+                  Result {tool.isError ? '(error)' : ''}
+                </Text>
+                <Code
+                  block
+                  color={tool.isError ? 'red' : undefined}
+                  style={{ fontSize: 11, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}
+                >
+                  {tool.result.length > 6000 ? tool.result.slice(0, 6000) + '\n…(truncated)' : tool.result}
+                </Code>
+              </>
+            )}
+          </Box>
+        )}
       </Collapse>
       {diff && (
         <MonacoDiffModal

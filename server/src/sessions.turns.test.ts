@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TranscriptEvent } from '@lines/shared';
-import { collectTurns, findStepStart } from './sessions.ts';
+import { collectTurns, findStepStart, unresolvedPermissionIds } from './sessions.ts';
 
 let seq = 0;
 const ev = (kind: TranscriptEvent['kind'], data: unknown): TranscriptEvent =>
@@ -12,6 +12,9 @@ const assistant = (...content: unknown[]) => ev('sdk', { type: 'assistant', mess
 const text = (t: string) => ({ type: 'text', text: t });
 const tool = (name: string, input: unknown) => ({ type: 'tool_use', name, input });
 const started = (stepIndex: number) => ev('workflow', { event: 'started', stepIndex, stepName: `s${stepIndex}` });
+const askPermission = (requestId: string) => ev('permission', { requestId, toolName: 'Bash', input: {} });
+const resolvePermission = (requestId: string, resolution = 'allow') =>
+  ev('permission', { requestId, toolName: '', input: {}, resolution });
 
 test('plan-mode turn (legacy shape): ExitPlanMode plan wins over trailing text', () => {
   const events = [
@@ -85,6 +88,27 @@ test('findStepStart re-entering a step uses its latest pass', () => {
     collectTurns(events, findStepStart(events, 1)).map((t) => t.output),
     ['b'],
   );
+});
+
+test('unresolvedPermissionIds returns requests with no recorded resolution', () => {
+  const events = [
+    askPermission('a'),
+    askPermission('b'),
+    resolvePermission('a'),
+    user('go'),
+    askPermission('c'),
+    resolvePermission('c', 'deny'),
+  ];
+  assert.deepEqual(unresolvedPermissionIds(events), ['b']);
+});
+
+test('unresolvedPermissionIds tolerates a resolution arriving before its request', () => {
+  assert.deepEqual(unresolvedPermissionIds([resolvePermission('a'), askPermission('a')]), []);
+});
+
+test('unresolvedPermissionIds ignores non-permission events and id-less entries', () => {
+  const events = [user('go'), ev('permission', { toolName: 'Bash', input: {} }), askPermission('a')];
+  assert.deepEqual(unresolvedPermissionIds(events), ['a']);
 });
 
 test('findStepStart falls back to the newest started marker, then to -1', () => {
