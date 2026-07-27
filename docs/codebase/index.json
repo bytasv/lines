@@ -316,6 +316,43 @@
       "relatedDecisions": []
     },
     {
+      "id": "workflow-approve-loader",
+      "name": "Workflow approve loader",
+      "doc": "features/workflow-approve-loader.md",
+      "purpose": "Show a loader and disable the Approve button the instant it is clicked, for the whole background consolidation window before the next step starts, instead of leaving the button looking unchanged and clickable.",
+      "entryPoints": [
+        "web/src/components/WorkflowStepper.tsx",
+        "server/src/workflows.ts"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/workflows.ts",
+        "server/src/sessions.ts",
+        "web/src/components/WorkflowStepper.tsx",
+        "server/src/workflows.advance.test.ts"
+      ],
+      "symbols": [
+        "WorkflowState.advancing",
+        "WorkflowEngine.advance",
+        "SessionManager.persistMeta",
+        "SessionManager.adoptSynced"
+      ],
+      "tests": [
+        "server/src/workflows.advance.test.ts"
+      ],
+      "businessRules": [
+        "the Approve button shows a loader and is disabled for the entire consolidation window, not just until the next step's status arrives",
+        "the button is also disabled while disconnected, since a dropped WS message would otherwise leave the click looking like it did nothing",
+        "the card's copy switches to an in-progress message while advancing"
+      ],
+      "architecturalRules": [
+        "the in-flight flag is server-owned broadcast state, never local optimistic UI state",
+        "clearing the flag rides the next status broadcast rather than issuing its own — no await may be inserted between the clear and that broadcast",
+        "cleared on process restart (constructor load loop) and on hand-off (adoptSynced), never in reconcileWithWorker, which runs far more often and would falsely clear a live advance"
+      ],
+      "relatedDecisions": []
+    },
+    {
       "id": "workflow-step-cost",
       "name": "Workflow step cost",
       "doc": "features/workflow-step-cost.md",

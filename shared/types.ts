@@ -174,6 +174,11 @@ export interface WorkflowState {
   /** Set when a plan is approved (true) or the step was manually stopped
    *  ('interrupted') mid-step: advance to the next step once the current turn ends. */
   advanceOnComplete?: boolean | 'interrupted';
+  /** An advance is in flight on this bridge: the finished step is 'done' and its
+   *  output is being consolidated, but the next step hasn't started. Drives the
+   *  Approve button's loader. In-flight only — never trusted across a bridge
+   *  restart or an instance hand-off. */
+  advancing?: boolean;
   /** Current step's configured permission mode, snapshotted at step start.
    *  Distinguishes a workflow-mandated 'plan' from a manual mid-step override. */
   stepPermissionMode?: PermissionMode;

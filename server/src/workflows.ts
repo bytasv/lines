@@ -9,7 +9,7 @@ import type {
   WorkflowMarkerData,
   WorkflowState,
 } from '@lines/shared';
-import { isStepRef } from '@lines/shared';
+import { isSessionActive, isStepRef } from '@lines/shared';
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
 import { captureBaseline, workingTreeDiff } from './git.ts';
@@ -617,6 +617,40 @@ export class WorkflowEngine {
     void this.advance(sessionId);
   }
 
+  /**
+   * "Mark as completed" from the stepper. A parked step takes the same path as
+   * Approve. A still-running step must go through `interrupt()` — that flags
+   * `advanceOnComplete` and advances only once the interrupted turn settles;
+   * advancing under a live turn lets the old query's late result clobber the next
+   * step (see docs/codebase/features/workflow-stop-advances.md).
+   */
+  forceAdvance(sessionId: string, stepIndex: number) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.workflow?.started) return;
+    const i = meta.workflow.stepIndex;
+    // Ignore a stale click (duplicate, or a second tab showing an older stepper).
+    if (stepIndex !== i) return;
+    const status = meta.workflow.stepStatuses[i];
+    if (status === 'waiting-approval') {
+      this.approve(sessionId, i);
+      return;
+    }
+    if (status !== 'running') return;
+    if (isSessionActive(meta.status)) {
+      this.sessions.interrupt(sessionId);
+      return;
+    }
+    // Marked running with no turn in flight (e.g. the worker died mid-step): no
+    // late result can arrive, so advance straight away.
+    const wf = this.resolve(meta.workflow.workflowId);
+    this.marker(sessionId, {
+      stepIndex: i,
+      stepName: this.stepName(wf?.steps[i]),
+      event: 'approved',
+    });
+    void this.advance(sessionId);
+  }
+
   retry(sessionId: string, stepIndex: number, feedback: string) {
     const meta = this.sessions.get(sessionId);
     if (!meta?.workflow) return;
@@ -632,24 +666,45 @@ export class WorkflowEngine {
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'done';
+    // Consolidating an iterated step runs a real query, so the gap before the next
+    // step starts is seconds long with nothing else broadcast in it. Raise the
+    // in-flight flag *before* the await — every path from the WS handler to here is
+    // synchronous, so the client sees it in the same tick as the click.
+    meta.workflow.advancing = true;
+    this.sessions.persistMeta(sessionId);
 
-    // Consolidate this step's final output (single-turn steps return their last
-    // text as-is; iterated steps fold every attempt into one deliverable). Kept
-    // for the {previous} hand-off, and published under the step's name so later
-    // steps can pull it via {outputs.<name>}.
-    const output = await this.sessions.consolidateStepOutput(sessionId, i);
-    // An empty capture is not a deliverable — publishing it would clobber a
-    // previous non-empty value and hand the next step nothing.
-    if (output.trim()) {
-      meta.workflow.lastStepOutput = output;
-      const outName = this.stepContent(wf.steps[i])?.outputName?.trim();
-      if (outName) {
-        (meta.workflow.outputs ??= {})[outName] = output;
+    try {
+      // Consolidate this step's final output (single-turn steps return their last
+      // text as-is; iterated steps fold every attempt into one deliverable). Kept
+      // for the {previous} hand-off, and published under the step's name so later
+      // steps can pull it via {outputs.<name>}.
+      const output = await this.sessions.consolidateStepOutput(sessionId, i);
+      // An empty capture is not a deliverable — publishing it would clobber a
+      // previous non-empty value and hand the next step nothing.
+      if (output.trim()) {
+        meta.workflow.lastStepOutput = output;
+        const outName = this.stepContent(wf.steps[i])?.outputName?.trim();
+        if (outName) {
+          (meta.workflow.outputs ??= {})[outName] = output;
+        }
+        // Persist the capture before the next step is queued: otherwise it rides on
+        // whatever setStatus happens next and is lost if the bridge dies in between.
+        this.sessions.persistMeta(sessionId);
       }
-      // Persist the capture before the next step is queued: otherwise it rides on
-      // whatever setStatus happens next and is lost if the bridge dies in between.
-      this.sessions.persistMeta(sessionId);
+    } catch (err) {
+      // consolidateStepOutput catches internally, so this is insurance only. Swallowed
+      // rather than rethrown: every caller does `void this.advance(...)`, so a rejection
+      // here would be an unhandled rejection — and the flow below still clears the
+      // in-flight flag and starts the next step, which beats a stuck loader.
+      console.warn('[workflow advance]', err);
     }
+
+    // Cleared without its own broadcast: both branches below broadcast next with no
+    // await in between (runStep's setStatus('running') / its error branch, or the
+    // final setStatus('idle')), so the clear rides that message and the button never
+    // flickers back to live. An await inserted between here and those calls reopens
+    // that window.
+    meta.workflow.advancing = false;
 
     if (i + 1 < wf.steps.length) {
       meta.workflow.stepIndex = i + 1;

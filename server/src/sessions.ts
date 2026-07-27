@@ -296,7 +296,12 @@ export class SessionManager {
     private broadcast: (msg: ServerMessage) => void,
     private auth?: AuthManager,
   ) {
-    for (const meta of this.store.loadSessions()) this.sessions.set(meta.id, meta);
+    for (const meta of this.store.loadSessions()) {
+      // An advance in flight belonged to the previous process — nothing is
+      // consolidating now, so a persisted flag would wedge the Approve loader.
+      if (meta.workflow) meta.workflow.advancing = false;
+      this.sessions.set(meta.id, meta);
+    }
   }
 
   /** Wired by index.ts right after construction, before any client can prompt. */
@@ -357,6 +362,8 @@ export class SessionManager {
     if (isSessionActive(meta.status)) meta.status = 'idle';
     // In-flight statuses were just reset, so no pause is owned by this instance.
     meta.pendingPermissionTool = undefined;
+    // Same reasoning: only the instance actually consolidating is advancing.
+    if (meta.workflow) meta.workflow.advancing = false;
     this.sessions.set(meta.id, meta);
     this.persist();
     this.broadcast({ type: 'sessionUpsert', session: meta });
