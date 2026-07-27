@@ -179,8 +179,13 @@ export function buildUserContext(
         // Merged before the applying flag drops, so the union is pushed once below.
         const local = store.loadSettings();
         if (remote && (remote.updatedAt ?? 0) > (local?.updatedAt ?? 0)) {
-          store.saveSettings(remote);
-          broadcast({ type: 'settings', settings: remote });
+          // Field merge, not a whole-blob replace: remote still wins per field it
+          // carries, but a client that predates a setting can't erase it by simply
+          // omitting it from its payload. The trade-off is that clearing a key now
+          // needs an explicit value — an omission no longer unsets anything.
+          const merged = { ...local, ...remote };
+          store.saveSettings(merged);
+          broadcast({ type: 'settings', settings: merged });
         }
         projectKeys.merge(pulled.projectKeys);
         // Adopted sessions may name checkouts this machine has but has never opened.

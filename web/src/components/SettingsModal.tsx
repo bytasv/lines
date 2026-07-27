@@ -21,6 +21,8 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
   const setCompactionLevel = useStore((s) => s.setCompactionLevel);
   const turnSummariesEnabled = useStore((s) => s.turnSummariesEnabled);
   const setTurnSummariesEnabled = useStore((s) => s.setTurnSummariesEnabled);
+  const autoContinueInterrupted = useStore((s) => s.autoContinueInterrupted);
+  const setAutoContinueInterrupted = useStore((s) => s.setAutoContinueInterrupted);
   const auth = useStore((s) => s.auth);
   const openLoginModal = useStore((s) => s.openLoginModal);
 
@@ -106,6 +108,15 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
           onChange={(e) => setTurnSummariesEnabled(e.currentTarget.checked)}
           label="AI turn summaries"
           description="Summarize each turn's actions in a sentence; off shows the agent's own narration instead"
+        />
+        <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
+          Recovery
+        </Text>
+        <Switch
+          checked={autoContinueInterrupted}
+          onChange={(e) => setAutoContinueInterrupted(e.currentTarget.checked)}
+          label="Auto-continue interrupted turns"
+          description="Resume a turn that died with the app instead of waiting for the Continue button"
         />
         <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
           Notifications

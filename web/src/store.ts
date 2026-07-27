@@ -40,6 +40,7 @@ const SIDEBAR_MODE_KEY = 'lines.sidebarMode';
 const OPEN_FILES_KEY = 'lines.openFiles';
 const COMPACTION_LEVEL_KEY = 'lines.compactionLevel';
 const TURN_SUMMARIES_ENABLED_KEY = 'lines.turnSummariesEnabled';
+const AUTO_CONTINUE_KEY = 'lines.autoContinueInterrupted';
 const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
 const DRAFTS_KEY = 'lines.drafts';
 
@@ -79,6 +80,11 @@ function loadCompactionLevel(): CompactionLevel {
 
 function loadTurnSummariesEnabled(): boolean {
   return localStorage.getItem(TURN_SUMMARIES_ENABLED_KEY) !== 'false';
+}
+
+/** On unless explicitly turned off, matching the bridge-side default. */
+function loadAutoContinueInterrupted(): boolean {
+  return localStorage.getItem(AUTO_CONTINUE_KEY) !== 'false';
 }
 
 function loadOpenFiles(): Record<string, OpenFilesState> {
@@ -337,6 +343,8 @@ interface UiState {
   compactionLevel: CompactionLevel;
   /** Show server-generated 1-2 sentence turn summaries in Compact view; off shows agent narration instead. */
   turnSummariesEnabled: boolean;
+  /** Let the bridge resume a turn that died with the app, instead of waiting for the Continue banner. */
+  autoContinueInterrupted: boolean;
   /** Open editor tabs per project path; persisted in localStorage. */
   openFiles: Record<string, OpenFilesState>;
 
@@ -361,6 +369,7 @@ interface UiState {
   setSidebarMode: (mode: SidebarMode) => void;
   setCompactionLevel: (level: CompactionLevel) => void;
   setTurnSummariesEnabled: (on: boolean) => void;
+  setAutoContinueInterrupted: (on: boolean) => void;
   openFileTab: (path: string) => void;
   closeFileTab: (path: string) => void;
   setActiveFileTab: (path: string) => void;
@@ -377,6 +386,7 @@ export const useStore = create<UiState>((set, get) => {
         sidebarMode: s.sidebarMode,
         compactionLevel: s.compactionLevel,
         turnSummariesEnabled: s.turnSummariesEnabled,
+        autoContinueInterrupted: s.autoContinueInterrupted,
         alertsEnabled: s.alertsEnabled,
         alertSound: s.alertSound,
         dismissedCheckouts: s.dismissedCheckouts,
@@ -392,6 +402,7 @@ export const useStore = create<UiState>((set, get) => {
       sidebarMode: s.sidebarMode ?? state.sidebarMode,
       compactionLevel: s.compactionLevel ?? state.compactionLevel,
       turnSummariesEnabled: s.turnSummariesEnabled ?? state.turnSummariesEnabled,
+      autoContinueInterrupted: s.autoContinueInterrupted ?? state.autoContinueInterrupted,
       alertsEnabled: s.alertsEnabled ?? state.alertsEnabled,
       alertSound: (s.alertSound as AlertSound | undefined) ?? state.alertSound,
       dismissedCheckouts: s.dismissedCheckouts ?? state.dismissedCheckouts,
@@ -401,6 +412,7 @@ export const useStore = create<UiState>((set, get) => {
     if (s.sidebarMode) localStorage.setItem(SIDEBAR_MODE_KEY, s.sidebarMode);
     if (s.compactionLevel) localStorage.setItem(COMPACTION_LEVEL_KEY, s.compactionLevel);
     if (s.turnSummariesEnabled != null) localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(s.turnSummariesEnabled));
+    if (s.autoContinueInterrupted != null) localStorage.setItem(AUTO_CONTINUE_KEY, String(s.autoContinueInterrupted));
     if (s.alertsEnabled != null) persistAlertsEnabled(s.alertsEnabled);
     if (s.alertSound) persistAlertSound(s.alertSound as AlertSound);
     if (s.dismissedCheckouts) {
@@ -443,6 +455,7 @@ export const useStore = create<UiState>((set, get) => {
   sidebarMode: loadSidebarMode(),
   compactionLevel: loadCompactionLevel(),
   turnSummariesEnabled: loadTurnSummariesEnabled(),
+  autoContinueInterrupted: loadAutoContinueInterrupted(),
   openFiles: loadOpenFiles(),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
@@ -493,6 +506,12 @@ export const useStore = create<UiState>((set, get) => {
   setTurnSummariesEnabled: (on) => {
     localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(on));
     set({ turnSummariesEnabled: on });
+    pushSettings();
+  },
+
+  setAutoContinueInterrupted: (on) => {
+    localStorage.setItem(AUTO_CONTINUE_KEY, String(on));
+    set({ autoContinueInterrupted: on });
     pushSettings();
   },
 

@@ -207,6 +207,64 @@
       "relatedDecisions": []
     },
     {
+      "id": "interrupted-turn-recovery",
+      "name": "Interrupted turn recovery",
+      "doc": "features/interrupted-turn-recovery.md",
+      "purpose": "Detect a turn that died with the app, offer a Continue banner, and optionally resume it automatically; heal sessions the worker is still running.",
+      "entryPoints": [
+        "server/src/workerClient.ts",
+        "server/src/sessions.ts",
+        "web/src/components/SessionView.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/Sidebar.tsx"
+      ],
+      "files": [
+        "server/src/workerProtocol.ts",
+        "server/src/worker.ts",
+        "server/src/workerClient.ts",
+        "server/src/userRegistry.ts",
+        "server/src/index.ts",
+        "server/src/sessions.ts",
+        "shared/types.ts",
+        "web/src/store.ts",
+        "web/src/components/SessionView.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/Sidebar.tsx",
+        "web/src/lib/format.ts"
+      ],
+      "symbols": [
+        "LiveSessionInfo.busy",
+        "SessionManager.reconcileWithWorker",
+        "SessionManager.markTurnLive",
+        "SessionManager.continueTurn",
+        "SessionMeta.interruptedAt",
+        "withQueuedPushes",
+        "UserUiSettings.autoContinueInterrupted",
+        "sessionRowMeta"
+      ],
+      "tests": [
+        "server/src/sessions.reconcile.test.ts"
+      ],
+      "businessRules": [
+        "auto-continue only resumes sessions flagged by the reconcile that is running; a stale flag keeps its banner",
+        "autoContinueInterrupted is on unless explicitly false; absent (or no settings.json) means enabled",
+        "a resume that throws is contained per session: logged, session put back into the flagged state, later sessions still resume",
+        "settings pulled from the storage server are merged field-wise so an older client cannot erase a newer setting by omitting it",
+        "interruptedAt clears on prompt, result, markTurnLive and archive/complete, but never on ackSession",
+        "a worker that answered on an incompatible protocol version is alive, so its in-flight statuses are left alone",
+        "the sidebar row shows the same yellow interrupted dot/badge as the banner via sessionRowMeta, reusing the banner's exact guard, and persists through ackSession the same way"
+      ],
+      "architecturalRules": [
+        "adding a field to LiveSessionInfo is not a protocol bump; busy is optional so an old worker stays demote-only instead of losing its socket mid-turn",
+        "reconcileWithWorker is the only place that stamps interruptedAt",
+        "a result for a flagged session means the flag was wrong (buffered result lands after reconcile) — clear it there rather than adding handshake ordering"
+      ],
+      "relatedDecisions": [
+        "session-status-badge",
+        "workflow-stop-advances"
+      ]
+    },
+    {
       "id": "composer-focus-new-session",
       "name": "Composer focus on new session",
       "doc": "features/composer-focus-new-session.md",
