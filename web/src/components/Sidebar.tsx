@@ -33,21 +33,12 @@ import { useLocalStorage } from '@mantine/hooks';
 import type { CSSProperties } from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { SessionMeta, SessionStatus } from '@lines/shared';
-import { formatDuration, waitingPermissionMeta } from '../lib/format';
+import type { SessionMeta } from '@lines/shared';
+import { formatDuration, sessionRowMeta } from '../lib/format';
 import type { SidebarMode } from '../store';
 import { sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
 import { FileTree } from './FileTree';
-
-const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
-  idle: { color: 'gray', label: 'idle' },
-  running: { color: 'blue', label: 'running' },
-  done: { color: 'green', label: 'done' },
-  'waiting-permission': { color: 'yellow', label: 'needs permission' },
-  'waiting-approval': { color: 'sandstone', label: 'needs approval' },
-  error: { color: 'red', label: 'error' },
-};
 
 function stop(e: { preventDefault: () => void; stopPropagation: () => void }) {
   e.preventDefault(); // don't follow the row link
@@ -64,10 +55,7 @@ function useOverflow() {
 }
 
 function SessionRow({ session, selected }: { session: SessionMeta; selected: boolean }) {
-  const status =
-    session.status === 'waiting-permission'
-      ? waitingPermissionMeta(session.pendingPermissionTool)
-      : STATUS_META[session.status] ?? STATUS_META.idle;
+  const status = sessionRowMeta(session);
   const { overflowing, check } = useOverflow();
   const [hovered, setHovered] = useState(false);
   // A session with no real prompt yet is safe to delete outright; others archive first.
@@ -98,9 +86,11 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
               ) : session.status === 'running' ? (
                 <Loader size={10} />
               ) : (
+                // `running` renders a Loader above, so only non-running
+                // statuses reach here — `actionable` is the whole pulse rule.
                 <span
                   className="status-dot"
-                  data-pulse={session.status !== 'idle' ? true : undefined}
+                  data-pulse={status.actionable ? true : undefined}
                   style={
                     {
                       '--status-dot-color': `var(--mantine-color-${status.color}-6)`,
@@ -130,10 +120,7 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
             </Tooltip>
           </Group>
           <Group gap={6} wrap="nowrap" align="center" mih={17} mt={3}>
-            {!hovered &&
-            session.status !== 'idle' &&
-            session.status !== 'running' &&
-            session.status !== 'done' ? (
+            {!hovered && status.actionable ? (
               <Badge
                 variant="light"
                 color={status.color}
