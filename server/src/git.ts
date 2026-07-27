@@ -4,6 +4,9 @@ import { promisify } from 'node:util';
 const pexec = promisify(execFile);
 const MAX_BUFFER = 12 * 1024 * 1024;
 const MAX_UNTRACKED = 50;
+/** Hard ceiling on an injected step diff (~50k tokens) so one huge working tree
+ *  can't push the hand-off prompt past the model's context window. */
+const MAX_DIFF_CHARS = 200_000;
 
 async function git(cwd: string, args: string[]): Promise<string> {
   try {
@@ -66,5 +69,7 @@ export async function workingTreeDiff(cwd: string, baseline?: DiffBaseline): Pro
     parts.push(`# … ${untracked.length - MAX_UNTRACKED} more untracked files omitted from the diff`);
   }
 
-  return parts.join('\n');
+  const diff = parts.join('\n');
+  if (diff.length <= MAX_DIFF_CHARS) return diff;
+  return `${diff.slice(0, MAX_DIFF_CHARS)}\n# … diff truncated at ${MAX_DIFF_CHARS} chars (${diff.length} total)`;
 }

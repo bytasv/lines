@@ -130,8 +130,9 @@ function segmentAllowed(segment: string, allowlist: GuardAllowEntry[]): boolean 
 const FILE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Read']);
 const PLAN_WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
-/** Harness convention for where plan mode parks its plan file. */
-export const PLAN_DIR_MARKER = '/.claude/plans/';
+/** Path fragment shared by both plan directories. Cheap hint only — permission
+ *  decisions go through `isPlanPath`, which anchors to the real directories. */
+export const PLAN_DIR_MARKER = `${path.join('.claude', 'plans')}${path.sep}`;
 
 function isInside(dir: string, target: string): boolean {
   const rel = path.relative(dir, target);

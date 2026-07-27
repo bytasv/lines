@@ -3,8 +3,10 @@ import { useStore } from './store';
 
 const WS_URL = `ws://${location.hostname}:8787`;
 const PING_INTERVAL_MS = 1000;
-// Declare the link dead after this long without a pong (~3 missed pings).
-const PONG_TIMEOUT_MS = 3000;
+// Declare the link dead after this long without a pong (~10 missed pings). Generous
+// on purpose: pings are sent and pongs are handled on the main thread, so a long
+// render blocks both and a tight timeout kills a perfectly healthy socket.
+const PONG_TIMEOUT_MS = 10_000;
 const RECONNECT_DELAY_MS = 1500;
 // Re-send a fresh Clerk token before its ~60s expiry.
 const AUTH_RELAY_INTERVAL_MS = 50_000;
@@ -60,11 +62,22 @@ function stopHeartbeat() {
 function startHeartbeat() {
   stopHeartbeat();
   lastPongAt = Date.now();
+  let expectedTick = Date.now() + PING_INTERVAL_MS;
   heartbeatTimer = setInterval(() => {
+    const now = Date.now();
+    // How late this tick itself ran = how long the main thread was blocked. Pongs
+    // arriving during that block were never processed, so the silence says nothing
+    // about the link — skip the liveness check and re-baseline instead of closing.
+    const stalledMs = now - expectedTick;
+    expectedTick = now + PING_INTERVAL_MS;
     if (socket?.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({ type: 'ping' } satisfies ClientMessage));
+    if (stalledMs > PING_INTERVAL_MS) {
+      lastPongAt = now;
+      return;
+    }
     // No pong for a while means the socket is dead even if the OS never told us.
-    if (Date.now() - lastPongAt > PONG_TIMEOUT_MS) socket.close();
+    if (now - lastPongAt > PONG_TIMEOUT_MS) socket.close();
   }, PING_INTERVAL_MS);
 }
 

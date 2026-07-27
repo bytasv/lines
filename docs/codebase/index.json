@@ -394,7 +394,7 @@
         "SessionManager.findStepStart",
         "WorkflowEngine.advance",
         "WorkflowEngine.runStep",
-        "substituteOutputs",
+        "substituteTokens",
         "usesHandoffTokens"
       ],
       "tests": [
@@ -408,11 +408,14 @@
         "consolidation is scoped to the stepIndex that just finished, not merely the newest started marker",
         "a step whose template references an {outputs.<name>} that is absent or blank parks at waiting-approval with an error marker instead of running with a silently blank substitution",
         "a step deliverable captured during plan mode comes from the ExitPlanMode plan (inline argument or written plan file), not the turn's trailing chat text",
-        "outputs are strictly per-session (WorkflowState.outputs); there is no cross-session write path"
+        "outputs are strictly per-session (WorkflowState.outputs); there is no cross-session write path",
+        "prompt tokens are honoured only where the step author wrote them: a token occurring inside substituted content (a step output, the diff, the task text) stays literal instead of being re-expanded",
+        "the working-tree diff handed to a fresh-start step is capped with a truncation marker (MAX_DIFF_CHARS) so a large dirty tree degrades the hand-off rather than failing the turn"
       ],
       "architecturalRules": [
         "reuses the transcript-walking pattern from lastAssistantText/summarizeTurn and the one-shot non-agentic query shape from summarizeTurn/autoName",
-        "advance() is async; callers fire it with void this.advance(sessionId)"
+        "advance() is async; callers fire it with void this.advance(sessionId)",
+        "all prompt tokens are filled in one pass over the template (substituteTokens) rather than by chained replaceAll calls; a new token is added to that pass, never appended as another pass"
       ],
       "relatedDecisions": []
     },

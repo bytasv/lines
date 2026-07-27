@@ -107,6 +107,31 @@ function ImageThumb({ src, alt, onOpen }: { src: string; alt: string; onOpen: ()
   );
 }
 
+/** Chars of a user prompt rendered before it collapses behind a toggle. */
+const USER_TEXT_CAP = 4000;
+
+/**
+ * A user prompt, capped. Workflow hand-off prompts splice in the working-tree diff
+ * and prior step output, and user items are fold *boundaries* — never collapsed,
+ * always rendered on first paint. Running ReactMarkdown + highlight over a
+ * multi-megabyte prompt blocks the main thread long enough to trip the socket
+ * heartbeat, and the reconnect re-downloads the transcript into the same stall.
+ */
+function UserText({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  if (text.length <= USER_TEXT_CAP) return <Markdown text={text} />;
+  return (
+    <>
+      <Markdown text={expanded ? text : text.slice(0, USER_TEXT_CAP) + '\n\n…'} />
+      <Button variant="subtle" size="compact-xs" mt={4} onClick={() => setExpanded((e) => !e)}>
+        {expanded
+          ? 'Show less'
+          : `Show full message (${Math.round(text.length / 1000).toLocaleString()}k chars)`}
+      </Button>
+    </>
+  );
+}
+
 function Item({
   item,
   sessionId,
@@ -143,7 +168,7 @@ function Item({
             // (min-content) would beat maxWidth: 80% for one long unbreakable token.
             style={{ maxWidth: '80%', minWidth: 0, overflowWrap: 'anywhere' }}
           >
-            {item.text && <Markdown text={item.text} />}
+            {item.text && <UserText text={item.text} />}
             {item.mentions && item.mentions.length > 0 && (
               <Group gap={6} mt={item.text ? 6 : 0}>
                 {item.mentions.map((m) => {

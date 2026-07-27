@@ -30,17 +30,38 @@ function sameContent(a: StepContent, b: StepContent): boolean {
 }
 
 /**
- * Substitute `{outputs.<name>}` from the outputs earlier steps published, and report
- * the names that resolved to nothing — absent, or present but blank. Those used to
- * collapse to '' silently, which is how a step ends up running without the plan it
- * asked for and improvising from whatever it can find on disk.
+ * True when a template threads the hand-off in itself — via `{previous}`/`{diff}` or
+ * any `{outputs.*}` — so `runStep` must not also auto-prepend it. Tested against the
+ * template: after substitution the tokens are gone.
  */
-export function substituteOutputs(
-  prompt: string,
+export function usesHandoffTokens(template: string): boolean {
+  return /\{previous\}|\{diff\}|\{outputs\./.test(template);
+}
+
+const TOKEN_RE = /\{(task|feedback|previous|diff|outputs\.[\w-]+)\}/g;
+
+/**
+ * Fill every prompt token in ONE pass over the template. Single-pass is the whole
+ * point: staged `replaceAll`s rescan text they just inserted, so a step output that
+ * merely *mentions* `{previous}`/`{diff}` (a plan about this very feature, say) gets
+ * those tokens expanded too — six literal `{previous}` in a plan meant the plan was
+ * pasted seven times and the diff thirty-five, blowing a 3.8 MB prompt past the
+ * context limit. `String.replace` never rescans replacement text, so substituted
+ * content stays inert.
+ *
+ * `{outputs.<name>}` resolving to nothing — absent, or present but blank — is
+ * reported rather than collapsed to '' silently, which is how a step ends up running
+ * without the plan it asked for and improvising from whatever it finds on disk.
+ */
+export function substituteTokens(
+  template: string,
+  values: { task: string; feedback: string; previous: string; diff: string },
   outputs: Record<string, string>,
 ): { prompt: string; missing: string[] } {
   const missing: string[] = [];
-  const substituted = prompt.replace(/\{outputs\.([\w-]+)\}/g, (_m, name: string) => {
+  const prompt = template.replace(TOKEN_RE, (_m, token: string) => {
+    if (!token.startsWith('outputs.')) return values[token as keyof typeof values];
+    const name = token.slice('outputs.'.length);
     const value = outputs[name];
     if (!value || !value.trim()) {
       if (!missing.includes(name)) missing.push(name);
@@ -48,16 +69,7 @@ export function substituteOutputs(
     }
     return value;
   });
-  return { prompt: substituted, missing };
-}
-
-/**
- * True when a template threads the hand-off in itself — via `{previous}`/`{diff}` or
- * any `{outputs.*}` — so `runStep` must not also auto-prepend it. Tested against the
- * template: after substitution the tokens are gone.
- */
-export function usesHandoffTokens(template: string): boolean {
-  return /\{previous\}|\{diff\}|\{outputs\./.test(template);
+  return { prompt, missing };
 }
 
 export const DEFAULT_WORKFLOW: WorkflowDef = {
@@ -443,15 +455,31 @@ export class WorkflowEngine {
     // A template pulling {outputs.*} already carries its context, so the
     // auto-prepend below must not inject the same text a second time.
     const usesTokens = usesHandoffTokens(content.promptTemplate);
-    let prompt = content.promptTemplate.includes('{feedback}')
-      ? content.promptTemplate.replaceAll('{feedback}', feedbackText)
-      : content.promptTemplate + feedbackText;
-    prompt = prompt.replaceAll('{task}', meta.workflow.task ?? '');
 
-    // Named outputs from earlier steps: {outputs.<name>} → the captured text. An
-    // unresolved name parks the step instead of running it blind.
-    const resolved = substituteOutputs(prompt, meta.workflow.outputs ?? {});
-    prompt = resolved.prompt;
+    // Fresh start: drop the accumulated conversation and seed a clean session
+    // with a compact hand-off — the previous step's final output ({previous},
+    // e.g. a plan) and the working-tree diff ({diff}). Only when entering a step
+    // that actually has predecessors (i > 0); step 0 has no prior output and its
+    // "diff" would just be the repo's pre-existing dirty state. Retries stay in
+    // the fresh session already established for this step.
+    const handoff = content.freshStart && entry && i > 0;
+    const previous = handoff
+      ? (meta.workflow.lastStepOutput ?? this.sessions.lastAssistantText(sessionId))
+      : '';
+    const diff = handoff ? await workingTreeDiff(meta.cwd, meta.workflow.diffBaseline) : '';
+
+    // Every token is filled in one pass over the *template*, so text pulled in by
+    // one token can never be rescanned for another (see substituteTokens). An
+    // unresolved {outputs.<name>} parks the step instead of running it blind.
+    const base = content.promptTemplate.includes('{feedback}')
+      ? content.promptTemplate
+      : content.promptTemplate + '{feedback}';
+    const resolved = substituteTokens(
+      base,
+      { task: meta.workflow.task ?? '', feedback: feedbackText, previous, diff },
+      meta.workflow.outputs ?? {},
+    );
+    let prompt = resolved.prompt;
     if (resolved.missing.length) {
       meta.workflow.stepStatuses[i] = 'waiting-approval';
       this.sessions.setStatus(sessionId, 'error');
@@ -464,16 +492,9 @@ export class WorkflowEngine {
       return;
     }
 
-    // Fresh start: drop the accumulated conversation and seed a clean session
-    // with a compact hand-off — the previous step's final output ({previous},
-    // e.g. a plan) and the working-tree diff ({diff}). Only when entering a step
-    // that actually has predecessors (i > 0); step 0 has no prior output and its
-    // "diff" would just be the repo's pre-existing dirty state. Retries stay in
-    // the fresh session already established for this step.
-    if (content.freshStart && entry && i > 0) {
-      const previous = meta.workflow.lastStepOutput ?? this.sessions.lastAssistantText(sessionId);
-      const diff = await workingTreeDiff(meta.cwd, meta.workflow.diffBaseline);
-      prompt = prompt.replaceAll('{previous}', previous).replaceAll('{diff}', diff);
+    if (handoff) {
+      // A template pulling {outputs.*} (or the hand-off tokens directly) already
+      // carries its context — auto-prepending would inject the same text twice.
       if (!usesTokens) {
         const parts: string[] = [];
         if (previous) parts.push(`## Context from the previous step\n\n${previous}`);
@@ -481,11 +502,9 @@ export class WorkflowEngine {
         if (parts.length) prompt = `${parts.join('\n\n')}\n\n---\n\n${prompt}`;
       }
       this.sessions.resetClaudeSession(sessionId);
-    } else {
-      // No hand-off to fill (non-fresh, a retry, or the first step): strip the
-      // tokens. A fresh first step still gets a clean session below.
-      prompt = prompt.replaceAll('{previous}', '').replaceAll('{diff}', '');
-      if (content.freshStart && entry) this.sessions.resetClaudeSession(sessionId);
+    } else if (content.freshStart && entry) {
+      // Nothing to hand off (a fresh first step) — still start from a clean session.
+      this.sessions.resetClaudeSession(sessionId);
     }
 
     this.sessions.prompt(sessionId, prompt, 'workflow', attachments);

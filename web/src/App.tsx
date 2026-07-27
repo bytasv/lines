@@ -7,6 +7,7 @@ import { Sidebar } from './components/Sidebar';
 import { SessionView } from './components/SessionView';
 import { ProjectTabs } from './components/ProjectTabs';
 import { ConnectionBanner } from './components/ConnectionBanner';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { StorageBanner } from './components/StorageBanner';
 import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/workflow/WorkflowEditor';
@@ -135,7 +136,9 @@ function Shell() {
           ) : sidebarMode === 'files' ? (
             <FilesView />
           ) : selectedSessionId && selectedSession ? (
-            <SessionView key={selectedSessionId} sessionId={selectedSessionId} />
+            <ErrorBoundary key={selectedSessionId}>
+              <SessionView sessionId={selectedSessionId} />
+            </ErrorBoundary>
           ) : (
             <Center h="100%">
               <Stack align="center" gap="xs">

@@ -617,8 +617,13 @@ export const useStore = create<UiState>((set, get) => {
           loginModalOpen:
             state.loginModalOpen || (!msg.auth.loggedIn && state.auth?.loggedIn !== false),
           activeProject: pickActive(msg.projects, state.activeProject),
-          // Live transcripts are stale after a reconnect; force reloads.
-          transcripts: {},
+          // Transcripts may have missed events while the socket was down, so the
+          // open session reloads (SessionView re-sends loadTranscript on `hello`).
+          // Keep the cached events until that reply lands — the `transcript`
+          // handler below merges and dedupes by seq — because blanking them here
+          // made every reconnect re-render from empty and re-download megabytes,
+          // which on a large transcript stalls the main thread into another
+          // heartbeat timeout: reconnect loop.
           transcriptLoaded: {},
         }));
         const { selectedSessionId } = get();
