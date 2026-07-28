@@ -59,6 +59,38 @@
   animation: status-pulse 1.4s ease-out infinite;
 }
 
+/* Brand wordmark: monochrome ink-on-paper / white-on-ink. The logo tile already
+   carries the teal, so the mark stays quiet — weight and tight tracking do the
+   branding instead of color. */
+.brand-wordmark {
+  /* Uppercase via CSS, not the JSX string, so the DOM text stays "Lines" for
+     selection and screen readers. Caps at a light weight need wide tracking or
+     the letters crowd; the trailing -0.14em cancels the space letter-spacing
+     leaves hanging after the final S. */
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  margin-right: -0.14em;
+  color: #232b2d; /* ink, on the #f7f5f0 paper body */
+}
+
+[data-mantine-color-scheme='dark'] .brand-wordmark {
+  color: #ffffff;
+}
+
+/* Brand/tabs separator. Deliberately 3px — status dots are 8px and pulse, so
+   this reads as punctuation, not as a state the user should act on. */
+.brand-separator {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: rgba(35, 43, 45, 0.28);
+  flex: 0 0 auto;
+}
+
+[data-mantine-color-scheme='dark'] .brand-separator {
+  background: rgba(255, 255, 255, 0.26);
+}
+
 /* Inline color swatch appended after detected color literals */
 .color-chip {
   display: inline-flex;

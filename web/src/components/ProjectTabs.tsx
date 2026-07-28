@@ -3,7 +3,6 @@ import {
   Box,
   Center,
   CloseButton,
-  Divider,
   Group,
   Loader,
   Menu,
@@ -122,11 +121,11 @@ export function ProjectTabs() {
         </Box>
         {/* Connection state lives in ConnectionBanner (a centered pill for every
             non-connected state), so a dot here would only ever say "fine". */}
-        <Text component="span" className="brand-wordmark" fw={500} size="md">
+        <Text component="span" className="brand-wordmark" fw={300} size="md">
           Lines
         </Text>
       </Group>
-      <Divider orientation="vertical" className="brand-divider" my={16} />
+      <Box className="brand-separator" mx={8} />
       <ScrollArea type="never" style={{ flex: 1 }}>
         <Group gap={4} wrap="nowrap">
           {projects.map((p) => (
