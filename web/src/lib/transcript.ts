@@ -1,5 +1,6 @@
 import type {
   Attachment,
+  ContextCompactData,
   FileSnapshotData,
   PermissionRequestData,
   PromptMention,
@@ -68,7 +69,16 @@ export type TranscriptItem =
   | { kind: 'system-init'; key: string; model: string }
   | ResultItem
   | { kind: 'permission'; key: string; data: PermissionRequestData; resolution?: 'allow' | 'deny' | 'expired' }
-  | { kind: 'workflow'; key: string; data: WorkflowMarkerData };
+  | { kind: 'workflow'; key: string; data: WorkflowMarkerData }
+  | ContextCompactItem;
+
+/** One compaction. A 'requested' marker renders as "Compacting…" and is upgraded
+ *  in place when its 'done' arrives, so a span is one line, not two. */
+export interface ContextCompactItem {
+  kind: 'context-compact';
+  key: string;
+  data: ContextCompactData;
+}
 
 interface SdkContentBlock {
   type: string;
@@ -140,6 +150,8 @@ export function buildTranscript(
   // to a file under .claude/plans/ instead. Keep the turn's last such write (the block,
   // not its text: its file snapshot can still be arriving) to stitch onto the card.
   let lastPlanWrite: ToolBlock | null = null;
+  /** Compaction whose 'done' hasn't landed yet, so it can be upgraded in place. */
+  let openCompact: ContextCompactItem | null = null;
 
   const attachSnapshot = (tool: ToolBlock) => {
     // Prefer exact tool_use_id match, fall back to file path (hook input ids can be absent).
@@ -214,6 +226,20 @@ export function buildTranscript(
         lastPlanWrite = null;
         items.push({ kind: 'workflow', key: `w${event.seq}`, data: event.data as WorkflowMarkerData });
         break;
+      case 'context-compact': {
+        const data = event.data as ContextCompactData;
+        // An auto-compaction only ever emits 'done', so a 'done' with nothing open
+        // stands on its own.
+        if (data.phase === 'done' && openCompact) {
+          openCompact.data = data;
+          openCompact = null;
+          break;
+        }
+        const item: ContextCompactItem = { kind: 'context-compact', key: `c${event.seq}`, data };
+        openCompact = data.phase === 'requested' ? item : null;
+        items.push(item);
+        break;
+      }
       case 'sdk': {
         const msg = event.data as Record<string, unknown> & { type: string };
         switch (msg.type) {
@@ -428,6 +454,7 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
       it.kind === 'user' ||
       it.kind === 'system-init' ||
       it.kind === 'workflow' ||
+      it.kind === 'context-compact' ||
       (it.kind === 'permission' && it.data.toolName === 'ExitPlanMode');
     if (isBoundary) {
       flush();

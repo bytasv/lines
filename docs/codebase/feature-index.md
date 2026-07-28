@@ -18,3 +18,4 @@
 | `app-data-root` | Machine-global app state root at `~/.lines-app` | [features/app-data-root.md](features/app-data-root.md) |
 | `plan-file-auto-approve` | Plan-mode file reads/writes under `.claude/plans/` auto-approve instead of prompting | [features/plan-file-auto-approve.md](features/plan-file-auto-approve.md) |
 | `auth-failure-recovery` | A turn rejected for a dead OAuth token refreshes or logs out on the spot (opening the login modal), and every query crash gets a Retry button | [features/auth-failure-recovery.md](features/auth-failure-recovery.md) |
+| `context-compaction` | Manual "Compact now" button and passive near-limit warning on the context indicator, plus readable transcript events for manual and CLI auto-compaction — never auto-fired | [features/context-compaction.md](features/context-compaction.md) |

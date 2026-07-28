@@ -16,6 +16,7 @@ import {
 } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
 import {
+  IconArchive,
   IconArrowDown,
   IconChevronDown,
   IconChevronRight,
@@ -24,7 +25,7 @@ import {
   IconRoute,
   IconZoomIn,
 } from '@tabler/icons-react';
-import type { TranscriptEvent, WorkflowMarkerData } from '@lines/shared';
+import type { ContextCompactData, TranscriptEvent, WorkflowMarkerData } from '@lines/shared';
 import { useStore } from '../store';
 import { send, withAuthToken } from '../ws';
 import {
@@ -35,6 +36,7 @@ import {
   type TranscriptItem,
 } from '../lib/transcript';
 import { mentionKindMeta } from '../lib/mentions';
+import { formatTokens } from '../lib/format';
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
 import { PermissionPrompt } from './PermissionPrompt';
@@ -69,6 +71,35 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
       }
       labelPosition="center"
       color={data.event === 'workflow-done' ? 'teal' : 'slate'}
+    />
+  );
+}
+
+/** Compaction marker: the conversation up to here was replaced by a summary. */
+function ContextCompactMarker({ data }: { data: ContextCompactData }) {
+  const pending = data.phase === 'requested';
+  const failed = data.ok === false;
+  const label = pending
+    ? 'Compacting context…'
+    : failed
+      ? data.error === 'no-compact-boundary'
+        ? 'Compaction unavailable — nothing was compacted'
+        : 'Compaction stopped — nothing was compacted'
+      : data.preTokens != null && data.postTokens != null
+        ? `Compacted: ${formatTokens(data.preTokens)} → ${formatTokens(data.postTokens)} tokens`
+        : data.trigger === 'auto'
+          ? 'Context auto-compacted'
+          : 'Context compacted';
+  return (
+    <Divider
+      label={
+        <Group gap={6}>
+          {pending ? <Loader size={10} /> : <IconArchive size={12} />}
+          <Text size="xs">{label}</Text>
+        </Group>
+      }
+      labelPosition="center"
+      color={failed ? 'orange' : 'slate'}
     />
   );
 }
@@ -289,6 +320,8 @@ function Item({
       return <PermissionPrompt sessionId={sessionId} data={item.data} resolution={item.resolution} />;
     case 'workflow':
       return <WorkflowMarker data={item.data} />;
+    case 'context-compact':
+      return <ContextCompactMarker data={item.data} />;
   }
 }
 

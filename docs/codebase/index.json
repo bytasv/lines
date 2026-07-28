@@ -772,6 +772,49 @@
         "SDK/CLI error wording is not a published contract; isAuthFailureMessage can silently stop matching after an upstream change"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "context-compaction",
+      "name": "Context compaction",
+      "doc": "features/context-compaction.md",
+      "purpose": "Manually compact a session's context (summarize + replace the conversation) via a button, plus a passive near-limit warning — never auto-fired — and readable transcript events for both manual and the CLI's own background auto-compaction.",
+      "entryPoints": [
+        "web/src/components/ContextWindowIndicator.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/sessions.ts",
+        "server/src/index.ts",
+        "web/src/lib/transcript.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/components/ContextWindowIndicator.tsx"
+      ],
+      "symbols": [
+        "ContextCompactRecord",
+        "ContextCompactData",
+        "CONTEXT_WARN_PCT",
+        "effectiveContextTokens",
+        "contextCompactBlock",
+        "canCompactContext",
+        "withoutCompactSpans",
+        "extractCompactBoundary",
+        "SessionManager.compactContext"
+      ],
+      "tests": [
+        "server/src/sessions.compact.test.ts"
+      ],
+      "businessRules": [
+        "compaction is never auto-fired by the app on the user's behalf — only a manual button and a passive warning badge, since it is irreversible, lossy, and billable",
+        "the manual button's disabled state always carries a specific reason (turn running, workflow step parked, no session yet, no reading yet, or found unsupported) via one shared contextCompactBlock predicate",
+        "a workflow step parked waiting-approval blocks the manual button but not the CLI's own background auto-compaction",
+        "a compaction is invisible to every workflow turn scan (consolidateStepOutput, lastAssistantText, summarizeTurn, retryTurn) via withoutCompactSpans, but never stripped from permission bookkeeping"
+      ],
+      "architecturalRules": [
+        "compactContext is a dedicated SessionManager method, not a call to prompt() — a compaction carries no 'user' transcript event and must not auto-name the session or touch the queue",
+        "one shared predicate (contextCompactBlock) backs the server-side guard, the button's disabled state, and its tooltip",
+        "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact — all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)"
+      ],
+      "relatedDecisions": []
     }
   ]
 }

@@ -6,6 +6,8 @@ import type {
   AttachmentKind,
   CavemanConfig,
   ContextBreakdown,
+  ContextCompactBlockInfo,
+  ContextCompactData,
   ContextUsage,
   FileSnapshotData,
   PermissionMode,
@@ -18,6 +20,7 @@ import type {
   TranscriptEvent,
 } from '@lines/shared';
 import {
+  contextCompactBlock,
   isPlanFilePath,
   isSessionActive,
   KEEP_PLANNING_MESSAGE,
@@ -75,6 +78,52 @@ export function extractContextUsage(
   const reportedTotal =
     typeof reported === 'number' && Number.isFinite(reported) && reported !== sum ? reported : undefined;
   return { inputTokens, cacheReadTokens, cacheCreationTokens, outputTokens, reportedTotal, model, at };
+}
+
+/**
+ * A compaction and everything it produced, removed from a transcript slice.
+ * Turn scans (collectTurns and friends) must never see it: the summarization
+ * turn has no user prompt of its own, so an unstripped compaction registers as
+ * an extra workflow-step "attempt" whose output is the compaction summary —
+ * which then becomes the `{previous}` hand-off to the next step.
+ *
+ * A span runs from a `phase:'requested'` marker to its matching `phase:'done'`.
+ * An unmatched `requested` (the bridge died mid-compaction) is bounded by the
+ * next `user` event rather than by the end of the array — otherwise one crash
+ * would silently swallow the rest of the transcript forever.
+ */
+export function withoutCompactSpans(events: TranscriptEvent[]): TranscriptEvent[] {
+  const out: TranscriptEvent[] = [];
+  let dropping = false;
+  for (const event of events) {
+    if (event.kind === 'context-compact') {
+      // The markers themselves are display-only; scans never want them either.
+      dropping = (event.data as ContextCompactData).phase === 'requested';
+      continue;
+    }
+    if (dropping && event.kind === 'user') dropping = false; // the next turn closes an orphan span
+    if (!dropping) out.push(event);
+  }
+  return out;
+}
+
+/**
+ * Compaction facts from an SDK `system`/`compact_boundary` message, or undefined
+ * for any other message. `trigger` is omitted when the metadata doesn't say —
+ * the caller knows whether it asked for this one.
+ */
+export function extractCompactBoundary(
+  msg: Record<string, unknown>,
+): { trigger?: 'manual' | 'auto'; preTokens?: number; postTokens?: number } | undefined {
+  if (msg.type !== 'system' || msg.subtype !== 'compact_boundary') return undefined;
+  const md = (msg.compact_metadata ?? {}) as Record<string, unknown>;
+  const num = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+  return {
+    trigger: md.trigger === 'manual' || md.trigger === 'auto' ? md.trigger : undefined,
+    preTokens: num(md.pre_tokens),
+    postTokens: num(md.post_tokens),
+  };
 }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
@@ -281,6 +330,10 @@ interface LiveState {
   /** Reading from the latest `assistant` message of the in-flight turn; committed
    *  to the meta when the turn settles, so the sidebar isn't re-rendered per message. */
   contextUsage?: ContextUsage;
+  /** A compaction boundary landed inside the turn still in flight. Its remaining
+   *  `assistant` messages can describe either side of the boundary, so none of
+   *  them is a trustworthy occupancy reading — compact_metadata is. */
+  compactedInTurn?: boolean;
 }
 
 export type TurnCompleteListener = (sessionId: string, source: 'user' | 'workflow') => void;
@@ -291,6 +344,10 @@ export class SessionManager {
   /** Sessions with a manual interrupt in flight — lets an `ended` without a
    *  `result` still settle the turn (see handleWorkerEnded). */
   private interrupting = new Set<string>();
+  /** Sessions with a manual compaction in flight. Guards against a second
+   *  concurrent request, and its survival past the turn's `result` is how we
+   *  detect that no compaction happened (see handleWorkerEvent). */
+  private compacting = new Set<string>();
   private onTurnComplete: TurnCompleteListener | null = null;
   private worker!: WorkerClient;
   /** In-flight `/context` fetches, so a hover during the post-turn refresh reuses
@@ -489,6 +546,7 @@ export class SessionManager {
     this.flushPending(id); // the session is gone with its cards
     this.sessions.delete(id);
     this.live.delete(id);
+    this.compacting.delete(id);
     this.store.deleteTranscript(id);
     this.persist();
     this.broadcast({ type: 'sessionDeleted', sessionId: id });
@@ -679,8 +737,9 @@ export class SessionManager {
     const meta = this.sessions.get(sessionId);
     if (!meta || this.isBusy(meta)) return;
 
-    const last = this.store
-      .loadTranscript(sessionId)
+    // A compaction emits no 'user' event, so stripping changes nothing here —
+    // applied anyway so the invariant is "turn scans never see compact spans".
+    const last = withoutCompactSpans(this.store.loadTranscript(sessionId))
       .filter((e) => e.kind === 'user')
       .at(-1);
     const data = last?.data as
@@ -805,6 +864,69 @@ export class SessionManager {
   }
 
   /**
+   * Compact this session's context now. Deliberately not routed through
+   * prompt(): a compaction is not a user turn — it emits no 'user' event, so it
+   * stays invisible to every turn scan (see withoutCompactSpans), and it must not
+   * auto-name the session, clear the interrupted flag, or touch the queue.
+   *
+   * The mechanism is the CLI's own: `/compact` dispatches from ordinary prompt
+   * text (`supportsNonInteractive` + `thinClientDispatch: "post-text"`), so the
+   * push below is the same path a prompt takes. That is reverse-engineered, not a
+   * published SDK contract — hence nothing here assumes it worked. A turn that
+   * settles without a `compact_boundary` records `ok: false`, which flips this
+   * guard to `unsupported` for every later call.
+   */
+  compactContext(sessionId: string): { ok: true } | ({ ok: false } & ContextCompactBlockInfo) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) {
+      return { ok: false, code: 'no-session', reason: "Send a message first — there's nothing to compact yet." };
+    }
+    const block = contextCompactBlock(meta);
+    if (block) return { ok: false, ...block };
+    // Belt and braces: an in-flight compaction already shows as 'running' above.
+    if (this.compacting.has(sessionId)) {
+      return { ok: false, code: 'turn-running', reason: 'Finish the current turn first.' };
+    }
+
+    this.compacting.add(sessionId);
+    this.emitEvent(sessionId, 'context-compact', {
+      phase: 'requested',
+      trigger: 'manual',
+    } satisfies ContextCompactData);
+    meta.turnSource = 'user';
+    meta.turnStartedAt = Date.now();
+    this.setStatus(sessionId, 'running');
+
+    this.worker.push(
+      sessionId,
+      {
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text: '/compact' }] },
+        parent_tool_use_id: null,
+      },
+      this.buildQueryOptions(meta),
+    );
+    return { ok: true };
+  }
+
+  /**
+   * Close an open compaction span without judging the mechanism: the user stopped
+   * it, or the query died. Neither proves compaction is unavailable, so no
+   * `contextCompact` record is written — only the transcript span is closed, so a
+   * later turn scan isn't bounded by an orphan marker.
+   */
+  private abandonCompaction(sessionId: string, error: string) {
+    if (!this.compacting.delete(sessionId)) return;
+    this.liveState(sessionId).compactedInTurn = undefined;
+    this.emitEvent(sessionId, 'context-compact', {
+      phase: 'done',
+      trigger: 'manual',
+      ok: false,
+      error,
+    } satisfies ContextCompactData);
+  }
+
+  /**
    * Drop the resumed CLI context so this session's next prompt starts a brand-new
    * Claude session (no memory of prior turns). Used by fresh-start workflow steps.
    * The next SDK message re-captures a fresh claudeSessionId (see handleSdkMessage).
@@ -825,7 +947,7 @@ export class SessionManager {
    * hand-off when a fresh step needs the prior step's output (e.g. a plan).
    */
   lastAssistantText(sessionId: string): string {
-    const events = this.store.loadTranscript(sessionId);
+    const events = withoutCompactSpans(this.store.loadTranscript(sessionId));
     let lastUserIdx = -1;
     for (let i = events.length - 1; i >= 0; i--) {
       if (events[i].kind === 'user') {
@@ -848,7 +970,9 @@ export class SessionManager {
    */
   async consolidateStepOutput(sessionId: string, stepIndex?: number): Promise<string> {
     try {
-      const events = this.store.loadTranscript(sessionId);
+      // Stripped before findStepStart, so the index it returns and the slice
+      // collectTurns takes are cut from the same array.
+      const events = withoutCompactSpans(this.store.loadTranscript(sessionId));
       // Slice from the marker that opened *this* step, not merely the newest
       // 'started' one: with a step queued while the previous one consolidates,
       // the newest marker can already belong to the next step.
@@ -987,7 +1111,7 @@ export class SessionManager {
    */
   private async summarizeTurn(sessionId: string, resultSeq: number) {
     try {
-      const events = this.store.loadTranscript(sessionId);
+      const events = withoutCompactSpans(this.store.loadTranscript(sessionId));
       const lastUserIdx = (() => {
         for (let i = events.length - 1; i >= 0; i--) if (events[i].kind === 'user') return i;
         return -1;
@@ -1071,6 +1195,8 @@ export class SessionManager {
       wf.advanceOnComplete = 'interrupted';
     }
     this.interrupting.add(sessionId);
+    // A stopped compaction is a user decision, not a broken mechanism.
+    this.abandonCompaction(sessionId, 'interrupted');
     this.worker.interrupt(sessionId);
     // Deny anything waiting on the user so the query is not stuck; user
     // explicitly stopped, so close the cards too.
@@ -1499,12 +1625,59 @@ export class SessionManager {
     // Each assistant message overwrites the reading; the last one before the
     // result describes the turn's final prompt. Held live rather than upserted
     // per message, which would broadcast a sidebar re-render 10-20x a turn.
-    if (msg.type === 'assistant' && meta) {
+    if (msg.type === 'assistant' && meta && !this.liveState(sessionId).compactedInTurn) {
       const reading = extractContextUsage(msg, meta.model, Date.now());
       if (reading) this.liveState(sessionId).contextUsage = reading;
     }
 
+    // A compaction — ours or the CLI's own auto-compaction, which fires without
+    // being asked (settingSources pulls in autoCompactEnabled). Recorded on the
+    // meta so the ring self-corrects immediately instead of showing the
+    // pre-compaction number until the next turn reports.
+    const boundary = extractCompactBoundary(msg);
+    if (boundary && meta) {
+      const trigger = boundary.trigger ?? (this.compacting.has(sessionId) ? 'manual' : 'auto');
+      meta.contextCompact = {
+        at: Date.now(),
+        trigger,
+        preTokens: boundary.preTokens,
+        postTokens: boundary.postTokens,
+        ok: true,
+      };
+      this.upsert(meta);
+      this.emitEvent(sessionId, 'context-compact', {
+        phase: 'done',
+        trigger,
+        preTokens: boundary.preTokens,
+        postTokens: boundary.postTokens,
+        ok: true,
+      } satisfies ContextCompactData);
+      this.compacting.delete(sessionId);
+      // Any reading from this turn describes the conversation that was just
+      // summarized away, so none of them may settle onto the meta at the result.
+      const state = this.liveState(sessionId);
+      state.contextUsage = undefined;
+      state.compactedInTurn = true;
+    }
+
     if (msg.type === 'result') {
+      // The compaction turn settled without a boundary: the mechanism didn't
+      // work here (DISABLE_COMPACT, or an SDK that dropped the behaviour). Record
+      // it — that is what flips the button to permanently-disabled-with-a-reason
+      // instead of leaving the user clicking a button that does nothing.
+      if (this.compacting.delete(sessionId)) {
+        const metaC = this.sessions.get(sessionId);
+        if (metaC) {
+          metaC.contextCompact = { at: Date.now(), trigger: 'manual', ok: false };
+          this.upsert(metaC);
+        }
+        this.emitEvent(sessionId, 'context-compact', {
+          phase: 'done',
+          trigger: 'manual',
+          ok: false,
+          error: 'no-compact-boundary',
+        } satisfies ContextCompactData);
+      }
       // The SDK can surface a rejected token as an error result instead of throwing;
       // Retry already renders for these, only the login prompt is missing.
       const failed = msg.is_error === true || (msg.subtype != null && msg.subtype !== 'success');
@@ -1543,6 +1716,7 @@ export class SessionManager {
           metaNow.contextUsage = live.contextUsage;
           live.contextUsage = undefined;
         }
+        live.compactedInTurn = undefined; // the next turn measures normally again
         const rawDurationMs = (msg as { duration_ms?: number }).duration_ms;
         if (typeof rawDurationMs === 'number') {
           const state = this.liveState(sessionId);
@@ -1577,6 +1751,9 @@ export class SessionManager {
   handleWorkerEnded(sessionId: string, error?: string) {
     // Cards stay open; answers recover via the resume path.
     this.flushPending(sessionId);
+    // A dead query says nothing about whether compaction is supported — close the
+    // span, keep the button enabled.
+    this.abandonCompaction(sessionId, error ? 'query-failed' : 'query-ended');
     if (error) {
       console.error(`[session ${sessionId}] query failed:`, error);
       // Don't auto-fire queued prompts into a broken session; a user send resumes.

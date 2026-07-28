@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import {
   Box,
+  Button,
   Collapse,
   Divider,
   Group,
@@ -11,13 +12,21 @@ import {
   ScrollArea,
   Stack,
   Text,
+  Tooltip,
   UnstyledButton,
 } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
-import { IconChevronRight } from '@tabler/icons-react';
+import { IconAlertTriangle, IconChevronRight } from '@tabler/icons-react';
 import type { ContextBreakdown, ContextCategory, ContextSummary, ContextUsage, SessionMeta } from '@lines/shared';
-import { contextDenominator, preferContextSummary } from '@lines/shared';
+import {
+  CONTEXT_WARN_PCT,
+  contextCompactBlock,
+  contextDenominator,
+  effectiveContextTokens,
+  preferContextSummary,
+} from '@lines/shared';
 import { useStore } from '../store';
+import { send } from '../ws';
 import { formatDuration, formatTokens, usageColor } from '../lib/format';
 
 /** Category name as a lookup key: lowercased, with a trailing ` (deferred)`
@@ -359,6 +368,40 @@ function BreakdownBody({
   );
 }
 
+/**
+ * Manual compaction trigger. Disabled in several legitimately different
+ * situations, so it always states which one — the tooltip text is the shared
+ * predicate's own `reason`, the same string the server rejects with.
+ */
+function CompactButton({ session }: { session: SessionMeta }) {
+  const block = contextCompactBlock(session);
+  return (
+    <Tooltip
+      label={block?.reason ?? "Compact this session's context now"}
+      multiline
+      w={240}
+      withArrow
+      position="top"
+    >
+      {/* Wrapper: a disabled Mantine button swallows the pointer events the
+          tooltip needs, and a disabled button with no explanation is the thing
+          this is meant to avoid. */}
+      <Box>
+        <Button
+          size="compact-xs"
+          variant="light"
+          fullWidth
+          disabled={block !== null}
+          title={block?.reason ?? "Compact this session's context now"}
+          onClick={() => send({ type: 'compactContext', sessionId: session.id })}
+        >
+          Compact now
+        </Button>
+      </Box>
+    </Tooltip>
+  );
+}
+
 /** Assistant-usage body — the reading we can derive without a live query. */
 function FallbackBody({ usage }: { usage: ContextUsage }) {
   const promptSum = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
@@ -434,11 +477,24 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
   const fallbackUsed = usage
     ? usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens + usage.outputTokens
     : 0;
-  const pct = view
-    ? Math.min(100, view.percentage)
-    : denominator
-      ? Math.min(100, (fallbackUsed / denominator) * 100)
-      : null;
+  // A compaction that landed after the last reading supersedes both bodies: the
+  // categories below describe a conversation that has since been summarized away.
+  const effective = effectiveContextTokens(session);
+  const compacted = effective?.fromCompaction ? effective.used : null;
+  // The CLI's real window when we have ever seen one, even in fallback mode —
+  // a compaction reports raw tokens, so it needs a denominator of its own.
+  const windowTokens = contextDenominator(summary, model, models);
+  const pct =
+    compacted != null
+      ? windowTokens
+        ? Math.min(100, (compacted / windowTokens) * 100)
+        : null
+      : view
+        ? Math.min(100, view.percentage)
+        : denominator
+          ? Math.min(100, (fallbackUsed / denominator) * 100)
+          : null;
+  const nearLimit = !stale && pct != null && pct >= CONTEXT_WARN_PCT;
   const modelLabel = models.find((m) => m.id === model)?.label ?? model;
 
   return (
@@ -454,7 +510,7 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
       <HoverCard.Target>
         <UnstyledButton
           aria-label="Context window usage"
-          style={{ display: 'flex', alignItems: 'center', opacity: stale ? 0.45 : 1 }}
+          style={{ display: 'flex', alignItems: 'center', gap: 2, opacity: stale ? 0.45 : 1 }}
         >
           {pct == null ? (
             <Text size="xs" c="dimmed">
@@ -469,6 +525,9 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
               sections={[{ value: pct, color: stale ? 'gray' : usageColor(pct) }]}
             />
           )}
+          {/* Passive warning only: compaction is lossy, irreversible and billable,
+              so it stays a decision the user makes. */}
+          {nearLimit && <IconAlertTriangle size={12} color="var(--mantine-color-orange-6)" />}
         </UnstyledButton>
       </HoverCard.Target>
       <HoverCard.Dropdown>
@@ -495,11 +554,29 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
                 Live detail unavailable — the session isn't running.
               </Text>
             )}
+            {compacted != null && (
+              <Text size="xs" c="dimmed">
+                {session.contextCompact?.trigger === 'auto'
+                  ? 'Auto-compacted since the last measured turn'
+                  : 'Compacted since the last measured turn'}
+                {` — ${formatTokens(compacted)} in context. The breakdown above predates it.`}
+              </Text>
+            )}
             <Text size="xs" c="dimmed">
               {stale
                 ? 'The conversation was reset for a fresh step — this reading is from before that, and refreshes when the next turn completes.'
                 : 'Measured at the last completed turn; the draft you are typing is not counted.'}
             </Text>
+            {nearLimit && (
+              <Group gap={6} wrap="nowrap">
+                <IconAlertTriangle size={12} color="var(--mantine-color-orange-6)" />
+                <Text size="xs" c="orange">
+                  Over {CONTEXT_WARN_PCT}% of the window — compacting now frees room for the rest of
+                  the task.
+                </Text>
+              </Group>
+            )}
+            <CompactButton session={session} />
             <Divider />
             <Text size="xs" fw={700} tt="uppercase" c="dimmed">
               Session totals

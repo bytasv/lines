@@ -622,6 +622,21 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       );
       break;
     }
+    case 'compactContext': {
+      const result = sessions.compactContext(msg.sessionId);
+      // The block reason is written for a human — surface it verbatim rather than
+      // inventing a second wording for the same gate the button already reads.
+      if (!result.ok) {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            sessionId: msg.sessionId,
+            message: result.reason,
+          } satisfies ServerMessage),
+        );
+      }
+      break;
+    }
     case 'loadTranscript': {
       const started = PERF ? performance.now() : 0;
       const lines = store.loadTranscriptRaw(msg.sessionId);

@@ -279,6 +279,35 @@ export interface ContextBreakdown extends ContextSummary {
   };
 }
 
+/**
+ * A compaction of the CLI conversation — the model summarizes the transcript so
+ * far and the summary replaces it. Either the user asked for it ('manual', via
+ * the Compact now button) or the CLI's own auto-compaction fired ('auto').
+ *
+ * `postTokens` is optional: the SDK's compact_metadata may omit it, in which case
+ * the next turn's reading is the only post-compaction number we get.
+ */
+export interface ContextCompactRecord {
+  at: number;
+  trigger: 'manual' | 'auto';
+  preTokens?: number;
+  postTokens?: number;
+  /** false = the request produced no compaction (see contextCompactBlock's
+   *  `unsupported`), which permanently disables the manual button. */
+  ok: boolean;
+}
+
+/** Transcript-event payload for a compaction (kind: 'context-compact'). */
+export interface ContextCompactData {
+  /** 'requested' opens a span, 'done' closes it. An auto-compaction only emits 'done'. */
+  phase: 'requested' | 'done';
+  trigger?: 'manual' | 'auto';
+  preTokens?: number;
+  postTokens?: number;
+  ok?: boolean;
+  error?: string;
+}
+
 export interface SessionMeta {
   id: string;
   name: string;
@@ -306,6 +335,10 @@ export interface SessionMeta {
   /** `/context` breakdown summary from the last successful control request —
    *  the authoritative occupancy reading. See preferContextSummary. */
   contextSummary?: ContextSummary;
+  /** Last compaction of this session's CLI conversation, whoever triggered it.
+   *  Self-corrects the occupancy reading (see effectiveContextTokens) and, when
+   *  `ok: false`, records that compaction isn't available here. */
+  contextCompact?: ContextCompactRecord;
   /** ms epoch the CLI conversation was discarded (fresh-start workflow step).
    *  Any reading older than this describes a conversation that no longer exists,
    *  so the UI marks it stale until the next turn reports. */
@@ -362,8 +395,9 @@ export interface TranscriptEvent {
    * - 'permission': permission request / resolution
    * - 'workflow'  : workflow step transition marker
    * - 'turn-summary': one-line summary of a completed turn's tool activity
+   * - 'context-compact': context compaction requested / finished
    */
-  kind: 'user' | 'sdk' | 'file-snapshot' | 'permission' | 'workflow' | 'turn-summary';
+  kind: 'user' | 'sdk' | 'file-snapshot' | 'permission' | 'workflow' | 'turn-summary' | 'context-compact';
   data: unknown;
 }
 
@@ -504,6 +538,8 @@ export type ClientMessage =
   | { type: 'stepVersions'; ownerId: string; stepId: string }
   /** Live `/context` breakdown for one session (hover-triggered). Echoed back. */
   | { type: 'contextBreakdown'; sessionId: string }
+  /** Compact this session's context now (manual compaction). */
+  | { type: 'compactContext'; sessionId: string }
   | { type: 'loadTranscript'; sessionId: string }
   | { type: 'pickFolder' }
   | { type: 'openProject'; path: string }
@@ -710,4 +746,92 @@ export function contextDenominator(
   models: ModelOption[],
 ): number | undefined {
   return summary?.maxTokens ?? contextWindowFor(modelId, models);
+}
+
+/** Percent of the window at which the UI starts warning about the context filling up. */
+export const CONTEXT_WARN_PCT = 80;
+
+/**
+ * Tokens currently in context, from the freshest source available. A compaction
+ * that landed *after* the last turn's reading wins: the readings describe the
+ * conversation that was just summarized away, so without this the ring keeps
+ * showing the pre-compaction number until the next turn reports — which is
+ * exactly what a CLI auto-compaction does to us.
+ *
+ * `fromCompaction` tells the caller the number came from compact_metadata rather
+ * than from a measured turn, so it can be labelled as such.
+ */
+export function effectiveContextTokens(
+  meta: Pick<SessionMeta, 'contextSummary' | 'contextUsage' | 'contextCompact'>,
+): { used: number; fromCompaction: boolean } | undefined {
+  const { contextSummary: summary, contextUsage: usage, contextCompact: compact } = meta;
+  const base = preferContextSummary(summary, usage)
+    ? { used: summary!.totalTokens, at: summary!.at }
+    : usage
+      ? {
+          used:
+            usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens + usage.outputTokens,
+          at: usage.at,
+        }
+      : undefined;
+  if (compact?.ok && compact.postTokens != null && (!base || compact.at > base.at)) {
+    return { used: compact.postTokens, fromCompaction: true };
+  }
+  return base ? { used: base.used, fromCompaction: false } : undefined;
+}
+
+export type ContextCompactBlockCode =
+  | 'turn-running'
+  | 'step-parked'
+  | 'no-session'
+  | 'no-reading'
+  | 'unsupported';
+
+/** Why compaction can't run right now — `reason` goes straight into a tooltip. */
+export interface ContextCompactBlockInfo {
+  code: ContextCompactBlockCode;
+  reason: string;
+}
+
+const NOTHING_TO_COMPACT = "Send a message first — there's nothing to compact yet.";
+
+/**
+ * The single predicate behind the manual-compaction gate: the server guard, the
+ * Compact now button's `disabled`, and its tooltip all read this, so a disabled
+ * button can always say *why*. Returns null when compaction is allowed.
+ *
+ * Order is transient-first: a session that is merely busy shouldn't be reported
+ * as permanently unsupported.
+ */
+export function contextCompactBlock(
+  meta: Pick<
+    SessionMeta,
+    'status' | 'claudeSessionId' | 'contextSummary' | 'contextUsage' | 'contextCompact'
+  >,
+): ContextCompactBlockInfo | null {
+  if (meta.status === 'running' || meta.status === 'waiting-permission') {
+    return { code: 'turn-running', reason: 'Finish the current turn first.' };
+  }
+  if (meta.status === 'waiting-approval') {
+    return {
+      code: 'step-parked',
+      reason:
+        'This workflow step is waiting for approval — approve or force-advance it first, then compact.',
+    };
+  }
+  // worker.push creates the query lazily, so '/compact' on a session that never
+  // ran would spawn a fresh query with `resume: undefined` and compact nothing.
+  if (!meta.claudeSessionId) return { code: 'no-session', reason: NOTHING_TO_COMPACT };
+  if (!effectiveContextTokens(meta)) return { code: 'no-reading', reason: NOTHING_TO_COMPACT };
+  if (meta.contextCompact?.ok === false) {
+    return { code: 'unsupported', reason: "Compaction isn't available in this session." };
+  }
+  return null;
+}
+
+/** Server-side guard form of {@link contextCompactBlock}. */
+export function canCompactContext(
+  meta: Parameters<typeof contextCompactBlock>[0],
+): boolean {
+  return contextCompactBlock(meta) === null;
 }
