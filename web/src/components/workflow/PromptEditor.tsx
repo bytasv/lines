@@ -71,11 +71,11 @@ export function PromptEditor({
           <Tooltip
             label={
               (freshStart ? '' : 'Turn on “Fresh start” to use this. ') +
-              "Replaced with the previous step's final message (e.g. its plan). If neither {previous} nor {diff} is used, both are prepended automatically."
+              "Replaced with the previous step's final message (e.g. its plan). A fresh-start step whose template uses {previous}, {diff} or any {outputs.…} is assumed to carry its own context — the automatic hand-off block is not prepended."
             }
             withArrow
             multiline
-            w={240}
+            w={260}
           >
             <Button
               size="compact-xs"
@@ -107,7 +107,7 @@ export function PromptEditor({
             </Button>
           </Tooltip>
           <Tooltip
-            label="Replaced with the named output of an earlier step. Give a step an “Output name”, then reference it here — works across the whole workflow this step runs in, not just the previous step."
+            label="Replaced with the named output of an earlier step. Give a step an “Output name”, then reference it here — works across the whole workflow this step runs in, not just the previous step. A fresh-start step whose template uses {previous}, {diff} or any {outputs.…} is assumed to carry its own context — the automatic hand-off block is not prepended."
             withArrow
             multiline
             w={260}
