@@ -33,6 +33,7 @@ import {
   setBadge,
 } from './lib/alerts';
 import { updateFavicon } from './lib/favicon';
+import { sessionRowMeta } from './lib/format';
 import type { MentionValue } from './lib/mentions';
 
 const ACTIVE_PROJECT_KEY = 'lines.activeProject';
@@ -260,23 +261,59 @@ function pickActive(projects: string[], current: string | null): string | null {
 }
 
 /**
- * Sessions that belong to the active project.
+ * Sessions that belong to the given project.
  *
- * Matching is by project key when the active checkout has one, so a session
- * created on another machine — where the same repo sits at a different absolute
- * path — still lands in this project. Unkeyed checkouts (no git remote) fall
- * back to exact path equality, which is the old behaviour.
+ * Matching is by project key when that checkout has one, so a session created
+ * on another machine — where the same repo sits at a different absolute path —
+ * still lands in this project. Unkeyed checkouts (no git remote) fall back to
+ * exact path equality, which is the old behaviour.
  */
 export function sessionsInProject(
   sessions: Record<string, SessionMeta>,
   projectKeys: ProjectKeyMap,
-  activeProject: string | null,
+  project: string | null,
 ): SessionMeta[] {
-  if (!activeProject) return [];
-  const activeKey = projectKeys[activeProject];
+  if (!project) return [];
+  const projectKey = projectKeys[project];
   return Object.values(sessions).filter(
-    (s) => s.cwd === activeProject || (activeKey != null && projectKeys[s.cwd] === activeKey),
+    (s) => s.cwd === project || (projectKey != null && projectKeys[s.cwd] === projectKey),
   );
+}
+
+/**
+ * Which actionable session states the user has already seen, session id -> the
+ * `sessionRowMeta` label that was acknowledged. Drives the project tab dot: a
+ * tab only pulses for states missing from this map.
+ *
+ * Two rules make "seen" mean what it should. Opening a project acknowledges
+ * everything actionable in it — the sidebar spells those out, so they are seen
+ * by definition. And an entry is dropped the moment its session stops being
+ * actionable, so the same session needing the user *again* later reads as new
+ * rather than staying silently acknowledged.
+ */
+function reconcileSeenStatus(
+  seen: Record<string, string>,
+  sessions: Record<string, SessionMeta>,
+  projectKeys: ProjectKeyMap,
+  activeProject: string | null,
+): Record<string, string> {
+  const next: Record<string, string> = {};
+  const activeKey = activeProject ? projectKeys[activeProject] : undefined;
+  for (const s of Object.values(sessions)) {
+    if (s.archived) continue;
+    const { actionable, label } = sessionRowMeta(s);
+    if (!actionable) continue; // no entry — a later relapse counts as unseen
+    const inActiveProject =
+      activeProject != null &&
+      (s.cwd === activeProject || (activeKey != null && projectKeys[s.cwd] === activeKey));
+    if (inActiveProject || seen[s.id] === label) next[s.id] = label;
+  }
+  return next;
+}
+
+function sameStringMap(a: Record<string, string>, b: Record<string, string>): boolean {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
 }
 
 /** Most recently created session in the given directory, if any. */
@@ -312,6 +349,8 @@ interface UiState {
   dismissedCheckouts: string[];
   /** Project whose sessions are shown; new sessions run here. */
   activeProject: string | null;
+  /** Actionable session states the user has already looked at; see reconcileSeenStatus. */
+  seenSessionStatus: Record<string, string>;
   transcripts: Record<string, TranscriptEvent[]>;
   /** Sessions whose on-disk transcript has been requested/loaded. */
   transcriptLoaded: Record<string, boolean>;
@@ -442,6 +481,7 @@ export const useStore = create<UiState>((set, get) => {
   projectKeys: {},
   dismissedCheckouts: loadDismissedCheckouts(),
   activeProject: localStorage.getItem(ACTIVE_PROJECT_KEY),
+  seenSessionStatus: {},
   transcripts: {},
   transcriptLoaded: {},
   lastEventAt: {},
@@ -822,4 +862,25 @@ export const useStore = create<UiState>((set, get) => {
     updateFavicon({ attention: countAttention(sessions), running: countRunning(sessions) > 0 });
   },
   };
+});
+
+// Derived state, maintained here rather than at each mutation site: session
+// status, project membership and which project is open all move independently,
+// and every one of them can change what counts as "seen".
+useStore.subscribe((state, prev) => {
+  if (
+    state.sessions === prev.sessions &&
+    state.projectKeys === prev.projectKeys &&
+    state.activeProject === prev.activeProject
+  ) {
+    return;
+  }
+  const next = reconcileSeenStatus(
+    state.seenSessionStatus,
+    state.sessions,
+    state.projectKeys,
+    state.activeProject,
+  );
+  // Bail on no-op writes: this listener would otherwise re-enter on its own set.
+  if (!sameStringMap(next, state.seenSessionStatus)) useStore.setState({ seenSessionStatus: next });
 });

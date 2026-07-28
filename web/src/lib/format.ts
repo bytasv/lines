@@ -10,6 +10,9 @@ const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
   error: { color: 'red', label: 'error' },
 };
 
+/** Interrupted turns have no `SessionStatus` of their own — they stay `idle`. */
+const INTERRUPTED_META = { color: 'yellow', label: 'interrupted' };
+
 /**
  * Dot color + badge label for a sidebar session row. Precedence mirrors the
  * banner order in `SessionView`: a pending permission first, then an
@@ -26,7 +29,7 @@ export function sessionRowMeta(session: SessionMeta): {
   }
   // Same guard as the Continue banner — keep the two in step.
   if (session.interruptedAt && !isSessionActive(session.status) && session.status !== 'error') {
-    return { color: 'yellow', label: 'interrupted', actionable: true };
+    return { ...INTERRUPTED_META, actionable: true };
   }
   const meta = STATUS_META[session.status] ?? STATUS_META.idle;
   const { status } = session;
@@ -51,6 +54,57 @@ export function waitingPermissionMeta(tool?: string): { label: string; color: st
     default:
       return { label: 'needs permission', color: 'yellow' };
   }
+}
+
+/**
+ * Which actionable state wins when a project tab can only show one dot, most
+ * urgent first. Built from the same tables `sessionRowMeta` reads so a tab dot
+ * can never drift from the sidebar dot it points at.
+ */
+const PROJECT_STATUS_ORDER = [
+  waitingPermissionMeta('ExitPlanMode'), // plan ready       — violet
+  waitingPermissionMeta('AskUserQuestion'), // needs answer     — teal
+  STATUS_META['waiting-approval'], // needs approval   — sandstone
+  waitingPermissionMeta(undefined), // needs permission — yellow
+  INTERRUPTED_META, // interrupted      — yellow
+  STATUS_META.error, // error            — red
+];
+
+/** Keyed on label — all six are distinct, so a rename propagates for free. */
+const PROJECT_STATUS_RANK = new Map(PROJECT_STATUS_ORDER.map((m, i) => [m.label, i]));
+
+/**
+ * The single most urgent *unseen* actionable state across a project's sessions,
+ * or `null` when nothing needs the user (caller keeps the plain folder icon).
+ *
+ * `seen` is the store's `seenSessionStatus` map — session id to the label the
+ * user has already looked at. Anything matching is skipped, so visiting a
+ * project quiets its tab until some session reaches a state the user hasn't
+ * seen yet.
+ *
+ * `running`/`done`/`idle` are already `actionable: false`, so they fall through
+ * without a second check. Archived sessions are skipped; `completed` needs no
+ * guard of its own because the server always sets it alongside `archived`.
+ * A label missing from the rank table (a future `SessionStatus`) is skipped
+ * rather than guessed at.
+ */
+export function projectStatusMeta(
+  sessions: SessionMeta[],
+  seen: Record<string, string>,
+): { color: string; label: string } | null {
+  let best: { color: string; label: string } | null = null;
+  let bestRank = Infinity;
+  for (const session of sessions) {
+    if (session.archived) continue;
+    const meta = sessionRowMeta(session);
+    if (!meta.actionable || seen[session.id] === meta.label) continue;
+    const rank = PROJECT_STATUS_RANK.get(meta.label);
+    if (rank == null || rank >= bestRank) continue;
+    best = { color: meta.color, label: meta.label };
+    bestRank = rank;
+    if (rank === 0) break;
+  }
+  return best;
 }
 
 /** Green under 50%, amber to 80%, red above — mirrors ClaudeUsageBar's thresholds. */

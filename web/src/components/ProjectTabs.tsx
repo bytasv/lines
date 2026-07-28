@@ -1,9 +1,10 @@
 import {
   ActionIcon,
   Box,
+  Center,
   CloseButton,
+  Divider,
   Group,
-  Indicator,
   Loader,
   Menu,
   ScrollArea,
@@ -12,8 +13,9 @@ import {
   useMantineColorScheme,
 } from '@mantine/core';
 import { IconFolder, IconFolderOpen, IconMoon, IconPlus, IconSettings, IconSun } from '@tabler/icons-react';
-import { useState } from 'react';
-import { useStore } from '../store';
+import { useState, type CSSProperties } from 'react';
+import { projectStatusMeta } from '../lib/format';
+import { sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
 import logoUrl from '../assets/logo.svg';
 import { SettingsModal } from './SettingsModal';
@@ -26,9 +28,18 @@ function baseName(path: string) {
 
 function ProjectTab({ path, active }: { path: string; active: boolean }) {
   const setActiveProject = useStore((s) => s.setActiveProject);
+  const sessions = useStore((s) => s.sessions);
+  const projectKeys = useStore((s) => s.projectKeys);
+  const seen = useStore((s) => s.seenSessionStatus);
+  // The active project's sessions are already spelled out in the sidebar, so a
+  // dot here would only be noise. Leaving keeps it quiet: opening the project
+  // marked those states seen, and only a state the user hasn't seen re-lights it.
+  const status = active
+    ? null
+    : projectStatusMeta(sessionsInProject(sessions, projectKeys, path), seen);
 
   return (
-    <Tooltip label={path} openDelay={500}>
+    <Tooltip label={status ? `${path} — ${status.label}` : path} openDelay={500}>
       <Box
         onClick={() => setActiveProject(path)}
         px={8}
@@ -43,7 +54,24 @@ function ProjectTab({ path, active }: { path: string; active: boolean }) {
           background: active ? 'var(--mantine-color-default-hover)' : undefined,
         }}
       >
-        <IconFolder size={13} opacity={0.6} />
+        {/* Fixed-width slot so the tab doesn't jitter as 13px icon ↔ 8px dot swap. */}
+        <Center w={13} style={{ flex: '0 0 13px' }}>
+          {status ? (
+            // Every dot rendered here is actionable by construction — always pulse.
+            <span
+              className="status-dot"
+              data-pulse
+              style={
+                {
+                  '--status-dot-color': `var(--mantine-color-${status.color}-6)`,
+                  '--status-pulse-color': `var(--mantine-color-${status.color}-5)`,
+                } as CSSProperties
+              }
+            />
+          ) : (
+            <IconFolder size={13} opacity={0.6} />
+          )}
+        </Center>
         <Text size="xs" fw={active ? 600 : 400}>
           {baseName(path)}
         </Text>
@@ -60,7 +88,6 @@ function ProjectTab({ path, active }: { path: string; active: boolean }) {
 }
 
 export function ProjectTabs() {
-  const connectionStatus = useStore((s) => s.connectionStatus);
   const projects = useStore((s) => s.projects);
   const activeProject = useStore((s) => s.activeProject);
   const recentDirs = useStore((s) => s.recentDirs);
@@ -93,31 +120,13 @@ export function ProjectTabs() {
         >
           <img src={logoUrl} alt="Lines" width={20} height={20} style={{ display: 'block' }} />
         </Box>
-        <Text fw={700} size="sm">
+        {/* Connection state lives in ConnectionBanner (a centered pill for every
+            non-connected state), so a dot here would only ever say "fine". */}
+        <Text component="span" className="brand-wordmark" fw={500} size="md">
           Lines
         </Text>
-        <Tooltip
-          label={
-            connectionStatus === 'connected'
-              ? 'Connected'
-              : connectionStatus === 'offline'
-                ? 'Offline'
-                : 'Reconnecting…'
-          }
-        >
-          <Indicator
-            color={
-              connectionStatus === 'connected'
-                ? 'teal'
-                : connectionStatus === 'offline'
-                  ? 'red'
-                  : 'yellow'
-            }
-            processing={connectionStatus !== 'connected'}
-            size={7}
-          />
-        </Tooltip>
       </Group>
+      <Divider orientation="vertical" className="brand-divider" my={16} />
       <ScrollArea type="never" style={{ flex: 1 }}>
         <Group gap={4} wrap="nowrap">
           {projects.map((p) => (
