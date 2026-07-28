@@ -3,6 +3,7 @@ import { IconPlayerPlay } from '@tabler/icons-react';
 import type { PermissionMode } from '@lines/shared';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
+import { GuardAllowlistSection } from './GuardAllowlistSection';
 import { modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { send } from '../ws';
@@ -25,6 +26,7 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
   const setAutoContinueInterrupted = useStore((s) => s.setAutoContinueInterrupted);
   const auth = useStore((s) => s.auth);
   const openLoginModal = useStore((s) => s.openLoginModal);
+  const openGuardReview = useStore((s) => s.openGuardReview);
 
   const alertsDescription =
     alertsEnabled && notifyPermission !== 'granted'
@@ -32,7 +34,8 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
       : 'Chime and desktop notification when a session finishes or needs input';
 
   return (
-    <Modal opened={opened} onClose={onClose} title="Settings" size="sm" centered>
+    // md, not sm: allowlisted Bash prefixes truncate at the narrower width.
+    <Modal opened={opened} onClose={onClose} title="Settings" size="md" centered>
       <Stack gap="xs">
         <Text size="xs" fw={600} c="dimmed" tt="uppercase">
           Account
@@ -148,6 +151,12 @@ export function SettingsModal({ opened, onClose }: { opened: boolean; onClose: (
             </ActionIcon>
           </Tooltip>
         </Group>
+        <GuardAllowlistSection
+          onOpenReview={() => {
+            onClose();
+            openGuardReview();
+          }}
+        />
       </Stack>
     </Modal>
   );

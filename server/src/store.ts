@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type {
+  GuardAllowEntry,
   ProjectKeyMap,
   SessionMeta,
   StepDef,
@@ -10,6 +11,17 @@ import type {
   UserUiSettings,
   WorkflowDef,
 } from '@lines/shared';
+
+/** Guard-allowlist sync bookkeeping, kept beside the entries but never mixed into them:
+ *  `updatedAt` orders the storage row (LWW), `pending` is a remote list awaiting review,
+ *  `rejected` remembers the remote content a "keep mine" answer already covered. */
+export interface GuardSyncState {
+  updatedAt: number;
+  pending: { entries: GuardAllowEntry[]; remoteUpdatedAt: number; detectedAt: number } | null;
+  rejected: { entries: GuardAllowEntry[]; rejectedAt: number } | null;
+}
+
+const EMPTY_GUARD_SYNC: GuardSyncState = { updatedAt: 0, pending: null, rejected: null };
 
 /** Machine-global app root. Per-user stores live under `${APP_ROOT}/users/{userId}`;
  * machine-wide assets (vendored plugins) stay directly under this root. */
@@ -98,6 +110,10 @@ export function createStore(root: string) {
   const PROJECT_KEYS_FILE = path.join(root, 'project-keys.json');
   const AUTH_FILE = path.join(root, 'auth.json');
   const GUARD_FILE = path.join(root, 'guard-allowlist.json');
+  // Separate file from GUARD_FILE, which stays a bare GuardAllowEntry[]: wrapping
+  // the entries in an envelope would make an older build's loader call .some() on
+  // an object and throw on startup.
+  const GUARD_SYNC_FILE = path.join(root, 'guard-allowlist-sync.json');
   const SETTINGS_FILE = path.join(root, 'settings.json');
   const MEMORY_MANIFEST_FILE = path.join(root, 'memory-manifest.json');
   const WATERMARKS_FILE = path.join(root, 'sync-watermarks.json');
@@ -329,6 +345,19 @@ export function createStore(root: string) {
 
     saveGuardAllowlist(entries: unknown) {
       writeJson(GUARD_FILE, entries);
+    },
+
+    loadGuardSync(): GuardSyncState {
+      const raw = readJson<Partial<GuardSyncState>>(GUARD_SYNC_FILE, EMPTY_GUARD_SYNC);
+      return {
+        updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
+        pending: raw.pending ?? null,
+        rejected: raw.rejected ?? null,
+      };
+    },
+
+    saveGuardSync(state: GuardSyncState) {
+      writeJson(GUARD_SYNC_FILE, state);
     },
 
     // Last-synced state of every memory file, keyed by absolute path, so the

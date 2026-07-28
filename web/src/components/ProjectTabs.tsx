@@ -4,6 +4,7 @@ import {
   Center,
   CloseButton,
   Group,
+  Indicator,
   Loader,
   Menu,
   ScrollArea,
@@ -165,18 +166,22 @@ export function ProjectTabs() {
 
 function SettingsButton() {
   const [opened, setOpened] = useState(false);
+  // A dismissed allowlist review still needs a way back in; the gear is it.
+  const guardReview = useStore((s) => s.guardReview);
   return (
     <>
-      <Tooltip label="Settings">
-        <ActionIcon
-          variant="subtle"
-          color="gray"
-          size="sm"
-          aria-label="Settings"
-          onClick={() => setOpened(true)}
-        >
-          <IconSettings size={14} />
-        </ActionIcon>
+      <Tooltip label={guardReview ? 'Settings — allowlist needs review' : 'Settings'}>
+        <Indicator size={6} color="yellow" disabled={!guardReview} offset={2}>
+          <ActionIcon
+            variant="subtle"
+            color="gray"
+            size="sm"
+            aria-label="Settings"
+            onClick={() => setOpened(true)}
+          >
+            <IconSettings size={14} />
+          </ActionIcon>
+        </Indicator>
       </Tooltip>
       <SettingsModal opened={opened} onClose={() => setOpened(false)} />
     </>

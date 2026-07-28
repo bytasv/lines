@@ -23,6 +23,7 @@ import {
   contextCompactBlock,
   isPlanFilePath,
   isSessionActive,
+  isSessionInterruptible,
   KEEP_PLANNING_MESSAGE,
   resolveModelId,
 } from '@lines/shared';
@@ -348,6 +349,8 @@ export class SessionManager {
    *  concurrent request, and its survival past the turn's `result` is how we
    *  detect that no compaction happened (see handleWorkerEvent). */
   private compacting = new Set<string>();
+  /** Access token each live worker query was spawned with (see pushTurn). */
+  private queryTokens = new Map<string, string | null>();
   private onTurnComplete: TurnCompleteListener | null = null;
   private worker!: WorkerClient;
   /** In-flight `/context` fetches, so a hover during the post-turn refresh reuses
@@ -542,7 +545,7 @@ export class SessionManager {
   }
 
   deleteSession(id: string) {
-    this.worker.close(id);
+    this.closeQuery(id);
     this.flushPending(id); // the session is gone with its cards
     this.sessions.delete(id);
     this.live.delete(id);
@@ -556,8 +559,7 @@ export class SessionManager {
    * The serializable half of the SDK query options. The worker splices in the
    * non-serializable callbacks (canUseTool, hooks, stderr) on its side.
    */
-  private buildQueryOptions(meta: SessionMeta): Record<string, unknown> {
-    const accessToken = this.auth?.getAccessTokenSync() ?? null;
+  private buildQueryOptions(meta: SessionMeta, accessToken: string | null): Record<string, unknown> {
     // Optional-chained throughout: a meta written before `caveman` existed, or
     // adopted wholesale from storage by adoptSynced, has no such object.
     const pluginPath = meta.caveman?.enabled ? getCavemanPluginPath() : null;
@@ -590,12 +592,43 @@ export class SessionManager {
   /**
    * Restart queries that aren't mid-turn so their next prompt rebuilds options
    * with the current token (resume keeps context). Called on login/logout and
-   * after token refresh; busy sessions finish their turn on the old token.
+   * after token refresh; busy sessions finish their turn on the old token, and
+   * pushTurn recycles them at their next push.
+   *
+   * Gated on interruptible, not active: a session parked at 'waiting-approval'
+   * has already settled its turn, so its query is as safe to drop as an idle
+   * one — and skipping those was how a plan-mode session could sit on a dead
+   * token across a re-login and keep 401ing.
    */
   recycleIdleQueries() {
     for (const meta of this.sessions.values()) {
-      if (!isSessionActive(meta.status)) this.worker.close(meta.id);
+      if (!isSessionInterruptible(meta.status)) this.closeQuery(meta.id);
     }
+  }
+
+  /** Close a session's worker query and forget the token it was spawned with. */
+  private closeQuery(sessionId: string) {
+    this.worker.close(sessionId);
+    this.queryTokens.delete(sessionId);
+  }
+
+  /**
+   * Send a message to the session's worker query, dropping that query first if
+   * it was spawned with a different access token.
+   *
+   * The worker reuses a live query for a session and ignores the options of
+   * later pushes, so the token handed over at spawn time is the one the CLI
+   * child keeps using for its whole life. Without this, a session that was
+   * mid-turn or awaiting approval when the token rotated would 401 forever, and
+   * re-logging in would not help. Closing is cheap: `resume` rebuilds the query
+   * with the current token and keeps the conversation.
+   */
+  private pushTurn(meta: SessionMeta, message: Record<string, unknown>) {
+    const accessToken = this.auth?.getAccessTokenSync() ?? null;
+    const spawnedWith = this.queryTokens.get(meta.id);
+    if (spawnedWith !== undefined && spawnedWith !== accessToken) this.closeQuery(meta.id);
+    this.queryTokens.set(meta.id, accessToken);
+    this.worker.push(meta.id, message, this.buildQueryOptions(meta, accessToken));
   }
 
   /** Persist attachments to disk and return the transcript/queue refs. */
@@ -848,19 +881,17 @@ export class SessionManager {
     meta.turnStartedAt = Date.now();
     meta.interruptedAt = undefined; // any prompt clears the crash-interrupted flag
     this.interrupting.delete(sessionId); // a new turn supersedes any in-flight interrupt
-    // A user prompt after Stop (before the interrupted turn settled) means they
-    // want to keep working here — don't let the stale flag advance a later turn.
+    // A user prompt after a force-advance (before the interrupted turn settled)
+    // means they want to keep working here — don't let the stale flag advance a
+    // later turn. Only for 'user': continueTurn and recoverOrphanedPermission
+    // deliberately re-prompt as 'workflow' and must keep a pending advance.
     if (source === 'user' && meta.workflow?.advanceOnComplete === 'interrupted') {
       meta.workflow.advanceOnComplete = undefined;
     }
     this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
     const content = [...blocks, ...(text ? [{ type: 'text', text }] : [])];
-    this.worker.push(
-      sessionId,
-      { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null },
-      this.buildQueryOptions(meta),
-    );
+    this.pushTurn(meta, { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
   }
 
   /**
@@ -897,15 +928,11 @@ export class SessionManager {
     meta.turnStartedAt = Date.now();
     this.setStatus(sessionId, 'running');
 
-    this.worker.push(
-      sessionId,
-      {
-        type: 'user',
-        message: { role: 'user', content: [{ type: 'text', text: '/compact' }] },
-        parent_tool_use_id: null,
-      },
-      this.buildQueryOptions(meta),
-    );
+    this.pushTurn(meta, {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: '/compact' }] },
+      parent_tool_use_id: null,
+    });
     return { ok: true };
   }
 
@@ -1185,15 +1212,14 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Stop the live turn — nothing more. Deliberately intent-free: it never infers
+   * "this step is done" from "stop". A stopped workflow step settles into
+   * waiting-approval so the user can iterate; the only callers that want an
+   * advance set `advanceOnComplete` themselves (see WorkflowEngine.forceAdvance).
+   */
   interrupt(sessionId: string) {
     const meta = this.sessions.get(sessionId);
-    // Stopping a running workflow step means "done with this step, move on":
-    // advance once the interrupted turn settles (result or ended). The step's
-    // output hand-off is whatever the model last said — the user cut it short.
-    const wf = meta?.workflow;
-    if (wf?.started && wf.stepStatuses[wf.stepIndex] === 'running' && meta?.turnSource === 'workflow') {
-      wf.advanceOnComplete = 'interrupted';
-    }
     this.interrupting.add(sessionId);
     // A stopped compaction is a user decision, not a broken mechanism.
     this.abandonCompaction(sessionId, 'interrupted');
@@ -1379,7 +1405,7 @@ export class SessionManager {
       const original = this.findPermissionRequest(sessionId, requestId);
       if (original) {
         const entry = allowEntryFor(original.toolName, original.input);
-        if (this.guard.add(entry)) {
+        if (this.guard.add(entry).ok) {
           console.log('[guard] allowlisted:', entry.tool, entry.prefix ?? '');
         }
       }

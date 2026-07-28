@@ -443,6 +443,42 @@ app.put('/settings', async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- auto-mode guard allowlist -----------------------------------------------
+
+/** Hard cap on a stored list. Authoritative validation is the bridge's (normalizeAllowEntry). */
+const GUARD_MAX_ENTRIES = 500;
+
+app.get('/guard-allowlist', async (req, res) => {
+  const row = await prisma.guardAllowlist.findUnique({ where: { userId: userIdOf(req) } });
+  res.json(row?.data ?? null);
+});
+
+app.put('/guard-allowlist', async (req, res) => {
+  const userId = userIdOf(req);
+  const body = req.body as { entries?: unknown; updatedAt?: unknown } | null;
+  if (!body || !Array.isArray(body.entries)) {
+    res.status(400).json({ error: 'body must hold an entries array' });
+    return;
+  }
+  // Light shape filter only, as PUT /memory does: the bridge re-validates every
+  // entry on ingest before it can reach a UI, and that is where the real rules live.
+  const entries: { tool: string; prefix?: string }[] = [];
+  for (const raw of body.entries.slice(0, GUARD_MAX_ENTRIES)) {
+    const e = raw as { tool?: unknown; prefix?: unknown } | null;
+    if (!e || typeof e.tool !== 'string' || e.tool.length === 0) continue;
+    if (e.prefix !== undefined && typeof e.prefix !== 'string') continue;
+    entries.push(typeof e.prefix === 'string' ? { tool: e.tool, prefix: e.prefix } : { tool: e.tool });
+  }
+  const data = { entries, updatedAt: typeof body.updatedAt === 'number' ? body.updatedAt : Date.now() };
+  await prisma.guardAllowlist.upsert({
+    where: { userId },
+    create: { userId, data, updatedAt: updatedAtOf(data) },
+    update: { data, updatedAt: updatedAtOf(data) },
+    select: { userId: true },
+  });
+  res.json({ ok: true });
+});
+
 // --- agent memory ------------------------------------------------------------
 
 const MEMORY_KEY_RE = /^(user|project|slug)\//;

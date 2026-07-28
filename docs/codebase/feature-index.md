@@ -6,7 +6,7 @@
 | `permission-mode-selector` | Permission mode pickers (composer, settings, workflow steps) with shared labels/descriptions | [features/permission-mode-selector.md](features/permission-mode-selector.md) |
 | `session-sidebar-usage` | Sidebar session cost/token spend display, EU date format | [features/session-sidebar-usage.md](features/session-sidebar-usage.md) |
 | `workflow-step-update-popover` | Warning popover diffing a pinned step against its latest published version, with scrollable diff list | [features/workflow-step-update-popover.md](features/workflow-step-update-popover.md) |
-| `workflow-stop-advances` | Manual Stop during a running workflow step marks it done and auto-advances to the next step | [features/workflow-stop-advances.md](features/workflow-stop-advances.md) |
+| `workflow-stop-parks` | Manual Stop during a running workflow step only interrupts the turn; the step parks at waiting-approval instead of advancing | [features/workflow-stop-parks.md](features/workflow-stop-parks.md) |
 | `workflow-force-advance` | Hover the current step's icon in the stepper to manually mark it done and advance, with a confirmation modal | [features/workflow-force-advance.md](features/workflow-force-advance.md) |
 | `workflow-approve-loader` | Approve button shows a loader and disables instantly while the finished step's output is consolidated in the background | [features/workflow-approve-loader.md](features/workflow-approve-loader.md) |
 | `interrupted-turn-recovery` | Detect turns that died with the app, offer a Continue banner, optionally resume them automatically | [features/interrupted-turn-recovery.md](features/interrupted-turn-recovery.md) |
@@ -19,6 +19,7 @@
 | `app-data-root` | Machine-global app state root at `~/.lines-app` | [features/app-data-root.md](features/app-data-root.md) |
 | `context-window-inspector` | Composer chip showing live context-window occupancy, with a hover breakdown of what's filling it | [features/context-window-inspector.md](features/context-window-inspector.md) |
 | `plan-file-auto-approve` | Plan-mode file reads/writes under `.claude/plans/` auto-approve instead of prompting | [features/plan-file-auto-approve.md](features/plan-file-auto-approve.md) |
+| `guard-allowlist` | Settings section exposing the auto-mode guard's allowlist for view/remove/hand-add, synced across machines with an explicit accept/reject review | [features/guard-allowlist.md](features/guard-allowlist.md) |
 | `plan-review-card` | Resolved plan card stays collapsed-but-reopenable; falls back to the plan-file write when no inline `plan` argument | [features/plan-review-card.md](features/plan-review-card.md) |
 | `auth-failure-recovery` | A turn rejected for a dead OAuth token refreshes or logs out on the spot (opening the login modal), and every query crash gets a Retry button | [features/auth-failure-recovery.md](features/auth-failure-recovery.md) |
 | `workflow-task-attachments` | Image attachments sent with a workflow's task description (first prompt) now reach step 0 instead of being silently dropped | [features/workflow-task-attachments.md](features/workflow-task-attachments.md) |

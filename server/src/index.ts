@@ -389,6 +389,10 @@ async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
     auth: ctx.auth.getStatus(),
     storage: ctx.sync.status,
     settings: ctx.store.loadSettings(),
+    guardAllowlist: ctx.guard.list(),
+    // Read from persisted state, so a pending review is on screen before the
+    // first pull lands (and survives the 30s pull spacing after a restart).
+    guardAllowlistReview: ctx.guard.review(),
   };
   ws.send(JSON.stringify(hello));
 
@@ -609,6 +613,28 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       broadcast({ type: 'settings', settings: incoming });
       break;
     }
+    case 'addGuardAllow': {
+      // Broadcasts and pushes through guard.onChange. The client runs the same
+      // shared validators, so a rejection here is version skew — the generic error
+      // envelope is enough, and a duplicate is a no-op worth no message at all.
+      const result = ctx.guard.add(msg.entry);
+      if (!result.ok && result.reason !== 'duplicate') {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            message: `Cannot allowlist that entry (${result.reason})`,
+          } satisfies ServerMessage),
+        );
+      }
+      break;
+    }
+    case 'removeGuardAllow':
+      ctx.guard.remove(msg.entry);
+      break;
+    case 'reviewGuardAllowlist':
+      if (msg.accept) ctx.guard.acceptReview();
+      else ctx.guard.rejectReview();
+      break;
     case 'contextBreakdown': {
       // Resolves null rather than throwing: a failed control request must not pop
       // the generic error toast every time the user hovers the chip.

@@ -1,4 +1,4 @@
-import type { MemoryFileMap, ProjectKeyMap, SessionMeta, StepDef, StepRef, StorageStatus, WorkflowDef } from '@lines/shared';
+import type { GuardAllowlistBlob, MemoryFileMap, ProjectKeyMap, SessionMeta, StepDef, StepRef, StorageStatus, WorkflowDef } from '@lines/shared';
 import type { SyncWatermarks } from './store.ts';
 
 const PUSH_DEBOUNCE_MS = 2_000;
@@ -25,6 +25,8 @@ export interface PulledState {
   settings: unknown;
   projectKeys: ProjectKeyMap;
   memory: MemoryFileMap | null;
+  /** null = no row yet (or this one request failed); never applied without a review. */
+  guardAllowlist: GuardAllowlistBlob | null;
 }
 
 /**
@@ -82,13 +84,18 @@ export class StorageSyncClient {
     if (Date.now() - this.lastPullAt < PULL_MIN_SPACING_MS) return THROTTLED;
     this.lastPullAt = Date.now();
     try {
-      const [workflows, steps, sessions, settings, projectKeys, memory] = await Promise.all([
+      const [workflows, steps, sessions, settings, projectKeys, memory, guardAllowlist] = await Promise.all([
         this.req('GET', this.delta('/workflows', 'workflows')),
         this.req('GET', this.delta('/steps', 'steps')),
         this.req('GET', this.delta('/sessions', 'sessions')),
         this.req('GET', '/settings'),
         this.req('GET', '/project-keys'),
         this.req('GET', this.delta('/memory', 'memory')),
+        // Caught on its own rather than joining the bare Promise.all: this is the
+        // newest table, so a storage server running without its migration answers
+        // 500 — and that would otherwise abort the whole pull and stop workflows,
+        // steps, sessions, settings, project keys and memory from syncing too.
+        this.req('GET', '/guard-allowlist').catch(() => null),
       ]);
       this.warned = false;
       // `body` guards against a 304 leaking into the applied state: only the two
@@ -102,6 +109,7 @@ export class StorageSyncClient {
         settings: body(settings),
         projectKeys: (body(projectKeys) ?? {}) as ProjectKeyMap,
         memory: (body(memory) ?? null) as MemoryFileMap | null,
+        guardAllowlist: (body(guardAllowlist) ?? null) as GuardAllowlistBlob | null,
       };
     } catch (err) {
       this.warnOnce('pull', err);
@@ -246,6 +254,12 @@ export class StorageSyncClient {
   pushSettings(blob: unknown): void {
     if (!this.enabled || this.applying) return;
     void this.req('PUT', '/settings', blob).catch((err) => this.warnOnce('push settings', err));
+  }
+
+  /** Undebounced like settings: allowlist edits are human-paced and few. */
+  pushGuardAllowlist(blob: GuardAllowlistBlob): void {
+    if (!this.enabled || this.applying) return;
+    void this.req('PUT', '/guard-allowlist', blob).catch((err) => this.warnOnce('push guard allowlist', err));
   }
 
   /**

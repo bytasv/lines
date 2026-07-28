@@ -171,8 +171,9 @@ export interface WorkflowState {
   /** The user's task description, captured from the first prompt; substituted into step templates as {task}. */
   task?: string;
   started: boolean;
-  /** Set when a plan is approved (true) or the step was manually stopped
-   *  ('interrupted') mid-step: advance to the next step once the current turn ends. */
+  /** Advance to the next step once the current turn ends. Two origins: `true` from
+   *  a plan approved mid-step, 'interrupted' from a force-advance ("mark as
+   *  completed") of a still-running step. A plain Stop never sets it. */
   advanceOnComplete?: boolean | 'interrupted';
   /** An advance is in flight on this bridge: the finished step is 'done' and its
    *  output is being consolidated, but the next step hasn't started. Drives the
@@ -552,6 +553,13 @@ export type ClientMessage =
   /** Fresh Clerk token relay (~50s cadence) so the bridge's per-connection token never expires. */
   | { type: 'auth'; token: string }
   | { type: 'saveSettings'; settings: UserUiSettings }
+  /** Auto-mode guard allowlist edits. Intent messages, not a whole-list save: the
+   *  server also writes entries on its own (permission cards), so a whole-list
+   *  payload from a stale tab would clobber them. */
+  | { type: 'addGuardAllow'; entry: GuardAllowEntry }
+  | { type: 'removeGuardAllow'; entry: GuardAllowEntry }
+  /** Resolve a pending remote-divergence review: accept installs it, reject keeps local. */
+  | { type: 'reviewGuardAllowlist'; accept: boolean }
   | { type: 'ping' };
 
 /** One Claude-plan rate-limit window (5-hour session, weekly, ...) from the OAuth usage endpoint. */
@@ -646,10 +654,109 @@ export interface MemoryFileEntry {
  */
 export type MemoryFileMap = Record<string, MemoryFileEntry>;
 
+// ---------------------------------------------------------------------------
+// Auto-mode guard allowlist
+// ---------------------------------------------------------------------------
+
+/** Tools that must always reach the user regardless of guard verdicts. */
+export const ALWAYS_ASK_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
+
+/** User-built exception to the auto-mode guard. */
+export interface GuardAllowEntry {
+  tool: string;
+  /** For Bash: command prefix, e.g. "npm run". Absent for every other tool. */
+  prefix?: string;
+}
+
+/** The synced form of the allowlist. `updatedAt` only orders writes at the storage row —
+ *  divergence detection is a set difference, never a timestamp comparison. */
+export interface GuardAllowlistBlob {
+  entries: GuardAllowEntry[];
+  updatedAt: number;
+}
+
+/** A remote allowlist awaiting explicit accept/reject. `entries` is what accept installs verbatim. */
+export interface GuardAllowlistReview {
+  entries: GuardAllowEntry[];
+  /** In remote, not local — would become newly permitted. */
+  added: GuardAllowEntry[];
+  /** In local, not remote — would stop being permitted. */
+  removed: GuardAllowEntry[];
+  /** ms epoch the divergence was first staged; a stable client dedupe key. */
+  detectedAt: number;
+}
+
+export type GuardEntryError =
+  | 'empty-tool'
+  | 'bad-tool'
+  | 'always-ask'
+  | 'bash-needs-prefix'
+  | 'prefix-chained'
+  | 'prefix-too-long';
+
+/** Wide enough for `mcp__server__tool`, narrow enough that a row can't render markup. */
+const GUARD_TOOL_RE = /^[A-Za-z][\w.-]{0,127}$/;
+const GUARD_PREFIX_MAX_LEN = 200;
+
+/**
+ * Canonical form of an allowlist entry, or why it was refused. The single gate
+ * every writer runs through — the permission card, the Settings form, the load
+ * migration, and remote ingest — so a hand-typed entry can never end up in a
+ * shape the guard's matching rules cannot match.
+ */
+export function normalizeAllowEntry(
+  raw: { tool: string; prefix?: string },
+): { entry: GuardAllowEntry } | { error: GuardEntryError } {
+  // Untrusted callers (disk, a storage row) reach this too, so nothing is assumed.
+  const src = (raw ?? {}) as { tool?: unknown; prefix?: unknown };
+  const tool = typeof src.tool === 'string' ? src.tool.trim() : '';
+  if (!tool) return { error: 'empty-tool' };
+  if (!GUARD_TOOL_RE.test(tool)) return { error: 'bad-tool' };
+  // The guard short-circuits on these *before* consulting the allowlist, so such
+  // an entry would be permanently inert — a row that lies about what it does.
+  if (ALWAYS_ASK_TOOLS.has(tool)) return { error: 'always-ask' };
+  // Dropped rather than rejected: `{ tool }` is the only shape the tool-name
+  // branch of the guard compares against.
+  if (tool !== 'Bash') return { entry: { tool } };
+  const rawPrefix = typeof src.prefix === 'string' ? src.prefix : '';
+  // Dead by construction — the guard splits commands on exactly these before matching.
+  if (/[|;&\n\r]/.test(rawPrefix)) return { error: 'prefix-chained' };
+  // Same whitespace collapse the permission card applies, or `git   status`
+  // could never match a real command segment.
+  const prefix = rawPrefix.trim().split(/\s+/).filter(Boolean).join(' ');
+  if (!prefix) return { error: 'bash-needs-prefix' };
+  if (prefix.length > GUARD_PREFIX_MAX_LEN) return { error: 'prefix-too-long' };
+  return { entry: { tool, prefix } };
+}
+
+export function sameAllowEntry(a: GuardAllowEntry, b: GuardAllowEntry): boolean {
+  return a.tool === b.tool && (a.prefix ?? '') === (b.prefix ?? '');
+}
+
+/** Human-readable row label, e.g. "Bash: npm run" / "WebFetch". */
+export function describeAllowEntry(e: GuardAllowEntry): string {
+  return e.prefix ? `${e.tool}: ${e.prefix}` : e.tool;
+}
+
+/** Set difference in both directions — what a remote list would widen and narrow. */
+export function diffAllowlists(
+  local: GuardAllowEntry[],
+  remote: GuardAllowEntry[],
+): { added: GuardAllowEntry[]; removed: GuardAllowEntry[] } {
+  return {
+    added: remote.filter((r) => !local.some((l) => sameAllowEntry(l, r))),
+    removed: local.filter((l) => !remote.some((r) => sameAllowEntry(r, l))),
+  };
+}
+
 export type ServerMessage =
-  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; storage: StorageStatus; settings?: UserUiSettings | null }
+  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; storage: StorageStatus; settings?: UserUiSettings | null; guardAllowlist?: GuardAllowEntry[]; guardAllowlistReview?: GuardAllowlistReview | null }
   | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
+  /** The whole auto-mode guard allowlist after any change (card, UI edit, accepted review). */
+  | { type: 'guardAllowlist'; entries: GuardAllowEntry[] }
+  /** A remote allowlist awaiting the user's accept/reject; null once resolved. */
+  | { type: 'guardAllowlistReview'; review: GuardAllowlistReview | null }
   | { type: 'usage'; usage: UsageSnapshot | null }
   | { type: 'authStatus'; auth: AuthStatus }
   | { type: 'storageStatus'; storage: StorageStatus }

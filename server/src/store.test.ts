@@ -102,6 +102,18 @@ test('the cache is bounded — old sessions are evicted, not accumulated', () =>
   assert.equal(store.loadTranscript('s19')[0].seq, 0);
 });
 
+test('guard sync state round-trips, and a missing file reads as empty', () => {
+  const { store } = tmpStore();
+  assert.deepEqual(store.loadGuardSync(), { updatedAt: 0, pending: null, rejected: null });
+  const state = {
+    updatedAt: 7,
+    pending: { entries: [{ tool: 'Bash', prefix: 'npm run' }], remoteUpdatedAt: 3, detectedAt: 5 },
+    rejected: { entries: [{ tool: 'WebFetch' }], rejectedAt: 6 },
+  };
+  store.saveGuardSync(state);
+  assert.deepEqual(store.loadGuardSync(), state);
+});
+
 test('sessions.json is written compactly', () => {
   const { store, root } = tmpStore();
   const meta = {

@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import type {
   AuthStatus,
   ContextBreakdown,
+  GuardAllowEntry,
+  GuardAllowlistReview,
   ModelOption,
   PermissionMode,
   ProjectKeyMap,
@@ -380,6 +382,19 @@ interface UiState {
   /** Last login failure, shown inline in the login modal. */
   authError: string | null;
   loginModalOpen: boolean;
+  /**
+   * Auto-mode guard allowlist. Server-authoritative and never cached in
+   * localStorage: it arrives in every `hello`, and a cached copy would be a stale
+   * second source of truth for a security-relevant list. Also deliberately absent
+   * from `pushSettings()` — the bridge writes entries on its own (permission
+   * cards), so a whole-blob settings save would clobber them.
+   */
+  guardAllowlist: GuardAllowEntry[];
+  /** A remote allowlist awaiting accept/reject; null when there is nothing to review. */
+  guardReview: GuardAllowlistReview | null;
+  guardReviewOpen: boolean;
+  /** `detectedAt` of a review the user dismissed with Escape, so a reconnect doesn't re-pop it. */
+  guardReviewDismissedAt: number | null;
   /** What the left sidebar shows: session list or project file tree. */
   sidebarMode: SidebarMode;
   /** Transcript compaction level; persisted in localStorage. */
@@ -411,6 +426,14 @@ interface UiState {
   closeFilePreview: () => void;
   openLoginModal: () => void;
   closeLoginModal: () => void;
+  /** Allowlist an entry (validated client-side first, with the same shared rules). */
+  addGuardAllow: (entry: GuardAllowEntry) => void;
+  removeGuardAllow: (entry: GuardAllowEntry) => void;
+  /** Resolve the pending review: accept installs the remote list, reject keeps this one. */
+  resolveGuardReview: (accept: boolean) => void;
+  openGuardReview: () => void;
+  /** Leaves the review pending (the Settings banner stays) and remembers the dismissal. */
+  closeGuardReview: () => void;
   setSidebarMode: (mode: SidebarMode) => void;
   setCompactionLevel: (level: CompactionLevel) => void;
   setTurnSummariesEnabled: (on: boolean) => void;
@@ -499,6 +522,10 @@ export const useStore = create<UiState>((set, get) => {
   authorizeUrl: null,
   authError: null,
   loginModalOpen: false,
+  guardAllowlist: [],
+  guardReview: null,
+  guardReviewOpen: false,
+  guardReviewDismissedAt: null,
   sidebarMode: loadSidebarMode(),
   compactionLevel: loadCompactionLevel(),
   turnSummariesEnabled: loadTurnSummariesEnabled(),
@@ -537,6 +564,23 @@ export const useStore = create<UiState>((set, get) => {
 
   openLoginModal: () => set({ loginModalOpen: true, authError: null }),
   closeLoginModal: () => set({ loginModalOpen: false, authorizeUrl: null, authError: null }),
+
+  // Intent messages, not a list save: the bridge is the only writer of the list
+  // and echoes the whole thing back on `guardAllowlist`.
+  addGuardAllow: (entry) => send({ type: 'addGuardAllow', entry }),
+  removeGuardAllow: (entry) => send({ type: 'removeGuardAllow', entry }),
+  resolveGuardReview: (accept) => {
+    // Closed optimistically; the server's `guardAllowlistReview: null` confirms it
+    // (and closes any other tab showing the same modal).
+    set({ guardReviewOpen: false });
+    send({ type: 'reviewGuardAllowlist', accept });
+  },
+  openGuardReview: () => set({ guardReviewOpen: true }),
+  closeGuardReview: () =>
+    set((state) => ({
+      guardReviewOpen: false,
+      guardReviewDismissedAt: state.guardReview?.detectedAt ?? state.guardReviewDismissedAt,
+    })),
 
   setSidebarMode: (mode) => {
     localStorage.setItem(SIDEBAR_MODE_KEY, mode);
@@ -694,6 +738,15 @@ export const useStore = create<UiState>((set, get) => {
           // that news, so reconnects don't reopen a dismissed modal.
           loginModalOpen:
             state.loginModalOpen || (!msg.auth.loggedIn && state.auth?.loggedIn !== false),
+          guardAllowlist: msg.guardAllowlist ?? [],
+          guardReview: msg.guardAllowlistReview ?? null,
+          // Same "auto-open on genuinely new news" rule as the login modal: a
+          // review the user already dismissed must not reopen on every reconnect,
+          // but a divergence they have not seen has to reach them unprompted.
+          guardReviewOpen:
+            state.guardReviewOpen ||
+            (msg.guardAllowlistReview != null &&
+              msg.guardAllowlistReview.detectedAt !== state.guardReviewDismissedAt),
           activeProject: pickActive(msg.projects, state.activeProject),
           // Transcripts may have missed events while the socket was down, so the
           // open session reloads (SessionView re-sends loadTranscript on `hello`).
@@ -718,6 +771,16 @@ export const useStore = create<UiState>((set, get) => {
       }
       case 'settings':
         applySettings(msg.settings);
+        break;
+      case 'guardAllowlist':
+        set({ guardAllowlist: msg.entries });
+        break;
+      case 'guardAllowlistReview':
+        set((state) => ({
+          guardReview: msg.review,
+          guardReviewOpen:
+            msg.review != null && msg.review.detectedAt !== state.guardReviewDismissedAt,
+        }));
         break;
       case 'projectKeys':
         set({ projectKeys: msg.projectKeys });

@@ -13,6 +13,7 @@ import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/workflow/WorkflowEditor';
 import { MonacoPreviewModal } from './components/MonacoPreviewModal';
 import { LoginModal } from './components/LoginModal';
+import { GuardAllowlistReviewModal } from './components/GuardAllowlistReviewModal';
 import { FilesView } from './components/FilesView';
 import { send } from './ws';
 
@@ -158,6 +159,7 @@ function Shell() {
       <WorkflowEditor opened={workflowEditorOpen} onClose={() => setWorkflowEditorOpen(false)} />
       <MonacoPreviewModal />
       <LoginModal />
+      <GuardAllowlistReviewModal />
     </AppShell>
   );
 }

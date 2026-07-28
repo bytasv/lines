@@ -39,7 +39,9 @@ segmented controls use `PERMISSION_MODE_SEGMENTS`; the workflow Selects use `PER
 
 The chosen value is UI/storage-level only. `'auto'` is a client-and-guard concept: the SDK
 session actually runs in `acceptEdits`, and the bridge guard decides per tool call whether to
-auto-approve or prompt (see the `PermissionMode` doc comment in `shared/types.ts`).
+auto-approve or prompt (see the `PermissionMode` doc comment in `shared/types.ts`). The guard's
+exceptions to that per-call decision are a user-visible, editable list — see
+[guard-allowlist](guard-allowlist.md).
 
 ## Dependencies
 

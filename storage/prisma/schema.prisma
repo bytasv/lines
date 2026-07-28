@@ -54,6 +54,17 @@ model UserSettings {
   @@map("user_settings")
 }
 
+// Auto-mode guard allowlist, one blob per user (tens of entries — the
+// row-per-item egress argument that shaped AgentMemoryFile does not apply).
+// Never applied silently on the receiving bridge: a divergence is reviewed.
+model GuardAllowlist {
+  userId    String   @id @map("user_id")
+  data      Json // GuardAllowlistBlob
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("guard_allowlist")
+}
+
 model Session {
   userId    String   @map("user_id")
   id        String   @db.Uuid

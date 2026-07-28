@@ -73,7 +73,7 @@
                 "'default' displays as Manual; the stored value is unchanged"
             ],
             "architecturalRules": [
-                "single shared PERMISSION_MODES list \u2014 no component defines its own label/description array",
+                "single shared PERMISSION_MODES list — no component defines its own label/description array",
                 "SegmentedControl has no per-segment tooltip prop, so per-item tooltips wrap each segment's label in a Tooltip-wrapped full-width span"
             ],
             "relatedDecisions": []
@@ -172,12 +172,13 @@
             "relatedDecisions": []
         },
         {
-            "id": "workflow-stop-advances",
-            "name": "Workflow stop advances",
-            "doc": "features/workflow-stop-advances.md",
-            "purpose": "Pressing Stop while a workflow step is running marks it done and auto-advances to the next step instead of parking at waiting-approval.",
+            "id": "workflow-stop-parks",
+            "name": "Workflow stop parks",
+            "doc": "features/workflow-stop-parks.md",
+            "purpose": "Pressing Stop while a workflow step is running only interrupts the turn; the step parks at waiting-approval once it settles instead of advancing. Advancing stays exclusively explicit (Approve, or the stepper's force-advance).",
             "entryPoints": [
                 "web/src/components/Composer.tsx",
+                "server/src/index.ts",
                 "server/src/sessions.ts",
                 "server/src/workflows.ts"
             ],
@@ -192,16 +193,22 @@
                 "SessionManager.interrupt",
                 "SessionManager.handleWorkerEnded",
                 "WorkflowState.advanceOnComplete",
+                "WorkflowEngine.forceAdvance",
                 "WorkflowEngine.onWorkflowTurnComplete"
             ],
-            "tests": [],
+            "tests": [
+                "server/src/workflows.advance.test.ts"
+            ],
             "businessRules": [
-                "plain Stop during a running workflow step always advances; no toggle",
-                "a user prompt sent before the interrupted turn settles clears the 'interrupted' flag",
-                "step output hand-off after Stop is whatever the model last said (partial by design)"
+                "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
+                "a user prompt sent after a force-advance but before the interrupted turn settles clears the 'interrupted' flag",
+                "step output hand-off after a force-advance is whatever the model last said (partial by design)",
+                "a step configured with autoAdvance: true still advances after Stop — that is the step's own configuration, not Stop semantics"
             ],
             "architecturalRules": [
-                "never advance synchronously on interrupt \u2014 flag advanceOnComplete and wait for the turn to settle",
+                "interrupt() stays intent-free — no caller may infer \"advance\" from \"stop\"",
+                "only forceAdvance sets advanceOnComplete, and only when the live turn is confirmed to be this step's own (turnSource === 'workflow')",
+                "never advance synchronously under a live turn — flag advanceOnComplete and wait for the turn to settle",
                 "the handleWorkerEnded settle fallback must stay gated on the interrupting set (routine non-error ended events exist)"
             ],
             "relatedDecisions": []
@@ -234,10 +241,10 @@
                 "confirmation copy differs by state: a running step warns its turn is stopped and the last-said text becomes the output; the last step's copy says the workflow finishes"
             ],
             "architecturalRules": [
-                "never call advance() directly on a running step while its turn is active \u2014 go through SessionManager.interrupt() so the advance is flagged and waits for the turn to settle"
+                "never call advance() directly on a running step while its turn is active — set advanceOnComplete then call SessionManager.interrupt(); interrupt() no longer implies an advance"
             ],
             "relatedDecisions": [
-                "workflow-stop-advances"
+                "workflow-stop-parks"
             ]
         },
         {
@@ -291,11 +298,11 @@
             "architecturalRules": [
                 "adding a field to LiveSessionInfo is not a protocol bump; busy is optional so an old worker stays demote-only instead of losing its socket mid-turn",
                 "reconcileWithWorker is the only place that stamps interruptedAt",
-                "a result for a flagged session means the flag was wrong (buffered result lands after reconcile) \u2014 clear it there rather than adding handshake ordering"
+                "a result for a flagged session means the flag was wrong (buffered result lands after reconcile) — clear it there rather than adding handshake ordering"
             ],
             "relatedDecisions": [
                 "session-status-badge",
-                "workflow-stop-advances"
+                "workflow-stop-parks"
             ]
         },
         {
@@ -381,7 +388,7 @@
             ],
             "architecturalRules": [
                 "the in-flight flag is server-owned broadcast state, never local optimistic UI state",
-                "clearing the flag rides the next status broadcast rather than issuing its own \u2014 no await may be inserted between the clear and that broadcast",
+                "clearing the flag rides the next status broadcast rather than issuing its own — no await may be inserted between the clear and that broadcast",
                 "cleared on process restart (constructor load loop) and on hand-off (adoptSynced), never in reconcileWithWorker, which runs far more often and would falsely clear a live advance"
             ],
             "relatedDecisions": []
@@ -501,11 +508,11 @@
                 "newest-first, gap-tolerant version list",
                 "own steps show full history; foreign steps show published versions only, with the exact pinned version always unioned in",
                 "pin/restore is disabled for the currently active version",
-                "workflow re-pin changes only which immutable version a ref points to; step-library restore creates a brand-new head version with old content \u2014 history is never rewritten",
+                "workflow re-pin changes only which immutable version a ref points to; step-library restore creates a brand-new head version with old content — history is never rewritten",
                 "both popovers fetch history on open, not on mount, and re-fetch on every reopen"
             ],
             "architecturalRules": [
-                "immutable step versions are never deleted or edited, on disk or in storage \u2014 only the head list and published flag change",
+                "immutable step versions are never deleted or edited, on disk or in storage — only the head list and published flag change",
                 "the storage route enforces the foreign-publish filter server-side; client-side version union never bypasses it"
             ],
             "relatedDecisions": []
@@ -636,7 +643,7 @@
             "id": "session-status-badge",
             "name": "Tool-aware waiting-permission status badge",
             "doc": "features/session-status-badge.md",
-            "purpose": "Vary the sidebar waiting-permission badge label/color (and matching notification text) by which tool triggered the pause \u2014 plan approval, a question, or a plain permission ask.",
+            "purpose": "Vary the sidebar waiting-permission badge label/color (and matching notification text) by which tool triggered the pause — plan approval, a question, or a plain permission ask.",
             "entryPoints": [
                 "web/src/components/Sidebar.tsx",
                 "web/src/lib/alerts.ts"
@@ -790,6 +797,61 @@
             "relatedDecisions": []
         },
         {
+            "id": "guard-allowlist",
+            "name": "Auto-mode guard allowlist",
+            "doc": "features/guard-allowlist.md",
+            "purpose": "Expose auto-mode's guard 'Always allow' exceptions in Settings for viewing, removal, and hand-add, synced across machines with an explicit accept/reject review instead of silent apply.",
+            "entryPoints": [
+                "web/src/components/SettingsModal.tsx",
+                "web/src/components/GuardAllowlistSection.tsx",
+                "web/src/components/GuardAllowlistReviewModal.tsx"
+            ],
+            "files": [
+                "shared/types.ts",
+                "server/src/autoGuard.ts",
+                "server/src/store.ts",
+                "server/src/sessions.ts",
+                "server/src/sync.ts",
+                "server/src/userContext.ts",
+                "server/src/index.ts",
+                "storage/prisma/schema.prisma",
+                "storage/src/index.ts",
+                "web/src/store.ts",
+                "web/src/lib/guardEntries.ts"
+            ],
+            "symbols": [
+                "GuardAllowlist",
+                "normalizeAllowEntry",
+                "diffAllowlists",
+                "sameAllowEntry",
+                "describeAllowEntry",
+                "GuardAllowlistBlob",
+                "GuardAllowlistReview"
+            ],
+            "tests": [
+                "server/src/autoGuard.allowlist.test.ts",
+                "server/src/autoGuard.sync.test.ts",
+                "server/src/sessions.alwaysAllow.test.ts"
+            ],
+            "businessRules": [
+                "a remote allowlist is never applied automatically; divergence is shown as an explicit added/removed diff the user accepts or rejects",
+                "divergence is detected as a set difference between local and remote entries, never by comparing updatedAt",
+                "pushing the local list to storage is suppressed while a review is pending",
+                "rejecting a review keeps the local list, pushes it back over the remote row, and is remembered by the remote's content so the same proposal is never re-asked",
+                "ALWAYS_ASK_TOOLS (AskUserQuestion, ExitPlanMode) can never be allowlisted",
+                "a hand-typed Bash prefix is whitespace-collapsed and may not contain &, &&, ||, ;, or |",
+                "non-Bash entries never carry a prefix; one given is silently dropped rather than rejected"
+            ],
+            "architecturalRules": [
+                "validators live in shared/types.ts so the web client runs the exact same rules as the bridge before sending an entry",
+                "allowlist edits are dedicated addGuardAllow/removeGuardAllow/reviewGuardAllowlist intent messages, not folded into the whole-blob UserUiSettings save",
+                "the web store never caches the allowlist in localStorage; it is server-authoritative and arrives on every hello",
+                "removing an entry has no confirmation modal since it only narrows the guard and fails safe",
+                "the review modal is mounted at the app root, not inside Settings, so a divergence reaches the user without requiring a gear click"
+            ],
+            "relatedDecisions": []
+        },
+        {
             "id": "plan-review-card",
             "name": "Plan review card stays readable after resolution",
             "doc": "features/plan-review-card.md",
@@ -928,7 +990,7 @@
                 "web is excluded from the freeze options since Vite HMR never restarts the dev server"
             ],
             "architecturalRules": [
-                "no deps= on the four service resources \u2014 tsx watch/Vite own file-watching, not Tilt",
+                "no deps= on the four service resources — tsx watch/Vite own file-watching, not Tilt",
                 "PORT is injected per resource via serve_env, never a shared env block",
                 "preflight reads .env key names only, never values, into any Tilt spec/log/UI button",
                 "the Freeze/Resume UI buttons and the --no-reload CLI flag are two entry points into one FROZEN state, reconciled by re-invoking tilt args with the full current flag set rather than mutating Tilt state directly"
@@ -993,7 +1055,7 @@
             "id": "context-compaction",
             "name": "Context compaction",
             "doc": "features/context-compaction.md",
-            "purpose": "Manually compact a session's context (summarize + replace the conversation) via a button, plus a passive near-limit warning \u2014 never auto-fired \u2014 and readable transcript events for both manual and the CLI's own background auto-compaction.",
+            "purpose": "Manually compact a session's context (summarize + replace the conversation) via a button, plus a passive near-limit warning — never auto-fired — and readable transcript events for both manual and the CLI's own background auto-compaction.",
             "entryPoints": [
                 "web/src/components/ContextWindowIndicator.tsx"
             ],
@@ -1020,15 +1082,15 @@
                 "server/src/sessions.compact.test.ts"
             ],
             "businessRules": [
-                "compaction is never auto-fired by the app on the user's behalf \u2014 only a manual button and a passive warning badge, since it is irreversible, lossy, and billable",
+                "compaction is never auto-fired by the app on the user's behalf — only a manual button and a passive warning badge, since it is irreversible, lossy, and billable",
                 "the manual button's disabled state always carries a specific reason (turn running, workflow step parked, no session yet, no reading yet, or found unsupported) via one shared contextCompactBlock predicate",
                 "a workflow step parked waiting-approval blocks the manual button but not the CLI's own background auto-compaction",
                 "a compaction is invisible to every workflow turn scan (consolidateStepOutput, lastAssistantText, summarizeTurn, retryTurn) via withoutCompactSpans, but never stripped from permission bookkeeping"
             ],
             "architecturalRules": [
-                "compactContext is a dedicated SessionManager method, not a call to prompt() \u2014 a compaction carries no 'user' transcript event and must not auto-name the session or touch the queue",
+                "compactContext is a dedicated SessionManager method, not a call to prompt() — a compaction carries no 'user' transcript event and must not auto-name the session or touch the queue",
                 "one shared predicate (contextCompactBlock) backs the server-side guard, the button's disabled state, and its tooltip",
-                "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact \u2014 all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)"
+                "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact — all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)"
             ],
             "relatedDecisions": []
         },

@@ -87,6 +87,18 @@ export function buildUserContext(
     }
   };
 
+  // Push is suppressed while a review is pending: overwriting the remote row would
+  // destroy the very state the user is being asked about, which is itself a silent
+  // decision. A reject unblocks it (and is what converges the fleet).
+  const pushGuard = () => {
+    if (!guard.pendingReview) sync.pushGuardAllowlist(guard.blob());
+  };
+  guard.onChange = (entries) => {
+    broadcast({ type: 'guardAllowlist', entries });
+    pushGuard();
+  };
+  guard.onReview = (review) => broadcast({ type: 'guardAllowlistReview', review });
+
   const projectKeys = new ProjectKeyRegistry(store, (keys) => {
     sync.pushProjectKeys(keys);
     broadcast({ type: 'projectKeys', projectKeys: keys });
@@ -187,6 +199,12 @@ export function buildUserContext(
           store.saveSettings(merged);
           broadcast({ type: 'settings', settings: merged });
         }
+        // Stage (never apply) a divergent remote allowlist. Ordering is
+        // load-bearing: this has to run before the push block below, or a fresh
+        // machine's first pull would upload its empty list over the populated row
+        // it is about to ask the user about. reviewRemote never mutates entries,
+        // so it cannot push from inside this applying window.
+        guard.reviewRemote(pulled.guardAllowlist);
         projectKeys.merge(pulled.projectKeys);
         // Adopted sessions may name checkouts this machine has but has never opened.
         projectKeys.learnAll(sessions.list().map((s) => s.cwd));
@@ -209,6 +227,7 @@ export function buildUserContext(
       sync.pushMemory(memory.collectAll());
       const local = store.loadSettings();
       if (local) sync.pushSettings(local);
+      pushGuard();
     }
     // Populate other users' published workflows + step library on connect/reconnect.
     await refreshShared();

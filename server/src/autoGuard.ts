@@ -1,6 +1,21 @@
 import path from 'node:path';
 import os from 'node:os';
-import type { Store } from './store.ts';
+import {
+  ALWAYS_ASK_TOOLS,
+  diffAllowlists,
+  normalizeAllowEntry,
+  sameAllowEntry,
+  type GuardAllowEntry,
+  type GuardAllowlistBlob,
+  type GuardAllowlistReview,
+  type GuardEntryError,
+} from '@lines/shared';
+import type { GuardSyncState, Store } from './store.ts';
+
+// Both moved to shared/ so the web client validates with the exact same rules;
+// re-exported here because sessions.ts and the guard tests import them from this
+// module, and a second definition is exactly the fork risk to avoid.
+export { ALWAYS_ASK_TOOLS, type GuardAllowEntry };
 
 /**
  * Local replica of Claude Code CLI's auto-mode boundaries, without the
@@ -77,34 +92,228 @@ const BASH_RULES: BashRule[] = [
   { pattern: /\bbrew\s+(install|uninstall)\b/, reason: 'System package change' },
 ];
 
-/** Tools that must always reach the user regardless of guard verdicts. */
-export const ALWAYS_ASK_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
+export type GuardAddResult = { ok: true } | { ok: false; reason: 'duplicate' | GuardEntryError };
 
-/** User-built exceptions, persisted by the caller. */
-export interface GuardAllowEntry {
-  tool: string;
-  /** For Bash: command prefix (first two tokens), e.g. "npx tsc". */
-  prefix?: string;
+/** Validate + dedupe an untrusted list (this disk, or a storage row) into canonical entries. */
+function sanitizeEntries(raw: unknown): GuardAllowEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: GuardAllowEntry[] = [];
+  for (const item of raw) {
+    const norm = normalizeAllowEntry(item as { tool: string; prefix?: string });
+    if ('error' in norm) continue;
+    if (out.some((e) => sameAllowEntry(e, norm.entry))) continue;
+    out.push(norm.entry);
+  }
+  return out;
 }
 
-/** Per-store allowlist of user-approved exceptions, persisted via the injected Store. */
+/** Order-insensitive set equality — the only comparison divergence detection uses. */
+function setEqual(a: GuardAllowEntry[], b: GuardAllowEntry[]): boolean {
+  const { added, removed } = diffAllowlists(a, b);
+  return added.length === 0 && removed.length === 0;
+}
+
+/**
+ * Per-store allowlist of user-approved exceptions, persisted via the injected Store.
+ *
+ * Also owns the cross-machine review lifecycle: a remote list is *never* applied
+ * silently. `reviewRemote` only stages a diff; entries change solely through
+ * `add`, `remove`, and `acceptReview`.
+ */
 export class GuardAllowlist {
   private entries: GuardAllowEntry[];
+  private syncState: GuardSyncState;
+
+  /** Fired on every local list change — permission card, UI edit, or accepted review. */
+  onChange?: (entries: GuardAllowEntry[]) => void;
+  /** Fired when a remote divergence is staged, recomputed, or cleared. */
+  onReview?: (review: GuardAllowlistReview | null) => void;
 
   constructor(private store: Store) {
-    this.entries = store.loadGuardAllowlist<GuardAllowEntry[]>([]);
+    const raw = store.loadGuardAllowlist<unknown[]>([]);
+    this.entries = sanitizeEntries(raw);
+    // Load-time migration. The file was append-only and unvalidated before the
+    // list became visible, so it can legitimately hold `{tool:'Bash',prefix:''}`,
+    // ALWAYS_ASK entries the guard ignores, and whitespace near-duplicates.
+    // Rewrite once, only when the sanitized form actually differs.
+    if (JSON.stringify(raw) !== JSON.stringify(this.entries)) this.persistEntries();
+    this.syncState = store.loadGuardSync();
+    if (!this.syncState.updatedAt) {
+      // No sync file yet (every install predating this feature). Stamp now, or the
+      // storage row would be written with a 1970 timestamp and always lose its LWW.
+      this.syncState = { ...this.syncState, updatedAt: Date.now() };
+      this.persistSync();
+    }
   }
 
   list(): GuardAllowEntry[] {
     return this.entries;
   }
 
-  /** Add an entry if absent; persists and returns true when it was new. */
-  add(entry: GuardAllowEntry): boolean {
-    if (this.entries.some((e) => e.tool === entry.tool && e.prefix === entry.prefix)) return false;
-    this.entries = [...this.entries, entry];
-    this.store.saveGuardAllowlist(this.entries);
+  /** The synced form: entries plus the local-change timestamp that orders the storage row. */
+  blob(): GuardAllowlistBlob {
+    return { entries: this.entries, updatedAt: this.syncState.updatedAt };
+  }
+
+  get pendingReview(): boolean {
+    return this.syncState.pending !== null;
+  }
+
+  /** Add an entry if absent. Normalizes internally, so every writer shares one gate. */
+  add(entry: GuardAllowEntry): GuardAddResult {
+    const norm = normalizeAllowEntry(entry);
+    if ('error' in norm) return { ok: false, reason: norm.error };
+    if (this.entries.some((e) => sameAllowEntry(e, norm.entry))) return { ok: false, reason: 'duplicate' };
+    this.entries = [...this.entries, norm.entry];
+    this.commit();
+    return { ok: true };
+  }
+
+  /** Drop an entry; persists and returns true when one matched. */
+  remove(entry: GuardAllowEntry): boolean {
+    const next = this.entries.filter((e) => !sameAllowEntry(e, entry));
+    if (next.length === this.entries.length) return false;
+    this.entries = next;
+    this.commit();
     return true;
+  }
+
+  /**
+   * Compare a pulled remote list against the local one and stage a review when
+   * they differ. Detection is a set difference, not last-write-wins: a fresh
+   * machine has an empty list and a *newer* timestamp than a populated cloud, and
+   * it must still ask rather than erase it.
+   *
+   * Never mutates `entries`, so it is safe to call inside the syncer's `applying`
+   * window — `onChange`, and with it the push, is unreachable from here.
+   */
+  reviewRemote(remote: GuardAllowlistBlob | null): void {
+    // An empty cloud is not a divergence; the caller's push bootstraps the row.
+    if (!remote) {
+      this.clearPending();
+      return;
+    }
+    // Security boundary: a tampered row must not smuggle an odd-shaped or
+    // ALWAYS_ASK entry as far as the UI, which is itself an attack surface.
+    const entries = sanitizeEntries(remote.entries);
+    if (setEqual(entries, this.entries)) {
+      // Converged — also forget any rejection, so a later change prompts again.
+      this.clearPending(true);
+      return;
+    }
+    const rejected = this.syncState.rejected;
+    if (rejected && setEqual(entries, rejected.entries)) {
+      // "Keep mine" was already answered for exactly this remote content. Stay
+      // quiet; the caller's push still retries overwriting the row.
+      this.clearPending();
+      return;
+    }
+    const pending = this.syncState.pending;
+    this.syncState = {
+      ...this.syncState,
+      pending: {
+        entries,
+        remoteUpdatedAt: typeof remote.updatedAt === 'number' ? remote.updatedAt : 0,
+        // Same remote content already pending: keep the original stamp, which is
+        // the client's dedupe key for "don't re-open a modal I dismissed".
+        detectedAt: pending && setEqual(pending.entries, entries) ? pending.detectedAt : Date.now(),
+      },
+      rejected: null, // remote moved on — an old answer no longer applies
+    };
+    this.persistSync();
+    this.onReview?.(this.review());
+  }
+
+  /** The staged review with a freshly recomputed diff, so the UI never shows a stale one. */
+  review(): GuardAllowlistReview | null {
+    const pending = this.syncState.pending;
+    if (!pending) return null;
+    const { added, removed } = diffAllowlists(this.entries, pending.entries);
+    return { entries: pending.entries, added, removed, detectedAt: pending.detectedAt };
+  }
+
+  /** Install the reviewed remote list verbatim — exactly what the user was shown. */
+  acceptReview(): boolean {
+    const pending = this.syncState.pending;
+    if (!pending) return false;
+    this.entries = pending.entries;
+    this.syncState = { updatedAt: Date.now(), pending: null, rejected: null };
+    this.persistEntries();
+    this.persistSync();
+    this.onChange?.(this.entries);
+    this.onReview?.(null);
+    return true;
+  }
+
+  /** Keep the local list and remember the answer, keyed on the remote *content*. */
+  rejectReview(): boolean {
+    const pending = this.syncState.pending;
+    if (!pending) return false;
+    const now = Date.now();
+    // Entries are untouched, but updatedAt advances on purpose: "keep mine" only
+    // converges the fleet if this list wins the row's LWW and gets pushed back over
+    // the remote one. Keyed on content, so the same answer is never re-asked while
+    // anything new still is.
+    this.syncState = {
+      updatedAt: now,
+      pending: null,
+      rejected: { entries: pending.entries, rejectedAt: now },
+    };
+    this.persistSync();
+    this.onChange?.(this.entries); // idempotent client-side; also unblocks the push
+    this.onReview?.(null); // closes the modal in this user's other tabs
+    return true;
+  }
+
+  /** Persist a local change, notify, and re-evaluate any review against the new list. */
+  private commit(): void {
+    this.syncState = { ...this.syncState, updatedAt: Date.now() };
+    this.persistEntries();
+    const pending = this.syncState.pending;
+    // A local edit can resolve the divergence outright, or merely change the diff
+    // being asked about. Either way the UI only ever renders diff(local, remote).
+    if (pending && setEqual(this.entries, pending.entries)) {
+      this.syncState = { ...this.syncState, pending: null, rejected: null };
+      this.persistSync();
+      this.onChange?.(this.entries);
+      this.onReview?.(null);
+      return;
+    }
+    this.persistSync();
+    this.onChange?.(this.entries);
+    if (pending) this.onReview?.(this.review());
+  }
+
+  /** Drop a staged review (and optionally the remembered rejection); notifies only on change. */
+  private clearPending(alsoRejected = false): void {
+    const hadPending = this.syncState.pending !== null;
+    const hadRejected = this.syncState.rejected !== null;
+    if (!hadPending && !(alsoRejected && hadRejected)) return;
+    this.syncState = {
+      ...this.syncState,
+      pending: null,
+      rejected: alsoRejected ? null : this.syncState.rejected,
+    };
+    this.persistSync();
+    if (hadPending) this.onReview?.(null);
+  }
+
+  // Persistence is best-effort: a throw here would take down the whole
+  // buildUserContext, and the in-memory list still governs this run.
+  private persistEntries(): void {
+    try {
+      this.store.saveGuardAllowlist(this.entries);
+    } catch (err) {
+      console.warn('[guard] could not persist allowlist:', err);
+    }
+  }
+
+  private persistSync(): void {
+    try {
+      this.store.saveGuardSync(this.syncState);
+    } catch (err) {
+      console.warn('[guard] could not persist allowlist sync state:', err);
+    }
   }
 }
 
