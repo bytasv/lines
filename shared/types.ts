@@ -219,6 +219,66 @@ export interface ContextUsage {
   at: number;
 }
 
+/**
+ * One row of the CLI's `/context` breakdown. Deferred rows (tools behind tool
+ * search) are EXCLUDED from `totalTokens` and from free space — never fold them
+ * into a derived total, or the ring double-counts.
+ */
+export interface ContextCategory {
+  name: string;
+  tokens: number;
+  deferred?: boolean;
+}
+
+/**
+ * Small PERSISTED projection of the SDK's context breakdown, stored on
+ * SessionMeta so the chip renders on load and after a restart with no live
+ * query. Keep it under ~1 KB: every upsert writes it to disk and pushes it
+ * through the storage sync.
+ */
+export interface ContextSummary {
+  at: number;
+  model: string;
+  /** SDK totalTokens — non-deferred categories only. */
+  totalTokens: number;
+  /** The window the CLI budgets against; the ring's denominator. */
+  maxTokens: number;
+  /** Model window before the CLI's reserves, when it differs from maxTokens. */
+  rawMaxTokens?: number;
+  percentage: number;
+  /** Non-zero rows with 'Free space' dropped (it is derived), capped. */
+  categories: ContextCategory[];
+  autoCompactThreshold?: number;
+  isAutoCompactEnabled?: boolean;
+}
+
+/** EPHEMERAL full breakdown — fetched on demand, never persisted or synced. */
+export interface ContextBreakdown extends ContextSummary {
+  /** MCP tools regrouped by server, so the UI expands server -> tools. */
+  mcpServers: {
+    serverName: string;
+    tokens: number;
+    toolCount: number;
+    tools: { name: string; tokens: number; loaded?: boolean }[];
+  }[];
+  memoryFiles: { path: string; type: string; tokens: number }[];
+  agents: { agentType: string; source: string; tokens: number }[];
+  systemTools: { name: string; tokens: number }[];
+  systemPromptSections: { name: string; tokens: number }[];
+  /** Built-in tools deferred behind tool search. */
+  deferredTools: { name: string; tokens: number; loaded?: boolean }[];
+  skills?: { total: number; included: number; tokens: number; items: { name: string; source: string; tokens: number }[] };
+  slashCommands?: { total: number; included: number; tokens: number };
+  messages?: {
+    toolCalls: number;
+    toolResults: number;
+    attachments: number;
+    assistant: number;
+    user: number;
+    other: number;
+  };
+}
+
 export interface SessionMeta {
   id: string;
   name: string;
@@ -240,8 +300,16 @@ export interface SessionMeta {
   /** Cumulative tokens spent across the session (input + output + cache). */
   totalTokens?: number;
   /** Context occupancy after the most recent turn; distinct from the cumulative
-   *  spend above. See ContextUsage. */
+   *  spend above. See ContextUsage. Fallback for when the SDK breakdown below
+   *  is unavailable. */
   contextUsage?: ContextUsage;
+  /** `/context` breakdown summary from the last successful control request —
+   *  the authoritative occupancy reading. See preferContextSummary. */
+  contextSummary?: ContextSummary;
+  /** ms epoch the CLI conversation was discarded (fresh-start workflow step).
+   *  Any reading older than this describes a conversation that no longer exists,
+   *  so the UI marks it stale until the next turn reports. */
+  contextResetAt?: number;
   /** Active-turn duration of the most recent turn in ms (SDK result duration_ms). */
   lastDurationMs?: number;
   /** Cumulative active-turn duration across the session in ms; excludes idle wait. */
@@ -434,6 +502,8 @@ export type ClientMessage =
   | { type: 'deleteStep'; stepId: string }
   /** Request the full version history of a step (for preview + re-pin). Keys are echoed back. */
   | { type: 'stepVersions'; ownerId: string; stepId: string }
+  /** Live `/context` breakdown for one session (hover-triggered). Echoed back. */
+  | { type: 'contextBreakdown'; sessionId: string }
   | { type: 'loadTranscript'; sessionId: string }
   | { type: 'pickFolder' }
   | { type: 'openProject'; path: string }
@@ -560,6 +630,8 @@ export type ServerMessage =
   | { type: 'sharedSteps'; sharedSteps: StepDef[]; pinnedSteps: StepDef[] }
   /** Version history for one step, newest first. Echoes the request keys so the store can slot it. */
   | { type: 'stepVersions'; ownerId: string; stepId: string; versions: StepDef[] }
+  /** `breakdown: null` = no live query or the control request failed — a state, not an error. */
+  | { type: 'contextBreakdown'; sessionId: string; breakdown: ContextBreakdown | null }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }
   | { type: 'transcript'; sessionId: string; events: TranscriptEvent[] }
   | { type: 'folderPicked'; path: string | null }
@@ -615,4 +687,27 @@ export function resolveModelId(id: string): string {
 export function contextWindowFor(modelId: string, models: ModelOption[]): number | undefined {
   const resolved = resolveModelId(modelId);
   return models.find((m) => m.id === resolved)?.contextWindow;
+}
+
+/**
+ * True when the SDK breakdown should be rendered instead of the assistant-usage
+ * fallback. Ties go to the summary: it is the source of truth, and both readings
+ * are written at the same turn boundary.
+ */
+export function preferContextSummary(summary?: ContextSummary, usage?: ContextUsage): boolean {
+  if (!summary) return false;
+  return !usage || summary.at >= usage.at;
+}
+
+/**
+ * Ring denominator. The SDK's own maxTokens wins whenever a breakdown exists —
+ * it already accounts for 1M-context betas and the CLI's reserves, so mixing in
+ * the hardcoded table would make our percentage disagree with `/context`.
+ */
+export function contextDenominator(
+  summary: ContextSummary | undefined,
+  modelId: string,
+  models: ModelOption[],
+): number | undefined {
+  return summary?.maxTokens ?? contextWindowFor(modelId, models);
 }

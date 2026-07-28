@@ -53,6 +53,18 @@ export function waitingPermissionMeta(tool?: string): { label: string; color: st
   }
 }
 
+/** Green under 50%, amber to 80%, red above — mirrors ClaudeUsageBar's thresholds. */
+export function usageColor(pct: number): string {
+  return pct >= 80 ? 'red' : pct >= 50 ? 'yellow' : 'teal';
+}
+
+/** Compact token count: `840`, `12.3k`, `1.05M`. */
+export function formatTokens(n: number): string {
+  if (n < 1000) return `${Math.round(n)}`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
 /** Human-friendly duration for step/session scale: `Xs` under a minute,
  *  `Xm Ys` under an hour, else `Xh Ym`. */
 export function formatDuration(ms: number): string {

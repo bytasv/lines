@@ -11,11 +11,7 @@ import {
 } from '@mantine/core';
 import { useStore } from '../store';
 import { send } from '../ws';
-
-/** Green under 50%, amber to 80%, red above — mirrors ClaudeUsageBar's thresholds. */
-function usageColor(pct: number): string {
-  return pct >= 80 ? 'red' : pct >= 50 ? 'yellow' : 'teal';
-}
+import { usageColor } from '../lib/format';
 
 const WINDOW_LABELS: Record<string, string> = {
   five_hour: 'Session (5h)',

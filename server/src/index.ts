@@ -609,6 +609,19 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       broadcast({ type: 'settings', settings: incoming });
       break;
     }
+    case 'contextBreakdown': {
+      // Resolves null rather than throwing: a failed control request must not pop
+      // the generic error toast every time the user hovers the chip.
+      const breakdown = await sessions.fetchContextBreakdown(msg.sessionId);
+      ws.send(
+        JSON.stringify({
+          type: 'contextBreakdown',
+          sessionId: msg.sessionId,
+          breakdown,
+        } satisfies ServerMessage),
+      );
+      break;
+    }
     case 'loadTranscript': {
       const started = PERF ? performance.now() : 0;
       const lines = store.loadTranscriptRaw(msg.sessionId);

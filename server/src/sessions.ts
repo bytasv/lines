@@ -5,6 +5,7 @@ import type {
   Attachment,
   AttachmentKind,
   CavemanConfig,
+  ContextBreakdown,
   ContextUsage,
   FileSnapshotData,
   PermissionMode,
@@ -32,6 +33,11 @@ import {
   isSafeReadOnly,
   type GuardAllowlist,
 } from './autoGuard.ts';
+import {
+  normalizeContextBreakdown,
+  sameContextSummary,
+  summarizeContextBreakdown,
+} from './contextBreakdown.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
 import { isAuthFailureMessage, type AuthManager } from './auth.ts';
@@ -287,6 +293,9 @@ export class SessionManager {
   private interrupting = new Set<string>();
   private onTurnComplete: TurnCompleteListener | null = null;
   private worker!: WorkerClient;
+  /** In-flight `/context` fetches, so a hover during the post-turn refresh reuses
+   *  it instead of issuing a second control request. */
+  private contextFetches = new Map<string, Promise<ContextBreakdown | null>>();
   /** Pending debounced sessions.json write, if any (see persist/flushPersist). */
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -804,6 +813,9 @@ export class SessionManager {
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
     meta.claudeSessionId = undefined;
+    // The occupancy readings now describe a conversation that is gone; they stay
+    // (a fresh step's overhead is close to the old floor) but render as stale.
+    meta.contextResetAt = Date.now();
     this.worker.close(sessionId);
   }
 
@@ -1409,6 +1421,51 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Ask the session's live query for its `/context` breakdown — the same data the
+   * CLI's `/context` command renders, and the authoritative occupancy reading.
+   *
+   * Best-effort: resolves null (never rejects) when there is no live query, the
+   * worker is down, or the CLI doesn't know the control request; the
+   * assistant-usage reading in `contextUsage` covers those cases. A successful
+   * fetch also commits a small summary to the meta so the ring survives a
+   * restart — skipped when nothing changed, which keeps hover-triggered
+   * refreshes off the broadcast and storage-sync path.
+   */
+  fetchContextBreakdown(sessionId: string): Promise<ContextBreakdown | null> {
+    const inFlight = this.contextFetches.get(sessionId);
+    if (inFlight) return inFlight;
+
+    const fetch = (async () => {
+      try {
+        const raw = await this.worker.contextUsage(sessionId);
+        const full = normalizeContextBreakdown(raw, Date.now());
+        if (!full) return null;
+        const meta = this.sessions.get(sessionId);
+        if (meta) {
+          const summary = summarizeContextBreakdown(full);
+          if (!sameContextSummary(meta.contextSummary, summary)) {
+            meta.contextSummary = summary;
+            this.upsert(meta);
+          }
+        }
+        return full;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // Expected states, not failures — don't log on every hover.
+        if (message !== 'no-live-session' && message !== 'worker-unavailable') {
+          console.warn(`[context ${sessionId.slice(0, 8)}]`, message);
+        }
+        return null;
+      } finally {
+        this.contextFetches.delete(sessionId);
+      }
+    })();
+
+    this.contextFetches.set(sessionId, fetch);
+    return fetch;
+  }
+
   handleWorkerEvent(sessionId: string, msg: Record<string, unknown> & { type: string }) {
     // Capture the CLI session id for resume-after-restart.
     const claudeSessionId = msg.session_id as string | undefined;
@@ -1510,6 +1567,10 @@ export class SessionManager {
       this.onTurnComplete?.(sessionId, source);
       this.maybeFlush(sessionId);
       void this.summarizeTurn(sessionId, resultSeq);
+      // Same class as summarizeTurn: fire-and-forget once the turn has settled.
+      // Never awaited — the queue flush and workflow advance above must not wait
+      // on a CLI control request.
+      void this.fetchContextBreakdown(sessionId);
     }
   }
 

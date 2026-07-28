@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type {
   AuthStatus,
+  ContextBreakdown,
   ModelOption,
   PermissionMode,
   ProjectKeyMap,
@@ -316,6 +317,9 @@ interface UiState {
   transcriptLoaded: Record<string, boolean>;
   /** ms epoch of the last event seen per session (not persisted) — wedged-agent detection. */
   lastEventAt: Record<string, number>;
+  /** Live `/context` breakdown per session from the last hover fetch. Ephemeral:
+   *  the detail is only meaningful while the session has a live query. */
+  contextBreakdowns: Record<string, { breakdown: ContextBreakdown | null; at: number; loading: boolean }>;
   selectedSessionId: string | null;
   folderPickPending: boolean;
   /** Model/mode applied to newly created sessions; persisted in localStorage. */
@@ -354,6 +358,8 @@ interface UiState {
   /** Return and clear the queue atomically; caller re-sends the drained prompts. */
   drainQueuedPrompts: () => QueuedPrompt[];
   selectSession: (id: string | null) => void;
+  /** Fetch the live `/context` breakdown for a session (hover-triggered). */
+  requestContextBreakdown: (sessionId: string) => void;
   setActiveProject: (path: string | null) => void;
   setFolderPickPending: (pending: boolean) => void;
   setNewSessionDefaults: (defaults: NewSessionDefaults) => void;
@@ -439,6 +445,7 @@ export const useStore = create<UiState>((set, get) => {
   transcripts: {},
   transcriptLoaded: {},
   lastEventAt: {},
+  contextBreakdowns: {},
   selectedSessionId: sessionIdFromUrl(),
   folderPickPending: false,
   newSessionDefaults: loadNewSessionDefaults(),
@@ -594,6 +601,18 @@ export const useStore = create<UiState>((set, get) => {
     pushSettings();
   },
 
+  requestContextBreakdown: (sessionId) => {
+    const prev = get().contextBreakdowns[sessionId];
+    if (prev?.loading) return; // one request in flight per session
+    set((state) => ({
+      contextBreakdowns: {
+        ...state.contextBreakdowns,
+        [sessionId]: { breakdown: prev?.breakdown ?? null, at: prev?.at ?? 0, loading: true },
+      },
+    }));
+    send({ type: 'contextBreakdown', sessionId });
+  },
+
   setActiveProject: (path) => {
     if (path) localStorage.setItem(ACTIVE_PROJECT_KEY, path);
     else localStorage.removeItem(ACTIVE_PROJECT_KEY);
@@ -644,6 +663,9 @@ export const useStore = create<UiState>((set, get) => {
           // which on a large transcript stalls the main thread into another
           // heartbeat timeout: reconnect loop.
           transcriptLoaded: {},
+          // A reconnect can follow a worker restart, so every live detail
+          // reading is suspect; the persisted summary on each meta remains.
+          contextBreakdowns: {},
         }));
         const { selectedSessionId } = get();
         if (selectedSessionId && !sessions[selectedSessionId]) {
@@ -686,6 +708,14 @@ export const useStore = create<UiState>((set, get) => {
         });
         break;
       }
+      case 'contextBreakdown':
+        set((state) => ({
+          contextBreakdowns: {
+            ...state.contextBreakdowns,
+            [msg.sessionId]: { breakdown: msg.breakdown, at: Date.now(), loading: false },
+          },
+        }));
+        break;
       case 'sessionDeleted':
         set((state) => {
           const sessions = { ...state.sessions };
@@ -694,10 +724,13 @@ export const useStore = create<UiState>((set, get) => {
           delete transcripts[msg.sessionId];
           const lastEventAt = { ...state.lastEventAt };
           delete lastEventAt[msg.sessionId];
+          const contextBreakdowns = { ...state.contextBreakdowns };
+          delete contextBreakdowns[msg.sessionId];
           return {
             sessions,
             transcripts,
             lastEventAt,
+            contextBreakdowns,
             selectedSessionId:
               state.selectedSessionId === msg.sessionId ? null : state.selectedSessionId,
           };

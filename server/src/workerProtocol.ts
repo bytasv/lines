@@ -9,10 +9,17 @@
  * Import from '@lines/shared' with `import type` only, if at all.
  */
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const WORKER_PORT = Number(process.env.CLAUDE_UI_WORKER_PORT ?? 8788);
 
 export type RpcKind = 'canUseTool' | 'preToolUse';
+
+/**
+ * Bridge->worker requests that expect exactly one `askResult`. Methods read the
+ * live Query handle (which only the worker owns); adding one here is not a
+ * protocol bump, adding a message type is.
+ */
+export type AskMethod = 'contextUsage';
 
 export type BridgeToWorker =
   /**
@@ -29,7 +36,9 @@ export type BridgeToWorker =
   /** Kill the session's query (options change, deletion). Resume revives context. */
   | { type: 'close'; sessionId: string }
   /** Answer to a worker->bridge rpc. Unknown/settled ids are ignored. */
-  | { type: 'rpcResult'; id: string; result: unknown };
+  | { type: 'rpcResult'; id: string; result: unknown }
+  /** Read something off the live Query handle; answered by exactly one `askResult`. */
+  | { type: 'ask'; id: string; sessionId: string; method: AskMethod };
 
 export interface LiveSessionInfo {
   sessionId: string;
@@ -37,8 +46,8 @@ export interface LiveSessionInfo {
   claudeSessionId?: string;
   /**
    * A turn is in flight (pushed, no `result` yet). `undefined` = a worker too
-   * old to report it; the bridge then only demotes, as it always did. Additive,
-   * so no protocol bump.
+   * old to report it; the bridge then only demotes, as it always did. Adding
+   * this field is not a protocol bump (see the note above AskMethod).
    */
   busy?: boolean;
 }
@@ -65,4 +74,10 @@ export type WorkerToBridge =
       payload: Record<string, unknown>;
     }
   /** The CLI aborted a pending rpc (e.g. interrupt) — drop the UI card. */
-  | { type: 'rpcCancel'; id: string };
+  | { type: 'rpcCancel'; id: string }
+  /**
+   * Answer to a bridge->worker `ask`. `value` is raw SDK JSON — the worker
+   * normalizes nothing. Never buffered: a bridge that went away has already
+   * timed the request out.
+   */
+  | ({ type: 'askResult'; id: string } & ({ ok: true; value: unknown } | { ok: false; error: string }));

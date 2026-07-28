@@ -100,6 +100,28 @@ function send(msg: WorkerToBridge) {
 }
 
 /**
+ * Read something off a live Query handle for the bridge. Replies bypass send():
+ * the outbox is for session events, and an ask the bridge already timed out on
+ * is worthless.
+ */
+async function handleAsk(msg: Extract<BridgeToWorker, { type: 'ask' }>) {
+  const reply = (result: WorkerToBridge) => {
+    if (bridge?.readyState === WebSocket.OPEN) bridge.send(JSON.stringify(result));
+  };
+  const state = sessions.get(msg.sessionId);
+  if (!state) {
+    reply({ type: 'askResult', id: msg.id, ok: false, error: 'no-live-session' });
+    return;
+  }
+  try {
+    const value = await state.query.getContextUsage();
+    reply({ type: 'askResult', id: msg.id, ok: true, value });
+  } catch (err) {
+    reply({ type: 'askResult', id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/**
  * PreToolUse hooks have a CLI-side timeout; if the bridge stays away this
  * long, fail closed into 'ask' — that routes the call to canUseTool, which
  * the SDK parks with no deadline until the bridge answers.
@@ -240,6 +262,9 @@ function handleBridgeMessage(msg: BridgeToWorker) {
     }
     case 'rpcResult':
       pendingRpcs.get(msg.id)?.settle(msg.result);
+      break;
+    case 'ask':
+      void handleAsk(msg);
       break;
   }
 }

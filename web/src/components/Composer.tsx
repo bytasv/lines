@@ -28,6 +28,7 @@ import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttach
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { buildExpandedPrompt, uniqueMentions } from '../lib/mentions';
+import { ContextWindowIndicator } from './ContextWindowIndicator';
 import { MentionInput } from './MentionInput';
 import { send } from '../ws';
 
@@ -346,6 +347,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           )}
         </Group>
         <Group gap="xs">
+          <ContextWindowIndicator session={session} />
           {session.totalCostUsd != null && (
             <Text size="xs" c="dimmed">
               ${session.totalCostUsd.toFixed(3)}
