@@ -20,6 +20,7 @@ import {
   IconArchive,
   IconArchiveOff,
   IconCircleCheck,
+  IconCircleCheckFilled,
   IconChevronDown,
   IconCoins,
   IconEye,
@@ -34,7 +35,7 @@ import type { CSSProperties } from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
-import { formatDuration, sessionRowMeta } from '../lib/format';
+import { formatDuration, isWorkflowFinished, sessionRowMeta } from '../lib/format';
 import type { SidebarMode } from '../store';
 import { sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
@@ -60,6 +61,10 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
   const [hovered, setHovered] = useState(false);
   // A session with no real prompt yet is safe to delete outright; others archive first.
   const isNew = session.nameAuto === true;
+  // Ran its workflow to the end but not manually completed — and never allowed to
+  // mask a session that still needs the user.
+  const finished = !session.completed && !status.actionable && isWorkflowFinished(session);
+  const wide = session.completed || finished;
 
   return (
     <UnstyledButton
@@ -80,11 +85,19 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
       <Group gap="xs" wrap="nowrap" justify="space-between">
         <Box style={{ minWidth: 0 }}>
           <Group gap={5} wrap="nowrap">
-            <Center w={session.completed ? 14 : 10} style={{ flex: session.completed ? '0 0 14px' : '0 0 10px' }}>
+            <Center w={wide ? 14 : 10} style={{ flex: wide ? '0 0 14px' : '0 0 10px' }}>
               {session.completed ? (
                 <IconCircleCheck size={14} color="var(--mantine-color-green-6)" style={{ flexShrink: 0 }} />
               ) : session.status === 'running' ? (
                 <Loader size={10} />
+              ) : finished ? (
+                // Filled check: same "done" green as the manual-completed outline
+                // check, inverted fill so the two read apart.
+                <IconCircleCheckFilled
+                  size={14}
+                  color="var(--mantine-color-green-6)"
+                  style={{ flexShrink: 0 }}
+                />
               ) : (
                 // `running` renders a Loader above, so only non-running
                 // statuses reach here — `actionable` is the whole pulse rule.

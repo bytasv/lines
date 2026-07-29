@@ -39,6 +39,16 @@ export function sessionRowMeta(session: SessionMeta): {
   };
 }
 
+/** Every step of the session's workflow reached 'done' — see workflows advance():
+ *  the last step is marked done with no further stepIndex bump, so there is no
+ *  stored "finished" flag to read. */
+export function isWorkflowFinished(session: SessionMeta): boolean {
+  const wf = session.workflow;
+  return (
+    !!wf?.started && wf.stepStatuses.length > 0 && wf.stepStatuses.every((s) => s === 'done')
+  );
+}
+
 /**
  * Label + badge color for a `waiting-permission` session, keyed off the tool
  * that triggered the pause. `AskUserQuestion` reads as a question and

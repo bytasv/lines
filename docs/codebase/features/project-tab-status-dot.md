@@ -59,6 +59,9 @@ None. `web/` has no test runner; `sessionRowMeta` itself is untested (see
 - Priority, highest first: plan ready (violet) > needs answer (teal) > needs approval
   (sandstone) > needs permission (yellow) > interrupted (yellow) > error (red).
 - `running` / `done` / `idle` never show a dot (not actionable) — folder icon.
+- A finished workflow (see [workflow-done-session-indicator](workflow-done-session-indicator.md))
+  never surfaces on a project tab: it is not actionable, so it never reaches
+  `projectStatusMeta`. Only the sidebar row shows the filled checkmark.
 - Archived sessions are excluded.
 - A session status not in the priority table is skipped rather than guessed at.
 - The active project's tab always shows the plain folder icon (render-time suppression, no
@@ -83,3 +86,4 @@ None. `web/` has no test runner; `sessionRowMeta` itself is untested (see
 
 - [session-status-badge](session-status-badge.md)
 - [interrupted-turn-recovery](interrupted-turn-recovery.md)
+- [workflow-done-session-indicator](workflow-done-session-indicator.md)

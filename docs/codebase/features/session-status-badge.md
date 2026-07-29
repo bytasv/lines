@@ -16,7 +16,9 @@ sidebar badge label/color and the OS/browser notification body, instead of a sin
 
 - `shared/types.ts` — `SessionMeta.pendingPermissionTool`
 - `server/src/sessions.ts` — `askPermission`, `setStatus`, `reconcileWithWorker`, `adoptSynced`
-- `web/src/lib/format.ts` — `waitingPermissionMeta`
+- `web/src/lib/format.ts` — `waitingPermissionMeta`, `sessionRowMeta` (the sidebar row's single
+  presentation entry point; wraps `waitingPermissionMeta` and the plain per-status `STATUS_META`
+  table, which now lives here instead of in `Sidebar.tsx`)
 - `web/src/components/Sidebar.tsx` — badge label/color lookup
 - `web/src/lib/alerts.ts` — notification body text
 
@@ -26,6 +28,13 @@ sidebar badge label/color and the OS/browser notification body, instead of a sin
   `waiting-permission` pause (e.g. `ExitPlanMode`, `AskUserQuestion`); undefined for any other
   status
 - `waitingPermissionMeta(tool)` — maps a pending tool name to `{ label, color }`
+- `sessionRowMeta(session)` — maps a full session to `{ color, label, actionable }` for the sidebar
+  row: `waitingPermissionMeta` first, then the [interrupted-turn-recovery](interrupted-turn-recovery.md)
+  yellow state, then the plain status table. Sits alongside a separate sibling predicate,
+  `isWorkflowFinished` (also in `format.ts`), which is not part of this return shape — see
+  [workflow-done-session-indicator](workflow-done-session-indicator.md). The sidebar row's icon
+  now has a fourth branch (finished-workflow filled checkmark) beyond what `sessionRowMeta`
+  alone drives.
 
 ## Data flow
 
@@ -62,4 +71,4 @@ introduced.
 
 ## Related decisions
 
-None recorded.
+- [workflow-done-session-indicator](workflow-done-session-indicator.md)

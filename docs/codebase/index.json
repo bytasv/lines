@@ -674,7 +674,38 @@
                 "sessionRowMeta is the single row-presentation entry point: waitingPermissionMeta first, then the interrupted-turn-recovery yellow state, then the plain per-status table (moved into format.ts from Sidebar.tsx)"
             ],
             "relatedDecisions": [
-                "interrupted-turn-recovery"
+                "interrupted-turn-recovery",
+                "workflow-done-session-indicator"
+            ]
+        },
+        {
+            "id": "workflow-done-session-indicator",
+            "name": "Sidebar checkmark for fully-completed workflows",
+            "doc": "features/workflow-done-session-indicator.md",
+            "purpose": "Show a filled green checkmark on the sidebar row of a session whose workflow ran every step to done, derived client-side with no stored 'finished' flag.",
+            "entryPoints": [
+                "web/src/components/Sidebar.tsx"
+            ],
+            "files": [
+                "web/src/lib/format.ts",
+                "web/src/components/Sidebar.tsx"
+            ],
+            "symbols": [
+                "isWorkflowFinished"
+            ],
+            "tests": [],
+            "businessRules": [
+                "icon precedence: session.completed -> outline check, status running -> Loader, status.actionable -> pulsing dot, isWorkflowFinished -> filled check, otherwise plain dot",
+                "actionable states always win over the finished checkmark so a session needing the user is never masked as done",
+                "force-advance (mark last running step completed) also sets the last step done, so a force-finished workflow shows the filled check too"
+            ],
+            "architecturalRules": [
+                "isWorkflowFinished is kept separate from sessionRowMeta's { color, label, actionable } return since projectStatusMeta and alerts.ts consume that shape and workflow-done is not actionable",
+                "isWorkflowFinished mirrors workflows.ts advance(): the last step is set done with no further stepIndex bump, so all-done is the only reliable signal"
+            ],
+            "relatedDecisions": [
+                "session-status-badge",
+                "project-tab-status-dot"
             ]
         },
         {
@@ -1248,7 +1279,8 @@
             ],
             "relatedDecisions": [
                 "session-status-badge",
-                "interrupted-turn-recovery"
+                "interrupted-turn-recovery",
+                "workflow-done-session-indicator"
             ]
         },
         {
