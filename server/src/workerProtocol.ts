@@ -4,15 +4,64 @@
  * or worker.ts changes).
  *
  * KEEP THIS FILE MINIMAL AND STABLE. The worker's runtime import graph is
- * worker.ts + this file + the SDK — nothing else — so tsx watch only restarts
- * the worker (killing in-flight agent turns) when the protocol itself changes.
- * Import from '@lines/shared' with `import type` only, if at all.
+ * worker.ts + this file + workerMcp.ts + the SDK — nothing else — so tsx watch
+ * only restarts the worker (killing in-flight agent turns) when the protocol
+ * itself changes. Import from '@lines/shared' with `import type` only, if at all.
  */
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const WORKER_PORT = Number(process.env.CLAUDE_UI_WORKER_PORT ?? 8788);
 
-export type RpcKind = 'canUseTool' | 'preToolUse';
+export type RpcKind = 'canUseTool' | 'preToolUse' | 'mcpTool';
+
+/**
+ * Closed subset of JSON Schema used by the tool manifest below. Deliberately
+ * small: the worker converts it to Zod at runtime, and every shape the bridge
+ * can express has to be one the converter understands.
+ */
+export type JsonSchemaType = 'object' | 'string' | 'number' | 'integer' | 'boolean' | 'array';
+
+export interface JsonSchemaNode {
+  type?: JsonSchemaType;
+  description?: string;
+  /** `type: 'object'` only. */
+  properties?: Record<string, JsonSchemaNode>;
+  /** Property names that are not optional. Ignored outside objects. */
+  required?: string[];
+  /** `type: 'array'` only. */
+  items?: JsonSchemaNode;
+  /** String enums only — the converter has no use for mixed-type enums. */
+  enum?: string[];
+}
+
+export interface McpToolSpec {
+  name: string;
+  description: string;
+  inputSchema: JsonSchemaNode;
+  /**
+   * The tool only observes state. Bridge-side policy (it decides whether a call
+   * raises a permission card), but carried here so the manifest is the single
+   * description of the surface rather than a list to keep in sync elsewhere.
+   */
+  readOnly?: boolean;
+}
+
+/**
+ * The in-process MCP server one session should expose. Sent with `push` so tool
+ * authoring stays on the bridge (hot-reloadable) even though the server instance
+ * — which holds a live, unserializable `McpServer` — must be built in the worker.
+ */
+export interface McpToolManifest {
+  serverName: string;
+  instructions?: string;
+  tools: McpToolSpec[];
+}
+
+/** MCP `CallToolResult`, narrowed to the text content our tools return. */
+export interface McpToolResult {
+  content: { type: 'text'; text: string }[];
+  isError?: boolean;
+}
 
 /**
  * Bridge->worker requests that expect exactly one `askResult`. Methods read the
@@ -27,8 +76,18 @@ export type BridgeToWorker =
    * object; the worker uses it only when no live query exists for the session
    * (creation is lazy and idempotent — no separate "ensure" message, so a
    * push can never race an ensure).
+   *
+   * `tools` is read on that same first push: the worker builds one MCP server
+   * instance per session from it and every tool call comes back as an `mcpTool`
+   * rpc. Omitted = the session gets no MCP tools.
    */
-  | { type: 'push'; sessionId: string; message: unknown; options: Record<string, unknown> }
+  | {
+      type: 'push';
+      sessionId: string;
+      message: unknown;
+      options: Record<string, unknown>;
+      tools?: McpToolManifest;
+    }
   | { type: 'interrupt'; sessionId: string }
   | { type: 'setModel'; sessionId: string; model: string }
   /** `mode` is pre-mapped to an SDK mode by the bridge (our 'auto' -> 'acceptEdits'). */

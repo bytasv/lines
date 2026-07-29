@@ -923,7 +923,60 @@
                 "the synthetic result is emitted via emitEvent directly, never routed through handleWorkerEvent, so it cannot re-run turn-settle bookkeeping (cost/token accumulation, onTurnComplete, workflow advance)",
                 "SDK/CLI error wording is not a published contract; isAuthFailureMessage can silently stop matching after an upstream change"
             ],
-            "relatedDecisions": []
+            "relatedDecisions": [
+                "app-managed-login-only — recovers a token rejected during a turn, whereas that feature guarantees a turn never starts on the ambient ~/.claude login"
+            ]
+        },
+        {
+            "id": "app-managed-login-only",
+            "name": "App-managed login is the only credential path",
+            "doc": "features/app-managed-login-only.md",
+            "purpose": "The app's own OAuth token is the sole credential every query runs on; a turn that cannot get one is refused instead of silently inheriting the unrefreshable ambient ~/.claude CLI login.",
+            "entryPoints": [
+                "server/src/sessions.ts",
+                "server/src/auth.ts"
+            ],
+            "files": [
+                "server/src/auth.ts",
+                "server/src/sessions.ts",
+                "web/src/store.ts",
+                "web/src/components/LoginModal.tsx"
+            ],
+            "symbols": [
+                "SessionManager.pushTurn",
+                "SessionManager.pushTurnSafely",
+                "SessionManager.pushWithToken",
+                "SessionManager.failTurn",
+                "SessionManager.ownerToken",
+                "authRefusalMessage",
+                "AuthManager.ensureFreshToken",
+                "PROACTIVE_RETRY_MS",
+                "PROACTIVE_RETRY_CAP_MS"
+            ],
+            "tests": [
+                "server/src/sessions.spawn.test.ts",
+                "server/src/auth.failure.test.ts",
+                "server/src/sessions.ended.test.ts"
+            ],
+            "businessRules": [
+                "a signed-in user's turn never runs on ambient ~/.claude credentials; with no app token the turn is refused, since a visible failure with Retry beats a silent 401 loop",
+                "a refusal caused by being logged out re-broadcasts the logged-out authStatus so a dismissed login modal reopens; a refusal from a transient refresh failure does not",
+                "the bridge-side helper queries (autoName, summarizeTurn, consolidateStepOutput) are best-effort: no token means skip the query, never fall back and never fail the surrounding turn",
+                "compactContext still returns a synchronous { ok: true }; an auth refusal after that point surfaces through failTurn, not the { ok: false, code, reason } union",
+                "a transiently failed proactive refresh retries on a 60s-doubling ladder capped at 15 minutes; a dead refresh token logs out instead, stopping the chain",
+                "accessToken: null in buildQueryOptions is reachable only when no AuthManager is wired at all (tests / embedding), never for a real signed-in user"
+            ],
+            "architecturalRules": [
+                "the never-fall-back guarantee lives in pushTurn, which refuses before reaching buildQueryOptions; there is deliberately no second options builder, which would duplicate the whole option set for one differing key",
+                "both turn-start call sites go through pushTurnSafely rather than void this.pushTurn(...), so one place guarantees no unhandled rejection",
+                "ownerToken() awaits ensureFreshToken() rather than reading getAccessTokenSync(), so helper queries get the same refresh-on-margin treatment as a real turn",
+                "the no-AuthManager branch of pushTurn returns before the first await, keeping that path synchronous for tests that assert an immediate push",
+                "the proactive backoff computes its first rung explicitly (null ? RETRY : min(x*2, CAP)) rather than doubling a default, which would skip the 60s rung",
+                "getAccessTokenSync() remains on AuthManager but has no production caller; it is kept for the sync-status shape tests rely on"
+            ],
+            "relatedDecisions": [
+                "auth-failure-recovery — reuses its synthetic-result / Retry pair and the authStatus broadcast for the refusal path"
+            ]
         },
         {
             "id": "workflow-task-attachments",
@@ -1095,6 +1148,70 @@
             "relatedDecisions": []
         },
         {
+            "id": "workflow-mcp-tools",
+            "name": "Conversational workflow/step editing (in-process MCP tools)",
+            "doc": "features/workflow-mcp-tools.md",
+            "purpose": "Expose workflow/step list/read/create/update/delete as in-process MCP tools (mcp__lines__*) so a session can discuss and edit its own workflows in conversation instead of only via the WorkflowEditor modal; writes are permission-gated, reads are not.",
+            "entryPoints": [
+                "web/src/components/PermissionPrompt.tsx"
+            ],
+            "files": [
+                "server/src/workerProtocol.ts",
+                "server/src/workerMcp.ts",
+                "server/src/worker.ts",
+                "server/src/workerClient.ts",
+                "server/src/workflowCommands.ts",
+                "server/src/mcpWorkflowTools.ts",
+                "shared/workflowValidation.ts",
+                "shared/types.ts",
+                "server/src/sessions.ts",
+                "server/src/index.ts",
+                "web/src/components/PermissionPrompt.tsx"
+            ],
+            "symbols": [
+                "McpToolManifest",
+                "McpToolSpec",
+                "McpToolResult",
+                "buildMcpServer",
+                "jsonSchemaToZod",
+                "jsonSchemaToZodShape",
+                "LINES_TOOL_MANIFEST",
+                "createMcpDispatcher",
+                "resolveWorkflowRef",
+                "isLinesMcpTool",
+                "isReadOnlyLinesTool",
+                "workflowToolPresentation"
+            ],
+            "tests": [
+                "server/src/workerMcp.test.ts",
+                "server/src/workflowCommands.test.ts",
+                "server/src/workflowValidation.test.ts",
+                "server/src/mcpWorkflowTools.test.ts",
+                "server/src/sessions.mcpGating.test.ts"
+            ],
+            "businessRules": [
+                "mutations address a workflow by id, or by a name unique among owned workflows; a name match against another user's published workflow is refused as read-only, never silently forked",
+                "create_workflow/update_workflow/save_step are rejected before WorkflowEngine.save() on a shared workflowValidation.ts failure, with one actionable error string",
+                "update_workflow's steps argument replaces the whole list, no patch-by-index",
+                "resolveWorkflowRef must catch the id-belongs-to-a-shared-workflow case before saveWorkflow runs, since WorkflowEngine.save() silently no-ops for it",
+                "list/read tools cap results at 100 rows (default 50)",
+                "a bridge gone mid-call answers after MCP_TOOL_FALLBACK_MS (30s) with an error result rather than parking the turn indefinitely"
+            ],
+            "architecturalRules": [
+                "tool names/descriptions/schemas live entirely on the bridge (mcpWorkflowTools.ts) and are hot-reloadable; only the workflow-agnostic conversion (workerMcp.ts) and protocol shape (workerProtocol.ts) sit in the worker's minimal import graph",
+                "PROTOCOL_VERSION bumped 2->3 for the optional push.tools field, so a bridge/worker skew is a loud mismatch instead of silently tool-less sessions",
+                "RPC_FALLBACK table excludes canUseTool on purpose - the SDK parks it with no deadline since a permission request must wait for a human",
+                "workflowCommands.ts imports UserContext type-only to avoid a runtime cycle with userContext.ts",
+                "shared/workflowValidation.ts is re-exported from shared/types.ts as that file's last statement, an intentional import cycle safe only while workflowValidation.ts never reads types.ts bindings at its own top level",
+                "the web WorkflowEditor draft (useWorkflowDraft.ts) was not migrated onto shared/workflowValidation.ts in this change; the two validators can drift"
+            ],
+            "relatedDecisions": [
+                "guard-allowlist",
+                "plan-file-auto-approve",
+                "context-window-inspector"
+            ]
+        },
+        {
             "id": "project-tab-status-dot",
             "name": "Project tab status dot",
             "doc": "features/project-tab-status-dot.md",
@@ -1133,6 +1250,43 @@
                 "session-status-badge",
                 "interrupted-turn-recovery"
             ]
+        },
+        {
+            "id": "brand-logo",
+            "name": "Brand logo assets",
+            "doc": "features/brand-logo.md",
+            "purpose": "Renders the Lines brand across the tab-bar header, browser tab favicon, and desktop notification icon, with the wordmark baked into the artwork rather than rendered as a DOM node.",
+            "entryPoints": [
+                "web/src/components/ProjectTabs.tsx",
+                "web/index.html",
+                "web/src/lib/favicon.ts",
+                "web/src/lib/alerts.ts"
+            ],
+            "files": [
+                "web/src/assets/logo.png",
+                "web/src/assets/logo-mark.png",
+                "web/public/favicon.png",
+                "web/src/index.css"
+            ],
+            "symbols": [
+                "FAVICON_SRC",
+                "drawLogo",
+                "restorePlain"
+            ],
+            "tests": [],
+            "businessRules": [
+                "the header takes the vertical lockup (mark over the word Lines); the favicon and notification icon take the mark alone - the first time the two assets diverge",
+                "favicon.png and logo-mark.png are the same art at two paths because index.html needs a /public URL while alerts.ts wants a Vite asset import",
+                "the header <img> is height-driven (height 36, width auto) because the lockup is portrait; 36px plus the plate's 12px padding fits the 56px HEADER_HEIGHT",
+                "alt=\"Lines\" on the <img> is the only accessible name for the brand - there is no text node"
+            ],
+            "architecturalRules": [
+                "the white plate in ProjectTabs is load-bearing: the PNGs have an opaque white background, so without it the art would show as a slab against the dark header",
+                "the wordmark can no longer be recolored - .brand-wordmark carried a dark-mode override, and a baked raster cannot respond to the color scheme; the retained white plate is what keeps the near-black art legible in both themes",
+                "link.type must track the real bytes: index.html declares image/png and restorePlain resets to image/png after render installs a data URL",
+                "committed PNGs are cropped/downsampled derivatives of 1254x1254 originals that are not in the repo; a future re-crop must start from those, not from the committed copies"
+            ],
+            "relatedDecisions": []
         }
     ]
 }

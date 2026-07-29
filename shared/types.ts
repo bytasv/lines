@@ -942,3 +942,28 @@ export function canCompactContext(
 ): boolean {
   return contextCompactBlock(meta) === null;
 }
+
+/**
+ * Workflow/step validation, re-exported so a caller gets the rules from the same
+ * module as the types they validate.
+ *
+ * MUST STAY THE LAST STATEMENT IN THIS FILE. `./workflowValidation.ts` imports
+ * back from here, so the two form a cycle, and it is only safe because (1) that
+ * module reads our bindings inside function bodies only, never at its own top
+ * level, and (2) this re-export runs after every other top-level binding here is
+ * initialized. Moving it up, or hoisting a top-level read over there, brings back
+ * a TDZ failure that shows up only for whichever module happens to be imported
+ * first.
+ */
+export {
+  formatWorkflowIssues,
+  MAX_WORKFLOW_NAME_LEN,
+  OUTPUT_NAME_HINT,
+  OUTPUT_NAME_RE,
+  validateStepContent,
+  validateWorkflow,
+  type StepForValidation,
+  type ValidateOptions,
+  type WorkflowIssue,
+  type WorkflowIssueField,
+} from './workflowValidation.ts';

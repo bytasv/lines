@@ -42,13 +42,21 @@ import {
   sameContextSummary,
   summarizeContextBreakdown,
 } from './contextBreakdown.ts';
+import { isLinesMcpTool, isReadOnlyLinesTool, LINES_TOOL_MANIFEST } from './mcpWorkflowTools.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
-import { isAuthFailureMessage, type AuthManager } from './auth.ts';
+import { AuthRequiredError, isAuthFailureMessage, type AuthManager } from './auth.ts';
 
 /** 'auto' is our guard layer on top of the SDK's acceptEdits mode. */
 function sdkPermissionMode(mode: PermissionMode): string {
   return mode === 'auto' ? 'acceptEdits' : mode;
+}
+
+/** Why a turn was refused before it started, in one place (see pushTurn). */
+function authRefusalMessage(err: unknown): string {
+  if (err instanceof AuthRequiredError) return 'Not signed in to Claude. Sign in, then Retry.';
+  const message = err instanceof Error ? err.message : String(err);
+  return `Could not refresh the Claude login: ${message}. Check your connection, then Retry.`;
 }
 
 /**
@@ -583,8 +591,11 @@ export class SessionManager {
       },
       settingSources: ['user', 'project'],
       ...(pluginPath ? { plugins: [{ type: 'local', path: pluginPath }] } : {}),
-      // App-managed login: hand the OAuth token to the CLI child. Absent (logged
-      // out or mid-refresh), the CLI falls back to its ambient credentials.
+      // App-managed login is the only credential path: pushTurn refuses the turn
+      // unless it holds a token, so this is always set in the real app. Never
+      // let a signed-in user inherit the ambient ~/.claude CLI login — that is a
+      // separate store the app cannot refresh, so a stale one 401s forever.
+      // Null only when no AuthManager is wired at all (tests / embedding).
       ...(accessToken ? { env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: accessToken } } : {}),
     };
   }
@@ -593,7 +604,8 @@ export class SessionManager {
    * Restart queries that aren't mid-turn so their next prompt rebuilds options
    * with the current token (resume keeps context). Called on login/logout and
    * after token refresh; busy sessions finish their turn on the old token, and
-   * pushTurn recycles them at their next push.
+   * pushTurn recycles them at their next push. After a logout the next push is
+   * refused outright, so nothing respawns on ambient credentials.
    *
    * Gated on interruptible, not active: a session parked at 'waiting-approval'
    * has already settled its turn, so its query is as safe to drop as an idle
@@ -622,13 +634,66 @@ export class SessionManager {
    * mid-turn or awaiting approval when the token rotated would 401 forever, and
    * re-logging in would not help. Closing is cheap: `resume` rebuilds the query
    * with the current token and keeps the conversation.
+   *
+   * The token is resolved (refreshing if it is inside the refresh margin) before
+   * the spawn, and a turn that cannot get one is refused rather than started on
+   * the ambient CLI login. Awaiting the single-flight refresh also means a Retry
+   * click landing mid-refresh queues on the same promise instead of re-pushing
+   * on the stale token.
+   *
+   * Callers fire-and-forget through pushTurnSafely, never awaiting.
    */
-  private pushTurn(meta: SessionMeta, message: Record<string, unknown>) {
-    const accessToken = this.auth?.getAccessTokenSync() ?? null;
+  private async pushTurn(meta: SessionMeta, message: Record<string, unknown>) {
+    // No AuthManager wired (tests / embedding): keep the pre-app-login
+    // behaviour. Returns before any await, so that path stays synchronous.
+    if (!this.auth) {
+      this.pushWithToken(meta, message, null);
+      return;
+    }
+
+    let accessToken: string;
+    try {
+      accessToken = await this.auth.ensureFreshToken();
+    } catch (err) {
+      this.failTurn(meta.id, authRefusalMessage(err));
+      // store.ts:898 force-opens the login modal on any logged-out authStatus,
+      // so re-broadcasting the current state reopens a dismissed one. Not routed
+      // through auth.onChange, which would also spin recycleIdleQueries() and
+      // usage.refreshSoon() for a state that did not change.
+      if (err instanceof AuthRequiredError) this.broadcast({ type: 'authStatus', auth: { loggedIn: false } });
+      return;
+    }
+    this.pushWithToken(meta, message, accessToken);
+  }
+
+  /** pushTurn is fire-and-forget, so a throw past its own handling must not
+   *  become an unhandled rejection. */
+  private pushTurnSafely(meta: SessionMeta, message: Record<string, unknown>) {
+    void this.pushTurn(meta, message).catch((err) => {
+      console.error(`[session ${meta.id}] push failed:`, err);
+    });
+  }
+
+  /** Recycle the query if it was spawned with a different token, then push. */
+  private pushWithToken(meta: SessionMeta, message: Record<string, unknown>, accessToken: string | null) {
     const spawnedWith = this.queryTokens.get(meta.id);
     if (spawnedWith !== undefined && spawnedWith !== accessToken) this.closeQuery(meta.id);
     this.queryTokens.set(meta.id, accessToken);
-    this.worker.push(meta.id, message, this.buildQueryOptions(meta, accessToken));
+    // Every session gets the workflow tool surface; the manifest is static, and
+    // the calls it produces are routed back to this user's context by the bridge.
+    this.worker.push(meta.id, message, this.buildQueryOptions(meta, accessToken), LINES_TOOL_MANIFEST);
+  }
+
+  /** Show a turn as failed with a Retry button: synthetic result first (so it is
+   *  the trailing transcript item), then the error status. */
+  private failTurn(sessionId: string, error: string) {
+    this.emitEvent(sessionId, 'sdk', {
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      result: error,
+    });
+    this.setStatus(sessionId, 'error', error);
   }
 
   /** Persist attachments to disk and return the transcript/queue refs. */
@@ -891,7 +956,7 @@ export class SessionManager {
     this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
     const content = [...blocks, ...(text ? [{ type: 'text', text }] : [])];
-    this.pushTurn(meta, { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
+    this.pushTurnSafely(meta, { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
   }
 
   /**
@@ -928,7 +993,9 @@ export class SessionManager {
     meta.turnStartedAt = Date.now();
     this.setStatus(sessionId, 'running');
 
-    this.pushTurn(meta, {
+    // Synchronous { ok: true } stands: an auth refusal after this point surfaces
+    // through failTurn, not through the { ok: false, code, reason } union.
+    this.pushTurnSafely(meta, {
       type: 'user',
       message: { role: 'user', content: [{ type: 'text', text: '/compact' }] },
       parent_tool_use_id: null,
@@ -1013,6 +1080,9 @@ export class SessionManager {
       // Single-turn step: its final text is the deliverable — no query, no latency.
       if (turns.length <= 1) return turns[0]?.output ?? this.lastAssistantText(sessionId);
 
+      const token = await this.ownerToken();
+      if (!token) return this.lastAssistantText(sessionId);
+
       const initialPrompt = turns[0].user.slice(0, 4000);
       const attempts = turns
         .map((t, n) => {
@@ -1043,7 +1113,7 @@ export class SessionManager {
             'You consolidate an iterated workflow step into its single final ' +
             'deliverable. You never ask questions, never refuse, and never add ' +
             'commentary or preamble — you output only the deliverable.',
-          ...this.ownerTokenEnv(),
+          env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token },
         } as never,
       });
       let output: string | null = null;
@@ -1061,13 +1131,19 @@ export class SessionManager {
   }
 
   /**
-   * Env for the bridge-side helper queries (autoName/summarizeTurn): they run
-   * outside the worker, so hand them the owner's OAuth token explicitly — a
-   * remote multi-user host has no ambient CLI login to fall back on.
+   * Token for the bridge-side helper queries (autoName/summarizeTurn/
+   * consolidateStepOutput): they run outside the worker, so they need the
+   * owner's OAuth token explicitly. Refreshes like a real turn rather than
+   * reading the sync cache, and returns null — never a fallback to the
+   * ambient CLI login — when the app has no usable token.
    */
-  private ownerTokenEnv(): { env?: Record<string, string | undefined> } {
-    const token = this.auth?.getAccessTokenSync() ?? null;
-    return token ? { env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token } } : {};
+  private async ownerToken(): Promise<string | null> {
+    if (!this.auth) return null;
+    try {
+      return await this.auth.ensureFreshToken();
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1091,6 +1167,9 @@ export class SessionManager {
    */
   private async autoName(sessionId: string, prompt: string) {
     try {
+      const token = await this.ownerToken();
+      if (!token) return;
+
       const q = query({
         prompt:
           'Summarize the following task in a 3-6 word title. Output only the ' +
@@ -1108,7 +1187,7 @@ export class SessionManager {
             'You are a title generator. You receive a task description and ' +
             'reply with a single short title. You never ask questions, never ' +
             'refuse, and never add commentary — you only output the title.',
-          ...this.ownerTokenEnv(),
+          env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token },
         } as never,
       });
       let title: string | null = null;
@@ -1174,6 +1253,9 @@ export class SessionManager {
       }
       if (toolCalls.length === 0) return; // plain text answer — nothing to summarize
 
+      const token = await this.ownerToken();
+      if (!token) return;
+
       const lines = toolCalls.map((t) => {
         const input = t.input.file_path ?? t.input.command ?? t.input.pattern ?? t.input.url ?? '';
         const failed = toolErrors.has(t.id) ? ' (failed)' : '';
@@ -1195,7 +1277,7 @@ export class SessionManager {
           systemPrompt:
             'You summarize a coding agent\'s completed turn in 1-2 plain sentences. ' +
             'You never ask questions, never refuse, and never add commentary or preamble.',
-          ...this.ownerTokenEnv(),
+          env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token },
         } as never,
       });
       let summary: string | null = null;
@@ -1789,15 +1871,9 @@ export class SessionManager {
       this.liveState(sessionId).permissionWaitMs = 0;
       // A crashed query emits no SDK `result`, so the transcript would end on a
       // half-finished turn with no failure row and no Retry button. Synthesize one
-      // (before the status flip, so it is the trailing item) — this is the "query
-      // crash" half of what retryTurn already documents itself as covering.
-      this.emitEvent(sessionId, 'sdk', {
-        type: 'result',
-        subtype: 'error_during_execution',
-        is_error: true,
-        result: error,
-      });
-      this.setStatus(sessionId, 'error', error);
+      // — this is the "query crash" half of what retryTurn already documents
+      // itself as covering.
+      this.failTurn(sessionId, error);
       // A dead token surfaces here as a query crash; recover (or log out, which
       // opens the login modal) now rather than waiting for the usage poller.
       if (isAuthFailureMessage(error)) void this.auth?.handleTokenRejected();
@@ -1867,6 +1943,37 @@ export class SessionManager {
     const meta = this.sessions.get(sessionId);
     const toolName = String(hookInput.tool_name ?? '');
     const toolInput = (hookInput.tool_input ?? {}) as Record<string, unknown>;
+
+    // Lines' own workflow tools are gated by what they do, not by the session's
+    // mode: reads never prompt, writes always do. A workflow edit outlives the
+    // session that made it and shows up in other users' shared views, so it is
+    // not something auto mode should be rubber-stamping.
+    if (isLinesMcpTool(toolName)) {
+      if (!isReadOnlyLinesTool(toolName)) {
+        return {
+          continue: true,
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'ask',
+            permissionDecisionReason: 'Changes a saved workflow or step.',
+          },
+        };
+      }
+      if (!resend) {
+        this.emitEvent(sessionId, 'permission', {
+          requestId: randomUUID(),
+          toolName,
+          input: toolInput,
+          resolution: 'allow',
+          auto: true,
+        } satisfies PermissionRequestData);
+      }
+      return {
+        continue: true,
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+      };
+    }
+
     if (meta?.permissionMode === 'auto') {
       if (!ALWAYS_ASK_TOOLS.has(toolName)) {
         const verdict = assessToolCall(toolName, toolInput, meta.cwd, this.guard.list());
@@ -1961,7 +2068,22 @@ export class SessionManager {
     // (recorded in the transcript); dangerous -> fall through to the prompt
     // with the guard's reason attached.
     let guardReason: string | undefined;
-    {
+    // Lines' own workflow tools bypass the guard entirely (see handlePreToolUse):
+    // reads auto-allow in every mode, writes always reach the card below.
+    if (isLinesMcpTool(toolName)) {
+      if (isReadOnlyLinesTool(toolName)) {
+        if (!resend) {
+          this.emitEvent(sessionId, 'permission', {
+            requestId: randomUUID(),
+            toolName,
+            input,
+            resolution: 'allow',
+            auto: true,
+          } satisfies PermissionRequestData);
+        }
+        return { behavior: 'allow', updatedInput: input };
+      }
+    } else {
       const meta = this.sessions.get(sessionId);
       if (meta?.permissionMode === 'auto' && !ALWAYS_ASK_TOOLS.has(toolName)) {
         const verdict = assessToolCall(toolName, input, meta.cwd, this.guard.list());

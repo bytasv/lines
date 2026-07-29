@@ -8,9 +8,15 @@
  * bridge; the worker forwards those decisions over blocking RPCs and buffers
  * session events while the bridge is away.
  *
- * KEEP THE IMPORT GRAPH MINIMAL (stdlib + ws + SDK + workerProtocol.ts):
- * this file runs under tsx watch too, and only restarts when its own graph
- * changes — which is exactly when a restart is unavoidable anyway.
+ * KEEP THE IMPORT GRAPH MINIMAL (stdlib + ws + zod + SDK + workerProtocol.ts +
+ * workerMcp.ts): this file runs under tsx watch too, and only restarts when its
+ * own graph changes — which is exactly when a restart is unavoidable anyway.
+ *
+ * workerMcp.ts qualifies for the same reason workerProtocol.ts does: it only
+ * turns protocol-shaped JSON Schema into MCP tool definitions whose handlers
+ * call back into the bridge, so it holds no domain knowledge and changes about
+ * as often as the protocol. The tools themselves (names, descriptions, argument
+ * shapes) are authored on the bridge and arrive as data on `push`.
  */
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -19,9 +25,12 @@ import {
   PROTOCOL_VERSION,
   WORKER_PORT,
   type BridgeToWorker,
+  type McpToolManifest,
+  type McpToolResult,
   type RpcKind,
   type WorkerToBridge,
 } from './workerProtocol.ts';
+import { buildMcpServer } from './workerMcp.ts';
 
 /** Push-based async iterable used as the streaming-input prompt for the SDK. */
 class AsyncQueue<T> implements AsyncIterable<T> {
@@ -128,6 +137,52 @@ async function handleAsk(msg: Extract<BridgeToWorker, { type: 'ask' }>) {
  */
 const HOOK_FALLBACK_MS = 90_000;
 
+/**
+ * The SDK's MCP tool timeout is effectively unbounded by default, so a tool call
+ * issued to a bridge that then went away would park the turn forever. Shorter
+ * than the hook fallback: nothing downstream retries an MCP tool call, and the
+ * model can recover from an error result on its own.
+ */
+const MCP_TOOL_FALLBACK_MS = 30_000;
+
+/**
+ * Per-kind deadline for a bridge that never answers, and what to answer in its
+ * place. canUseTool is absent deliberately: the SDK parks it with no deadline,
+ * and a permission request is exactly the thing that must wait for a human.
+ */
+const RPC_FALLBACK: Partial<Record<RpcKind, { ms: number; result: unknown }>> = {
+  preToolUse: {
+    ms: HOOK_FALLBACK_MS,
+    result: {
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'ask',
+        permissionDecisionReason: 'Bridge unavailable — escalated to a permission prompt.',
+      },
+    },
+  },
+  mcpTool: {
+    ms: MCP_TOOL_FALLBACK_MS,
+    result: {
+      content: [{ type: 'text', text: 'The Lines bridge is unavailable — try again in a moment.' }],
+      isError: true,
+    } satisfies McpToolResult,
+  },
+};
+
+/** How to answer a pending rpc that the bridge can no longer decide. */
+function unavailableResult(kind: RpcKind, message: string): unknown {
+  switch (kind) {
+    case 'canUseTool':
+      return { behavior: 'deny', message };
+    case 'mcpTool':
+      return { content: [{ type: 'text', text: message }], isError: true } satisfies McpToolResult;
+    default:
+      return { continue: true };
+  }
+}
+
 function rpcCall(
   sessionId: string,
   kind: RpcKind,
@@ -144,28 +199,18 @@ function rpcCall(
     };
     pendingRpcs.set(id, { sessionId, kind, payload, settle });
 
-    if (kind === 'preToolUse') {
+    const fallback = RPC_FALLBACK[kind];
+    if (fallback) {
       timer = setTimeout(() => {
         if (bridge?.readyState === WebSocket.OPEN) return; // bridge alive — keep waiting
-        settle({
-          continue: true,
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            permissionDecision: 'ask',
-            permissionDecisionReason: 'Bridge unavailable — escalated to a permission prompt.',
-          },
-        });
-      }, HOOK_FALLBACK_MS);
+        settle(fallback.result);
+      }, fallback.ms);
       timer.unref();
     }
 
     signal?.addEventListener('abort', () => {
       send({ type: 'rpcCancel', id });
-      settle(
-        kind === 'canUseTool'
-          ? { behavior: 'deny', message: 'Interrupted.' }
-          : { continue: true },
-      );
+      settle(unavailableResult(kind, 'Interrupted.'));
     });
 
     if (bridge?.readyState === WebSocket.OPEN) {
@@ -175,7 +220,11 @@ function rpcCall(
   });
 }
 
-function ensureSession(sessionId: string, options: Record<string, unknown>): SessionState {
+function ensureSession(
+  sessionId: string,
+  options: Record<string, unknown>,
+  tools?: McpToolManifest,
+): SessionState {
   let state = sessions.get(sessionId);
   if (state) return state;
 
@@ -198,6 +247,20 @@ function ensureSession(sessionId: string, options: Record<string, unknown>): Ses
         },
       ],
     },
+    // One server instance per session, never a cached singleton: the handler has
+    // to close over this sessionId so the bridge can route the call to the
+    // owning user context. MCP's own `extra` carries no Lines session id.
+    ...(tools
+      ? {
+          mcpServers: {
+            [tools.serverName]: buildMcpServer(
+              tools,
+              (toolName, args, signal) =>
+                rpcCall(sessionId, 'mcpTool', { tool: toolName, args }, signal) as Promise<McpToolResult>,
+            ),
+          },
+        }
+      : {}),
   };
 
   const q = query({ prompt: queue as AsyncIterable<SDKUserMessage>, options: fullOptions as never });
@@ -225,9 +288,7 @@ async function pump(sessionId: string, state: SessionState, q: Query) {
     // Settle rpcs still waiting on this dead query so their promises resolve.
     for (const [, p] of [...pendingRpcs]) {
       if (p.sessionId !== sessionId) continue;
-      p.settle(
-        p.kind === 'canUseTool' ? { behavior: 'deny', message: 'Session ended.' } : { continue: true },
-      );
+      p.settle(unavailableResult(p.kind, 'Session ended.'));
     }
   }
 }
@@ -235,7 +296,7 @@ async function pump(sessionId: string, state: SessionState, q: Query) {
 function handleBridgeMessage(msg: BridgeToWorker) {
   switch (msg.type) {
     case 'push': {
-      const state = ensureSession(msg.sessionId, msg.options);
+      const state = ensureSession(msg.sessionId, msg.options, msg.tools);
       state.busy = true;
       state.queue.push(msg.message as SDKUserMessage);
       break;

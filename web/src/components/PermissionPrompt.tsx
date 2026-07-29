@@ -96,6 +96,8 @@ function toolPresentation(data: PermissionRequestData): {
       };
 
     default: {
+      const workflowEdit = workflowToolPresentation(data.toolName, input);
+      if (workflowEdit) return workflowEdit;
       if (isEditTool(data.toolName)) {
         return {
           icon: <IconFilePencil size={16} color="var(--mantine-color-teal-5)" />,
@@ -123,6 +125,80 @@ function toolPresentation(data: PermissionRequestData): {
       };
     }
   }
+}
+
+/** Lines' own workflow-editing MCP tools, as the model sees them. */
+const WORKFLOW_TOOL_PREFIX = 'mcp__lines__';
+
+const WORKFLOW_TOOL_TITLES: Record<string, { title: string; allowLabel: string }> = {
+  create_workflow: { title: 'Claude wants to create a workflow', allowLabel: 'Create workflow' },
+  update_workflow: { title: 'Claude wants to change a workflow', allowLabel: 'Save workflow' },
+  delete_workflow: { title: 'Claude wants to delete a workflow', allowLabel: 'Delete workflow' },
+  save_step: { title: 'Claude wants to save a reusable step', allowLabel: 'Save step' },
+  delete_step: { title: 'Claude wants to delete a reusable step', allowLabel: 'Delete step' },
+};
+
+/**
+ * A readable summary for a workflow write instead of the default JSON dump. A
+ * five-step workflow serialises to a few hundred lines of prompt template, which
+ * makes the approval a rubber stamp — the point of gating these is that the user
+ * can see what changes.
+ */
+function workflowToolPresentation(
+  toolName: string,
+  input: Record<string, unknown>,
+): ReturnType<typeof toolPresentation> | null {
+  if (!toolName.startsWith(WORKFLOW_TOOL_PREFIX)) return null;
+  const labels = WORKFLOW_TOOL_TITLES[toolName.slice(WORKFLOW_TOOL_PREFIX.length)];
+  if (!labels) return null; // a read tool, or one added since — fall through to the default card
+
+  const target = String(input.workflow ?? input.name ?? input.stepId ?? '');
+  const steps = Array.isArray(input.steps) ? (input.steps as Record<string, unknown>[]) : null;
+
+  return {
+    icon: <IconMap size={16} color="var(--mantine-color-violet-4)" />,
+    title: labels.title,
+    allowLabel: labels.allowLabel,
+    denyLabel: 'Deny',
+    body: (
+      <>
+        {target && (
+          <Text size="sm" fw={500}>
+            {target}
+          </Text>
+        )}
+        {typeof input.name === 'string' && input.name && target !== input.name && (
+          <Text size="xs" c="dimmed">
+            Name: {input.name}
+          </Text>
+        )}
+        {steps && (
+          <Box mt={6}>
+            <Text size="xs" c="dimmed" mb={2}>
+              {steps.length} step{steps.length === 1 ? '' : 's'} (replaces the existing list)
+            </Text>
+            {steps.map((step, i) => (
+              <Text key={i} size="xs" ff="monospace" truncate>
+                {i + 1}. {String(step.name ?? (step.kind === 'ref' ? `pinned ${step.stepId ?? ''}` : 'untitled'))}
+                {step.model ? ` — ${String(step.model)}` : ''}
+                {step.permissionMode ? ` / ${String(step.permissionMode)}` : ''}
+              </Text>
+            ))}
+          </Box>
+        )}
+        {typeof input.promptTemplate === 'string' && (
+          <Code block mt={6} style={{ fontSize: 11, maxHeight: 160, overflow: 'auto' }}>
+            {input.promptTemplate}
+          </Code>
+        )}
+        {typeof input.published === 'boolean' && (
+          <Text size="xs" c="dimmed" mt={4}>
+            {input.published ? 'Shared with every user on this instance' : 'Kept private'}
+          </Text>
+        )}
+      </>
+    ),
+  };
 }
 
 /** File-path line + fragment diff with Monaco zoom for Edit/Write/MultiEdit requests. */

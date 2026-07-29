@@ -6,6 +6,7 @@ import {
   type AskMethod,
   type BridgeToWorker,
   type LiveSessionInfo,
+  type McpToolManifest,
   type RpcKind,
   type WorkerToBridge,
 } from './workerProtocol.ts';
@@ -168,8 +169,14 @@ export class WorkerClient {
     }
   }
 
-  push(sessionId: string, message: unknown, options: Record<string, unknown>) {
-    this.send({ type: 'push', sessionId, message, options });
+  /** `tools` is only read when the worker has to create the query (see `push` in workerProtocol.ts). */
+  push(
+    sessionId: string,
+    message: unknown,
+    options: Record<string, unknown>,
+    tools?: McpToolManifest,
+  ) {
+    this.send({ type: 'push', sessionId, message, options, tools });
   }
 
   interrupt(sessionId: string) {

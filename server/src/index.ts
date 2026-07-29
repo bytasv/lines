@@ -12,11 +12,14 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { ClientMessage, ServerMessage } from '@lines/shared';
 import { DEFAULT_MODELS } from '@lines/shared';
 import { verifyToken } from '@clerk/backend';
-import { WorkerClient } from './workerClient.ts';
+import { WorkerClient, type WorkerRpc } from './workerClient.ts';
 import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
 import type { UserContext } from './userContext.ts';
 import { searchFiles } from './fileSearch.ts';
+import { createMcpDispatcher } from './mcpWorkflowTools.ts';
+import * as workflowCommands from './workflowCommands.ts';
+import type { McpToolResult } from './workerProtocol.ts';
 
 const PORT = Number(process.env.PORT ?? 8787);
 
@@ -88,7 +91,13 @@ const worker = new WorkerClient({
   onEvent: (sessionId, message) =>
     registry.forSession(sessionId).sessions.handleWorkerEvent(sessionId, message),
   onEnded: (sessionId, error) => registry.forSession(sessionId).sessions.handleWorkerEnded(sessionId, error),
-  onRpc: (rpc) => void registry.forSession(rpc.sessionId).sessions.handleWorkerRpc(rpc),
+  onRpc: (rpc) => {
+    const ctx = registry.forSession(rpc.sessionId);
+    // Workflow tool calls are the bridge's own business, not the session's —
+    // they read and write this user's context rather than gating a tool call.
+    if (rpc.kind === 'mcpTool') void handleMcpToolRpc(ctx, rpc);
+    else void ctx.sessions.handleWorkerRpc(rpc);
+  },
   // No sessionId on a cancel — only the owner's live map has the pending rpc, the rest no-op.
   onRpcCancel: (id) => {
     for (const ctx of registry.all()) ctx.sessions.handleRpcCancel(id);
@@ -419,6 +428,28 @@ async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
   });
 }
 
+/**
+ * Run one workflow tool call for the session's owner and answer the worker.
+ * Failures come back as an error result rather than a rejection: the model is
+ * waiting on this call, and a thrown bridge error would park its turn until the
+ * worker's fallback fires.
+ */
+async function handleMcpToolRpc(ctx: UserContext, rpc: WorkerRpc): Promise<void> {
+  const toolName = String(rpc.payload.tool ?? '');
+  const args = (rpc.payload.args ?? {}) as Record<string, unknown>;
+  let result: McpToolResult;
+  try {
+    result = await createMcpDispatcher(ctx)(toolName, args);
+  } catch (err) {
+    console.error('[mcp]', toolName, err);
+    result = {
+      content: [{ type: 'text', text: `Lines could not run ${toolName}: ${err instanceof Error ? err.message : String(err)}` }],
+      isError: true,
+    };
+  }
+  worker.rpcResult(rpc.id, result);
+}
+
 async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage): Promise<void> {
   const { sessions, workflows, store, auth, broadcast } = ctx;
   switch (msg.type) {
@@ -516,33 +547,35 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
     case 'workflowRetry':
       workflows.retry(msg.sessionId, msg.stepIndex, msg.feedback);
       break;
+    // The four workflow mutations and the version read below go through
+    // workflowCommands.ts, which the session's own MCP tools also call — so the
+    // two surfaces are the same code path rather than two that look alike.
     case 'saveWorkflow':
-      // ownerName is cosmetic (owner's display label); ownerId is stamped in save().
-      if (msg.ownerName !== undefined) msg.workflow.ownerName = msg.ownerName;
-      workflows.save(msg.workflow);
+      workflowCommands.saveWorkflow(ctx, { workflow: msg.workflow, ownerName: msg.ownerName });
       break;
     case 'deleteWorkflow':
-      workflows.delete(msg.workflowId);
-      // The 'workflows' broadcast only upserts what's left; remove the row too.
-      ctx.sync.deleteWorkflow(msg.workflowId);
+      workflowCommands.deleteWorkflow(ctx, msg.workflowId);
       break;
     case 'saveStep':
-      workflows.saveStep(msg.step, msg.stepId, msg.published, msg.ownerName);
+      workflowCommands.saveStep(ctx, {
+        step: msg.step,
+        stepId: msg.stepId,
+        published: msg.published,
+        ownerName: msg.ownerName,
+      });
       break;
     case 'deleteStep':
-      workflows.deleteStep(msg.stepId);
-      ctx.sync.deleteStep(msg.stepId);
+      workflowCommands.deleteStep(ctx, msg.stepId);
       break;
     case 'stepVersions': {
       // Ping→pong: pull remote history (if online), adopt it so re-pins resolve, reply to this socket.
-      const remote = await ctx.sync.pullStepVersions(msg.ownerId, msg.stepId);
-      if (remote) workflows.addStepVersions(remote);
+      const versions = await workflowCommands.stepVersionsView(ctx, msg.ownerId, msg.stepId);
       ws.send(
         JSON.stringify({
           type: 'stepVersions',
           ownerId: msg.ownerId,
           stepId: msg.stepId,
-          versions: workflows.listStepVersions(msg.ownerId, msg.stepId),
+          versions,
         } satisfies ServerMessage),
       );
       break;
