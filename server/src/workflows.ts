@@ -674,6 +674,18 @@ export class WorkflowEngine {
       this.approve(sessionId, i);
       return;
     }
+    if (status === 'done') {
+      // The advance marked this step done but never bumped past it (see advance's
+      // persist). `advancing` is the only marker of a live advance, so a cleared flag
+      // means nothing is coming to finish this one — re-enter advance, which
+      // re-consolidates the output and starts the next step.
+      if (meta.workflow.advancing) return;
+      const done = this.resolve(meta.workflow.workflowId);
+      // The last step reading 'done' is a finished workflow, not a stall.
+      if (!done || i + 1 >= done.steps.length) return;
+      void this.advance(sessionId);
+      return;
+    }
     if (status !== 'running') return;
     if (isSessionActive(meta.status)) {
       // Flagged whatever the turn's source: a user-source turn can be live while the
@@ -823,6 +835,13 @@ export class WorkflowEngine {
 
     if (i + 1 < wf.steps.length) {
       meta.workflow.stepIndex = i + 1;
+      // Persisted before handing off to runStep. Until this lands, the durable state is
+      // `stepStatuses[i] === 'done'` with `stepIndex` still `i`, and a bridge death in
+      // that window (a consolidation that outlived the process, say) leaves a step no
+      // affordance can move: approve/retry want 'waiting-approval', forceAdvance wants
+      // 'running', startStep wants 'pending'. Synchronous, so it cannot reopen the
+      // `advancing` flicker window the comment above guards.
+      this.sessions.persistMeta(sessionId);
       void this.runStep(sessionId, undefined, true);
     } else {
       this.sessions.setStatus(sessionId, 'idle');

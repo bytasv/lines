@@ -28,6 +28,8 @@ Give instant feedback when the user clicks **Approve → next step**: the click 
 
 `advance()` sets `stepStatuses[i] = 'done'`, then sets `workflow.advancing = true` and calls `SessionManager.persistMeta()` — a plain persist + `sessionUpsert` broadcast with no status change — **before** awaiting `consolidateStepOutput()`. Everything from the WS handler through this point is synchronous, so every connected tab sees the flag in the same tick as the click.
 
+The next-step branch persists its `stepIndex` bump immediately (`persistMeta` right after `stepIndex = i + 1`) rather than letting the bump ride `runStep`'s later broadcast. Until that call existed, the bump was in-memory only for the whole consolidation window, making the durable on-disk state `stepStatuses[i] === 'done'` with `stepIndex` still `i` — a shape no affordance could move, so a bridge death inside the window wedged the run permanently. See [workflow-stalled-step-start](workflow-stalled-step-start.md).
+
 `workflow.advancing` is cleared right before the branch that either starts the next step or finishes the workflow, with no broadcast of its own: both branches broadcast next regardless (`runStep`'s `setStatus('running')`, its unresolved-ref `setStatus('error')`, or the last-step `setStatus('idle')`), so the clear rides that message and the client never sees a flicker back to a live-looking button. A failure during consolidation is caught and logged; the flag still clears via the same fall-through so the loader can never hang. `runStep`'s two silent early-return paths (unresolved workflow/session, and a step index past the end of the list) now also call `SessionManager.persistMeta` before returning, so the cleared flag and bumped `stepIndex` reach the client even when neither branch above runs — previously those returns broadcast nothing and the loader could hang forever.
 
 The consolidation itself (`SessionManager.consolidateStepOutput`, awaited inside this window) is bounded by `consolidateTimeoutMs` (60s default, overridable in tests) so a hung token refresh or an unbounded query drain can no longer keep this window open indefinitely — see [workflow-step-output-consolidation](workflow-step-output-consolidation.md).
@@ -61,4 +63,4 @@ The flag is in-flight-only and lives in one bridge process's memory, so two boun
 
 ## Related decisions
 
-None.
+- [workflow-stalled-step-start](workflow-stalled-step-start.md)

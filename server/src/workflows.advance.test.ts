@@ -400,6 +400,64 @@ test('startStep does not run step 0 before the task description arrives', () => 
   assert.equal(h.s1().workflow?.stepStatuses[0], 'pending', 'the first prompt is what starts it');
 });
 
+/**
+ * The state a bridge death mid-consolidation leaves behind: step 0 already marked 'done'
+ * by advance(), `stepIndex` never bumped past it, and `advancing` cleared on load. The
+ * session status is the stale 'waiting-approval' from the park before the approve.
+ */
+function halfAdvanced() {
+  const h = harness(2, { stepIndex: 0, stepStatuses: ['done', 'pending'] });
+  h.s1().workflow!.advancing = false;
+  return h;
+}
+
+test('the bumped stepIndex is persisted before the next step is queued', async () => {
+  const h = harness(2);
+  // runStep is what normally broadcasts the bump; stub it out to prove the bump goes out
+  // on its own rather than riding a later message that a bailing runStep never sends.
+  (h.workflows as unknown as { runStep: () => Promise<void> }).runStep = async () => {};
+  h.workflows.approve('s1', 0);
+  await settle();
+
+  assert.equal(h.upserts.at(-1)?.workflow?.stepIndex, 1, 'the bump reached the client');
+  // The write itself is debounced like every other status write, so flush to read it.
+  h.sessions.flushPersist();
+  assert.equal(h.store.loadSessions()[0]?.workflow?.stepIndex, 1, 'and was queued for disk');
+});
+
+test('force-advance resumes an advance that died before bumping', async () => {
+  const h = halfAdvanced();
+  h.workflows.forceAdvance('s1', 0);
+  await settle();
+
+  assert.equal(h.s1().workflow?.stepIndex, 1, 'the stalled advance completed');
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+  assert.ok(markerEvents(h).includes('started'));
+});
+
+test('force-advance leaves a done step alone when it is not a stall', async () => {
+  // An advance genuinely in flight owns the step — nothing to recover.
+  const mid = halfAdvanced();
+  mid.s1().workflow!.advancing = true;
+  mid.workflows.forceAdvance('s1', 0);
+  await settle();
+  assert.equal(mid.s1().workflow?.stepIndex, 0, 'the live advance was not disturbed');
+
+  // The last step reading 'done' is a finished workflow, not a stall.
+  const last = harness(2, { stepIndex: 1, stepStatuses: ['done', 'done'] });
+  last.s1().status = 'idle';
+  last.workflows.forceAdvance('s1', 1);
+  await settle();
+  assert.equal(last.s1().workflow?.stepIndex, 1);
+  assert.equal(markerEvents(last).length, 0, 'the workflow was not re-finished');
+
+  // A stale click from a tab showing an older stepper.
+  const stale = halfAdvanced();
+  stale.workflows.forceAdvance('s1', 1);
+  await settle();
+  assert.equal(stale.s1().workflow?.stepIndex, 0);
+});
+
 test('advancing clears on the wire when the workflow vanishes mid-advance', async () => {
   const h = harness(2);
   h.sessions.consolidateStepOutput = async () => {

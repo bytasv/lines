@@ -109,6 +109,16 @@ export function WorkflowStepper({
     !advancing &&
     !stopping &&
     !isSessionActive(session.status);
+  /** The advance marked the current step done but never started the next one (a bridge
+   *  death mid-consolidation). Deliberately NOT gated on isSessionActive: the session
+   *  status is whatever it was before the approve — usually the stale 'waiting-approval'
+   *  from the park — and `advancing` is the only honest marker of a live advance. */
+  const resumable =
+    state.started &&
+    currentStatus === 'done' &&
+    state.stepIndex + 1 < workflow.steps.length &&
+    !advancing &&
+    !stopping;
   const connected = useStore((s) => s.connectionStatus === 'connected');
   const currentStep = workflow.steps[state.stepIndex];
   const currentName = currentStep ? nameOf(currentStep) : '';
@@ -160,10 +170,18 @@ export function WorkflowStepper({
                         ? 'Proceed to next step'
                         : stalled
                           ? 'Start this step'
-                          : undefined
+                          : resumable
+                            ? 'Continue to the next step'
+                            : undefined
                 }
-                advanceIcon={stalled && i === state.stepIndex ? 'play' : 'check'}
-                onAdvance={() => setConfirmIndex(i)}
+                advanceIcon={(stalled || resumable) && i === state.stepIndex ? 'play' : 'check'}
+                // A resumable step is already done — there is nothing to confirm
+                // overriding, so it skips the modal the other two paths use.
+                onAdvance={() =>
+                  resumable && i === state.stepIndex
+                    ? send({ type: 'workflowForceAdvance', sessionId: session.id, stepIndex: i })
+                    : setConfirmIndex(i)
+                }
               />
               <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
                 <Text size="xs" lh="18px" fw={i === state.stepIndex ? 600 : 500} truncate>
@@ -221,7 +239,7 @@ export function WorkflowStepper({
           );
         })}
       </Group>
-      {(waiting || advancing || stopping || stalled) && (
+      {(waiting || advancing || stopping || stalled || resumable) && (
         <Paper withBorder radius="md" p="sm" mt="xs" style={{ borderColor: 'var(--mantine-color-sandstone-6)' }}>
           <Group justify="space-between" wrap="wrap" gap="xs">
             <Text size="sm" fw={600}>
@@ -231,7 +249,9 @@ export function WorkflowStepper({
                   ? `“${currentName}” is stopping — the next step starts as soon as it settles.`
                   : stalled
                     ? `“${currentName}” never started and nothing is running — start it to continue.`
-                    : `“${currentName}” finished — approve to continue, or send a message to keep iterating.`}
+                    : resumable
+                      ? `“${currentName}” is done but the next step never started — continue to resume the hand-off.`
+                      : `“${currentName}” finished — approve to continue, or send a message to keep iterating.`}
             </Text>
             {/* Busy state is server-owned (state.advancing) so every tab agrees and the
                 loader can't hang on a dropped message. Disabled offline: ws.ts silently
@@ -243,10 +263,16 @@ export function WorkflowStepper({
               onClick={() =>
                 stalled
                   ? setConfirmIndex(state.stepIndex)
-                  : send({ type: 'workflowApprove', sessionId: session.id, stepIndex: state.stepIndex })
+                  : send({
+                      // A resumable step is already approved and done; re-approving it
+                      // would be refused, so the resume goes through forceAdvance.
+                      type: resumable ? 'workflowForceAdvance' : 'workflowApprove',
+                      sessionId: session.id,
+                      stepIndex: state.stepIndex,
+                    })
               }
             >
-              {stalled ? 'Start step' : 'Approve → next step'}
+              {stalled ? 'Start step' : resumable ? 'Continue → next step' : 'Approve → next step'}
             </Button>
           </Group>
         </Paper>

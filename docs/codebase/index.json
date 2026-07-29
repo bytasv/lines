@@ -263,9 +263,9 @@
         },
         {
             "id": "workflow-stalled-step-start",
-            "name": "Workflow stalled-step start",
+            "name": "Workflow stalled-step recovery",
             "doc": "features/workflow-stalled-step-start.md",
-            "purpose": "Manual way to run a step an advance left pending with nothing running to start it, via a play-icon affordance in the stepper.",
+            "purpose": "Manual recoveries for an advance that died mid-flight: start a step left pending with nothing running, or resume one left done at the current index before stepIndex was bumped.",
             "entryPoints": [
                 "web/src/components/WorkflowStepper.tsx",
                 "server/src/index.ts",
@@ -280,18 +280,25 @@
             ],
             "symbols": [
                 "WorkflowEngine.startStep",
+                "WorkflowEngine.forceAdvance",
+                "WorkflowEngine.advance",
                 "WorkflowEngine.runStep"
             ],
             "tests": [
                 "server/src/workflows.advance.test.ts"
             ],
             "businessRules": [
-                "the affordance only ever targets the workflow's current step, and only while it is genuinely stalled (pending, no live turn, no in-flight advance)",
-                "starting a stalled step runs it exactly as a normal advance would — same fresh-start behavior, same hand-off"
+                "each affordance only ever targets the workflow current step, and only while it is genuinely stalled",
+                "starting a stalled pending step runs it exactly as a normal advance would — same fresh-start behavior, same hand-off",
+                "resuming a stalled done step re-runs its consolidation, so the outputs entry the dead advance never published is filled in first",
+                "resuming needs no confirmation dialog — the step is already done, so nothing is being overridden",
+                "the last step reading done is a finished workflow, never a stall; it gets no affordance"
             ],
             "architecturalRules": [
-                "startStep is a guarded no-op the user must trigger — the engine never self-heals a stalled step automatically",
-                "reuses runStep's existing step-entry behavior rather than duplicating hand-off logic"
+                "both recoveries are guarded no-ops the user must trigger — the engine never self-heals a stalled step automatically",
+                "reuses runStep step-entry behavior (pending) and advance() (done) rather than duplicating hand-off or consolidation logic",
+                "a done-at-current-index recovery keys off advancing, never isSessionActive — advance() sets no session status, so the leftover status says nothing about whether an advance is live",
+                "advance() must persist the stepIndex bump itself; leaving it to a later broadcast makes the unrecoverable done-at-current-index shape the durable state for the whole consolidation window"
             ],
             "relatedDecisions": [
                 "workflow-force-advance"
@@ -442,9 +449,12 @@
                 "the in-flight flag is server-owned broadcast state, never local optimistic UI state",
                 "clearing the flag rides the next status broadcast rather than issuing its own — no await may be inserted between the clear and that broadcast",
                 "cleared on process restart (constructor load loop) and on hand-off (adoptSynced), never in reconcileWithWorker, which runs far more often and would falsely clear a live advance",
-                "runStep's silent early returns now persistMeta before returning, so the cleared flag and bumped stepIndex always reach the client"
+                "runStep's silent early returns now persistMeta before returning, so the cleared flag and bumped stepIndex always reach the client",
+                "advance() persists the stepIndex bump immediately rather than letting it ride runStep later broadcast"
             ],
-            "relatedDecisions": []
+            "relatedDecisions": [
+                "workflow-stalled-step-start"
+            ]
         },
         {
             "id": "workflow-step-cost",
