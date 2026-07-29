@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Box, Button, Center, Group, Loader, Paper, Stack, Text, ThemeIcon, Tooltip } from '@mantine/core';
-import { IconCheck, IconCoins } from '@tabler/icons-react';
+import { IconCheck, IconCoins, IconPlayerPlay } from '@tabler/icons-react';
 import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@lines/shared';
-import { isStepRef } from '@lines/shared';
+import { isSessionActive, isStepRef } from '@lines/shared';
 import { formatDuration } from '../lib/format';
 import { useStore } from '../store';
 import { send } from '../ws';
@@ -12,18 +12,21 @@ function StepIcon({
   status,
   index,
   advanceLabel,
+  advanceIcon = 'check',
   onAdvance,
 }: {
   status: WorkflowStepStatus;
   index: number;
   /** Tooltip for the force-advance affordance; undefined when this step can't be advanced. */
   advanceLabel?: string;
+  /** What the affordance does: complete this step, or start one that never began. */
+  advanceIcon?: 'check' | 'play';
   onAdvance?: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
-  // Hovering an advanceable step swaps its number/loader for a checkmark — the
-  // affordance for "mark as completed" lives on the icon only, so the rest of the
-  // row keeps its scroll-to-marker click.
+  // Hovering an advanceable step swaps its number/loader for the action's glyph — the
+  // affordance lives on the icon only, so the rest of the row keeps its
+  // scroll-to-marker click.
   const showAdvance = !!advanceLabel && hovered;
   // Fixed width so the title (and the metrics row indented under it) never shifts
   // when a step flips between the 20px loader and the 22px icon.
@@ -45,8 +48,18 @@ function StepIcon({
       {status === 'running' && !showAdvance ? (
         <Loader size={20} />
       ) : (
-        <ThemeIcon size={22} radius="xl" variant={status === 'pending' ? 'default' : 'filled'}>
-          {status === 'done' || showAdvance ? <IconCheck size={13} /> : <Text fz={11}>{index + 1}</Text>}
+        <ThemeIcon size={22} radius="xl" variant={status === 'pending' && !showAdvance ? 'default' : 'filled'}>
+          {showAdvance ? (
+            advanceIcon === 'play' ? (
+              <IconPlayerPlay size={12} />
+            ) : (
+              <IconCheck size={13} />
+            )
+          ) : status === 'done' ? (
+            <IconCheck size={13} />
+          ) : (
+            <Text fz={11}>{index + 1}</Text>
+          )}
         </ThemeIcon>
       )}
     </Center>
@@ -82,15 +95,28 @@ export function WorkflowStepper({
     return found?.name ?? 'Shared step';
   };
 
-  const waiting = state.stepStatuses[state.stepIndex] === 'waiting-approval';
+  const currentStatus = state.stepStatuses[state.stepIndex];
+  const waiting = currentStatus === 'waiting-approval';
   /** Server-owned: an approve is in flight and the step's output is being consolidated. */
   const advancing = !!state.advancing;
+  /** A force-advance stopped the live turn and the advance waits on it settling. */
+  const stopping = state.advanceOnComplete === 'interrupted';
+  /** The current step never got its first turn and nothing is in flight to give it one
+   *  (an advance that died mid-flight) — so only the user can start it. */
+  const stalled =
+    state.started &&
+    currentStatus === 'pending' &&
+    !advancing &&
+    !stopping &&
+    !isSessionActive(session.status);
   const connected = useStore((s) => s.connectionStatus === 'connected');
   const currentStep = workflow.steps[state.stepIndex];
   const currentName = currentStep ? nameOf(currentStep) : '';
   /** Step index awaiting the "mark as completed" confirmation. */
   const [confirmIndex, setConfirmIndex] = useState<number | null>(null);
   const confirmRunning = confirmIndex !== null && state.stepStatuses[confirmIndex] === 'running';
+  /** A stalled step is started, not completed — different question, different message. */
+  const confirmPending = confirmIndex !== null && state.stepStatuses[confirmIndex] === 'pending';
   const confirmLast = confirmIndex !== null && confirmIndex === workflow.steps.length - 1;
   const confirmName = confirmIndex !== null ? nameOf(workflow.steps[confirmIndex]!) : '';
 
@@ -132,8 +158,11 @@ export function WorkflowStepper({
                       ? 'Mark as completed'
                       : status === 'waiting-approval'
                         ? 'Proceed to next step'
-                        : undefined
+                        : stalled
+                          ? 'Start this step'
+                          : undefined
                 }
+                advanceIcon={stalled && i === state.stepIndex ? 'play' : 'check'}
                 onAdvance={() => setConfirmIndex(i)}
               />
               <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
@@ -192,43 +221,56 @@ export function WorkflowStepper({
           );
         })}
       </Group>
-      {(waiting || advancing) && (
+      {(waiting || advancing || stopping || stalled) && (
         <Paper withBorder radius="md" p="sm" mt="xs" style={{ borderColor: 'var(--mantine-color-sandstone-6)' }}>
           <Group justify="space-between" wrap="wrap" gap="xs">
             <Text size="sm" fw={600}>
               {advancing
                 ? `“${currentName}” approved — wrapping up its output…`
-                : `“${currentName}” finished — approve to continue, or send a message to keep iterating.`}
+                : stopping
+                  ? `“${currentName}” is stopping — the next step starts as soon as it settles.`
+                  : stalled
+                    ? `“${currentName}” never started and nothing is running — start it to continue.`
+                    : `“${currentName}” finished — approve to continue, or send a message to keep iterating.`}
             </Text>
             {/* Busy state is server-owned (state.advancing) so every tab agrees and the
                 loader can't hang on a dropped message. Disabled offline: ws.ts silently
                 drops non-prompt messages when the socket is closed. */}
             <Button
               size="xs"
-              leftSection={advancing ? <Loader size={14} /> : undefined}
-              disabled={advancing || !connected}
+              leftSection={advancing || stopping ? <Loader size={14} /> : undefined}
+              disabled={advancing || stopping || !connected}
               onClick={() =>
-                send({ type: 'workflowApprove', sessionId: session.id, stepIndex: state.stepIndex })
+                stalled
+                  ? setConfirmIndex(state.stepIndex)
+                  : send({ type: 'workflowApprove', sessionId: session.id, stepIndex: state.stepIndex })
               }
             >
-              Approve → next step
+              {stalled ? 'Start step' : 'Approve → next step'}
             </Button>
           </Group>
         </Paper>
       )}
       <ConfirmModal
         opened={confirmIndex !== null}
-        title="Mark step as completed?"
+        title={confirmPending ? 'Start this step?' : 'Mark step as completed?'}
         message={
-          (confirmRunning
-            ? `“${confirmName}” is still running — its turn is stopped and whatever it said last becomes the step's output. `
-            : `“${confirmName}” is marked done. `) +
-          (confirmLast ? 'The workflow finishes.' : 'The next step starts right away.')
+          confirmPending
+            ? `“${confirmName}” never started and nothing is running. Starting it runs the step now, ` +
+              "with the previous step's output handed over as usual."
+            : (confirmRunning
+                ? `“${confirmName}” is still running — its turn is stopped and whatever it said last becomes the step's output. `
+                : `“${confirmName}” is marked done. `) +
+              (confirmLast ? 'The workflow finishes.' : 'The next step starts right away.')
         }
-        confirmLabel="Mark completed"
+        confirmLabel={confirmPending ? 'Start step' : 'Mark completed'}
         onConfirm={() => {
           if (confirmIndex !== null) {
-            send({ type: 'workflowForceAdvance', sessionId: session.id, stepIndex: confirmIndex });
+            send({
+              type: confirmPending ? 'workflowStartStep' : 'workflowForceAdvance',
+              sessionId: session.id,
+              stepIndex: confirmIndex,
+            });
           }
           setConfirmIndex(null);
         }}

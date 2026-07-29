@@ -544,6 +544,9 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
     case 'workflowForceAdvance':
       workflows.forceAdvance(msg.sessionId, msg.stepIndex);
       break;
+    case 'workflowStartStep':
+      workflows.startStep(msg.sessionId, msg.stepIndex);
+      break;
     case 'workflowRetry':
       workflows.retry(msg.sessionId, msg.stepIndex, msg.feedback);
       break;

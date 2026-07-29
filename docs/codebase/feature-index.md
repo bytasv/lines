@@ -7,7 +7,8 @@
 | `session-sidebar-usage` | Sidebar session cost/token spend display, EU date format | [features/session-sidebar-usage.md](features/session-sidebar-usage.md) |
 | `workflow-step-update-popover` | Warning popover diffing a pinned step against its latest published version, with scrollable diff list | [features/workflow-step-update-popover.md](features/workflow-step-update-popover.md) |
 | `workflow-stop-parks` | Manual Stop during a running workflow step only interrupts the turn; the step parks at waiting-approval instead of advancing | [features/workflow-stop-parks.md](features/workflow-stop-parks.md) |
-| `workflow-force-advance` | Hover the current step's icon in the stepper to manually mark it done and advance, with a confirmation modal | [features/workflow-force-advance.md](features/workflow-force-advance.md) |
+| `workflow-force-advance` | Hover the current step's icon in the stepper to manually mark it done and advance — always reaches the next step, via settle or a watchdog | [features/workflow-force-advance.md](features/workflow-force-advance.md) |
+| `workflow-stalled-step-start` | Play-icon affordance to manually start a step an advance left pending with nothing running | [features/workflow-stalled-step-start.md](features/workflow-stalled-step-start.md) |
 | `workflow-approve-loader` | Approve button shows a loader and disables instantly while the finished step's output is consolidated in the background | [features/workflow-approve-loader.md](features/workflow-approve-loader.md) |
 | `interrupted-turn-recovery` | Detect turns that died with the app, offer a Continue banner, optionally resume them automatically | [features/interrupted-turn-recovery.md](features/interrupted-turn-recovery.md) |
 | `composer-focus-new-session` | Auto-focus the prompt textarea when a brand-new session is created | [features/composer-focus-new-session.md](features/composer-focus-new-session.md) |

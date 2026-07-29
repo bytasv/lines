@@ -134,6 +134,11 @@ export class WorkflowEngine {
   private sharedSteps = new Map<string, StepDef>();
   /** Every resolved immutable version (own history + resolved foreign pins), keyed by stepKey. */
   private stepVersions = new Map<string, StepDef>();
+  /** Grace period a force-advance gives the interrupted turn to settle on its own
+   *  before the watchdog advances the step anyway. A field so tests can shrink it. */
+  forceAdvanceSettleMs = 5_000;
+  /** Armed watchdogs, keyed by session (see armSettleWatchdog). */
+  private settleWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private store: Store,
@@ -155,9 +160,10 @@ export class WorkflowEngine {
       this.workflows.set(DEFAULT_WORKFLOW.id, DEFAULT_WORKFLOW);
       this.persist();
     }
-    sessions.setTurnCompleteListener((sessionId, source) => {
-      if (source === 'workflow') this.onWorkflowTurnComplete(sessionId);
-    });
+    // Every settle is forwarded, source included: a user-source turn is normally a
+    // no-op here, but it must still be able to consume an explicit force-advance
+    // (see onWorkflowTurnComplete).
+    sessions.setTurnCompleteListener((sessionId, source) => this.onWorkflowTurnComplete(sessionId, source));
   }
 
   list(): WorkflowDef[] {
@@ -419,15 +425,28 @@ export class WorkflowEngine {
   ) {
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
-    if (!meta || !meta.workflow || !wf) return;
+    if (!meta || !meta.workflow || !wf) {
+      // `advance` clears `advancing` without its own broadcast, riding whatever this
+      // call broadcasts next — so a return that broadcasts nothing leaves the client's
+      // loader spinning forever on a stale flag.
+      this.sessions.persistMeta(sessionId);
+      return;
+    }
     const i = meta.workflow.stepIndex;
     const step = wf.steps[i];
     const content = step && this.stepContent(step);
     if (!step || !content) {
       // Unresolved reference (e.g. a shared step version this bridge couldn't fetch).
       if (step) {
-        this.sessions.setStatus(sessionId, 'error');
+        // Status set first: setStatus is what broadcasts, so a later mutation would
+        // only reach the client on the next unrelated message.
         meta.workflow.stepStatuses[i] = 'waiting-approval';
+        this.sessions.setStatus(sessionId, 'error');
+      } else {
+        // Index past the last step (a workflow edited shorter mid-run, say): nothing
+        // to run, but the bumped stepIndex and the cleared `advancing` still have to
+        // reach the client.
+        this.sessions.persistMeta(sessionId);
       }
       return;
     }
@@ -515,7 +534,7 @@ export class WorkflowEngine {
     return (step && this.stepContent(step)?.name) || '';
   }
 
-  private onWorkflowTurnComplete(sessionId: string) {
+  private onWorkflowTurnComplete(sessionId: string, source: 'user' | 'workflow') {
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
@@ -523,31 +542,47 @@ export class WorkflowEngine {
     const step = wf.steps[i];
     if (!step || meta.workflow.stepStatuses[i] !== 'running') return;
 
-    // Accumulate this turn's cost onto the step (retries add to the same slot).
-    const cost = meta.lastCostUsd;
-    if (typeof cost === 'number') {
-      const costs = (meta.workflow.stepCostsUsd ??= []);
-      costs[i] = (costs[i] ?? 0) + cost;
+    // A pending advance only counts for the step it was flagged for: an abandoned
+    // turn settling late (see the force-advance watchdog) must not advance or park
+    // whatever step is current by then. Metas from an older build carry no stamp.
+    const stamped = (meta.workflow.advanceOnCompleteStep ?? i) === i;
+    const forced = meta.workflow.advanceOnComplete === 'interrupted' && stamped;
+    // A user-source turn can be live while the step still reads 'running' (a worker
+    // error skipped the settle, then the user typed). It does nothing here except
+    // consume an explicit force-advance stamped for this step — otherwise that step
+    // would sit at 'running' forever.
+    if (source !== 'workflow' && !forced) return;
+
+    if (source === 'workflow') {
+      // Accumulate this turn's cost onto the step (retries add to the same slot).
+      const cost = meta.lastCostUsd;
+      if (typeof cost === 'number') {
+        const costs = (meta.workflow.stepCostsUsd ??= []);
+        costs[i] = (costs[i] ?? 0) + cost;
+      }
+
+      // Same accumulation for tokens (retries add to the same slot).
+      const tokens = meta.lastTokens;
+      if (typeof tokens === 'number') {
+        const stepTokens = (meta.workflow.stepTokens ??= []);
+        stepTokens[i] = (stepTokens[i] ?? 0) + tokens;
+      }
+
+      // Same accumulation for active-turn duration (retries add to the same slot).
+      const durationMs = meta.lastDurationMs;
+      if (typeof durationMs === 'number') {
+        const durations = (meta.workflow.stepDurationsMs ??= []);
+        durations[i] = (durations[i] ?? 0) + durationMs;
+      }
     }
 
-    // Same accumulation for tokens (retries add to the same slot).
-    const tokens = meta.lastTokens;
-    if (typeof tokens === 'number') {
-      const stepTokens = (meta.workflow.stepTokens ??= []);
-      stepTokens[i] = (stepTokens[i] ?? 0) + tokens;
-    }
-
-    // Same accumulation for active-turn duration (retries add to the same slot).
-    const durationMs = meta.lastDurationMs;
-    if (typeof durationMs === 'number') {
-      const durations = (meta.workflow.stepDurationsMs ??= []);
-      durations[i] = (durations[i] ?? 0) + durationMs;
-    }
-
-    // A plan approved mid-step — or a manual Stop — advances straight to the next step.
-    if (meta.workflow.advanceOnComplete) {
+    // A plan approved mid-step — or a force-advance of a running step — advances
+    // straight to the next step. A plain Stop parks below instead.
+    if (meta.workflow.advanceOnComplete && stamped) {
       const event = meta.workflow.advanceOnComplete === 'interrupted' ? 'interrupted' : 'approved';
       meta.workflow.advanceOnComplete = undefined;
+      meta.workflow.advanceOnCompleteStep = undefined;
+      this.clearSettleWatchdog(sessionId); // a normal settle disarms the watchdog
       this.marker(sessionId, { stepIndex: i, stepName: this.stepName(step), event });
       void this.advance(sessionId);
       return;
@@ -619,10 +654,14 @@ export class WorkflowEngine {
 
   /**
    * "Mark as completed" from the stepper. A parked step takes the same path as
-   * Approve. A still-running step must go through `interrupt()` — that flags
-   * `advanceOnComplete` and advances only once the interrupted turn settles;
-   * advancing under a live turn lets the old query's late result clobber the next
-   * step (see docs/codebase/features/workflow-stop-advances.md).
+   * Approve. A still-running step flags `advanceOnComplete` here and then stops
+   * the turn, so the advance happens only once that turn settles; advancing under
+   * a live turn lets the old query's late result clobber the next step. `interrupt()`
+   * itself implies nothing (see docs/codebase/features/workflow-stop-parks.md).
+   *
+   * The flag is stamped with the step it was raised for, so a settle for any other
+   * step ignores it — and a watchdog advances anyway if no settle ever arrives. One
+   * click must always end on the next step.
    */
   forceAdvance(sessionId: string, stepIndex: number) {
     const meta = this.sessions.get(sessionId);
@@ -637,7 +676,15 @@ export class WorkflowEngine {
     }
     if (status !== 'running') return;
     if (isSessionActive(meta.status)) {
+      // Flagged whatever the turn's source: a user-source turn can be live while the
+      // step still reads 'running' (a worker error skipped the settle, then the user
+      // typed), and refusing to flag there left the step stranded at 'running'
+      // forever. The step stamp — not the turn source — is what keeps a stale flag
+      // from skipping a later step's park.
+      meta.workflow.advanceOnComplete = 'interrupted';
+      meta.workflow.advanceOnCompleteStep = i;
       this.sessions.interrupt(sessionId);
+      this.armSettleWatchdog(sessionId, i);
       return;
     }
     // Marked running with no turn in flight (e.g. the worker died mid-step): no
@@ -649,6 +696,74 @@ export class WorkflowEngine {
       event: 'approved',
     });
     void this.advance(sessionId);
+  }
+
+  /**
+   * "Start this step" from the stepper. An advance can land on a step without ever
+   * queueing its first turn — the bridge died mid-advance, or runStep bailed — and
+   * then the step sits 'pending' with nothing in flight, so no settle is ever coming
+   * to move it. Runs it as a normal step entry, hand-off included, so it proceeds
+   * exactly as the advance would have.
+   */
+  startStep(sessionId: string, stepIndex: number) {
+    const meta = this.sessions.get(sessionId);
+    // Before the first prompt there is no task to substitute — that prompt starts step 0.
+    if (!meta?.workflow?.started) return;
+    const i = meta.workflow.stepIndex;
+    // Ignore a stale click (duplicate, or a second tab showing an older stepper).
+    if (stepIndex !== i) return;
+    // Only a step that never started: 'running' belongs to forceAdvance, and a parked
+    // step to approve/retry.
+    if (meta.workflow.stepStatuses[i] !== 'pending') return;
+    // A live turn or an advance mid-consolidation is already on its way to starting it.
+    if (isSessionActive(meta.status) || meta.workflow.advancing) return;
+    void this.runStep(sessionId, undefined, true);
+  }
+
+  /**
+   * A force-advance hands the advance to whatever settles the interrupted turn — a
+   * `result`, or an `ended` for a query that dies without one. A wedged worker emits
+   * neither, and the step would then sit at 'running' forever, so advance it here.
+   *
+   * Clearing `turnSource` is load-bearing: a very late result from the abandoned turn
+   * then settles as 'user' with the stamp already consumed, which onWorkflowTurnComplete
+   * ignores — so it can neither advance nor park the *next* step.
+   */
+  private armSettleWatchdog(sessionId: string, i: number) {
+    this.clearSettleWatchdog(sessionId);
+    const timer = setTimeout(() => {
+      this.settleWatchdogs.delete(sessionId);
+      const meta = this.sessions.get(sessionId);
+      const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
+      if (!meta || !meta.workflow || !wf) return;
+      // Bail unless nothing has moved since the click: the flag is still ours, the
+      // step is still the current running one, and no turn is live — a session back
+      // to active means the user (or a recovery path) re-prompted, and that turn's own
+      // settle owns the advance.
+      if (meta.workflow.advanceOnComplete !== 'interrupted') return;
+      if (meta.workflow.advanceOnCompleteStep !== i) return;
+      if (meta.workflow.stepIndex !== i) return;
+      if (meta.workflow.stepStatuses[i] !== 'running') return;
+      if (isSessionActive(meta.status)) return;
+      meta.turnSource = undefined;
+      meta.workflow.advanceOnComplete = undefined;
+      meta.workflow.advanceOnCompleteStep = undefined;
+      this.marker(sessionId, {
+        stepIndex: i,
+        stepName: this.stepName(wf.steps[i]),
+        event: 'interrupted',
+      });
+      void this.advance(sessionId);
+    }, this.forceAdvanceSettleMs);
+    timer.unref?.(); // never hold the process open on a pending advance
+    this.settleWatchdogs.set(sessionId, timer);
+  }
+
+  private clearSettleWatchdog(sessionId: string) {
+    const timer = this.settleWatchdogs.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.settleWatchdogs.delete(sessionId);
   }
 
   retry(sessionId: string, stepIndex: number, feedback: string) {

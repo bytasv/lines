@@ -175,6 +175,10 @@ export interface WorkflowState {
    *  a plan approved mid-step, 'interrupted' from a force-advance ("mark as
    *  completed") of a still-running step. A plain Stop never sets it. */
   advanceOnComplete?: boolean | 'interrupted';
+  /** The step index `advanceOnComplete` was flagged for. A settle for any other
+   *  index ignores the flag, so an abandoned turn's late result can never advance
+   *  (or park) a later step. Absent on metas persisted by an older build. */
+  advanceOnCompleteStep?: number;
   /** An advance is in flight on this bridge: the finished step is 'done' and its
    *  output is being consolidated, but the next step hasn't started. Drives the
    *  Approve button's loader. In-flight only — never trusted across a bridge
@@ -528,6 +532,8 @@ export type ClientMessage =
   | { type: 'workflowApprove'; sessionId: string; stepIndex: number }
   /** Mark the current step done from the stepper, whether it is parked or still running. */
   | { type: 'workflowForceAdvance'; sessionId: string; stepIndex: number }
+  /** Run the current step's first turn when an advance landed on it but never queued one. */
+  | { type: 'workflowStartStep'; sessionId: string; stepIndex: number }
   | { type: 'workflowRetry'; sessionId: string; stepIndex: number; feedback: string }
   | { type: 'saveWorkflow'; workflow: WorkflowDef; ownerName?: string }
   | { type: 'deleteWorkflow'; workflowId: string }

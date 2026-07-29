@@ -366,6 +366,9 @@ export class SessionManager {
   private contextFetches = new Map<string, Promise<ContextBreakdown | null>>();
   /** Pending debounced sessions.json write, if any (see persist/flushPersist). */
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** How long consolidateStepOutput waits on its query before falling back to the
+   *  last assistant text. A field so tests can shrink it. */
+  consolidateTimeoutMs = 60_000;
 
   constructor(
     private store: Store,
@@ -952,6 +955,7 @@ export class SessionManager {
     // deliberately re-prompt as 'workflow' and must keep a pending advance.
     if (source === 'user' && meta.workflow?.advanceOnComplete === 'interrupted') {
       meta.workflow.advanceOnComplete = undefined;
+      meta.workflow.advanceOnCompleteStep = undefined;
     }
     this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
@@ -1061,6 +1065,11 @@ export class SessionManager {
    * non-agentic shape as summarizeTurn) that folds every turn's output plus the
    * user's feedback into the single final deliverable. Falls back to
    * lastAssistantText on any failure — never blocks the workflow.
+   *
+   * "Never blocks" is enforced, not hoped for: the token refresh and the query drain
+   * are raced against `consolidateTimeoutMs`. `advance` awaits this with `advancing`
+   * already on the wire, so an unbounded stall here is a workflow that never reaches
+   * its next step and a stepper stuck on "wrapping up its output…".
    */
   async consolidateStepOutput(sessionId: string, stepIndex?: number): Promise<string> {
     try {
@@ -1080,8 +1089,32 @@ export class SessionManager {
       // Single-turn step: its final text is the deliverable — no query, no latency.
       if (turns.length <= 1) return turns[0]?.output ?? this.lastAssistantText(sessionId);
 
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = Symbol('consolidate-timeout');
+      const output = await Promise.race([
+        this.consolidateQuery(turns),
+        new Promise<typeof timedOut>((resolve) => {
+          timer = setTimeout(() => resolve(timedOut), this.consolidateTimeoutMs);
+          timer.unref?.();
+        }),
+      ]).finally(() => clearTimeout(timer));
+      if (output === timedOut) {
+        // The abandoned query keeps draining in the background; nothing reads it.
+        console.warn(`[consolidateStepOutput] timed out after ${this.consolidateTimeoutMs}ms`);
+        return this.lastAssistantText(sessionId);
+      }
+      return output || this.lastAssistantText(sessionId);
+    } catch (err) {
+      console.warn('[consolidateStepOutput]', err);
+      return this.lastAssistantText(sessionId);
+    }
+  }
+
+  /** The consolidation query itself — everything consolidateStepOutput has to bound. */
+  private async consolidateQuery(turns: { user: string; output: string }[]): Promise<string | null> {
+    try {
       const token = await this.ownerToken();
-      if (!token) return this.lastAssistantText(sessionId);
+      if (!token) return null;
 
       const initialPrompt = turns[0].user.slice(0, 4000);
       const attempts = turns
@@ -1123,10 +1156,10 @@ export class SessionManager {
           output = msg.result.trim();
         }
       }
-      return output || this.lastAssistantText(sessionId);
+      return output;
     } catch (err) {
       console.warn('[consolidateStepOutput]', err);
-      return this.lastAssistantText(sessionId);
+      return null;
     }
   }
 
@@ -1400,6 +1433,7 @@ export class SessionManager {
       if (stepRunning && (wf!.stepPermissionMode ?? meta.permissionMode) === 'plan') {
         // Configured plan step: advance the workflow instead of implementing in place.
         wf!.advanceOnComplete = true;
+        wf!.advanceOnCompleteStep = wf!.stepIndex; // only this step's settle may consume it
         this.upsert(meta);
         text =
           'I approved your plan (the session was interrupted before the approval reached you). ' +
@@ -1526,6 +1560,7 @@ export class SessionManager {
       (meta0.workflow.stepPermissionMode ?? meta0.permissionMode) === 'plan'
     ) {
       meta0.workflow.advanceOnComplete = true;
+      meta0.workflow.advanceOnCompleteStep = meta0.workflow.stepIndex;
       this.upsert(meta0);
       resolve({
         allow: false,

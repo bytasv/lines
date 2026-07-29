@@ -3,7 +3,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { SessionMeta, ServerMessage, WorkflowDef, WorkflowState } from '@lines/shared';
+import type {
+  SessionMeta,
+  ServerMessage,
+  TranscriptEvent,
+  WorkflowDef,
+  WorkflowMarkerData,
+  WorkflowState,
+} from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -38,7 +45,8 @@ const meta = (workflow: WorkflowState): SessionMeta =>
 
 /**
  * A manager + engine over a throwaway store holding one session parked mid-workflow.
- * `upserts` collects every broadcast session meta, in order — the wire the client sees.
+ * `upserts` collects every broadcast session meta, in order — the wire the client sees;
+ * `events` collects the transcript events alongside it (workflow markers included).
  */
 function harness(stepCount: number, workflow: Partial<WorkflowState> = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-advance-'));
@@ -53,9 +61,11 @@ function harness(stepCount: number, workflow: Partial<WorkflowState> = {}) {
   fs.writeFileSync(path.join(root, 'workflows.json'), JSON.stringify([wfDef(stepCount)]));
 
   const upserts: SessionMeta[] = [];
+  const events: TranscriptEvent[] = [];
   const broadcast = (msg: ServerMessage) => {
     // Snapshot: metas are mutated in place, so the live object would show final state.
     if (msg.type === 'sessionUpsert') upserts.push(structuredClone(msg.session));
+    if (msg.type === 'event') events.push(msg.event);
   };
   const store = createStore(root);
   const sessions = new SessionManager(store, new GuardAllowlist(store), broadcast);
@@ -66,11 +76,28 @@ function harness(stepCount: number, workflow: Partial<WorkflowState> = {}) {
     setPermissionMode: () => {},
   } as never);
   const workflows = new WorkflowEngine(store, sessions, broadcast, 'u1');
-  return { root, sessions, workflows, upserts, s1: () => sessions.get('s1')! };
+  return { root, store, sessions, workflows, upserts, events, s1: () => sessions.get('s1')! };
 }
+
+/** One session mid-step: step 0 running, and its turn live and workflow-sourced. */
+function running(stepCount: number) {
+  const h = harness(stepCount, {
+    stepIndex: 0,
+    stepStatuses: Array.from({ length: stepCount }, (_, n) => (n === 0 ? 'running' : 'pending')),
+  });
+  const m = h.s1();
+  m.status = 'running';
+  m.turnSource = 'workflow';
+  return h;
+}
+
+const markerEvents = (h: ReturnType<typeof harness>) =>
+  h.events.filter((e) => e.kind === 'workflow').map((e) => (e.data as WorkflowMarkerData).event);
 
 /** Let the void-ed advance() chain (and the runStep it queues) run to completion. */
 const settle = () => new Promise((r) => setTimeout(r, 0));
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 test('approve raises the in-flight flag in the same tick as the click', () => {
   const h = harness(2);
@@ -149,4 +176,241 @@ test('reconcile leaves a live advance alone', () => {
   m.status = 'running';
   h.sessions.reconcileWithWorker([{ sessionId: 's1', busy: true }]);
   assert.equal(h.s1().workflow?.advancing, true);
+});
+
+test('Stop does not flag an advance', async () => {
+  const h = running(2);
+  h.workflows.forceAdvanceSettleMs = 5;
+  h.sessions.interrupt('s1');
+
+  assert.equal(h.s1().workflow?.advanceOnComplete, undefined, 'Stop means stop, not "step done"');
+  assert.equal(h.s1().status, 'idle');
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'running', 'still the current step until it settles');
+
+  // Only an explicit force-advance arms the watchdog: a plain Stop must still park.
+  await sleep(20);
+  assert.equal(h.s1().workflow?.stepIndex, 0, 'no watchdog fired');
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval');
+});
+
+test('a stopped step parks on the SDK result', () => {
+  const h = running(2);
+  h.sessions.interrupt('s1');
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+
+  assert.deepEqual(h.s1().workflow?.stepStatuses, ['waiting-approval', 'pending']);
+  assert.equal(h.s1().status, 'waiting-approval');
+  assert.equal(h.s1().workflow?.stepIndex, 0);
+});
+
+test('a stopped step parks when the query ends without a result', () => {
+  const h = running(2);
+  h.sessions.interrupt('s1');
+  h.sessions.handleWorkerEnded('s1');
+
+  assert.deepEqual(h.s1().workflow?.stepStatuses, ['waiting-approval', 'pending']);
+  assert.equal(h.s1().status, 'waiting-approval');
+  assert.equal(h.s1().workflow?.stepIndex, 0);
+});
+
+test('a queued follow-up survives the park', () => {
+  const h = running(2);
+  h.sessions.userPrompt('s1', 'also do X');
+  h.sessions.interrupt('s1');
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval');
+  assert.equal(h.s1().status, 'waiting-approval');
+  // Held, not consumed: the park must not swallow the follow-up into a re-run.
+  assert.equal(h.s1().queued?.length, 1);
+  assert.equal(h.s1().queuePaused, true);
+});
+
+test('force-advance still advances a running step', async () => {
+  const h = running(2);
+  h.workflows.forceAdvance('s1', 0);
+
+  assert.equal(h.s1().workflow?.advanceOnComplete, 'interrupted', 'flagged by forceAdvance itself');
+  assert.equal(h.s1().status, 'idle', 'and the live turn is stopped');
+
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  await settle();
+
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'done');
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+  assert.ok(markerEvents(h).includes('interrupted'), 'the stop-and-complete marker');
+});
+
+test("force-advance advances even when the live turn isn't the step's own", async () => {
+  const h = running(2);
+  h.s1().turnSource = 'user'; // e.g. a worker error skipped the settle, then the user typed
+  h.workflows.forceAdvance('s1', 0);
+
+  // The step stamp — not the turn source — is what keeps the flag off a later step.
+  assert.equal(h.s1().workflow?.advanceOnComplete, 'interrupted');
+  assert.equal(h.s1().workflow?.advanceOnCompleteStep, 0);
+
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  await settle();
+
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+  assert.ok(markerEvents(h).includes('interrupted'));
+});
+
+test('a user prompt clears a pending force-advance flag', () => {
+  const h = running(2);
+  h.workflows.forceAdvance('s1', 0);
+  h.sessions.prompt('s1', 'hold on', 'user');
+
+  assert.equal(h.s1().workflow?.advanceOnComplete, undefined);
+  assert.equal(h.s1().workflow?.advanceOnCompleteStep, undefined, 'the stamp goes with it');
+});
+
+test('a flag stamped for an earlier step is not honored', async () => {
+  const h = harness(3, {
+    stepIndex: 1,
+    stepStatuses: ['done', 'running', 'pending'],
+    advanceOnComplete: 'interrupted',
+    advanceOnCompleteStep: 0, // left over from a step-0 force-advance
+  });
+  const m = h.s1();
+  m.status = 'running';
+  m.turnSource = 'workflow';
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  await settle();
+
+  assert.equal(h.s1().workflow?.stepIndex, 1, 'the stale stamp advanced nothing');
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'waiting-approval', 'it parked normally instead');
+});
+
+test('the watchdog advances when the interrupted turn never settles', async () => {
+  const h = running(2);
+  h.workflows.forceAdvanceSettleMs = 5;
+  h.workflows.forceAdvance('s1', 0);
+  // No 'result', no 'ended' — a wedged worker.
+  await sleep(20);
+  await settle();
+
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+  assert.equal(h.s1().workflow?.advanceOnComplete, undefined, 'the flag was consumed, not left set');
+  assert.ok(markerEvents(h).includes('interrupted'));
+});
+
+test('a late result after the watchdog advanced does not touch the next step', async () => {
+  const h = running(2);
+  h.workflows.forceAdvanceSettleMs = 5;
+  // Hold the advance mid-consolidation, which is the window the abandoned turn's
+  // result lands in: stepIndex already bumped, the next step not started yet.
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  h.sessions.consolidateStepOutput = async () => {
+    await held;
+    return '';
+  };
+  h.workflows.forceAdvance('s1', 0);
+  await sleep(20);
+  assert.equal(h.s1().turnSource, undefined, 'the watchdog disowned the abandoned turn');
+
+  // It finally reports in: source-less, stamp consumed — a no-op either way.
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  release();
+  await settle();
+
+  assert.equal(h.s1().workflow?.stepIndex, 1, 'the abandoned turn advanced nothing');
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running', 'and parked nothing');
+});
+
+test('a consolidation that hangs still advances', async () => {
+  const h = harness(2);
+  // An iterated step (two user turns inside step 0) is the only shape that runs the
+  // consolidation query — a single-turn step returns its text with no await at all.
+  const ev = (seq: number, kind: TranscriptEvent['kind'], data: unknown) =>
+    ({ seq, ts: seq, kind, data }) as TranscriptEvent;
+  h.store.appendTranscript('s1', ev(0, 'workflow', { stepIndex: 0, stepName: 'Step 1', event: 'started' }));
+  h.store.appendTranscript('s1', ev(1, 'user', { text: 'do step 1' }));
+  h.store.appendTranscript('s1', ev(2, 'sdk', { type: 'assistant', message: { content: [{ type: 'text', text: 'first draft' }] } }));
+  h.store.appendTranscript('s1', ev(3, 'user', { text: 'tighten it' }));
+  h.store.appendTranscript('s1', ev(4, 'sdk', { type: 'assistant', message: { content: [{ type: 'text', text: 'tightened' }] } }));
+
+  h.sessions.consolidateTimeoutMs = 5;
+  // The query itself never resolves — the timeout is the only way out.
+  (h.sessions as unknown as { consolidateQuery: () => Promise<string | null> }).consolidateQuery = () =>
+    new Promise(() => {});
+  h.workflows.approve('s1', 0);
+  await sleep(20);
+  await settle();
+
+  assert.equal(h.s1().workflow?.advancing, false, 'the loader does not hang');
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+  // Fallback output, not an empty hand-off.
+  assert.equal(h.s1().workflow?.lastStepOutput, 'tightened');
+});
+
+/** A workflow whose advance landed on step 1 but never queued its turn. */
+function stalled() {
+  const h = harness(2, { stepIndex: 1, stepStatuses: ['done', 'pending'] });
+  h.s1().status = 'idle';
+  return h;
+}
+
+test('startStep runs a step an advance left pending', () => {
+  const h = stalled();
+  h.workflows.startStep('s1', 1);
+
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+  assert.equal(h.s1().status, 'running');
+  assert.ok(markerEvents(h).includes('started'));
+});
+
+test('startStep ignores a step that is not stalled', () => {
+  // Running: forceAdvance owns that step, not startStep.
+  const r = running(2);
+  r.workflows.startStep('s1', 0);
+  assert.equal(r.s1().workflow?.stepStatuses[0], 'running');
+  assert.equal(markerEvents(r).length, 0, 'no second turn was queued');
+
+  // A live turn is already on its way to starting the step.
+  const live = stalled();
+  live.s1().status = 'running';
+  live.workflows.startStep('s1', 1);
+  assert.equal(live.s1().workflow?.stepStatuses[1], 'pending');
+
+  // So is an advance mid-consolidation.
+  const mid = stalled();
+  mid.s1().workflow!.advancing = true;
+  mid.workflows.startStep('s1', 1);
+  assert.equal(mid.s1().workflow?.stepStatuses[1], 'pending');
+
+  // A stale click from a tab showing an older stepper.
+  const stale = stalled();
+  stale.workflows.startStep('s1', 0);
+  assert.equal(stale.s1().workflow?.stepStatuses[1], 'pending');
+});
+
+test('startStep does not run step 0 before the task description arrives', () => {
+  const h = harness(2, { started: false, stepStatuses: ['pending', 'pending'] });
+  h.s1().status = 'idle';
+  h.workflows.startStep('s1', 0);
+
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'pending', 'the first prompt is what starts it');
+});
+
+test('advancing clears on the wire when the workflow vanishes mid-advance', async () => {
+  const h = harness(2);
+  h.sessions.consolidateStepOutput = async () => {
+    // e.g. the workflow was deleted from another tab while the output consolidated.
+    h.workflows.delete('wf1');
+    return '';
+  };
+  h.workflows.approve('s1', 0);
+  await settle();
+
+  const last = h.upserts.at(-1)!;
+  assert.equal(last.workflow?.advancing, false, 'the cleared flag reached the client');
+  assert.equal(last.workflow?.stepIndex, 1, 'and the bumped index with it');
 });

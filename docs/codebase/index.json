@@ -193,6 +193,7 @@
                 "SessionManager.interrupt",
                 "SessionManager.handleWorkerEnded",
                 "WorkflowState.advanceOnComplete",
+                "WorkflowState.advanceOnCompleteStep",
                 "WorkflowEngine.forceAdvance",
                 "WorkflowEngine.onWorkflowTurnComplete"
             ],
@@ -201,14 +202,15 @@
             ],
             "businessRules": [
                 "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
-                "a user prompt sent after a force-advance but before the interrupted turn settles clears the 'interrupted' flag",
-                "step output hand-off after a force-advance is whatever the model last said (partial by design)",
+                "a user prompt sent after a force-advance but before the interrupted turn settles clears the 'interrupted' flag and its step stamp",
+                "step output hand-off after a force-advance goes through the same (now-bounded) consolidation as a normal advance",
                 "a step configured with autoAdvance: true still advances after Stop — that is the step's own configuration, not Stop semantics"
             ],
             "architecturalRules": [
                 "interrupt() stays intent-free — no caller may infer \"advance\" from \"stop\"",
-                "only forceAdvance sets advanceOnComplete, and only when the live turn is confirmed to be this step's own (turnSource === 'workflow')",
-                "never advance synchronously under a live turn — flag advanceOnComplete and wait for the turn to settle",
+                "only forceAdvance sets advanceOnComplete (+ advanceOnCompleteStep); a plain Stop leaves it unset and arms no watchdog",
+                "whether a settle may consume advanceOnComplete is decided by the advanceOnCompleteStep stamp matching the current step index, not by turnSource",
+                "never advance synchronously under a live turn — flag advanceOnComplete and wait for the turn to settle, with a watchdog as the only fallback",
                 "the handleWorkerEnded settle fallback must stay gated on the interrupting set (routine non-error ended events exist)"
             ],
             "relatedDecisions": []
@@ -217,7 +219,53 @@
             "id": "workflow-force-advance",
             "name": "Workflow force-advance",
             "doc": "features/workflow-force-advance.md",
-            "purpose": "Manual escape hatch for a stuck workflow step: hovering the current step's icon in the stepper shows a checkmark; clicking it confirms, then marks the step done and advances.",
+            "purpose": "Manual escape hatch for a stuck workflow step: hovering the current step's icon in the stepper shows a checkmark; clicking it confirms, then marks the step done and advances — always reaching the next step via settle or a watchdog.",
+            "entryPoints": [
+                "web/src/components/WorkflowStepper.tsx",
+                "server/src/index.ts",
+                "server/src/workflows.ts"
+            ],
+            "files": [
+                "shared/types.ts",
+                "server/src/index.ts",
+                "server/src/workflows.ts",
+                "server/src/sessions.ts",
+                "web/src/components/WorkflowStepper.tsx",
+                "web/src/components/ConfirmModal.tsx"
+            ],
+            "symbols": [
+                "WorkflowEngine.forceAdvance",
+                "WorkflowEngine.approve",
+                "WorkflowEngine.onWorkflowTurnComplete",
+                "WorkflowEngine.armSettleWatchdog",
+                "WorkflowEngine.forceAdvanceSettleMs",
+                "SessionManager.interrupt",
+                "SessionManager.consolidateTimeoutMs",
+                "WorkflowState.advanceOnCompleteStep"
+            ],
+            "tests": [
+                "server/src/workflows.advance.test.ts"
+            ],
+            "businessRules": [
+                "the affordance only ever targets the workflow's current step; other steps show no hover state",
+                "confirmation copy differs by state: a running step warns its turn is stopped and the last-said text becomes the output; the last step's copy says the workflow finishes",
+                "one click on Mark as completed always ends with the workflow on the next step (or done), via a normal settle or the watchdog"
+            ],
+            "architecturalRules": [
+                "never call advance() directly on a running step while its turn is active — set advanceOnComplete (+ advanceOnCompleteStep) then call SessionManager.interrupt(); interrupt() no longer implies an advance",
+                "the advanceOnCompleteStep stamp, not turnSource, decides whether a settle or the watchdog may consume a pending flag",
+                "the watchdog clears turnSource when it fires, so a late arrival from the abandoned turn is ignored by the stamp check"
+            ],
+            "relatedDecisions": [
+                "workflow-stop-parks",
+                "workflow-stalled-step-start"
+            ]
+        },
+        {
+            "id": "workflow-stalled-step-start",
+            "name": "Workflow stalled-step start",
+            "doc": "features/workflow-stalled-step-start.md",
+            "purpose": "Manual way to run a step an advance left pending with nothing running to start it, via a play-icon affordance in the stepper.",
             "entryPoints": [
                 "web/src/components/WorkflowStepper.tsx",
                 "server/src/index.ts",
@@ -231,20 +279,22 @@
                 "web/src/components/ConfirmModal.tsx"
             ],
             "symbols": [
-                "WorkflowEngine.forceAdvance",
-                "WorkflowEngine.approve",
-                "SessionManager.interrupt"
+                "WorkflowEngine.startStep",
+                "WorkflowEngine.runStep"
             ],
-            "tests": [],
+            "tests": [
+                "server/src/workflows.advance.test.ts"
+            ],
             "businessRules": [
-                "the affordance only ever targets the workflow's current step; other steps show no hover state",
-                "confirmation copy differs by state: a running step warns its turn is stopped and the last-said text becomes the output; the last step's copy says the workflow finishes"
+                "the affordance only ever targets the workflow's current step, and only while it is genuinely stalled (pending, no live turn, no in-flight advance)",
+                "starting a stalled step runs it exactly as a normal advance would — same fresh-start behavior, same hand-off"
             ],
             "architecturalRules": [
-                "never call advance() directly on a running step while its turn is active — set advanceOnComplete then call SessionManager.interrupt(); interrupt() no longer implies an advance"
+                "startStep is a guarded no-op the user must trigger — the engine never self-heals a stalled step automatically",
+                "reuses runStep's existing step-entry behavior rather than duplicating hand-off logic"
             ],
             "relatedDecisions": [
-                "workflow-stop-parks"
+                "workflow-force-advance"
             ]
         },
         {
@@ -376,7 +426,8 @@
                 "WorkflowState.advancing",
                 "WorkflowEngine.advance",
                 "SessionManager.persistMeta",
-                "SessionManager.adoptSynced"
+                "SessionManager.adoptSynced",
+                "SessionManager.consolidateTimeoutMs"
             ],
             "tests": [
                 "server/src/workflows.advance.test.ts"
@@ -384,12 +435,14 @@
             "businessRules": [
                 "the Approve button shows a loader and is disabled for the entire consolidation window, not just until the next step's status arrives",
                 "the button is also disabled while disconnected, since a dropped WS message would otherwise leave the click looking like it did nothing",
-                "the card's copy switches to an in-progress message while advancing"
+                "the card's copy switches to an in-progress message while advancing",
+                "the consolidation window is bounded, so even a hung query or token refresh cannot hold advancing open forever"
             ],
             "architecturalRules": [
                 "the in-flight flag is server-owned broadcast state, never local optimistic UI state",
                 "clearing the flag rides the next status broadcast rather than issuing its own — no await may be inserted between the clear and that broadcast",
-                "cleared on process restart (constructor load loop) and on hand-off (adoptSynced), never in reconcileWithWorker, which runs far more often and would falsely clear a live advance"
+                "cleared on process restart (constructor load loop) and on hand-off (adoptSynced), never in reconcileWithWorker, which runs far more often and would falsely clear a live advance",
+                "runStep's silent early returns now persistMeta before returning, so the cleared flag and bumped stepIndex always reach the client"
             ],
             "relatedDecisions": []
         },
@@ -535,6 +588,8 @@
             "symbols": [
                 "WorkflowState.lastStepOutput",
                 "SessionManager.consolidateStepOutput",
+                "SessionManager.consolidateQuery",
+                "SessionManager.consolidateTimeoutMs",
                 "SessionManager.collectTurns",
                 "SessionManager.findStepStart",
                 "WorkflowEngine.advance",
@@ -544,11 +599,12 @@
             ],
             "tests": [
                 "server/src/sessions.turns.test.ts",
-                "server/src/workflows.substitution.test.ts"
+                "server/src/workflows.substitution.test.ts",
+                "server/src/workflows.advance.test.ts"
             ],
             "businessRules": [
                 "consolidation only fires when a step ran more than one turn; single-turn steps incur no extra query or latency",
-                "on query failure or empty result, falls back to lastAssistantText (per-step-scoped) rather than blocking the workflow",
+                "on query failure, empty result, or a timeout (consolidateTimeoutMs), falls back to lastAssistantText (per-step-scoped) rather than blocking the workflow",
                 "an empty consolidated output is never published, so it cannot overwrite a previously captured value",
                 "consolidation is scoped to the stepIndex that just finished, not merely the newest started marker",
                 "a step whose template references an {outputs.<name>} that is absent or blank parks at waiting-approval with an error marker instead of running with a silently blank substitution",
