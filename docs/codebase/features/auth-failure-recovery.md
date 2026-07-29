@@ -28,8 +28,10 @@ transcript ended on a half-finished turn with no Retry affordance.
 
 - `isAuthFailureMessage(message)` — narrow regex match over SDK/CLI error text
   (`invalid_grant`, `authentication_error`, `invalid bearer token`, `401 Unauthorized`,
-  `oauth token … expired`, `oauth authentication failed`, `please run /login`)
-- `AuthManager.handleTokenRejected()` — no-op when logged out, else one `forceRefresh()`
+  `oauth … token … expired`, `oauth authentication failed`, `please run /login`,
+  `re-authenticate to continue`)
+- `AuthManager.handleTokenRejected()` — no-op when logged out, else one `forceRefresh()`;
+  a non-`AuthRequiredError` failure (5xx, offline) is logged and leaves the session signed in
 
 ## Data flow
 
@@ -89,4 +91,6 @@ Retry-button pair. No new message type, no client changes.
 
 ## Related decisions
 
-None recorded.
+- [app-managed-login-only](app-managed-login-only.md) — this feature recovers a token
+  rejected *during* a turn; that one guarantees a turn never *starts* on the ambient
+  `~/.claude` login, and reuses the same synthetic-result / Retry pair.

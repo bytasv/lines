@@ -1,8 +1,11 @@
 /**
- * App-managed Claude login via OAuth 2.0 (PKCE). Replaces the previous model of
- * inheriting the ambient Claude Code CLI login: the app runs its own authorize
- * flow, stores its own tokens under ~/.lines-app/auth.json, refreshes them, and
- * hands the access token to the SDK (worker queries) and the usage poller.
+ * App-managed Claude login via OAuth 2.0 (PKCE). Replaces the ambient Claude
+ * Code CLI login outright: the app runs its own authorize flow, stores its own
+ * tokens under ~/.lines-app/auth.json, refreshes them, and hands the access
+ * token to the SDK (worker queries) and the usage poller. The ambient
+ * ~/.claude login is never a fallback — it is a separate token store this app
+ * cannot refresh, so a stale one 401s every turn forever. A turn that cannot
+ * get an app token is refused instead (see SessionManager.pushTurn).
  *
  * Uses Claude Code's public OAuth client. The manual code-paste redirect
  * (console.anthropic.com/oauth/code/callback) is used so no local port needs to
@@ -25,6 +28,10 @@ const SCOPES = 'org:create_api_key user:profile user:inference';
 const REFRESH_MARGIN_MS = 5 * 60_000;
 /** Proactive refresh timer fires this long before expiry. */
 const PROACTIVE_MARGIN_MS = 60 * 60_000;
+/** First retry delay after a proactive refresh fails transiently. */
+const PROACTIVE_RETRY_MS = 60_000;
+/** Ceiling for the proactive-refresh retry backoff. */
+const PROACTIVE_RETRY_CAP_MS = 15 * 60_000;
 
 /** Thrown when a turn-starting action is attempted while logged out. */
 export class AuthRequiredError extends Error {
@@ -46,10 +53,11 @@ const AUTH_FAILURE_PATTERNS = [
   /authentication_error/i,
   /invalid bearer token/i,
   /oauth authentication failed/i,
-  /\boauth token\b[^.\n]*\bexpired\b/i,
+  /\boauth\b[^.\n]*\btoken\b[^.\n]*\bexpired\b/i,
   /\b401\b[^\n]*\bunauthorized\b/i,
   /\bunauthorized\b[^\n]*\b401\b/i,
   /please run \/login/i,
+  /re-?authenticate to continue/i,
 ];
 
 export function isAuthFailureMessage(message: string): boolean {
@@ -74,6 +82,8 @@ export class AuthManager {
   private pendingLogin: { verifier: string; state: string } | null = null;
   private refreshInFlight: Promise<string> | null = null;
   private proactiveTimer: NodeJS.Timeout | null = null;
+  /** Current proactive-retry backoff, null while the ladder is unclimbed. */
+  private proactiveBackoffMs: number | null = null;
 
   /** Wired by index.ts: fires on any login/logout/refresh so the bridge can broadcast + recycle. */
   onChange: ((status: AuthStatus) => void) | null = null;
@@ -146,6 +156,7 @@ export class AuthManager {
     this.store.deleteAuth();
     if (this.proactiveTimer) clearTimeout(this.proactiveTimer);
     this.proactiveTimer = null;
+    this.proactiveBackoffMs = null;
     this.emitChange();
   }
 
@@ -173,7 +184,14 @@ export class AuthManager {
    */
   async handleTokenRejected(): Promise<void> {
     if (!this.isLoggedIn()) return;
-    await this.forceRefresh().catch(() => {});
+    try {
+      await this.forceRefresh();
+    } catch (err) {
+      // 400/401 already self-logged-out and broadcast; anything else (5xx,
+      // offline) leaves us logged in with a token the API rejects — log it and
+      // let the next turn's ensureFreshToken surface the reason to the user.
+      if (!(err instanceof AuthRequiredError)) console.warn('[auth] recovery refresh failed:', err);
+    }
   }
 
   /** Force a refresh regardless of expiry (used after a 401 from the usage endpoint). */
@@ -201,12 +219,17 @@ export class AuthManager {
         });
         if (res.status === 400 || res.status === 401) {
           // invalid_grant: refresh token is dead — treat as logged out.
+          console.warn('[auth] refresh token rejected — signed out');
           this.logout();
           throw new AuthRequiredError();
         }
-        if (!res.ok) throw new Error(`Token refresh failed (${res.status})`);
+        if (!res.ok) {
+          console.warn(`[auth] token refresh failed (${res.status})`);
+          throw new Error(`Token refresh failed (${res.status})`);
+        }
         const body = (await res.json()) as TokenResponse;
         this.persistTokens(body);
+        console.log('[auth] token refreshed');
         this.onRefresh?.();
         return body.access_token;
       } finally {
@@ -228,14 +251,29 @@ export class AuthManager {
       account: extractAccount(body) ?? prev?.account,
     };
     this.store.saveAuth(this.auth);
+    // A recovery resets the backoff ladder for the next expiry window.
+    this.proactiveBackoffMs = null;
     this.scheduleProactiveRefresh();
   }
 
-  private scheduleProactiveRefresh(): void {
+  private scheduleProactiveRefresh(delayMs?: number): void {
     if (this.proactiveTimer) clearTimeout(this.proactiveTimer);
     if (!this.auth) return;
-    const delay = Math.max(0, this.auth.expiresAt - Date.now() - PROACTIVE_MARGIN_MS);
-    this.proactiveTimer = setTimeout(() => void this.refresh().catch(() => {}), delay);
+    const delay = delayMs ?? Math.max(0, this.auth.expiresAt - Date.now() - PROACTIVE_MARGIN_MS);
+    this.proactiveTimer = setTimeout(() => {
+      void this.refresh().catch(() => {
+        // Transient (offline at wake, 5xx): retry with backoff rather than let
+        // the token rot until a turn 401s. A dead refresh token already logged
+        // out, which cleared this.auth and stops the chain.
+        if (!this.auth) return;
+        this.proactiveBackoffMs =
+          this.proactiveBackoffMs === null
+            ? PROACTIVE_RETRY_MS
+            : Math.min(this.proactiveBackoffMs * 2, PROACTIVE_RETRY_CAP_MS);
+        console.warn(`[auth] proactive refresh failed, retrying in ${this.proactiveBackoffMs / 1000}s`);
+        this.scheduleProactiveRefresh(this.proactiveBackoffMs);
+      });
+    }, delay);
     this.proactiveTimer.unref();
   }
 

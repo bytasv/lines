@@ -43,6 +43,8 @@ export interface ResultItem {
   costUsd?: number;
   durationMs?: number;
   isError: boolean;
+  /** The SDK/synthetic result text, kept only for failures so the row can say why. */
+  error?: string;
   /** 1-2 sentence summary of the turn's tool activity, filled in async by the server. */
   summary?: string;
 }
@@ -335,13 +337,23 @@ export function buildTranscript(
             live = null;
             openGroup = null;
             lastText = '';
-            const r = msg as { total_cost_usd?: number; duration_ms?: number; is_error?: boolean; subtype?: string };
+            const r = msg as {
+              total_cost_usd?: number;
+              duration_ms?: number;
+              is_error?: boolean;
+              subtype?: string;
+              result?: unknown;
+            };
+            const isError = Boolean(r.is_error) || (r.subtype != null && r.subtype !== 'success');
             const resultItem: ResultItem = {
               kind: 'result',
               key: `r${event.seq}`,
               costUsd: r.total_cost_usd,
               durationMs: r.duration_ms,
-              isError: Boolean(r.is_error) || (r.subtype != null && r.subtype !== 'success'),
+              isError,
+              // Only on failures: a successful turn's `result` is the assistant's
+              // own final text, already rendered above.
+              ...(isError && typeof r.result === 'string' && r.result ? { error: r.result } : {}),
             };
             resultItems.set(event.seq, resultItem);
             items.push(resultItem);

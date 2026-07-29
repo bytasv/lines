@@ -28,7 +28,8 @@ function harness() {
   const store = createStore(root);
   let rejections = 0;
   const auth = {
-    getAccessTokenSync: () => null,
+    getAccessTokenSync: () => 'tok',
+    ensureFreshToken: async () => 'tok',
     handleTokenRejected: async () => {
       rejections++;
     },

@@ -12,6 +12,9 @@ test('isAuthFailureMessage matches rejected-token error text', () => {
     'API Error: 401 Unauthorized',
     'Unauthorized (401)',
     'OAuth token has expired',
+    // The CLI's own wording — the words are not adjacent, and it says neither
+    // "unauthorized" nor "/login", so every other pattern here misses it.
+    'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.',
     'OAuth authentication failed',
     'Invalid API key · Please run /login',
   ];
@@ -119,6 +122,70 @@ test('handleTokenRejected logs out on invalid_grant, which opens the login modal
   assert.equal(manager.isLoggedIn(), false);
   assert.equal(stored(), null);
   assert.deepEqual(changes, [{ loggedIn: false } satisfies AuthStatus]);
+});
+
+test('ensureFreshToken refreshes a token inside the refresh margin', async (t) => {
+  const calls = stubFetch(t, okToken);
+  // 1 minute left: inside the 5-minute refresh margin.
+  const { manager, stored } = makeManager({ ...LIVE_AUTH, expiresAt: Date.now() + 60_000 });
+
+  assert.equal(await manager.ensureFreshToken(), 'new-access');
+  assert.equal(calls.count, 1);
+  assert.equal(stored()?.accessToken, 'new-access');
+});
+
+test('ensureFreshToken throws AuthRequiredError when logged out', async (t) => {
+  const calls = stubFetch(t, okToken);
+  const { manager } = makeManager(null);
+
+  await assert.rejects(() => manager.ensureFreshToken(), { name: 'AuthRequiredError' });
+  assert.equal(calls.count, 0);
+});
+
+test('handleTokenRejected keeps the session logged in on a 5xx', async (t) => {
+  const calls = stubFetch(t, () => new Response('boom', { status: 500 }));
+  const { manager, changes, stored } = makeManager({ ...LIVE_AUTH });
+
+  await manager.handleTokenRejected();
+
+  assert.equal(calls.count, 1);
+  // The case that used to dead-end silently: still signed in, token untouched.
+  assert.equal(manager.isLoggedIn(), true);
+  assert.equal(stored()?.accessToken, 'old-access');
+  assert.deepEqual(changes, []);
+});
+
+test('handleTokenRejected keeps the session logged in on a network error', async (t) => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error('getaddrinfo ENOTFOUND');
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  const { manager, changes, stored } = makeManager({ ...LIVE_AUTH });
+
+  await manager.handleTokenRejected();
+
+  assert.equal(manager.isLoggedIn(), true);
+  assert.equal(stored()?.accessToken, 'old-access');
+  assert.deepEqual(changes, []);
+});
+
+test('a failed proactive refresh schedules a retry', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const calls = stubFetch(t, () => new Response('boom', { status: 500 }));
+  // Already past the proactive margin, so the timer is scheduled at delay 0.
+  makeManager({ ...LIVE_AUTH, expiresAt: Date.now() + 10 * 60_000 });
+
+  t.mock.timers.tick(1);
+  // Drain microtasks so the rejected refresh settles and reschedules; real
+  // timers are mocked, so there is nothing else to wait on.
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  assert.equal(calls.count, 1);
+
+  t.mock.timers.tick(60_000); // first backoff step
+  assert.equal(calls.count, 2);
 });
 
 test('concurrent rejections share one refresh', async (t) => {

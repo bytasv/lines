@@ -17,7 +17,9 @@ import { send } from '../ws';
  * App-managed Claude login. Opens automatically when the bridge reports
  * logged-out; the flow is: start login -> approve in the browser tab the
  * server's authorize URL opens -> paste the `code#state` shown there back
- * here. Dismissible — sessions then fall back to ambient CLI credentials.
+ * here. Dismissible, but there is no ambient-CLI fallback: until a sign-in
+ * lands, every turn is refused with "Not signed in to Claude. Sign in, then
+ * Retry.", and the next prompt reopens this modal.
  */
 export function LoginModal() {
   const opened = useStore((s) => s.loginModalOpen);

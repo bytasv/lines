@@ -296,24 +296,32 @@ function Item({
       );
     case 'result':
       return (
-        <Group gap="xs" justify="center">
-          <Text size="xs" c={item.isError ? 'red' : 'dimmed'} ta="center">
-            {item.isError ? 'turn failed' : 'turn done'}
-            {item.costUsd != null ? ` · $${item.costUsd.toFixed(4)}` : ''}
-            {item.durationMs != null ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''}
-          </Text>
-          {showRetry && (
-            <Button
-              size="compact-xs"
-              variant="light"
-              color="red"
-              leftSection={<IconRefresh size={12} />}
-              onClick={() => send({ type: 'retryTurn', sessionId })}
-            >
-              Retry
-            </Button>
+        <Stack gap={2} align="center">
+          <Group gap="xs" justify="center">
+            <Text size="xs" c={item.isError ? 'red' : 'dimmed'} ta="center">
+              {item.isError ? 'turn failed' : 'turn done'}
+              {item.costUsd != null ? ` · $${item.costUsd.toFixed(4)}` : ''}
+              {item.durationMs != null ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''}
+            </Text>
+            {showRetry && (
+              <Button
+                size="compact-xs"
+                variant="light"
+                color="red"
+                leftSection={<IconRefresh size={12} />}
+                onClick={() => send({ type: 'retryTurn', sessionId })}
+              >
+                Retry
+              </Button>
+            )}
+          </Group>
+          {/* The durable record of why: SessionView's alert vanishes on the next prompt. */}
+          {item.error && (
+            <Text size="xs" c="red" opacity={0.75} ta="center" lineClamp={3}>
+              {item.error}
+            </Text>
           )}
-        </Group>
+        </Stack>
       );
     case 'permission':
       // Auto-allowed calls are filtered out upstream; only real prompts reach here.
