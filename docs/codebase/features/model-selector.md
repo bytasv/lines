@@ -8,7 +8,7 @@ shows the model name plus a one-line description to help users pick between mode
 ## Entry points
 
 - Session composer model dropdown
-- New-session defaults in the settings modal
+- New-session defaults in the settings modal's Sessions pane
 - Workflow step editor and step library model dropdowns
 
 ## Important files

@@ -183,7 +183,11 @@ function SettingsButton() {
           </ActionIcon>
         </Indicator>
       </Tooltip>
-      <SettingsModal opened={opened} onClose={() => setOpened(false)} />
+      <SettingsModal
+        opened={opened}
+        onClose={() => setOpened(false)}
+        initialSection={guardReview ? 'allowlist' : 'account'}
+      />
     </>
   );
 }

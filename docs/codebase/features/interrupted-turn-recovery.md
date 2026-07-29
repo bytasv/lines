@@ -9,7 +9,7 @@ A turn that died with the app (bridge and worker both gone) is detected on recon
 - `server/src/workerClient.ts` (`onHello` -> `withQueuedPushes`)
 - `server/src/sessions.ts` (`SessionManager.reconcileWithWorker`, `continueTurn`, `markTurnLive`)
 - `web/src/components/SessionView.tsx` (Continue banner, sends `continueTurn`)
-- `web/src/components/SettingsModal.tsx` ("Recovery" section)
+- `web/src/components/SettingsModal.tsx` (Sessions pane, "Recovery" subgroup)
 - `web/src/components/Sidebar.tsx` (session row indicator)
 
 ## Files
@@ -72,4 +72,4 @@ The settings field-merge in `userContext.ts` is uncovered — `buildUserContext`
 ## Related decisions
 
 - [session-status-badge](session-status-badge.md) — how these statuses render.
-- [workflow-stop-advances](workflow-stop-advances.md) — the other path that settles a turn without a normal result.
+- [workflow-stop-parks](workflow-stop-parks.md) — the other path that settles a turn without a normal result; a plain Stop parks rather than advances.

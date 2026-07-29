@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ActionIcon, Alert, Autocomplete, Button, Code, Group, Text, TextInput, Tooltip } from '@mantine/core';
+import { ActionIcon, Alert, Autocomplete, Button, Code, Group, Stack, Text, TextInput, Tooltip } from '@mantine/core';
 import { IconAlertTriangle, IconPlus, IconTrash } from '@tabler/icons-react';
 import { describeAllowEntry, normalizeAllowEntry, sameAllowEntry } from '@lines/shared';
 import { useStore } from '../store';
@@ -47,10 +47,7 @@ export function GuardAllowlistSection({ onOpenReview }: { onOpenReview: () => vo
       : null;
 
   return (
-    <>
-      <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
-        Auto-mode allowlist
-      </Text>
+    <Stack gap="xs">
       {review && (
         <Alert color="yellow" icon={<IconAlertTriangle size={16} />} p="xs">
           <Group justify="space-between" wrap="nowrap" gap="xs">
@@ -139,6 +136,6 @@ export function GuardAllowlistSection({ onOpenReview }: { onOpenReview: () => vo
           {broadWarning}
         </Text>
       )}
-    </>
+    </Stack>
   );
 }

@@ -10,7 +10,8 @@ to run without asking.
 
 ## Entry points
 
-- Settings modal, "Auto-mode allowlist" section — list, remove, hand-add an entry.
+- Settings modal, "Auto-mode allowlist" pane (nav rail item, deep-linked when a
+  review is pending) — list, remove, hand-add an entry.
 - Permission card "Always allow" — the existing write path, now going through the
   same normalization and change notifications as the UI.
 - Allowlist-changed-elsewhere review modal, mounted at the app root (not inside

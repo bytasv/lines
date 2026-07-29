@@ -9,7 +9,7 @@ editor/library) shows the same five modes with the same labels and descriptions.
 ## Entry points
 
 - Session composer permission-mode segmented control
-- New-session defaults in the settings modal
+- New-session defaults in the settings modal's Sessions pane
 - Workflow step editor and step library permission-mode dropdowns
 
 ## Important files
