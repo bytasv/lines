@@ -17,7 +17,7 @@ import { useState, type CSSProperties } from 'react';
 import { projectStatusMeta } from '../lib/format';
 import { sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
-import logoUrl from '../assets/logo.svg';
+import logoUrl from '../assets/logo-mark.png';
 import { SettingsModal } from './SettingsModal';
 import { UsageIndicator } from './UsageIndicator';
 import { UserMenu } from './UserMenu';
@@ -106,26 +106,25 @@ export function ProjectTabs() {
 
   return (
     <Group h="100%" px="sm" gap="sm" wrap="nowrap">
-      <Group gap={6} wrap="nowrap">
-        <Box
-          ml={4}
-          mr={4}
-          style={{
-            background: '#ffffff',
-            borderRadius: 9,
-            padding: 6,
-            display: 'flex',
-            boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
-          }}
-        >
-          <img src={logoUrl} alt="Lines" width={20} height={20} style={{ display: 'block' }} />
-        </Box>
-        {/* Connection state lives in ConnectionBanner (a centered pill for every
-            non-connected state), so a dot here would only ever say "fine". */}
-        <Text component="span" className="brand-wordmark" fw={300} size="md">
-          Lines
-        </Text>
-      </Group>
+      {/* The brand is the mark alone — there is no sibling <Text>, so alt carries
+          the accessible name. The art is near-black on transparent and would
+          vanish into the dark header, so the plate supplies the white ground and
+          the rounded corners the PNG no longer bakes in.
+          Connection state lives in ConnectionBanner (a centered pill for every
+          non-connected state), so a dot here would only ever say "fine". */}
+      <Box
+        ml={4}
+        mr={4}
+        style={{
+          background: '#ffffff',
+          borderRadius: 6,
+          padding: 4,
+          display: 'flex',
+          boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
+        }}
+      >
+        <img src={logoUrl} alt="Lines" height={24} style={{ display: 'block', width: 'auto' }} />
+      </Box>
       <Box className="brand-separator" mx={8} />
       <ScrollArea type="never" style={{ flex: 1 }}>
         <Group gap={4} wrap="nowrap">

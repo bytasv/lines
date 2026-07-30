@@ -1346,14 +1346,47 @@
             "relatedDecisions": [
                 "session-status-badge",
                 "interrupted-turn-recovery",
-                "workflow-done-session-indicator"
+                "workflow-done-session-indicator",
+                "project-switch-session-selection"
+            ]
+        },
+        {
+            "id": "project-switch-session-selection",
+            "name": "Project switch session selection",
+            "doc": "features/project-switch-session-selection.md",
+            "purpose": "Decide which session opens when the active project changes: keep a selection already valid for that project, or auto-select its most recently created non-archived session.",
+            "entryPoints": [
+                "web/src/components/ProjectTabs.tsx",
+                "web/src/lib/ws.ts",
+                "web/src/App.tsx"
+            ],
+            "files": [
+                "web/src/store.ts"
+            ],
+            "symbols": [
+                "setActiveProject",
+                "latestSessionIn",
+                "sessionsInProject"
+            ],
+            "tests": [],
+            "businessRules": [
+                "auto-selection always excludes archived sessions; completed needs no separate check since the server always archives alongside it",
+                "a project whose sessions are all archived auto-selects nothing (empty state) rather than opening an archived one",
+                "an explicit selection already in the target project, including an archived session, is never overridden by a tab switch",
+                "sort key for most recent is createdAt, matching the sidebar list order"
+            ],
+            "architecturalRules": [
+                "membership check reuses sessionsInProject rather than an inline cwd comparison, so it stays key-aware like every other project-scoped scan"
+            ],
+            "relatedDecisions": [
+                "project-tab-status-dot"
             ]
         },
         {
             "id": "brand-logo",
             "name": "Brand logo assets",
             "doc": "features/brand-logo.md",
-            "purpose": "Renders the Lines brand across the tab-bar header, browser tab favicon, and desktop notification icon, with the wordmark baked into the artwork rather than rendered as a DOM node.",
+            "purpose": "Renders the Lines brand mark across the tab-bar header, browser tab favicon, and desktop notification icon; there is no wordmark anywhere, baked or DOM.",
             "entryPoints": [
                 "web/src/components/ProjectTabs.tsx",
                 "web/index.html",
@@ -1361,8 +1394,8 @@
                 "web/src/lib/alerts.ts"
             ],
             "files": [
-                "web/src/assets/logo.png",
                 "web/src/assets/logo-mark.png",
+                "web/src/assets/logo-mark-solid.png",
                 "web/public/favicon.png",
                 "web/src/index.css"
             ],
@@ -1373,16 +1406,16 @@
             ],
             "tests": [],
             "businessRules": [
-                "the header takes the vertical lockup (mark over the word Lines); the favicon and notification icon take the mark alone - the first time the two assets diverge",
-                "favicon.png and logo-mark.png are the same art at two paths because index.html needs a /public URL while alerts.ts wants a Vite asset import",
-                "the header <img> is height-driven (height 36, width auto) because the lockup is portrait; 36px plus the plate's 12px padding fits the 56px HEADER_HEIGHT",
-                "alt=\"Lines\" on the <img> is the only accessible name for the brand - there is no text node"
+                "the header, favicon, and notification icon all use the same mark art now - no separate lockup - logo-mark.png for the header, logo-mark-solid.png/favicon.png for the other two",
+                "favicon.png and logo-mark-solid.png are the same art at two paths because index.html needs a /public URL while alerts.ts wants a Vite asset import",
+                "the header <img> is height-driven (height 24, width auto) inside a plate with padding 4 and borderRadius 6",
+                "alt=\"Lines\" on the header <img> is the only accessible name for the brand"
             ],
             "architecturalRules": [
-                "the white plate in ProjectTabs is load-bearing: the PNGs have an opaque white background, so without it the art would show as a slab against the dark header",
-                "the wordmark can no longer be recolored - .brand-wordmark carried a dark-mode override, and a baked raster cannot respond to the color scheme; the retained white plate is what keeps the near-black art legible in both themes",
+                "the white plate in ProjectTabs is load-bearing: logo-mark.png is transparent with no background of its own, so without the plate the art would sit directly on the dark header; the plate also supplies the header's corner rounding since that asset carries no baked mask",
+                "logo-mark-solid.png/favicon.png bake their own rounded-rect corner mask (RGBA), unlike the header asset, because nothing downstream - the favicon <link>, the Notification icon - can round them at render time",
                 "link.type must track the real bytes: index.html declares image/png and restorePlain resets to image/png after render installs a data URL",
-                "committed PNGs are cropped/downsampled derivatives of 1254x1254 originals that are not in the repo; a future re-crop must start from those, not from the committed copies"
+                "committed PNGs are cropped derivatives of a single 1254x1254 RGB-on-white source that is not in the repo; a future re-crop or re-tone must start from that source, not from the committed derivatives"
             ],
             "relatedDecisions": []
         }

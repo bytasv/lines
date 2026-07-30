@@ -1,5 +1,5 @@
 import type { SessionMeta, SessionStatus } from '@lines/shared';
-import logoUrl from '../assets/logo.svg';
+import logoUrl from '../assets/logo-mark-solid.png';
 import { waitingPermissionMeta } from './format';
 
 const ALERTS_KEY = 'lines.alerts';
