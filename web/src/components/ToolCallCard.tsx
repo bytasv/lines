@@ -1,12 +1,16 @@
-import { useState } from 'react';
-import { ActionIcon, Badge, Box, Code, Collapse, Group, Text, Tooltip } from '@mantine/core';
+import { useState, type ReactNode } from 'react';
+import { ActionIcon, Badge, Box, Code, Collapse, Group, Stack, Text, Tooltip } from '@mantine/core';
 import { IconChevronDown, IconChevronRight, IconZoomScan } from '@tabler/icons-react';
-import type { ToolBlock } from '../lib/transcript';
-import { isEditTool, toolDiff } from '../lib/transcript';
+import type { ToolBlock, ToolGroupItem, TranscriptItem } from '../lib/transcript';
+import { groupSummary, isEditTool, toolDiff } from '../lib/transcript';
 import { MonacoDiffModal } from './MonacoDiffModal';
 
 function summarizeInput(tool: ToolBlock): string {
   const input = tool.input;
+  // A Task call is named by the agent it spawned, not just its description.
+  if (tool.name === 'Task') {
+    return `${String(input.subagent_type ?? 'agent')}: ${String(input.description ?? '')}`.trim();
+  }
   if (typeof input.command === 'string') return input.command;
   if (typeof input.file_path === 'string') return input.file_path;
   if (typeof input.pattern === 'string') return String(input.pattern);
@@ -16,11 +20,24 @@ function summarizeInput(tool: ToolBlock): string {
   return json.length > 120 ? json.slice(0, 120) + '…' : json;
 }
 
+/** The tool calls a subagent made, for the card's activity subtitle. */
+function nestedTools(items: TranscriptItem[]): ToolBlock[] {
+  return items.filter((i): i is ToolGroupItem => i.kind === 'tool-group').flatMap((g) => g.tools);
+}
+
 // Sticky per-card expansion, keyed by tool_use id. Module scope so it survives
 // the card unmounting — which now happens whenever its group collapses.
 const stickyExpanded = new Map<string, boolean>();
 
-export function ToolCallCard({ tool }: { tool: ToolBlock }) {
+export function ToolCallCard({
+  tool,
+  renderNested,
+}: {
+  tool: ToolBlock;
+  /** Renders a subagent's items inside this card. Passed down instead of importing
+   *  Transcript's `Item` — that module already imports this one. */
+  renderNested?: (items: TranscriptItem[]) => ReactNode;
+}) {
   const [expanded, setExpanded] = useState(() => stickyExpanded.get(tool.id) ?? false);
   const [diffOpen, setDiffOpen] = useState(false);
 
@@ -37,6 +54,10 @@ export function ToolCallCard({ tool }: { tool: ToolBlock }) {
   const diff = entry?.diff ?? null;
   const stats = entry?.stats ?? null;
   const pending = tool.result === undefined && !editTool;
+  // A Task call with a subagent transcript underneath it: violet badge, and the
+  // subagent's own tool tally instead of nothing.
+  const children = tool.children ?? [];
+  const nested = children.length > 0 ? nestedTools(children) : [];
 
   return (
     <Box>
@@ -57,12 +78,21 @@ export function ToolCallCard({ tool }: { tool: ToolBlock }) {
       >
         <Group gap="xs" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
           {expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
-          <Badge variant="light" color={tool.isError ? 'red' : editTool ? 'teal' : 'blue'} tt="none">
+          <Badge
+            variant="light"
+            color={tool.isError ? 'red' : children.length > 0 ? 'violet' : editTool ? 'teal' : 'blue'}
+            tt="none"
+          >
             {tool.name}
           </Badge>
           <Text size="xs" c="dimmed" ff="monospace" truncate style={{ flex: 1 }}>
             {summarizeInput(tool)}
           </Text>
+          {nested.length > 0 && (
+            <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
+              {groupSummary(nested)}
+            </Text>
+          )}
           {pending && (
             <Badge variant="dot" color="yellow">
               running
@@ -103,6 +133,13 @@ export function ToolCallCard({ tool }: { tool: ToolBlock }) {
       <Collapse expanded={expanded}>
         {expanded && (
           <Box mt={4}>
+            {/* The subagent's own transcript, above the raw call — opening a Task
+                card should show what the agent did, not a JSON dump. */}
+            {children.length > 0 && renderNested && (
+              <Stack gap={6} mb={6} style={{ minWidth: 0 }}>
+                {renderNested(children)}
+              </Stack>
+            )}
             <Text size="xs" c="dimmed" fw={600}>
               Input
             </Text>

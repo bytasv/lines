@@ -162,6 +162,86 @@ export interface WorkflowDef {
   ownerName?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Recipes — publishable, versioned prompt documents
+// ---------------------------------------------------------------------------
+
+/** A saved bundle's member. No `version` — bundles compose identities, not snapshots. */
+export interface RecipeRef {
+  ownerId: string;
+  recipeId: string;
+}
+
+/** The editable/publishable fields of a recipe (leaf prompt or bundle of recipes). */
+export interface RecipeContent {
+  title: string;
+  /** One-paragraph pitch shown in the browse list. */
+  description: string;
+  /** Normalized, deduped, <= RECIPE_TAG_MAX; order carries no meaning, may be empty. */
+  tags: string[];
+  /** Public R2 URLs, in display order. */
+  images: string[];
+  /** Leaf recipe: the prompt injected verbatim. Empty on a bundle. */
+  prompt: string;
+  /** Bundle: ordered members, 2..RECIPE_BUNDLE_MAX. Absent/empty on a leaf. */
+  members?: RecipeRef[];
+}
+
+/**
+ * Exactly one of `prompt` / `members` is populated — enforced in
+ * `RecipeEngine.saveRecipe`, which is the only write path that can be trusted.
+ */
+export function isBundle(r: Pick<RecipeContent, 'members'>): boolean {
+  return (r.members?.length ?? 0) > 0;
+}
+
+/**
+ * A published recipe head or one of its immutable versions. Carries no
+ * `model`/`permissionMode` — a recipe is a prompt, not a step; the spawned
+ * session uses the runner's own defaults. The run counter deliberately lives
+ * outside this shape (see `recipeStats`) so an author's stale push can't
+ * clobber it.
+ */
+export interface RecipeDef extends RecipeContent {
+  id: string;
+  ownerId: string;
+  ownerName?: string;
+  version: number;
+  published: boolean;
+  updatedAt?: number;
+}
+
+export const RECIPE_IMAGE_MAX_COUNT = 4;
+/** Decoded bytes, checked bridge- and storage-side. */
+export const RECIPE_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+export const RECIPE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const;
+export const RECIPE_TAG_MAX = 6;
+export const RECIPE_TAG_MAX_LEN = 24;
+/** Recipes combinable into one run — also the post-expansion ceiling on a bundle. */
+export const RECIPE_BUNDLE_MAX = 8;
+
+/**
+ * Canonical tag form: lowercase, trimmed, inner whitespace to '-', anything
+ * outside [a-z0-9-_.] stripped, repeated '-' collapsed, truncated.
+ *
+ * Shared (not server-only) so the editor can preview the exact string the engine
+ * will store — otherwise a tag silently changes shape on save. The server still
+ * re-normalizes every save: this is a convenience, never the enforcement point.
+ */
+export function normalizeRecipeTag(raw: string): string {
+  return raw
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9\-_.]/g, '')
+    .replace(/-{2,}/g, '-')
+    .slice(0, RECIPE_TAG_MAX_LEN)
+    // After the truncation, not before: a cut that lands on a '-' would otherwise
+    // store a tag that re-normalizes to a different string, and every later save
+    // of that same tag would look like a content change and bump a version.
+    .replace(/^-+|-+$/g, '');
+}
+
 export type WorkflowStepStatus = 'pending' | 'running' | 'waiting-approval' | 'done';
 
 export interface WorkflowState {
@@ -199,8 +279,13 @@ export interface WorkflowState {
   /** Per-step accumulated active-turn duration in ms, indexed by step position.
    *  Summed across every turn a step runs (retries included); excludes idle wait. */
   stepDurationsMs?: number[];
-  /** Working-tree snapshot taken when the workflow starts, so a fresh step's
-   *  {diff} shows only what the workflow changed, not pre-existing dirty state. */
+  /** Working-tree snapshot taken when the workflow starts, one per commit unit
+   *  (`git rev-parse --show-toplevel`), so a fresh step's {diff} shows only what
+   *  the workflow changed in each repo, not pre-existing dirty state. */
+  diffBaselines?: { repo: string; ref: string; untracked: string[] }[];
+  /** @deprecated pre-multi-root single baseline. Never written any more, still
+   *  read so a workflow already in flight across the deploy keeps a correct diff
+   *  instead of silently falling back to HEAD. */
   diffBaseline?: { ref: string; untracked: string[] };
   /** Consolidated final output of the last-completed step; consumed as {previous}
    *  by the next fresh-start step. Falls back to lastAssistantText when absent. */
@@ -420,12 +505,33 @@ export interface FileSnapshotData {
   before: string | null;
 }
 
+/**
+ * How a permission resolution came about. Recorded so "did a human decide this?"
+ * is answerable from the transcript alone — 'user' and 'plan-reply' are the only
+ * human gestures; everything else is the server resolving on its own behalf.
+ */
+export type PermissionResolutionSource =
+  | 'user'
+  | 'plan-reply'
+  | 'auto'
+  | 'recovery'
+  | 'workflow-advance'
+  | 'interrupt-expire'
+  | 'stop'
+  | 'cancel';
+
 export interface PermissionRequestData {
   requestId: string;
   toolName: string;
   input: Record<string, unknown>;
   /** 'expired' = the server no longer holds this request (restart/interrupt); re-prompt needed. */
   resolution?: 'allow' | 'deny' | 'expired';
+  /**
+   * On resolutions: which path produced this answer. Optional — absent on
+   * transcripts written before it existed, which every consumer must read as
+   * 'user' (the only resolution source that existed for cards the user saw).
+   */
+  resolvedBy?: PermissionResolutionSource;
   /** For AskUserQuestion: question text -> selected label(s) the user chose. */
   answers?: Record<string, string>;
   /**
@@ -492,8 +598,8 @@ export interface TreeResponse {
 
 /** Response body of the bridge's GET /find endpoint (@mention file-name search). */
 export interface FindResponse {
-  /** Ranked matches, as paths relative to the searched root. */
-  files: string[];
+  /** Ranked matches; `rel` is relative to the absolute `root` it was found under. */
+  files: { root: string; rel: string }[];
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +649,36 @@ export type ClientMessage =
   | { type: 'deleteStep'; stepId: string }
   /** Request the full version history of a step (for preview + re-pin). Keys are echoed back. */
   | { type: 'stepVersions'; ownerId: string; stepId: string }
+  /** Save or update a recipe. Content changes bump the version; server stamps ownerId and normalizes tags. */
+  | { type: 'saveRecipe'; recipe: RecipeContent; recipeId?: string; published: boolean; ownerName?: string }
+  /** Remove a recipe from the library — an unpublish, mirroring deleteStep; rows stay. */
+  | { type: 'deleteRecipe'; recipeId: string }
+  /** Request the full version history of a recipe. Keys are echoed back. */
+  | { type: 'recipeVersions'; ownerId: string; recipeId: string }
+  /** Upload one recipe screenshot; answered with the public URL. `data` is raw base64. */
+  | { type: 'uploadRecipeImage'; uploadId: string; name: string; mediaType: string; data: string }
+  | {
+      type: 'runRecipe';
+      /** Correlation id echoed on `recipeRun` — the protocol has none of its own. */
+      runId: string;
+      /**
+       * Ad-hoc selection, order = execution order. A single entry that resolves to
+       * a saved bundle is expanded server-side into its members, so the client
+       * never flattens (and a stale client can't run a bundle's old membership).
+       * One leaf = a plain session; more than one, or a bundle = a synthesized workflow.
+       */
+      recipes: { ownerId: string; recipeId: string; version?: number }[];
+      cwd: string;
+      model: string;
+      permissionMode: PermissionMode;
+      caveman: CavemanConfig;
+      /** Bundle runs only — the name of the workflow that gets created. */
+      bundleName?: string;
+      /** Bundle runs only: false parks for review between recipes. */
+      autoAdvance?: boolean;
+      /** Single-leaf only — mutually exclusive with a bundle, which already is a workflow. */
+      workflowId?: string;
+    }
   /** Live `/context` breakdown for one session (hover-triggered). Echoed back. */
   | { type: 'contextBreakdown'; sessionId: string }
   /** Compact this session's context now (manual compaction). */
@@ -551,6 +687,10 @@ export type ClientMessage =
   | { type: 'pickFolder' }
   | { type: 'openProject'; path: string }
   | { type: 'closeProject'; path: string }
+  /** Widen a project to span another folder. Two explicit intents rather than
+   *  overloading `openProject`, so "new tab" and "new root" never get confused. */
+  | { type: 'addProjectRoot'; project: string; path: string }
+  | { type: 'removeProjectRoot'; project: string; path: string }
   /** Manually bind a path to a project key — for a cwd that doesn't exist on this machine. */
   | { type: 'linkProjectPath'; path: string; key: string }
   | { type: 'authStartLogin' }
@@ -640,6 +780,48 @@ export interface UserUiSettings {
  * A cwd with no resolvable key is absent here and falls back to path equality.
  */
 export type ProjectKeyMap = Record<string, string>;
+
+/**
+ * One project tab. `path` stays the project's identity — the tab key, the
+ * `activeProject` value, every session's `cwd`, and the project-key anchor — so
+ * spanning extra folders changes nothing that is persisted or synced elsewhere.
+ */
+export interface Project {
+  /** Absolute path; the project's identity — tab key, activeProject, session cwd, project-key anchor. */
+  path: string;
+  /** Extra absolute roots the agent may also work in. Never contains `path`. */
+  extraRoots?: string[];
+}
+
+/** Strip trailing slashes; '/' survives. The one normalizer every root path goes through. */
+export function normalizeRootPath(raw: string): string {
+  const trimmed = raw.trim();
+  const stripped = trimmed.replace(/\/+$/, '');
+  return stripped || (trimmed ? '/' : '');
+}
+
+/** Every root the project spans, primary first. */
+export function projectRoots(p: Project): string[] {
+  return [p.path, ...(p.extraRoots ?? [])];
+}
+
+/** The project owning `cwd` — primary match first, then extra-root match. */
+export function findProject(projects: Project[], cwd: string): Project | null {
+  return (
+    projects.find((p) => p.path === cwd) ??
+    projects.find((p) => (p.extraRoots ?? []).includes(cwd)) ??
+    null
+  );
+}
+
+/**
+ * Roots a session at `cwd` may touch: its project's roots, else `[cwd]`. Never
+ * empty — an empty list would make the guard escalate every single file call.
+ */
+export function rootsForCwd(projects: Project[], cwd: string): string[] {
+  const project = findProject(projects, cwd);
+  return project ? projectRoots(project) : [cwd];
+}
 
 /**
  * One synced agent-memory file. The SDK reads memory only off disk, so disk
@@ -756,7 +938,7 @@ export function diffAllowlists(
 }
 
 export type ServerMessage =
-  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; models: ModelOption[]; recentDirs: string[]; projects: string[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; storage: StorageStatus; settings?: UserUiSettings | null; guardAllowlist?: GuardAllowEntry[]; guardAllowlistReview?: GuardAllowlistReview | null }
+  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; recipes: RecipeDef[]; sharedRecipes: RecipeDef[]; recipeStats: Record<string, number>; models: ModelOption[]; recentDirs: string[]; projects: Project[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; storage: StorageStatus; settings?: UserUiSettings | null; guardAllowlist?: GuardAllowEntry[]; guardAllowlistReview?: GuardAllowlistReview | null }
   | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
   /** The whole auto-mode guard allowlist after any change (card, UI edit, accepted review). */
@@ -768,7 +950,7 @@ export type ServerMessage =
   | { type: 'storageStatus'; storage: StorageStatus }
   | { type: 'authLoginStarted'; authorizeUrl: string }
   | { type: 'authError'; message: string }
-  | { type: 'projects'; projects: string[] }
+  | { type: 'projects'; projects: Project[] }
   | { type: 'sessionUpsert'; session: SessionMeta }
   | { type: 'sessionDeleted'; sessionId: string }
   | { type: 'workflows'; workflows: WorkflowDef[] }
@@ -779,6 +961,17 @@ export type ServerMessage =
   | { type: 'sharedSteps'; sharedSteps: StepDef[]; pinnedSteps: StepDef[] }
   /** Version history for one step, newest first. Echoes the request keys so the store can slot it. */
   | { type: 'stepVersions'; ownerId: string; stepId: string; versions: StepDef[] }
+  /** This user's own recipe heads. */
+  | { type: 'recipes'; recipes: RecipeDef[] }
+  /** Other users' published recipe heads — the browsable corpus. */
+  | { type: 'sharedRecipes'; sharedRecipes: RecipeDef[] }
+  /** Version history for one recipe, newest first. Echoes the request keys. */
+  | { type: 'recipeVersions'; ownerId: string; recipeId: string; versions: RecipeDef[] }
+  /** Run counts keyed `ownerId/recipeId`. A PARTIAL map — merge it, never replace. */
+  | { type: 'recipeStats'; stats: Record<string, number> }
+  | { type: 'recipeImageUploaded'; uploadId: string; url: string }
+  /** Answer to `runRecipe`, so the client can select the new session deterministically. */
+  | { type: 'recipeRun'; runId: string; sessionId: string }
   /** `breakdown: null` = no live query or the control request failed — a state, not an error. */
   | { type: 'contextBreakdown'; sessionId: string; breakdown: ContextBreakdown | null }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }
@@ -797,6 +990,16 @@ export const PLAN_DIR_MARKER = '.claude/plans/';
  *  so Windows backslash paths match too (`path` is not importable in the browser). */
 export function isPlanFilePath(filePath: string): boolean {
   return filePath.replace(/\\/g, '/').includes(PLAN_DIR_MARKER);
+}
+
+/**
+ * The `parent_tool_use_id` of an SDK message, when it names one — i.e. the message
+ * was produced by a subagent spawned by that `Task` call, not by the main agent.
+ * Null for main-agent messages (outbound user messages carry an explicit null).
+ */
+export function subagentParentId(msg: unknown): string | null {
+  const p = (msg as { parent_tool_use_id?: string | null } | null)?.parent_tool_use_id;
+  return typeof p === 'string' && p ? p : null;
 }
 
 export const DEFAULT_MODELS: ModelOption[] = [

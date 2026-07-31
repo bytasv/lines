@@ -57,7 +57,7 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
           : data.event === 'approved'
             ? `${data.stepName} — approved`
             : data.event === 'interrupted'
-              ? `${data.stepName} — stopped, moving to next step`
+              ? `${data.stepName} — stopped and marked completed`
               : 'Workflow complete';
   return (
     <Divider
@@ -268,7 +268,20 @@ function Item({
         </Stack>
       );
     case 'tool-group':
-      return <ToolGroup group={item} active={!!isActiveGroup} sessionId={sessionId} />;
+      return (
+        <ToolGroup
+          group={item}
+          active={!!isActiveGroup}
+          sessionId={sessionId}
+          // A subagent's items are rendered by this same component; passing the
+          // renderer down avoids an import cycle (Transcript → ToolGroup → card).
+          renderNested={(nested) =>
+            nested.map((child) => (
+              <Item key={child.key} item={child} sessionId={sessionId} onImage={onImage} />
+            ))
+          }
+        />
+      );
     case 'agent-turn':
       return (
         <AgentTurn

@@ -1609,6 +1609,48 @@
         "multi-root-projects",
         "workflow-step-output-consolidation"
       ]
+    },
+    {
+      "id": "subagent-transcript",
+      "name": "Subagent transcript nesting",
+      "doc": "features/subagent-transcript.md",
+      "purpose": "Nest a subagent's (Task tool) transcript under its spawning card instead of flattening it into the main transcript, and exclude subagent messages from main-agent state (context usage, workflow step output, turn summaries).",
+      "entryPoints": [
+        "web/src/lib/transcript.ts",
+        "server/src/sessions.ts"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/sessions.ts",
+        "web/src/lib/transcript.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/components/ToolGroup.tsx",
+        "web/src/components/ToolCallCard.tsx",
+        "web/src/components/ActivityRow.tsx"
+      ],
+      "symbols": [
+        "subagentParentId",
+        "Sink",
+        "sinkFor",
+        "ToolBlock.children",
+        "scanTurnActivity"
+      ],
+      "tests": [
+        "server/src/sessions.turns.test.ts",
+        "server/src/sessions.context.test.ts"
+      ],
+      "businessRules": [
+        "a subagent's assistant text and tool calls are never counted as main-agent output: workflow step output, the turn summary, and the live context-usage reading are all derived from main-agent messages only",
+        "a subagent's tool calls and text nest under its spawning Task card, never inline in the main transcript or folded into the main agent's tool group",
+        "a subagent cannot itself spawn a Task (harness restriction), so nesting is one level deep in practice, though the data model is recursive",
+        "a message whose parent_tool_use_id names a Task block not present in the transcript falls back to the main sink instead of being dropped"
+      ],
+      "architecturalRules": [
+        "existing transcripts already carry parent_tool_use_id on disk (persisted verbatim by the worker), so this feature is a pure read-side reinterpretation with no new capture and no migration",
+        "no agents option was added to buildQueryOptions; subagent definitions are inherited via settingSources, the same mechanism that already inherits the rest of the preset",
+        "nested rendering is threaded down as a renderNested callback rather than a new shared module, since ToolCallCard cannot import Transcript.tsx's Item without an import cycle"
+      ],
+      "relatedDecisions": []
     }
   ]
 }

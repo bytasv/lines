@@ -28,6 +28,7 @@ import {
   KEEP_PLANNING_MESSAGE,
   resolveModelId,
   rootsForCwd,
+  subagentParentId,
 } from '@lines/shared';
 import type { Store } from './store.ts';
 import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
@@ -210,6 +211,9 @@ export function collectTurns(
       continue;
     }
     if (ev.kind !== 'sdk') continue;
+    // Subagent output belongs to its parent Task call, never to the turn: a subagent
+    // that answers after the main agent's final text must not become the step output.
+    if (subagentParentId(ev.data)) continue;
     const msg = ev.data as { type?: string; message?: { content?: unknown } };
     if (msg.type !== 'assistant') continue;
     const content = msg.message?.content;
@@ -253,6 +257,48 @@ export function collectTurns(
       : undefined;
     return { user: t.user, output: t.planArg ?? planFile ?? t.lastText };
   });
+}
+
+/**
+ * The tool calls, failed tool ids, and final text of a turn slice — the raw material
+ * for the turn summary. Main-agent only: a subagent's own tool calls and text belong
+ * to its parent `Task` card, and that `Task` call is itself in the list, so the
+ * summary still reads as "spawned an Explore subagent".
+ */
+export function scanTurnActivity(events: TranscriptEvent[]): {
+  toolCalls: { id: string; name: string; input: Record<string, unknown> }[];
+  toolErrors: Set<string>;
+  finalText: string;
+} {
+  const toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
+  const toolErrors = new Set<string>();
+  let finalText = '';
+  for (const ev of events) {
+    if (ev.kind !== 'sdk') continue;
+    if (subagentParentId(ev.data)) continue;
+    const msg = ev.data as { type?: string; message?: { content?: unknown } };
+    if (msg.type === 'assistant') {
+      const content = msg.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content as Record<string, unknown>[]) {
+          if (block.type === 'text' && typeof block.text === 'string') finalText = block.text;
+          if (block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
+            toolCalls.push({ id: block.id, name: block.name, input: (block.input as Record<string, unknown>) ?? {} });
+          }
+        }
+      }
+    } else if (msg.type === 'user') {
+      const content = msg.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content as Record<string, unknown>[]) {
+          if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.is_error) {
+            toolErrors.add(block.tool_use_id);
+          }
+        }
+      }
+    }
+  }
+  return { toolCalls, toolErrors, finalText };
 }
 
 /**
@@ -1366,33 +1412,7 @@ export class SessionManager {
       })();
       const turnEvents = events.slice(Math.max(lastUserIdx, 0));
 
-      const toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
-      const toolErrors = new Set<string>();
-      let finalText = '';
-      for (const ev of turnEvents) {
-        if (ev.kind !== 'sdk') continue;
-        const msg = ev.data as { type?: string; message?: { content?: unknown } };
-        if (msg.type === 'assistant') {
-          const content = msg.message?.content;
-          if (Array.isArray(content)) {
-            for (const block of content as Record<string, unknown>[]) {
-              if (block.type === 'text' && typeof block.text === 'string') finalText = block.text;
-              if (block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') {
-                toolCalls.push({ id: block.id, name: block.name, input: (block.input as Record<string, unknown>) ?? {} });
-              }
-            }
-          }
-        } else if (msg.type === 'user') {
-          const content = msg.message?.content;
-          if (Array.isArray(content)) {
-            for (const block of content as Record<string, unknown>[]) {
-              if (block.type === 'tool_result' && typeof block.tool_use_id === 'string' && block.is_error) {
-                toolErrors.add(block.tool_use_id);
-              }
-            }
-          }
-        }
-      }
+      const { toolCalls, toolErrors, finalText } = scanTurnActivity(turnEvents);
       if (toolCalls.length === 0) return; // plain text answer — nothing to summarize
 
       const token = await this.ownerToken();
@@ -1927,7 +1947,14 @@ export class SessionManager {
     // Each assistant message overwrites the reading; the last one before the
     // result describes the turn's final prompt. Held live rather than upserted
     // per message, which would broadcast a sidebar re-render 10-20x a turn.
-    if (msg.type === 'assistant' && meta && !this.liveState(sessionId).compactedInTurn) {
+    // Subagent messages are skipped: their context is their own, and letting one
+    // settle here shows the composer ring a subagent's tiny reading.
+    if (
+      msg.type === 'assistant' &&
+      !subagentParentId(msg) &&
+      meta &&
+      !this.liveState(sessionId).compactedInTurn
+    ) {
       const reading = extractContextUsage(msg, meta.model, Date.now());
       if (reading) this.liveState(sessionId).contextUsage = reading;
     }

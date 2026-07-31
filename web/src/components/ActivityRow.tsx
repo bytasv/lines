@@ -9,7 +9,8 @@ const QUIET_ALARM_S = 120;
 
 function label(live: LiveActivity | null): string {
   if (!live) return 'Working…';
-  const prefix = live.subagent ? 'Subagent: ' : '';
+  // Named when the spawning Task call is known, generic otherwise.
+  const prefix = live.subagent ? `${live.subagentType ?? 'Subagent'}: ` : '';
   switch (live.phase) {
     case 'thinking':
       return `${prefix}Thinking…`;

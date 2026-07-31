@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Badge, Box, Collapse, Group, Loader, Stack, Text } from '@mantine/core';
 import { IconChevronDown, IconChevronRight } from '@tabler/icons-react';
-import type { ToolGroupItem } from '../lib/transcript';
+import type { ReactNode } from 'react';
+import type { ToolGroupItem, TranscriptItem } from '../lib/transcript';
 import { groupDiffTotals, groupSummary } from '../lib/transcript';
 import { ToolCallCard } from './ToolCallCard';
 
@@ -13,16 +14,21 @@ export function ToolGroup({
   group,
   active,
   sessionId,
+  renderNested,
 }: {
   group: ToolGroupItem;
   active: boolean;
   sessionId: string;
+  /** Renders a subagent's items inside a Task card. Threaded through from Transcript. */
+  renderNested?: (items: TranscriptItem[]) => ReactNode;
 }) {
   const k = `${sessionId}:${group.key}`;
   const [override, setOverride] = useState<boolean | null>(() => stickyOverrides.get(k) ?? null);
 
   // A lone tool call needs no group chrome — the card is already collapsible.
-  if (group.tools.length === 1) return <ToolCallCard tool={group.tools[0]} />;
+  if (group.tools.length === 1) {
+    return <ToolCallCard tool={group.tools[0]} renderNested={renderNested} />;
+  }
 
   const expanded = override ?? active;
   const toggle = () => {
@@ -87,7 +93,7 @@ export function ToolGroup({
         {expanded && (
           <Stack gap={2} mt={2}>
             {group.tools.map((t) => (
-              <ToolCallCard key={t.id} tool={t} />
+              <ToolCallCard key={t.id} tool={t} renderNested={renderNested} />
             ))}
           </Stack>
         )}

@@ -8,7 +8,7 @@ import type {
   TurnSummaryData,
   WorkflowMarkerData,
 } from '@lines/shared';
-import { isPlanFilePath } from '@lines/shared';
+import { isPlanFilePath, subagentParentId } from '@lines/shared';
 
 export interface ToolBlock {
   type: 'tool';
@@ -18,6 +18,9 @@ export interface ToolBlock {
   result?: string;
   isError?: boolean;
   snapshot?: FileSnapshotData;
+  /** Items built from messages whose `parent_tool_use_id` is this block's id — i.e.
+   *  the transcript of the subagent this `Task` call spawned. */
+  children?: TranscriptItem[];
 }
 
 export type AssistantBlock =
@@ -60,6 +63,8 @@ export interface LiveActivity {
   inputBytes?: number;
   /** The activity belongs to a subagent (parent_tool_use_id set). */
   subagent?: boolean;
+  /** The subagent's type (`Task` input `subagent_type`), when its Task call is known. */
+  subagentType?: string;
 }
 
 export type TranscriptItem =
@@ -126,6 +131,14 @@ function withPlanFileText(
   return { ...data, input: { ...input, plan: text } };
 }
 
+/** Where one agent's assistant output accumulates: the main transcript, or a
+ *  subagent's slice of its parent Task block. */
+interface Sink {
+  items: TranscriptItem[];
+  openGroup: ToolGroupItem | null;
+  lastText: string;
+}
+
 /**
  * Single pass over the event log:
  * - complete assistant messages become items with text/thinking/tool blocks
@@ -135,6 +148,10 @@ function withPlanFileText(
  *   complete assistant message lands
  * - stream events also drive `live`, the agent's current phase (thinking,
  *   preparing a tool, writing) for the standalone activity row
+ *
+ * Subagent messages (`parent_tool_use_id` set) are routed into their `Task` block's
+ * `children` instead of the top-level list, each parent getting its own item/group/text
+ * state so parallel subagents can't merge into one group.
  */
 export function buildTranscript(
   events: TranscriptEvent[],
@@ -152,8 +169,24 @@ export function buildTranscript(
   let liveThinking = '';
   let liveInputBytes = 0;
   let liveToolName: string | undefined;
-  let openGroup: ToolGroupItem | null = null;
-  let lastText = '';
+  // Per-agent assistant state. The main agent owns the top-level list; each subagent
+  // gets its own sink writing into its Task block's children.
+  const main: Sink = { items, openGroup: null, lastText: '' };
+  const sinks = new Map<string, Sink>();
+  const sinkFor = (parentId: string | null): Sink => {
+    if (!parentId) return main;
+    let sink = sinks.get(parentId);
+    if (!sink) {
+      const parent = toolBlocks.get(parentId);
+      // Unknown parent (truncated transcript, compaction dropped the Task call):
+      // fall back to the main list rather than lose the item.
+      if (!parent) return main;
+      parent.children ??= [];
+      sink = { items: parent.children, openGroup: null, lastText: '' };
+      sinks.set(parentId, sink);
+    }
+    return sink;
+  };
   // The current harness passes no `plan` argument to ExitPlanMode — it writes the plan
   // to a file under .claude/plans/ instead. Keep the turn's last such write (the block,
   // not its text: its file snapshot can still be arriving) to stitch onto the card.
@@ -179,8 +212,9 @@ export function buildTranscript(
   for (const event of events) {
     switch (event.kind) {
       case 'user': {
-        openGroup = null;
-        lastText = '';
+        main.openGroup = null;
+        main.lastText = '';
+        sinks.clear();
         lastPlanWrite = null;
         const data = event.data as {
           text: string;
@@ -235,8 +269,9 @@ export function buildTranscript(
         break;
       }
       case 'workflow':
-        openGroup = null;
-        lastText = '';
+        main.openGroup = null;
+        main.lastText = '';
+        sinks.clear();
         lastPlanWrite = null;
         items.push({ kind: 'workflow', key: `w${event.seq}`, data: event.data as WorkflowMarkerData });
         break;
@@ -268,8 +303,13 @@ export function buildTranscript(
             break;
           }
           case 'assistant': {
-            streamingText = '';
-            streamingActive = false;
+            const sink = sinkFor(subagentParentId(msg));
+            // A subagent's completed message says nothing about the main agent's
+            // streaming tail, which is parked inside the Task tool.
+            if (sink === main) {
+              streamingText = '';
+              streamingActive = false;
+            }
             live = null;
             const message = (msg as { message?: { content?: SdkContentBlock[] } }).message;
             let pending: AssistantBlock[] = [];
@@ -277,19 +317,19 @@ export function buildTranscript(
             const flush = () => {
               if (pending.length === 0) return;
               const key = flushCount === 0 ? `a${event.seq}` : `a${event.seq}.${flushCount}`;
-              items.push({ kind: 'assistant', key, blocks: pending });
+              sink.items.push({ kind: 'assistant', key, blocks: pending });
               pending = [];
               flushCount++;
             };
             for (const block of message?.content ?? []) {
               if (block.type === 'text' && block.text) {
                 pending.push({ type: 'text', text: block.text });
-                lastText = block.text;
-                openGroup = null;
+                sink.lastText = block.text;
+                sink.openGroup = null;
               } else if (block.type === 'thinking' && block.thinking) {
                 pending.push({ type: 'thinking', text: block.thinking });
-                lastText = '';
-                openGroup = null;
+                sink.lastText = '';
+                sink.openGroup = null;
               } else if (block.type === 'tool_use' && block.id && block.name) {
                 flush();
                 const tool: ToolBlock = {
@@ -305,23 +345,25 @@ export function buildTranscript(
                   isPlanFilePath(String(tool.input.file_path ?? tool.input.notebook_path ?? ''))
                 ) {
                   // A revised plan resolves to the final write, matching the server's turn scan.
+                  // Unscoped by agent: a Plan subagent's write must still stitch onto the
+                  // main agent's ExitPlanMode card.
                   lastPlanWrite = tool;
                   sessionPlanWrite = tool;
                 }
                 // Full level (groupTools=false): each tool is its own 1-tool group,
                 // which ToolGroup renders as a bare card — i.e. ungrouped.
-                if (!groupTools) openGroup = null;
-                if (!openGroup) {
-                  openGroup = {
+                if (!groupTools) sink.openGroup = null;
+                if (!sink.openGroup) {
+                  sink.openGroup = {
                     kind: 'tool-group',
                     key: `g${block.id}`,
                     tools: [],
-                    labelText: lastText ? lastText.slice(0, 100) : undefined,
+                    labelText: sink.lastText ? sink.lastText.slice(0, 100) : undefined,
                   };
-                  items.push(openGroup);
+                  sink.items.push(sink.openGroup);
                 }
-                openGroup.tools.push(tool);
-                if (!groupTools) openGroup = null;
+                sink.openGroup.tools.push(tool);
+                if (!groupTools) sink.openGroup = null;
               }
             }
             flush();
@@ -348,8 +390,9 @@ export function buildTranscript(
             streamingText = '';
             streamingActive = false;
             live = null;
-            openGroup = null;
-            lastText = '';
+            main.openGroup = null;
+            main.lastText = '';
+            sinks.clear();
             const r = msg as {
               total_cost_usd?: number;
               duration_ms?: number;
@@ -375,7 +418,14 @@ export function buildTranscript(
           case 'stream_event': {
             // Subagent deltas (parent_tool_use_id set) drive `live` but must not
             // clobber the main agent's streaming tail.
-            const subagent = ((msg as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? null) !== null;
+            const parentId = subagentParentId(msg);
+            const subagent = parentId !== null;
+            // The Task call names which agent this is, so the row can say "Explore: …".
+            const type = parentId ? toolBlocks.get(parentId)?.input.subagent_type : undefined;
+            const who = {
+              subagent,
+              subagentType: typeof type === 'string' && type ? type : undefined,
+            };
             const streamEvent = (
               msg as {
                 event?: {
@@ -393,17 +443,17 @@ export function buildTranscript(
               liveThinking = '';
               liveInputBytes = 0;
               liveToolName = undefined;
-              live = { phase: 'responding', subagent };
+              live = { phase: 'responding', ...who };
             } else if (streamEvent?.type === 'content_block_start') {
               const block = streamEvent.content_block;
               liveThinking = '';
               liveInputBytes = 0;
               liveToolName = undefined;
-              if (block?.type === 'thinking') live = { phase: 'thinking', subagent };
+              if (block?.type === 'thinking') live = { phase: 'thinking', ...who };
               else if (block?.type === 'tool_use') {
                 liveToolName = block.name;
-                live = { phase: 'tool-prep', toolName: liveToolName, subagent };
-              } else if (block?.type === 'text') live = { phase: 'writing', subagent };
+                live = { phase: 'tool-prep', toolName: liveToolName, ...who };
+              } else if (block?.type === 'text') live = { phase: 'writing', ...who };
             } else if (streamEvent?.type === 'content_block_delta') {
               const delta = streamEvent.delta;
               if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
@@ -411,13 +461,13 @@ export function buildTranscript(
                   streamingText += delta.text;
                   streamingActive = true;
                 }
-                live = { phase: 'writing', subagent };
+                live = { phase: 'writing', ...who };
               } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
                 liveThinking = (liveThinking + delta.thinking).slice(-200);
-                live = { phase: 'thinking', thinkingPreview: liveThinking, subagent };
+                live = { phase: 'thinking', thinkingPreview: liveThinking, ...who };
               } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
                 liveInputBytes += delta.partial_json.length;
-                live = { phase: 'tool-prep', toolName: liveToolName, inputBytes: liveInputBytes, subagent };
+                live = { phase: 'tool-prep', toolName: liveToolName, inputBytes: liveInputBytes, ...who };
               }
             }
             break;

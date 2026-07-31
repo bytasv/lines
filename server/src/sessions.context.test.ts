@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DEFAULT_MODELS, contextWindowFor } from '@lines/shared';
+import { DEFAULT_MODELS, contextWindowFor, subagentParentId } from '@lines/shared';
 import { extractContextUsage } from './sessions.ts';
 
 const assistantMsg = (usage: unknown) => ({ type: 'assistant', message: { usage } });
@@ -40,6 +40,18 @@ test('missing usage fields coerce to 0, never NaN', () => {
 test('assistant message without usage returns undefined', () => {
   assert.equal(extractContextUsage({ type: 'assistant', message: {} }, 'claude-opus-5', 1), undefined);
   assert.equal(extractContextUsage({ type: 'assistant' }, 'claude-opus-5', 1), undefined);
+});
+
+// `handleWorkerEvent` gates the reading on this predicate, so a subagent's usage
+// (its own small context) never settles onto the session's contextUsage. The
+// extractor itself is agent-agnostic — it reads whatever message it is handed.
+test('a subagent assistant message is recognised as not belonging to the main agent', () => {
+  const sub = { ...assistantMsg({ input_tokens: 1, output_tokens: 1 }), parent_tool_use_id: 'task_1' };
+  assert.equal(subagentParentId(sub), 'task_1');
+  assert.equal(subagentParentId(assistantMsg({ input_tokens: 1, output_tokens: 1 })), null);
+  assert.equal(subagentParentId({ type: 'assistant', parent_tool_use_id: null }), null);
+  // Handed the message directly, the extractor still reads it — hence the gate.
+  assert.ok(extractContextUsage(sub, 'claude-opus-5', 1));
 });
 
 test('reported prompt total differing from the component sum is preserved', () => {
