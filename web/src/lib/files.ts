@@ -19,17 +19,27 @@ export async function fetchTree(dir: string): Promise<TreeEntry[]> {
   return data.entries;
 }
 
-/** Ranked project-wide file-name matches for `query`, as paths relative to `root`. */
-export async function searchFiles(root: string, query: string, limit: number): Promise<string[]> {
-  const params = new URLSearchParams({ path: root, q: query, limit: String(limit) });
+/** Ranked file-name matches for `query` across every project root, each hit relative to its own root. */
+export async function searchFiles(
+  roots: string[],
+  query: string,
+  limit: number,
+): Promise<{ root: string; rel: string }[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  // Repeated `path` params, one per root — the bridge 403s if any fails to resolve.
+  for (const r of roots) params.append('path', r);
   const res = await fetch(withAuthToken(`${fileBase}/find?${params}`));
   if (!res.ok) throw new Error(`Failed to search files (${res.status}).`);
   const data = (await res.json()) as FindResponse;
   return data.files;
 }
 
-/** Fetch a file's contents from the bridge; returns loading/error/content states. */
-export function useFileContent(path: string | undefined) {
+/**
+ * Fetch a file's contents from the bridge; returns loading/error/content states.
+ * Bumping `reloadKey` refetches the same path — used by the plan card to pick up
+ * a plan revised since the card was opened last.
+ */
+export function useFileContent(path: string | undefined, reloadKey?: number) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,7 +64,7 @@ export function useFileContent(path: string | undefined) {
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [path, reloadKey]);
 
   return { content, error };
 }

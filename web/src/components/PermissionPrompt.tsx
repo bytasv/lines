@@ -24,13 +24,14 @@ import {
   IconWorld,
   IconZoomScan,
 } from '@tabler/icons-react';
-import type { PermissionRequestData } from '@lines/shared';
+import type { PermissionRequestData, PermissionResolutionSource } from '@lines/shared';
 import { KEEP_PLANNING_MESSAGE } from '@lines/shared';
 import { send } from '../ws';
 import { QuestionPrompt } from './QuestionPrompt';
 import { Markdown } from './Markdown';
 import { MonacoDiffModal } from './MonacoDiffModal';
 import { computeDiff, isEditTool, type ToolBlock } from '../lib/transcript';
+import { useFileContent } from '../lib/files';
 
 type Resolution = 'allow' | 'deny' | 'expired';
 
@@ -39,6 +40,40 @@ const RESOLUTION_BADGE: Record<Resolution, { color: string; label: string }> = {
   deny: { color: 'red', label: 'denied' },
   expired: { color: 'gray', label: 'expired' },
 };
+
+/**
+ * How a resolution came about, when it was not a plain click on this card. The
+ * label itself stays as it was — this only makes "who decided?" answerable from
+ * the transcript. 'user' has no note: that is what the badge already implies.
+ */
+const SOURCE_NOTE: Partial<Record<PermissionResolutionSource, string>> = {
+  'plan-reply': 'resolved by your reply in the composer',
+  auto: 'approved automatically by the auto-mode guard',
+  recovery: 'resolved by recovery after an interrupted turn',
+  'workflow-advance': 'you approved this; the workflow advanced instead of implementing here',
+  'interrupt-expire': 'closed when the interrupted session was resumed',
+  stop: 'closed when the turn was stopped',
+  cancel: 'cancelled by Claude Code',
+};
+
+/** The resolution badge, with a provenance tooltip when a human did not click it. */
+function ResolutionBadge({
+  data,
+  color,
+  children,
+}: {
+  data: PermissionRequestData;
+  color: string;
+  children: React.ReactNode;
+}) {
+  const note = data.resolvedBy ? SOURCE_NOTE[data.resolvedBy] : undefined;
+  const badge = (
+    <Badge color={color} variant="light">
+      {children}
+    </Badge>
+  );
+  return note ? <Tooltip label={note}>{badge}</Tooltip> : badge;
+}
 
 function respond(
   sessionId: string,
@@ -282,7 +317,24 @@ function PlanApproval({
   // Pending cards render open as before; one loaded from history renders collapsed.
   const [expanded, setExpanded] = useState(!resolution);
   const plan = String(data.input.plan ?? '');
-  const hasPlan = plan.trim().length > 0;
+  // Set by withPlanFileText whenever the turn (or session) saw a plan-file write.
+  const planPath = String(data.input.planPath ?? '') || undefined;
+  const hasPlan = plan.trim().length > 0 || Boolean(planPath);
+
+  // The captured text is a snapshot; the agent keeps revising the file across
+  // "keep planning" rounds. Re-read it whenever the card opens — the snapshot
+  // renders immediately (no empty flash) and live content swaps in on arrival.
+  // A failed read (deleted plan, 403) silently keeps the snapshot.
+  const open = expanded || focus;
+  const [reloadKey, setReloadKey] = useState(0);
+  const wasOpen = useRef(open);
+  useEffect(() => {
+    if (open && !wasOpen.current) setReloadKey((k) => k + 1);
+    wasOpen.current = open;
+  }, [open]);
+  const { content } = useFileContent(open ? planPath : undefined, reloadKey);
+  const shown = content ?? plan;
+  const revised = Boolean(content && content !== plan);
 
   // If the plan arrived while this tab was in the background, open focus mode once when the tab
   // regains focus — unless the user has already dismissed it.
@@ -359,19 +411,24 @@ function PlanApproval({
               Claude finished planning
             </Text>
             {resolution && (
-              <Badge
+              <ResolutionBadge
+                data={data}
                 color={resolution === 'deny' ? 'sandstone' : RESOLUTION_BADGE[resolution].color}
-                variant="light"
               >
                 {resolution === 'allow' ? 'plan approved' : null}
                 {/* A denied plan is not a rejection — the session stayed in plan mode. */}
                 {resolution === 'deny' ? 'kept planning' : null}
                 {resolution === 'expired' ? RESOLUTION_BADGE[resolution].label : null}
-              </Badge>
+              </ResolutionBadge>
+            )}
+            {resolution && revised && (
+              <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+                updated since approval
+              </Text>
             )}
             {!expanded && hasPlan && (
               <Text size="xs" c="dimmed" truncate style={{ flex: 1 }}>
-                {planHeadline(plan)}
+                {planHeadline(shown)}
               </Text>
             )}
           </Group>
@@ -409,7 +466,7 @@ function PlanApproval({
           <ScrollArea.Autosize mah={320} type="auto">
             {/* Not default-hover: that shade now reads as a user bubble. */}
             <Paper bg="var(--mantine-color-default)" radius="md" px="sm" py={4}>
-              <Markdown text={plan} />
+              <Markdown text={shown} />
             </Paper>
           </ScrollArea.Autosize>
           {/* Buttons never render for a dead requestId. */}
@@ -437,7 +494,7 @@ function PlanApproval({
           </Group>
           <ScrollArea style={{ flex: 1 }}>
             <Box maw={760} mx="auto" px="xl" pb="xl" fz="md">
-              <Markdown text={plan} />
+              <Markdown text={shown} />
             </Box>
           </ScrollArea>
           {/* A resolved plan opens read-only — the footer and its border go with the buttons. */}
@@ -494,9 +551,9 @@ export function PermissionPrompt({
           {p.title}
         </Text>
         {resolution && (
-          <Badge color={RESOLUTION_BADGE[resolution].color} variant="light">
+          <ResolutionBadge data={data} color={RESOLUTION_BADGE[resolution].color}>
             {RESOLUTION_BADGE[resolution].label}
-          </Badge>
+          </ResolutionBadge>
         )}
       </Group>
       {resolution === 'expired' && (

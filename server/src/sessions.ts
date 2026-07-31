@@ -27,6 +27,7 @@ import {
   isSessionInterruptible,
   KEEP_PLANNING_MESSAGE,
   resolveModelId,
+  rootsForCwd,
 } from '@lines/shared';
 import type { Store } from './store.ts';
 import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
@@ -34,6 +35,7 @@ import {
   ALWAYS_ASK_TOOLS,
   allowEntryFor,
   assessToolCall,
+  isPlanPath,
   isSafePlanWrite,
   isSafeReadOnly,
   type GuardAllowlist,
@@ -151,6 +153,9 @@ interface PermissionAnswer {
 /** Tools whose write to a plan file can carry a plan-mode deliverable. */
 const PLAN_WRITE_TOOLS = new Set(['Write', 'Edit']);
 
+/** Cap on a plan file read back from disk, matching the /file route's limit. */
+const MAX_PLAN_FILE_BYTES = 2 * 1024 * 1024;
+
 interface TurnScan {
   user: string;
   lastText: string;
@@ -158,7 +163,26 @@ interface TurnScan {
   planArg?: string;
   /** Content of a plan file written in this turn (current harness shape). */
   planFileText?: string;
+  /** Path of that write, so a plan revised by `Edit` can be read from disk. */
+  planFilePath?: string;
   sawExitPlan: boolean;
+}
+
+/**
+ * The plan file's current text, or undefined if it can't be read. Guarded by
+ * `isPlanPath` (so only real plan directories are ever opened) and a size cap;
+ * every failure degrades to the transcript-captured text.
+ */
+function readPlanFile(filePath: string, roots: string[]): string | undefined {
+  try {
+    if (!isPlanPath(filePath, roots)) return undefined;
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size > MAX_PLAN_FILE_BYTES) return undefined;
+    const text = fs.readFileSync(filePath, 'utf8');
+    return text.trim() ? text : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -168,10 +192,17 @@ interface TurnScan {
  * the current harness passes no `plan` argument), and the turn's last *text* block is
  * then only trailing chatter. Otherwise the last text block, as before.
  *
- * Pure and transcript-local: nothing here reads the filesystem, so a plan file's
- * content only counts when the `Write` that produced it is in this slice.
+ * The plan file's *current* text wins over the `Write` content captured in the
+ * transcript, so a plan revised by `Edit` (which carries no full content) still
+ * reaches the next step. `roots` gates that read via `isPlanPath`; with no roots
+ * only `~/.claude/plans` is readable, and an unreadable file degrades to the
+ * captured content — i.e. the previous transcript-local behaviour.
  */
-export function collectTurns(events: TranscriptEvent[], from: number): { user: string; output: string }[] {
+export function collectTurns(
+  events: TranscriptEvent[],
+  from: number,
+  roots: string[] = [],
+): { user: string; output: string }[] {
   const turns: TurnScan[] = [];
   for (const ev of events.slice(Math.max(from, 0))) {
     if (ev.kind === 'user') {
@@ -202,21 +233,26 @@ export function collectTurns(events: TranscriptEvent[], from: number): { user: s
         typeof block.name === 'string' &&
         PLAN_WRITE_TOOLS.has(block.name) &&
         typeof input.file_path === 'string' &&
-        isPlanFilePath(input.file_path) &&
-        typeof input.content === 'string' &&
-        input.content.trim()
+        isPlanFilePath(input.file_path)
       ) {
-        turn.planFileText = input.content;
+        // Tracked even for an `Edit` (no `content` argument) — the path alone is
+        // enough to read the revised plan back off disk.
+        turn.planFilePath = input.file_path;
+        if (typeof input.content === 'string' && input.content.trim()) {
+          turn.planFileText = input.content;
+        }
       }
     }
   }
   // Later blocks overwrite earlier ones, so a revised plan resolves to the final one.
   // The plan file only counts when the turn actually exited plan mode — an ordinary
   // step that happens to write into the plans directory keeps its text output.
-  return turns.map((t) => ({
-    user: t.user,
-    output: t.planArg ?? (t.sawExitPlan ? t.planFileText : undefined) ?? t.lastText,
-  }));
+  return turns.map((t) => {
+    const planFile = t.sawExitPlan
+      ? (t.planFilePath ? readPlanFile(t.planFilePath, roots) : undefined) ?? t.planFileText
+      : undefined;
+    return { user: t.user, output: t.planArg ?? planFile ?? t.lastText };
+  });
 }
 
 /**
@@ -604,6 +640,16 @@ export class SessionManager {
   }
 
   /**
+   * Every directory a session may work in: its project's roots when the cwd
+   * belongs to one, else just the cwd. Resolved at use time rather than
+   * snapshotted onto the meta, so adding a root applies to existing sessions and
+   * `SessionMeta` (which is synced) keeps its shape.
+   */
+  private rootsFor(meta: SessionMeta): string[] {
+    return rootsForCwd(this.store.loadProjects(), meta.cwd);
+  }
+
+  /**
    * The serializable half of the SDK query options. The worker splices in the
    * non-serializable callbacks (canUseTool, hooks, stderr) on its side.
    */
@@ -618,8 +664,17 @@ export class SessionManager {
       appendParts.push(`Caveman level: ${meta.caveman.level}. Apply /caveman ${meta.caveman.level} intensity.`);
     }
 
+    // cwd stays this session's own root so settingSources and CLAUDE.md
+    // resolution keep pointing at it; the project's other roots ride along as
+    // additionalDirectories. Filtered against `cwd` rather than sliced, because a
+    // session created in an extra root has the *primary* among its siblings. The
+    // key is absent (not `[]`) for a single-root project, so its serialized
+    // options stay byte-identical to before.
+    const extraRoots = this.rootsFor(meta).filter((root) => root !== meta.cwd);
+
     return {
       cwd: meta.cwd,
+      ...(extraRoots.length ? { additionalDirectories: extraRoots } : {}),
       model: resolveModelId(meta.model),
       permissionMode: sdkPermissionMode(meta.permissionMode),
       includePartialMessages: true,
@@ -1101,7 +1156,13 @@ export class SessionManager {
         break;
       }
     }
-    return collectTurns(events, lastUserIdx).at(-1)?.output ?? '';
+    return collectTurns(events, lastUserIdx, this.planRoots(sessionId)).at(-1)?.output ?? '';
+  }
+
+  /** Roots a plan-file read may resolve inside for this session (see collectTurns). */
+  private planRoots(sessionId: string): string[] {
+    const meta = this.get(sessionId);
+    return meta ? this.rootsFor(meta) : [];
   }
 
   /**
@@ -1132,7 +1193,7 @@ export class SessionManager {
 
       // Each 'user' event in the slice opens a turn (its text is the initial
       // prompt or the iteration feedback); its output is that turn's deliverable.
-      const turns = collectTurns(events, startIdx);
+      const turns = collectTurns(events, startIdx, this.planRoots(sessionId));
 
       // Single-turn step: its final text is the deliverable — no query, no latency.
       if (turns.length <= 1) return turns[0]?.output ?? this.lastAssistantText(sessionId);
@@ -2135,9 +2196,13 @@ export class SessionManager {
       };
     }
 
+    // Resolved once per invocation: every guard call below wants the same list,
+    // and rootsFor re-reads the projects file on each call.
+    const roots = meta ? this.rootsFor(meta) : [];
+
     if (meta?.permissionMode === 'auto') {
       if (!ALWAYS_ASK_TOOLS.has(toolName)) {
-        const verdict = assessToolCall(toolName, toolInput, meta.cwd, this.guard.list());
+        const verdict = assessToolCall(toolName, toolInput, roots, this.guard.list());
         if (verdict.dangerous) {
           // Route to a prompt (canUseTool) regardless of allowlists.
           return {
@@ -2169,8 +2234,8 @@ export class SessionManager {
       }
     } else if (
       meta &&
-      (isSafeReadOnly(toolName, toolInput, meta.cwd, this.guard.list()) ||
-        isSafePlanWrite(toolName, toolInput, meta.cwd))
+      (isSafeReadOnly(toolName, toolInput, roots, this.guard.list()) ||
+        isSafePlanWrite(toolName, toolInput, roots))
     ) {
       // Outside auto mode every call reaches the user, including plain reads —
       // so an approved plan re-prompts on each Read/Grep. Let observation-only
@@ -2256,8 +2321,10 @@ export class SessionManager {
       }
     } else {
       const meta = this.sessions.get(sessionId);
+      // One resolution for both guard branches — rootsFor re-reads the projects file.
+      const roots = meta ? this.rootsFor(meta) : [];
       if (meta?.permissionMode === 'auto' && !ALWAYS_ASK_TOOLS.has(toolName)) {
-        const verdict = assessToolCall(toolName, input, meta.cwd, this.guard.list());
+        const verdict = assessToolCall(toolName, input, roots, this.guard.list());
         if (!verdict.dangerous) {
           if (!resend) {
             this.emitEvent(sessionId, 'permission', {
@@ -2274,8 +2341,8 @@ export class SessionManager {
         guardReason = verdict.reason;
       } else if (
         meta &&
-        (isSafeReadOnly(toolName, input, meta.cwd, this.guard.list()) ||
-          isSafePlanWrite(toolName, input, meta.cwd))
+        (isSafeReadOnly(toolName, input, roots, this.guard.list()) ||
+          isSafePlanWrite(toolName, input, roots))
       ) {
         // Other modes: observation-only calls and plan-file writes still
         // auto-approve (see handlePreToolUse) so post-plan reads don't ask again.

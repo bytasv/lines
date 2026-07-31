@@ -108,16 +108,22 @@ function contentToString(content: unknown): string {
  * An ExitPlanMode request with no inline `plan` argument gets the text of the turn's
  * last plan-file write, resolved through computeDiff so an Edit-revised plan
  * reconstructs from its snapshot. A real inline plan always wins.
+ *
+ * The write's path also rides along as `planPath` whenever one is known — even when
+ * the inline plan won the text — so the card can re-read the file and show the plan
+ * as it stands now, not as it was captured.
  */
 function withPlanFileText(
   data: PermissionRequestData,
   planWrite: ToolBlock | null,
 ): PermissionRequestData {
   if (data.toolName !== 'ExitPlanMode' || !planWrite) return data;
-  if (String(data.input.plan ?? '').trim()) return data;
+  const planPath = String(planWrite.input.file_path ?? planWrite.input.notebook_path ?? '');
+  const input = planPath ? { ...data.input, planPath } : { ...data.input };
+  if (String(data.input.plan ?? '').trim()) return { ...data, input };
   const text = computeDiff(planWrite)?.after ?? '';
-  if (!text.trim()) return data;
-  return { ...data, input: { ...data.input, plan: text } };
+  if (!text.trim()) return { ...data, input };
+  return { ...data, input: { ...input, plan: text } };
 }
 
 /**
@@ -152,6 +158,10 @@ export function buildTranscript(
   // to a file under .claude/plans/ instead. Keep the turn's last such write (the block,
   // not its text: its file snapshot can still be arriving) to stitch onto the card.
   let lastPlanWrite: ToolBlock | null = null;
+  // Same tracking, never reset on a turn boundary: an ExitPlanMode that lands in a
+  // later turn than the write still resolves to the session's plan instead of
+  // rendering an empty card. Only consulted when the turn-scoped write is absent.
+  let sessionPlanWrite: ToolBlock | null = null;
   /** Compaction whose 'done' hasn't landed yet, so it can be upgraded in place. */
   let openCompact: ContextCompactItem | null = null;
 
@@ -201,6 +211,8 @@ export function buildTranscript(
         const existing = permissionItems.get(data.requestId);
         if (existing) {
           existing.resolution = data.resolution;
+          // Provenance rides the resolution event, not the request.
+          if (data.resolvedBy) existing.data = { ...existing.data, resolvedBy: data.resolvedBy };
           if (data.answers) existing.data = { ...existing.data, answers: data.answers };
           // The deny reason arrives on the resolution event, not the request.
           if (data.denyMessage) existing.data = { ...existing.data, denyMessage: data.denyMessage };
@@ -208,7 +220,7 @@ export function buildTranscript(
           const item: TranscriptItem = {
             kind: 'permission',
             key: `p${event.seq}`,
-            data: withPlanFileText(data, lastPlanWrite),
+            data: withPlanFileText(data, lastPlanWrite ?? sessionPlanWrite),
             resolution: data.resolution,
           };
           permissionItems.set(data.requestId, item as never);
@@ -294,6 +306,7 @@ export function buildTranscript(
                 ) {
                   // A revised plan resolves to the final write, matching the server's turn scan.
                   lastPlanWrite = tool;
+                  sessionPlanWrite = tool;
                 }
                 // Full level (groupTools=false): each tool is its own 1-tool group,
                 // which ToolGroup renders as a bare card — i.e. ungrouped.

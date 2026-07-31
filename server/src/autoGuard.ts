@@ -232,11 +232,14 @@ export class GuardAllowlist {
     return { entries: pending.entries, added, removed, detectedAt: pending.detectedAt };
   }
 
-  /** Install the reviewed remote list verbatim — exactly what the user was shown. */
+  /** Install the reviewed remote list — exactly what the user was shown, re-sanitized. */
   acceptReview(): boolean {
     const pending = this.syncState.pending;
     if (!pending) return false;
-    this.entries = pending.entries;
+    // reviewRemote already sanitized what it staged, but the pending blob round-trips
+    // through disk (loadGuardSync is unvalidated), so re-run the gate here: the
+    // invariant "no ALWAYS_ASK / odd-shaped entry ever reaches list()" holds locally.
+    this.entries = sanitizeEntries(pending.entries);
     this.syncState = { updatedAt: Date.now(), pending: null, rejected: null };
     this.persistEntries();
     this.persistSync();
@@ -344,24 +347,37 @@ function isInside(dir: string, target: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
+function isInsideAny(dirs: string[], target: string): boolean {
+  return dirs.some((dir) => isInside(dir, target));
+}
+
 /**
  * True when the target resolves inside a plan directory (~/.claude/plans or
- * <cwd>/.claude/plans). Anchored to real directories rather than a substring
- * match on the shared PLAN_DIR_MARKER, so `.../plans/../../../.ssh/id_rsa`
- * cannot pass.
+ * `<root>/.claude/plans` for any of the session's roots). Anchored to real
+ * directories rather than a substring match on the shared PLAN_DIR_MARKER, so
+ * `.../plans/../../../.ssh/id_rsa` cannot pass.
+ *
+ * Exported because the `/file` HTTP route reuses it to let the plan review card
+ * read a plan that lives outside every project root.
  */
-function isPlanPath(filePath: string, cwd: string): boolean {
+export function isPlanPath(filePath: string, roots: string[]): boolean {
   const resolved = path.resolve(filePath);
   return (
     isInside(path.join(os.homedir(), '.claude', 'plans'), resolved) ||
-    isInside(path.join(cwd, '.claude', 'plans'), resolved)
+    isInsideAny(roots.map((root) => path.join(root, '.claude', 'plans')), resolved)
   );
 }
 
+/**
+ * @param roots Every directory this session may work in — its project's roots,
+ *   primary first (see `rootsForCwd`, which never returns empty). An empty list
+ *   escalates every file tool, which is the safe direction: the guard fails
+ *   toward prompting the user.
+ */
 export function assessToolCall(
   toolName: string,
   input: Record<string, unknown>,
-  cwd: string,
+  roots: string[],
   allowlist: GuardAllowEntry[],
 ): GuardVerdict {
   if (toolName === 'Bash') {
@@ -383,7 +399,7 @@ export function assessToolCall(
 
   if (FILE_TOOLS.has(toolName)) {
     const filePath = String(input.file_path ?? input.notebook_path ?? '');
-    if (filePath && !isInside(cwd, filePath)) {
+    if (filePath && !isInsideAny(roots, filePath)) {
       // Home-directory dotfiles and credentials are the riskiest targets.
       const home = os.homedir();
       const sensitive =
@@ -392,7 +408,7 @@ export function assessToolCall(
         filePath.includes('.env');
       // Plan mode's deliverable lives outside cwd by design; reading or
       // authoring it shouldn't prompt.
-      if (!sensitive && isPlanPath(filePath, cwd)) return { dangerous: false };
+      if (!sensitive && isPlanPath(filePath, roots)) return { dangerous: false };
       return {
         dangerous: true,
         reason: sensitive
@@ -430,11 +446,11 @@ const READ_ONLY_TOOLS = new Set(['Read', 'Glob', 'Grep', 'NotebookRead', 'TodoWr
 export function isSafeReadOnly(
   toolName: string,
   input: Record<string, unknown>,
-  cwd: string,
+  roots: string[],
   allowlist: GuardAllowEntry[],
 ): boolean {
   if (ALWAYS_ASK_TOOLS.has(toolName) || !READ_ONLY_TOOLS.has(toolName)) return false;
-  return !assessToolCall(toolName, input, cwd, allowlist).dangerous;
+  return !assessToolCall(toolName, input, roots, allowlist).dangerous;
 }
 
 /**
@@ -445,9 +461,9 @@ export function isSafeReadOnly(
 export function isSafePlanWrite(
   toolName: string,
   input: Record<string, unknown>,
-  cwd: string,
+  roots: string[],
 ): boolean {
   if (!PLAN_WRITE_TOOLS.has(toolName)) return false;
   const filePath = String(input.file_path ?? input.notebook_path ?? '');
-  return Boolean(filePath) && isPlanPath(filePath, cwd);
+  return Boolean(filePath) && isPlanPath(filePath, roots);
 }

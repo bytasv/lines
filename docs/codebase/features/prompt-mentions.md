@@ -12,11 +12,12 @@ Let the user type `@` in the composer to reference a documented feature or a pro
 ## Files
 
 - `web/src/components/MentionInput.tsx` (text/range state, atomic pill editing, caret snapping, hover card, mirror-div pill rendering)
-- `web/src/components/MentionAutocomplete.tsx` (popover list, debounced search)
+- `web/src/components/MentionAutocomplete.tsx` (popover list, debounced search, keyed on `cwd` + a joined `roots` string)
 - `web/src/lib/mentions.ts` (pure helpers, feature/file providers)
 - `web/src/lib/files.ts` (`searchFiles`, `fetchTree` — HTTP calls backing the file provider)
-- `server/src/fileSearch.ts` (`git ls-files`-backed project-wide file-name ranking)
+- `server/src/fileSearch.ts` (`searchFilesAcross`, `FileHit` — multi-root, globally-ranked file-name search)
 - `server/src/index.ts` (`/find`, `/file`, `/tree` bridge routes; per-request CORS)
+- `server/src/workspacePaths.ts` (`workspaceRoots`/`resolveWorkspacePath`/`resolveWorkspaceParam`)
 - `shared/types.ts` (`PromptMention`, `FindResponse`)
 - `web/src/components/Transcript.tsx`, `web/src/components/QueuedMessages.tsx` (mention badges on sent/queued messages)
 
@@ -24,12 +25,12 @@ Let the user type `@` in the composer to reference a documented feature or a pro
 
 - `MentionInput`, `MentionValue`, `MentionRange`
 - `findMentionToken`, `diffEdit`, `remapRanges`, `snapCaretOut`, `buildExpandedPrompt`, `uniqueMentions`
-- `mentionProviders`, `MentionProvider`, `MentionCandidate`
-- `searchFiles` (both `web/src/lib/files.ts`'s HTTP client and `server/src/fileSearch.ts`'s ranker share this name)
+- `mentionProviders`, `MentionProvider` (search context is now `{ cwd, roots }`, not just `cwd`), `MentionCandidate`
+- `searchFiles(root, query, limit)` / `searchFilesAcross(roots, query, limit)` — `web/src/lib/files.ts`'s HTTP client and `server/src/fileSearch.ts`'s ranker share the `searchFiles` name; the ranker's multi-root entry point is `searchFilesAcross`
 
 ## Data flow
 
-Typing `@query` opens a composer-anchored popover. Two providers run in parallel: the feature provider matches against `docs/codebase/index.json` (fetched live via the existing `/file` route), the file provider either browses one directory via `/tree` (bare `@` or a query ending in `/`) or searches the whole project by name via the `/find` route.
+Typing `@query` opens a composer-anchored popover. Two providers run in parallel: the feature provider matches against `docs/codebase/index.json` (fetched live via the existing `/file` route, and stays primary-root-only — see [multi-root-projects](multi-root-projects.md)); the file provider either browses one directory via `/tree` (bare `@` or a query ending in `/`) or searches every root of the active project by name via the `/find` route, which now takes one `path` query param per root and 403s if any fails to resolve. A non-primary hit's `id`/expansion is the absolute path (`${root}/${rel}`); a primary-root hit keeps the bare `rel`, unchanged from before multi-root.
 
 Selecting a candidate inserts an inline pill: a `MentionRange` (`start`/`end` character span) layered over the plain-text prompt. A mirror `<div>`, absolutely positioned behind a transparent-background `<textarea>`, paints pill backgrounds under the corresponding characters — the textarea itself stays a plain native input, so typing/caret/selection/IME/undo are all native behavior. Ranges are kept valid across edits by diffing old vs. new text on every keystroke and shifting/dropping ranges accordingly (`remapRanges`); editing inside a range dissolves it back to plain text.
 
@@ -50,8 +51,8 @@ None.
 - New mention kinds are added by registering one more `MentionProvider` in `mentionProviders` — no switch-over-kind exists elsewhere in the composer or transcript code.
 - Pill state (`MentionRange[]`) is a derived view kept in sync with the authoritative plain-text string via prefix/suffix diffing, not a second source of truth or a separate rich-text document model.
 - No contenteditable and no rich-text editor dependency — pills are a cosmetic overlay (mirror div) behind a plain `<textarea>`.
-- `/find`, `/file`, and `/tree` share one CORS helper (`corsFor()` in `server/src/index.ts`) and one workspace-root restriction (`resolveWorkspacePath`), so a new file-serving route can't accidentally skip either check.
+- `/find`, `/file`, and `/tree` share one CORS helper (`corsFor()` in `server/src/index.ts`) and one workspace-root restriction (`resolveWorkspacePath`, now in `server/src/workspacePaths.ts`), so a new file-serving route can't accidentally skip either check. `resolveWorkspacePath` also allows a path outside every root when it resolves inside a plan directory (`isPlanPath`) — see [plan-file-auto-approve](plan-file-auto-approve.md) — so a mention's `/file`/`/tree` reads inherit that one exception too.
 
 ## Related decisions
 
-None.
+- [multi-root-projects](multi-root-projects.md)

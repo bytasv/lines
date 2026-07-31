@@ -1,6 +1,5 @@
 import http from 'node:http';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import dotenv from 'dotenv';
@@ -10,15 +9,17 @@ import dotenv from 'dotenv';
 dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
 import { WebSocketServer, WebSocket } from 'ws';
 import type { ClientMessage, ServerMessage } from '@lines/shared';
-import { DEFAULT_MODELS } from '@lines/shared';
+import { DEFAULT_MODELS, normalizeRootPath, projectRoots } from '@lines/shared';
 import { verifyToken } from '@clerk/backend';
 import { WorkerClient, type WorkerRpc } from './workerClient.ts';
 import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
 import type { UserContext } from './userContext.ts';
-import { searchFiles } from './fileSearch.ts';
+import { searchFilesAcross } from './fileSearch.ts';
+import { resolveWorkspaceParam, resolveWorkspacePath } from './workspacePaths.ts';
 import { createMcpDispatcher } from './mcpWorkflowTools.ts';
 import * as workflowCommands from './workflowCommands.ts';
+import * as recipeCommands from './recipeCommands.ts';
 import type { McpToolResult } from './workerProtocol.ts';
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -219,16 +220,6 @@ const server = http.createServer((req, res) => {
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
-/** Resolve a ?path= query param to an absolute path, or null if outside the user's project/session roots. */
-function resolveWorkspacePath(ctx: UserContext, url: string): string | null {
-  const raw = new URL(url, 'http://localhost').searchParams.get('path') ?? '';
-  const expanded = raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw;
-  const abs = path.resolve(expanded);
-  const roots = [...ctx.store.loadProjects(), ...ctx.sessions.list().map((s) => s.cwd)];
-  const allowed = roots.some((root) => abs === root || abs.startsWith(root + path.sep));
-  return allowed ? abs : null;
-}
-
 /** Serve a workspace file for the clickable-path preview, restricted to the user's project/session roots. */
 function serveFile(
   ctx: UserContext,
@@ -236,7 +227,7 @@ function serveFile(
   res: http.ServerResponse,
   cors: Record<string, string>,
 ) {
-  const abs = resolveWorkspacePath(ctx, url);
+  const abs = resolveWorkspaceParam(ctx, url);
   if (!abs) {
     res.writeHead(403, cors).end();
     return;
@@ -282,7 +273,7 @@ function serveTree(
   res: http.ServerResponse,
   cors: Record<string, string>,
 ) {
-  const abs = resolveWorkspacePath(ctx, url);
+  const abs = resolveWorkspaceParam(ctx, url);
   if (!abs) {
     res.writeHead(403, cors).end();
     return;
@@ -315,14 +306,18 @@ function serveFind(
   res: http.ServerResponse,
   cors: Record<string, string>,
 ) {
-  const root = resolveWorkspacePath(ctx, url);
-  if (!root) {
+  const params = new URL(url, 'http://localhost').searchParams;
+  // One `path` per root. Any unresolvable root fails the whole request rather
+  // than silently searching the rest: a partial result looks like "no match here"
+  // and would quietly hide a whole folder from the mention list.
+  const requested = params.getAll('path');
+  const roots = requested.map((raw) => resolveWorkspacePath(ctx, raw));
+  if (!roots.length || roots.some((root) => root === null)) {
     res.writeHead(403, cors).end();
     return;
   }
-  const params = new URL(url, 'http://localhost').searchParams;
   const limit = Math.min(Number(params.get('limit')) || FIND_MAX_LIMIT, FIND_MAX_LIMIT);
-  const files = searchFiles(root, params.get('q') ?? '', limit);
+  const files = searchFilesAcross(roots as string[], params.get('q') ?? '', limit);
   res.writeHead(200, { ...cors, 'content-type': 'application/json' });
   res.end(JSON.stringify({ files }));
 }
@@ -390,6 +385,11 @@ async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
     steps: ctx.workflows.listSteps(),
     sharedSteps: ctx.workflows.listSharedSteps(),
     pinnedSteps: ctx.workflows.listPinnedSteps(),
+    recipes: ctx.recipes.listRecipes(),
+    sharedRecipes: ctx.recipes.listSharedRecipes(),
+    // From the local cache, so counts render before the first pull lands (and
+    // while storage is unreachable) instead of showing blanks.
+    recipeStats: ctx.recipes.allStats(),
     models: DEFAULT_MODELS,
     recentDirs: ctx.store.loadRecentDirs(),
     projects: ctx.store.loadProjects(),
@@ -451,7 +451,7 @@ async function handleMcpToolRpc(ctx: UserContext, rpc: WorkerRpc): Promise<void>
 }
 
 async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage): Promise<void> {
-  const { sessions, workflows, store, auth, broadcast } = ctx;
+  const { sessions, workflows, recipes, store, auth, broadcast } = ctx;
   switch (msg.type) {
     case 'ping':
       // App-level heartbeat: browsers can't send WS protocol pings, so we answer this.
@@ -583,14 +583,58 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       );
       break;
     }
+    case 'saveRecipe':
+      recipes.saveRecipe(msg.recipe, msg.recipeId, msg.published, msg.ownerName);
+      break;
+    case 'deleteRecipe':
+      // Both legs: the engine drops it locally and broadcasts, but an upsert
+      // broadcast cannot express a removal, so storage is told separately.
+      recipes.deleteRecipe(msg.recipeId);
+      ctx.sync.deleteRecipe(msg.recipeId);
+      break;
+    case 'recipeVersions': {
+      // Ping→pong, as stepVersions: pull remote history (if online), adopt it, reply to this socket.
+      const versions = await recipeCommands.recipeVersionsView(ctx, msg.ownerId, msg.recipeId);
+      ws.send(
+        JSON.stringify({
+          type: 'recipeVersions',
+          ownerId: msg.ownerId,
+          recipeId: msg.recipeId,
+          versions,
+        } satisfies ServerMessage),
+      );
+      break;
+    }
+    case 'uploadRecipeImage': {
+      const url = await ctx.sync.uploadRecipeImage({
+        name: msg.name,
+        mediaType: msg.mediaType,
+        data: msg.data,
+      });
+      ws.send(
+        JSON.stringify({ type: 'recipeImageUploaded', uploadId: msg.uploadId, url } satisfies ServerMessage),
+      );
+      break;
+    }
+    case 'runRecipe': {
+      // The whole run lives in recipeCommands: its ordering (refuse before any
+      // side effect, count last) is the part that must not be re-derived here.
+      const sessionId = recipeCommands.runRecipe(ctx, msg);
+      // null = the cooldown swallowed a repeated click; nothing to answer.
+      if (!sessionId) break;
+      // Answered on the originating socket so the web selects the new session
+      // deterministically instead of leaning on its new-session heuristic.
+      ws.send(JSON.stringify({ type: 'recipeRun', runId: msg.runId, sessionId } satisfies ServerMessage));
+      break;
+    }
     case 'openProject': {
-      const dir = msg.path.replace(/\/+$/, '') || '/';
+      const dir = normalizeRootPath(msg.path) || '/';
       if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
         throw new Error(`Not a directory: ${dir}`);
       }
       const projects = store.loadProjects();
-      if (!projects.includes(dir)) {
-        projects.push(dir);
+      if (!projects.some((p) => p.path === dir)) {
+        projects.push({ path: dir });
         store.saveProjects(projects);
       }
       store.addRecentDir(dir);
@@ -600,15 +644,62 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       break;
     }
     case 'closeProject': {
-      const projects = store.loadProjects().filter((p) => p !== msg.path);
+      // Normalized first: openProject normalizes and close never did, so a
+      // trailing slash from the client used to close nothing at all.
+      const dir = normalizeRootPath(msg.path) || '/';
+      const projects = store.loadProjects().filter((p) => p.path !== dir);
       store.saveProjects(projects);
+      broadcast({ type: 'projects', projects });
+      break;
+    }
+    case 'addProjectRoot': {
+      const target = normalizeRootPath(msg.project) || '/';
+      const root = normalizeRootPath(msg.path) || '/';
+      if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+        throw new Error(`Not a directory: ${root}`);
+      }
+      const projects = store.loadProjects();
+      const project = projects.find((p) => p.path === target);
+      if (!project) throw new Error(`Not an open project: ${target}`);
+      // One root, one owner — otherwise a /tree hit or a project key would be
+      // ambiguous about which tab it belongs to.
+      const owner = projects.find((p) => projectRoots(p).includes(root));
+      if (owner) throw new Error(`Already a folder of ${owner.path}`);
+      // Nested roots would double every tree and find hit under the overlap.
+      const nested = projectRoots(project).find(
+        (existing) => root === existing || root.startsWith(existing + path.sep) || existing.startsWith(root + path.sep),
+      );
+      if (nested) throw new Error(`Overlaps an existing folder: ${nested}`);
+      project.extraRoots = [...(project.extraRoots ?? []), root];
+      store.saveProjects(projects);
+      store.addRecentDir(root);
+      ctx.projectKeys.learn(root);
+      // Already-spawned queries rebuild their options — and so pick up the new
+      // additionalDirectories — at their next push; `resume` keeps the context.
+      // The guard needs no nudge: it resolves the roots per call.
+      ctx.sessions.recycleIdleQueries();
+      broadcast({ type: 'projects', projects });
+      break;
+    }
+    case 'removeProjectRoot': {
+      const target = normalizeRootPath(msg.project) || '/';
+      const root = normalizeRootPath(msg.path) || '/';
+      const projects = store.loadProjects();
+      const project = projects.find((p) => p.path === target);
+      if (!project) break;
+      project.extraRoots = (project.extraRoots ?? []).filter((r) => r !== root);
+      if (!project.extraRoots.length) delete project.extraRoots;
+      store.saveProjects(projects);
+      // The learned project key stays: the registry deliberately never forgets a
+      // path's identity, so re-adding the folder resolves it without another git call.
+      ctx.sessions.recycleIdleQueries();
       broadcast({ type: 'projects', projects });
       break;
     }
     case 'linkProjectPath': {
       // Binds a path this machine can't resolve (a checkout that lives only on
       // another install) to a known key, so its sessions group with the rest.
-      const dir = msg.path.replace(/\/+$/, '') || '/';
+      const dir = normalizeRootPath(msg.path) || '/';
       if (msg.key) ctx.projectKeys.set(dir, msg.key);
       break;
     }

@@ -608,7 +608,8 @@
         "WorkflowEngine.advance",
         "WorkflowEngine.runStep",
         "substituteTokens",
-        "usesHandoffTokens"
+        "usesHandoffTokens",
+        "isPlanPath"
       ],
       "tests": [
         "server/src/sessions.turns.test.ts",
@@ -624,7 +625,8 @@
         "a step deliverable captured during plan mode comes from the ExitPlanMode plan (inline argument or written plan file), not the turn's trailing chat text",
         "outputs are strictly per-session (WorkflowState.outputs); there is no cross-session write path",
         "prompt tokens are honoured only where the step author wrote them: a token occurring inside substituted content (a step output, the diff, the task text) stays literal instead of being re-expanded",
-        "the working-tree diff handed to a fresh-start step is capped with a truncation marker (MAX_DIFF_CHARS) so a large dirty tree degrades the hand-off rather than failing the turn"
+        "the working-tree diff handed to a fresh-start step is capped with a truncation marker (MAX_DIFF_CHARS) so a large dirty tree degrades the hand-off rather than failing the turn",
+        "a plan revised by Edit after the deliverable-producing Write still contributes its current on-disk text to the hand-off, via collectTurns reading the plan file (gated by isPlanPath) instead of the last captured Write content"
       ],
       "architecturalRules": [
         "reuses the transcript-walking pattern from lastAssistantText/summarizeTurn and the one-shot non-agentic query shape from summarizeTurn/autoName",
@@ -827,6 +829,7 @@
         "web/src/lib/files.ts",
         "server/src/fileSearch.ts",
         "server/src/index.ts",
+        "server/src/workspacePaths.ts",
         "shared/types.ts",
         "web/src/components/Transcript.tsx",
         "web/src/components/QueuedMessages.tsx"
@@ -854,7 +857,7 @@
         "new mention kinds are added as one more MentionProvider entry, no switch-over-kind elsewhere",
         "pill ranges are a derived view synced to the authoritative plain-text string by prefix/suffix diffing, not a second source of truth",
         "no contenteditable/rich-text dependency; pills are a cosmetic mirror-div overlay behind a plain textarea",
-        "/find, /file, /tree share one corsFor() helper and one resolveWorkspacePath() root restriction"
+        "/find, /file, /tree share one corsFor() helper and one resolveWorkspacePath() root restriction (now in server/src/workspacePaths.ts), which also allows a plan-directory path outside every root (isPlanPath)"
       ],
       "relatedDecisions": []
     },
@@ -862,7 +865,7 @@
       "id": "plan-file-auto-approve",
       "name": "Plan-file auto-approve",
       "doc": "features/plan-file-auto-approve.md",
-      "purpose": "Auto-approve reads and writes of plan mode's deliverable file under .claude/plans/ instead of prompting on every call, even though it lives outside the session cwd.",
+      "purpose": "Auto-approve reads and writes of plan mode's deliverable file under .claude/plans/ instead of prompting on every call, even though it lives outside the session cwd. isPlanPath is also exported and reused by the bridge's /file route so the plan review card can read a plan live from outside every project/session root.",
       "entryPoints": [
         "server/src/autoGuard.ts",
         "server/src/sessions.ts"
@@ -870,31 +873,41 @@
       "files": [
         "server/src/autoGuard.ts",
         "server/src/sessions.ts",
-        "shared/types.ts"
+        "shared/types.ts",
+        "server/src/workspacePaths.ts",
+        "server/src/index.planFile.test.ts"
       ],
       "symbols": [
         "isPlanPath",
         "isSafeReadOnly",
         "isSafePlanWrite",
         "assessToolCall",
-        "isPlanFilePath"
+        "isPlanFilePath",
+        "resolveWorkspacePath",
+        "workspaceRoots"
       ],
       "tests": [
-        "server/src/autoGuard.plan.test.ts"
+        "server/src/autoGuard.plan.test.ts",
+        "server/src/index.planFile.test.ts"
       ],
       "businessRules": [
         "plan-directory reads and writes (~/.claude/plans/** or <cwd>/.claude/plans/**) auto-approve in every permission mode",
         "ExitPlanMode and AskUserQuestion always still prompt the user regardless of target path",
         "credential paths (~/.ssh, ~/.aws, .env) always escalate even if nested under a plans directory",
-        "any other out-of-cwd file access is unaffected and still escalates"
+        "any other out-of-cwd file access is unaffected and still escalates",
+        "/file (and by extension /tree/find) can read any plan directory reachable from isPlanPath, not just the requesting session's own plan file \u2014 a deliberate widening of a route previously confined to project/session roots, scoped to plan directories only"
       ],
       "architecturalRules": [
         "isPlanPath resolves the path and anchors containment checks to real directories, not a substring match on the plan-dir marker, so path traversal cannot pass as a plan path",
         "isInside does not resolve symlinks; a symlink planted inside a plan directory pointing elsewhere is accepted as a pre-existing limitation",
         "auto-approved plan writes remain visible as tool_use blocks in the transcript, but the auto-approval permission event is filtered from the UI like other auto-approved calls",
-        "PLAN_DIR_MARKER/isPlanFilePath live in shared/types.ts, not autoGuard.ts, so the web client can reuse the same plan-path hint without importing server code"
+        "PLAN_DIR_MARKER/isPlanFilePath live in shared/types.ts, not autoGuard.ts, so the web client can reuse the same plan-path hint without importing server code",
+        "resolveWorkspacePath/workspaceRoots/resolveWorkspaceParam live in server/src/workspacePaths.ts, not server/src/index.ts, so they're importable by their own test \u2014 index.ts starts listening as a side effect of being imported",
+        "~/.claude/plans is per-OS-user, not per-app-user: under AUTH_ENABLED every signed-in app user on the same machine shares that directory, so this exception can cross app-user boundaries \u2014 accepted for now"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "plan-review-card"
+      ]
     },
     {
       "id": "guard-allowlist",
@@ -955,34 +968,50 @@
       "id": "plan-review-card",
       "name": "Plan review card stays readable after resolution",
       "doc": "features/plan-review-card.md",
-      "purpose": "Keep a resolved ExitPlanMode plan card's text and Focus mode reachable (collapsed, one click to reopen) instead of collapsing to a dead header, and fall back to the turn's plan-file write when the harness passes no inline plan argument.",
+      "purpose": "Keep a resolved ExitPlanMode plan card's text and Focus mode reachable (collapsed, one click to reopen), fall back to the turn's plan-file write when the harness passes no inline plan argument, and always show the plan's current text by re-reading its file live whenever the card is opened.",
       "entryPoints": [
         "web/src/components/PermissionPrompt.tsx"
       ],
       "files": [
         "web/src/components/PermissionPrompt.tsx",
         "web/src/lib/transcript.ts",
-        "shared/types.ts"
+        "shared/types.ts",
+        "web/src/lib/files.ts",
+        "server/src/autoGuard.ts",
+        "server/src/workspacePaths.ts"
       ],
       "symbols": [
         "PlanApproval",
         "withPlanFileText",
         "computeDiff",
-        "isPlanFilePath"
+        "isPlanFilePath",
+        "useFileContent",
+        "isPlanPath",
+        "resolveWorkspacePath"
       ],
-      "tests": [],
+      "tests": [
+        "server/src/autoGuard.plan.test.ts",
+        "server/src/index.planFile.test.ts"
+      ],
       "businessRules": [
         "a resolved plan card renders collapsed by default but is always reopenable via its header",
         "action buttons never render once a request is resolved, in the inline card or the fullscreen modal",
         "fullscreen focus mode opens read-only for a resolved plan",
         "when the harness passes no inline plan argument, the card falls back to the turn's last plan-file write, reconstructing Edit-revised plans from the file snapshot",
-        "a plan card with no resolvable text at all shows no chevron and a disabled Focus button instead of an empty expandable body"
+        "a plan card is live (chevron + Focus enabled) whenever a plan path is known, even with no resolvable inline/snapshot text",
+        "opening a plan card re-reads its plan file from disk, so the card (pending or resolved) always shows the plan's current text, not a frozen snapshot",
+        "a resolved card whose live text differs from what was captured shows an 'updated since approval' hint"
       ],
       "architecturalRules": [
-        "the plan-file fallback is transcript-local (no filesystem read) and turn-scoped, reset on user/workflow boundaries but not on result",
-        "expanded (inline collapse) and focus (fullscreen) are independent state; an effect keyed only on resolution forces both closed once a request resolves"
+        "the plan-file fallback builds data.input.plan/planPath from the transcript alone; the rendered card layers a live filesystem read (useFileContent against /file) on top whenever it's open, falling back to the transcript-only text before that fetch resolves or on failure",
+        "the plan-file write is tracked turn-scoped (lastPlanWrite) for text stitching, with a non-reset session-wide fallback (sessionPlanWrite) only consulted when the turn-scoped write is absent",
+        "expanded (inline collapse) and focus (fullscreen) are independent state; an effect keyed only on resolution forces both closed once a request resolves",
+        "the card's live read means a resolved card can show text the user never approved; the 'updated since approval' hint is the mitigation, not a faithful-approval guarantee"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "permission-resolution-provenance",
+        "plan-file-auto-approve"
+      ]
     },
     {
       "id": "auth-failure-recovery",

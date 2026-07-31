@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import type { TranscriptEvent } from '@lines/shared';
 import { collectTurns, findStepStart, unresolvedPermissionIds } from './sessions.ts';
@@ -109,6 +112,51 @@ test('unresolvedPermissionIds tolerates a resolution arriving before its request
 test('unresolvedPermissionIds ignores non-permission events and id-less entries', () => {
   const events = [user('go'), ev('permission', { toolName: 'Bash', input: {} }), askPermission('a')];
   assert.deepEqual(unresolvedPermissionIds(events), ['a']);
+});
+
+/** A real `<root>/.claude/plans/plan.md`, so the on-disk read is exercised. */
+function planRoot(contents: string): { root: string; file: string } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-plan-'));
+  const dir = path.join(root, '.claude', 'plans');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'plan.md');
+  fs.writeFileSync(file, contents);
+  return { root, file };
+}
+
+test('a plan revised by Edit resolves to the file on disk, not the trailing text', () => {
+  const { root, file } = planRoot('# Plan\n\nRevised, with rollback.');
+  const events = [
+    user('plan this'),
+    assistant(tool('Write', { file_path: file, content: '# Plan\n\nFirst draft.' })),
+    // An Edit carries no `content` — before the disk read this turn fell back to 'Done.'
+    assistant(tool('Edit', { file_path: file, old_string: 'First draft.', new_string: 'Revised.' })),
+    assistant(tool('ExitPlanMode', {}), text('Done.')),
+  ];
+  assert.equal(collectTurns(events, 0, [root]).at(-1)?.output, '# Plan\n\nRevised, with rollback.');
+});
+
+test('an unreadable plan file degrades to the captured Write content', () => {
+  const { root, file } = planRoot('# Plan\n\nOn disk.');
+  fs.rmSync(file);
+  const events = [
+    user('plan this'),
+    assistant(tool('Write', { file_path: file, content: '# Plan\n\nCaptured.' })),
+    assistant(tool('ExitPlanMode', {}), text('Done.')),
+  ];
+  assert.equal(collectTurns(events, 0, [root]).at(-1)?.output, '# Plan\n\nCaptured.');
+});
+
+test('a plan file outside every root is not read from disk', () => {
+  const { root, file } = planRoot('# Plan\n\nOther project.');
+  const events = [
+    user('plan this'),
+    assistant(tool('Write', { file_path: file, content: '# Plan\n\nCaptured.' })),
+    assistant(tool('ExitPlanMode', {}), text('Done.')),
+  ];
+  // Roots list omits `root`, so isPlanPath rejects the path even though it exists.
+  assert.equal(collectTurns(events, 0, ['/Users/x/Projects/other']).at(-1)?.output, '# Plan\n\nCaptured.');
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test('findStepStart falls back to the newest started marker, then to -1', () => {
