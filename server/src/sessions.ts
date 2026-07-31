@@ -12,6 +12,7 @@ import type {
   FileSnapshotData,
   PermissionMode,
   PermissionRequestData,
+  PermissionResolutionSource,
   PromptAttachment,
   PromptMention,
   ServerMessage,
@@ -238,21 +239,38 @@ export function findStepStart(events: TranscriptEvent[], stepIndex?: number): nu
 }
 
 /**
- * Request ids that have a permission request recorded but no resolution. One
- * pass: a busy session can hold hundreds of permission events, and resolving
+ * Permission requests recorded with no resolution, with the tool each asked for.
+ * One pass: a busy session can hold hundreds of permission events, and resolving
  * each one against its own scan of the transcript was quadratic.
  */
-export function unresolvedPermissionIds(events: TranscriptEvent[]): string[] {
-  const requested = new Set<string>();
+export function unresolvedPermissions(
+  events: TranscriptEvent[],
+): { requestId: string; toolName: string }[] {
+  const requested = new Map<string, string>();
   const resolved = new Set<string>();
   for (const event of events) {
     if (event.kind !== 'permission') continue;
     const data = event.data as PermissionRequestData;
     if (!data.requestId) continue;
     if (data.resolution) resolved.add(data.requestId);
-    else if (data.toolName) requested.add(data.requestId);
+    else if (data.toolName) requested.set(data.requestId, data.toolName);
   }
-  return [...requested].filter((id) => !resolved.has(id));
+  return [...requested]
+    .filter(([id]) => !resolved.has(id))
+    .map(([requestId, toolName]) => ({ requestId, toolName }));
+}
+
+export function unresolvedPermissionIds(events: TranscriptEvent[]): string[] {
+  return unresolvedPermissions(events).map((p) => p.requestId);
+}
+
+/**
+ * A card only a human may answer (plan approval, clarifying questions) is still
+ * open. Auto-continue and card expiry both defer to this: nothing the server
+ * does on its own may stand in for that decision.
+ */
+export function hasUnresolvedAlwaysAsk(events: TranscriptEvent[]): boolean {
+  return unresolvedPermissions(events).some((p) => ALWAYS_ASK_TOOLS.has(p.toolName));
 }
 
 /**
@@ -345,7 +363,12 @@ interface LiveState {
   compactedInTurn?: boolean;
 }
 
-export type TurnCompleteListener = (sessionId: string, source: 'user' | 'workflow') => void;
+export type TurnCompleteListener = (
+  sessionId: string,
+  source: 'user' | 'workflow',
+  /** The turn settled under a Stop (see WorkflowEngine.onWorkflowTurnComplete). */
+  interrupted: boolean,
+) => void;
 
 export class SessionManager {
   private sessions = new Map<string, SessionMeta>();
@@ -530,6 +553,20 @@ export class SessionManager {
     if (persistToDisk) this.store.appendTranscript(sessionId, event);
     this.broadcast({ type: 'event', sessionId, event });
     return event.seq;
+  }
+
+  /**
+   * One line per permission resolution. There was no server-side record of *how*
+   * a request got answered, which is why a report of "I never approved that plan"
+   * could not be settled from the logs — so every resolution site logs here.
+   */
+  private logResolution(
+    sessionId: string,
+    toolName: string,
+    resolution: 'allow' | 'deny' | 'expired',
+    source: PermissionResolutionSource,
+  ) {
+    console.log(`[permission] [session ${sessionId}] ${toolName || '?'} ${resolution} by ${source}`);
   }
 
   createSession(params: {
@@ -747,6 +784,8 @@ export class SessionManager {
         undefined,
         undefined,
         planReply.denyMessage,
+        undefined,
+        'plan-reply',
       );
       // With attachments the deny only unblocks the query; fall through so the
       // queue branch stages text + attachments and maybeFlush delivers them as
@@ -885,16 +924,25 @@ export class SessionManager {
     );
   }
 
-  /** Emit an 'expired' resolution for every unresolved permission request. */
+  /**
+   * Emit an 'expired' resolution for every unresolved permission request, except
+   * the human-only ones: a plan-approval or question card is deliberately
+   * answerable long after its query died (resolvePermission routes a late click
+   * to recoverOrphanedPermission), and expiring it would quietly discard the one
+   * decision the server is not allowed to make for the user.
+   */
   private expireUnresolvedPermissions(sessionId: string) {
     const events = this.store.loadTranscript(sessionId);
-    for (const requestId of unresolvedPermissionIds(events)) {
+    for (const { requestId, toolName } of unresolvedPermissions(events)) {
+      if (ALWAYS_ASK_TOOLS.has(toolName)) continue;
       this.emitEvent(sessionId, 'permission', {
         requestId,
         toolName: '',
         input: {},
         resolution: 'expired',
+        resolvedBy: 'interrupt-expire',
       } satisfies PermissionRequestData);
+      this.logResolution(sessionId, toolName, 'expired', 'interrupt-expire');
     }
   }
 
@@ -1365,7 +1413,9 @@ export class SessionManager {
           toolName: '',
           input: {},
           resolution: opts.emitResolution,
+          resolvedBy: 'stop',
         } satisfies PermissionRequestData);
+        this.logResolution(sessionId, '', opts.emitResolution, 'stop');
       }
       resolve({ allow: false });
     }
@@ -1382,9 +1432,16 @@ export class SessionManager {
     return null;
   }
 
-  /** Look up a recorded resolution for a permission request in the transcript. */
+  /**
+   * Look up a recorded resolution for a permission request in the transcript.
+   * Scanned backwards — the newest resolution wins, matching exitPlanRequestId's
+   * convention. Forwards, an early 'expired' or 'deny' would outrank the real
+   * answer that followed it.
+   */
   private findPermissionResolution(sessionId: string, requestId: string): PermissionRequestData | null {
-    for (const event of this.store.loadTranscript(sessionId)) {
+    const events = this.store.loadTranscript(sessionId);
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
       if (event.kind !== 'permission') continue;
       const data = event.data as PermissionRequestData;
       if (data.requestId === requestId && data.resolution) return data;
@@ -1405,6 +1462,13 @@ export class SessionManager {
     answers?: Record<string, string>,
     denyMessage?: string,
   ) {
+    // Already answered — a second click, a second tab, or a stale card. Recovering
+    // again would inject another "I approved your plan" prompt off one decision.
+    if (this.findPermissionResolution(sessionId, requestId)) {
+      console.log(`[permission] [session ${sessionId}] duplicate answer ignored (${requestId})`);
+      return;
+    }
+
     const meta = this.sessions.get(sessionId);
     const original = meta ? this.findPermissionRequest(sessionId, requestId) : null;
     if (!meta || !original) {
@@ -1413,7 +1477,9 @@ export class SessionManager {
         toolName: '',
         input: {},
         resolution: 'expired',
+        resolvedBy: 'recovery',
       } satisfies PermissionRequestData);
+      this.logResolution(sessionId, original?.toolName ?? '', 'expired', 'recovery');
       return;
     }
 
@@ -1422,9 +1488,11 @@ export class SessionManager {
       toolName: '',
       input: {},
       resolution: allow ? 'allow' : 'deny',
+      resolvedBy: 'recovery',
       answers,
       denyMessage: allow ? undefined : denyMessage,
     } satisfies PermissionRequestData);
+    this.logResolution(sessionId, original.toolName, allow ? 'allow' : 'deny', 'recovery');
 
     let text: string;
     if (original.toolName === 'ExitPlanMode' && allow) {
@@ -1507,6 +1575,12 @@ export class SessionManager {
     this.worker.close(sessionId);
   }
 
+  /**
+   * Record and deliver a decision on one permission request. `source` says who
+   * decided: it defaults to 'user' because every wire-level caller is a click,
+   * and internal callers pass their own so the transcript can tell a human answer
+   * from one the server synthesized.
+   */
   resolvePermission(
     sessionId: string,
     requestId: string,
@@ -1515,6 +1589,7 @@ export class SessionManager {
     answers?: Record<string, string>,
     denyMessage?: string,
     alwaysAllow?: boolean,
+    source: PermissionResolutionSource = 'user',
   ) {
     // Persist the exception first so it also covers the recovery path.
     if (allow && alwaysAllow) {
@@ -1529,12 +1604,35 @@ export class SessionManager {
     const state = this.live.get(sessionId);
     const resolve = state?.pendingPermissions.get(requestId);
     if (!resolve) {
+      // Already answered once: a double click, a second tab, or a card left open
+      // by flushPending. Silently drop it rather than synthesizing a second
+      // decision out of one gesture.
+      if (this.findPermissionResolution(sessionId, requestId)) {
+        console.log(`[permission] [session ${sessionId}] duplicate answer ignored (${requestId})`);
+        return;
+      }
       // The query that asked is gone — resume the session and deliver the
       // decision as a message instead of forcing the user to re-prompt.
       this.recoverOrphanedPermission(sessionId, requestId, allow, answers, denyMessage);
       return;
     }
     state!.pendingPermissions.delete(requestId);
+
+    // Approving a plan inside a workflow plan step advances the workflow instead
+    // of implementing in-place: deny ExitPlanMode so the step stays read-only and
+    // ends its turn, then flag the workflow to advance when that turn completes.
+    const original = this.findPermissionRequest(sessionId, requestId);
+    const meta0 = this.sessions.get(sessionId);
+    const planStepGate =
+      allow &&
+      original?.toolName === 'ExitPlanMode' &&
+      !!meta0?.workflow &&
+      meta0.workflow.stepStatuses[meta0.workflow.stepIndex] === 'running' &&
+      (meta0.workflow.stepPermissionMode ?? meta0.permissionMode) === 'plan';
+
+    // The recorded 'allow' of a gated plan step is the user's decision, not the
+    // SDK's answer (the tool itself is denied below) — resolvedBy says which.
+    const resolvedBy: PermissionResolutionSource = planStepGate ? 'workflow-advance' : source;
     // updatedInput is recorded so a worker rpc re-send after a bridge restart
     // can be answered from the transcript with the exact approved input.
     this.emitEvent(sessionId, 'permission', {
@@ -1542,26 +1640,17 @@ export class SessionManager {
       toolName: '',
       input: {},
       resolution: allow ? 'allow' : 'deny',
+      resolvedBy,
       answers,
       updatedInput,
       denyMessage: allow ? undefined : denyMessage,
     } satisfies PermissionRequestData);
+    this.logResolution(sessionId, original?.toolName ?? '', allow ? 'allow' : 'deny', resolvedBy);
 
-    // Approving a plan inside a workflow plan step advances the workflow instead
-    // of implementing in-place: deny ExitPlanMode so the step stays read-only and
-    // ends its turn, then flag the workflow to advance when that turn completes.
-    const original = this.findPermissionRequest(sessionId, requestId);
-    const meta0 = this.sessions.get(sessionId);
-    if (
-      allow &&
-      original?.toolName === 'ExitPlanMode' &&
-      meta0?.workflow &&
-      meta0.workflow.stepStatuses[meta0.workflow.stepIndex] === 'running' &&
-      (meta0.workflow.stepPermissionMode ?? meta0.permissionMode) === 'plan'
-    ) {
-      meta0.workflow.advanceOnComplete = true;
-      meta0.workflow.advanceOnCompleteStep = meta0.workflow.stepIndex;
-      this.upsert(meta0);
+    if (planStepGate) {
+      meta0!.workflow!.advanceOnComplete = true;
+      meta0!.workflow!.advanceOnCompleteStep = meta0!.workflow!.stepIndex;
+      this.upsert(meta0!);
       resolve({
         allow: false,
         denyMessage:
@@ -1576,7 +1665,6 @@ export class SessionManager {
     // Approving a plan exits plan mode inside the CLI — mirror that in our
     // session meta so the composer's mode control stays truthful.
     if (allow) {
-      const original = this.findPermissionRequest(sessionId, requestId);
       const meta = this.sessions.get(sessionId);
       if (meta && original?.toolName === 'ExitPlanMode' && meta.permissionMode === 'plan') {
         const wf = meta.workflow;
@@ -1654,7 +1742,17 @@ export class SessionManager {
         // finished) — Continue resumes it as a workflow turn, and its eventual
         // result parks the step for approve/retry the normal way.
         meta.interruptedAt = Date.now();
-        flagged.push(meta.id);
+        // A plan-approval / question card still open is the user's to answer, and
+        // auto-continue's nudge ("continue the task from there") would read as an
+        // approval nobody gave. Keep the banner and the clickable card; park the
+        // session instead — `flagged` is exactly the auto-continue list below.
+        if (hasUnresolvedAlwaysAsk(this.store.loadTranscript(meta.id))) {
+          console.log(
+            `[permission] [session ${meta.id}] auto-continue skipped: an always-ask card is unanswered`,
+          );
+        } else {
+          flagged.push(meta.id);
+        }
         changed = true;
       }
       if (changed) this.upsert(meta);
@@ -1880,8 +1978,8 @@ export class SessionManager {
         metaNow.turnStartedAt = undefined;
         this.upsert(metaNow);
       }
-      this.interrupting.delete(sessionId); // turn settled normally
-      this.onTurnComplete?.(sessionId, source);
+      const interrupted = this.interrupting.delete(sessionId); // turn settled normally
+      this.onTurnComplete?.(sessionId, source, interrupted);
       this.maybeFlush(sessionId);
       void this.summarizeTurn(sessionId, resultSeq);
       // Same class as summarizeTurn: fire-and-forget once the turn has settled.
@@ -1926,7 +2024,7 @@ export class SessionManager {
         meta.turnStartedAt = undefined;
         this.liveState(sessionId).permissionWaitMs = 0;
         this.upsert(meta);
-        this.onTurnComplete?.(sessionId, source);
+        this.onTurnComplete?.(sessionId, source, true); // gated on the interrupt flag above
         this.maybeFlush(sessionId);
       }
     }
@@ -1943,7 +2041,9 @@ export class SessionManager {
         toolName: '',
         input: {},
         resolution: 'expired',
+        resolvedBy: 'cancel',
       } satisfies PermissionRequestData);
+      this.logResolution(sessionId, '', 'expired', 'cancel');
       resolve({ allow: false });
     }
   }
@@ -2001,11 +2101,37 @@ export class SessionManager {
           input: toolInput,
           resolution: 'allow',
           auto: true,
+          resolvedBy: 'auto',
         } satisfies PermissionRequestData);
       }
       return {
         continue: true,
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+      };
+    }
+
+    // The model asked to enter plan mode itself. That tool is invisible to us
+    // otherwise, so meta.permissionMode would stay 'default' and any query
+    // restart (worker restart, caveman toggle) would respawn out of plan mode with
+    // edits no longer gated. Mirror it, the inverse of the approval-side mirroring
+    // in resolvePermission.
+    if (toolName === 'EnterPlanMode' && meta && meta.permissionMode !== 'plan') {
+      meta.permissionMode = 'plan';
+      this.upsert(meta);
+    }
+
+    // Plan approval and clarifying questions are the user's call in every mode. A
+    // bare `continue: true` here lets bypassPermissions and a settings.json
+    // permissions.allow entry resolve before canUseTool ever runs, so force the
+    // prompt rather than merely declining to auto-allow it below.
+    if (ALWAYS_ASK_TOOLS.has(toolName)) {
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'ask',
+          permissionDecisionReason: 'This decision is always the user’s.',
+        },
       };
     }
 
@@ -2030,6 +2156,7 @@ export class SessionManager {
             input: toolInput,
             resolution: 'allow',
             auto: true,
+            resolvedBy: 'auto',
           } satisfies PermissionRequestData);
         }
         return {
@@ -2056,6 +2183,7 @@ export class SessionManager {
           input: toolInput,
           resolution: 'allow',
           auto: true,
+          resolvedBy: 'auto',
         } satisfies PermissionRequestData);
       }
       return {
@@ -2084,7 +2212,14 @@ export class SessionManager {
     // again — no resume-recovery dance needed for plain bridge restarts.
     if (resend) {
       const resolved = this.findPermissionResolution(sessionId, requestId);
-      if (resolved) {
+      // A human-only tool replays only a human answer. A synthesized 'allow'
+      // (recovery, or the workflow plan-step gate, which records an allow and
+      // denies the tool) must not be handed to the SDK as a real approval —
+      // re-ask instead. Legacy resolutions carry no resolvedBy and predate every
+      // synthesized source, so they count as the user's.
+      const humanAnswered =
+        !resolved?.resolvedBy || resolved.resolvedBy === 'user' || resolved.resolvedBy === 'plan-reply';
+      if (resolved && (humanAnswered || !ALWAYS_ASK_TOOLS.has(toolName))) {
         return resolved.resolution === 'allow'
           ? { behavior: 'allow', updatedInput: resolved.updatedInput ?? input }
           : {
@@ -2114,6 +2249,7 @@ export class SessionManager {
             input,
             resolution: 'allow',
             auto: true,
+            resolvedBy: 'auto',
           } satisfies PermissionRequestData);
         }
         return { behavior: 'allow', updatedInput: input };
@@ -2130,6 +2266,7 @@ export class SessionManager {
               input,
               resolution: 'allow',
               auto: true,
+              resolvedBy: 'auto',
             } satisfies PermissionRequestData);
           }
           return { behavior: 'allow', updatedInput: input };
@@ -2149,6 +2286,7 @@ export class SessionManager {
             input,
             resolution: 'allow',
             auto: true,
+            resolvedBy: 'auto',
           } satisfies PermissionRequestData);
         }
         return { behavior: 'allow', updatedInput: input };

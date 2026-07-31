@@ -16,7 +16,7 @@ import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
 import { WorkflowEngine } from './workflows.ts';
 
-const wfDef = (stepCount: number): WorkflowDef => ({
+const wfDef = (stepCount: number, autoAdvance = false): WorkflowDef => ({
   id: 'wf1',
   name: 'test flow',
   steps: Array.from({ length: stepCount }, (_, n) => ({
@@ -24,7 +24,7 @@ const wfDef = (stepCount: number): WorkflowDef => ({
     promptTemplate: `do step ${n + 1}{feedback}`,
     model: 'claude-sonnet-5',
     permissionMode: 'default' as const,
-    autoAdvance: false,
+    autoAdvance,
     // No fresh start: keeps runStep off the git/diff hand-off path in a temp dir.
     freshStart: false,
   })),
@@ -48,7 +48,7 @@ const meta = (workflow: WorkflowState): SessionMeta =>
  * `upserts` collects every broadcast session meta, in order — the wire the client sees;
  * `events` collects the transcript events alongside it (workflow markers included).
  */
-function harness(stepCount: number, workflow: Partial<WorkflowState> = {}) {
+function harness(stepCount: number, workflow: Partial<WorkflowState> = {}, autoAdvance = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-advance-'));
   const state: WorkflowState = {
     workflowId: 'wf1',
@@ -58,7 +58,7 @@ function harness(stepCount: number, workflow: Partial<WorkflowState> = {}) {
     ...workflow,
   };
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta(state)]));
-  fs.writeFileSync(path.join(root, 'workflows.json'), JSON.stringify([wfDef(stepCount)]));
+  fs.writeFileSync(path.join(root, 'workflows.json'), JSON.stringify([wfDef(stepCount, autoAdvance)]));
 
   const upserts: SessionMeta[] = [];
   const events: TranscriptEvent[] = [];
@@ -80,11 +80,16 @@ function harness(stepCount: number, workflow: Partial<WorkflowState> = {}) {
 }
 
 /** One session mid-step: step 0 running, and its turn live and workflow-sourced. */
-function running(stepCount: number) {
-  const h = harness(stepCount, {
-    stepIndex: 0,
-    stepStatuses: Array.from({ length: stepCount }, (_, n) => (n === 0 ? 'running' : 'pending')),
-  });
+function running(stepCount: number, opts: { autoAdvance?: boolean; workflow?: Partial<WorkflowState> } = {}) {
+  const h = harness(
+    stepCount,
+    {
+      stepIndex: 0,
+      stepStatuses: Array.from({ length: stepCount }, (_, n) => (n === 0 ? 'running' : 'pending')),
+      ...opts.workflow,
+    },
+    opts.autoAdvance,
+  );
   const m = h.s1();
   m.status = 'running';
   m.turnSource = 'workflow';
@@ -212,6 +217,56 @@ test('a stopped step parks when the query ends without a result', () => {
   assert.deepEqual(h.s1().workflow?.stepStatuses, ['waiting-approval', 'pending']);
   assert.equal(h.s1().status, 'waiting-approval');
   assert.equal(h.s1().workflow?.stepIndex, 0);
+});
+
+test('Stop parks an autoAdvance step', () => {
+  // Stop is explicit intent to halt: the toggle does not get to override it.
+  const onResult = running(2, { autoAdvance: true });
+  onResult.sessions.interrupt('s1');
+  onResult.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+
+  assert.equal(onResult.s1().workflow?.stepStatuses[0], 'waiting-approval');
+  assert.equal(onResult.s1().workflow?.stepIndex, 0);
+
+  // Same for a query that dies without emitting a final result.
+  const onEnded = running(2, { autoAdvance: true });
+  onEnded.sessions.interrupt('s1');
+  onEnded.sessions.handleWorkerEnded('s1');
+
+  assert.equal(onEnded.s1().workflow?.stepStatuses[0], 'waiting-approval');
+  assert.equal(onEnded.s1().workflow?.stepIndex, 0);
+});
+
+test('Stop discards a pending plan-approval advance', () => {
+  // The plan was approved, then the user stopped before the turn ended.
+  const h = running(2, { workflow: { advanceOnComplete: true, advanceOnCompleteStep: 0 } });
+  h.sessions.interrupt('s1');
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval');
+  assert.equal(h.s1().workflow?.stepIndex, 0);
+  // Flag and stamp both gone, so no later settle can replay the advance.
+  assert.equal(h.s1().workflow?.advanceOnComplete, undefined);
+  assert.equal(h.s1().workflow?.advanceOnCompleteStep, undefined);
+});
+
+test('autoAdvance still advances on a normal settle', async () => {
+  const h = running(2, { autoAdvance: true });
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  await settle();
+
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+});
+
+test('a plan-approval advance still fires on a normal settle', async () => {
+  const h = running(2, { workflow: { advanceOnComplete: true, advanceOnCompleteStep: 0 } });
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  await settle();
+
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+  assert.ok(markerEvents(h).includes('approved'));
 });
 
 test('a queued follow-up survives the park', () => {

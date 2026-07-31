@@ -163,7 +163,9 @@ export class WorkflowEngine {
     // Every settle is forwarded, source included: a user-source turn is normally a
     // no-op here, but it must still be able to consume an explicit force-advance
     // (see onWorkflowTurnComplete).
-    sessions.setTurnCompleteListener((sessionId, source) => this.onWorkflowTurnComplete(sessionId, source));
+    sessions.setTurnCompleteListener((sessionId, source, interrupted) =>
+      this.onWorkflowTurnComplete(sessionId, source, interrupted),
+    );
   }
 
   list(): WorkflowDef[] {
@@ -534,7 +536,7 @@ export class WorkflowEngine {
     return (step && this.stepContent(step)?.name) || '';
   }
 
-  private onWorkflowTurnComplete(sessionId: string, source: 'user' | 'workflow') {
+  private onWorkflowTurnComplete(sessionId: string, source: 'user' | 'workflow', interrupted: boolean) {
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
@@ -552,6 +554,7 @@ export class WorkflowEngine {
     // consume an explicit force-advance stamped for this step — otherwise that step
     // would sit at 'running' forever.
     if (source !== 'workflow' && !forced) return;
+    this.clearSettleWatchdog(sessionId); // any settle for this step ends the watchdog's job
 
     if (source === 'workflow') {
       // Accumulate this turn's cost onto the step (retries add to the same slot).
@@ -576,19 +579,23 @@ export class WorkflowEngine {
       }
     }
 
-    // A plan approved mid-step — or a force-advance of a running step — advances
-    // straight to the next step. A plain Stop parks below instead.
-    if (meta.workflow.advanceOnComplete && stamped) {
+    // Stop is explicit intent to halt, so it overrides both advance paths below: a
+    // pending plan-approval advance is discarded and autoAdvance is ignored. Only an
+    // explicit force-advance survives — that user asked for exactly this advance, and
+    // forceAdvance reaches here through interrupt() by design.
+    if (interrupted && !forced) {
+      meta.workflow.advanceOnComplete = undefined;
+      meta.workflow.advanceOnCompleteStep = undefined;
+    } else if (meta.workflow.advanceOnComplete && stamped) {
+      // A plan approved mid-step — or a force-advance of a running step — advances
+      // straight to the next step.
       const event = meta.workflow.advanceOnComplete === 'interrupted' ? 'interrupted' : 'approved';
       meta.workflow.advanceOnComplete = undefined;
       meta.workflow.advanceOnCompleteStep = undefined;
-      this.clearSettleWatchdog(sessionId); // a normal settle disarms the watchdog
       this.marker(sessionId, { stepIndex: i, stepName: this.stepName(step), event });
       void this.advance(sessionId);
       return;
-    }
-
-    if (this.stepContent(step)?.autoAdvance) {
+    } else if (this.stepContent(step)?.autoAdvance) {
       void this.advance(sessionId);
       return;
     }
