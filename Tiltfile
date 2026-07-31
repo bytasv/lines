@@ -161,12 +161,22 @@ if have('PORT'):
 local_resource('preflight', cmd=preflight_cmd, labels=['setup'], allow_parallel=True)
 
 # ---- install ---------------------------------------------------------------
+# `package-lock.json` is deliberately NOT in `deps`. `npm install` REWRITES the
+# lockfile, and Tilt keeps file changes that land after a build started as
+# pending changes for the NEXT build -- it consumes only changes older than the
+# build's start time. A resource that watches a file its own cmd writes
+# retriggers itself forever, which is exactly what happens the moment a new
+# dependency makes the lock non-idempotent. Watch the manifests instead.
+#
+# Consequence: a `git pull` that moves ONLY package-lock.json triggers nothing.
+# Run `tilt trigger install` by hand. Symptom if you forget is a normal
+# missing/stale-module error from a service.
 
 local_resource(
     'install',
     cmd='npm install',
-    deps=['package.json', 'package-lock.json', 'shared/package.json',
-          'server/package.json', 'web/package.json', 'storage/package.json'],
+    deps=['package.json', 'shared/package.json', 'server/package.json',
+          'web/package.json', 'storage/package.json'],
     labels=['setup'],
     allow_parallel=True,
 )

@@ -1151,7 +1151,9 @@
         "Tiltfile",
         ".tiltignore",
         ".env.example",
+        "package.json",
         "server/package.json",
+        "web/package.json",
         "storage/package.json"
       ],
       "symbols": [
@@ -1169,13 +1171,16 @@
         "freezing worker or bridge reload swaps which npm script the resource runs, it does not change Tilt's own watch behavior",
         "toggling freeze restarts that resource once, at the moment it's toggled, dropping any in-flight agent turn on the worker",
         "freezing worker while bridge stays hot and editing workerProtocol.ts produces a visible protocol-version mismatch in the bridge log until the worker is restarted by hand",
-        "web is excluded from the freeze options since Vite HMR never restarts the dev server"
+        "web is excluded from the freeze options since Vite HMR never restarts the dev server",
+        "a pull that changes only package-lock.json triggers nothing; run tilt trigger install by hand"
       ],
       "architecturalRules": [
         "no deps= on the four service resources \u2014 tsx watch/Vite own file-watching, not Tilt",
         "PORT is injected per resource via serve_env, never a shared env block",
         "preflight reads .env key names only, never values, into any Tilt spec/log/UI button",
-        "the Freeze/Resume UI buttons and the --no-reload CLI flag are two entry points into one FROZEN state, reconciled by re-invoking tilt args with the full current flag set rather than mutating Tilt state directly"
+        "the Freeze/Resume UI buttons and the --no-reload CLI flag are two entry points into one FROZEN state, reconciled by re-invoking tilt args with the full current flag set rather than mutating Tilt state directly",
+        "no resource watches a file its own cmd writes \u2014 install's deps list the five workspace manifests but omit package-lock.json, which npm install itself rewrites and would retrigger the resource forever",
+        "resource_deps gates only the first build after tilt up; a later re-run of install does not cascade to prisma-generate or the four service resources"
       ],
       "relatedDecisions": []
     },
@@ -1494,6 +1499,115 @@
         "interrupted-turn-recovery",
         "plan-file-auto-approve",
         "plan-review-card"
+      ]
+    },
+    {
+      "id": "multi-root-projects",
+      "name": "Multi-root projects",
+      "doc": "features/multi-root-projects.md",
+      "purpose": "Let one project tab span more than one folder, so every session created in it can read and write in all of them with the same auto-approve behavior as the primary, and the file tree, @mention, and /find see every root.",
+      "entryPoints": [
+        "web/src/components/ProjectTabs.tsx",
+        "web/src/components/Sidebar.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/store.ts",
+        "server/src/autoGuard.ts",
+        "server/src/sessions.ts",
+        "server/src/index.ts",
+        "server/src/fileSearch.ts",
+        "server/src/recipeCommands.ts",
+        "server/src/userContext.ts",
+        "web/src/store.ts",
+        "web/src/lib/files.ts",
+        "web/src/lib/mentions.ts",
+        "web/src/components/MentionAutocomplete.tsx",
+        "web/src/components/MentionInput.tsx",
+        "web/src/components/Composer.tsx",
+        "web/src/components/MonacoPreviewModal.tsx",
+        "web/src/components/recipe/RecipeRunModal.tsx"
+      ],
+      "symbols": [
+        "Project",
+        "normalizeRootPath",
+        "projectRoots",
+        "findProject",
+        "rootsForCwd",
+        "SessionManager.rootsFor",
+        "searchFilesAcross",
+        "FileHit"
+      ],
+      "tests": [],
+      "businessRules": [
+        "the primary path is the project's sole identity; extra roots widen what its sessions may read/write, but every session's cwd stays the primary",
+        "writes in an extra root auto-approve in auto mode exactly like the primary; the sensitive-path override (~/.ssh, ~/.aws, .env) still wins regardless of which root a path resolves under",
+        "one root belongs to exactly one project; roots may not nest within a project",
+        "an empty roots list escalates every file tool - the guard fails toward prompting, never toward silently trusting nothing",
+        "@mention's feature provider stays primary-root-only; only the file provider is multi-root",
+        "removing a root only narrows what the project's sessions may reach; nothing on disk is touched, and the learned project key for that path is kept"
+      ],
+      "architecturalRules": [
+        "roots are resolved at use time from the project record (rootsForCwd), never snapshotted onto SessionMeta, which is synced and must keep its existing shape",
+        "additionalDirectories is omitted (not []) for a single-root project, so a single-root session's serialized query options stay byte-identical to before this feature",
+        "the guard's three exported functions take roots: string[], not an optional 5th parameter after cwd",
+        "projects.json stays local-only (never synced); only the resolved project-key map is synced",
+        "deliberately does not reuse resolveProjectKey for root membership - that key's --show-prefix keeps monorepo siblings apart, the opposite of what one workspace tab needs"
+      ],
+      "relatedDecisions": [
+        "multi-repo-commits",
+        "prompt-mentions",
+        "plan-file-auto-approve",
+        "app-data-root",
+        "project-tab-status-dot",
+        "project-switch-session-selection"
+      ]
+    },
+    {
+      "id": "multi-repo-commits",
+      "name": "Multi-repo commits",
+      "doc": "features/multi-repo-commits.md",
+      "purpose": "Group a multi-root session's folders into git commit units by work tree (not by project), give a workflow step's {diff} a per-repo section, and add a {roots} token so a step can scope every git command with -C <repo root>, since additionalDirectories never moves the Bash shell out of the session's primary cwd.",
+      "entryPoints": [
+        "server/src/workflows.ts"
+      ],
+      "files": [
+        "server/src/git.ts",
+        "server/src/workflows.ts",
+        "shared/types.ts",
+        "server/src/mcpWorkflowTools.ts",
+        "web/src/components/workflow/PromptEditor.tsx"
+      ],
+      "symbols": [
+        "repoRoot",
+        "repoBranch",
+        "groupByRepo",
+        "RepoGroup",
+        "captureBaselines",
+        "workingTreeDiff",
+        "multiRepoDiff",
+        "WorkflowState.diffBaselines",
+        "usesHandoffTokens",
+        "substituteTokens"
+      ],
+      "tests": [],
+      "businessRules": [
+        "commit units come from git rev-parse --show-toplevel, never from resolveProjectKey, whose --show-prefix component deliberately keeps monorepo siblings apart",
+        "two roots that resolve to the same work tree are one commit unit; two separate work trees are two",
+        "a root that isn't inside any git work tree is never a commit unit",
+        "{roots} is not a hand-off token: a template using only {roots} with freshStart on still gets the normal {previous}/{diff} auto-prepend",
+        "a single repo produces no '# repo:' header in {diff} - existing single-root workflows see byte-identical prompts",
+        "the MAX_DIFF_CHARS budget for {diff} is shared across every commit unit, not multiplied by the repo count, with unused share redistributed to repos that overflowed theirs"
+      ],
+      "architecturalRules": [
+        "repo-grouping/diff logic (git.ts) stays pure git, with no prompt formatting; {roots}'s rendering lives in workflows.ts",
+        "the shared git() helper now has a timeout, since this feature multiplies git calls on the step-entry path the user waits through at every approval gap",
+        "diffBaselines is additive alongside the deprecated diffBaseline inside the synced WorkflowState; writers only ever set diffBaselines, the legacy field is read-only",
+        "MAX_UNTRACKED (new-file cap per diff) is per repo, not per workflow"
+      ],
+      "relatedDecisions": [
+        "multi-root-projects",
+        "workflow-step-output-consolidation"
       ]
     }
   ]
