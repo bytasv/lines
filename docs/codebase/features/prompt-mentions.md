@@ -51,7 +51,7 @@ None.
 - New mention kinds are added by registering one more `MentionProvider` in `mentionProviders` — no switch-over-kind exists elsewhere in the composer or transcript code.
 - Pill state (`MentionRange[]`) is a derived view kept in sync with the authoritative plain-text string via prefix/suffix diffing, not a second source of truth or a separate rich-text document model.
 - No contenteditable and no rich-text editor dependency — pills are a cosmetic overlay (mirror div) behind a plain `<textarea>`.
-- `/find`, `/file`, and `/tree` share one CORS helper (`corsFor()` in `server/src/index.ts`) and one workspace-root restriction (`resolveWorkspacePath`, now in `server/src/workspacePaths.ts`), so a new file-serving route can't accidentally skip either check. `resolveWorkspacePath` also allows a path outside every root when it resolves inside a plan directory (`isPlanPath`) — see [plan-file-auto-approve](plan-file-auto-approve.md) — so a mention's `/file`/`/tree` reads inherit that one exception too.
+- `/find`, `/file`, `/tree`, and `/docs` (see [docs-reader](docs-reader.md)) share one CORS helper (`corsFor()` in `server/src/index.ts`) and one workspace-root restriction (`resolveWorkspacePath`, now in `server/src/workspacePaths.ts`), so a new file-serving route can't accidentally skip either check. `resolveWorkspacePath` also allows a path outside every root when it resolves inside a plan directory (`isPlanPath`) — see [plan-file-auto-approve](plan-file-auto-approve.md) — so a mention's `/file`/`/tree` reads inherit that one exception too.
 
 ## Related decisions
 

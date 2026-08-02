@@ -1696,6 +1696,72 @@
         "no new persistence and no new ws message \u2014 costByModel travels inside the existing SessionMeta blob"
       ],
       "relatedDecisions": []
+    },
+    {
+      "id": "docs-reader",
+      "name": "Documentation reader",
+      "doc": "features/docs-reader.md",
+      "purpose": "In-app reader for a project's docs/** markdown corpus: a doc tree, an index.json-driven feature-card home, full-text search, and cross-links that navigate inside the reader instead of opening the source-file preview.",
+      "entryPoints": [
+        "web/src/components/ProjectTabs.tsx",
+        "web/src/components/SettingsModal.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/docsBundle.ts",
+        "server/src/index.ts",
+        "web/src/lib/files.ts",
+        "web/src/lib/features.ts",
+        "web/src/lib/docs.ts",
+        "web/src/lib/mentions.ts",
+        "web/src/components/Markdown.tsx",
+        "web/src/components/docs/DocsPage.tsx",
+        "web/src/components/docs/DocsSidebar.tsx",
+        "web/src/components/docs/DocsHome.tsx",
+        "web/src/components/docs/DocView.tsx",
+        "web/src/App.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/src/index.css"
+      ],
+      "symbols": [
+        "collectDocs",
+        "DocFile",
+        "DocsResponse",
+        "resolveDocLink",
+        "DocLinkTarget",
+        "docTitle",
+        "docSummary",
+        "searchDocs",
+        "useDocs",
+        "fetchDocs",
+        "toDocTreeNodes",
+        "featureCards",
+        "unindexedDocs",
+        "Markdown.onLinkClick"
+      ],
+      "tests": [
+        "server/src/docsBundle.test.ts",
+        "server/src/docsLinks.test.ts",
+        "server/src/docsSearch.test.ts"
+      ],
+      "businessRules": [
+        "an index entry whose doc is missing from the bundle still renders as a card with a 'no doc' badge; a bundle doc no entry claims lists under 'Other documents'; a missing/unparseable index degrades to a plain document list",
+        "a markdown link target always resolves to kind: 'doc' and opens inside the reader even when the target isn't in this corpus, surfacing a 'not in this corpus' panel instead of a source-preview 404",
+        "a link that escapes the docs root, or isn't markdown, opens the existing file-preview modal instead",
+        "no project open, or no docs/ folder in the active project, shows an empty state instead of an error boundary"
+      ],
+      "architecturalRules": [
+        "one bundle request (GET /docs?path=) powers the tree, cards, search and cross-links; no per-file fan-out and no separate search route",
+        "/docs sits inside the same corsFor() + resolveWorkspacePath gate as /file, /tree and /find",
+        "collectDocs never follows symlinked files or directories, closing an exfiltration path a prefix-based containment check would otherwise miss",
+        "pure doc logic (link resolution, title/summary extraction, search ranking) lives in shared/types.ts so node:test can cover it",
+        "Markdown gained one optional onLinkClick prop instead of being forked; absent, every transcript call site keeps the existing openFilePreview behavior",
+        "the three global modals (MonacoPreviewModal, LoginModal, GuardAllowlistReviewModal) are mounted at the App root instead of inside Shell, so they still work on /docs"
+      ],
+      "relatedDecisions": [
+        "prompt-mentions",
+        "transcript-markdown-rendering"
+      ]
     }
   ]
 }

@@ -16,6 +16,7 @@ import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
 import type { UserContext } from './userContext.ts';
 import { searchFilesAcross } from './fileSearch.ts';
+import { collectDocs } from './docsBundle.ts';
 import { resolveWorkspaceParam, resolveWorkspacePath } from './workspacePaths.ts';
 import { createMcpDispatcher } from './mcpWorkflowTools.ts';
 import * as workflowCommands from './workflowCommands.ts';
@@ -193,7 +194,8 @@ const server = http.createServer((req, res) => {
     url.startsWith('/attachments/') ||
     url.startsWith('/file?') ||
     url.startsWith('/tree?') ||
-    url.startsWith('/find?');
+    url.startsWith('/find?') ||
+    url.startsWith('/docs?');
   if (isFileRoute) {
     const cors = corsFor(req);
     void (async () => {
@@ -207,6 +209,7 @@ const server = http.createServer((req, res) => {
       if (url.startsWith('/attachments/')) serveAttachment(ctx, url, res);
       else if (url.startsWith('/file?')) serveFile(ctx, url, res, cors);
       else if (url.startsWith('/find?')) serveFind(ctx, url, res, cors);
+      else if (url.startsWith('/docs?')) serveDocs(ctx, url, res, cors);
       else serveTree(ctx, url, res, cors);
     })().catch((err) => {
       console.error('[http]', err);
@@ -292,6 +295,39 @@ function serveTree(
     .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
   res.writeHead(200, { ...cors, 'content-type': 'application/json' });
   res.end(JSON.stringify({ entries }));
+}
+
+/**
+ * Serve a project's whole `docs/**` markdown corpus in one response — the
+ * documentation reader's only request. Restricted to the user's project/session
+ * roots exactly like /tree and /file; not cached here, since the walk is small
+ * and the client holds the bundle for the life of the page.
+ */
+function serveDocs(
+  ctx: UserContext,
+  url: string,
+  res: http.ServerResponse,
+  cors: Record<string, string>,
+) {
+  const abs = resolveWorkspaceParam(ctx, url);
+  if (!abs) {
+    res.writeHead(403, cors).end();
+    return;
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(abs);
+  } catch {
+    res.writeHead(404, cors).end();
+    return;
+  }
+  if (!stat.isDirectory()) {
+    res.writeHead(404, cors).end();
+    return;
+  }
+  const bundle = collectDocs(abs);
+  res.writeHead(200, { ...cors, 'content-type': 'application/json' });
+  res.end(JSON.stringify({ root: abs, ...bundle }));
 }
 
 const FIND_MAX_LIMIT = 25;

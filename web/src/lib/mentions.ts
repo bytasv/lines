@@ -4,8 +4,8 @@ import {
   type Icon,
 } from '@tabler/icons-react';
 import type { PromptMention } from '@lines/shared';
-import { fetchTree, fileBase, searchFiles } from './files';
-import { withAuthToken } from '../ws';
+import { fetchTree, searchFiles } from './files';
+import { loadFeatures, type FeatureEntry } from './features';
 
 /**
  * A mention candidate as offered in the autocomplete popover. Extends the
@@ -42,7 +42,8 @@ export interface MentionValue {
 export interface MentionProvider {
   kind: string; // 'feature'
   kindLabel: string; // 'Feature'
-  search(query: string, ctx: { cwd: string }): Promise<MentionCandidate[]>;
+  /** `cwd` is the session's directory (the project's primary root); `roots` is every root it spans, primary first. */
+  search(query: string, ctx: { cwd: string; roots: string[] }): Promise<MentionCandidate[]>;
 }
 
 /** Per-kind display metadata for inline pills and transcript badges. */
@@ -180,42 +181,6 @@ export function buildExpandedPrompt(text: string, mentions: MentionCandidate[]):
 // Feature provider — sourced from docs/codebase/index.json
 // ---------------------------------------------------------------------------
 
-interface FeatureEntry {
-  id: string;
-  name: string;
-  doc?: string;
-  purpose?: string;
-  entryPoints?: string[];
-}
-
-interface FeatureIndex {
-  version?: number;
-  features?: FeatureEntry[];
-}
-
-const FEATURE_TTL_MS = 30_000;
-/** Per-cwd cache; a null value marks "no manifest here" so we don't refetch per keystroke. */
-const featureCache = new Map<string, { at: number; features: FeatureEntry[] | null }>();
-
-async function loadFeatures(cwd: string): Promise<FeatureEntry[] | null> {
-  const cached = featureCache.get(cwd);
-  if (cached && Date.now() - cached.at < FEATURE_TTL_MS) return cached.features;
-  let features: FeatureEntry[] | null = null;
-  try {
-    const path = `${cwd}/docs/codebase/index.json`;
-    const res = await fetch(withAuthToken(`${fileBase}/file?path=${encodeURIComponent(path)}`));
-    if (res.ok) {
-      const data = (await res.json()) as { content?: string };
-      const parsed = JSON.parse(data.content ?? '') as FeatureIndex;
-      features = Array.isArray(parsed.features) ? parsed.features : [];
-    }
-  } catch {
-    features = null; // parse error / too large / offline — kind silently absent
-  }
-  featureCache.set(cwd, { at: Date.now(), features });
-  return features;
-}
-
 function featureExpansion(f: FeatureEntry): string {
   const lines = [`- Feature "${f.name}" (${f.id})`];
   if (f.doc) lines.push(`  Doc: docs/codebase/${f.doc}`);
@@ -267,10 +232,15 @@ function fileCandidate(rel: string, isDir = false): MentionCandidate {
   };
 }
 
-/** List one directory relative to `cwd` — the browse mode behind `@` and `@dir/`. */
+/**
+ * List one directory relative to `cwd` — the browse mode behind `@` and `@dir/`.
+ * An absolute `dirPart` is used as-is, which is what makes drilling into an extra
+ * root (offered as an absolute candidate below) work.
+ */
 async function browseDir(cwd: string, dirPart: string): Promise<MentionCandidate[]> {
   try {
-    const entries = await fetchTree(dirPart ? `${cwd}/${dirPart}` : cwd);
+    const base = dirPart.startsWith('/') ? dirPart : dirPart ? `${cwd}/${dirPart}` : cwd;
+    const entries = await fetchTree(base);
     return entries
       .slice(0, MAX_PER_KIND)
       .map((e) => fileCandidate(dirPart ? `${dirPart}/${e.name}` : e.name, e.type === 'dir'));
@@ -282,14 +252,25 @@ async function browseDir(cwd: string, dirPart: string): Promise<MentionCandidate
 const fileProvider: MentionProvider = {
   kind: 'file',
   kindLabel: 'File',
-  async search(query, { cwd }) {
+  async search(query, { cwd, roots }) {
     // A bare '@' or a trailing '/' means "show me what's in here" — keep browsing
     // by directory so drilling down still works. Anything else is a name search
-    // across the whole project, so `@types` finds `shared/types.ts`.
-    if (query === '' || query.endsWith('/')) return browseDir(cwd, query.replace(/\/$/, ''));
+    // across every root, so `@types` finds `shared/types.ts`.
+    if (query === '' || query.endsWith('/')) {
+      const dirPart = query.replace(/\/$/, '');
+      const entries = await browseDir(cwd, dirPart);
+      // Top level of a multi-root project: lead with the extra roots as drill-in
+      // dirs, since browsing only ever shows the cwd's own children otherwise.
+      const extras =
+        dirPart === '' && roots.length > 1 ? roots.slice(1).map((r) => fileCandidate(r, true)) : [];
+      return [...extras, ...entries];
+    }
     try {
-      const files = await searchFiles(cwd, query, MAX_PER_KIND);
-      return files.map((rel) => fileCandidate(rel));
+      const files = await searchFiles(roots, query, MAX_PER_KIND);
+      // The agent's cwd is the primary root, so a hit anywhere else needs an
+      // absolute reference to be unambiguous; primary hits keep the bare relative
+      // path, leaving single-root output exactly as it was.
+      return files.map(({ root, rel }) => fileCandidate(root === roots[0] ? rel : `${root}/${rel}`));
     } catch {
       return [];
     }

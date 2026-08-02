@@ -11,10 +11,12 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { StorageBanner } from './components/StorageBanner';
 import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/workflow/WorkflowEditor';
+import type { WorkflowEditorView } from './components/workflow/WorkflowEditor';
 import { MonacoPreviewModal } from './components/MonacoPreviewModal';
 import { LoginModal } from './components/LoginModal';
 import { GuardAllowlistReviewModal } from './components/GuardAllowlistReviewModal';
 import { FilesView } from './components/FilesView';
+import { DocsPage } from './components/docs/DocsPage';
 import { send } from './ws';
 
 const HEADER_HEIGHT = 56;
@@ -28,10 +30,20 @@ function clampSidebar(w: number) {
 
 export function App() {
   return (
-    <Routes>
-      <Route path="/session/:sessionId" element={<Shell />} />
-      <Route path="*" element={<Shell />} />
-    </Routes>
+    <>
+      <Routes>
+        {/* Ranked by specificity in v7, but ordered here to document the intent. */}
+        <Route path="/docs/*" element={<DocsPage />} />
+        <Route path="/session/:sessionId" element={<Shell />} />
+        <Route path="*" element={<Shell />} />
+      </Routes>
+      {/* Global overlays live outside the routes: the documentation reader opens
+          source previews and the sign-in modal too, and they are portalled, so
+          AppShell parentage never mattered. */}
+      <MonacoPreviewModal />
+      <LoginModal />
+      <GuardAllowlistReviewModal />
+    </>
   );
 }
 
@@ -48,6 +60,8 @@ function Shell() {
   const setActiveProject = useStore((s) => s.setActiveProject);
   const sidebarMode = useStore((s) => s.sidebarMode);
   const [workflowEditorOpen, setWorkflowEditorOpen] = useState(false);
+  // Which library the modal lands on — the sidebar has an entry point per library.
+  const [workflowEditorView, setWorkflowEditorView] = useState<WorkflowEditorView>('workflows');
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem(SIDEBAR_STORAGE_KEY));
     return saved ? clampSidebar(saved) : SIDEBAR_MIN;
@@ -72,6 +86,11 @@ function Shell() {
   }, []);
 
   const hasProjects = projects.length > 0;
+
+  const openWorkflowEditor = (view: WorkflowEditorView) => {
+    setWorkflowEditorView(view);
+    setWorkflowEditorOpen(true);
+  };
 
   // URL -> store (reload, back/forward, pasted links).
   useEffect(() => {
@@ -99,7 +118,7 @@ function Shell() {
   // Selecting a session (URL, auto-select) activates its project tab.
   useEffect(() => {
     const cwd = selectedSession?.cwd;
-    if (cwd && cwd !== activeProject && projects.includes(cwd)) {
+    if (cwd && cwd !== activeProject && projects.some((p) => p.path === cwd)) {
       setActiveProject(cwd);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -121,7 +140,10 @@ function Shell() {
       <ConnectionBanner headerHeight={HEADER_HEIGHT} />
       <StorageBanner headerHeight={HEADER_HEIGHT} />
       <AppShell.Navbar>
-        <Sidebar onEditWorkflows={() => setWorkflowEditorOpen(true)} />
+        <Sidebar
+          onEditWorkflows={() => openWorkflowEditor('workflows')}
+          onBrowseRecipes={() => openWorkflowEditor('recipes')}
+        />
         {hasProjects && (
           <Box
             onMouseDown={startResize}
@@ -156,10 +178,11 @@ function Shell() {
           )}
         </Box>
       </AppShell.Main>
-      <WorkflowEditor opened={workflowEditorOpen} onClose={() => setWorkflowEditorOpen(false)} />
-      <MonacoPreviewModal />
-      <LoginModal />
-      <GuardAllowlistReviewModal />
+      <WorkflowEditor
+        opened={workflowEditorOpen}
+        initialView={workflowEditorView}
+        onClose={() => setWorkflowEditorOpen(false)}
+      />
     </AppShell>
   );
 }

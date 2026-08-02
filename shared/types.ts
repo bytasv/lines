@@ -618,6 +618,217 @@ export interface FindResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Documentation reader
+// ---------------------------------------------------------------------------
+
+/** One markdown file in the docs bundle; `path` is POSIX and relative to the docs root. */
+export interface DocFile {
+  path: string;
+  content: string;
+  bytes: number;
+  mtime: number;
+}
+
+/** Response body of the bridge's GET /docs endpoint (the whole `docs/**` corpus in one request). */
+export interface DocsResponse {
+  /** Absolute docs root the paths are relative to. */
+  root: string;
+  docs: DocFile[];
+  /** A limit was hit, so `docs` is a partial view of the tree. */
+  truncated: boolean;
+}
+
+/** Where a link inside a rendered doc should go. */
+export type DocLinkTarget =
+  | { kind: 'doc'; rel: string; hash?: string }
+  | { kind: 'file'; abs: string }
+  | { kind: 'external'; href: string };
+
+/** The feature manifest, relative to the docs root. */
+export const DOCS_INDEX_REL = 'codebase/index.json';
+
+/**
+ * Collapse `.`, `..` and empty segments in a POSIX-ish relative path. Leading
+ * `..` segments survive — that is how {@link resolveDocLink} detects a link that
+ * climbs out of the docs root. Hand-rolled because this module is imported by
+ * the browser, where `node:path` isn't available.
+ */
+export function normalizeDocPath(rel: string): string {
+  const out: string[] = [];
+  for (const seg of rel.split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') {
+      if (out.length && out[out.length - 1] !== '..') out.pop();
+      else out.push('..');
+      continue;
+    }
+    out.push(seg);
+  }
+  return out.join('/');
+}
+
+/** The directory part of a doc-relative path; `''` for a top-level doc. */
+export function docDirname(rel: string): string {
+  const at = rel.lastIndexOf('/');
+  return at === -1 ? '' : rel.slice(0, at);
+}
+
+/** A link the reader must hand to the browser: `scheme:`, protocol-relative, `mailto:`. */
+export function isExternalHref(href: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith('//');
+}
+
+/** Join `rel` onto the absolute `base`, never climbing above `floor`. */
+function joinAbsClamped(base: string, rel: string, floor: string): string {
+  const floorSegs = floor.split('/').filter(Boolean);
+  const segs = base.split('/').filter(Boolean);
+  for (const seg of rel.split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') {
+      // A link may not walk out of the project it belongs to.
+      if (segs.length > floorSegs.length) segs.pop();
+      continue;
+    }
+    segs.push(seg);
+  }
+  return `/${segs.join('/')}`;
+}
+
+/**
+ * Decide where a link inside doc `fromRel` points. Markdown targets stay inside
+ * the reader even when the file isn't in this corpus — the reader reports that
+ * itself, which is friendlier than dropping the user into a 404 preview.
+ * Anything that escapes the docs root, or isn't markdown, becomes an absolute
+ * source path for the file preview.
+ */
+export function resolveDocLink(a: {
+  href: string;
+  fromRel: string;
+  docsRoot: string;
+  projectRoot: string;
+  hasDoc: (rel: string) => boolean;
+}): DocLinkTarget {
+  const href = a.href.trim();
+  if (!href) return { kind: 'doc', rel: a.fromRel };
+  if (isExternalHref(href)) return { kind: 'external', href };
+
+  const hashAt = href.indexOf('#');
+  const hash = (hashAt === -1 ? '' : href.slice(hashAt + 1)) || undefined;
+  let pathPart = hashAt === -1 ? href : href.slice(0, hashAt);
+  const queryAt = pathPart.indexOf('?');
+  if (queryAt !== -1) pathPart = pathPart.slice(0, queryAt);
+  // A bare `#anchor` (or `?q=1`) stays on the current doc.
+  if (!pathPart) return hash ? { kind: 'doc', rel: a.fromRel, hash } : { kind: 'doc', rel: a.fromRel };
+
+  if (pathPart.startsWith('/')) {
+    const abs = joinAbsClamped('/', pathPart, '');
+    const inDocs = abs === a.docsRoot || abs.startsWith(a.docsRoot + '/');
+    if (!inDocs) return { kind: 'file', abs };
+    pathPart = abs.slice(a.docsRoot.length + 1);
+    if (!pathPart) return { kind: 'file', abs };
+    return docOrFile(pathPart, hash, a);
+  }
+
+  const dir = docDirname(a.fromRel);
+  const joined = normalizeDocPath(dir ? `${dir}/${pathPart}` : pathPart);
+  if (!joined || joined.startsWith('..')) {
+    return { kind: 'file', abs: joinAbsClamped(a.docsRoot, joined, a.projectRoot) };
+  }
+  return docOrFile(joined, hash, a);
+}
+
+/** Shared tail of {@link resolveDocLink} for a path already relative to the docs root. */
+function docOrFile(
+  rel: string,
+  hash: string | undefined,
+  a: { docsRoot: string; hasDoc: (rel: string) => boolean },
+): DocLinkTarget {
+  // Extensionless links are a markdown convention; honour them only when the
+  // corpus actually holds the target, so a source path isn't hijacked.
+  const isDoc = /\.md$/i.test(rel) || a.hasDoc(rel) || a.hasDoc(`${rel}.md`);
+  if (!isDoc) return { kind: 'file', abs: `${a.docsRoot}/${rel}` };
+  const target = /\.md$/i.test(rel) || a.hasDoc(rel) ? rel : `${rel}.md`;
+  return hash ? { kind: 'doc', rel: target, hash } : { kind: 'doc', rel: target };
+}
+
+/** The doc's `# ` heading, falling back to its file name. */
+export function docTitle(content: string, rel: string): string {
+  const heading = /^#[ \t]+(.+)$/m.exec(content);
+  if (heading) return heading[1].trim();
+  const base = rel.slice(rel.lastIndexOf('/') + 1);
+  return base.replace(/\.md$/i, '');
+}
+
+/** The `## Purpose` body if the doc has one, else its first paragraph. */
+export function docSummary(content: string): string {
+  // No `m` flag: the trailing `$` must mean end-of-content, so a Purpose section
+  // that runs to the end of the file is still captured.
+  const purpose = /\n?##[ \t]+purpose[ \t]*\r?\n([\s\S]*?)(?=\n#{1,6}[ \t]|$)/i.exec(content);
+  const body = purpose ? purpose[1] : content.replace(/^#[ \t]+.*$/m, '');
+  for (const block of body.split(/\n{2,}/)) {
+    const text = block.trim();
+    if (!text || text.startsWith('#')) continue;
+    return text.replace(/\s+/g, ' ');
+  }
+  return '';
+}
+
+/** One doc that matched a search, with the lines that matched. */
+export interface DocSearchHit {
+  path: string;
+  title: string;
+  /** Lower is better: 0 title, 1 heading, 2 body. */
+  rank: number;
+  matches: { line: number; text: string }[];
+}
+
+const SEARCH_SNIPPETS = 3;
+const SNIPPET_CHARS = 160;
+
+/** ~{@link SNIPPET_CHARS} characters of `line` centred on the match. */
+function snippet(line: string, at: number, len: number): string {
+  if (line.length <= SNIPPET_CHARS) return line.trim();
+  const start = Math.max(0, at - Math.floor((SNIPPET_CHARS - len) / 2));
+  const end = Math.min(line.length, start + SNIPPET_CHARS);
+  return `${start > 0 ? '…' : ''}${line.slice(start, end).trim()}${end < line.length ? '…' : ''}`;
+}
+
+/**
+ * Case-insensitive substring search across the whole corpus. Title and heading
+ * hits outrank body hits, then denser docs win — good enough for a ~30-file
+ * corpus searched on every keystroke, with no index to keep in sync.
+ */
+export function searchDocs(
+  docs: readonly Pick<DocFile, 'path' | 'content'>[],
+  query: string,
+  limit: number,
+): DocSearchHit[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const hits: (DocSearchHit & { count: number })[] = [];
+  for (const doc of docs) {
+    const title = docTitle(doc.content, doc.path);
+    const matches: { line: number; text: string }[] = [];
+    let count = 0;
+    let headingHit = false;
+    doc.content.split('\n').forEach((line, i) => {
+      const at = line.toLowerCase().indexOf(q);
+      if (at === -1) return;
+      count++;
+      if (line.startsWith('#')) headingHit = true;
+      if (matches.length < SEARCH_SNIPPETS) {
+        matches.push({ line: i + 1, text: snippet(line, at, q.length) });
+      }
+    });
+    const titleHit = title.toLowerCase().includes(q) || doc.path.toLowerCase().includes(q);
+    if (!count && !titleHit) continue;
+    hits.push({ path: doc.path, title, rank: titleHit ? 0 : headingHit ? 1 : 2, matches, count });
+  }
+  hits.sort((a, b) => a.rank - b.rank || b.count - a.count || a.path.localeCompare(b.path));
+  return hits.slice(0, limit).map(({ count: _count, ...hit }) => hit);
+}
+
+// ---------------------------------------------------------------------------
 // Client -> Server
 // ---------------------------------------------------------------------------
 

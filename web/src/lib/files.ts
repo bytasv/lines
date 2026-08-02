@@ -1,5 +1,11 @@
-import { useEffect, useState } from 'react';
-import type { FileContentResponse, FindResponse, TreeEntry, TreeResponse } from '@lines/shared';
+import { useCallback, useEffect, useState } from 'react';
+import type {
+  DocsResponse,
+  FileContentResponse,
+  FindResponse,
+  TreeEntry,
+  TreeResponse,
+} from '@lines/shared';
 import { withAuthToken } from '../ws';
 
 /** The bridge HTTP server (same host, port 8787) serves file contents and directory listings. */
@@ -32,6 +38,67 @@ export async function searchFiles(
   if (!res.ok) throw new Error(`Failed to search files (${res.status}).`);
   const data = (await res.json()) as FindResponse;
   return data.files;
+}
+
+const DOCS_ERROR_MESSAGES: Record<number, string> = {
+  403: 'Access denied — the docs folder is outside the project.',
+  404: 'This project has no `docs/` folder.',
+};
+
+/** The documentation corpus of a project lives under its `docs/` directory. */
+export function docsRootFor(projectRoot: string): string {
+  return `${projectRoot}/docs`;
+}
+
+/** The whole markdown corpus under `docsRoot`, in one request. */
+export async function fetchDocs(docsRoot: string): Promise<DocsResponse> {
+  const res = await fetch(withAuthToken(`${fileBase}/docs?path=${encodeURIComponent(docsRoot)}`));
+  if (!res.ok) {
+    throw new Error(DOCS_ERROR_MESSAGES[res.status] ?? `Failed to load documentation (${res.status}).`);
+  }
+  return (await res.json()) as DocsResponse;
+}
+
+/**
+ * Load a project's docs bundle once per project. Everything the reader does —
+ * tree, cards, search, doc-to-doc navigation — runs off this one payload, so
+ * `reload` is the only way it refreshes (there is no watcher).
+ */
+export function useDocs(projectRoot: string | null) {
+  const [bundle, setBundle] = useState<DocsResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const reload = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  useEffect(() => {
+    if (!projectRoot) {
+      setBundle(null);
+      setError(null);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    let cancelled = false;
+    fetchDocs(docsRootFor(projectRoot))
+      .then((data) => {
+        if (!cancelled) setBundle(data);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setBundle(null);
+        setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectRoot, reloadKey]);
+
+  return { bundle, error, loading, reload };
 }
 
 /**

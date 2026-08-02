@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import type { PluggableList } from 'unified';
 import rehypeHighlight from 'rehype-highlight';
 import { Typography } from '@mantine/core';
+import { isExternalHref } from '@lines/shared';
 import { rehypeFilePaths } from '../lib/rehypeFilePaths';
 import { rehypeColorSwatches } from '../lib/rehypeColorSwatches';
 import { InlineColorSwatch } from './InlineColorSwatch';
@@ -14,7 +15,19 @@ const rehypePlugins: PluggableList = [
   rehypeColorSwatches,
 ];
 
-export const Markdown = memo(function Markdown({ text }: { text: string }) {
+/**
+ * `onLinkClick` lets a host (the documentation reader) route links itself
+ * instead of opening the source preview. Omitted — as every transcript call site
+ * does — behaviour is exactly the store's `openFilePreview`. Keep it referentially
+ * stable: this component is memo'd.
+ */
+export const Markdown = memo(function Markdown({
+  text,
+  onLinkClick,
+}: {
+  text: string;
+  onLinkClick?: (href: string) => void;
+}) {
   return (
     <Typography fz="sm" className="md-body">
       <ReactMarkdown
@@ -30,7 +43,22 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
                   style={{ cursor: 'pointer' }}
                   onClick={(e) => {
                     e.preventDefault();
-                    useStore.getState().openFilePreview(filepath);
+                    if (onLinkClick) onLinkClick(filepath);
+                    else useStore.getState().openFilePreview(filepath);
+                  }}
+                >
+                  {children}
+                </a>
+              );
+            }
+            if (onLinkClick && href && !isExternalHref(href)) {
+              return (
+                <a
+                  href="#"
+                  style={{ cursor: 'pointer' }}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onLinkClick(href);
                   }}
                 >
                   {children}

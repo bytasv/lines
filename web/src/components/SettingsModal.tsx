@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   ActionIcon,
   Button,
@@ -23,7 +24,13 @@ import { modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { send } from '../ws';
 
-export type SettingsSection = 'account' | 'sessions' | 'transcript' | 'notifications' | 'allowlist';
+export type SettingsSection =
+  | 'account'
+  | 'sessions'
+  | 'transcript'
+  | 'notifications'
+  | 'allowlist'
+  | 'docs';
 
 const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   { value: 'account', label: 'Account' },
@@ -31,6 +38,7 @@ const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   { value: 'transcript', label: 'Transcript' },
   { value: 'notifications', label: 'Notifications' },
   { value: 'allowlist', label: 'Auto-mode allowlist' },
+  { value: 'docs', label: 'Documentation' },
 ];
 
 export function SettingsModal({
@@ -111,6 +119,7 @@ export function SettingsModal({
             {section === 'sessions' && <SessionsSection />}
             {section === 'transcript' && <TranscriptSection />}
             {section === 'notifications' && <NotificationsSection />}
+            {section === 'docs' && <DocsSection onClose={onClose} />}
             {section === 'allowlist' && (
               <GuardAllowlistSection
                 onOpenReview={() => {
@@ -155,6 +164,44 @@ function AccountSection({ onClose }: { onClose: () => void }) {
         Sign in…
       </Button>
     </Group>
+  );
+}
+
+/** Hand-off to the documentation reader — close first, like the sign-in and allowlist-review buttons. */
+function DocsSection({ onClose }: { onClose: () => void }) {
+  const activeProject = useStore((s) => s.activeProject);
+  const navigate = useNavigate();
+
+  return (
+    <>
+      <Text size="xs" fw={600} c="dimmed" tt="uppercase">
+        Documentation
+      </Text>
+      <Text size="sm" c="dimmed">
+        Read the active project’s docs/ folder in the app — feature index, doc tree, and full-text
+        search.
+      </Text>
+      <Text size="xs" c="dimmed" ff="monospace" truncate>
+        {activeProject ? `${activeProject}/docs` : 'No project open'}
+      </Text>
+      <Group>
+        <Button
+          size="xs"
+          disabled={!activeProject}
+          onClick={() => {
+            onClose();
+            navigate('/docs');
+          }}
+        >
+          Open documentation
+        </Button>
+        {!activeProject && (
+          <Text size="xs" c="dimmed">
+            Open a project first.
+          </Text>
+        )}
+      </Group>
+    </>
   );
 }
 

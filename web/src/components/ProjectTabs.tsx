@@ -12,8 +12,24 @@ import {
   Tooltip,
   useMantineColorScheme,
 } from '@mantine/core';
-import { IconFolder, IconFolderOpen, IconMoon, IconPlus, IconSettings, IconSun } from '@tabler/icons-react';
+import {
+  IconBooks,
+  IconDots,
+  IconFolder,
+  IconFolderMinus,
+  IconFolderOpen,
+  IconFolderPlus,
+  IconFolders,
+  IconMoon,
+  IconPlus,
+  IconSettings,
+  IconSun,
+} from '@tabler/icons-react';
 import { useState, type CSSProperties } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import type { Project } from '@lines/shared';
+import { projectRoots } from '@lines/shared';
+import { ConfirmModal } from './ConfirmModal';
 import { projectStatusMeta } from '../lib/format';
 import { sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
@@ -26,8 +42,12 @@ function baseName(path: string) {
   return path.split('/').filter(Boolean).pop() ?? path;
 }
 
-function ProjectTab({ path, active }: { path: string; active: boolean }) {
+function ProjectTab({ project, active }: { project: Project; active: boolean }) {
+  const path = project.path;
+  const extraRoots = project.extraRoots ?? [];
   const setActiveProject = useStore((s) => s.setActiveProject);
+  const setFolderPickPending = useStore((s) => s.setFolderPickPending);
+  const setFolderPickTarget = useStore((s) => s.setFolderPickTarget);
   const sessions = useStore((s) => s.sessions);
   const projectKeys = useStore((s) => s.projectKeys);
   const seen = useStore((s) => s.seenSessionStatus);
@@ -36,54 +56,136 @@ function ProjectTab({ path, active }: { path: string; active: boolean }) {
   // marked those states seen, and only a state the user hasn't seen re-lights it.
   const status = active
     ? null
-    : projectStatusMeta(sessionsInProject(sessions, projectKeys, path), seen);
+    : projectStatusMeta(sessionsInProject(sessions, projectKeys, project), seen);
+  // The label stays the primary's basename; the tooltip is where every root fits.
+  const rootList = projectRoots(project).join('\n');
+
+  const addFolder = () => {
+    setFolderPickTarget(path);
+    setFolderPickPending(true);
+    send({ type: 'pickFolder' });
+  };
+
+  // The root awaiting confirmation. Removal widens/narrows what every session in
+  // this tab may write to, so it goes through the same gate as deleting a step.
+  const [pendingRemove, setPendingRemove] = useState<string | null>(null);
 
   return (
-    <Tooltip label={status ? `${path} — ${status.label}` : path} openDelay={500}>
-      <Box
-        onClick={() => setActiveProject(path)}
-        px={8}
-        py={3}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          borderRadius: 6,
-          cursor: 'pointer',
-          whiteSpace: 'nowrap',
-          background: active ? 'var(--mantine-color-default-hover)' : undefined,
-        }}
+    <>
+      <Tooltip
+        label={status ? `${rootList} — ${status.label}` : rootList}
+        openDelay={500}
+        multiline
+        // `multiline` alone collapses the newlines between roots.
+        styles={{ tooltip: { whiteSpace: 'pre-line' } }}
       >
-        {/* Fixed-width slot so the tab doesn't jitter as 13px icon ↔ 8px dot swap. */}
-        <Center w={13} style={{ flex: '0 0 13px' }}>
-          {status ? (
-            // Every dot rendered here is actionable by construction — always pulse.
-            <span
-              className="status-dot"
-              data-pulse
-              style={
-                {
-                  '--status-dot-color': `var(--mantine-color-${status.color}-6)`,
-                  '--status-pulse-color': `var(--mantine-color-${status.color}-5)`,
-                } as CSSProperties
-              }
-            />
-          ) : (
-            <IconFolder size={13} opacity={0.6} />
-          )}
-        </Center>
-        <Text size="xs" fw={active ? 600 : 400}>
-          {baseName(path)}
-        </Text>
-        <CloseButton
-          size={14}
-          onClick={(e) => {
-            e.stopPropagation();
-            send({ type: 'closeProject', path });
+        <Box
+          onClick={() => setActiveProject(path)}
+          px={8}
+          py={3}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            borderRadius: 6,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+            background: active ? 'var(--mantine-color-default-hover)' : undefined,
           }}
-        />
-      </Box>
-    </Tooltip>
+        >
+          {/* Fixed-width slot so the tab doesn't jitter as 13px icon ↔ 8px dot swap. */}
+          <Center w={13} style={{ flex: '0 0 13px' }}>
+            {status ? (
+              // Every dot rendered here is actionable by construction — always pulse.
+              <span
+                className="status-dot"
+                data-pulse
+                style={
+                  {
+                    '--status-dot-color': `var(--mantine-color-${status.color}-6)`,
+                    '--status-pulse-color': `var(--mantine-color-${status.color}-5)`,
+                  } as CSSProperties
+                }
+              />
+            ) : extraRoots.length ? (
+              // Stacked folders: this tab is a workspace spanning several roots, so
+              // its sessions can write outside the folder the label names.
+              <IconFolders size={13} opacity={0.6} />
+            ) : (
+              <IconFolder size={13} opacity={0.6} />
+            )}
+          </Center>
+          <Text size="xs" fw={active ? 600 : 400}>
+            {baseName(path)}
+          </Text>
+          {/* Roots menu. Clicks are stopped on both the trigger and the dropdown —
+              a portalled dropdown still bubbles through the React tree, so without
+              it managing folders would double as "switch to this tab". */}
+          <Menu position="bottom-start" width={320} withinPortal>
+            <Menu.Target>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size={14}
+                aria-label="Project folders"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <IconDots size={12} />
+              </ActionIcon>
+            </Menu.Target>
+            <Menu.Dropdown onClick={(e) => e.stopPropagation()}>
+              <Menu.Item leftSection={<IconFolderPlus size={14} />} onClick={addFolder}>
+                Add folder…
+              </Menu.Item>
+              {/* Only the extra roots are listed: the primary is the project's
+                  identity and can't be removed, only closed. */}
+              {extraRoots.length > 0 && <Menu.Label>Extra folders</Menu.Label>}
+              {extraRoots.map((root) => (
+                // Each row is a named action, not a bare path that happens to be
+                // destructive. A CloseButton in rightSection would nest a <button>
+                // inside Menu.Item's own <button> — invalid markup, and the click
+                // lands on one or the other depending on the exact pixel.
+                <Menu.Item
+                  key={root}
+                  color="red"
+                  leftSection={<IconFolderMinus size={14} />}
+                  onClick={() => setPendingRemove(root)}
+                >
+                  <Text size="xs">
+                    Remove{' '}
+                    {/* truncate="start" keeps the tail: the distinctive part of a path. */}
+                    <Text span ff="monospace" truncate="start">
+                      {root}
+                    </Text>
+                  </Text>
+                </Menu.Item>
+              ))}
+            </Menu.Dropdown>
+          </Menu>
+          <CloseButton
+            size={14}
+            onClick={(e) => {
+              e.stopPropagation();
+              send({ type: 'closeProject', path });
+            }}
+          />
+        </Box>
+      </Tooltip>
+      {/* Outside the tab's Box on purpose: a click inside the modal would otherwise
+          bubble up to the Box's onClick and switch projects behind the dialog. */}
+      <ConfirmModal
+        opened={pendingRemove !== null}
+        title="Remove folder"
+        message={`Remove ${pendingRemove ?? ''} from this project? Sessions in this tab lose access to it — nothing on disk is deleted.`}
+        confirmLabel="Remove"
+        confirmColor="red"
+        onConfirm={() => {
+          send({ type: 'removeProjectRoot', project: path, path: pendingRemove! });
+          setPendingRemove(null);
+        }}
+        onCancel={() => setPendingRemove(null)}
+      />
+    </>
   );
 }
 
@@ -93,8 +195,10 @@ export function ProjectTabs() {
   const recentDirs = useStore((s) => s.recentDirs);
   const folderPickPending = useStore((s) => s.folderPickPending);
   const setFolderPickPending = useStore((s) => s.setFolderPickPending);
+  const setFolderPickTarget = useStore((s) => s.setFolderPickTarget);
 
   const browse = () => {
+    setFolderPickTarget(null); // a plain browse opens a project rather than widening one
     setFolderPickPending(true);
     send({ type: 'pickFolder' });
   };
@@ -102,7 +206,7 @@ export function ProjectTabs() {
     send({ type: 'openProject', path: dir });
     useStore.getState().setActiveProject(dir);
   };
-  const recents = recentDirs.filter((d) => !projects.includes(d)).slice(0, 8);
+  const recents = recentDirs.filter((d) => !projects.some((p) => p.path === d)).slice(0, 8);
 
   return (
     <Group h="100%" px="sm" gap="sm" wrap="nowrap">
@@ -129,7 +233,7 @@ export function ProjectTabs() {
       <ScrollArea type="never" style={{ flex: 1 }}>
         <Group gap={4} wrap="nowrap">
           {projects.map((p) => (
-            <ProjectTab key={p} path={p} active={p === activeProject} />
+            <ProjectTab key={p.path} project={p} active={p.path === activeProject} />
           ))}
           <Menu position="bottom-start" width={320}>
             <Menu.Target>
@@ -156,10 +260,32 @@ export function ProjectTabs() {
         </Group>
       </ScrollArea>
       <UsageIndicator />
+      <DocsButton />
       <ThemeToggle />
       <SettingsButton />
       <UserMenu />
     </Group>
+  );
+}
+
+/** Direct route into the documentation reader; Settings carries the same entry point. */
+function DocsButton() {
+  const navigate = useNavigate();
+  const activeProject = useStore((s) => s.activeProject);
+  const onDocs = useLocation().pathname.startsWith('/docs');
+  return (
+    <Tooltip label={activeProject ? 'Documentation' : 'Open a project to read its docs'}>
+      <ActionIcon
+        variant={onDocs ? 'light' : 'subtle'}
+        color="gray"
+        size="sm"
+        aria-label="Documentation"
+        disabled={!activeProject}
+        onClick={() => navigate('/docs')}
+      >
+        <IconBooks size={14} />
+      </ActionIcon>
+    </Tooltip>
   );
 }
 
