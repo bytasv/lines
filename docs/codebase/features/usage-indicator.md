@@ -42,7 +42,9 @@ None. No test infrastructure covers this at time of writing; natural first targe
 - No login → no chip. Enforced both server-side (poller never fetches without a session,
   logout nulls the snapshot) and client-side (`UsageIndicator` gates on `auth.loggedIn`).
 - `{type: 'usage', usage: null}` means auth is gone (logout or a revoked/expired OAuth
-  session) — nothing else.
+  session) — nothing else. The poller is no longer the only discoverer of a dead session:
+  a turn rejected for a bad token now recovers or logs out on the spot (see
+  `features/auth-failure-recovery.md`).
 - A stale snapshot survives transient fetch failures (network blips, non-2xx responses);
   staleness is communicated to the user via "Updated Xm ago" in the hover card, never by
   hiding the chip.
@@ -54,6 +56,9 @@ None. No test infrastructure covers this at time of writing; natural first targe
 
 None beyond existing `sessionUpsert`-style broadcast conventions — no new message types were
 introduced for this feature.
+
+The hover card also carries a "Spend by model" section (see [[usage-by-model]]); it inherits this
+feature's login gate rather than checking `auth.loggedIn` a second time.
 
 ## Related decisions
 

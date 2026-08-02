@@ -35,3 +35,4 @@
 | `permission-resolution-provenance` | Closes every path an ExitPlanMode/AskUserQuestion request could be resolved without a human clicking, and records how every permission resolution happened | [features/permission-resolution-provenance.md](features/permission-resolution-provenance.md) |
 | `multi-root-projects` | One project tab spans several folders — sessions read/write all of them, with the file tree, `@mention`, and `/find` covering every root | [features/multi-root-projects.md](features/multi-root-projects.md) |
 | `multi-repo-commits` | Workflow steps group a multi-root session's folders into git commit units by work tree, with a per-repo `{diff}` and a new `{roots}` prompt token | [features/multi-repo-commits.md](features/multi-repo-commits.md) |
+| `usage-by-model` | Chat-turn spend split by model, shown as a "Spend by model" section in the plan-usage hover card | [features/usage-by-model.md](features/usage-by-model.md) |

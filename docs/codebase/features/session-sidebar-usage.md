@@ -73,6 +73,9 @@ to 0 both when a turn's `result` consumes it and whenever a turn dies without a 
 (worker crash/error, interrupt, or reconcile-on-reconnect), so stale wait time from a dead turn
 never leaks into the next turn's deduction.
 
+The same accumulate-on-`result` pass also splits spend by model onto `SessionMeta.costByModel` —
+see [[usage-by-model]].
+
 ## Related decisions
 
 None recorded.

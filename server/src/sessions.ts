@@ -21,6 +21,7 @@ import type {
   TranscriptEvent,
 } from '@lines/shared';
 import {
+  addSpend,
   contextCompactBlock,
   isPlanFilePath,
   isSessionActive,
@@ -137,6 +138,24 @@ export function extractCompactBoundary(
     preTokens: num(md.pre_tokens),
     postTokens: num(md.post_tokens),
   };
+}
+
+/** Cap on a persisted, synced compact_error — it rides SessionMeta everywhere. */
+const COMPACT_ERROR_MAX = 200;
+
+/**
+ * Compaction outcome from an SDK `system`/`status` message — the authoritative
+ * signal, unlike the absence of a boundary. Undefined for any other message and
+ * for status messages that carry no compact verdict.
+ */
+export function extractCompactStatus(
+  msg: Record<string, unknown>,
+): { result: 'success' | 'failed'; error?: string } | undefined {
+  if (msg.type !== 'system' || msg.subtype !== 'status') return undefined;
+  const result = msg.compact_result;
+  if (result !== 'success' && result !== 'failed') return undefined;
+  const error = typeof msg.compact_error === 'string' ? msg.compact_error : undefined;
+  return { result, error: error ? error.slice(0, COMPACT_ERROR_MAX) : undefined };
 }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
@@ -485,6 +504,8 @@ export class SessionManager {
       // An advance in flight belonged to the previous process — nothing is
       // consolidating now, so a persisted flag would wedge the Approve loader.
       if (meta.workflow) meta.workflow.advancing = false;
+      // A verdict from a previous process proved nothing durable about this one.
+      if (meta.contextCompact?.ok === false) meta.contextCompact = undefined;
       this.sessions.set(meta.id, meta);
     }
   }
@@ -549,6 +570,9 @@ export class SessionManager {
     meta.pendingPermissionTool = undefined;
     // Same reasoning: only the instance actually consolidating is advancing.
     if (meta.workflow) meta.workflow.advancing = false;
+    // A failure verdict belongs to the CLI conversation that produced it, on
+    // whichever device that was — it must not disable the button here.
+    if (meta.contextCompact?.ok === false) meta.contextCompact = undefined;
     this.sessions.set(meta.id, meta);
     this.persist();
     this.broadcast({ type: 'sessionUpsert', session: meta });
@@ -1121,9 +1145,10 @@ export class SessionManager {
    * The mechanism is the CLI's own: `/compact` dispatches from ordinary prompt
    * text (`supportsNonInteractive` + `thinClientDispatch: "post-text"`), so the
    * push below is the same path a prompt takes. That is reverse-engineered, not a
-   * published SDK contract — hence nothing here assumes it worked. A turn that
-   * settles without a `compact_boundary` records `ok: false`, which flips this
-   * guard to `unsupported` for every later call.
+   * published SDK contract — hence nothing here assumes it worked. Only an
+   * explicit SDK `compact_result: 'failed'` records `ok: false`, which flips this
+   * guard to `unsupported` for the rest of this CLI conversation; a turn that just
+   * settles quietly is inconclusive and leaves the button clickable.
    */
   compactContext(sessionId: string): { ok: true } | ({ ok: false } & ContextCompactBlockInfo) {
     const meta = this.sessions.get(sessionId);
@@ -1185,6 +1210,9 @@ export class SessionManager {
     // The occupancy readings now describe a conversation that is gone; they stay
     // (a fresh step's overhead is close to the old floor) but render as stale.
     meta.contextResetAt = Date.now();
+    // A fresh CLI conversation is a fresh verdict: whatever compaction did or
+    // didn't do in the old one says nothing about this one.
+    meta.contextCompact = undefined;
     this.worker.close(sessionId);
   }
 
@@ -1989,24 +2017,39 @@ export class SessionManager {
       state.compactedInTurn = true;
     }
 
-    if (msg.type === 'result') {
-      // The compaction turn settled without a boundary: the mechanism didn't
-      // work here (DISABLE_COMPACT, or an SDK that dropped the behaviour). Record
-      // it — that is what flips the button to permanently-disabled-with-a-reason
-      // instead of leaving the user clicking a button that does nothing.
-      if (this.compacting.delete(sessionId)) {
-        const metaC = this.sessions.get(sessionId);
-        if (metaC) {
-          metaC.contextCompact = { at: Date.now(), trigger: 'manual', ok: false };
-          this.upsert(metaC);
-        }
-        this.emitEvent(sessionId, 'context-compact', {
-          phase: 'done',
-          trigger: 'manual',
-          ok: false,
-          error: 'no-compact-boundary',
-        } satisfies ContextCompactData);
+    // The SDK's own verdict on the compaction we asked for. Unlike a missing
+    // boundary this is conclusive, so it is the only thing allowed to condemn the
+    // mechanism. The boundary branch above already left `compacting`, so a turn
+    // that produced a real boundary can't be handled twice.
+    const status = extractCompactStatus(msg);
+    if (status && meta && this.compacting.has(sessionId)) {
+      const at = Date.now();
+      const ok = status.result === 'success';
+      meta.contextCompact = ok
+        ? { at, trigger: 'manual', ok: true }
+        : { at, trigger: 'manual', ok: false, error: status.error };
+      this.upsert(meta);
+      this.emitEvent(sessionId, 'context-compact', {
+        phase: 'done',
+        trigger: 'manual',
+        ok,
+        ...(status.error ? { error: status.error } : {}),
+      } satisfies ContextCompactData);
+      this.compacting.delete(sessionId);
+      if (ok) {
+        // Same reasoning as the boundary branch: this turn's readings describe the
+        // conversation that was just summarized away.
+        const state = this.liveState(sessionId);
+        state.contextUsage = undefined;
+        state.compactedInTurn = true;
       }
+    }
+
+    if (msg.type === 'result') {
+      // No boundary and no status verdict: inconclusive, not unsupported. Close the
+      // span so a later turn scan isn't bounded by an orphan marker, but write no
+      // record — condemning the mechanism on silence is what wedged the button.
+      this.abandonCompaction(sessionId, 'no-compact-boundary');
       // The SDK can surface a rejected token as an error result instead of throwing;
       // Retry already renders for these, only the login prompt is missing.
       const failed = msg.is_error === true || (msg.subtype != null && msg.subtype !== 'success');
@@ -2029,14 +2072,23 @@ export class SessionManager {
             cache_read_input_tokens?: number;
           };
         }).usage;
+        let turnTokens: number | undefined;
         if (usage) {
-          const turnTokens =
+          turnTokens =
             (usage.input_tokens ?? 0) +
             (usage.output_tokens ?? 0) +
             (usage.cache_creation_input_tokens ?? 0) +
             (usage.cache_read_input_tokens ?? 0);
           metaNow.lastTokens = turnTokens;
           metaNow.totalTokens = (metaNow.totalTokens ?? 0) + turnTokens;
+        }
+        // Same accumulate-on-result pass that owns totalCostUsd — keyed by the
+        // model the turn ran on. resolveModelId keeps a retired stored id from
+        // opening a second row for what is really one model. A result carrying
+        // neither number opens no row at all.
+        if (typeof cost === 'number' || turnTokens != null) {
+          metaNow.costByModel ??= {};
+          addSpend(metaNow.costByModel, resolveModelId(metaNow.model), cost ?? 0, turnTokens ?? 0);
         }
         // Occupancy settles here, from the turn's last assistant message —
         // never from the usage above, which is cumulative across API calls.

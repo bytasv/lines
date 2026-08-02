@@ -9,9 +9,11 @@ import {
   Text,
   UnstyledButton,
 } from '@mantine/core';
+import { mergeSpend, sortedSpend } from '@lines/shared';
+import type { ModelOption, ModelSpend } from '@lines/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
-import { usageColor } from '../lib/format';
+import { formatTokens, usageColor } from '../lib/format';
 
 const WINDOW_LABELS: Record<string, string> = {
   five_hour: 'Session (5h)',
@@ -41,11 +43,43 @@ function formatAgo(ts: number): string {
   return `Updated ${mins}m ago`;
 }
 
+/** Human label for a spend row; a retired or unknown id still shows as itself. */
+function modelLabel(id: string, models: ModelOption[]): string {
+  return models.find((m) => m.id === id)?.label ?? id;
+}
+
+function SpendRows({ rows, models }: { rows: [string, ModelSpend][]; models: ModelOption[] }) {
+  return (
+    <>
+      {rows.map(([id, spend]) => (
+        <Group key={id} justify="space-between" gap="xs">
+          <Text size="xs" truncate>
+            {modelLabel(id, models)}
+          </Text>
+          <Text size="xs" c="dimmed">
+            ${spend.costUsd.toFixed(2)} · {formatTokens(spend.tokens)}
+          </Text>
+        </Group>
+      ))}
+    </>
+  );
+}
+
 export function UsageIndicator() {
   const usage = useStore((s) => s.usage);
   const auth = useStore((s) => s.auth);
+  const sessions = useStore((s) => s.sessions);
+  const models = useStore((s) => s.models);
+  const selectedSessionId = useStore((s) => s.selectedSessionId);
   // No login → no chip, independent of usage-message timing (also covers API-key users).
   if (!auth?.loggedIn || !usage || usage.windows.length === 0) return null;
+
+  // Rollup over the sessions the store already holds — deleting a session drops
+  // its spend, and a session that hasn't had a turn since `costByModel` existed
+  // contributes nothing.
+  const globalRows = sortedSpend(mergeSpend(Object.values(sessions).map((s) => s.costByModel)));
+  const selected = selectedSessionId ? sessions[selectedSessionId] : undefined;
+  const sessionRows = sortedSpend(selected?.costByModel ?? {});
 
   const worst = usage.windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), usage.windows[0]);
   const primary = usage.windows.find((w) => w.id === 'five_hour') ?? worst;
@@ -93,6 +127,24 @@ export function UsageIndicator() {
               </div>
             );
           })}
+          {globalRows.length > 0 && (
+            <>
+              <Divider />
+              <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+                Spend by model
+              </Text>
+              <SpendRows rows={globalRows} models={models} />
+              {/* A single-model session adds nothing over the sidebar's own total. */}
+              {sessionRows.length > 1 && (
+                <>
+                  <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+                    This session
+                  </Text>
+                  <SpendRows rows={sessionRows} models={models} />
+                </>
+              )}
+            </>
+          )}
           <Text size="xs" c="dimmed">
             {formatAgo(usage.fetchedAt)}
           </Text>

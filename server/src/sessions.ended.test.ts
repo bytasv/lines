@@ -108,3 +108,44 @@ test('a successful result message does not notify auth', () => {
   h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success', result: 'done' });
   assert.equal(h.rejections(), 0);
 });
+
+/** A settled turn's cost/usage payload, the shape the by-model split reads. */
+const settled = (costUsd: number, inputTokens: number) => ({
+  type: 'result',
+  subtype: 'success',
+  result: 'done',
+  total_cost_usd: costUsd,
+  usage: { input_tokens: inputTokens, output_tokens: 0 },
+});
+
+test('a settled turn splits its spend under the session model', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', settled(0.4, 1_000));
+  h.sessions.handleWorkerEvent('s1', settled(0.6, 500));
+
+  const meta = h.sessions.get('s1')!;
+  assert.deepEqual(meta.costByModel, {
+    'claude-opus-5': { costUsd: 1, tokens: 1_500, turns: 2 },
+  });
+  const summed = Object.values(meta.costByModel!).reduce((n, s) => n + s.costUsd, 0);
+  assert.equal(summed, meta.totalCostUsd);
+});
+
+test('switching model mid-session opens a second row instead of moving the first', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', settled(0.4, 1_000));
+  h.sessions.setModel('s1', 'claude-haiku-4-5');
+  h.sessions.handleWorkerEvent('s1', settled(0.01, 200));
+
+  const meta = h.sessions.get('s1')!;
+  assert.deepEqual(meta.costByModel, {
+    'claude-opus-5': { costUsd: 0.4, tokens: 1_000, turns: 1 },
+    'claude-haiku-4-5': { costUsd: 0.01, tokens: 200, turns: 1 },
+  });
+});
+
+test('a result carrying neither cost nor usage opens no row', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success', result: 'done' });
+  assert.equal(h.sessions.get('s1')!.costByModel, undefined);
+});

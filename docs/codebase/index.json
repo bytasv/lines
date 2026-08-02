@@ -105,7 +105,9 @@
         "hello may carry usage: null before the poller's first fetch completes (e.g. after a server restart); a logged-in client keeps its previously held snapshot instead of clearing it"
       ],
       "architecturalRules": [],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "usage-by-model"
+      ]
     },
     {
       "id": "session-sidebar-usage",
@@ -139,7 +141,9 @@
         "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction",
         "permission-wait time is deducted via LiveState.permissionWaitMs (measured from askPermission call to resolution) rather than switching to the SDK's duration_api_ms, which would also strip genuine tool-execution time"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "usage-by-model"
+      ]
     },
     {
       "id": "workflow-step-update-popover",
@@ -496,7 +500,9 @@
         "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction",
         "permission-wait time is deducted via LiveState.permissionWaitMs rather than the SDK's duration_api_ms, which would also strip genuine tool-execution time"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "usage-by-model"
+      ]
     },
     {
       "id": "transcript-markdown-rendering",
@@ -1649,6 +1655,45 @@
         "existing transcripts already carry parent_tool_use_id on disk (persisted verbatim by the worker), so this feature is a pure read-side reinterpretation with no new capture and no migration",
         "no agents option was added to buildQueryOptions; subagent definitions are inherited via settingSources, the same mechanism that already inherits the rest of the preset",
         "nested rendering is threaded down as a renderNested callback rather than a new shared module, since ToolCallCard cannot import Transcript.tsx's Item without an import cycle"
+      ],
+      "relatedDecisions": []
+    },
+    {
+      "id": "usage-by-model",
+      "name": "Usage by model",
+      "doc": "features/usage-by-model.md",
+      "purpose": "Split chat-turn spend by the model that produced it, shown as a per-model breakdown in the plan-usage hover card.",
+      "entryPoints": [
+        "web/src/components/UsageIndicator.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "shared/usageByModel.ts",
+        "server/src/sessions.ts",
+        "web/src/components/UsageIndicator.tsx"
+      ],
+      "symbols": [
+        "ModelSpend",
+        "ModelSpendMap",
+        "SessionMeta.costByModel",
+        "addSpend",
+        "mergeSpend",
+        "sortedSpend"
+      ],
+      "tests": [
+        "server/src/usageByModel.test.ts",
+        "server/src/sessions.ended.test.ts"
+      ],
+      "businessRules": [
+        "rows keyed by resolveModelId(meta.model), so a retired stored model id folds into its replacement's row",
+        "helper-query spend (autoName, summarizeTurn, step-output consolidation) is excluded \u2014 the table is chat-turn spend only, not full account spend",
+        "costByModel is additive and never backfilled; existing sessions show nothing until their next turn settles",
+        "the global rollup is derived client-side from the sessions the store already holds, so deleting a session removes its spend",
+        "a result carrying neither cost nor usage opens no row"
+      ],
+      "architecturalRules": [
+        "reuses the existing accumulate-on-result pass in server/src/sessions.ts that already owns totalCostUsd/totalTokens, instead of a new tracking mechanism",
+        "no new persistence and no new ws message \u2014 costByModel travels inside the existing SessionMeta blob"
       ],
       "relatedDecisions": []
     }

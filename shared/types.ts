@@ -382,9 +382,11 @@ export interface ContextCompactRecord {
   trigger: 'manual' | 'auto';
   preTokens?: number;
   postTokens?: number;
-  /** false = the request produced no compaction (see contextCompactBlock's
-   *  `unsupported`), which permanently disables the manual button. */
+  /** false = the SDK reported the compaction failed (see contextCompactBlock's
+   *  `unsupported`), which disables the manual button for this CLI conversation. */
   ok: boolean;
+  /** SDK-reported failure text (compact_error), capped. Only set when ok:false. */
+  error?: string;
 }
 
 /** Transcript-event payload for a compaction (kind: 'context-compact'). */
@@ -397,6 +399,16 @@ export interface ContextCompactData {
   ok?: boolean;
   error?: string;
 }
+
+/** Chat-turn spend for one model id. Internal helper queries are not counted. */
+export interface ModelSpend {
+  costUsd: number;
+  tokens: number;
+  turns: number;
+}
+
+/** Per-model spend rows, keyed by resolved model id. See `./usageByModel.ts`. */
+export type ModelSpendMap = Record<string, ModelSpend>;
 
 export interface SessionMeta {
   id: string;
@@ -413,6 +425,9 @@ export interface SessionMeta {
   workflow?: WorkflowState;
   lastCostUsd?: number;
   totalCostUsd?: number;
+  /** `totalCostUsd` split by the model each turn ran on. Additive and never
+   *  backfilled — a session shows nothing here until its next turn settles. */
+  costByModel?: ModelSpendMap;
   /** Tokens spent by the most recent turn (input + output + cache), matching
    *  the `totalTokens` composition. */
   lastTokens?: number;
@@ -1140,7 +1155,13 @@ export function contextCompactBlock(
   if (!meta.claudeSessionId) return { code: 'no-session', reason: NOTHING_TO_COMPACT };
   if (!effectiveContextTokens(meta)) return { code: 'no-reading', reason: NOTHING_TO_COMPACT };
   if (meta.contextCompact?.ok === false) {
-    return { code: 'unsupported', reason: "Compaction isn't available in this session." };
+    const why = meta.contextCompact.error;
+    return {
+      code: 'unsupported',
+      reason: why
+        ? `Compaction isn't available in this session — ${why}`
+        : "Compaction isn't available in this session.",
+    };
   }
   return null;
 }
@@ -1151,6 +1172,13 @@ export function canCompactContext(
 ): boolean {
   return contextCompactBlock(meta) === null;
 }
+
+/**
+ * Per-model spend helpers, re-exported so callers get them alongside
+ * `ModelSpendMap`. Safe above the cycle-sensitive block below: `usageByModel.ts`
+ * imports only types from here, so nothing of ours is read at its top level.
+ */
+export { addSpend, mergeSpend, sortedSpend } from './usageByModel.ts';
 
 /**
  * Workflow/step validation, re-exported so a caller gets the rules from the same

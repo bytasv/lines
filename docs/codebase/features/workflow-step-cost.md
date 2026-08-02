@@ -52,6 +52,9 @@ None. No test infrastructure covers `WorkflowStepper` rendering at time of writi
 - Tokens and duration follow the identical pattern via `SessionMeta.lastTokens` / `lastDurationMs`, mirroring `lastCostUsd` rather than introducing a separate tracking mechanism.
 - Duration is sourced from the SDK `result` event's `duration_ms`, not clock math against `turnStartedAt`, so it excludes idle time by construction; permission-wait time is deducted via `LiveState.permissionWaitMs` (see [[session-sidebar-usage]]) rather than switching to the SDK's `duration_api_ms`, since that would also strip genuine tool-execution time, not just approval wait.
 
+The same accumulate-on-`result` pass in `server/src/sessions.ts` also splits spend by model onto
+`SessionMeta.costByModel` — see [[usage-by-model]].
+
 ## Related decisions
 
 None.
