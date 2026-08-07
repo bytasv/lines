@@ -290,6 +290,12 @@ export interface WorkflowState {
   /** Consolidated final output of the last-completed step; consumed as {previous}
    *  by the next fresh-start step. Falls back to lastAssistantText when absent. */
   lastStepOutput?: string;
+  /** Set when the current step parked because it *failed* rather than finishing, so
+   *  a one-click Retry knows what to re-run. 'turn' = its turn failed, so Retry
+   *  re-sends that prompt as a follow-up; 'pre-run' = the step never got a prompt
+   *  (unresolved ref, missing `{outputs.*}`), so Retry re-renders it from scratch.
+   *  Cleared the moment the step runs again or the workflow moves on. */
+  stepFailure?: 'pre-run' | 'turn';
 }
 
 /**
@@ -593,6 +599,9 @@ export interface WorkflowMarkerData {
   /** Set on a 'waiting-approval' the step was parked with *before* running: the
    *  `{outputs.<name>}` names its template referenced but no earlier step published. */
   missingOutputs?: string[];
+  /** Set on a 'waiting-approval' the step parked into because its turn *failed*,
+   *  so the divider says so instead of "waiting for your approval". */
+  failed?: boolean;
 }
 
 /** Response body of the bridge's GET /file endpoint (clickable file-path preview). */

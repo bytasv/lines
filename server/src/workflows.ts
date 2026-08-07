@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   PromptAttachment,
   ServerMessage,
+  SessionMeta,
   StepContent,
   StepDef,
   StepRef,
@@ -9,10 +10,17 @@ import type {
   WorkflowMarkerData,
   WorkflowState,
 } from '@lines/shared';
-import { isSessionActive, isStepRef } from '@lines/shared';
+import { isSessionActive, isStepRef, rootsForCwd } from '@lines/shared';
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
-import { captureBaseline, workingTreeDiff } from './git.ts';
+import {
+  captureBaselines,
+  groupByRepo,
+  multiRepoDiff,
+  repoBranch,
+  type RepoBaseline,
+  type RepoGroup,
+} from './git.ts';
 
 const stepKey = (ownerId: string, id: string, version: number) => `${ownerId}/${id}/${version}`;
 
@@ -33,12 +41,52 @@ function sameContent(a: StepContent, b: StepContent): boolean {
  * True when a template threads the hand-off in itself — via `{previous}`/`{diff}` or
  * any `{outputs.*}` — so `runStep` must not also auto-prepend it. Tested against the
  * template: after substitution the tokens are gone.
+ *
+ * `{roots}` is deliberately NOT here: it is static workspace shape, not a
+ * hand-off, so a template using only `{roots}` should still get the auto-prepend.
  */
 export function usesHandoffTokens(template: string): boolean {
   return /\{previous\}|\{diff\}|\{outputs\./.test(template);
 }
 
-const TOKEN_RE = /\{(task|feedback|previous|diff|outputs\.[\w-]+)\}/g;
+const TOKEN_RE = /\{(task|feedback|previous|diff|roots|outputs\.[\w-]+)\}/g;
+
+/** Cheap pre-check so a template that never mentions {roots} costs no git calls. */
+const USES_ROOTS_RE = /\{roots\}/;
+
+/**
+ * The workspace as a step needs to understand it: which folders are in scope,
+ * which work tree each belongs to, and therefore how many commits the work can
+ * produce. Formatting lives here rather than in git.ts, which stays pure git.
+ *
+ * Bash never leaves the session's cwd — `additionalDirectories` grants file-tool
+ * access, not a shell — so the `git -C` instruction is the whole point of this
+ * block: without it a step's bare `git status` silently sees only one repo.
+ */
+function renderRoots(
+  repos: RepoGroup[],
+  orphans: string[],
+  branches: Map<string, string | null>,
+  cwd: string,
+): string {
+  const lines: string[] = ['# Workspace roots', ''];
+  for (const repo of repos) {
+    for (const root of repo.roots) {
+      const branch = branches.get(repo.root);
+      const primary = root === cwd ? 'primary, session cwd; ' : '';
+      lines.push(`- ${root} — ${primary}repo ${repo.root}${branch ? ` (${branch})` : ''}`);
+    }
+  }
+  for (const root of orphans) {
+    lines.push(`- ${root} — ${root === cwd ? 'primary, session cwd; ' : ''}not a git repository`);
+  }
+  lines.push(
+    '',
+    `${repos.length} commit unit${repos.length === 1 ? '' : 's'}. Bash runs in the primary root, so scope every git command`,
+    'with `git -C <repo root>`.',
+  );
+  return lines.join('\n');
+}
 
 /**
  * Fill every prompt token in ONE pass over the template. Single-pass is the whole
@@ -55,7 +103,7 @@ const TOKEN_RE = /\{(task|feedback|previous|diff|outputs\.[\w-]+)\}/g;
  */
 export function substituteTokens(
   template: string,
-  values: { task: string; feedback: string; previous: string; diff: string },
+  values: { task: string; feedback: string; previous: string; diff: string; roots: string },
   outputs: Record<string, string>,
 ): { prompt: string; missing: string[] } {
   const missing: string[] = [];
@@ -163,8 +211,8 @@ export class WorkflowEngine {
     // Every settle is forwarded, source included: a user-source turn is normally a
     // no-op here, but it must still be able to consume an explicit force-advance
     // (see onWorkflowTurnComplete).
-    sessions.setTurnCompleteListener((sessionId, source, interrupted) =>
-      this.onWorkflowTurnComplete(sessionId, source, interrupted),
+    sessions.setTurnCompleteListener((sessionId, source, interrupted, failed) =>
+      this.onWorkflowTurnComplete(sessionId, source, interrupted, failed),
     );
   }
 
@@ -398,14 +446,41 @@ export class WorkflowEngine {
     // dirty state. Fire-and-forget: the first fresh step is at least one approval
     // gap away, long after this resolves.
     void this.captureDiffBaseline(sessionId);
-    void this.runStep(sessionId, undefined, true, attachments);
+    this.runStepSafely(sessionId, undefined, true, attachments);
     return true;
+  }
+
+  /** Every root a session may work in — its project's, else just its cwd. */
+  private rootsFor(cwd: string): string[] {
+    return rootsForCwd(this.store.loadProjects(), cwd);
   }
 
   private async captureDiffBaseline(sessionId: string) {
     const meta = this.sessions.get(sessionId);
     if (!meta?.workflow) return;
-    meta.workflow.diffBaseline = await captureBaseline(meta.cwd);
+    meta.workflow.diffBaselines = await captureBaselines(this.rootsFor(meta.cwd));
+  }
+
+  /**
+   * Baselines to diff a step's hand-off against. `diffBaselines` is authoritative;
+   * a legacy single `diffBaseline` is wrapped as one unit rooted at the session's
+   * own cwd — exactly what it was captured against — so a workflow already in
+   * flight across the deploy keeps a correct diff instead of silently falling back
+   * to HEAD and dragging pre-existing dirty state into the prompt.
+   */
+  private baselinesFor(meta: SessionMeta): RepoBaseline[] {
+    const baselines = meta.workflow?.diffBaselines;
+    if (baselines?.length) return baselines;
+    const legacy = meta.workflow?.diffBaseline;
+    return legacy ? [{ repo: meta.cwd, ...legacy }] : [];
+  }
+
+  /** The `{roots}` block for this session: commit units, their branches, orphan roots. */
+  private async renderWorkspace(meta: SessionMeta): Promise<string> {
+    const { repos, orphans } = await groupByRepo(this.rootsFor(meta.cwd));
+    const branches = new Map<string, string | null>();
+    for (const repo of repos) branches.set(repo.root, await repoBranch(repo.root));
+    return renderRoots(repos, orphans, branches, meta.cwd);
   }
 
   private marker(sessionId: string, data: WorkflowMarkerData) {
@@ -440,10 +515,16 @@ export class WorkflowEngine {
     if (!step || !content) {
       // Unresolved reference (e.g. a shared step version this bridge couldn't fetch).
       if (step) {
-        // Status set first: setStatus is what broadcasts, so a later mutation would
-        // only reach the client on the next unrelated message.
+        // Park it so Approve can still skip past, and fail the turn so the transcript
+        // ends on a failure row carrying the reason — with a Retry that re-renders
+        // this step once the version resolves. State set before failTurn, whose
+        // setStatus is what broadcasts.
         meta.workflow.stepStatuses[i] = 'waiting-approval';
-        this.sessions.setStatus(sessionId, 'error');
+        meta.workflow.stepFailure = 'pre-run';
+        this.sessions.failTurn(
+          sessionId,
+          `Step ${i + 1} could not be resolved — the shared step version it pins is not available on this bridge.`,
+        );
       } else {
         // Index past the last step (a workflow edited shorter mid-run, say): nothing
         // to run, but the bumped stepIndex and the cleared `advancing` still have to
@@ -455,6 +536,7 @@ export class WorkflowEngine {
 
     meta.workflow.stepStatuses[i] = 'running';
     meta.workflow.stepPermissionMode = content.permissionMode;
+    meta.workflow.stepFailure = undefined; // the step is running again; judge this attempt on its own
     // Clear any stale waiting-approval status before the async model/mode setup below.
     this.sessions.setStatus(sessionId, 'running');
     this.marker(sessionId, {
@@ -487,7 +569,12 @@ export class WorkflowEngine {
     const previous = handoff
       ? (meta.workflow.lastStepOutput ?? this.sessions.lastAssistantText(sessionId))
       : '';
-    const diff = handoff ? await workingTreeDiff(meta.cwd, meta.workflow.diffBaseline) : '';
+    const diff = handoff ? await multiRepoDiff(this.baselinesFor(meta)) : '';
+    // Unlike {diff}, {roots} is workspace shape rather than a hand-off, so it is
+    // not gated on `handoff` and works in an inheriting step too. Resolved only
+    // when the template asks for it — it costs a --show-toplevel plus an
+    // --abbrev-ref per root, on the step-entry path the user waits through.
+    const roots = USES_ROOTS_RE.test(content.promptTemplate) ? await this.renderWorkspace(meta) : '';
 
     // Every token is filled in one pass over the *template*, so text pulled in by
     // one token can never be rescanned for another (see substituteTokens). An
@@ -497,13 +584,21 @@ export class WorkflowEngine {
       : content.promptTemplate + '{feedback}';
     const resolved = substituteTokens(
       base,
-      { task: meta.workflow.task ?? '', feedback: feedbackText, previous, diff },
+      { task: meta.workflow.task ?? '', feedback: feedbackText, previous, diff, roots },
       meta.workflow.outputs ?? {},
     );
     let prompt = resolved.prompt;
     if (resolved.missing.length) {
       meta.workflow.stepStatuses[i] = 'waiting-approval';
-      this.sessions.setStatus(sessionId, 'error');
+      meta.workflow.stepFailure = 'pre-run';
+      // Failure row first (it carries the message and the Retry); the marker after it
+      // names the missing outputs on the step divider.
+      this.sessions.failTurn(
+        sessionId,
+        `Step "${content.name}" was not run: nothing published for ${resolved.missing
+          .map((n) => `{outputs.${n}}`)
+          .join(', ')}.`,
+      );
       this.marker(sessionId, {
         stepIndex: i,
         stepName: content.name,
@@ -531,12 +626,43 @@ export class WorkflowEngine {
     this.sessions.prompt(sessionId, prompt, 'workflow', attachments);
   }
 
+  /**
+   * Every caller fire-and-forgets runStep, so a throw past its own handling would be
+   * an unhandled rejection leaving the step wedged at 'running' with nothing in
+   * flight. Park it as a pre-run failure instead: the transcript gets a failure row
+   * with a Retry, and the stepper's Approve can still skip past.
+   */
+  private runStepSafely(
+    sessionId: string,
+    feedback?: string,
+    entry = false,
+    attachments?: PromptAttachment[],
+  ) {
+    void this.runStep(sessionId, feedback, entry, attachments).catch((err) => {
+      console.error(`[workflow ${sessionId}] step failed to start:`, err);
+      const meta = this.sessions.get(sessionId);
+      if (meta?.workflow) {
+        meta.workflow.stepStatuses[meta.workflow.stepIndex] = 'waiting-approval';
+        meta.workflow.stepFailure = 'pre-run';
+      }
+      this.sessions.failTurn(
+        sessionId,
+        `Step failed to start: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }
+
   /** Resolved step name for transcript markers ('' if a ref couldn't be resolved). */
   private stepName(step?: WorkflowDef['steps'][number]): string {
     return (step && this.stepContent(step)?.name) || '';
   }
 
-  private onWorkflowTurnComplete(sessionId: string, source: 'user' | 'workflow', interrupted: boolean) {
+  private onWorkflowTurnComplete(
+    sessionId: string,
+    source: 'user' | 'workflow',
+    interrupted: boolean,
+    failed: boolean,
+  ) {
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
@@ -595,7 +721,9 @@ export class WorkflowEngine {
       this.marker(sessionId, { stepIndex: i, stepName: this.stepName(step), event });
       void this.advance(sessionId);
       return;
-    } else if (this.stepContent(step)?.autoAdvance) {
+    } else if (!failed && this.stepContent(step)?.autoAdvance) {
+      // A failed turn produced no deliverable to hand on, so it parks below instead
+      // — an explicit force-advance above still wins, that user asked for it.
       void this.advance(sessionId);
       return;
     }
@@ -609,8 +737,55 @@ export class WorkflowEngine {
     }
 
     meta.workflow.stepStatuses[i] = 'waiting-approval';
-    this.sessions.setStatus(sessionId, 'waiting-approval');
-    this.marker(sessionId, { stepIndex: i, stepName: this.stepName(step), event: 'waiting-approval' });
+    if (failed) {
+      // Keep the 'error' status + message the failed result already wrote, so the
+      // session reads as failed and Retry stays live; the step still parks so Approve
+      // can skip it. setStatus is what clears errorMessage (see sessions.setStatus),
+      // so it is deliberately not called on this path.
+      meta.workflow.stepFailure = 'turn';
+      this.sessions.persistMeta(sessionId);
+    } else {
+      meta.workflow.stepFailure = undefined;
+      this.sessions.setStatus(sessionId, 'waiting-approval');
+    }
+    this.marker(sessionId, {
+      stepIndex: i,
+      stepName: this.stepName(step),
+      event: 'waiting-approval',
+      ...(failed ? { failed: true } : {}),
+    });
+  }
+
+  /**
+   * A Retry click on a workflow session whose current step *failed*. Returns true if
+   * it consumed the click; false falls through to SessionManager.retryTurn, which is
+   * the right handler for a plain session (and for a workflow session whose step
+   * didn't fail).
+   *
+   * The two failure kinds re-run different things: a 'pre-run' failure never got a
+   * prompt, so the step is re-rendered from WorkflowState; a 'turn' failure has a
+   * prompt in the transcript, so it is re-sent as a follow-up on the same step.
+   */
+  retryIfFailed(sessionId: string): boolean {
+    const meta = this.sessions.get(sessionId);
+    const failure = meta?.workflow?.stepFailure;
+    if (!meta?.workflow || !failure) return false;
+    // An advance mid-consolidation is about to bump past this step — re-running it
+    // now would race that.
+    if (meta.workflow.advancing) return false;
+    if (isSessionActive(meta.status)) return false;
+    const i = meta.workflow.stepIndex;
+    if (meta.workflow.stepStatuses[i] !== 'waiting-approval') return false;
+    if (failure === 'pre-run') {
+      // No prompt was ever sent for this step: re-enter it exactly as the advance
+      // would have, hand-off included.
+      this.runStepSafely(sessionId, undefined, true);
+      return true;
+    }
+    const last = this.sessions.lastPromptForRetry(sessionId);
+    if (!last) return false;
+    this.iterateStep(sessionId, last.text, last.attachments);
+    return true;
   }
 
   /**
@@ -633,6 +808,7 @@ export class WorkflowEngine {
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'running';
+    meta.workflow.stepFailure = undefined; // this attempt is judged on its own
     this.sessions.setStatus(sessionId, 'running');
     this.marker(sessionId, {
       stepIndex: i,
@@ -736,7 +912,7 @@ export class WorkflowEngine {
     if (meta.workflow.stepStatuses[i] !== 'pending') return;
     // A live turn or an advance mid-consolidation is already on its way to starting it.
     if (isSessionActive(meta.status) || meta.workflow.advancing) return;
-    void this.runStep(sessionId, undefined, true);
+    this.runStepSafely(sessionId, undefined, true);
   }
 
   /**
@@ -791,7 +967,7 @@ export class WorkflowEngine {
     const i = meta.workflow.stepIndex;
     if (stepIndex !== i) return;
     if (meta.workflow.stepStatuses[i] !== 'waiting-approval') return;
-    void this.runStep(sessionId, feedback);
+    this.runStepSafely(sessionId, feedback);
   }
 
   private async advance(sessionId: string) {
@@ -800,6 +976,7 @@ export class WorkflowEngine {
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'done';
+    meta.workflow.stepFailure = undefined; // the workflow is moving on from this step
     // Consolidating an iterated step runs a real query, so the gap before the next
     // step starts is seconds long with nothing else broadcast in it. Raise the
     // in-flight flag *before* the await — every path from the WS handler to here is
@@ -849,7 +1026,7 @@ export class WorkflowEngine {
       // 'running', startStep wants 'pending'. Synchronous, so it cannot reopen the
       // `advancing` flicker window the comment above guards.
       this.sessions.persistMeta(sessionId);
-      void this.runStep(sessionId, undefined, true);
+      this.runStepSafely(sessionId, undefined, true);
     } else {
       this.sessions.setStatus(sessionId, 'idle');
       this.marker(sessionId, {

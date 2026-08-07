@@ -53,7 +53,9 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
             ? `${data.stepName} — not run: nothing published for ${data.missingOutputs
                 .map((n) => `{outputs.${n}}`)
                 .join(', ')}`
-            : `${data.stepName} — waiting for your approval`
+            : data.failed
+              ? `${data.stepName} — failed, retry or approve to skip`
+              : `${data.stepName} — waiting for your approval`
           : data.event === 'approved'
             ? `${data.stepName} — approved`
             : data.event === 'interrupted'
@@ -529,13 +531,22 @@ export function Transcript({
   // Retry only on the trailing failed result of a settled session — a retry
   // button mid-history or during a running turn would be stale/confusing.
   // Use the flat list so it's found even when the result is folded into a turn.
-  const lastItem = built.at(-1);
+  // A workflow park marker or a compaction row can land *after* the result without
+  // meaning the turn moved on, so scan past those two kinds only: everything else
+  // (a live permission card, or any content of a new turn) ends the scan.
+  let trailing: TranscriptItem | undefined;
+  for (let n = built.length - 1; n >= 0; n--) {
+    const item = built[n]!;
+    if (item.kind === 'workflow' || item.kind === 'context-compact') continue;
+    trailing = item;
+    break;
+  }
   const retryKey =
-    lastItem?.kind === 'result' &&
-    lastItem.isError &&
+    trailing?.kind === 'result' &&
+    trailing.isError &&
     status !== 'running' &&
     status !== 'waiting-permission'
-      ? lastItem.key
+      ? trailing.key
       : null;
   const [lightbox, setLightbox] = useState<string | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);

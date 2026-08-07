@@ -131,6 +131,12 @@ function withPlanFileText(
   return { ...data, input: { ...input, plan: text } };
 }
 
+/** A `result` that ended its turn in failure — the shape both the rendered result
+ *  item and the compaction-span escape key off. */
+function isFailedResult(r: { is_error?: boolean; subtype?: string }): boolean {
+  return Boolean(r.is_error) || (r.subtype != null && r.subtype !== 'success');
+}
+
 /** Where one agent's assistant output accumulates: the main transcript, or a
  *  subagent's slice of its parent Task block. */
 interface Sink {
@@ -210,6 +216,24 @@ export function buildTranscript(
   };
 
   for (const event of events) {
+    // Everything between a compaction's 'requested' and its 'done' belongs to the
+    // compaction, not to the conversation: `/compact` rides ordinary prompt text,
+    // so a CLI that doesn't dispatch it lets the model answer the literal string.
+    // Mirrors the server's withoutCompactSpans, including its bound — the next
+    // 'user' event closes an orphan span, so a crash mid-compaction can't swallow
+    // the rest of the transcript.
+    if (openCompact && event.kind !== 'context-compact') {
+      // A failed `result` is the turn dying mid-compaction — the server has already
+      // abandoned the span (the result is emitted before the abandon event that
+      // would close it), so let it through rather than swallowing the only failure
+      // row the Retry button can key off.
+      const failed =
+        event.kind === 'sdk' &&
+        (event.data as { type?: string }).type === 'result' &&
+        isFailedResult(event.data as { is_error?: boolean; subtype?: string });
+      if (event.kind !== 'user' && !failed) continue;
+      openCompact = null;
+    }
     switch (event.kind) {
       case 'user': {
         main.openGroup = null;
@@ -400,7 +424,7 @@ export function buildTranscript(
               subtype?: string;
               result?: unknown;
             };
-            const isError = Boolean(r.is_error) || (r.subtype != null && r.subtype !== 'success');
+            const isError = isFailedResult(r);
             const resultItem: ResultItem = {
               kind: 'result',
               key: `r${event.seq}`,

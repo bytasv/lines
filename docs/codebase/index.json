@@ -210,7 +210,8 @@
         "a user prompt sent after a force-advance but before the interrupted turn settles clears the 'interrupted' flag and its step stamp",
         "step output hand-off after a force-advance goes through the same (now-bounded) consolidation as a normal advance",
         "a step configured with autoAdvance: true still parks after Stop \u2014 Stop overrides the step's own configuration",
-        "a plan-approval advance already pending when Stop is pressed is discarded, not delayed: both the flag and its step stamp are cleared"
+        "a plan-approval advance already pending when Stop is pressed is discarded, not delayed: both the flag and its step stamp are cleared",
+        "a failed turn (is_error result or a crashed query) also never autoAdvances \u2014 it parks the step with stepFailure: 'turn' instead, keeping the error status alive for Retry"
       ],
       "architecturalRules": [
         "interrupt() stays intent-free \u2014 no caller may infer \"advance\" from \"stop\"",
@@ -220,7 +221,9 @@
         "never advance synchronously under a live turn \u2014 flag advanceOnComplete and wait for the turn to settle, with a watchdog as the only fallback",
         "the handleWorkerEnded settle fallback must stay gated on the interrupting set (routine non-error ended events exist)"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "turn-failure-retry"
+      ]
     },
     {
       "id": "workflow-force-advance",
@@ -627,7 +630,7 @@
         "on query failure, empty result, or a timeout (consolidateTimeoutMs), falls back to lastAssistantText (per-step-scoped) rather than blocking the workflow",
         "an empty consolidated output is never published, so it cannot overwrite a previously captured value",
         "consolidation is scoped to the stepIndex that just finished, not merely the newest started marker",
-        "a step whose template references an {outputs.<name>} that is absent or blank parks at waiting-approval with an error marker instead of running with a silently blank substitution",
+        "a step whose template references an {outputs.<name>} that is absent or blank parks at waiting-approval via failTurn (stepFailure: 'pre-run') with a marker naming the missing outputs, instead of running with a silently blank substitution",
         "a step deliverable captured during plan mode comes from the ExitPlanMode plan (inline argument or written plan file), not the turn's trailing chat text",
         "outputs are strictly per-session (WorkflowState.outputs); there is no cross-session write path",
         "prompt tokens are honoured only where the step author wrote them: a token occurring inside substituted content (a step output, the diff, the task text) stays literal instead of being re-expanded",
@@ -639,7 +642,9 @@
         "advance() is async; callers fire it with void this.advance(sessionId)",
         "all prompt tokens are filled in one pass over the template (substituteTokens) rather than by chained replaceAll calls; a new token is added to that pass, never appended as another pass"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "turn-failure-retry"
+      ]
     },
     {
       "id": "agent-memory-sync",
@@ -1049,17 +1054,20 @@
         "the login modal opens off the existing authStatus broadcast, not a new message type, and unlike the hello auto-open it is not deduped",
         "every query crash (auth-related or not) writes a synthetic result event, so the transcript shows 'turn failed' and a Retry button",
         "retry after re-login is manual; nothing auto-resumes the failed turn",
-        "a clean ended (no error) writes no synthetic result"
+        "a clean ended (no error) writes no synthetic result",
+        "an is_error SDK result on a plain session now also sets status 'error' + errorMessage (previously always 'done'), so the Retry banner shows for that case too"
       ],
       "architecturalRules": [
         "classification lives in auth.ts and is called from sessions.ts; worker.ts stays thin and does no error interpretation",
         "handleTokenRejected goes through the single-flight refresh() rather than logout() directly, so N simultaneous failures cause one token request and a merely-expired token recovers silently",
         "the pattern list is narrow and biased toward false negatives: a miss degrades to the old behavior, a false positive would force a refresh on a healthy session",
         "the synthetic result is emitted via emitEvent directly, never routed through handleWorkerEvent, so it cannot re-run turn-settle bookkeeping (cost/token accumulation, onTurnComplete, workflow advance)",
-        "SDK/CLI error wording is not a published contract; isAuthFailureMessage can silently stop matching after an upstream change"
+        "SDK/CLI error wording is not a published contract; isAuthFailureMessage can silently stop matching after an upstream change",
+        "SessionManager.failTurn is now public \u2014 the single funnel every recoverable failure (including workflow pre-run failures) writes through"
       ],
       "relatedDecisions": [
-        "app-managed-login-only \u2014 recovers a token rejected during a turn, whereas that feature guarantees a turn never starts on the ambient ~/.claude login"
+        "app-managed-login-only \u2014 recovers a token rejected during a turn, whereas that feature guarantees a turn never starts on the ambient ~/.claude login",
+        "turn-failure-retry"
       ]
     },
     {
@@ -1235,7 +1243,8 @@
         "deferred categories are excluded from the total and from free space, and shown with no percentage share, to avoid double-counting",
         "the persisted SessionMeta.contextSummary is capped and holds no per-item detail since it is synced and written to disk; per-item detail is fetched on demand and never persisted",
         "a hover-triggered summary refresh only broadcasts/syncs when the summary actually changed",
-        "resetting a session's Claude conversation (workflow fresh-start step) stamps contextResetAt; readings older than that render as stale until the next turn reports"
+        "resetting a session's Claude conversation (workflow fresh-start step) stamps contextResetAt; readings older than that render as stale until the next turn reports",
+        "Lines does not set autoCompactEnabled and has no control over the CLI's own background auto-compaction; the hover card's auto-compact row is a straight passthrough of the CLI's own settingSources-resolved setting, shown even when off"
       ],
       "architecturalRules": [
         "the bridge-worker protocol gained a generic ask/askResult request-response method rather than a one-off message type, so future control requests do not require another PROTOCOL_VERSION bump (which restarts the worker and drops in-flight turns)",
@@ -1269,23 +1278,29 @@
         "canCompactContext",
         "withoutCompactSpans",
         "extractCompactBoundary",
+        "extractCompactStatus",
         "SessionManager.compactContext"
       ],
       "tests": [
         "server/src/sessions.compact.test.ts"
       ],
       "businessRules": [
-        "compaction is never auto-fired by the app on the user's behalf \u2014 only a manual button and a passive warning badge, since it is irreversible, lossy, and billable",
-        "the manual button's disabled state always carries a specific reason (turn running, workflow step parked, no session yet, no reading yet, or found unsupported) via one shared contextCompactBlock predicate",
+        "Lines never fires compaction itself \u2014 only a manual button and a passive warning badge, since it is irreversible, lossy, and billable; this is distinct from the CLI's own background auto-compaction, which Lines does not control",
+        "the manual button's disabled state always carries a specific reason (turn running, workflow step parked, no session yet, no reading yet, or the SDK explicitly reported the compaction failed) via one shared contextCompactBlock predicate",
+        "the unsupported latch requires an explicit SDK compact_result:'failed' \u2014 a turn settling with neither a boundary nor a status verdict is inconclusive and leaves the button enabled",
+        "the unsupported latch is scoped to the CLI conversation that produced it: cleared on resetClaudeSession, on bridge restart, and when adopting a synced session, so it never survives past the process/conversation that saw the failure",
         "a workflow step parked waiting-approval blocks the manual button but not the CLI's own background auto-compaction",
         "a compaction is invisible to every workflow turn scan (consolidateStepOutput, lastAssistantText, summarizeTurn, retryTurn) via withoutCompactSpans, but never stripped from permission bookkeeping"
       ],
       "architecturalRules": [
         "compactContext is a dedicated SessionManager method, not a call to prompt() \u2014 a compaction carries no 'user' transcript event and must not auto-name the session or touch the queue",
         "one shared predicate (contextCompactBlock) backs the server-side guard, the button's disabled state, and its tooltip",
-        "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact \u2014 all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)"
+        "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact \u2014 all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)",
+        "the browser's buildTranscript mirrors withoutCompactSpans: events inside an open compact span are dropped from the rendered transcript, not just hidden by the marker pair — except a failed result, which closes the span like a 'user' event does"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "turn-failure-retry"
+      ]
     },
     {
       "id": "workflow-mcp-tools",
@@ -1761,6 +1776,58 @@
       "relatedDecisions": [
         "prompt-mentions",
         "transcript-markdown-rendering"
+      ]
+    },
+    {
+      "id": "turn-failure-retry",
+      "name": "Single-click retry for every recoverable turn failure",
+      "doc": "features/turn-failure-retry.md",
+      "purpose": "Every recoverable turn failure — a crashed query, an is_error result, a workflow step that never got a prompt, or a push that never reached the worker — ends on a failure row with a working one-click Retry, in both plain and workflow sessions.",
+      "entryPoints": [
+        "web/src/components/Transcript.tsx",
+        "server/src/index.ts"
+      ],
+      "files": [
+        "server/src/sessions.ts",
+        "server/src/workflows.ts",
+        "server/src/index.ts",
+        "shared/types.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/lib/transcript.ts"
+      ],
+      "symbols": [
+        "SessionManager.failTurn",
+        "SessionManager.lastPromptForRetry",
+        "WorkflowEngine.retryIfFailed",
+        "WorkflowState.stepFailure",
+        "WorkflowMarkerData.failed",
+        "SessionManager.TurnCompleteListener",
+        "isFailedResult"
+      ],
+      "tests": [
+        "server/src/sessions.ended.test.ts",
+        "server/src/workflows.advance.test.ts",
+        "server/src/workflows.retry.test.ts"
+      ],
+      "businessRules": [
+        "every recoverable failure ends on a failure row with a working Retry, in a plain session and inside a running workflow alike",
+        "a failed turn never autoAdvances; it parks the step as failed instead, unless an explicit stamped force-advance is already pending",
+        "Retry re-runs the right thing: a step that never got a prompt is re-rendered from WorkflowState ('pre-run'); a step whose turn failed is re-sent as a follow-up on the same conversation ('turn')",
+        "no auto-retry or backoff — a transient failure (e.g. a 529) is an ordinary failed turn with a manual button",
+        "stepFailure is persisted, so a reload while parked in the failed state still shows Retry"
+      ],
+      "architecturalRules": [
+        "failTurn is the single funnel for every failure the SDK never reports as a result; public so WorkflowEngine can call it for pre-run failures",
+        "the retry router idiom mirrors case 'prompt': WorkflowEngine.retryIfFailed gets first refusal, only false falls through to SessionManager.retryTurn; no new ClientMessage type",
+        "lastPromptForRetry is the single source both retryTurn and retryIfFailed read from",
+        "the failed park skips setStatus (which clears errorMessage on every transition) and calls persistMeta instead, so the error banner and Retry stay live while the step shows waiting-approval",
+        "the client's backward scan for retryKey may only skip 'workflow' and 'context-compact' items; every other kind ends the scan"
+      ],
+      "relatedDecisions": [
+        "workflow-stop-parks",
+        "auth-failure-recovery",
+        "workflow-step-output-consolidation",
+        "context-compaction"
       ]
     }
   ]

@@ -469,6 +469,9 @@ export type TurnCompleteListener = (
   source: 'user' | 'workflow',
   /** The turn settled under a Stop (see WorkflowEngine.onWorkflowTurnComplete). */
   interrupted: boolean,
+  /** The turn ended in failure (is_error result, or a query that crashed) — the
+   *  step parks as failed instead of auto-advancing. */
+  failed: boolean,
 ) => void;
 
 export class SessionManager {
@@ -836,6 +839,9 @@ export class SessionManager {
   private pushTurnSafely(meta: SessionMeta, message: Record<string, unknown>) {
     void this.pushTurn(meta, message).catch((err) => {
       console.error(`[session ${meta.id}] push failed:`, err);
+      // The turn never reached the worker, so no `result` and no `ended` is coming:
+      // without a synthetic failure the session sits at 'running' forever.
+      this.failTurn(meta.id, `Failed to start the turn: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
 
@@ -850,8 +856,11 @@ export class SessionManager {
   }
 
   /** Show a turn as failed with a Retry button: synthetic result first (so it is
-   *  the trailing transcript item), then the error status. */
-  private failTurn(sessionId: string, error: string) {
+   *  the trailing transcript item), then the error status. The single funnel for
+   *  every failure the SDK never reports as a `result` — a crashed query, a push
+   *  that never left the bridge, a workflow step that failed before it could run
+   *  (WorkflowEngine calls this too, hence public). */
+  failTurn(sessionId: string, error: string) {
     this.emitEvent(sessionId, 'sdk', {
       type: 'result',
       subtype: 'error_during_execution',
@@ -1001,7 +1010,16 @@ export class SessionManager {
   retryTurn(sessionId: string) {
     const meta = this.sessions.get(sessionId);
     if (!meta || this.isBusy(meta)) return;
+    const last = this.lastPromptForRetry(sessionId);
+    if (!last) return;
+    this.prompt(sessionId, last.text, last.source, last.attachments);
+  }
 
+  /** The last user prompt + attachments rehydrated from disk, for re-sending a
+   *  failed turn. Also used by WorkflowEngine, which re-sends it as a step retry. */
+  lastPromptForRetry(
+    sessionId: string,
+  ): { text: string; source: 'user' | 'workflow'; attachments: PromptAttachment[] } | null {
     // A compaction emits no 'user' event, so stripping changes nothing here —
     // applied anyway so the invariant is "turn scans never see compact spans".
     const last = withoutCompactSpans(this.store.loadTranscript(sessionId))
@@ -1010,7 +1028,7 @@ export class SessionManager {
     const data = last?.data as
       | { text?: string; source?: 'user' | 'workflow'; attachments?: Attachment[] }
       | undefined;
-    if (!data || (!data.text && !data.attachments?.length)) return;
+    if (!data || (!data.text && !data.attachments?.length)) return null;
 
     const attachments = (data.attachments ?? [])
       .map((a) => {
@@ -1020,7 +1038,7 @@ export class SessionManager {
       })
       .filter((a): a is PromptAttachment => a !== null);
 
-    this.prompt(sessionId, data.text ?? '', data.source ?? 'user', attachments);
+    return { text: data.text ?? '', source: data.source ?? 'user', attachments };
   }
 
   /**
@@ -2107,7 +2125,11 @@ export class SessionManager {
           metaNow.totalDurationMs = (metaNow.totalDurationMs ?? 0) + durationMs;
         }
         if (metaNow.status === 'running' || metaNow.status === 'waiting-permission') {
-          metaNow.status = 'done';
+          // A failed result is a failed turn: 'error' + a message is what puts the
+          // red banner up and keeps Retry meaningful. Mutated directly (rather than
+          // via setStatus) so the single upsert below still carries everything.
+          metaNow.status = failed ? 'error' : 'done';
+          metaNow.errorMessage = failed ? resultText || 'The turn failed.' : undefined;
         }
         // A result proves the turn reached its end, so any Continue banner we
         // stamped for it was wrong — a result buffered while the bridge was away
@@ -2119,7 +2141,7 @@ export class SessionManager {
         this.upsert(metaNow);
       }
       const interrupted = this.interrupting.delete(sessionId); // turn settled normally
-      this.onTurnComplete?.(sessionId, source, interrupted);
+      this.onTurnComplete?.(sessionId, source, interrupted, failed);
       this.maybeFlush(sessionId);
       void this.summarizeTurn(sessionId, resultSeq);
       // Same class as summarizeTurn: fire-and-forget once the turn has settled.
@@ -2142,11 +2164,21 @@ export class SessionManager {
       if (meta?.queued?.length) meta.queuePaused = true;
       if (meta) meta.turnStartedAt = undefined;
       this.liveState(sessionId).permissionWaitMs = 0;
+      // Cleared before failTurn so its broadcast already carries the settled turn.
+      const source = meta?.turnSource;
+      if (meta) meta.turnSource = undefined;
+      const interrupted = this.interrupting.delete(sessionId);
       // A crashed query emits no SDK `result`, so the transcript would end on a
       // half-finished turn with no failure row and no Retry button. Synthesize one
       // — this is the "query crash" half of what retryTurn already documents
       // itself as covering.
       this.failTurn(sessionId, error);
+      // The turn is over, so tell the listener: a workflow step would otherwise
+      // dangle at 'running' with no settle ever coming. Listener only — the
+      // synthetic result above deliberately bypasses handleWorkerEvent, so the
+      // spend/token accumulation that lives in the result branch must not re-run.
+      // failTurn's setStatus already ran maybeFlush, so no queue nudge is needed here.
+      if (source) this.onTurnComplete?.(sessionId, source, interrupted, true);
       // A dead token surfaces here as a query crash; recover (or log out, which
       // opens the login modal) now rather than waiting for the usage poller.
       if (isAuthFailureMessage(error)) void this.auth?.handleTokenRejected();
@@ -2164,7 +2196,7 @@ export class SessionManager {
         meta.turnStartedAt = undefined;
         this.liveState(sessionId).permissionWaitMs = 0;
         this.upsert(meta);
-        this.onTurnComplete?.(sessionId, source, true); // gated on the interrupt flag above
+        this.onTurnComplete?.(sessionId, source, true, false); // gated on the interrupt flag above
         this.maybeFlush(sessionId);
       }
     }

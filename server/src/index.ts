@@ -534,6 +534,9 @@ async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage
       sessions.interrupt(msg.sessionId);
       break;
     case 'retryTurn':
+      // A failed workflow step re-runs through the engine, which knows whether to
+      // re-render the step or re-send its prompt; anything else is a plain re-send.
+      if (workflows.retryIfFailed(msg.sessionId)) break;
       sessions.retryTurn(msg.sessionId);
       break;
     case 'continueTurn':

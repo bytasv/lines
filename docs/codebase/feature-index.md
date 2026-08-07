@@ -37,3 +37,4 @@
 | `multi-repo-commits` | Workflow steps group a multi-root session's folders into git commit units by work tree, with a per-repo `{diff}` and a new `{roots}` prompt token | [features/multi-repo-commits.md](features/multi-repo-commits.md) |
 | `usage-by-model` | Chat-turn spend split by model, shown as a "Spend by model" section in the plan-usage hover card | [features/usage-by-model.md](features/usage-by-model.md) |
 | `docs-reader` | In-app reader for a project's `docs/**`: doc tree, `index.json`-driven feature cards, full-text search, in-reader cross-links | [features/docs-reader.md](features/docs-reader.md) |
+| `turn-failure-retry` | Single-click Retry for every recoverable turn failure — crashed query, `is_error` result, workflow pre-run failure — in plain and workflow sessions alike | [features/turn-failure-retry.md](features/turn-failure-retry.md) |

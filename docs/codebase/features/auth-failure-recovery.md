@@ -32,6 +32,10 @@ transcript ended on a half-finished turn with no Retry affordance.
   `re-authenticate to continue`)
 - `AuthManager.handleTokenRejected()` — no-op when logged out, else one `forceRefresh()`;
   a non-`AuthRequiredError` failure (5xx, offline) is logged and leaves the session signed in
+- `SessionManager.failTurn(sessionId, error)` — now public; the single funnel this
+  feature's synthetic-result-then-error-status shape was generalized into. See
+  [turn-failure-retry](turn-failure-retry.md) for its other callers (workflow pre-run
+  failures, a push that never reached the worker).
 
 ## Data flow
 
@@ -69,7 +73,10 @@ Retry-button pair. No new message type, no client changes.
   modal, which is intended.
 - Every query crash (auth-related or not) now writes a synthetic `result` event, so the
   transcript shows "turn failed" and a Retry button. This is what `retryTurn` always
-  documented itself as covering ("query crash or `is_error` result").
+  documented itself as covering ("query crash or `is_error` result"). An `is_error`
+  result now also sets status `'error'` + `errorMessage` (previously always `'done'`),
+  so the plain-session Retry banner shows for that case too — see
+  [turn-failure-retry](turn-failure-retry.md).
 - Retry after re-login is manual; nothing auto-resumes the failed turn.
 - A clean `ended` (no error) writes no synthetic result.
 
@@ -94,3 +101,6 @@ Retry-button pair. No new message type, no client changes.
 - [app-managed-login-only](app-managed-login-only.md) — this feature recovers a token
   rejected *during* a turn; that one guarantees a turn never *starts* on the ambient
   `~/.claude` login, and reuses the same synthetic-result / Retry pair.
+- [turn-failure-retry](turn-failure-retry.md) — generalizes `failTurn` into the single
+  funnel for every recoverable turn failure, including inside a workflow step, and adds
+  the `WorkflowEngine.retryIfFailed` routing this feature's `retryTurn` now shares with.
