@@ -6,7 +6,7 @@ Lets plan mode's deliverable — a Markdown file under a `.claude/plans/` direct
 get written, edited, and re-read without a permission card on every call, even
 though the file lives outside the session `cwd` (which the guard otherwise
 escalates as "file access outside the working directory"). `isPlanPath` is also
-exported and reused by the bridge's `/file` HTTP route, so the
+exported and reused by the bridge's `file` request handler, so the
 [plan review card](plan-review-card.md) can read a plan file live even though it
 lives outside every project/session root.
 
@@ -14,7 +14,7 @@ lives outside every project/session root.
 
 - `Read`/`Write`/`Edit`/`MultiEdit`/`NotebookEdit` tool calls targeting a plan file,
   arriving via `PreToolUse` and `canUseTool`.
-- `GET /file?path=...` on the bridge HTTP server, when the resolved path falls
+- a `file` request over the WebSocket, when the resolved path falls
   outside every project/session root but inside a plan directory.
 
 ## Important files
@@ -29,7 +29,7 @@ lives outside every project/session root.
   workflow step's deliverable — see
   [workflow-step-output-consolidation](workflow-step-output-consolidation.md))
 - `server/src/workspacePaths.ts` — `resolveWorkspacePath`, `workspaceRoots` (the
-  `/file`/`/tree`/`/find` root gate; its plan-directory exception is `isPlanPath`)
+  `file`/`tree`/`find` root gate; its plan-directory exception is `isPlanPath`)
 
 ## Important symbols
 
@@ -49,7 +49,7 @@ lives outside every project/session root.
   function; plan paths short-circuit to non-dangerous inside its out-of-root
   branch. Takes every root a session may work in (see
   [multi-root-projects](multi-root-projects.md)), not a single `cwd`.
-- `resolveWorkspacePath(ctx, raw)` — `/file`/`/tree`/`/find`'s path resolver; falls
+- `resolveWorkspacePath(ctx, raw)` — the `file`/`tree`/`find` path resolver; falls
   back to `isPlanPath(abs, ctx.sessions.list().map(cwd))` when the project/session
   root check fails
 
@@ -61,18 +61,18 @@ lives outside every project/session root.
 'allow'` / `{ behavior: 'allow' }` return used by the existing observation-only
 path) instead of prompting.
 
-Separately, `resolveWorkspacePath` (used by the `/file`, `/tree`, and `/find` HTTP
+Separately, `resolveWorkspacePath` (used by the `file`, `tree`, and `find` request
 routes) first checks the requested path against every project root and session
 cwd; if that fails, it additionally allows the path when `isPlanPath` holds for any
 of the user's session cwds (which also covers the cwd-independent
 `~/.claude/plans`). Everything downstream of that resolve — the `MAX_FILE_BYTES`
-cap, binary rejection, `?token=` auth — is unchanged; `/tree` and `/find` inherit
+cap, binary rejection, auth — is unchanged; `tree` and `find` inherit
 the same widening since they share the same resolver.
 
 ## Dependencies
 
 Builds entirely on the pre-existing `isInside` path-containment helper and the
-out-of-cwd branch in `assessToolCall`; no new state or message type. The `/file`
+out-of-cwd branch in `assessToolCall`; no new state or message type. The `file`
 route's use is a second caller of the same exported `isPlanPath`, not a parallel
 check.
 
@@ -99,8 +99,8 @@ check.
   [permission-resolution-provenance](permission-resolution-provenance.md).
 - Credential paths (`~/.ssh`, `~/.aws`, `.env`) always escalate even if nested
   under a `plans` directory — the sensitive check runs before the plan check.
-- Any other out-of-cwd file access is unaffected and still escalates.
-- `/file` (and by extension `/tree`/`/find`) can now read any plan directory
+- Any other out-of-root file access is unaffected and still escalates.
+- a `file` request (and by extension `tree`/`find`) can now read any plan directory
   reachable from `isPlanPath`, not just the requesting session's own plan file —
   a deliberate widening of a route previously confined to project/session roots,
   scoped to plan directories only.
@@ -117,7 +117,7 @@ check.
   and cannot import from `server/`.
 - `isInside` does not resolve symlinks — a symlink planted inside a plan directory
   pointing elsewhere would still be treated as safe. Accepted risk: the plan
-  directory is agent-and-user-owned. The `/file` route inherits this same
+  directory is agent-and-user-owned. The `file` handler inherits this same
   limitation since it reuses `isPlanPath` unchanged.
 - Auto-approved plan writes stop producing a permission card but remain visible as
   `tool_use` blocks in the transcript; the auto-approval event itself is filtered
@@ -138,4 +138,6 @@ editable exception list for the same guard this file's `assessToolCall` and
 `ALWAYS_ASK_TOOLS` belong to —
 [permission-resolution-provenance](permission-resolution-provenance.md) for how
 `ALWAYS_ASK_TOOLS` is now force-prompted rather than merely never auto-approved —
-and [plan-review-card](plan-review-card.md), the consumer of the `/file` widening.
+[plan-review-card](plan-review-card.md), the consumer of the `file` widening —
+and [multi-root-projects](multi-root-projects.md), whose `roots` replaced the
+single `cwd` this file's guard functions took.

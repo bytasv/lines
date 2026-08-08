@@ -53,6 +53,7 @@ export function MentionInput({
   onChange,
   onSubmit,
   cwd,
+  roots,
   placeholder,
   textareaRef,
   onPasteFiles,
@@ -61,6 +62,8 @@ export function MentionInput({
   onChange: (next: MentionValue) => void;
   onSubmit: () => void;
   cwd: string;
+  /** Every root the session's project spans, primary first — what `@` searches. */
+  roots: string[];
   placeholder: string;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   onPasteFiles: (files: File[]) => void;
@@ -80,7 +83,7 @@ export function MentionInput({
   /** Caret before the current key/click — gives {@link snapCaretOut} its direction. */
   const prevCaretRef = useRef(0);
 
-  const results = useMentionSearch(token?.query ?? null, cwd);
+  const results = useMentionSearch(token?.query ?? null, cwd, roots);
   const activeCandidate = results[Math.min(activeIndex, results.length - 1)];
 
   // Keep the mirror's text metrics in sync with the textarea.

@@ -103,6 +103,10 @@ type and no new client state.
   point surfaces through `failTurn`, not through the `{ ok: false, code, reason }` union.
 - A proactive refresh that fails transiently retries on a 60s-doubling ladder capped at
   15 minutes; a dead refresh token instead logs out, which stops the chain.
+- Logins are tracked per OAuth `state`, so two started at once (two tabs today, two
+  paired devices once the app is hosted) each keep their own PKCE verifier and either
+  paste completes. Completing one clears the rest; unfinished ones expire after 30
+  minutes. A paste carrying no `#state` falls back to the newest in-flight login.
 - `accessToken: null` in `buildQueryOptions` is reachable only when no `AuthManager` is
   wired at all (tests / embedding), not for any real signed-in user.
 

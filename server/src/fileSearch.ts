@@ -97,17 +97,43 @@ function score(rel: string, query: string): number | null {
   return isSubsequence(lower, query) ? 3 : null;
 }
 
-/** The best `limit` matches for `query`, as paths relative to `root`. */
-export function searchFiles(root: string, query: string, limit: number): string[] {
+/**
+ * The best `limit` matches for `query` across every root, each hit carrying the
+ * root it was found under. Ranking is global, not per-root, so a strong match in
+ * the second project still outranks a weak one in the first. When roots nest,
+ * the same file can surface under both — the first (better-ranked) hit wins.
+ */
+export function searchFilesAcross(
+  roots: string[],
+  query: string,
+  limit: number,
+): { root: string; rel: string }[] {
   const q = query.toLowerCase();
   if (!q) return [];
-  const scored: { rel: string; rank: number }[] = [];
-  for (const rel of candidates(root)) {
-    const rank = score(rel, q);
-    if (rank !== null) scored.push({ rel, rank });
-  }
+  const scored: { root: string; rel: string; rank: number; rootIndex: number }[] = [];
+  roots.forEach((root, rootIndex) => {
+    for (const rel of candidates(root)) {
+      const rank = score(rel, q);
+      if (rank !== null) scored.push({ root, rel, rank, rootIndex });
+    }
+  });
+  // Root order is an explicit tiebreak, not a side effect of sort stability: the
+  // primary root has to win an otherwise-equal match every time.
   scored.sort(
-    (a, b) => a.rank - b.rank || a.rel.length - b.rel.length || a.rel.localeCompare(b.rel),
+    (a, b) =>
+      a.rank - b.rank ||
+      a.rel.length - b.rel.length ||
+      a.rootIndex - b.rootIndex ||
+      a.rel.localeCompare(b.rel),
   );
-  return scored.slice(0, limit).map((s) => s.rel);
+  const seen = new Set<string>();
+  const out: { root: string; rel: string }[] = [];
+  for (const s of scored) {
+    const abs = path.resolve(s.root, s.rel);
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+    out.push({ root: s.root, rel: s.rel });
+    if (out.length >= limit) break;
+  }
+  return out;
 }

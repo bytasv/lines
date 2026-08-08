@@ -48,7 +48,9 @@ to run without asking.
 - `GuardAllowlist.reviewRemote(remote)` — stages, updates, or clears a pending
   review; never mutates the live entries.
 - `GuardAllowlist.acceptReview()` / `rejectReview()` — the only two ways a pending
-  review resolves.
+  review resolves. `acceptReview` re-runs `sanitizeEntries` on the pending blob
+  before installing it, since the blob round-trips through disk (`loadGuardSync`
+  is unvalidated) between `reviewRemote` staging it and the user accepting.
 - `GuardAllowlist.blob()` — entries plus the `updatedAt` that orders the storage
   row; distinct from the set-difference comparison used to detect divergence.
 

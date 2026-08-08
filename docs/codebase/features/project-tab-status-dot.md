@@ -87,3 +87,4 @@ None. `web/` has no test runner; `sessionRowMeta` itself is untested (see
 - [session-status-badge](session-status-badge.md)
 - [interrupted-turn-recovery](interrupted-turn-recovery.md)
 - [workflow-done-session-indicator](workflow-done-session-indicator.md)
+- [project-switch-session-selection](project-switch-session-selection.md)

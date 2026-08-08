@@ -13,9 +13,16 @@ const DEBOUNCE_MS = 150;
  * the search (returns empty). A request-sequence guard drops stale responses so
  * fast typing never flashes an older result set.
  */
-export function useMentionSearch(query: string | null, cwd: string): MentionCandidate[] {
+export function useMentionSearch(
+  query: string | null,
+  cwd: string,
+  roots: string[],
+): MentionCandidate[] {
   const [results, setResults] = useState<MentionCandidate[]>([]);
   const seqRef = useRef(0);
+  // Callers derive `roots` per render, so the array identity churns even when the
+  // roots don't; the joined string is what the effect can actually compare.
+  const rootsKey = roots.join('\n');
 
   useEffect(() => {
     if (query === null) {
@@ -24,14 +31,15 @@ export function useMentionSearch(query: string | null, cwd: string): MentionCand
     }
     const seq = ++seqRef.current;
     const timer = setTimeout(async () => {
+      const searchRoots = rootsKey.split('\n');
       const perProvider = await Promise.all(
-        mentionProviders.map((p) => p.search(query, { cwd }).catch(() => [])),
+        mentionProviders.map((p) => p.search(query, { cwd, roots: searchRoots }).catch(() => [])),
       );
       if (seq !== seqRef.current) return; // a newer query superseded this one
       setResults(perProvider.flat());
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [query, cwd]);
+  }, [query, cwd, rootsKey]);
 
   return results;
 }

@@ -13,7 +13,7 @@ An in-app reader for a project's `docs/**` markdown corpus: a doc tree, an `inde
 ## Important files
 
 - `server/src/docsBundle.ts` — `collectDocs`, the recursive markdown walk
-- `server/src/index.ts` — `/docs?path=` bridge route (`serveDocs`)
+- `server/src/fileRoutes.ts` — the `docs` request handler, reached over the WebSocket (see [file-routes-over-ws](file-routes-over-ws.md))
 - `shared/types.ts` — `DocFile`, `DocsResponse`, `resolveDocLink`, `docTitle`, `docSummary`, `searchDocs`
 - `web/src/lib/files.ts` — `docsRootFor`, `fetchDocs`, `useDocs`
 - `web/src/lib/features.ts` — `loadFeatures`/`invalidateFeatures` (extracted from `mentions.ts`, now shared with the reader)
@@ -58,7 +58,7 @@ No front-end tests — `web/` has no test runner; the pure logic (link resolutio
 ## Architectural rules
 
 - One bundle request powers every reader feature; there is deliberately no per-file `/file` fan-out and no separate search route.
-- `/docs` sits inside the same `corsFor()` + `resolveWorkspacePath` gate as `/file`, `/tree`, and `/find` — no bypass for the reader.
+- `docs` sits inside the same `resolveWorkspacePath` gate as `file`, `tree`, and `find` — no bypass for the reader.
 - `collectDocs` never follows symlinks (files or directories): `readdirSync`'s `Dirent.isFile()`/`isDirectory()` are both false for a symlink, which is what keeps a `docs/key.md -> ~/.ssh/id_rsa` link from being read through an otherwise-allowed root.
 - Pure doc logic (link resolution, title/summary extraction, search ranking) lives in `shared/types.ts`, not a new module, because that is the one place both `node:test` and the browser can import from.
 - `Markdown` gained one optional `onLinkClick` prop rather than being forked; every transcript call site passes nothing, so its behavior is unchanged (`openFilePreview` fallback). The prop must stay referentially stable (`useCallback`) since the component is `memo`'d.

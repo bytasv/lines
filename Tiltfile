@@ -21,6 +21,12 @@ update_settings(max_parallel_updates=8)
 config.define_bool('no-storage', usage='Skip storage + Prisma (offline / no Supabase).')
 config.define_bool('with-studio', usage='Start Prisma Studio on :5555 at tilt up.')
 config.define_bool(
+    'with-relay',
+    usage='Start the relay on :8791 and point the bridge at it, so the browser ' +
+          'reaches the bridge through the tunnel instead of directly. Off by ' +
+          'default: the bridge only dials when RELAY_URL is set.',
+)
+config.define_bool(
     'no-ui-buttons',
     usage='Skip the freeze/resume reload buttons. They come from ext://uibutton, ' +
           'which is fetched from GitHub the first time it is used — pass this to ' +
@@ -36,6 +42,7 @@ config.define_string_list(
 cfg = config.parse()
 WITH_STORAGE = not cfg.get('no-storage', False)
 WITH_STUDIO = cfg.get('with-studio', False)
+WITH_RELAY = cfg.get('with-relay', False)
 WITH_BUTTONS = not cfg.get('no-ui-buttons', False)
 
 # Accept both `--no-reload worker --no-reload bridge` and `--no-reload worker,bridge`.
@@ -79,6 +86,7 @@ if frozen('bridge'):
 # from .env, because server/src/index.ts:21 and storage/src/index.ts:43 both
 # read the same `PORT` key out of the same root .env file.
 BRIDGE_PORT = 8787
+RELAY_PORT = 8791
 WORKER_PORT = 8788
 STORAGE_PORT = 8790
 WEB_PORT = 5173
@@ -154,9 +162,9 @@ else:
 # Warnings, not failures: the bridge/worker/web stack runs fine without these.
 if not have('VITE_CLERK_PUBLISHABLE_KEY'):
     warn('VITE_CLERK_PUBLISHABLE_KEY unset — web renders without a sign-in gate.')
-if have('PORT'):
-    warn('PORT is set. Tilt overrides it per process (bridge %d / storage %d), ' % (BRIDGE_PORT, STORAGE_PORT) +
-         'but `npm run dev` does NOT — the fallback path will collide. Remove PORT from .env.')
+# PORT used to be read by BOTH the bridge and storage out of this one .env file,
+# so a single value collided. The bridge now reads LINES_BRIDGE_PORT, leaving
+# PORT to storage alone — nothing to warn about.
 
 local_resource('preflight', cmd=preflight_cmd, labels=['setup'], allow_parallel=True)
 
@@ -206,8 +214,11 @@ local_resource(
     # resource ALWAYS kills in-flight agent turns — that is what --no-reload buys.
     serve_cmd=WORKER_CMD,
     # worker.ts loads no dotenv — this must be a real env var
-    # (server/src/workerProtocol.ts:13).
-    serve_env={'CLAUDE_UI_WORKER_PORT': str(WORKER_PORT)},
+    # (server/src/workerProtocol.ts). The bridge finds the worker through
+    # run/<instance>/worker.json and does not need this; the pin exists so the
+    # readiness probe below has a known port to dial. Unset, the worker binds an
+    # ephemeral one and stays perfectly reachable — only the probe would break.
+    serve_env={'LINES_WORKER_PORT': str(WORKER_PORT)},
     resource_deps=['install'],
     # WS-only, binds 127.0.0.1 (server/src/worker.ts:321) — TCP is the only
     # honest check.
@@ -221,20 +232,46 @@ local_resource(
     'bridge',
     cmd='',
     serve_cmd=BRIDGE_CMD,
-    serve_env={'PORT': str(BRIDGE_PORT),
-               'STORAGE_URL': 'http://localhost:%d' % STORAGE_PORT},
+    # LINES_BRIDGE_PORT is pinned here for the same reason the worker's is: the
+    # readiness probe and the status link below need a fixed target. The packaged
+    # app sets neither and binds :0, publishing the result to bridge.json.
+    serve_env=dict(
+        {'LINES_BRIDGE_PORT': str(BRIDGE_PORT),
+         'STORAGE_URL': 'http://localhost:%d' % STORAGE_PORT},
+        **({'RELAY_URL': 'ws://127.0.0.1:%d' % RELAY_PORT,
+            'LINES_DEVICE_ID': 'tilt-dev',
+            'LINES_DEVICE_SECRET': 'tilt-dev'} if WITH_RELAY else {})
+    ),
     # Deliberately NOT depending on worker/storage: the bridge reconnects to the
     # worker every 1s (workerClient.ts:74-79) and treats storage as best-effort
     # (sync.ts:295-308). A broken worker/storage still leaves a reachable UI.
     resource_deps=['install'],
-    # GET / returns 200 {"ok":true,...} via the catch-all at index.ts:207-208 and
-    # is not behind the auth gate (which covers /attachments|/file|/tree|/find).
+    # GET / returns 200 {"ok":true,...}. It is the bridge's only HTTP surface now
+    # that workspace reads moved onto the WebSocket (see fileRoutes.ts).
     readiness_probe=probe(initial_delay_secs=2, period_secs=15,
                           http_get=http_get_action(port=BRIDGE_PORT, host='localhost', path='/')),
     links=[link('http://localhost:%d/' % BRIDGE_PORT, 'bridge status')],
     labels=['services'],
     allow_parallel=True,
 )
+
+# The relay is opt-in (`tilt up -- --with-relay`): the bridge only dials it when
+# RELAY_URL is set, so the default local stack is unchanged. Useful for exercising
+# the hosted path — a browser reaching the bridge through the tunnel — locally.
+if WITH_RELAY:
+    local_resource(
+        'relay',
+        cmd='',
+        serve_cmd='npm run dev -w relay',
+        # Auth off: the Device table arrives in Phase 3. Dev-only, never deployed.
+        serve_env={'RELAY_PORT': str(RELAY_PORT), 'RELAY_AUTH_DISABLED': '1'},
+        resource_deps=['install'],
+        readiness_probe=probe(initial_delay_secs=2, period_secs=15,
+                              http_get=http_get_action(port=RELAY_PORT, host='localhost', path='/')),
+        links=[link('http://localhost:%d/' % RELAY_PORT, 'relay status')],
+        labels=['services'],
+        allow_parallel=True,
+    )
 
 if WITH_STORAGE:
     local_resource(
@@ -280,6 +317,8 @@ def tilt_args_argv(frozen_names):
     flags = []
     if not WITH_STORAGE:
         flags.append('--no-storage')
+    if WITH_RELAY:
+        flags.append('--with-relay')
     if WITH_STUDIO:
         flags.append('--with-studio')
     if not WITH_BUTTONS:

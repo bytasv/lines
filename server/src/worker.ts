@@ -19,11 +19,16 @@
  * shapes) are authored on the bridge and arrive as data on `push`.
  */
 import { randomUUID } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import {
   PROTOCOL_VERSION,
   WORKER_PORT,
+  WORKER_TOKEN_HEADER,
+  clearRuntimeInfo,
+  newRuntimeToken,
+  publishRuntimeInfo,
   type BridgeToWorker,
   type McpToolManifest,
   type McpToolResult,
@@ -81,6 +86,9 @@ interface PendingRpc {
 }
 
 const startedAt = Date.now();
+/** Minted per boot and published (0600) in worker.json. The bridge must echo it
+ *  to connect — see the note on RuntimeInfo.token. */
+const bootToken = newRuntimeToken();
 const sessions = new Map<string, SessionState>();
 const pendingRpcs = new Map<string, PendingRpc>();
 
@@ -330,7 +338,14 @@ function handleBridgeMessage(msg: BridgeToWorker) {
   }
 }
 
-function handleConnection(ws: WebSocket) {
+function handleConnection(ws: WebSocket, req: IncomingMessage) {
+  // Check the token *before* the newest-bridge-wins takeover below: otherwise
+  // any local process could terminate the real bridge just by connecting.
+  if (req.headers[WORKER_TOKEN_HEADER] !== bootToken) {
+    console.warn('[worker] rejected connection with a missing or stale token');
+    ws.close(1008, 'unauthorized');
+    return;
+  }
   if (bridge && bridge !== ws) bridge.terminate(); // newest bridge wins
   bridge = ws;
 
@@ -384,7 +399,19 @@ let listenAttempts = 0;
 function listen() {
   const wss = new WebSocketServer({ host: '127.0.0.1', port: WORKER_PORT });
   wss.on('listening', () => {
-    console.log(`lines worker listening on ws://127.0.0.1:${WORKER_PORT}`);
+    // The bound port, not WORKER_PORT: the default is 0, so the OS picked one.
+    // Publishing is what makes the worker reachable at all — the bridge has no
+    // other way to learn the port, and handleConnection rejects anyone who
+    // cannot echo the token in this file.
+    const { port } = wss.address() as { port: number };
+    publishRuntimeInfo('worker', {
+      port,
+      pid: process.pid,
+      startedAt,
+      protocolVersion: PROTOCOL_VERSION,
+      token: bootToken,
+    });
+    console.log(`lines worker listening on ws://127.0.0.1:${port}`);
   });
   wss.on('connection', handleConnection);
   wss.on('error', (err: NodeJS.ErrnoException) => {
@@ -398,5 +425,16 @@ function listen() {
     }
   });
 }
+
+// tsx watch restarts this process with SIGTERM; a stale worker.json left behind
+// would point the bridge at a dead port until the pid check in readRuntimeInfo
+// caught it. Clearing on the way out makes the common case exact.
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => {
+    clearRuntimeInfo('worker');
+    process.exit(0);
+  });
+}
+process.on('exit', () => clearRuntimeInfo('worker'));
 
 listen();

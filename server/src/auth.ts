@@ -32,6 +32,9 @@ const PROACTIVE_MARGIN_MS = 60 * 60_000;
 const PROACTIVE_RETRY_MS = 60_000;
 /** Ceiling for the proactive-refresh retry backoff. */
 const PROACTIVE_RETRY_CAP_MS = 15 * 60_000;
+/** How long an unfinished login stays completable. Generous: the user has to
+ *  leave the app, approve in a browser, and paste the result back. */
+const PENDING_LOGIN_TTL_MS = 30 * 60_000;
 
 /** Thrown when a turn-starting action is attempted while logged out. */
 export class AuthRequiredError extends Error {
@@ -79,7 +82,15 @@ interface TokenResponse {
 
 export class AuthManager {
   private auth: StoredAuth | null;
-  private pendingLogin: { verifier: string; state: string } | null = null;
+  /**
+   * In-flight logins, keyed by their OAuth `state`. A map rather than a single
+   * slot because two logins can overlap — two browser tabs today, two paired
+   * devices later — and a second startLogin would otherwise overwrite the first
+   * one's PKCE verifier, making the first paste fail with a confusing
+   * state-mismatch. Never persisted: the verifier staying in memory is what
+   * makes an intercepted authorization code useless.
+   */
+  private pendingLogins = new Map<string, { verifier: string; state: string; startedAt: number }>();
   private refreshInFlight: Promise<string> | null = null;
   private proactiveTimer: NodeJS.Timeout | null = null;
   /** Current proactive-retry backoff, null while the ladder is unclimbed. */
@@ -109,7 +120,12 @@ export class AuthManager {
     const verifier = base64url(randomBytes(32));
     const challenge = base64url(createHash('sha256').update(verifier).digest());
     const state = base64url(randomBytes(32));
-    this.pendingLogin = { verifier, state };
+    // Drop logins the user clearly abandoned, so a long-lived bridge doesn't
+    // accumulate verifiers for approvals that never happened.
+    for (const [key, p] of this.pendingLogins) {
+      if (Date.now() - p.startedAt > PENDING_LOGIN_TTL_MS) this.pendingLogins.delete(key);
+    }
+    this.pendingLogins.set(state, { verifier, state, startedAt: Date.now() });
 
     const url = new URL(AUTHORIZE_URL);
     url.searchParams.set('code', 'true');
@@ -125,12 +141,19 @@ export class AuthManager {
 
   /** Exchange a pasted `code#state` (or full callback URL) for tokens. */
   async completeLogin(pasted: string): Promise<void> {
-    const pending = this.pendingLogin;
-    if (!pending) throw new Error('No login in progress — start again');
+    if (!this.pendingLogins.size) throw new Error('No login in progress — start again');
 
     const { code, state } = parsePastedCode(pasted);
     if (!code) throw new Error('Could not read the code — paste the value shown after approving');
-    if (state && state !== pending.state) throw new Error('State mismatch — start the login again');
+    // With a state we can name the exact login this paste belongs to. Without
+    // one (the paste carried no `#state`) fall back to the newest in-flight
+    // login, which is what a single-slot implementation effectively did.
+    // Newest = last inserted; Map preserves insertion order, and two logins
+    // started in the same millisecond make startedAt useless for ordering.
+    const pending = state
+      ? this.pendingLogins.get(state)
+      : [...this.pendingLogins.values()].at(-1);
+    if (!pending) throw new Error('State mismatch — start the login again');
 
     const res = await fetch(TOKEN_URL, {
       method: 'POST',
@@ -146,7 +169,8 @@ export class AuthManager {
     });
     if (!res.ok) throw new Error(`Token exchange failed (${res.status})`);
     const body = (await res.json()) as TokenResponse;
-    this.pendingLogin = null;
+    // We are signed in now, so every other in-flight attempt is moot.
+    this.pendingLogins.clear();
     this.persistTokens(body);
     this.emitChange();
   }

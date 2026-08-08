@@ -32,6 +32,7 @@ A turn that died with the app (bridge and worker both gone) is detected on recon
 - `SessionManager.reconcileWithWorker`
 - `SessionManager.markTurnLive` (promote a stale-idle session back to running)
 - `SessionManager.continueTurn`
+- `hasUnresolvedAlwaysAsk` (`server/src/sessions.ts`) — gates both auto-continue's `flagged` list and `expireUnresolvedPermissions`
 - `SessionMeta.interruptedAt` (the banner flag)
 - `sessionRowMeta` (`web/src/lib/format.ts`) — sidebar row equivalent of the banner
 - `withQueuedPushes` (bridge-side: a queued `push` counts as live)
@@ -43,19 +44,21 @@ The worker tracks `busy` per session (`true` on `push`, `false` on the turn's `r
 
 Reconcile then moves in both directions. `busy: true` on a session we believe is idle calls `markTurnLive` (status back to `running`, keep a known `turnStartedAt`, clear `interruptedAt`). Absent from the list, or `busy: false`, on a session we believe is `running`/`waiting-permission` demotes it to `idle`, pauses any queue, and stamps `interruptedAt`. `busy: undefined` demotes only.
 
-`continueTurn` expires the dead turn's orphaned permission cards, releases `queuePaused`, and re-prompts with a synthetic nudge, resuming through `claudeSessionId`. A turn interrupted mid-workflow-step resumes with source `'workflow'` so its result still parks the step for approve/retry.
+`continueTurn` expires the dead turn's orphaned permission cards, releases `queuePaused`, and re-prompts with a synthetic nudge, resuming through `claudeSessionId`. A turn interrupted mid-workflow-step resumes with source `'workflow'` so its result still parks the step for approve/retry. A card for an `ALWAYS_ASK_TOOLS` request (`ExitPlanMode`, `AskUserQuestion`) is skipped by this expiry — see [permission-resolution-provenance](permission-resolution-provenance.md).
 
-Unless `autoContinueInterrupted` is `false`, reconcile then calls `continueTurn` for the sessions **that pass flagged**, after the `maybeFlush` sweep, each inside its own try/catch.
+Unless `autoContinueInterrupted` is `false`, reconcile then calls `continueTurn` for the sessions **that pass flagged**, after the `maybeFlush` sweep, each inside its own try/catch. A session demoted with an unresolved `ALWAYS_ASK_TOOLS` card is stamped `interruptedAt` (banner still shows) but never added to `flagged`, so auto-continue cannot resume it — its nudge text ("continue the task from there") would otherwise read as an approval the user never gave.
 
 ## Tests
 
-`server/src/sessions.reconcile.test.ts` — promote/demote/old-worker matrix, event-based healing, stop-ordering, `withQueuedPushes`, and the auto-continue cases (fresh flag resumes, absent setting resumes, explicit `false` does not, stale flag does not, workflow source preserved, a meta with no `caveman` resumes, one failing session doesn't stop the others, `result`/archive clear the flag).
+`server/src/sessions.reconcile.test.ts` — promote/demote/old-worker matrix, event-based healing, stop-ordering, `withQueuedPushes`, and the auto-continue cases (fresh flag resumes, absent setting resumes, explicit `false` does not, stale flag does not, workflow source preserved, a meta with no `caveman` resumes, one failing session doesn't stop the others, `result`/archive clear the flag, an unresolved `ExitPlanMode` card blocks auto-continue and is not expired by `continueTurn`, an ordinary tool's card still expires).
 
 The settings field-merge in `userContext.ts` is uncovered — `buildUserContext` wires sync, stores and a worker together with no seam. Verified by hand.
 
 ## Business rules
 
 - Auto-continue only fires for sessions flagged by the reconcile that is running. A flag left from an earlier crash keeps its banner, so a restart can't fan out into a pile of unattended turns.
+- Auto-continue never fires while a session holds an unresolved `ExitPlanMode`/`AskUserQuestion` card (`hasUnresolvedAlwaysAsk`) — that decision is the user's alone. The session still gets the banner and its sidebar dot; the card stays open and clickable, and a later click recovers it via `recoverOrphanedPermission` rather than the server nudging the turn forward on its own.
+- `continueTurn`'s card expiry skips those same `ALWAYS_ASK_TOOLS` requests for the same reason — see [permission-resolution-provenance](permission-resolution-provenance.md).
 - Auto-continue is on unless `autoContinueInterrupted` is explicitly `false`. Absent — including no `settings.json` at all — means enabled, so a fresh install recovers without configuration.
 - A resume that throws is contained per session: the failure is logged, the session is put back into the flagged state so its banner returns, and the sessions after it still resume.
 - Settings pulled from the storage server are merged field-wise, not replaced wholesale, so a client that predates a setting cannot erase it by omitting it from its payload.
@@ -73,3 +76,4 @@ The settings field-merge in `userContext.ts` is uncovered — `buildUserContext`
 
 - [session-status-badge](session-status-badge.md) — how these statuses render.
 - [workflow-stop-parks](workflow-stop-parks.md) — the other path that settles a turn without a normal result; a plain Stop parks rather than advances.
+- [permission-resolution-provenance](permission-resolution-provenance.md) — why auto-continue and expiry both defer to an open `ALWAYS_ASK_TOOLS` card.

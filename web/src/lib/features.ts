@@ -1,5 +1,4 @@
-import { fileBase } from './files';
-import { withAuthToken } from '../ws';
+import { fileRequest } from '../ws';
 
 /**
  * The feature manifest at `docs/codebase/index.json` — one client shared by the
@@ -30,10 +29,9 @@ export async function loadFeatures(cwd: string): Promise<FeatureEntry[] | null> 
   let features: FeatureEntry[] | null = null;
   try {
     const path = `${cwd}/docs/codebase/index.json`;
-    const res = await fetch(withAuthToken(`${fileBase}/file?path=${encodeURIComponent(path)}`));
-    if (res.ok) {
-      const data = (await res.json()) as { content?: string };
-      const parsed = JSON.parse(data.content ?? '') as FeatureIndex;
+    const { status, body } = await fileRequest('file', { paths: [path] });
+    if (status === 200) {
+      const parsed = JSON.parse((body as { content?: string }).content ?? '') as FeatureIndex;
       features = Array.isArray(parsed.features) ? parsed.features : [];
     }
   } catch {

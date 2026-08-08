@@ -26,7 +26,7 @@ function harness(seed?: unknown[]) {
 
 /** The entry as the guard itself sees it — the only assertion that proves a row works. */
 const allows = (command: string, entries: GuardAllowEntry[]) =>
-  !assessToolCall('Bash', { command }, '/tmp', entries).dangerous;
+  !assessToolCall('Bash', { command }, ['/tmp'], entries).dangerous;
 
 test('a hand-typed prefix is whitespace-collapsed into one the guard can match', () => {
   const result = normalizeAllowEntry({ tool: 'Bash', prefix: '  git   status  ' });
@@ -64,7 +64,7 @@ test('a non-Bash entry drops its prefix into the shape the guard compares', () =
   const result = normalizeAllowEntry({ tool: 'WebFetch', prefix: 'ignored' });
   assert.deepEqual(result, { entry: { tool: 'WebFetch' } });
   assert.equal(
-    assessToolCall('SomeMcpWrite', {}, '/tmp', [{ tool: 'SomeMcpWrite' }]).dangerous,
+    assessToolCall('SomeMcpWrite', {}, ['/tmp'], [{ tool: 'SomeMcpWrite' }]).dangerous,
     false,
   );
 });
@@ -118,4 +118,25 @@ test('a second instance over the same root sees what the first added', () => {
   h.guard.add({ tool: 'Bash', prefix: 'npm run' });
   const reloaded = new GuardAllowlist(createStore(h.root));
   assert.deepEqual(reloaded.list(), [{ tool: 'Bash', prefix: 'npm run' }]);
+});
+
+test('acceptReview drops an always-ask entry arriving via a pending blob', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-guard-accept-'));
+  // A staged review round-trips through disk unvalidated, so it can hold an entry
+  // the guard would never match — accepting it must not install one.
+  fs.writeFileSync(
+    path.join(root, 'guard-allowlist-sync.json'),
+    JSON.stringify({
+      updatedAt: 1,
+      pending: {
+        entries: [{ tool: 'ExitPlanMode' }, { tool: 'Bash', prefix: 'npm  run' }],
+        remoteUpdatedAt: 2,
+        detectedAt: 3,
+      },
+      rejected: null,
+    }),
+  );
+  const guard = new GuardAllowlist(createStore(root));
+  assert.equal(guard.acceptReview(), true);
+  assert.deepEqual(guard.list(), [{ tool: 'Bash', prefix: 'npm run' }]);
 });

@@ -1839,8 +1839,15 @@ export class SessionManager {
    * running anywhere — its in-flight status is stale (both processes restarted,
    * or a push was lost mid-death). A session the worker reports busy is running
    * regardless of what our status says.
+   *
+   * `autoContinue: false` is for the "worker is known down" call (an empty
+   * `live` fired from the disconnect deadline, not a real hello): flagging for
+   * the Continue banner is still right, but firing `continueTurn()` would just
+   * re-queue the push into `WorkerClient.pending` against a socket that isn't
+   * there. The next real hello reconciles again with the default true and
+   * resumes it.
    */
-  reconcileWithWorker(live: LiveSessionInfo[]) {
+  reconcileWithWorker(live: LiveSessionInfo[], opts?: { autoContinue?: boolean }) {
     const liveById = new Map(live.map((l) => [l.sessionId, l]));
     const flagged: string[] = [];
     for (const meta of this.sessions.values()) {
@@ -1893,7 +1900,11 @@ export class SessionManager {
     // banner rather than firing an unattended turn on every boot. Per-session
     // try/catch: a meta that can't build query options must not take the bridge
     // down (nothing up the stack catches) or skip the sessions after it.
-    if (flagged.length && this.store.loadSettings()?.autoContinueInterrupted !== false) {
+    if (
+      flagged.length &&
+      opts?.autoContinue !== false &&
+      this.store.loadSettings()?.autoContinueInterrupted !== false
+    ) {
       for (const id of flagged) {
         try {
           this.continueTurn(id);

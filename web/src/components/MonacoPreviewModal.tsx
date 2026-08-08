@@ -1,6 +1,7 @@
 import { Modal, Text, Center, Loader, Alert, Box, Group } from '@mantine/core';
 import { useComputedColorScheme } from '@mantine/core';
 import { Editor } from '@monaco-editor/react';
+import { projectRoots } from '@lines/shared';
 import { useStore } from '../store';
 import { useFileContent } from '../lib/files';
 import { languageFor } from '../lib/language';
@@ -18,9 +19,11 @@ export function MonacoPreviewModal() {
   const line = filePreview?.line;
   const { content, error } = useFileContent(path);
 
-  // Root the tree at the project that contains the previewed file, else the active project.
+  // Root the tree at the root that contains the previewed file — any root of any
+  // open project, since a project spans several — else the active project.
   const treeRoot =
-    (path && projects.find((p) => path === p || path.startsWith(p + '/'))) ?? activeProject;
+    (path && projects.flatMap(projectRoots).find((r) => path === r || path.startsWith(r + '/'))) ??
+    activeProject;
 
   return (
     <Modal

@@ -6,7 +6,9 @@
     "shared",
     "server",
     "web",
-    "storage"
+    "relay",
+    "storage",
+    "desktop"
   ],
   "scripts": {
     "dev": "concurrently -n worker,server,web,storage -c magenta,blue,green,yellow \"npm run dev:worker -w server\" \"npm run dev -w server\" \"npm run dev -w web\" \"npm run dev -w storage\"",

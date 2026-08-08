@@ -106,6 +106,24 @@ export function PromptEditor({
               {'{diff}'}
             </Button>
           </Tooltip>
+          {/* Not dimmed with freshStart off, unlike {previous}/{diff}: the workspace
+              shape is just as useful to a step that continues the same session. */}
+          <Tooltip
+            label="Replaced with the workspace shape: every folder this project spans, each with its repo root and branch (or “not a git repository”). Use it to scope commands per repo, e.g. git -C <repo root>."
+            withArrow
+            multiline
+            w={260}
+          >
+            <Button
+              size="compact-xs"
+              variant="light"
+              color="gray"
+              onClick={() => insert('{roots}')}
+              styles={{ label: { fontFamily: 'var(--mantine-font-family-monospace)' } }}
+            >
+              {'{roots}'}
+            </Button>
+          </Tooltip>
           <Tooltip
             label="Replaced with the named output of an earlier step. Give a step an “Output name”, then reference it here — works across the whole workflow this step runs in, not just the previous step. A fresh-start step whose template uses {previous}, {diff} or any {outputs.…} is assumed to carry its own context — the automatic hand-off block is not prepended."
             withArrow

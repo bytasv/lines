@@ -1,13 +1,21 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 import type { SessionMeta, TranscriptEvent } from '@lines/shared';
 import { contextCompactBlock, effectiveContextTokens } from '@lines/shared';
+import { GuardAllowlist } from './autoGuard.ts';
 import {
+  SessionManager,
   collectTurns,
   extractCompactBoundary,
+  extractCompactStatus,
   findStepStart,
   withoutCompactSpans,
 } from './sessions.ts';
+import { createStore } from './store.ts';
+import type { WorkerClient } from './workerClient.ts';
 
 let seq = 0;
 const ev = (kind: TranscriptEvent['kind'], data: unknown): TranscriptEvent => ({
@@ -104,6 +112,56 @@ test('an unknown trigger is left undefined for the caller to decide', () => {
 test('other messages are not boundaries', () => {
   assert.equal(extractCompactBoundary({ type: 'system', subtype: 'init' }), undefined);
   assert.equal(extractCompactBoundary({ type: 'assistant' }), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// extractCompactStatus
+// ---------------------------------------------------------------------------
+
+test('a failed status carries the SDK error text', () => {
+  assert.deepEqual(
+    extractCompactStatus({
+      type: 'system',
+      subtype: 'status',
+      status: null,
+      compact_result: 'failed',
+      compact_error: 'compaction is disabled',
+    }),
+    { result: 'failed', error: 'compaction is disabled' },
+  );
+});
+
+test('a success status with no error text leaves error undefined', () => {
+  assert.deepEqual(extractCompactStatus({ type: 'system', subtype: 'status', compact_result: 'success' }), {
+    result: 'success',
+    error: undefined,
+  });
+});
+
+test('a status message with no compact verdict is not an outcome', () => {
+  assert.equal(extractCompactStatus({ type: 'system', subtype: 'status', status: 'requesting' }), undefined);
+  assert.equal(
+    extractCompactStatus({ type: 'system', subtype: 'status', compact_result: 'maybe' }),
+    undefined,
+  );
+});
+
+test('other messages are not statuses', () => {
+  assert.equal(
+    extractCompactStatus({ type: 'system', subtype: 'compact_boundary', compact_result: 'success' }),
+    undefined,
+  );
+  assert.equal(extractCompactStatus({ type: 'assistant' }), undefined);
+});
+
+test('an over-long compact_error is capped before it reaches the meta', () => {
+  const got = extractCompactStatus({
+    type: 'system',
+    subtype: 'status',
+    compact_result: 'failed',
+    compact_error: 'x'.repeat(500),
+  });
+  assert.equal(got?.error?.length, 200);
 });
 
 // ---------------------------------------------------------------------------
@@ -206,4 +264,79 @@ test('a busy session reports the transient reason, not unsupported', () => {
     meta({ status: 'running', contextCompact: { at: 1, trigger: 'manual', ok: false } }),
   );
   assert.equal(block?.code, 'turn-running');
+});
+
+test("the SDK's own failure text lands in the tooltip", () => {
+  const block = contextCompactBlock(
+    meta({ contextCompact: { at: 1, trigger: 'manual', ok: false, error: 'compaction is disabled' } }),
+  );
+  assert.equal(block?.code, 'unsupported');
+  assert.match(block!.reason, /compaction is disabled/);
+});
+
+test('a boundary-less success does not read as a failure', () => {
+  assert.equal(contextCompactBlock(meta({ contextCompact: { at: 200, trigger: 'manual', ok: true } })), null);
+});
+
+// ---------------------------------------------------------------------------
+// The unsupported latch: only an explicit SDK verdict sets it, and it never
+// outlives the CLI conversation that produced it.
+// ---------------------------------------------------------------------------
+
+/** A SessionManager over a throwaway store, with a worker that swallows pushes. */
+function harness() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-compact-'));
+  fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta()]));
+  const store = createStore(root);
+  const sessions = new SessionManager(store, new GuardAllowlist(store), () => {});
+  sessions.attachWorker({ push: () => {}, close: () => {} } as unknown as WorkerClient);
+  return sessions;
+}
+
+/** Start a manual compaction, then feed the turn's messages back in. */
+function compacting() {
+  const sessions = harness();
+  assert.deepEqual(sessions.compactContext('s'), { ok: true });
+  return sessions;
+}
+
+const status = (over: Record<string, unknown>) => ({
+  type: 'system' as const,
+  subtype: 'status',
+  ...over,
+});
+
+test('a silent turn is inconclusive: no record, button stays clickable', () => {
+  const sessions = compacting();
+  sessions.handleWorkerEvent('s', { type: 'result', subtype: 'success' });
+  const after = sessions.get('s')!;
+  assert.equal(after.contextCompact, undefined);
+  assert.equal(contextCompactBlock(after), null);
+});
+
+test('an SDK compact_result:failed latches with its own error text', () => {
+  const sessions = compacting();
+  sessions.handleWorkerEvent('s', status({ compact_result: 'failed', compact_error: 'no can do' }));
+  sessions.handleWorkerEvent('s', { type: 'result', subtype: 'success' });
+  const after = sessions.get('s')!;
+  assert.equal(after.contextCompact?.ok, false);
+  assert.equal(after.contextCompact?.error, 'no can do');
+  assert.equal(contextCompactBlock(after)?.code, 'unsupported');
+});
+
+test('an SDK compact_result:success with no boundary leaves the button enabled', () => {
+  const sessions = compacting();
+  sessions.handleWorkerEvent('s', status({ compact_result: 'success' }));
+  sessions.handleWorkerEvent('s', { type: 'result', subtype: 'success' });
+  const after = sessions.get('s')!;
+  assert.equal(after.contextCompact?.ok, true);
+  assert.equal(after.contextCompact?.postTokens, undefined);
+  assert.equal(contextCompactBlock(after), null);
+});
+
+test('a fresh CLI conversation clears a latched verdict', () => {
+  const sessions = compacting();
+  sessions.handleWorkerEvent('s', status({ compact_result: 'failed', compact_error: 'no can do' }));
+  sessions.resetClaudeSession('s');
+  assert.equal(sessions.get('s')?.contextCompact, undefined);
 });

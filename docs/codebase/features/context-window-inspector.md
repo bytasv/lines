@@ -104,6 +104,12 @@ either exists.
 - The fallback reading is main-agent-only: an `assistant` message produced by a subagent
   (`parent_tool_use_id` set) never updates it, so a spawned Task's small context can't clobber
   the ring with a number that isn't the main agent's — see [[subagent-transcript]].
+- Lines does not set `autoCompactEnabled` and has no control over the CLI's own background
+  auto-compaction — the hover card's auto-compact row (`isAutoCompactEnabled`,
+  `autoCompactThreshold`) is a straight passthrough of whatever the CLI itself resolved through
+  `settingSources`. The row is shown even when the CLI reports it off, naming the CLI as the
+  owner, rather than hidden — so "off" reads as a setting, not a missing feature. See
+  [[context-compaction]] for the manual alternative.
 
 ## Architectural rules
 

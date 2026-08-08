@@ -40,6 +40,8 @@ function Root() {
 }
 
 // Without Clerk the socket needs no token — connect immediately as before.
+// connect() resolves the bridge's port itself, so nothing has to await it here:
+// every workspace read now goes over that same socket.
 if (!CLERK_ENABLED) void connect();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

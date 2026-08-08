@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { SessionMeta, SessionStatus, UserUiSettings } from '@lines/shared';
+import type {
+  PermissionRequestData,
+  SessionMeta,
+  SessionStatus,
+  TranscriptEvent,
+  UserUiSettings,
+} from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -27,10 +33,22 @@ const meta = (status: SessionStatus, extra: Partial<SessionMeta> = {}): SessionM
  * worker push throw for that session, standing in for any per-session failure
  * on the resume path.
  */
-function managerOver(metas: SessionMeta[], settings?: UserUiSettings, throwFor?: string) {
+function managerOver(
+  metas: SessionMeta[],
+  settings?: UserUiSettings,
+  throwFor?: string,
+  events?: TranscriptEvent[],
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-reconcile-'));
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify(metas));
   if (settings) fs.writeFileSync(path.join(root, 'settings.json'), JSON.stringify(settings));
+  if (events?.length) {
+    fs.mkdirSync(path.join(root, 'transcripts'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, 'transcripts', `${metas[0].id}.jsonl`),
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+    );
+  }
   const store = createStore(root);
   const sessions = new SessionManager(store, new GuardAllowlist(store), () => {});
   const pushed: string[] = [];
@@ -41,12 +59,26 @@ function managerOver(metas: SessionMeta[], settings?: UserUiSettings, throwFor?:
     },
     interrupt: () => {},
   } as never);
-  return { sessions, pushed, get: (id: string) => sessions.get(id)! };
+  return {
+    sessions,
+    pushed,
+    get: (id: string) => sessions.get(id)!,
+    cards: (id: string) =>
+      store
+        .loadTranscript(id)
+        .filter((e) => e.kind === 'permission')
+        .map((e) => e.data as PermissionRequestData),
+  };
 }
 
 /** A manager over a throwaway store seeded with one session in `status`. */
-function harness(status: SessionStatus, extra: Partial<SessionMeta> = {}, settings?: UserUiSettings) {
-  const m = managerOver([meta(status, extra)], settings);
+function harness(
+  status: SessionStatus,
+  extra: Partial<SessionMeta> = {},
+  settings?: UserUiSettings,
+  events?: TranscriptEvent[],
+) {
+  const m = managerOver([meta(status, extra)], settings, undefined, events);
   return { ...m, s1: () => m.get('s1') };
 }
 
@@ -194,6 +226,70 @@ test('auto-continue resumes a mid-workflow-step turn as a workflow turn', () => 
   assert.equal(h.s1().turnSource, 'workflow', 'so its result still parks the step');
 });
 
+let cardSeq = 0;
+const card = (requestId: string, toolName: string): TranscriptEvent =>
+  ({ seq: cardSeq++, ts: 0, kind: 'permission', data: { requestId, toolName, input: {} } }) as TranscriptEvent;
+const answeredCard = (requestId: string): TranscriptEvent =>
+  ({
+    seq: cardSeq++,
+    ts: 0,
+    kind: 'permission',
+    data: { requestId, toolName: '', input: {}, resolution: 'allow', resolvedBy: 'user' },
+  }) as TranscriptEvent;
+
+const waitingOnPlan: Partial<SessionMeta> = {
+  claudeSessionId: 'c1',
+  pendingPermissionTool: 'ExitPlanMode',
+};
+
+test('a session holding an unanswered plan card is parked, not auto-continued', () => {
+  const h = harness('waiting-permission', waitingOnPlan, autoContinue, [card('p1', 'ExitPlanMode')]);
+  h.sessions.reconcileWithWorker([]);
+
+  const m = h.s1();
+  assert.deepEqual(h.pushed, [], 'nudging it would read as an approval nobody gave');
+  assert.ok((m.interruptedAt ?? 0) > 0, 'the Continue banner still appears');
+  assert.equal(m.status, 'idle');
+  // The card stays clickable: a late click recovers through resolvePermission.
+  assert.deepEqual(h.cards('s1').map((c) => c.resolution), [undefined]);
+});
+
+test('the same session auto-continues once the plan card is answered', () => {
+  const h = harness('waiting-permission', waitingOnPlan, autoContinue, [
+    card('p1', 'ExitPlanMode'),
+    answeredCard('p1'),
+  ]);
+  h.sessions.reconcileWithWorker([]);
+
+  assert.deepEqual(h.pushed, ['s1']);
+  assert.equal(h.s1().interruptedAt, undefined);
+});
+
+test('an unanswered card for an ordinary tool does not park the session', () => {
+  const h = harness('waiting-permission', { claudeSessionId: 'c1', pendingPermissionTool: 'Bash' }, autoContinue, [
+    card('b1', 'Bash'),
+  ]);
+  h.sessions.reconcileWithWorker([]);
+
+  assert.deepEqual(h.pushed, ['s1']);
+  // continueTurn closes it, so a later click can't inject into the new turn.
+  assert.deepEqual(h.cards('s1').map((c) => [c.resolution, c.resolvedBy]), [
+    [undefined, undefined],
+    ['expired', 'interrupt-expire'],
+  ]);
+});
+
+test('continueTurn expires ordinary cards but leaves an always-ask one open', () => {
+  const h = harness('idle', { interruptedAt: 5, claudeSessionId: 'c1' }, noAutoContinue, [
+    card('b1', 'Bash'),
+    card('p1', 'ExitPlanMode'),
+  ]);
+  h.sessions.continueTurn('s1');
+
+  const expired = h.cards('s1').filter((c) => c.resolution === 'expired');
+  assert.deepEqual(expired.map((c) => c.requestId), ['b1']);
+});
+
 test('a session meta with no caveman field resumes without throwing', () => {
   const h = harness('running', { caveman: undefined });
   assert.doesNotThrow(() => h.sessions.reconcileWithWorker([]));
@@ -226,6 +322,16 @@ test('putting a session away answers the Continue banner', () => {
   const completed = harness('idle', { interruptedAt: 5 });
   completed.sessions.completeSession('s1');
   assert.equal(completed.s1().interruptedAt, undefined);
+});
+
+test('worker lost, never returns: idles the session but does not auto-continue', () => {
+  const h = harness('running', { claudeSessionId: 'c1' }, autoContinue);
+  h.sessions.reconcileWithWorker([], { autoContinue: false });
+
+  const m = h.s1();
+  assert.equal(m.status, 'idle');
+  assert.ok((m.interruptedAt ?? 0) > 0, 'the Continue banner appears');
+  assert.deepEqual(h.pushed, [], 'no worker to push a resumed turn to');
 });
 
 test('a queued push counts as live so its session survives reconcile', () => {

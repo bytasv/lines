@@ -1,0 +1,17 @@
+{
+  "name": "@lines/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist/main.cjs",
+    "dev": "npm run build && electron dist/main.cjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^33.0.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.2"
+  }
+}

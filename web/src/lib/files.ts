@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useState } from 'react';
 import type {
+  AttachmentBody,
   DocsResponse,
   FileContentResponse,
   FindResponse,
   TreeEntry,
   TreeResponse,
 } from '@lines/shared';
-import { withAuthToken } from '../ws';
+import { fileRequest } from '../ws';
 
-/** The bridge HTTP server (same host, port 8787) serves file contents and directory listings. */
-export const fileBase = `${location.protocol}//${location.hostname}:8787`;
+/**
+ * Workspace reads travel over the WebSocket, not HTTP — see FileRequestKind in
+ * shared/types.ts. `status` still uses HTTP codes, which the maps below turn
+ * into user-facing messages exactly as before.
+ */
+function fail(status: number, messages: Record<number, string>, fallback: string): never {
+  throw new Error(messages[status] ?? `${fallback} (${status}).`);
+}
 
 const ERROR_MESSAGES: Record<number, string> = {
   403: 'Access denied — file is outside the project.',
@@ -19,10 +26,9 @@ const ERROR_MESSAGES: Record<number, string> = {
 };
 
 export async function fetchTree(dir: string): Promise<TreeEntry[]> {
-  const res = await fetch(withAuthToken(`${fileBase}/tree?path=${encodeURIComponent(dir)}`));
-  if (!res.ok) throw new Error(`Failed to list directory (${res.status}).`);
-  const data = (await res.json()) as TreeResponse;
-  return data.entries;
+  const { status, body } = await fileRequest('tree', { paths: [dir] });
+  if (status !== 200) fail(status, {}, 'Failed to list directory');
+  return (body as TreeResponse).entries;
 }
 
 /** Ranked file-name matches for `query` across every project root, each hit relative to its own root. */
@@ -31,13 +37,10 @@ export async function searchFiles(
   query: string,
   limit: number,
 ): Promise<{ root: string; rel: string }[]> {
-  const params = new URLSearchParams({ q: query, limit: String(limit) });
-  // Repeated `path` params, one per root — the bridge 403s if any fails to resolve.
-  for (const r of roots) params.append('path', r);
-  const res = await fetch(withAuthToken(`${fileBase}/find?${params}`));
-  if (!res.ok) throw new Error(`Failed to search files (${res.status}).`);
-  const data = (await res.json()) as FindResponse;
-  return data.files;
+  // One path per root — the bridge 403s if any fails to resolve.
+  const { status, body } = await fileRequest('find', { paths: roots, q: query, limit });
+  if (status !== 200) fail(status, {}, 'Failed to search files');
+  return (body as FindResponse).files;
 }
 
 const DOCS_ERROR_MESSAGES: Record<number, string> = {
@@ -52,11 +55,9 @@ export function docsRootFor(projectRoot: string): string {
 
 /** The whole markdown corpus under `docsRoot`, in one request. */
 export async function fetchDocs(docsRoot: string): Promise<DocsResponse> {
-  const res = await fetch(withAuthToken(`${fileBase}/docs?path=${encodeURIComponent(docsRoot)}`));
-  if (!res.ok) {
-    throw new Error(DOCS_ERROR_MESSAGES[res.status] ?? `Failed to load documentation (${res.status}).`);
-  }
-  return (await res.json()) as DocsResponse;
+  const { status, body } = await fileRequest('docs', { paths: [docsRoot] });
+  if (status !== 200) fail(status, DOCS_ERROR_MESSAGES, 'Failed to load documentation');
+  return body as DocsResponse;
 }
 
 /**
@@ -115,15 +116,14 @@ export function useFileContent(path: string | undefined, reloadKey?: number) {
     setContent(null);
     setError(null);
     let cancelled = false;
-    fetch(withAuthToken(`${fileBase}/file?path=${encodeURIComponent(path)}`))
-      .then(async (res) => {
+    fileRequest('file', { paths: [path] })
+      .then(({ status, body }) => {
         if (cancelled) return;
-        if (!res.ok) {
-          setError(ERROR_MESSAGES[res.status] ?? `Failed to load file (${res.status}).`);
+        if (status !== 200) {
+          setError(ERROR_MESSAGES[status] ?? `Failed to load file (${status}).`);
           return;
         }
-        const data = (await res.json()) as FileContentResponse;
-        if (!cancelled) setContent(data.content);
+        setContent((body as FileContentResponse).content);
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -134,4 +134,44 @@ export function useFileContent(path: string | undefined, reloadKey?: number) {
   }, [path, reloadKey]);
 
   return { content, error };
+}
+
+/**
+ * A stored attachment as an object URL.
+ *
+ * Attachments used to be a plain `<img src>` against the bridge's HTTP route.
+ * They now arrive as base64 on the socket, so each one is turned into a blob URL
+ * here and revoked when the component unmounts (or the attachment changes) —
+ * without that, every re-render would leak a blob for the life of the page.
+ */
+export function useAttachmentUrl(rel: string | undefined): { url: string | null; error: string | null } {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!rel) return;
+    let revoked: string | null = null;
+    let cancelled = false;
+    fileRequest('attachment', { rel })
+      .then(({ status, body }) => {
+        if (cancelled) return;
+        if (status !== 200) {
+          setError(ERROR_MESSAGES[status] ?? `Failed to load attachment (${status}).`);
+          return;
+        }
+        const { data, mediaType } = body as AttachmentBody;
+        const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+        revoked = URL.createObjectURL(new Blob([bytes], { type: mediaType }));
+        setUrl(revoked);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+      if (revoked) URL.revokeObjectURL(revoked);
+    };
+  }, [rel]);
+
+  return { url, error };
 }

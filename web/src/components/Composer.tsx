@@ -23,7 +23,7 @@ import {
   IconZoomIn,
 } from '@tabler/icons-react';
 import type { CavemanLevel, PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
-import { isSessionInterruptible } from '@lines/shared';
+import { isSessionInterruptible, rootsForCwd } from '@lines/shared';
 import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
@@ -120,6 +120,7 @@ function PreviewTile({
 
 export function Composer({ session }: { session: SessionMeta }) {
   const models = useStore((s) => s.models);
+  const projects = useStore((s) => s.projects);
   const connectionStatus = useStore((s) => s.connectionStatus);
   const queuedCount = useStore((s) => s.queuedPrompts.filter((q) => q.sessionId === session.id).length);
   // Prompt text plus the inline @mention pill ranges painted over it. Seeded from
@@ -283,6 +284,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         onChange={setPrompt}
         onSubmit={submit}
         cwd={session.cwd}
+        roots={rootsForCwd(projects, session.cwd)}
         placeholder={
           session.workflow && !session.workflow.started
             ? 'Describe the task — this kicks off the workflow…'
@@ -369,7 +371,7 @@ export function Composer({ session }: { session: SessionMeta }) {
                 label={
                   session.workflow?.started &&
                   session.workflow.stepStatuses[session.workflow.stepIndex] === 'running'
-                    ? 'Stop — workflow will continue to the next step'
+                    ? 'Stop — the step will wait for your review'
                     : 'Interrupt'
                 }
               >

@@ -7,10 +7,153 @@
  * worker.ts + this file + workerMcp.ts + the SDK — nothing else — so tsx watch
  * only restarts the worker (killing in-flight agent turns) when the protocol
  * itself changes. Import from '@lines/shared' with `import type` only, if at all.
+ * Node stdlib is fine (see the runtime-discovery section below); anything else
+ * is not.
  */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 
-export const PROTOCOL_VERSION = 3;
-export const WORKER_PORT = Number(process.env.CLAUDE_UI_WORKER_PORT ?? 8788);
+// v4 = ephemeral ports + the runtime-discovery handshake below. A v3 bridge and
+// a v4 worker cannot find each other at all, which the version check in
+// workerClient.ts reports as the protocol mismatch it is.
+export const PROTOCOL_VERSION = 4;
+
+/** Explicit pin for local dev; unset means "bind :0 and let the OS pick", which
+ *  is the default so two Lines instances can never fight over a port. */
+export const WORKER_PORT = Number(process.env.LINES_WORKER_PORT ?? 0);
+
+/** Carries the discovery-file token on the bridge's connect request. A header
+ *  rather than a query param so it cannot leak into a URL that gets logged. */
+export const WORKER_TOKEN_HEADER = 'x-lines-worker-token';
+
+/* ------------------------------------------------------------------ *
+ * Runtime discovery
+ *
+ * Nothing hardcodes a port. Each local listener binds an ephemeral one and
+ * publishes it to `~/.lines-app/run/<instance>/<name>.json`; whoever needs to
+ * reach it reads (and watches) that file.
+ *
+ * This lives here rather than in a module of its own because it *is* part of
+ * the bridge<->worker contract, and this file is already inside the worker's
+ * deliberately-minimal import graph — a separate module would widen the
+ * worker's tsx-watch restart trigger for no benefit.
+ * ------------------------------------------------------------------ */
+
+/** Machine-global app root. Re-exported by store.ts, which owns everything else
+ *  under it; defined here so the worker can reach it without importing store.ts
+ *  (and dragging the whole bridge graph into the worker). */
+export const APP_ROOT = path.join(os.homedir(), '.lines-app');
+
+/** Separates concurrent Lines installs on one machine — a dev checkout (Tilt
+ *  sets `dev`) and an installed app would otherwise publish over each other. */
+export const INSTANCE = process.env.LINES_INSTANCE ?? 'default';
+
+export const RUNTIME_DIR = path.join(APP_ROOT, 'run', INSTANCE);
+
+export type RuntimeName = 'worker' | 'bridge';
+
+export interface RuntimeInfo {
+  port: number;
+  pid: number;
+  startedAt: number;
+  protocolVersion: number;
+  /** Per-boot secret the peer must present to connect. The file is 0600, so
+   *  this is what stops another process on the same host from driving a worker
+   *  that is otherwise protected only by its 127.0.0.1 binding. */
+  token: string;
+}
+
+const runtimeFile = (name: RuntimeName) => path.join(RUNTIME_DIR, `${name}.json`);
+
+export const newRuntimeToken = () => randomBytes(32).toString('hex');
+
+/** Publish atomically (write temp + rename) so a reader never sees a partial
+ *  file, and 0600 so the token stays private to this OS user. */
+export function publishRuntimeInfo(name: RuntimeName, info: RuntimeInfo): void {
+  fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
+  const target = runtimeFile(name);
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(info), { mode: 0o600 });
+  fs.renameSync(tmp, target);
+}
+
+/** True unless the pid is demonstrably gone. EPERM means it exists but belongs
+ *  to another user, which still counts as alive. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Read a peer's published info, or null if it is missing, unparseable, or
+ * names a dead process (in which case the stale file is removed).
+ *
+ * A file that outlived a SIGKILL and now names an unrelated live pid still
+ * reads as valid here — the handshake token is what makes that case fail
+ * closed rather than connecting to a stranger.
+ */
+export function readRuntimeInfo(name: RuntimeName): RuntimeInfo | null {
+  const file = runtimeFile(name);
+  let info: RuntimeInfo;
+  try {
+    info = JSON.parse(fs.readFileSync(file, 'utf8')) as RuntimeInfo;
+  } catch {
+    return null;
+  }
+  if (!info || typeof info.port !== 'number' || typeof info.token !== 'string') return null;
+  if (!pidAlive(info.pid)) {
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      /* raced with another reader; harmless */
+    }
+    return null;
+  }
+  return info;
+}
+
+/** Best-effort removal on clean exit. A crash leaves the file behind; that is
+ *  what the pid check and the token are for. */
+export function clearRuntimeInfo(name: RuntimeName): void {
+  try {
+    fs.unlinkSync(runtimeFile(name));
+  } catch {
+    /* already gone */
+  }
+}
+
+/**
+ * Watch for a peer republishing (restart on a fresh port). Watches the
+ * directory, not the file: publishing renames over the target, so a file watch
+ * would keep following the replaced inode.
+ */
+export function watchRuntimeInfo(name: RuntimeName, onChange: () => void): () => void {
+  fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 });
+  let debounce: NodeJS.Timeout | null = null;
+  const watcher = fs.watch(RUNTIME_DIR, (_event, filename) => {
+    if (filename && filename !== `${name}.json`) return;
+    if (debounce) clearTimeout(debounce);
+    // A rename fires several events; coalesce so we re-dial once.
+    debounce = setTimeout(onChange, 50);
+  });
+  watcher.on('error', () => {
+    /* the dir went away; the reconnect loop keeps retrying regardless */
+  });
+  // Never let the watcher be the reason a process stays alive: the bridge is
+  // held open by its own listener, while a short-lived consumer (a test, a CLI)
+  // must still be able to exit.
+  watcher.unref();
+  return () => {
+    if (debounce) clearTimeout(debounce);
+    watcher.close();
+  };
+}
 
 export type RpcKind = 'canUseTool' | 'preToolUse' | 'mcpTool';
 

@@ -1,7 +1,37 @@
-import type { ClientMessage, ServerMessage } from '@lines/shared';
+import type {
+  ClientMessage,
+  FileRequestKind,
+  FileRequestParams,
+  ServerMessage,
+} from '@lines/shared';
+import { APP_PROTOCOL_VERSION } from '@lines/shared';
 import { useStore } from './store';
 
-const WS_URL = `ws://${location.hostname}:8787`;
+/**
+ * Where the bridge lives. Hosted builds set VITE_BRIDGE_WS_URL and never probe;
+ * in dev the bridge binds an ephemeral port, so the URL is resolved from the dev
+ * server's /__bridge endpoint (see web/vite.config.ts) on every connect attempt —
+ * a restarted bridge comes back on a different port.
+ */
+const ENV_WS_URL = import.meta.env.VITE_BRIDGE_WS_URL as string | undefined;
+
+let WS_URL = ENV_WS_URL ?? '';
+
+/**
+ * Resolve where the bridge is listening. A failure leaves WS_URL empty, which
+ * surfaces as an ordinary failed connection and retry rather than a boot error.
+ */
+async function resolveBridgeUrl(): Promise<void> {
+  if (ENV_WS_URL) return;
+  try {
+    const res = await fetch('/__bridge', { cache: 'no-store' });
+    const { port } = (await res.json()) as { port: number | null };
+    if (!port) return;
+    WS_URL = `ws://${location.hostname}:${port}`;
+  } catch {
+    console.warn('[ws] bridge discovery failed — is the bridge running?');
+  }
+}
 const PING_INTERVAL_MS = 1000;
 // Declare the link dead after this long without a pong (~10 missed pings). Generous
 // on purpose: pings are sent and pongs are handled on the main thread, so a long
@@ -20,20 +50,43 @@ let connectivityWired = false;
 
 /** Set by main.tsx once Clerk is active; null means local no-auth mode. */
 let tokenProvider: (() => Promise<string | null>) | null = null;
-/** Latest minted token — kept fresh by connect() and the ~50s relay, for HTTP URLs. */
-let lastToken: string | null = null;
 
 export function setTokenProvider(fn: () => Promise<string | null>) {
   tokenProvider = fn;
 }
 
 /**
- * Append the current auth token to a bridge HTTP URL (file/tree/attachment
- * routes verify it like the WS handshake). No-op in local no-auth mode.
+ * In-flight fileRequests, keyed by reqId. Rejected on disconnect rather than
+ * left hanging — the caller surfaces a normal error and can retry.
  */
-export function withAuthToken(url: string): string {
-  if (!lastToken) return url;
-  return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(lastToken)}`;
+const pendingFileRequests = new Map<
+  string,
+  { resolve: (r: { status: number; body?: unknown }) => void; reject: (e: Error) => void }
+>();
+let reqCounter = 0;
+
+/**
+ * Read a workspace file/tree/docs bundle, search files, or fetch an attachment,
+ * over the already-authenticated socket. Replaces the old token-in-query-string
+ * HTTP routes.
+ */
+export function fileRequest(
+  kind: FileRequestKind,
+  params: FileRequestParams,
+): Promise<{ status: number; body?: unknown }> {
+  if (socket?.readyState !== WebSocket.OPEN) {
+    return Promise.reject(new Error('Not connected to the bridge.'));
+  }
+  const reqId = `f${++reqCounter}`;
+  return new Promise((resolve, reject) => {
+    pendingFileRequests.set(reqId, { resolve, reject });
+    socket!.send(JSON.stringify({ type: 'fileRequest', reqId, kind, params } satisfies ClientMessage));
+  });
+}
+
+function rejectPendingFileRequests() {
+  for (const [, p] of pendingFileRequests) p.reject(new Error('Connection lost.'));
+  pendingFileRequests.clear();
 }
 
 function stopAuthRelay() {
@@ -48,7 +101,6 @@ function startAuthRelay() {
     if (socket?.readyState !== WebSocket.OPEN) return;
     const token = await tokenProvider?.().catch(() => null);
     if (token) {
-      lastToken = token;
       socket.send(JSON.stringify({ type: 'auth', token } satisfies ClientMessage));
     }
   }, AUTH_RELAY_INTERVAL_MS);
@@ -96,9 +148,17 @@ function flushQueue() {
 export async function connect() {
   if (socket && socket.readyState !== WebSocket.CLOSED) return;
   wireConnectivity();
+  // Re-resolve on every attempt, not just the first: a restarted bridge comes
+  // back on a different ephemeral port, and this is what finds it.
+  await resolveBridgeUrl();
+  if (!WS_URL) {
+    useStore.getState().setConnectionStatus('reconnecting');
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => void connect(), RECONNECT_DELAY_MS);
+    return;
+  }
   // Mint a fresh token for every (re)connect — a stale one fails the handshake.
   const token = tokenProvider ? await tokenProvider().catch(() => null) : null;
-  if (token) lastToken = token;
   if (socket && socket.readyState !== WebSocket.CLOSED) return; // raced a parallel connect
   socket = new WebSocket(token ? `${WS_URL}/?token=${encodeURIComponent(token)}` : WS_URL);
 
@@ -115,17 +175,42 @@ export async function connect() {
         lastPongAt = Date.now();
         return;
       }
+      if (msg.type === 'fileResponse') {
+        // Point-to-point reply, not app state — settled here, never in the store.
+        const pending = pendingFileRequests.get(msg.reqId);
+        pendingFileRequests.delete(msg.reqId);
+        pending?.resolve({ status: msg.status, body: msg.body });
+        return;
+      }
+      // Which project (if any) this pick adds a root to — read before the reducer
+      // clears it below.
+      const folderPickTarget =
+        msg.type === 'folderPicked' ? useStore.getState().folderPickTarget : null;
       useStore.getState().applyServerMessage(msg);
       // Flush only after the hello reducer ran: sessions are fresh and transcripts reset.
-      if (msg.type === 'hello') flushQueue();
+      if (msg.type === 'hello') {
+        if (useStore.getState().protocolSkew) {
+          console.warn(
+            `[ws] protocol skew: bridge speaks v${msg.bridge?.appProtocol ?? '<pre-versioning>'}, ` +
+              `this client speaks v${APP_PROTOCOL_VERSION}. Unknown messages are ignored.`,
+          );
+        }
+        flushQueue();
+      }
       // Pop the Claude approval page; the login modal keeps a link as the popup-blocked fallback.
       if (msg.type === 'authLoginStarted') {
         window.open(msg.authorizeUrl, '_blank', 'noopener');
       }
-      // The native folder picker's only job is opening projects now.
+      // The native folder picker either opens a project or widens one, depending on
+      // where the pick was started from. Adding a root leaves the active tab alone —
+      // the tab the root lands in need not be the one in front.
       if (msg.type === 'folderPicked' && msg.path) {
-        send({ type: 'openProject', path: msg.path });
-        useStore.getState().setActiveProject(msg.path);
+        if (folderPickTarget) {
+          send({ type: 'addProjectRoot', project: folderPickTarget, path: msg.path });
+        } else {
+          send({ type: 'openProject', path: msg.path });
+          useStore.getState().setActiveProject(msg.path);
+        }
       }
     } catch (err) {
       console.error('bad server message', err);
@@ -135,6 +220,7 @@ export async function connect() {
   socket.onclose = (e) => {
     stopHeartbeat();
     stopAuthRelay();
+    rejectPendingFileRequests();
     // 1008 = bridge rejected the token. Blind reconnects would spam the gate;
     // Clerk's session state (sign-in redirect) is what recovers from here.
     if (e.code === 1008) {

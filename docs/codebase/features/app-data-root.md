@@ -19,6 +19,10 @@ Defines the machine-global directory that holds all server-side app state — pe
 - `APP_ROOT` — `~/.lines-app`, the machine-global app root
 - `userStoreRoot(userId)` — `~/.lines-app/users/{userId}`, one flat-JSON store per user
 - `createStore(root)` — flat-JSON persistence rooted at the given directory
+- `loadTranscriptRaw(sessionId)` — cached, unparsed JSONL lines for a transcript; used to build the wire frame without a parse/stringify round-trip
+- `loadTranscript(sessionId)` — cached parsed events, lazily built from the same cache entry
+- `loadProjects()`/`saveProjects()` — `projects.json`, sanitized to `Project[]` on
+  every read (see [multi-root-projects](multi-root-projects.md))
 
 ## Data flow
 
@@ -30,7 +34,7 @@ None.
 
 ## Tests
 
-None. No test infrastructure covers the store layer at time of writing.
+- `server/src/store.test.ts` — transcript cache hit/miss on mtime+size, cache extension on append, LRU eviction, torn-trailing-line tolerance, compact `sessions.json` write.
 
 ## Business rules
 
@@ -41,7 +45,15 @@ None. No test infrastructure covers the store layer at time of writing.
 ## Architectural rules
 
 - All persistent paths must derive from `APP_ROOT` / `userStoreRoot`; never hardcode the home-directory path elsewhere.
+- `createStore` keeps an in-memory, per-user transcript cache (raw lines + lazily-parsed events), revalidated by `statSync` mtime/size and bounded by count and byte size (LRU eviction). It assumes this process is the sole writer of `transcripts/*.jsonl`; a second writer would go stale silently between stat checks.
+- `sessions.json` writes are not pretty-printed and are debounced (see `SessionManager.persist`/`flushPersist` in `server/src/sessions.ts`) — a status-transition burst coalesces into one write instead of one synchronous whole-file rewrite per transition. Broadcasts still fire immediately; only the disk write is delayed.
+- `projects.json` migrates once at store construction, mirroring `GuardAllowlist`'s
+  constructor migration: the pre-multi-root `string[]` form (or any junk an older
+  build wrote) is sanitized to `Project[]` and rewritten only when the sanitized
+  form actually differs, so a second `createStore` on an already-migrated file
+  leaves its bytes untouched. `loadProjects()` itself never writes — only the
+  one-shot migration does.
 
 ## Related decisions
 
-None.
+- [multi-root-projects](multi-root-projects.md)

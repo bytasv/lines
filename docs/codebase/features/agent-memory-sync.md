@@ -45,6 +45,9 @@ None (repo has typecheck only, no test runner configured).
 - Client-side full-snapshot push additionally caps total payload at ~1.5 MB, dropping the largest files first (logged via a one-time warning) if the cap is exceeded.
 - Server prunes tombstones older than ~30 days so the stored blob doesn't grow unbounded.
 - Conflict resolution is per-file last-write-wins by mtime; a losing side's edit is silently dropped (same trade-off already accepted for settings/project-keys sync).
+- A project's extra roots (see [multi-root-projects](multi-root-projects.md)) need
+  no change here: each is just another keyed cwd with its own project-key
+  namespace, resolved the same way any other checkout is.
 
 ## Architectural rules
 
@@ -55,4 +58,4 @@ None (repo has typecheck only, no test runner configured).
 
 ## Related decisions
 
-None.
+- [multi-root-projects](multi-root-projects.md)

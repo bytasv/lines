@@ -361,10 +361,27 @@ function BreakdownBody({
         value={formatTokens(view.maxTokens)}
         dim={view.rawMaxTokens && view.rawMaxTokens !== view.maxTokens ? `of ${formatTokens(view.rawMaxTokens)} raw` : undefined}
       />
-      {view.isAutoCompactEnabled && view.autoCompactThreshold != null && (
-        <TotalRow label="Auto-compacts at" value={formatTokens(view.autoCompactThreshold)} />
-      )}
+      <AutoCompactRow view={view} />
     </>
+  );
+}
+
+/**
+ * Auto-compaction is the CLI's, not ours — Lines never sets `autoCompactEnabled`,
+ * it only reports whatever the CLI resolved. Shown even when off, so "it never
+ * fires" reads as a setting rather than a missing row, and with the headroom left
+ * so "on but never reached" is distinguishable too.
+ */
+function AutoCompactRow({ view }: { view: ContextSummary }) {
+  if (view.isAutoCompactEnabled === false) return <TotalRow label="CLI auto-compact" value="off" />;
+  if (!view.isAutoCompactEnabled || view.autoCompactThreshold == null) return null;
+  const toGo = view.autoCompactThreshold - view.totalTokens;
+  return (
+    <TotalRow
+      label="CLI auto-compacts at"
+      value={formatTokens(view.autoCompactThreshold)}
+      dim={toGo > 0 ? `${formatTokens(toGo)} to go` : undefined}
+    />
   );
 }
 

@@ -10,6 +10,7 @@ import {
   Modal,
   Paper,
   ScrollArea,
+  Skeleton,
   Stack,
   Text,
   Tooltip,
@@ -25,9 +26,9 @@ import {
   IconRoute,
   IconZoomIn,
 } from '@tabler/icons-react';
-import type { ContextCompactData, TranscriptEvent, WorkflowMarkerData } from '@lines/shared';
+import type { Attachment, ContextCompactData, TranscriptEvent, WorkflowMarkerData } from '@lines/shared';
 import { useStore } from '../store';
-import { send, withAuthToken } from '../ws';
+import { send } from '../ws';
 import {
   buildTranscript,
   foldAgentTurns,
@@ -35,6 +36,7 @@ import {
   type AgentTurnItem,
   type TranscriptItem,
 } from '../lib/transcript';
+import { useAttachmentUrl } from '../lib/files';
 import { mentionKindMeta } from '../lib/mentions';
 import { formatTokens } from '../lib/format';
 import { Markdown } from './Markdown';
@@ -106,8 +108,50 @@ function ContextCompactMarker({ data }: { data: ContextCompactData }) {
   );
 }
 
-/** Attachments are served by the bridge HTTP server (same host, port 8787). */
-const attachmentBase = `${location.protocol}//${location.hostname}:8787`;
+/**
+ * One attachment tile. A component rather than inline JSX because each tile
+ * resolves its own blob URL through a hook, and hooks can't run inside a .map()
+ * callback. Attachments arrive as base64 over the socket now — see
+ * useAttachmentUrl.
+ */
+function AttachmentTile({
+  att,
+  onImage,
+}: {
+  att: Attachment;
+  onImage: (src: string) => void;
+}) {
+  // att.url is the legacy `/attachments/<sessionId>/<file>` shape; the request
+  // takes the part below the user's attachments root.
+  const rel = decodeURIComponent(att.url.replace(/^\/attachments\//, ''));
+  const { url } = useAttachmentUrl(rel);
+
+  // Render anything the browser shows as an image (incl. SVG, which the model
+  // receives as text but is still a displayable image).
+  if (att.mediaType.startsWith('image/')) {
+    if (!url) return <Skeleton width={72} height={72} radius="md" />;
+    return <ImageThumb src={url} alt={att.name} onOpen={() => onImage(url)} />;
+  }
+  return (
+    <Tooltip label={att.name}>
+      <Paper
+        withBorder
+        radius="md"
+        component="a"
+        href={url ?? undefined}
+        target="_blank"
+        style={{ width: 72, height: 72, overflow: 'hidden', flexShrink: 0, display: 'block', cursor: 'pointer' }}
+      >
+        <Stack align="center" justify="center" gap={2} h="100%" px={4}>
+          <IconFile size={22} opacity={0.6} />
+          <Text size="9px" ta="center" lineClamp={1} style={{ maxWidth: '100%' }}>
+            {att.name}
+          </Text>
+        </Stack>
+      </Paper>
+    </Tooltip>
+  );
+}
 
 /** Square image thumbnail with a zoom-icon overlay on hover; click opens the lightbox. */
 function ImageThumb({ src, alt, onOpen }: { src: string; alt: string; onOpen: () => void }) {
@@ -223,33 +267,9 @@ function Item({
             )}
             {item.attachments && item.attachments.length > 0 && (
               <Group gap="xs" mt={item.text ? 6 : 0}>
-                {item.attachments.map((att) => {
-                  const href = withAuthToken(`${attachmentBase}${att.url}`);
-                  // Render anything the browser shows as an image (incl. SVG, which
-                  // the model receives as text but is still a displayable image).
-                  if (att.mediaType.startsWith('image/')) {
-                    return <ImageThumb key={att.url} src={href} alt={att.name} onOpen={() => onImage(href)} />;
-                  }
-                  return (
-                    <Tooltip key={att.url} label={att.name}>
-                      <Paper
-                        withBorder
-                        radius="md"
-                        component="a"
-                        href={href}
-                        target="_blank"
-                        style={{ width: 72, height: 72, overflow: 'hidden', flexShrink: 0, display: 'block', cursor: 'pointer' }}
-                      >
-                        <Stack align="center" justify="center" gap={2} h="100%" px={4}>
-                          <IconFile size={22} opacity={0.6} />
-                          <Text size="9px" ta="center" lineClamp={1} style={{ maxWidth: '100%' }}>
-                            {att.name}
-                          </Text>
-                        </Stack>
-                      </Paper>
-                    </Tooltip>
-                  );
-                })}
+                {item.attachments.map((att) => (
+                  <AttachmentTile key={att.url} att={att} onImage={onImage} />
+                ))}
               </Group>
             )}
           </Paper>

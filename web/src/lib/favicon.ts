@@ -1,4 +1,4 @@
-const FAVICON_SRC = '/favicon.svg';
+const FAVICON_SRC = '/favicon.png';
 // Matches Mantine blue-6 / red-6 used by the sidebar status dots.
 const RUNNING_BLUE = '#228be6';
 const ATTENTION_RED = '#fa5252';
@@ -31,7 +31,7 @@ function faviconLink(): HTMLLinkElement | null {
 function restorePlain(): void {
   const link = faviconLink();
   if (!link) return;
-  link.type = 'image/svg+xml';
+  link.type = 'image/png';
   link.href = FAVICON_SRC;
 }
 
