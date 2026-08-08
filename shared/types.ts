@@ -1,4 +1,64 @@
 /**
+ * Browser <-> bridge wire contract, distinct from the bridge <-> worker
+ * PROTOCOL_VERSION in server/src/workerProtocol.ts.
+ *
+ * These two halves ship together today, so nothing enforces this yet. It exists
+ * because once the web app is hosted it will ship ahead of every installed
+ * bridge, and a version the client can read is the prerequisite for degrading
+ * gracefully instead of throwing on a message shape it does not know.
+ */
+export const APP_PROTOCOL_VERSION = 1;
+
+/**
+ * Workspace reads the browser makes over the WebSocket rather than plain HTTP.
+ *
+ * These were `/file`, `/tree`, `/find`, `/docs` and `/attachments/*` GETs with the
+ * Clerk token in the query string. Moving them onto the already-authenticated
+ * socket removes that token from URLs (and so from logs and browser history),
+ * and means a connection reached through a relay needs no HTTP surface at all.
+ */
+export type FileRequestKind = 'file' | 'tree' | 'find' | 'docs' | 'attachment';
+
+export interface FileRequestParams {
+  /** file/tree/docs: exactly one. find: one per project root. */
+  paths?: string[];
+  /** find only. */
+  q?: string;
+  limit?: number;
+  /** attachment only: path relative to the user's attachments root. */
+  rel?: string;
+}
+
+/** Bodies mirror the old JSON responses; `attachment` returns base64 bytes. */
+export interface AttachmentBody {
+  data: string;
+  mediaType: string;
+}
+
+/**
+ * Desktop auto-update, surfaced in the browser because that is where the user is
+ * looking — not the tray. `restartBlocked` is the bridge's contribution: a
+ * restart kills in-flight turns, so it is refused while any session is active.
+ */
+export interface UpdateStatus {
+  state: 'idle' | 'available' | 'downloading' | 'ready' | 'error';
+  /** Version being offered, when one is. */
+  version?: string;
+  /** 0..100 while downloading. */
+  progress?: number;
+  message?: string;
+  restartBlocked?: boolean;
+}
+
+/** Who the client is actually talking to, sent on `hello`. */
+export interface BridgeInfo {
+  /** Package version of the running bridge — for display and support. */
+  version: string;
+  /** Contract version; compare against the client's own APP_PROTOCOL_VERSION. */
+  appProtocol: number;
+}
+
+/**
  * 'auto' is UI-level: the SDK runs in acceptEdits underneath while the bridge
  * server auto-approves tool calls its guard considers safe and prompts only
  * for dangerous ones (a local replica of the CLI's auto mode).
@@ -941,6 +1001,11 @@ export type ClientMessage =
   | { type: 'removeGuardAllow'; entry: GuardAllowEntry }
   /** Resolve a pending remote-divergence review: accept installs it, reject keeps local. */
   | { type: 'reviewGuardAllowlist'; accept: boolean }
+  /** Read a workspace file/tree/docs bundle, search files, or fetch an attachment.
+   *  `reqId` is echoed on the matching fileResponse. */
+  | { type: 'fileRequest'; reqId: string; kind: FileRequestKind; params: FileRequestParams }
+  /** Apply a downloaded update now. Ignored while a session is active. */
+  | { type: 'installUpdate' }
   | { type: 'ping' };
 
 /** One Claude-plan rate-limit window (5-hour session, weekly, ...) from the OAuth usage endpoint. */
@@ -1173,7 +1238,9 @@ export function diffAllowlists(
 }
 
 export type ServerMessage =
-  | { type: 'hello'; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; recipes: RecipeDef[]; sharedRecipes: RecipeDef[]; recipeStats: Record<string, number>; models: ModelOption[]; recentDirs: string[]; projects: Project[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; storage: StorageStatus; settings?: UserUiSettings | null; guardAllowlist?: GuardAllowEntry[]; guardAllowlistReview?: GuardAllowlistReview | null }
+  /** `bridge` is optional: once the web app is hosted it will meet bridges older
+   *  than itself, and an absent field is exactly that case. */
+  | { type: 'hello'; bridge?: BridgeInfo; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; recipes: RecipeDef[]; sharedRecipes: RecipeDef[]; recipeStats: Record<string, number>; models: ModelOption[]; recentDirs: string[]; projects: Project[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; storage: StorageStatus; settings?: UserUiSettings | null; guardAllowlist?: GuardAllowEntry[]; guardAllowlistReview?: GuardAllowlistReview | null }
   | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
   /** The whole auto-mode guard allowlist after any change (card, UI edit, accepted review). */
@@ -1213,6 +1280,10 @@ export type ServerMessage =
   | { type: 'transcript'; sessionId: string; events: TranscriptEvent[] }
   | { type: 'folderPicked'; path: string | null }
   | { type: 'error'; sessionId?: string; message: string }
+  /** Reply to one fileRequest. `status` mirrors the HTTP codes the client already
+   *  maps to messages (403/404/413/415); `body` is absent on failure. */
+  | { type: 'fileResponse'; reqId: string; status: number; body?: unknown }
+  | { type: 'updateStatus'; status: UpdateStatus }
   | { type: 'pong' };
 
 /** Path fragment shared by both plan directories. Cheap hint only — the server's

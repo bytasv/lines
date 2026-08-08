@@ -1,16 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { APP_ROOT } from './workerProtocol.ts';
 import type {
   GuardAllowEntry,
+  Project,
   ProjectKeyMap,
+  RecipeDef,
   SessionMeta,
   StepDef,
   TranscriptEvent,
   UserUiSettings,
   WorkflowDef,
 } from '@lines/shared';
+import { normalizeRootPath } from '@lines/shared';
 
 /** Guard-allowlist sync bookkeeping, kept beside the entries but never mixed into them:
  *  `updatedAt` orders the storage row (LWW), `pending` is a remote list awaiting review,
@@ -24,8 +27,14 @@ export interface GuardSyncState {
 const EMPTY_GUARD_SYNC: GuardSyncState = { updatedAt: 0, pending: null, rejected: null };
 
 /** Machine-global app root. Per-user stores live under `${APP_ROOT}/users/{userId}`;
- * machine-wide assets (vendored plugins) stay directly under this root. */
-export const APP_ROOT = path.join(os.homedir(), '.lines-app');
+ * machine-wide assets (vendored plugins) and the `run/<instance>/` port-discovery
+ * files stay directly under this root.
+ *
+ * Defined in workerProtocol.ts and re-exported here: the worker needs it to
+ * publish its port and cannot import this module without pulling the whole
+ * bridge graph into its tsx-watch restart trigger. This module stays the owner
+ * of every path *under* the root. */
+export { APP_ROOT };
 
 function readJson<T>(file: string, fallback: T): T {
   try {
@@ -71,6 +80,38 @@ function splitJsonl(text: string): string[] {
   return lines;
 }
 
+/**
+ * Validate an untrusted projects file into canonical records. Tolerates the
+ * pre-multi-root `string[]` form, which is what makes the load-time migration a
+ * plain read-sanitize-write. Junk is dropped rather than repaired: a malformed
+ * entry has no path to anchor on, so there is nothing to preserve.
+ */
+function sanitizeProjects(raw: unknown): Project[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Project[] = [];
+  for (const item of raw) {
+    const rawPath = typeof item === 'string' ? item : (item as Project | null)?.path;
+    if (typeof rawPath !== 'string') continue;
+    const path = normalizeRootPath(rawPath);
+    if (!path) continue;
+    // First primary wins, so a duplicated tab collapses without losing its roots.
+    if (out.some((p) => p.path === path)) continue;
+    const rawRoots = typeof item === 'string' ? [] : (item as Project).extraRoots;
+    const extraRoots: string[] = [];
+    if (Array.isArray(rawRoots)) {
+      for (const r of rawRoots) {
+        if (typeof r !== 'string') continue;
+        const root = normalizeRootPath(r);
+        // A primary listed in its own extraRoots would double every tree/find hit.
+        if (!root || root === path || extraRoots.includes(root)) continue;
+        extraRoots.push(root);
+      }
+    }
+    out.push(extraRoots.length ? { path, extraRoots } : { path });
+  }
+  return out;
+}
+
 /** Last-synced fingerprint per memory file (absolute path -> state). */
 export type MemoryManifest = Record<string, { key: string; mtimeMs: number; size: number }>;
 
@@ -80,7 +121,9 @@ export type MemoryManifest = Record<string, { key: string; mtimeMs: number; size
  * *server* timestamps, never local ones — the bridge's clock may differ from the
  * database's, and a fast local clock would silently skip rows.
  */
-export type SyncWatermarks = Partial<Record<'workflows' | 'steps' | 'sessions' | 'memory', string>>;
+export type SyncWatermarks = Partial<
+  Record<'workflows' | 'steps' | 'recipes' | 'sessions' | 'memory', string>
+>;
 
 /** Persisted app-managed Claude OAuth credentials. Written 0600 (tokens are secrets). */
 export interface StoredAuth {
@@ -105,6 +148,9 @@ export function createStore(root: string) {
   const WORKFLOWS_FILE = path.join(root, 'workflows.json');
   const STEPS_FILE = path.join(root, 'steps.json');
   const STEP_VERSIONS_FILE = path.join(root, 'step-versions.json');
+  const RECIPES_FILE = path.join(root, 'recipes.json');
+  const RECIPE_VERSIONS_FILE = path.join(root, 'recipe-versions.json');
+  const RECIPE_STATS_FILE = path.join(root, 'recipe-stats.json');
   const RECENT_DIRS_FILE = path.join(root, 'recent-dirs.json');
   const PROJECTS_FILE = path.join(root, 'projects.json');
   const PROJECT_KEYS_FILE = path.join(root, 'project-keys.json');
@@ -211,6 +257,34 @@ export function createStore(root: string) {
       writeJson(STEP_VERSIONS_FILE, versions);
     },
 
+    loadRecipes(): RecipeDef[] {
+      return readJson<RecipeDef[]>(RECIPES_FILE, []);
+    },
+
+    saveRecipes(recipes: RecipeDef[]) {
+      writeJson(RECIPES_FILE, recipes);
+    },
+
+    // Own recipes' full immutable history, as step-versions.json is for steps.
+    loadRecipeVersions(): RecipeDef[] {
+      return readJson<RecipeDef[]>(RECIPE_VERSIONS_FILE, []);
+    },
+
+    saveRecipeVersions(versions: RecipeDef[]) {
+      writeJson(RECIPE_VERSIONS_FILE, versions);
+    },
+
+    // Cached run counts keyed `ownerId/recipeId`, so a `hello` served while
+    // storage is unreachable shows numbers rather than blanks. Never the source
+    // of truth — the counter lives in its own storage table.
+    loadRecipeStats(): Record<string, number> {
+      return readJson<Record<string, number>>(RECIPE_STATS_FILE, {});
+    },
+
+    saveRecipeStats(stats: Record<string, number>) {
+      writeJson(RECIPE_STATS_FILE, stats);
+    },
+
     loadRecentDirs(): string[] {
       return readJson<string[]>(RECENT_DIRS_FILE, []);
     },
@@ -221,17 +295,20 @@ export function createStore(root: string) {
       writeJson(RECENT_DIRS_FILE, dirs.slice(0, 10));
     },
 
-    loadProjects(): string[] {
-      return readJson<string[]>(PROJECTS_FILE, []);
+    // Sanitized on every read but never rewritten from here — a defensive read
+    // must not write. The one-shot migration below owns the rewrite.
+    loadProjects(): Project[] {
+      return sanitizeProjects(readJson<unknown>(PROJECTS_FILE, []));
     },
 
-    saveProjects(projects: string[]) {
+    saveProjects(projects: Project[]) {
       writeJson(PROJECTS_FILE, projects);
     },
 
-    // `projects` is this machine's open paths (never synced — paths are local).
-    // `project-keys` maps those paths to machine-independent identities and IS
-    // synced, so other installs can group sessions by repo.
+    // `projects` is this machine's open paths and the extra roots they span
+    // (never synced — paths are local). `project-keys` maps those paths to
+    // machine-independent identities and IS synced, so other installs can group
+    // sessions by repo.
     loadProjectKeys(): ProjectKeyMap {
       return readJson<ProjectKeyMap>(PROJECT_KEYS_FILE, {});
     },
@@ -383,6 +460,25 @@ export function createStore(root: string) {
     rootDir: root,
     attachmentsRoot: ATTACHMENTS,
   };
+
+  // One-shot migration of projects.json from the pre-multi-root `string[]` form
+  // (and of any junk an older build wrote), mirroring GuardAllowlist's
+  // constructor migration. Rewritten only when the sanitized form differs, so a
+  // second createStore leaves the file's bytes alone.
+  {
+    const raw = readJson<unknown>(PROJECTS_FILE, null);
+    if (raw !== null) {
+      const projects = sanitizeProjects(raw);
+      if (JSON.stringify(raw) !== JSON.stringify(projects)) {
+        try {
+          store.saveProjects(projects);
+        } catch (err) {
+          // In-memory reads still sanitize, so a failed rewrite costs nothing but a retry.
+          console.warn('[store] could not migrate projects.json:', err);
+        }
+      }
+    }
+  }
 
   return store;
 }

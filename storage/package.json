@@ -10,10 +10,12 @@
     "postinstall": "prisma generate",
     "generate": "prisma generate",
     "migrate": "dotenv -e ../.env -- prisma migrate deploy",
-    "studio": "dotenv -e ../.env -- prisma studio"
+    "studio": "dotenv -e ../.env -- prisma studio",
+    "test": "tsx --test src/*.test.ts"
   },
   "dependencies": {
     "@lines/shared": "*",
+    "@aws-sdk/client-s3": "^3.744.0",
     "@clerk/express": "^1.7.41",
     "@prisma/client": "^6.19.0",
     "dotenv": "^17.4.2",

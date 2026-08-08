@@ -1,17 +1,87 @@
-import { WebSocket } from 'ws';
 import type { ServerMessage, UserUiSettings } from '@lines/shared';
+import { projectRoots } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
 import { AuthManager } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { UsagePoller } from './usage.ts';
 import { WorkflowEngine } from './workflows.ts';
+import { RecipeEngine } from './recipes.ts';
 import { StorageSyncClient, THROTTLED } from './sync.ts';
 import { ProjectKeyRegistry } from './projectKeys.ts';
 import { MemorySyncer } from './memory.ts';
 import type { WorkerClient } from './workerClient.ts';
 
 const STORAGE_URL = process.env.STORAGE_URL ?? 'http://localhost:8790';
+
+/**
+ * The whole surface the bridge uses on a browser connection — structural, not
+ * `ws.WebSocket`, so a connection can arrive over something other than a direct
+ * socket (a relay channel) and still be handed to the same `handleConnection`.
+ * A real `ws.WebSocket` satisfies this as-is.
+ *
+ * Keep it to what the bridge genuinely calls. Every addition is one more thing
+ * an alternative transport has to implement.
+ */
+export interface BrowserLink {
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  /** Drop without a close handshake; used only by the shutdown path. */
+  terminate(): void;
+  on(event: 'message', cb: (raw: unknown) => void): unknown;
+  on(event: 'close', cb: () => void): unknown;
+  on(event: 'error', cb: (err: Error) => void): unknown;
+  /** Compared against OPEN (1) numerically, so no ws constant is needed.
+   *  `close()` must move this off OPEN synchronously — broadcast relies on it to
+   *  avoid closing the same slow link on every subsequent message. */
+  readonly readyState: number;
+  /** Bytes queued but not yet flushed to the peer — the backpressure signal
+   *  broadcast() uses. An implementation with no queue may report 0. */
+  readonly bufferedAmount: number;
+}
+
+/** `WebSocket.OPEN`, inlined so BrowserLink implementations need no ws import. */
+export const LINK_OPEN = 1;
+
+/**
+ * Backpressure thresholds for the broadcast fan-out, mirroring the worker's
+ * OUTBOX_CAP policy at the other end of the pipe.
+ *
+ * `ws.send()` buffers without limit. On loopback the socket drains instantly, so
+ * nothing ever queued and these never trip; over a relay a suspended laptop makes
+ * bridge memory climb without bound. Deliberately generous — normal use must
+ * never reach them.
+ */
+const SEND_HIGH_WATER = 4 * 1024 * 1024;
+const SEND_HARD_LIMIT = 32 * 1024 * 1024;
+
+/**
+ * Stream deltas are the only droppable traffic: they are never persisted, and
+ * the browser refetches the transcript on reconnect, so losing one costs a
+ * partially-typed token — not state. Exactly the worker's rule in worker.ts.
+ */
+function isDroppable(msg: ServerMessage): boolean {
+  return (
+    msg.type === 'event' &&
+    msg.event.kind === 'sdk' &&
+    (msg.event.data as { type?: string } | null)?.type === 'stream_event'
+  );
+}
+
+/**
+ * What to do with one message for one link, given how much that link already has
+ * queued. Pure so the policy is testable without a socket:
+ *
+ * - `send`  — normal case, and every critical message under the hard limit
+ * - `skip`  — a stream delta for a link that is falling behind
+ * - `close` — even critical traffic is backing up; drop the client and let it
+ *             resync from `hello`
+ */
+export function linkSendAction(msg: ServerMessage, bufferedAmount: number): 'send' | 'skip' | 'close' {
+  if (bufferedAmount > SEND_HARD_LIMIT) return 'close';
+  if (bufferedAmount > SEND_HIGH_WATER && isDroppable(msg)) return 'skip';
+  return 'send';
+}
 
 /**
  * Everything the bridge holds for one user. Isolation is structural: each
@@ -25,11 +95,12 @@ export interface UserContext {
   guard: GuardAllowlist;
   sessions: SessionManager;
   workflows: WorkflowEngine;
+  recipes: RecipeEngine;
   usage: UsagePoller;
   /** cwd -> machine-independent project identity; groups sessions across installs. */
   projectKeys: ProjectKeyRegistry;
   /** This user's live browser connections; broadcast fans out to these only. */
-  sockets: Set<WebSocket>;
+  sockets: Set<BrowserLink>;
   broadcast: (msg: ServerMessage) => void;
   /** Freshest verified Clerk token (handshake or relay); null in local no-auth mode. */
   clerkToken: string | null;
@@ -41,6 +112,8 @@ export interface UserContext {
   refreshShared: () => Promise<void>;
   /** Re-pull the shared step library, resolve pins, and broadcast if changed. */
   refreshSharedSteps: () => Promise<void>;
+  /** Re-pull other users' published recipes and broadcast if they changed. */
+  refreshSharedRecipes: () => Promise<void>;
   touchedAt: number;
 }
 
@@ -60,7 +133,7 @@ export function buildUserContext(
 ): UserContext {
   const store = createStore(storeRoot);
   const guard = new GuardAllowlist(store);
-  const sockets = new Set<WebSocket>();
+  const sockets = new Set<BrowserLink>();
   const sync = new StorageSyncClient(
     STORAGE_URL,
     () => ctx.clerkToken,
@@ -81,9 +154,25 @@ export function buildUserContext(
     // Push the full own history, not just the heads in msg.steps — else the debounce
     // coalesces intermediate versions away and storage never records them.
     else if (msg.type === 'steps') sync.pushSteps(workflows.listOwnStepVersions());
+    // Same reason as steps: heads alone would let the debounce coalesce
+    // intermediate versions away before they ever reach Postgres.
+    else if (msg.type === 'recipes') sync.pushRecipes(recipes.listOwnRecipeVersions());
     const payload = JSON.stringify(msg);
     for (const ws of sockets) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+      if (ws.readyState !== LINK_OPEN) continue;
+      const action = linkSendAction(msg, ws.bufferedAmount);
+      if (action === 'skip') continue;
+      if (action === 'close') {
+        // Even critical messages are backing up, so this client is wedged rather
+        // than merely slow. Dropping it is safe: `hello` is a complete state
+        // snapshot, so whatever it missed arrives whole when it reconnects.
+        console.warn(`[ws] dropping a client backed up by ${Math.round(ws.bufferedAmount / 1e6)}MB`);
+        ws.close(1013, 'too slow');
+        // No sockets.delete here — the 'close' handler owns removal, and
+        // readyState has already left OPEN so the next broadcast skips it.
+        continue;
+      }
+      ws.send(payload);
     }
   };
 
@@ -134,10 +223,14 @@ export function buildUserContext(
   sessions.attachWorker(worker);
 
   const workflows = new WorkflowEngine(store, sessions, broadcast, userId);
+  const recipes = new RecipeEngine(store, broadcast, userId);
 
   // Backfill: sessions that predate project keys (and any checkout opened while
   // the feature was off) get resolved once, from whatever exists on this disk.
-  projectKeys.learnAll([...store.loadProjects(), ...sessions.list().map((s) => s.cwd)]);
+  projectKeys.learnAll([
+    ...store.loadProjects().flatMap(projectRoots),
+    ...sessions.list().map((s) => s.cwd),
+  ]);
 
   // Login/logout: tell this user's browsers, restart idle queries so their next
   // turn uses (or drops) the app-managed token, and re-check plan usage.
@@ -175,6 +268,15 @@ export function buildUserContext(
     }
   };
 
+  /** Re-pull the published recipe corpus and broadcast it. Nothing pins recipes,
+   *  so there is no resolveSteps analogue to run alongside. */
+  const refreshSharedRecipes = async () => {
+    const shared = await sync.pullSharedRecipes();
+    if (shared && recipes.setSharedRecipes(shared)) {
+      broadcast({ type: 'sharedRecipes', sharedRecipes: recipes.listSharedRecipes() });
+    }
+  };
+
   const syncNow = async () => {
     const pulled = await sync.pullAll();
     // A pull this recent already ran the whole routine — pushing and re-pulling
@@ -186,6 +288,8 @@ export function buildUserContext(
       try {
         workflows.applySyncedAll(pulled.workflows);
         workflows.applySyncedSteps(pulled.steps);
+        recipes.applySyncedRecipes(pulled.recipes);
+        recipes.applyStats(pulled.recipeStats);
         for (const meta of pulled.sessions) sessions.adoptSynced(meta);
         const remote = pulled.settings as UserUiSettings | null;
         // Merged before the applying flag drops, so the union is pushed once below.
@@ -222,6 +326,7 @@ export function buildUserContext(
     if (sync.enabled) {
       sync.pushWorkflows(workflows.list());
       sync.pushSteps(workflows.listOwnStepVersions());
+      sync.pushRecipes(recipes.listOwnRecipeVersions());
       sync.pushSessions(sessions.list());
       sync.pushProjectKeys(projectKeys.all());
       sync.pushMemory(memory.collectAll());
@@ -232,6 +337,7 @@ export function buildUserContext(
     // Populate other users' published workflows + step library on connect/reconnect.
     await refreshShared();
     await refreshSharedSteps();
+    await refreshSharedRecipes();
   };
 
   const ctx: UserContext = {
@@ -241,6 +347,7 @@ export function buildUserContext(
     guard,
     sessions,
     workflows,
+    recipes,
     usage,
     projectKeys,
     sockets,
@@ -250,6 +357,7 @@ export function buildUserContext(
     syncNow,
     refreshShared,
     refreshSharedSteps,
+    refreshSharedRecipes,
     touchedAt: Date.now(),
   };
   // After ctx exists — its async broadcasts reference ctx-bound state (sync token).

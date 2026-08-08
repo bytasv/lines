@@ -19,6 +19,7 @@ import {
 import {
   IconArchive,
   IconArchiveOff,
+  IconBook,
   IconCircleCheck,
   IconCircleCheckFilled,
   IconChevronDown,
@@ -35,9 +36,10 @@ import type { CSSProperties } from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
+import { projectRoots } from '@lines/shared';
 import { formatDuration, isWorkflowFinished, sessionRowMeta } from '../lib/format';
 import type { SidebarMode } from '../store';
-import { sessionsInProject, useStore } from '../store';
+import { projectAt, sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
 import { FileTree } from './FileTree';
 
@@ -371,7 +373,13 @@ function UnlinkedCheckouts({ activeKey }: { activeKey: string }) {
   );
 }
 
-export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
+export function Sidebar({
+  onEditWorkflows,
+  onBrowseRecipes,
+}: {
+  onEditWorkflows: () => void;
+  onBrowseRecipes: () => void;
+}) {
   const sessions = useStore((s) => s.sessions);
   const workflows = useStore((s) => s.workflows);
   const sharedWorkflows = useStore((s) => s.sharedWorkflows);
@@ -389,8 +397,11 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
   const lastWorkflow = [...workflows, ...sharedWorkflows].find((w) => w.id === lastChoice);
 
   const projectKeys = useStore((s) => s.projectKeys);
+  const projects = useStore((s) => s.projects);
+  const project = projectAt(projects, activeProject);
+  const roots = project ? projectRoots(project) : [];
   const activeProjectKey = activeProject ? projectKeys[activeProject] ?? null : null;
-  const projectSessions = sessionsInProject(sessions, projectKeys, activeProject);
+  const projectSessions = sessionsInProject(sessions, projectKeys, project);
   const list = projectSessions
     .filter((s) => !s.archived)
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -430,11 +441,18 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
           {sidebarMode === 'files' ? 'Files' : 'Sessions'}
         </Text>
         {sidebarMode === 'sessions' && (
-          <Tooltip label="Workflows">
-            <ActionIcon variant="subtle" color="gray" size="sm" onClick={onEditWorkflows}>
-              <IconRoute size={15} />
-            </ActionIcon>
-          </Tooltip>
+          <Group gap={2}>
+            <Tooltip label="Recipes">
+              <ActionIcon variant="subtle" color="gray" size="sm" onClick={onBrowseRecipes}>
+                <IconBook size={15} />
+              </ActionIcon>
+            </Tooltip>
+            <Tooltip label="Workflows">
+              <ActionIcon variant="subtle" color="gray" size="sm" onClick={onEditWorkflows}>
+                <IconRoute size={15} />
+              </ActionIcon>
+            </Tooltip>
+          </Group>
         )}
       </Group>
       {sidebarMode === 'sessions' && (
@@ -495,14 +513,20 @@ export function Sidebar({ onEditWorkflows }: { onEditWorkflows: () => void }) {
       )}
       <ScrollArea style={{ flex: 1 }} px={6}>
         {sidebarMode === 'files' ? (
-          activeProject ? (
+          roots.length > 0 ? (
             <Box pb="sm">
-              <FileTree
-                key={activeProject}
-                root={activeProject}
-                onFileClick={openFileTab}
-                selectedPath={activeFile}
-              />
+              {roots.map((root) => (
+                <Box key={root}>
+                  {/* Only a multi-root project needs headers — a single tree is
+                      already unambiguously the project's. */}
+                  {roots.length > 1 && (
+                    <Text size="10px" c="dimmed" fw={600} tt="uppercase" px={6} pt={6} truncate>
+                      {root.split('/').filter(Boolean).pop() ?? root}
+                    </Text>
+                  )}
+                  <FileTree root={root} onFileClick={openFileTab} selectedPath={activeFile} />
+                </Box>
+              ))}
             </Box>
           ) : (
             <Text size="xs" c="dimmed" ta="center" pt="lg">

@@ -1,14 +1,17 @@
 import { create } from 'zustand';
 import type {
   AuthStatus,
+  BridgeInfo,
   ContextBreakdown,
   GuardAllowEntry,
   GuardAllowlistReview,
   ModelOption,
   PermissionMode,
+  Project,
   ProjectKeyMap,
   PromptAttachment,
   PromptMention,
+  RecipeDef,
   ServerMessage,
   SessionMeta,
   StepDef,
@@ -18,7 +21,7 @@ import type {
   UserUiSettings,
   WorkflowDef,
 } from '@lines/shared';
-import { DEFAULT_MODEL, resolveModelId } from '@lines/shared';
+import { APP_PROTOCOL_VERSION, DEFAULT_MODEL, projectRoots, resolveModelId } from '@lines/shared';
 import { send } from './ws';
 import type { AlertSound } from './lib/alerts';
 import {
@@ -257,13 +260,29 @@ function loadDismissedCheckouts(): string[] {
   }
 }
 
-function pickActive(projects: string[], current: string | null): string | null {
-  if (current && projects.includes(current)) return current;
-  return projects[0] ?? null;
+function pickActive(projects: Project[], current: string | null): string | null {
+  if (current && projects.some((p) => p.path === current)) return current;
+  return projects[0]?.path ?? null;
 }
 
 /**
- * Sessions that belong to the given project.
+ * Coerce a wire project list to `Project[]`. `hello` carries no protocol
+ * version, so a tab left open across the upgrade — or an old bridge — would
+ * otherwise feed bare path strings straight into the tab list and render
+ * `[object Object]`.
+ */
+function toProjects(raw: (Project | string)[]): Project[] {
+  return raw.map((p) => (typeof p === 'string' ? { path: p } : p));
+}
+
+/** The open project with this path, if any — what `sessionsInProject` wants. */
+export function projectAt(projects: Project[], path: string | null): Project | null {
+  return path ? projects.find((p) => p.path === path) ?? null : null;
+}
+
+/**
+ * Sessions that belong to the given project — every one of its roots, since a
+ * session started in an extra root belongs to the tab that spans it.
  *
  * Matching is by project key when that checkout has one, so a session created
  * on another machine — where the same repo sits at a different absolute path —
@@ -273,12 +292,13 @@ function pickActive(projects: string[], current: string | null): string | null {
 export function sessionsInProject(
   sessions: Record<string, SessionMeta>,
   projectKeys: ProjectKeyMap,
-  project: string | null,
+  project: Project | null,
 ): SessionMeta[] {
   if (!project) return [];
-  const projectKey = projectKeys[project];
+  const roots = projectRoots(project);
+  const keys = new Set(roots.map((r) => projectKeys[r]).filter((k): k is string => k != null));
   return Object.values(sessions).filter(
-    (s) => s.cwd === project || (projectKey != null && projectKeys[s.cwd] === projectKey),
+    (s) => roots.includes(s.cwd) || keys.has(projectKeys[s.cwd]),
   );
 }
 
@@ -292,23 +312,26 @@ export function sessionsInProject(
  * by definition. And an entry is dropped the moment its session stops being
  * actionable, so the same session needing the user *again* later reads as new
  * rather than staying silently acknowledged.
+ *
+ * Membership comes from `sessionsInProject` — the one sanctioned check — rather
+ * than a second inline copy of the rules, so the tab dot cannot drift from what
+ * the sidebar lists.
  */
 function reconcileSeenStatus(
   seen: Record<string, string>,
   sessions: Record<string, SessionMeta>,
   projectKeys: ProjectKeyMap,
-  activeProject: string | null,
+  activeProject: Project | null,
 ): Record<string, string> {
   const next: Record<string, string> = {};
-  const activeKey = activeProject ? projectKeys[activeProject] : undefined;
+  const inActive = new Set(
+    sessionsInProject(sessions, projectKeys, activeProject).map((s) => s.id),
+  );
   for (const s of Object.values(sessions)) {
     if (s.archived) continue;
     const { actionable, label } = sessionRowMeta(s);
     if (!actionable) continue; // no entry — a later relapse counts as unseen
-    const inActiveProject =
-      activeProject != null &&
-      (s.cwd === activeProject || (activeKey != null && projectKeys[s.cwd] === activeKey));
-    if (inActiveProject || seen[s.id] === label) next[s.id] = label;
+    if (inActive.has(s.id) || seen[s.id] === label) next[s.id] = label;
   }
   return next;
 }
@@ -318,10 +341,20 @@ function sameStringMap(a: Record<string, string>, b: Record<string, string>): bo
   return keys.length === Object.keys(b).length && keys.every((k) => a[k] === b[k]);
 }
 
-/** Most recently created session in the given directory, if any. */
-function latestSessionIn(sessions: Record<string, SessionMeta>, cwd: string): SessionMeta | undefined {
-  return Object.values(sessions)
-    .filter((s) => s.cwd === cwd)
+/**
+ * Most recently created non-archived session in the given project, if any.
+ *
+ * Archived sessions are skipped so auto-selection never lands on a row the
+ * sidebar hides in its "Archived (N)" group. `completed` needs no separate
+ * check — the server always archives alongside it (see `lib/format.ts`).
+ */
+function latestSessionIn(
+  sessions: Record<string, SessionMeta>,
+  projectKeys: ProjectKeyMap,
+  project: Project,
+): SessionMeta | undefined {
+  return sessionsInProject(sessions, projectKeys, project)
+    .filter((s) => !s.archived)
     .sort((a, b) => b.createdAt - a.createdAt)[0];
 }
 
@@ -341,10 +374,20 @@ interface UiState {
   pinnedSteps: StepDef[];
   /** Fetched version histories, keyed `${ownerId}/${stepId}`; populated on demand per popover open. */
   stepVersions: Record<string, StepDef[]>;
+  /** This user's own recipe heads (published or not). */
+  recipes: RecipeDef[];
+  /** Other users' published recipes — the browsable corpus. */
+  sharedRecipes: RecipeDef[];
+  /** Fetched recipe histories, keyed `${ownerId}/${recipeId}`; populated per popover open. */
+  recipeVersions: Record<string, RecipeDef[]>;
+  /** Public run counts keyed `${ownerId}/${recipeId}`. Server pushes partial maps, so this only ever grows/merges. */
+  recipeStats: Record<string, number>;
+  /** In-flight recipe screenshot uploads by uploadId, resolved to a `url` or an `error`. */
+  recipeUploads: Record<string, { name: string; url?: string; error?: string }>;
   models: ModelOption[];
   recentDirs: string[];
-  /** Open project folders, shown as tabs. */
-  projects: string[];
+  /** Open projects, shown as tabs. Each spans a primary path plus any extra roots. */
+  projects: Project[];
   /** cwd -> machine-independent project identity; see ProjectKeyMap. */
   projectKeys: ProjectKeyMap;
   /** Unresolvable cwds the user marked as "not my project"; hidden from the link hint. */
@@ -363,6 +406,12 @@ interface UiState {
   contextBreakdowns: Record<string, { breakdown: ContextBreakdown | null; at: number; loading: boolean }>;
   selectedSessionId: string | null;
   folderPickPending: boolean;
+  /**
+   * Project the in-flight folder pick adds a root to; null means the pick opens a
+   * new project. `folderPicked` is answered only on the socket that asked, so the
+   * intent can live here instead of on the wire.
+   */
+  folderPickTarget: string | null;
   /** Model/mode applied to newly created sessions; persisted in localStorage. */
   newSessionDefaults: NewSessionDefaults;
   /** Play a chime + desktop notification when a session finishes or needs input. */
@@ -377,6 +426,13 @@ interface UiState {
   auth: AuthStatus | null;
   /** Bridge->storage/Supabase link health; null until first `hello`. `available: false` shows the sync-degraded banner. */
   storageStatus: StorageStatus | null;
+  /** Which bridge we're talking to; null until the first hello, and on a bridge
+   *  too old to send it. */
+  bridge: BridgeInfo | null;
+  /** The bridge speaks a contract this client doesn't. Hosted builds ship ahead
+   *  of installed bridges, so this is the expected steady state after a deploy,
+   *  not an error — the UI degrades rather than throwing. */
+  protocolSkew: boolean;
   /** Authorize URL of the in-progress login, set once the server answers authStartLogin. */
   authorizeUrl: string | null;
   /** Last login failure, shown inline in the login modal. */
@@ -414,8 +470,16 @@ interface UiState {
   selectSession: (id: string | null) => void;
   /** Fetch the live `/context` breakdown for a session (hover-triggered). */
   requestContextBreakdown: (sessionId: string) => void;
+  /**
+   * Register/settle a recipe screenshot upload. The `recipeImageUploaded` reply
+   * carries only an uploadId, so the sender records the file name here first;
+   * `null` drops a consumed entry.
+   */
+  trackRecipeUpload: (uploadId: string, entry: { name?: string; url?: string; error?: string } | null) => void;
   setActiveProject: (path: string | null) => void;
   setFolderPickPending: (pending: boolean) => void;
+  /** Aim the next folder pick at a project (adds a root) or at nothing (opens a project). */
+  setFolderPickTarget: (project: string | null) => void;
   setNewSessionDefaults: (defaults: NewSessionDefaults) => void;
   /** Hide (or restore) an unresolvable checkout in the link hint. */
   setCheckoutDismissed: (cwd: string, dismissed: boolean) => void;
@@ -498,6 +562,11 @@ export const useStore = create<UiState>((set, get) => {
   sharedSteps: [],
   pinnedSteps: [],
   stepVersions: {},
+  recipes: [],
+  sharedRecipes: [],
+  recipeVersions: {},
+  recipeStats: {},
+  recipeUploads: {},
   models: [],
   recentDirs: [],
   projects: [],
@@ -511,6 +580,7 @@ export const useStore = create<UiState>((set, get) => {
   contextBreakdowns: {},
   selectedSessionId: sessionIdFromUrl(),
   folderPickPending: false,
+  folderPickTarget: null,
   newSessionDefaults: loadNewSessionDefaults(),
   alertsEnabled: loadAlertsEnabled(),
   alertSound: loadAlertSound(),
@@ -519,6 +589,8 @@ export const useStore = create<UiState>((set, get) => {
   usage: null,
   auth: null,
   storageStatus: null,
+  bridge: null,
+  protocolSkew: false,
   authorizeUrl: null,
   authError: null,
   loginModalOpen: false,
@@ -541,6 +613,7 @@ export const useStore = create<UiState>((set, get) => {
   },
   selectSession: (id) => set({ selectedSessionId: id }),
   setFolderPickPending: (pending) => set({ folderPickPending: pending }),
+  setFolderPickTarget: (project) => set({ folderPickTarget: project }),
 
   openFilePreview: (raw) => {
     // Split off a trailing :line(:col); the path itself never ends in a digit-only segment.
@@ -685,6 +758,16 @@ export const useStore = create<UiState>((set, get) => {
     pushSettings();
   },
 
+  trackRecipeUpload: (uploadId, entry) => {
+    set((state) => {
+      const recipeUploads = { ...state.recipeUploads };
+      const prev = recipeUploads[uploadId];
+      if (entry) recipeUploads[uploadId] = { ...prev, ...entry, name: entry.name ?? prev?.name ?? '' };
+      else delete recipeUploads[uploadId];
+      return { recipeUploads };
+    });
+  },
+
   requestContextBreakdown: (sessionId) => {
     const prev = get().contextBreakdowns[sessionId];
     if (prev?.loading) return; // one request in flight per session
@@ -703,11 +786,21 @@ export const useStore = create<UiState>((set, get) => {
     set((state) => {
       let selected = state.selectedSessionId;
       const current = selected ? state.sessions[selected] : undefined;
-      if (!path) {
+      // A tab activated before the server's `projects` echo lands (open-recent, a
+      // fresh folder pick) isn't in the list yet — treat it as a bare single root
+      // so its existing sessions still get picked up.
+      const project = path ? projectAt(state.projects, path) ?? { path } : null;
+      if (!project) {
         selected = null;
-      } else if (!current || current.cwd !== path) {
-        // Switching tabs lands on that project's latest session.
-        selected = latestSessionIn(state.sessions, path)?.id ?? null;
+      } else {
+        // Keep a selection that already belongs here — including an archived
+        // one, so deep-linking to it survives a tab switch. Membership is
+        // key-aware, matching what the sidebar lists.
+        const inProject =
+          current != null &&
+          sessionsInProject(state.sessions, state.projectKeys, project).some((s) => s.id === current.id);
+        // Otherwise switching tabs lands on that project's latest active session.
+        if (!inProject) selected = latestSessionIn(state.sessions, state.projectKeys, project)?.id ?? null;
       }
       return { activeProject: path, selectedSessionId: selected };
     });
@@ -718,6 +811,7 @@ export const useStore = create<UiState>((set, get) => {
       case 'hello': {
         const sessions: Record<string, SessionMeta> = {};
         for (const s of msg.sessions) sessions[s.id] = s;
+        const projects = toProjects(msg.projects);
         set((state) => ({
           sessions,
           workflows: msg.workflows,
@@ -725,15 +819,21 @@ export const useStore = create<UiState>((set, get) => {
           steps: msg.steps ?? [],
           sharedSteps: msg.sharedSteps ?? [],
           pinnedSteps: msg.pinnedSteps ?? [],
+          recipes: msg.recipes ?? [],
+          sharedRecipes: msg.sharedRecipes ?? [],
+          recipeStats: msg.recipeStats ?? {},
           models: msg.models,
           recentDirs: msg.recentDirs,
-          projects: msg.projects,
+          projects,
           projectKeys: msg.projectKeys ?? {},
           // Server restarts send hello before the first usage fetch completes;
           // keep the last good snapshot rather than flickering the chip away.
           usage: msg.usage ?? (msg.auth.loggedIn ? state.usage : null),
           auth: msg.auth,
           storageStatus: msg.storage ?? null,
+          bridge: msg.bridge ?? null,
+          // Absent `bridge` means a bridge older than this field — treat as skew.
+          protocolSkew: msg.bridge?.appProtocol !== APP_PROTOCOL_VERSION,
           // Logged out? Open the login flow — but only on the first hello with
           // that news, so reconnects don't reopen a dismissed modal.
           loginModalOpen:
@@ -747,7 +847,7 @@ export const useStore = create<UiState>((set, get) => {
             state.guardReviewOpen ||
             (msg.guardAllowlistReview != null &&
               msg.guardAllowlistReview.detectedAt !== state.guardReviewDismissedAt),
-          activeProject: pickActive(msg.projects, state.activeProject),
+          activeProject: pickActive(projects, state.activeProject),
           // Transcripts may have missed events while the socket was down, so the
           // open session reloads (SessionView re-sends loadTranscript on `hello`).
           // Keep the cached events until that reply lands — the `transcript`
@@ -786,9 +886,10 @@ export const useStore = create<UiState>((set, get) => {
         set({ projectKeys: msg.projectKeys });
         break;
       case 'projects': {
-        set({ projects: msg.projects });
+        const projects = toProjects(msg.projects);
+        set({ projects });
         // Re-validate the active tab (it may have just been closed).
-        get().setActiveProject(pickActive(msg.projects, get().activeProject));
+        get().setActiveProject(pickActive(projects, get().activeProject));
         break;
       }
       case 'sessionUpsert': {
@@ -856,6 +957,34 @@ export const useStore = create<UiState>((set, get) => {
           stepVersions: { ...state.stepVersions, [`${msg.ownerId}/${msg.stepId}`]: msg.versions },
         }));
         break;
+      case 'recipes':
+        set({ recipes: msg.recipes });
+        break;
+      case 'sharedRecipes':
+        set({ sharedRecipes: msg.sharedRecipes });
+        break;
+      case 'recipeVersions':
+        set((state) => ({
+          recipeVersions: { ...state.recipeVersions, [`${msg.ownerId}/${msg.recipeId}`]: msg.versions },
+        }));
+        break;
+      case 'recipeStats':
+        // Partial by contract — a replace would blank every count the push omits.
+        set((state) => ({ recipeStats: { ...state.recipeStats, ...msg.stats } }));
+        break;
+      case 'recipeImageUploaded':
+        set((state) => ({
+          recipeUploads: {
+            ...state.recipeUploads,
+            [msg.uploadId]: { ...state.recipeUploads[msg.uploadId], name: state.recipeUploads[msg.uploadId]?.name ?? '', url: msg.url },
+          },
+        }));
+        break;
+      case 'recipeRun':
+        // Deterministic selection: the run's session id, rather than leaning on
+        // `sessionUpsert`'s just-created heuristic (which a slow spawn loses).
+        set({ selectedSessionId: msg.sessionId });
+        break;
       case 'event':
         set((state) => {
           const existing = state.transcripts[msg.sessionId] ?? [];
@@ -913,7 +1042,9 @@ export const useStore = create<UiState>((set, get) => {
         set({ authError: msg.message });
         break;
       case 'folderPicked':
-        set({ folderPickPending: false });
+        // Cleared even when the pick was cancelled (no `path`), so a stale target
+        // can't turn the next plain "Browse…" into an add-root.
+        set({ folderPickPending: false, folderPickTarget: null });
         break;
       case 'error':
         console.error('[server]', msg.message);
@@ -934,6 +1065,7 @@ useStore.subscribe((state, prev) => {
   if (
     state.sessions === prev.sessions &&
     state.projectKeys === prev.projectKeys &&
+    state.projects === prev.projects &&
     state.activeProject === prev.activeProject
   ) {
     return;
@@ -942,7 +1074,8 @@ useStore.subscribe((state, prev) => {
     state.seenSessionStatus,
     state.sessions,
     state.projectKeys,
-    state.activeProject,
+    // Extra roots widen membership, so the open project's own shape matters here.
+    projectAt(state.projects, state.activeProject),
   );
   // Bail on no-op writes: this listener would otherwise re-enter on its own set.
   if (!sameStringMap(next, state.seenSessionStatus)) useStore.setState({ seenSessionStatus: next });

@@ -74,6 +74,20 @@ export class UserRegistry {
     }
   }
 
+  /**
+   * The socket has been down for `WORKER_LOST_MS` with no reconnect. Every
+   * context reconciles against an empty live view — same transition a real
+   * hello with no sessions would produce — but without firing auto-continue,
+   * since there is no worker to push the resumed turn to. The next real hello
+   * reconciles again (with auto-continue back on) and resumes them.
+   */
+  onWorkerLost() {
+    this.lastWorkerLive = [];
+    for (const ctx of this.contexts.values()) {
+      ctx.sessions.reconcileWithWorker([], { autoContinue: false });
+    }
+  }
+
   /** Keep the ownership index current from each context's own broadcasts. */
   private observe(userId: string, msg: ServerMessage) {
     if (msg.type === 'sessionUpsert') this.sessionOwner.set(msg.session.id, userId);
@@ -88,6 +102,8 @@ export class UserRegistry {
       this.fanoutSharedRefresh(userId, 'wf', (ctx) => ctx.refreshShared());
     } else if (msg.type === 'steps' && !this.contexts.get(userId)?.sync.applying) {
       this.fanoutSharedRefresh(userId, 'step', (ctx) => ctx.refreshSharedSteps());
+    } else if (msg.type === 'recipes' && !this.contexts.get(userId)?.sync.applying) {
+      this.fanoutSharedRefresh(userId, 'recipe', (ctx) => ctx.refreshSharedRecipes());
     }
   }
 

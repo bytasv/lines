@@ -1,4 +1,4 @@
-import type { GuardAllowlistBlob, MemoryFileMap, ProjectKeyMap, SessionMeta, StepDef, StepRef, StorageStatus, WorkflowDef } from '@lines/shared';
+import type { GuardAllowlistBlob, MemoryFileMap, ProjectKeyMap, RecipeDef, SessionMeta, StepDef, StepRef, StorageStatus, WorkflowDef } from '@lines/shared';
 import type { SyncWatermarks } from './store.ts';
 
 const PUSH_DEBOUNCE_MS = 2_000;
@@ -14,13 +14,28 @@ const NOT_MODIFIED = Symbol('not-modified');
 const CURSOR_KEYS: Record<string, keyof SyncWatermarks> = {
   '/workflows': 'workflows',
   '/steps': 'steps',
+  '/recipes': 'recipes',
   '/sessions': 'sessions',
   '/memory': 'memory',
 };
 
+/** `[{ownerId, id, runCount}]` rows -> the `ownerId/recipeId` map the engine keeps. */
+function statsMap(rows: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!Array.isArray(rows)) return out;
+  for (const row of rows as { ownerId?: string; id?: string; runCount?: number }[]) {
+    if (!row?.ownerId || !row?.id || typeof row.runCount !== 'number') continue;
+    out[`${row.ownerId}/${row.id}`] = row.runCount;
+  }
+  return out;
+}
+
 export interface PulledState {
   workflows: WorkflowDef[];
   steps: StepDef[];
+  recipes: RecipeDef[];
+  /** Authoritative run counts, keyed `ownerId/recipeId`. */
+  recipeStats: Record<string, number>;
   sessions: SessionMeta[];
   settings: unknown;
   projectKeys: ProjectKeyMap;
@@ -54,10 +69,12 @@ export class StorageSyncClient {
   private etags = new Map<string, string>();
   private pendingWorkflows: WorkflowDef[] | null = null;
   private pendingSteps: StepDef[] | null = null;
+  private pendingRecipes: RecipeDef[] | null = null;
   private pendingSessions = new Map<string, SessionMeta>();
   private pendingMemory: MemoryFileMap | null = null;
   private wfTimer: NodeJS.Timeout | null = null;
   private stepTimer: NodeJS.Timeout | null = null;
+  private recipeTimer: NodeJS.Timeout | null = null;
   private sessTimer: NodeJS.Timeout | null = null;
   private memTimer: NodeJS.Timeout | null = null;
 
@@ -84,9 +101,13 @@ export class StorageSyncClient {
     if (Date.now() - this.lastPullAt < PULL_MIN_SPACING_MS) return THROTTLED;
     this.lastPullAt = Date.now();
     try {
-      const [workflows, steps, sessions, settings, projectKeys, memory, guardAllowlist] = await Promise.all([
+      const [workflows, steps, recipes, recipeStats, sessions, settings, projectKeys, memory, guardAllowlist] = await Promise.all([
         this.req('GET', this.delta('/workflows', 'workflows')),
         this.req('GET', this.delta('/steps', 'steps')),
+        this.req('GET', this.delta('/recipes', 'recipes')),
+        // Counts ride their own route, never the head lists: /recipes/shared is
+        // ETag'd on content, so a 304 there must not be able to freeze them.
+        this.req('GET', '/recipes/stats'),
         this.req('GET', this.delta('/sessions', 'sessions')),
         this.req('GET', '/settings'),
         this.req('GET', '/project-keys'),
@@ -105,6 +126,8 @@ export class StorageSyncClient {
       return {
         workflows: (body(workflows) ?? []) as WorkflowDef[],
         steps: (body(steps) ?? []) as StepDef[],
+        recipes: (body(recipes) ?? []) as RecipeDef[],
+        recipeStats: statsMap(body(recipeStats)),
         sessions: (body(sessions) ?? []) as SessionMeta[],
         settings: body(settings),
         projectKeys: (body(projectKeys) ?? {}) as ProjectKeyMap,
@@ -225,6 +248,83 @@ export class StorageSyncClient {
     void this.req('DELETE', `/steps/${id}`).catch((err) => this.warnOnce('delete step', err));
   }
 
+  // ---- recipes ----
+
+  /** Other users' published recipes — the browsable corpus. Rate-limited and ETag-guarded. */
+  async pullSharedRecipes(): Promise<RecipeDef[] | null> {
+    if (!this.enabled || this.throttleShared('/recipes/shared')) return null;
+    try {
+      const shared = await this.req('GET', '/recipes/shared');
+      if (shared === NOT_MODIFIED) return null;
+      return (shared ?? []) as RecipeDef[];
+    } catch (err) {
+      this.warnOnce('pull shared recipes', err);
+      return null;
+    }
+  }
+
+  /** Full version history for one recipe (any author). null = storage offline/disabled. */
+  async pullRecipeVersions(ownerId: string, recipeId: string): Promise<RecipeDef[] | null> {
+    if (!this.enabled) return null;
+    try {
+      const path = `/recipes/${encodeURIComponent(ownerId)}/${encodeURIComponent(recipeId)}/versions`;
+      return ((await this.req('GET', path)) ?? []) as RecipeDef[];
+    } catch (err) {
+      this.warnOnce('pull recipe versions', err);
+      return null;
+    }
+  }
+
+  pushRecipes(list: RecipeDef[]): void {
+    if (!this.enabled || this.applying) return;
+    this.pendingRecipes = list;
+    this.recipeTimer ??= setTimeout(() => {
+      this.recipeTimer = null;
+      const body = this.pendingRecipes;
+      this.pendingRecipes = null;
+      void this.req('PUT', '/recipes', body).catch((err) => this.warnOnce('push recipes', err));
+    }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
+  }
+
+  deleteRecipe(id: string): void {
+    if (!this.enabled || this.applying) return;
+    void this.req('DELETE', `/recipes/${id}`).catch((err) => this.warnOnce('delete recipe', err));
+  }
+
+  /**
+   * Count one run per pair, in one call — a bundle of six must not be six round
+   * trips. Returns the authoritative counts for the pairs that were accepted, so
+   * the caller can replace its optimistic numbers; null when storage said no.
+   *
+   * `softErrors`: a 404 here means "none of these keys were runnable", which is a
+   * per-request answer, not a storage outage — without it every browser of this
+   * user would raise the global "cloud sync unavailable" banner.
+   */
+  async incrementRecipeRuns(
+    pairs: { ownerId: string; id: string }[],
+  ): Promise<Record<string, number> | null> {
+    if (!this.enabled || pairs.length === 0) return null;
+    try {
+      return statsMap(await this.req('POST', '/recipes/run', pairs, { softErrors: true }));
+    } catch (err) {
+      this.warnOnce('increment recipe runs', err);
+      return null;
+    }
+  }
+
+  /**
+   * Upload one recipe screenshot and get its public URL back. `softErrors` again:
+   * an install with no R2 answers 503, and that is a missing optional feature
+   * rather than the storage link being down.
+   */
+  async uploadRecipeImage(image: { name: string; mediaType: string; data: string }): Promise<string> {
+    const res = (await this.req('POST', '/recipes/images', image, { softErrors: true })) as {
+      url?: string;
+    } | null;
+    if (!res?.url) throw new Error('image upload returned no url');
+    return res.url;
+  }
+
   pushSession(meta: SessionMeta): void {
     if (!this.enabled || this.applying) return;
     this.pendingSessions.set(meta.id, meta);
@@ -286,7 +386,19 @@ export class StorageSyncClient {
     void this.req('PUT', '/project-keys', keys).catch((err) => this.warnOnce('push project keys', err));
   }
 
-  private async req(method: string, path: string, body?: unknown): Promise<unknown> {
+  /**
+   * @param opts.softErrors Treat an HTTP error as this request's own failure
+   *   rather than a storage outage — it still throws, but the availability flag
+   *   (and therefore every browser's sync-outage banner) is left alone. For
+   *   routes whose non-2xx answers are normal operating states: an
+   *   R2-unconfigured 503, a "nothing runnable" 404.
+   */
+  private async req(
+    method: string,
+    path: string,
+    body?: unknown,
+    opts?: { softErrors?: boolean },
+  ): Promise<unknown> {
     const token = this.tokenFn();
     if (!token) throw new Error('no token'); // disabled, not an outage — leave status untouched
     // Cursor/ETag bookkeeping is per resource, not per URL — `?since=` changes
@@ -318,6 +430,11 @@ export class StorageSyncClient {
     if (!res.ok) {
       // A 500 carries the storage server's error body (Prisma/DB message) — surface it as the reason.
       const reason = await res.json().then((b) => (b as { error?: string })?.error).catch(() => undefined);
+      if (opts?.softErrors) {
+        // The link itself is fine — the server answered — so only this call fails.
+        this.setAvailable(true);
+        throw new Error(reason ?? `storage ${method} ${path} → ${res.status}`);
+      }
       this.setAvailable(false, reason ?? `storage ${method} ${path} → ${res.status}`);
       throw new Error(`storage ${method} ${path} → ${res.status}`);
     }

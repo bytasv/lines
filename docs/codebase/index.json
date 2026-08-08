@@ -1099,7 +1099,8 @@
       "tests": [
         "server/src/sessions.spawn.test.ts",
         "server/src/auth.failure.test.ts",
-        "server/src/sessions.ended.test.ts"
+        "server/src/sessions.ended.test.ts",
+        "server/src/auth.concurrentLogin.test.ts"
       ],
       "businessRules": [
         "a signed-in user's turn never runs on ambient ~/.claude credentials; with no app token the turn is refused, since a visible failure with Retry beats a silent 401 loop",
@@ -1107,7 +1108,8 @@
         "the bridge-side helper queries (autoName, summarizeTurn, consolidateStepOutput) are best-effort: no token means skip the query, never fall back and never fail the surrounding turn",
         "compactContext still returns a synchronous { ok: true }; an auth refusal after that point surfaces through failTurn, not the { ok: false, code, reason } union",
         "a transiently failed proactive refresh retries on a 60s-doubling ladder capped at 15 minutes; a dead refresh token logs out instead, stopping the chain",
-        "accessToken: null in buildQueryOptions is reachable only when no AuthManager is wired at all (tests / embedding), never for a real signed-in user"
+        "accessToken: null in buildQueryOptions is reachable only when no AuthManager is wired at all (tests / embedding), never for a real signed-in user",
+        "logins are tracked per OAuth state, so two started at once each keep their own PKCE verifier; completing one clears the rest, unfinished ones expire after 30 minutes, and a paste with no #state falls back to the newest"
       ],
       "architecturalRules": [
         "the never-fall-back guarantee lives in pushTurn, which refuses before reaching buildQueryOptions; there is deliberately no second options builder, which would duplicate the whole option set for one differing key",
@@ -1296,7 +1298,7 @@
         "compactContext is a dedicated SessionManager method, not a call to prompt() \u2014 a compaction carries no 'user' transcript event and must not auto-name the session or touch the queue",
         "one shared predicate (contextCompactBlock) backs the server-side guard, the button's disabled state, and its tooltip",
         "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact \u2014 all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)",
-        "the browser's buildTranscript mirrors withoutCompactSpans: events inside an open compact span are dropped from the rendered transcript, not just hidden by the marker pair — except a failed result, which closes the span like a 'user' event does"
+        "the browser's buildTranscript mirrors withoutCompactSpans: events inside an open compact span are dropped from the rendered transcript, not just hidden by the marker pair \u2014 except a failed result, which closes the span like a 'user' event does"
       ],
       "relatedDecisions": [
         "turn-failure-retry"
@@ -1546,8 +1548,7 @@
         "web/src/components/MentionAutocomplete.tsx",
         "web/src/components/MentionInput.tsx",
         "web/src/components/Composer.tsx",
-        "web/src/components/MonacoPreviewModal.tsx",
-        "web/src/components/recipe/RecipeRunModal.tsx"
+        "web/src/components/MonacoPreviewModal.tsx"
       ],
       "symbols": [
         "Project",
@@ -1782,7 +1783,7 @@
       "id": "turn-failure-retry",
       "name": "Single-click retry for every recoverable turn failure",
       "doc": "features/turn-failure-retry.md",
-      "purpose": "Every recoverable turn failure — a crashed query, an is_error result, a workflow step that never got a prompt, or a push that never reached the worker — ends on a failure row with a working one-click Retry, in both plain and workflow sessions.",
+      "purpose": "Every recoverable turn failure \u2014 a crashed query, an is_error result, a workflow step that never got a prompt, or a push that never reached the worker \u2014 ends on a failure row with a working one-click Retry, in both plain and workflow sessions.",
       "entryPoints": [
         "web/src/components/Transcript.tsx",
         "server/src/index.ts"
@@ -1813,7 +1814,7 @@
         "every recoverable failure ends on a failure row with a working Retry, in a plain session and inside a running workflow alike",
         "a failed turn never autoAdvances; it parks the step as failed instead, unless an explicit stamped force-advance is already pending",
         "Retry re-runs the right thing: a step that never got a prompt is re-rendered from WorkflowState ('pre-run'); a step whose turn failed is re-sent as a follow-up on the same conversation ('turn')",
-        "no auto-retry or backoff — a transient failure (e.g. a 529) is an ordinary failed turn with a manual button",
+        "no auto-retry or backoff \u2014 a transient failure (e.g. a 529) is an ordinary failed turn with a manual button",
         "stepFailure is persisted, so a reload while parked in the failed state still shows Retry"
       ],
       "architecturalRules": [
@@ -1828,6 +1829,368 @@
         "auth-failure-recovery",
         "workflow-step-output-consolidation",
         "context-compaction"
+      ]
+    },
+    {
+      "id": "local-port-discovery",
+      "name": "Local port discovery",
+      "doc": "features/local-port-discovery.md",
+      "purpose": "Worker and bridge each bind an ephemeral port and publish it (with a per-boot token) to ~/.lines-app/run/<instance>/, so nothing hardcodes a port and two Lines installs never collide.",
+      "entryPoints": [
+        "server/src/worker.ts",
+        "server/src/index.ts",
+        "server/src/workerClient.ts",
+        "web/vite.config.ts"
+      ],
+      "files": [
+        "server/src/workerProtocol.ts",
+        "server/src/worker.ts",
+        "server/src/workerClient.ts",
+        "server/src/index.ts",
+        "server/src/store.ts",
+        "web/src/ws.ts",
+        "web/vite.config.ts",
+        "Tiltfile",
+        ".env.example"
+      ],
+      "symbols": [
+        "RuntimeInfo",
+        "publishRuntimeInfo",
+        "readRuntimeInfo",
+        "clearRuntimeInfo",
+        "watchRuntimeInfo",
+        "WORKER_TOKEN_HEADER",
+        "INSTANCE",
+        "RUNTIME_DIR",
+        "APP_ROOT",
+        "WorkerClient.dispose",
+        "initBridgeOrigin",
+        "bridgeOrigin"
+      ],
+      "tests": [
+        "server/src/portDiscovery.test.ts",
+        "server/src/workerHandshake.test.ts",
+        "server/src/workerClient.test.ts"
+      ],
+      "businessRules": [
+        "ephemeral by default; LINES_WORKER_PORT/LINES_BRIDGE_PORT pin a port only when explicitly set, which Tilt does so its readiness probes have fixed targets",
+        "LINES_INSTANCE separates concurrent installs (Tilt sets 'dev'), so a dev checkout and an installed app never publish over each other",
+        "the worker rejects any connection that cannot echo the published token, checked before the newest-bridge-wins takeover so a local process cannot evict the real bridge by connecting",
+        "a discovery file naming a dead pid is removed on read, not merely ignored",
+        "PORT belongs to the storage server alone now; bridge and worker no longer read it"
+      ],
+      "architecturalRules": [
+        "the helpers live in workerProtocol.ts, not a module of their own: port discovery is part of the bridge<->worker contract, and a separate file would widen the worker's tsx-watch restart trigger",
+        "APP_ROOT is defined in workerProtocol.ts and re-exported by store.ts, so the worker can reach it without importing the bridge graph",
+        "publishing is atomic (temp + rename) and 0600; watchRuntimeInfo watches the directory, not the file, because rename replaces the inode",
+        "timers/watchers are released via WorkerClient.dispose() rather than unref(), which would make a timer invisible to node's mock timers",
+        "the bridge's token is published but not enforced on browser connections (a browser cannot set WebSocket headers); the Clerk gate guards that path and /__bridge exposes only the port",
+        "a live ws socket and node's mock timers cannot be mixed; tests compress the client's intervals instead"
+      ],
+      "relatedDecisions": []
+    },
+    {
+      "id": "browser-bridge-link",
+      "name": "Browser-bridge link",
+      "doc": "features/browser-bridge-link.md",
+      "purpose": "The contract between a browser connection and the bridge: the structural BrowserLink surface, backpressure on the broadcast fan-out, and the APP_PROTOCOL_VERSION the two sides exchange on hello.",
+      "entryPoints": [
+        "server/src/index.ts",
+        "server/src/userContext.ts",
+        "web/src/ws.ts"
+      ],
+      "files": [
+        "server/src/userContext.ts",
+        "server/src/index.ts",
+        "shared/types.ts",
+        "web/src/store.ts",
+        "web/src/ws.ts"
+      ],
+      "symbols": [
+        "BrowserLink",
+        "LINK_OPEN",
+        "linkSendAction",
+        "APP_PROTOCOL_VERSION",
+        "BridgeInfo",
+        "protocolSkew",
+        "BRIDGE_VERSION"
+      ],
+      "tests": [
+        "server/src/browserLink.test.ts",
+        "server/src/broadcastBackpressure.test.ts"
+      ],
+      "businessRules": [
+        "stream deltas are the only droppable traffic: never persisted, and the browser refetches the transcript on reconnect, so losing one costs a partially-typed token rather than state",
+        "above the high-water mark a link sheds stream deltas but still receives every critical message",
+        "above the hard limit the link is closed outright, which is safe because hello is a complete state snapshot and a reconnect resyncs whatever was missed",
+        "thresholds (4MB/32MB) sit far above any loopback burst, so local dev never reaches them",
+        "an absent hello.bridge means a bridge older than the field, which counts as skew"
+      ],
+      "architecturalRules": [
+        "BrowserLink covers only what the bridge genuinely calls; every addition is one more thing an alternative transport must implement",
+        "close() must move readyState off LINK_OPEN synchronously, so broadcast does not re-close the same wedged link on every message",
+        "removal from ctx.sockets is owned solely by the 'close' handler, including on the hard-limit path",
+        "a per-socket 'error' listener is mandatory: an unhandled 'error' on an EventEmitter throws and takes the bridge down; a plain-object link avoids the footgun entirely",
+        "linkSendAction is pure and exported so the policy is testable without a socket",
+        "APP_PROTOCOL_VERSION is bumped only for browser<->bridge changes; the bridge<->worker PROTOCOL_VERSION is a separate contract on its own numbering",
+        "hello.bridge is optional in the type, because a hosted web app will meet bridges older than itself"
+      ],
+      "relatedDecisions": [
+        "local-port-discovery"
+      ]
+    },
+    {
+      "id": "file-routes-over-ws",
+      "name": "Workspace reads over the WebSocket",
+      "doc": "features/file-routes-over-ws.md",
+      "purpose": "File contents, directory listings, the docs bundle, @mention search and attachments travel over the authenticated WebSocket instead of bridge HTTP routes, removing the Clerk token from query strings and leaving the bridge with no file-serving HTTP surface.",
+      "entryPoints": [
+        "web/src/lib/files.ts",
+        "server/src/index.ts"
+      ],
+      "files": [
+        "server/src/fileRoutes.ts",
+        "server/src/workspacePaths.ts",
+        "web/src/ws.ts",
+        "web/src/lib/files.ts",
+        "web/src/lib/features.ts",
+        "web/src/components/Transcript.tsx",
+        "shared/types.ts"
+      ],
+      "symbols": [
+        "handleFileRequest",
+        "FileRequestKind",
+        "FileRequestParams",
+        "AttachmentBody",
+        "fileRequest",
+        "useAttachmentUrl",
+        "AttachmentTile"
+      ],
+      "tests": [
+        "server/src/fileRoutes.test.ts",
+        "server/src/index.planFile.test.ts"
+      ],
+      "businessRules": [
+        "status keeps using HTTP codes because the client already maps 403/404/413/415 to user-facing messages",
+        "a request made while disconnected rejects immediately; in-flight requests reject on close rather than hanging",
+        "find stays all-or-nothing across roots: a partial result reads as 'no match here' and would silently hide a folder",
+        "attachments are capped at the same 2MB as the old /file route"
+      ],
+      "architecturalRules": [
+        "handlers are pure {status, body} functions in their own module rather than http.ServerResponse writers, so they can serve a relay channel and are testable without a socket (index.ts listens on import)",
+        "fileResponse is settled in ws.ts before applyServerMessage and returns early; the store never sees it",
+        "replies go to the originating link, never via broadcast, since two tabs each have their own in-flight reqIds",
+        "corsFor, httpUserId, WEB_ORIGIN and withAuthToken are deleted rather than retained: each was a second auth path to keep in step with the socket's",
+        "attachment blob URLs are revoked on unmount, else every re-render leaks a blob for the life of the page"
+      ],
+      "relatedDecisions": [
+        "browser-bridge-link",
+        "plan-file-auto-approve"
+      ]
+    },
+    {
+      "id": "remote-relay-bridge",
+      "name": "Remote relay bridge",
+      "doc": "features/remote-relay-bridge.md",
+      "purpose": "The bridge dials OUT to a relay and the browser connects to the same relay, so a hosted web app can drive the agent on the user's own machine with no inbound port, NAT config, or dynamic DNS. The relay verifies each device against storage and enforces that a browser may only reach a device it owns.",
+      "entryPoints": [
+        "relay/src/index.ts",
+        "server/src/relayClient.ts",
+        "server/src/index.ts"
+      ],
+      "files": [
+        "relay/src/protocol.ts",
+        "relay/src/mux.ts",
+        "relay/src/index.ts",
+        "server/src/relayClient.ts",
+        "server/src/index.ts",
+        "Tiltfile",
+        "storage/src/index.ts"
+      ],
+      "symbols": [
+        "RELAY_PROTOCOL_VERSION",
+        "DeviceHub",
+        "HubRegistry",
+        "RelayClient",
+        "RelayChannel",
+        "AttestedIdentity"
+      ],
+      "tests": [
+        "relay/src/mux.test.ts",
+        "server/src/relayEndToEnd.test.ts"
+      ],
+      "businessRules": [
+        "a browser connecting while no bridge is attached is told deviceOffline immediately rather than left on an indefinite spinner",
+        "a bridge restart does not disconnect the browser: channels stay open and are replayed to the new bridge, which answers with a fresh hello",
+        "newest bridge wins, so a reconnecting bridge can take over from a half-dead predecessor the relay has not noticed",
+        "the relay persists nothing and logs no payload",
+        "with RELAY_URL unset nothing dials and the local-only setup is unchanged",
+        "a browser may only reach a device it owns; if storage cannot verify a device's secret the relay refuses the connection rather than admitting it"
+      ],
+      "architecturalRules": [
+        "the relay client is a peripheral, never a supervisor: relay health must never restart the bridge and absolutely never the worker, which would turn a relay blip into a reconcile, an interruptedAt stamp and an auto-continued turn",
+        "the payload is opaque - the relay routes on the header and never parses the message, so end-to-end encryption can later encrypt payload alone with no codec rewrite",
+        "frames are forwarded synchronously inside the message handler; an await per frame would let two race and reorder a stream",
+        "a dropped relay socket must synthesize close for every open channel, else ctx.sockets keeps dead links and broadcast serialises into them forever",
+        "RelayChannel is a plain object, not an EventEmitter, so it cannot inherit the throw-on-unhandled-error hazard",
+        "the relay is the auth edge and the bridge trusts the attested userId on relay channels; re-verifying would mean two failure modes and a hard dependency on the user's machine reaching Clerk's JWKS",
+        "relay/ shares no types with the app and the bridge does not import the relay package; frame shapes are duplicated in relayClient.ts on purpose",
+        "reconnect uses exponential backoff with jitter, since a flat retry turns one relay restart into a synchronised stampede"
+      ],
+      "relatedDecisions": [
+        "device-pairing",
+        "browser-bridge-link",
+        "file-routes-over-ws"
+      ]
+    },
+    {
+      "id": "device-pairing",
+      "name": "Device pairing",
+      "doc": "features/device-pairing.md",
+      "purpose": "Binds a machine's bridge to a Clerk user so the relay can refuse an unclaimed device and refuse a claimed device to any user but its owner. Only a hash of the machine's pairing secret ever reaches Postgres.",
+      "entryPoints": [
+        "storage/src/index.ts",
+        "relay/src/index.ts"
+      ],
+      "files": [
+        "storage/prisma/schema.prisma",
+        "storage/src/index.ts",
+        "relay/src/index.ts",
+        "relay/src/mux.ts"
+      ],
+      "symbols": [
+        "Device",
+        "DeviceHub.ownerId"
+      ],
+      "tests": [
+        "storage/src/schema.credentials.test.ts",
+        "relay/src/mux.test.ts"
+      ],
+      "businessRules": [
+        "register is unauthenticated - the machine has no user yet and a code is worthless until claimed; re-registering an already-claimed device is refused (409) rather than silently re-bound",
+        "claim/verify answer the same 'unknown or expired code' for absent, expired, and revoked, so a distinct 'expired' reply can't confirm a guessed code had once been real",
+        "revoking a device tombstones it (revokedAt) rather than deleting the row, so it stays an audit trail",
+        "GET /v1/devices never returns secretHash",
+        "if storage is unreachable the relay refuses the device rather than admitting it"
+      ],
+      "architecturalRules": [
+        "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
+        "the relay holds no database credentials and never queries Postgres directly - it asks storage, the only process with DB credentials at all",
+        "the cross-user check (hub.ownerId === userId) lives on the /client gate, not deeper in routing, so it fails closed at the earliest point"
+      ],
+      "relatedDecisions": [
+        "remote-relay-bridge",
+        "app-managed-login-only"
+      ]
+    },
+    {
+      "id": "desktop-shell",
+      "name": "Desktop shell",
+      "doc": "features/desktop-shell.md",
+      "purpose": "A menu-bar app that supervises the bridge and worker as local child processes and serves the web UI, so Lines can be installed rather than run from a terminal via Tilt.",
+      "entryPoints": [
+        "desktop/src/main.ts",
+        "server/src/updates.ts"
+      ],
+      "files": [
+        "desktop/src/main.ts",
+        "server/src/updates.ts",
+        "shared/types.ts"
+      ],
+      "symbols": [
+        "spawnChild",
+        "childEnv",
+        "loginShellPath",
+        "startUiServer",
+        "UpdateManager"
+      ],
+      "tests": [
+        "server/src/updates.test.ts"
+      ],
+      "businessRules": [
+        "a restart is refused while any session is running, waiting-permission, or waiting-approval, since a restart kills bridge and worker together under one atomic update",
+        "closing the window does not quit the app, and must not kill an in-flight turn",
+        "the actual install/restart mechanism is a deliberate no-op today - electron-updater's install step needs a signed, notarized build that does not exist yet, so it is left obviously inert rather than faked"
+      ],
+      "architecturalRules": [
+        "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
+        "children are spawned with ELECTRON_RUN_AS_NODE=1, since process.execPath inside Electron is the Electron binary and would otherwise relaunch the app",
+        "the worker is never auto-restarted on crash - its live queries are gone, and a silent respawn would look like a healthy session that lost its turn; the bridge is restarted freely",
+        "the desktop app and Tilt share the same LINES_INSTANCE/port-discovery contract, so a dev checkout and an installed app never collide"
+      ],
+      "relatedDecisions": [
+        "local-port-discovery",
+        "browser-bridge-link"
+      ]
+    },
+    {
+      "id": "recipes",
+      "name": "Recipes",
+      "doc": "features/recipes.md",
+      "purpose": "Publishable, versioned prompt documents with tags, screenshots, an author and a public run count; browse everyone's published recipes and run one (standalone, inside a chosen workflow, or as a synthesized workflow), including bundles of recipes.",
+      "entryPoints": [
+        "web/src/components/recipe/RecipeLibrary.tsx",
+        "web/src/components/recipe/RecipeRunModal.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/recipes.ts",
+        "server/src/recipeCommands.ts",
+        "server/src/store.ts",
+        "server/src/sync.ts",
+        "server/src/userContext.ts",
+        "server/src/userRegistry.ts",
+        "server/src/index.ts",
+        "storage/prisma/schema.prisma",
+        "storage/src/index.ts",
+        "storage/src/r2.ts",
+        "web/src/store.ts",
+        "web/src/components/recipe/RecipeLibrary.tsx",
+        "web/src/components/recipe/RecipeRunModal.tsx",
+        "web/src/components/recipe/RecipeImages.tsx",
+        "web/src/lib/recipeImage.ts",
+        "web/src/components/workflow/WorkflowEditor.tsx"
+      ],
+      "symbols": [
+        "RecipeEngine",
+        "RecipeDef",
+        "RecipeContent",
+        "RecipeRef",
+        "isBundle",
+        "normalizeRecipeTag",
+        "sameRecipeContent",
+        "RecipeEngine.expandForRun",
+        "RecipeEngine.resolveForRun",
+        "recipeCommands.runRecipe",
+        "putRecipeImage",
+        "r2PublicBaseWarning",
+        "StorageSyncClient.incrementRecipeRuns"
+      ],
+      "tests": [
+        "server/src/recipes.version.test.ts",
+        "server/src/recipes.tags.test.ts",
+        "server/src/recipes.sync.test.ts",
+        "server/src/recipes.run.test.ts",
+        "server/src/recipes.bundle.test.ts",
+        "server/src/recipes.composite.test.ts"
+      ],
+      "businessRules": [
+        "a RecipeContent carries exactly one of prompt or members; a bundle's members must all be leaves and publishing a bundle requires every member already published",
+        "bundle members are unversioned - the newest version of a member is always the one that runs; reproducibility lives in the synthesized workflow's frozen inline step prompts instead",
+        "run counts increment once per recipe at trigger time, only after the first prompt is successfully injected; a bundle and each of its expanded members count separately",
+        "tags are freeform, server-normalized and deduped on every save, capped at 6, and may be empty; tag filtering is client-side over the wholesale shared pull",
+        "a run always spawns a new session; a multi-recipe run cannot also specify an existing workflowId",
+        "R2 is optional - unconfigured R2 answers 503 on upload and the recipe still saves without a screenshot; a public base pointed at the S3 API endpoint instead of a public r2.dev/custom domain uploads successfully but never renders, which the storage server warns about at boot"
+      ],
+      "architecturalRules": [
+        "RecipeEngine is a standalone class, not folded into WorkflowEngine, since a recipe has no step/handoff/pin semantics",
+        "all bundle/tag invariants are enforced only inside RecipeEngine.saveRecipe - storage treats data as an opaque JSON blob",
+        "a multi-recipe run's synthesized workflow is saved, never ephemeral, because every WorkflowEngine lifecycle method re-resolves the def by id and silently no-ops if it is missing",
+        "RecipeEngine.expandForRun is the only place bundle expansion happens; the client always sends refs, never a pre-flattened list"
+      ],
+      "relatedDecisions": [
+        "workflow-step-version-history",
+        "multi-root-projects"
       ]
     }
   ]

@@ -9,21 +9,45 @@ import dotenv from 'dotenv';
 dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
 import { WebSocketServer, WebSocket } from 'ws';
 import type { ClientMessage, ServerMessage } from '@lines/shared';
-import { DEFAULT_MODELS, normalizeRootPath, projectRoots } from '@lines/shared';
+import { APP_PROTOCOL_VERSION, DEFAULT_MODELS, normalizeRootPath, projectRoots } from '@lines/shared';
 import { verifyToken } from '@clerk/backend';
-import { WorkerClient, type WorkerRpc } from './workerClient.ts';
+import { WORKER_LOST_MS, WorkerClient, type WorkerRpc } from './workerClient.ts';
+import { RelayClient } from './relayClient.ts';
 import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
-import type { UserContext } from './userContext.ts';
-import { searchFilesAcross } from './fileSearch.ts';
-import { collectDocs } from './docsBundle.ts';
-import { resolveWorkspaceParam, resolveWorkspacePath } from './workspacePaths.ts';
+import type { BrowserLink, UserContext } from './userContext.ts';
+import { handleFileRequest } from './fileRoutes.ts';
+import { UpdateManager } from './updates.ts';
 import { createMcpDispatcher } from './mcpWorkflowTools.ts';
 import * as workflowCommands from './workflowCommands.ts';
 import * as recipeCommands from './recipeCommands.ts';
-import type { McpToolResult } from './workerProtocol.ts';
+import {
+  clearRuntimeInfo,
+  newRuntimeToken,
+  publishRuntimeInfo,
+  type McpToolResult,
+} from './workerProtocol.ts';
 
-const PORT = Number(process.env.PORT ?? 8787);
+/** Explicit pin for local dev (Tilt sets it so its readiness probe has a fixed
+ *  target); unset means bind :0 and publish the result to bridge.json. */
+const PORT = Number(process.env.LINES_BRIDGE_PORT ?? 0);
+
+/** Published in bridge.json for the tray app's future control channel. It is
+ *  deliberately *not* enforced on browser connections: a browser cannot set
+ *  headers on a WebSocket, and the Clerk gate in handleConnection is what
+ *  guards that path. The dev-server discovery endpoint never exposes it. */
+const bridgeToken = newRuntimeToken();
+
+/** Reported to clients on `hello`. Read from disk rather than imported so the
+ *  bridge needs no resolveJsonModule; a missing/unreadable manifest is cosmetic. */
+const BRIDGE_VERSION: string = (() => {
+  try {
+    const pkg = fs.readFileSync(path.resolve(import.meta.dirname, '../package.json'), 'utf8');
+    return (JSON.parse(pkg) as { version?: string }).version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 /**
  * Opt-in perf instrumentation (LINES_PERF=1). Everything it guards — the timer
@@ -73,7 +97,9 @@ interface ConnState {
   /** Freshest verified Clerk token from this connection (handshake or relay). */
   clerkToken: string | null;
 }
-const conns = new WeakMap<WebSocket, ConnState>();
+// Keyed on the link object; relayClient will hold a strong ref per channel,
+// so a WeakMap entry lives exactly as long as its connection.
+const conns = new WeakMap<BrowserLink, ConnState>();
 
 /**
  * Phase 2 of the multi-user plan: all state lives in per-user contexts held by
@@ -103,6 +129,10 @@ const worker = new WorkerClient({
   // No sessionId on a cancel — only the owner's live map has the pending rpc, the rest no-op.
   onRpcCancel: (id) => {
     for (const ctx of registry.all()) ctx.sessions.handleRpcCancel(id);
+  },
+  onWorkerLost: () => {
+    console.warn(`[worker] lost — no reconnect within ${WORKER_LOST_MS}ms, flagging in-flight sessions`);
+    registry.onWorkerLost();
   },
 });
 // Legacy-state adoption is a manual step: server/scripts/migrate-user.ts.
@@ -136,6 +166,41 @@ if (!AUTH_ENABLED) {
   }
 }
 
+/**
+ * Desktop update plumbing. Inert unless the tray app spawned us, so Tilt and
+ * `npm run dev` are untouched.
+ */
+const updates = new UpdateManager(
+  () => registry.get(LOCAL_USER).sessions.list(),
+  (msg) => {
+    for (const ctx of registry.all()) ctx.broadcast(msg);
+  },
+);
+
+/**
+ * Outbound relay link, so a hosted web app can reach this machine. Opt-in: with
+ * no RELAY_URL the bridge behaves exactly as before, serving only its local
+ * socket.
+ *
+ * Deliberately a peripheral, never a supervisor. Relay health must never restart
+ * the bridge and absolutely never the worker — that would turn a relay blip into
+ * a reconcile, an `interruptedAt` stamp, and an auto-continued turn.
+ */
+const RELAY_URL = process.env.RELAY_URL;
+if (RELAY_URL) {
+  const deviceId = process.env.LINES_DEVICE_ID ?? 'dev-device';
+  const secret = process.env.LINES_DEVICE_SECRET ?? 'dev-secret';
+  new RelayClient(RELAY_URL, deviceId, secret, {
+    onChannel: (link, identity) => {
+      void handleConnection(link, {}, identity);
+    },
+    onToken: (userId, token) => {
+      registry.get(userId).clerkToken = token;
+    },
+  });
+  console.log(`[relay] dialling ${RELAY_URL} as device ${deviceId}`);
+}
+
 // If the worker never shows up, in-flight statuses loaded from disk are stale.
 // Unless it did show up and we hung up on it over a protocol mismatch: that
 // worker is alive and still running turns, so clearing would falsely idle them.
@@ -149,239 +214,16 @@ setTimeout(() => {
   registry.onWorkerLive([]);
 }, 15_000).unref();
 
-const MIME: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.svg': 'image/svg+xml',
-  '.pdf': 'application/pdf',
-  '.txt': 'text/plain; charset=utf-8',
-  '.md': 'text/markdown; charset=utf-8',
-  '.json': 'application/json',
-};
 
 /**
- * Browsers may only call the file routes from the web app's origin. `WEB_ORIGIN`
- * (comma-separated) pins the allowlist in deployments; with it unset any loopback
- * origin passes, because the vite dev server drifts to 5174/5175 when 5173 is taken.
+ * The bridge's only HTTP surface is this status page. Workspace reads moved onto
+ * the WebSocket (see fileRoutes.ts), which removed the Clerk token from query
+ * strings and left nothing here needing CORS or an auth gate.
  */
-const WEB_ORIGINS = (process.env.WEB_ORIGIN ?? '')
-  .split(',')
-  .map((o) => o.trim())
-  .filter(Boolean);
-const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
-
-/** The response CORS headers for one request: the caller's own origin, echoed back if allowed. */
-function corsFor(req: http.IncomingMessage): Record<string, string> {
-  const origin = req.headers.origin;
-  if (!origin) return {}; // non-browser caller (curl, <img>) — nothing to grant
-  const allowed = WEB_ORIGINS.length ? WEB_ORIGINS.includes(origin) : LOOPBACK_ORIGIN.test(origin);
-  return allowed ? { 'access-control-allow-origin': origin, vary: 'Origin' } : {};
-}
-
-/** Resolve the requesting user for a plain-HTTP route from its ?token= param. */
-async function httpUserId(url: string): Promise<string | null> {
-  if (!AUTH_ENABLED) return LOCAL_USER;
-  const token = new URL(url, 'http://localhost').searchParams.get('token');
-  return token ? verifyClerkUserId(token) : null;
-}
-
-const server = http.createServer((req, res) => {
-  const url = req.url ?? '';
-  const isFileRoute =
-    url.startsWith('/attachments/') ||
-    url.startsWith('/file?') ||
-    url.startsWith('/tree?') ||
-    url.startsWith('/find?') ||
-    url.startsWith('/docs?');
-  if (isFileRoute) {
-    const cors = corsFor(req);
-    void (async () => {
-      // These routes read workspace files and attachments — same gate as the WS.
-      const userId = await httpUserId(url);
-      if (!userId) {
-        res.writeHead(401, cors).end();
-        return;
-      }
-      const ctx = registry.get(userId);
-      if (url.startsWith('/attachments/')) serveAttachment(ctx, url, res);
-      else if (url.startsWith('/file?')) serveFile(ctx, url, res, cors);
-      else if (url.startsWith('/find?')) serveFind(ctx, url, res, cors);
-      else if (url.startsWith('/docs?')) serveDocs(ctx, url, res, cors);
-      else serveTree(ctx, url, res, cors);
-    })().catch((err) => {
-      console.error('[http]', err);
-      if (!res.headersSent) res.writeHead(500, cors).end();
-    });
-    return;
-  }
+const server = http.createServer((_req, res) => {
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ ok: true, sessions: registry.get(LOCAL_USER).sessions.list().length }));
 });
-
-const MAX_FILE_BYTES = 2 * 1024 * 1024;
-
-/** Serve a workspace file for the clickable-path preview, restricted to the user's project/session roots. */
-function serveFile(
-  ctx: UserContext,
-  url: string,
-  res: http.ServerResponse,
-  cors: Record<string, string>,
-) {
-  const abs = resolveWorkspaceParam(ctx, url);
-  if (!abs) {
-    res.writeHead(403, cors).end();
-    return;
-  }
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(abs);
-  } catch {
-    res.writeHead(404, cors).end();
-    return;
-  }
-  if (!stat.isFile()) {
-    res.writeHead(404, cors).end();
-    return;
-  }
-  if (stat.size > MAX_FILE_BYTES) {
-    res.writeHead(413, cors).end();
-    return;
-  }
-  let buf: Buffer;
-  try {
-    buf = fs.readFileSync(abs);
-  } catch {
-    res.writeHead(404, cors).end();
-    return;
-  }
-  // Reject binary files (NUL byte in the first 8KB).
-  if (buf.subarray(0, 8192).includes(0)) {
-    res.writeHead(415, cors).end();
-    return;
-  }
-  res.writeHead(200, { ...cors, 'content-type': 'application/json' });
-  res.end(JSON.stringify({ content: buf.toString('utf8') }));
-}
-
-/** Directory entries hidden from the file tree. */
-const TREE_IGNORE = new Set(['node_modules', '.git']);
-
-/** List one directory for the sidebar file tree, restricted to the user's project/session roots. */
-function serveTree(
-  ctx: UserContext,
-  url: string,
-  res: http.ServerResponse,
-  cors: Record<string, string>,
-) {
-  const abs = resolveWorkspaceParam(ctx, url);
-  if (!abs) {
-    res.writeHead(403, cors).end();
-    return;
-  }
-  let dirents: fs.Dirent[];
-  try {
-    dirents = fs.readdirSync(abs, { withFileTypes: true });
-  } catch {
-    res.writeHead(404, cors).end();
-    return;
-  }
-  const entries = dirents
-    .filter((d) => !d.name.startsWith('.') && !TREE_IGNORE.has(d.name))
-    .filter((d) => d.isDirectory() || d.isFile())
-    .map((d) => ({ name: d.name, type: d.isDirectory() ? ('dir' as const) : ('file' as const) }))
-    .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
-  res.writeHead(200, { ...cors, 'content-type': 'application/json' });
-  res.end(JSON.stringify({ entries }));
-}
-
-/**
- * Serve a project's whole `docs/**` markdown corpus in one response — the
- * documentation reader's only request. Restricted to the user's project/session
- * roots exactly like /tree and /file; not cached here, since the walk is small
- * and the client holds the bundle for the life of the page.
- */
-function serveDocs(
-  ctx: UserContext,
-  url: string,
-  res: http.ServerResponse,
-  cors: Record<string, string>,
-) {
-  const abs = resolveWorkspaceParam(ctx, url);
-  if (!abs) {
-    res.writeHead(403, cors).end();
-    return;
-  }
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(abs);
-  } catch {
-    res.writeHead(404, cors).end();
-    return;
-  }
-  if (!stat.isDirectory()) {
-    res.writeHead(404, cors).end();
-    return;
-  }
-  const bundle = collectDocs(abs);
-  res.writeHead(200, { ...cors, 'content-type': 'application/json' });
-  res.end(JSON.stringify({ root: abs, ...bundle }));
-}
-
-const FIND_MAX_LIMIT = 25;
-
-/**
- * Rank project files by name for the composer's `@mention` search, restricted to
- * the user's project/session roots exactly like /tree and /file.
- */
-function serveFind(
-  ctx: UserContext,
-  url: string,
-  res: http.ServerResponse,
-  cors: Record<string, string>,
-) {
-  const params = new URL(url, 'http://localhost').searchParams;
-  // One `path` per root. Any unresolvable root fails the whole request rather
-  // than silently searching the rest: a partial result looks like "no match here"
-  // and would quietly hide a whole folder from the mention list.
-  const requested = params.getAll('path');
-  const roots = requested.map((raw) => resolveWorkspacePath(ctx, raw));
-  if (!roots.length || roots.some((root) => root === null)) {
-    res.writeHead(403, cors).end();
-    return;
-  }
-  const limit = Math.min(Number(params.get('limit')) || FIND_MAX_LIMIT, FIND_MAX_LIMIT);
-  const files = searchFilesAcross(roots as string[], params.get('q') ?? '', limit);
-  res.writeHead(200, { ...cors, 'content-type': 'application/json' });
-  res.end(JSON.stringify({ files }));
-}
-
-/**
- * Serve a stored attachment, guarding against path traversal. Only the
- * requesting user's own attachments root is searched, so another user's
- * sessionId in the URL simply 404s.
- */
-function serveAttachment(ctx: UserContext, url: string, res: http.ServerResponse) {
-  const rel = decodeURIComponent(url.slice('/attachments/'.length).split('?')[0]);
-  const attachmentsRoot = ctx.store.attachmentsRoot;
-  const abs = path.resolve(attachmentsRoot, rel);
-  if (abs !== attachmentsRoot && !abs.startsWith(attachmentsRoot + path.sep)) {
-    res.writeHead(403).end();
-    return;
-  }
-  fs.readFile(abs, (err, data) => {
-    if (err) {
-      res.writeHead(404).end();
-      return;
-    }
-    res.writeHead(200, {
-      'content-type': MIME[path.extname(abs).toLowerCase()] ?? 'application/octet-stream',
-    });
-    res.end(data);
-  });
-}
 
 const wss = new WebSocketServer({ server });
 // The ws library re-emits http server errors here; without a listener they crash the process.
@@ -391,10 +233,23 @@ wss.on('connection', (ws, req) => {
   void handleConnection(ws, req);
 });
 
-async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
+/**
+ * `attested` is supplied for relay channels, where the relay is the auth edge and
+ * has already verified the token. The bridge does not re-verify: a second
+ * verifier means two failure modes, and would make every relayed connection
+ * depend on this machine reaching Clerk's JWKS. Direct sockets are unaffected.
+ */
+async function handleConnection(
+  ws: BrowserLink,
+  req: { url?: string },
+  attested?: { userId: string; clerkToken: string | null },
+) {
   let userId = LOCAL_USER;
   let clerkToken: string | null = null;
-  if (AUTH_ENABLED) {
+  if (attested) {
+    userId = attested.userId;
+    clerkToken = attested.clerkToken;
+  } else if (AUTH_ENABLED) {
     // Hard gate: no valid Clerk token in the handshake query → close, no hello.
     const token = new URL(req.url ?? '/', 'http://localhost').searchParams.get('token');
     const verified = token ? await verifyClerkUserId(token) : null;
@@ -415,6 +270,7 @@ async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
   ctx.sockets.add(ws);
   const hello: ServerMessage = {
     type: 'hello',
+    bridge: { version: BRIDGE_VERSION, appProtocol: APP_PROTOCOL_VERSION },
     sessions: ctx.sessions.list(),
     workflows: ctx.workflows.list(),
     sharedWorkflows: ctx.workflows.listShared(),
@@ -442,6 +298,11 @@ async function handleConnection(ws: WebSocket, req: http.IncomingMessage) {
   ws.send(JSON.stringify(hello));
 
   ws.on('close', () => ctx.sockets.delete(ws));
+
+  // Without this an unhandled 'error' on the socket's EventEmitter throws and
+  // takes the whole bridge down. Loopback hides it; over a relay, per-socket
+  // errors are routine. 'close' always follows, so cleanup stays there.
+  ws.on('error', (err) => console.warn('[ws] socket error:', err.message));
 
   ws.on('message', (raw) => {
     let msg: ClientMessage;
@@ -486,13 +347,26 @@ async function handleMcpToolRpc(ctx: UserContext, rpc: WorkerRpc): Promise<void>
   worker.rpcResult(rpc.id, result);
 }
 
-async function handleMessage(ctx: UserContext, ws: WebSocket, msg: ClientMessage): Promise<void> {
+async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessage): Promise<void> {
   const { sessions, workflows, recipes, store, auth, broadcast } = ctx;
   switch (msg.type) {
     case 'ping':
       // App-level heartbeat: browsers can't send WS protocol pings, so we answer this.
       ws.send(JSON.stringify({ type: 'pong' } satisfies ServerMessage));
       break;
+    case 'installUpdate':
+      // Refused while any session is active — a restart kills in-flight turns.
+      // The reply is the status itself, so the UI shows why nothing happened.
+      updates.requestRestart();
+      ws.send(JSON.stringify({ type: 'updateStatus', status: updates.current() } satisfies ServerMessage));
+      break;
+    case 'fileRequest': {
+      // Replies on the originating link, never via broadcast: two tabs each have
+      // their own in-flight reqIds.
+      const { status, body } = handleFileRequest(ctx, msg.kind, msg.params);
+      ws.send(JSON.stringify({ type: 'fileResponse', reqId: msg.reqId, status, body } satisfies ServerMessage));
+      break;
+    }
     case 'auth': {
       // Fresh-token relay. Re-verifying catches a revoked Clerk session within
       // one relay cycle; failure closes the socket like a failed handshake.
@@ -880,7 +754,17 @@ function pickFolderNative(): Promise<string | null> {
 let listenAttempts = 0;
 function listen() {
   server.listen(PORT, () => {
-    console.log(`lines bridge listening on http://localhost:${PORT}`);
+    // The bound port, not PORT: the default is 0, so the OS picked one.
+    // Publishing is what lets the dev server (and later the tray app) find us.
+    const { port } = server.address() as { port: number };
+    publishRuntimeInfo('bridge', {
+      port,
+      pid: process.pid,
+      startedAt: Date.now(),
+      protocolVersion: APP_PROTOCOL_VERSION,
+      token: bridgeToken,
+    });
+    console.log(`lines bridge listening on http://localhost:${port}`);
   });
 }
 server.on('error', (err: NodeJS.ErrnoException) => {
@@ -899,6 +783,7 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 
 // Release the port promptly when tsx watch restarts us (SIGTERM) or on Ctrl-C.
 function shutdown() {
+  clearRuntimeInfo('bridge');
   for (const ctx of registry.all()) {
     // persist() is debounced — land any pending session state before we exit.
     ctx.sessions.flushPersist();

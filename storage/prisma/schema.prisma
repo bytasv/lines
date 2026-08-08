@@ -46,6 +46,40 @@ model StepVersion {
   @@map("step_versions")
 }
 
+// One immutable row per (owner, recipe, version), exactly as StepVersion: the
+// head (max version) is the author's editable recipe and older versions stay so
+// a version history can never be rewritten by a republish.
+model RecipeVersion {
+  userId    String   @map("user_id")
+  id        String
+  version   Int
+  data      Json // RecipeDef — including `tags` and, for a bundle, `members`
+  published Boolean  @default(false)
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@id([userId, id, version])
+  // Both head reads are `DISTINCT ON (user_id, id) … ORDER BY user_id, id, version DESC`,
+  // so the trailing column has to be descending (see StepVersion).
+  @@index([userId, id, version(sort: Desc)])
+  @@index([published, userId, id, version(sort: Desc)])
+  @@index([userId, updatedAt(sort: Desc)]) // delta pulls: `?since=`
+  @@map("recipe_versions")
+}
+
+// Public run counter, keyed by recipe *identity* rather than version — it has to
+// survive version churn, be incrementable in one atomic statement, and stay
+// unreachable from `PUT /recipes`, whose last-write-wins blob would otherwise
+// let a stale author push clobber it. Never mirrored into `data`.
+model RecipeStats {
+  userId    String    @map("user_id") // recipe OWNER (identity), not the runner
+  id        String
+  runCount  Int       @default(0) @map("run_count")
+  lastRunAt DateTime? @map("last_run_at")
+
+  @@id([userId, id])
+  @@map("recipe_stats")
+}
+
 model UserSettings {
   userId    String   @id @map("user_id")
   data      Json // per-user UI settings blob
@@ -105,9 +139,11 @@ model AgentMemory {
 // read the whole map, merge in JS, write it back and echo it, so a one-line
 // memory edit moved the entire map three times.
 model AgentMemoryFile {
-  userId String @map("user_id")
-  key    String
-  /** Empty for a tombstone; `deleted` is the flag that matters. */
+  userId    String   @map("user_id")
+  key       String
+  /**
+   * Empty for a tombstone; `deleted` is the flag that matters.
+   */
   content   String
   deleted   Boolean  @default(false)
   updatedAt DateTime @map("updated_at")
@@ -115,4 +151,42 @@ model AgentMemoryFile {
   @@id([userId, key])
   @@index([userId, updatedAt(sort: Desc)]) // delta pulls
   @@map("agent_memory_files")
+}
+
+/// A machine paired to a user, so a hosted browser can reach that machine's bridge.
+///
+/// Only the *hash* of the pairing secret is stored: the plaintext is generated on
+/// the machine and never leaves it, so this row cannot be replayed to impersonate
+/// a device. See storage/src/schema.credentials.test.ts, which allowlists exactly
+/// this one field.
+model Device {
+  id String @id
+
+  /// Null until a signed-in user claims the pairing code, which is what binds a
+  /// machine to an account. The relay refuses an unclaimed device.
+  userId String? @map("user_id")
+
+  name     String
+  platform String?
+
+  /// sha256 of the secret the machine presents on /agent.
+  secretHash String @map("secret_hash")
+
+  /// One-time code the user types on the web to claim this device. Cleared once
+  /// claimed, so it cannot be replayed.
+  pairingCode      String?   @unique @map("pairing_code")
+  /// Unclaimed devices expire; a stale code must not stay claimable forever.
+  pairingExpiresAt DateTime? @map("pairing_expires_at")
+
+  /// Browser<->bridge contract this machine speaks, so the web app can load a
+  /// build that matches it.
+  appProtocol Int? @map("app_protocol")
+
+  createdAt  DateTime  @default(now()) @map("created_at")
+  lastSeenAt DateTime? @map("last_seen_at")
+  /// Revocation is a tombstone, not a delete: the row stays as an audit trail.
+  revokedAt  DateTime? @map("revoked_at")
+
+  @@index([userId])
+  @@map("devices")
 }

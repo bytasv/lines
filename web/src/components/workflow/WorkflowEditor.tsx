@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert,
   Badge,
@@ -28,6 +28,10 @@ import { useWorkflowDraft } from './useWorkflowDraft';
 import { WorkflowList } from './WorkflowList';
 import { StepLibrary } from './StepLibrary';
 import { StepCard } from './StepCard';
+import { RecipeLibrary } from '../recipe/RecipeLibrary';
+
+/** Which library the modal opens on. */
+export type WorkflowEditorView = 'workflows' | 'steps' | 'recipes';
 
 /** "Add step" with a blank option plus my own steps and the shared library. */
 function AddStepMenu({
@@ -88,11 +92,25 @@ function AddStepMenu({
   );
 }
 
-export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: () => void }) {
+export function WorkflowEditor({
+  opened,
+  onClose,
+  initialView = 'workflows',
+}: {
+  opened: boolean;
+  onClose: () => void;
+  initialView?: WorkflowEditorView;
+}) {
   const models = useStore((s) => s.models);
-  const [view, setView] = useState<'workflows' | 'steps'>('workflows');
+  const [view, setView] = useState<WorkflowEditorView>(initialView);
   const wf = useWorkflowDraft(opened, onClose);
   const { draft, readOnly, validation, submitAttempted, collapsed } = wf;
+
+  // Each open honours the entry point (the sidebar has one icon per library);
+  // the tab the user picked while it was open is not worth remembering.
+  useEffect(() => {
+    if (opened) setView(initialView);
+  }, [opened, initialView]);
 
   const selectStep = (uid: string) => {
     wf.expandStep(uid);
@@ -113,7 +131,7 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
       <Modal
         opened={opened}
         onClose={wf.requestClose}
-        title="Workflows & steps"
+        title="Workflows, steps & recipes"
         size="90%"
         centered
         padding={0}
@@ -129,15 +147,20 @@ export function WorkflowEditor({ opened, onClose }: { opened: boolean; onClose: 
             <SegmentedControl
               size="xs"
               value={view}
-              onChange={(v) => setView(v as 'workflows' | 'steps')}
+              onChange={(v) => setView(v as WorkflowEditorView)}
               data={[
                 { value: 'workflows', label: 'Workflows' },
                 { value: 'steps', label: 'Steps' },
+                { value: 'recipes', label: 'Recipes' },
               ]}
             />
           </Box>
           {view === 'steps' ? (
             <StepLibrary />
+          ) : view === 'recipes' ? (
+            // Plain onClose, not wf.requestClose: a run is not a workflow-draft
+            // edit, so it must not raise the discard-changes prompt.
+            <RecipeLibrary onRan={onClose} />
           ) : (
         <Group align="stretch" gap={0} wrap="nowrap" style={{ flex: 1, minHeight: 0 }}>
           <Box p="md" style={{ display: 'flex' }}>

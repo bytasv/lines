@@ -4,10 +4,13 @@
  * execution. Every request authenticates a Clerk token; all rows are scoped
  * by the verified userId — the bridge forwards user tokens, never re-signs.
  */
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import dotenv from 'dotenv';
 // Aliased: the global `Response` in scope here is undici's, not Express's.
 import type { ErrorRequestHandler, Request, Response as ExResponse } from 'express';
+import { RECIPE_IMAGE_MAX_BYTES, RECIPE_IMAGE_TYPES } from '@lines/shared';
+import { putRecipeImage, r2Configured, r2PublicBaseWarning } from './r2.ts';
 
 dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
 
@@ -49,7 +52,20 @@ const app = express();
 // The two shared routes below set an ETag explicitly, from an aggregate that
 // runs *before* the real query.
 app.set('etag', false);
-app.use(express.json({ limit: '2mb' }));
+// A global `json({ limit: '2mb' })` rejects a 2 MB screenshot before any
+// route-level parser could run, so the limit is picked per path here instead.
+const jsonSmall = express.json({ limit: '2mb' });
+const jsonUpload = express.json({ limit: '8mb' });
+app.use((req, res, next) => (req.path === '/recipes/images' ? jsonUpload : jsonSmall)(req, res, next));
+
+// Recipe images are optional — unlike DATABASE_URL this is a warning, not an
+// exit, and the upload route answers 503 until it is configured.
+if (!r2Configured()) {
+  console.warn('[storage] R2 not configured — recipe image uploads disabled');
+} else {
+  const warning = r2PublicBaseWarning();
+  if (warning) console.warn(`[storage] ${warning}`);
+}
 
 // Egress meter. Off by default; STORAGE_LOG_BYTES=1 logs one line per request so
 // a change in query shape shows up as a change in bytes rather than a guess.
@@ -313,6 +329,186 @@ app.delete('/steps/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- recipes (versioned, shareable) ----------------------------------------
+
+/** All of the caller's own recipe heads (published or not) — their private library. */
+app.get('/recipes', async (req, res) => {
+  // `since` filters before the head pick for the same reason as /steps: version
+  // rows are append-only, so a head picked from a partial window can only be
+  // older than the local copy, and the bridge's LWW-on-version adopt ignores it.
+  const since = sinceOf(req);
+  const userId = userIdOf(req);
+  const rows = since
+    ? await prisma.$queryRaw<{ data: unknown; updatedAt: Date }[]>`
+        SELECT DISTINCT ON (user_id, id) data, updated_at AS "updatedAt" FROM recipe_versions
+        WHERE user_id = ${userId} AND updated_at >= ${since}
+        ORDER BY user_id, id, version DESC`
+    : await prisma.$queryRaw<{ data: unknown; updatedAt: Date }[]>`
+        SELECT DISTINCT ON (user_id, id) data, updated_at AS "updatedAt" FROM recipe_versions
+        WHERE user_id = ${userId}
+        ORDER BY user_id, id, version DESC`;
+  stampCursor(res, rows);
+  res.json(rows.map((r) => r.data));
+});
+
+/**
+ * Every other user's published recipes, head version only — the browsable
+ * corpus. ETag'd on content alone (`count(*)`/`max(updated_at)` of version
+ * rows), which is why run counts deliberately do not ride this route: a 304
+ * here must not be able to freeze them. They come from /recipes/stats instead.
+ */
+app.get('/recipes/shared', async (req, res) => {
+  const userId = userIdOf(req);
+  const [tag] = await prisma.$queryRaw<{ count: bigint; max: Date | null }[]>`
+    SELECT count(*) AS count, max(updated_at) AS max FROM recipe_versions
+    WHERE published AND user_id <> ${userId}`;
+  if (servedFromEtag(req, res, tag)) return;
+  const rows = await prisma.$queryRaw<{ data: unknown }[]>`
+    SELECT DISTINCT ON (user_id, id) data FROM recipe_versions
+    WHERE published AND user_id <> ${userId}
+    ORDER BY user_id, id, version DESC`;
+  res.json(rows.map((r) => r.data));
+});
+
+/**
+ * Run counts for every recipe the caller can see (own, plus anyone's published).
+ * Its own ETag comes from `sum(run_count)` rather than `count(*)`, so re-running
+ * an already-counted recipe still busts it.
+ */
+app.get('/recipes/stats', async (req, res) => {
+  const userId = userIdOf(req);
+  const [tag] = await prisma.$queryRaw<{ count: bigint; max: Date | null }[]>`
+    SELECT coalesce(sum(run_count), 0)::bigint AS count, max(last_run_at) AS max FROM recipe_stats`;
+  if (servedFromEtag(req, res, tag)) return;
+  const rows = await prisma.$queryRaw<{ ownerId: string; id: string; runCount: number }[]>`
+    SELECT s.user_id AS "ownerId", s.id, s.run_count AS "runCount" FROM recipe_stats s
+    WHERE s.user_id = ${userId}
+       OR EXISTS (SELECT 1 FROM recipe_versions v
+                  WHERE v.user_id = s.user_id AND v.id = s.id AND v.published)`;
+  res.json(rows);
+});
+
+/**
+ * Count one run per recipe. Batched, because a bundle of six must not be six
+ * round trips — a single run is just a batch of one, so there is one route.
+ *
+ * Authorization and the atomic increment are the same statement: the `EXISTS`
+ * join means a fabricated key contributes no row rather than creating one, and
+ * only the rows that passed come back, so the caller learns which keys were
+ * rejected by their absence.
+ */
+app.post('/recipes/run', async (req, res) => {
+  const me = userIdOf(req);
+  const list = Array.isArray(req.body) ? (req.body as { ownerId?: string; id?: string }[]) : [];
+  // `ON CONFLICT DO UPDATE` cannot affect the same row twice in one statement,
+  // and a bundle legitimately may list the same recipe twice — dedupe first.
+  const seen = new Set<string>();
+  const pairs: { ownerId: string; id: string }[] = [];
+  for (const r of list) {
+    if (!r?.ownerId || !r?.id) continue;
+    const key = `${r.ownerId}/${r.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pairs.push({ ownerId: r.ownerId, id: r.id });
+  }
+  if (pairs.length === 0) {
+    res.status(404).json({ error: 'no runnable recipes' });
+    return;
+  }
+  const rows = await prisma.$queryRaw<{ ownerId: string; id: string; runCount: number }[]>`
+    INSERT INTO recipe_stats (user_id, id, run_count, last_run_at)
+    SELECT u.owner_id, u.id, 1, now()
+    FROM UNNEST(${pairs.map((p) => p.ownerId)}::text[], ${pairs.map((p) => p.id)}::text[]) AS u(owner_id, id)
+    WHERE EXISTS (SELECT 1 FROM recipe_versions v
+                  WHERE v.user_id = u.owner_id AND v.id = u.id
+                    AND (v.published OR v.user_id = ${me}))
+    ON CONFLICT (user_id, id) DO UPDATE
+      SET run_count = recipe_stats.run_count + 1, last_run_at = now()
+    RETURNING user_id AS "ownerId", id, run_count AS "runCount"`;
+  if (rows.length === 0) {
+    res.status(404).json({ error: 'no runnable recipes' });
+    return;
+  }
+  res.json(rows);
+});
+
+/** Upload one recipe screenshot to R2; answers its public URL. */
+app.post('/recipes/images', async (req, res) => {
+  const userId = userIdOf(req);
+  if (!r2Configured()) {
+    // 503, not 500: the bridge marks this a soft error so an install without R2
+    // shows an inline uploader message instead of a global sync-outage banner.
+    res.status(503).json({ error: 'recipe images not configured' });
+    return;
+  }
+  const body = req.body as { mediaType?: unknown; data?: unknown } | null;
+  const mediaType = typeof body?.mediaType === 'string' ? body.mediaType : '';
+  if (!RECIPE_IMAGE_TYPES.includes(mediaType as (typeof RECIPE_IMAGE_TYPES)[number])) {
+    res.status(400).json({ error: 'unsupported image type' });
+    return;
+  }
+  if (typeof body?.data !== 'string' || !body.data) {
+    res.status(400).json({ error: 'body must hold base64 data' });
+    return;
+  }
+  const buf = Buffer.from(body.data, 'base64');
+  // Re-validated here rather than trusting the browser's downscale.
+  if (buf.byteLength === 0 || buf.byteLength > RECIPE_IMAGE_MAX_BYTES) {
+    res.status(400).json({ error: 'image too large' });
+    return;
+  }
+  res.json({ url: await putRecipeImage(userId, mediaType, buf) });
+});
+
+/**
+ * One multi-row upsert, as PUT /steps. Unlike steps, an absent `published` means
+ * **private**: recipes are published deliberately, so a blob from a client that
+ * predates the flag must not become world-visible.
+ */
+app.put('/recipes', async (req, res) => {
+  const userId = userIdOf(req);
+  const list = Array.isArray(req.body) ? (req.body as { id?: string; version?: number; published?: boolean }[]) : [];
+  const valid = list.filter((r) => r?.id && typeof r.version === 'number');
+  if (valid.length === 0) {
+    res.json({ ok: true, count: 0 });
+    return;
+  }
+  await prisma.$executeRaw`
+    INSERT INTO recipe_versions (user_id, id, version, data, published, updated_at)
+    SELECT ${userId}, u.id, u.version, u.data::jsonb, u.published, u.updated_at
+    FROM UNNEST(
+      ${valid.map((r) => r.id!)}::text[],
+      ${valid.map((r) => r.version!)}::int[],
+      ${valid.map((r) => JSON.stringify(r))}::text[],
+      ${valid.map((r) => r.published === true)}::bool[],
+      ${valid.map((r) => updatedAtOf(r).toISOString())}::timestamptz[]
+    ) AS u(id, version, data, published, updated_at)
+    ON CONFLICT (user_id, id, version) DO UPDATE
+      SET data = EXCLUDED.data, published = EXCLUDED.published, updated_at = EXCLUDED.updated_at`;
+  res.json({ ok: true, count: valid.length });
+});
+
+/** Full version history for one recipe, newest first. Own: all; foreign: published only. */
+app.get('/recipes/:ownerId/:id/versions', async (req, res) => {
+  const requester = userIdOf(req);
+  const { ownerId, id } = req.params;
+  const rows = await prisma.recipeVersion.findMany({
+    where: { userId: ownerId, id, ...(requester === ownerId ? {} : { published: true }) },
+    orderBy: { version: 'desc' },
+    take: 200,
+    select: { data: true },
+  });
+  res.json(rows.map((r) => r.data));
+});
+
+/** Unpublish a recipe — every version's flag flips off; rows stay, as with steps. */
+app.delete('/recipes/:id', async (req, res) => {
+  await prisma.recipeVersion
+    .updateMany({ where: { userId: userIdOf(req), id: req.params.id }, data: { published: false } })
+    .catch(() => undefined);
+  res.json({ ok: true });
+});
+
 // --- sessions (metadata only) ----------------------------------------------
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -554,6 +750,146 @@ app.put('/memory', async (req, res) => {
   });
   res.json({ ok: true, count: rows.length });
 });
+
+/* ------------------------------------------------------------------ *
+ * Devices — pairing a machine to an account
+ *
+ * The machine mints its own secret and only ever sends us a hash, so a database
+ * compromise cannot yield anything that impersonates a device. Claiming is a
+ * one-time code the signed-in user types on the web, which is what binds the
+ * machine to an account: until then the row has no userId and the relay refuses
+ * it.
+ * ------------------------------------------------------------------ */
+
+/** Codes are typed by a human, so keep them short and unambiguous. */
+const PAIRING_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1
+const PAIRING_TTL_MS = 15 * 60_000;
+
+function pairingCode(): string {
+  const bytes = randomBytes(8);
+  return [...bytes].map((b) => PAIRING_ALPHABET[b % PAIRING_ALPHABET.length]).join('');
+}
+
+const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');
+
+/**
+ * Start pairing. Unauthenticated on purpose: the machine has no user yet, and
+ * the code is worthless until a signed-in user claims it.
+ */
+app.post('/v1/devices/register', async (req, res) => {
+  const body = (req.body ?? {}) as { id?: string; secretHash?: string; name?: string; platform?: string; appProtocol?: number };
+  if (!body.id || !body.secretHash || !body.name) {
+    res.status(400).json({ error: 'id, secretHash and name are required' });
+    return;
+  }
+  // The machine sends a hash; we never see the secret itself.
+  if (!/^[0-9a-f]{64}$/.test(body.secretHash)) {
+    res.status(400).json({ error: 'secretHash must be a sha256 hex digest' });
+    return;
+  }
+  const code = pairingCode();
+  const data = {
+    name: body.name,
+    platform: body.platform ?? null,
+    secretHash: body.secretHash,
+    appProtocol: body.appProtocol ?? null,
+    pairingCode: code,
+    pairingExpiresAt: new Date(Date.now() + PAIRING_TTL_MS),
+  };
+  // Re-registering the same machine re-issues a code rather than duplicating it,
+  // but never silently re-binds one already claimed by a user.
+  const existing = await prisma.device.findUnique({ where: { id: body.id } });
+  if (existing?.userId) {
+    res.status(409).json({ error: 'device already paired' });
+    return;
+  }
+  await prisma.device.upsert({
+    where: { id: body.id },
+    create: { id: body.id, ...data },
+    update: data,
+  });
+  res.json({ pairingCode: code, expiresAt: data.pairingExpiresAt.toISOString() });
+});
+
+/** Claim a pending code. Authenticated: this is the step that binds machine to user. */
+app.post('/v1/devices/claim', async (req, res) => {
+  const userId = userIdOf(req);
+  const code = String((req.body as { code?: string } | null)?.code ?? '').trim().toUpperCase();
+  if (!code) {
+    res.status(400).json({ error: 'code is required' });
+    return;
+  }
+  const device = await prisma.device.findUnique({ where: { pairingCode: code } });
+  if (!device || device.revokedAt || !device.pairingExpiresAt || device.pairingExpiresAt < new Date()) {
+    // One message for absent, expired and revoked: a distinct "expired" reply
+    // would confirm a guessed code had once been real.
+    res.status(404).json({ error: 'unknown or expired code' });
+    return;
+  }
+  const claimed = await prisma.device.update({
+    where: { id: device.id },
+    // Code cleared on use, so it cannot be replayed.
+    data: { userId, pairingCode: null, pairingExpiresAt: null },
+  });
+  res.json({ id: claimed.id, name: claimed.name, platform: claimed.platform });
+});
+
+/** This user's devices. Never returns secretHash. */
+app.get('/v1/devices', async (req, res) => {
+  const devices = await prisma.device.findMany({
+    where: { userId: userIdOf(req), revokedAt: null },
+    select: { id: true, name: true, platform: true, appProtocol: true, createdAt: true, lastSeenAt: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  res.json({ devices });
+});
+
+/** Revoke. A tombstone rather than a delete, so the row stays as an audit trail. */
+app.delete('/v1/devices/:id', async (req, res) => {
+  const userId = userIdOf(req);
+  // Scoped by userId in the where clause: another user's id simply matches nothing.
+  const { count } = await prisma.device.updateMany({
+    where: { id: req.params.id, userId, revokedAt: null },
+    data: { revokedAt: new Date() },
+  });
+  if (!count) {
+    res.status(404).json({ error: 'unknown device' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+/**
+ * Verify a machine's secret. Called by the relay, not by browsers.
+ *
+ * Returns the owning userId so the relay can also assert that a browser asking
+ * for this device belongs to the same user.
+ */
+app.post('/v1/devices/verify', async (req, res) => {
+  const body = (req.body ?? {}) as { id?: string; secret?: string };
+  if (!body.id || !body.secret) {
+    res.status(400).json({ error: 'id and secret are required' });
+    return;
+  }
+  const device = await prisma.device.findUnique({ where: { id: body.id } });
+  const ok =
+    device &&
+    !device.revokedAt &&
+    device.userId &&
+    timingSafeEqualHex(device.secretHash, sha256(body.secret));
+  if (!ok) {
+    res.status(403).json({ error: 'unauthorized' });
+    return;
+  }
+  await prisma.device.update({ where: { id: device.id }, data: { lastSeenAt: new Date() } });
+  res.json({ userId: device.userId, appProtocol: device.appProtocol });
+});
+
+/** Constant-time compare of two hex digests of equal length. */
+function timingSafeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+}
 
 // Express 5 forwards async route rejections here.
 const onError: ErrorRequestHandler = (err, _req, res, _next) => {
