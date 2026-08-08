@@ -318,11 +318,13 @@
       "id": "interrupted-turn-recovery",
       "name": "Interrupted turn recovery",
       "doc": "features/interrupted-turn-recovery.md",
-      "purpose": "Detect a turn that died with the app, offer a Continue banner, and optionally resume it automatically; heal sessions the worker is still running.",
+      "purpose": "Detect a turn that died with the app, offer a Continue banner, and optionally resume it automatically; heal sessions the worker is still running; flag and surface a worker that never comes back at all.",
       "entryPoints": [
         "server/src/workerClient.ts",
         "server/src/sessions.ts",
+        "server/src/userRegistry.ts",
         "web/src/components/SessionView.tsx",
+        "web/src/components/WorkerBanner.tsx",
         "web/src/components/SettingsModal.tsx",
         "web/src/components/Sidebar.tsx"
       ],
@@ -333,9 +335,12 @@
         "server/src/userRegistry.ts",
         "server/src/index.ts",
         "server/src/sessions.ts",
+        "server/src/autoGuard.ts",
         "shared/types.ts",
         "web/src/store.ts",
         "web/src/components/SessionView.tsx",
+        "web/src/components/WorkerBanner.tsx",
+        "web/src/components/StorageBanner.tsx",
         "web/src/components/SettingsModal.tsx",
         "web/src/components/Sidebar.tsx",
         "web/src/lib/format.ts"
@@ -348,10 +353,20 @@
         "SessionMeta.interruptedAt",
         "withQueuedPushes",
         "UserUiSettings.autoContinueInterrupted",
-        "sessionRowMeta"
+        "sessionRowMeta",
+        "WORKER_LOST_MS",
+        "WorkerClient.status",
+        "onWorkerLost",
+        "onStatusChange",
+        "UserRegistry.onWorkerLost",
+        "WorkerStatus",
+        "WorkerBanner",
+        "isSelfWorkerSource"
       ],
       "tests": [
-        "server/src/sessions.reconcile.test.ts"
+        "server/src/sessions.reconcile.test.ts",
+        "server/src/workerClient.test.ts",
+        "server/src/autoGuard.worker.test.ts"
       ],
       "businessRules": [
         "auto-continue only resumes sessions flagged by the reconcile that is running; a stale flag keeps its banner",
@@ -359,13 +374,20 @@
         "a resume that throws is contained per session: logged, session put back into the flagged state, later sessions still resume",
         "settings pulled from the storage server are merged field-wise so an older client cannot erase a newer setting by omitting it",
         "interruptedAt clears on prompt, result, markTurnLive and archive/complete, but never on ackSession",
-        "a worker that answered on an incompatible protocol version is alive, so its in-flight statuses are left alone",
-        "the sidebar row shows the same yellow interrupted dot/badge as the banner via sessionRowMeta, reusing the banner's exact guard, and persists through ackSession the same way"
+        "the blind-clear timer fires only when no worker ever answered and it never saw an incompatible version; a mismatch is instead surfaced immediately via WorkerStatus.mismatch, not by this timer or the lost deadline",
+        "the sidebar row shows the same yellow interrupted dot/badge as the banner via sessionRowMeta, reusing the banner's exact guard, and persists through ackSession the same way",
+        "the socket may be down for WORKER_LOST_MS (20s) before it's treated as a real outage, well past an ordinary tsx-watch reconnect (~1-2s)",
+        "the worker-lost path flags sessions but never auto-continues them, even with autoContinueInterrupted on; the next real hello resumes them",
+        "a cold-start protocol mismatch never sets everConnected, so the outage clock never starts; it's surfaced by WorkerStatus.mismatch instead",
+        "exactly one of ConnectionBanner/WorkerBanner/StorageBanner renders at a time; bridge-down outranks worker-down outranks storage-down"
       ],
       "architecturalRules": [
         "adding a field to LiveSessionInfo is not a protocol bump; busy is optional so an old worker stays demote-only instead of losing its socket mid-turn",
         "reconcileWithWorker is the only place that stamps interruptedAt",
-        "a result for a flagged session means the flag was wrong (buffered result lands after reconcile) \u2014 clear it there rather than adding handshake ordering"
+        "a result for a flagged session means the flag was wrong (buffered result lands after reconcile) \u2014 clear it there rather than adding handshake ordering",
+        "onStatusChange (UI health) is kept separate from onWorkerLost (session reconcile) rather than merged",
+        "isSelfWorkerSource's check runs before the guard's blanket tool allowlist short-circuit, not after",
+        "isSelfWorkerSource is self-locating (import.meta.dirname) rather than threading session/bridge identity into assessToolCall"
       ],
       "relatedDecisions": [
         "session-status-badge",
@@ -971,7 +993,8 @@
         "allowlist edits are dedicated addGuardAllow/removeGuardAllow/reviewGuardAllowlist intent messages, not folded into the whole-blob UserUiSettings save",
         "the web store never caches the allowlist in localStorage; it is server-authoritative and arrives on every hello",
         "removing an entry has no confirmation modal since it only narrows the guard and fails safe",
-        "the review modal is mounted at the app root, not inside Settings, so a divergence reaches the user without requiring a gear click"
+        "the review modal is mounted at the app root, not inside Settings, so a divergence reaches the user without requiring a gear click",
+        "assessToolCall's self-worker-source check (isSelfWorkerSource) runs before the blanket tool allowlist short-circuit — the first guard verdict an allowlist entry cannot disarm; keep it ordered first in any refactor"
       ],
       "relatedDecisions": []
     },
@@ -1924,7 +1947,8 @@
         "above the high-water mark a link sheds stream deltas but still receives every critical message",
         "above the hard limit the link is closed outright, which is safe because hello is a complete state snapshot and a reconnect resyncs whatever was missed",
         "thresholds (4MB/32MB) sit far above any loopback burst, so local dev never reaches them",
-        "an absent hello.bridge means a bridge older than the field, which counts as skew"
+        "an absent hello.bridge means a bridge older than the field, which counts as skew",
+        "hello also carries an optional worker: WorkerStatus, and workerStatus broadcasts later transitions; neither bumped APP_PROTOCOL_VERSION since both are additive and an older client tolerates their absence"
       ],
       "architecturalRules": [
         "BrowserLink covers only what the bridge genuinely calls; every addition is one more thing an alternative transport must implement",

@@ -369,6 +369,32 @@ export function isPlanPath(filePath: string, roots: string[]): boolean {
 }
 
 /**
+ * The source files that back the *running* worker process. Self-locating rather
+ * than plumbed in: the guard has no session or bridge identity, and the only
+ * writes that kill this worker are writes to the files this bridge itself runs
+ * from. `import.meta.dirname` is `server/src` under tsx watch, so a second
+ * checkout of Lines is correctly unaffected — its paths don't match.
+ *
+ * A packaged build that doesn't run from `server/src` matches nothing and the
+ * rule silently no-ops. That fails safe (no spurious prompts) but means it
+ * protects dogfooding, not a shipped app.
+ */
+const SELF_WORKER_SOURCES = new Set(
+  ['worker.ts', 'workerProtocol.ts', 'workerMcp.ts'].map((f) => path.join(import.meta.dirname, f)),
+);
+
+/**
+ * True when the target is one of this bridge's own worker sources. Writing one
+ * restarts the worker under tsx watch, which kills the very turn making the
+ * edit — the incident this rule exists for.
+ *
+ * Exported so its test can assert directly, following `isPlanPath`.
+ */
+export function isSelfWorkerSource(filePath: string): boolean {
+  return SELF_WORKER_SOURCES.has(path.resolve(filePath));
+}
+
+/**
  * @param roots Every directory this session may work in — its project's roots,
  *   primary first (see `rootsForCwd`, which never returns empty). An empty list
  *   escalates every file tool, which is the safe direction: the guard fails
@@ -393,6 +419,16 @@ export function assessToolCall(
       }
     }
     return { dangerous: false };
+  }
+
+  // Deliberately above the allowlist short-circuit: a blanket `{ tool: 'Edit' }`
+  // entry must not disarm the one write that kills the turn doing it. Writes
+  // only — reading these files is harmless.
+  if (PLAN_WRITE_TOOLS.has(toolName) && isSelfWorkerSource(String(input.file_path ?? input.notebook_path ?? ''))) {
+    return {
+      dangerous: true,
+      reason: "Edits this bridge's worker source — the write restarts the worker and kills this turn",
+    };
   }
 
   if (allowlist.some((e) => !e.prefix && e.tool === toolName)) return { dangerous: false };

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { after, test } from 'node:test';
+import type { WorkerStatus } from '@lines/shared';
 import { WebSocketServer, type WebSocket } from 'ws';
 
 // Isolate this run's runtime-discovery directory from any real worker on the
@@ -37,8 +38,9 @@ async function until(cond: () => boolean, label: string, timeoutMs = 5000) {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** A fake worker: binds an ephemeral port, publishes it, and says hello to
- *  anyone presenting the right token — enough for WorkerClient to connect. */
-function startFakeWorker(): Promise<{ close: () => void }> {
+ *  anyone presenting the right token — enough for WorkerClient to connect.
+ *  `version` overrides the hello's protocol version, to play a stale worker. */
+function startFakeWorker({ version }: { version?: number } = {}): Promise<{ close: () => void }> {
   return new Promise((resolve) => {
     const token = randomUUID();
     const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -70,12 +72,12 @@ function startFakeWorker(): Promise<{ close: () => void }> {
       }
       clients.add(ws);
       ws.on('close', () => clients.delete(ws));
-      ws.send(JSON.stringify({ type: 'hello', version: PROTOCOL_VERSION, live: [] }));
+      ws.send(JSON.stringify({ type: 'hello', version: version ?? PROTOCOL_VERSION, live: [] }));
     });
   });
 }
 
-function startClient(onWorkerLost: () => void) {
+function startClient(onWorkerLost: () => void, onStatusChange: (s: WorkerStatus) => void = () => {}) {
   return new WorkerClient(
     {
       onHello: () => {},
@@ -84,6 +86,7 @@ function startClient(onWorkerLost: () => void) {
       onRpc: () => {},
       onRpcCancel: () => {},
       onWorkerLost,
+      onStatusChange,
     },
     { retryMs: RETRY_MS, lostMs: LOST_MS },
   );
@@ -127,4 +130,105 @@ test('onWorkerLost does not fire when the worker reconnects inside the deadline'
 
   await sleep(LOST_MS * 2);
   assert.equal(lostCount, 0, 'reconnected long before the deadline');
+});
+
+test('onStatusChange publishes one disconnected status when the worker is lost', async (t) => {
+  const worker = await startFakeWorker();
+  const statuses: WorkerStatus[] = [];
+  const client = startClient(
+    () => {},
+    (s) => statuses.push(s),
+  );
+  t.after(() => client.dispose());
+
+  await until(() => client.everConnected, 'fake worker hello');
+  // A healthy start is the assumed state, so nothing is published for it.
+  assert.equal(statuses.length, 0);
+
+  const downAt = Date.now();
+  worker.close();
+  await until(() => statuses.length === 1, 'disconnected status');
+
+  const [status] = statuses;
+  assert.equal(status.connected, false);
+  assert.equal(status.mismatch, undefined, 'a plain outage carries no version pair');
+  assert.ok(status.since !== undefined && status.since >= downAt, '`since` stamps the outage start');
+  assert.equal(client.status.connected, false, 'the getter agrees with what was published');
+
+  // The retry loop keeps ticking; the status must not be republished per tick.
+  await sleep(LOST_MS);
+  assert.equal(statuses.length, 1, 'publishes on transition, not on every retry tick');
+});
+
+test('onStatusChange publishes nothing when the worker reconnects inside the deadline', async (t) => {
+  const worker = await startFakeWorker();
+  const statuses: WorkerStatus[] = [];
+  const client = startClient(
+    () => {},
+    (s) => statuses.push(s),
+  );
+  t.after(() => client.dispose());
+
+  await until(() => client.everConnected, 'fake worker hello');
+
+  worker.close();
+  const restarted = await startFakeWorker();
+  t.after(() => restarted.close());
+
+  await sleep(LOST_MS * 2);
+  assert.equal(statuses.length, 0, 'a tsx-watch blip is not a status transition');
+});
+
+test('onStatusChange publishes connected exactly once after a lost worker returns', async (t) => {
+  const worker = await startFakeWorker();
+  const statuses: WorkerStatus[] = [];
+  const client = startClient(
+    () => {},
+    (s) => statuses.push(s),
+  );
+  t.after(() => client.dispose());
+
+  await until(() => client.everConnected, 'fake worker hello');
+
+  worker.close();
+  await until(() => statuses.length === 1, 'disconnected status');
+
+  const restarted = await startFakeWorker();
+  t.after(() => restarted.close());
+
+  await until(() => statuses.length === 2, 'reconnected status');
+  assert.equal(statuses[1].connected, true);
+  assert.equal(statuses[1].since, undefined, 'a healthy link has no outage start');
+
+  await sleep(LOST_MS);
+  assert.equal(statuses.length, 2, 'the re-arm publishes once');
+});
+
+// The cold-start hang this whole change exists for: a worker on a protocol the
+// bridge can't speak never sets `everConnected`, so the outage clock never
+// starts and `onWorkerLost` can never fire. Without `mismatch` the UI shows a
+// permanent silent spinner.
+test('a never-compatible worker publishes a mismatch without ever connecting', async (t) => {
+  const stale = await startFakeWorker({ version: PROTOCOL_VERSION + 1 });
+  t.after(() => stale.close());
+  const statuses: WorkerStatus[] = [];
+  let lostCount = 0;
+  const client = startClient(
+    () => lostCount++,
+    (s) => statuses.push(s),
+  );
+  t.after(() => client.dispose());
+
+  await until(() => statuses.length === 1, 'mismatch status');
+
+  const [status] = statuses;
+  assert.equal(status.connected, false);
+  assert.deepEqual(status.mismatch, { worker: PROTOCOL_VERSION + 1, bridge: PROTOCOL_VERSION });
+  assert.ok(status.since !== undefined, '`since` stamps when the mismatch was first seen');
+  assert.equal(client.everConnected, false, 'no compatible handshake ever happened');
+
+  // The client re-dials the same stale worker every RETRY_MS.
+  await sleep(LOST_MS);
+  assert.equal(statuses.length, 1, 'one mismatch message, not one per retry');
+  assert.equal(lostCount, 0, 'the outage clock never started, so onWorkerLost cannot fire');
 });

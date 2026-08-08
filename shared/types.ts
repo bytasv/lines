@@ -1038,6 +1038,20 @@ export interface StorageStatus {
   reason?: string;
 }
 
+/** Bridge->worker socket health. App-wide: one worker per bridge, not per session. */
+export interface WorkerStatus {
+  /** false once the socket has been down past WORKER_LOST_MS, or on a protocol mismatch. */
+  connected: boolean;
+  /** Epoch ms the socket went down. Absent while connected. */
+  since?: number;
+  /**
+   * Present instead of a plain outage when a worker answered on a version this
+   * bridge can't speak. The remedy differs (restart the *other* process), so the
+   * copy differs.
+   */
+  mismatch?: { worker: number; bridge: number };
+}
+
 // ---------------------------------------------------------------------------
 // Server -> Client
 // ---------------------------------------------------------------------------
@@ -1240,7 +1254,7 @@ export function diffAllowlists(
 export type ServerMessage =
   /** `bridge` is optional: once the web app is hosted it will meet bridges older
    *  than itself, and an absent field is exactly that case. */
-  | { type: 'hello'; bridge?: BridgeInfo; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; recipes: RecipeDef[]; sharedRecipes: RecipeDef[]; recipeStats: Record<string, number>; models: ModelOption[]; recentDirs: string[]; projects: Project[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; storage: StorageStatus; settings?: UserUiSettings | null; guardAllowlist?: GuardAllowEntry[]; guardAllowlistReview?: GuardAllowlistReview | null }
+  | { type: 'hello'; bridge?: BridgeInfo; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; recipes: RecipeDef[]; sharedRecipes: RecipeDef[]; recipeStats: Record<string, number>; models: ModelOption[]; recentDirs: string[]; projects: Project[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; storage: StorageStatus; worker?: WorkerStatus; settings?: UserUiSettings | null; guardAllowlist?: GuardAllowEntry[]; guardAllowlistReview?: GuardAllowlistReview | null }
   | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
   /** The whole auto-mode guard allowlist after any change (card, UI edit, accepted review). */
@@ -1250,6 +1264,8 @@ export type ServerMessage =
   | { type: 'usage'; usage: UsageSnapshot | null }
   | { type: 'authStatus'; auth: AuthStatus }
   | { type: 'storageStatus'; storage: StorageStatus }
+  /** Bridge->worker link health. No sessionId: one worker backs every session. */
+  | { type: 'workerStatus'; worker: WorkerStatus }
   | { type: 'authLoginStarted'; authorizeUrl: string }
   | { type: 'authError'; message: string }
   | { type: 'projects'; projects: Project[] }

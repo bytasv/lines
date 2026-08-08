@@ -5,12 +5,16 @@ import { useStore } from '../store';
  * Amber pill shown when the bridge can't reach the storage server / Supabase.
  * Distinct from the red ConnectionBanner: the bridge link is fine and local
  * persistence still works — only cross-machine cloud sync is paused. Hidden
- * while the browser<->bridge link itself is down (that red banner wins).
+ * while the browser<->bridge link itself is down (that red banner wins), or
+ * while the agent worker is down (WorkerBanner wins — a dead agent outranks
+ * paused sync, and all three pills share one fixed position).
  */
 export function StorageBanner({ headerHeight }: { headerHeight: number }) {
   const status = useStore((s) => s.storageStatus);
+  const worker = useStore((s) => s.workerStatus);
   const connection = useStore((s) => s.connectionStatus);
   if (connection !== 'connected' || status?.available !== false) return null;
+  if (worker?.connected === false) return null;
 
   return (
     <Box

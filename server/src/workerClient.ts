@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { WorkerStatus } from '@lines/shared';
 import { WebSocket } from 'ws';
 import {
   PROTOCOL_VERSION,
@@ -59,6 +60,15 @@ export interface WorkerClientCallbacks {
    * re-armed by the next successful `hello`.
    */
   onWorkerLost(): void;
+  /**
+   * Bridge->worker link health changed, for the UI. Fired on every transition
+   * only — a retry loop against a down or stale worker publishes once.
+   *
+   * Deliberately separate from `onWorkerLost`: that one reconciles sessions,
+   * this one publishes health. A protocol mismatch fires this without ever
+   * firing `onWorkerLost` (the outage clock needs a prior connection).
+   */
+  onStatusChange(status: WorkerStatus): void;
 }
 
 /**
@@ -86,6 +96,12 @@ export class WorkerClient {
   private disconnectedAt: number | null = null;
   /** Guards `onWorkerLost` to once per outage; cleared alongside `disconnectedAt`. */
   private lostFired = false;
+  /** Set when a worker answered hello on a version we can't speak; cleared by a compatible hello. */
+  private mismatch: { worker: number; bridge: number } | null = null;
+  /** When that mismatch was first seen — `since` for a link that never came up at all. */
+  private mismatchAt: number | null = null;
+  /** Last published health, so `onStatusChange` only fires on a real transition. */
+  private published: WorkerStatus = { connected: true };
   private retryTimer: NodeJS.Timeout | null = null;
   private stopWatching: (() => void) | null = null;
   private disposed = false;
@@ -133,12 +149,40 @@ export class WorkerClient {
     }, this.timing.retryMs ?? 1000);
   }
 
+  /**
+   * Current link health, for the `hello` payload. Optimistic while booting: a
+   * worker that hasn't answered yet is not reported as down until either the
+   * outage deadline passes or it answers on the wrong protocol version.
+   */
+  get status(): WorkerStatus {
+    if (this.mismatch) {
+      return { connected: false, since: this.mismatchAt ?? undefined, mismatch: this.mismatch };
+    }
+    if (this.lostFired) return { connected: false, since: this.disconnectedAt ?? undefined };
+    return { connected: true };
+  }
+
+  /** Fires `onStatusChange` only when the derived status actually moved. */
+  private publishStatus() {
+    const next = this.status;
+    const prev = this.published;
+    const same =
+      prev.connected === next.connected &&
+      prev.since === next.since &&
+      prev.mismatch?.worker === next.mismatch?.worker &&
+      prev.mismatch?.bridge === next.mismatch?.bridge;
+    if (same) return;
+    this.published = next;
+    this.callbacks.onStatusChange(next);
+  }
+
   /** Checked on every retry tick rather than a second timer — see `onWorkerLost`. */
   private checkWorkerLost() {
     if (this.lostFired || this.disconnectedAt === null) return;
     if (Date.now() - this.disconnectedAt >= (this.timing.lostMs ?? WORKER_LOST_MS)) {
       this.lostFired = true;
       this.callbacks.onWorkerLost();
+      this.publishStatus();
     }
   }
 
@@ -194,12 +238,19 @@ export class WorkerClient {
           // A stale worker (started before a protocol change, outside tsx
           // watch) — keep retrying and tell the user what to do, once.
           this.sawIncompatibleWorker = true;
+          // Not gated on `everConnected`: a cold start against a stale worker
+          // never sets the outage clock, so this is the only signal the UI gets.
+          this.mismatch = { worker: msg.version, bridge: PROTOCOL_VERSION };
+          this.mismatchAt ??= Date.now();
           if (this.warnedVersion !== msg.version) {
             this.warnedVersion = msg.version;
             console.error(
-              `[worker] protocol mismatch: worker v${msg.version}, bridge v${PROTOCOL_VERSION} — restart the worker process`,
+              `[worker] protocol mismatch: worker v${msg.version}, bridge v${PROTOCOL_VERSION} — restart whichever process is stale (worker: npm run dev:worker -w server, bridge: npm run dev -w server)`,
             );
           }
+          // The retry loop re-dials this same worker every tick; publishStatus
+          // dedupes so the browsers see one message, not one per second.
+          this.publishStatus();
           ws.close();
           return;
         }
@@ -208,6 +259,9 @@ export class WorkerClient {
         this.sawIncompatibleWorker = false;
         this.disconnectedAt = null;
         this.lostFired = false;
+        this.mismatch = null;
+        this.mismatchAt = null;
+        this.publishStatus();
         // Reconcile first so command handlers see fresh session statuses, and
         // count queued pushes as live — otherwise reconcile idles a session
         // milliseconds before its turn actually starts.

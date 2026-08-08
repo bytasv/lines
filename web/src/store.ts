@@ -19,6 +19,7 @@ import type {
   TranscriptEvent,
   UsageSnapshot,
   UserUiSettings,
+  WorkerStatus,
   WorkflowDef,
 } from '@lines/shared';
 import { APP_PROTOCOL_VERSION, DEFAULT_MODEL, projectRoots, resolveModelId } from '@lines/shared';
@@ -426,6 +427,9 @@ interface UiState {
   auth: AuthStatus | null;
   /** Bridge->storage/Supabase link health; null until first `hello`. `available: false` shows the sync-degraded banner. */
   storageStatus: StorageStatus | null;
+  /** Bridge->worker link health; null until first `hello`, and on a bridge too
+   *  old to send it. `connected: false` shows the worker banner. */
+  workerStatus: WorkerStatus | null;
   /** Which bridge we're talking to; null until the first hello, and on a bridge
    *  too old to send it. */
   bridge: BridgeInfo | null;
@@ -589,6 +593,7 @@ export const useStore = create<UiState>((set, get) => {
   usage: null,
   auth: null,
   storageStatus: null,
+  workerStatus: null,
   bridge: null,
   protocolSkew: false,
   authorizeUrl: null,
@@ -831,6 +836,8 @@ export const useStore = create<UiState>((set, get) => {
           usage: msg.usage ?? (msg.auth.loggedIn ? state.usage : null),
           auth: msg.auth,
           storageStatus: msg.storage ?? null,
+          // Absent on a bridge older than this field — degrades to "no strip".
+          workerStatus: msg.worker ?? null,
           bridge: msg.bridge ?? null,
           // Absent `bridge` means a bridge older than this field — treat as skew.
           protocolSkew: msg.bridge?.appProtocol !== APP_PROTOCOL_VERSION,
@@ -1034,6 +1041,9 @@ export const useStore = create<UiState>((set, get) => {
         break;
       case 'storageStatus':
         set({ storageStatus: msg.storage });
+        break;
+      case 'workerStatus':
+        set({ workerStatus: msg.worker });
         break;
       case 'authLoginStarted':
         set({ authorizeUrl: msg.authorizeUrl, authError: null });

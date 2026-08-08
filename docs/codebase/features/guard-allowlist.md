@@ -131,6 +131,13 @@ storage row's last-write-wins and gets pushed back over the remote one).
 - The review modal is mounted at the app root, not inside the Settings modal,
   because the requirement is that the user is notified of a divergence, not that
   they happen to open Settings.
+- `assessToolCall`'s self-worker-source check (`isSelfWorkerSource`, see
+  [interrupted-turn-recovery](interrupted-turn-recovery.md)) runs *before* the
+  blanket `{ tool: 'Edit' }`/`{ tool: 'Write' }` allowlist short-circuit — the
+  first guard verdict an allowlist entry cannot disarm. Keep it ordered first if
+  this function is refactored; moving it below the short-circuit would let a
+  standing allowlist entry silently re-enable edits that kill the running
+  worker.
 
 ## Related decisions
 

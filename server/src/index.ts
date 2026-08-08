@@ -134,6 +134,11 @@ const worker = new WorkerClient({
     console.warn(`[worker] lost — no reconnect within ${WORKER_LOST_MS}ms, flagging in-flight sessions`);
     registry.onWorkerLost();
   },
+  // Link health carries no session, so it fans out to every context rather than
+  // going through the registry's session ownership.
+  onStatusChange: (worker) => {
+    for (const ctx of registry.all()) ctx.broadcast({ type: 'workerStatus', worker });
+  },
 });
 // Legacy-state adoption is a manual step: server/scripts/migrate-user.ts.
 const registry = new UserRegistry(
@@ -289,6 +294,9 @@ async function handleConnection(
     usage: ctx.usage.snapshot,
     auth: ctx.auth.getStatus(),
     storage: ctx.sync.status,
+    // So a browser connecting mid-outage learns about it without waiting for
+    // the next transition (which may never come).
+    worker: worker.status,
     settings: ctx.store.loadSettings(),
     guardAllowlist: ctx.guard.list(),
     // Read from persisted state, so a pending review is on screen before the

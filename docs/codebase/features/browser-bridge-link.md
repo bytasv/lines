@@ -76,6 +76,13 @@ will supply non-socket links is not built.
   local development never reaches them.
 - An absent `hello.bridge` means a bridge older than the field, which counts as
   skew.
+- `hello` also carries an optional `worker: WorkerStatus` (bridge<->worker link
+  health — see [interrupted-turn-recovery](interrupted-turn-recovery.md)), and a
+  `workerStatus` message broadcasts later transitions. Neither bumped
+  `APP_PROTOCOL_VERSION`: both are additive and `applyServerMessage` has no
+  `default` case, so an older client simply ignores `workerStatus` and an absent
+  `hello.worker` degrades to "no banner" — the same tolerance `hello.bridge`
+  already relies on.
 
 ## Architectural rules
 

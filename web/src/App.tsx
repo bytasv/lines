@@ -9,6 +9,7 @@ import { ProjectTabs } from './components/ProjectTabs';
 import { ConnectionBanner } from './components/ConnectionBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { StorageBanner } from './components/StorageBanner';
+import { WorkerBanner } from './components/WorkerBanner';
 import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/workflow/WorkflowEditor';
 import type { WorkflowEditorView } from './components/workflow/WorkflowEditor';
@@ -139,6 +140,7 @@ function Shell() {
       </AppShell.Header>
       <ConnectionBanner headerHeight={HEADER_HEIGHT} />
       <StorageBanner headerHeight={HEADER_HEIGHT} />
+      <WorkerBanner headerHeight={HEADER_HEIGHT} />
       <AppShell.Navbar>
         <Sidebar
           onEditWorkflows={() => openWorkflowEditor('workflows')}
