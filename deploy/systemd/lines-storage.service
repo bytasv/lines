@@ -9,6 +9,10 @@
 Description=Lines storage server (Prisma/Supabase, localhost only)
 After=network-online.target
 Wants=network-online.target
+; Rate limiting lives in [Unit], not [Service] — systemd ignores
+; StartLimitIntervalSec there with an "Unknown key name" warning.
+StartLimitIntervalSec=300
+StartLimitBurst=20
 
 [Service]
 Type=simple
@@ -24,8 +28,6 @@ ExecStart=/home/lines/app/node_modules/.bin/tsx /home/lines/app/storage/src/inde
 ; while sync was dead. Always + a burst limit surfaces it as a restart loop.
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=20
 KillSignal=SIGTERM
 TimeoutStopSec=15
 MemoryHigh=768M

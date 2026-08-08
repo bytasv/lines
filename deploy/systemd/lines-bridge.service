@@ -1,7 +1,16 @@
 ; Lines bridge — install to /etc/systemd/system/lines-bridge.service
 ;
-; No app env here: LINES_BRIDGE_PORT, CLERK_SECRET_KEY and STORAGE_URL all come
-; from /home/lines/app/.env, which server/src/index.ts dotenv-loads itself.
+; LINES_BRIDGE_PORT, CLERK_SECRET_KEY and STORAGE_URL come from
+; /home/lines/app/.env, which server/src/index.ts dotenv-loads itself.
+;
+; LINES_INSTANCE does NOT, and must be set here. ESM hoists imports, so
+; workerProtocol.ts (which derives RUNTIME_DIR from LINES_INSTANCE at module
+; scope) is evaluated before index.ts's dotenv.config() body statement runs.
+; Set it only in .env and the bridge publishes to ~/.lines-app/run/default/
+; while the worker publishes to run/prod/: the bridge never finds the worker and
+; logs "[worker] not reachable after 15s" while otherwise looking healthy.
+; LINES_BRIDGE_PORT survives the same hoisting because index.ts reads it in the
+; module body, after dotenv has run.
 
 [Unit]
 Description=Lines bridge (WebSocket server for the web client)
@@ -19,6 +28,8 @@ WorkingDirectory=/home/lines/app
 Environment=NODE_ENV=production
 Environment=HOME=/home/lines
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+; Must match lines-worker.service and LINES_INSTANCE in .env — see above.
+Environment=LINES_INSTANCE=prod
 ExecStart=/home/lines/app/node_modules/.bin/tsx /home/lines/app/server/src/index.ts
 Restart=always
 RestartSec=2
