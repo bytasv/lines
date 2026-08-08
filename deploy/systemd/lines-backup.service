@@ -1,0 +1,22 @@
+; Lines backup — install to /etc/systemd/system/lines-backup.service
+;
+; Oneshot, driven by lines-backup.timer. The script stops lines-bridge for the
+; duration of the tar and restarts it afterwards, so it needs the same narrow
+; sudo rule as deploy.sh (/etc/sudoers.d/lines-deploy).
+
+[Unit]
+Description=Lines nightly backup of ~/.lines-app to R2
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=lines
+Group=lines
+WorkingDirectory=/home/lines/app
+Environment=HOME=/home/lines
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/lines/app/deploy/backup-lines.sh
+TimeoutStartSec=3600
+SyslogIdentifier=lines-backup
+NoNewPrivileges=yes

@@ -1,0 +1,39 @@
+; Lines bridge — install to /etc/systemd/system/lines-bridge.service
+;
+; No app env here: LINES_BRIDGE_PORT, CLERK_SECRET_KEY and STORAGE_URL all come
+; from /home/lines/app/.env, which server/src/index.ts dotenv-loads itself.
+
+[Unit]
+Description=Lines bridge (WebSocket server for the web client)
+After=network-online.target lines-worker.service
+Wants=network-online.target lines-worker.service
+; Not Requires=/BindsTo=: WorkerClient mkdir -p's the run dir, fs.watch()es it
+; and retries every 1000 ms forever, so ordering here only avoids one
+; "worker not reachable" log line at boot.
+
+[Service]
+Type=simple
+User=lines
+Group=lines
+WorkingDirectory=/home/lines/app
+Environment=NODE_ENV=production
+Environment=HOME=/home/lines
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/lines/app/node_modules/.bin/tsx /home/lines/app/server/src/index.ts
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=30
+MemoryHigh=1500M
+MemoryMax=2G
+TasksMax=512
+LimitNOFILE=65535
+SyslogIdentifier=lines-bridge
+NoNewPrivileges=yes
+PrivateTmp=yes
+; No ProtectHome: the bridge serves file reads/writes and transcripts out of
+; /home/lines (workspaces and ~/.lines-app).
+
+[Install]
+WantedBy=multi-user.target

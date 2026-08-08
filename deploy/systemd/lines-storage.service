@@ -1,0 +1,45 @@
+; Lines storage server — install to /etc/systemd/system/lines-storage.service
+;
+; Run `npm run migrate -w storage` BEFORE first start. Prisma $connect()
+; succeeds against an empty database, so a storage server started ahead of its
+; migrations looks healthy while every query fails P2021 — and sync.ts swallows
+; storage errors as best-effort, so the only symptom is the amber StorageBanner.
+
+[Unit]
+Description=Lines storage server (Prisma/Supabase, localhost only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lines
+Group=lines
+WorkingDirectory=/home/lines/app
+Environment=NODE_ENV=production
+Environment=HOME=/home/lines
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/lines/app/node_modules/.bin/tsx /home/lines/app/storage/src/index.ts
+; Restart=always, deliberately not on-failure: storage exit(0)s on a missing
+; DATABASE_URL or CLERK_SECRET_KEY, which on-failure would report as "fine"
+; while sync was dead. Always + a burst limit surfaces it as a restart loop.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=20
+KillSignal=SIGTERM
+TimeoutStopSec=15
+MemoryHigh=768M
+MemoryMax=1G
+TasksMax=256
+LimitNOFILE=65535
+SyslogIdentifier=lines-storage
+NoNewPrivileges=yes
+PrivateTmp=yes
+; Storage touches no workspaces and spawns no children, so unlike the worker and
+; bridge it can take the full sandbox.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/lines/app
+
+[Install]
+WantedBy=multi-user.target
