@@ -1,0 +1,134 @@
+# Server-side Lines: relay + storage + the static bundle.
+#
+# The bridge and worker are NOT here. They run on the user's own machine (the
+# desktop app supervises them) and dial out to the relay's /agent endpoint, so
+# no agent turn ever executes on this host.
+#
+# Routing and TLS come from the pre-existing Traefik stack in /docker/traefik.
+# Traefik runs with --providers.docker.exposedbydefault=false, so a service is
+# reachable only if it carries traefik.enable=true — which is why `storage` has
+# no labels at all and is reachable solely from `relay` over the internal
+# network.
+#
+#   cp env.example lines.env && chmod 600 lines.env   # then fill it in
+#   docker compose --env-file lines.env build
+#   docker compose --env-file lines.env run --rm migrate
+#   docker compose --env-file lines.env up -d
+
+name: lines
+
+services:
+  storage:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: storage
+    image: lines-storage:latest
+    restart: unless-stopped
+    env_file: lines.env
+    environment:
+      PORT: 8790
+    networks: [lines]
+    # No `ports:` and no Traefik labels: the browser never calls storage, and
+    # `relay` reaches it at http://storage:8790 inside this network.
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8790/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  relay:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: relay
+    image: lines-relay:latest
+    restart: unless-stopped
+    env_file: lines.env
+    environment:
+      RELAY_PORT: 8791
+      # Device verification is delegated to storage so the relay holds no
+      # database credentials — it is the most exposed process in the system.
+      STORAGE_URL: http://storage:8790
+    networks: [lines]
+    depends_on:
+      storage:
+        condition: service_healthy
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8791/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: lines
+      # Longer rules already outrank shorter ones in Traefik, but pin it: if
+      # this ever loses to the catch-all web router, every WebSocket 404s
+      # against the static bundle instead.
+      traefik.http.routers.lines-relay.rule: "Host(`${LINES_DOMAIN}`) && (PathPrefix(`/agent`) || PathPrefix(`/client`))"
+      traefik.http.routers.lines-relay.priority: "100"
+      traefik.http.routers.lines-relay.entrypoints: websecure
+      traefik.http.routers.lines-relay.tls: "true"
+      traefik.http.routers.lines-relay.tls.certresolver: letsencrypt
+      traefik.http.services.lines-relay.loadbalancer.server.port: "8791"
+      # Deliberately NO StripPrefix middleware: relay/src/index.ts matches
+      # `url.pathname === '/client'` exactly, so a stripped or rewritten path
+      # closes the socket with 1008 'unknown endpoint'.
+      # WebSocket upgrades need no configuration — Traefik passes them through.
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: web
+      args:
+        # Baked into the bundle. Changing either needs `build` + `up -d`, not a
+        # restart. The browser talks to the relay's /client endpoint here.
+        VITE_BRIDGE_WS_URL: ${VITE_BRIDGE_WS_URL}
+        VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY}
+    image: lines-web:latest
+    restart: unless-stopped
+    networks: [lines]
+    security_opt: [no-new-privileges:true]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: lines
+      traefik.http.routers.lines-web.rule: "Host(`${LINES_DOMAIN}`)"
+      traefik.http.routers.lines-web.priority: "1"
+      traefik.http.routers.lines-web.entrypoints: websecure
+      traefik.http.routers.lines-web.tls: "true"
+      traefik.http.routers.lines-web.tls.certresolver: letsencrypt
+      traefik.http.services.lines-web.loadbalancer.server.port: "80"
+
+  # One-shot, not part of `up`. `prisma migrate deploy` is forward-only and uses
+  # DIRECT_URL (:5432), not the pooled :6543 string. Run it BEFORE starting
+  # storage against a new database: $connect() succeeds on an empty schema, so
+  # the service looks healthy while every query fails P2021 — and sync treats
+  # storage errors as best-effort, so the only symptom is an amber banner.
+  migrate:
+    profiles: [tools]
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: storage
+    image: lines-storage:latest
+    env_file: lines.env
+    networks: [lines]
+    working_dir: /app/storage
+    command: ["../node_modules/.bin/prisma", "migrate", "deploy"]
+
+networks:
+  lines:
+    name: lines

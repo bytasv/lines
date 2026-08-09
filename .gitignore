@@ -13,6 +13,8 @@ npm-debug.log*
 .env
 .env.*
 !.env.example
+# Compose secrets: the `.env.*` rule above does not match this name.
+deploy/docker/lines.env
 
 # Editor / OS
 .DS_Store
