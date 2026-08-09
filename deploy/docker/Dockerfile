@@ -53,6 +53,11 @@ CMD ["node_modules/.bin/tsx", "relay/src/index.ts"]
 # ---------- storage ----------
 FROM deps AS storage
 WORKDIR /app
+# node:22-slim ships no libssl, and Prisma's query engine needs it: without this
+# the client warns "Please manually install OpenSSL" at boot and falls back to a
+# guessed engine build.
+RUN apt-get update && apt-get install -y --no-install-recommends openssl \
+ && rm -rf /var/lib/apt/lists/*
 COPY shared shared
 COPY storage storage
 # Explicit because --ignore-scripts skipped the postinstall hook above. Without
