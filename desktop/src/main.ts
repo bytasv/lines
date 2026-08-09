@@ -9,7 +9,6 @@
  * live Claude query, so a bridge crash or restart must not take a turn with it.
  */
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -33,58 +32,12 @@ const STORAGE_URL = process.env.LINES_STORAGE_URL;
 const WEB_URL = process.env.LINES_WEB_URL;
 const RELAY_MODE = Boolean(RELAY_URL && STORAGE_URL);
 
-/** Identity of this machine, as the relay knows it. Mode 0600: the secret is a credential. */
-const DEVICE_FILE = path.join(APP_ROOT, 'device.json');
-
-interface DeviceIdentity {
-  id: string;
-  secret: string;
-}
-
 /**
- * Load or mint this machine's identity. The secret never leaves the machine —
- * only its sha256 is registered — so a compromise of the server cannot yield
- * anything that impersonates this device.
+ * Device identity lives in the server workspace, shared with
+ * `npm run pair -w server` so the two cannot drift on the credential format.
+ * esbuild bundles it into main.cjs; nothing else from the bridge comes with it.
  */
-function deviceIdentity(): DeviceIdentity {
-  try {
-    const saved = JSON.parse(fs.readFileSync(DEVICE_FILE, 'utf8')) as Partial<DeviceIdentity>;
-    if (saved.id && saved.secret) return { id: saved.id, secret: saved.secret };
-  } catch {
-    // Absent or unreadable: mint a fresh one below. A corrupt file is treated as
-    // a new machine rather than a fatal error — the user re-pairs and moves on.
-  }
-  const identity: DeviceIdentity = { id: randomUUID(), secret: randomBytes(32).toString('hex') };
-  fs.mkdirSync(APP_ROOT, { recursive: true });
-  fs.writeFileSync(DEVICE_FILE, JSON.stringify(identity, null, 2), { mode: 0o600 });
-  return identity;
-}
-
-/**
- * Announce this machine to storage and return the code the user types into the
- * web app. Null means it is already claimed and needs no pairing — the common
- * case on every launch after the first.
- */
-async function registerDevice(identity: DeviceIdentity): Promise<string | null> {
-  const res = await fetch(`${STORAGE_URL}/v1/devices/register`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      id: identity.id,
-      secretHash: createHash('sha256').update(identity.secret).digest('hex'),
-      name: os.hostname(),
-      platform: process.platform,
-    }),
-  });
-  // Registration refuses to re-issue a code for a machine someone already
-  // claimed, which is exactly how we recognise "already paired".
-  if (res.status === 409) return null;
-  if (!res.ok) {
-    throw new Error(`device registration failed: ${res.status} ${await res.text()}`);
-  }
-  const { pairingCode } = (await res.json()) as { pairingCode: string };
-  return pairingCode;
-}
+import { deviceIdentity, registerDevice, type DeviceIdentity } from '../../server/src/device.ts';
 
 /**
  * A GUI-launched macOS app inherits a minimal PATH — no Homebrew, often no
@@ -328,7 +281,7 @@ app.whenReady().then(async () => {
   if (RELAY_MODE) {
     device = deviceIdentity();
     try {
-      pairingCode = await registerDevice(device);
+      pairingCode = await registerDevice(STORAGE_URL!, device);
       console.log(
         pairingCode
           ? `[device] ${device.id} awaiting pairing, code ${pairingCode}`

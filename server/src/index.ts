@@ -13,6 +13,7 @@ import { APP_PROTOCOL_VERSION, DEFAULT_MODELS, normalizeRootPath, projectRoots }
 import { verifyToken } from '@clerk/backend';
 import { WORKER_LOST_MS, WorkerClient, type WorkerRpc } from './workerClient.ts';
 import { RelayClient } from './relayClient.ts';
+import { deviceIdentity } from './device.ts';
 import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
 import type { BrowserLink, UserContext } from './userContext.ts';
@@ -193,8 +194,15 @@ const updates = new UpdateManager(
  */
 const RELAY_URL = process.env.RELAY_URL;
 if (RELAY_URL) {
-  const deviceId = process.env.LINES_DEVICE_ID ?? 'dev-device';
-  const secret = process.env.LINES_DEVICE_SECRET ?? 'dev-secret';
+  // Env first: the desktop app and the dev relay (RELAY_AUTH_DISABLED, where any
+  // secret is accepted) both supply one explicitly. Otherwise fall back to this
+  // machine's own identity file, minting it if absent — which is what lets the
+  // bridge be started straight from Tilt or a terminal without a supervisor
+  // handing it credentials, and keeps the secret out of any process spec.
+  const stored =
+    process.env.LINES_DEVICE_ID && process.env.LINES_DEVICE_SECRET ? null : deviceIdentity();
+  const deviceId = process.env.LINES_DEVICE_ID ?? stored!.id;
+  const secret = process.env.LINES_DEVICE_SECRET ?? stored!.secret;
   new RelayClient(RELAY_URL, deviceId, secret, {
     onChannel: (link, identity) => {
       void handleConnection(link, {}, identity);
