@@ -24,11 +24,18 @@ COPY desktop/package.json desktop/
 # --ignore-scripts: desktop's electron postinstall downloads ~100 MB we never
 #   use. It also skips storage's `prisma generate`, which the storage target
 #   therefore runs explicitly — the same trap as on a bare VM.
-# --omit=optional: drops @anthropic-ai/claude-agent-sdk-linux-x64 (262 MB). The
-#   agent runs on the user's machine; nothing in these images spawns a query.
+# --workspace: limits the tree to what this server actually runs. It excludes
+#   `server`, and with it the 262 MB linux `claude` binary — the agent runs on
+#   the user's machine, and nothing in these images spawns a query.
 # Dev dependencies are kept on purpose: tsx runs both services and vite builds
 # the bundle.
-RUN npm ci --ignore-scripts --omit=optional
+#
+# NOT --omit=optional. That would also drop @rollup/rollup-linux-x64-gnu, which
+# is an optionalDependency of rollup by the same platform-binary mechanism, and
+# vite build then dies with "Cannot find module @rollup/rollup-linux-x64-gnu".
+# Excluding the server workspace is what keeps the claude binary out.
+RUN npm ci --ignore-scripts --include-workspace-root \
+      --workspace shared --workspace relay --workspace storage --workspace web
 
 # ---------- relay ----------
 # Pipes frames between a browser (/client) and the user's bridge (/agent).
