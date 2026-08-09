@@ -49,14 +49,21 @@ config.define_string_list(
 )
 cfg = config.parse()
 HOSTED = cfg.get('hosted', False)
+# The flags as the user actually passed them. Hosted mode overrides two of them,
+# and the toggle buttons rebuild the whole arg list — so without remembering the
+# raw values, switching to hosted and back would silently drop (or invent) a
+# --no-storage / --with-relay the user never chose.
+RAW_NO_STORAGE = cfg.get('no-storage', False)
+RAW_WITH_RELAY = cfg.get('with-relay', False)
+
 # Hosted mode owns the whole topology: storage and the web app are the deployed
 # ones, and a local relay would be pointless when the bridge dials a remote.
-WITH_STORAGE = not cfg.get('no-storage', False) and not HOSTED
+WITH_STORAGE = not RAW_NO_STORAGE and not HOSTED
 WITH_STUDIO = cfg.get('with-studio', False)
-WITH_RELAY = cfg.get('with-relay', False) and not HOSTED
+WITH_RELAY = RAW_WITH_RELAY and not HOSTED
 WITH_BUTTONS = not cfg.get('no-ui-buttons', False)
 
-if HOSTED and cfg.get('with-relay', False):
+if HOSTED and RAW_WITH_RELAY:
     warn('--with-relay ignored under --hosted: the bridge dials the deployed relay.')
 
 # Accept both `--no-reload worker --no-reload bridge` and `--no-reload worker,bridge`.
@@ -369,15 +376,15 @@ if HOSTED:
 # Changing args re-evaluates this Tiltfile, which regenerates these buttons for
 # the new state — the button on a frozen resource is always the Resume one.
 
-def tilt_args_argv(frozen_names):
+def tilt_args_argv(frozen_names, hosted=HOSTED):
     flags = []
-    if HOSTED:
+    if hosted:
         flags.append('--hosted')
-    elif not WITH_STORAGE:
-        # Under --hosted, storage is off implicitly; re-emitting --no-storage too
-        # would be redundant and would survive a later --hosted removal.
+    # Raw values, not the hosted-adjusted ones: these must round-trip exactly as
+    # the user passed them, so toggling hosted off restores the original stack.
+    if RAW_NO_STORAGE:
         flags.append('--no-storage')
-    if WITH_RELAY:
+    if RAW_WITH_RELAY:
         flags.append('--with-relay')
     if WITH_STUDIO:
         flags.append('--with-studio')
@@ -414,6 +421,30 @@ if WITH_BUTTONS:
                 # worker. Confirm rather than one-click it.
                 requires_confirmation=True,
             )
+
+    # Hosted/local toggle, live: `tilt args` re-evaluates the Tiltfile, so the
+    # web and storage resources appear or disappear and the bridge restarts with
+    # a different environment — no `tilt down` needed.
+    #
+    # It sits on `bridge` because that is the only service resource present in
+    # both modes. The worker's spec is identical either way, so Tilt leaves it
+    # running: switching modes does NOT kill an in-flight turn.
+    if HOSTED:
+        cmd_button(
+            'hosted-off',
+            resource='bridge',
+            argv=tilt_args_argv(FROZEN, hosted=False),
+            text='Switch to local stack',
+            icon_name='home',
+        )
+    else:
+        cmd_button(
+            'hosted-on',
+            resource='bridge',
+            argv=tilt_args_argv(FROZEN, hosted=True),
+            text='Switch to hosted',
+            icon_name='cloud',
+        )
 
 # ---- manual tasks ----------------------------------------------------------
 # auto_init=False       -> not run on `tilt up`
