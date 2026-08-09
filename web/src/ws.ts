@@ -56,6 +56,18 @@ export function setTokenProvider(fn: () => Promise<string | null>) {
 }
 
 /**
+ * Which paired machine to reach, in a relayed deployment. The relay refuses a
+ * connection without it (`1008 device required`) because one user may have
+ * several machines and it has no basis to guess. Null when talking to a bridge
+ * directly, which serves exactly one machine — its own.
+ */
+let deviceId: string | null = null;
+
+export function setDeviceId(id: string | null) {
+  deviceId = id;
+}
+
+/**
  * In-flight fileRequests, keyed by reqId. Rejected on disconnect rather than
  * left hanging — the caller surfaces a normal error and can retry.
  */
@@ -145,6 +157,21 @@ function flushQueue() {
   }
 }
 
+/**
+ * Build the connect URL, preserving whatever path WS_URL carries.
+ *
+ * Parsed rather than concatenated: the relay matches its endpoint path exactly
+ * (`/client`), so appending "/?token=" — as this once did — turns a valid URL
+ * into `/client/` and the socket closes with 1008. A bridge ignores the path
+ * entirely, so both cases come out right.
+ */
+function socketUrl(token: string | null): string {
+  const url = new URL(WS_URL);
+  if (token) url.searchParams.set('token', token);
+  if (deviceId) url.searchParams.set('device', deviceId);
+  return url.toString();
+}
+
 export async function connect() {
   if (socket && socket.readyState !== WebSocket.CLOSED) return;
   wireConnectivity();
@@ -160,7 +187,7 @@ export async function connect() {
   // Mint a fresh token for every (re)connect — a stale one fails the handshake.
   const token = tokenProvider ? await tokenProvider().catch(() => null) : null;
   if (socket && socket.readyState !== WebSocket.CLOSED) return; // raced a parallel connect
-  socket = new WebSocket(token ? `${WS_URL}/?token=${encodeURIComponent(token)}` : WS_URL);
+  socket = new WebSocket(socketUrl(token));
 
   socket.onopen = () => {
     useStore.getState().setConnectionStatus('connected');

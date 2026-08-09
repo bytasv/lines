@@ -82,6 +82,70 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+/**
+ * CORS. Needed only once the browser talks to this server directly, which it
+ * does in the hosted split (web app on one origin, storage on another). Empty in
+ * a local setup, where the bridge is the only caller and same-origin rules do
+ * not apply to it.
+ *
+ * An explicit origin list, not `*`: these responses carry another user's data if
+ * the Clerk token is wrong, and a wildcard would let any page on the internet
+ * make authenticated calls on a signed-in user's behalf.
+ */
+const WEB_ORIGINS = (process.env.WEB_ORIGINS ?? '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && WEB_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    // The allowed origin varies by request, so caches must key on it.
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'authorization,content-type');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+  // Preflights carry no Authorization header, so they must answer before the
+  // auth gate below or every cross-origin call fails as a 401 on the OPTIONS.
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
+
+/**
+ * Routes that must answer without a Clerk user, and why:
+ *
+ *   /v1/devices/register — the machine has no user yet; that is the whole point
+ *     of pairing. The row it creates is inert until someone claims the code.
+ *   /v1/devices/verify — called by the relay, machine to machine, with no user
+ *     token to present. Guarded by a shared secret instead (below), and kept off
+ *     the public router: it trades a device secret for the owning user id, so it
+ *     has no business being reachable from the internet.
+ */
+const UNAUTHENTICATED_PATHS = new Set(['/v1/devices/register', '/v1/devices/verify']);
+
+/**
+ * Shared secret for relay→storage calls. Required in a deployment: without it
+ * `/v1/devices/verify` would be an open oracle for testing device secrets.
+ */
+const RELAY_SHARED_SECRET = process.env.RELAY_SHARED_SECRET;
+app.use('/v1/devices/verify', (req, res, next) => {
+  if (!RELAY_SHARED_SECRET) {
+    console.warn('[storage] RELAY_SHARED_SECRET not set — refusing device verification');
+    res.status(503).json({ error: 'device verification not configured' });
+    return;
+  }
+  const presented = req.header('x-relay-secret') ?? '';
+  if (!timingSafeEqualUtf8(presented, RELAY_SHARED_SECRET)) {
+    res.status(401).json({ error: 'unauthenticated' });
+    return;
+  }
+  next();
+});
+
 app.use(
   clerkMiddleware({
     secretKey: process.env.CLERK_SECRET_KEY,
@@ -91,6 +155,10 @@ app.use(
 );
 // API-style 401 (requireAuth() redirects browsers to sign-in — wrong for a JSON API).
 app.use((req, res, next) => {
+  if (UNAUTHENTICATED_PATHS.has(req.path)) {
+    next();
+    return;
+  }
   if (!getAuth(req).userId) {
     res.status(401).json({ error: 'unauthenticated' });
     return;
@@ -889,6 +957,15 @@ app.post('/v1/devices/verify', async (req, res) => {
 function timingSafeEqualHex(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+}
+
+/**
+ * Constant-time compare for arbitrary strings. Hashed first so the comparison
+ * runs over two fixed-length buffers: timingSafeEqual throws on a length
+ * mismatch, and returning early on that would leak the secret's length.
+ */
+function timingSafeEqualUtf8(a: string, b: string): boolean {
+  return timingSafeEqual(Buffer.from(sha256(a), 'hex'), Buffer.from(sha256(b), 'hex'));
 }
 
 // Express 5 forwards async route rejections here.

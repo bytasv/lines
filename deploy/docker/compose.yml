@@ -28,9 +28,10 @@ services:
     env_file: lines.env
     environment:
       PORT: 8790
+      # Origins allowed to call this server from a browser. The web app is on a
+      # different host to storage, so without this every device call fails CORS.
+      WEB_ORIGINS: https://${LINES_DOMAIN}
     networks: [lines]
-    # No `ports:` and no Traefik labels: the browser never calls storage, and
-    # `relay` reaches it at http://storage:8790 inside this network.
     security_opt: [no-new-privileges:true]
     healthcheck:
       test:
@@ -42,6 +43,25 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    labels:
+      # Public on its own hostname, because the bridge now runs on the user's
+      # machine and syncs from there. Its own host rather than a path prefix on
+      # the apex: storage's routes are flat (/workflows, /sessions, /settings),
+      # and the web app's router has a catch-all, so sharing an origin would put
+      # them one route name apart from shadowing each other.
+      traefik.enable: "true"
+      traefik.docker.network: lines
+      # /v1/devices/verify trades a device secret for its owner's user id. The
+      # relay calls it over the internal network; nothing on the internet has any
+      # business reaching it, so the public router excludes that one path and it
+      # falls through to a 404. Rule negation needs Traefik v3 (running 3.7).
+      # Storage also requires a shared secret on that route — this is the second
+      # of the two locks, not the only one.
+      traefik.http.routers.lines-storage.rule: "Host(`api.${LINES_DOMAIN}`) && !Path(`/v1/devices/verify`)"
+      traefik.http.routers.lines-storage.entrypoints: websecure
+      traefik.http.routers.lines-storage.tls: "true"
+      traefik.http.routers.lines-storage.tls.certresolver: letsencrypt
+      traefik.http.services.lines-storage.loadbalancer.server.port: "8790"
 
   relay:
     build:
@@ -56,6 +76,9 @@ services:
       # Device verification is delegated to storage so the relay holds no
       # database credentials — it is the most exposed process in the system.
       STORAGE_URL: http://storage:8790
+      # Machine-to-machine credential for that one call; storage has no user
+      # token to check on it. Shared with the storage service via lines.env.
+      RELAY_SHARED_SECRET: ${RELAY_SHARED_SECRET}
     networks: [lines]
     depends_on:
       storage:
@@ -98,6 +121,10 @@ services:
         # restart. The browser talks to the relay's /client endpoint here.
         VITE_BRIDGE_WS_URL: ${VITE_BRIDGE_WS_URL}
         VITE_CLERK_PUBLISHABLE_KEY: ${VITE_CLERK_PUBLISHABLE_KEY}
+        # Setting this is what turns on the pairing gate: the web app lists the
+        # user's machines before opening a socket. Unset, the build expects a
+        # local bridge and never asks about devices.
+        VITE_STORAGE_URL: ${VITE_STORAGE_URL}
     image: lines-web:latest
     restart: unless-stopped
     networks: [lines]

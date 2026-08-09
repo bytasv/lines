@@ -82,13 +82,16 @@ COPY web web
 #   VITE_CLERK_PUBLISHABLE_KEY — pk_live for a production Clerk instance.
 ARG VITE_BRIDGE_WS_URL
 ARG VITE_CLERK_PUBLISHABLE_KEY
+#   VITE_STORAGE_URL — public storage origin. Its presence is what enables the
+#     device-pairing gate in the web app.
+ARG VITE_STORAGE_URL
 
 # Written to a file rather than passed as bare environment variables: vite reads
 # the repo-root .env (envDir: '..'), and a file makes the baked-in values
 # explicit and greppable if a build ever produces a bundle without them.
 RUN test -n "$VITE_BRIDGE_WS_URL" || { echo "FATAL: --build-arg VITE_BRIDGE_WS_URL is required"; exit 1; }
-RUN printf 'VITE_BRIDGE_WS_URL=%s\nVITE_CLERK_PUBLISHABLE_KEY=%s\n' \
-      "$VITE_BRIDGE_WS_URL" "$VITE_CLERK_PUBLISHABLE_KEY" > .env
+RUN printf 'VITE_BRIDGE_WS_URL=%s\nVITE_CLERK_PUBLISHABLE_KEY=%s\nVITE_STORAGE_URL=%s\n' \
+      "$VITE_BRIDGE_WS_URL" "$VITE_CLERK_PUBLISHABLE_KEY" "$VITE_STORAGE_URL" > .env
 RUN npm run build -w web
 # Unset or mistyped, the build still succeeds and the app reconnects forever —
 # so fail the image instead of shipping one that cannot reach the relay.

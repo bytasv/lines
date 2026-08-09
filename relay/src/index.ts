@@ -35,6 +35,8 @@ const CLERK_SECRET_KEY = process.env.CLERK_SECRET_KEY;
  */
 const AUTH_DISABLED = process.env.RELAY_AUTH_DISABLED === '1';
 const STORAGE_URL = process.env.STORAGE_URL ?? 'http://localhost:8790';
+/** Presented to storage on /v1/devices/verify, which has no user token to check. */
+const RELAY_SHARED_SECRET = process.env.RELAY_SHARED_SECRET;
 const DEV_USER = 'local';
 
 if (!AUTH_DISABLED && !CLERK_SECRET_KEY) {
@@ -70,7 +72,12 @@ async function verifyDevice(deviceId: string, secret: string | null): Promise<{ 
   try {
     const res = await fetch(`${STORAGE_URL}/v1/devices/verify`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      // Storage has no user token to check on this call, so the shared secret is
+      // what distinguishes the relay from anyone else who can reach that route.
+      headers: {
+        'content-type': 'application/json',
+        ...(RELAY_SHARED_SECRET ? { 'x-relay-secret': RELAY_SHARED_SECRET } : {}),
+      },
       body: JSON.stringify({ id: deviceId, secret }),
       signal: AbortSignal.timeout(10_000),
     });
