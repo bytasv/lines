@@ -111,6 +111,19 @@ services:
       traefik.http.routers.lines-web.tls: "true"
       traefik.http.routers.lines-web.tls.certresolver: letsencrypt
       traefik.http.services.lines-web.loadbalancer.server.port: "80"
+      # www exists in DNS, so it needs its own router or Traefik answers it with
+      # the self-signed TRAEFIK DEFAULT CERT and the browser shows a warning.
+      # It only redirects: the bundle's baked socket URL and the Clerk origin
+      # are both the apex, so the app itself is never served from www.
+      # $$ escapes compose interpolation — $${1} must reach Traefik intact.
+      traefik.http.routers.lines-www.rule: "Host(`www.${LINES_DOMAIN}`)"
+      traefik.http.routers.lines-www.entrypoints: websecure
+      traefik.http.routers.lines-www.tls: "true"
+      traefik.http.routers.lines-www.tls.certresolver: letsencrypt
+      traefik.http.routers.lines-www.middlewares: lines-www-redirect
+      traefik.http.middlewares.lines-www-redirect.redirectregex.regex: "^https://www\\.(.*)"
+      traefik.http.middlewares.lines-www-redirect.redirectregex.replacement: "https://$${1}"
+      traefik.http.middlewares.lines-www-redirect.redirectregex.permanent: "true"
 
   # One-shot, not part of `up`. `prisma migrate deploy` is forward-only and uses
   # DIRECT_URL (:5432), not the pooled :6543 string. Run it BEFORE starting
