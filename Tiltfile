@@ -27,14 +27,6 @@ config.define_bool(
           'default: the bridge only dials when RELAY_URL is set.',
 )
 config.define_bool(
-    'hosted',
-    usage='Run only the agent half locally (worker + bridge) and point it at a ' +
-          'hosted Lines install: the bridge dials LINES_RELAY_URL and syncs to ' +
-          'LINES_STORAGE_URL, both read from .env. The web app and storage are ' +
-          'the deployed ones, so neither runs here. Equivalent to the desktop ' +
-          'app, without Electron.',
-)
-config.define_bool(
     'no-ui-buttons',
     usage='Skip the freeze/resume reload buttons. They come from ext://uibutton, ' +
           'which is fetched from GitHub the first time it is used — pass this to ' +
@@ -48,23 +40,17 @@ config.define_string_list(
           'or the Freeze/Resume reload buttons on the worker and bridge resources.',
 )
 cfg = config.parse()
-HOSTED = cfg.get('hosted', False)
-# The flags as the user actually passed them. Hosted mode overrides two of them,
-# and the toggle buttons rebuild the whole arg list — so without remembering the
-# raw values, switching to hosted and back would silently drop (or invent) a
-# --no-storage / --with-relay the user never chose.
-RAW_NO_STORAGE = cfg.get('no-storage', False)
-RAW_WITH_RELAY = cfg.get('with-relay', False)
-
-# Hosted mode owns the whole topology: storage and the web app are the deployed
-# ones, and a local relay would be pointless when the bridge dials a remote.
-WITH_STORAGE = not RAW_NO_STORAGE and not HOSTED
+WITH_STORAGE = not cfg.get('no-storage', False)
 WITH_STUDIO = cfg.get('with-studio', False)
-WITH_RELAY = RAW_WITH_RELAY and not HOSTED
+WITH_RELAY = cfg.get('with-relay', False)
 WITH_BUTTONS = not cfg.get('no-ui-buttons', False)
 
-if HOSTED and RAW_WITH_RELAY:
-    warn('--with-relay ignored under --hosted: the bridge dials the deployed relay.')
+# Whether the bridge reaches a hosted install is NOT a Tilt flag: it follows from
+# RELAY_URL in .env, which the bridge reads itself. A flag would be a second
+# source of truth for the same decision, and the version that rebuilt the whole
+# resource list took `pair-device` away with it every time it was switched off.
+# To run agent-only against a deployment, disable `web` and `storage` from the
+# Tilt UI — per-resource enable/disable is built in.
 
 # Accept both `--no-reload worker --no-reload bridge` and `--no-reload worker,bridge`.
 NO_RELOAD = []
@@ -154,27 +140,7 @@ if NODE_MAJOR < 20:
 STORAGE_REQUIRED = ['DATABASE_URL', 'DIRECT_URL', 'CLERK_SECRET_KEY']
 MISSING = [k for k in STORAGE_REQUIRED if not have(k)]
 
-# Hosted mode needs neither Supabase nor a Clerk secret locally — the deployed
-# storage server holds both, and the relay is the auth edge for this bridge.
-# These are read by the bridge's own dotenv, so Tilt only checks they exist and
-# never copies the values anywhere.
-HOSTED_REQUIRED = ['RELAY_URL', 'STORAGE_URL']
-HOSTED_MISSING = [k for k in HOSTED_REQUIRED if not have(k)]
-
-if HOSTED and HOSTED_MISSING:
-    preflight_cmd = fail_cmd([
-        'PREFLIGHT FAILED (--hosted): missing/empty in .env: ' + ', '.join(HOSTED_MISSING),
-        '',
-        'RELAY_URL    wss://<domain>         -- base only; relayClient appends',
-        '                                       /agent?device=..&secret=.. itself',
-        'STORAGE_URL  https://api.<domain>   -- where it syncs, and where pairing',
-        '                                       registers this machine',
-        '',
-        'Both are deployment-specific, so they live in .env rather than here.',
-    ])
-elif HOSTED:
-    preflight_cmd = 'echo "preflight ok: hosted mode, %s set"' % ', '.join(HOSTED_REQUIRED)
-elif not os.path.exists(ENV_FILE):
+if not os.path.exists(ENV_FILE):
     preflight_cmd = fail_cmd([
         'PREFLIGHT FAILED: no .env at the repo root.',
         '',
@@ -201,8 +167,17 @@ else:
     preflight_cmd = 'echo "preflight ok: .env present, %s set"' % ', '.join(STORAGE_REQUIRED)
 
 # Warnings, not failures: the bridge/worker/web stack runs fine without these.
-if not HOSTED and not have('VITE_CLERK_PUBLISHABLE_KEY'):
+if not have('VITE_CLERK_PUBLISHABLE_KEY'):
     warn('VITE_CLERK_PUBLISHABLE_KEY unset — web renders without a sign-in gate.')
+
+# RELAY_URL in .env is what makes this machine reachable from a hosted install.
+# Both halves have to agree: dialling a deployed relay while syncing to a local
+# storage server splits one machine's data across two databases.
+RELAYED = have('RELAY_URL')
+if RELAYED and not have('STORAGE_URL'):
+    warn('RELAY_URL is set but STORAGE_URL is not — the bridge will dial the ' +
+         'hosted relay while syncing to localhost. Set STORAGE_URL to the same ' +
+         'deployment (https://api.<domain>), or unset RELAY_URL for local-only.')
 # PORT used to be read by BOTH the bridge and storage out of this one .env file,
 # so a single value collided. The bridge now reads LINES_BRIDGE_PORT, leaving
 # PORT to storage alone — nothing to warn about.
@@ -276,17 +251,19 @@ local_resource(
     # LINES_BRIDGE_PORT is pinned here for the same reason the worker's is: the
     # readiness probe and the status link below need a fixed target. The packaged
     # app sets neither and binds :0, publishing the result to bridge.json.
-    # Under --hosted nothing is injected but the port: RELAY_URL and STORAGE_URL
-    # come from .env through the bridge's own dotenv, and the device credential
-    # from ~/.lines-app/device.json — so no secret is ever copied into a spec.
+    # STORAGE_URL is injected only as a DEFAULT: an explicit value in .env means
+    # this bridge syncs to a deployment, and overriding it here would silently
+    # point it back at localhost. RELAY_URL is never injected unless --with-relay
+    # wires up the loopback one — otherwise .env decides, and the device
+    # credential comes from ~/.lines-app/device.json, so no secret reaches a spec.
     serve_env=dict(
-        {'LINES_BRIDGE_PORT': str(BRIDGE_PORT)},
-        **({} if HOSTED else dict(
-            {'STORAGE_URL': 'http://localhost:%d' % STORAGE_PORT},
-            **({'RELAY_URL': 'ws://127.0.0.1:%d' % RELAY_PORT,
-                'LINES_DEVICE_ID': 'tilt-dev',
-                'LINES_DEVICE_SECRET': 'tilt-dev'} if WITH_RELAY else {})
-        ))
+        dict(
+            {'LINES_BRIDGE_PORT': str(BRIDGE_PORT)},
+            **({} if have('STORAGE_URL') else {'STORAGE_URL': 'http://localhost:%d' % STORAGE_PORT})
+        ),
+        **({'RELAY_URL': 'ws://127.0.0.1:%d' % RELAY_PORT,
+            'LINES_DEVICE_ID': 'tilt-dev',
+            'LINES_DEVICE_SECRET': 'tilt-dev'} if WITH_RELAY else {})
     ),
     # Deliberately NOT depending on worker/storage: the bridge reconnects to the
     # worker every 1s (workerClient.ts:74-79) and treats storage as best-effort
@@ -335,37 +312,19 @@ if WITH_STORAGE:
         allow_parallel=True,
     )
 
-# Hosted mode uses the DEPLOYED web app, so there is nothing to serve here. A
-# local vite would need its own baked relay URL and device id, which is what the
-# deployed bundle already has.
-if not HOSTED:
-    local_resource(
-        'web',
-        cmd='',
-        # --strictPort: without it vite drifts to 5174 when a stale `npm run dev`
-        # holds 5173, and the probe goes green against the STALE server.
-        serve_cmd='npm run dev -w web -- --strictPort',
-        resource_deps=['install'],
-        readiness_probe=probe(initial_delay_secs=2, period_secs=10,
-                              http_get=http_get_action(port=WEB_PORT, host='localhost', path='/')),
-        links=[link('http://localhost:%d' % WEB_PORT, 'Lines UI')],
-        labels=['services'],
-        allow_parallel=True,
-    )
-
-# ---- pairing ---------------------------------------------------------------
-# Registers this machine with the hosted install and prints the code to type
-# into the web app. Idempotent: once claimed it prints "already paired" and
-# exits 0, so it can run on every `tilt up` without a branch. Re-trigger it from
-# the Tilt UI when a code expires (15 minutes).
-if HOSTED:
-    local_resource(
-        'pair-device',
-        cmd='npm run pair -w server',
-        resource_deps=['preflight', 'install'],
-        labels=['setup'],
-        allow_parallel=True,
-    )
+local_resource(
+    'web',
+    cmd='',
+    # --strictPort: without it vite drifts to 5174 when a stale `npm run dev`
+    # holds 5173, and the probe goes green against the STALE server.
+    serve_cmd='npm run dev -w web -- --strictPort',
+    resource_deps=['install'],
+    readiness_probe=probe(initial_delay_secs=2, period_secs=10,
+                          http_get=http_get_action(port=WEB_PORT, host='localhost', path='/')),
+    links=[link('http://localhost:%d' % WEB_PORT, 'Lines UI')],
+    labels=['services'],
+    allow_parallel=True,
+)
 
 # ---- freeze / resume buttons ----------------------------------------------
 # One button on `worker` and one on `bridge`, so the freeze is reachable without
@@ -377,15 +336,11 @@ if HOSTED:
 # Changing args re-evaluates this Tiltfile, which regenerates these buttons for
 # the new state — the button on a frozen resource is always the Resume one.
 
-def tilt_args_argv(frozen_names, hosted=HOSTED):
+def tilt_args_argv(frozen_names):
     flags = []
-    if hosted:
-        flags.append('--hosted')
-    # Raw values, not the hosted-adjusted ones: these must round-trip exactly as
-    # the user passed them, so toggling hosted off restores the original stack.
-    if RAW_NO_STORAGE:
+    if not WITH_STORAGE:
         flags.append('--no-storage')
-    if RAW_WITH_RELAY:
+    if WITH_RELAY:
         flags.append('--with-relay')
     if WITH_STUDIO:
         flags.append('--with-studio')
@@ -423,29 +378,16 @@ if WITH_BUTTONS:
                 requires_confirmation=True,
             )
 
-    # Hosted/local toggle, live: `tilt args` re-evaluates the Tiltfile, so the
-    # web and storage resources appear or disappear and the bridge restarts with
-    # a different environment — no `tilt down` needed.
-    #
-    # It sits on `bridge` because that is the only service resource present in
-    # both modes. The worker's spec is identical either way, so Tilt leaves it
-    # running: switching modes does NOT kill an in-flight turn.
-    if HOSTED:
-        cmd_button(
-            'hosted-off',
-            resource='bridge',
-            argv=tilt_args_argv(FROZEN, hosted=False),
-            text='Switch to local stack',
-            icon_name='home',
-        )
-    else:
-        cmd_button(
-            'hosted-on',
-            resource='bridge',
-            argv=tilt_args_argv(FROZEN, hosted=True),
-            text='Switch to hosted',
-            icon_name='cloud',
-        )
+    # Pairing is reachable from the bridge too: it is the resource whose relay
+    # link the code exists to establish, so that is where you look when a machine
+    # will not connect.
+    cmd_button(
+        'bridge-pair-device',
+        resource='bridge',
+        argv=['tilt', 'trigger', 'pair-device'],
+        text='Pair this machine',
+        icon_name='link',
+    )
 
 # ---- manual tasks ----------------------------------------------------------
 # auto_init=False       -> not run on `tilt up`
@@ -460,6 +402,15 @@ local_resource('test', cmd='npm run test -w server',
                deps=['server/src'],
                auto_init=False, trigger_mode=TRIGGER_MODE_MANUAL,
                resource_deps=['install'], labels=['checks'], allow_parallel=True)
+
+# Registers this machine with the deployment in STORAGE_URL and prints the code
+# to type into the hosted web app. Always present, never automatic: it is a thing
+# you do when a code has expired (15 minutes) or a machine has been revoked, not
+# a step in bringing the stack up. Idempotent — once claimed it prints
+# "already paired" and exits 0. Fails with one clear line if STORAGE_URL is unset.
+local_resource('pair-device', cmd='npm run pair -w server',
+               auto_init=False, trigger_mode=TRIGGER_MODE_MANUAL,
+               resource_deps=['install'], labels=['setup'], allow_parallel=True)
 
 if WITH_STORAGE:
     # storage/package.json:12 already wraps this in `dotenv -e ../.env`, which
@@ -479,14 +430,8 @@ if WITH_STORAGE:
                    links=[link('http://localhost:%d' % STUDIO_PORT, 'Prisma Studio')],
                    labels=['db'], allow_parallel=True)
 
-if HOSTED:
-    print(('lines [hosted]: agent only — bridge :%d  worker :%d. Web and storage ' +
-           'are the deployed ones; run `tilt trigger pair-device` for a new ' +
-           'pairing code.%s') % (
-              BRIDGE_PORT, WORKER_PORT,
-              '  [reload frozen: %s]' % ','.join(FROZEN) if FROZEN else ''))
-else:
-    print('lines: web :%d  bridge :%d  worker :%d  storage :%s%s' % (
-        WEB_PORT, BRIDGE_PORT, WORKER_PORT,
-        str(STORAGE_PORT) if WITH_STORAGE else 'disabled',
-        '  [reload frozen: %s]' % ','.join(FROZEN) if FROZEN else ''))
+print('lines: web :%d  bridge :%d  worker :%d  storage :%s%s%s' % (
+    WEB_PORT, BRIDGE_PORT, WORKER_PORT,
+    str(STORAGE_PORT) if WITH_STORAGE else 'disabled',
+    '  [relayed: %s]' % os.getenv('RELAY_URL', 'via .env') if RELAYED else '',
+    '  [reload frozen: %s]' % ','.join(FROZEN) if FROZEN else ''))
