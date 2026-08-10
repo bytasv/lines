@@ -10,8 +10,10 @@ import { App } from './App';
 import { connect, setDeviceId, setTokenProvider } from './ws';
 import { CLERK_ENABLED, CLERK_PUBLISHABLE_KEY, setOwnerId, setOwnerName } from './lib/clerk';
 import {
+  chooseDevice,
   DEVICE_PAIRING_ENABLED,
   listDevices,
+  rememberDeviceId,
   setStorageTokenProvider,
   type Device,
 } from './lib/storage';
@@ -20,23 +22,6 @@ import {
   ConnectMachineError,
   ConnectMachineLoading,
 } from './components/ConnectMachine';
-
-/** Remembers the chosen machine across reloads, so a multi-machine user lands back where they were. */
-const DEVICE_STORAGE_KEY = 'lines.deviceId';
-
-/**
- * Pick which machine to connect to. The stored choice wins while it still
- * exists; otherwise the most recently seen one, which is the best guess at
- * "the machine I am sitting at".
- */
-function chooseDevice(devices: Device[]): Device | null {
-  if (devices.length === 0) return null;
-  const remembered = devices.find((d) => d.id === localStorage.getItem(DEVICE_STORAGE_KEY));
-  if (remembered) return remembered;
-  return [...devices].sort(
-    (a, b) => new Date(b.lastSeenAt ?? 0).getTime() - new Date(a.lastSeenAt ?? 0).getTime(),
-  )[0];
-}
 
 /**
  * Gate between signing in and opening the socket, in deployments where the agent
@@ -65,7 +50,7 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!chosen) return;
-    localStorage.setItem(DEVICE_STORAGE_KEY, chosen.id);
+    rememberDeviceId(chosen.id);
     setDeviceId(chosen.id);
     void connect();
   }, [chosen]);

@@ -58,6 +58,47 @@ export async function listDevices(): Promise<Device[]> {
 }
 
 /**
+ * Revoke a machine's access. The relay checks `revokedAt` when a machine
+ * attaches, so this stops it reconnecting — it does NOT sever a connection that
+ * is already open. Say so in the UI rather than promising an instant kill.
+ */
+export async function revokeDevice(id: string): Promise<void> {
+  await call<{ ok: true }>(`/v1/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/**
+ * Which machine this browser is talking to. Persisted so a reload lands on the
+ * same one, and read by the device gate at startup.
+ */
+const DEVICE_STORAGE_KEY = 'lines.deviceId';
+
+export function rememberedDeviceId(): string | null {
+  return localStorage.getItem(DEVICE_STORAGE_KEY);
+}
+
+export function rememberDeviceId(id: string): void {
+  localStorage.setItem(DEVICE_STORAGE_KEY, id);
+}
+
+export function forgetDeviceId(): void {
+  localStorage.removeItem(DEVICE_STORAGE_KEY);
+}
+
+/**
+ * Pick which machine to connect to: the remembered one while it still exists,
+ * otherwise the most recently seen, which is the best guess at "the machine I am
+ * sitting at". Null when there are none, which is what shows the pairing screen.
+ */
+export function chooseDevice(devices: Device[]): Device | null {
+  if (devices.length === 0) return null;
+  const remembered = devices.find((d) => d.id === rememberedDeviceId());
+  if (remembered) return remembered;
+  return [...devices].sort(
+    (a, b) => new Date(b.lastSeenAt ?? 0).getTime() - new Date(a.lastSeenAt ?? 0).getTime(),
+  )[0];
+}
+
+/**
  * Bind a machine to this account with the code it printed. The code is consumed
  * on use, so a retry with the same one fails as unknown.
  */

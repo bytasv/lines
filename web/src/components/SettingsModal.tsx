@@ -20,12 +20,15 @@ import type { PermissionMode } from '@lines/shared';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { GuardAllowlistSection } from './GuardAllowlistSection';
+import { DevicesSection } from './DevicesSection';
+import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
 import { modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { send } from '../ws';
 
 export type SettingsSection =
   | 'account'
+  | 'devices'
   | 'sessions'
   | 'transcript'
   | 'notifications'
@@ -34,6 +37,11 @@ export type SettingsSection =
 
 const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   { value: 'account', label: 'Account' },
+  // Only in a hosted build. A local install talks to the bridge on this machine,
+  // which is the one and only device — a list of one it cannot revoke is noise.
+  ...(DEVICE_PAIRING_ENABLED
+    ? [{ value: 'devices' as SettingsSection, label: 'Machines' }]
+    : []),
   { value: 'sessions', label: 'Sessions' },
   { value: 'transcript', label: 'Transcript' },
   { value: 'notifications', label: 'Notifications' },
@@ -116,6 +124,7 @@ export function SettingsModal({
         <ScrollArea style={{ flex: 1 }} type="hover">
           <Stack gap="xs" p="md" maw={620}>
             {section === 'account' && <AccountSection onClose={onClose} />}
+            {section === 'devices' && <DevicesSection />}
             {section === 'sessions' && <SessionsSection />}
             {section === 'transcript' && <TranscriptSection />}
             {section === 'notifications' && <NotificationsSection />}

@@ -38,6 +38,9 @@ const PING_INTERVAL_MS = 1000;
 // render blocks both and a tight timeout kills a perfectly healthy socket.
 const PONG_TIMEOUT_MS = 10_000;
 const RECONNECT_DELAY_MS = 1500;
+// Slower than an ordinary reconnect: a 1008 is usually a state that needs
+// something to change elsewhere (sign in again, start the machine), not a blip.
+const UNAUTHORIZED_RETRY_DELAY_MS = 5000;
 // Re-send a fresh Clerk token before its ~60s expiry.
 const AUTH_RELAY_INTERVAL_MS = 50_000;
 
@@ -65,6 +68,19 @@ let deviceId: string | null = null;
 
 export function setDeviceId(id: string | null) {
   deviceId = id;
+}
+
+/**
+ * Point the socket at a different machine. Closes the current one rather than
+ * waiting for it to drop: every message in flight belongs to the old machine's
+ * bridge, and delivering any of them to the new one would attribute a session to
+ * the wrong host. The close handler's normal retry path does the reconnecting.
+ */
+export function switchDevice(id: string) {
+  if (id === deviceId) return;
+  deviceId = id;
+  if (socket && socket.readyState !== WebSocket.CLOSED) socket.close();
+  else void connect();
 }
 
 /**
@@ -248,11 +264,15 @@ export async function connect() {
     stopHeartbeat();
     stopAuthRelay();
     rejectPendingFileRequests();
-    // 1008 = bridge rejected the token. Blind reconnects would spam the gate;
-    // Clerk's session state (sign-in redirect) is what recovers from here.
+    // 1008 = rejected. Against a bridge that means the token; through a relay it
+    // also means "that machine has not attached yet", which recovers on its own
+    // the moment it does — so this retries rather than parking, but slowly, so a
+    // genuinely bad token does not hammer the gate.
     if (e.code === 1008) {
-      console.warn('[ws] unauthorized (1008) — waiting for sign-in');
+      console.warn('[ws] rejected (1008) — retrying slowly; check sign-in and that your machine is running');
       useStore.getState().setConnectionStatus('reconnecting');
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => void connect(), UNAUTHORIZED_RETRY_DELAY_MS);
       return;
     }
     useStore.getState().setConnectionStatus(navigator.onLine ? 'reconnecting' : 'offline');
