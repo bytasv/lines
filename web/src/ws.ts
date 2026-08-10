@@ -80,6 +80,10 @@ export function setDeviceId(id: string | null) {
 export function switchDevice(id: string) {
   if (id === deviceId) return;
   deviceId = id;
+  // The store still describes the previous machine. Clearing it puts the
+  // connecting screen back up rather than showing one machine's sessions under
+  // another's name until the new `hello` lands.
+  useStore.getState().clearBootstrap();
   if (socket && socket.readyState !== WebSocket.CLOSED) socket.close();
   else void connect();
 }

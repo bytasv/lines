@@ -361,6 +361,16 @@ function latestSessionIn(
 
 interface UiState {
   connectionStatus: ConnectionStatus;
+  /**
+   * Whether a `hello` has landed, i.e. whether this store holds a machine's real
+   * state or just its initial emptiness. Distinct from `connectionStatus`: the
+   * socket opens a beat before `hello` arrives, and rendering the app in that gap
+   * shows a fully-built UI containing nothing, which reads as data loss.
+   *
+   * Sticky once true — a reconnect must not blank the app, because the cached
+   * state is still the right thing to show while the link comes back.
+   */
+  bootstrapped: boolean;
   /** Prompts waiting for the socket to come back, flushed FIFO after the next `hello`. */
   queuedPrompts: QueuedPrompt[];
   sessions: Record<string, SessionMeta>;
@@ -468,6 +478,12 @@ interface UiState {
 
   applyServerMessage: (msg: ServerMessage) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
+  /**
+   * Drop back to "nothing loaded yet". Called when the socket is repointed at a
+   * different machine: everything held here describes the old one, and showing it
+   * under the new machine's name would be a lie until its `hello` replaces it.
+   */
+  clearBootstrap: () => void;
   enqueuePrompt: (p: QueuedPrompt) => void;
   /** Return and clear the queue atomically; caller re-sends the drained prompts. */
   drainQueuedPrompts: () => QueuedPrompt[];
@@ -558,6 +574,7 @@ export const useStore = create<UiState>((set, get) => {
 
   return {
   connectionStatus: 'reconnecting',
+  bootstrapped: false,
   queuedPrompts: [],
   sessions: {},
   workflows: [],
@@ -610,6 +627,7 @@ export const useStore = create<UiState>((set, get) => {
   openFiles: loadOpenFiles(),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
+  clearBootstrap: () => set({ bootstrapped: false }),
   enqueuePrompt: (p) => set((state) => ({ queuedPrompts: [...state.queuedPrompts, p] })),
   drainQueuedPrompts: () => {
     const queued = get().queuedPrompts;
@@ -818,6 +836,7 @@ export const useStore = create<UiState>((set, get) => {
         for (const s of msg.sessions) sessions[s.id] = s;
         const projects = toProjects(msg.projects);
         set((state) => ({
+          bootstrapped: true,
           sessions,
           workflows: msg.workflows,
           sharedWorkflows: msg.sharedWorkflows ?? [],

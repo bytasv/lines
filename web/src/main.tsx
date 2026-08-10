@@ -21,6 +21,8 @@ import {
   ConnectMachineError,
   ConnectMachineLoading,
 } from './components/ConnectMachine';
+import { ConnectingMachine } from './components/ConnectingMachine';
+import { useStore } from './store';
 
 /**
  * Gate between signing in and opening the socket, in deployments where the agent
@@ -37,6 +39,7 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
   const devices = useDevices((s) => s.devices);
   const error = useDevices((s) => s.error);
   const refresh = useDevices((s) => s.refresh);
+  const bootstrapped = useStore((s) => s.bootstrapped);
 
   useEffect(() => {
     void refresh();
@@ -58,6 +61,10 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
   if (error && !devices) return <ConnectMachineError error={error} onRetry={() => void refresh()} />;
   if (!devices) return <ConnectMachineLoading />;
   if (!chosen) return <ConnectMachine />;
+  // Chosen but not yet heard from: the socket has to open AND deliver `hello`
+  // before the store describes anything. Rendering the app in between shows a
+  // built-out UI with no sessions in it, behind a red "disconnected" pill.
+  if (!bootstrapped) return <ConnectingMachine name={chosen.name} />;
   return <>{children}</>;
 }
 

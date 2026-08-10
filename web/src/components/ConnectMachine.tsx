@@ -1,12 +1,9 @@
 import { useState } from 'react';
 import {
   Alert,
-  Box,
   Button,
   Card,
-  Center,
   Code,
-  Group,
   List,
   Loader,
   Stack,
@@ -17,37 +14,8 @@ import {
 import { IconAlertCircle } from '@tabler/icons-react';
 import { claimDevice } from '../lib/storage';
 import { useDevices } from '../lib/devices';
-import { UserMenu } from './UserMenu';
-import { BrandMark } from './BrandMark';
+import { GateShell } from './GateShell';
 import { PairingDiagram } from './PairingDiagram';
-
-/**
- * Chrome for every pre-app state.
- *
- * These screens render instead of the app, so without a header there is no way
- * to sign out — which strands anyone who signed in as the wrong user, or whose
- * machines belong to another account, with nothing but a browser back button.
- */
-function GateShell({ children }: { children: React.ReactNode }) {
-  return (
-    <Box h="100vh" display="flex" style={{ flexDirection: 'column' }}>
-      <Group
-        h={56}
-        px="md"
-        justify="space-between"
-        style={{ flexShrink: 0, borderBottom: '1px solid var(--mantine-color-default-border)' }}
-      >
-        <BrandMark />
-        <UserMenu />
-      </Group>
-      <Box style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-        <Center mih="100%" p="md">
-          {children}
-        </Center>
-      </Box>
-    </Box>
-  );
-}
 
 /**
  * Shown when a signed-in user has no machine to connect to — either they have
