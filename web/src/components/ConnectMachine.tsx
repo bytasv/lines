@@ -18,6 +18,7 @@ import { IconAlertCircle } from '@tabler/icons-react';
 import { claimDevice } from '../lib/storage';
 import { useDevices } from '../lib/devices';
 import { UserMenu } from './UserMenu';
+import { BrandMark } from './BrandMark';
 import { PairingDiagram } from './PairingDiagram';
 
 /**
@@ -36,7 +37,7 @@ function GateShell({ children }: { children: React.ReactNode }) {
         justify="space-between"
         style={{ flexShrink: 0, borderBottom: '1px solid var(--mantine-color-default-border)' }}
       >
-        <Text fw={600}>Lines</Text>
+        <BrandMark />
         <UserMenu />
       </Group>
       <Box style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
