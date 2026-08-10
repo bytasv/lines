@@ -866,15 +866,24 @@ app.post('/v1/devices/register', async (req, res) => {
   };
   // Re-registering the same machine re-issues a code rather than duplicating it,
   // but never silently re-binds one already claimed by a user.
+  //
+  // A REVOKED row is exempt: revocation leaves userId in place and only stamps
+  // revokedAt, so treating any owned row as final meant a revoked machine could
+  // never come back — register answered 409 while the relay refused it for being
+  // revoked, and that device id was dead for good. Re-registering is safe because
+  // the fresh code it returns is worthless until a signed-in user claims it.
   const existing = await prisma.device.findUnique({ where: { id: body.id } });
-  if (existing?.userId) {
+  if (existing?.userId && !existing.revokedAt) {
     res.status(409).json({ error: 'device already paired' });
     return;
   }
   await prisma.device.upsert({
     where: { id: body.id },
     create: { id: body.id, ...data },
-    update: data,
+    // Clear the previous owner and the revocation explicitly: leaving either in
+    // place would hand the machine straight back to the account that revoked it,
+    // or leave the relay refusing a row that now has a valid pairing code.
+    update: { ...data, userId: null, revokedAt: null },
   });
   res.json({ pairingCode: code, expiresAt: data.pairingExpiresAt.toISOString() });
 });
