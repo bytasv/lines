@@ -25,15 +25,29 @@ a turn with it.
 
 - `spawnChild`, `childEnv`, `loginShellPath` — child process supervision and
   environment
-- `startUiServer` — serves `web/dist` plus `/__bridge`
+- `startUiServer` — serves `web/dist` plus `/__bridge`; only started in local mode
+- `RELAY_MODE` — `Boolean(LINES_RELAY_URL && LINES_STORAGE_URL)`; the switch
+  between the two data-flow paths above
+- `openPairingWindow` — the data-URL window showing a pairing code
 - `UpdateManager.requestRestart` / `.busy` / `.current`
 
 ## Data flow
 
-On boot the shell spawns the worker, then the bridge (with an IPC channel),
-starts a local static server for `web/dist`, and opens a window against it. The
-`/__bridge` endpoint on that server answers the same shape as the Vite dev
-plugin, so the web client needs no change to run under either.
+On boot, if `LINES_RELAY_URL`/`LINES_STORAGE_URL` are unset (**local mode**), the
+shell spawns the worker, then the bridge (with an IPC channel), starts a local
+static server for `web/dist`, and opens a window against it. The `/__bridge`
+endpoint on that server answers the same shape as the Vite dev plugin, so the
+web client needs no change to run under either.
+
+With both set (**hosted/relay mode**), the shell instead loads or mints this
+machine's identity (`server/src/device.ts`), registers it with the hosted
+storage server, and spawns the bridge with `RELAY_URL`/`STORAGE_URL`/the device
+credential in its env. It serves no local UI at all — the user works in the
+hosted web app, and this process exists only to run the agent and keep the
+outbound relay connection open. If registration returns a pairing code (the
+machine has never been claimed), a small `BrowserWindow` shows it as a data URL,
+independent of `web/dist` even existing; the tray menu repeats it and opens the
+hosted URL instead of a local window.
 
 Update state flows bridge → shell → bridge: the shell pushes `updateStatus` over
 `process.send`; `UpdateManager` folds in the live `busy` flag and broadcasts it
@@ -63,6 +77,9 @@ whenever `process.send` is absent, which is every Tilt and `npm run dev` run.
   `desktop/src/main.ts`) is a deliberate no-op today: `electron-updater`'s
   install step needs a signed, notarized build, which does not exist yet. It is
   left obviously inert rather than faked.
+- Device registration failing at boot (storage unreachable) is not fatal: the
+  bridge's own `RelayClient` retries the relay forever, so a machine that
+  registers late still comes up once storage is reachable again.
 
 ## Architectural rules
 
@@ -79,6 +96,9 @@ whenever `process.send` is absent, which is every Tilt and `npm run dev` run.
 - The desktop app and Tilt both read the same `LINES_INSTANCE`/port-discovery
   contract (see [local-port-discovery](local-port-discovery.md)), so a dev
   checkout and an installed app never collide.
+- Device identity lives in `server/src/device.ts`, not duplicated here, so the
+  shell and `npm run pair -w server` (used by Tilt) cannot drift on the
+  credential format.
 
 ## Related decisions
 
@@ -86,3 +106,6 @@ whenever `process.send` is absent, which is every Tilt and `npm run dev` run.
   find and announce their ports
 - [browser-bridge-link](browser-bridge-link.md) — `hello`'s protocol version,
   which the update flow exists to keep from drifting too far
+- [device-pairing](device-pairing.md) — the identity and registration this
+  shell performs in hosted mode
+- [remote-relay-bridge](remote-relay-bridge.md) — what `RELAY_URL` connects to

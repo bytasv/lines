@@ -46,6 +46,14 @@ which resources are declared at all. Preflight reads `.env` key names (never
 values) to decide whether `storage` is allowed to start; a missing key fails
 loudly instead of the storage server's `process.exit(0)`.
 
+Whether this bridge talks to a hosted install is **not** a Tilt flag — it
+follows `RELAY_URL` in `.env`, which the bridge reads itself via its own
+dotenv. `STORAGE_URL` is injected into `serve_env` only as a *default*
+(`http://localhost:8790`); an explicit `.env` value overrides it, so a bridge
+configured to dial a hosted relay does not end up syncing to a local storage
+server instead. Running agent-only against a deployment is a resource-level
+action (disable `web` and `storage` from the Tilt UI), not a flag.
+
 ## Dependencies
 
 - Tilt v0.37.0+ (`version_settings(constraint='>=0.33.0')`)
@@ -80,6 +88,14 @@ port isolation, `tilt down` orphan check).
   turn the way a worker/bridge process restart can.
 - A pull that changes only `package-lock.json` triggers nothing; run `tilt
   trigger install` by hand.
+- `pair-device` (`npm run pair -w server`) is always declared but never runs
+  automatically (`auto_init=False`) — it is something you trigger when a
+  pairing code has expired (15 minutes) or a machine was revoked, not a step in
+  bringing the stack up. It is idempotent: once claimed it prints "already
+  paired" and exits 0.
+- `RELAY_URL` set without `STORAGE_URL` warns rather than failing preflight: the
+  bridge would dial a hosted relay while syncing to the local storage default,
+  splitting one machine's data across two databases.
 
 ## Architectural rules
 

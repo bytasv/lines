@@ -994,7 +994,7 @@
         "the web store never caches the allowlist in localStorage; it is server-authoritative and arrives on every hello",
         "removing an entry has no confirmation modal since it only narrows the guard and fails safe",
         "the review modal is mounted at the app root, not inside Settings, so a divergence reaches the user without requiring a gear click",
-        "assessToolCall's self-worker-source check (isSelfWorkerSource) runs before the blanket tool allowlist short-circuit — the first guard verdict an allowlist entry cannot disarm; keep it ordered first in any refactor"
+        "assessToolCall's self-worker-source check (isSelfWorkerSource) runs before the blanket tool allowlist short-circuit \u2014 the first guard verdict an allowlist entry cannot disarm; keep it ordered first in any refactor"
       ],
       "relatedDecisions": []
     },
@@ -1211,7 +1211,9 @@
         "toggling freeze restarts that resource once, at the moment it's toggled, dropping any in-flight agent turn on the worker",
         "freezing worker while bridge stays hot and editing workerProtocol.ts produces a visible protocol-version mismatch in the bridge log until the worker is restarted by hand",
         "web is excluded from the freeze options since Vite HMR never restarts the dev server",
-        "a pull that changes only package-lock.json triggers nothing; run tilt trigger install by hand"
+        "a pull that changes only package-lock.json triggers nothing; run tilt trigger install by hand",
+        "pair-device (npm run pair -w server) is always declared but never auto_init - triggered by hand when a code expires or a machine is revoked, not part of bringing the stack up; idempotent, prints 'already paired' and exits 0 on a claimed device",
+        "RELAY_URL set without STORAGE_URL warns rather than failing preflight - the bridge would dial a hosted relay while syncing to the local storage default, splitting one machine's data across two databases"
       ],
       "architecturalRules": [
         "no deps= on the four service resources \u2014 tsx watch/Vite own file-watching, not Tilt",
@@ -1219,7 +1221,8 @@
         "preflight reads .env key names only, never values, into any Tilt spec/log/UI button",
         "the Freeze/Resume UI buttons and the --no-reload CLI flag are two entry points into one FROZEN state, reconciled by re-invoking tilt args with the full current flag set rather than mutating Tilt state directly",
         "no resource watches a file its own cmd writes \u2014 install's deps list the five workspace manifests but omit package-lock.json, which npm install itself rewrites and would retrigger the resource forever",
-        "resource_deps gates only the first build after tilt up; a later re-run of install does not cascade to prisma-generate or the four service resources"
+        "resource_deps gates only the first build after tilt up; a later re-run of install does not cascade to prisma-generate or the four service resources",
+        "whether the bridge talks to a hosted install is not a Tilt flag - it follows RELAY_URL in .env, read by the bridge's own dotenv; STORAGE_URL is injected into serve_env only as a default, so an explicit .env value is never overridden"
       ],
       "relatedDecisions": []
     },
@@ -2074,37 +2077,46 @@
       "purpose": "Binds a machine's bridge to a Clerk user so the relay can refuse an unclaimed device and refuse a claimed device to any user but its owner. Only a hash of the machine's pairing secret ever reaches Postgres.",
       "entryPoints": [
         "storage/src/index.ts",
-        "relay/src/index.ts"
+        "relay/src/index.ts",
+        "server/src/device.ts",
+        "server/scripts/pair-device.ts"
       ],
       "files": [
         "storage/prisma/schema.prisma",
         "storage/src/index.ts",
         "relay/src/index.ts",
-        "relay/src/mux.ts"
+        "relay/src/mux.ts",
+        "server/src/device.ts",
+        "Tiltfile"
       ],
       "symbols": [
         "Device",
-        "DeviceHub.ownerId"
+        "DeviceHub.ownerId",
+        "deviceIdentity"
       ],
       "tests": [
         "storage/src/schema.credentials.test.ts",
         "relay/src/mux.test.ts"
       ],
       "businessRules": [
-        "register is unauthenticated - the machine has no user yet and a code is worthless until claimed; re-registering an already-claimed device is refused (409) rather than silently re-bound",
+        "register is unauthenticated - the machine has no user yet and a code is worthless until claimed; re-registering an already-claimed AND UNREVOKED device is refused (409) rather than silently re-bound",
+        "re-registering a REVOKED device clears its stale userId/revokedAt and issues a fresh code - otherwise a revoked machine could never be claimed again, since claim and verify both refuse a revoked row",
         "claim/verify answer the same 'unknown or expired code' for absent, expired, and revoked, so a distinct 'expired' reply can't confirm a guessed code had once been real",
-        "revoking a device tombstones it (revokedAt) rather than deleting the row, so it stays an audit trail",
+        "revoking a device tombstones it (revokedAt) rather than deleting the row, so it stays an audit trail; it stops the device RECONNECTING, checked on attach, not on every frame of a connection already open",
         "GET /v1/devices never returns secretHash",
         "if storage is unreachable the relay refuses the device rather than admitting it"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
         "the relay holds no database credentials and never queries Postgres directly - it asks storage, the only process with DB credentials at all",
-        "the cross-user check (hub.ownerId === userId) lives on the /client gate, not deeper in routing, so it fails closed at the earliest point"
+        "the cross-user check (hub.ownerId === userId) lives on the /client gate, not deeper in routing, so it fails closed at the earliest point",
+        "POST /v1/devices/verify is machine-to-machine with no Clerk token, so it is gated by a constant-time-compared RELAY_SHARED_SECRET instead, and excluded from storage's public router in a hosted deployment even with the secret guessed; unset, storage refuses verification with 503 rather than falling open",
+        "device identity (mint, hash, register) lives in server/src/device.ts, shared by the desktop app and the CLI pairing script, so the two cannot drift on the credential format"
       ],
       "relatedDecisions": [
         "remote-relay-bridge",
-        "app-managed-login-only"
+        "app-managed-login-only",
+        "production-deployment"
       ]
     },
     {
@@ -2126,7 +2138,9 @@
         "childEnv",
         "loginShellPath",
         "startUiServer",
-        "UpdateManager"
+        "UpdateManager",
+        "RELAY_MODE",
+        "openPairingWindow"
       ],
       "tests": [
         "server/src/updates.test.ts"
@@ -2134,17 +2148,22 @@
       "businessRules": [
         "a restart is refused while any session is running, waiting-permission, or waiting-approval, since a restart kills bridge and worker together under one atomic update",
         "closing the window does not quit the app, and must not kill an in-flight turn",
-        "the actual install/restart mechanism is a deliberate no-op today - electron-updater's install step needs a signed, notarized build that does not exist yet, so it is left obviously inert rather than faked"
+        "the actual install/restart mechanism is a deliberate no-op today - electron-updater's install step needs a signed, notarized build that does not exist yet, so it is left obviously inert rather than faked",
+        "in hosted/relay mode (LINES_RELAY_URL and LINES_STORAGE_URL both set) the shell serves no local UI - it registers this machine's device identity, spawns the bridge with the relay/storage/device env, and shows a pairing code window only if the machine has not been claimed yet",
+        "device registration failing at boot is not fatal - RelayClient retries the relay forever, so a machine that registers late still comes up once storage is reachable again"
       ],
       "architecturalRules": [
         "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
         "children are spawned with ELECTRON_RUN_AS_NODE=1, since process.execPath inside Electron is the Electron binary and would otherwise relaunch the app",
         "the worker is never auto-restarted on crash - its live queries are gone, and a silent respawn would look like a healthy session that lost its turn; the bridge is restarted freely",
-        "the desktop app and Tilt share the same LINES_INSTANCE/port-discovery contract, so a dev checkout and an installed app never collide"
+        "the desktop app and Tilt share the same LINES_INSTANCE/port-discovery contract, so a dev checkout and an installed app never collide",
+        "device identity lives in server/src/device.ts, not duplicated in the shell, so it and npm run pair -w server cannot drift on the credential format"
       ],
       "relatedDecisions": [
         "local-port-discovery",
-        "browser-bridge-link"
+        "browser-bridge-link",
+        "device-pairing",
+        "remote-relay-bridge"
       ]
     },
     {
@@ -2215,6 +2234,83 @@
       "relatedDecisions": [
         "workflow-step-version-history",
         "multi-root-projects"
+      ]
+    },
+    {
+      "id": "production-deployment",
+      "name": "Production deployment",
+      "doc": "features/production-deployment.md",
+      "purpose": "Runs the server side of a hosted install (relay, storage, static web bundle) as containers behind Traefik, with per-hostname TLS. Excludes the bridge and worker entirely - the agent runs on each user's own machine.",
+      "entryPoints": [
+        "deploy/docker/compose.yml",
+        "deploy/docker/Dockerfile"
+      ],
+      "files": [
+        "deploy/docker/Dockerfile",
+        "deploy/docker/compose.yml",
+        "deploy/docker/web-nginx.conf",
+        "deploy/docker/env.example"
+      ],
+      "symbols": [],
+      "tests": [],
+      "businessRules": [
+        "storage never gets a published port or Traefik exposure beyond its one router; only relay and the browser's device calls reach it, everything else is internal-network only",
+        "migrations run via `docker compose run --rm migrate` before the first `up` against a new database, using the direct (:5432) connection string"
+      ],
+      "architecturalRules": [
+        "npm ci is scoped by --workspace rather than --omit=optional, since --omit=optional also drops @rollup/rollup-linux-x64-gnu (an optional dependency on the same platform-binary mechanism as the Claude SDK's native binary) and breaks vite build",
+        "the relay's Traefik router carries no StripPrefix middleware - relay/src/index.ts matches url.pathname exactly, so a rewritten path closes the socket with 1008",
+        "storage's public router excludes /v1/devices/verify by rule, on top of that route's own shared-secret gate - defense in depth: a network-level exclusion and an application-level check, either could fail without the other",
+        "the storage image installs openssl explicitly - node:22-slim ships without libssl and Prisma's query engine otherwise falls back to a guessed build and warns at every boot"
+      ],
+      "relatedDecisions": [
+        "remote-relay-bridge",
+        "device-pairing",
+        "desktop-shell"
+      ]
+    },
+    {
+      "id": "hosted-device-gate",
+      "name": "Hosted device gate",
+      "doc": "features/hosted-device-gate.md",
+      "purpose": "Gates the hosted web app behind 'which of my machines am I talking to': lists paired machines, pairs new ones, switches between them, and re-gates if the active machine is revoked or the socket closes with an auth-shaped code. Inert in a local build.",
+      "entryPoints": [
+        "web/src/main.tsx",
+        "web/src/components/SettingsModal.tsx"
+      ],
+      "files": [
+        "web/src/main.tsx",
+        "web/src/lib/devices.ts",
+        "web/src/lib/storage.ts",
+        "web/src/components/ConnectMachine.tsx",
+        "web/src/components/ConnectingMachine.tsx",
+        "web/src/components/GateShell.tsx",
+        "web/src/components/PairingDiagram.tsx",
+        "web/src/components/DevicesSection.tsx",
+        "web/src/ws.ts"
+      ],
+      "symbols": [
+        "useDevices",
+        "chooseDevice",
+        "bootstrapped",
+        "switchDevice",
+        "DeviceGate"
+      ],
+      "tests": [],
+      "businessRules": [
+        "pairing a new machine only becomes the active one automatically if none was active before - silently moving a working session to a different computer would be worse than an extra click",
+        "revoking is described in the UI as what it does: stops a machine reconnecting, does not sever a connection already open",
+        "the Machines settings section does not render in a local build - a one-row list of the machine you're already on is noise"
+      ],
+      "architecturalRules": [
+        "Clerk token providers are installed during render, not inside useEffect - child effects (DeviceGate) run before parent effects (AuthedConnect), so an effect-based registration meant the device list's first fetch and the first socket connect both fired with no token attached",
+        "switchDevice closes the existing socket and clears bootstrapped before reconnecting, rather than waiting for the old one to drop - in-flight messages on it belong to the old machine's bridge",
+        "the socket URL is built with URL/searchParams, not concatenation - the relay matches its endpoint path exactly and a concatenated token could produce a non-matching path"
+      ],
+      "relatedDecisions": [
+        "device-pairing",
+        "remote-relay-bridge",
+        "production-deployment"
       ]
     }
   ]
