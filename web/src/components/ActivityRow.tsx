@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Box, Group, Loader, Text } from '@mantine/core';
+import { agentMeta, MAIN_AGENT_META } from '../lib/agents';
 import type { LiveActivity } from '../lib/transcript';
 
 /** Seconds of silence before the row starts warning about missing output. */
@@ -7,22 +8,21 @@ const QUIET_WARN_S = 30;
 /** Seconds of silence after which the warning turns orange. */
 const QUIET_ALARM_S = 120;
 
+/** The phase text alone — the agent it belongs to is rendered as a badge prefix. */
 function label(live: LiveActivity | null): string {
   if (!live) return 'Working…';
-  // Named when the spawning Task call is known, generic otherwise.
-  const prefix = live.subagent ? `${live.subagentType ?? 'Subagent'}: ` : '';
   switch (live.phase) {
     case 'thinking':
-      return `${prefix}Thinking…`;
+      return 'Thinking…';
     case 'tool-prep': {
       if (live.toolName === 'ExitPlanMode') {
         const kb = live.inputBytes && live.inputBytes >= 2048 ? ` · ${Math.round(live.inputBytes / 1024)}kB` : '';
-        return `${prefix}Writing plan…${kb}`;
+        return `Writing plan…${kb}`;
       }
-      return `${prefix}Preparing ${live.toolName ?? 'tool'}…`;
+      return `Preparing ${live.toolName ?? 'tool'}…`;
     }
     default:
-      return `${prefix}Responding…`;
+      return 'Responding…';
   }
 }
 
@@ -50,12 +50,24 @@ export function ActivityRow({
 
   const elapsed = startedAt != null ? Math.max(0, Math.round((now - startedAt) / 1000)) : null;
   const quiet = lastEventAt != null ? Math.round((now - lastEventAt) / 1000) : null;
+  // Same map the settled Agent card reads, so a running agent and the card that
+  // replaces it name it identically. The main agent shares the glyph but not the
+  // colour, so who is working reads before the text does — and it stays unnamed:
+  // the session *is* the main agent, so a "Claude:" prefix on every row is noise.
+  const agent = live?.subagent ? agentMeta(live.subagentType) : live ? MAIN_AGENT_META : null;
+  const named = Boolean(live?.subagent);
 
   return (
     <Group align="flex-start" gap="xs" wrap="nowrap">
       <Loader size={14} style={{ marginTop: 5, flexShrink: 0 }} />
       <Box style={{ flex: 1, minWidth: 0 }}>
         <Text size="sm" c="dimmed">
+          {agent && (
+            <Text span size="sm" c={agent.color}>
+              <agent.icon size={13} style={{ verticalAlign: '-2px' }} />
+              {named ? ` ${agent.label}: ` : ' '}
+            </Text>
+          )}
           {label(live)}
           {elapsed != null ? ` · ${elapsed}s` : ''}
           {quiet != null && quiet > QUIET_WARN_S && (

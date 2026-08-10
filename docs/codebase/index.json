@@ -561,7 +561,7 @@
         "user bubble Paper needs minWidth: 0 alongside maxWidth: '80%' so wide content (e.g. a code block or one long unbroken token) can't win over max-width via min-content sizing",
         "compact markdown rhythm overrides Mantine spacing variables scoped to .md-body rather than CSS selectors, because Typography's list rule outranks a .md-body ul selector override on specificity",
         "collapsible transcript rows (agent turns, tool groups, tool calls) share one borderless .tx-row convention: no Paper/border, CSS-only hover, and no accumulating indentation",
-        "a collapsed row's body unmounts instead of only being CSS-hidden, so per-row state that must survive collapse/expand lives in a module-scope sticky map, not component state",
+        "a collapsed row's body unmounts instead of only being CSS-hidden, so per-row state that must survive collapse/expand lives in a module-scope sticky map, not component state; sub-toggles inside an already-expanded body (a spawn card's prompt disclosure, every tool card's raw-input toggle) are deliberately plain useState, not sticky, since resetting on close is expected there.",
         "no virtualization is used for the transcript list; lazy-mounted bodies keep per-row cost low enough that this still holds"
       ],
       "relatedDecisions": []
@@ -741,8 +741,8 @@
       "architecturalRules": [
         "SESSIONS_PUSH_MAX_BYTES (1.5MB) mirrors the same headroom-under-2mb constant style as TOTAL_MAX_BYTES in server/src/memory.ts",
         "chunk sends are sequential inside the debounce timer callback, not parallel, so one failure doesn't strand the rest silently",
-        "pushSessions owns the dedup filter; userContext.ts's syncNow still hands it the full session list — sync.ts keeps sole ownership of what actually goes on the wire",
-        "the real growth driver (WorkflowState.outputs/lastStepOutput, uncapped in server/src/workflows.ts) is not capped by this change — deferred as a follow-up"
+        "pushSessions owns the dedup filter; userContext.ts's syncNow still hands it the full session list \u2014 sync.ts keeps sole ownership of what actually goes on the wire",
+        "the real growth driver (WorkflowState.outputs/lastStepOutput, uncapped in server/src/workflows.ts) is not capped by this change \u2014 deferred as a follow-up"
       ],
       "relatedDecisions": [
         "agent-memory-sync"
@@ -1703,7 +1703,7 @@
       "id": "subagent-transcript",
       "name": "Subagent transcript nesting",
       "doc": "features/subagent-transcript.md",
-      "purpose": "Nest a subagent's (Task tool) transcript under its spawning card instead of flattening it into the main transcript, and exclude subagent messages from main-agent state (context usage, workflow step output, turn summaries).",
+      "purpose": "Nest a subagent's transcript under its spawning card instead of flattening it into the main transcript, exclude subagent messages from main-agent state (context usage, workflow step output, turn summaries), and give the spawning card a description-first header with a shared agent-identity badge (icon + color) also used by the live ActivityRow.",
       "entryPoints": [
         "web/src/lib/transcript.ts",
         "server/src/sessions.ts"
@@ -1712,17 +1712,25 @@
         "shared/types.ts",
         "server/src/sessions.ts",
         "web/src/lib/transcript.ts",
+        "web/src/lib/agents.ts",
+        "web/src/components/TaskCall.tsx",
         "web/src/components/Transcript.tsx",
         "web/src/components/ToolGroup.tsx",
         "web/src/components/ToolCallCard.tsx",
-        "web/src/components/ActivityRow.tsx"
+        "web/src/components/ActivityRow.tsx",
+        "web/src/index.css"
       ],
       "symbols": [
         "subagentParentId",
         "Sink",
         "sinkFor",
         "ToolBlock.children",
-        "scanTurnActivity"
+        "scanTurnActivity",
+        "isAgentTool",
+        "parseTaskInput",
+        "agentMeta",
+        "MAIN_AGENT_META",
+        "taskFlags"
       ],
       "tests": [
         "server/src/sessions.turns.test.ts",
@@ -1730,13 +1738,18 @@
       ],
       "businessRules": [
         "a subagent's assistant text and tool calls are never counted as main-agent output: workflow step output, the turn summary, and the live context-usage reading are all derived from main-agent messages only",
-        "a subagent's tool calls and text nest under its spawning Task card, never inline in the main transcript or folded into the main agent's tool group",
-        "a subagent cannot itself spawn a Task (harness restriction), so nesting is one level deep in practice, though the data model is recursive",
-        "a message whose parent_tool_use_id names a Task block not present in the transcript falls back to the main sink instead of being dropped"
+        "a subagent's tool calls and text nest under its spawning card, never inline in the main transcript or folded into the main agent's tool group",
+        "a subagent cannot itself spawn another subagent (harness restriction), so nesting is one level deep in practice, though the data model is recursive",
+        "a message whose parent_tool_use_id names a spawn block not present in the transcript falls back to the main sink instead of being dropped",
+        "a spawn card leads with description, not the tool name; an unmapped or plugin-scoped subagent_type degrades to a generic agent badge (never hidden, never a crash)",
+        "the main agent and a subagent share the same badge icon but never the same color, so who is running reads from color alone before any label"
       ],
       "architecturalRules": [
         "existing transcripts already carry parent_tool_use_id on disk (persisted verbatim by the worker), so this feature is a pure read-side reinterpretation with no new capture and no migration",
         "no agents option was added to buildQueryOptions; subagent definitions are inherited via settingSources, the same mechanism that already inherits the rest of the preset",
+        "the spawn tool's name is not a stable literal: the harness emits 'Agent', the SDK's own AgentInput type and docs call it 'Task', and both appear in persisted transcripts, so every consumer matches via isAgentTool() rather than one string",
+        "agentMeta/MAIN_AGENT_META is the single source of truth for agent icon/color, read by both the settled card and the live ActivityRow so they cannot drift apart",
+        "parseTaskInput never throws and never assumes a field is present, since AgentInput gains fields the map won't know about (effort is the live example) \u2014 this is why the raw-input toggle stays reachable behind every spawn card",
         "nested rendering is threaded down as a renderNested callback rather than a new shared module, since ToolCallCard cannot import Transcript.tsx's Item without an import cycle"
       ],
       "relatedDecisions": []
@@ -2353,6 +2366,43 @@
         "remote-relay-bridge",
         "production-deployment"
       ]
+    },
+    {
+      "id": "tool-call-structured-input",
+      "name": "Tool call structured input",
+      "doc": "features/tool-call-structured-input.md",
+      "purpose": "Replace the raw JSON dump every transcript tool card showed (collapsed one-liner and expanded body) with a per-tool structured field list; raw JSON stays one toggle away. A resolved edit or answered AskUserQuestion drops its now-redundant expand affordance / duplicate summary card.",
+      "entryPoints": [
+        "web/src/components/ToolCallCard.tsx"
+      ],
+      "files": [
+        "web/src/lib/toolFields.ts",
+        "web/src/components/ToolCallCard.tsx",
+        "web/src/components/QuestionPrompt.tsx",
+        "web/src/components/Transcript.tsx",
+        "web/src/index.css"
+      ],
+      "symbols": [
+        "toolFields",
+        "toolSummary",
+        "parseQuestionAnswers",
+        "matchAnswerToOptions",
+        "BODY_CAP",
+        "QuestionReview",
+        "isRedundant"
+      ],
+      "tests": [],
+      "businessRules": [
+        "every tool's expanded body shows a structured field list, never raw JSON by default; raw JSON is one toggle away for every tool with no exceptions",
+        "a tool call already fully explained elsewhere in the row loses its expand affordance instead of showing an empty/redundant body: a successful edit (diff button covers it) and a resolved AskUserQuestion (its own card carries the review) are the current cases",
+        "an AskUserQuestion call's answer is read from its tool result's prose, not its input \u2014 the input only ever contains the questions asked"
+      ],
+      "architecturalRules": [
+        "toolFields degrades instead of failing: an unclassifiable value becomes a capped json field rather than throwing or being skipped, since tool input shapes (especially MCP tools) are not controlled by this code",
+        "OptionCard gained a readOnly prop instead of being duplicated into a second component, so a settled answer looks exactly like the choice that produced it",
+        "the raw-input toggle shows even for an empty ({}) input, unlike PermissionPrompt's equivalent guard \u2014 consistency across every tool card was chosen over hiding a no-op toggle"
+      ],
+      "relatedDecisions": []
     }
   ]
 }

@@ -13,6 +13,7 @@ import {
 } from '@mantine/core';
 import { IconHelpCircle } from '@tabler/icons-react';
 import type { AskUserQuestionInput, PermissionRequestData } from '@lines/shared';
+import { matchAnswerToOptions, parseQuestionAnswers } from '../lib/toolFields';
 import { send } from '../ws';
 
 const OTHER = '__other__';
@@ -28,44 +29,122 @@ function OptionCard({
   checked,
   multi,
   onToggle,
+  readOnly,
 }: {
   label: string;
   description?: string;
   checked: boolean;
   multi: boolean;
-  onToggle: () => void;
+  onToggle?: () => void;
+  /** Settled transcript view: the same card, without a click target. */
+  readOnly?: boolean;
 }) {
+  const card = (
+    <Paper
+      withBorder
+      radius="md"
+      px="sm"
+      py={8}
+      style={{
+        borderColor: checked ? 'var(--mantine-primary-color-filled)' : undefined,
+        background: checked ? 'var(--mantine-color-default-hover)' : undefined,
+        // Unpicked options are context, not choices, once the question is answered.
+        opacity: readOnly && !checked ? 0.55 : undefined,
+      }}
+    >
+      <Group gap="sm" wrap="nowrap" align="flex-start">
+        {multi ? (
+          <Checkbox checked={checked} onChange={onToggle} readOnly={readOnly} size="xs" mt={2} tabIndex={-1} />
+        ) : (
+          <Radio checked={checked} onChange={onToggle} readOnly={readOnly} size="xs" mt={2} tabIndex={-1} />
+        )}
+        <div>
+          <Text size="sm" fw={checked ? 600 : 500}>
+            {label}
+          </Text>
+          {description && (
+            <Text size="xs" c="dimmed">
+              {description}
+            </Text>
+          )}
+        </div>
+      </Group>
+    </Paper>
+  );
+  if (readOnly) return card;
   return (
     <UnstyledButton onClick={onToggle} w="100%">
-      <Paper
-        withBorder
-        radius="md"
-        px="sm"
-        py={8}
-        style={{
-          borderColor: checked ? 'var(--mantine-primary-color-filled)' : undefined,
-          background: checked ? 'var(--mantine-color-default-hover)' : undefined,
-        }}
-      >
-        <Group gap="sm" wrap="nowrap" align="flex-start">
-          {multi ? (
-            <Checkbox checked={checked} onChange={onToggle} size="xs" mt={2} tabIndex={-1} />
-          ) : (
-            <Radio checked={checked} onChange={onToggle} size="xs" mt={2} tabIndex={-1} />
-          )}
-          <div>
-            <Text size="sm" fw={checked ? 600 : 500}>
-              {label}
-            </Text>
-            {description && (
-              <Text size="xs" c="dimmed">
-                {description}
-              </Text>
-            )}
-          </div>
-        </Group>
-      </Paper>
+      {card}
     </UnstyledButton>
+  );
+}
+
+/**
+ * A settled `AskUserQuestion` call in the transcript: the same option cards the
+ * prompt offered, with what was picked still selected. Reuses {@link OptionCard} on
+ * purpose — reading back an answer should look like the choice that produced it,
+ * which a `Q: A` text pair (or a raw JSON dump) does not.
+ */
+export function QuestionReview({
+  input,
+  result,
+}: {
+  input: Record<string, unknown>;
+  result?: string;
+}) {
+  // Tool inputs reach the web verbatim, so nothing here may be assumed well-formed.
+  const questions = Array.isArray(input.questions)
+    ? (input.questions as AskUserQuestionInput['questions'])
+    : [];
+  if (questions.length === 0) return null;
+  const answers = parseQuestionAnswers(result);
+
+  return (
+    <Stack gap="sm">
+      {questions.map((q, qi) => {
+        const answer = answers[qi] ?? '';
+        const options = Array.isArray(q?.options) ? q.options : [];
+        const multi = Boolean(q?.multiSelect);
+        const { picked, custom } = matchAnswerToOptions(
+          answer,
+          options.map((opt) => opt.label),
+        );
+        return (
+          <div key={qi}>
+            <Group gap={6} mb={6} wrap="nowrap">
+              {q?.header && (
+                <Badge variant="light" size="sm">
+                  {q.header}
+                </Badge>
+              )}
+              <Text size="xs" fw={500}>
+                {q?.question}
+              </Text>
+            </Group>
+            <Stack gap={4}>
+              {options.map((opt) => (
+                <OptionCard
+                  key={opt.label}
+                  label={opt.label}
+                  description={opt.description}
+                  checked={picked.includes(opt.label)}
+                  multi={multi}
+                  readOnly
+                />
+              ))}
+              {custom.map((text) => (
+                <OptionCard key={text} label={text} description="Typed answer" checked multi={multi} readOnly />
+              ))}
+              {!answer && (
+                <Text size="xs" c="dimmed" fs="italic">
+                  No answer recorded.
+                </Text>
+              )}
+            </Stack>
+          </div>
+        );
+      })}
+    </Stack>
   );
 }
 

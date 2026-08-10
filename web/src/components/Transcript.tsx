@@ -26,7 +26,13 @@ import {
   IconRoute,
   IconZoomIn,
 } from '@tabler/icons-react';
-import type { Attachment, ContextCompactData, TranscriptEvent, WorkflowMarkerData } from '@lines/shared';
+import type {
+  Attachment,
+  ContextCompactData,
+  PermissionRequestData,
+  TranscriptEvent,
+  WorkflowMarkerData,
+} from '@lines/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
 import {
@@ -368,6 +374,20 @@ function Item({
   }
 }
 
+/**
+ * A permission item whose tool card already says everything it would.
+ *
+ * Auto-allowed calls never had anything to show. An *answered* `AskUserQuestion` is
+ * the same case since its tool card renders the questions with the chosen options
+ * still selected — the resolved prompt underneath repeated the question and answer a
+ * second time. Denied and expired ones stay: their copy ("re-send your prompt and
+ * Claude will ask again") exists nowhere else.
+ */
+function isRedundant(item: { data: PermissionRequestData; resolution?: string }): boolean {
+  if (item.data.auto) return true;
+  return item.data.toolName === 'AskUserQuestion' && item.resolution === 'allow';
+}
+
 // Sticky per-turn override (Compact level), keyed `${sessionId}:${turn.key}`. Module scope
 // so it survives Transcript remount and rebuilds; `t*` keys never collide with `g*` groups.
 const turnOverrides = new Map<string, boolean>();
@@ -495,7 +515,7 @@ export function Transcript({
   // are redundant (their tool shows in the group card) so drop them; real prompts stay.
   const { built, live } = useMemo(() => {
     const { items, live } = buildTranscript(events, compactionLevel !== 'full');
-    return { built: items.filter((it) => !(it.kind === 'permission' && it.data.auto)), live };
+    return { built: items.filter((it) => !(it.kind === 'permission' && isRedundant(it))), live };
   }, [events, compactionLevel]);
   // Compact level additionally folds each agent turn into a collapsible super-group.
   const items = useMemo(

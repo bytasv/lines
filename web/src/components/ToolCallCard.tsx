@@ -1,28 +1,114 @@
 import { useState, type ReactNode } from 'react';
-import { ActionIcon, Badge, Box, Code, Collapse, Group, Stack, Text, Tooltip } from '@mantine/core';
+import {
+  ActionIcon,
+  Badge,
+  Box,
+  Button,
+  Code,
+  Collapse,
+  Group,
+  Stack,
+  Text,
+  Tooltip,
+} from '@mantine/core';
 import { IconChevronDown, IconChevronRight, IconZoomScan } from '@tabler/icons-react';
 import type { ToolBlock, ToolGroupItem, TranscriptItem } from '../lib/transcript';
 import { groupSummary, isEditTool, toolDiff } from '../lib/transcript';
+import { isAgentTool } from '../lib/agents';
+import { BODY_CAP, toolFields, toolSummary, type ToolField } from '../lib/toolFields';
 import { MonacoDiffModal } from './MonacoDiffModal';
-
-function summarizeInput(tool: ToolBlock): string {
-  const input = tool.input;
-  // A Task call is named by the agent it spawned, not just its description.
-  if (tool.name === 'Task') {
-    return `${String(input.subagent_type ?? 'agent')}: ${String(input.description ?? '')}`.trim();
-  }
-  if (typeof input.command === 'string') return input.command;
-  if (typeof input.file_path === 'string') return input.file_path;
-  if (typeof input.pattern === 'string') return String(input.pattern);
-  if (typeof input.url === 'string') return String(input.url);
-  if (typeof input.description === 'string') return String(input.description);
-  const json = JSON.stringify(input);
-  return json.length > 120 ? json.slice(0, 120) + '…' : json;
-}
+import { QuestionReview } from './QuestionPrompt';
+import { TaskBody, TaskHeader } from './TaskCall';
 
 /** The tool calls a subagent made, for the card's activity subtitle. */
 function nestedTools(items: TranscriptItem[]): ToolBlock[] {
   return items.filter((i): i is ToolGroupItem => i.kind === 'tool-group').flatMap((g) => g.tools);
+}
+
+/** Inline field values above this, or spanning lines, need their own code block. */
+const INLINE_FIELD_CAP = 120;
+
+function fieldIsBlock(field: ToolField): boolean {
+  if (field.kind === 'code' || field.kind === 'json') return true;
+  return field.value.includes('\n') || field.value.length > INLINE_FIELD_CAP;
+}
+
+/**
+ * A tool call's input as a field list instead of a JSON dump: the field that names
+ * the call reads prominently, the rest as dimmed `label: value` lines. The raw JSON
+ * stays one toggle away — {@link toolFields} classifies defensively, and MCP tools
+ * carry input shapes it can't know about.
+ */
+function ToolFields({ tool }: { tool: ToolBlock }) {
+  // The primary field is already the collapsed row's one-liner: repeating a Read's
+  // path or a short Bash command inside the body is pure duplication. It survives
+  // only when it needs a block (multi-line or long), where the row can show a
+  // truncated first line at best.
+  const fields = toolFields(tool).filter((f) => f.kind !== 'primary' || fieldIsBlock(f));
+  if (fields.length === 0) return null;
+  return (
+    <Stack gap={2} style={{ minWidth: 0 }}>
+      {fields.map((field) => {
+        const block = fieldIsBlock(field);
+        if (field.kind === 'primary') {
+          return block ? (
+            <Code
+              key={field.key}
+              block
+              style={{ fontSize: 11, maxHeight: 200, overflow: 'auto', whiteSpace: 'pre-wrap' }}
+            >
+              {field.value}
+            </Code>
+          ) : (
+            <Text key={field.key} size="xs" ff="monospace" style={{ wordBreak: 'break-all' }}>
+              {field.value}
+            </Text>
+          );
+        }
+        return (
+          <Box key={field.key}>
+            <Text size="xs" ff={!block && field.kind === 'path' ? 'monospace' : undefined}>
+              <Text span size="xs" c="dimmed" ff="var(--mantine-font-family)">
+                {field.label}
+                {block ? '' : ': '}
+              </Text>
+              {!block && field.value}
+            </Text>
+            {block && (
+              <Code
+                block
+                style={{ fontSize: 11, maxHeight: 200, overflow: 'auto', whiteSpace: 'pre-wrap' }}
+              >
+                {field.value}
+              </Code>
+            )}
+          </Box>
+        );
+      })}
+    </Stack>
+  );
+}
+
+/**
+ * The escape hatch behind the structured field list. Serialized only while open —
+ * the same laziness the collapsed body already relies on, and the reason this is
+ * strictly cheaper than the unconditional JSON dump it replaced.
+ */
+function RawInput({ input }: { input: Record<string, unknown> }) {
+  const [shown, setShown] = useState(false);
+  const json = shown ? JSON.stringify(input, null, 2) : '';
+  return (
+    <>
+      <Button variant="subtle" size="compact-xs" onClick={() => setShown((v) => !v)}>
+        {shown ? 'Hide raw input' : 'Show raw input'}
+      </Button>
+      {shown && (
+        <Code block style={{ fontSize: 11, maxHeight: 200, overflow: 'auto' }}>
+          {json.length > BODY_CAP ? json.slice(0, BODY_CAP) + '\n…(truncated)' : json}
+        </Code>
+      )}
+    </>
+  );
 }
 
 // Sticky per-card expansion, keyed by tool_use id. Module scope so it survives
@@ -54,44 +140,70 @@ export function ToolCallCard({
   const diff = entry?.diff ?? null;
   const stats = entry?.stats ?? null;
   const pending = tool.result === undefined && !editTool;
-  // A Task call with a subagent transcript underneath it: violet badge, and the
-  // subagent's own tool tally instead of nothing.
+  // An Agent/Task call reads as a subagent *run*: its own header, its own container,
+  // and the subagent's tool tally instead of nothing.
+  const isAgent = isAgentTool(tool.name);
+  const isQuestion = tool.name === 'AskUserQuestion';
   const children = tool.children ?? [];
   const nested = children.length > 0 ? nestedTools(children) : [];
+  // A successful edit has nothing behind the chevron the diff button doesn't show
+  // better — the body would be the file content it already renders plus a
+  // "File updated successfully" line. Errors stay expandable: that text is the point.
+  const expandable = !(editTool && diff && !tool.isError);
 
   return (
-    <Box>
+    <Box className={isAgent ? 'tx-task' : undefined}>
       <Group
-        className="tx-row"
+        className={expandable ? 'tx-row' : 'tx-row tx-static'}
         gap="xs"
         wrap="nowrap"
         justify="space-between"
-        onClick={toggle}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            toggle();
-          }
-        }}
+        onClick={expandable ? toggle : undefined}
+        role={expandable ? 'button' : undefined}
+        tabIndex={expandable ? 0 : undefined}
+        onKeyDown={
+          expandable
+            ? (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  toggle();
+                }
+              }
+            : undefined
+        }
       >
         <Group gap="xs" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
-          {expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
-          <Badge
-            variant="light"
-            color={tool.isError ? 'red' : children.length > 0 ? 'violet' : editTool ? 'teal' : 'blue'}
-            tt="none"
-          >
-            {tool.name}
-          </Badge>
-          <Text size="xs" c="dimmed" ff="monospace" truncate style={{ flex: 1 }}>
-            {summarizeInput(tool)}
-          </Text>
-          {nested.length > 0 && (
-            <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
-              {groupSummary(nested)}
-            </Text>
+          {/* The chevron's slot is held open even when there is nothing to expand, so
+              every row's badge stays in the same column. */}
+          {expandable ? (
+            expanded ? (
+              <IconChevronDown size={13} />
+            ) : (
+              <IconChevronRight size={13} />
+            )
+          ) : (
+            <Box w={13} style={{ flexShrink: 0 }} />
+          )}
+          {isAgent ? (
+            <TaskHeader tool={tool} nested={nested} />
+          ) : (
+            <>
+              <Badge
+                variant="light"
+                color={tool.isError ? 'red' : editTool ? 'teal' : 'blue'}
+                tt="none"
+              >
+                {tool.name}
+              </Badge>
+              <Text size="xs" c="dimmed" ff="monospace" truncate style={{ flex: 1 }}>
+                {toolSummary(tool)}
+              </Text>
+              {nested.length > 0 && (
+                <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
+                  {groupSummary(nested)}
+                </Text>
+              )}
+            </>
           )}
           {pending && (
             <Badge variant="dot" color="yellow">
@@ -140,23 +252,37 @@ export function ToolCallCard({
                 {renderNested(children)}
               </Stack>
             )}
-            <Text size="xs" c="dimmed" fw={600}>
-              Input
-            </Text>
-            <Code block style={{ fontSize: 11, maxHeight: 200, overflow: 'auto' }}>
-              {JSON.stringify(tool.input, null, 2)}
-            </Code>
-            {tool.result !== undefined && (
+            {/* A background agent can sit running for minutes before its first
+                nested message lands — say so rather than showing a blank body. */}
+            {isAgent && children.length === 0 && pending && (
+              <Text size="xs" c="dimmed" fs="italic">
+                Waiting for the agent's first message…
+              </Text>
+            )}
+            {isAgent ? (
+              <TaskBody tool={tool} />
+            ) : isQuestion ? (
+              <QuestionReview input={tool.input} result={tool.result} />
+            ) : (
+              <ToolFields tool={tool} />
+            )}
+            {/* An answered question is fully told by the option cards above — the raw
+                questions array and the "your questions have been answered" result add
+                nothing a reader wants. */}
+            {!isQuestion && <RawInput input={tool.input} />}
+            {tool.result !== undefined && (!isQuestion || tool.isError) && (
               <>
                 <Text size="xs" c="dimmed" fw={600} mt={6}>
-                  Result {tool.isError ? '(error)' : ''}
+                  {isAgent ? 'Agent report' : 'Result'} {tool.isError ? '(error)' : ''}
                 </Text>
                 <Code
                   block
                   color={tool.isError ? 'red' : undefined}
                   style={{ fontSize: 11, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}
                 >
-                  {tool.result.length > 6000 ? tool.result.slice(0, 6000) + '\n…(truncated)' : tool.result}
+                  {tool.result.length > BODY_CAP
+                    ? tool.result.slice(0, BODY_CAP) + '\n…(truncated)'
+                    : tool.result}
                 </Code>
               </>
             )}
