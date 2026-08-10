@@ -978,7 +978,14 @@ function timingSafeEqualUtf8(a: string, b: string): boolean {
 }
 
 // Express 5 forwards async route rejections here.
-const onError: ErrorRequestHandler = (err, _req, res, _next) => {
+const onError: ErrorRequestHandler = (err, req, res, _next) => {
+  // Body-parser rejection. Answered as JSON 413 rather than the generic 500 so
+  // the bridge reads the real reason instead of raising a blanket outage banner.
+  if ((err as { type?: string })?.type === 'entity.too.large') {
+    console.warn(`[storage] payload too large: ${req.method} ${req.path} (${(err as { length?: number }).length} bytes)`);
+    res.status(413).json({ error: 'payload too large' });
+    return;
+  }
   console.error('[storage]', err);
   res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
 };

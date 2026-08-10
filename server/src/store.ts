@@ -120,9 +120,13 @@ export type MemoryManifest = Record<string, { key: string; mtimeMs: number; size
  * back as `?since=` so a pull transfers only rows changed since then. These are
  * *server* timestamps, never local ones — the bridge's clock may differ from the
  * database's, and a fast local clock would silently skip rows.
+ *
+ * `sessionsPushed` is the one exception: an *outbound* mark, the newest local
+ * `SessionMeta.updatedAt` storage has already accepted, so a reconnect's bulk
+ * push doesn't re-send every session it already holds.
  */
 export type SyncWatermarks = Partial<
-  Record<'workflows' | 'steps' | 'recipes' | 'sessions' | 'memory', string>
+  Record<'workflows' | 'steps' | 'recipes' | 'sessions' | 'memory' | 'sessionsPushed', string>
 >;
 
 /** Persisted app-managed Claude OAuth credentials. Written 0600 (tokens are secrets). */

@@ -708,6 +708,47 @@
       "relatedDecisions": []
     },
     {
+      "id": "cloud-sync-sessions",
+      "name": "Cloud sync: session push budgeting",
+      "doc": "features/cloud-sync-sessions.md",
+      "purpose": "Push a user's SessionMeta list to the storage server without re-sending rows it already has and without exceeding the storage server's request body limit.",
+      "entryPoints": [],
+      "files": [
+        "shared/types.ts",
+        "server/src/store.ts",
+        "server/src/sync.ts",
+        "server/src/userContext.ts",
+        "storage/src/index.ts"
+      ],
+      "symbols": [
+        "StorageSyncClient.pushSessions",
+        "StorageSyncClient.pushSession",
+        "StorageSyncClient.flushSessions",
+        "StorageSyncClient.chunkSessions",
+        "SyncWatermarks.sessionsPushed"
+      ],
+      "tests": [
+        "server/src/sync.sessions.test.ts",
+        "server/src/sync.credentials.test.ts"
+      ],
+      "businessRules": [
+        "a bulk push filters out sessions whose updatedAt/createdAt is not newer than the last accepted push, since storage rows are LWW upserts and re-sending unchanged rows is pure waste",
+        "a meta with neither updatedAt nor createdAt is always pushed",
+        "a single session whose own JSON exceeds the push budget is dropped from the cloud push (with a one-time warning), never blocking its siblings; its local copy is untouched",
+        "a rejected chunk's sessions are retried on the next flush, not dropped",
+        "a storage 413 (entity.too.large) answers JSON {error: 'payload too large'} instead of a generic 500 HTML page"
+      ],
+      "architecturalRules": [
+        "SESSIONS_PUSH_MAX_BYTES (1.5MB) mirrors the same headroom-under-2mb constant style as TOTAL_MAX_BYTES in server/src/memory.ts",
+        "chunk sends are sequential inside the debounce timer callback, not parallel, so one failure doesn't strand the rest silently",
+        "pushSessions owns the dedup filter; userContext.ts's syncNow still hands it the full session list — sync.ts keeps sole ownership of what actually goes on the wire",
+        "the real growth driver (WorkflowState.outputs/lastStepOutput, uncapped in server/src/workflows.ts) is not capped by this change — deferred as a follow-up"
+      ],
+      "relatedDecisions": [
+        "agent-memory-sync"
+      ]
+    },
+    {
       "id": "app-data-root",
       "name": "App data root",
       "doc": "features/app-data-root.md",

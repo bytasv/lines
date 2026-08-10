@@ -4,6 +4,8 @@ import type { SyncWatermarks } from './store.ts';
 const PUSH_DEBOUNCE_MS = 2_000;
 const PULL_MIN_SPACING_MS = 30_000;
 const FETCH_TIMEOUT_MS = 10_000;
+/** Headroom under the storage server's 2mb JSON body limit, as memory.ts keeps for its map. */
+const SESSIONS_PUSH_MAX_BYTES = 1.5 * 1024 * 1024;
 
 /** `pullAll` skipped this call because a pull happened less than PULL_MIN_SPACING_MS ago. */
 export const THROTTLED = Symbol('throttled');
@@ -28,6 +30,13 @@ function statsMap(rows: unknown): Record<string, number> {
     out[`${row.ownerId}/${row.id}`] = row.runCount;
   }
   return out;
+}
+
+/** LWW stamp for a meta; undefined when it carries neither timestamp (legacy rows). */
+function sessionStamp(meta: SessionMeta): number | undefined {
+  if (typeof meta.updatedAt === 'number') return meta.updatedAt;
+  if (typeof meta.createdAt === 'number') return meta.createdAt;
+  return undefined;
 }
 
 export interface PulledState {
@@ -197,6 +206,13 @@ export class StorageSyncClient {
   /** Append the stored delta cursor for a resource, if we have one. */
   private delta(path: string, key: keyof SyncWatermarks): string {
     const since = this.marks[key];
+    // A cursor-less /sessions pull means we're starting from nothing against this
+    // storage server (fresh or migrated install), so what it already has is
+    // unknown — drop the push mark too and let the next bulk push be complete.
+    if (!since && key === 'sessions' && this.marks.sessionsPushed) {
+      delete this.marks.sessionsPushed;
+      this.marksDirty = true;
+    }
     return since ? `${path}?since=${encodeURIComponent(since)}` : path;
   }
 
@@ -332,12 +348,79 @@ export class StorageSyncClient {
       this.sessTimer = null;
       const batch = [...this.pendingSessions.values()];
       this.pendingSessions.clear();
-      void this.req('PUT', '/sessions', batch).catch((err) => this.warnOnce('push sessions', err));
+      void this.flushSessions(batch);
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
   }
 
+  /**
+   * Bulk push (a reconnect's whole list). Storage rows are LWW upserts, so
+   * re-sending metas it already holds is pure bytes: filter to the ones newer
+   * than the last accepted push. Per-session `pushSession` calls stay unfiltered
+   * — those are already deltas.
+   */
   pushSessions(list: SessionMeta[]): void {
-    for (const meta of list) this.pushSession(meta);
+    if (!this.enabled || this.applying) return;
+    const since = Number(this.marks.sessionsPushed ?? 0);
+    for (const meta of list) {
+      const stamp = sessionStamp(meta);
+      if (stamp === undefined || stamp > since) this.pushSession(meta);
+    }
+  }
+
+  /**
+   * Send one debounced batch as chunks that each stay under the body limit,
+   * sequentially so a failure doesn't strand the rest silently. The watermark
+   * only advances when every chunk was accepted; a failed chunk goes back into
+   * `pendingSessions` (merged, never overwriting a meta that arrived meanwhile)
+   * and rides along with the next push.
+   */
+  private async flushSessions(batch: SessionMeta[]): Promise<void> {
+    let allOk = true;
+    for (const chunk of this.chunkSessions(batch)) {
+      try {
+        await this.req('PUT', '/sessions', chunk);
+      } catch (err) {
+        allOk = false;
+        for (const meta of chunk) if (!this.pendingSessions.has(meta.id)) this.pendingSessions.set(meta.id, meta);
+        this.warnOnce('push sessions', err);
+      }
+    }
+    if (!allOk) return;
+    const since = Number(this.marks.sessionsPushed ?? 0);
+    let newest = since;
+    for (const meta of batch) newest = Math.max(newest, sessionStamp(meta) ?? 0);
+    if (newest > since) {
+      this.marks.sessionsPushed = String(newest);
+      this.marksDirty = true;
+      this.commitCursors();
+    }
+  }
+
+  /**
+   * Split a batch into bodies under SESSIONS_PUSH_MAX_BYTES. A single meta over
+   * budget can't be chunked, so it is dropped with a warning, as memory.ts does
+   * with an oversized file — the local copy is untouched, only its cloud copy lags.
+   */
+  private chunkSessions(batch: SessionMeta[]): SessionMeta[][] {
+    const chunks: SessionMeta[][] = [];
+    let chunk: SessionMeta[] = [];
+    let bytes = 2; // the enclosing `[]`
+    for (const meta of batch) {
+      const size = Buffer.byteLength(JSON.stringify(meta)) + 1; // + the separating comma
+      if (size + 2 > SESSIONS_PUSH_MAX_BYTES) {
+        this.warnSkipOnce(`session ${meta.id} is ${size} bytes — over the push budget, not sent to storage`);
+        continue;
+      }
+      if (chunk.length > 0 && bytes + size > SESSIONS_PUSH_MAX_BYTES) {
+        chunks.push(chunk);
+        chunk = [];
+        bytes = 2;
+      }
+      chunk.push(meta);
+      bytes += size;
+    }
+    if (chunk.length > 0) chunks.push(chunk);
+    return chunks;
   }
 
   deleteSession(id: string): void {
@@ -463,6 +546,13 @@ export class StorageSyncClient {
     this.reason = ok ? undefined : reason;
     if (ok) this.warned = false; // allow one fresh warn on the next outage
     this.onStatusChange?.(this.status);
+  }
+
+  /** As warnOnce, for a local skip that says nothing about the link's health. */
+  private warnSkipOnce(msg: string): void {
+    if (this.warned) return;
+    this.warned = true;
+    console.warn(`[sync] ${msg}`);
   }
 
   /** One warning per outage, not one per debounced push. */

@@ -18,6 +18,7 @@
 | `subagent-transcript` | Subagent (`Task`) output nests under its spawning card instead of flattening into the main transcript; excluded from context usage, workflow step output, and turn summaries | [features/subagent-transcript.md](features/subagent-transcript.md) |
 | `workflow-step-version-history` | Browse a step's version history, preview a per-field diff, re-pin a workflow ref or restore old content as a new library version | [features/workflow-step-version-history.md](features/workflow-step-version-history.md) |
 | `agent-memory-sync` | Sync `~/.claude` agent memory (user CLAUDE.md + per-project auto-memory) across machines via the storage server, disk-cached for the SDK | [features/agent-memory-sync.md](features/agent-memory-sync.md) |
+| `cloud-sync-sessions` | Bulk session push dedups against a watermark and chunks under the storage body-size limit; storage answers a legible 413 instead of a 500 | [features/cloud-sync-sessions.md](features/cloud-sync-sessions.md) |
 | `app-data-root` | Machine-global app state root at `~/.lines-app` | [features/app-data-root.md](features/app-data-root.md) |
 | `context-window-inspector` | Composer chip showing live context-window occupancy, with a hover breakdown of what's filling it | [features/context-window-inspector.md](features/context-window-inspector.md) |
 | `plan-file-auto-approve` | Plan-mode file reads/writes under `.claude/plans/` auto-approve instead of prompting | [features/plan-file-auto-approve.md](features/plan-file-auto-approve.md) |
