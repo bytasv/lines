@@ -165,7 +165,8 @@ if HOSTED and HOSTED_MISSING:
     preflight_cmd = fail_cmd([
         'PREFLIGHT FAILED (--hosted): missing/empty in .env: ' + ', '.join(HOSTED_MISSING),
         '',
-        'RELAY_URL    wss://<domain>/agent   -- where the bridge dials out',
+        'RELAY_URL    wss://<domain>         -- base only; relayClient appends',
+        '                                       /agent?device=..&secret=.. itself',
         'STORAGE_URL  https://api.<domain>   -- where it syncs, and where pairing',
         '                                       registers this machine',
         '',

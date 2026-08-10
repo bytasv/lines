@@ -182,8 +182,16 @@ export class RelayClient {
       this.dispatch(frame);
     });
 
-    ws.on('close', () => {
+    ws.on('close', (code: number, reason: Buffer) => {
       if (this.ws === ws) this.ws = null;
+      // A policy close is a configuration error, not a blip: the relay answers
+      // 1008 for an unknown endpoint (RELAY_URL carrying a path — it appends
+      // /agent itself) and for a device it cannot verify. Retrying cannot fix
+      // either, so it must not be silent. Backoff bounds the log volume.
+      if (code !== 1000) {
+        const text = reason.toString() || '(no reason)';
+        console.warn(`[relay] closed ${code} ${text} — dialling ${this.url}/agent`);
+      }
       this.dropAllChannels();
       this.retry();
     });
