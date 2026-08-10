@@ -6,6 +6,7 @@ import type {
 } from '@lines/shared';
 import { APP_PROTOCOL_VERSION } from '@lines/shared';
 import { useStore } from './store';
+import { refreshDevices } from './lib/devices';
 
 /**
  * Where the bridge lives. Hosted builds set VITE_BRIDGE_WS_URL and never probe;
@@ -271,6 +272,10 @@ export async function connect() {
     if (e.code === 1008) {
       console.warn('[ws] rejected (1008) — retrying slowly; check sign-in and that your machine is running');
       useStore.getState().setConnectionStatus('reconnecting');
+      // A revoked machine is indistinguishable from a sleeping one at this layer,
+      // so re-read the list: if it is gone, the gate shows the pairing screen
+      // instead of retrying a machine that will now be refused forever.
+      if (deviceId) refreshDevices();
       if (retryTimer) clearTimeout(retryTimer);
       retryTimer = setTimeout(() => void connect(), UNAUTHORIZED_RETRY_DELAY_MS);
       return;

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { MantineProvider } from '@mantine/core';
@@ -7,16 +7,15 @@ import '@mantine/core/styles.css';
 import './index.css';
 import { theme } from './theme';
 import { App } from './App';
-import { connect, setDeviceId, setTokenProvider } from './ws';
+import { connect, setTokenProvider, switchDevice } from './ws';
 import { CLERK_ENABLED, CLERK_PUBLISHABLE_KEY, setOwnerId, setOwnerName } from './lib/clerk';
 import {
   chooseDevice,
   DEVICE_PAIRING_ENABLED,
-  listDevices,
   rememberDeviceId,
   setStorageTokenProvider,
-  type Device,
 } from './lib/storage';
+import { useDevices } from './lib/devices';
 import {
   ConnectMachine,
   ConnectMachineError,
@@ -33,31 +32,32 @@ import {
  * bridge, which is itself the one and only machine.
  */
 function DeviceGate({ children }: { children: React.ReactNode }) {
-  const [devices, setDevices] = useState<Device[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Shared with the Machines settings pane, so revoking the machine in use there
+  // puts this gate straight back up instead of leaving a dead app on screen.
+  const devices = useDevices((s) => s.devices);
+  const error = useDevices((s) => s.error);
+  const refresh = useDevices((s) => s.refresh);
 
-  const load = useCallback(() => {
-    setError(null);
-    setDevices(null);
-    listDevices()
-      .then(setDevices)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
-
-  useEffect(load, [load]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
   const chosen = devices ? chooseDevice(devices) : null;
 
   useEffect(() => {
     if (!chosen) return;
     rememberDeviceId(chosen.id);
-    setDeviceId(chosen.id);
-    void connect();
+    // switchDevice, not setDeviceId: if the previous machine was revoked while
+    // its socket was still open, that socket has to be closed before this one is
+    // opened, or messages meant for the new machine go to the old one.
+    switchDevice(chosen.id);
   }, [chosen]);
 
-  if (error) return <ConnectMachineError error={error} onRetry={load} />;
+  // Only a failure with nothing cached is fatal — a refresh that fails while a
+  // machine is already chosen leaves the app running on it.
+  if (error && !devices) return <ConnectMachineError error={error} onRetry={() => void refresh()} />;
   if (!devices) return <ConnectMachineLoading />;
-  if (!chosen) return <ConnectMachine onPaired={load} />;
+  if (!chosen) return <ConnectMachine />;
   return <>{children}</>;
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActionIcon,
   Alert,
@@ -17,12 +17,12 @@ import { useStore } from '../store';
 import {
   claimDevice,
   forgetDeviceId,
-  listDevices,
   rememberDeviceId,
   rememberedDeviceId,
   revokeDevice,
   type Device,
 } from '../lib/storage';
+import { useDevices } from '../lib/devices';
 import { switchDevice } from '../ws';
 
 /**
@@ -33,38 +33,38 @@ import { switchDevice } from '../ws';
  * belong to a machine's filesystem, so there is no meaningful "all of them".
  */
 export function DevicesSection() {
-  const [devices, setDevices] = useState<Device[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // The same store the device gate reads: revoking the machine in use here has to
+  // put that gate back up, which a fetch local to this pane could not do.
+  const devices = useDevices((s) => s.devices);
+  const storeError = useDevices((s) => s.error);
+  const load = useDevices((s) => s.refresh);
   const [pairing, setPairing] = useState(false);
   const [code, setCode] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const connected = useStore((s) => s.connectionStatus === 'connected');
   const activeId = rememberedDeviceId();
+  const error = actionError ?? storeError;
 
-  const load = useCallback(() => {
-    setError(null);
-    listDevices()
-      .then(setDevices)
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
-
-  useEffect(load, [load]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const pair = async () => {
     if (!code.trim()) return;
     setBusyId('pairing');
-    setError(null);
+    setActionError(null);
     try {
       const device = await claimDevice(code);
       setCode('');
       setPairing(false);
-      load();
+      await load();
       // Nothing is connected to the new machine yet, so make it the active one
       // only when there was nothing before — silently moving a working session
       // to a different computer would be worse than an extra click.
       if (!activeId) switchToDevice(device.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusyId(null);
     }
@@ -77,16 +77,17 @@ export function DevicesSection() {
 
   const revoke = async (device: Device) => {
     setBusyId(device.id);
-    setError(null);
+    setActionError(null);
     try {
       await revokeDevice(device.id);
       // Dropping the active machine leaves the app with nothing to talk to. Clear
-      // the choice so a reload lands on the pairing screen rather than retrying a
-      // device the relay will now refuse.
+      // the choice first, then refresh: the gate reads both, and in that order it
+      // falls through to the pairing screen instead of briefly re-selecting a
+      // machine the relay will now refuse.
       if (device.id === activeId) forgetDeviceId();
-      load();
+      await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusyId(null);
     }
