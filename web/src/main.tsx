@@ -80,9 +80,14 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
 function AuthedConnect() {
   const { getToken } = useAuth();
   const { user } = useUser();
+  // Assigned during render, NOT in an effect: React runs child effects before
+  // parent ones, so DeviceGate's device fetch and its connect() both fire first.
+  // Registered from an effect, the first storage call goes out with no
+  // Authorization header (401) and the first socket with no token (1008).
+  // These are idempotent module-level assignments, so a re-render is harmless.
+  setTokenProvider(() => getToken());
+  setStorageTokenProvider(() => getToken());
   useEffect(() => {
-    setTokenProvider(() => getToken());
-    setStorageTokenProvider(() => getToken());
     // With pairing on, DeviceGate owns the connect() call: opening the socket
     // before a device is known guarantees a 1008 and a reconnect loop.
     if (!DEVICE_PAIRING_ENABLED) void connect();
