@@ -22,6 +22,7 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconFile,
+  IconLogin,
   IconRefresh,
   IconRoute,
   IconZoomIn,
@@ -215,6 +216,35 @@ function UserText({ text }: { text: string }) {
   );
 }
 
+/**
+ * What the user can do about the trailing failed turn. Reads the session straight
+ * out of the store rather than threading two more props through Item/AgentTurn;
+ * `retryKey` upstream is still the only gate on whether this renders at all.
+ */
+function FailedTurnActions({ sessionId }: { sessionId: string }) {
+  const needsSignIn = useStore((s) => s.sessions[sessionId]?.errorKind === 'auth');
+  const loggedOut = useStore((s) => s.auth?.loggedIn === false);
+  const openLoginModal = useStore((s) => s.openLoginModal);
+  return (
+    <>
+      {needsSignIn && loggedOut && (
+        <Button size="compact-xs" color="red" leftSection={<IconLogin size={12} />} onClick={openLoginModal}>
+          Sign in
+        </Button>
+      )}
+      <Button
+        size="compact-xs"
+        variant="light"
+        color="red"
+        leftSection={<IconRefresh size={12} />}
+        onClick={() => send({ type: 'retryTurn', sessionId })}
+      >
+        Retry
+      </Button>
+    </>
+  );
+}
+
 function Item({
   item,
   sessionId,
@@ -344,17 +374,7 @@ function Item({
               {item.costUsd != null ? ` · $${item.costUsd.toFixed(4)}` : ''}
               {item.durationMs != null ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''}
             </Text>
-            {showRetry && (
-              <Button
-                size="compact-xs"
-                variant="light"
-                color="red"
-                leftSection={<IconRefresh size={12} />}
-                onClick={() => send({ type: 'retryTurn', sessionId })}
-              >
-                Retry
-              </Button>
-            )}
+            {showRetry && <FailedTurnActions sessionId={sessionId} />}
           </Group>
           {/* The durable record of why: SessionView's alert vanishes on the next prompt. */}
           {item.error && (

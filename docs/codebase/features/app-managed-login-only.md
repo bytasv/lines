@@ -44,7 +44,8 @@ Before this, three paths could silently fall through to ambient credentials:
 - `SessionManager.failTurn(sessionId, error)` — synthetic `result` event then `error`
   status, so a refusal renders as an ordinary failed turn with Retry
 - `authRefusalMessage(err)` — the two user-facing refusal strings (not signed in vs.
-  refresh failed) in one place
+  refresh failed) in one place; also reused by `authRecoveryMessage` in
+  [auth-failure-recovery](auth-failure-recovery.md) for its `'refresh-failed'` outcome
 - `SessionManager.ownerToken()` — async token for the bridge-side helper queries; returns
   `null` rather than falling back, and each caller skips its query entirely on `null`
 - `PROACTIVE_RETRY_MS` / `PROACTIVE_RETRY_CAP_MS` — 60s first rung, 15min ceiling for the

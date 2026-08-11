@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AuthStatus } from '@lines/shared';
+import { resultErrorText } from '@lines/shared';
 import { AuthManager, isAuthFailureMessage } from './auth.ts';
 import type { Store, StoredAuth } from './store.ts';
 
@@ -88,11 +89,11 @@ const okToken = () =>
     { status: 200, headers: { 'content-type': 'application/json' } },
   );
 
-test('handleTokenRejected is a no-op when logged out', async (t) => {
+test('handleTokenRejected reports signed-out without a request when logged out', async (t) => {
   const calls = stubFetch(t, okToken);
   const { manager, changes } = makeManager(null);
 
-  await manager.handleTokenRejected();
+  assert.deepEqual(await manager.handleTokenRejected(), { outcome: 'signed-out' });
 
   assert.equal(calls.count, 0);
   assert.deepEqual(changes, []);
@@ -102,7 +103,7 @@ test('handleTokenRejected recovers silently when the refresh token still works',
   const calls = stubFetch(t, okToken);
   const { manager, changes, refreshCount, stored } = makeManager({ ...LIVE_AUTH });
 
-  await manager.handleTokenRejected();
+  assert.deepEqual(await manager.handleTokenRejected(), { outcome: 'refreshed' });
 
   assert.equal(calls.count, 1);
   assert.equal(manager.isLoggedIn(), true);
@@ -116,7 +117,7 @@ test('handleTokenRejected logs out on invalid_grant, which opens the login modal
   const calls = stubFetch(t, () => new Response('{"error":"invalid_grant"}', { status: 400 }));
   const { manager, changes, stored } = makeManager({ ...LIVE_AUTH });
 
-  await manager.handleTokenRejected();
+  assert.deepEqual(await manager.handleTokenRejected(), { outcome: 'signed-out' });
 
   assert.equal(calls.count, 1);
   assert.equal(manager.isLoggedIn(), false);
@@ -146,8 +147,14 @@ test('handleTokenRejected keeps the session logged in on a 5xx', async (t) => {
   const calls = stubFetch(t, () => new Response('boom', { status: 500 }));
   const { manager, changes, stored } = makeManager({ ...LIVE_AUTH });
 
-  await manager.handleTokenRejected();
+  const rejection = await manager.handleTokenRejected();
 
+  assert.equal(rejection.outcome, 'refresh-failed');
+  // The status code reaches the user through authRefusalMessage, so it has to survive.
+  assert.match(
+    String(rejection.outcome === 'refresh-failed' && (rejection.error as Error).message),
+    /500/,
+  );
   assert.equal(calls.count, 1);
   // The case that used to dead-end silently: still signed in, token untouched.
   assert.equal(manager.isLoggedIn(), true);
@@ -165,7 +172,7 @@ test('handleTokenRejected keeps the session logged in on a network error', async
   });
   const { manager, changes, stored } = makeManager({ ...LIVE_AUTH });
 
-  await manager.handleTokenRejected();
+  assert.equal((await manager.handleTokenRejected()).outcome, 'refresh-failed');
 
   assert.equal(manager.isLoggedIn(), true);
   assert.equal(stored()?.accessToken, 'old-access');
@@ -192,11 +199,24 @@ test('concurrent rejections share one refresh', async (t) => {
   const calls = stubFetch(t, okToken);
   const { manager } = makeManager({ ...LIVE_AUTH });
 
-  await Promise.all([
+  const outcomes = await Promise.all([
     manager.handleTokenRejected(),
     manager.handleTokenRejected(),
     manager.handleTokenRejected(),
   ]);
 
   assert.equal(calls.count, 1);
+  // All three sessions get to say "renewed — Retry", not just the one that raced first.
+  assert.deepEqual(outcomes, [
+    { outcome: 'refreshed' },
+    { outcome: 'refreshed' },
+    { outcome: 'refreshed' },
+  ]);
+});
+
+test('resultErrorText prefers result, then joins errors', () => {
+  assert.equal(resultErrorText({ result: 'done', errors: ['ignored'] }), 'done');
+  assert.equal(resultErrorText({ errors: ['first', 'second'] }), 'first\nsecond');
+  assert.equal(resultErrorText({ errors: ['kept', 42, null, ''] }), 'kept');
+  assert.equal(resultErrorText({}), '');
 });

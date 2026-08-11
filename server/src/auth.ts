@@ -45,6 +45,16 @@ export class AuthRequiredError extends Error {
 }
 
 /**
+ * What one recovery attempt achieved, so the caller can tell the user what to do
+ * next. `refresh-failed` carries its cause because that text is what the banner
+ * echoes ("Check your connection, then Retry").
+ */
+export type TokenRejection =
+  | { outcome: 'refreshed' }
+  | { outcome: 'signed-out' }
+  | { outcome: 'refresh-failed'; error: unknown };
+
+/**
  * Error text that means "the API rejected our token", as opposed to a network
  * blip or an ordinary tool failure. Matched against SDK/CLI error strings, which
  * are not a published contract — a wording change degrades this to today's
@@ -205,16 +215,23 @@ export class AuthManager {
    * `authStatus { loggedIn: false }` and opens the browser's login modal.
    * Single-flight comes free from refresh(), so N sessions failing at once
    * cause one token request.
+   *
+   * Returns what happened so the caller can rewrite the failed turn's banner —
+   * a silent recovery is otherwise invisible to the user staring at raw 401 text.
    */
-  async handleTokenRejected(): Promise<void> {
-    if (!this.isLoggedIn()) return;
+  async handleTokenRejected(): Promise<TokenRejection> {
+    // Already logged out: that *is* the state the user has to fix.
+    if (!this.isLoggedIn()) return { outcome: 'signed-out' };
     try {
       await this.forceRefresh();
+      return { outcome: 'refreshed' };
     } catch (err) {
       // 400/401 already self-logged-out and broadcast; anything else (5xx,
       // offline) leaves us logged in with a token the API rejects — log it and
       // let the next turn's ensureFreshToken surface the reason to the user.
-      if (!(err instanceof AuthRequiredError)) console.warn('[auth] recovery refresh failed:', err);
+      if (err instanceof AuthRequiredError) return { outcome: 'signed-out' };
+      console.warn('[auth] recovery refresh failed:', err);
+      return { outcome: 'refresh-failed', error: err };
     }
   }
 

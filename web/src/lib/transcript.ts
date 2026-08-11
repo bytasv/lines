@@ -8,7 +8,7 @@ import type {
   TurnSummaryData,
   WorkflowMarkerData,
 } from '@lines/shared';
-import { isPlanFilePath, subagentParentId } from '@lines/shared';
+import { isPlanFilePath, resultErrorText, subagentParentId } from '@lines/shared';
 
 export interface ToolBlock {
   type: 'tool';
@@ -46,7 +46,8 @@ export interface ResultItem {
   costUsd?: number;
   durationMs?: number;
   isError: boolean;
-  /** The SDK/synthetic result text, kept only for failures so the row can say why. */
+  /** Why the turn failed, kept only for failures so the row can say so — from the
+   *  result text, or from `errors[]` when the SDK carried no `result` at all. */
   error?: string;
   /** 1-2 sentence summary of the turn's tool activity, filled in async by the server. */
   summary?: string;
@@ -423,8 +424,10 @@ export function buildTranscript(
               is_error?: boolean;
               subtype?: string;
               result?: unknown;
+              errors?: unknown;
             };
             const isError = isFailedResult(r);
+            const errorText = resultErrorText(r);
             const resultItem: ResultItem = {
               kind: 'result',
               key: `r${event.seq}`,
@@ -433,7 +436,7 @@ export function buildTranscript(
               isError,
               // Only on failures: a successful turn's `result` is the assistant's
               // own final text, already rendered above.
-              ...(isError && typeof r.result === 'string' && r.result ? { error: r.result } : {}),
+              ...(isError && errorText ? { error: errorText } : {}),
             };
             resultItems.set(event.seq, resultItem);
             items.push(resultItem);

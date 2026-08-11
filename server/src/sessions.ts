@@ -16,6 +16,7 @@ import type {
   PromptAttachment,
   PromptMention,
   ServerMessage,
+  SessionErrorKind,
   SessionMeta,
   SessionStatus,
   TranscriptEvent,
@@ -28,6 +29,7 @@ import {
   isSessionInterruptible,
   KEEP_PLANNING_MESSAGE,
   resolveModelId,
+  resultErrorText,
   rootsForCwd,
   subagentParentId,
 } from '@lines/shared';
@@ -47,14 +49,51 @@ import {
   sameContextSummary,
   summarizeContextBreakdown,
 } from './contextBreakdown.ts';
+import { claudeCliRefusalMessage, claudeCliStatus } from './claudeCli.ts';
 import { isLinesMcpTool, isReadOnlyLinesTool, LINES_TOOL_MANIFEST } from './mcpWorkflowTools.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
-import { AuthRequiredError, isAuthFailureMessage, type AuthManager } from './auth.ts';
+import {
+  AuthRequiredError,
+  isAuthFailureMessage,
+  type AuthManager,
+  type TokenRejection,
+} from './auth.ts';
 
 /** 'auto' is our guard layer on top of the SDK's acceptEdits mode. */
 function sdkPermissionMode(mode: PermissionMode): string {
   return mode === 'auto' ? 'acceptEdits' : mode;
+}
+
+/**
+ * Which `claude` binary every query runs, for the whole bridge.
+ *
+ * The packaged app ships no CLI, so leaving this to the SDK's own resolution
+ * would mean the tray reporting one binary while turns silently used another (or
+ * none). Absent only when discovery found nothing at all — in which case
+ * `pushTurn` has already refused the turn.
+ */
+function claudeExecutableOption(): Record<string, unknown> {
+  const cli = claudeCliStatus();
+  return cli.path ? { pathToClaudeCodeExecutable: cli.path } : {};
+}
+
+/**
+ * The shared shape of the bridge's own one-shot helper queries (autoName,
+ * summarizeTurn, consolidateStepOutput): non-agentic, no tools, no setting
+ * sources, the owner's OAuth token, and this machine's CLI. Extracted so the
+ * four query sites cannot drift on any of that.
+ */
+function baseQueryOptions(token: string, model: string, systemPrompt: string): Record<string, unknown> {
+  return {
+    model,
+    maxTurns: 1,
+    allowedTools: [],
+    settingSources: [],
+    systemPrompt,
+    env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token },
+    ...claudeExecutableOption(),
+  };
 }
 
 /** Why a turn was refused before it started, in one place (see pushTurn). */
@@ -62,6 +101,23 @@ function authRefusalMessage(err: unknown): string {
   if (err instanceof AuthRequiredError) return 'Not signed in to Claude. Sign in, then Retry.';
   const message = err instanceof Error ? err.message : String(err);
   return `Could not refresh the Claude login: ${message}. Check your connection, then Retry.`;
+}
+
+/**
+ * What to tell the user after a turn failed on a rejected token and recovery has
+ * resolved — the raw CLI text ("Re-authenticate to continue") names no action they
+ * can take in this app. These strings deliberately avoid every word
+ * AUTH_FAILURE_PATTERNS matches, so re-showing one cannot re-classify itself.
+ */
+function authRecoveryMessage(rejection: TokenRejection): string {
+  switch (rejection.outcome) {
+    case 'refreshed':
+      return 'The Claude login expired mid-turn and has been renewed. Retry to continue.';
+    case 'signed-out':
+      return 'The Claude login expired and could not be renewed. Sign in to Claude, then Retry.';
+    case 'refresh-failed':
+      return authRefusalMessage(rejection.error);
+  }
 }
 
 /**
@@ -581,11 +637,13 @@ export class SessionManager {
     this.broadcast({ type: 'sessionUpsert', session: meta });
   }
 
-  setStatus(id: string, status: SessionStatus, errorMessage?: string) {
+  setStatus(id: string, status: SessionStatus, errorMessage?: string, errorKind?: SessionErrorKind) {
     const meta = this.sessions.get(id);
     if (!meta) return;
     meta.status = status;
     meta.errorMessage = errorMessage;
+    // Same lifetime as the message it qualifies, so every 3-arg caller clears it.
+    meta.errorKind = errorKind;
     // The pending tool only means anything while paused for permission.
     if (status !== 'waiting-permission') meta.pendingPermissionTool = undefined;
     this.upsert(meta);
@@ -765,6 +823,9 @@ export class SessionManager {
       // separate store the app cannot refresh, so a stale one 401s forever.
       // Null only when no AuthManager is wired at all (tests / embedding).
       ...(accessToken ? { env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: accessToken } } : {}),
+      // Serialized bridge → worker and spread into the worker's own query(), so
+      // this one line is what makes the packaged app use the machine's CLI.
+      ...claudeExecutableOption(),
     };
   }
 
@@ -819,6 +880,16 @@ export class SessionManager {
       return;
     }
 
+    // No CLI, no turn. Checked before the token because it cannot be fixed by
+    // retrying, and because the SDK reports a missing or too-old binary only as
+    // `Claude Code process exited with code 1` — this is the one place a hosted
+    // user can be told what to install. Cached, so it costs nothing per push.
+    const cliRefusal = claudeCliRefusalMessage();
+    if (cliRefusal) {
+      this.failTurn(meta.id, cliRefusal);
+      return;
+    }
+
     let accessToken: string;
     try {
       accessToken = await this.auth.ensureFreshToken();
@@ -868,6 +939,29 @@ export class SessionManager {
       result: error,
     });
     this.setStatus(sessionId, 'error', error);
+    this.recoverAuthFailure(sessionId, error);
+  }
+
+  /**
+   * A turn failed on what looks like a rejected token: attempt exactly one
+   * recovery, then rewrite the banner to name the action the user must take. The
+   * raw CLI text stays in the transcript as the durable record; only the banner
+   * changes. Nothing is auto-resumed — Retry stays the user's call.
+   */
+  private recoverAuthFailure(sessionId: string, error: string) {
+    if (!this.auth || !isAuthFailureMessage(error)) return;
+    void this.auth.handleTokenRejected().then((rejection) => {
+      const meta = this.sessions.get(sessionId);
+      // The session moved on while we refreshed (new turn, flushed queue, retry,
+      // workflow advance): the banner is no longer ours to rewrite.
+      if (!meta || meta.status !== 'error' || meta.errorMessage !== error) return;
+      this.setStatus(
+        sessionId,
+        'error',
+        authRecoveryMessage(rejection),
+        rejection.outcome === 'signed-out' ? 'auth' : undefined,
+      );
+    });
   }
 
   /** Persist attachments to disk and return the transcript/queue refs. */
@@ -1338,17 +1432,13 @@ export class SessionManager {
 
       const q = query({
         prompt,
-        options: {
-          model: 'claude-sonnet-5',
-          maxTurns: 1,
-          allowedTools: [],
-          settingSources: [],
-          systemPrompt:
-            'You consolidate an iterated workflow step into its single final ' +
+        options: baseQueryOptions(
+          token,
+          'claude-sonnet-5',
+          'You consolidate an iterated workflow step into its single final ' +
             'deliverable. You never ask questions, never refuse, and never add ' +
             'commentary or preamble — you output only the deliverable.',
-          env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token },
-        } as never,
+        ) as never,
       });
       let output: string | null = null;
       for await (const message of q) {
@@ -1412,17 +1502,13 @@ export class SessionManager {
           'whatever is given.\n\n<task>\n' +
           prompt.slice(0, 2000) +
           '\n</task>',
-        options: {
-          model: 'claude-haiku-4-5-20251001',
-          maxTurns: 1,
-          allowedTools: [],
-          settingSources: [],
-          systemPrompt:
-            'You are a title generator. You receive a task description and ' +
+        options: baseQueryOptions(
+          token,
+          'claude-haiku-4-5-20251001',
+          'You are a title generator. You receive a task description and ' +
             'reply with a single short title. You never ask questions, never ' +
             'refuse, and never add commentary — you only output the title.',
-          env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token },
-        } as never,
+        ) as never,
       });
       let title: string | null = null;
       for await (const message of q) {
@@ -1477,16 +1563,12 @@ export class SessionManager {
 
       const q = query({
         prompt,
-        options: {
-          model: 'claude-haiku-4-5-20251001',
-          maxTurns: 1,
-          allowedTools: [],
-          settingSources: [],
-          systemPrompt:
-            'You summarize a coding agent\'s completed turn in 1-2 plain sentences. ' +
+        options: baseQueryOptions(
+          token,
+          'claude-haiku-4-5-20251001',
+          'You summarize a coding agent\'s completed turn in 1-2 plain sentences. ' +
             'You never ask questions, never refuse, and never add commentary or preamble.',
-          env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token },
-        } as never,
+        ) as never,
       });
       let summary: string | null = null;
       for await (const message of q) {
@@ -2082,8 +2164,9 @@ export class SessionManager {
       // The SDK can surface a rejected token as an error result instead of throwing;
       // Retry already renders for these, only the login prompt is missing.
       const failed = msg.is_error === true || (msg.subtype != null && msg.subtype !== 'success');
-      const resultText = typeof msg.result === 'string' ? msg.result : '';
-      if (failed && isAuthFailureMessage(resultText)) void this.auth?.handleTokenRejected();
+      // A failure result carries its reason in `errors[]`, not `result` — reading
+      // only `result` degraded every one of them to 'The turn failed.'
+      const resultText = resultErrorText(msg as { result?: unknown; errors?: unknown });
 
       const metaNow = this.sessions.get(sessionId);
       let source: 'user' | 'workflow' = 'user';
@@ -2141,6 +2224,9 @@ export class SessionManager {
           // via setStatus) so the single upsert below still carries everything.
           metaNow.status = failed ? 'error' : 'done';
           metaNow.errorMessage = failed ? resultText || 'The turn failed.' : undefined;
+          // Shares errorMessage's lifetime; recoverAuthFailure re-sets it below if
+          // this failure turns out to need a sign-in.
+          metaNow.errorKind = undefined;
         }
         // A result proves the turn reached its end, so any Continue banner we
         // stamped for it was wrong — a result buffered while the bridge was away
@@ -2151,6 +2237,10 @@ export class SessionManager {
         metaNow.turnStartedAt = undefined;
         this.upsert(metaNow);
       }
+      // After the upsert, so the revision guard can tell "still my banner" from
+      // "the session moved on". This branch bypasses failTurn by design (the SDK
+      // reported the result itself), so it classifies here instead.
+      if (failed) this.recoverAuthFailure(sessionId, resultText);
       const interrupted = this.interrupting.delete(sessionId); // turn settled normally
       this.onTurnComplete?.(sessionId, source, interrupted, failed);
       this.maybeFlush(sessionId);
@@ -2190,9 +2280,8 @@ export class SessionManager {
       // spend/token accumulation that lives in the result branch must not re-run.
       // failTurn's setStatus already ran maybeFlush, so no queue nudge is needed here.
       if (source) this.onTurnComplete?.(sessionId, source, interrupted, true);
-      // A dead token surfaces here as a query crash; recover (or log out, which
-      // opens the login modal) now rather than waiting for the usage poller.
-      if (isAuthFailureMessage(error)) void this.auth?.handleTokenRejected();
+      // A dead token surfacing as a query crash is recovered by failTurn above,
+      // which is now the single classification point for every synthetic failure.
       return;
     }
     // An interrupted query sometimes dies without emitting a final `result`;

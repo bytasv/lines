@@ -1092,21 +1092,29 @@
       "id": "auth-failure-recovery",
       "name": "Auth-failure recovery",
       "doc": "features/auth-failure-recovery.md",
-      "purpose": "Recover in the same turn when the OAuth token is rejected: refresh it, or log out so the login modal opens immediately, and leave the failed turn showing the usual Retry button.",
+      "purpose": "Recover in the same turn when the OAuth token is rejected: refresh it, or log out so the login modal opens immediately; then rewrite the failed turn's banner to name the action the user must take, with a Sign in button next to Retry when a sign-in is genuinely required.",
       "entryPoints": [
         "server/src/sessions.ts"
       ],
       "files": [
+        "shared/types.ts",
         "server/src/auth.ts",
         "server/src/sessions.ts",
         "web/src/lib/transcript.ts",
+        "web/src/components/SessionView.tsx",
         "web/src/components/Transcript.tsx",
         "web/src/store.ts"
       ],
       "symbols": [
         "isAuthFailureMessage",
         "AuthManager.handleTokenRejected",
-        "SessionManager.handleWorkerEnded",
+        "TokenRejection",
+        "SessionManager.recoverAuthFailure",
+        "authRecoveryMessage",
+        "SessionMeta.errorKind",
+        "resultErrorText",
+        "SessionManager.setStatus",
+        "SessionManager.failTurn",
         "SessionManager.retryTurn"
       ],
       "tests": [
@@ -1114,23 +1122,26 @@
         "server/src/sessions.ended.test.ts"
       ],
       "businessRules": [
-        "an auth-classified turn failure attempts exactly one token refresh before logging out; a successful refresh means no login prompt at all",
+        "an auth-classified turn failure attempts exactly one token refresh, then always rewrites the banner to name the next action (Retry, Sign in, or check your connection) instead of leaving raw CLI text with only Retry",
+        "errorKind: 'auth' is set only for the signed-out outcome; refreshed/refresh-failed clear it",
         "the login modal opens off the existing authStatus broadcast, not a new message type, and unlike the hello auto-open it is not deduped",
-        "every query crash (auth-related or not) writes a synthetic result event, so the transcript shows 'turn failed' and a Retry button",
-        "retry after re-login is manual; nothing auto-resumes the failed turn",
-        "a clean ended (no error) writes no synthetic result",
-        "an is_error SDK result on a plain session now also sets status 'error' + errorMessage (previously always 'done'), so the Retry banner shows for that case too"
+        "retry stays entirely manual; nothing auto-resumes a failed turn, even after a silent refresh or a fresh sign-in \u2014 a login landing later or from another device must not fire N queued turns",
+        "errorKind is never set when no AuthManager is wired (ambient-token mode)",
+        "every query crash (auth-related or not) still writes a synthetic result event with the raw CLI text preserved verbatim, even after the banner is revised",
+        "a clean ended (no error) writes no synthetic result"
       ],
       "architecturalRules": [
-        "classification lives in auth.ts and is called from sessions.ts; worker.ts stays thin and does no error interpretation",
-        "handleTokenRejected goes through the single-flight refresh() rather than logout() directly, so N simultaneous failures cause one token request and a merely-expired token recovers silently",
-        "the pattern list is narrow and biased toward false negatives: a miss degrades to the old behavior, a false positive would force a refresh on a healthy session",
-        "the synthetic result is emitted via emitEvent directly, never routed through handleWorkerEvent, so it cannot re-run turn-settle bookkeeping (cost/token accumulation, onTurnComplete, workflow advance)",
+        "classification happens at exactly two points: failTurn (covers every funnel caller) and the result branch of handleWorkerEvent, which bypasses failTurn by design",
+        "the revision guard (status === 'error' && errorMessage === error) is the entire don't-clobber mechanism, relying on the workflow failed-park path using persistMeta not setStatus",
+        "authRecoveryMessage's strings avoid every word AUTH_FAILURE_PATTERNS matches, so a re-failure cannot re-classify itself into a loop",
+        "a successful refresh() still does not call emitChange(); the revised banner is the visible signal, not an auth-status broadcast",
+        "handleTokenRejected goes through the single-flight refresh() rather than logout() directly, so N simultaneous failures cause one token request and concurrent callers all resolve 'refreshed'",
+        "the synthetic result is emitted via emitEvent directly, never routed through handleWorkerEvent, so it cannot re-run turn-settle bookkeeping",
         "SDK/CLI error wording is not a published contract; isAuthFailureMessage can silently stop matching after an upstream change",
-        "SessionManager.failTurn is now public \u2014 the single funnel every recoverable failure (including workflow pre-run failures) writes through"
+        "known limitation: in Compact view the failed row sits inside a collapsed AgentTurn, so SessionView's alert is the always-visible affordance (pre-existing, out of scope)"
       ],
       "relatedDecisions": [
-        "app-managed-login-only \u2014 recovers a token rejected during a turn, whereas that feature guarantees a turn never starts on the ambient ~/.claude login",
+        "app-managed-login-only \u2014 recovers a token rejected during a turn, whereas that feature guarantees a turn never starts on the ambient ~/.claude login; shares authRefusalMessage",
         "turn-failure-retry"
       ]
     },
@@ -1883,7 +1894,9 @@
         "WorkflowState.stepFailure",
         "WorkflowMarkerData.failed",
         "SessionManager.TurnCompleteListener",
-        "isFailedResult"
+        "isFailedResult",
+        "resultErrorText",
+        "SessionMeta.errorKind"
       ],
       "tests": [
         "server/src/sessions.ended.test.ts",

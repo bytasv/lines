@@ -85,6 +85,19 @@ export const isSessionInterruptible = (s: SessionStatus) =>
 export const isSessionActive = (s: SessionStatus) =>
   isSessionInterruptible(s) || s === 'waiting-approval';
 
+/**
+ * The error text of an SDK `result` message. A success result carries the assistant's
+ * final text in `result`; SDKResultError carries no `result` at all — only
+ * `errors: string[]` — so reading `result` alone loses the reason entirely.
+ */
+export function resultErrorText(msg: { result?: unknown; errors?: unknown }): string {
+  if (typeof msg.result === 'string' && msg.result) return msg.result;
+  if (Array.isArray(msg.errors)) {
+    return msg.errors.filter((e): e is string => typeof e === 'string' && e !== '').join('\n');
+  }
+  return '';
+}
+
 export type CavemanLevel = 'lite' | 'full' | 'ultra';
 
 /** How an attachment is presented to the model. */
@@ -476,6 +489,9 @@ export interface ModelSpend {
 /** Per-model spend rows, keyed by resolved model id. See `./usageByModel.ts`. */
 export type ModelSpendMap = Record<string, ModelSpend>;
 
+/** Why a failed turn needs more than a Retry. See SessionMeta.errorKind. */
+export type SessionErrorKind = 'auth';
+
 export interface SessionMeta {
   id: string;
   name: string;
@@ -519,6 +535,11 @@ export interface SessionMeta {
   /** Cumulative active-turn duration across the session in ms; excludes idle wait. */
   totalDurationMs?: number;
   errorMessage?: string;
+  /** Set alongside `errorMessage` when Retry alone cannot clear the failure — the
+   *  app is signed out and a sign-in has to happen first. Drives the Sign in button.
+   *  Same lifetime as `errorMessage` (setStatus clears both). Never set when no
+   *  AuthManager is wired: ambient-token mode has no login flow to offer. */
+  errorKind?: SessionErrorKind;
   /** Tool that triggered the current `waiting-permission` pause (e.g. `AskUserQuestion`,
    *  `ExitPlanMode`), so the UI can vary the badge label/color. Cleared on any other status. */
   pendingPermissionTool?: string;

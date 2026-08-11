@@ -35,7 +35,7 @@ function harness(ensureFreshToken: () => Promise<string>) {
   const auth = {
     getAccessTokenSync: () => null,
     ensureFreshToken,
-    handleTokenRejected: async () => {},
+    handleTokenRejected: async () => ({ outcome: 'refreshed' }),
   } as unknown as AuthManager;
   const broadcasts: ServerMessage[] = [];
   const sessions = new SessionManager(store, new GuardAllowlist(store), (msg) => broadcasts.push(msg), auth);

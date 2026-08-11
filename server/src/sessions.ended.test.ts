@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import type { ServerMessage, SessionMeta, TranscriptEvent } from '@lines/shared';
-import type { AuthManager } from './auth.ts';
+import type { AuthManager, TokenRejection } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -21,8 +21,15 @@ const meta = (id: string): SessionMeta =>
     createdAt: 1,
   }) as SessionMeta;
 
-/** A manager over a throwaway store, with token-rejection notifications counted. */
-function harness() {
+/**
+ * A manager over a throwaway store, with token-rejection notifications counted.
+ * `rejection` is what the fake AuthManager reports back; `withAuth: false` builds
+ * the ambient-token manager, which has no login flow to offer.
+ */
+function harness(
+  rejection: TokenRejection = { outcome: 'refreshed' },
+  withAuth = true,
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-ended-'));
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta('s1')]));
   const store = createStore(root);
@@ -32,6 +39,7 @@ function harness() {
     ensureFreshToken: async () => 'tok',
     handleTokenRejected: async () => {
       rejections++;
+      return rejection;
     },
   } as unknown as AuthManager;
   const broadcasts: ServerMessage[] = [];
@@ -39,10 +47,15 @@ function harness() {
     store,
     new GuardAllowlist(store),
     (msg) => broadcasts.push(msg),
-    auth,
+    withAuth ? auth : undefined,
   );
   const transcript = () => store.loadTranscript('s1');
   return { sessions, broadcasts, transcript, rejections: () => rejections };
+}
+
+/** Let the recovery promise and its banner rewrite settle. */
+async function drain() {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
 /** The trailing transcript event, which is what the web Retry button keys off. */
@@ -80,10 +93,108 @@ test('an ordinary crash does not touch auth', () => {
   assert.equal(h.rejections(), 0);
 });
 
+/** The CLI's own wording for the case this recovery exists to make actionable. */
+const CLI_401 = 'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.';
+
 test('a rejected-token crash notifies auth so the login modal can open', () => {
   const h = harness();
   h.sessions.handleWorkerEnded('s1', 'API Error: 401 Unauthorized');
   assert.equal(h.rejections(), 1);
+});
+
+test('a recovered token rewrites the banner to say Retry will now work', async () => {
+  const h = harness({ outcome: 'refreshed' });
+  h.sessions.handleWorkerEnded('s1', CLI_401);
+  await drain();
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.status, 'error');
+  assert.match(meta.errorMessage!, /Retry to continue/);
+  assert.equal(meta.errorKind, undefined);
+  // The transcript keeps the raw CLI text as the durable diagnostic record.
+  assert.equal(lastResult(h.transcript()).result, CLI_401);
+});
+
+test('a dead refresh token asks for a sign-in and flags the session', async () => {
+  const h = harness({ outcome: 'signed-out' });
+  h.sessions.handleWorkerEnded('s1', CLI_401);
+  await drain();
+
+  const meta = h.sessions.get('s1')!;
+  assert.match(meta.errorMessage!, /Sign in to Claude, then Retry/);
+  assert.equal(meta.errorKind, 'auth');
+});
+
+test('a transient refresh failure explains itself without offering a sign-in', async () => {
+  const h = harness({ outcome: 'refresh-failed', error: new Error('Token refresh failed (500)') });
+  h.sessions.handleWorkerEnded('s1', CLI_401);
+  await drain();
+
+  const meta = h.sessions.get('s1')!;
+  assert.match(meta.errorMessage!, /Could not refresh the Claude login/);
+  assert.match(meta.errorMessage!, /500/);
+  assert.equal(meta.errorKind, undefined);
+});
+
+test('a session that moved on keeps its new status instead of the revised banner', async () => {
+  const h = harness({ outcome: 'signed-out' });
+  h.sessions.handleWorkerEnded('s1', CLI_401);
+  // A queued prompt flushed / the user hit Retry before the refresh resolved.
+  h.sessions.setStatus('s1', 'running');
+  await drain();
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.status, 'running');
+  assert.equal(meta.errorMessage, undefined);
+  assert.equal(meta.errorKind, undefined);
+  // Recovery itself still ran — only the banner rewrite was dropped.
+  assert.equal(h.rejections(), 1);
+});
+
+test('a failure result carrying only errors[] recovers its reason instead of degrading', async () => {
+  const h = harness({ outcome: 'signed-out' });
+  h.sessions.handleWorkerEvent('s1', {
+    type: 'result',
+    subtype: 'error_during_execution',
+    is_error: true,
+    errors: [CLI_401],
+  });
+  await drain();
+
+  assert.equal(h.rejections(), 1);
+  const meta = h.sessions.get('s1')!;
+  assert.match(meta.errorMessage!, /Sign in to Claude, then Retry/);
+  assert.equal(meta.errorKind, 'auth');
+});
+
+test('failTurn is itself a classification point, so every caller is covered', async () => {
+  const h = harness();
+  h.sessions.failTurn('s1', `Failed to start the turn: ${CLI_401}`);
+  await drain();
+  assert.equal(h.rejections(), 1);
+});
+
+test('the recovery messages cannot re-classify themselves into a loop', async () => {
+  const h = harness();
+  h.sessions.failTurn('s1', 'Not signed in to Claude. Sign in, then Retry.');
+  await drain();
+  assert.equal(h.rejections(), 0);
+
+  const h2 = harness();
+  h2.sessions.failTurn('s1', 'The Claude login expired and could not be renewed. Sign in to Claude, then Retry.');
+  await drain();
+  assert.equal(h2.rejections(), 0);
+});
+
+test('ambient-token mode keeps the raw message and offers no sign-in', async () => {
+  const h = harness({ outcome: 'signed-out' }, false);
+  h.sessions.handleWorkerEnded('s1', CLI_401);
+  await drain();
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.errorMessage, CLI_401);
+  assert.equal(meta.errorKind, undefined);
+  assert.equal(h.rejections(), 0);
 });
 
 test('a clean end writes no synthetic result', () => {

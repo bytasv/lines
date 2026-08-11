@@ -26,8 +26,9 @@ failure row at all.
 - `server/src/index.ts` — `case 'retryTurn'`
 - `shared/types.ts` — `WorkflowState.stepFailure`, `WorkflowMarkerData.failed`
 - `web/src/components/Transcript.tsx` — the backward scan for `retryKey`,
-  `WorkflowMarker`'s failed label
-- `web/src/lib/transcript.ts` — `isFailedResult`, the compaction-span escape
+  `WorkflowMarker`'s failed label, `FailedTurnActions`
+- `web/src/lib/transcript.ts` — `isFailedResult`, `resultErrorText`, the
+  compaction-span escape
 
 ## Symbols
 
@@ -60,7 +61,12 @@ workflow session whose step didn't fail).
   `runStepSafely` wrapper.
 - The `result` branch of `handleWorkerEvent` — for an `is_error` SDK result. Sets
   `status: 'error'` + `errorMessage` (previously always `'done'`, so a failed non-workflow
-  turn's `SessionView` banner never showed).
+  turn's `SessionView` banner never showed). The error text comes from
+  `resultErrorText(msg)`, which falls back to `msg.errors[]` when the SDK reported no
+  `result` at all (an `SDKResultError`) — reading `result` alone degraded those to the
+  generic `'The turn failed.'`. This branch also calls `SessionManager.recoverAuthFailure`
+  after its upsert, since it bypasses `failTurn` by design — see
+  [auth-failure-recovery](auth-failure-recovery.md).
 
 Both paths report the failure to `WorkflowEngine` via a fourth `failed` argument on
 `TurnCompleteListener`. `handleWorkerEnded`'s error branch fires the listener itself
@@ -145,7 +151,9 @@ only failure row Retry can key off.
   with `stepStatuses[i] === 'waiting-approval'`. Any future code path that calls
   `setStatus` inside the failed-park branch would silently kill the banner —
   `onWorkflowTurnComplete`'s failed branch calls `persistMeta`, never `setStatus`, for
-  exactly this reason.
+  exactly this reason. `SessionMeta.errorKind` (see
+  [auth-failure-recovery](auth-failure-recovery.md)) shares `errorMessage`'s lifetime and
+  the same constraint: it must ride `persistMeta` on that branch too, never `setStatus`.
 - The client's backward scan may only skip `'workflow'` and `'context-compact'` items;
   every other kind ends the scan, since it means a new turn (or a live permission
   request) started.

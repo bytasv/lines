@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { Alert, Button, Divider, Group, Stack, Text } from '@mantine/core';
-import { IconAlertTriangle, IconPlayerPlay, IconRefresh } from '@tabler/icons-react';
+import { IconAlertTriangle, IconLogin, IconPlayerPlay, IconRefresh } from '@tabler/icons-react';
 import { isSessionActive } from '@lines/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
@@ -14,12 +14,18 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const events = useStore((s) => s.transcripts[sessionId]);
   const loaded = useStore((s) => s.transcriptLoaded[sessionId]);
   const workflows = useStore((s) => s.workflows);
+  const loggedOut = useStore((s) => s.auth?.loggedIn === false);
+  const openLoginModal = useStore((s) => s.openLoginModal);
 
   useEffect(() => {
     if (!loaded) send({ type: 'loadTranscript', sessionId });
   }, [sessionId, loaded]);
 
   if (!session) return null;
+  // Both halves matter: the server says a sign-in is required, and the client
+  // still is signed out — so a re-login elsewhere retires the button with no
+  // server sweep.
+  const needsSignIn = session.errorKind === 'auth' && loggedOut;
   const workflow = session.workflow
     ? workflows.find((w) => w.id === session.workflow!.workflowId)
     : undefined;
@@ -47,16 +53,27 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         <Alert color="red" icon={<IconAlertTriangle size={16} />} m="md" py={6}>
           <Group gap="sm" wrap="nowrap" justify="space-between">
             <Text size="xs">{session.errorMessage}</Text>
-            <Button
-              size="compact-xs"
-              variant="light"
-              color="red"
-              leftSection={<IconRefresh size={12} />}
-              style={{ flexShrink: 0 }}
-              onClick={() => send({ type: 'retryTurn', sessionId })}
-            >
-              Retry
-            </Button>
+            <Group gap={6} wrap="nowrap" style={{ flexShrink: 0 }}>
+              {needsSignIn && (
+                <Button
+                  size="compact-xs"
+                  color="red"
+                  leftSection={<IconLogin size={12} />}
+                  onClick={openLoginModal}
+                >
+                  Sign in
+                </Button>
+              )}
+              <Button
+                size="compact-xs"
+                variant="light"
+                color="red"
+                leftSection={<IconRefresh size={12} />}
+                onClick={() => send({ type: 'retryTurn', sessionId })}
+              >
+                Retry
+              </Button>
+            </Group>
           </Group>
         </Alert>
       )}
