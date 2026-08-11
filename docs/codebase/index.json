@@ -2234,6 +2234,57 @@
       ]
     },
     {
+      "id": "desktop-packaging",
+      "name": "Desktop packaging",
+      "doc": "features/desktop-packaging.md",
+      "purpose": "Builds the menu-bar shell into an ad-hoc signed macOS .dmg that runs away from a repo checkout, using the machine's own Claude Code CLI.",
+      "entryPoints": [
+        "desktop/scripts/build.mjs",
+        "desktop/scripts/afterPack.mjs",
+        "desktop/scripts/release.mjs",
+        "desktop/package.json"
+      ],
+      "files": [
+        "desktop/src/config.ts",
+        "desktop/src/main.ts",
+        "server/src/claudeCli.ts",
+        "server/src/index.ts",
+        "deploy/README.md"
+      ],
+      "symbols": [
+        "MIN_CLAUDE_VERSION",
+        "claudeCliStatus",
+        "refreshClaudeCli",
+        "claudeCliRefusalMessage",
+        "loadConfig",
+        "isLocalMode",
+        "CAN_SELF_INSTALL"
+      ],
+      "tests": [
+        "server/src/claudeCli.test.ts",
+        "server/src/sessions.claudeCli.test.ts"
+      ],
+      "businessRules": [
+        "hosted is the default; local mode requires LINES_LOCAL_MODE=1 and web/dist is not shipped",
+        "a missing or too-old Claude Code refuses the turn with an actionable message in both the browser and the tray",
+        "LINES_CLAUDE_PATH is exclusive: when set, no other location is tried",
+        "update checks only notify \u2014 the tray links the download page"
+      ],
+      "architecturalRules": [
+        "electron-builder's identity: null skips bundle signing entirely, leaving no _CodeSignature/CodeResources, which macOS reports as \"damaged\" with no Open Anyway path \u2014 afterPack.mjs seals the bundle and verifies it so a broken one fails the build",
+        "the agent SDK ships unbundled because sdk.mjs resolves through createRequire(import.meta.url)",
+        "the SDK's -darwin-arm64 platform package is deleted; every query passes pathToClaudeCodeExecutable so its resolver never runs",
+        "the bridge and worker bundles must be ESM \u2014 server and shared use import.meta.dirname, which is undefined under CJS",
+        "the version floor is ours or nobody's \u2014 the SDK performs no version handshake at all",
+        "releases use a second public R2 bucket, because public-read is a bucket-level setting"
+      ],
+      "relatedDecisions": [
+        "ad-hoc signing leaves a Gatekeeper step only a Developer ID can remove; self-install stays behind CAN_SELF_INSTALL until then",
+        "electron is pinned exact so electron-builder can resolve its version from a hoisted workspace",
+        "arm64 only; x64/universal is a one-line mac.target change"
+      ]
+    },
+    {
       "id": "recipes",
       "name": "Recipes",
       "doc": "features/recipes.md",
