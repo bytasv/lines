@@ -30,6 +30,7 @@
       "output": "release",
       "buildResources": "assets"
     },
+    "afterPack": "scripts/afterPack.mjs",
     "files": [
       "dist/main.cjs",
       "package.json"
