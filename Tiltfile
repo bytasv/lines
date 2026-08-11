@@ -412,6 +412,15 @@ local_resource('pair-device', cmd='npm run pair -w server',
                auto_init=False, trigger_mode=TRIGGER_MODE_MANUAL,
                resource_deps=['install'], labels=['setup'], allow_parallel=True)
 
+# Builds the installable DMG into desktop/release. Never automatic: it is a
+# minutes-long electron-builder run producing a release artifact, and nothing in
+# the dev stack consumes it. Here so the packaging step is discoverable at all —
+# the desktop app was otherwise invisible to Tilt.
+local_resource('desktop-package', cmd='npm run package -w desktop',
+               deps=['desktop/src', 'desktop/scripts', 'server/src', 'shared'],
+               auto_init=False, trigger_mode=TRIGGER_MODE_MANUAL,
+               resource_deps=['install'], labels=['setup'], allow_parallel=True)
+
 if WITH_STORAGE:
     # storage/package.json:12 already wraps this in `dotenv -e ../.env`, which
     # supplies DIRECT_URL to the migrate engine. Never automatic: writes to

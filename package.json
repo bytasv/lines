@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "dev": "concurrently -n worker,server,web,storage -c magenta,blue,green,yellow \"npm run dev:worker -w server\" \"npm run dev -w server\" \"npm run dev -w web\" \"npm run dev -w storage\"",
-    "typecheck": "npm run typecheck -w server && npm run typecheck -w web && npm run typecheck -w storage",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web && npm run typecheck -w storage && npm run typecheck -w desktop",
     "test": "npm run test -w server",
     "dev:storage": "npm run dev -w storage"
   },

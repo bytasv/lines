@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ServerMessage, SessionMeta, SessionStatus } from '@lines/shared';
-import { UpdateManager } from './updates.ts';
+import { reportRelayStatus, UpdateManager } from './updates.ts';
 
 /**
  * A restart always kills in-flight turns — bridge and worker go down together
@@ -94,4 +94,28 @@ test('status from the shell is broadcast with the live busy flag folded in', () 
   // The shell cannot know this; the bridge supplies it.
   assert.equal(msg.status.restartBlocked, true);
   assert.equal(mgr.current().restartBlocked, true);
+});
+
+test('relay transitions reach the shell over the same channel', () => {
+  withSend((calls) => {
+    reportRelayStatus({ connected: true });
+    // 1008 is the relay refusing this device — the shell turns that into
+    // "Not paired", so the code has to survive the hop.
+    reportRelayStatus({ connected: false, code: 1008, reason: 'unauthorized' });
+    assert.deepEqual(calls, [
+      { type: 'relayStatus', status: { connected: true } },
+      { type: 'relayStatus', status: { connected: false, code: 1008, reason: 'unauthorized' } },
+    ]);
+  });
+});
+
+test('relay reporting is inert without the desktop shell', () => {
+  const original = process.send;
+  (process as { send?: unknown }).send = undefined;
+  try {
+    // Under Tilt and `npm run dev` there is no parent listening; this must not throw.
+    reportRelayStatus({ connected: true });
+  } finally {
+    (process as { send?: unknown }).send = original;
+  }
 });

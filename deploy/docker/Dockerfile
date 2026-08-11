@@ -85,18 +85,27 @@ ARG VITE_CLERK_PUBLISHABLE_KEY
 #   VITE_STORAGE_URL — public storage origin. Its presence is what enables the
 #     device-pairing gate in the web app.
 ARG VITE_STORAGE_URL
+#   VITE_DESKTOP_DOWNLOAD_URL — direct link to the published macOS DMG. Its
+#     presence is what enables the download surface on the pairing screens.
+ARG VITE_DESKTOP_DOWNLOAD_URL
 
 # Written to a file rather than passed as bare environment variables: vite reads
 # the repo-root .env (envDir: '..'), and a file makes the baked-in values
 # explicit and greppable if a build ever produces a bundle without them.
 RUN test -n "$VITE_BRIDGE_WS_URL" || { echo "FATAL: --build-arg VITE_BRIDGE_WS_URL is required"; exit 1; }
-RUN printf 'VITE_BRIDGE_WS_URL=%s\nVITE_CLERK_PUBLISHABLE_KEY=%s\nVITE_STORAGE_URL=%s\n' \
-      "$VITE_BRIDGE_WS_URL" "$VITE_CLERK_PUBLISHABLE_KEY" "$VITE_STORAGE_URL" > .env
+RUN printf 'VITE_BRIDGE_WS_URL=%s\nVITE_CLERK_PUBLISHABLE_KEY=%s\nVITE_STORAGE_URL=%s\nVITE_DESKTOP_DOWNLOAD_URL=%s\n' \
+      "$VITE_BRIDGE_WS_URL" "$VITE_CLERK_PUBLISHABLE_KEY" "$VITE_STORAGE_URL" \
+      "$VITE_DESKTOP_DOWNLOAD_URL" > .env
 RUN npm run build -w web
 # Unset or mistyped, the build still succeeds and the app reconnects forever —
 # so fail the image instead of shipping one that cannot reach the relay.
 RUN grep -qF "$VITE_BRIDGE_WS_URL" web/dist/assets/*.js \
  || { echo "FATAL: VITE_BRIDGE_WS_URL is not in the built bundle"; exit 1; }
+# Optional, so only asserted when asked for: a typo here silently ships an image
+# whose pairing screens tell the user to install an app they cannot download.
+RUN test -z "$VITE_DESKTOP_DOWNLOAD_URL" \
+ || grep -qF "$VITE_DESKTOP_DOWNLOAD_URL" web/dist/assets/*.js \
+ || { echo "FATAL: VITE_DESKTOP_DOWNLOAD_URL is not in the built bundle"; exit 1; }
 
 # ---------- web (runtime) ----------
 # Traefik cannot serve files, so the bundle ships with its own nginx.

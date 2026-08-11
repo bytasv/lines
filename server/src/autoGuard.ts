@@ -369,18 +369,25 @@ export function isPlanPath(filePath: string, roots: string[]): boolean {
 }
 
 /**
- * The source files that back the *running* worker process. Self-locating rather
- * than plumbed in: the guard has no session or bridge identity, and the only
- * writes that kill this worker are writes to the files this bridge itself runs
- * from. `import.meta.dirname` is `server/src` under tsx watch, so a second
+ * The files that back the *running* worker process.
+ *
+ * Self-locating by default: the guard has no session or bridge identity, and the
+ * only writes that kill this worker are writes to the files this bridge itself
+ * runs from. `import.meta.dirname` is `server/src` under tsx watch, so a second
  * checkout of Lines is correctly unaffected — its paths don't match.
  *
- * A packaged build that doesn't run from `server/src` matches nothing and the
- * rule silently no-ops. That fails safe (no spurious prompts) but means it
- * protects dogfooding, not a shipped app.
+ * A packaged build runs from a bundle instead, where that default matches
+ * nothing and the rule silently no-ops. It fails safe (no spurious prompts) but
+ * the protection is gone, so the desktop shell names the real files explicitly
+ * in `LINES_WORKER_SOURCES` (delimited like a PATH). Read once at module load:
+ * the set cannot change without a restart, which is when it is recomputed
+ * anyway.
  */
 const SELF_WORKER_SOURCES = new Set(
-  ['worker.ts', 'workerProtocol.ts', 'workerMcp.ts'].map((f) => path.join(import.meta.dirname, f)),
+  (process.env.LINES_WORKER_SOURCES
+    ? process.env.LINES_WORKER_SOURCES.split(path.delimiter).filter(Boolean)
+    : ['worker.ts', 'workerProtocol.ts', 'workerMcp.ts'].map((f) => path.join(import.meta.dirname, f))
+  ).map((file) => path.resolve(file)),
 );
 
 /**

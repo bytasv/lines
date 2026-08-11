@@ -24,6 +24,7 @@ import {
 } from '../lib/storage';
 import { useDevices } from '../lib/devices';
 import { switchDevice } from '../ws';
+import { DownloadDesktopApp } from './DownloadDesktopApp';
 
 /**
  * The machines this account can run agent turns on.
@@ -170,9 +171,12 @@ export function DevicesSection() {
         <Card withBorder padding="sm" radius="sm">
           <Stack gap="xs">
             <Text size="sm">
-              Run the Lines desktop app on the machine you want to add. It prints a pairing
+              Run the Lines desktop app on the machine you want to add. It shows a pairing
               code on first launch.
             </Text>
+            {/* The same download surface as the connect gate: this panel's copy also
+                assumed the app was already installed on the new machine. */}
+            <DownloadDesktopApp />
             <Group gap="xs" wrap="nowrap">
               <TextInput
                 placeholder="XXXXXXXX"
@@ -190,7 +194,7 @@ export function DevicesSection() {
               </Button>
             </Group>
             <Text size="xs" c="dimmed">
-              Codes expire 15 minutes after the app prints one.
+              Codes expire 15 minutes after the app shows one; it fetches a fresh one on its own.
             </Text>
           </Stack>
         </Card>

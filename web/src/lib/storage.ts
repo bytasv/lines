@@ -13,6 +13,25 @@
 export const STORAGE_URL: string | undefined = import.meta.env.VITE_STORAGE_URL;
 export const DEVICE_PAIRING_ENABLED = Boolean(STORAGE_URL);
 
+/**
+ * Direct link to the macOS DMG, baked in at image build time like STORAGE_URL.
+ * Unset (a local build, or a deployment with no release published yet) hides the
+ * download surface entirely — a button pointing at nothing is worse than none.
+ */
+export const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL;
+export const DESKTOP_DOWNLOAD_ENABLED = Boolean(DESKTOP_DOWNLOAD_URL);
+
+/**
+ * Version out of the artifact name (`Lines-0.2.0-arm64.dmg`). Derived rather than
+ * carried in a second env var, so a published build and the version shown next to
+ * it cannot disagree. Null when the name does not follow that shape.
+ */
+export const DESKTOP_DOWNLOAD_VERSION: string | null = (() => {
+  if (!DESKTOP_DOWNLOAD_URL) return null;
+  const match = /(\d+\.\d+\.\d+)/.exec(DESKTOP_DOWNLOAD_URL.split('/').pop() ?? '');
+  return match ? match[1] : null;
+})();
+
 export interface Device {
   id: string;
   name: string;

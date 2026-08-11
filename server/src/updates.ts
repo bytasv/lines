@@ -11,8 +11,34 @@
 import { isSessionActive, type ServerMessage, type SessionMeta, type UpdateStatus } from '@lines/shared';
 
 /** Messages exchanged with the desktop shell over the Node IPC channel. */
-type ToShell = { type: 'updateRestartRequest' };
+type ToShell = { type: 'updateRestartRequest' } | { type: 'relayStatus'; status: RelayLinkStatus };
 type FromShell = { type: 'updateStatus'; status: UpdateStatus };
+
+/**
+ * Whether the outbound relay link is up, as the shell's tray reports it.
+ *
+ * Shares the update channel rather than opening a second one — it is the same
+ * parent process and the same one-way needs. Kept in this module so the whole
+ * bridge↔shell IPC contract is one file.
+ */
+export interface RelayLinkStatus {
+  connected: boolean;
+  /**
+   * Close code, when a socket that had opened went away. `1008` is the relay
+   * refusing this device — unpaired or revoked — which is the difference between
+   * "connecting" and "not paired" in the tray.
+   */
+  code?: number;
+  reason?: string;
+}
+
+/**
+ * Tell the shell the relay link changed. A no-op under Tilt and `npm run dev`,
+ * where nothing is listening — same inertness as the rest of this module.
+ */
+export function reportRelayStatus(status: RelayLinkStatus): void {
+  process.send?.({ type: 'relayStatus', status } satisfies ToShell);
+}
 
 export class UpdateManager {
   private status: UpdateStatus = { state: 'idle' };

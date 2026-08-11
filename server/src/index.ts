@@ -1,12 +1,25 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import dotenv from 'dotenv';
 
 // Env comes from the repo-root .env (single file for all workspaces); real
 // environment variables win over .env entries.
-dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
+//
+// Both files are optional and existence-checked, because the packaged desktop
+// app has neither: it boots with an empty environment and takes its URLs from
+// the shell's config.json instead. `~/.lines-app/.env` is the user-level
+// override for an installed build — same directory as every other piece of app
+// state — and is read *first* because dotenv keeps the first value it sees for a
+// key, so reading it before the repo file is what makes it an override.
+for (const envFile of [
+  path.join(os.homedir(), '.lines-app', '.env'),
+  path.resolve(import.meta.dirname, '../../.env'),
+]) {
+  if (fs.existsSync(envFile)) dotenv.config({ path: envFile });
+}
 import { WebSocketServer, WebSocket } from 'ws';
 import type { ClientMessage, ServerMessage } from '@lines/shared';
 import { APP_PROTOCOL_VERSION, DEFAULT_MODELS, normalizeRootPath, projectRoots } from '@lines/shared';
@@ -18,7 +31,7 @@ import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
 import type { BrowserLink, UserContext } from './userContext.ts';
 import { handleFileRequest } from './fileRoutes.ts';
-import { UpdateManager } from './updates.ts';
+import { reportRelayStatus, UpdateManager } from './updates.ts';
 import { createMcpDispatcher } from './mcpWorkflowTools.ts';
 import * as workflowCommands from './workflowCommands.ts';
 import * as recipeCommands from './recipeCommands.ts';
@@ -39,6 +52,13 @@ const PORT = Number(process.env.LINES_BRIDGE_PORT ?? 0);
  *  guards that path. The dev-server discovery endpoint never exposes it. */
 const bridgeToken = newRuntimeToken();
 
+/**
+ * Injected by the desktop bundler (esbuild `--define`), because a packaged
+ * bundle has no `package.json` beside it. Undefined under tsx, Tilt and every
+ * test — hence the `typeof` guard rather than a bare read.
+ */
+declare const __LINES_VERSION__: string | undefined;
+
 /** Reported to clients on `hello`. Read from disk rather than imported so the
  *  bridge needs no resolveJsonModule; a missing/unreadable manifest is cosmetic. */
 const BRIDGE_VERSION: string = (() => {
@@ -46,7 +66,7 @@ const BRIDGE_VERSION: string = (() => {
     const pkg = fs.readFileSync(path.resolve(import.meta.dirname, '../package.json'), 'utf8');
     return (JSON.parse(pkg) as { version?: string }).version ?? '0.0.0';
   } catch {
-    return '0.0.0';
+    return typeof __LINES_VERSION__ === 'string' ? __LINES_VERSION__ : '0.0.0';
   }
 })();
 
@@ -210,6 +230,9 @@ if (RELAY_URL) {
     onToken: (userId, token) => {
       registry.get(userId).clerkToken = token;
     },
+    // Straight through to the desktop shell: it is the only consumer, and the
+    // tray is the only place a user can see that this machine is reachable.
+    onStatus: reportRelayStatus,
   });
   console.log(`[relay] dialling ${RELAY_URL} as device ${deviceId}`);
 }

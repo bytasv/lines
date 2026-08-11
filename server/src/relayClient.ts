@@ -9,6 +9,7 @@
  */
 import { WebSocket } from 'ws';
 import type { BrowserLink } from './userContext.ts';
+import type { RelayLinkStatus } from './updates.ts';
 
 /** Mirrors relay/src/protocol.ts. Duplicated rather than imported: the bridge
  *  ships to users' machines and must not depend on the relay package. */
@@ -32,6 +33,17 @@ export interface RelayClientCallbacks {
   onChannel(link: BrowserLink, identity: AttestedIdentity): void;
   /** A freshly verified token for a user, so storage sync keeps working. */
   onToken(userId: string, token: string): void;
+  /**
+   * The link came up or went down. Optional: only the desktop shell cares, and
+   * only so its tray can report whether this machine is actually reachable
+   * rather than whether our child processes happen to be alive.
+   *
+   * Deliberately raw — the relay verifies the device *after* accepting the
+   * socket, so an `open` here is not proof of a claim. Interpreting that (a
+   * 1008 close means unpaired; a connection that stays up means the claim
+   * landed) is the shell's job, where the pairing state lives.
+   */
+  onStatus?(status: RelayLinkStatus): void;
 }
 
 const RECONNECT_BASE_MS = 1_000;
@@ -170,6 +182,7 @@ export class RelayClient {
     ws.on('open', () => {
       this.attempt = 0;
       ws.send(JSON.stringify({ t: 'hello', version: RELAY_PROTOCOL_VERSION, appProtocol: 1 }));
+      this.callbacks.onStatus?.({ connected: true });
     });
 
     ws.on('message', (raw) => {
@@ -188,10 +201,11 @@ export class RelayClient {
       // 1008 for an unknown endpoint (RELAY_URL carrying a path — it appends
       // /agent itself) and for a device it cannot verify. Retrying cannot fix
       // either, so it must not be silent. Backoff bounds the log volume.
+      const text = reason.toString();
       if (code !== 1000) {
-        const text = reason.toString() || '(no reason)';
-        console.warn(`[relay] closed ${code} ${text} — dialling ${this.url}/agent`);
+        console.warn(`[relay] closed ${code} ${text || '(no reason)'} — dialling ${this.url}/agent`);
       }
+      this.callbacks.onStatus?.({ connected: false, code, ...(text ? { reason: text } : {}) });
       this.dropAllChannels();
       this.retry();
     });

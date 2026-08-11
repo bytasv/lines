@@ -125,6 +125,9 @@ services:
         # user's machines before opening a socket. Unset, the build expects a
         # local bridge and never asks about devices.
         VITE_STORAGE_URL: ${VITE_STORAGE_URL}
+        # Setting this is what turns on the desktop download surface on the
+        # pairing screens. Unset, they assume the app is already installed.
+        VITE_DESKTOP_DOWNLOAD_URL: ${VITE_DESKTOP_DOWNLOAD_URL}
     image: lines-web:latest
     restart: unless-stopped
     networks: [lines]

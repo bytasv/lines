@@ -14,6 +14,7 @@ import {
 import { IconAlertCircle } from '@tabler/icons-react';
 import { claimDevice } from '../lib/storage';
 import { useDevices } from '../lib/devices';
+import { DownloadDesktopApp } from './DownloadDesktopApp';
 import { GateShell } from './GateShell';
 import { PairingDiagram } from './PairingDiagram';
 
@@ -63,11 +64,15 @@ export function ConnectMachine() {
           <PairingDiagram />
         </Card>
 
+        {/* Above the steps on purpose: step one is impossible without the app,
+            and this is a user who demonstrably has no machine yet. */}
+        <DownloadDesktopApp />
+
         <Card withBorder radius="md" p="lg">
           <Stack gap="md">
             <List size="sm" spacing={6} type="ordered">
               <List.Item>Run the Lines desktop app on the machine you want to use.</List.Item>
-              <List.Item>It prints a pairing code on first launch.</List.Item>
+              <List.Item>It shows a pairing code on first launch.</List.Item>
               <List.Item>Enter that code here.</List.Item>
             </List>
 
@@ -94,8 +99,8 @@ export function ConnectMachine() {
             </Button>
 
             <Text size="xs" c="dimmed">
-              Codes expire 15 minutes after the app prints one. Restart the desktop app for a
-              fresh code.
+              Codes expire 15 minutes after the app shows one. The app fetches a fresh code on its
+              own — or pick “Get a new code” from its menu-bar icon.
             </Text>
           </Stack>
         </Card>
