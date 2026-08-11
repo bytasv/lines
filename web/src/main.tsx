@@ -1,8 +1,8 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { MantineProvider } from '@mantine/core';
-import { ClerkProvider, RedirectToSignIn, SignedIn, SignedOut, useAuth, useUser } from '@clerk/clerk-react';
+import { ClerkProvider, SignedIn, SignedOut, useAuth, useUser } from '@clerk/clerk-react';
 import '@mantine/core/styles.css';
 import './index.css';
 import { theme } from './theme';
@@ -22,6 +22,7 @@ import {
   ConnectMachineLoading,
 } from './components/ConnectMachine';
 import { ConnectingMachine } from './components/ConnectingMachine';
+import { LandingPage } from './components/LandingPage';
 import { useStore } from './store';
 
 /**
@@ -40,12 +41,26 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
   const error = useDevices((s) => s.error);
   const refresh = useDevices((s) => s.refresh);
   const bootstrapped = useStore((s) => s.bootstrapped);
+  /** Set from the connecting screen when the automatic choice is unreachable. */
+  const [pickedId, setPickedId] = useState<string | null>(null);
+  /** Show the pairing form even though a machine is already chosen. */
+  const [pairingNew, setPairingNew] = useState(false);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
-  const chosen = devices ? chooseDevice(devices) : null;
+  // Leave the pairing form as soon as the account gains a machine, so a
+  // successful claim lands in the app instead of sitting on a stale form.
+  useEffect(() => {
+    setPairingNew(false);
+  }, [devices?.length]);
+
+  // A manual pick wins over the remembered/most-recent heuristic, which is the
+  // whole point: the heuristic is what chose the unreachable machine.
+  const chosen = devices
+    ? (pickedId ? devices.find((d) => d.id === pickedId) : null) ?? chooseDevice(devices)
+    : null;
 
   useEffect(() => {
     if (!chosen) return;
@@ -60,11 +75,20 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
   // machine is already chosen leaves the app running on it.
   if (error && !devices) return <ConnectMachineError error={error} onRetry={() => void refresh()} />;
   if (!devices) return <ConnectMachineLoading />;
-  if (!chosen) return <ConnectMachine />;
+  if (!chosen || pairingNew) return <ConnectMachine />;
   // Chosen but not yet heard from: the socket has to open AND deliver `hello`
   // before the store describes anything. Rendering the app in between shows a
   // built-out UI with no sessions in it, behind a red "disconnected" pill.
-  if (!bootstrapped) return <ConnectingMachine name={chosen.name} />;
+  if (!bootstrapped) {
+    return (
+      <ConnectingMachine
+        name={chosen.name}
+        others={devices.filter((d) => d.id !== chosen.id)}
+        onSwitch={setPickedId}
+        onPairNew={() => setPairingNew(true)}
+      />
+    );
+  }
   return <>{children}</>;
 }
 
@@ -104,7 +128,7 @@ function Root() {
         <AuthedConnect />
       </SignedIn>
       <SignedOut>
-        <RedirectToSignIn />
+        <LandingPage />
       </SignedOut>
     </ClerkProvider>
   );

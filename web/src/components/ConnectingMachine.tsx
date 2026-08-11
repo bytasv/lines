@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Loader, Stack, Text, Title } from '@mantine/core';
+import { Button, Loader, Stack, Text, Title } from '@mantine/core';
+import { IconDeviceLaptop, IconPlus } from '@tabler/icons-react';
+import type { Device } from '../lib/storage';
 import { useStore } from '../store';
 import { GateHint, GateShell } from './GateShell';
 
@@ -13,9 +15,24 @@ const SLOW_MS = 6000;
  * sessions and no projects, which reads as data loss rather than as loading.
  *
  * A machine that is asleep or not running Lines never finishes this, so the copy
- * escalates instead of spinning forever with no explanation.
+ * escalates — and, crucially, offers a way out. Waiting is not a recoverable
+ * state on its own: the socket reaches the relay and simply finds no agent
+ * attached, so retrying forever changes nothing. Without the actions below the
+ * only advice was "switch machines from Settings", which is unreachable because
+ * Settings lives behind this very gate.
  */
-export function ConnectingMachine({ name }: { name: string }) {
+export function ConnectingMachine({
+  name,
+  others,
+  onSwitch,
+  onPairNew,
+}: {
+  name: string;
+  /** Every other machine on the account, so a dead one is never a dead end. */
+  others: Device[];
+  onSwitch: (id: string) => void;
+  onPairNew: () => void;
+}) {
   const status = useStore((s) => s.connectionStatus);
   const [slow, setSlow] = useState(false);
 
@@ -42,14 +59,40 @@ export function ConnectingMachine({ name }: { name: string }) {
         </Stack>
 
         {slow && (
-          <Stack align="center" gap={2} mt="xs">
+          <Stack align="center" gap="xs" mt="xs" maw={420}>
             <GateHint>
               Taking longer than usual. Check that Lines is running on {name} and that the
               machine is awake.
             </GateHint>
-            <Text size="xs" c="dimmed">
-              You can switch machines from Settings once connected.
-            </Text>
+
+            {others.length > 0 && (
+              <Stack align="stretch" gap={6} w="100%" mt={4}>
+                <Text size="xs" c="dimmed" ta="center">
+                  Or use a different machine:
+                </Text>
+                {others.map((device) => (
+                  <Button
+                    key={device.id}
+                    variant="light"
+                    size="xs"
+                    leftSection={<IconDeviceLaptop size={14} />}
+                    onClick={() => onSwitch(device.id)}
+                  >
+                    {device.name}
+                  </Button>
+                ))}
+              </Stack>
+            )}
+
+            <Button
+              variant="subtle"
+              size="xs"
+              color="gray"
+              leftSection={<IconPlus size={14} />}
+              onClick={onPairNew}
+            >
+              Pair another machine
+            </Button>
           </Stack>
         )}
       </Stack>
