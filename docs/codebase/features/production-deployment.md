@@ -34,10 +34,12 @@ None — this is infrastructure, not application code.
 `docker compose build` produces three images from one `deps` layer (installed
 with `--ignore-scripts`, scoped to the `shared`/`relay`/`storage`/`web`
 workspaces via `npm ci --workspace`). The `web` build stage bakes
-`VITE_BRIDGE_WS_URL`, `VITE_CLERK_PUBLISHABLE_KEY`, and `VITE_STORAGE_URL` into
-the bundle as build args and fails the build if the WS URL is not actually
-present in the output — those three cannot be changed by restarting the
-container, only by rebuilding it.
+`VITE_BRIDGE_WS_URL`, `VITE_CLERK_PUBLISHABLE_KEY`, `VITE_STORAGE_URL`, and
+`VITE_DESKTOP_DOWNLOAD_URL` into the bundle as build args — none of the four can
+be changed by restarting the container, only by rebuilding it. The build fails
+if the WS URL is not actually present in the output; the download URL gets the
+same assertion but only when set, since an empty value is the legitimate state
+before a desktop release exists (see [desktop-packaging](desktop-packaging.md)).
 
 At runtime, Traefik routes by `Host()`/`PathPrefix()` label rules on the
 existing Docker socket provider: `web` takes the apex host, `relay` takes
@@ -101,3 +103,5 @@ edge, cert issuance for both the apex and `www`).
   depends on
 - [desktop-shell](desktop-shell.md) — the other half of the split; nothing in
   this doc runs an agent
+- [desktop-packaging](desktop-packaging.md) — where `VITE_DESKTOP_DOWNLOAD_URL`
+  comes from

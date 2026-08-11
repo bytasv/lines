@@ -1265,6 +1265,7 @@
         "web is excluded from the freeze options since Vite HMR never restarts the dev server",
         "a pull that changes only package-lock.json triggers nothing; run tilt trigger install by hand",
         "pair-device (npm run pair -w server) is always declared but never auto_init - triggered by hand when a code expires or a machine is revoked, not part of bringing the stack up; idempotent, prints 'already paired' and exits 0 on a claimed device",
+        "desktop-package (npm run package -w desktop) is the same shape as pair-device - manual, never part of tilt up - and exists so the DMG build is discoverable from Tilt at all",
         "RELAY_URL set without STORAGE_URL warns rather than failing preflight - the bridge would dial a hosted relay while syncing to the local storage default, splitting one machine's data across two databases"
       ],
       "architecturalRules": [
@@ -2171,7 +2172,8 @@
         "claim/verify answer the same 'unknown or expired code' for absent, expired, and revoked, so a distinct 'expired' reply can't confirm a guessed code had once been real",
         "revoking a device tombstones it (revokedAt) rather than deleting the row, so it stays an audit trail; it stops the device RECONNECTING, checked on attach, not on every frame of a connection already open",
         "GET /v1/devices never returns secretHash",
-        "if storage is unreachable the relay refuses the device rather than admitting it"
+        "if storage is unreachable the relay refuses the device rather than admitting it",
+        "the desktop shell re-registers an unclaimed device on a timer and on demand to keep a valid code on screen with no app restart, relying on register's re-issue (not 409) behavior for an unclaimed row"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
@@ -2190,24 +2192,33 @@
       "id": "desktop-shell",
       "name": "Desktop shell",
       "doc": "features/desktop-shell.md",
-      "purpose": "A menu-bar app that supervises the bridge and worker as local child processes and serves the web UI, so Lines can be installed rather than run from a terminal via Tilt.",
+      "purpose": "A menu-bar app that supervises the bridge and worker as local child processes, so Lines can be installed and run without a repo checkout or Tilt. Hosted is the default; local mode (own web server, own window) is an explicit dev-only path.",
       "entryPoints": [
         "desktop/src/main.ts",
+        "desktop/src/config.ts",
         "server/src/updates.ts"
       ],
       "files": [
         "desktop/src/main.ts",
+        "desktop/src/config.ts",
         "server/src/updates.ts",
+        "server/src/relayClient.ts",
         "shared/types.ts"
       ],
       "symbols": [
         "spawnChild",
         "childEnv",
         "loginShellPath",
-        "startUiServer",
-        "UpdateManager",
         "RELAY_MODE",
-        "openPairingWindow"
+        "startUiServer",
+        "applyRelayStatus",
+        "onRelayVerified",
+        "RELAY_SETTLE_MS",
+        "refreshPairingCode",
+        "claudeCliStatus",
+        "CAN_SELF_INSTALL",
+        "openPairingWindow",
+        "UpdateManager"
       ],
       "tests": [
         "server/src/updates.test.ts"
@@ -2215,8 +2226,10 @@
       "businessRules": [
         "a restart is refused while any session is running, waiting-permission, or waiting-approval, since a restart kills bridge and worker together under one atomic update",
         "closing the window does not quit the app, and must not kill an in-flight turn",
-        "the actual install/restart mechanism is a deliberate no-op today - electron-updater's install step needs a signed, notarized build that does not exist yet, so it is left obviously inert rather than faked",
-        "in hosted/relay mode (LINES_RELAY_URL and LINES_STORAGE_URL both set) the shell serves no local UI - it registers this machine's device identity, spawns the bridge with the relay/storage/device env, and shows a pairing code window only if the machine has not been claimed yet",
+        "restartForUpdate never installs on an unsigned build - CAN_SELF_INSTALL is false until real code signing exists, so it opens the download page instead of pretending to update in place",
+        "in hosted mode (the default; local mode needs LINES_LOCAL_MODE=1) the shell serves no local UI - it registers this machine's device identity, spawns the bridge with the relay/storage/device env, and shows a pairing code window only if the machine has not been claimed yet",
+        "a relay open alone is not proof of pairing - the relay accepts the socket before asking storage whether the device is claimed, so Connected lags the raw socket by RELAY_SETTLE_MS and a 1008 close reads as Not paired rather than an indefinite Connecting",
+        "a pairing code never requires an app restart to refresh, on a timer or on demand",
         "device registration failing at boot is not fatal - RelayClient retries the relay forever, so a machine that registers late still comes up once storage is reachable again"
       ],
       "architecturalRules": [
@@ -2224,9 +2237,11 @@
         "children are spawned with ELECTRON_RUN_AS_NODE=1, since process.execPath inside Electron is the Electron binary and would otherwise relaunch the app",
         "the worker is never auto-restarted on crash - its live queries are gone, and a silent respawn would look like a healthy session that lost its turn; the bridge is restarted freely",
         "the desktop app and Tilt share the same LINES_INSTANCE/port-discovery contract, so a dev checkout and an installed app never collide",
-        "device identity lives in server/src/device.ts, not duplicated in the shell, so it and npm run pair -w server cannot drift on the credential format"
+        "device identity lives in server/src/device.ts, not duplicated in the shell, so it and npm run pair -w server cannot drift on the credential format",
+        "ROOT resolves to process.resourcesPath when packaged, the repo root otherwise, which is the one branch letting a dev checkout and an installed app share this file"
       ],
       "relatedDecisions": [
+        "desktop-packaging",
         "local-port-discovery",
         "browser-bridge-link",
         "device-pairing",
@@ -2372,6 +2387,7 @@
       "symbols": [],
       "tests": [],
       "businessRules": [
+        "the web build stage also bakes VITE_DESKTOP_DOWNLOAD_URL; unlike the other three VITE_* args it may legitimately be empty (no desktop release yet), so its build-time assertion only fires when the value is set",
         "storage never gets a published port or Traefik exposure beyond its one router; only relay and the browser's device calls reach it, everything else is internal-network only",
         "migrations run via `docker compose run --rm migrate` before the first `up` against a new database, using the direct (:5432) connection string"
       ],
@@ -2384,17 +2400,19 @@
       "relatedDecisions": [
         "remote-relay-bridge",
         "device-pairing",
-        "desktop-shell"
+        "desktop-shell",
+        "desktop-packaging"
       ]
     },
     {
       "id": "hosted-device-gate",
       "name": "Hosted device gate",
       "doc": "features/hosted-device-gate.md",
-      "purpose": "Gates the hosted web app behind 'which of my machines am I talking to': lists paired machines, pairs new ones, switches between them, and re-gates if the active machine is revoked or the socket closes with an auth-shaped code. Inert in a local build.",
+      "purpose": "Gates the hosted web app behind 'which of my machines am I talking to': lists paired machines, pairs new ones, switches between them, and re-gates if the active machine is revoked or the socket closes with an auth-shaped code. Inert in a local build. Links to the installable desktop app so a machine that has to run locally has a one-click answer instead of a repo checkout.",
       "entryPoints": [
         "web/src/main.tsx",
-        "web/src/components/SettingsModal.tsx"
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/DownloadDesktopApp.tsx"
       ],
       "files": [
         "web/src/main.tsx",
@@ -2405,7 +2423,8 @@
         "web/src/components/GateShell.tsx",
         "web/src/components/PairingDiagram.tsx",
         "web/src/components/DevicesSection.tsx",
-        "web/src/ws.ts"
+        "web/src/ws.ts",
+        "web/src/components/DownloadDesktopApp.tsx"
       ],
       "symbols": [
         "useDevices",
@@ -2418,7 +2437,9 @@
       "businessRules": [
         "pairing a new machine only becomes the active one automatically if none was active before - silently moving a working session to a different computer would be worse than an extra click",
         "revoking is described in the UI as what it does: stops a machine reconnecting, does not sever a connection already open",
-        "the Machines settings section does not render in a local build - a one-row list of the machine you're already on is noise"
+        "the Machines settings section does not render in a local build - a one-row list of the machine you're already on is noise",
+        "the stuck-connecting screen offers a way out after 6s - switch to any other paired machine (overriding chooseDevice's remembered/most-recent pick, which is what chose the unreachable one) or pair a new one; waiting alone never resolves it, since the socket reaches the relay fine and simply finds no agent attached",
+        "DownloadDesktopApp renders nothing when no build has been published, since a button pointing at nothing is worse than none"
       ],
       "architecturalRules": [
         "Clerk token providers are installed during render, not inside useEffect - child effects (DeviceGate) run before parent effects (AuthedConnect), so an effect-based registration meant the device list's first fetch and the first socket connect both fired with no token attached",
@@ -2428,7 +2449,8 @@
       "relatedDecisions": [
         "device-pairing",
         "remote-relay-bridge",
-        "production-deployment"
+        "production-deployment",
+        "desktop-packaging"
       ]
     },
     {

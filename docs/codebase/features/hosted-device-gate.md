@@ -7,7 +7,9 @@ to": lists paired machines, lets the signed-in user pair a new one or switch
 between them, and re-gates automatically if the machine in use is revoked or
 disconnects with an auth-shaped close. Renders a diagram explaining the
 split (browser ↔ relay ↔ user's own machine) at the one moment a user has to
-understand why a website is asking them to run something locally.
+understand why a website is asking them to run something locally, and links to
+the installable desktop app (see [desktop-packaging](desktop-packaging.md)) so
+that "run something locally" has a one-click answer rather than a repo checkout.
 
 Inert in a local (non-hosted) build: gated entirely on `VITE_STORAGE_URL`
 being set at build time, since a local bridge is the only machine there is and
@@ -17,17 +19,22 @@ nothing to pick between.
 
 - `web/src/main.tsx` — `DeviceGate`, the component this whole feature hangs off
 - `web/src/components/SettingsModal.tsx` — the `devices` section (`Machines`)
+- `web/src/components/DownloadDesktopApp.tsx` — the install surface shown on
+  `ConnectMachine`, `DevicesSection`, and reachable from the stuck-connecting
+  screen below
 
 ## Important files
 
 - `web/src/main.tsx` — `DeviceGate`; wraps the authenticated app
 - `web/src/lib/devices.ts` — `useDevices`, the shared machine-list store
 - `web/src/lib/storage.ts` — `listDevices`/`claimDevice`/`revokeDevice`,
-  `chooseDevice`, remembered-device persistence
+  `chooseDevice`, remembered-device persistence, `DESKTOP_DOWNLOAD_URL`
 - `web/src/components/ConnectMachine.tsx` — pairing screen and its
   loading/error siblings
 - `web/src/components/ConnectingMachine.tsx` — shown between "device chosen"
-  and the bridge's first `hello`
+  and the bridge's first `hello`; offers a way out once that takes too long
+- `web/src/components/DownloadDesktopApp.tsx` — the DMG link and the Gatekeeper
+  steps an ad-hoc signed build forces
 - `web/src/components/GateShell.tsx` — chrome (header + sign-out) shared by
   every pre-app screen
 - `web/src/components/PairingDiagram.tsx` — the explainer SVG
@@ -59,8 +66,15 @@ nothing to pick between.
 3. One or more devices → `chooseDevice` picks one, `ws.ts` gets `setDeviceId`
    and `connect()` is called.
 4. Between the socket opening and its first `hello`, `bootstrapped` is false —
-   `ConnectingMachine` renders instead of the app, naming the chosen machine
-   and escalating its copy after 6s if nothing has arrived.
+   `ConnectingMachine` renders instead of the app, naming the chosen machine.
+   After 6s with no `hello` — the common case is the machine asleep or the
+   desktop app not running — it also offers a way out: a button per other
+   paired machine (a manual pick overrides `chooseDevice`'s remembered/
+   most-recent heuristic, since that heuristic is what chose the unreachable
+   one) and "Pair another machine", which reopens `ConnectMachine` without
+   losing the account's other devices. Waiting alone is not a recoverable
+   state here — the socket reaches the relay fine and simply finds no agent
+   attached, so the reconnect loop by itself never resolves it.
 5. `hello` sets `bootstrapped: true` in the main store; only then does
    `DeviceGate` render its children (the real app).
 6. A socket closed with `1008` (bridge/relay rejection) re-reads the device
@@ -97,6 +111,13 @@ revoke, gate transition on a live `hello`).
   machine from *reconnecting*, it does not sever a connection already open.
 - The `Machines` settings section does not render at all in a local build —
   a one-row list of the machine you are already on is noise, not a feature.
+- The stuck-connecting screen's escape hatch only offers machines the account
+  already has; a "pair another" action always stays available regardless,
+  since a first-time user with one dead machine would otherwise have no path
+  forward at all.
+- `DownloadDesktopApp` renders nothing when no build has been published
+  (`DESKTOP_DOWNLOAD_URL` unset) — a button pointing at nothing is worse than no
+  button.
 
 ## Architectural rules
 
@@ -121,3 +142,5 @@ revoke, gate transition on a live `hello`).
 - [remote-relay-bridge](remote-relay-bridge.md)
 - [production-deployment](production-deployment.md) — the topology this gate
   exists for
+- [desktop-packaging](desktop-packaging.md) — what `DownloadDesktopApp` links to,
+  and why its copy has to name the Gatekeeper steps explicitly

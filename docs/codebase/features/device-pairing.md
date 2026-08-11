@@ -46,7 +46,11 @@ password hash live in a database.
 
 1. The machine generates a random secret, keeps it, and calls `register` with
    only its sha256 hash. Storage creates (or re-issues a code for) the `Device`
-   row and returns a short human-typeable `pairingCode`.
+   row and returns a short human-typeable `pairingCode`. The desktop shell
+   leans on the re-issue behavior deliberately: it calls `register` again on a
+   timer (and on demand, from "Get a new code") to keep a valid code on screen,
+   which only works because re-registering an *unclaimed* device is a repeat,
+   not a conflict — see [desktop-shell](desktop-shell.md).
 2. The signed-in user types that code into the web app, which calls `claim`.
    Storage looks the code up, checks it is unexpired and unrevoked, and sets
    `userId` — the step that actually binds machine to account. The code is

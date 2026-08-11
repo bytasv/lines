@@ -93,6 +93,10 @@ port isolation, `tilt down` orphan check).
   pairing code has expired (15 minutes) or a machine was revoked, not a step in
   bringing the stack up. It is idempotent: once claimed it prints "already
   paired" and exits 0.
+- `desktop-package` (`npm run package -w desktop`) is the same shape: manual,
+  never a step in `tilt up`, and exists so the DMG build (see
+  [desktop-packaging](desktop-packaging.md)) is discoverable from Tilt at all —
+  the desktop app previously had no resource here.
 - `RELAY_URL` set without `STORAGE_URL` warns rather than failing preflight: the
   bridge would dial a hosted relay while syncing to the local storage default,
   splitting one machine's data across two databases.
