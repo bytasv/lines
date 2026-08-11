@@ -150,10 +150,10 @@ permission-gated through the existing card, reads are not.
 
 ## Related decisions
 
-- [guard-allowlist](guard-allowlist.md) / [plan-file-auto-approve](plan-file-auto-approve.md) —
+- [permissions-and-plan-mode](permissions-and-plan-mode.md) —
   same `PreToolUse`/`canUseTool` hook path this feature adds a namespace branch
   to; no new hook mechanism was introduced.
-- [context-window-inspector](context-window-inspector.md) — the other feature
+- [context-window](context-window.md) — the other feature
   that extended `workerProtocol.ts`/`worker.ts`/`workerClient.ts` for a new
   bridge↔worker request shape (`ask`/`askResult`) without a protocol bump; this
   feature's `push.tools` field follows the same "additive field, not a new

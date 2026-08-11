@@ -122,7 +122,7 @@ truncation.
 ## Related decisions
 
 - [multi-root-projects](multi-root-projects.md)
-- [workflow-step-output-consolidation](workflow-step-output-consolidation.md) —
+- [workflow-step-lifecycle](workflow-step-lifecycle.md) —
   owns the rest of `substituteTokens`/`usesHandoffTokens`
 
 ## Risks / open items

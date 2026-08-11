@@ -193,7 +193,7 @@ middleware).
 
 ## Related decisions
 
-- [workflow-step-version-history](workflow-step-version-history.md) — the
+- [workflow-step-versioning](workflow-step-versioning.md) — the
   `StepVersion` pattern this feature's storage/sync layer mirrors.
 - [multi-root-projects](multi-root-projects.md) — `recipeCommands.ts` uses
   `findProject` for the cwd-membership check before creating a session.

@@ -28,7 +28,7 @@ Two things are still rough, and neither is a deployment problem:
 
 1. **The desktop build is ad-hoc signed, not notarized.** Gatekeeper blocks a
    browser download until the user allows it in Privacy & Security. See
-   `docs/codebase/features/desktop-packaging.md`; only a Developer ID fixes it.
+   `docs/codebase/features/desktop-app.md`; only a Developer ID fixes it.
 2. **Auto-update notifies, it does not self-install.** Squirrel.Mac needs a valid
    signature, so `CAN_SELF_INSTALL` in `desktop/src/main.ts` is false and the tray
    links the download page instead.

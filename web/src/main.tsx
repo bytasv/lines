@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import { BrowserRouter } from 'react-router-dom';
+import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { MantineProvider } from '@mantine/core';
 import { ClerkProvider, SignedIn, SignedOut, useAuth, useUser } from '@clerk/clerk-react';
 import '@mantine/core/styles.css';
@@ -124,12 +124,27 @@ function Root() {
   if (!CLERK_ENABLED) return <App />;
   return (
     <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY!}>
-      <SignedIn>
-        <AuthedConnect />
-      </SignedIn>
-      <SignedOut>
-        <LandingPage />
-      </SignedOut>
+      <Routes>
+        {/* /welcome must render the landing page for BOTH SignedIn and SignedOut —
+            it is the only way a signed-in user can re-read it, since every other
+            path renders the app for them. Do not wrap this in an auth gate. */}
+        <Route path="/welcome" element={<LandingPage />} />
+        {/* App mounts its own <Routes> underneath this splat (descendant routes),
+            so /docs/* and /session/:id keep resolving against the full path. */}
+        <Route
+          path="*"
+          element={
+            <>
+              <SignedIn>
+                <AuthedConnect />
+              </SignedIn>
+              <SignedOut>
+                <LandingPage />
+              </SignedOut>
+            </>
+          }
+        />
+      </Routes>
     </ClerkProvider>
   );
 }

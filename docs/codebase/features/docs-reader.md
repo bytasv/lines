@@ -67,4 +67,4 @@ No front-end tests — `web/` has no test runner; the pure logic (link resolutio
 ## Related decisions
 
 - [prompt-mentions](prompt-mentions.md)
-- [transcript-markdown-rendering](transcript-markdown-rendering.md)
+- [transcript-rendering](transcript-rendering.md)

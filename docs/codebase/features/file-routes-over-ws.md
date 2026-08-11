@@ -86,6 +86,6 @@ an open socket — there is no unauthenticated fallback.
 
 ## Related decisions
 
-- [browser-bridge-link](browser-bridge-link.md) — the connection these ride on
-- [plan-file-auto-approve](plan-file-auto-approve.md) — the plan-directory
+- [hosted-machine-access](hosted-machine-access.md) — the connection these ride on
+- [permissions-and-plan-mode](permissions-and-plan-mode.md) — the plan-directory
   exception in the containment check

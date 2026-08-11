@@ -123,7 +123,6 @@ None yet for this pass; static (`tsc --noEmit`) verified across `server`, `web`,
 
 - [multi-repo-commits](multi-repo-commits.md)
 - [prompt-mentions](prompt-mentions.md)
-- [plan-file-auto-approve](plan-file-auto-approve.md)
+- [permissions-and-plan-mode](permissions-and-plan-mode.md)
 - [app-data-root](app-data-root.md)
-- [project-tab-status-dot](project-tab-status-dot.md)
-- [project-switch-session-selection](project-switch-session-selection.md)
+- [session-and-project-ui](session-and-project-ui.md)

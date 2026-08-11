@@ -840,7 +840,7 @@ export class WorkflowEngine {
    * Approve. A still-running step flags `advanceOnComplete` here and then stops
    * the turn, so the advance happens only once that turn settles; advancing under
    * a live turn lets the old query's late result clobber the next step. `interrupt()`
-   * itself implies nothing (see docs/codebase/features/workflow-stop-parks.md).
+   * itself implies nothing (see docs/codebase/features/workflow-step-lifecycle.md).
    *
    * The flag is stamped with the step it was raised for, so a settle for any other
    * step ignores it — and a watchdog advances anyway if no settle ever arrives. One

@@ -44,466 +44,189 @@
       "relatedDecisions": []
     },
     {
-      "id": "permission-mode-selector",
-      "name": "Permission mode selector",
-      "doc": "features/permission-mode-selector.md",
-      "purpose": "Pick how much a session or workflow step's tool calls are gated by the permission guard, with a shared label/description per mode across all pickers.",
+      "id": "permissions-and-plan-mode",
+      "name": "Permissions and plan mode",
+      "doc": "features/permissions-and-plan-mode.md",
+      "purpose": "What decides whether a tool call runs, who decided it, and how plan mode's deliverable is written and reviewed: mode pickers, resolution provenance, the synced auto-mode allowlist, plan-file auto-approval, the reopenable plan card, and a typed reply counting as \"keep planning\".",
+      "covers": [
+        "permission-mode-selector",
+        "permission-resolution-provenance",
+        "guard-allowlist",
+        "plan-file-auto-approve",
+        "plan-review-card",
+        "plan-reply-keeps-planning"
+      ],
       "entryPoints": [
         "web/src/components/Composer.tsx",
         "web/src/components/SettingsModal.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
-        "web/src/components/workflow/StepCard.tsx"
+        "web/src/components/workflow/StepCard.tsx",
+        "server/src/sessions.ts",
+        "web/src/components/PermissionPrompt.tsx",
+        "web/src/components/GuardAllowlistSection.tsx",
+        "web/src/components/GuardAllowlistReviewModal.tsx",
+        "server/src/autoGuard.ts"
       ],
       "files": [
         "shared/types.ts",
         "web/src/lib/permissionModes.tsx",
         "web/src/lib/modelSelect.tsx",
-        "server/src/sessions.ts"
+        "server/src/sessions.ts",
+        "web/src/lib/transcript.ts",
+        "web/src/components/PermissionPrompt.tsx",
+        "server/src/autoGuard.ts",
+        "server/src/store.ts",
+        "server/src/sync.ts",
+        "server/src/userContext.ts",
+        "server/src/index.ts",
+        "storage/prisma/schema.prisma",
+        "storage/src/index.ts",
+        "web/src/store.ts",
+        "web/src/lib/guardEntries.ts",
+        "server/src/workspacePaths.ts",
+        "server/src/index.planFile.test.ts",
+        "web/src/lib/files.ts"
       ],
       "symbols": [
         "PermissionMode",
         "PERMISSION_MODES",
         "PERMISSION_MODE_SEGMENTS",
         "permissionModeLabel",
-        "renderPermissionModeOption"
+        "renderPermissionModeOption",
+        "PermissionResolutionSource",
+        "PermissionRequestData.resolvedBy",
+        "hasUnresolvedAlwaysAsk",
+        "unresolvedPermissions",
+        "findPermissionResolution",
+        "GuardAllowlist",
+        "normalizeAllowEntry",
+        "diffAllowlists",
+        "sameAllowEntry",
+        "describeAllowEntry",
+        "GuardAllowlistBlob",
+        "GuardAllowlistReview",
+        "isPlanPath",
+        "isSafeReadOnly",
+        "isSafePlanWrite",
+        "assessToolCall",
+        "isPlanFilePath",
+        "resolveWorkspacePath",
+        "workspaceRoots",
+        "PlanApproval",
+        "withPlanFileText",
+        "computeDiff",
+        "useFileContent"
       ],
-      "tests": [],
+      "tests": [
+        "server/src/autoGuard.plan.test.ts",
+        "server/src/sessions.permission.test.ts",
+        "server/src/sessions.reconcile.test.ts",
+        "server/src/autoGuard.allowlist.test.ts",
+        "server/src/autoGuard.sync.test.ts",
+        "server/src/sessions.alwaysAllow.test.ts",
+        "server/src/index.planFile.test.ts"
+      ],
       "businessRules": [
         "all five PermissionMode values stay selectable, including acceptEdits, because preset workflows ship steps with permissionMode: 'acceptEdits'",
-        "'default' displays as Manual; the stored value is unchanged"
+        "'default' displays as Manual; the stored value is unchanged",
+        "ExitPlanMode and AskUserQuestion always resolve to an explicit 'ask' from the hook, in every permission mode, never a bare continue: true a mode or settings entry could pre-empt",
+        "a second answer to an already-resolved permission request is dropped; it never re-emits a resolution event or re-triggers recoverOrphanedPermission's injected prompt",
+        "a resend after a bridge restart replays a stored ALWAYS_ASK_TOOLS resolution only when it was produced by a human (resolvedBy is 'user', 'plan-reply', or absent/legacy); any server-synthesized resolution is re-asked instead",
+        "a model-initiated EnterPlanMode sets meta.permissionMode = 'plan' immediately, so a subsequent worker/bridge restart resumes still gated",
+        "every resolution logs one [permission] line (session, tool, allow/deny, source)",
+        "a remote allowlist is never applied automatically; divergence is shown as an explicit added/removed diff the user accepts or rejects",
+        "divergence is detected as a set difference between local and remote entries, never by comparing updatedAt",
+        "pushing the local list to storage is suppressed while a review is pending",
+        "rejecting a review keeps the local list, pushes it back over the remote row, and is remembered by the remote's content so the same proposal is never re-asked",
+        "ALWAYS_ASK_TOOLS (AskUserQuestion, ExitPlanMode) can never be allowlisted",
+        "a hand-typed Bash prefix is whitespace-collapsed and may not contain &, &&, ||, ;, or |",
+        "non-Bash entries never carry a prefix; one given is silently dropped rather than rejected",
+        "plan-directory reads and writes (~/.claude/plans/** or <cwd>/.claude/plans/**) auto-approve in every permission mode",
+        "ExitPlanMode and AskUserQuestion always still prompt the user regardless of target path",
+        "credential paths (~/.ssh, ~/.aws, .env) always escalate even if nested under a plans directory",
+        "any other out-of-cwd file access is unaffected and still escalates",
+        "/file (and by extension /tree/find) can read any plan directory reachable from isPlanPath, not just the requesting session's own plan file — a deliberate widening of a route previously confined to project/session roots, scoped to plan directories only",
+        "a resolved plan card renders collapsed by default but is always reopenable via its header",
+        "action buttons never render once a request is resolved, in the inline card or the fullscreen modal",
+        "fullscreen focus mode opens read-only for a resolved plan",
+        "when the harness passes no inline plan argument, the card falls back to the turn's last plan-file write, reconstructing Edit-revised plans from the file snapshot",
+        "a plan card is live (chevron + Focus enabled) whenever a plan path is known, even with no resolvable inline/snapshot text",
+        "opening a plan card re-reads its plan file from disk, so the card (pending or resolved) always shows the plan's current text, not a frozen snapshot",
+        "a resolved card whose live text differs from what was captured shows an 'updated since approval' hint",
+        "a typed composer reply while an ExitPlanMode card is pending is treated as \"keep planning\": it denies that one request with the user's text as the reason, unblocking the query instead of queueing behind a promise nothing can resolve; it only fires for a pending ExitPlanMode, never another tool",
+        "no attachments: the deny reason is KEEP_PLANNING_MESSAGE plus the user's raw text and nothing else is queued; with attachments: the reason is a note only and the real text/attachments are queued as the next turn once the deny settles the busy query",
+        "the plan card's badge shows 'kept planning' (not 'denied') for a denied ExitPlanMode request"
       ],
       "architecturalRules": [
-        "single shared PERMISSION_MODES list \u2014 no component defines its own label/description array",
-        "SegmentedControl has no per-segment tooltip prop, so per-item tooltips wrap each segment's label in a Tooltip-wrapped full-width span"
+        "single shared PERMISSION_MODES list — no component defines its own label/description array",
+        "SegmentedControl has no per-segment tooltip prop, so per-item tooltips wrap each segment's label in a Tooltip-wrapped full-width span",
+        "resolvedBy is optional and every reader treats a missing value as 'user'",
+        "findPermissionResolution scans backwards (newest wins), matching the existing convention in exitPlanRequestId",
+        "the workflow plan-step gate's recorded resolution: 'allow' was already not a record of the SDK's tool result; resolvedBy: 'workflow-advance' makes that legible rather than changing it",
+        "validators live in shared/types.ts so the web client runs the exact same rules as the bridge before sending an entry",
+        "allowlist edits are dedicated addGuardAllow/removeGuardAllow/reviewGuardAllowlist intent messages, not folded into the whole-blob UserUiSettings save",
+        "the web store never caches the allowlist in localStorage; it is server-authoritative and arrives on every hello",
+        "removing an entry has no confirmation modal since it only narrows the guard and fails safe",
+        "the review modal is mounted at the app root, not inside Settings, so a divergence reaches the user without requiring a gear click",
+        "assessToolCall's self-worker-source check (isSelfWorkerSource) runs before the blanket tool allowlist short-circuit — the first guard verdict an allowlist entry cannot disarm; keep it ordered first in any refactor",
+        "isPlanPath resolves the path and anchors containment checks to real directories, not a substring match on the plan-dir marker, so path traversal cannot pass as a plan path",
+        "isInside does not resolve symlinks; a symlink planted inside a plan directory pointing elsewhere is accepted as a pre-existing limitation",
+        "auto-approved plan writes remain visible as tool_use blocks in the transcript, but the auto-approval permission event is filtered from the UI like other auto-approved calls",
+        "PLAN_DIR_MARKER/isPlanFilePath live in shared/types.ts, not autoGuard.ts, so the web client can reuse the same plan-path hint without importing server code",
+        "resolveWorkspacePath/workspaceRoots/resolveWorkspaceParam live in server/src/workspacePaths.ts, not server/src/index.ts, so they're importable by their own test — index.ts starts listening as a side effect of being imported",
+        "~/.claude/plans is per-OS-user, not per-app-user: under AUTH_ENABLED every signed-in app user on the same machine shares that directory, so this exception can cross app-user boundaries — accepted for now",
+        "the plan-file fallback builds data.input.plan/planPath from the transcript alone; the rendered card layers a live filesystem read (useFileContent against /file) on top whenever it's open, falling back to the transcript-only text before that fetch resolves or on failure",
+        "the plan-file write is tracked turn-scoped (lastPlanWrite) for text stitching, with a non-reset session-wide fallback (sessionPlanWrite) only consulted when the turn-scoped write is absent",
+        "expanded (inline collapse) and focus (fullscreen) are independent state; an effect keyed only on resolution forces both closed once a request resolves",
+        "the card's live read means a resolved card can show text the user never approved; the 'updated since approval' hint is the mitigation, not a faithful-approval guarantee",
+        "the plan-reply path picks the request id via a single backwards scan (same shape as findPermissionRequest/findPermissionResolution), never a bulk deny-everything-pending pass, so a concurrent unrelated permission card is never touched",
+        "the no-attachments plan-reply path never emits a 'user' transcript event or calls prompt() directly — both would open a new turn boundary and corrupt turn-scoped bookkeeping (collectTurns, permissionWaitMs)"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "turn-recovery"
+      ]
     },
     {
-      "id": "usage-indicator",
-      "name": "Plan usage indicator",
-      "doc": "features/usage-indicator.md",
-      "purpose": "Show the logged-in user's Claude-plan usage (5-hour / weekly windows) as a ring-progress chip with a hover-card breakdown.",
+      "id": "usage-and-cost",
+      "name": "Usage and cost",
+      "doc": "features/usage-and-cost.md",
+      "purpose": "Plan-usage chip, spend split by model, per-session cost/token/duration in the sidebar, and per-step spend in the workflow stepper — all fed by one accumulate-on-result pass.",
+      "covers": [
+        "usage-indicator",
+        "usage-by-model",
+        "session-sidebar-usage",
+        "workflow-step-cost"
+      ],
       "entryPoints": [
-        "web/src/components/UsageIndicator.tsx"
+        "web/src/components/UsageIndicator.tsx",
+        "web/src/components/Sidebar.tsx",
+        "web/src/components/WorkflowStepper.tsx"
       ],
       "files": [
         "shared/types.ts",
         "server/src/usage.ts",
         "web/src/store.ts",
-        "web/src/components/UsageIndicator.tsx"
+        "web/src/components/UsageIndicator.tsx",
+        "shared/usageByModel.ts",
+        "server/src/sessions.ts",
+        "web/src/components/Sidebar.tsx",
+        "web/src/lib/format.ts",
+        "server/src/workflows.ts",
+        "web/src/components/WorkflowStepper.tsx"
       ],
       "symbols": [
         "UsagePoller",
         "UsageSnapshot",
-        "UsageIndicator"
-      ],
-      "tests": [],
-      "businessRules": [
-        "no login, no chip - enforced server-side (poller never fetches, logout nulls snapshot) and client-side (auth.loggedIn gate)",
-        "{type: 'usage', usage: null} means auth is gone (logout or revoked/expired OAuth session), nothing else",
-        "a stale snapshot survives transient fetch failures; staleness is shown via 'Updated Xm ago', never by hiding the chip",
-        "hello may carry usage: null before the poller's first fetch completes (e.g. after a server restart); a logged-in client keeps its previously held snapshot instead of clearing it"
-      ],
-      "architecturalRules": [],
-      "relatedDecisions": [
-        "usage-by-model"
-      ]
-    },
-    {
-      "id": "session-sidebar-usage",
-      "name": "Session sidebar usage display",
-      "doc": "features/session-sidebar-usage.md",
-      "purpose": "Show per-session cost, token spend, active-turn duration, and EU-formatted date in the sidebar session list.",
-      "entryPoints": [
-        "web/src/components/Sidebar.tsx"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/sessions.ts",
-        "web/src/components/Sidebar.tsx",
-        "web/src/lib/format.ts"
-      ],
-      "symbols": [
+        "UsageIndicator",
+        "ModelSpend",
+        "ModelSpendMap",
+        "SessionMeta.costByModel",
+        "addSpend",
+        "mergeSpend",
+        "sortedSpend",
         "SessionMeta.totalCostUsd",
         "SessionMeta.totalTokens",
-        "SessionMeta.totalDurationMs"
-      ],
-      "tests": [],
-      "businessRules": [
-        "cost rendered as $X.XX, hidden when totalCostUsd is unset",
-        "token icon/tooltip hidden when totalTokens is unset",
-        "date rendered en-GB (dd/mm/yyyy) instead of browser-default locale",
-        "hovering a badge-state row swaps the status badge for date/cost/tokens meta; row min-height is fixed to prevent layout jump",
-        "duration rendered via formatDuration, hidden when totalDurationMs is unset; excludes idle wait between turns and permission-prompt approval wait within a turn"
-      ],
-      "architecturalRules": [
-        "totalTokens and totalDurationMs accumulate on the SDK result message the same way totalCostUsd already does, rather than introducing a separate tracking mechanism",
-        "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction",
-        "permission-wait time is deducted via LiveState.permissionWaitMs (measured from askPermission call to resolution) rather than switching to the SDK's duration_api_ms, which would also strip genuine tool-execution time"
-      ],
-      "relatedDecisions": [
-        "usage-by-model"
-      ]
-    },
-    {
-      "id": "workflow-step-update-popover",
-      "name": "Workflow step update popover",
-      "doc": "features/workflow-step-update-popover.md",
-      "purpose": "Warn when a pinned workflow step is behind its published version, show a field diff, and let the user update to the latest version, or update every outdated step at once from a banner.",
-      "entryPoints": [
-        "web/src/components/workflow/StepCard.tsx",
-        "web/src/components/workflow/WorkflowEditor.tsx"
-      ],
-      "files": [
-        "web/src/components/workflow/StepCard.tsx",
-        "web/src/components/workflow/useWorkflowDraft.ts",
-        "web/src/components/workflow/WorkflowEditor.tsx"
-      ],
-      "symbols": [
-        "UpdatePopover",
-        "FieldDiffList",
-        "changedFields",
-        "useWorkflowDraft.updateFor",
-        "useWorkflowDraft.updateStepToLatest",
-        "useWorkflowDraft.updateAllToLatest"
-      ],
-      "tests": [],
-      "businessRules": [
-        "diff list scrolls independently (ScrollArea.Autosize, mah 280) once it exceeds popover height, so the Update button stays reachable regardless of diff length",
-        "Update all re-pins every outdated ref step directly, skipping the per-field diff review"
-      ],
-      "architecturalRules": [],
-      "relatedDecisions": []
-    },
-    {
-      "id": "workflow-stop-parks",
-      "name": "Workflow stop parks",
-      "doc": "features/workflow-stop-parks.md",
-      "purpose": "Pressing Stop while a workflow step is running only interrupts the turn; the step parks at waiting-approval once it settles instead of advancing. Advancing stays exclusively explicit (Approve, or the stepper's force-advance).",
-      "entryPoints": [
-        "web/src/components/Composer.tsx",
-        "server/src/index.ts",
-        "server/src/sessions.ts",
-        "server/src/workflows.ts"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/sessions.ts",
-        "server/src/workflows.ts",
-        "web/src/components/Transcript.tsx",
-        "web/src/components/Composer.tsx"
-      ],
-      "symbols": [
-        "SessionManager.interrupt",
-        "SessionManager.handleWorkerEnded",
-        "WorkflowState.advanceOnComplete",
-        "WorkflowState.advanceOnCompleteStep",
-        "WorkflowEngine.forceAdvance",
-        "WorkflowEngine.onWorkflowTurnComplete",
-        "SessionManager.TurnCompleteListener"
-      ],
-      "tests": [
-        "server/src/workflows.advance.test.ts"
-      ],
-      "businessRules": [
-        "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
-        "a user prompt sent after a force-advance but before the interrupted turn settles clears the 'interrupted' flag and its step stamp",
-        "step output hand-off after a force-advance goes through the same (now-bounded) consolidation as a normal advance",
-        "a step configured with autoAdvance: true still parks after Stop \u2014 Stop overrides the step's own configuration",
-        "a plan-approval advance already pending when Stop is pressed is discarded, not delayed: both the flag and its step stamp are cleared",
-        "a failed turn (is_error result or a crashed query) also never autoAdvances \u2014 it parks the step with stepFailure: 'turn' instead, keeping the error status alive for Retry"
-      ],
-      "architecturalRules": [
-        "interrupt() stays intent-free \u2014 no caller may infer \"advance\" from \"stop\"",
-        "only forceAdvance sets advanceOnComplete (+ advanceOnCompleteStep); a plain Stop leaves it unset and arms no watchdog",
-        "whether a settle may consume advanceOnComplete is decided by the advanceOnCompleteStep stamp matching the current step index, not by turnSource",
-        "an interrupted settle always parks unless it is also the forced (stamped force-advance) exception, overriding both autoAdvance and a pending plan-approval advance",
-        "never advance synchronously under a live turn \u2014 flag advanceOnComplete and wait for the turn to settle, with a watchdog as the only fallback",
-        "the handleWorkerEnded settle fallback must stay gated on the interrupting set (routine non-error ended events exist)"
-      ],
-      "relatedDecisions": [
-        "turn-failure-retry"
-      ]
-    },
-    {
-      "id": "workflow-force-advance",
-      "name": "Workflow force-advance",
-      "doc": "features/workflow-force-advance.md",
-      "purpose": "Manual escape hatch for a stuck workflow step: hovering the current step's icon in the stepper shows a checkmark; clicking it confirms, then marks the step done and advances \u2014 always reaching the next step via settle or a watchdog.",
-      "entryPoints": [
-        "web/src/components/WorkflowStepper.tsx",
-        "server/src/index.ts",
-        "server/src/workflows.ts"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/index.ts",
-        "server/src/workflows.ts",
-        "server/src/sessions.ts",
-        "web/src/components/WorkflowStepper.tsx",
-        "web/src/components/ConfirmModal.tsx"
-      ],
-      "symbols": [
-        "WorkflowEngine.forceAdvance",
-        "WorkflowEngine.approve",
-        "WorkflowEngine.onWorkflowTurnComplete",
-        "WorkflowEngine.armSettleWatchdog",
-        "WorkflowEngine.forceAdvanceSettleMs",
-        "SessionManager.interrupt",
-        "SessionManager.consolidateTimeoutMs",
-        "WorkflowState.advanceOnCompleteStep"
-      ],
-      "tests": [
-        "server/src/workflows.advance.test.ts"
-      ],
-      "businessRules": [
-        "the affordance only ever targets the workflow's current step; other steps show no hover state",
-        "confirmation copy differs by state: a running step warns its turn is stopped and the last-said text becomes the output; the last step's copy says the workflow finishes",
-        "one click on Mark as completed always ends with the workflow on the next step (or done), via a normal settle or the watchdog"
-      ],
-      "architecturalRules": [
-        "never call advance() directly on a running step while its turn is active \u2014 set advanceOnComplete (+ advanceOnCompleteStep) then call SessionManager.interrupt(); interrupt() no longer implies an advance",
-        "the advanceOnCompleteStep stamp, not turnSource, decides whether a settle or the watchdog may consume a pending flag",
-        "the watchdog clears turnSource when it fires, so a late arrival from the abandoned turn is ignored by the stamp check"
-      ],
-      "relatedDecisions": [
-        "workflow-stop-parks",
-        "workflow-stalled-step-start"
-      ]
-    },
-    {
-      "id": "workflow-stalled-step-start",
-      "name": "Workflow stalled-step recovery",
-      "doc": "features/workflow-stalled-step-start.md",
-      "purpose": "Manual recoveries for an advance that died mid-flight: start a step left pending with nothing running, or resume one left done at the current index before stepIndex was bumped.",
-      "entryPoints": [
-        "web/src/components/WorkflowStepper.tsx",
-        "server/src/index.ts",
-        "server/src/workflows.ts"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/index.ts",
-        "server/src/workflows.ts",
-        "web/src/components/WorkflowStepper.tsx",
-        "web/src/components/ConfirmModal.tsx"
-      ],
-      "symbols": [
-        "WorkflowEngine.startStep",
-        "WorkflowEngine.forceAdvance",
-        "WorkflowEngine.advance",
-        "WorkflowEngine.runStep"
-      ],
-      "tests": [
-        "server/src/workflows.advance.test.ts"
-      ],
-      "businessRules": [
-        "each affordance only ever targets the workflow current step, and only while it is genuinely stalled",
-        "starting a stalled pending step runs it exactly as a normal advance would \u2014 same fresh-start behavior, same hand-off",
-        "resuming a stalled done step re-runs its consolidation, so the outputs entry the dead advance never published is filled in first",
-        "resuming needs no confirmation dialog \u2014 the step is already done, so nothing is being overridden",
-        "the last step reading done is a finished workflow, never a stall; it gets no affordance"
-      ],
-      "architecturalRules": [
-        "both recoveries are guarded no-ops the user must trigger \u2014 the engine never self-heals a stalled step automatically",
-        "reuses runStep step-entry behavior (pending) and advance() (done) rather than duplicating hand-off or consolidation logic",
-        "a done-at-current-index recovery keys off advancing, never isSessionActive \u2014 advance() sets no session status, so the leftover status says nothing about whether an advance is live",
-        "advance() must persist the stepIndex bump itself; leaving it to a later broadcast makes the unrecoverable done-at-current-index shape the durable state for the whole consolidation window"
-      ],
-      "relatedDecisions": [
-        "workflow-force-advance"
-      ]
-    },
-    {
-      "id": "interrupted-turn-recovery",
-      "name": "Interrupted turn recovery",
-      "doc": "features/interrupted-turn-recovery.md",
-      "purpose": "Detect a turn that died with the app, offer a Continue banner, and optionally resume it automatically; heal sessions the worker is still running; flag and surface a worker that never comes back at all.",
-      "entryPoints": [
-        "server/src/workerClient.ts",
-        "server/src/sessions.ts",
-        "server/src/userRegistry.ts",
-        "web/src/components/SessionView.tsx",
-        "web/src/components/WorkerBanner.tsx",
-        "web/src/components/SettingsModal.tsx",
-        "web/src/components/Sidebar.tsx"
-      ],
-      "files": [
-        "server/src/workerProtocol.ts",
-        "server/src/worker.ts",
-        "server/src/workerClient.ts",
-        "server/src/userRegistry.ts",
-        "server/src/index.ts",
-        "server/src/sessions.ts",
-        "server/src/autoGuard.ts",
-        "shared/types.ts",
-        "web/src/store.ts",
-        "web/src/components/SessionView.tsx",
-        "web/src/components/WorkerBanner.tsx",
-        "web/src/components/StorageBanner.tsx",
-        "web/src/components/SettingsModal.tsx",
-        "web/src/components/Sidebar.tsx",
-        "web/src/lib/format.ts"
-      ],
-      "symbols": [
-        "LiveSessionInfo.busy",
-        "SessionManager.reconcileWithWorker",
-        "SessionManager.markTurnLive",
-        "SessionManager.continueTurn",
-        "SessionMeta.interruptedAt",
-        "withQueuedPushes",
-        "UserUiSettings.autoContinueInterrupted",
-        "sessionRowMeta",
-        "WORKER_LOST_MS",
-        "WorkerClient.status",
-        "onWorkerLost",
-        "onStatusChange",
-        "UserRegistry.onWorkerLost",
-        "WorkerStatus",
-        "WorkerBanner",
-        "isSelfWorkerSource"
-      ],
-      "tests": [
-        "server/src/sessions.reconcile.test.ts",
-        "server/src/workerClient.test.ts",
-        "server/src/autoGuard.worker.test.ts"
-      ],
-      "businessRules": [
-        "auto-continue only resumes sessions flagged by the reconcile that is running; a stale flag keeps its banner",
-        "autoContinueInterrupted is on unless explicitly false; absent (or no settings.json) means enabled",
-        "a resume that throws is contained per session: logged, session put back into the flagged state, later sessions still resume",
-        "settings pulled from the storage server are merged field-wise so an older client cannot erase a newer setting by omitting it",
-        "interruptedAt clears on prompt, result, markTurnLive and archive/complete, but never on ackSession",
-        "the blind-clear timer fires only when no worker ever answered and it never saw an incompatible version; a mismatch is instead surfaced immediately via WorkerStatus.mismatch, not by this timer or the lost deadline",
-        "the sidebar row shows the same yellow interrupted dot/badge as the banner via sessionRowMeta, reusing the banner's exact guard, and persists through ackSession the same way",
-        "the socket may be down for WORKER_LOST_MS (20s) before it's treated as a real outage, well past an ordinary tsx-watch reconnect (~1-2s)",
-        "the worker-lost path flags sessions but never auto-continues them, even with autoContinueInterrupted on; the next real hello resumes them",
-        "a cold-start protocol mismatch never sets everConnected, so the outage clock never starts; it's surfaced by WorkerStatus.mismatch instead",
-        "exactly one of ConnectionBanner/WorkerBanner/StorageBanner renders at a time; bridge-down outranks worker-down outranks storage-down"
-      ],
-      "architecturalRules": [
-        "adding a field to LiveSessionInfo is not a protocol bump; busy is optional so an old worker stays demote-only instead of losing its socket mid-turn",
-        "reconcileWithWorker is the only place that stamps interruptedAt",
-        "a result for a flagged session means the flag was wrong (buffered result lands after reconcile) \u2014 clear it there rather than adding handshake ordering",
-        "onStatusChange (UI health) is kept separate from onWorkerLost (session reconcile) rather than merged",
-        "isSelfWorkerSource's check runs before the guard's blanket tool allowlist short-circuit, not after",
-        "isSelfWorkerSource is self-locating (import.meta.dirname) rather than threading session/bridge identity into assessToolCall"
-      ],
-      "relatedDecisions": [
-        "session-status-badge",
-        "workflow-stop-parks"
-      ]
-    },
-    {
-      "id": "composer-focus-new-session",
-      "name": "Composer focus on new session",
-      "doc": "features/composer-focus-new-session.md",
-      "purpose": "Auto-focus the prompt textarea when a brand-new session is created so the user can type immediately.",
-      "entryPoints": [
-        "web/src/components/Composer.tsx"
-      ],
-      "files": [
-        "web/src/components/Composer.tsx",
-        "web/src/store.ts",
-        "shared/types.ts"
-      ],
-      "symbols": [
-        "Composer"
-      ],
-      "tests": [],
-      "businessRules": [
-        "focus fires only when session.createdAt is under 5s old, same threshold as the store's auto-select-on-create logic",
-        "switching to an older existing session does not steal focus"
-      ],
-      "architecturalRules": [
-        "reuses the store's existing justCreated 5s threshold instead of adding a new is-new flag or protocol field"
-      ],
-      "relatedDecisions": []
-    },
-    {
-      "id": "workflow-draft-selection",
-      "name": "Workflow editor draft selection",
-      "doc": "features/workflow-draft-selection.md",
-      "purpose": "Govern which workflow the editor draft reflects across modal-open, workflows-broadcast, and new-workflow id-reconciliation triggers, so a live draft is never silently replaced by an unrelated workflow.",
-      "entryPoints": [
-        "web/src/components/workflow/WorkflowEditor.tsx"
-      ],
-      "files": [
-        "web/src/components/workflow/useWorkflowDraft.ts"
-      ],
-      "symbols": [
-        "useWorkflowDraft"
-      ],
-      "tests": [],
-      "businessRules": [
-        "a workflows/sharedWorkflows length change while the modal is already open with a live draft must not re-trigger the pick-a-workflow fallback",
-        "loadFrom collapses every step of the loaded workflow by default; a step opens only via explicit selection"
-      ],
-      "architecturalRules": [
-        "init effect tracks the open transition via a prevOpened ref and skips its workflows[0] fallback whenever a draft already exists and this isn't the open transition, to avoid racing the id-reconciliation effect after a new-workflow save",
-        "new-workflow id reconciliation matches by name plus deep step equality, not step count alone"
-      ],
-      "relatedDecisions": []
-    },
-    {
-      "id": "workflow-approve-loader",
-      "name": "Workflow approve loader",
-      "doc": "features/workflow-approve-loader.md",
-      "purpose": "Show a loader and disable the Approve button the instant it is clicked, for the whole background consolidation window before the next step starts, instead of leaving the button looking unchanged and clickable.",
-      "entryPoints": [
-        "web/src/components/WorkflowStepper.tsx",
-        "server/src/workflows.ts"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/workflows.ts",
-        "server/src/sessions.ts",
-        "web/src/components/WorkflowStepper.tsx",
-        "server/src/workflows.advance.test.ts"
-      ],
-      "symbols": [
-        "WorkflowState.advancing",
-        "WorkflowEngine.advance",
-        "SessionManager.persistMeta",
-        "SessionManager.adoptSynced",
-        "SessionManager.consolidateTimeoutMs"
-      ],
-      "tests": [
-        "server/src/workflows.advance.test.ts"
-      ],
-      "businessRules": [
-        "the Approve button shows a loader and is disabled for the entire consolidation window, not just until the next step's status arrives",
-        "the button is also disabled while disconnected, since a dropped WS message would otherwise leave the click looking like it did nothing",
-        "the card's copy switches to an in-progress message while advancing",
-        "the consolidation window is bounded, so even a hung query or token refresh cannot hold advancing open forever"
-      ],
-      "architecturalRules": [
-        "the in-flight flag is server-owned broadcast state, never local optimistic UI state",
-        "clearing the flag rides the next status broadcast rather than issuing its own \u2014 no await may be inserted between the clear and that broadcast",
-        "cleared on process restart (constructor load loop) and on hand-off (adoptSynced), never in reconcileWithWorker, which runs far more often and would falsely clear a live advance",
-        "runStep's silent early returns now persistMeta before returning, so the cleared flag and bumped stepIndex always reach the client",
-        "advance() persists the stepIndex bump immediately rather than letting it ride runStep later broadcast"
-      ],
-      "relatedDecisions": [
-        "workflow-stalled-step-start"
-      ]
-    },
-    {
-      "id": "workflow-step-cost",
-      "name": "Workflow step cost",
-      "doc": "features/workflow-step-cost.md",
-      "purpose": "Show per-step USD spend, token spend, and active-turn duration in the workflow stepper so users can see which step of a running workflow is expensive or slow without opening the transcript.",
-      "entryPoints": [
-        "web/src/components/WorkflowStepper.tsx"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/sessions.ts",
-        "server/src/workflows.ts",
-        "web/src/components/WorkflowStepper.tsx",
-        "web/src/lib/format.ts"
-      ],
-      "symbols": [
+        "SessionMeta.totalDurationMs",
         "WorkflowState.stepCostsUsd",
         "WorkflowState.stepTokens",
         "SessionMeta.lastTokens",
@@ -512,68 +235,57 @@
         "SessionMeta.lastDurationMs",
         "formatDuration"
       ],
-      "tests": [],
+      "tests": [
+        "server/src/usageByModel.test.ts",
+        "server/src/sessions.ended.test.ts"
+      ],
       "businessRules": [
+        "no login, no chip - enforced server-side (poller never fetches, logout nulls snapshot) and client-side (auth.loggedIn gate)",
+        "{type: 'usage', usage: null} means auth is gone (logout or revoked/expired OAuth session), nothing else",
+        "a stale snapshot survives transient fetch failures; staleness is shown via 'Updated Xm ago', never by hiding the chip",
+        "hello may carry usage: null before the poller's first fetch completes (e.g. after a server restart); a logged-in client keeps its previously held snapshot instead of clearing it",
+        "rows keyed by resolveModelId(meta.model), so a retired stored model id folds into its replacement's row",
+        "helper-query spend (autoName, summarizeTurn, step-output consolidation) is excluded — the table is chat-turn spend only, not full account spend",
+        "costByModel is additive and never backfilled; existing sessions show nothing until their next turn settles",
+        "the global rollup is derived client-side from the sessions the store already holds, so deleting a session removes its spend",
+        "a result carrying neither cost nor usage opens no row",
+        "cost rendered as $X.XX, hidden when totalCostUsd is unset",
+        "token icon/tooltip hidden when totalTokens is unset",
+        "date rendered en-GB (dd/mm/yyyy) instead of browser-default locale",
+        "hovering a badge-state row swaps the status badge for date/cost/tokens meta; row min-height is fixed to prevent layout jump",
+        "duration rendered via formatDuration, hidden when totalDurationMs is unset; excludes idle wait between turns and permission-prompt approval wait within a turn",
         "cost rendered as $X.XX next to the step name, hidden when that step's accumulated cost is zero or unset",
         "token icon with a tooltip ('N tokens spent') shown next to the cost label, hidden when that step's accumulated tokens are zero or unset",
         "retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it, for both cost and tokens",
         "duration shown next to the token icon via formatDuration, hidden when that step's accumulated duration is zero or unset; excludes permission-prompt approval wait within the turn"
       ],
       "architecturalRules": [
+        "reuses the existing accumulate-on-result pass in server/src/sessions.ts that already owns totalCostUsd/totalTokens, instead of a new tracking mechanism",
+        "no new persistence and no new ws message — costByModel travels inside the existing SessionMeta blob",
+        "totalTokens and totalDurationMs accumulate on the SDK result message the same way totalCostUsd already does, rather than introducing a separate tracking mechanism",
+        "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction",
+        "permission-wait time is deducted via LiveState.permissionWaitMs (measured from askPermission call to resolution) rather than switching to the SDK's duration_api_ms, which would also strip genuine tool-execution time",
         "reuses the existing per-turn SessionMeta.lastCostUsd accumulation instead of adding a new cost-tracking path",
         "tokens mirror the same pattern via a new SessionMeta.lastTokens field rather than a separate tracking mechanism",
-        "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction",
         "permission-wait time is deducted via LiveState.permissionWaitMs rather than the SDK's duration_api_ms, which would also strip genuine tool-execution time"
-      ],
-      "relatedDecisions": [
-        "usage-by-model"
-      ]
-    },
-    {
-      "id": "transcript-markdown-rendering",
-      "name": "Transcript markdown rendering",
-      "doc": "features/transcript-markdown-rendering.md",
-      "purpose": "Render every transcript item's text through the same Markdown component with a shared compact rhythm; only user prompts render as a bubble, agent output is unwrapped and flush-left.",
-      "entryPoints": [
-        "web/src/components/Transcript.tsx"
-      ],
-      "files": [
-        "web/src/components/Transcript.tsx",
-        "web/src/components/Markdown.tsx",
-        "web/src/components/ToolGroup.tsx",
-        "web/src/components/ToolCallCard.tsx",
-        "web/src/index.css"
-      ],
-      "symbols": [
-        "Markdown",
-        ".md-body",
-        ".md-body pre code",
-        ".tx-row"
-      ],
-      "tests": [],
-      "businessRules": [
-        "user and agent text render markdown instead of plain preformatted text; single newlines collapse and raw HTML tags are dropped",
-        "code blocks wrap long lines (white-space: pre-wrap, overflow-wrap: anywhere) instead of scrolling horizontally",
-        "only the user prompt renders as a bubble (right-aligned, capped at 80% column width); agent output is unwrapped and flush-left with nesting shown by order/expand affordance, not indentation"
-      ],
-      "architecturalRules": [
-        "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
-        "user bubble Paper needs minWidth: 0 alongside maxWidth: '80%' so wide content (e.g. a code block or one long unbroken token) can't win over max-width via min-content sizing",
-        "compact markdown rhythm overrides Mantine spacing variables scoped to .md-body rather than CSS selectors, because Typography's list rule outranks a .md-body ul selector override on specificity",
-        "collapsible transcript rows (agent turns, tool groups, tool calls) share one borderless .tx-row convention: no Paper/border, CSS-only hover, and no accumulating indentation",
-        "a collapsed row's body unmounts instead of only being CSS-hidden, so per-row state that must survive collapse/expand lives in a module-scope sticky map, not component state; sub-toggles inside an already-expanded body (a spawn card's prompt disclosure, every tool card's raw-input toggle) are deliberately plain useState, not sticky, since resetting on close is expected there.",
-        "no virtualization is used for the transcript list; lazy-mounted bodies keep per-row cost low enough that this still holds"
       ],
       "relatedDecisions": []
     },
     {
-      "id": "workflow-step-version-history",
-      "name": "Workflow step version history",
-      "doc": "features/workflow-step-version-history.md",
-      "purpose": "Browse a step's full immutable version history, preview a per-field diff of any past version, and either re-pin a workflow ref to it or restore its content into the step-library draft as a new head version.",
+      "id": "workflow-step-versioning",
+      "name": "Workflow step versioning",
+      "doc": "features/workflow-step-versioning.md",
+      "purpose": "Shared diff-popover UI for warning that a pinned step is stale and for browsing, re-pinning, or restoring any past step version, plus the rules deciding which workflow the editor draft reflects.",
+      "covers": [
+        "workflow-step-version-history",
+        "workflow-step-version-ui",
+        "workflow-step-update-popover",
+        "workflow-draft-selection"
+      ],
       "entryPoints": [
         "web/src/components/workflow/StepCard.tsx",
-        "web/src/components/workflow/StepLibrary.tsx"
+        "web/src/components/workflow/StepLibrary.tsx",
+        "web/src/components/workflow/WorkflowEditor.tsx"
       ],
       "files": [
         "shared/types.ts",
@@ -598,56 +310,123 @@
         "useWorkflowDraft.pinStepToVersion",
         "WorkflowEngine.listStepVersions",
         "WorkflowEngine.listOwnStepVersions",
-        "StorageSyncClient.pullStepVersions"
+        "StorageSyncClient.pullStepVersions",
+        "UpdatePopover",
+        "changedFields",
+        "useWorkflowDraft.updateFor",
+        "useWorkflowDraft.updateStepToLatest",
+        "useWorkflowDraft.updateAllToLatest",
+        "useWorkflowDraft"
       ],
       "tests": [],
       "businessRules": [
         "newest-first, gap-tolerant version list",
         "own steps show full history; foreign steps show published versions only, with the exact pinned version always unioned in",
         "pin/restore is disabled for the currently active version",
-        "workflow re-pin changes only which immutable version a ref points to; step-library restore creates a brand-new head version with old content \u2014 history is never rewritten",
-        "both popovers fetch history on open, not on mount, and re-fetch on every reopen"
+        "workflow re-pin changes only which immutable version a ref points to; step-library restore creates a brand-new head version with old content — history is never rewritten",
+        "both popovers fetch history on open, not on mount, and re-fetch on every reopen",
+        "diff list scrolls independently (ScrollArea.Autosize, mah 280) once it exceeds popover height, so the Update button stays reachable regardless of diff length",
+        "Update all re-pins every outdated ref step directly, skipping the per-field diff review",
+        "a workflows/sharedWorkflows length change while the modal is already open with a live draft must not re-trigger the pick-a-workflow fallback",
+        "loadFrom collapses every step of the loaded workflow by default; a step opens only via explicit selection"
       ],
       "architecturalRules": [
-        "immutable step versions are never deleted or edited, on disk or in storage \u2014 only the head list and published flag change",
-        "the storage route enforces the foreign-publish filter server-side; client-side version union never bypasses it"
+        "immutable step versions are never deleted or edited, on disk or in storage — only the head list and published flag change",
+        "the storage route enforces the foreign-publish filter server-side; client-side version union never bypasses it",
+        "init effect tracks the open transition via a prevOpened ref and skips its workflows[0] fallback whenever a draft already exists and this isn't the open transition, to avoid racing the id-reconciliation effect after a new-workflow save",
+        "new-workflow id reconciliation matches by name plus deep step equality, not step count alone"
       ],
       "relatedDecisions": []
     },
     {
-      "id": "workflow-step-output-consolidation",
-      "name": "Workflow step output consolidation",
-      "doc": "features/workflow-step-output-consolidation.md",
-      "purpose": "Ensure the output handed to the next workflow step is the step's full definitive deliverable (including a plan-mode step's ExitPlanMode plan) rather than a short delta reply or trailing chat text, and that a step never runs with a silently-empty {outputs.<name>} reference.",
+      "id": "workflow-step-lifecycle",
+      "name": "Workflow step lifecycle",
+      "doc": "features/workflow-step-lifecycle.md",
+      "purpose": "How a running workflow step's turn settles into advance, park, or stall; the manual escape hatches for a stuck or stalled step; the bounded consolidation of a step's output before it is handed on; and the sidebar checkmark for a fully-finished workflow.",
+      "covers": [
+        "workflow-step-advance",
+        "workflow-stop-parks",
+        "workflow-force-advance",
+        "workflow-stalled-step-start",
+        "workflow-approve-loader",
+        "workflow-step-output-consolidation",
+        "workflow-done-session-indicator"
+      ],
       "entryPoints": [
-        "server/src/workflows.ts"
+        "web/src/components/Composer.tsx",
+        "server/src/index.ts",
+        "server/src/sessions.ts",
+        "server/src/workflows.ts",
+        "web/src/components/WorkflowStepper.tsx",
+        "web/src/components/Sidebar.tsx"
       ],
       "files": [
+        "shared/types.ts",
         "server/src/sessions.ts",
+        "server/src/workflows.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/components/Composer.tsx",
+        "server/src/index.ts",
+        "web/src/components/WorkflowStepper.tsx",
+        "web/src/components/ConfirmModal.tsx",
+        "server/src/workflows.advance.test.ts",
         "server/src/sessions.turns.test.ts",
         "server/src/workflows.substitution.test.ts",
-        "server/src/workflows.ts",
-        "shared/types.ts"
+        "web/src/lib/format.ts",
+        "web/src/components/Sidebar.tsx"
       ],
       "symbols": [
+        "SessionManager.interrupt",
+        "SessionManager.handleWorkerEnded",
+        "WorkflowState.advanceOnComplete",
+        "WorkflowState.advanceOnCompleteStep",
+        "WorkflowEngine.forceAdvance",
+        "WorkflowEngine.onWorkflowTurnComplete",
+        "SessionManager.TurnCompleteListener",
+        "WorkflowEngine.approve",
+        "WorkflowEngine.armSettleWatchdog",
+        "WorkflowEngine.forceAdvanceSettleMs",
+        "SessionManager.consolidateTimeoutMs",
+        "WorkflowEngine.startStep",
+        "WorkflowEngine.advance",
+        "WorkflowEngine.runStep",
+        "WorkflowState.advancing",
+        "SessionManager.persistMeta",
+        "SessionManager.adoptSynced",
         "WorkflowState.lastStepOutput",
         "SessionManager.consolidateStepOutput",
         "SessionManager.consolidateQuery",
-        "SessionManager.consolidateTimeoutMs",
         "SessionManager.collectTurns",
         "SessionManager.findStepStart",
-        "WorkflowEngine.advance",
-        "WorkflowEngine.runStep",
         "substituteTokens",
         "usesHandoffTokens",
-        "isPlanPath"
+        "isPlanPath",
+        "isWorkflowFinished"
       ],
       "tests": [
+        "server/src/workflows.advance.test.ts",
         "server/src/sessions.turns.test.ts",
-        "server/src/workflows.substitution.test.ts",
-        "server/src/workflows.advance.test.ts"
+        "server/src/workflows.substitution.test.ts"
       ],
       "businessRules": [
+        "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
+        "a user prompt sent after a force-advance but before the interrupted turn settles clears the 'interrupted' flag and its step stamp",
+        "step output hand-off after a force-advance goes through the same (now-bounded) consolidation as a normal advance",
+        "a step configured with autoAdvance: true still parks after Stop — Stop overrides the step's own configuration",
+        "a plan-approval advance already pending when Stop is pressed is discarded, not delayed: both the flag and its step stamp are cleared",
+        "a failed turn (is_error result or a crashed query) also never autoAdvances — it parks the step with stepFailure: 'turn' instead, keeping the error status alive for Retry",
+        "the affordance only ever targets the workflow's current step; other steps show no hover state",
+        "confirmation copy differs by state: a running step warns its turn is stopped and the last-said text becomes the output; the last step's copy says the workflow finishes",
+        "one click on Mark as completed always ends with the workflow on the next step (or done), via a normal settle or the watchdog",
+        "each affordance only ever targets the workflow current step, and only while it is genuinely stalled",
+        "starting a stalled pending step runs it exactly as a normal advance would — same fresh-start behavior, same hand-off",
+        "resuming a stalled done step re-runs its consolidation, so the outputs entry the dead advance never published is filled in first",
+        "resuming needs no confirmation dialog — the step is already done, so nothing is being overridden",
+        "the last step reading done is a finished workflow, never a stall; it gets no affordance",
+        "the Approve button shows a loader and is disabled for the entire consolidation window, not just until the next step's status arrives",
+        "the button is also disabled while disconnected, since a dropped WS message would otherwise leave the click looking like it did nothing",
+        "the card's copy switches to an in-progress message while advancing",
+        "the consolidation window is bounded, so even a hung query or token refresh cannot hold advancing open forever",
         "consolidation only fires when a step ran more than one turn; single-turn steps incur no extra query or latency",
         "on query failure, empty result, or a timeout (consolidateTimeoutMs), falls back to lastAssistantText (per-step-scoped) rather than blocking the workflow",
         "an empty consolidated output is never published, so it cannot overwrite a previously captured value",
@@ -657,16 +436,383 @@
         "outputs are strictly per-session (WorkflowState.outputs); there is no cross-session write path",
         "prompt tokens are honoured only where the step author wrote them: a token occurring inside substituted content (a step output, the diff, the task text) stays literal instead of being re-expanded",
         "the working-tree diff handed to a fresh-start step is capped with a truncation marker (MAX_DIFF_CHARS) so a large dirty tree degrades the hand-off rather than failing the turn",
-        "a plan revised by Edit after the deliverable-producing Write still contributes its current on-disk text to the hand-off, via collectTurns reading the plan file (gated by isPlanPath) instead of the last captured Write content"
+        "a plan revised by Edit after the deliverable-producing Write still contributes its current on-disk text to the hand-off, via collectTurns reading the plan file (gated by isPlanPath) instead of the last captured Write content",
+        "icon precedence: session.completed -> outline check, status running -> Loader, status.actionable -> pulsing dot, isWorkflowFinished -> filled check, otherwise plain dot",
+        "actionable states always win over the finished checkmark so a session needing the user is never masked as done",
+        "force-advance (mark last running step completed) also sets the last step done, so a force-finished workflow shows the filled check too"
       ],
       "architecturalRules": [
+        "interrupt() stays intent-free — no caller may infer \"advance\" from \"stop\"",
+        "only forceAdvance sets advanceOnComplete (+ advanceOnCompleteStep); a plain Stop leaves it unset and arms no watchdog",
+        "whether a settle may consume advanceOnComplete is decided by the advanceOnCompleteStep stamp matching the current step index, not by turnSource",
+        "an interrupted settle always parks unless it is also the forced (stamped force-advance) exception, overriding both autoAdvance and a pending plan-approval advance",
+        "never advance synchronously under a live turn — flag advanceOnComplete and wait for the turn to settle, with a watchdog as the only fallback",
+        "the handleWorkerEnded settle fallback must stay gated on the interrupting set (routine non-error ended events exist)",
+        "never call advance() directly on a running step while its turn is active — set advanceOnComplete (+ advanceOnCompleteStep) then call SessionManager.interrupt(); interrupt() no longer implies an advance",
+        "the advanceOnCompleteStep stamp, not turnSource, decides whether a settle or the watchdog may consume a pending flag",
+        "the watchdog clears turnSource when it fires, so a late arrival from the abandoned turn is ignored by the stamp check",
+        "both recoveries are guarded no-ops the user must trigger — the engine never self-heals a stalled step automatically",
+        "reuses runStep step-entry behavior (pending) and advance() (done) rather than duplicating hand-off or consolidation logic",
+        "a done-at-current-index recovery keys off advancing, never isSessionActive — advance() sets no session status, so the leftover status says nothing about whether an advance is live",
+        "advance() must persist the stepIndex bump itself; leaving it to a later broadcast makes the unrecoverable done-at-current-index shape the durable state for the whole consolidation window",
+        "the in-flight flag is server-owned broadcast state, never local optimistic UI state",
+        "clearing the flag rides the next status broadcast rather than issuing its own — no await may be inserted between the clear and that broadcast",
+        "cleared on process restart (constructor load loop) and on hand-off (adoptSynced), never in reconcileWithWorker, which runs far more often and would falsely clear a live advance",
+        "runStep's silent early returns now persistMeta before returning, so the cleared flag and bumped stepIndex always reach the client",
+        "advance() persists the stepIndex bump immediately rather than letting it ride runStep later broadcast",
         "reuses the transcript-walking pattern from lastAssistantText/summarizeTurn and the one-shot non-agentic query shape from summarizeTurn/autoName",
         "advance() is async; callers fire it with void this.advance(sessionId)",
-        "all prompt tokens are filled in one pass over the template (substituteTokens) rather than by chained replaceAll calls; a new token is added to that pass, never appended as another pass"
+        "all prompt tokens are filled in one pass over the template (substituteTokens) rather than by chained replaceAll calls; a new token is added to that pass, never appended as another pass",
+        "isWorkflowFinished is kept separate from sessionRowMeta's { color, label, actionable } return since projectStatusMeta and alerts.ts consume that shape and workflow-done is not actionable",
+        "isWorkflowFinished mirrors workflows.ts advance(): the last step is set done with no further stepIndex bump, so all-done is the only reliable signal"
       ],
       "relatedDecisions": [
-        "turn-failure-retry"
+        "turn-recovery",
+        "session-and-project-ui"
       ]
+    },
+    {
+      "id": "turn-recovery",
+      "name": "Turn recovery",
+      "doc": "features/turn-recovery.md",
+      "purpose": "Everything that gets a turn back on its feet: detecting and resuming turns that died with the app, a working Retry for every recoverable failure, in-turn recovery from a rejected OAuth token, and the rule that a turn never runs on the unrefreshable ambient ~/.claude login.",
+      "covers": [
+        "interrupted-turn-recovery",
+        "turn-failure-retry",
+        "auth-failure-recovery",
+        "app-managed-login-only"
+      ],
+      "entryPoints": [
+        "server/src/workerClient.ts",
+        "server/src/sessions.ts",
+        "server/src/userRegistry.ts",
+        "web/src/components/SessionView.tsx",
+        "web/src/components/WorkerBanner.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/Sidebar.tsx",
+        "web/src/components/Transcript.tsx",
+        "server/src/index.ts",
+        "server/src/auth.ts"
+      ],
+      "files": [
+        "server/src/workerProtocol.ts",
+        "server/src/worker.ts",
+        "server/src/workerClient.ts",
+        "server/src/userRegistry.ts",
+        "server/src/index.ts",
+        "server/src/sessions.ts",
+        "server/src/autoGuard.ts",
+        "shared/types.ts",
+        "web/src/store.ts",
+        "web/src/components/SessionView.tsx",
+        "web/src/components/WorkerBanner.tsx",
+        "web/src/components/StorageBanner.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/Sidebar.tsx",
+        "web/src/lib/format.ts",
+        "server/src/workflows.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/lib/transcript.ts",
+        "server/src/auth.ts",
+        "web/src/components/LoginModal.tsx"
+      ],
+      "symbols": [
+        "LiveSessionInfo.busy",
+        "SessionManager.reconcileWithWorker",
+        "SessionManager.markTurnLive",
+        "SessionManager.continueTurn",
+        "SessionMeta.interruptedAt",
+        "withQueuedPushes",
+        "UserUiSettings.autoContinueInterrupted",
+        "sessionRowMeta",
+        "WORKER_LOST_MS",
+        "WorkerClient.status",
+        "onWorkerLost",
+        "onStatusChange",
+        "UserRegistry.onWorkerLost",
+        "WorkerStatus",
+        "WorkerBanner",
+        "isSelfWorkerSource",
+        "SessionManager.failTurn",
+        "SessionManager.lastPromptForRetry",
+        "WorkflowEngine.retryIfFailed",
+        "WorkflowState.stepFailure",
+        "WorkflowMarkerData.failed",
+        "SessionManager.TurnCompleteListener",
+        "isFailedResult",
+        "resultErrorText",
+        "SessionMeta.errorKind",
+        "isAuthFailureMessage",
+        "AuthManager.handleTokenRejected",
+        "TokenRejection",
+        "SessionManager.recoverAuthFailure",
+        "authRecoveryMessage",
+        "SessionManager.setStatus",
+        "SessionManager.retryTurn",
+        "SessionManager.pushTurn",
+        "SessionManager.pushTurnSafely",
+        "SessionManager.pushWithToken",
+        "SessionManager.ownerToken",
+        "authRefusalMessage",
+        "AuthManager.ensureFreshToken",
+        "PROACTIVE_RETRY_MS",
+        "PROACTIVE_RETRY_CAP_MS"
+      ],
+      "tests": [
+        "server/src/sessions.reconcile.test.ts",
+        "server/src/workerClient.test.ts",
+        "server/src/autoGuard.worker.test.ts",
+        "server/src/sessions.ended.test.ts",
+        "server/src/workflows.advance.test.ts",
+        "server/src/auth.failure.test.ts",
+        "server/src/sessions.spawn.test.ts",
+        "server/src/auth.concurrentLogin.test.ts"
+      ],
+      "businessRules": [
+        "auto-continue only resumes sessions flagged by the reconcile that is running; a stale flag keeps its banner",
+        "autoContinueInterrupted is on unless explicitly false; absent (or no settings.json) means enabled",
+        "a resume that throws is contained per session: logged, session put back into the flagged state, later sessions still resume",
+        "settings pulled from the storage server are merged field-wise so an older client cannot erase a newer setting by omitting it",
+        "interruptedAt clears on prompt, result, markTurnLive and archive/complete, but never on ackSession",
+        "the blind-clear timer fires only when no worker ever answered and it never saw an incompatible version; a mismatch is instead surfaced immediately via WorkerStatus.mismatch, not by this timer or the lost deadline",
+        "the sidebar row shows the same yellow interrupted dot/badge as the banner via sessionRowMeta, reusing the banner's exact guard, and persists through ackSession the same way",
+        "the socket may be down for WORKER_LOST_MS (20s) before it's treated as a real outage, well past an ordinary tsx-watch reconnect (~1-2s)",
+        "the worker-lost path flags sessions but never auto-continues them, even with autoContinueInterrupted on; the next real hello resumes them",
+        "a cold-start protocol mismatch never sets everConnected, so the outage clock never starts; it's surfaced by WorkerStatus.mismatch instead",
+        "exactly one of ConnectionBanner/WorkerBanner/StorageBanner renders at a time; bridge-down outranks worker-down outranks storage-down",
+        "every recoverable failure ends on a failure row with a working Retry, in a plain session and inside a running workflow alike",
+        "a failed turn never autoAdvances; it parks the step as failed instead, unless an explicit stamped force-advance is already pending",
+        "Retry re-runs the right thing: a step that never got a prompt is re-rendered from WorkflowState ('pre-run'); a step whose turn failed is re-sent as a follow-up on the same conversation ('turn')",
+        "no auto-retry or backoff — a transient failure (e.g. a 529) is an ordinary failed turn with a manual button",
+        "stepFailure is persisted, so a reload while parked in the failed state still shows Retry",
+        "an auth-classified turn failure attempts exactly one token refresh, then always rewrites the banner to name the next action (Retry, Sign in, or check your connection) instead of leaving raw CLI text with only Retry",
+        "errorKind: 'auth' is set only for the signed-out outcome; refreshed/refresh-failed clear it",
+        "the login modal opens off the existing authStatus broadcast, not a new message type, and unlike the hello auto-open it is not deduped",
+        "retry stays entirely manual; nothing auto-resumes a failed turn, even after a silent refresh or a fresh sign-in — a login landing later or from another device must not fire N queued turns",
+        "errorKind is never set when no AuthManager is wired (ambient-token mode)",
+        "every query crash (auth-related or not) still writes a synthetic result event with the raw CLI text preserved verbatim, even after the banner is revised",
+        "a clean ended (no error) writes no synthetic result",
+        "a signed-in user's turn never runs on ambient ~/.claude credentials; with no app token the turn is refused, since a visible failure with Retry beats a silent 401 loop",
+        "a refusal caused by being logged out re-broadcasts the logged-out authStatus so a dismissed login modal reopens; a refusal from a transient refresh failure does not",
+        "the bridge-side helper queries (autoName, summarizeTurn, consolidateStepOutput) are best-effort: no token means skip the query, never fall back and never fail the surrounding turn",
+        "compactContext still returns a synchronous { ok: true }; an auth refusal after that point surfaces through failTurn, not the { ok: false, code, reason } union",
+        "a transiently failed proactive refresh retries on a 60s-doubling ladder capped at 15 minutes; a dead refresh token logs out instead, stopping the chain",
+        "accessToken: null in buildQueryOptions is reachable only when no AuthManager is wired at all (tests / embedding), never for a real signed-in user",
+        "logins are tracked per OAuth state, so two started at once each keep their own PKCE verifier; completing one clears the rest, unfinished ones expire after 30 minutes, and a paste with no #state falls back to the newest"
+      ],
+      "architecturalRules": [
+        "adding a field to LiveSessionInfo is not a protocol bump; busy is optional so an old worker stays demote-only instead of losing its socket mid-turn",
+        "reconcileWithWorker is the only place that stamps interruptedAt",
+        "a result for a flagged session means the flag was wrong (buffered result lands after reconcile) — clear it there rather than adding handshake ordering",
+        "onStatusChange (UI health) is kept separate from onWorkerLost (session reconcile) rather than merged",
+        "isSelfWorkerSource's check runs before the guard's blanket tool allowlist short-circuit, not after",
+        "isSelfWorkerSource is self-locating (import.meta.dirname) rather than threading session/bridge identity into assessToolCall",
+        "failTurn is the single funnel for every failure the SDK never reports as a result; public so WorkflowEngine can call it for pre-run failures",
+        "the retry router idiom mirrors case 'prompt': WorkflowEngine.retryIfFailed gets first refusal, only false falls through to SessionManager.retryTurn; no new ClientMessage type",
+        "lastPromptForRetry is the single source both retryTurn and retryIfFailed read from",
+        "the failed park skips setStatus (which clears errorMessage on every transition) and calls persistMeta instead, so the error banner and Retry stay live while the step shows waiting-approval",
+        "the client's backward scan for retryKey may only skip 'workflow' and 'context-compact' items; every other kind ends the scan",
+        "classification happens at exactly two points: failTurn (covers every funnel caller) and the result branch of handleWorkerEvent, which bypasses failTurn by design",
+        "the revision guard (status === 'error' && errorMessage === error) is the entire don't-clobber mechanism, relying on the workflow failed-park path using persistMeta not setStatus",
+        "authRecoveryMessage's strings avoid every word AUTH_FAILURE_PATTERNS matches, so a re-failure cannot re-classify itself into a loop",
+        "a successful refresh() still does not call emitChange(); the revised banner is the visible signal, not an auth-status broadcast",
+        "handleTokenRejected goes through the single-flight refresh() rather than logout() directly, so N simultaneous failures cause one token request and concurrent callers all resolve 'refreshed'",
+        "the synthetic result is emitted via emitEvent directly, never routed through handleWorkerEvent, so it cannot re-run turn-settle bookkeeping",
+        "SDK/CLI error wording is not a published contract; isAuthFailureMessage can silently stop matching after an upstream change",
+        "known limitation: in Compact view the failed row sits inside a collapsed AgentTurn, so SessionView's alert is the always-visible affordance (pre-existing, out of scope)",
+        "the never-fall-back guarantee lives in pushTurn, which refuses before reaching buildQueryOptions; there is deliberately no second options builder, which would duplicate the whole option set for one differing key",
+        "both turn-start call sites go through pushTurnSafely rather than void this.pushTurn(...), so one place guarantees no unhandled rejection",
+        "ownerToken() awaits ensureFreshToken() rather than reading getAccessTokenSync(), so helper queries get the same refresh-on-margin treatment as a real turn",
+        "the no-AuthManager branch of pushTurn returns before the first await, keeping that path synchronous for tests that assert an immediate push",
+        "the proactive backoff computes its first rung explicitly (null ? RETRY : min(x*2, CAP)) rather than doubling a default, which would skip the 60s rung",
+        "getAccessTokenSync() remains on AuthManager but has no production caller; it is kept for the sync-status shape tests rely on"
+      ],
+      "relatedDecisions": [
+        "session-and-project-ui",
+        "workflow-step-lifecycle",
+        "context-window"
+      ]
+    },
+    {
+      "id": "session-and-project-ui",
+      "name": "Session and project UI",
+      "doc": "features/session-and-project-ui.md",
+      "purpose": "The shell around a session: persisted unsent drafts, focus on a new session, which session a project switch opens, the project tab's actionable-status dot, and the tool-aware waiting-permission badge.",
+      "covers": [
+        "composer-draft-persistence",
+        "composer-focus-new-session",
+        "project-switch-session-selection",
+        "project-tab-status-dot",
+        "session-status-badge"
+      ],
+      "entryPoints": [
+        "web/src/components/Composer.tsx",
+        "web/src/components/ProjectTabs.tsx",
+        "web/src/ws.ts",
+        "web/src/App.tsx",
+        "web/src/components/Sidebar.tsx",
+        "web/src/lib/alerts.ts"
+      ],
+      "files": [
+        "web/src/store.ts",
+        "web/src/components/Composer.tsx",
+        "web/src/lib/mentions.ts",
+        "shared/types.ts",
+        "web/src/lib/format.ts",
+        "web/src/components/ProjectTabs.tsx",
+        "server/src/sessions.ts",
+        "web/src/components/Sidebar.tsx",
+        "web/src/lib/alerts.ts"
+      ],
+      "symbols": [
+        "readDraft",
+        "writeDraft",
+        "pruneDrafts",
+        "readDraftAttachments",
+        "writeDraftAttachments",
+        "pruneDraftAttachments",
+        "Composer",
+        "setActiveProject",
+        "latestSessionIn",
+        "sessionsInProject",
+        "projectStatusMeta",
+        "PROJECT_STATUS_ORDER",
+        "sessionRowMeta",
+        "seenSessionStatus",
+        "reconcileSeenStatus",
+        "SessionMeta.pendingPermissionTool",
+        "waitingPermissionMeta"
+      ],
+      "tests": [],
+      "businessRules": [
+        "persisted text draft is the full MentionValue (text + ranges), not plain text, so restored pills/expansions stay intact",
+        "staged attachments persist too, in IndexedDB rather than localStorage (base64 file data can run tens of MB)",
+        "an empty text draft or attachment list is deleted from storage rather than stored empty",
+        "focus fires only when session.createdAt is under 5s old, same threshold as the store's auto-select-on-create logic",
+        "switching to an older existing session does not steal focus",
+        "auto-selection always excludes archived sessions; completed needs no separate check since the server always archives alongside it",
+        "a project whose sessions are all archived auto-selects nothing (empty state) rather than opening an archived one",
+        "an explicit selection already in the target project, including an archived session, is never overridden by a tab switch",
+        "sort key for most recent is createdAt, matching the sidebar list order",
+        "priority highest first: plan ready (violet) > needs answer (teal) > needs approval (sandstone) > needs permission (yellow) > interrupted (yellow) > error (red)",
+        "running/done/idle sessions never show a dot",
+        "archived sessions are excluded; completed sessions are always archived too, so no separate guard is needed",
+        "the active project's tab always shows the plain folder icon, suppressed at render time",
+        "opening a project marks its actionable sessions seen; a tab stays quiet until a session reaches a status not yet seen, and a resolved-then-relapsed session counts as new again",
+        "seenSessionStatus is in-memory only, so already-seen dots can reappear once after a page reload",
+        "ExitPlanMode -> label 'plan ready', violet badge",
+        "AskUserQuestion -> label 'needs answer', teal badge",
+        "any other tool -> label 'needs permission', yellow badge (unchanged default)",
+        "notification body mirrors the sidebar label (capitalized) for waiting-permission sessions"
+      ],
+      "architecturalRules": [
+        "text drafts use a single lines.drafts JSON map keyed by session id, following the existing store.ts convention (e.g. lines.openFiles) rather than one key per session",
+        "attachment drafts use IndexedDB (db lines-drafts, store attachments, keyed by session id) instead of localStorage, since size is the reason attachments are staged as raw base64 in the first place",
+        "reuses the store's existing justCreated 5s threshold instead of adding a new is-new flag or protocol field",
+        "membership check reuses sessionsInProject rather than an inline cwd comparison, so it stays key-aware like every other project-scoped scan",
+        "format.ts never imports store.ts; projectStatusMeta takes plain SessionMeta[] plus a seen map to keep that dependency edge one-way",
+        "the priority table is built from the same waitingPermissionMeta/STATUS_META entries sessionRowMeta uses, so a tab dot can never drift from the sidebar dot it points at",
+        "seenSessionStatus is maintained in a single store subscription rather than at each mutation site that could change what counts as seen",
+        "pendingPermissionTool rides the existing sessionUpsert broadcast, no new message type",
+        "cleared centrally in setStatus for any non-waiting-permission status, plus the worker-reconcile and sync-adopt paths that can force waiting-permission back to idle out from under a live turn",
+        "concurrent permission asks on the same session: last askPermission call wins the label/color, consistent with pre-existing status-overwrite behavior",
+        "sessionRowMeta is the single row-presentation entry point: waitingPermissionMeta first, then the interrupted-turn-recovery yellow state, then the plain per-status table (moved into format.ts from Sidebar.tsx)"
+      ],
+      "relatedDecisions": [
+        "turn-recovery",
+        "workflow-step-lifecycle"
+      ]
+    },
+    {
+      "id": "transcript-rendering",
+      "name": "Transcript rendering",
+      "doc": "features/transcript-rendering.md",
+      "purpose": "How the transcript is drawn: one shared markdown renderer with a bubble only for user prompts, structured per-tool field lists instead of raw JSON, and subagent runs nested under their spawning card.",
+      "covers": [
+        "transcript-markdown-rendering",
+        "tool-call-structured-input",
+        "subagent-transcript"
+      ],
+      "entryPoints": [
+        "web/src/components/Transcript.tsx",
+        "web/src/components/ToolCallCard.tsx",
+        "web/src/lib/transcript.ts",
+        "server/src/sessions.ts"
+      ],
+      "files": [
+        "web/src/components/Transcript.tsx",
+        "web/src/components/Markdown.tsx",
+        "web/src/components/ToolGroup.tsx",
+        "web/src/components/ToolCallCard.tsx",
+        "web/src/index.css",
+        "web/src/lib/toolFields.ts",
+        "web/src/components/QuestionPrompt.tsx",
+        "shared/types.ts",
+        "server/src/sessions.ts",
+        "web/src/lib/transcript.ts",
+        "web/src/lib/agents.ts",
+        "web/src/components/TaskCall.tsx",
+        "web/src/components/ActivityRow.tsx"
+      ],
+      "symbols": [
+        "Markdown",
+        ".md-body",
+        ".md-body pre code",
+        ".tx-row",
+        "toolFields",
+        "toolSummary",
+        "parseQuestionAnswers",
+        "matchAnswerToOptions",
+        "BODY_CAP",
+        "QuestionReview",
+        "isRedundant",
+        "subagentParentId",
+        "Sink",
+        "sinkFor",
+        "ToolBlock.children",
+        "scanTurnActivity",
+        "isAgentTool",
+        "parseTaskInput",
+        "agentMeta",
+        "MAIN_AGENT_META",
+        "taskFlags"
+      ],
+      "tests": [
+        "server/src/sessions.turns.test.ts",
+        "server/src/sessions.context.test.ts"
+      ],
+      "businessRules": [
+        "user and agent text render markdown instead of plain preformatted text; single newlines collapse and raw HTML tags are dropped",
+        "code blocks wrap long lines (white-space: pre-wrap, overflow-wrap: anywhere) instead of scrolling horizontally",
+        "only the user prompt renders as a bubble (right-aligned, capped at 80% column width); agent output is unwrapped and flush-left with nesting shown by order/expand affordance, not indentation",
+        "every tool's expanded body shows a structured field list, never raw JSON by default; raw JSON is one toggle away for every tool with no exceptions",
+        "a tool call already fully explained elsewhere in the row loses its expand affordance instead of showing an empty/redundant body: a successful edit (diff button covers it) and a resolved AskUserQuestion (its own card carries the review) are the current cases",
+        "an AskUserQuestion call's answer is read from its tool result's prose, not its input — the input only ever contains the questions asked",
+        "a subagent's assistant text and tool calls are never counted as main-agent output: workflow step output, the turn summary, and the live context-usage reading are all derived from main-agent messages only",
+        "a subagent's tool calls and text nest under its spawning card, never inline in the main transcript or folded into the main agent's tool group",
+        "a subagent cannot itself spawn another subagent (harness restriction), so nesting is one level deep in practice, though the data model is recursive",
+        "a message whose parent_tool_use_id names a spawn block not present in the transcript falls back to the main sink instead of being dropped",
+        "a spawn card leads with description, not the tool name; an unmapped or plugin-scoped subagent_type degrades to a generic agent badge (never hidden, never a crash)",
+        "the main agent and a subagent share the same badge icon but never the same color, so who is running reads from color alone before any label"
+      ],
+      "architecturalRules": [
+        "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
+        "user bubble Paper needs minWidth: 0 alongside maxWidth: '80%' so wide content (e.g. a code block or one long unbroken token) can't win over max-width via min-content sizing",
+        "compact markdown rhythm overrides Mantine spacing variables scoped to .md-body rather than CSS selectors, because Typography's list rule outranks a .md-body ul selector override on specificity",
+        "collapsible transcript rows (agent turns, tool groups, tool calls) share one borderless .tx-row convention: no Paper/border, CSS-only hover, and no accumulating indentation",
+        "a collapsed row's body unmounts instead of only being CSS-hidden, so per-row state that must survive collapse/expand lives in a module-scope sticky map, not component state; sub-toggles inside an already-expanded body (a spawn card's prompt disclosure, every tool card's raw-input toggle) are deliberately plain useState, not sticky, since resetting on close is expected there.",
+        "no virtualization is used for the transcript list; lazy-mounted bodies keep per-row cost low enough that this still holds",
+        "toolFields degrades instead of failing: an unclassifiable value becomes a capped json field rather than throwing or being skipped, since tool input shapes (especially MCP tools) are not controlled by this code",
+        "OptionCard gained a readOnly prop instead of being duplicated into a second component, so a settled answer looks exactly like the choice that produced it",
+        "the raw-input toggle shows even for an empty ({}) input, unlike PermissionPrompt's equivalent guard — consistency across every tool card was chosen over hiding a no-op toggle",
+        "existing transcripts already carry parent_tool_use_id on disk (persisted verbatim by the worker), so this feature is a pure read-side reinterpretation with no new capture and no migration",
+        "no agents option was added to buildQueryOptions; subagent definitions are inherited via settingSources, the same mechanism that already inherits the rest of the preset",
+        "the spawn tool's name is not a stable literal: the harness emits 'Agent', the SDK's own AgentInput type and docs call it 'Task', and both appear in persisted transcripts, so every consumer matches via isAgentTool() rather than one string",
+        "agentMeta/MAIN_AGENT_META is the single source of truth for agent icon/color, read by both the settled card and the live ActivityRow so they cannot drift apart",
+        "parseTaskInput never throws and never assumes a field is present, since AgentInput gains fields the map won't know about (effort is the live example) — this is why the raw-input toggle stays reachable behind every spawn card",
+        "nested rendering is threaded down as a renderNested callback rather than a new shared module, since ToolCallCard cannot import Transcript.tsx's Item without an import cycle"
+      ],
+      "relatedDecisions": []
     },
     {
       "id": "agent-memory-sync",
@@ -741,8 +887,8 @@
       "architecturalRules": [
         "SESSIONS_PUSH_MAX_BYTES (1.5MB) mirrors the same headroom-under-2mb constant style as TOTAL_MAX_BYTES in server/src/memory.ts",
         "chunk sends are sequential inside the debounce timer callback, not parallel, so one failure doesn't strand the rest silently",
-        "pushSessions owns the dedup filter; userContext.ts's syncNow still hands it the full session list \u2014 sync.ts keeps sole ownership of what actually goes on the wire",
-        "the real growth driver (WorkflowState.outputs/lastStepOutput, uncapped in server/src/workflows.ts) is not capped by this change \u2014 deferred as a follow-up"
+        "pushSessions owns the dedup filter; userContext.ts's syncNow still hands it the full session list — sync.ts keeps sole ownership of what actually goes on the wire",
+        "the real growth driver (WorkflowState.outputs/lastStepOutput, uncapped in server/src/workflows.ts) is not capped by this change — deferred as a follow-up"
       ],
       "relatedDecisions": [
         "agent-memory-sync"
@@ -781,109 +927,6 @@
         "all persistent paths derive from APP_ROOT / userStoreRoot; never hardcode the home-directory path elsewhere",
         "createStore keeps an in-memory, per-user transcript cache (raw lines + lazily-parsed events) revalidated by statSync mtime/size and bounded by count and byte size; it assumes this process is the sole writer of transcripts/*.jsonl",
         "sessions.json writes are compact (not pretty-printed) and debounced via SessionManager.persist/flushPersist, coalescing a burst of status transitions into one write without delaying the broadcast"
-      ],
-      "relatedDecisions": []
-    },
-    {
-      "id": "session-status-badge",
-      "name": "Tool-aware waiting-permission status badge",
-      "doc": "features/session-status-badge.md",
-      "purpose": "Vary the sidebar waiting-permission badge label/color (and matching notification text) by which tool triggered the pause \u2014 plan approval, a question, or a plain permission ask.",
-      "entryPoints": [
-        "web/src/components/Sidebar.tsx",
-        "web/src/lib/alerts.ts"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/sessions.ts",
-        "web/src/lib/format.ts",
-        "web/src/components/Sidebar.tsx",
-        "web/src/lib/alerts.ts"
-      ],
-      "symbols": [
-        "SessionMeta.pendingPermissionTool",
-        "waitingPermissionMeta",
-        "sessionRowMeta"
-      ],
-      "tests": [],
-      "businessRules": [
-        "ExitPlanMode -> label 'plan ready', violet badge",
-        "AskUserQuestion -> label 'needs answer', teal badge",
-        "any other tool -> label 'needs permission', yellow badge (unchanged default)",
-        "notification body mirrors the sidebar label (capitalized) for waiting-permission sessions"
-      ],
-      "architecturalRules": [
-        "pendingPermissionTool rides the existing sessionUpsert broadcast, no new message type",
-        "cleared centrally in setStatus for any non-waiting-permission status, plus the worker-reconcile and sync-adopt paths that can force waiting-permission back to idle out from under a live turn",
-        "concurrent permission asks on the same session: last askPermission call wins the label/color, consistent with pre-existing status-overwrite behavior",
-        "sessionRowMeta is the single row-presentation entry point: waitingPermissionMeta first, then the interrupted-turn-recovery yellow state, then the plain per-status table (moved into format.ts from Sidebar.tsx)"
-      ],
-      "relatedDecisions": [
-        "interrupted-turn-recovery",
-        "workflow-done-session-indicator"
-      ]
-    },
-    {
-      "id": "workflow-done-session-indicator",
-      "name": "Sidebar checkmark for fully-completed workflows",
-      "doc": "features/workflow-done-session-indicator.md",
-      "purpose": "Show a filled green checkmark on the sidebar row of a session whose workflow ran every step to done, derived client-side with no stored 'finished' flag.",
-      "entryPoints": [
-        "web/src/components/Sidebar.tsx"
-      ],
-      "files": [
-        "web/src/lib/format.ts",
-        "web/src/components/Sidebar.tsx"
-      ],
-      "symbols": [
-        "isWorkflowFinished"
-      ],
-      "tests": [],
-      "businessRules": [
-        "icon precedence: session.completed -> outline check, status running -> Loader, status.actionable -> pulsing dot, isWorkflowFinished -> filled check, otherwise plain dot",
-        "actionable states always win over the finished checkmark so a session needing the user is never masked as done",
-        "force-advance (mark last running step completed) also sets the last step done, so a force-finished workflow shows the filled check too"
-      ],
-      "architecturalRules": [
-        "isWorkflowFinished is kept separate from sessionRowMeta's { color, label, actionable } return since projectStatusMeta and alerts.ts consume that shape and workflow-done is not actionable",
-        "isWorkflowFinished mirrors workflows.ts advance(): the last step is set done with no further stepIndex bump, so all-done is the only reliable signal"
-      ],
-      "relatedDecisions": [
-        "session-status-badge",
-        "project-tab-status-dot"
-      ]
-    },
-    {
-      "id": "composer-draft-persistence",
-      "name": "Composer draft persistence",
-      "purpose": "Persist unsent prompt text, @mention pills, and staged attachments per session so a reload or bridge restart never loses them.",
-      "doc": "features/composer-draft-persistence.md",
-      "entryPoints": [
-        "web/src/components/Composer.tsx"
-      ],
-      "files": [
-        "web/src/store.ts",
-        "web/src/components/Composer.tsx",
-        "web/src/lib/mentions.ts"
-      ],
-      "symbols": [
-        "readDraft",
-        "writeDraft",
-        "pruneDrafts",
-        "readDraftAttachments",
-        "writeDraftAttachments",
-        "pruneDraftAttachments",
-        "Composer"
-      ],
-      "tests": [],
-      "businessRules": [
-        "persisted text draft is the full MentionValue (text + ranges), not plain text, so restored pills/expansions stay intact",
-        "staged attachments persist too, in IndexedDB rather than localStorage (base64 file data can run tens of MB)",
-        "an empty text draft or attachment list is deleted from storage rather than stored empty"
-      ],
-      "architecturalRules": [
-        "text drafts use a single lines.drafts JSON map keyed by session id, following the existing store.ts convention (e.g. lines.openFiles) rather than one key per session",
-        "attachment drafts use IndexedDB (db lines-drafts, store attachments, keyed by session id) instead of localStorage, since size is the reason attachments are staged as raw base64 in the first place"
       ],
       "relatedDecisions": []
     },
@@ -934,269 +977,6 @@
         "/find, /file, /tree share one corsFor() helper and one resolveWorkspacePath() root restriction (now in server/src/workspacePaths.ts), which also allows a plan-directory path outside every root (isPlanPath)"
       ],
       "relatedDecisions": []
-    },
-    {
-      "id": "plan-file-auto-approve",
-      "name": "Plan-file auto-approve",
-      "doc": "features/plan-file-auto-approve.md",
-      "purpose": "Auto-approve reads and writes of plan mode's deliverable file under .claude/plans/ instead of prompting on every call, even though it lives outside the session cwd. isPlanPath is also exported and reused by the bridge's /file route so the plan review card can read a plan live from outside every project/session root.",
-      "entryPoints": [
-        "server/src/autoGuard.ts",
-        "server/src/sessions.ts"
-      ],
-      "files": [
-        "server/src/autoGuard.ts",
-        "server/src/sessions.ts",
-        "shared/types.ts",
-        "server/src/workspacePaths.ts",
-        "server/src/index.planFile.test.ts"
-      ],
-      "symbols": [
-        "isPlanPath",
-        "isSafeReadOnly",
-        "isSafePlanWrite",
-        "assessToolCall",
-        "isPlanFilePath",
-        "resolveWorkspacePath",
-        "workspaceRoots"
-      ],
-      "tests": [
-        "server/src/autoGuard.plan.test.ts",
-        "server/src/index.planFile.test.ts"
-      ],
-      "businessRules": [
-        "plan-directory reads and writes (~/.claude/plans/** or <cwd>/.claude/plans/**) auto-approve in every permission mode",
-        "ExitPlanMode and AskUserQuestion always still prompt the user regardless of target path",
-        "credential paths (~/.ssh, ~/.aws, .env) always escalate even if nested under a plans directory",
-        "any other out-of-cwd file access is unaffected and still escalates",
-        "/file (and by extension /tree/find) can read any plan directory reachable from isPlanPath, not just the requesting session's own plan file \u2014 a deliberate widening of a route previously confined to project/session roots, scoped to plan directories only"
-      ],
-      "architecturalRules": [
-        "isPlanPath resolves the path and anchors containment checks to real directories, not a substring match on the plan-dir marker, so path traversal cannot pass as a plan path",
-        "isInside does not resolve symlinks; a symlink planted inside a plan directory pointing elsewhere is accepted as a pre-existing limitation",
-        "auto-approved plan writes remain visible as tool_use blocks in the transcript, but the auto-approval permission event is filtered from the UI like other auto-approved calls",
-        "PLAN_DIR_MARKER/isPlanFilePath live in shared/types.ts, not autoGuard.ts, so the web client can reuse the same plan-path hint without importing server code",
-        "resolveWorkspacePath/workspaceRoots/resolveWorkspaceParam live in server/src/workspacePaths.ts, not server/src/index.ts, so they're importable by their own test \u2014 index.ts starts listening as a side effect of being imported",
-        "~/.claude/plans is per-OS-user, not per-app-user: under AUTH_ENABLED every signed-in app user on the same machine shares that directory, so this exception can cross app-user boundaries \u2014 accepted for now"
-      ],
-      "relatedDecisions": [
-        "plan-review-card"
-      ]
-    },
-    {
-      "id": "guard-allowlist",
-      "name": "Auto-mode guard allowlist",
-      "doc": "features/guard-allowlist.md",
-      "purpose": "Expose auto-mode's guard 'Always allow' exceptions in Settings for viewing, removal, and hand-add, synced across machines with an explicit accept/reject review instead of silent apply.",
-      "entryPoints": [
-        "web/src/components/SettingsModal.tsx",
-        "web/src/components/GuardAllowlistSection.tsx",
-        "web/src/components/GuardAllowlistReviewModal.tsx"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/autoGuard.ts",
-        "server/src/store.ts",
-        "server/src/sessions.ts",
-        "server/src/sync.ts",
-        "server/src/userContext.ts",
-        "server/src/index.ts",
-        "storage/prisma/schema.prisma",
-        "storage/src/index.ts",
-        "web/src/store.ts",
-        "web/src/lib/guardEntries.ts"
-      ],
-      "symbols": [
-        "GuardAllowlist",
-        "normalizeAllowEntry",
-        "diffAllowlists",
-        "sameAllowEntry",
-        "describeAllowEntry",
-        "GuardAllowlistBlob",
-        "GuardAllowlistReview"
-      ],
-      "tests": [
-        "server/src/autoGuard.allowlist.test.ts",
-        "server/src/autoGuard.sync.test.ts",
-        "server/src/sessions.alwaysAllow.test.ts"
-      ],
-      "businessRules": [
-        "a remote allowlist is never applied automatically; divergence is shown as an explicit added/removed diff the user accepts or rejects",
-        "divergence is detected as a set difference between local and remote entries, never by comparing updatedAt",
-        "pushing the local list to storage is suppressed while a review is pending",
-        "rejecting a review keeps the local list, pushes it back over the remote row, and is remembered by the remote's content so the same proposal is never re-asked",
-        "ALWAYS_ASK_TOOLS (AskUserQuestion, ExitPlanMode) can never be allowlisted",
-        "a hand-typed Bash prefix is whitespace-collapsed and may not contain &, &&, ||, ;, or |",
-        "non-Bash entries never carry a prefix; one given is silently dropped rather than rejected"
-      ],
-      "architecturalRules": [
-        "validators live in shared/types.ts so the web client runs the exact same rules as the bridge before sending an entry",
-        "allowlist edits are dedicated addGuardAllow/removeGuardAllow/reviewGuardAllowlist intent messages, not folded into the whole-blob UserUiSettings save",
-        "the web store never caches the allowlist in localStorage; it is server-authoritative and arrives on every hello",
-        "removing an entry has no confirmation modal since it only narrows the guard and fails safe",
-        "the review modal is mounted at the app root, not inside Settings, so a divergence reaches the user without requiring a gear click",
-        "assessToolCall's self-worker-source check (isSelfWorkerSource) runs before the blanket tool allowlist short-circuit \u2014 the first guard verdict an allowlist entry cannot disarm; keep it ordered first in any refactor"
-      ],
-      "relatedDecisions": []
-    },
-    {
-      "id": "plan-review-card",
-      "name": "Plan review card stays readable after resolution",
-      "doc": "features/plan-review-card.md",
-      "purpose": "Keep a resolved ExitPlanMode plan card's text and Focus mode reachable (collapsed, one click to reopen), fall back to the turn's plan-file write when the harness passes no inline plan argument, and always show the plan's current text by re-reading its file live whenever the card is opened.",
-      "entryPoints": [
-        "web/src/components/PermissionPrompt.tsx"
-      ],
-      "files": [
-        "web/src/components/PermissionPrompt.tsx",
-        "web/src/lib/transcript.ts",
-        "shared/types.ts",
-        "web/src/lib/files.ts",
-        "server/src/autoGuard.ts",
-        "server/src/workspacePaths.ts"
-      ],
-      "symbols": [
-        "PlanApproval",
-        "withPlanFileText",
-        "computeDiff",
-        "isPlanFilePath",
-        "useFileContent",
-        "isPlanPath",
-        "resolveWorkspacePath"
-      ],
-      "tests": [
-        "server/src/autoGuard.plan.test.ts",
-        "server/src/index.planFile.test.ts"
-      ],
-      "businessRules": [
-        "a resolved plan card renders collapsed by default but is always reopenable via its header",
-        "action buttons never render once a request is resolved, in the inline card or the fullscreen modal",
-        "fullscreen focus mode opens read-only for a resolved plan",
-        "when the harness passes no inline plan argument, the card falls back to the turn's last plan-file write, reconstructing Edit-revised plans from the file snapshot",
-        "a plan card is live (chevron + Focus enabled) whenever a plan path is known, even with no resolvable inline/snapshot text",
-        "opening a plan card re-reads its plan file from disk, so the card (pending or resolved) always shows the plan's current text, not a frozen snapshot",
-        "a resolved card whose live text differs from what was captured shows an 'updated since approval' hint"
-      ],
-      "architecturalRules": [
-        "the plan-file fallback builds data.input.plan/planPath from the transcript alone; the rendered card layers a live filesystem read (useFileContent against /file) on top whenever it's open, falling back to the transcript-only text before that fetch resolves or on failure",
-        "the plan-file write is tracked turn-scoped (lastPlanWrite) for text stitching, with a non-reset session-wide fallback (sessionPlanWrite) only consulted when the turn-scoped write is absent",
-        "expanded (inline collapse) and focus (fullscreen) are independent state; an effect keyed only on resolution forces both closed once a request resolves",
-        "the card's live read means a resolved card can show text the user never approved; the 'updated since approval' hint is the mitigation, not a faithful-approval guarantee"
-      ],
-      "relatedDecisions": [
-        "permission-resolution-provenance",
-        "plan-file-auto-approve"
-      ]
-    },
-    {
-      "id": "auth-failure-recovery",
-      "name": "Auth-failure recovery",
-      "doc": "features/auth-failure-recovery.md",
-      "purpose": "Recover in the same turn when the OAuth token is rejected: refresh it, or log out so the login modal opens immediately; then rewrite the failed turn's banner to name the action the user must take, with a Sign in button next to Retry when a sign-in is genuinely required.",
-      "entryPoints": [
-        "server/src/sessions.ts"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/auth.ts",
-        "server/src/sessions.ts",
-        "web/src/lib/transcript.ts",
-        "web/src/components/SessionView.tsx",
-        "web/src/components/Transcript.tsx",
-        "web/src/store.ts"
-      ],
-      "symbols": [
-        "isAuthFailureMessage",
-        "AuthManager.handleTokenRejected",
-        "TokenRejection",
-        "SessionManager.recoverAuthFailure",
-        "authRecoveryMessage",
-        "SessionMeta.errorKind",
-        "resultErrorText",
-        "SessionManager.setStatus",
-        "SessionManager.failTurn",
-        "SessionManager.retryTurn"
-      ],
-      "tests": [
-        "server/src/auth.failure.test.ts",
-        "server/src/sessions.ended.test.ts"
-      ],
-      "businessRules": [
-        "an auth-classified turn failure attempts exactly one token refresh, then always rewrites the banner to name the next action (Retry, Sign in, or check your connection) instead of leaving raw CLI text with only Retry",
-        "errorKind: 'auth' is set only for the signed-out outcome; refreshed/refresh-failed clear it",
-        "the login modal opens off the existing authStatus broadcast, not a new message type, and unlike the hello auto-open it is not deduped",
-        "retry stays entirely manual; nothing auto-resumes a failed turn, even after a silent refresh or a fresh sign-in \u2014 a login landing later or from another device must not fire N queued turns",
-        "errorKind is never set when no AuthManager is wired (ambient-token mode)",
-        "every query crash (auth-related or not) still writes a synthetic result event with the raw CLI text preserved verbatim, even after the banner is revised",
-        "a clean ended (no error) writes no synthetic result"
-      ],
-      "architecturalRules": [
-        "classification happens at exactly two points: failTurn (covers every funnel caller) and the result branch of handleWorkerEvent, which bypasses failTurn by design",
-        "the revision guard (status === 'error' && errorMessage === error) is the entire don't-clobber mechanism, relying on the workflow failed-park path using persistMeta not setStatus",
-        "authRecoveryMessage's strings avoid every word AUTH_FAILURE_PATTERNS matches, so a re-failure cannot re-classify itself into a loop",
-        "a successful refresh() still does not call emitChange(); the revised banner is the visible signal, not an auth-status broadcast",
-        "handleTokenRejected goes through the single-flight refresh() rather than logout() directly, so N simultaneous failures cause one token request and concurrent callers all resolve 'refreshed'",
-        "the synthetic result is emitted via emitEvent directly, never routed through handleWorkerEvent, so it cannot re-run turn-settle bookkeeping",
-        "SDK/CLI error wording is not a published contract; isAuthFailureMessage can silently stop matching after an upstream change",
-        "known limitation: in Compact view the failed row sits inside a collapsed AgentTurn, so SessionView's alert is the always-visible affordance (pre-existing, out of scope)"
-      ],
-      "relatedDecisions": [
-        "app-managed-login-only \u2014 recovers a token rejected during a turn, whereas that feature guarantees a turn never starts on the ambient ~/.claude login; shares authRefusalMessage",
-        "turn-failure-retry"
-      ]
-    },
-    {
-      "id": "app-managed-login-only",
-      "name": "App-managed login is the only credential path",
-      "doc": "features/app-managed-login-only.md",
-      "purpose": "The app's own OAuth token is the sole credential every query runs on; a turn that cannot get one is refused instead of silently inheriting the unrefreshable ambient ~/.claude CLI login.",
-      "entryPoints": [
-        "server/src/sessions.ts",
-        "server/src/auth.ts"
-      ],
-      "files": [
-        "server/src/auth.ts",
-        "server/src/sessions.ts",
-        "web/src/store.ts",
-        "web/src/components/LoginModal.tsx"
-      ],
-      "symbols": [
-        "SessionManager.pushTurn",
-        "SessionManager.pushTurnSafely",
-        "SessionManager.pushWithToken",
-        "SessionManager.failTurn",
-        "SessionManager.ownerToken",
-        "authRefusalMessage",
-        "AuthManager.ensureFreshToken",
-        "PROACTIVE_RETRY_MS",
-        "PROACTIVE_RETRY_CAP_MS"
-      ],
-      "tests": [
-        "server/src/sessions.spawn.test.ts",
-        "server/src/auth.failure.test.ts",
-        "server/src/sessions.ended.test.ts",
-        "server/src/auth.concurrentLogin.test.ts"
-      ],
-      "businessRules": [
-        "a signed-in user's turn never runs on ambient ~/.claude credentials; with no app token the turn is refused, since a visible failure with Retry beats a silent 401 loop",
-        "a refusal caused by being logged out re-broadcasts the logged-out authStatus so a dismissed login modal reopens; a refusal from a transient refresh failure does not",
-        "the bridge-side helper queries (autoName, summarizeTurn, consolidateStepOutput) are best-effort: no token means skip the query, never fall back and never fail the surrounding turn",
-        "compactContext still returns a synchronous { ok: true }; an auth refusal after that point surfaces through failTurn, not the { ok: false, code, reason } union",
-        "a transiently failed proactive refresh retries on a 60s-doubling ladder capped at 15 minutes; a dead refresh token logs out instead, stopping the chain",
-        "accessToken: null in buildQueryOptions is reachable only when no AuthManager is wired at all (tests / embedding), never for a real signed-in user",
-        "logins are tracked per OAuth state, so two started at once each keep their own PKCE verifier; completing one clears the rest, unfinished ones expire after 30 minutes, and a paste with no #state falls back to the newest"
-      ],
-      "architecturalRules": [
-        "the never-fall-back guarantee lives in pushTurn, which refuses before reaching buildQueryOptions; there is deliberately no second options builder, which would duplicate the whole option set for one differing key",
-        "both turn-start call sites go through pushTurnSafely rather than void this.pushTurn(...), so one place guarantees no unhandled rejection",
-        "ownerToken() awaits ensureFreshToken() rather than reading getAccessTokenSync(), so helper queries get the same refresh-on-margin treatment as a real turn",
-        "the no-AuthManager branch of pushTurn returns before the first await, keeping that path synchronous for tests that assert an immediate push",
-        "the proactive backoff computes its first rung explicitly (null ? RETRY : min(x*2, CAP)) rather than doubling a default, which would skip the 60s rung",
-        "getAccessTokenSync() remains on AuthManager but has no production caller; it is kept for the sync-status shape tests rely on"
-      ],
-      "relatedDecisions": [
-        "auth-failure-recovery \u2014 reuses its synthetic-result / Retry pair and the authStatus broadcast for the refusal path"
-      ]
     },
     {
       "id": "workflow-task-attachments",
@@ -1269,21 +1049,25 @@
         "RELAY_URL set without STORAGE_URL warns rather than failing preflight - the bridge would dial a hosted relay while syncing to the local storage default, splitting one machine's data across two databases"
       ],
       "architecturalRules": [
-        "no deps= on the four service resources \u2014 tsx watch/Vite own file-watching, not Tilt",
+        "no deps= on the four service resources — tsx watch/Vite own file-watching, not Tilt",
         "PORT is injected per resource via serve_env, never a shared env block",
         "preflight reads .env key names only, never values, into any Tilt spec/log/UI button",
         "the Freeze/Resume UI buttons and the --no-reload CLI flag are two entry points into one FROZEN state, reconciled by re-invoking tilt args with the full current flag set rather than mutating Tilt state directly",
-        "no resource watches a file its own cmd writes \u2014 install's deps list the five workspace manifests but omit package-lock.json, which npm install itself rewrites and would retrigger the resource forever",
+        "no resource watches a file its own cmd writes — install's deps list the five workspace manifests but omit package-lock.json, which npm install itself rewrites and would retrigger the resource forever",
         "resource_deps gates only the first build after tilt up; a later re-run of install does not cascade to prisma-generate or the four service resources",
         "whether the bridge talks to a hosted install is not a Tilt flag - it follows RELAY_URL in .env, read by the bridge's own dotenv; STORAGE_URL is injected into serve_env only as a default, so an explicit .env value is never overridden"
       ],
       "relatedDecisions": []
     },
     {
-      "id": "context-window-inspector",
-      "name": "Context window inspector",
-      "doc": "features/context-window-inspector.md",
-      "purpose": "Show live context-window occupancy in the composer as a ring chip, with a hover breakdown of what's filling the window (system prompt, tools, MCP servers, memory files, skills, agents, messages), distinct from cumulative billing figures.",
+      "id": "context-window",
+      "name": "Context window",
+      "doc": "features/context-window.md",
+      "purpose": "Live context-window occupancy in the composer with a per-category breakdown, plus manual compaction, a near-limit warning, and readable transcript events for both manual and CLI auto-compaction.",
+      "covers": [
+        "context-window-inspector",
+        "context-compaction"
+      ],
       "entryPoints": [
         "web/src/components/ContextWindowIndicator.tsx"
       ],
@@ -1297,7 +1081,9 @@
         "server/src/index.ts",
         "web/src/store.ts",
         "web/src/components/ContextWindowIndicator.tsx",
-        "web/src/lib/format.ts"
+        "web/src/lib/format.ts",
+        "web/src/lib/transcript.ts",
+        "web/src/components/Transcript.tsx"
       ],
       "symbols": [
         "ContextUsage",
@@ -1309,48 +1095,7 @@
         "fetchContextBreakdown",
         "preferContextSummary",
         "contextDenominator",
-        "SessionMeta.contextResetAt"
-      ],
-      "tests": [
-        "server/src/sessions.context.test.ts",
-        "server/src/contextBreakdown.test.ts"
-      ],
-      "businessRules": [
-        "occupancy is sourced from the SDK's /context control request (getContextUsage()) when a live query exists, never from result.usage, which is cumulative across every API call in the turn rather than a point-in-time reading",
-        "the ContextUsage fallback (derived from the last assistant message's usage) is used only when no live query is available",
-        "no reading yet means no chip, in both fallback and SDK modes",
-        "unknown model context window shows raw token counts with no ring rather than guessing a denominator",
-        "category/component rows must sum to the shown total; any SDK-reported vs component-sum mismatch is surfaced as an explicit residual row instead of hidden",
-        "deferred categories are excluded from the total and from free space, and shown with no percentage share, to avoid double-counting",
-        "the persisted SessionMeta.contextSummary is capped and holds no per-item detail since it is synced and written to disk; per-item detail is fetched on demand and never persisted",
-        "a hover-triggered summary refresh only broadcasts/syncs when the summary actually changed",
-        "resetting a session's Claude conversation (workflow fresh-start step) stamps contextResetAt; readings older than that render as stale until the next turn reports",
-        "Lines does not set autoCompactEnabled and has no control over the CLI's own background auto-compaction; the hover card's auto-compact row is a straight passthrough of the CLI's own settingSources-resolved setting, shown even when off"
-      ],
-      "architecturalRules": [
-        "the bridge-worker protocol gained a generic ask/askResult request-response method rather than a one-off message type, so future control requests do not require another PROTOCOL_VERSION bump (which restarts the worker and drops in-flight turns)",
-        "the worker returns raw SDK JSON from ask; all normalization lives in server/src/contextBreakdown.ts as pure, defensively-coerced functions, keeping the worker's import graph unchanged",
-        "the existing cumulative fields (lastTokens, totalTokens) are untouched; this feature adds a parallel occupancy reading rather than altering the billing one"
-      ],
-      "relatedDecisions": []
-    },
-    {
-      "id": "context-compaction",
-      "name": "Context compaction",
-      "doc": "features/context-compaction.md",
-      "purpose": "Manually compact a session's context (summarize + replace the conversation) via a button, plus a passive near-limit warning \u2014 never auto-fired \u2014 and readable transcript events for both manual and the CLI's own background auto-compaction.",
-      "entryPoints": [
-        "web/src/components/ContextWindowIndicator.tsx"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/sessions.ts",
-        "server/src/index.ts",
-        "web/src/lib/transcript.ts",
-        "web/src/components/Transcript.tsx",
-        "web/src/components/ContextWindowIndicator.tsx"
-      ],
-      "symbols": [
+        "SessionMeta.contextResetAt",
         "ContextCompactRecord",
         "ContextCompactData",
         "CONTEXT_WARN_PCT",
@@ -1363,24 +1108,39 @@
         "SessionManager.compactContext"
       ],
       "tests": [
+        "server/src/sessions.context.test.ts",
+        "server/src/contextBreakdown.test.ts",
         "server/src/sessions.compact.test.ts"
       ],
       "businessRules": [
-        "Lines never fires compaction itself \u2014 only a manual button and a passive warning badge, since it is irreversible, lossy, and billable; this is distinct from the CLI's own background auto-compaction, which Lines does not control",
+        "occupancy is sourced from the SDK's /context control request (getContextUsage()) when a live query exists, never from result.usage, which is cumulative across every API call in the turn rather than a point-in-time reading",
+        "the ContextUsage fallback (derived from the last assistant message's usage) is used only when no live query is available",
+        "no reading yet means no chip, in both fallback and SDK modes",
+        "unknown model context window shows raw token counts with no ring rather than guessing a denominator",
+        "category/component rows must sum to the shown total; any SDK-reported vs component-sum mismatch is surfaced as an explicit residual row instead of hidden",
+        "deferred categories are excluded from the total and from free space, and shown with no percentage share, to avoid double-counting",
+        "the persisted SessionMeta.contextSummary is capped and holds no per-item detail since it is synced and written to disk; per-item detail is fetched on demand and never persisted",
+        "a hover-triggered summary refresh only broadcasts/syncs when the summary actually changed",
+        "resetting a session's Claude conversation (workflow fresh-start step) stamps contextResetAt; readings older than that render as stale until the next turn reports",
+        "Lines does not set autoCompactEnabled and has no control over the CLI's own background auto-compaction; the hover card's auto-compact row is a straight passthrough of the CLI's own settingSources-resolved setting, shown even when off",
+        "Lines never fires compaction itself — only a manual button and a passive warning badge, since it is irreversible, lossy, and billable; this is distinct from the CLI's own background auto-compaction, which Lines does not control",
         "the manual button's disabled state always carries a specific reason (turn running, workflow step parked, no session yet, no reading yet, or the SDK explicitly reported the compaction failed) via one shared contextCompactBlock predicate",
-        "the unsupported latch requires an explicit SDK compact_result:'failed' \u2014 a turn settling with neither a boundary nor a status verdict is inconclusive and leaves the button enabled",
+        "the unsupported latch requires an explicit SDK compact_result:'failed' — a turn settling with neither a boundary nor a status verdict is inconclusive and leaves the button enabled",
         "the unsupported latch is scoped to the CLI conversation that produced it: cleared on resetClaudeSession, on bridge restart, and when adopting a synced session, so it never survives past the process/conversation that saw the failure",
         "a workflow step parked waiting-approval blocks the manual button but not the CLI's own background auto-compaction",
         "a compaction is invisible to every workflow turn scan (consolidateStepOutput, lastAssistantText, summarizeTurn, retryTurn) via withoutCompactSpans, but never stripped from permission bookkeeping"
       ],
       "architecturalRules": [
-        "compactContext is a dedicated SessionManager method, not a call to prompt() \u2014 a compaction carries no 'user' transcript event and must not auto-name the session or touch the queue",
+        "the bridge-worker protocol gained a generic ask/askResult request-response method rather than a one-off message type, so future control requests do not require another PROTOCOL_VERSION bump (which restarts the worker and drops in-flight turns)",
+        "the worker returns raw SDK JSON from ask; all normalization lives in server/src/contextBreakdown.ts as pure, defensively-coerced functions, keeping the worker's import graph unchanged",
+        "the existing cumulative fields (lastTokens, totalTokens) are untouched; this feature adds a parallel occupancy reading rather than altering the billing one",
+        "compactContext is a dedicated SessionManager method, not a call to prompt() — a compaction carries no 'user' transcript event and must not auto-name the session or touch the queue",
         "one shared predicate (contextCompactBlock) backs the server-side guard, the button's disabled state, and its tooltip",
-        "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact \u2014 all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)",
-        "the browser's buildTranscript mirrors withoutCompactSpans: events inside an open compact span are dropped from the rendered transcript, not just hidden by the marker pair \u2014 except a failed result, which closes the span like a 'user' event does"
+        "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact — all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)",
+        "the browser's buildTranscript mirrors withoutCompactSpans: events inside an open compact span are dropped from the rendered transcript, not just hidden by the marker pair — except a failed result, which closes the span like a 'user' event does"
       ],
       "relatedDecisions": [
-        "turn-failure-retry"
+        "turn-recovery"
       ]
     },
     {
@@ -1442,83 +1202,8 @@
         "the web WorkflowEditor draft (useWorkflowDraft.ts) was not migrated onto shared/workflowValidation.ts in this change; the two validators can drift"
       ],
       "relatedDecisions": [
-        "guard-allowlist",
-        "plan-file-auto-approve",
-        "context-window-inspector"
-      ]
-    },
-    {
-      "id": "project-tab-status-dot",
-      "name": "Project tab status dot",
-      "doc": "features/project-tab-status-dot.md",
-      "purpose": "Show the single most important actionable status across a background project's sessions as a colored pulsing dot on its header tab, in place of the folder icon; the active project's tab always shows the plain folder icon.",
-      "entryPoints": [
-        "web/src/components/ProjectTabs.tsx"
-      ],
-      "files": [
-        "web/src/lib/format.ts",
-        "web/src/components/ProjectTabs.tsx",
-        "web/src/store.ts"
-      ],
-      "symbols": [
-        "projectStatusMeta",
-        "PROJECT_STATUS_ORDER",
-        "sessionsInProject",
-        "sessionRowMeta",
-        "seenSessionStatus",
-        "reconcileSeenStatus"
-      ],
-      "tests": [],
-      "businessRules": [
-        "priority highest first: plan ready (violet) > needs answer (teal) > needs approval (sandstone) > needs permission (yellow) > interrupted (yellow) > error (red)",
-        "running/done/idle sessions never show a dot",
-        "archived sessions are excluded; completed sessions are always archived too, so no separate guard is needed",
-        "the active project's tab always shows the plain folder icon, suppressed at render time",
-        "opening a project marks its actionable sessions seen; a tab stays quiet until a session reaches a status not yet seen, and a resolved-then-relapsed session counts as new again",
-        "seenSessionStatus is in-memory only, so already-seen dots can reappear once after a page reload"
-      ],
-      "architecturalRules": [
-        "format.ts never imports store.ts; projectStatusMeta takes plain SessionMeta[] plus a seen map to keep that dependency edge one-way",
-        "the priority table is built from the same waitingPermissionMeta/STATUS_META entries sessionRowMeta uses, so a tab dot can never drift from the sidebar dot it points at",
-        "seenSessionStatus is maintained in a single store subscription rather than at each mutation site that could change what counts as seen"
-      ],
-      "relatedDecisions": [
-        "session-status-badge",
-        "interrupted-turn-recovery",
-        "workflow-done-session-indicator",
-        "project-switch-session-selection"
-      ]
-    },
-    {
-      "id": "project-switch-session-selection",
-      "name": "Project switch session selection",
-      "doc": "features/project-switch-session-selection.md",
-      "purpose": "Decide which session opens when the active project changes: keep a selection already valid for that project, or auto-select its most recently created non-archived session.",
-      "entryPoints": [
-        "web/src/components/ProjectTabs.tsx",
-        "web/src/lib/ws.ts",
-        "web/src/App.tsx"
-      ],
-      "files": [
-        "web/src/store.ts"
-      ],
-      "symbols": [
-        "setActiveProject",
-        "latestSessionIn",
-        "sessionsInProject"
-      ],
-      "tests": [],
-      "businessRules": [
-        "auto-selection always excludes archived sessions; completed needs no separate check since the server always archives alongside it",
-        "a project whose sessions are all archived auto-selects nothing (empty state) rather than opening an archived one",
-        "an explicit selection already in the target project, including an archived session, is never overridden by a tab switch",
-        "sort key for most recent is createdAt, matching the sidebar list order"
-      ],
-      "architecturalRules": [
-        "membership check reuses sessionsInProject rather than an inline cwd comparison, so it stays key-aware like every other project-scoped scan"
-      ],
-      "relatedDecisions": [
-        "project-tab-status-dot"
+        "permissions-and-plan-mode",
+        "context-window"
       ]
     },
     {
@@ -1557,51 +1242,6 @@
         "committed PNGs are cropped derivatives of a single 1254x1254 RGB-on-white source that is not in the repo; a future re-crop or re-tone must start from that source, not from the committed derivatives"
       ],
       "relatedDecisions": []
-    },
-    {
-      "id": "permission-resolution-provenance",
-      "name": "Permission resolution provenance",
-      "doc": "features/permission-resolution-provenance.md",
-      "purpose": "Close every path by which an ALWAYS_ASK_TOOLS request (ExitPlanMode, AskUserQuestion) could be resolved without a human clicking a card, and record how every permission resolution happened.",
-      "entryPoints": [
-        "server/src/sessions.ts",
-        "web/src/components/PermissionPrompt.tsx"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/sessions.ts",
-        "web/src/lib/transcript.ts",
-        "web/src/components/PermissionPrompt.tsx"
-      ],
-      "symbols": [
-        "PermissionResolutionSource",
-        "PermissionRequestData.resolvedBy",
-        "hasUnresolvedAlwaysAsk",
-        "unresolvedPermissions",
-        "findPermissionResolution"
-      ],
-      "tests": [
-        "server/src/autoGuard.plan.test.ts",
-        "server/src/sessions.permission.test.ts",
-        "server/src/sessions.reconcile.test.ts"
-      ],
-      "businessRules": [
-        "ExitPlanMode and AskUserQuestion always resolve to an explicit 'ask' from the hook, in every permission mode, never a bare continue: true a mode or settings entry could pre-empt",
-        "a second answer to an already-resolved permission request is dropped; it never re-emits a resolution event or re-triggers recoverOrphanedPermission's injected prompt",
-        "a resend after a bridge restart replays a stored ALWAYS_ASK_TOOLS resolution only when it was produced by a human (resolvedBy is 'user', 'plan-reply', or absent/legacy); any server-synthesized resolution is re-asked instead",
-        "a model-initiated EnterPlanMode sets meta.permissionMode = 'plan' immediately, so a subsequent worker/bridge restart resumes still gated",
-        "every resolution logs one [permission] line (session, tool, allow/deny, source)"
-      ],
-      "architecturalRules": [
-        "resolvedBy is optional and every reader treats a missing value as 'user'",
-        "findPermissionResolution scans backwards (newest wins), matching the existing convention in exitPlanRequestId",
-        "the workflow plan-step gate's recorded resolution: 'allow' was already not a record of the SDK's tool result; resolvedBy: 'workflow-advance' makes that legible rather than changing it"
-      ],
-      "relatedDecisions": [
-        "interrupted-turn-recovery",
-        "plan-file-auto-approve",
-        "plan-review-card"
-      ]
     },
     {
       "id": "multi-root-projects",
@@ -1658,10 +1298,9 @@
       "relatedDecisions": [
         "multi-repo-commits",
         "prompt-mentions",
-        "plan-file-auto-approve",
+        "permissions-and-plan-mode",
         "app-data-root",
-        "project-tab-status-dot",
-        "project-switch-session-selection"
+        "session-and-project-ui"
       ]
     },
     {
@@ -1708,102 +1347,8 @@
       ],
       "relatedDecisions": [
         "multi-root-projects",
-        "workflow-step-output-consolidation"
+        "workflow-step-lifecycle"
       ]
-    },
-    {
-      "id": "subagent-transcript",
-      "name": "Subagent transcript nesting",
-      "doc": "features/subagent-transcript.md",
-      "purpose": "Nest a subagent's transcript under its spawning card instead of flattening it into the main transcript, exclude subagent messages from main-agent state (context usage, workflow step output, turn summaries), and give the spawning card a description-first header with a shared agent-identity badge (icon + color) also used by the live ActivityRow.",
-      "entryPoints": [
-        "web/src/lib/transcript.ts",
-        "server/src/sessions.ts"
-      ],
-      "files": [
-        "shared/types.ts",
-        "server/src/sessions.ts",
-        "web/src/lib/transcript.ts",
-        "web/src/lib/agents.ts",
-        "web/src/components/TaskCall.tsx",
-        "web/src/components/Transcript.tsx",
-        "web/src/components/ToolGroup.tsx",
-        "web/src/components/ToolCallCard.tsx",
-        "web/src/components/ActivityRow.tsx",
-        "web/src/index.css"
-      ],
-      "symbols": [
-        "subagentParentId",
-        "Sink",
-        "sinkFor",
-        "ToolBlock.children",
-        "scanTurnActivity",
-        "isAgentTool",
-        "parseTaskInput",
-        "agentMeta",
-        "MAIN_AGENT_META",
-        "taskFlags"
-      ],
-      "tests": [
-        "server/src/sessions.turns.test.ts",
-        "server/src/sessions.context.test.ts"
-      ],
-      "businessRules": [
-        "a subagent's assistant text and tool calls are never counted as main-agent output: workflow step output, the turn summary, and the live context-usage reading are all derived from main-agent messages only",
-        "a subagent's tool calls and text nest under its spawning card, never inline in the main transcript or folded into the main agent's tool group",
-        "a subagent cannot itself spawn another subagent (harness restriction), so nesting is one level deep in practice, though the data model is recursive",
-        "a message whose parent_tool_use_id names a spawn block not present in the transcript falls back to the main sink instead of being dropped",
-        "a spawn card leads with description, not the tool name; an unmapped or plugin-scoped subagent_type degrades to a generic agent badge (never hidden, never a crash)",
-        "the main agent and a subagent share the same badge icon but never the same color, so who is running reads from color alone before any label"
-      ],
-      "architecturalRules": [
-        "existing transcripts already carry parent_tool_use_id on disk (persisted verbatim by the worker), so this feature is a pure read-side reinterpretation with no new capture and no migration",
-        "no agents option was added to buildQueryOptions; subagent definitions are inherited via settingSources, the same mechanism that already inherits the rest of the preset",
-        "the spawn tool's name is not a stable literal: the harness emits 'Agent', the SDK's own AgentInput type and docs call it 'Task', and both appear in persisted transcripts, so every consumer matches via isAgentTool() rather than one string",
-        "agentMeta/MAIN_AGENT_META is the single source of truth for agent icon/color, read by both the settled card and the live ActivityRow so they cannot drift apart",
-        "parseTaskInput never throws and never assumes a field is present, since AgentInput gains fields the map won't know about (effort is the live example) \u2014 this is why the raw-input toggle stays reachable behind every spawn card",
-        "nested rendering is threaded down as a renderNested callback rather than a new shared module, since ToolCallCard cannot import Transcript.tsx's Item without an import cycle"
-      ],
-      "relatedDecisions": []
-    },
-    {
-      "id": "usage-by-model",
-      "name": "Usage by model",
-      "doc": "features/usage-by-model.md",
-      "purpose": "Split chat-turn spend by the model that produced it, shown as a per-model breakdown in the plan-usage hover card.",
-      "entryPoints": [
-        "web/src/components/UsageIndicator.tsx"
-      ],
-      "files": [
-        "shared/types.ts",
-        "shared/usageByModel.ts",
-        "server/src/sessions.ts",
-        "web/src/components/UsageIndicator.tsx"
-      ],
-      "symbols": [
-        "ModelSpend",
-        "ModelSpendMap",
-        "SessionMeta.costByModel",
-        "addSpend",
-        "mergeSpend",
-        "sortedSpend"
-      ],
-      "tests": [
-        "server/src/usageByModel.test.ts",
-        "server/src/sessions.ended.test.ts"
-      ],
-      "businessRules": [
-        "rows keyed by resolveModelId(meta.model), so a retired stored model id folds into its replacement's row",
-        "helper-query spend (autoName, summarizeTurn, step-output consolidation) is excluded \u2014 the table is chat-turn spend only, not full account spend",
-        "costByModel is additive and never backfilled; existing sessions show nothing until their next turn settles",
-        "the global rollup is derived client-side from the sessions the store already holds, so deleting a session removes its spend",
-        "a result carrying neither cost nor usage opens no row"
-      ],
-      "architecturalRules": [
-        "reuses the existing accumulate-on-result pass in server/src/sessions.ts that already owns totalCostUsd/totalTokens, instead of a new tracking mechanism",
-        "no new persistence and no new ws message \u2014 costByModel travels inside the existing SessionMeta blob"
-      ],
-      "relatedDecisions": []
     },
     {
       "id": "docs-reader",
@@ -1868,86 +1413,83 @@
       ],
       "relatedDecisions": [
         "prompt-mentions",
-        "transcript-markdown-rendering"
+        "transcript-rendering"
       ]
     },
     {
-      "id": "turn-failure-retry",
-      "name": "Single-click retry for every recoverable turn failure",
-      "doc": "features/turn-failure-retry.md",
-      "purpose": "Every recoverable turn failure \u2014 a crashed query, an is_error result, a workflow step that never got a prompt, or a push that never reached the worker \u2014 ends on a failure row with a working one-click Retry, in both plain and workflow sessions.",
+      "id": "hosted-machine-access",
+      "name": "Hosted machine access",
+      "doc": "features/hosted-machine-access.md",
+      "purpose": "The whole path from a browser anywhere to the agent on the user's own machine: ephemeral local ports, the browser-bridge contract, the outbound relay, device pairing, and the UI gate that picks which machine you are talking to.",
+      "covers": [
+        "device-pairing",
+        "hosted-device-gate",
+        "browser-bridge-link",
+        "local-port-discovery",
+        "remote-relay-bridge"
+      ],
       "entryPoints": [
-        "web/src/components/Transcript.tsx",
-        "server/src/index.ts"
+        "storage/src/index.ts",
+        "relay/src/index.ts",
+        "server/src/device.ts",
+        "server/scripts/pair-device.ts",
+        "web/src/main.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/DownloadDesktopApp.tsx",
+        "server/src/index.ts",
+        "server/src/userContext.ts",
+        "web/src/ws.ts",
+        "server/src/worker.ts",
+        "server/src/workerClient.ts",
+        "web/vite.config.ts",
+        "server/src/relayClient.ts"
       ],
       "files": [
-        "server/src/sessions.ts",
-        "server/src/workflows.ts",
+        "storage/prisma/schema.prisma",
+        "storage/src/index.ts",
+        "relay/src/index.ts",
+        "relay/src/mux.ts",
+        "server/src/device.ts",
+        "Tiltfile",
+        "web/src/main.tsx",
+        "web/src/lib/devices.ts",
+        "web/src/lib/storage.ts",
+        "web/src/components/ConnectMachine.tsx",
+        "web/src/components/ConnectingMachine.tsx",
+        "web/src/components/GateShell.tsx",
+        "web/src/components/PairingDiagram.tsx",
+        "web/src/components/DevicesSection.tsx",
+        "web/src/ws.ts",
+        "web/src/components/DownloadDesktopApp.tsx",
+        "server/src/userContext.ts",
         "server/src/index.ts",
         "shared/types.ts",
-        "web/src/components/Transcript.tsx",
-        "web/src/lib/transcript.ts"
-      ],
-      "symbols": [
-        "SessionManager.failTurn",
-        "SessionManager.lastPromptForRetry",
-        "WorkflowEngine.retryIfFailed",
-        "WorkflowState.stepFailure",
-        "WorkflowMarkerData.failed",
-        "SessionManager.TurnCompleteListener",
-        "isFailedResult",
-        "resultErrorText",
-        "SessionMeta.errorKind"
-      ],
-      "tests": [
-        "server/src/sessions.ended.test.ts",
-        "server/src/workflows.advance.test.ts",
-        "server/src/workflows.retry.test.ts"
-      ],
-      "businessRules": [
-        "every recoverable failure ends on a failure row with a working Retry, in a plain session and inside a running workflow alike",
-        "a failed turn never autoAdvances; it parks the step as failed instead, unless an explicit stamped force-advance is already pending",
-        "Retry re-runs the right thing: a step that never got a prompt is re-rendered from WorkflowState ('pre-run'); a step whose turn failed is re-sent as a follow-up on the same conversation ('turn')",
-        "no auto-retry or backoff \u2014 a transient failure (e.g. a 529) is an ordinary failed turn with a manual button",
-        "stepFailure is persisted, so a reload while parked in the failed state still shows Retry"
-      ],
-      "architecturalRules": [
-        "failTurn is the single funnel for every failure the SDK never reports as a result; public so WorkflowEngine can call it for pre-run failures",
-        "the retry router idiom mirrors case 'prompt': WorkflowEngine.retryIfFailed gets first refusal, only false falls through to SessionManager.retryTurn; no new ClientMessage type",
-        "lastPromptForRetry is the single source both retryTurn and retryIfFailed read from",
-        "the failed park skips setStatus (which clears errorMessage on every transition) and calls persistMeta instead, so the error banner and Retry stay live while the step shows waiting-approval",
-        "the client's backward scan for retryKey may only skip 'workflow' and 'context-compact' items; every other kind ends the scan"
-      ],
-      "relatedDecisions": [
-        "workflow-stop-parks",
-        "auth-failure-recovery",
-        "workflow-step-output-consolidation",
-        "context-compaction"
-      ]
-    },
-    {
-      "id": "local-port-discovery",
-      "name": "Local port discovery",
-      "doc": "features/local-port-discovery.md",
-      "purpose": "Worker and bridge each bind an ephemeral port and publish it (with a per-boot token) to ~/.lines-app/run/<instance>/, so nothing hardcodes a port and two Lines installs never collide.",
-      "entryPoints": [
-        "server/src/worker.ts",
-        "server/src/index.ts",
-        "server/src/workerClient.ts",
-        "web/vite.config.ts"
-      ],
-      "files": [
+        "web/src/store.ts",
         "server/src/workerProtocol.ts",
         "server/src/worker.ts",
         "server/src/workerClient.ts",
-        "server/src/index.ts",
         "server/src/store.ts",
-        "web/src/ws.ts",
         "web/vite.config.ts",
-        "Tiltfile",
-        ".env.example"
+        ".env.example",
+        "relay/src/protocol.ts",
+        "server/src/relayClient.ts"
       ],
       "symbols": [
+        "Device",
+        "DeviceHub.ownerId",
+        "deviceIdentity",
+        "useDevices",
+        "chooseDevice",
+        "bootstrapped",
+        "switchDevice",
+        "DeviceGate",
+        "BrowserLink",
+        "LINK_OPEN",
+        "linkSendAction",
+        "APP_PROTOCOL_VERSION",
+        "BridgeInfo",
+        "protocolSkew",
+        "BRIDGE_VERSION",
         "RuntimeInfo",
         "publishRuntimeInfo",
         "readRuntimeInfo",
@@ -1959,79 +1501,91 @@
         "APP_ROOT",
         "WorkerClient.dispose",
         "initBridgeOrigin",
-        "bridgeOrigin"
+        "bridgeOrigin",
+        "RELAY_PROTOCOL_VERSION",
+        "DeviceHub",
+        "HubRegistry",
+        "RelayClient",
+        "RelayChannel",
+        "AttestedIdentity"
       ],
       "tests": [
+        "storage/src/schema.credentials.test.ts",
+        "relay/src/mux.test.ts",
+        "server/src/browserLink.test.ts",
+        "server/src/broadcastBackpressure.test.ts",
         "server/src/portDiscovery.test.ts",
         "server/src/workerHandshake.test.ts",
-        "server/src/workerClient.test.ts"
+        "server/src/workerClient.test.ts",
+        "server/src/relayEndToEnd.test.ts"
       ],
       "businessRules": [
-        "ephemeral by default; LINES_WORKER_PORT/LINES_BRIDGE_PORT pin a port only when explicitly set, which Tilt does so its readiness probes have fixed targets",
-        "LINES_INSTANCE separates concurrent installs (Tilt sets 'dev'), so a dev checkout and an installed app never publish over each other",
-        "the worker rejects any connection that cannot echo the published token, checked before the newest-bridge-wins takeover so a local process cannot evict the real bridge by connecting",
-        "a discovery file naming a dead pid is removed on read, not merely ignored",
-        "PORT belongs to the storage server alone now; bridge and worker no longer read it"
-      ],
-      "architecturalRules": [
-        "the helpers live in workerProtocol.ts, not a module of their own: port discovery is part of the bridge<->worker contract, and a separate file would widen the worker's tsx-watch restart trigger",
-        "APP_ROOT is defined in workerProtocol.ts and re-exported by store.ts, so the worker can reach it without importing the bridge graph",
-        "publishing is atomic (temp + rename) and 0600; watchRuntimeInfo watches the directory, not the file, because rename replaces the inode",
-        "timers/watchers are released via WorkerClient.dispose() rather than unref(), which would make a timer invisible to node's mock timers",
-        "the bridge's token is published but not enforced on browser connections (a browser cannot set WebSocket headers); the Clerk gate guards that path and /__bridge exposes only the port",
-        "a live ws socket and node's mock timers cannot be mixed; tests compress the client's intervals instead"
-      ],
-      "relatedDecisions": []
-    },
-    {
-      "id": "browser-bridge-link",
-      "name": "Browser-bridge link",
-      "doc": "features/browser-bridge-link.md",
-      "purpose": "The contract between a browser connection and the bridge: the structural BrowserLink surface, backpressure on the broadcast fan-out, and the APP_PROTOCOL_VERSION the two sides exchange on hello.",
-      "entryPoints": [
-        "server/src/index.ts",
-        "server/src/userContext.ts",
-        "web/src/ws.ts"
-      ],
-      "files": [
-        "server/src/userContext.ts",
-        "server/src/index.ts",
-        "shared/types.ts",
-        "web/src/store.ts",
-        "web/src/ws.ts"
-      ],
-      "symbols": [
-        "BrowserLink",
-        "LINK_OPEN",
-        "linkSendAction",
-        "APP_PROTOCOL_VERSION",
-        "BridgeInfo",
-        "protocolSkew",
-        "BRIDGE_VERSION"
-      ],
-      "tests": [
-        "server/src/browserLink.test.ts",
-        "server/src/broadcastBackpressure.test.ts"
-      ],
-      "businessRules": [
+        "register is unauthenticated - the machine has no user yet and a code is worthless until claimed; re-registering an already-claimed AND UNREVOKED device is refused (409) rather than silently re-bound",
+        "re-registering a REVOKED device clears its stale userId/revokedAt and issues a fresh code - otherwise a revoked machine could never be claimed again, since claim and verify both refuse a revoked row",
+        "claim/verify answer the same 'unknown or expired code' for absent, expired, and revoked, so a distinct 'expired' reply can't confirm a guessed code had once been real",
+        "revoking a device tombstones it (revokedAt) rather than deleting the row, so it stays an audit trail; it stops the device RECONNECTING, checked on attach, not on every frame of a connection already open",
+        "GET /v1/devices never returns secretHash",
+        "if storage is unreachable the relay refuses the device rather than admitting it",
+        "the desktop shell re-registers an unclaimed device on a timer and on demand to keep a valid code on screen with no app restart, relying on register's re-issue (not 409) behavior for an unclaimed row",
+        "pairing a new machine only becomes the active one automatically if none was active before - silently moving a working session to a different computer would be worse than an extra click",
+        "revoking is described in the UI as what it does: stops a machine reconnecting, does not sever a connection already open",
+        "the Machines settings section does not render in a local build - a one-row list of the machine you're already on is noise",
+        "the stuck-connecting screen offers a way out after 6s - switch to any other paired machine (overriding chooseDevice's remembered/most-recent pick, which is what chose the unreachable one) or pair a new one; waiting alone never resolves it, since the socket reaches the relay fine and simply finds no agent attached",
+        "DownloadDesktopApp renders nothing when no build has been published, since a button pointing at nothing is worse than none",
         "stream deltas are the only droppable traffic: never persisted, and the browser refetches the transcript on reconnect, so losing one costs a partially-typed token rather than state",
         "above the high-water mark a link sheds stream deltas but still receives every critical message",
         "above the hard limit the link is closed outright, which is safe because hello is a complete state snapshot and a reconnect resyncs whatever was missed",
         "thresholds (4MB/32MB) sit far above any loopback burst, so local dev never reaches them",
         "an absent hello.bridge means a bridge older than the field, which counts as skew",
-        "hello also carries an optional worker: WorkerStatus, and workerStatus broadcasts later transitions; neither bumped APP_PROTOCOL_VERSION since both are additive and an older client tolerates their absence"
+        "hello also carries an optional worker: WorkerStatus, and workerStatus broadcasts later transitions; neither bumped APP_PROTOCOL_VERSION since both are additive and an older client tolerates their absence",
+        "ephemeral by default; LINES_WORKER_PORT/LINES_BRIDGE_PORT pin a port only when explicitly set, which Tilt does so its readiness probes have fixed targets",
+        "LINES_INSTANCE separates concurrent installs (Tilt sets 'dev'), so a dev checkout and an installed app never publish over each other",
+        "the worker rejects any connection that cannot echo the published token, checked before the newest-bridge-wins takeover so a local process cannot evict the real bridge by connecting",
+        "a discovery file naming a dead pid is removed on read, not merely ignored",
+        "PORT belongs to the storage server alone now; bridge and worker no longer read it",
+        "a browser connecting while no bridge is attached is told deviceOffline immediately rather than left on an indefinite spinner",
+        "a bridge restart does not disconnect the browser: channels stay open and are replayed to the new bridge, which answers with a fresh hello",
+        "newest bridge wins, so a reconnecting bridge can take over from a half-dead predecessor the relay has not noticed",
+        "the relay persists nothing and logs no payload",
+        "with RELAY_URL unset nothing dials and the local-only setup is unchanged",
+        "a browser may only reach a device it owns; if storage cannot verify a device's secret the relay refuses the connection rather than admitting it"
       ],
       "architecturalRules": [
+        "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
+        "the relay holds no database credentials and never queries Postgres directly - it asks storage, the only process with DB credentials at all",
+        "the cross-user check (hub.ownerId === userId) lives on the /client gate, not deeper in routing, so it fails closed at the earliest point",
+        "POST /v1/devices/verify is machine-to-machine with no Clerk token, so it is gated by a constant-time-compared RELAY_SHARED_SECRET instead, and excluded from storage's public router in a hosted deployment even with the secret guessed; unset, storage refuses verification with 503 rather than falling open",
+        "device identity (mint, hash, register) lives in server/src/device.ts, shared by the desktop app and the CLI pairing script, so the two cannot drift on the credential format",
+        "Clerk token providers are installed during render, not inside useEffect - child effects (DeviceGate) run before parent effects (AuthedConnect), so an effect-based registration meant the device list's first fetch and the first socket connect both fired with no token attached",
+        "switchDevice closes the existing socket and clears bootstrapped before reconnecting, rather than waiting for the old one to drop - in-flight messages on it belong to the old machine's bridge",
+        "the socket URL is built with URL/searchParams, not concatenation - the relay matches its endpoint path exactly and a concatenated token could produce a non-matching path",
         "BrowserLink covers only what the bridge genuinely calls; every addition is one more thing an alternative transport must implement",
         "close() must move readyState off LINK_OPEN synchronously, so broadcast does not re-close the same wedged link on every message",
         "removal from ctx.sockets is owned solely by the 'close' handler, including on the hard-limit path",
         "a per-socket 'error' listener is mandatory: an unhandled 'error' on an EventEmitter throws and takes the bridge down; a plain-object link avoids the footgun entirely",
         "linkSendAction is pure and exported so the policy is testable without a socket",
         "APP_PROTOCOL_VERSION is bumped only for browser<->bridge changes; the bridge<->worker PROTOCOL_VERSION is a separate contract on its own numbering",
-        "hello.bridge is optional in the type, because a hosted web app will meet bridges older than itself"
+        "hello.bridge is optional in the type, because a hosted web app will meet bridges older than itself",
+        "the helpers live in workerProtocol.ts, not a module of their own: port discovery is part of the bridge<->worker contract, and a separate file would widen the worker's tsx-watch restart trigger",
+        "APP_ROOT is defined in workerProtocol.ts and re-exported by store.ts, so the worker can reach it without importing the bridge graph",
+        "publishing is atomic (temp + rename) and 0600; watchRuntimeInfo watches the directory, not the file, because rename replaces the inode",
+        "timers/watchers are released via WorkerClient.dispose() rather than unref(), which would make a timer invisible to node's mock timers",
+        "the bridge's token is published but not enforced on browser connections (a browser cannot set WebSocket headers); the Clerk gate guards that path and /__bridge exposes only the port",
+        "a live ws socket and node's mock timers cannot be mixed; tests compress the client's intervals instead",
+        "the relay client is a peripheral, never a supervisor: relay health must never restart the bridge and absolutely never the worker, which would turn a relay blip into a reconcile, an interruptedAt stamp and an auto-continued turn",
+        "the payload is opaque - the relay routes on the header and never parses the message, so end-to-end encryption can later encrypt payload alone with no codec rewrite",
+        "frames are forwarded synchronously inside the message handler; an await per frame would let two race and reorder a stream",
+        "a dropped relay socket must synthesize close for every open channel, else ctx.sockets keeps dead links and broadcast serialises into them forever",
+        "RelayChannel is a plain object, not an EventEmitter, so it cannot inherit the throw-on-unhandled-error hazard",
+        "the relay is the auth edge and the bridge trusts the attested userId on relay channels; re-verifying would mean two failure modes and a hard dependency on the user's machine reaching Clerk's JWKS",
+        "relay/ shares no types with the app and the bridge does not import the relay package; frame shapes are duplicated in relayClient.ts on purpose",
+        "reconnect uses exponential backoff with jitter, since a flat retry turns one relay restart into a synchronised stampede"
       ],
       "relatedDecisions": [
-        "local-port-discovery"
+        "turn-recovery",
+        "production-deployment",
+        "desktop-app",
+        "file-routes-over-ws"
       ]
     },
     {
@@ -2079,131 +1633,37 @@
         "attachment blob URLs are revoked on unmount, else every re-render leaks a blob for the life of the page"
       ],
       "relatedDecisions": [
-        "browser-bridge-link",
-        "plan-file-auto-approve"
+        "hosted-machine-access",
+        "permissions-and-plan-mode"
       ]
     },
     {
-      "id": "remote-relay-bridge",
-      "name": "Remote relay bridge",
-      "doc": "features/remote-relay-bridge.md",
-      "purpose": "The bridge dials OUT to a relay and the browser connects to the same relay, so a hosted web app can drive the agent on the user's own machine with no inbound port, NAT config, or dynamic DNS. The relay verifies each device against storage and enforces that a browser may only reach a device it owns.",
-      "entryPoints": [
-        "relay/src/index.ts",
-        "server/src/relayClient.ts",
-        "server/src/index.ts"
+      "id": "desktop-app",
+      "name": "Desktop app",
+      "doc": "features/desktop-app.md",
+      "purpose": "The menu-bar app that supervises the bridge and worker as local children, owns this machine's pairing state and tray UI, and the packaging that turns it into an installable macOS .dmg that runs away from a repo checkout.",
+      "covers": [
+        "desktop-shell",
+        "desktop-packaging"
       ],
-      "files": [
-        "relay/src/protocol.ts",
-        "relay/src/mux.ts",
-        "relay/src/index.ts",
-        "server/src/relayClient.ts",
-        "server/src/index.ts",
-        "Tiltfile",
-        "storage/src/index.ts"
-      ],
-      "symbols": [
-        "RELAY_PROTOCOL_VERSION",
-        "DeviceHub",
-        "HubRegistry",
-        "RelayClient",
-        "RelayChannel",
-        "AttestedIdentity"
-      ],
-      "tests": [
-        "relay/src/mux.test.ts",
-        "server/src/relayEndToEnd.test.ts"
-      ],
-      "businessRules": [
-        "a browser connecting while no bridge is attached is told deviceOffline immediately rather than left on an indefinite spinner",
-        "a bridge restart does not disconnect the browser: channels stay open and are replayed to the new bridge, which answers with a fresh hello",
-        "newest bridge wins, so a reconnecting bridge can take over from a half-dead predecessor the relay has not noticed",
-        "the relay persists nothing and logs no payload",
-        "with RELAY_URL unset nothing dials and the local-only setup is unchanged",
-        "a browser may only reach a device it owns; if storage cannot verify a device's secret the relay refuses the connection rather than admitting it"
-      ],
-      "architecturalRules": [
-        "the relay client is a peripheral, never a supervisor: relay health must never restart the bridge and absolutely never the worker, which would turn a relay blip into a reconcile, an interruptedAt stamp and an auto-continued turn",
-        "the payload is opaque - the relay routes on the header and never parses the message, so end-to-end encryption can later encrypt payload alone with no codec rewrite",
-        "frames are forwarded synchronously inside the message handler; an await per frame would let two race and reorder a stream",
-        "a dropped relay socket must synthesize close for every open channel, else ctx.sockets keeps dead links and broadcast serialises into them forever",
-        "RelayChannel is a plain object, not an EventEmitter, so it cannot inherit the throw-on-unhandled-error hazard",
-        "the relay is the auth edge and the bridge trusts the attested userId on relay channels; re-verifying would mean two failure modes and a hard dependency on the user's machine reaching Clerk's JWKS",
-        "relay/ shares no types with the app and the bridge does not import the relay package; frame shapes are duplicated in relayClient.ts on purpose",
-        "reconnect uses exponential backoff with jitter, since a flat retry turns one relay restart into a synchronised stampede"
-      ],
-      "relatedDecisions": [
-        "device-pairing",
-        "browser-bridge-link",
-        "file-routes-over-ws"
-      ]
-    },
-    {
-      "id": "device-pairing",
-      "name": "Device pairing",
-      "doc": "features/device-pairing.md",
-      "purpose": "Binds a machine's bridge to a Clerk user so the relay can refuse an unclaimed device and refuse a claimed device to any user but its owner. Only a hash of the machine's pairing secret ever reaches Postgres.",
-      "entryPoints": [
-        "storage/src/index.ts",
-        "relay/src/index.ts",
-        "server/src/device.ts",
-        "server/scripts/pair-device.ts"
-      ],
-      "files": [
-        "storage/prisma/schema.prisma",
-        "storage/src/index.ts",
-        "relay/src/index.ts",
-        "relay/src/mux.ts",
-        "server/src/device.ts",
-        "Tiltfile"
-      ],
-      "symbols": [
-        "Device",
-        "DeviceHub.ownerId",
-        "deviceIdentity"
-      ],
-      "tests": [
-        "storage/src/schema.credentials.test.ts",
-        "relay/src/mux.test.ts"
-      ],
-      "businessRules": [
-        "register is unauthenticated - the machine has no user yet and a code is worthless until claimed; re-registering an already-claimed AND UNREVOKED device is refused (409) rather than silently re-bound",
-        "re-registering a REVOKED device clears its stale userId/revokedAt and issues a fresh code - otherwise a revoked machine could never be claimed again, since claim and verify both refuse a revoked row",
-        "claim/verify answer the same 'unknown or expired code' for absent, expired, and revoked, so a distinct 'expired' reply can't confirm a guessed code had once been real",
-        "revoking a device tombstones it (revokedAt) rather than deleting the row, so it stays an audit trail; it stops the device RECONNECTING, checked on attach, not on every frame of a connection already open",
-        "GET /v1/devices never returns secretHash",
-        "if storage is unreachable the relay refuses the device rather than admitting it",
-        "the desktop shell re-registers an unclaimed device on a timer and on demand to keep a valid code on screen with no app restart, relying on register's re-issue (not 409) behavior for an unclaimed row"
-      ],
-      "architecturalRules": [
-        "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
-        "the relay holds no database credentials and never queries Postgres directly - it asks storage, the only process with DB credentials at all",
-        "the cross-user check (hub.ownerId === userId) lives on the /client gate, not deeper in routing, so it fails closed at the earliest point",
-        "POST /v1/devices/verify is machine-to-machine with no Clerk token, so it is gated by a constant-time-compared RELAY_SHARED_SECRET instead, and excluded from storage's public router in a hosted deployment even with the secret guessed; unset, storage refuses verification with 503 rather than falling open",
-        "device identity (mint, hash, register) lives in server/src/device.ts, shared by the desktop app and the CLI pairing script, so the two cannot drift on the credential format"
-      ],
-      "relatedDecisions": [
-        "remote-relay-bridge",
-        "app-managed-login-only",
-        "production-deployment"
-      ]
-    },
-    {
-      "id": "desktop-shell",
-      "name": "Desktop shell",
-      "doc": "features/desktop-shell.md",
-      "purpose": "A menu-bar app that supervises the bridge and worker as local child processes, so Lines can be installed and run without a repo checkout or Tilt. Hosted is the default; local mode (own web server, own window) is an explicit dev-only path.",
       "entryPoints": [
         "desktop/src/main.ts",
         "desktop/src/config.ts",
-        "server/src/updates.ts"
+        "server/src/updates.ts",
+        "desktop/scripts/build.mjs",
+        "desktop/scripts/afterPack.mjs",
+        "desktop/scripts/release.mjs",
+        "desktop/package.json"
       ],
       "files": [
         "desktop/src/main.ts",
         "desktop/src/config.ts",
         "server/src/updates.ts",
         "server/src/relayClient.ts",
-        "shared/types.ts"
+        "shared/types.ts",
+        "server/src/claudeCli.ts",
+        "server/src/index.ts",
+        "deploy/README.md"
       ],
       "symbols": [
         "spawnChild",
@@ -2218,10 +1678,17 @@
         "claudeCliStatus",
         "CAN_SELF_INSTALL",
         "openPairingWindow",
-        "UpdateManager"
+        "UpdateManager",
+        "MIN_CLAUDE_VERSION",
+        "refreshClaudeCli",
+        "claudeCliRefusalMessage",
+        "loadConfig",
+        "isLocalMode"
       ],
       "tests": [
-        "server/src/updates.test.ts"
+        "server/src/updates.test.ts",
+        "server/src/claudeCli.test.ts",
+        "server/src/sessions.claudeCli.test.ts"
       ],
       "businessRules": [
         "a restart is refused while any session is running, waiting-permission, or waiting-approval, since a restart kills bridge and worker together under one atomic update",
@@ -2230,7 +1697,11 @@
         "in hosted mode (the default; local mode needs LINES_LOCAL_MODE=1) the shell serves no local UI - it registers this machine's device identity, spawns the bridge with the relay/storage/device env, and shows a pairing code window only if the machine has not been claimed yet",
         "a relay open alone is not proof of pairing - the relay accepts the socket before asking storage whether the device is claimed, so Connected lags the raw socket by RELAY_SETTLE_MS and a 1008 close reads as Not paired rather than an indefinite Connecting",
         "a pairing code never requires an app restart to refresh, on a timer or on demand",
-        "device registration failing at boot is not fatal - RelayClient retries the relay forever, so a machine that registers late still comes up once storage is reachable again"
+        "device registration failing at boot is not fatal - RelayClient retries the relay forever, so a machine that registers late still comes up once storage is reachable again",
+        "hosted is the default; local mode requires LINES_LOCAL_MODE=1 and web/dist is not shipped",
+        "a missing or too-old Claude Code refuses the turn with an actionable message in both the browser and the tray",
+        "LINES_CLAUDE_PATH is exclusive: when set, no other location is tried",
+        "update checks only notify — the tray links the download page"
       ],
       "architecturalRules": [
         "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
@@ -2238,62 +1709,16 @@
         "the worker is never auto-restarted on crash - its live queries are gone, and a silent respawn would look like a healthy session that lost its turn; the bridge is restarted freely",
         "the desktop app and Tilt share the same LINES_INSTANCE/port-discovery contract, so a dev checkout and an installed app never collide",
         "device identity lives in server/src/device.ts, not duplicated in the shell, so it and npm run pair -w server cannot drift on the credential format",
-        "ROOT resolves to process.resourcesPath when packaged, the repo root otherwise, which is the one branch letting a dev checkout and an installed app share this file"
-      ],
-      "relatedDecisions": [
-        "desktop-packaging",
-        "local-port-discovery",
-        "browser-bridge-link",
-        "device-pairing",
-        "remote-relay-bridge"
-      ]
-    },
-    {
-      "id": "desktop-packaging",
-      "name": "Desktop packaging",
-      "doc": "features/desktop-packaging.md",
-      "purpose": "Builds the menu-bar shell into an ad-hoc signed macOS .dmg that runs away from a repo checkout, using the machine's own Claude Code CLI.",
-      "entryPoints": [
-        "desktop/scripts/build.mjs",
-        "desktop/scripts/afterPack.mjs",
-        "desktop/scripts/release.mjs",
-        "desktop/package.json"
-      ],
-      "files": [
-        "desktop/src/config.ts",
-        "desktop/src/main.ts",
-        "server/src/claudeCli.ts",
-        "server/src/index.ts",
-        "deploy/README.md"
-      ],
-      "symbols": [
-        "MIN_CLAUDE_VERSION",
-        "claudeCliStatus",
-        "refreshClaudeCli",
-        "claudeCliRefusalMessage",
-        "loadConfig",
-        "isLocalMode",
-        "CAN_SELF_INSTALL"
-      ],
-      "tests": [
-        "server/src/claudeCli.test.ts",
-        "server/src/sessions.claudeCli.test.ts"
-      ],
-      "businessRules": [
-        "hosted is the default; local mode requires LINES_LOCAL_MODE=1 and web/dist is not shipped",
-        "a missing or too-old Claude Code refuses the turn with an actionable message in both the browser and the tray",
-        "LINES_CLAUDE_PATH is exclusive: when set, no other location is tried",
-        "update checks only notify \u2014 the tray links the download page"
-      ],
-      "architecturalRules": [
-        "electron-builder's identity: null skips bundle signing entirely, leaving no _CodeSignature/CodeResources, which macOS reports as \"damaged\" with no Open Anyway path \u2014 afterPack.mjs seals the bundle and verifies it so a broken one fails the build",
+        "ROOT resolves to process.resourcesPath when packaged, the repo root otherwise, which is the one branch letting a dev checkout and an installed app share this file",
+        "electron-builder's identity: null skips bundle signing entirely, leaving no _CodeSignature/CodeResources, which macOS reports as \"damaged\" with no Open Anyway path — afterPack.mjs seals the bundle and verifies it so a broken one fails the build",
         "the agent SDK ships unbundled because sdk.mjs resolves through createRequire(import.meta.url)",
         "the SDK's -darwin-arm64 platform package is deleted; every query passes pathToClaudeCodeExecutable so its resolver never runs",
-        "the bridge and worker bundles must be ESM \u2014 server and shared use import.meta.dirname, which is undefined under CJS",
-        "the version floor is ours or nobody's \u2014 the SDK performs no version handshake at all",
+        "the bridge and worker bundles must be ESM — server and shared use import.meta.dirname, which is undefined under CJS",
+        "the version floor is ours or nobody's — the SDK performs no version handshake at all",
         "releases use a second public R2 bucket, because public-read is a bucket-level setting"
       ],
       "relatedDecisions": [
+        "hosted-machine-access",
         "ad-hoc signing leaves a Gatekeeper step only a Developer ID can remove; self-install stays behind CAN_SELF_INSTALL until then",
         "electron is pinned exact so electron-builder can resolve its version from a hoisted workspace",
         "arm64 only; x64/universal is a one-line mac.target change"
@@ -2365,7 +1790,7 @@
         "RecipeEngine.expandForRun is the only place bundle expansion happens; the client always sends refs, never a pre-flattened list"
       ],
       "relatedDecisions": [
-        "workflow-step-version-history",
+        "workflow-step-versioning",
         "multi-root-projects"
       ]
     },
@@ -2398,97 +1823,9 @@
         "the storage image installs openssl explicitly - node:22-slim ships without libssl and Prisma's query engine otherwise falls back to a guessed build and warns at every boot"
       ],
       "relatedDecisions": [
-        "remote-relay-bridge",
-        "device-pairing",
-        "desktop-shell",
-        "desktop-packaging"
+        "hosted-machine-access",
+        "desktop-app"
       ]
-    },
-    {
-      "id": "hosted-device-gate",
-      "name": "Hosted device gate",
-      "doc": "features/hosted-device-gate.md",
-      "purpose": "Gates the hosted web app behind 'which of my machines am I talking to': lists paired machines, pairs new ones, switches between them, and re-gates if the active machine is revoked or the socket closes with an auth-shaped code. Inert in a local build. Links to the installable desktop app so a machine that has to run locally has a one-click answer instead of a repo checkout.",
-      "entryPoints": [
-        "web/src/main.tsx",
-        "web/src/components/SettingsModal.tsx",
-        "web/src/components/DownloadDesktopApp.tsx"
-      ],
-      "files": [
-        "web/src/main.tsx",
-        "web/src/lib/devices.ts",
-        "web/src/lib/storage.ts",
-        "web/src/components/ConnectMachine.tsx",
-        "web/src/components/ConnectingMachine.tsx",
-        "web/src/components/GateShell.tsx",
-        "web/src/components/PairingDiagram.tsx",
-        "web/src/components/DevicesSection.tsx",
-        "web/src/ws.ts",
-        "web/src/components/DownloadDesktopApp.tsx"
-      ],
-      "symbols": [
-        "useDevices",
-        "chooseDevice",
-        "bootstrapped",
-        "switchDevice",
-        "DeviceGate"
-      ],
-      "tests": [],
-      "businessRules": [
-        "pairing a new machine only becomes the active one automatically if none was active before - silently moving a working session to a different computer would be worse than an extra click",
-        "revoking is described in the UI as what it does: stops a machine reconnecting, does not sever a connection already open",
-        "the Machines settings section does not render in a local build - a one-row list of the machine you're already on is noise",
-        "the stuck-connecting screen offers a way out after 6s - switch to any other paired machine (overriding chooseDevice's remembered/most-recent pick, which is what chose the unreachable one) or pair a new one; waiting alone never resolves it, since the socket reaches the relay fine and simply finds no agent attached",
-        "DownloadDesktopApp renders nothing when no build has been published, since a button pointing at nothing is worse than none"
-      ],
-      "architecturalRules": [
-        "Clerk token providers are installed during render, not inside useEffect - child effects (DeviceGate) run before parent effects (AuthedConnect), so an effect-based registration meant the device list's first fetch and the first socket connect both fired with no token attached",
-        "switchDevice closes the existing socket and clears bootstrapped before reconnecting, rather than waiting for the old one to drop - in-flight messages on it belong to the old machine's bridge",
-        "the socket URL is built with URL/searchParams, not concatenation - the relay matches its endpoint path exactly and a concatenated token could produce a non-matching path"
-      ],
-      "relatedDecisions": [
-        "device-pairing",
-        "remote-relay-bridge",
-        "production-deployment",
-        "desktop-packaging"
-      ]
-    },
-    {
-      "id": "tool-call-structured-input",
-      "name": "Tool call structured input",
-      "doc": "features/tool-call-structured-input.md",
-      "purpose": "Replace the raw JSON dump every transcript tool card showed (collapsed one-liner and expanded body) with a per-tool structured field list; raw JSON stays one toggle away. A resolved edit or answered AskUserQuestion drops its now-redundant expand affordance / duplicate summary card.",
-      "entryPoints": [
-        "web/src/components/ToolCallCard.tsx"
-      ],
-      "files": [
-        "web/src/lib/toolFields.ts",
-        "web/src/components/ToolCallCard.tsx",
-        "web/src/components/QuestionPrompt.tsx",
-        "web/src/components/Transcript.tsx",
-        "web/src/index.css"
-      ],
-      "symbols": [
-        "toolFields",
-        "toolSummary",
-        "parseQuestionAnswers",
-        "matchAnswerToOptions",
-        "BODY_CAP",
-        "QuestionReview",
-        "isRedundant"
-      ],
-      "tests": [],
-      "businessRules": [
-        "every tool's expanded body shows a structured field list, never raw JSON by default; raw JSON is one toggle away for every tool with no exceptions",
-        "a tool call already fully explained elsewhere in the row loses its expand affordance instead of showing an empty/redundant body: a successful edit (diff button covers it) and a resolved AskUserQuestion (its own card carries the review) are the current cases",
-        "an AskUserQuestion call's answer is read from its tool result's prose, not its input \u2014 the input only ever contains the questions asked"
-      ],
-      "architecturalRules": [
-        "toolFields degrades instead of failing: an unclassifiable value becomes a capped json field rather than throwing or being skipped, since tool input shapes (especially MCP tools) are not controlled by this code",
-        "OptionCard gained a readOnly prop instead of being duplicated into a second component, so a settled answer looks exactly like the choice that produced it",
-        "the raw-input toggle shows even for an empty ({}) input, unlike PermissionPrompt's equivalent guard \u2014 consistency across every tool card was chosen over hiding a no-op toggle"
-      ],
-      "relatedDecisions": []
     }
   ]
 }

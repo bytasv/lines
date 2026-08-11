@@ -95,7 +95,7 @@ port isolation, `tilt down` orphan check).
   paired" and exits 0.
 - `desktop-package` (`npm run package -w desktop`) is the same shape: manual,
   never a step in `tilt up`, and exists so the DMG build (see
-  [desktop-packaging](desktop-packaging.md)) is discoverable from Tilt at all —
+  [desktop-app](desktop-app.md)) is discoverable from Tilt at all —
   the desktop app previously had no resource here.
 - `RELAY_URL` set without `STORAGE_URL` warns rather than failing preflight: the
   bridge would dial a hosted relay while syncing to the local storage default,

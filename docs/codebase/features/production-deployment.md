@@ -6,8 +6,8 @@ Runs the server side of a hosted Lines install — the relay, the storage server
 and the static web bundle — as containers behind an existing Traefik instance,
 issuing its own TLS certificate per hostname. Deliberately excludes the bridge
 and worker: the agent runs on each user's own machine (see
-[remote-relay-bridge](remote-relay-bridge.md) and
-[device-pairing](device-pairing.md)), so no agent turn ever executes on this
+[hosted-machine-access](hosted-machine-access.md) and
+[hosted-machine-access](hosted-machine-access.md)), so no agent turn ever executes on this
 host, and the images ship without `server/`'s Claude Agent SDK dependency.
 
 ## Entry points
@@ -39,7 +39,7 @@ workspaces via `npm ci --workspace`). The `web` build stage bakes
 be changed by restarting the container, only by rebuilding it. The build fails
 if the WS URL is not actually present in the output; the download URL gets the
 same assertion but only when set, since an empty value is the legitimate state
-before a desktop release exists (see [desktop-packaging](desktop-packaging.md)).
+before a desktop release exists (see [desktop-app](desktop-app.md)).
 
 At runtime, Traefik routes by `Host()`/`PathPrefix()` label rules on the
 existing Docker socket provider: `web` takes the apex host, `relay` takes
@@ -87,7 +87,7 @@ edge, cert issuance for both the apex and `www`).
   classic nginx trailing-slash trap.
 - `storage`'s public router excludes `/v1/devices/verify` by rule (Traefik v3
   `!Path(...)`), on top of that route's own shared-secret gate (see
-  [device-pairing](device-pairing.md)) — defense in depth, not redundancy: one
+  [hosted-machine-access](hosted-machine-access.md)) — defense in depth, not redundancy: one
   is a network-level exclusion, the other an application-level credential
   check, and either alone would leave the route reachable if the other broke.
 - The image installs `openssl` explicitly in the `storage` stage: `node:22-slim`
@@ -96,12 +96,8 @@ edge, cert issuance for both the apex and `www`).
 
 ## Related decisions
 
-- [remote-relay-bridge](remote-relay-bridge.md) — what `relay` in this compose
-  file actually is
-- [device-pairing](device-pairing.md) — the auth model `storage`'s device
-  routes implement, including the CORS and shared-secret rules this deploy
-  depends on
-- [desktop-shell](desktop-shell.md) — the other half of the split; nothing in
-  this doc runs an agent
-- [desktop-packaging](desktop-packaging.md) — where `VITE_DESKTOP_DOWNLOAD_URL`
-  comes from
+- [hosted-machine-access](hosted-machine-access.md) — what `relay` in this compose
+  file actually is, and the auth model `storage`'s device routes implement,
+  including the CORS and shared-secret rules this deploy depends on
+- [desktop-app](desktop-app.md) — the other half of the split (nothing in this doc
+  runs an agent), and where `VITE_DESKTOP_DOWNLOAD_URL` comes from

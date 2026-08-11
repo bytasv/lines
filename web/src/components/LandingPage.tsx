@@ -1,4 +1,5 @@
 import {
+  Anchor,
   Badge,
   Box,
   Button,
@@ -12,7 +13,8 @@ import {
   ThemeIcon,
   Title,
 } from '@mantine/core';
-import { SignInButton, SignUpButton } from '@clerk/clerk-react';
+import { SignedIn, SignedOut, SignInButton, SignUpButton } from '@clerk/clerk-react';
+import { Link } from 'react-router-dom';
 import {
   IconAdjustmentsHorizontal,
   IconBolt,
@@ -30,6 +32,10 @@ import {
   IconTerminal2,
 } from '@tabler/icons-react';
 import { BrandMark } from './BrandMark';
+import { DownloadDesktopApp } from './DownloadDesktopApp';
+
+const REPO_URL = 'https://github.com/bytasv/lines';
+const CLAUDE_CODE_SETUP_URL = 'https://docs.claude.com/en/docs/claude-code/setup';
 
 type Feature = {
   icon: typeof IconBolt;
@@ -166,9 +172,18 @@ export function LandingPage() {
         }}
       >
         <BrandMark />
-        <SignInButton mode="modal">
-          <Button variant="subtle">Sign in</Button>
-        </SignInButton>
+        {/* This page also renders at /welcome for an already-signed-in visitor,
+            so the header action has to work in both states. */}
+        <SignedIn>
+          <Button component={Link} to="/" variant="subtle">
+            Open app
+          </Button>
+        </SignedIn>
+        <SignedOut>
+          <SignInButton mode="modal">
+            <Button variant="subtle">Sign in</Button>
+          </SignInButton>
+        </SignedOut>
       </Box>
 
       <Container size="lg" py={80}>
@@ -196,6 +211,37 @@ export function LandingPage() {
             </SignInButton>
           </Group>
         </Stack>
+
+        {/* What it is before where it runs: a first-time visitor needs the
+            feature set to mean anything before the deployment choice does. */}
+        <Stack gap="xl" mb={96}>
+          <Stack gap={4} ta="center">
+            <Title order={2} fz={26}>
+              Everything a long agent session needs
+            </Title>
+            <Text c="dimmed" maw={560} mx="auto">
+              Not just a chat window — the tooling to run Claude Code for real work, at scale,
+              without losing track of cost, context, or control.
+            </Text>
+          </Stack>
+          <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="lg">
+            {FEATURES.map((feature) => (
+              <Card key={feature.title} withBorder radius="md" p="lg" h="100%">
+                <Stack gap="sm">
+                  <ThemeIcon variant="light" size={36} radius="md">
+                    <feature.icon size={20} stroke={1.5} />
+                  </ThemeIcon>
+                  <Text fw={600}>{feature.title}</Text>
+                  <Text size="sm" c="dimmed">
+                    {feature.description}
+                  </Text>
+                </Stack>
+              </Card>
+            ))}
+          </SimpleGrid>
+        </Stack>
+
+        <Divider mb={96} />
 
         <Stack gap="xl" mb={96}>
           <Stack gap={4} ta="center">
@@ -226,33 +272,19 @@ export function LandingPage() {
           </SimpleGrid>
         </Stack>
 
-        <Divider mb={96} />
-
+        {/* DownloadDesktopApp is env-gated and touches no authed API, so it is
+            safe before sign-in; it renders null when no build is published. */}
         <Stack gap="xl" mb={96}>
           <Stack gap={4} ta="center">
             <Title order={2} fz={26}>
-              Everything a long agent session needs
+              Get started
             </Title>
             <Text c="dimmed" maw={560} mx="auto">
-              Not just a chat window — the tooling to run Claude Code for real work, at scale,
-              without losing track of cost, context, or control.
+              Install the desktop app, sign in, and pair the machine it is running on. That
+              machine is where every agent turn executes.
             </Text>
           </Stack>
-          <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }} spacing="lg">
-            {FEATURES.map((feature) => (
-              <Card key={feature.title} withBorder radius="md" p="lg" h="100%">
-                <Stack gap="sm">
-                  <ThemeIcon variant="light" size={36} radius="md">
-                    <feature.icon size={20} stroke={1.5} />
-                  </ThemeIcon>
-                  <Text fw={600}>{feature.title}</Text>
-                  <Text size="sm" c="dimmed">
-                    {feature.description}
-                  </Text>
-                </Stack>
-              </Card>
-            ))}
-          </SimpleGrid>
+          <DownloadDesktopApp />
         </Stack>
 
         <Card withBorder radius="md" p="xl">
@@ -269,6 +301,27 @@ export function LandingPage() {
             </SignUpButton>
           </Stack>
         </Card>
+
+        <Divider my={64} />
+
+        <Stack gap="xs" ta="center" pb="xl">
+          <Group justify="center" gap="lg">
+            <Anchor href={REPO_URL} target="_blank" rel="noreferrer" size="sm">
+              Source on GitHub
+            </Anchor>
+            <Anchor href={CLAUDE_CODE_SETUP_URL} target="_blank" rel="noreferrer" size="sm">
+              Install Claude Code
+            </Anchor>
+          </Group>
+          <Text size="sm" c="dimmed">
+            Prefer to run the whole thing yourself? Everything here — relay, storage, and web
+            app — is in the repo;{' '}
+            <Anchor href={`${REPO_URL}#readme`} target="_blank" rel="noreferrer">
+              the README
+            </Anchor>{' '}
+            covers local dev and self-hosting.
+          </Text>
+        </Stack>
       </Container>
     </Box>
   );
