@@ -84,8 +84,16 @@ const CONTENT_TYPES = {
   '.blockmap': 'application/octet-stream',
 };
 
+/**
+ * electron-builder also drops `builder-debug.yml` here — its fully resolved
+ * config, including absolute paths from the build machine. Nothing downloads it,
+ * so it has no business in a public bucket: match the artifacts by name rather
+ * than sweeping every `.yml` in the directory.
+ */
+const PUBLISHABLE = /(\.dmg|\.zip)(\.blockmap)?$|^latest-mac\.yml$/;
+
 const files = fs.existsSync(RELEASE_DIR)
-  ? fs.readdirSync(RELEASE_DIR).filter((name) => CONTENT_TYPES[path.extname(name)])
+  ? fs.readdirSync(RELEASE_DIR).filter((name) => PUBLISHABLE.test(name) && CONTENT_TYPES[path.extname(name)])
   : [];
 if (!files.length) {
   console.error(`No artifacts in ${RELEASE_DIR} — run \`npm run package -w desktop\` first.`);
