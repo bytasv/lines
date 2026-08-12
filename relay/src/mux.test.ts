@@ -149,9 +149,13 @@ test('dropping a device tears down both sides', () => {
   hub.openChannel('u1', 'ctrl', client.sink, null);
 
   reg.drop('d1', 'revoked');
-  assert.equal(client.closed()?.reason, 'revoked');
-  assert.equal(agent.closed()?.reason, 'revoked');
+  // 1008 on both, because both are now unauthorized rather than merely finished:
+  // the bridge's client treats it as a state that needs something to change
+  // elsewhere, and retries slowly instead of hammering the relay.
+  assert.deepEqual(client.closed(), { code: 1008, reason: 'revoked' });
+  assert.deepEqual(agent.closed(), { code: 1008, reason: 'revoked' });
   assert.equal(reg.peek('d1'), undefined);
+  assert.equal(hub.online, false, 'a dropped hub must not still look reachable');
 });
 
 test('a hub records the owner its bridge authenticated as', () => {

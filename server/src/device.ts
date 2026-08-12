@@ -75,3 +75,26 @@ export async function registerDevice(
   const { pairingCode } = (await res.json()) as { pairingCode: string };
   return pairingCode;
 }
+
+/**
+ * Release this machine from whatever account claimed it, proving possession of
+ * its own secret.
+ *
+ * The counterpart to {@link registerDevice}, and the machine's own way back when
+ * the web app is unusable: storage refuses to re-issue a pairing code for a
+ * claimed device, so the claim has to go first. It issues no code itself — call
+ * `registerDevice` after this, which is the one path that mints one.
+ */
+export async function unpairDevice(storageUrl: string, identity: DeviceIdentity): Promise<void> {
+  const res = await fetch(`${storageUrl}/v1/devices/unpair`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: identity.id, secret: identity.secret }),
+  });
+  // 403 covers "not claimed by anyone" as well as a bad secret, and the first is
+  // already the desired end state — so it is not an error worth raising.
+  if (res.status === 403) return;
+  if (!res.ok) {
+    throw new Error(`device unpair failed: ${res.status} ${await res.text()}`);
+  }
+}

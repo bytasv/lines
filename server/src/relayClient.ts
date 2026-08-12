@@ -50,6 +50,21 @@ const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
 
 /**
+ * Silence that means the socket is dead even though the OS never said so.
+ *
+ * The relay pings every 20s, so a link with nothing to say still delivers a frame
+ * well inside this window; only a half-open connection goes quiet. Without this
+ * the bridge can sit on a socket that reports OPEN forever — after a sleep, a
+ * Wi-Fi change or a NAT rebind — and the retry logic below never gets its chance.
+ *
+ * This is also the macOS-sleep fix: the tick uses wall clock, so on wake it fires
+ * late, the delta is enormous, and the stale socket is replaced immediately.
+ */
+const RELAY_IDLE_MS = Number(process.env.LINES_RELAY_IDLE_MS ?? 60_000);
+/** Derived, so compressing the timeout in a test compresses the check with it. */
+const RELAY_HEALTH_MS = Math.max(1_000, Math.min(15_000, Math.floor(RELAY_IDLE_MS / 4)));
+
+/**
  * One relay channel, presented to the bridge as a BrowserLink.
  *
  * A plain object with stored callbacks rather than an EventEmitter: an
@@ -123,6 +138,9 @@ export class RelayClient {
   private ws: WebSocket | null = null;
   private channels = new Map<string, RelayChannel>();
   private retryTimer: NodeJS.Timeout | null = null;
+  private healthTimer: NodeJS.Timeout | null = null;
+  /** When the relay last said anything at all. 0 until the first frame arrives. */
+  private lastFrameAt = 0;
   private attempt = 0;
   private disposed = false;
 
@@ -143,6 +161,7 @@ export class RelayClient {
     this.disposed = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+    this.stopHealthCheck();
     this.dropAllChannels();
     this.ws?.close();
     this.ws = null;
@@ -168,6 +187,30 @@ export class RelayClient {
    * bridge's `ctx.sockets` keeps dead links forever and `broadcast` serialises
    * JSON into them on every state change.
    */
+  private stopHealthCheck(): void {
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = null;
+  }
+
+  /**
+   * Terminate a socket that has gone silent, and only that: this client is a
+   * peripheral, never a supervisor. It re-dials its own connection and leaves the
+   * bridge and the worker — which may be mid-turn — completely alone.
+   */
+  private startHealthCheck(ws: WebSocket): void {
+    this.stopHealthCheck();
+    this.lastFrameAt = Date.now();
+    this.healthTimer = setInterval(() => {
+      if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - this.lastFrameAt <= RELAY_IDLE_MS) return;
+      console.warn(`[relay] no frame for >${RELAY_IDLE_MS}ms — terminating and re-dialling`);
+      // terminate, not close: a close handshake on a half-open socket waits for a
+      // peer that is gone. The 'close' handler drops channels and retries.
+      ws.terminate();
+    }, RELAY_HEALTH_MS);
+    this.healthTimer.unref();
+  }
+
   private dropAllChannels(): void {
     for (const ch of this.channels.values()) ch.remoteClosed();
     this.channels.clear();
@@ -182,10 +225,12 @@ export class RelayClient {
     ws.on('open', () => {
       this.attempt = 0;
       ws.send(JSON.stringify({ t: 'hello', version: RELAY_PROTOCOL_VERSION, appProtocol: 1 }));
+      this.startHealthCheck(ws);
       this.callbacks.onStatus?.({ connected: true });
     });
 
     ws.on('message', (raw) => {
+      this.lastFrameAt = Date.now();
       let frame: RelayToAgent;
       try {
         frame = JSON.parse(String(raw)) as RelayToAgent;
@@ -196,7 +241,12 @@ export class RelayClient {
     });
 
     ws.on('close', (code: number, reason: Buffer) => {
-      if (this.ws === ws) this.ws = null;
+      // Only the current socket's watchdog: a superseded predecessor closing late
+      // must not clear the timer belonging to the connection that replaced it.
+      if (this.ws === ws) {
+        this.ws = null;
+        this.stopHealthCheck();
+      }
       // A policy close is a configuration error, not a blip: the relay answers
       // 1008 for an unknown endpoint (RELAY_URL carrying a path — it appends
       // /agent itself) and for a device it cannot verify. Retrying cannot fix

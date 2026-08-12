@@ -124,8 +124,18 @@ app.use((req, res, next) => {
  *     token to present. Guarded by a shared secret instead (below), and kept off
  *     the public router: it trades a device secret for the owning user id, so it
  *     has no business being reachable from the internet.
+ *   /v1/devices/unpair — called by the machine itself, which holds no user token
+ *     and no relay secret. It proves possession of its own device secret instead,
+ *     exactly as /verify does. Unlike /verify it must stay internet-reachable:
+ *     the machine dials storage directly, the same way it does to register. This
+ *     is the path that makes a lockout unrecoverable-proof — without it a machine
+ *     whose owner cannot reach the web app can never be re-paired.
  */
-const UNAUTHENTICATED_PATHS = new Set(['/v1/devices/register', '/v1/devices/verify']);
+const UNAUTHENTICATED_PATHS = new Set([
+  '/v1/devices/register',
+  '/v1/devices/verify',
+  '/v1/devices/unpair',
+]);
 
 /**
  * Shared secret for relay→storage calls. Required in a deployment: without it
@@ -933,6 +943,44 @@ app.delete('/v1/devices/:id', async (req, res) => {
     res.status(404).json({ error: 'unknown device' });
     return;
   }
+  res.json({ ok: true });
+});
+
+/**
+ * Let a machine release itself, proving possession of its own device secret.
+ *
+ * The machine cannot use `DELETE /v1/devices/:id` — that is Clerk-authenticated
+ * and it holds no user token — so without this route a machine claimed by an
+ * account whose owner cannot reach the web app is stuck for good: `register`
+ * refuses to re-issue a code for a claimed row, and nothing else can clear it.
+ *
+ * Grants strictly less than the secret already does: whoever holds it can dial
+ * `/agent` and drive the agent on that machine. It is still an unpair oracle, so
+ * the compare is constant-time and every failure answers identically.
+ *
+ * Deliberately returns no pairing code. The machine calls `register` next, whose
+ * revoked-row exception issues one — keeping exactly one code-issuing path.
+ */
+app.post('/v1/devices/unpair', async (req, res) => {
+  const body = (req.body ?? {}) as { id?: string; secret?: string };
+  if (!body.id || !body.secret) {
+    res.status(400).json({ error: 'id and secret are required' });
+    return;
+  }
+  const device = await prisma.device.findUnique({ where: { id: body.id } });
+  const ok =
+    device &&
+    device.userId &&
+    timingSafeEqualHex(device.secretHash, sha256(body.secret));
+  if (!ok) {
+    // One reply for unknown, never-claimed and wrong-secret: a distinct answer
+    // would confirm a guessed id had once been real.
+    res.status(403).json({ error: 'unauthorized' });
+    return;
+  }
+  // A tombstone, identical to DELETE /v1/devices/:id: the row stays as an audit
+  // trail and drops out of GET /v1/devices, which filters revokedAt: null.
+  await prisma.device.update({ where: { id: device.id }, data: { revokedAt: new Date() } });
   res.json({ ok: true });
 });
 

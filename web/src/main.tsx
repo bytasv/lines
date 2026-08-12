@@ -7,12 +7,14 @@ import '@mantine/core/styles.css';
 import './index.css';
 import { theme } from './theme';
 import { App } from './App';
-import { connect, setTokenProvider, switchDevice } from './ws';
+import { connect, reconnectNow, setTokenProvider, switchDevice } from './ws';
 import { CLERK_ENABLED, CLERK_PUBLISHABLE_KEY, setOwnerId, setOwnerName } from './lib/clerk';
 import {
   chooseDevice,
   DEVICE_PAIRING_ENABLED,
+  forgetDeviceId,
   rememberDeviceId,
+  revokeDevice,
   setStorageTokenProvider,
 } from './lib/storage';
 import { useDevices } from './lib/devices';
@@ -86,6 +88,20 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
         others={devices.filter((d) => d.id !== chosen.id)}
         onSwitch={setPickedId}
         onPairNew={() => setPairingNew(true)}
+        onReconnect={async () => {
+          reconnectNow();
+          await refresh();
+        }}
+        onUnpair={async () => {
+          await revokeDevice(chosen.id);
+          // The same order DevicesSection.revoke uses, for the same reason: clear
+          // the remembered choice before refreshing, or the gate briefly
+          // re-selects a machine the relay will now refuse. With the row gone
+          // `chosen` is null and this falls through to the pairing screen.
+          forgetDeviceId();
+          await refresh();
+          setPickedId(null);
+        }}
       />
     );
   }

@@ -61,9 +61,10 @@ relay pipes frames between them, and the UI that gates all of it.
 - `relay/src/index.ts` — `/agent` (bridge dials in) and `/client` (browser)
 - `server/src/relayClient.ts` — the outbound dialler
 - `storage/src/index.ts` — `POST /v1/devices/register`, `POST /v1/devices/claim`,
-  `GET /v1/devices`, `DELETE /v1/devices/:id`, `POST /v1/devices/verify`
-- `server/src/device.ts` — `deviceIdentity`, `registerDevice`; shared by the desktop app and
-  `npm run pair -w server`
+  `GET /v1/devices`, `DELETE /v1/devices/:id`, `POST /v1/devices/verify`,
+  `POST /v1/devices/unpair`
+- `server/src/device.ts` — `deviceIdentity`, `registerDevice`, `unpairDevice`; shared by the
+  desktop app and `npm run pair -w server`
 - `server/scripts/pair-device.ts` — CLI/Tilt entry point that calls the above and prints the
   pairing code
 - `web/src/main.tsx` — `DeviceGate`, the component the gate hangs off
@@ -76,23 +77,26 @@ relay pipes frames between them, and the UI that gates all of it.
 - `server/src/workerProtocol.ts` — every port-discovery helper, plus `APP_ROOT`
 - `server/src/store.ts` — re-exports `APP_ROOT`, owns every path *under* it
 - `web/src/ws.ts` — `initBridgeOrigin()` and the `bridgeOrigin` the HTTP routes use;
-  `setDeviceId`/`switchDevice`, the device param on the socket URL, and the 1008 retry/re-check
-  path
+  `setDeviceId`/`switchDevice`/`reconnectNow`, the device param on the socket URL, the 1008
+  retry/re-check path, and the relay control frames
 - `Tiltfile` — pins both ports so its readiness probes have fixed targets; the opt-in `relay`
   resource; the `pair-device` resource
-- `.env.example` — `LINES_BRIDGE_PORT`, `LINES_WORKER_PORT`, `LINES_INSTANCE`
+- `.env.example` — `LINES_BRIDGE_PORT`, `LINES_WORKER_PORT`, `LINES_INSTANCE`;
+  `RELAY_AGENT_PING_MS`, `RELAY_AGENT_DEAD_MS`, `RELAY_REVERIFY_MS`, `LINES_RELAY_IDLE_MS`
 - `server/src/userContext.ts` — `BrowserLink`, `linkSendAction`, `broadcast`
 - `server/src/index.ts` — `BRIDGE_VERSION`, per-socket handlers
 - `shared/types.ts` — `APP_PROTOCOL_VERSION`, `BridgeInfo`, `hello.bridge`
 - `web/src/store.ts` — `bridge`, `protocolSkew`
 - `relay/src/protocol.ts` — frames, shared by both ends
 - `relay/src/mux.ts` — `DeviceHub`, `HubRegistry`: pairing and routing, transport-free;
-  `DeviceHub.ownerId`
-- `server/src/relayClient.ts` — `RelayChannel` (a `BrowserLink`), reconnect, channel lifecycle
+  `DeviceHub.ownerId`; `HubRegistry.drop`, whose caller is the re-verify tick
+- `server/src/relayClient.ts` — `RelayChannel` (a `BrowserLink`), reconnect, channel lifecycle,
+  the idle watchdog on its own socket
 - `storage/prisma/schema.prisma` — the `Device` model
-- `storage/src/index.ts` — the five device routes, plus CORS and the unauthenticated-path
+- `storage/src/index.ts` — the six device routes, plus CORS and the unauthenticated-path
   allowlist that fronts them
-- `relay/src/index.ts` — calls `verify`, sets `hub.ownerId`
+- `relay/src/index.ts` — calls `verify`, sets `hub.ownerId`; the per-agent ping/reap interval and
+  the re-verify tick that rides it
 - `server/src/device.ts` — identity minting/registration, shared to avoid a second
   implementation drifting on the credential format
 - `web/src/lib/devices.ts` — `useDevices`, the shared machine-list store
@@ -100,7 +104,8 @@ relay pipes frames between them, and the UI that gates all of it.
   remembered-device persistence, `DESKTOP_DOWNLOAD_URL`
 - `web/src/components/ConnectMachine.tsx` — pairing screen and its loading/error siblings
 - `web/src/components/ConnectingMachine.tsx` — shown between "device chosen" and the bridge's
-  first `hello`; offers a way out once that takes too long
+  first `hello`; offers the escalating way out once that takes too long, or at once when the relay
+  says the machine is offline
 - `web/src/components/DownloadDesktopApp.tsx` — the DMG link and the Gatekeeper steps an ad-hoc
   signed build forces
 - `web/src/components/GateShell.tsx` — chrome (header + sign-out) shared by every pre-app screen
@@ -135,6 +140,12 @@ relay pipes frames between them, and the UI that gates all of it.
   `null` until a bridge has ever attached
 - `deviceIdentity()` — loads `~/.lines-app/device.json` or mints one; a corrupt file is treated
   as a new machine rather than a fatal error
+- `unpairDevice(storageUrl, identity)` — the machine releasing itself, proving possession of its
+  own secret; issues no code, so `registerDevice` stays the only thing that mints one
+- `machineOffline` (in `web/src/store.ts`) — set by the relay's `deviceOffline`/`deviceOnline`
+  control frames, cleared on `hello` and by `clearBootstrap()`
+- `reconnectNow()` — re-dial the current machine immediately; `switchDevice` cannot serve this
+  because it early-returns when the device id is unchanged
 - `useDevices` — a small zustand store independent of the main `useStore`, because two unrelated
   trees (the gate, and the Settings pane) must observe and mutate the same machine list; a revoke
   in Settings has to put the gate back up, which a component-local fetch could not do
@@ -201,6 +212,23 @@ device's owner (`DeviceHub.ownerId`, learned from the bridge's own `/agent` auth
 4. A browser connecting to `/client?device=…` is refused unless its verified Clerk `userId`
    equals `hub.ownerId`.
 
+### Un-pairing a machine
+
+Two ways in, one end state — the row is tombstoned and the machine's next `register` mints a
+fresh code:
+
+1. **From the browser.** `DELETE /v1/devices/:id` (Clerk-authed), from Settings → Machines or from
+   the stuck-connecting screen's "Unpair" action. The relay's next re-verify tick sees the revoked
+   row and drops the hub; the bridge re-dials into `1008` until a new code is claimed.
+2. **From the machine.** `POST /v1/devices/unpair` with `{id, secret}`, from the tray's
+   "Unpair this machine…". This is the lockout-proof path: it needs no browser, which matters
+   because the browser's own escape hatch lives *behind* the gate, and `register` refuses to
+   re-issue a code for a claimed device.
+
+Either way the desktop shell ends up registering again — automatically on a `1008` it did not
+expect, or immediately after its own unpair — and shows the new code in the tray and a pairing
+window. See [desktop-app](desktop-app.md).
+
 In a hosted deployment the browser calls storage cross-origin (it lives on its own subdomain —
 see [production-deployment](production-deployment.md)), so storage answers CORS preflights
 against an explicit `WEB_ORIGINS` allowlist before the auth gate runs; a wildcard origin is not
@@ -215,13 +243,23 @@ used because these responses carry Clerk-authenticated user data.
 3. One or more devices → `chooseDevice` picks one, `ws.ts` gets `setDeviceId` and `connect()` is
    called.
 4. Between the socket opening and its first `hello`, `bootstrapped` is false —
-   `ConnectingMachine` renders instead of the app, naming the chosen machine. After 6s with no
-   `hello` — the common case is the machine asleep or the desktop app not running — it also
-   offers a way out: a button per other paired machine (a manual pick overrides `chooseDevice`'s
-   remembered/most-recent heuristic, since that heuristic is what chose the unreachable one) and
-   "Pair another machine", which reopens `ConnectMachine` without losing the account's other
-   devices. Waiting alone is not a recoverable state here — the socket reaches the relay fine and
-   simply finds no agent attached, so the reconnect loop by itself never resolves it.
+   `ConnectingMachine` renders instead of the app, naming the chosen machine. It escalates either
+   after 6s with no `hello` **or** immediately on a `deviceOffline` frame, which is a fact where
+   the 6s timer is only a guess. Waiting alone is not a recoverable state here — the socket
+   reaches the relay fine and simply finds no agent attached, so the reconnect loop by itself
+   never resolves it. The escape hatch escalates in that order:
+   - **Reconnect now** — `reconnectNow()` plus a device-list refresh. Non-destructive, and the
+     right first move after waking a machine.
+   - **A button per other paired machine** — a manual pick overrides `chooseDevice`'s
+     remembered/most-recent heuristic, since that heuristic is what chose the unreachable one.
+   - **Pair another machine** — reopens `ConnectMachine` without losing the account's other
+     devices.
+   - **Unpair \<name\>** — last, red, behind an inline confirm, and the only one that cannot
+     dead-end: "pair another machine" used to ask for a code the claimed machine would never
+     issue. It reuses `DevicesSection.revoke`'s exact sequence (`revokeDevice` → `forgetDeviceId`
+     → refresh → clear the manual pick), after which `chosen` is null and the gate falls through
+     to `ConnectMachine`. The copy names the consequence: the machine's menu-bar icon shows a
+     fresh pairing code.
 5. `hello` sets `bootstrapped: true` in the main store; only then does `DeviceGate` render its
    children (the real app).
 6. A socket closed with `1008` (bridge/relay rejection) re-reads the device list — a revoked
@@ -259,13 +297,21 @@ instead of retrying a device the relay will now refuse.
 - `relay/src/mux.test.ts` — routing, agent takeover, offline notification, per-channel isolation,
   token replay, registry sweep and revoke; `ownerId` recording; cross-user channel isolation on
   one device.
+- `relay/src/agentHeartbeat.test.ts` — spawns real relay processes with the intervals compressed
+  by env: an agent answering `pong` survives, a silent one is reaped and a later browser gets
+  `deviceOffline`, and the re-verify asymmetry both ways against a stub storage (403 drops the
+  device, 500 does not).
 - `server/src/relayEndToEnd.test.ts` — a real relay and a real bridge, with a browser reaching
-  the bridge only through the tunnel.
+  the bridge only through the tunnel; plus the bridge's idle watchdog, driven by `SIGSTOP`ping the
+  relay so the socket goes silent without closing.
 - `storage/src/schema.credentials.test.ts` — `Device.secretHash` is the one allowlisted field,
   with its justification.
+- `storage/src/devices.unpair.test.ts` — the unpair route's failure modes. **Opt-in**: the only
+  test in the repo needing a real Postgres, gated on `STORAGE_TEST_DATABASE_URL` (deliberately not
+  `DATABASE_URL`, which in a checkout points at the deployment's database) and skipped without it.
 - No web test harness in this repo for the gate's UI flows; verified manually against the
   deployed relay (device rejection close code, re-pairing after revoke, gate transition on a live
-  `hello`).
+  `hello`, sleep/wake recovery, and both escape hatches end to end).
 
 ## Business rules
 
@@ -314,9 +360,32 @@ instead of retrying a device the relay will now refuse.
   absent, expired, and revoked — a distinct "expired" reply would confirm a guessed code had once
   been real.
 - Revoking a device tombstones it (`revokedAt`) rather than deleting the row, so it stays an audit
-  trail. Revoking stops it *reconnecting* — the relay checks `revokedAt` on attach, not on every
-  frame — so a connection already open is unaffected until it next drops. The UI describes it as
-  exactly that.
+  trail. Revoking stops it reconnecting **and** ends a connection already open, within a bounded
+  window: the relay re-checks each attached device's claim every `REVERIFY_MS` (5 minutes by
+  default) and drops the hub on a refusal, rather than only checking on attach. The UI describes
+  it as exactly that — "within a few minutes", not "when it next reconnects".
+- The re-verify tick is **asymmetric with attach, deliberately**. Attach fails closed on either a
+  refusal or an outage. The tick drops a live device only on an explicit `unauthorized` (storage's
+  403); `unreachable` — a 401, a 503, a 5xx, a timeout — leaves it alone. Getting this backwards
+  would turn a storage blip into every user being kicked off their own machine, which is why
+  `verifyDevice` returns three outcomes rather than a nullable one.
+- The relay pings its attached agent every `AGENT_PING_MS` (20s) and `terminate()`s one that has
+  been silent for `AGENT_DEAD_MS` (55s, ~2 missed pings). Without it a half-open socket — after a
+  sleep, a Wi-Fi change, a NAT rebind — leaves both ends reporting `OPEN`, so `hub.online` stays
+  true, a browser is handed a channel into a dead sink, and no `hello` ever arrives: an indefinite
+  spinner with no way out. Reaping is what makes `hub.online` false, which is what gets
+  `deviceOffline` to the browser.
+- The bridge watches its own side the same way: no frame for `LINES_RELAY_IDLE_MS` (60s) and it
+  terminates its own socket and re-dials with the existing backoff. This is also the macOS-sleep
+  fix — the tick is wall-clock, so on wake it fires late, the delta is enormous, and the stale
+  socket goes immediately. No `powerMonitor` hook needed.
+- `POST /v1/devices/unpair` is authenticated by the device secret, not a Clerk token, because the
+  machine has none — and unlike `verify` it must stay reachable from the internet, since the
+  machine dials storage directly exactly as it does to `register`. It grants strictly less than
+  the secret already does (whoever holds it can dial `/agent` and drive that machine), the compare
+  is constant-time, and unknown id / never-claimed / wrong secret all answer the same opaque 403 —
+  a distinct reply would confirm a guessed id had once been real. It returns **no** pairing code:
+  `register`'s revoked-row exception is the one code-issuing path.
 - `GET /v1/devices` never returns `secretHash`.
 - Pairing a new machine only becomes the active one automatically if there was no machine active
   before; otherwise silently switching a working session to a different computer would be worse
@@ -325,7 +394,12 @@ instead of retrying a device the relay will now refuse.
   machine you are already on is noise, not a feature.
 - The stuck-connecting screen's escape hatch only offers machines the account already has; a
   "pair another" action always stays available regardless, since a first-time user with one dead
-  machine would otherwise have no path forward at all.
+  machine would otherwise have no path forward at all. Unpair sits behind an inline confirm (the
+  second click flips the label) because it is destructive and one click from a screen the user is
+  already frustrated with.
+- `deviceOffline` / `deviceOnline` are relay control frames, not app messages: they are handled in
+  `ws.ts` alongside `pong` and `fileResponse`, never in `applyServerMessage`, which has no
+  `default` case and would drop them silently — as it did until they were wired up.
 - `DownloadDesktopApp` renders nothing when no build has been published (`DESKTOP_DOWNLOAD_URL`
   unset) — a button pointing at nothing is worse than no button.
 

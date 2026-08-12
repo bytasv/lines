@@ -35,7 +35,7 @@ unbundled next to the code.
 
 ## Files
 
-- `desktop/src/main.ts` — spawn, supervise, tray, pairing, relay status
+- `desktop/src/main.ts` — spawn, supervise, tray, pairing, un-pairing, relay status
 - `desktop/src/config.ts` — `loadConfig`, `isLocalMode`; reads `Resources/config.json`, env vars
   override
 - `server/src/updates.ts` — `UpdateManager`, `reportRelayStatus`
@@ -91,6 +91,21 @@ unclaimed device rather than 409ing, so neither needs a restart. The bridge rela
 `RelayClient`'s raw connect/close over IPC as `relayStatus`; the shell treats a link that survives
 `RELAY_SETTLE_MS` as proof the claim landed (clearing the code, closing the pairing window, firing
 a native notification) and a `1008` close as "Not paired" rather than "Connecting…".
+
+A `1008` with no code in hand now also *acts*: the shell re-registers on its own (debounced by
+`AUTO_REGISTER_MIN_MS`) and pops the pairing window with a fresh code. That is what closes the loop
+after the owner unpairs the machine from the browser — storage only refuses to re-issue a code for
+a *claimed* row, so registering again after a revoke succeeds. Before this the tray simply read
+"Not paired" and offered nothing, because both pairing items are hidden while `pairingCode` is
+null.
+
+When paired, the tray offers `Unpair this machine…` instead: a `dialog.showMessageBox` confirm
+(it kicks the owner's browser session off this machine), then `unpairDevice()` and an immediate
+re-register, so the fresh code is on screen at once. This is the lockout-proof path — it needs no
+browser at all, which matters because the web app's own escape hatch lives behind the gate that is
+stuck, and "Get a new code" cannot help while the device is still claimed. Nothing here restarts
+the bridge or the worker: the link converges on its own once the relay's re-verify sees the revoked
+row.
 
 The tray also shows this machine's `Claude Code` status (from `claudeCliStatus()`) and a
 login-item toggle (`app.setLoginItemSettings`), and enforces a single instance
@@ -160,7 +175,14 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
   storage whether the device is claimed, and refuses with `1008` only after. The tray's
   "Connected" therefore lags the raw socket by `RELAY_SETTLE_MS`, and "Not paired" is a real,
   actionable state rather than an indefinite "Connecting…".
-- A pairing code never requires an app restart to refresh, on a timer or on demand.
+- A pairing code never requires an app restart to refresh, on a timer, on demand, after an unpair
+  from either side.
+- The automatic re-register on `1008` is debounced (30s floor) and guarded on `!pairingCode`.
+  Without both, a device refused for some *other* reason would `register` against storage on every
+  one of the bridge's relay retries.
+- Unpairing from the tray revokes the row (a tombstone, exactly as `DELETE /v1/devices/:id`) and
+  touches no session data and no filesystem state — hence the confirm dialog is about access, not
+  about losing work.
 - **Hosted is the default.** Local mode (own web server, own window) needs `LINES_LOCAL_MODE=1`,
   which the `dev` script sets. `web/dist` is not in the DMG.
 - A missing or too-old CLI refuses the turn with an actionable sentence, in the browser and in

@@ -19,7 +19,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { app, BrowserWindow, Menu, Notification, Tray, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, Menu, Notification, Tray, dialog, nativeImage, shell } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import type { UpdateStatus } from '@lines/shared';
 
@@ -29,7 +29,12 @@ import type { UpdateStatus } from '@lines/shared';
  * format or on which `claude` binary runs. esbuild bundles them into main.cjs;
  * nothing else from the bridge comes with them.
  */
-import { deviceIdentity, registerDevice, type DeviceIdentity } from '../../server/src/device.ts';
+import {
+  deviceIdentity,
+  registerDevice,
+  unpairDevice,
+  type DeviceIdentity,
+} from '../../server/src/device.ts';
 import {
   CLAUDE_INSTALL_URL,
   claudeCliStatus,
@@ -111,6 +116,8 @@ let relay: RelayLinkStatus | null = null;
 /** True once a relay link has stayed up long enough to prove the claim landed. */
 let relayVerified = false;
 let relaySettleTimer: NodeJS.Timeout | null = null;
+/** When we last re-registered on our own, so a 1008 loop cannot hammer storage. */
+let lastRegisterAt = 0;
 let cli: ClaudeCliStatus = claudeCliStatus();
 let update: UpdateStatus = { state: 'idle' };
 
@@ -125,6 +132,15 @@ const RELAY_SETTLE_MS = 6_000;
 
 /** Codes expire after 15 minutes; refresh just inside that so one is always valid. */
 const PAIRING_REFRESH_MS = 14 * 60_000;
+
+/**
+ * Floor between automatic re-registrations after a 1008.
+ *
+ * The bridge retries the relay forever, so every retry of a device that is
+ * refused for some other reason would otherwise be one more `register` against
+ * storage. This plus the `!pairingCode` guard bounds it.
+ */
+const AUTO_REGISTER_MIN_MS = 30_000;
 
 function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
@@ -407,6 +423,7 @@ function openPairingWindow(code: string) {
  */
 async function refreshPairingCode(show: boolean): Promise<void> {
   if (!RELAY_MODE || !device) return;
+  lastRegisterAt = Date.now();
   try {
     pairingCode = await registerDevice(config.storageUrl, device);
     console.log(
@@ -449,6 +466,14 @@ function applyRelayStatus(status: RelayLinkStatus) {
     relaySettleTimer.unref();
   } else {
     relayVerified = false;
+    // 1008 with no code in hand means this machine was revoked in the web app:
+    // storage only refuses to re-issue a code for a *claimed* row, so registering
+    // again now succeeds and pops a fresh code without the user asking. That is
+    // what closes the loop after an unpair from the browser — otherwise the tray
+    // just reads "Not paired" and offers nothing.
+    if (status.code === 1008 && !pairingCode && Date.now() - lastRegisterAt > AUTO_REGISTER_MIN_MS) {
+      void refreshPairingCode(true);
+    }
   }
   updateTray();
 }
@@ -468,6 +493,42 @@ function onRelayVerified() {
     }).show();
   }
   updateTray();
+}
+
+/**
+ * Release this machine from the account that claimed it, from the machine itself.
+ *
+ * The lockout-proof path: it works when the web app's gate is unusable, which is
+ * the state that has no other way out — "Get a new code" cannot help, because
+ * storage refuses to re-issue one for a claimed device.
+ *
+ * Nothing here restarts the bridge or the worker: that would break "the relay
+ * client is a peripheral, never a supervisor" and could interrupt a live turn. The
+ * link converges on its own — the relay's re-verify sees the revoked row and drops
+ * the hub, the bridge re-dials into 1008 until the new code is claimed.
+ */
+async function unpairThisMachine(): Promise<void> {
+  if (!RELAY_MODE || !device) return;
+  const { response } = await dialog.showMessageBox({
+    type: 'warning',
+    buttons: ['Cancel', 'Unpair'],
+    defaultId: 0,
+    cancelId: 0,
+    message: 'Unpair this machine from your Lines account?',
+    detail:
+      'Your browser will lose access to this machine and a new pairing code will be shown here. Sessions and files on this machine are not touched.',
+  });
+  if (response !== 1) return;
+  try {
+    await unpairDevice(config.storageUrl, device);
+  } catch (err) {
+    console.error(`[device] ${(err as Error).message}`);
+    return;
+  }
+  relayVerified = false;
+  // Registering straight after is what mints the fresh code — unpair deliberately
+  // returns none, so there is exactly one code-issuing path.
+  await refreshPairingCode(true);
 }
 
 /** One line for the tray: what the relay link is actually doing. */
@@ -544,7 +605,9 @@ function updateTray() {
             { label: `Pairing code: ${pairingCode}`, click: () => openPairingWindow(pairingCode!) },
             { label: 'Get a new code', click: () => void refreshPairingCode(true) },
           ]
-        : []),
+        : RELAY_MODE
+          ? [{ label: 'Unpair this machine…', click: () => void unpairThisMachine() }]
+          : []),
       { type: 'separator' as const },
       {
         label: claudeLabel(),

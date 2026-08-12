@@ -371,6 +371,13 @@ interface UiState {
    * state is still the right thing to show while the link comes back.
    */
   bootstrapped: boolean;
+  /**
+   * The relay says no bridge is attached for this machine — it is asleep, off, or
+   * not running Lines. Distinct from a failed socket: the socket is fine, the
+   * machine behind it is not, and waiting cannot fix that. It is what lets the
+   * connecting screen state the problem instead of guessing after six seconds.
+   */
+  machineOffline: boolean;
   /** Prompts waiting for the socket to come back, flushed FIFO after the next `hello`. */
   queuedPrompts: QueuedPrompt[];
   sessions: Record<string, SessionMeta>;
@@ -478,6 +485,8 @@ interface UiState {
 
   applyServerMessage: (msg: ServerMessage) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
+  /** Relay control frames — the machine's bridge attached or went away. */
+  setMachineOffline: (offline: boolean) => void;
   /**
    * Drop back to "nothing loaded yet". Called when the socket is repointed at a
    * different machine: everything held here describes the old one, and showing it
@@ -575,6 +584,7 @@ export const useStore = create<UiState>((set, get) => {
   return {
   connectionStatus: 'reconnecting',
   bootstrapped: false,
+  machineOffline: false,
   queuedPrompts: [],
   sessions: {},
   workflows: [],
@@ -627,7 +637,10 @@ export const useStore = create<UiState>((set, get) => {
   openFiles: loadOpenFiles(),
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
-  clearBootstrap: () => set({ bootstrapped: false }),
+  setMachineOffline: (offline) => set({ machineOffline: offline }),
+  // Also clears machineOffline: it describes the machine we are leaving, and a
+  // stale "offline" would put the escalated copy up before the new one is tried.
+  clearBootstrap: () => set({ bootstrapped: false, machineOffline: false }),
   enqueuePrompt: (p) => set((state) => ({ queuedPrompts: [...state.queuedPrompts, p] })),
   drainQueuedPrompts: () => {
     const queued = get().queuedPrompts;
@@ -837,6 +850,8 @@ export const useStore = create<UiState>((set, get) => {
         const projects = toProjects(msg.projects);
         set((state) => ({
           bootstrapped: true,
+          // A `hello` is proof the bridge is there, whatever the relay last said.
+          machineOffline: false,
           sessions,
           workflows: msg.workflows,
           sharedWorkflows: msg.sharedWorkflows ?? [],

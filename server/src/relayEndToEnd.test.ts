@@ -19,6 +19,7 @@ const REPO = path.resolve(import.meta.dirname, '../..');
 let relay: ChildProcess;
 let bridge: ChildProcess;
 let relayPort = 0;
+let bridgeLog = '';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -43,9 +44,18 @@ before(async () => {
   );
 
   // Relay on an ephemeral port, auth off — the Device table arrives in Phase 3.
+  // Its keepalive is compressed to stay well inside the bridge's idle window below;
+  // its own reap threshold is left long, so only the bridge-side watchdog is under
+  // test here.
   relay = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
     cwd: path.join(REPO, 'relay'),
-    env: { ...process.env, RELAY_PORT: '0', RELAY_AUTH_DISABLED: '1' },
+    env: {
+      ...process.env,
+      RELAY_PORT: '0',
+      RELAY_AUTH_DISABLED: '1',
+      RELAY_AGENT_PING_MS: '400',
+      RELAY_AGENT_DEAD_MS: '60000',
+    },
     stdio: ['ignore', 'pipe', 'ignore'],
   });
   let out = '';
@@ -65,9 +75,16 @@ before(async () => {
       RELAY_URL: `ws://127.0.0.1:${relayPort}`,
       LINES_DEVICE_ID: DEVICE,
       LINES_DEVICE_SECRET: 'dev-secret',
+      // Compressed watchdog: the relay pings every 400ms above, so a healthy link
+      // never trips this, and a relay that stops answering trips it in ~2s.
+      LINES_RELAY_IDLE_MS: '2000',
     },
-    stdio: 'ignore',
+    // Piped, because the watchdog test's only direct evidence is what the bridge
+    // says when it gives up on a socket the OS still calls open.
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
+  bridge.stdout!.on('data', (c) => (bridgeLog += String(c)));
+  bridge.stderr!.on('data', (c) => (bridgeLog += String(c)));
   // The bridge publishes only once it is listening; the relay dial follows.
   await until(
     () => fs.existsSync(path.join(HOME, '.lines-app', 'run', 'relay-e2e', 'bridge.json')),
@@ -140,6 +157,25 @@ test('two browsers get their own replies', async () => {
 
   a.ws.close();
   b.ws.close();
+});
+
+test('the bridge gives up on a silent relay and re-dials', async () => {
+  // SIGSTOP, not a kill: the socket stays open at the OS level and simply goes
+  // quiet, which is exactly the half-open state that used to strand the tunnel —
+  // both ends report OPEN, so nothing but silence can reveal it.
+  relay.kill('SIGSTOP');
+  await until(
+    () => bridgeLog.includes('no frame for') || null,
+    'the bridge to notice the silence',
+    15_000,
+  );
+
+  relay.kill('SIGCONT');
+  // Recovery is the point, not just the detection: the bridge's own retry re-attaches
+  // and a browser gets a fresh hello with no user action anywhere.
+  const { ws, messages } = openClient();
+  await until(() => find(messages, 'hello'), 'hello after the re-dial');
+  ws.close();
 });
 
 test('a client that connects while the bridge is down is told, not left hanging', async () => {

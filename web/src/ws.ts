@@ -16,6 +16,13 @@ import { refreshDevices } from './lib/devices';
  */
 const ENV_WS_URL = import.meta.env.VITE_BRIDGE_WS_URL as string | undefined;
 
+/**
+ * Frames the relay itself sends, about the machine rather than from it. Mirrors
+ * `RelayToClient` in relay/src/protocol.ts; not imported, because a browser bundle
+ * must not depend on the relay package. No ServerMessage uses either `type`.
+ */
+type RelayControlMessage = { type: 'deviceOffline' } | { type: 'deviceOnline' };
+
 let WS_URL = ENV_WS_URL ?? '';
 
 /**
@@ -84,6 +91,22 @@ export function switchDevice(id: string) {
   // connecting screen back up rather than showing one machine's sessions under
   // another's name until the new `hello` lands.
   useStore.getState().clearBootstrap();
+  if (socket && socket.readyState !== WebSocket.CLOSED) socket.close();
+  else void connect();
+}
+
+/**
+ * Re-dial the current machine now, instead of waiting out the retry timer.
+ *
+ * `switchDevice` cannot serve this: it early-returns when the device id has not
+ * changed, which is exactly the case here. Non-destructive — nothing is revoked
+ * and nothing is forgotten; the socket is simply replaced.
+ */
+export function reconnectNow() {
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
+  // The close handler's own retry does the reconnecting; only a socket that is
+  // already gone needs the direct call.
   if (socket && socket.readyState !== WebSocket.CLOSED) socket.close();
   else void connect();
 }
@@ -218,7 +241,14 @@ export async function connect() {
 
   socket.onmessage = (e) => {
     try {
-      const msg = JSON.parse(e.data as string) as ServerMessage;
+      const msg = JSON.parse(e.data as string) as ServerMessage | RelayControlMessage;
+      // Relay control frames, not app messages: the socket is healthy, the machine
+      // behind it is not. Handled here with the other non-app frames because the
+      // reducer has no case for them and would drop them silently.
+      if (msg.type === 'deviceOffline' || msg.type === 'deviceOnline') {
+        useStore.getState().setMachineOffline(msg.type === 'deviceOffline');
+        return;
+      }
       if (msg.type === 'pong') {
         lastPongAt = Date.now();
         return;

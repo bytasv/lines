@@ -210,9 +210,9 @@ export function DevicesSection() {
       )}
 
       <Text size="xs" c="dimmed">
-        Revoking stops a machine reconnecting. It does not cut a connection that is
-        already open — that ends when the machine next reconnects, or when you quit Lines
-        there.
+        Revoking stops a machine reconnecting, and ends a connection that is already open
+        within a few minutes — access is re-checked periodically, not only when the machine
+        reconnects. The machine then shows a fresh pairing code, so you can add it back.
       </Text>
     </Stack>
   );

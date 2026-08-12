@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Button, Loader, Stack, Text, Title } from '@mantine/core';
-import { IconDeviceLaptop, IconPlus } from '@tabler/icons-react';
+import { IconDeviceLaptop, IconPlus, IconRefresh, IconUnlink } from '@tabler/icons-react';
 import type { Device } from '../lib/storage';
 import { useStore } from '../store';
 import { GateHint, GateShell } from './GateShell';
@@ -20,26 +20,49 @@ const SLOW_MS = 6000;
  * attached, so retrying forever changes nothing. Without the actions below the
  * only advice was "switch machines from Settings", which is unreachable because
  * Settings lives behind this very gate.
+ *
+ * The actions escalate deliberately: re-dial, use another machine, pair a new
+ * one, and only then unpair. Unpair is last and destructive, but it is the one
+ * that cannot dead-end — the machine answers a revoke by showing a fresh pairing
+ * code, so "pair another machine" stops asking for a code nothing will issue.
  */
 export function ConnectingMachine({
   name,
   others,
   onSwitch,
   onPairNew,
+  onReconnect,
+  onUnpair,
 }: {
   name: string;
   /** Every other machine on the account, so a dead one is never a dead end. */
   others: Device[];
   onSwitch: (id: string) => void;
   onPairNew: () => void;
+  onReconnect: () => void | Promise<void>;
+  onUnpair: () => void | Promise<void>;
 }) {
   const status = useStore((s) => s.connectionStatus);
+  // The relay told us no bridge is attached. A fact, where `slow` is a guess.
+  const offline = useStore((s) => s.machineOffline);
   const [slow, setSlow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  /** Unpair is destructive, so the second click is the one that does it. */
+  const [confirmUnpair, setConfirmUnpair] = useState(false);
 
   useEffect(() => {
     const timer = setTimeout(() => setSlow(true), SLOW_MS);
     return () => clearTimeout(timer);
   }, []);
+
+  const reconnect = async () => {
+    setBusy(true);
+    try {
+      await onReconnect();
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <GateShell>
@@ -52,18 +75,32 @@ export function ConnectingMachine({
             Connecting to {name}
           </Title>
           <GateHint>
-            {status === 'connected'
-              ? 'Loading your sessions and projects…'
-              : 'Waiting for your machine to answer…'}
+            {offline
+              ? 'That machine is not connected right now.'
+              : status === 'connected'
+                ? 'Loading your sessions and projects…'
+                : 'Waiting for your machine to answer…'}
           </GateHint>
         </Stack>
 
-        {slow && (
+        {(offline || slow) && (
           <Stack align="center" gap="xs" mt="xs" maw={420}>
             <GateHint>
-              Taking longer than usual. Check that Lines is running on {name} and that the
-              machine is awake.
+              {offline
+                ? `Lines is not running on ${name}, or the machine is asleep. Wake it and open Lines, then reconnect.`
+                : `Taking longer than usual. Check that Lines is running on ${name} and that the machine is awake.`}
             </GateHint>
+
+            <Button
+              variant="light"
+              size="xs"
+              leftSection={<IconRefresh size={14} />}
+              loading={busy}
+              onClick={() => void reconnect()}
+              mt={4}
+            >
+              Reconnect now
+            </Button>
 
             {others.length > 0 && (
               <Stack align="stretch" gap={6} w="100%" mt={4}>
@@ -93,6 +130,31 @@ export function ConnectingMachine({
             >
               Pair another machine
             </Button>
+
+            <Stack align="center" gap={2} mt={4}>
+              <Button
+                variant="subtle"
+                size="xs"
+                color="red"
+                leftSection={<IconUnlink size={14} />}
+                onClick={() => {
+                  if (!confirmUnpair) {
+                    setConfirmUnpair(true);
+                    return;
+                  }
+                  void onUnpair();
+                }}
+              >
+                {confirmUnpair ? 'Unpair — you’ll need a new code' : `Unpair ${name}`}
+              </Button>
+              <Text size="xs" c="dimmed" ta="center">
+                {/* Says what happens next, because otherwise this looks like a
+                    one-way door: the previous escape hatch asked for a pairing
+                    code the machine would not issue while still claimed. */}
+                Unpairing frees the machine. The Lines icon in its menu bar will show a fresh
+                pairing code you can enter here.
+              </Text>
+            </Stack>
           </Stack>
         )}
       </Stack>
