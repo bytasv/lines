@@ -489,8 +489,13 @@ export interface ModelSpend {
 /** Per-model spend rows, keyed by resolved model id. See `./usageByModel.ts`. */
 export type ModelSpendMap = Record<string, ModelSpend>;
 
-/** Why a failed turn needs more than a Retry. See SessionMeta.errorKind. */
-export type SessionErrorKind = 'auth';
+/**
+ * Which named failure a red banner is describing, so the UI can offer more than a
+ * bare Retry. `'auth'` is the app being signed out; the rest are the API refusing
+ * the turn itself (see `server/src/turnFailure.ts`). Additive — a client that only
+ * understands `'auth'` still behaves correctly for the others.
+ */
+export type SessionErrorKind = 'auth' | 'filtered' | 'context' | 'invalid' | 'overloaded';
 
 export interface SessionMeta {
   id: string;
@@ -535,10 +540,11 @@ export interface SessionMeta {
   /** Cumulative active-turn duration across the session in ms; excludes idle wait. */
   totalDurationMs?: number;
   errorMessage?: string;
-  /** Set alongside `errorMessage` when Retry alone cannot clear the failure — the
-   *  app is signed out and a sign-in has to happen first. Drives the Sign in button.
-   *  Same lifetime as `errorMessage` (setStatus clears both). Never set when no
-   *  AuthManager is wired: ambient-token mode has no login flow to offer. */
+  /** Set alongside `errorMessage` when the failure has a named next action — a
+   *  sign-in (`'auth'`, which drives the Sign in button and is never set in
+   *  ambient-token mode, where there is no login flow to offer), or one of the
+   *  API-side refusals the banner spells out. Unset when the failure is unclassified
+   *  and the raw text stands. Same lifetime as `errorMessage` (setStatus clears both). */
   errorKind?: SessionErrorKind;
   /** Tool that triggered the current `waiting-permission` pause (e.g. `AskUserQuestion`,
    *  `ExitPlanMode`), so the UI can vary the badge label/color. Cleared on any other status. */

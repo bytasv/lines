@@ -514,7 +514,8 @@
         "web/src/components/Transcript.tsx",
         "web/src/lib/transcript.ts",
         "server/src/auth.ts",
-        "web/src/components/LoginModal.tsx"
+        "web/src/components/LoginModal.tsx",
+        "server/src/turnFailure.ts"
       ],
       "symbols": [
         "LiveSessionInfo.busy",
@@ -557,7 +558,13 @@
         "AuthManager.ensureFreshToken",
         "PROACTIVE_RETRY_MS",
         "PROACTIVE_RETRY_CAP_MS",
-        "SessionManager.ranHere"
+        "SessionManager.ranHere",
+        "SessionManager.classifyFailure",
+        "classifyTurnFailure",
+        "turnFailureAdvice",
+        "turnFailureRetryHint",
+        "TurnFailureKind",
+        "skippableFailedStep"
       ],
       "tests": [
         "server/src/sessions.reconcile.test.ts",
@@ -567,7 +574,8 @@
         "server/src/workflows.advance.test.ts",
         "server/src/auth.failure.test.ts",
         "server/src/sessions.spawn.test.ts",
-        "server/src/auth.concurrentLogin.test.ts"
+        "server/src/auth.concurrentLogin.test.ts",
+        "server/src/turnFailure.test.ts"
       ],
       "businessRules": [
         "auto-continue only resumes sessions flagged by the reconcile that is running; a stale flag keeps its banner",
@@ -600,7 +608,11 @@
         "compactContext still returns a synchronous { ok: true }; an auth refusal after that point surfaces through failTurn, not the { ok: false, code, reason } union",
         "a transiently failed proactive refresh retries on a 60s-doubling ladder capped at 15 minutes; a dead refresh token logs out instead, stopping the chain",
         "accessToken: null in buildQueryOptions is reachable only when no AuthManager is wired at all (tests / embedding), never for a real signed-in user",
-        "logins are tracked per OAuth state, so two started at once each keep their own PKCE verifier; completing one clears the rest, unfinished ones expire after 30 minutes, and a paste with no #state falls back to the newest"
+        "logins are tracked per OAuth state, so two started at once each keep their own PKCE verifier; completing one clears the rest, unfinished ones expire after 30 minutes, and a paste with no #state falls back to the newest",
+        "a content-filter, context-overflow, invalid-request or overloaded failure never implies an automatic retry, backoff, or step advance",
+        "auth wins outright when a failure text matches both an auth pattern and a turnFailureKind pattern",
+        "the retry hint rides only the re-sent prompt text, never the stored transcript event for the original failed turn",
+        "Skip step and the stepper's Approve button send the identical workflowApprove message under the identical gate"
       ],
       "architecturalRules": [
         "adding a field to LiveSessionInfo is not a protocol bump; busy is optional so an old worker stays demote-only instead of losing its socket mid-turn",

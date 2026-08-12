@@ -26,6 +26,15 @@ session and a workflow session. Before this, a failure inside a workflow step le
 `waiting-approval` status made `retryTurn`'s busy guard refuse the click even if one had
 rendered), and some pre-run failures wrote no failure row at all.
 
+Beyond auth, four more failure shapes get the same actionable-banner treatment: a
+content-filter refusal, a context-length overflow, a malformed/invalid request, and an
+overloaded/rate-limited API. Each rewrites the raw CLI text into a banner naming what's
+available in-session — Retry, a rephrased retry, a model switch, or (inside a workflow)
+**Skip step** — instead of leaving a bare Retry under text like "output blocked by content
+filtering policy". Auth is tried first and always wins if the text matches both; unlike auth,
+none of these four *do* anything (no refresh, no retry) — only the banner and, for two of the
+four, the re-sent prompt change.
+
 When the app-managed OAuth token is rejected during a turn, recovery happens in the same turn:
 refresh the token if the refresh token is still good, or log out — which opens the browser's
 login modal immediately. The outcome is made **visible**: the failed turn's banner is
@@ -53,8 +62,8 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `server/src/sessions.ts` (`SessionManager.reconcileWithWorker`, `continueTurn`,
   `markTurnLive`)
 - `server/src/userRegistry.ts` (`UserRegistry.onWorkerLost`)
-- `web/src/components/SessionView.tsx` (Continue banner, sends `continueTurn`; Sign in button
-  in the session-level error alert)
+- `web/src/components/SessionView.tsx` (Continue banner, sends `continueTurn`; Sign in and
+  Skip step buttons in the session-level error alert)
 - `web/src/components/WorkerBanner.tsx` (global "worker not responding" / protocol-mismatch
   strip)
 - `web/src/components/SettingsModal.tsx` (Sessions pane, "Recovery" subgroup)
@@ -89,11 +98,13 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `server/src/auth.ts` (`ensureFreshToken`, `scheduleProactiveRefresh` backoff,
   `AUTH_FAILURE_PATTERNS`, `isAuthFailureMessage`, `AuthManager.handleTokenRejected`,
   `TokenRejection`)
+- `server/src/turnFailure.ts` (`classifyTurnFailure`, `turnFailureAdvice`,
+  `turnFailureRetryHint`, the four `TURN_FAILURE_PATTERNS` groups)
 - `server/src/autoGuard.ts` (`isSelfWorkerSource` — always-ask on edits to the worker's own
   source)
 - `shared/types.ts` (`SessionMeta.interruptedAt`, `UserUiSettings.autoContinueInterrupted`,
   `WorkerStatus`, `WorkflowState.stepFailure`, `WorkflowMarkerData.failed`,
-  `SessionErrorKind`, `SessionMeta.errorKind`, `resultErrorText`)
+  `SessionErrorKind`, `SessionMeta.errorKind`, `resultErrorText`, `TurnFailureKind`)
 - `web/src/store.ts` (`autoContinueInterrupted`, `pushSettings`/`applySettings`,
   `workerStatus`, `authStatus` handler that opens/force-opens the login modal — unchanged)
 - `web/src/components/SessionView.tsx`, `web/src/components/SettingsModal.tsx`
@@ -101,7 +112,7 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `web/src/components/WorkerBanner.tsx`, `web/src/components/StorageBanner.tsx` (pill
   precedence)
 - `web/src/components/Transcript.tsx` (the backward scan for `retryKey`, `WorkflowMarker`'s
-  failed label, `FailedTurnActions` — Sign in + Retry)
+  failed label, `FailedTurnActions` — Sign in + Skip step + Retry)
 - `web/src/lib/transcript.ts` (`isFailedResult`, `resultErrorText`, the compaction-span
   escape; builds the `ResultItem` the Retry button keys off)
 - `web/src/components/LoginModal.tsx` (the modal a refusal reopens)
@@ -132,8 +143,20 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `isSelfWorkerSource` (`server/src/autoGuard.ts`) — true for
   `worker.ts`/`workerProtocol.ts`/`workerMcp.ts` under this bridge's own `server/src`
 - `SessionManager.failTurn(sessionId, error)` — the single funnel that shows a turn as failed:
-  emits a synthetic `result` event, then sets status `'error'` + `errorMessage`; also the
-  single auth-classification point, calling `recoverAuthFailure` after `setStatus`
+  emits a synthetic `result` event, then sets status `'error'` + `errorMessage`; also one of
+  the two classification points, calling `classifyFailure` after `setStatus`
+- `SessionManager.classifyFailure(sessionId, error)` (private) — tries `recoverAuthFailure`
+  first (auth wins outright); if that reports no match, tries `classifyTurnFailure` and, on a
+  hit, rewrites the banner via `turnFailureAdvice`. Synchronous, unlike the auth path — no
+  refresh to await — so it always lands before `WorkflowEngine`'s failed-park
+- `classifyTurnFailure(message): TurnFailureKind | null` (`turnFailure.ts`) — first matching
+  kind wins, checked in order `'filtered'` → `'context'` → `'invalid'` → `'overloaded'`; `null`
+  leaves the raw text and plain Retry, same as before this feature existed
+- `turnFailureAdvice(kind, { inWorkflow }): string` (`turnFailure.ts`) — the banner text for a
+  kind; appends a "…or approve the step to skip it" sentence only when `inWorkflow` is true
+- `turnFailureRetryHint(kind): string | null` (`turnFailure.ts`) — non-null only for
+  `'filtered'`/`'context'`, the two kinds where rephrasing the prompt changes the outcome;
+  `null` for `'invalid'`/`'overloaded'`/`'auth'`/undefined
 - `SessionManager.lastPromptForRetry(sessionId)` — the last user prompt + attachments
   rehydrated from disk, extracted out of `retryTurn` so `WorkflowEngine.retryIfFailed` can
   reuse it
@@ -157,15 +180,22 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `resultErrorText(msg)` — the error text of an SDK `result` message: prefers `msg.result`,
   falls back to `msg.errors[]` joined with `\n` (an `SDKResultError` carries no `result` at
   all). Shared between server and web so both read a failure the same way
-- `SessionManager.recoverAuthFailure(sessionId, error)` — if the error is auth-classified,
-  awaits `handleTokenRejected()` and then rewrites the failed turn's `errorMessage`/`errorKind`
-  via `setStatus` — but only if the session is still showing that exact error
+- `SessionManager.recoverAuthFailure(sessionId, error): boolean` — returns `false` immediately
+  for a non-auth-classified message (or no `AuthManager`), which is what lets `classifyFailure`
+  fall through to `classifyTurnFailure`. Otherwise returns `true` and, async, awaits
+  `handleTokenRejected()` and rewrites the failed turn's `errorMessage`/`errorKind` via
+  `setStatus` — but only if the session is still showing that exact error
 - `authRecoveryMessage(rejection)` — the three actionable strings ("…has been renewed. Retry to
   continue.", "…could not be renewed. Sign in to Claude, then Retry.", or the shared
   `authRefusalMessage` text for a transient failure)
-- `SessionMeta.errorKind?: 'auth'` — set alongside `errorMessage` only when Retry alone cannot
-  clear the failure (a sign-in is required); drives the Sign in button. Same lifetime as
-  `errorMessage`
+- `SessionMeta.errorKind?: SessionErrorKind` (`'auth' | 'filtered' | 'context' | 'invalid' |
+  'overloaded'`) — set alongside `errorMessage` whenever the failure has a named next action;
+  `'auth'` drives the Sign in button specifically, the other four drive the rewritten banner
+  copy and (inside a workflow) the Skip step button. Same lifetime as `errorMessage`
+- `skippableFailedStep(session): number | null` (`web/src/lib/format.ts`) — the step index a
+  Skip step button may target, or `null`. Mirrors `WorkflowEngine.retryIfFailed`'s own gate
+  (`stepFailure` set, no advance in flight, that step parked at `waiting-approval`) so the
+  button never appears for a click the server would refuse
 - `SessionManager.pushTurn(meta, message)` — async; resolves a token via `ensureFreshToken()`
   before the spawn, and refuses the turn if it cannot get one
 - `SessionManager.pushTurnSafely(meta, message)` — the fire-and-forget wrapper both call sites
@@ -304,6 +334,57 @@ before flipping the status to `error`, so `transcript.ts` builds a `ResultItem` 
 transcript keeps the raw CLI text as the durable diagnostic record — only the banner changes,
 never the transcript row.
 
+### Non-auth failure classification
+
+`classifyFailure(sessionId, error)` is the single dispatch point at both existing
+classification sites (`failTurn`, and the `result` branch of `handleWorkerEvent`) — it replaces
+the direct `recoverAuthFailure` calls those sites used to make. It tries `recoverAuthFailure`
+first; a `true` return means the message was auth-shaped and that path owns the (async)
+rewrite, so `classifyFailure` returns immediately. Only a `false` — not auth-shaped, or no
+`AuthManager` wired — moves on to `classifyTurnFailure(error)`.
+
+`classifyTurnFailure` matches one of four kinds, or `null`:
+
+- `'filtered'` — a content-filter/usage-policy refusal (e.g. "output blocked by content
+  filtering policy", a `refusal` stop reason). Usually a large verbatim text block triggered
+  it, not the task itself.
+- `'context'` — the prompt exceeded the model's context window (`prompt is too long`,
+  `context_length_exceeded`).
+- `'invalid'` — the API rejected the request as malformed (`invalid_request_error`, a plain 400
+  not otherwise explained).
+- `'overloaded'` — the API is overloaded or rate-limited (`overloaded_error`, `rate_limit_error`,
+  a 429/529 whose surrounding text says so).
+
+On a hit, `classifyFailure` re-checks the same don't-clobber guard the auth path uses
+(`status === 'error' && errorMessage === error`) and, if it still holds, calls `setStatus` with
+`turnFailureAdvice(kind, { inWorkflow: !!meta.workflow })` and the kind. Unlike the auth path
+this whole branch is synchronous — there is no refresh to await — so it always completes before
+`onTurnComplete` fires and therefore before `WorkflowEngine` parks a failed step. That park
+writes through `persistMeta`, not `setStatus` (see "Parking as failed" above), which is what
+lets the rewritten message and `errorKind` survive it.
+
+The rewritten banner rides the same synthetic-result-then-error-status shape every failure
+gets: the raw CLI text stays in the transcript as the durable record, and only `errorMessage`
+changes.
+
+**Retry hint.** `SessionManager.lastPromptForRetry` — already the single source both
+`retryTurn` and `WorkflowEngine.retryIfFailed` read from — appends
+`turnFailureRetryHint(meta.errorKind)` to the re-sent prompt text when it's non-null (only for
+`'filtered'`/`'context'`; `'invalid'`/`'overloaded'`/`'auth'`/undefined add nothing). The hint
+rides only the re-sent prompt, which is what appears in the transcript as a new `'user'` event
+— the original failed turn's stored prompt is untouched. A workflow step parked with
+`stepFailure: 'pre-run'` never reaches this function (no prompt was ever sent for it), so it
+never gets a hint either — expected, since `retryIfFailed` re-enters the step via `runStep`
+instead.
+
+**Skip step.** A workflow session parked as failed (`stepFailure` set, current step at
+`waiting-approval`, no advance in flight) can skip the step instead of retrying it: both
+`SessionView`'s alert and `Transcript`'s `FailedTurnActions` show a **Skip step** button
+(gated by `skippableFailedStep`) that sends the *existing* `{ type: 'workflowApprove',
+sessionId, stepIndex }` — the same message `WorkflowStepper`'s Approve button already sends, so
+no new `ClientMessage` variant and no server change were needed. See
+[workflow-step-lifecycle](workflow-step-lifecycle.md) for what `approve()` does with it.
+
 ### App-managed login is the only credential path
 
 A turn push resolves its own credential before spawning:
@@ -360,16 +441,28 @@ message type, no new modal, no new client state, no DB migration.
 - `server/src/sessions.ended.test.ts` — a failed result marks the session errored with a
   Retry-able banner and still settles the turn's spend/listener; a crashed query settles the
   turn so a workflow step doesn't dangle; a push rejection fails the turn instead of wedging
-  the session at `running`; the no-`AuthManager` path still pushes.
+  the session at `running`; the no-`AuthManager` path still pushes. Also: each of the four
+  non-auth kinds rewrites the banner and sets `errorKind`; an unrecognised failure keeps its
+  raw text and `errorKind: undefined`; an auth-shaped message wins over a coincidental 400 in
+  the same text; `failTurn` classifies non-auth failures the same way as a `result`; a Retry
+  after a `'filtered'` failure appends the hint to the re-sent prompt, and a Retry after
+  `'overloaded'`/an unrecognised failure re-sends the prompt untouched.
+- `server/src/turnFailure.test.ts` — each kind matches representative CLI/SDK error text; an
+  unrelated failure and a filter-vs-generic-400 precedence case both resolve correctly; every
+  string returned by `turnFailureAdvice` and `turnFailureRetryHint` is rejected by both
+  `classifyTurnFailure` and `isAuthFailureMessage` (the anti-reclassification rule);
+  `inWorkflow: false` omits the skip sentence; no kind's advice implies an automatic retry.
 - `server/src/workflows.advance.test.ts` — a failed result parks the step, keeps the error
   status, and does not `autoAdvance`; spend still accumulates onto the step slot; a normal park
-  carries no `stepFailure`.
-- **STALE** — `server/src/workflows.retry.test.ts` does not exist in the repo. The claimed
-  coverage (`retryIfFailed` re-sends the last prompt for a `'turn'` failure, re-runs the step for
-  a `'pre-run'` failure, ignores a normally-parked step and a plain session, and clears
-  `stepFailure` on retry; an unresolved step ref and missing step outputs both fail the turn with
-  a message) is either gone or folded into `workflows.advance.test.ts`. Source is authoritative —
-  re-verify before relying on it.
+  carries no `stepFailure`. Also: a classified (non-auth) failure's rewritten banner and
+  `errorKind` survive the failed-park, proving the `persistMeta`-not-`setStatus` invariant this
+  feature leans on.
+- The claimed `server/src/workflows.retry.test.ts` from an earlier revision of this doc does
+  not exist in the repo; its coverage (`retryIfFailed` re-sends the last prompt for a `'turn'`
+  failure, re-runs the step for a `'pre-run'` failure, ignores a normally-parked step and a
+  plain session, and clears `stepFailure` on retry) lives in `workflows.advance.test.ts`
+  instead. No web test infra beyond typecheck exists yet — the Skip step button and the
+  Sign-in gate are manual-verified via the `verify` skill.
 - `server/src/auth.failure.test.ts` — auth classification and recovery outcomes;
   proactive-refresh retry scheduling and the widened failure patterns.
 - `server/src/sessions.spawn.test.ts` — a turn while logged out is refused instead of falling
@@ -478,6 +571,19 @@ message type, no new modal, no new client state, no DB migration.
   `#state` falls back to the newest in-flight login.
 - `accessToken: null` in `buildQueryOptions` is reachable only when no `AuthManager` is wired at
   all (tests / embedding), not for any real signed-in user.
+- A content-filter, context-overflow, invalid-request or overloaded failure never implies an
+  automatic retry, backoff, or step advance — same rule as every other failure in this feature.
+  The banner only ever names an action for the user to take by hand.
+- Auth wins outright when a failure text matches both an auth pattern and a `turnFailureKind`
+  pattern (e.g. a 401 wrapped in a 400 envelope) — `classifyFailure` tries `recoverAuthFailure`
+  first and only falls through to `classifyTurnFailure` on a `false`.
+- The retry hint (`turnFailureRetryHint`) rides only the re-sent prompt text, never the stored
+  transcript event for the original failed turn — the user sees exactly what was (re-)sent, and
+  the original prompt's record is untouched.
+- Skip step and the stepper's own Approve are two senders of the identical
+  `{ type: 'workflowApprove', sessionId, stepIndex }` message, gated by the same conditions
+  (`skippableFailedStep` mirrors `retryIfFailed`'s gate) — there is no separate skip code path
+  to keep in sync.
 
 ## Architectural rules
 
@@ -520,12 +626,23 @@ message type, no new modal, no new client state, no DB migration.
   branch too, never `setStatus`.
 - The client's backward scan may only skip `'workflow'` and `'context-compact'` items; every
   other kind ends the scan, since it means a new turn (or a live permission request) started.
-- Classification lives in `auth.ts` (pattern matching, refresh outcome) and `sessions.ts`
-  (`recoverAuthFailure`, banner text); `worker.ts` stays thin and does no error interpretation.
-- Auth classification happens at exactly two points: `failTurn` (covers every caller that
-  funnels through it, including `pushTurnSafely` and the `workflows.ts` pre-run sites) and the
-  `result` branch of `handleWorkerEvent`, which bypasses `failTurn` by design since the SDK
-  already reported the result itself.
+- Classification lives in `auth.ts` and `turnFailure.ts` (pattern matching, and for
+  `turnFailure.ts` also the banner/hint text); `sessions.ts` owns dispatch (`classifyFailure`)
+  and the actual `setStatus` call, never pattern matching itself. `worker.ts` stays thin and
+  does no error interpretation.
+- Classification happens at exactly two points: `failTurn` (covers every caller that funnels
+  through it, including `pushTurnSafely` and the `workflows.ts` pre-run sites) and the `result`
+  branch of `handleWorkerEvent`, which bypasses `failTurn` by design since the SDK already
+  reported the result itself. Both now call `classifyFailure`, which is auth-first
+  (`recoverAuthFailure`) then the four non-auth kinds (`classifyTurnFailure`).
+- `turnFailureAdvice`'s and `turnFailureRetryHint`'s strings must not contain any word matched
+  by `classifyTurnFailure`'s own patterns or by `AUTH_FAILURE_PATTERNS` — otherwise a rewritten
+  banner would re-classify itself the next time this session fails. Same constraint as
+  `authRecoveryMessage`, enforced by a dedicated test in `turnFailure.test.ts` rather than by
+  review alone.
+- `SessionMeta.errorKind`'s widened lifetime (see the `errorMessage`/`persistMeta` rule above)
+  now covers five values instead of one; the failed-park branch must keep calling `persistMeta`,
+  never `setStatus`, or every one of them stops surviving the park, not just `'auth'`.
 - `handleTokenRejected` goes through the single-flight `refresh()` rather than `logout()`
   directly, so N simultaneous failures cause one token request; concurrent callers all resolve
   `'refreshed'`.

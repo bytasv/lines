@@ -1,8 +1,15 @@
 import { useEffect } from 'react';
 import { Alert, Button, Divider, Group, Stack, Text } from '@mantine/core';
-import { IconAlertTriangle, IconLogin, IconPlayerPlay, IconRefresh } from '@tabler/icons-react';
+import {
+  IconAlertTriangle,
+  IconLogin,
+  IconPlayerPlay,
+  IconPlayerSkipForward,
+  IconRefresh,
+} from '@tabler/icons-react';
 import { isSessionActive } from '@lines/shared';
 import { useStore } from '../store';
+import { skippableFailedStep } from '../lib/format';
 import { send } from '../ws';
 import { Transcript } from './Transcript';
 import { Composer } from './Composer';
@@ -16,6 +23,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const workflows = useStore((s) => s.workflows);
   const loggedOut = useStore((s) => s.auth?.loggedIn === false);
   const openLoginModal = useStore((s) => s.openLoginModal);
+  const connected = useStore((s) => s.connectionStatus === 'connected');
 
   useEffect(() => {
     if (!loaded) send({ type: 'loadTranscript', sessionId });
@@ -26,6 +34,9 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   // still is signed out — so a re-login elsewhere retires the button with no
   // server sweep.
   const needsSignIn = session.errorKind === 'auth' && loggedOut;
+  // A failed workflow step can be skipped instead of retried — the same Approve
+  // the stepper sends, offered where the failure is actually reported.
+  const skipStep = skippableFailedStep(session);
   const workflow = session.workflow
     ? workflows.find((w) => w.id === session.workflow!.workflowId)
     : undefined;
@@ -62,6 +73,19 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                   onClick={openLoginModal}
                 >
                   Sign in
+                </Button>
+              )}
+              {skipStep !== null && (
+                <Button
+                  size="compact-xs"
+                  variant="light"
+                  color="red"
+                  leftSection={<IconPlayerSkipForward size={12} />}
+                  // ws.ts silently drops non-prompt messages on a closed socket.
+                  disabled={!connected}
+                  onClick={() => send({ type: 'workflowApprove', sessionId, stepIndex: skipStep })}
+                >
+                  Skip step
                 </Button>
               )}
               <Button

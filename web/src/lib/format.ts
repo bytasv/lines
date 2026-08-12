@@ -50,6 +50,19 @@ export function isWorkflowFinished(session: SessionMeta): boolean {
 }
 
 /**
+ * The step index a failure banner may offer to skip, or null when skipping isn't
+ * on the table. Mirrors WorkflowEngine.retryIfFailed's gate — the failed step has
+ * to be the one parked at waiting-approval, with no advance in flight — so the
+ * button never appears for a click `approve` would refuse.
+ */
+export function skippableFailedStep(session: SessionMeta): number | null {
+  const wf = session.workflow;
+  if (!wf?.stepFailure || wf.advancing) return null;
+  const i = wf.stepIndex;
+  return wf.stepStatuses[i] === 'waiting-approval' ? i : null;
+}
+
+/**
  * Label + badge color for a `waiting-permission` session, keyed off the tool
  * that triggered the pause. `AskUserQuestion` reads as a question and
  * `ExitPlanMode` as a plan-ready state; every other tool is a plain permission

@@ -513,6 +513,27 @@ test('force-advance leaves a done step alone when it is not a stall', async () =
   assert.equal(stale.s1().workflow?.stepIndex, 0);
 });
 
+test('a classified failure banner survives the park that follows it', () => {
+  const h = running(2);
+  h.sessions.handleWorkerEvent('s1', {
+    type: 'result',
+    subtype: 'error_during_execution',
+    is_error: true,
+    result: 'API Error: 400 {"type":"invalid_request_error","message":"Output blocked by content filtering policy"}',
+  });
+
+  const m = h.s1();
+  assert.equal(m.workflow?.stepStatuses[0], 'waiting-approval');
+  assert.equal(m.workflow?.stepFailure, 'turn');
+  assert.equal(m.status, 'error', 'the park must not settle the session out of error');
+  // The park persists the meta rather than re-setting the status, which is the only
+  // reason the rewritten banner (and its kind) are still here.
+  assert.equal(m.errorKind, 'filtered');
+  assert.match(m.errorMessage!, /smaller pieces/);
+  // Parked as failed, so skipping the step is one of the offers.
+  assert.match(m.errorMessage!, /approve the step/);
+});
+
 test('advancing clears on the wire when the workflow vanishes mid-advance', async () => {
   const h = harness(2);
   h.sessions.consolidateStepOutput = async () => {

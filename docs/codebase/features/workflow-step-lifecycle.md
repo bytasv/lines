@@ -149,7 +149,10 @@ before sending anything. On confirm, the client sends
 `WorkflowEngine.forceAdvance` branches on the step's current status:
 
 - `waiting-approval` — delegates to `approve()` (identical to clicking the existing Approve
-  button).
+  button). `approve()` itself now has two senders of the same `{ type: 'workflowApprove',
+  sessionId, stepIndex }` message: the stepper's Approve button, and a **Skip step** button on
+  the failure banner when the step is parked as failed — see
+  [turn-recovery](turn-recovery.md#non-auth-failure-classification).
 - `done` at the current index with `advancing` cleared — a previous advance marked the step
   done and then died before bumping `stepIndex`. Re-enters `advance()` to finish the job.
   Declines when `advancing` is set (a real advance owns it) or when this is the last step (a

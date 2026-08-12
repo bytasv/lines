@@ -23,6 +23,7 @@ import {
   IconChevronRight,
   IconFile,
   IconLogin,
+  IconPlayerSkipForward,
   IconRefresh,
   IconRoute,
   IconZoomIn,
@@ -45,7 +46,7 @@ import {
 } from '../lib/transcript';
 import { useAttachmentUrl } from '../lib/files';
 import { mentionKindMeta } from '../lib/mentions';
-import { formatTokens } from '../lib/format';
+import { formatTokens, skippableFailedStep } from '../lib/format';
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
 import { PermissionPrompt } from './PermissionPrompt';
@@ -225,11 +226,29 @@ function FailedTurnActions({ sessionId }: { sessionId: string }) {
   const needsSignIn = useStore((s) => s.sessions[sessionId]?.errorKind === 'auth');
   const loggedOut = useStore((s) => s.auth?.loggedIn === false);
   const openLoginModal = useStore((s) => s.openLoginModal);
+  const skipStep = useStore((s) => {
+    const session = s.sessions[sessionId];
+    return session ? skippableFailedStep(session) : null;
+  });
+  const connected = useStore((s) => s.connectionStatus === 'connected');
   return (
     <>
       {needsSignIn && loggedOut && (
         <Button size="compact-xs" color="red" leftSection={<IconLogin size={12} />} onClick={openLoginModal}>
           Sign in
+        </Button>
+      )}
+      {skipStep !== null && (
+        <Button
+          size="compact-xs"
+          variant="light"
+          color="red"
+          leftSection={<IconPlayerSkipForward size={12} />}
+          // ws.ts silently drops non-prompt messages on a closed socket.
+          disabled={!connected}
+          onClick={() => send({ type: 'workflowApprove', sessionId, stepIndex: skipStep })}
+        >
+          Skip step
         </Button>
       )}
       <Button

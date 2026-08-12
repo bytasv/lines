@@ -200,6 +200,99 @@ test('ambient-token mode keeps the raw message and offers no sign-in', async () 
   assert.equal(h.rejections(), 0);
 });
 
+/** The failure this second class of banner exists for: a content-filter block. */
+const FILTERED =
+  'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Output blocked by content filtering policy"}}';
+
+/** A failed SDK result carrying `text` as its reason. */
+const failedResult = (text: string) => ({
+  type: 'result',
+  subtype: 'error_during_execution',
+  is_error: true,
+  result: text,
+});
+
+test('a blocked request is rewritten into the choices the user actually has', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', failedResult(FILTERED));
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.status, 'error');
+  assert.equal(meta.errorKind, 'filtered');
+  assert.match(meta.errorMessage!, /smaller pieces/);
+  // No workflow, so nothing to skip — the banner must not offer it.
+  assert.equal(meta.errorMessage!.includes('approve the step'), false);
+  // The raw text stays in the transcript as the durable diagnostic record.
+  assert.equal(lastResult(h.transcript()).result, FILTERED);
+  // Classification is local: no token refresh was attempted.
+  assert.equal(h.rejections(), 0);
+});
+
+test('the other named API failures each get their own banner', () => {
+  const cases: [string, string, RegExp][] = [
+    ['context', 'API Error: 400 prompt is too long: 214331 tokens > 200000 maximum', /context window/],
+    ['overloaded', 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}', /Wait a moment/],
+    ['invalid', 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error"}}', /malformed/],
+  ];
+  for (const [kind, text, banner] of cases) {
+    const h = harness();
+    h.sessions.handleWorkerEvent('s1', failedResult(text));
+    const meta = h.sessions.get('s1')!;
+    assert.equal(meta.errorKind, kind, text);
+    assert.match(meta.errorMessage!, banner);
+  }
+});
+
+test('an unrecognised failure keeps its raw text and offers only Retry', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', failedResult('Claude Code process exited with code 1'));
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.errorMessage, 'Claude Code process exited with code 1');
+  assert.equal(meta.errorKind, undefined);
+});
+
+test('an auth failure still wins over the other classifications', async () => {
+  // Auth is the only kind that also acts (one refresh), so its async rewrite must
+  // not be pre-empted — even though this text also carries a 400.
+  const h = harness({ outcome: 'signed-out' });
+  h.sessions.handleWorkerEvent('s1', failedResult(`API Error: 400 Bad Request — ${CLI_401}`));
+  await drain();
+
+  assert.equal(h.rejections(), 1);
+  assert.equal(h.sessions.get('s1')!.errorKind, 'auth');
+});
+
+test('failTurn classifies the same way, so a refused push is covered too', () => {
+  const h = harness();
+  h.sessions.failTurn('s1', FILTERED);
+  assert.equal(h.sessions.get('s1')!.errorKind, 'filtered');
+});
+
+test('a Retry after a blocked turn asks for the same result in a different shape', () => {
+  const h = harness();
+  h.sessions.emitEvent('s1', 'user', { text: 'Write out the whole licence', source: 'user' });
+  h.sessions.handleWorkerEvent('s1', failedResult(FILTERED));
+
+  const last = h.sessions.lastPromptForRetry('s1')!;
+  assert.match(last.text, /^Write out the whole licence\n\n/);
+  assert.match(last.text, /verbatim/);
+  assert.equal(last.source, 'user');
+  assert.deepEqual(last.attachments, []);
+});
+
+test('a Retry re-sends the prompt untouched where re-phrasing would not help', () => {
+  for (const text of [
+    'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}',
+    'Claude Code process exited with code 1',
+  ]) {
+    const h = harness();
+    h.sessions.emitEvent('s1', 'user', { text: 'go on', source: 'user' });
+    h.sessions.handleWorkerEvent('s1', failedResult(text));
+    assert.equal(h.sessions.lastPromptForRetry('s1')!.text, 'go on', text);
+  }
+});
+
 test('a clean end writes no synthetic result', () => {
   const h = harness();
   h.sessions.handleWorkerEnded('s1');

@@ -50,6 +50,7 @@ import {
   summarizeContextBreakdown,
 } from './contextBreakdown.ts';
 import { claudeCliRefusalMessage, claudeCliStatus } from './claudeCli.ts';
+import { classifyTurnFailure, turnFailureAdvice, turnFailureRetryHint } from './turnFailure.ts';
 import { isLinesMcpTool, isReadOnlyLinesTool, LINES_TOOL_MANIFEST } from './mcpWorkflowTools.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
@@ -1015,7 +1016,28 @@ export class SessionManager {
       result: error,
     });
     this.setStatus(sessionId, 'error', error);
-    this.recoverAuthFailure(sessionId, error);
+    this.classifyFailure(sessionId, error);
+  }
+
+  /**
+   * Turn the raw failure text into a banner that names what the user can do,
+   * where we recognise the failure. Auth is tried first and wins outright: it is
+   * the only kind that also *acts* (one token refresh), and its async rewrite
+   * must not be raced by a second one. An unrecognised failure keeps its raw text
+   * and its plain Retry, which is what every failure used to get.
+   */
+  private classifyFailure(sessionId: string, error: string) {
+    if (this.recoverAuthFailure(sessionId, error)) return;
+    const kind = classifyTurnFailure(error);
+    if (!kind) return;
+    const meta = this.sessions.get(sessionId);
+    // Same don't-clobber guard as the auth path: only rewrite our own banner.
+    if (!meta || meta.status !== 'error' || meta.errorMessage !== error) return;
+    // Synchronous by design — there is nothing to await, so this lands before
+    // onTurnComplete and therefore before WorkflowEngine parks a failed step. That
+    // park persists the meta rather than re-setting the status, so the rewritten
+    // message and kind survive it (see workflows.ts onWorkflowTurnComplete).
+    this.setStatus(sessionId, 'error', turnFailureAdvice(kind, { inWorkflow: !!meta.workflow }), kind);
   }
 
   /**
@@ -1023,9 +1045,12 @@ export class SessionManager {
    * recovery, then rewrite the banner to name the action the user must take. The
    * raw CLI text stays in the transcript as the durable record; only the banner
    * changes. Nothing is auto-resumed — Retry stays the user's call.
+   *
+   * Returns whether this failure was an auth failure at all, so classifyFailure
+   * knows not to look further.
    */
-  private recoverAuthFailure(sessionId: string, error: string) {
-    if (!this.auth || !isAuthFailureMessage(error)) return;
+  private recoverAuthFailure(sessionId: string, error: string): boolean {
+    if (!this.auth || !isAuthFailureMessage(error)) return false;
     void this.auth.handleTokenRejected().then((rejection) => {
       const meta = this.sessions.get(sessionId);
       // The session moved on while we refreshed (new turn, flushed queue, retry,
@@ -1038,6 +1063,7 @@ export class SessionManager {
         rejection.outcome === 'signed-out' ? 'auth' : undefined,
       );
     });
+    return true;
   }
 
   /** Persist attachments to disk and return the transcript/queue refs. */
@@ -1186,7 +1212,9 @@ export class SessionManager {
   }
 
   /** The last user prompt + attachments rehydrated from disk, for re-sending a
-   *  failed turn. Also used by WorkflowEngine, which re-sends it as a step retry. */
+   *  failed turn. Also used by WorkflowEngine, which re-sends it as a step retry —
+   *  so a hint added here reaches both retry paths, and only the re-sent prompt
+   *  (the stored transcript event keeps what the user actually wrote). */
   lastPromptForRetry(
     sessionId: string,
   ): { text: string; source: 'user' | 'workflow'; attachments: PromptAttachment[] } | null {
@@ -1208,7 +1236,15 @@ export class SessionManager {
       })
       .filter((a): a is PromptAttachment => a !== null);
 
-    return { text: data.text ?? '', source: data.source ?? 'user', attachments };
+    // For the failures where the phrasing is what failed, say so in the re-sent
+    // prompt: an identical retry of a blocked or oversized turn just fails again.
+    const hint = turnFailureRetryHint(this.sessions.get(sessionId)?.errorKind);
+    const text = data.text ?? '';
+    return {
+      text: hint ? `${text}\n\n${hint}` : text,
+      source: data.source ?? 'user',
+      attachments,
+    };
   }
 
   /**
@@ -2305,8 +2341,8 @@ export class SessionManager {
           // via setStatus) so the single upsert below still carries everything.
           metaNow.status = failed ? 'error' : 'done';
           metaNow.errorMessage = failed ? resultText || 'The turn failed.' : undefined;
-          // Shares errorMessage's lifetime; recoverAuthFailure re-sets it below if
-          // this failure turns out to need a sign-in.
+          // Shares errorMessage's lifetime; classifyFailure re-sets it below if
+          // this failure turns out to have a named next action.
           metaNow.errorKind = undefined;
         }
         // A result proves the turn reached its end, so any Continue banner we
@@ -2321,7 +2357,7 @@ export class SessionManager {
       // After the upsert, so the revision guard can tell "still my banner" from
       // "the session moved on". This branch bypasses failTurn by design (the SDK
       // reported the result itself), so it classifies here instead.
-      if (failed) this.recoverAuthFailure(sessionId, resultText);
+      if (failed) this.classifyFailure(sessionId, resultText);
       const interrupted = this.interrupting.delete(sessionId); // turn settled normally
       this.onTurnComplete?.(sessionId, source, interrupted, failed);
       this.maybeFlush(sessionId);
