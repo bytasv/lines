@@ -92,6 +92,8 @@ export function collectDocs(
   };
 
   walk('', 0);
-  docs.sort((a, b) => a.path.localeCompare(b.path));
+  // Code-unit order, not locale collation: the payload must not shift with the
+  // server's ICU locale, and '/' has to keep directory groups intact.
+  docs.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return { docs, truncated };
 }

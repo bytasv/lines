@@ -313,7 +313,7 @@ test('a session meta with no caveman field resumes without throwing', () => {
   assert.deepEqual(h.pushed, ['s1']);
 });
 
-test('one session failing to resume does not stop the others', () => {
+test('one session failing to resume does not stop the others', async () => {
   const m = managerOver(
     [meta('running', { id: 'bad', name: 'bad' }), meta('running', { id: 'good', name: 'good' })],
     undefined,
@@ -322,7 +322,13 @@ test('one session failing to resume does not stop the others', () => {
   assert.doesNotThrow(() => m.sessions.reconcileWithWorker([]));
 
   assert.deepEqual(m.pushed, ['good']);
-  assert.ok((m.get('bad').interruptedAt ?? 0) > 0, 'the failed one keeps its banner');
+  // The push leaves the bridge through pushTurnSafely, so a worker throw surfaces as
+  // a rejected promise rather than out of continueTurn: the recovery is failTurn's,
+  // one tick later — a synthetic failed result and an error status carrying Retry.
+  await new Promise((r) => setImmediate(r));
+  const bad = m.get('bad');
+  assert.equal(bad.status, 'error', 'the failed one must not be left looking live');
+  assert.match(bad.errorMessage ?? '', /cannot build query options/);
 });
 
 test('a result clears a Continue flag stamped for a turn that had finished', () => {

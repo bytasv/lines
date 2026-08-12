@@ -113,8 +113,18 @@ export function runRecipe(ctx: UserContext, msg: RunRecipeMsg): string | null {
   // Only now that injection returned without throwing. A bundle and each of its
   // members are separate facts ("this bundle ran 40 times", "this auth recipe ran
   // 200 times, 40 of them via that bundle"), so both count.
-  const pairs = leaves.map((r) => ({ ownerId: r.ownerId, id: r.id }));
-  for (const b of bundles) pairs.push({ ownerId: b.ownerId, id: b.id });
+  // One increment per identity, even when it ran twice: `ON CONFLICT DO UPDATE`
+  // cannot touch the same row twice in one statement, and two selected bundles can
+  // legitimately share a member. Deduping here rather than in `leaves` keeps the
+  // optimistic count equal to the authoritative one — offline it is never corrected.
+  const pairs: { ownerId: string; id: string }[] = [];
+  const counted = new Set<string>();
+  for (const r of [...leaves, ...bundles]) {
+    const key = `${r.ownerId}/${r.id}`;
+    if (counted.has(key)) continue;
+    counted.add(key);
+    pairs.push({ ownerId: r.ownerId, id: r.id });
+  }
   const stats: Record<string, number> = {};
   for (const p of pairs) {
     const key = `${p.ownerId}/${p.id}`;

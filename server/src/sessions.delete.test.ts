@@ -105,7 +105,9 @@ test('a session left in sessions.json despite a tombstone does not come back on 
   // session list without knowing about tombstones.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-delete-'));
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta('s1')]));
-  fs.writeFileSync(path.join(root, 'deleted-sessions.json'), JSON.stringify({ s1: 2 }));
+  // A real timestamp, not the fake clock the metas use: the loader prunes tombstones
+  // past the 30-day window, so a 1970 one would be dropped before it could guard.
+  fs.writeFileSync(path.join(root, 'deleted-sessions.json'), JSON.stringify({ s1: Date.now() }));
 
   assert.deepEqual(harness(root).ids(), []);
 });

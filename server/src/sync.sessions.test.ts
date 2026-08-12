@@ -131,12 +131,23 @@ test('a delete issued while a push is in flight is not undone by it', async (t) 
   const sent = captureFetch(t);
   const sync = client();
 
-  sync.pushSessions([meta('a'), meta('b')]);
-  // Inside the debounce window, so the batch that is about to go out still carries
-  // 'b' — the drain happens before the await, which is how the row came back.
-  await flush(DEBOUNCE_WAIT_MS - 200);
-  sync.deleteSession('b');
-  await flush(400);
+  // Two sessions too big to share one body, so the push goes out as two requests and
+  // the delete is issued from inside the first one — genuinely in flight, which is the
+  // window the per-chunk re-check in flushSessions exists for. A delete raised after
+  // the bytes of its own chunk are already on the wire cannot be retracted at all.
+  const captured = globalThis.fetch;
+  let first = true;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const res = await (captured as typeof fetch)(url as never, init as never);
+    if (first && String(url).endsWith('/sessions')) {
+      first = false;
+      sync.deleteSession('b');
+    }
+    return res;
+  }) as typeof fetch;
+
+  sync.pushSessions([meta('a', 800 * 1024), meta('b', 800 * 1024)]);
+  await flush(DEBOUNCE_WAIT_MS);
 
   const puts = sessionPuts(sent);
   assert.deepEqual(idsOf(puts), ['a'], 'a session deleted mid-flight must not be pushed');

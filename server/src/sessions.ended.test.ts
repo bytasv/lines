@@ -49,6 +49,9 @@ function harness(
     (msg) => broadcasts.push(msg),
     withAuth ? auth : undefined,
   );
+  // index.ts wires a worker before any client can prompt; the model and permission
+  // setters forward to it, so an unwired manager is not a state production has.
+  sessions.attachWorker({ setModel: () => {}, close: () => {}, push: () => {}, interrupt: () => {} } as never);
   const transcript = () => store.loadTranscript('s1');
   return { sessions, broadcasts, transcript, rejections: () => rejections };
 }

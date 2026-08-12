@@ -620,6 +620,21 @@ export class SessionManager {
     this.store.saveDeletedSessions(Object.fromEntries(this.deletedAt));
   }
 
+  /**
+   * Write now rather than in 250 ms. A delete is the one transition that cannot be
+   * debounced: `forget` drops the transcript synchronously, so a crash inside the
+   * debounce window leaves the row in sessions.json with no tombstone and no
+   * transcript — an empty session that the next bulk push also re-uploads, undoing
+   * the remote delete (`pendingDeletes` lives only in memory).
+   */
+  private persistNow() {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    this.writeState();
+  }
+
   /** Write pending session state out now. Called on shutdown — the debounce
    *  must never be the reason a status transition is lost. */
   flushPersist() {
@@ -800,7 +815,7 @@ export class SessionManager {
   deleteSession(id: string) {
     this.forget(id);
     this.deletedAt.set(id, Date.now());
-    this.persist();
+    this.persistNow();
     this.broadcast({ type: 'sessionDeleted', sessionId: id });
   }
 
@@ -814,7 +829,7 @@ export class SessionManager {
     if (known !== undefined && known >= deletedAt) return;
     this.deletedAt.set(id, deletedAt);
     this.forget(id);
-    this.persist();
+    this.persistNow();
     this.broadcast({ type: 'sessionDeleted', sessionId: id });
   }
 
