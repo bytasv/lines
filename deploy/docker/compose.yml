@@ -23,7 +23,7 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
       target: storage
-    image: lines-storage:latest
+    image: ${REGISTRY:-}lines-storage:${TAG:-latest}
     restart: unless-stopped
     env_file: lines.env
     environment:
@@ -68,7 +68,7 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
       target: relay
-    image: lines-relay:latest
+    image: ${REGISTRY:-}lines-relay:${TAG:-latest}
     restart: unless-stopped
     env_file: lines.env
     environment:
@@ -128,7 +128,7 @@ services:
         # Setting this is what turns on the desktop download surface on the
         # pairing screens. Unset, they assume the app is already installed.
         VITE_DESKTOP_DOWNLOAD_URL: ${VITE_DESKTOP_DOWNLOAD_URL}
-    image: lines-web:latest
+    image: ${REGISTRY:-}lines-web:${TAG:-latest}
     restart: unless-stopped
     networks: [lines]
     security_opt: [no-new-privileges:true]
@@ -166,7 +166,7 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
       target: storage
-    image: lines-storage:latest
+    image: ${REGISTRY:-}lines-storage:${TAG:-latest}
     env_file: lines.env
     networks: [lines]
     working_dir: /app/storage

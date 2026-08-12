@@ -1,0 +1,118 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test -w server
+      - run: npm run test -w relay
+      - run: npm run test -w storage
+
+  check-migrations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          deploy/scripts/check-migration-safety.sh \
+            "${{ github.event.before || 'HEAD^' }}" \
+            "${{ github.sha }}"
+
+  build:
+    needs: [test, check-migrations]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push relay
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          target: relay
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/lines-relay:latest
+            ghcr.io/${{ github.repository_owner }}/lines-relay:${{ github.sha }}
+          cache-from: type=gha,scope=relay
+          cache-to: type=gha,mode=max,scope=relay
+
+      - name: Build & push storage
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          target: storage
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/lines-storage:latest
+            ghcr.io/${{ github.repository_owner }}/lines-storage:${{ github.sha }}
+          cache-from: type=gha,scope=storage
+          cache-to: type=gha,mode=max,scope=storage
+
+      - name: Build & push web
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          target: web
+          push: true
+          build-args: |
+            VITE_BRIDGE_WS_URL=${{ secrets.VITE_BRIDGE_WS_URL }}
+            VITE_CLERK_PUBLISHABLE_KEY=${{ secrets.VITE_CLERK_PUBLISHABLE_KEY }}
+            VITE_STORAGE_URL=${{ secrets.VITE_STORAGE_URL }}
+            VITE_DESKTOP_DOWNLOAD_URL=${{ secrets.VITE_DESKTOP_DOWNLOAD_URL }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/lines-web:latest
+            ghcr.io/${{ github.repository_owner }}/lines-web:${{ github.sha }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add VPS to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Run deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          key_file=$(mktemp)
+          printf '%s\n' "$SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          # The VPS-side authorized_keys entry forces /root/deploy-lines.sh
+          # regardless of what command we pass here — this key can do nothing
+          # else on that box. The script reads the registry token off stdin.
+          printf '%s\n%s\n' "${{ secrets.GITHUB_TOKEN }}" "${{ github.actor }}" | \
+            ssh -i "$key_file" -o StrictHostKeyChecking=yes \
+              "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}"
+          rm -f "$key_file"

@@ -65,6 +65,49 @@ is gitignored by exact path; the repo's `.env.*` rule does not match this name.
 Build on your laptop or in CI if the box is small: the web build peaks around
 1.5 GB and will compete with anything else running.
 
+## Auto-deploy
+
+Every push to `main` that passes tests deploys automatically —
+`.github/workflows/deploy.yml`:
+
+1. **test** — `npm ci`, `npm run typecheck`, tests for `server`/`relay`/`storage`.
+2. **check-migrations** — `deploy/scripts/check-migration-safety.sh` diffs
+   `storage/prisma/migrations` against the previous commit and fails the run if
+   a newly added migration contains `DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, or
+   `DELETE FROM`. `DROP INDEX`/`DROP CONSTRAINT` are fine — no data loss. A
+   flagged migration needs a human to review and merge by hand; the pipeline
+   will not auto-deploy it.
+3. **build** — builds `relay`/`storage`/`web` from `deploy/docker/Dockerfile`
+   and pushes each to `ghcr.io/bytasv/lines-<service>` tagged `latest` and the
+   commit SHA. The `web` build args come from the `VITE_*` GitHub secrets — keep
+   those in sync with `lines.env` by hand if either changes.
+4. **deploy** — SSHes into the VPS with a key scoped to that one purpose (see
+   below) and runs `/root/deploy-lines.sh`: `git pull --ff-only`, `docker
+   compose pull`, `run --rm migrate`, `up -d`, then prunes old images.
+
+**The deploy key is forced-command, not a general login.** Its
+`authorized_keys` entry on the VPS is:
+
+```
+command="/root/deploy-lines.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA...
+```
+
+Whatever command the workflow requests, sshd runs `/root/deploy-lines.sh`
+instead — a leaked key can only trigger that one script, not arbitrary root
+commands. The script reads the GHCR login token off stdin (the workflow's own
+short-lived `GITHUB_TOKEN`, piped in each run) rather than storing a
+long-lived registry credential on the box.
+
+GitHub secrets involved: `DEPLOY_SSH_KEY` (the private half), `DEPLOY_HOST`,
+`DEPLOY_USER`, and the four `VITE_*` build args. `lines.env` on the VPS carries
+one addition, `REGISTRY=ghcr.io/bytasv/`, which is what makes `compose.yml`
+pull the CI-built images instead of building locally — unset it and `build`
+still works exactly as before for a manual/local deploy.
+
+Rotate the key by generating a new pair, updating the `authorized_keys` entry
+and the `DEPLOY_SSH_KEY` secret together, then deleting the old public key
+line.
+
 ## What each piece does
 
 **`relay`** — pipes frames between a browser on `/client` and the user's bridge
@@ -129,6 +172,11 @@ curl -s -o /dev/null -w '%{http_code}\n' https://<domain>/some/deep/route   # 20
       always names a device, so this is a curl-level check, not a symptom.
 
 ## Updating
+
+Normally you don't — push to `main` and the [auto-deploy](#auto-deploy)
+pipeline does this for you. Manual steps below are for a rollback, a schema
+change flagged by the migration-safety check, or the pipeline itself being
+down.
 
 The checkout lives at `/docker/lines` on the VPS (alongside `/docker/traefik`).
 
