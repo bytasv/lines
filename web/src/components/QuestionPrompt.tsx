@@ -54,32 +54,15 @@ function OptionCard({
     >
       <Group gap="sm" wrap="nowrap" align="flex-start">
         {/*
-          Indicator only. The wrapping button is the sole click target — wiring
-          `onChange` here too made a click on the control fire the toggle twice
-          (once from the input, once from the bubbled button click), which
-          cancelled itself in multi-select. `pointerEvents: none` is what keeps
-          the click on the wrapper: `readOnly` is inert on checkbox inputs.
+          `.Indicator` is a plain div with no underlying `<input>` — the wrapping
+          button is the sole click target. Plain `Checkbox`/`Radio` render a real
+          (if visually hidden) input that keeps its own pointer-events via Mantine's
+          CSS, so a click landing on it never reached the wrapper button.
         */}
         {multi ? (
-          <Checkbox
-            checked={checked}
-            readOnly
-            size="xs"
-            mt={2}
-            tabIndex={-1}
-            aria-hidden
-            style={{ pointerEvents: 'none' }}
-          />
+          <Checkbox.Indicator checked={checked} size="xs" mt={2} />
         ) : (
-          <Radio
-            checked={checked}
-            readOnly
-            size="xs"
-            mt={2}
-            tabIndex={-1}
-            aria-hidden
-            style={{ pointerEvents: 'none' }}
-          />
+          <Radio.Indicator checked={checked} size="xs" mt={2} />
         )}
         <div>
           <Text size="sm" fw={checked ? 600 : 500}>
