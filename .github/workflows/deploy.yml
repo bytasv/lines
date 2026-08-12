@@ -96,6 +96,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Add VPS to known_hosts
         run: |
@@ -111,8 +114,9 @@ jobs:
           chmod 600 "$key_file"
           # The VPS-side authorized_keys entry forces /root/deploy-lines.sh
           # regardless of what command we pass here — this key can do nothing
-          # else on that box. The script reads the registry token off stdin.
-          printf '%s\n%s\n' "${{ secrets.GITHUB_TOKEN }}" "${{ github.actor }}" | \
+          # else on that box. The script reads three lines off stdin:
+          # registry token, registry actor, image tag.
+          printf '%s\n%s\n%s\n' "${{ secrets.GITHUB_TOKEN }}" "${{ github.actor }}" "${{ github.sha }}" | \
             ssh -i "$key_file" -o StrictHostKeyChecking=yes \
               "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}"
           rm -f "$key_file"

@@ -1893,13 +1893,19 @@
       "purpose": "Runs the server side of a hosted install (relay, storage, static web bundle) as containers behind Traefik, with per-hostname TLS. Excludes the bridge and worker entirely - the agent runs on each user's own machine.",
       "entryPoints": [
         "deploy/docker/compose.yml",
-        "deploy/docker/Dockerfile"
+        "deploy/docker/Dockerfile",
+        ".github/workflows/deploy.yml",
+        "deploy/scripts/deploy-lines.sh",
+        "deploy/scripts/check-migration-safety.sh"
       ],
       "files": [
         "deploy/docker/Dockerfile",
         "deploy/docker/compose.yml",
         "deploy/docker/web-nginx.conf",
-        "deploy/docker/env.example"
+        "deploy/docker/env.example",
+        ".github/workflows/deploy.yml",
+        "deploy/scripts/deploy-lines.sh",
+        "deploy/scripts/check-migration-safety.sh"
       ],
       "symbols": [],
       "tests": [],
@@ -1908,13 +1914,17 @@
         "storage never gets a published port or Traefik exposure beyond its one router; only relay and the browser's device calls reach it, everything else is internal-network only",
         "migrations run via `docker compose run --rm migrate` before the first `up` against a new database, using the direct (:5432) connection string",
         "the same ordering applies to every later schema change, not just the first bring-up: migrate deploy must run against the live database before a new storage image serves traffic, or the new code 500s with a Prisma unknown-column/table error (P2021) against the old schema",
-        "the relay's health endpoint (GET / on the relay's own host) accepts an optional x-relay-secret header; a request presenting the correct RELAY_SHARED_SECRET gets a hubs array (per-device attach counts/timestamps) alongside the ordinary health body, used to triage a duplicate-bridge or flapping-relay-link report without touching Postgres — see hosted-machine-access"
+        "the relay's health endpoint (GET / on the relay's own host) accepts an optional x-relay-secret header; a request presenting the correct RELAY_SHARED_SECRET gets a hubs array (per-device attach counts/timestamps) alongside the ordinary health body, used to triage a duplicate-bridge or flapping-relay-link report without touching Postgres — see hosted-machine-access",
+        "the deploy SSH key's VPS-side authorized_keys entry forces /root/deploy-lines.sh regardless of the command CI sends — that key can run nothing else on the box; the script takes three stdin lines (GHCR token, GHCR actor, image tag)",
+        "check-migration-safety.sh gates on added migration files (--diff-filter=A) between the push's before/after SHAs; editing an already-applied migration to add something destructive bypasses it — accepted because Prisma migrations are append-only by convention",
+        "images are pinned to the pushing commit's SHA: build pushes :latest and :<sha>, deploy-lines.sh exports TAG=<sha> from the third stdin line, and compose.yml reads ${TAG:-latest}; rollback is `TAG=<old-sha> docker compose --env-file lines.env up -d` with no rebuild, and an old two-line stdin caller still works and falls back to latest"
       ],
       "architecturalRules": [
         "npm ci is scoped by --workspace rather than --omit=optional, since --omit=optional also drops @rollup/rollup-linux-x64-gnu (an optional dependency on the same platform-binary mechanism as the Claude SDK's native binary) and breaks vite build",
         "the relay's Traefik router carries no StripPrefix middleware - relay/src/index.ts matches url.pathname exactly, so a rewritten path closes the socket with 1008",
         "storage's public router excludes /v1/devices/verify by rule, on top of that route's own shared-secret gate - defense in depth: a network-level exclusion and an application-level check, either could fail without the other",
-        "the storage image installs openssl explicitly - node:22-slim ships without libssl and Prisma's query engine otherwise falls back to a guessed build and warns at every boot"
+        "the storage image installs openssl explicitly - node:22-slim ships without libssl and Prisma's query engine otherwise falls back to a guessed build and warns at every boot",
+        "the four VITE_* build args exist in two places kept in sync by hand: GitHub Actions secrets (CI image build) and lines.env on the VPS (manual build only) — nothing checks the two agree"
       ],
       "relatedDecisions": [
         "hosted-machine-access",

@@ -15,6 +15,12 @@ host, and the images ship without `server/`'s Claude Agent SDK dependency.
 - `deploy/docker/compose.yml` — `docker compose --env-file lines.env up -d`
 - `deploy/docker/Dockerfile` — `relay` / `storage` / `web` build targets
 - `deploy/README.md` — the runbook this doc summarizes
+- `.github/workflows/deploy.yml` — CI: on push to `main`, runs `test` →
+  `check-migrations` → `build` (push images to GHCR) → `deploy` (SSH into the
+  VPS)
+- `deploy/scripts/deploy-lines.sh` — the VPS-side script the forced-command SSH
+  key runs; pulls, migrates, and restarts the stack
+- `deploy/scripts/check-migration-safety.sh` — the `check-migrations` job's gate
 
 ## Important files
 
@@ -24,6 +30,11 @@ host, and the images ship without `server/`'s Claude Agent SDK dependency.
 - `deploy/docker/web-nginx.conf` — the bundle's own static-file server; Traefik
   cannot serve files, so `web` ships one
 - `deploy/docker/env.example` — template for `lines.env`
+- `.github/workflows/deploy.yml` — the auto-deploy pipeline
+- `deploy/scripts/deploy-lines.sh` — kept byte-identical to the copy installed
+  at `/root/deploy-lines.sh` on the VPS; the repo copy is the only record of it
+- `deploy/scripts/check-migration-safety.sh` — refuses the push if a new
+  migration file looks destructive
 
 ## Important symbols
 
@@ -60,9 +71,14 @@ intentionally public (Clerk-authenticated) on that one subdomain.
 
 ## Tests
 
-None — this is deploy configuration, verified manually per `deploy/README.md`'s
-checklist (health endpoints, CORS preflight, the `/v1/devices/verify` 404 at the
-edge, cert issuance for both the apex and `www`).
+None as a test suite — the `.github/workflows/deploy.yml` pipeline itself is
+the verification path: `test` runs the `server`/`relay`/`storage` unit suites
+and `npm run typecheck` (all five workspaces, including `relay`), then
+`check-migrations`, `build`, and `deploy` gate on each other in sequence. Manual
+verification is still `deploy/README.md`'s checklist (health endpoints, CORS
+preflight, the `/v1/devices/verify` 404 at the edge, cert issuance for both the
+apex and `www`, and — after a deploy — confirming the running images are
+tagged with the pushed commit SHA).
 
 ## Business rules
 
@@ -86,6 +102,21 @@ edge, cert issuance for both the apex and `www`).
   timestamps) alongside the ordinary health body — the triage call for a
   duplicate-bridge or flapping-relay-link report, with no Postgres access
   needed. See [hosted-machine-access](hosted-machine-access.md).
+- The deploy SSH key's VPS-side `authorized_keys` entry forces
+  `/root/deploy-lines.sh` regardless of what command the CI job sends — that
+  key can run nothing else on the box. The script itself takes three lines on
+  stdin (GHCR token, GHCR actor, image tag) and is the only privileged
+  operation a leaked key grants.
+- `check-migration-safety.sh` gates on added migration files
+  (`--diff-filter=A`) between the push's before/after SHAs; editing an
+  already-applied migration to add something destructive bypasses it — accepted
+  because Prisma migrations are append-only by convention.
+- Images are pinned to the pushing commit's SHA: `build` pushes both `:latest`
+  and `:<sha>`, and `deploy-lines.sh` exports `TAG=<sha>` (from the third stdin
+  line) before `docker compose pull`/`up -d`, which read `${TAG:-latest}` in
+  `compose.yml`. Rollback is `TAG=<old-sha> docker compose --env-file lines.env
+  up -d` — no rebuild needed. An old workflow or a manual `ssh` run with only
+  two stdin lines still works and falls back to `latest`.
 
 ## Architectural rules
 
@@ -105,6 +136,11 @@ edge, cert issuance for both the apex and `www`).
 - The image installs `openssl` explicitly in the `storage` stage: `node:22-slim`
   ships without libssl, and Prisma's query engine falls back to a guessed build
   and warns at every boot without it.
+- The four `VITE_*` build args exist in two places that must be kept in sync by
+  hand: GitHub Actions secrets (used by `.github/workflows/deploy.yml`'s image
+  build) and `lines.env` on the VPS (used only for a manual `docker compose
+  build`). Nothing checks the two agree; the Dockerfile only asserts
+  `VITE_BRIDGE_WS_URL` is present, not that it matches the other source.
 
 ## Related decisions
 
