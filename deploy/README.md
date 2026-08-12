@@ -185,6 +185,12 @@ signed requests. The API token needs access to both buckets.
 `immutable` with a one-year max-age, so overwriting a filename can leave the edge
 serving the old bytes.
 
+**Clear `desktop/release/` first, or check the URL step 2 prints.** It reports the
+first `.dmg` in that directory, so a previous version's artifact left behind wins
+alphabetically and the printed `VITE_DESKTOP_DOWNLOAD_URL` names the *old* build —
+which then ships as the download link. `latest-mac.yml` is unaffected;
+electron-updater still sees the new version.
+
 ## Adding another app to this box
 
 Give it a compose file, put it on its own network, and label it for Traefik:
