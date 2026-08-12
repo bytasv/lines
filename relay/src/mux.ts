@@ -11,6 +11,13 @@ import { encode, type AgentToRelay, type ChannelId, type LinkClass, type RelayTo
 export interface Sink {
   send(data: string): void;
   close(code?: number, reason?: string): void;
+  /**
+   * Hard drop, skipping the close handshake. Optional so a test sink need not
+   * implement it. Used on supersede: a predecessor is by definition dead or
+   * being replaced, and a graceful close waits on a reply from a peer that may
+   * be gone — leaving the loser's socket OPEN on the relay for minutes.
+   */
+  terminate?(): void;
 }
 
 interface Channel {
@@ -27,6 +34,14 @@ export class DeviceHub {
    * the /client gate compares against this.
    */
   ownerId: string | null = null;
+  /**
+   * How many bridges have ever attached to this device. Diagnostics, exposed
+   * through the relay's health payload: on an idle paired machine this stays at
+   * 1, so a climbing counter is two processes fighting over one identity.
+   */
+  agentAttaches = 0;
+  /** ms epoch of the newest attach; 0 before the first one. */
+  lastAttachAt = 0;
   private agent: Sink | null = null;
   private channels = new Map<ChannelId, Channel>();
   private nextId = 0;
@@ -44,16 +59,35 @@ export class DeviceHub {
   }
 
   /**
+   * Whether this socket is still the device's bridge. Every per-socket timer and
+   * handler on the relay has to ask: a superseded socket that keeps acting owns
+   * nothing, and its actions land on the connection that replaced it.
+   */
+  isAgent(sink: Sink): boolean {
+    return this.agent === sink;
+  }
+
+  /**
    * Attach a bridge. Newest wins — a reconnecting bridge must be able to take
    * over from a half-dead predecessor the relay hasn't noticed yet.
    *
    * Existing channels are *not* closed: the browser stays connected across a
    * bridge restart and simply gets a fresh `hello` once it re-opens them.
+   *
+   * Returns the sink it superseded, so the caller can log a duplicate attach —
+   * which is otherwise indistinguishable from a first one.
    */
-  attachAgent(sink: Sink): void {
+  attachAgent(sink: Sink): Sink | null {
     const previous = this.agent;
     this.agent = sink;
-    if (previous && previous !== sink) previous.close(1012, 'superseded');
+    this.agentAttaches++;
+    this.lastAttachAt = Date.now();
+    if (previous && previous !== sink) {
+      previous.close(1012, 'superseded');
+      // And then hang up on it: a close handshake on a socket whose peer is gone
+      // never completes, and until it does the loser still looks OPEN here.
+      previous.terminate?.();
+    }
 
     // Re-announce every live channel so the new bridge builds its own state,
     // and re-push tokens, which the bridge needs for storage sync.
@@ -64,6 +98,7 @@ export class DeviceHub {
       sink.send(encode({ t: 'open', ch: ch.id, userId: ch.userId, token: this.tokens.get(ch.userId) ?? null }));
     }
     this.broadcastToClients({ type: 'deviceOnline' });
+    return previous && previous !== sink ? previous : null;
   }
 
   /** The bridge went away. Channels stay open and are told, so the UI can say so. */
@@ -102,8 +137,14 @@ export class DeviceHub {
   /**
    * Bridge -> browser. Forwarded synchronously by the caller's message handler:
    * introducing an await here would let two frames race and reorder a stream.
+   *
+   * `sink` is the socket the frame arrived on, and only the current bridge is
+   * allowed to speak: a superseded one that is still writing would inject its own
+   * (older) state into live browser channels, and its `close` frames would delete
+   * channels owned by the bridge that replaced it.
    */
-  fromAgent(frame: AgentToRelay): void {
+  fromAgent(frame: AgentToRelay, sink: Sink): void {
+    if (this.agent !== sink) return;
     if (frame.t === 'data') {
       this.channels.get(frame.ch)?.sink.send(frame.payload);
       return;
@@ -164,6 +205,27 @@ export class HubRegistry {
 
   get size(): number {
     return this.hubs.size;
+  }
+
+  /**
+   * Per-device summary for the secret-gated half of the health endpoint. Triage
+   * only: it says how many bridges have claimed each device and when, which is
+   * the one thing the logs could not answer during a takeover flap.
+   */
+  list(): Array<{
+    deviceId: string;
+    online: boolean;
+    channels: number;
+    agentAttaches: number;
+    lastAttachAt: number;
+  }> {
+    return [...this.hubs.values()].map((hub) => ({
+      deviceId: hub.deviceId,
+      online: hub.online,
+      channels: hub.channelCount,
+      agentAttaches: hub.agentAttaches,
+      lastAttachAt: hub.lastAttachAt,
+    }));
   }
 
   /** Revoke: tear the hub down and forget it. */

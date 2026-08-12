@@ -53,6 +53,13 @@ const UNAUTHORIZED_RETRY_DELAY_MS = 5000;
 const AUTH_RELAY_INTERVAL_MS = 50_000;
 
 let socket: WebSocket | null = null;
+/**
+ * Monotonic id per socket. `switchDevice` closes the old socket but never detaches
+ * its `onmessage`, so frames already in flight from the previous machine still
+ * arrived — after `clearBootstrap()` — and were applied as if they described the new
+ * one. Anything from a generation that is no longer current is dropped.
+ */
+let socketGeneration = 0;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let authRelayTimer: ReturnType<typeof setInterval> | null = null;
@@ -232,6 +239,7 @@ export async function connect() {
   const token = tokenProvider ? await tokenProvider().catch(() => null) : null;
   if (socket && socket.readyState !== WebSocket.CLOSED) return; // raced a parallel connect
   socket = new WebSocket(socketUrl(token));
+  const generation = ++socketGeneration;
 
   socket.onopen = () => {
     useStore.getState().setConnectionStatus('connected');
@@ -240,6 +248,8 @@ export async function connect() {
   };
 
   socket.onmessage = (e) => {
+    // A superseded socket's frames describe a machine we have already left.
+    if (generation !== socketGeneration) return;
     try {
       const msg = JSON.parse(e.data as string) as ServerMessage | RelayControlMessage;
       // Relay control frames, not app messages: the socket is healthy, the machine
@@ -337,10 +347,14 @@ function wireConnectivity() {
   });
 }
 
-export function send(msg: ClientMessage) {
+/** False when the message was dropped — the caller can then say so instead of
+ *  leaving the user with a button that appears to do nothing. */
+export function send(msg: ClientMessage): boolean {
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(msg));
-  } else if (msg.type === 'prompt') {
+    return true;
+  }
+  if (msg.type === 'prompt') {
     // Only prompts are safe to replay blind; other control messages depend on live state.
     useStore.getState().enqueuePrompt({
       id: crypto.randomUUID(),
@@ -350,7 +364,13 @@ export function send(msg: ClientMessage) {
       mentions: msg.mentions,
       queuedAt: Date.now(),
     });
-  } else {
-    console.warn('ws not connected, dropped', msg.type);
+    return true;
   }
+  console.warn('ws not connected, dropped', msg.type);
+  // Not only a console line: a silently dropped control message is exactly what
+  // "delete does nothing" looked like from the outside.
+  useStore
+    .getState()
+    .setActionError(`Not connected to your machine — that action wasn't sent. Try again once it reconnects.`);
+  return false;
 }

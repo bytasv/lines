@@ -125,6 +125,55 @@ test('a rejected push keeps its metas and does not advance the watermark', async
   assert.deepEqual(persisted, ['1000'], 'the watermark lands once the retry is accepted');
 });
 
+const sessionDeletes = (sent: Sent[]) => sent.filter((r) => r.url.includes('/sessions/'));
+
+test('a delete issued while a push is in flight is not undone by it', async (t) => {
+  const sent = captureFetch(t);
+  const sync = client();
+
+  sync.pushSessions([meta('a'), meta('b')]);
+  // Inside the debounce window, so the batch that is about to go out still carries
+  // 'b' — the drain happens before the await, which is how the row came back.
+  await flush(DEBOUNCE_WAIT_MS - 200);
+  sync.deleteSession('b');
+  await flush(400);
+
+  const puts = sessionPuts(sent);
+  assert.deepEqual(idsOf(puts), ['a'], 'a session deleted mid-flight must not be pushed');
+  assert.ok(sessionDeletes(sent).length >= 1, 'and its delete still goes out');
+});
+
+test('a delete issued while pulled state is applied is queued, not lost', async (t) => {
+  const sent = captureFetch(t);
+  const sync = client();
+
+  // `applying` is the window where a pull is being written to disk; the resulting
+  // broadcasts route back through here, and a delete used to be dropped outright.
+  sync.applying = true;
+  sync.deleteSession('gone');
+  await flush();
+  assert.deepEqual(sessionDeletes(sent), [], 'nothing is sent while applying');
+
+  sync.applying = false;
+  sync.pushSessions([meta('a')]);
+  await flush(DEBOUNCE_WAIT_MS);
+  assert.equal(sessionDeletes(sent).length, 1, 'the queued delete rides the next sync');
+  assert.ok(sessionDeletes(sent)[0].url.endsWith('/sessions/gone'));
+});
+
+test('a bulk push does not carry a session whose delete is still unconfirmed', async (t) => {
+  const sent = captureFetch(t);
+  const sync = client();
+
+  // A reconnect pushes the whole list; if the delete has not been acknowledged yet,
+  // that list must not be the thing that puts the row back.
+  sync.deleteSession('gone');
+  sync.pushSessions([meta('a'), meta('gone')]);
+  await flush(DEBOUNCE_WAIT_MS);
+
+  assert.deepEqual(idsOf(sessionPuts(sent)), ['a'], 'the whole-list push must not undo a delete');
+});
+
 test('a single over-budget session is skipped while its siblings still go out', async (t) => {
   const sent = captureFetch(t);
   const sync = client();

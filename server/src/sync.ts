@@ -39,13 +39,20 @@ function sessionStamp(meta: SessionMeta): number | undefined {
   return undefined;
 }
 
+/**
+ * One row from `GET /sessions`. `deletedAt` (ms epoch) marks a tombstone: storage
+ * soft-deletes sessions and keeps serving them in the delta window, which is how a
+ * peer learns about a delete instead of pushing the row back.
+ */
+export type PulledSession = SessionMeta & { deletedAt?: number };
+
 export interface PulledState {
   workflows: WorkflowDef[];
   steps: StepDef[];
   recipes: RecipeDef[];
   /** Authoritative run counts, keyed `ownerId/recipeId`. */
   recipeStats: Record<string, number>;
-  sessions: SessionMeta[];
+  sessions: PulledSession[];
   settings: unknown;
   projectKeys: ProjectKeyMap;
   memory: MemoryFileMap | null;
@@ -80,6 +87,13 @@ export class StorageSyncClient {
   private pendingSteps: StepDef[] | null = null;
   private pendingRecipes: RecipeDef[] | null = null;
   private pendingSessions = new Map<string, SessionMeta>();
+  /**
+   * Sessions deleted locally whose DELETE storage has not confirmed yet. Held
+   * rather than fired-and-forgotten, because a delete has three ways to be lost: it
+   * can arrive while pulled state is being applied, before there is a token to send
+   * it with, or while a push carrying that very row is already in flight.
+   */
+  private pendingDeletes = new Set<string>();
   private pendingMemory: MemoryFileMap | null = null;
   private wfTimer: NodeJS.Timeout | null = null;
   private stepTimer: NodeJS.Timeout | null = null;
@@ -137,7 +151,7 @@ export class StorageSyncClient {
         steps: (body(steps) ?? []) as StepDef[],
         recipes: (body(recipes) ?? []) as RecipeDef[],
         recipeStats: statsMap(body(recipeStats)),
-        sessions: (body(sessions) ?? []) as SessionMeta[],
+        sessions: (body(sessions) ?? []) as PulledSession[],
         settings: body(settings),
         projectKeys: (body(projectKeys) ?? {}) as ProjectKeyMap,
         memory: (body(memory) ?? null) as MemoryFileMap | null,
@@ -343,6 +357,8 @@ export class StorageSyncClient {
 
   pushSession(meta: SessionMeta): void {
     if (!this.enabled || this.applying) return;
+    // Deleted here already; pushing it would ask storage to undo that.
+    if (this.pendingDeletes.has(meta.id)) return;
     this.pendingSessions.set(meta.id, meta);
     this.sessTimer ??= setTimeout(() => {
       this.sessTimer = null;
@@ -360,6 +376,9 @@ export class StorageSyncClient {
    */
   pushSessions(list: SessionMeta[]): void {
     if (!this.enabled || this.applying) return;
+    // Every reconnect/sync passes through here, so it doubles as the retry point for
+    // deletes that had nowhere to go when they were issued.
+    this.drainDeletes();
     const since = Number(this.marks.sessionsPushed ?? 0);
     for (const meta of list) {
       const stamp = sessionStamp(meta);
@@ -377,14 +396,21 @@ export class StorageSyncClient {
   private async flushSessions(batch: SessionMeta[]): Promise<void> {
     let allOk = true;
     for (const chunk of this.chunkSessions(batch)) {
+      // Re-checked per chunk rather than once up front: the batch was drained before
+      // the first await, so a delete issued while an earlier chunk was in flight
+      // would otherwise be undone by a later one.
+      const live = chunk.filter((meta) => !this.pendingDeletes.has(meta.id));
+      if (live.length === 0) continue;
       try {
-        await this.req('PUT', '/sessions', chunk);
+        await this.req('PUT', '/sessions', live);
       } catch (err) {
         allOk = false;
-        for (const meta of chunk) if (!this.pendingSessions.has(meta.id)) this.pendingSessions.set(meta.id, meta);
+        for (const meta of live) if (!this.pendingSessions.has(meta.id)) this.pendingSessions.set(meta.id, meta);
         this.warnOnce('push sessions', err);
       }
     }
+    // A delete that raced this push has to land after it, or storage keeps the row.
+    this.drainDeletes();
     if (!allOk) return;
     const since = Number(this.marks.sessionsPushed ?? 0);
     let newest = since;
@@ -424,9 +450,25 @@ export class StorageSyncClient {
   }
 
   deleteSession(id: string): void {
-    if (!this.enabled || this.applying) return;
     this.pendingSessions.delete(id);
-    void this.req('DELETE', `/sessions/${id}`).catch((err) => this.warnOnce('delete session', err));
+    this.pendingDeletes.add(id);
+    // Queued, not dropped. `applying` (pulled state being written) and `!enabled` (no
+    // token yet) both used to lose the delete outright with nothing to retry it, so
+    // the row survived in storage and came back on the next pull.
+    if (!this.enabled || this.applying) return;
+    this.sendDelete(id);
+  }
+
+  /** Retry every unconfirmed delete. Storage's soft delete is idempotent. */
+  private drainDeletes(): void {
+    if (!this.enabled || this.applying) return;
+    for (const id of this.pendingDeletes) this.sendDelete(id);
+  }
+
+  private sendDelete(id: string): void {
+    void this.req('DELETE', `/sessions/${id}`)
+      .then(() => this.pendingDeletes.delete(id))
+      .catch((err) => this.warnOnce('delete session', err));
   }
 
   deleteWorkflow(id: string): void {

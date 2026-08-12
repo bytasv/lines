@@ -82,7 +82,13 @@ web client needs no change to run under either.
 
 **Hosted mode** (the default, and the only path in a packaged build): the shell loads or mints
 this machine's identity (`server/src/device.ts`), registers it with the hosted storage server, and
-spawns the bridge with the relay URL, storage URL, and device credential in its env. It serves no
+spawns the bridge with the relay URL, storage URL, and device credential in its env. The bridge
+itself takes this machine's single-instance lock (`~/.lines-app/bridge.lock`) right after
+resolving that identity, before it ever dials the relay — see
+[hosted-machine-access](hosted-machine-access.md#one-bridge-speaks-at-a-time). A respawn racing a
+not-yet-exited previous bridge child, or a bridge started by hand alongside the packaged app, now
+exits immediately with a message naming the pid already holding the lock, rather than silently
+becoming a second `RelayClient` claiming the same device. It serves no
 local UI — the tray menu opens the hosted web app instead of a local window. If registration
 returns a pairing code, a small `BrowserWindow` shows it as a data URL, independent of `web/dist`
 even existing. The code auto-refreshes every ~14 minutes while unpaired, and "Get a new code" in
@@ -189,6 +195,12 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
   the tray — never a raw SDK error.
 - `LINES_CLAUDE_PATH` is exclusive: set it, and no other location is tried.
 - Update checks only notify. The tray links the download page.
+- A bridge child refuses to start if another live process already holds this machine's
+  single-instance lock. This is a second, independent guard beneath the shell's own
+  `requestSingleInstanceLock` (which stops a second *Electron* process) — it also catches a
+  respawn racing a not-yet-exited previous bridge, or a bridge run by hand alongside the packaged
+  app. Without it, two bridge processes can share one `device.json`, and the relay resolves that
+  by superseding one of them — visible in every connected browser as a flicker until it does.
 
 ## Architectural rules
 
@@ -230,6 +242,11 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
   both `.env` paths and falls back to a build-time version constant.
 - **Releases go to their own public bucket.** Public-read is a bucket-level setting, so sharing
   the recipe-image bucket would publish user uploads in order to publish an installer.
+- The bridge lock file lives beside `device.json` under the same `APP_ROOT`, reusing the existing
+  app-data-root path helpers rather than adding a new resolver (see
+  [app-data-root](app-data-root.md)). A stale lock is detected via `process.kill(pid, 0)`
+  (`ESRCH` means take it); `LINES_ALLOW_MULTIPLE_BRIDGES=1` is the deliberate escape hatch that
+  must never be set in a real deployment.
 
 ## Related decisions
 
@@ -245,7 +262,9 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
   from a range when the module is hoisted out of the workspace.
 - arm64 only for now. Adding `x64`/universal is a one-line `mac.target` change.
 - A dev checkout and the installed app share `~/.lines-app/device.json`, so the same device
-  identity can be claimed by whichever registers last.
+  identity can be claimed by whichever registers last — and, since the bridge lock, also share
+  `~/.lines-app/bridge.lock`, so only one bridge from either can be running against it at once.
+- [app-data-root](app-data-root.md) — the `~/.lines-app` root the bridge lock lives under.
 - [hosted-machine-access](hosted-machine-access.md) — how the shell's children find and announce
   their ports, the identity and registration it performs in hosted mode, what `RELAY_URL`
   connects to, and `hello`'s protocol version, which the update flow exists to keep from drifting

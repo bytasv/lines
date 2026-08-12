@@ -532,6 +532,12 @@ export type TurnCompleteListener = (
 
 export class SessionManager {
   private sessions = new Map<string, SessionMeta>();
+  /**
+   * Deleted session id -> ms epoch of the delete. A delete has to be a positive
+   * fact, not an absence: storage sync pushes rows both ways, so an absent session
+   * is re-adopted from whichever peer has not heard yet.
+   */
+  private deletedAt = new Map<string, number>();
   private live = new Map<string, LiveState>();
   /** Sessions with a manual interrupt in flight — lets an `ended` without a
    *  `result` still settle the turn (see handleWorkerEnded). */
@@ -567,6 +573,14 @@ export class SessionManager {
       if (meta.contextCompact?.ok === false) meta.contextCompact = undefined;
       this.sessions.set(meta.id, meta);
     }
+    // Pruned by the store on load, so an old tombstone doesn't suppress a session
+    // id forever.
+    for (const [id, at] of Object.entries(this.store.loadDeletedSessions())) {
+      this.deletedAt.set(id, at);
+      // A row that survived in sessions.json despite being deleted (an older build
+      // wrote it back) must not come back to life on this restart.
+      this.sessions.delete(id);
+    }
   }
 
   /** Wired by index.ts right after construction, before any client can prompt. */
@@ -596,8 +610,14 @@ export class SessionManager {
     if (this.persistTimer) return;
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
-      this.store.saveSessions([...this.sessions.values()]);
+      this.writeState();
     }, PERSIST_DEBOUNCE_MS);
+  }
+
+  /** Sessions and their tombstones are one state: written together, always. */
+  private writeState() {
+    this.store.saveSessions([...this.sessions.values()]);
+    this.store.saveDeletedSessions(Object.fromEntries(this.deletedAt));
   }
 
   /** Write pending session state out now. Called on shutdown — the debounce
@@ -606,7 +626,7 @@ export class SessionManager {
     if (!this.persistTimer) return;
     clearTimeout(this.persistTimer);
     this.persistTimer = null;
-    this.store.saveSessions([...this.sessions.values()]);
+    this.writeState();
   }
 
   private upsert(meta: SessionMeta) {
@@ -622,6 +642,15 @@ export class SessionManager {
    * to whichever instance is actually running the turn, not this one.
    */
   adoptSynced(meta: SessionMeta) {
+    const tombstone = this.deletedAt.get(meta.id);
+    if (tombstone !== undefined) {
+      // The branch the LWW check below never reaches: with no local copy there is
+      // nothing to compare against, so a deleted session used to be re-adopted from
+      // every peer that had not heard about the delete yet — the undeletable session.
+      if ((meta.updatedAt ?? meta.createdAt ?? 0) <= tombstone) return;
+      // Written after the delete, somewhere else: a deliberate resurrection wins.
+      this.deletedAt.delete(meta.id);
+    }
     const cur = this.sessions.get(meta.id);
     if (cur && (meta.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) return;
     if (isSessionActive(meta.status)) meta.status = 'idle';
@@ -700,6 +729,15 @@ export class SessionManager {
     this.upsert(meta);
   }
 
+  /**
+   * Whether this instance has ever run a turn for this session — live state, or a
+   * transcript on this disk. False for a session that only exists here because
+   * storage sync adopted it from another machine.
+   */
+  private ranHere(id: string): boolean {
+    return this.live.has(id) || this.store.loadTranscriptRaw(id).length > 0;
+  }
+
   private liveState(id: string): LiveState {
     let state = this.live.get(id);
     if (!state) {
@@ -760,14 +798,37 @@ export class SessionManager {
   }
 
   deleteSession(id: string) {
+    this.forget(id);
+    this.deletedAt.set(id, Date.now());
+    this.persist();
+    this.broadcast({ type: 'sessionDeleted', sessionId: id });
+  }
+
+  /**
+   * Another machine deleted this session. Records the tombstone even when we never
+   * held the row, so a later pull from a third machine that is still behind cannot
+   * reintroduce it here.
+   */
+  applyRemoteDelete(id: string, deletedAt: number) {
+    const known = this.deletedAt.get(id);
+    if (known !== undefined && known >= deletedAt) return;
+    this.deletedAt.set(id, deletedAt);
+    this.forget(id);
+    this.persist();
+    this.broadcast({ type: 'sessionDeleted', sessionId: id });
+  }
+
+  /** Drop every trace of a session from this instance. Shared by both delete paths. */
+  private forget(id: string) {
+    // Nothing here to tear down (a remote delete for a session this machine never
+    // held): closing a query the worker has no record of is a pointless round trip.
+    if (!this.sessions.has(id) && !this.live.has(id)) return;
     this.closeQuery(id);
     this.flushPending(id); // the session is gone with its cards
     this.sessions.delete(id);
     this.live.delete(id);
     this.compacting.delete(id);
     this.store.deleteTranscript(id);
-    this.persist();
-    this.broadcast({ type: 'sessionDeleted', sessionId: id });
   }
 
   /**
@@ -1934,6 +1995,11 @@ export class SessionManager {
     const flagged: string[] = [];
     for (const meta of this.sessions.values()) {
       const info = liveById.get(meta.id);
+      // A session adopted from another machine's storage sync has never executed
+      // here: no live state, no local transcript. Demoting it, restamping it and
+      // auto-continuing it would broadcast and cloud-push a turn this machine never
+      // owned — and with a flapping worker that is a storm, once per reconcile.
+      if (!info && !this.ranHere(meta.id)) continue;
       let changed = false;
       if (info?.claudeSessionId && meta.claudeSessionId !== info.claudeSessionId) {
         meta.claudeSessionId = info.claudeSessionId;

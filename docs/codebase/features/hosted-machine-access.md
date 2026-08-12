@@ -84,14 +84,15 @@ relay pipes frames between them, and the UI that gates all of it.
 - `.env.example` — `LINES_BRIDGE_PORT`, `LINES_WORKER_PORT`, `LINES_INSTANCE`;
   `RELAY_AGENT_PING_MS`, `RELAY_AGENT_DEAD_MS`, `RELAY_REVERIFY_MS`, `LINES_RELAY_IDLE_MS`
 - `server/src/userContext.ts` — `BrowserLink`, `linkSendAction`, `broadcast`
-- `server/src/index.ts` — `BRIDGE_VERSION`, per-socket handlers
+- `server/src/index.ts` — `BRIDGE_VERSION`, per-socket handlers, `claimBridgeLock`/
+  `releaseBridgeLock`, the single-instance `bridge.lock`, `LINES_ALLOW_MULTIPLE_BRIDGES`
 - `shared/types.ts` — `APP_PROTOCOL_VERSION`, `BridgeInfo`, `hello.bridge`
 - `web/src/store.ts` — `bridge`, `protocolSkew`
 - `relay/src/protocol.ts` — frames, shared by both ends
 - `relay/src/mux.ts` — `DeviceHub`, `HubRegistry`: pairing and routing, transport-free;
   `DeviceHub.ownerId`; `HubRegistry.drop`, whose caller is the re-verify tick
 - `server/src/relayClient.ts` — `RelayChannel` (a `BrowserLink`), reconnect, channel lifecycle,
-  the idle watchdog on its own socket
+  the idle watchdog on its own socket, the duplicate-`open` guard, the supersede-count log
 - `storage/prisma/schema.prisma` — the `Device` model
 - `storage/src/index.ts` — the six device routes, plus CORS and the unauthenticated-path
   allowlist that fronts them
@@ -143,9 +144,24 @@ relay pipes frames between them, and the UI that gates all of it.
 - `unpairDevice(storageUrl, identity)` — the machine releasing itself, proving possession of its
   own secret; issues no code, so `registerDevice` stays the only thing that mints one
 - `machineOffline` (in `web/src/store.ts`) — set by the relay's `deviceOffline`/`deviceOnline`
-  control frames, cleared on `hello` and by `clearBootstrap()`
+  control frames, cleared on `hello` and by `clearBootstrap()`; surfaced by `ConnectionBanner`
+  even after bootstrap, not just by the pre-`hello` `ConnectingMachine` screen
 - `reconnectNow()` — re-dial the current machine immediately; `switchDevice` cannot serve this
   because it early-returns when the device id is unchanged
+- `DeviceHub.isAgent(sink)` — whether a socket is still the hub's current bridge; every per-socket
+  timer and handler on the relay checks this before acting, since a superseded socket owns nothing
+- `DeviceHub.agentAttaches` / `lastAttachAt` — how many bridges have ever claimed this device and
+  when the newest one did; diagnostics for telling a flapping single link from two competing
+  bridges
+- `HubRegistry.list()` — per-device `{deviceId, online, channels, agentAttaches, lastAttachAt}`
+  summary, returned by the relay's health endpoint only to a caller presenting the shared secret
+- `Sink.terminate?()` — hard drop, skipping the close handshake; optional so a test sink need not
+  implement it. Used on supersede, mirroring the existing dead-agent reap
+- `claimBridgeLock(deviceId)` / `releaseBridgeLock()` (`server/src/index.ts`) — this machine's
+  single-instance lock (`~/.lines-app/bridge.lock`); exits the process if another live pid already
+  holds it
+- `socketGeneration` (`web/src/ws.ts`) — monotonic id per `new WebSocket(...)`; `onmessage` drops a
+  frame whose generation is not current
 - `useDevices` — a small zustand store independent of the main `useStore`, because two unrelated
   trees (the gate, and the Settings pane) must observe and mutate the same machine list; a revoke
   in Settings has to put the gate back up, which a component-local fetch could not do
@@ -194,6 +210,57 @@ directions, verbatim.
 
 A browser's `/client` connection is refused unless its verified Clerk `userId` matches the
 device's owner (`DeviceHub.ownerId`, learned from the bridge's own `/agent` authentication).
+
+On the browser side, `web/src/ws.ts` stamps each socket with a monotonic generation and has
+`onmessage` drop any frame whose generation is stale. `switchDevice` closes the previous socket but
+does not detach its listener, so without this a frame already in flight from the old machine could
+still reach `applyServerMessage` after `clearBootstrap()` had already reset the store for the new
+one.
+
+### One bridge speaks at a time
+
+Two bridge processes can end up claiming one device — a stale `device.json` shared across
+processes, a respawn racing a not-yet-exited predecessor — and the relay's fan-in used to have no
+guard against it: a superseded (or merely half-dead) bridge could keep writing frames into a live
+browser channel, and its `t:'close'` frame could delete a channel the *current* bridge now owns.
+Two alternating bridge states meant two alternating `hello` snapshots reaching one browser, which
+is what turned a freshly created session into a flicker loop between it and the previous one.
+
+`DeviceHub.attachAgent` now returns the sink it superseded (if any), so the caller can log a
+distinct warning naming the running attach count — a takeover used to be indistinguishable from a
+first attach. The predecessor is `close(1012, 'superseded')`d **and** `terminate()`d: a close
+handshake on a socket whose peer may be gone never completes, so without the hard drop the loser
+lingers `OPEN` on the relay for minutes. `DeviceHub.fromAgent(frame, sink)` takes the sender and
+refuses (`this.agent !== sink`) as its first line — mirroring the guard `detachAgent` already had —
+so a superseded socket cannot inject state or close a channel it no longer owns. The per-agent
+re-verify tick and the ping/health interval both bail out the instant their own socket is no longer
+`hub.isAgent(sink)`, so a superseded socket's still-running timer can never tear down the hub (or
+evict the browser's channels) that replaced it.
+
+Bridge-side, `RelayClient.dispatch`'s `open` case is now idempotent: every agent attach replays
+`open` for all live channels, so a takeover re-delivers channel ids the bridge already serves.
+Handling one again used to build a second `RelayChannel`, run `handleConnection` a second time, and
+push a second full `hello` snapshot down a browser socket that never reconnected — the other half of
+the flicker loop. A repeated `open` for a channel id already held is now a no-op (logged); a
+genuine reopen after the channel actually closed still creates a new one. `connect()` also closes
+any socket it already holds before dialling a new one, so one `RelayClient` instance can never hold
+two live sockets for the same device.
+
+None of this fixes two bridges existing — it only stops the fallout from being visible. The actual
+cure is `claimBridgeLock`: right after resolving its device identity, a bridge started with
+`RELAY_URL` set writes (or checks) `~/.lines-app/bridge.lock` (pid + start time). If the recorded
+pid is still alive (`process.kill(pid, 0)`, `ESRCH` meaning take it), the new process exits with a
+message naming the running pid and the lock file to remove if it is genuinely stale.
+`LINES_ALLOW_MULTIPLE_BRIDGES=1` is the deliberate escape hatch (tests, an intentional second
+bridge) and must never be set in a real deployment.
+
+The relay's health endpoint (`GET /`) keeps its exact unauthenticated shape — `{ok, version,
+devices}` — for anyone; a request presenting the correct `x-relay-secret` (constant-time compared)
+additionally gets `hubs: HubRegistry.list()`, a per-device `{online, channels, agentAttaches,
+lastAttachAt}` summary. `agentAttaches` climbing on an otherwise-idle paired device is the tell for
+two bridges fighting over one identity, versus `agentAttaches: 1` pointing at a single flapping
+link instead — this is the triage tool for a report like "sessions keep flickering," without
+touching Postgres.
 
 ### Pairing a machine
 
@@ -296,14 +363,21 @@ instead of retrying a device the relay will now refuse.
 - `server/src/broadcastBackpressure.test.ts` — the full `linkSendAction` policy.
 - `relay/src/mux.test.ts` — routing, agent takeover, offline notification, per-channel isolation,
   token replay, registry sweep and revoke; `ownerId` recording; cross-user channel isolation on
-  one device.
+  one device; a superseded agent's `data`/`close` frames are refused and cannot touch the live
+  agent's channel; `attachAgent` replays `open` only to the new sink and reports who it superseded
+  (including that predecessor being `terminate()`d, not just closed); `agentAttaches` increments
+  per attach; `HubRegistry.list()`'s per-hub summary.
 - `relay/src/agentHeartbeat.test.ts` — spawns real relay processes with the intervals compressed
   by env: an agent answering `pong` survives, a silent one is reaped and a later browser gets
-  `deviceOffline`, and the re-verify asymmetry both ways against a stub storage (403 drops the
-  device, 500 does not).
+  `deviceOffline`, the re-verify asymmetry both ways against a stub storage (403 drops the
+  device, 500 does not), and a second bridge claiming the same device supersedes (and hard-drops)
+  the first without the takeover looking like an outage to a browser arriving after it.
 - `server/src/relayEndToEnd.test.ts` — a real relay and a real bridge, with a browser reaching
   the bridge only through the tunnel; plus the bridge's idle watchdog, driven by `SIGSTOP`ping the
   relay so the socket goes silent without closing.
+- `server/src/relayClient.duplicateOpen.test.ts` — a repeated `open` for a channel id already
+  served invokes `onChannel` exactly once and leaves one live link; a channel actually closed and
+  reopened on the same id is still served as new.
 - `storage/src/schema.credentials.test.ts` — `Device.secretHash` is the one allowlisted field,
   with its justification.
 - `storage/src/devices.unpair.test.ts` — the unpair route's failure modes. **Opt-in**: the only
@@ -402,6 +476,39 @@ instead of retrying a device the relay will now refuse.
   `default` case and would drop them silently — as it did until they were wired up.
 - `DownloadDesktopApp` renders nothing when no build has been published (`DESKTOP_DOWNLOAD_URL`
   unset) — a button pointing at nothing is worse than no button.
+- `fromAgent` only accepts a frame from the socket the hub currently calls its agent — a
+  superseded (or half-dead) bridge that keeps writing cannot inject state into a live browser
+  channel, nor close a channel now owned by the bridge that replaced it.
+- `attachAgent` `terminate()`s (not just closes) the predecessor it supersedes, so a takeover
+  cannot leave the loser's socket lingering `OPEN` on the relay for minutes.
+- The per-agent re-verify tick and health/ping interval both bail out the instant their own socket
+  is no longer `hub.isAgent(sink)`, so a superseded socket's still-running timer can never drop the
+  hub — or evict the browser channels — out from under the bridge that replaced it.
+- A duplicate agent attach for a device logs distinctly from a first attach, naming the running
+  attach count — a takeover used to be indistinguishable from a first attach in the logs.
+- The relay's unauthenticated health shape is unchanged; presenting the correct `x-relay-secret`
+  additionally returns `hubs` (per-device `online`/`channels`/`agentAttaches`/`lastAttachAt`).
+  Device ids must never leak to an unauthenticated caller.
+- The bridge rejects a duplicate `open` for a channel id it already serves (warns, keeps the
+  existing link) rather than building a second `RelayChannel` — a takeover (or any re-announcement)
+  re-delivers ids already held, and building a second link means a second full `hello` down a
+  browser socket that never reconnected.
+- `RelayClient.connect()` closes any pre-existing socket (and drops its channels) before dialling
+  a new one, so one `RelayClient` instance can never hold two live sockets for the same device.
+- A bridge with `RELAY_URL` set takes a single-instance lock
+  (`~/.lines-app/bridge.lock`, pid + start time) right after resolving its device identity. A live
+  recorded pid refuses the new process with a message naming the running pid and the lock file to
+  remove if it is genuinely stale — the actual cure for two bridge processes sharing one
+  `device.json`; everything above is containment.
+- `LINES_ALLOW_MULTIPLE_BRIDGES=1` is the deliberate escape hatch that skips the lock, for tests
+  and any intentionally-run second bridge; it must never be set in a real deployment.
+- A browser socket carries a monotonic generation stamp; `onmessage` drops a frame whose
+  generation is no longer current. `switchDevice` closes the old socket but does not detach its
+  handler, so a late frame from the previous machine could otherwise still reach
+  `applyServerMessage` after `clearBootstrap()`.
+- `machineOffline` is surfaced by `ConnectionBanner` after bootstrap too, not only by the
+  pre-bootstrap `ConnectingMachine` screen — "relay up, machine gone" used to render as a healthy
+  "connected" UI in which every action silently went nowhere.
 
 ## Architectural rules
 
@@ -484,6 +591,20 @@ instead of retrying a device the relay will now refuse.
 - The socket URL is built with `new URL(...)`/`searchParams`, not string concatenation — the
   relay matches its endpoint path exactly, and concatenating a token onto a URL that already had
   a trailing segment once produced a non-matching path.
+- `terminate()` on supersede is deliberately aggressive rather than a graceful close-and-drain: a
+  superseded bridge has no readers left, so draining it only leaves a noisy half-open socket
+  around longer. The trade-off is a louder log during a genuine flap — a feature during triage,
+  not a bug.
+- The bridge closes its own pre-existing socket (and drops its channels) at the start of
+  `connect()`, before dialling — belt-and-braces alongside the existing single-flight
+  `retryTimer`, so `RelayClient` itself can never be the source of two live sockets for one
+  device.
+- The single-instance lock file lives beside `device.json` under the same `APP_ROOT`, reusing the
+  existing app-data-root path helpers rather than adding a new resolver (see
+  [app-data-root](app-data-root.md)).
+- Stale-lock detection is `process.kill(pid, 0)`: `ESRCH` means nothing holds the pid, so the new
+  process takes the lock; any other outcome (including `EPERM`, another OS user's live process) is
+  treated as held.
 
 ## Related decisions
 
@@ -492,4 +613,10 @@ instead of retrying a device the relay will now refuse.
   into.
 - [desktop-app](desktop-app.md) — the installable shell that runs the bridge and drives pairing.
 - [turn-recovery](turn-recovery.md) — the other credential boundary (Claude OAuth), kept local by
-  the same kind of argument, and the `WorkerStatus` the `hello` payload carries.
+  the same kind of argument, and the `WorkerStatus` the `hello` payload carries; also where a
+  duplicate bridge's reconcile amplification is scoped down separately.
+- [app-data-root](app-data-root.md) — the `~/.lines-app` root the single-instance lock lives
+  under.
+- [cloud-sync-sessions](cloud-sync-sessions.md) — the delete-tombstone half of the same underlying
+  bug report (a stuck session that could not be deleted), fixed independently of the relay/bridge
+  supersede work here.

@@ -176,6 +176,8 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   `null` rather than falling back, and each caller skips its query entirely on `null`
 - `PROACTIVE_RETRY_MS` / `PROACTIVE_RETRY_CAP_MS` — 60s first rung, 15min ceiling for the
   proactive-refresh retry ladder
+- `SessionManager.ranHere(id)` (private) — true when this instance has live state for the
+  session or a non-empty local transcript; the scope guard for `reconcileWithWorker`'s skip below
 
 ## Data flow
 
@@ -186,11 +188,19 @@ reports it in `hello.live`. `WorkerClient` folds in the sessions whose `push` is
 locally — the snapshot predates that flush — and hands the merged list to
 `reconcileWithWorker`, per user via `UserRegistry.sliceFor`.
 
-Reconcile then moves in both directions. `busy: true` on a session we believe is idle calls
-`markTurnLive` (status back to `running`, keep a known `turnStartedAt`, clear `interruptedAt`).
-Absent from the list, or `busy: false`, on a session we believe is `running`/`waiting-permission`
-demotes it to `idle`, pauses any queue, and stamps `interruptedAt`. `busy: undefined` demotes
-only.
+Reconcile first skips any session with neither a worker report (`info` undefined) **nor**
+`ranHere(id)` — no live state and no local transcript. Such a session exists on this instance
+only because storage sync (`adoptSynced`) pulled it from another machine; it never ran here, so
+promoting, demoting, restamping or auto-continuing it would broadcast and cloud-push a turn this
+machine has no business touching. A session with an actual worker report for this pass is still
+fully reconciled even with an empty local transcript, since a live report is itself evidence this
+instance is the one running it now.
+
+Reconcile then moves in both directions for every session that passes that check. `busy: true` on
+a session we believe is idle calls `markTurnLive` (status back to `running`, keep a known
+`turnStartedAt`, clear `interruptedAt`). Absent from the list, or `busy: false`, on a session we
+believe is `running`/`waiting-permission` demotes it to `idle`, pauses any queue, and stamps
+`interruptedAt`. `busy: undefined` demotes only.
 
 `continueTurn` expires the dead turn's orphaned permission cards, releases `queuePaused`, and
 re-prompts with a synthetic nudge, resuming through `claudeSessionId`. A turn interrupted
@@ -333,8 +343,11 @@ message type, no new modal, no new client state, no DB migration.
   absent setting resumes, explicit `false` does not, stale flag does not, workflow source
   preserved, a meta with no `caveman` resumes, one failing session doesn't stop the others,
   `result`/archive clear the flag, an unresolved `ExitPlanMode` card blocks auto-continue and
-  is not expired by `continueTurn`, an ordinary tool's card still expires), and the worker-lost
-  case (reconciled with an empty live list, `autoContinue: false`, never auto-resumed).
+  is not expired by `continueTurn`, an ordinary tool's card still expires), the worker-lost
+  case (reconciled with an empty live list, `autoContinue: false`, never auto-resumed), and the
+  no-local-history skip (a session with no live state and no transcript on this instance is left
+  alone; a session with an actual worker report is still fully reconciled even with no local
+  transcript).
 - `server/src/workerClient.test.ts` — `onWorkerLost` fires once at the deadline and not on a
   reconnect inside it; `onStatusChange` publishes a disconnected status once per outage, a
   connected status once on recovery, nothing on an in-deadline reconnect, and a `mismatch`
@@ -403,6 +416,12 @@ message type, no new modal, no new client state, no DB migration.
   but never auto-continues them, even when `autoContinueInterrupted` is on — resuming would
   just re-queue the push into `WorkerClient.pending` against a worker that isn't there. The
   next real `hello` reconciles normally and, if flagged, resumes them then.
+- `reconcileWithWorker` skips a session that has neither live state nor a local on-disk
+  transcript (`ranHere`) — it only exists here because storage sync (`adoptSynced`) adopted it
+  from another machine, and demoting/restamping/auto-continuing it would broadcast and
+  cloud-push a turn this machine never ran. A session with an actual worker report for this pass
+  is still fully reconciled even with no local transcript, since a live report is itself
+  evidence.
 - A cold-start protocol mismatch (a worker that has never once answered compatibly) cannot be
   caught by the lost deadline: `everConnected` never becomes `true`, so the outage clock never
   starts. It is instead surfaced the moment the mismatched `hello` is seen, via
@@ -539,6 +558,12 @@ message type, no new modal, no new client state, no DB migration.
   rather than doubling a default, which would have skipped the 60s rung.
 - `getAccessTokenSync()` remains on `AuthManager` but no longer has a production caller; it is
   kept for the sync-status shape tests rely on.
+- The no-local-history skip is narrow and scoped to `reconcileWithWorker` only — it does not
+  change `adoptSynced` or what counts as this instance owning a session. It exists because a
+  flapping worker or a duplicate bridge process (see
+  [hosted-machine-access](hosted-machine-access.md)) turned every reconcile pass into a
+  broadcast/cloud-push storm across sessions this machine never actually ran, which is an
+  amplifier for exactly the kind of loop this feature exists to break, not feed.
 - **Known limitation:** in Compact view the failed row sits inside a collapsed `AgentTurn`, so
   `SessionView`'s alert is the always-visible affordance; this is pre-existing.
 
@@ -553,3 +578,5 @@ message type, no new modal, no new client state, no DB migration.
   defer to an open `ALWAYS_ASK_TOOLS` card.
 - [context-window](context-window.md) — the compaction-span escape for a failed result that
   lands while a span is still open.
+- [hosted-machine-access](hosted-machine-access.md) — the duplicate-bridge scenario the
+  no-local-history reconcile skip guards against.

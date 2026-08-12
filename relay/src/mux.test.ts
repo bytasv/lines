@@ -7,10 +7,14 @@ import { decode, type RelayToAgent } from './protocol.ts';
 function fakeSink() {
   const sent: string[] = [];
   let closed: { code?: number; reason?: string } | null = null;
+  let terminated = false;
   const sink: Sink = {
     send: (d) => sent.push(d),
     close: (code, reason) => {
       closed = { code, reason };
+    },
+    terminate: () => {
+      terminated = true;
     },
   };
   return {
@@ -18,6 +22,7 @@ function fakeSink() {
     sent,
     frames: () => sent.map((s) => decode<RelayToAgent>(s)!).filter(Boolean),
     closed: () => closed,
+    terminated: () => terminated,
   };
 }
 
@@ -44,7 +49,7 @@ test('frames route between the browser and the bridge', () => {
   assert.deepEqual(agent.frames().at(-1), { t: 'data', ch, payload: '{"type":"ping"}' });
 
   // The payload reaches the browser verbatim — the relay never rewraps it.
-  hub.fromAgent({ t: 'data', ch, payload: '{"type":"pong"}' });
+  hub.fromAgent({ t: 'data', ch, payload: '{"type":"pong"}' }, agent.sink);
   assert.equal(client.sent.at(-1), '{"type":"pong"}');
 });
 
@@ -65,6 +70,82 @@ test('a reattaching agent is replayed the live channels and tokens', () => {
   assert.deepEqual(frames[1], { t: 'open', ch, userId: 'u1', token: 'tok' });
   // Newest agent wins; the predecessor is hung up on.
   assert.equal(first.closed()?.code, 1012);
+  // And terminated: a close handshake on a socket whose peer is gone never
+  // completes, so without this the loser lingers OPEN on the relay for minutes.
+  assert.equal(first.terminated(), true, 'a superseded predecessor is dropped, not drained');
+  // Replayed only to the new sink — the predecessor must not be handed the channel
+  // it is about to lose, or it starts serving a browser it no longer owns.
+  assert.equal(first.frames().filter((f) => f.t === 'open').length, 1, 'only its own original open');
+});
+
+test('a superseded agent cannot speak into a live channel', () => {
+  const hub = new DeviceHub('d1');
+  const first = fakeSink();
+  hub.attachAgent(first.sink);
+  const client = fakeSink();
+  const ch = hub.openChannel('u1', 'ctrl', client.sink, null);
+  const second = fakeSink();
+  hub.attachAgent(second.sink);
+  const before = client.sent.length;
+
+  // The whole flicker loop: a superseded (or half-dead) bridge still writing frames
+  // injects its own older state into a browser that never reconnected.
+  hub.fromAgent({ t: 'data', ch, payload: 'stale' }, first.sink);
+  assert.equal(client.sent.length, before, 'a bridge that no longer owns this device is mute');
+
+  hub.fromAgent({ t: 'data', ch, payload: 'fresh' }, second.sink);
+  assert.equal(client.sent.at(-1), 'fresh');
+});
+
+test("a superseded agent's close does not kill the current agent's channel", () => {
+  const hub = new DeviceHub('d1');
+  const first = fakeSink();
+  hub.attachAgent(first.sink);
+  const client = fakeSink();
+  const ch = hub.openChannel('u1', 'ctrl', client.sink, null);
+  const second = fakeSink();
+  hub.attachAgent(second.sink);
+
+  hub.fromAgent({ t: 'close', ch }, first.sink);
+  assert.equal(client.closed(), null, 'the browser belongs to the live bridge now');
+  assert.equal(hub.channelCount, 1);
+
+  // Still reachable from the bridge that does own it.
+  hub.fromAgent({ t: 'data', ch, payload: 'still here' }, second.sink);
+  assert.equal(client.sent.at(-1), 'still here');
+});
+
+test('attach bookkeeping counts every claim on a device', () => {
+  // Diagnostics for the two-bridges-one-identity case: on an idle paired machine
+  // this stays at 1, so a climbing count is the tell.
+  const hub = new DeviceHub('d1');
+  assert.equal(hub.agentAttaches, 0);
+  assert.equal(hub.lastAttachAt, 0);
+
+  const first = fakeSink();
+  assert.equal(hub.attachAgent(first.sink), null, 'a first attach supersedes nobody');
+  assert.equal(hub.agentAttaches, 1);
+  assert.ok(hub.lastAttachAt > 0);
+  assert.equal(hub.isAgent(first.sink), true);
+
+  const second = fakeSink();
+  assert.equal(hub.attachAgent(second.sink), first.sink, 'the caller is told whom it displaced');
+  assert.equal(hub.agentAttaches, 2);
+  assert.equal(hub.isAgent(first.sink), false);
+});
+
+test('the registry summarises each hub for triage', () => {
+  const reg = new HubRegistry();
+  const hub = reg.get('d1');
+  hub.attachAgent(fakeSink().sink);
+  hub.openChannel('u1', 'ctrl', fakeSink().sink, null);
+
+  const [row] = reg.list();
+  assert.equal(row.deviceId, 'd1');
+  assert.equal(row.online, true);
+  assert.equal(row.channels, 1);
+  assert.equal(row.agentAttaches, 1);
+  assert.ok(row.lastAttachAt > 0);
 });
 
 test('losing the agent notifies clients but keeps them connected', () => {
@@ -110,7 +191,7 @@ test('data for an unknown channel is dropped, not broadcast', () => {
   hub.openChannel('u1', 'ctrl', client.sink, null);
   const before = client.sent.length;
 
-  hub.fromAgent({ t: 'data', ch: 'nope', payload: 'x' });
+  hub.fromAgent({ t: 'data', ch: 'nope', payload: 'x' }, agent.sink);
   assert.equal(client.sent.length, before, 'a stray channel id must not leak to other clients');
 });
 
@@ -179,7 +260,7 @@ test('channels from different users stay isolated on one device', () => {
   hub.openChannel('user-b', 'ctrl', b.sink, null);
 
   const beforeB = b.sent.length;
-  hub.fromAgent({ t: 'data', ch: chA, payload: 'for-a-only' });
+  hub.fromAgent({ t: 'data', ch: chA, payload: 'for-a-only' }, agent.sink);
   assert.ok(a.sent.includes('for-a-only'));
   assert.equal(b.sent.length, beforeB, "user-b must not see user-a's traffic");
 });

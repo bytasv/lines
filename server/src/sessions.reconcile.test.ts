@@ -29,6 +29,16 @@ const meta = (status: SessionStatus, extra: Partial<SessionMeta> = {}): SessionM
   }) as SessionMeta;
 
 /**
+ * A transcript stands for "this machine ran this session". Reconcile skips
+ * sessions with no local execution history — a row adopted from another machine's
+ * storage sync — so a session that is meant to be reconciled has to look like one
+ * that ran here.
+ */
+const ranHere: TranscriptEvent[] = [
+  { seq: 0, ts: 0, kind: 'sdk', data: { type: 'assistant' } } as TranscriptEvent,
+];
+
+/**
  * A manager over a throwaway store seeded with `metas`. `throwFor` makes the
  * worker push throw for that session, standing in for any per-session failure
  * on the resume path.
@@ -38,16 +48,23 @@ function managerOver(
   settings?: UserUiSettings,
   throwFor?: string,
   events?: TranscriptEvent[],
+  opts: { adoptedFromElsewhere?: boolean } = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-reconcile-'));
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify(metas));
   if (settings) fs.writeFileSync(path.join(root, 'settings.json'), JSON.stringify(settings));
-  if (events?.length) {
-    fs.mkdirSync(path.join(root, 'transcripts'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'transcripts'), { recursive: true });
+  const writeTranscript = (id: string, list: TranscriptEvent[]) =>
     fs.writeFileSync(
-      path.join(root, 'transcripts', `${metas[0].id}.jsonl`),
-      events.map((e) => JSON.stringify(e)).join('\n') + '\n',
+      path.join(root, 'transcripts', `${id}.jsonl`),
+      list.map((e) => JSON.stringify(e)).join('\n') + '\n',
     );
+  if (opts.adoptedFromElsewhere) {
+    // Deliberately no transcript: nothing here has ever executed these.
+  } else if (events?.length) {
+    writeTranscript(metas[0].id, events);
+  } else {
+    for (const m of metas) writeTranscript(m.id, ranHere);
   }
   const store = createStore(root);
   const sessions = new SessionManager(store, new GuardAllowlist(store), () => {});
@@ -332,6 +349,30 @@ test('worker lost, never returns: idles the session but does not auto-continue',
   assert.equal(m.status, 'idle');
   assert.ok((m.interruptedAt ?? 0) > 0, 'the Continue banner appears');
   assert.deepEqual(h.pushed, [], 'no worker to push a resumed turn to');
+});
+
+test('a session adopted from another machine is left alone', () => {
+  // It only exists here because storage sync pulled it: no live query, no local
+  // transcript. Demoting it restamps and re-broadcasts a turn this machine never
+  // owned — once per reconcile, per session, which is the storm that fed the loop.
+  const h = managerOver([meta('running', { claudeSessionId: 'c1' })], autoContinue, undefined, undefined, {
+    adoptedFromElsewhere: true,
+  });
+  h.sessions.reconcileWithWorker([]);
+
+  const m = h.get('s1');
+  assert.equal(m.status, 'running', 'its status belongs to the machine actually running it');
+  assert.equal(m.interruptedAt, undefined, "no Continue banner for another machine's turn");
+  assert.deepEqual(h.pushed, [], 'and certainly no auto-continue');
+});
+
+test('a worker report still reconciles a session with no local transcript', () => {
+  // The skip is scoped to "no evidence at all": a live report is evidence.
+  const h = managerOver([meta('running')], noAutoContinue, undefined, undefined, {
+    adoptedFromElsewhere: true,
+  });
+  h.sessions.reconcileWithWorker([{ sessionId: 's1', busy: false }]);
+  assert.equal(h.get('s1').status, 'idle');
 });
 
 test('a queued push counts as live so its session survives reconcile', () => {

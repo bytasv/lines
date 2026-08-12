@@ -100,9 +100,16 @@ model GuardAllowlist {
 }
 
 model Session {
-  userId    String   @map("user_id")
-  id        String   @db.Uuid
-  data      Json // SessionMeta (metadata only; transcripts stay host-local)
+  userId String @map("user_id")
+  id     String @db.Uuid
+  data   Json // SessionMeta (metadata only; transcripts stay host-local)
+
+  /// Soft delete, and it has to be one: a hard delete leaves peers nothing to
+  /// adopt, so whichever machine still held the row pushed it straight back on its
+  /// next sync — the undeletable session. Deleting also bumps `updatedAt`, so the
+  /// tombstone lands inside every peer's next delta window.
+  deletedAt DateTime? @map("deleted_at")
+
   updatedAt DateTime @default(now()) @map("updated_at")
 
   @@id([userId, id])

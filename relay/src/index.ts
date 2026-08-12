@@ -9,6 +9,7 @@
  * payload, and never logs one — see protocol.ts on why the payload stays opaque.
  * Anything that needs to understand a Lines message belongs in the bridge.
  */
+import { timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 import dotenv from 'dotenv';
@@ -124,9 +125,35 @@ async function verifyDevice(deviceId: string, secret: string | null): Promise<De
   }
 }
 
-const server = http.createServer((_req, res) => {
+/**
+ * Constant-time check of the shared secret on a public endpoint, so the header
+ * cannot be guessed byte by byte from response timing. Length is compared first
+ * because timingSafeEqual throws on a mismatch — that leak is only the length.
+ */
+function presentedSecretMatches(presented: string | string[] | undefined): boolean {
+  if (!RELAY_SHARED_SECRET || typeof presented !== 'string') return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(RELAY_SHARED_SECRET);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Health, plus a triage payload behind the shared secret.
+ *
+ * The unauthenticated shape is unchanged and must stay that way: device ids are
+ * the addresses of users' machines, and this endpoint is public.
+ */
+const server = http.createServer((req, res) => {
+  const authorized = presentedSecretMatches(req.headers['x-relay-secret']);
   res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ ok: true, version: RELAY_PROTOCOL_VERSION, devices: hubs.size }));
+  res.end(
+    JSON.stringify({
+      ok: true,
+      version: RELAY_PROTOCOL_VERSION,
+      devices: hubs.size,
+      ...(authorized ? { hubs: hubs.list() } : {}),
+    }),
+  );
 });
 
 const wss = new WebSocketServer({ server });
@@ -137,6 +164,7 @@ const sinkFor = (ws: WebSocket): Sink => ({
     if (ws.readyState === ws.OPEN) ws.send(data);
   },
   close: (code, reason) => ws.close(code, reason),
+  terminate: () => ws.terminate(),
 });
 
 wss.on('connection', (ws, req) => {
@@ -169,8 +197,17 @@ async function handleAgent(ws: WebSocket, url: URL, deviceId: string) {
   const hub = hubs.get(deviceId);
   hub.ownerId = device.userId;
   const sink = sinkFor(ws);
-  hub.attachAgent(sink);
-  console.log(`[relay] agent attached for device ${deviceId}`);
+  const superseded = hub.attachAgent(sink);
+  if (superseded) {
+    // A takeover used to read exactly like a first attach. It is the one thing
+    // worth shouting about: two bridges claiming one device is what lets a
+    // superseded process keep writing state into live browser channels.
+    console.warn(
+      `[relay] duplicate agent attach for device ${deviceId} — superseding (attach #${hub.agentAttaches})`,
+    );
+  } else {
+    console.log(`[relay] agent attached for device ${deviceId}`);
+  }
 
   /** Any inbound frame proves the socket is alive; silence is what we act on. */
   let lastSeen = Date.now();
@@ -187,13 +224,24 @@ async function handleAgent(ws: WebSocket, url: URL, deviceId: string) {
    * into every user being kicked off their own machine.
    */
   async function reverify(): Promise<void> {
+    // A superseded socket owns nothing: its still-running tick would otherwise
+    // drop the hub — and every channel on it — out from under the live bridge.
+    if (!hub.isAgent(sink)) return;
     if ((await verifyDevice(deviceId, secret)) !== 'unauthorized') return;
+    // Re-checked after the await: the takeover may have happened while we asked.
+    if (!hub.isAgent(sink)) return;
     console.warn(`[relay] device ${deviceId} is no longer authorized — dropping its hub`);
     hubs.drop(deviceId, 'revoked');
     if (ws.readyState === ws.OPEN) ws.close(1008, 'revoked');
   }
 
   const health = setInterval(() => {
+    // Superseded: stop pinging and stop re-verifying. The socket has already been
+    // closed and terminated by attachAgent; this only stops the bookkeeping.
+    if (!hub.isAgent(sink)) {
+      clearInterval(health);
+      return;
+    }
     if (Date.now() - lastSeen > AGENT_DEAD_MS) {
       console.warn(`[relay] agent for device ${deviceId} silent for >${AGENT_DEAD_MS}ms — terminating`);
       // terminate, not close: a close handshake on a half-open socket waits for a
@@ -226,8 +274,9 @@ async function handleAgent(ws: WebSocket, url: URL, deviceId: string) {
       return;
     }
     // Forwarded synchronously — an await here would let two frames race and
-    // reorder a stream.
-    hub.fromAgent(frame);
+    // reorder a stream. The sink goes along so the hub can refuse a frame from a
+    // bridge it has already superseded.
+    hub.fromAgent(frame, sink);
   });
   ws.on('close', () => {
     clearInterval(health);

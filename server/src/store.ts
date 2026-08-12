@@ -112,6 +112,13 @@ function sanitizeProjects(raw: unknown): Project[] {
   return out;
 }
 
+/**
+ * How long a session tombstone is kept. Generous on purpose: a machine that was
+ * off for a fortnight still has to learn about the delete rather than re-push the
+ * row it never heard was gone.
+ */
+const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
 /** Last-synced fingerprint per memory file (absolute path -> state). */
 export type MemoryManifest = Record<string, { key: string; mtimeMs: number; size: number }>;
 
@@ -149,6 +156,9 @@ export function createStore(root: string) {
   const TRANSCRIPTS = path.join(root, 'transcripts');
   const ATTACHMENTS = path.join(root, 'attachments');
   const SESSIONS_FILE = path.join(root, 'sessions.json');
+  // Separate file from SESSIONS_FILE, which stays a bare SessionMeta[]: an older
+  // build's loader would call .map() on an envelope and throw on startup.
+  const DELETED_SESSIONS_FILE = path.join(root, 'deleted-sessions.json');
   const WORKFLOWS_FILE = path.join(root, 'workflows.json');
   const STEPS_FILE = path.join(root, 'steps.json');
   const STEP_VERSIONS_FILE = path.join(root, 'step-versions.json');
@@ -233,6 +243,27 @@ export function createStore(root: string) {
       // rewritten state file (every status transition), and nothing reads it by
       // hand. The indentation alone was roughly half the bytes written.
       fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions));
+    },
+
+    /**
+     * Session tombstones (`id -> ms epoch of the delete`), pruned on load.
+     *
+     * Without them a delete is only an absence, and an absence loses every race:
+     * any peer that still holds the row pushes it back on its next sync, and
+     * `adoptSynced` has nothing to compare a re-arriving session against.
+     */
+    loadDeletedSessions(): Record<string, number> {
+      const raw = readJson<Record<string, number>>(DELETED_SESSIONS_FILE, {});
+      const cutoff = Date.now() - TOMBSTONE_TTL_MS;
+      const kept: Record<string, number> = {};
+      for (const [id, at] of Object.entries(raw)) {
+        if (typeof at === 'number' && at >= cutoff) kept[id] = at;
+      }
+      return kept;
+    },
+
+    saveDeletedSessions(deleted: Record<string, number>) {
+      writeJson(DELETED_SESSIONS_FILE, deleted);
     },
 
     loadWorkflows(): WorkflowDef[] {

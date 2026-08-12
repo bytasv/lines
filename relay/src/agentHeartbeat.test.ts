@@ -120,6 +120,30 @@ test('a silent agent is reaped and the device reports offline', async () => {
   client.ws.close();
 });
 
+test('a second bridge for one device supersedes the first, hard', async () => {
+  const port = await startRelay({
+    RELAY_AUTH_DISABLED: '1',
+    RELAY_AGENT_PING_MS: '150',
+    RELAY_AGENT_DEAD_MS: '10000',
+  });
+  const first = openAgent(port, 'd-dup', { answerPings: true });
+  await until(() => first.pings() >= 1, 'the first agent to be attached');
+
+  const second = openAgent(port, 'd-dup', { answerPings: true });
+  // 1012 and then terminated: a graceful close would wait on a peer that may be
+  // gone, leaving the loser OPEN here — still holding a socket the relay counts.
+  const closed = await until(() => first.closed(), 'the predecessor to be hung up on');
+  assert.equal(closed.code, 1012);
+  await until(() => first.ws.readyState === WebSocket.CLOSED || null, 'the predecessor socket to go');
+
+  // The winner keeps serving: a browser arriving now gets a channel, not offline.
+  const client = openClient(port, 'd-dup');
+  await until(() => second.pings() >= 2, 'the survivor to stay pinged');
+  assert.equal(client.find('deviceOffline'), undefined, 'the takeover must not look like an outage');
+  client.ws.close();
+  second.ws.close();
+});
+
 /** Storage, stubbed, answering /v1/devices/verify from a scripted sequence. */
 async function startStubStorage(replies: { status: number; body?: unknown }[]): Promise<number> {
   let n = 0;

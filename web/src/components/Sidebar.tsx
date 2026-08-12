@@ -61,6 +61,16 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
   const status = sessionRowMeta(session);
   const { overflowing, check } = useOverflow();
   const [hovered, setHovered] = useState(false);
+  // A delete that has been sent but not echoed back. No optimistic removal: the
+  // `sessionDeleted` echo stays the only thing that takes a row off the list, so a
+  // delete that never lands leaves the row visible rather than silently "working".
+  const [deleting, setDeleting] = useState(false);
+  const setActionError = useStore((s) => s.setActionError);
+  const deleteSession = (opts: { confirmFirst: boolean }) => {
+    if (opts.confirmFirst && !confirm(`Delete session "${session.name}"?`)) return;
+    setActionError(null);
+    if (send({ type: 'deleteSession', sessionId: session.id })) setDeleting(true);
+  };
   // A session with no real prompt yet is safe to delete outright; others archive first.
   const isNew = session.nameAuto === true;
   // Ran its workflow to the end but not manually completed — and never allowed to
@@ -191,16 +201,15 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
                   <IconArchiveOff size={13} />
                 </ActionIcon>
               </Tooltip>
-              <Tooltip label="Delete session">
+              <Tooltip label={deleting ? 'Deleting…' : 'Delete session'}>
                 <ActionIcon
                   size="xs"
                   variant="subtle"
                   color="gray"
+                  loading={deleting}
                   onClick={(e) => {
                     stop(e);
-                    if (confirm(`Delete session "${session.name}"?`)) {
-                      send({ type: 'deleteSession', sessionId: session.id });
-                    }
+                    deleteSession({ confirmFirst: true });
                   }}
                 >
                   <IconTrash size={13} />
@@ -208,14 +217,16 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
               </Tooltip>
             </>
           ) : isNew ? (
-            <Tooltip label="Delete session">
+            <Tooltip label={deleting ? 'Deleting…' : 'Delete session'}>
               <ActionIcon
                 size="xs"
                 variant="subtle"
                 color="gray"
+                loading={deleting}
                 onClick={(e) => {
+                  // No confirm: a session with no real prompt yet has nothing to lose.
                   stop(e);
-                  send({ type: 'deleteSession', sessionId: session.id });
+                  deleteSession({ confirmFirst: false });
                 }}
               >
                 <IconTrash size={13} />
@@ -412,9 +423,15 @@ export function Sidebar({
   // Model/mode come from the settings modal (header gear); caveman still
   // inherits from the project's latest session.
   const newSessionDefaults = useStore((s) => s.newSessionDefaults);
+  const markSessionCreatePending = useStore((s) => s.markSessionCreatePending);
+  const actionError = useStore((s) => s.actionError);
+  const setSidebarActionError = useStore((s) => s.setActionError);
   const createSession = (workflowId?: string) => {
     if (!activeProject) return;
     const last = list[0];
+    // Records the intent that lets the resulting upsert take the selection; the
+    // reducer no longer guesses from `createdAt` (a timestamp from another machine).
+    markSessionCreatePending();
     send({
       type: 'createSession',
       name: 'New session',
@@ -509,6 +526,15 @@ export function Sidebar({
               </Menu>
             )}
           </Button.Group>
+        </Box>
+      )}
+      {actionError && (
+        // The one place a dropped control message becomes visible. Click to dismiss;
+        // it is a notice about a send that did not happen, not a persistent state.
+        <Box px="sm" pb="xs">
+          <Text size="xs" c="red" onClick={() => setSidebarActionError(null)} style={{ cursor: 'pointer' }}>
+            {actionError}
+          </Text>
         </Box>
       )}
       <ScrollArea style={{ flex: 1 }} px={6}>

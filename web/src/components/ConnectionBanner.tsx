@@ -5,9 +5,20 @@ import { useStore } from '../store';
 export function ConnectionBanner({ headerHeight }: { headerHeight: number }) {
   const status = useStore((s) => s.connectionStatus);
   const queued = useStore((s) => s.queuedPrompts.length);
-  if (status === 'connected') return null;
+  // Relay up, machine gone. Before bootstrap the ConnectingMachine screen says this;
+  // after it, nothing did — the app rendered a healthy "connected" UI in which every
+  // action silently went nowhere.
+  const machineOffline = useStore((s) => s.machineOffline);
+  const bootstrapped = useStore((s) => s.bootstrapped);
+  const machineGone = machineOffline && bootstrapped;
+  if (status === 'connected' && !machineGone) return null;
 
-  const base = status === 'offline' ? "You're offline — waiting for network…" : 'Disconnected — reconnecting…';
+  const base =
+    status === 'connected'
+      ? 'Your machine is offline — start Lines on it to reconnect.'
+      : status === 'offline'
+        ? "You're offline — waiting for network…"
+        : 'Disconnected — reconnecting…';
   const label = queued > 0 ? `${base} · ${queued} message${queued === 1 ? '' : 's'} queued` : base;
 
   return (

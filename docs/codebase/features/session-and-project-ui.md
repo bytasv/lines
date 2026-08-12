@@ -1,7 +1,8 @@
 # Session and project UI
 
 Covers: `composer-draft-persistence`, `composer-focus-new-session`,
-`project-switch-session-selection`, `project-tab-status-dot`, `session-status-badge`.
+`project-switch-session-selection`, `project-tab-status-dot`, `session-status-badge`,
+`session-create-auto-select`, `hello-duplicate-inertness`.
 
 ## Purpose
 
@@ -27,6 +28,17 @@ and how status is surfaced in the sidebar row and the project tab.
   `waiting-permission` session is actually in (a plan awaiting approval, a question awaiting an
   answer, or a plain tool permission ask) via the sidebar badge label/color and the OS/browser
   notification body, instead of a single generic "needs permission" for all three.
+- **Session-create auto-select** — which session actually gets selected right after the user asks
+  to create one. Intent-based (`pendingCreate` + `seenSessionIds`) rather than a wall-clock
+  comparison against the session's `createdAt`, because that timestamp is stamped on the *bridge*
+  machine while the comparison ran against the *browser's* clock — fine when they're the same
+  computer, silently always-true when they're not (a hosted deployment, where the bridge runs on
+  the user's own machine).
+- **`hello` duplicate inertness** — a repeated `hello` carrying the same session/project snapshot
+  as the last one applied does nothing visible: it must not replace `sessions` or blank the
+  transcript/context-breakdown caches. The relay replays a channel's `open` (and with it, a fresh
+  `hello`) on every bridge attach or takeover, so a browser that never itself reconnected can still
+  receive one.
 
 ## Entry points
 
@@ -40,9 +52,11 @@ and how status is surfaced in the sidebar row and the project tab.
 ## Files
 
 - `web/src/store.ts` — `readDraft`, `writeDraft`, `pruneDrafts`, `readDraftAttachments`,
-  `writeDraftAttachments`, `pruneDraftAttachments`; `sessionUpsert` auto-select-on-create;
-  `setActiveProject`, `latestSessionIn`, `sessionsInProject`; `seenSessionStatus`,
-  `reconcileSeenStatus`
+  `writeDraftAttachments`, `pruneDraftAttachments`; `sessionUpsert`'s intent-based auto-select;
+  the `hello` reducer's signature short-circuit; `setActiveProject`, `latestSessionIn`,
+  `sessionsInProject`; `seenSessionStatus`, `reconcileSeenStatus`; `actionError`
+- `web/src/ws.ts` — `send()` returning `boolean` and setting `actionError` on a dropped
+  non-prompt message
 - `web/src/components/Composer.tsx`
 - `web/src/lib/mentions.ts` (`MentionValue` — the persisted text/mentions shape)
 - `shared/types.ts` — `SessionMeta.createdAt`, `SessionMeta.pendingPermissionTool`
@@ -88,6 +102,20 @@ and how status is surfaced in the sidebar row and the project tab.
   `isWorkflowFinished` (also in `format.ts`), which is not part of this return shape — see
   [workflow-step-lifecycle](workflow-step-lifecycle.md). The sidebar row's icon has a fourth
   branch (finished-workflow filled checkmark) beyond what `sessionRowMeta` alone drives
+- `helloSignature(sessions, projects)` — a cheap string (each session's `id:updatedAt`, joined,
+  plus project paths); the `hello` reducer compares it against the last one it stored and, on a
+  match, skips replacing `sessions`/`transcriptLoaded`/`contextBreakdowns`
+- `withSeen(seen, ids)` — returns `seen` unchanged when every id is already present, so a no-op
+  merge doesn't trigger a re-render
+- `pendingCreate` (store field) — true from `markSessionCreatePending()` until the matching
+  `sessionUpsert` arrives or `CREATE_INTENT_TTL_MS` (15s) elapses
+- `seenSessionIds` (store field) — every session id this browser has ever been told about, via
+  either `hello` or `sessionUpsert`; maintained so a session can never look "new" a second time
+- `markSessionCreatePending()` — called by every `createSession` sender (the sidebar's New
+  session button and its workflow-picker menu); sets `pendingCreate`
+- `actionError` / `setActionError(message)` — a control message the socket couldn't carry; set by
+  `ws.ts`'s `send()` on the dropped-non-prompt path, rendered (and dismissed on click) by the
+  sidebar
 
 ## Data flow
 
@@ -113,10 +141,48 @@ next mirror-effect run. On each `hello` from the server, `pruneDrafts` and
 
 ### Focus on a new session
 
-`store.ts`'s `sessionUpsert` handler auto-selects a session when it's new and
-`Date.now() - session.createdAt < 5000`. `Composer` re-runs a focus effect keyed on `session.id`
-and reuses the same 5-second heuristic to decide whether to call `.focus()` on the textarea ref —
-so it only fires for genuinely new sessions, not on every session switch.
+`Composer` re-runs a focus effect keyed on `session.id` and calls `.focus()` on the textarea ref
+when `Date.now() - session.createdAt < 5000` — its own independent heuristic, so it only fires for
+genuinely new sessions rather than on every session switch. This no longer shares a mechanism with
+session *selection* (below); the two used to lean on the same clock comparison, but selection has
+since moved to an intent flag because it has to survive the bridge and the browser being different
+machines, while focus's blast radius (which textarea gets focus, on the machine the user is
+already looking at) never had that problem.
+
+### Session-create auto-select
+
+`store.ts`'s `sessionUpsert` handler used to auto-select any upsert that was both new to the
+current session map and had a `createdAt` under 5 seconds old — comparing the browser's own clock
+against a timestamp stamped on whichever machine the bridge runs on. Locally those are the same
+clock. Hosted, they're two different computers, and a bridge clock running even slightly ahead
+made the comparison true forever, so *any* upsert for an id not currently in the map — including a
+session resurrected by a duplicate/stale `hello` — stole the selection out from under whatever the
+user was looking at.
+
+The fix is explicit intent instead of a clock: `Sidebar.tsx`'s `createSession` calls
+`markSessionCreatePending()` right before sending `createSession`, which sets `pendingCreate` (and
+arms a 15-second expiry in case the create never lands). `sessionUpsert` claims the selection only
+when `pendingCreate && !seenSessionIds.has(id)` — both the browser asked for a session recently
+*and* this is genuinely the first time it's seen this id. `seenSessionIds` is maintained by both
+`hello` and `sessionUpsert`, so a session that leaves and re-enters the map (deleted then
+resurrected, or replayed by a duplicate snapshot) is never treated as new again.
+
+### A repeated `hello` is inert
+
+The `hello` reducer computes `helloSignature(msg.sessions, msg.projects)` and compares it against
+the signature it stored on the previous `hello`. On a match, every other field (usage, auth,
+worker/storage health, projects, etc.) still applies exactly as before, but `sessions`,
+`transcriptLoaded` and `contextBreakdowns` are left untouched.
+
+This matters because a `hello` is not always proof of a fresh reconnect. The relay replays a
+channel's `open` — and the bridge answers each one with a full `hello` — every time a bridge
+attaches, including a takeover by a second bridge process that superseded the first (see
+[hosted-machine-access](hosted-machine-access.md)). A browser that never itself reconnected could
+receive two different `hello` snapshots (one from each bridge process) in quick succession;
+applying each one wholesale replaced `sessions` and blanked the transcript/breakdown caches, which
+reloaded the open session's transcript and, combined with the old clock-based auto-select above,
+produced a session that visibly alternated between "new" and "previous" — the flicker loop this
+fix (together with the relay/bridge changes) breaks.
 
 ### Project switch
 
@@ -143,6 +209,15 @@ calling `setStatus(id, 'waiting-permission')` → persisted/broadcast via the ex
 `sessionUpsert` path → `Sidebar` and `alerts.ts` both call `waitingPermissionMeta` to derive the
 label/color or notification body from it.
 
+### Deleting a session
+
+`Sidebar.tsx`'s `SessionRow` no longer removes its own row optimistically. Clicking delete calls
+`send({ type: 'deleteSession', ... })`; while `send()` returns `true` the row shows a loading
+spinner on its trash icon and stays put until the server's `sessionDeleted` broadcast actually
+removes it (unaffected — see the `applyServerMessage` case). If `send()` returns `false` — the
+socket isn't open — `setActionError` records a message, which the sidebar renders (and lets the
+user dismiss by clicking it) instead of the delete looking like it silently did nothing.
+
 ## Dependencies
 
 - `@mention` pill data model (`MentionValue` = `{ text, ranges }`) from `web/src/lib/mentions.ts`
@@ -150,12 +225,17 @@ label/color or notification body from it.
 - Browser IndexedDB, for staged attachments only.
 - The existing `.status-dot` CSS (`web/src/index.css`) and Mantine theme colors (`sandstone`,
   `violet`, `teal`, `yellow`, `red`); Mantine `Badge` color props.
+- [hosted-machine-access](hosted-machine-access.md) — why a `hello` can repeat with no browser
+  reconnect, and the socket-generation guard that keeps a stale one's frames from landing at all.
 
 ## Tests
 
 None — `web/` has no test runner. Draft persistence was verified manually via reload; the rest
 (`sessionRowMeta`, `projectStatusMeta`, the alerts status logic, the selection rules) is
-uncovered and verified by hand.
+uncovered and verified by hand. This is the least-tested part of this feature and, per the
+plan that introduced `pendingCreate`/`seenSessionIds`/the `hello` short-circuit, the highest-risk:
+adding a `vitest`/`jsdom` harness with a `store.hello.test.ts` covering "duplicate hello is inert"
+and "auto-select needs `pendingCreate`" is the recommended follow-up.
 
 ## Business rules
 
@@ -166,8 +246,24 @@ uncovered and verified by hand.
   `localStorage` quotas.
 - An empty text draft (`text === ''`) or empty attachment list deletes its storage entry rather
   than storing an empty one.
-- Focus fires only when the session is younger than 5 seconds (shared threshold with the store's
-  auto-select logic); switching to an older existing session does not steal focus.
+- Focus fires only when the session is younger than 5 seconds — its own heuristic, no longer
+  shared with the store's session-select logic (see below); switching to an older existing
+  session does not steal focus.
+- A `sessionUpsert` only takes the selection when `pendingCreate` is true **and** the session id
+  is not already in `seenSessionIds` — never merely because the id is new to the *current* map.
+  `pendingCreate` expires on its own after 15 seconds if no matching upsert ever arrives, so a
+  lost or refused create can't leave a stale intent for an unrelated session to consume.
+- `seenSessionIds` is maintained by both `hello` and `sessionUpsert`; a session that leaves and
+  re-enters the map — deleted then resurrected, or replayed by a duplicate `hello` — is never
+  treated as new again.
+- A repeated `hello` (same session/project signature as the last one applied) is inert:
+  `sessions`, `transcriptLoaded` and `contextBreakdowns` are left untouched, while every other
+  field still applies as normal.
+- Deleting a session shows a loading state on its own row and leaves the row in place until the
+  `sessionDeleted` echo removes it — no optimistic removal, so a delete that failed to send is
+  never mistaken for one that worked.
+- A dropped non-prompt control message (delete included) sets `actionError`, rendered by the
+  sidebar and dismissed by clicking it — replacing a `console.warn` nobody saw.
 - Auto-selection (no valid current selection in the target project) always excludes archived
   sessions; `completed` needs no separate check since the server always archives alongside it.
 - A project whose sessions are all archived auto-selects nothing (empty state) rather than
@@ -223,6 +319,12 @@ uncovered and verified by hand.
   future pause. Concurrent permission asks on the same session: the last `askPermission` call
   wins the label/color, consistent with pre-existing status-overwrite behavior — no new race was
   introduced.
+- `helloSignature` is a cheap string (each session's `id:updatedAt` joined, plus project paths)
+  rather than a hash of the whole `hello` payload, precisely so volatile fields (usage, auth,
+  worker/storage health) stay outside it and keep applying on every `hello` regardless of the
+  short-circuit.
+- `send()` (`ws.ts`) returns `boolean` instead of `void`, so a caller can tell "sent" apart from
+  "dropped" without re-deriving socket state itself.
 
 ## Related decisions
 
@@ -230,3 +332,7 @@ uncovered and verified by hand.
 - [workflow-step-lifecycle](workflow-step-lifecycle.md) — `isWorkflowFinished` and the sidebar
   icon's fourth branch.
 - [prompt-mentions](prompt-mentions.md) — the `MentionValue` the text draft persists.
+- [hosted-machine-access](hosted-machine-access.md) — why a `hello` can repeat with no browser
+  reconnect (relay `open` replay on a bridge attach/takeover).
+- [cloud-sync-sessions](cloud-sync-sessions.md) — what actually makes a delete stick once the
+  `deleteSession` message here reaches the bridge.

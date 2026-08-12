@@ -276,6 +276,29 @@ function toProjects(raw: (Project | string)[]): Project[] {
   return raw.map((p) => (typeof p === 'string' ? { path: p } : p));
 }
 
+/**
+ * Cheap identity of the session/project half of a `hello`.
+ *
+ * Two *different* bridge states alternating (the flicker) produce two signatures;
+ * one bridge announcing itself twice produces one, and the reducer can then leave
+ * `sessions`, `transcriptLoaded` and `contextBreakdowns` alone. Deliberately not a
+ * hash of the whole message: the volatile fields (usage, worker/storage health) are
+ * applied on every `hello` regardless, so including them would defeat this.
+ */
+function helloSignature(sessions: SessionMeta[], projects: Project[]): string {
+  const ids = sessions.map((s) => `${s.id}:${s.updatedAt ?? s.createdAt}`).join(',');
+  return `${ids}|${projects.map((p) => p.path).join(',')}`;
+}
+
+/** `seen` plus `ids`, or `seen` itself when nothing is new — no pointless re-render. */
+function withSeen(seen: Set<string>, ids: string[]): Set<string> {
+  const fresh = ids.filter((id) => !seen.has(id));
+  if (fresh.length === 0) return seen;
+  const next = new Set(seen);
+  for (const id of fresh) next.add(id);
+  return next;
+}
+
 /** The open project with this path, if any — what `sessionsInProject` wants. */
 export function projectAt(projects: Project[], path: string | null): Project | null {
   return path ? projects.find((p) => p.path === path) ?? null : null;
@@ -378,6 +401,31 @@ interface UiState {
    * connecting screen state the problem instead of guessing after six seconds.
    */
   machineOffline: boolean;
+  /**
+   * A control message the socket could not carry (delete, archive, …). Surfaced
+   * because a dropped one used to be a `console.warn` and nothing else, which is
+   * how "delete did nothing" stayed invisible.
+   */
+  actionError: string | null;
+  /**
+   * Fingerprint of the last applied `hello` payload. A repeated `hello` — which the
+   * relay produces whenever it replays a channel `open` to a (re)attaching bridge —
+   * carries the same one, and applying it again is what replaced `sessions`
+   * wholesale and blanked the transcript cache on a loop.
+   */
+  helloSignature: string | null;
+  /**
+   * Every session id this browser has been told about. A session that leaves the
+   * map and comes back (a sync round-trip, a duplicate snapshot) must never look
+   * new again, or it steals the selection from the one the user is looking at.
+   */
+  seenSessionIds: Set<string>;
+  /**
+   * The user asked for a session and its upsert has not arrived yet. Auto-select is
+   * gated on this rather than on `createdAt`: that timestamp is stamped on the
+   * *bridge* machine, so hosted the comparison was against a foreign clock.
+   */
+  pendingCreate: boolean;
   /** Prompts waiting for the socket to come back, flushed FIFO after the next `hello`. */
   queuedPrompts: QueuedPrompt[];
   sessions: Record<string, SessionMeta>;
@@ -485,6 +533,13 @@ interface UiState {
 
   applyServerMessage: (msg: ServerMessage) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
+  /** A control message could not be delivered; null clears the notice. */
+  setActionError: (message: string | null) => void;
+  /**
+   * The user asked for a new session. Read by the `sessionUpsert` reducer, which
+   * hands selection to the first session id it has never seen — see `pendingCreate`.
+   */
+  markSessionCreatePending: () => void;
   /** Relay control frames — the machine's bridge attached or went away. */
   setMachineOffline: (offline: boolean) => void;
   /**
@@ -536,6 +591,10 @@ interface UiState {
   setActiveFileTab: (path: string) => void;
 }
 
+/** How long a "the user asked for a new session" intent stays live. */
+const CREATE_INTENT_TTL_MS = 15_000;
+let createIntentTimer: ReturnType<typeof setTimeout> | null = null;
+
 export const useStore = create<UiState>((set, get) => {
   /** Mirror the current UI settings to the bridge (and through it, the storage server). */
   const pushSettings = () => {
@@ -585,6 +644,10 @@ export const useStore = create<UiState>((set, get) => {
   connectionStatus: 'reconnecting',
   bootstrapped: false,
   machineOffline: false,
+  actionError: null,
+  helloSignature: null,
+  seenSessionIds: new Set<string>(),
+  pendingCreate: false,
   queuedPrompts: [],
   sessions: {},
   workflows: [],
@@ -638,9 +701,30 @@ export const useStore = create<UiState>((set, get) => {
 
   setConnectionStatus: (status) => set({ connectionStatus: status }),
   setMachineOffline: (offline) => set({ machineOffline: offline }),
+  setActionError: (message) => set({ actionError: message }),
+  markSessionCreatePending: () => {
+    if (createIntentTimer) clearTimeout(createIntentTimer);
+    // Expires on its own: a create that never lands (the socket dropped, the bridge
+    // refused) must not leave an intent behind for an unrelated session to consume.
+    createIntentTimer = setTimeout(() => {
+      createIntentTimer = null;
+      set({ pendingCreate: false });
+    }, CREATE_INTENT_TTL_MS);
+    set({ pendingCreate: true });
+  },
   // Also clears machineOffline: it describes the machine we are leaving, and a
   // stale "offline" would put the escalated copy up before the new one is tried.
-  clearBootstrap: () => set({ bootstrapped: false, machineOffline: false }),
+  // The hello fingerprint and the seen-id set go with it — they describe the old
+  // machine's sessions, and keeping them would make the new machine's first `hello`
+  // look like a duplicate.
+  clearBootstrap: () =>
+    set({
+      bootstrapped: false,
+      machineOffline: false,
+      helloSignature: null,
+      seenSessionIds: new Set<string>(),
+      pendingCreate: false,
+    }),
   enqueuePrompt: (p) => set((state) => ({ queuedPrompts: [...state.queuedPrompts, p] })),
   drainQueuedPrompts: () => {
     const queued = get().queuedPrompts;
@@ -845,14 +929,23 @@ export const useStore = create<UiState>((set, get) => {
   applyServerMessage: (msg) => {
     switch (msg.type) {
       case 'hello': {
-        const sessions: Record<string, SessionMeta> = {};
-        for (const s of msg.sessions) sessions[s.id] = s;
+        const incoming: Record<string, SessionMeta> = {};
+        for (const s of msg.sessions) incoming[s.id] = s;
         const projects = toProjects(msg.projects);
+        const signature = helloSignature(msg.sessions, projects);
+        // A duplicate `hello` has to be inert. The bridge sends a full snapshot per
+        // channel `open`, and the relay replays `open` for every live channel each
+        // time a bridge attaches — so a takeover delivers one to a browser that never
+        // reconnected. Re-applying it replaced `sessions` and blanked the transcript
+        // and breakdown caches, which reloaded transcripts and fed the next round.
+        const repeat = signature === get().helloSignature;
         set((state) => ({
           bootstrapped: true,
           // A `hello` is proof the bridge is there, whatever the relay last said.
           machineOffline: false,
-          sessions,
+          helloSignature: signature,
+          seenSessionIds: withSeen(state.seenSessionIds, Object.keys(incoming)),
+          ...(repeat ? {} : { sessions: incoming }),
           workflows: msg.workflows,
           sharedWorkflows: msg.sharedWorkflows ?? [],
           steps: msg.steps ?? [],
@@ -895,12 +988,11 @@ export const useStore = create<UiState>((set, get) => {
           // handler below merges and dedupes by seq — because blanking them here
           // made every reconnect re-render from empty and re-download megabytes,
           // which on a large transcript stalls the main thread into another
-          // heartbeat timeout: reconnect loop.
-          transcriptLoaded: {},
-          // A reconnect can follow a worker restart, so every live detail
-          // reading is suspect; the persisted summary on each meta remains.
-          contextBreakdowns: {},
+          // heartbeat timeout: reconnect loop. Skipped entirely on a repeat, where
+          // there is by definition nothing new to reload.
+          ...(repeat ? {} : { transcriptLoaded: {}, contextBreakdowns: {} }),
         }));
+        const sessions = get().sessions;
         const { selectedSessionId } = get();
         if (selectedSessionId && !sessions[selectedSessionId]) {
           set({ selectedSessionId: null });
@@ -936,13 +1028,17 @@ export const useStore = create<UiState>((set, get) => {
       case 'sessionUpsert': {
         const prev = get().sessions[msg.session.id];
         set((state) => {
-          const isNew = !state.sessions[msg.session.id];
-          const justCreated = Date.now() - msg.session.createdAt < 5000;
+          // Auto-select on explicit intent, not on a clock. `createdAt` is stamped on
+          // the bridge machine: hosted, that is a different computer, and a bridge
+          // clock even slightly ahead made every upsert look "just created" — so any
+          // session re-entering the map stole the selection. `seenSessionIds` is the
+          // other half: a session this browser already knows is never new again.
+          const claim = state.pendingCreate && !state.seenSessionIds.has(msg.session.id);
           return {
             sessions: { ...state.sessions, [msg.session.id]: msg.session },
-            // Auto-select freshly created sessions (single-user local app).
-            selectedSessionId:
-              isNew && justCreated ? msg.session.id : state.selectedSessionId,
+            seenSessionIds: withSeen(state.seenSessionIds, [msg.session.id]),
+            pendingCreate: claim ? false : state.pendingCreate,
+            selectedSessionId: claim ? msg.session.id : state.selectedSessionId,
           };
         });
         maybeAlert(prev, msg.session, {

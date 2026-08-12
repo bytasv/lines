@@ -11,6 +11,7 @@ import dotenv from 'dotenv';
 import type { ErrorRequestHandler, Request, Response as ExResponse } from 'express';
 import { RECIPE_IMAGE_MAX_BYTES, RECIPE_IMAGE_TYPES } from '@lines/shared';
 import { putRecipeImage, r2Configured, r2PublicBaseWarning } from './r2.ts';
+import { listSessions, putSession, putSessions, softDeleteSession, toWire } from './sessionRows.ts';
 
 dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
 
@@ -588,79 +589,36 @@ app.delete('/recipes/:id', async (req, res) => {
 });
 
 // --- sessions (metadata only) ----------------------------------------------
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/**
- * Ceiling on one /sessions pull. Sessions are never deleted from storage by
- * age, so without this the newest install re-downloads years of metadata. The
- * bridge keeps its own full copy on disk; this only bounds what a *sync* moves.
- */
-const SESSIONS_PAGE_MAX = 500;
+//
+// The row rules — LWW upsert, soft delete, resurrect guard — live in
+// sessionRows.ts so they are testable without a Clerk token.
 
 app.get('/sessions', async (req, res) => {
   // The heaviest pull in the system — session metadata accumulates forever and
   // the UI only ever shows the recent end of it. Bounded even on a full pull.
-  //
-  // Direction matters with `take`. A full pull wants the newest page (`desc`),
-  // and the cursor it hands back is the newest row — everything older is
-  // deliberately left behind. A delta pull walks *forward* (`asc`), so when
-  // more than a page has changed the cursor lands on the oldest unsent row and
-  // the next pull resumes there; newest-first would strand the remainder.
-  const since = sinceOf(req);
-  const rows = await prisma.session.findMany({
-    where: { userId: userIdOf(req), ...(since ? { updatedAt: { gte: since } } : {}) },
-    select: { data: true, updatedAt: true },
-    orderBy: { updatedAt: since ? 'asc' : 'desc' },
-    take: SESSIONS_PAGE_MAX,
-  });
+  const rows = await listSessions(prisma, userIdOf(req), sinceOf(req));
   stampCursor(res, rows);
-  res.json(rows.map((r) => r.data));
+  res.json(toWire(rows));
 });
 
 app.put('/sessions', async (req, res) => {
-  const userId = userIdOf(req);
   const list = Array.isArray(req.body) ? (req.body as { id?: string }[]) : [];
-  // sessions.id is a uuid column and this is now one batched statement, so a
-  // single malformed id would reject the whole push — drop those instead.
-  const valid = list.filter((m) => m?.id && UUID_RE.test(m.id));
-  if (valid.length === 0) {
-    res.json({ ok: true, count: 0 });
-    return;
-  }
-  await prisma.$executeRaw`
-    INSERT INTO sessions (user_id, id, data, updated_at)
-    SELECT ${userId}, u.id::uuid, u.data::jsonb, u.updated_at
-    FROM UNNEST(
-      ${valid.map((m) => m.id!)}::text[],
-      ${valid.map((m) => JSON.stringify(m))}::text[],
-      ${valid.map((m) => updatedAtOf(m).toISOString())}::timestamptz[]
-    ) AS u(id, data, updated_at)
-    ON CONFLICT (user_id, id) DO UPDATE
-      SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at`;
-  res.json({ ok: true, count: valid.length });
+  const count = await putSessions(prisma, userIdOf(req), list);
+  res.json({ ok: true, count });
 });
 
 app.put('/sessions/:id', async (req, res) => {
-  const userId = userIdOf(req);
   const meta = req.body as { id?: string };
   if (!meta?.id || meta.id !== req.params.id) {
     res.status(400).json({ error: 'body id must match path id' });
     return;
   }
-  await prisma.session.upsert({
-    where: { userId_id: { userId, id: meta.id } },
-    create: { userId, id: meta.id, data: meta as object, updatedAt: updatedAtOf(meta) },
-    update: { data: meta as object, updatedAt: updatedAtOf(meta) },
-    select: { userId: true }, // never return the blob we just sent
-  });
-  res.json({ ok: true });
+  const { deleted } = await putSession(prisma, userIdOf(req), meta as { id: string });
+  res.json({ ok: true, ...(deleted ? { deleted } : {}) });
 });
 
 app.delete('/sessions/:id', async (req, res) => {
-  await prisma.session
-    .deleteMany({ where: { userId: userIdOf(req), id: req.params.id } })
-    .catch(() => undefined); // a malformed (non-uuid) id is not worth a 500
+  await softDeleteSession(prisma, userIdOf(req), req.params.id);
   res.json({ ok: true });
 });
 

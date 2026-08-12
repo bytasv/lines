@@ -48,7 +48,7 @@ test('routing a payload in either direction logs nothing containing it', (t) => 
   const ch = hub.openChannel('u1', 'ctrl', client.sink, `token-${CANARY}`);
 
   hub.fromClient(ch, JSON.stringify({ type: 'prompt', text: CANARY }));
-  hub.fromAgent({ t: 'data', ch, payload: JSON.stringify({ type: 'event', data: CANARY }) });
+  hub.fromAgent({ t: 'data', ch, payload: JSON.stringify({ type: 'event', data: CANARY }) }, agent.sink);
   hub.setToken('u1', `token-${CANARY}`);
   hub.closeChannel(ch);
 
@@ -64,7 +64,7 @@ test('the payload still arrives intact — redaction is not silent dropping', (t
   const client = fakeSink();
   const ch = hub.openChannel('u1', 'ctrl', client.sink, null);
 
-  hub.fromAgent({ t: 'data', ch, payload: CANARY });
+  hub.fromAgent({ t: 'data', ch, payload: CANARY }, agent.sink);
   assert.ok(client.sent.includes(CANARY), 'the browser must still receive the payload verbatim');
 });
 

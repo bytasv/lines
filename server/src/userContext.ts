@@ -290,7 +290,12 @@ export function buildUserContext(
         workflows.applySyncedSteps(pulled.steps);
         recipes.applySyncedRecipes(pulled.recipes);
         recipes.applyStats(pulled.recipeStats);
-        for (const meta of pulled.sessions) sessions.adoptSynced(meta);
+        for (const row of pulled.sessions) {
+          // A soft-deleted row is a tombstone to adopt, not a session: adopting it as
+          // one is what made a delete on another machine come straight back here.
+          if (row.deletedAt) sessions.applyRemoteDelete(row.id, row.deletedAt);
+          else sessions.adoptSynced(row);
+        }
         const remote = pulled.settings as UserUiSettings | null;
         // Merged before the applying flag drops, so the union is pushed once below.
         const local = store.loadSettings();

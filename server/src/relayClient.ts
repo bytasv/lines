@@ -143,6 +143,10 @@ export class RelayClient {
   private lastFrameAt = 0;
   private attempt = 0;
   private disposed = false;
+  /** How many times the relay has hung up on us as superseded. Logged, because a
+   *  single takeover is normal (a restart) and a climbing count is not: it means
+   *  another process on this machine is claiming the same device. */
+  private supersededCount = 0;
 
   constructor(
     private url: string,
@@ -218,6 +222,20 @@ export class RelayClient {
 
   private connect(): void {
     if (this.disposed) return;
+    // Never two live sockets from one client: the relay would see two attaches for
+    // this device and supersede one of them. The single-flight retryTimer makes
+    // this defensive today. Listeners come off first — the old socket's `close`
+    // would otherwise drop the channels this connection is about to rebuild and
+    // schedule a competing re-dial.
+    if (this.ws) {
+      const stale = this.ws;
+      this.ws = null;
+      stale.removeAllListeners();
+      // An 'error' with no listener throws and takes the bridge down.
+      stale.on('error', () => {});
+      stale.close();
+      this.dropAllChannels();
+    }
     const url = `${this.url}/agent?device=${encodeURIComponent(this.deviceId)}&secret=${encodeURIComponent(this.secret)}`;
     const ws = new WebSocket(url);
     this.ws = ws;
@@ -252,8 +270,12 @@ export class RelayClient {
       // /agent itself) and for a device it cannot verify. Retrying cannot fix
       // either, so it must not be silent. Backoff bounds the log volume.
       const text = reason.toString();
+      if (code === 1012) this.supersededCount++;
       if (code !== 1000) {
-        console.warn(`[relay] closed ${code} ${text || '(no reason)'} — dialling ${this.url}/agent`);
+        // The supersede count is the bridge-side tell for two processes sharing one
+        // device identity: one line per takeover looks like an ordinary restart.
+        const tally = code === 1012 ? ` (superseded ${this.supersededCount} times)` : '';
+        console.warn(`[relay] closed ${code} ${text || '(no reason)'}${tally} — dialling ${this.url}/agent`);
       }
       this.callbacks.onStatus?.({ connected: false, code, ...(text ? { reason: text } : {}) });
       this.dropAllChannels();
@@ -273,6 +295,16 @@ export class RelayClient {
   private dispatch(frame: RelayToAgent): void {
     switch (frame.t) {
       case 'open': {
+        // Every agent attach replays `open` for all live channels, so a takeover
+        // (or any re-announcement) re-delivers ids we already serve. Idempotent, so
+        // that a repeat costs nothing: handling it again would build a second
+        // BrowserLink for one browser and push it a second full `hello` snapshot,
+        // which is how a relay flap turned into a session-flicker loop. A genuine
+        // reconnect can't land here — `ws.on('close')` already dropped the channels.
+        if (this.channels.has(frame.ch)) {
+          console.warn(`[relay] duplicate open for channel ${frame.ch} — keeping the existing link`);
+          break;
+        }
         const ch = new RelayChannel(
           frame.ch,
           (payload) => this.ws?.send(JSON.stringify({ t: 'data', ch: frame.ch, payload })),

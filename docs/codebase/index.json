@@ -556,7 +556,8 @@
         "authRefusalMessage",
         "AuthManager.ensureFreshToken",
         "PROACTIVE_RETRY_MS",
-        "PROACTIVE_RETRY_CAP_MS"
+        "PROACTIVE_RETRY_CAP_MS",
+        "SessionManager.ranHere"
       ],
       "tests": [
         "server/src/sessions.reconcile.test.ts",
@@ -578,6 +579,7 @@
         "the sidebar row shows the same yellow interrupted dot/badge as the banner via sessionRowMeta, reusing the banner's exact guard, and persists through ackSession the same way",
         "the socket may be down for WORKER_LOST_MS (20s) before it's treated as a real outage, well past an ordinary tsx-watch reconnect (~1-2s)",
         "the worker-lost path flags sessions but never auto-continues them, even with autoContinueInterrupted on; the next real hello resumes them",
+        "reconcileWithWorker skips a session that has neither live state nor a local on-disk transcript (SessionManager.ranHere) — it only exists here because storage sync (adoptSynced) adopted it from another machine, and demoting/restamping/auto-continuing it would broadcast and cloud-push a turn this machine never ran; a session with an actual worker report for this pass is still fully reconciled even with no local transcript, since a live report is itself evidence",
         "a cold-start protocol mismatch never sets everConnected, so the outage clock never starts; it's surfaced by WorkerStatus.mismatch instead",
         "exactly one of ConnectionBanner/WorkerBanner/StorageBanner renders at a time; bridge-down outranks worker-down outranks storage-down",
         "every recoverable failure ends on a failure row with a working Retry, in a plain session and inside a running workflow alike",
@@ -625,12 +627,14 @@
         "ownerToken() awaits ensureFreshToken() rather than reading getAccessTokenSync(), so helper queries get the same refresh-on-margin treatment as a real turn",
         "the no-AuthManager branch of pushTurn returns before the first await, keeping that path synchronous for tests that assert an immediate push",
         "the proactive backoff computes its first rung explicitly (null ? RETRY : min(x*2, CAP)) rather than doubling a default, which would skip the 60s rung",
-        "getAccessTokenSync() remains on AuthManager but has no production caller; it is kept for the sync-status shape tests rely on"
+        "getAccessTokenSync() remains on AuthManager but has no production caller; it is kept for the sync-status shape tests rely on",
+        "the no-local-history skip is narrow and scoped to reconcileWithWorker only — it does not change adoptSynced or what counts as this instance owning a session; it exists because a flapping worker or duplicate bridge (see hosted-machine-access) turned every reconcile pass into a broadcast/cloud-push storm across sessions this machine never actually ran, feeding the very kind of loop this feature exists to break rather than amplify"
       ],
       "relatedDecisions": [
         "session-and-project-ui",
         "workflow-step-lifecycle",
-        "context-window"
+        "context-window",
+        "hosted-machine-access"
       ]
     },
     {
@@ -643,7 +647,9 @@
         "composer-focus-new-session",
         "project-switch-session-selection",
         "project-tab-status-dot",
-        "session-status-badge"
+        "session-status-badge",
+        "session-create-auto-select",
+        "hello-duplicate-inertness"
       ],
       "entryPoints": [
         "web/src/components/Composer.tsx",
@@ -655,6 +661,7 @@
       ],
       "files": [
         "web/src/store.ts",
+        "web/src/ws.ts",
         "web/src/components/Composer.tsx",
         "web/src/lib/mentions.ts",
         "shared/types.ts",
@@ -681,14 +688,22 @@
         "seenSessionStatus",
         "reconcileSeenStatus",
         "SessionMeta.pendingPermissionTool",
-        "waitingPermissionMeta"
+        "waitingPermissionMeta",
+        "helloSignature",
+        "withSeen",
+        "pendingCreate",
+        "seenSessionIds",
+        "markSessionCreatePending",
+        "actionError",
+        "setActionError",
+        "send"
       ],
       "tests": [],
       "businessRules": [
         "persisted text draft is the full MentionValue (text + ranges), not plain text, so restored pills/expansions stay intact",
         "staged attachments persist too, in IndexedDB rather than localStorage (base64 file data can run tens of MB)",
         "an empty text draft or attachment list is deleted from storage rather than stored empty",
-        "focus fires only when session.createdAt is under 5s old, same threshold as the store's auto-select-on-create logic",
+        "Composer's focus effect fires only when session.createdAt is under 5s old; this is its own independent heuristic and no longer shares a threshold with the store's session-select-on-create logic (see session-create-auto-select below) — focus and selection now solve different problems on purpose",
         "switching to an older existing session does not steal focus",
         "auto-selection always excludes archived sessions; completed needs no separate check since the server always archives alongside it",
         "a project whose sessions are all archived auto-selects nothing (empty state) rather than opening an archived one",
@@ -703,7 +718,13 @@
         "ExitPlanMode -> label 'plan ready', violet badge",
         "AskUserQuestion -> label 'needs answer', teal badge",
         "any other tool -> label 'needs permission', yellow badge (unchanged default)",
-        "notification body mirrors the sidebar label (capitalized) for waiting-permission sessions"
+        "notification body mirrors the sidebar label (capitalized) for waiting-permission sessions",
+        "a sessionUpsert only takes the selection when pendingCreate is true AND the session id is not already in seenSessionIds — replaces a comparison of session.createdAt (stamped on the bridge machine) against Date.now() (the browser's clock): hosted, those are different machines, and even a slightly-ahead bridge clock made every upsert look 'just created' forever, so any session re-entering the map stole the selection",
+        "pendingCreate is set by markSessionCreatePending() (called by every createSession sender: the sidebar's New session button/menu, and the recipe-run path already selects explicitly via its own sessionId and does not need it) and expires on its own after 15s if no matching upsert ever arrives",
+        "seenSessionIds is maintained by both the hello reducer and sessionUpsert, so a session that leaves and re-enters the map — deleted then resurrected, or replayed by a duplicate hello — is never treated as new again",
+        "a repeated hello (same session/project signature as the last one applied) is inert: sessions, transcriptLoaded and contextBreakdowns are left untouched, while every other field (usage, worker/storage health, auth) still applies as normal — the relay replays open (and its full hello) for every live channel on any bridge attach or takeover, and wholesale-replacing state on each one is what turned two alternating bridge snapshots into a self-sustaining flicker loop across sessions and transcript reloads",
+        "send() (ws.ts) returns false when the socket is not open and the message is not a prompt (prompts alone queue for replay); the caller sets actionError so a dropped control message — e.g. a delete sent while disconnected — is visible instead of a console.warn nobody saw",
+        "deleting a session shows a loading state on its own row and leaves the row in place until the sessionDeleted echo removes it — no optimistic removal, so a delete that silently failed to send is never mistaken for one that worked"
       ],
       "architecturalRules": [
         "text drafts use a single lines.drafts JSON map keyed by session id, following the existing store.ts convention (e.g. lines.openFiles) rather than one key per session",
@@ -716,11 +737,14 @@
         "pendingPermissionTool rides the existing sessionUpsert broadcast, no new message type",
         "cleared centrally in setStatus for any non-waiting-permission status, plus the worker-reconcile and sync-adopt paths that can force waiting-permission back to idle out from under a live turn",
         "concurrent permission asks on the same session: last askPermission call wins the label/color, consistent with pre-existing status-overwrite behavior",
-        "sessionRowMeta is the single row-presentation entry point: waitingPermissionMeta first, then the interrupted-turn-recovery yellow state, then the plain per-status table (moved into format.ts from Sidebar.tsx)"
+        "sessionRowMeta is the single row-presentation entry point: waitingPermissionMeta first, then the interrupted-turn-recovery yellow state, then the plain per-status table (moved into format.ts from Sidebar.tsx)",
+        "helloSignature is a cheap string (each session's id:updatedAt joined, plus project paths) rather than a hash of the whole hello payload, precisely so volatile fields (usage, worker/storage health) stay outside it and keep applying on every hello regardless of the short-circuit",
+        "store changes here (the hello short-circuit, pendingCreate/seenSessionIds) are pure reducer logic with no web test harness backing them (web/ has no test runner) — the highest-risk, least-covered part of this feature; verified manually"
       ],
       "relatedDecisions": [
         "turn-recovery",
-        "workflow-step-lifecycle"
+        "workflow-step-lifecycle",
+        "hosted-machine-access"
       ]
     },
     {
@@ -855,43 +879,73 @@
     },
     {
       "id": "cloud-sync-sessions",
-      "name": "Cloud sync: session push budgeting",
+      "name": "Cloud sync: session push budgeting and delete tombstones",
       "doc": "features/cloud-sync-sessions.md",
-      "purpose": "Push a user's SessionMeta list to the storage server without re-sending rows it already has and without exceeding the storage server's request body limit.",
+      "purpose": "Push a user's SessionMeta list to the storage server without re-sending rows it already has and without exceeding the storage server's request body limit, and make a session delete stick across every machine syncing that account rather than being silently re-pushed by whichever one hasn't heard about it yet.",
       "entryPoints": [],
       "files": [
         "shared/types.ts",
         "server/src/store.ts",
         "server/src/sync.ts",
+        "server/src/sessions.ts",
         "server/src/userContext.ts",
-        "storage/src/index.ts"
+        "storage/prisma/schema.prisma",
+        "storage/src/index.ts",
+        "storage/src/sessionRows.ts"
       ],
       "symbols": [
         "StorageSyncClient.pushSessions",
         "StorageSyncClient.pushSession",
         "StorageSyncClient.flushSessions",
         "StorageSyncClient.chunkSessions",
-        "SyncWatermarks.sessionsPushed"
+        "StorageSyncClient.deleteSession",
+        "StorageSyncClient.drainDeletes",
+        "SyncWatermarks.sessionsPushed",
+        "SessionManager.adoptSynced",
+        "SessionManager.applyRemoteDelete",
+        "Store.loadDeletedSessions",
+        "Store.saveDeletedSessions",
+        "listSessions",
+        "putSessions",
+        "putSession",
+        "softDeleteSession",
+        "toWire"
       ],
       "tests": [
         "server/src/sync.sessions.test.ts",
-        "server/src/sync.credentials.test.ts"
+        "server/src/sync.credentials.test.ts",
+        "server/src/sessions.delete.test.ts",
+        "storage/src/sessions.softDelete.test.ts"
       ],
       "businessRules": [
         "a bulk push filters out sessions whose updatedAt/createdAt is not newer than the last accepted push, since storage rows are LWW upserts and re-sending unchanged rows is pure waste",
         "a meta with neither updatedAt nor createdAt is always pushed",
         "a single session whose own JSON exceeds the push budget is dropped from the cloud push (with a one-time warning), never blocking its siblings; its local copy is untouched",
         "a rejected chunk's sessions are retried on the next flush, not dropped",
-        "a storage 413 (entity.too.large) answers JSON {error: 'payload too large'} instead of a generic 500 HTML page"
+        "a storage 413 (entity.too.large) answers JSON {error: 'payload too large'} instead of a generic 500 HTML page",
+        "a session delete is a soft delete (Session.deletedAt) in storage, never a hard delete — a hard delete leaves peers nothing to adopt, so whichever machine still holds the row pushes it right back on its next sync",
+        "DELETE is idempotent: a repeat keeps the original deletedAt stamp rather than advancing it, since the bridge retries a delete until storage confirms it and moving the tombstone forward each retry would re-notify every peer",
+        "GET /sessions serves tombstoned rows inside the ordinary delta window (carrying deletedAt in ms) — that is the only way a peer learns about a delete at all",
+        "PUT (bulk or single) refuses to resurrect a row whose deletedAt is at or after the pushed updatedAt; a write genuinely newer than the delete does bring the row back and clears the tombstone",
+        "the bridge keeps its own tombstone map (id -> deletedAt ms), persisted alongside sessions.json and pruned past ~30 days on load",
+        "adoptSynced returns early when a pulled session's stamp does not beat an existing local tombstone — the branch the ordinary LWW check never reached before, since that check only ran when a local copy of the session already existed",
+        "applyRemoteDelete records a tombstone even for a session this machine never held, so a slower third machine's later push can't resurrect it here either",
+        "a delete issued while pulled state is being applied, or before there is a token to send it with, is queued (pendingDeletes) rather than dropped, and rides the next flush/sync instead of being lost",
+        "a bulk push (reconnect) filters out any session whose delete is still unconfirmed, so the whole-list push can't undo a delete that raced it"
       ],
       "architecturalRules": [
         "SESSIONS_PUSH_MAX_BYTES (1.5MB) mirrors the same headroom-under-2mb constant style as TOTAL_MAX_BYTES in server/src/memory.ts",
         "chunk sends are sequential inside the debounce timer callback, not parallel, so one failure doesn't strand the rest silently",
         "pushSessions owns the dedup filter; userContext.ts's syncNow still hands it the full session list — sync.ts keeps sole ownership of what actually goes on the wire",
-        "the real growth driver (WorkflowState.outputs/lastStepOutput, uncapped in server/src/workflows.ts) is not capped by this change — deferred as a follow-up"
+        "the real growth driver (WorkflowState.outputs/lastStepOutput, uncapped in server/src/workflows.ts) is not capped by this change — deferred as a follow-up",
+        "the row-level rules (LWW upsert, soft delete, resurrect guard, wire shape) live in storage/src/sessionRows.ts rather than inline in the /sessions routes, so they're unit-testable without a Clerk token — /sessions itself stays Clerk-gated and just calls through",
+        "flushSessions re-checks pendingDeletes per chunk, after the batch was drained but before each chunk's own await, so a delete issued while an earlier chunk is in flight is not undone by a later one",
+        "SessionManager's sessions map and tombstone map are always written together (a single writeState), so they can never desync on disk",
+        "deleteSession and applyRemoteDelete share a private forget() that only tears down live state that actually exists, so a remote tombstone for a session this machine never ran costs nothing"
       ],
       "relatedDecisions": [
-        "agent-memory-sync"
+        "agent-memory-sync",
+        "hosted-machine-access"
       ]
     },
     {
@@ -1510,7 +1564,16 @@
         "AttestedIdentity",
         "unpairDevice",
         "reconnectNow",
-        "machineOffline"
+        "machineOffline",
+        "DeviceHub.isAgent",
+        "DeviceHub.agentAttaches",
+        "DeviceHub.lastAttachAt",
+        "HubRegistry.list",
+        "Sink.terminate",
+        "claimBridgeLock",
+        "releaseBridgeLock",
+        "BRIDGE_LOCK_FILE",
+        "socketGeneration"
       ],
       "tests": [
         "storage/src/schema.credentials.test.ts",
@@ -1522,9 +1585,19 @@
         "server/src/portDiscovery.test.ts",
         "server/src/workerHandshake.test.ts",
         "server/src/workerClient.test.ts",
-        "server/src/relayEndToEnd.test.ts"
+        "server/src/relayEndToEnd.test.ts",
+        "server/src/relayClient.duplicateOpen.test.ts"
       ],
       "businessRules": [
+        "fromAgent only accepts a frame from the socket the hub currently calls its agent; a superseded (or half-dead) bridge that keeps writing cannot inject state into a live browser channel or close a channel now owned by the bridge that replaced it",
+        "attachAgent terminates (not just closes) the predecessor it supersedes, so a takeover cannot leave the loser's socket lingering OPEN on the relay",
+        "the per-agent re-verify tick and health/ping interval both bail out the instant their own socket is no longer the hub's agent, so a superseded socket's still-running timer can never drop the hub — or evict the browser channels — out from under the bridge that replaced it",
+        "a duplicate agent attach for a device (attachAgent superseding a live one) logs distinctly from a first attach, naming the running attach count",
+        "the relay's public health endpoint (GET /) keeps its exact unauthenticated shape; presenting the correct x-relay-secret (constant-time compared) additionally returns hubs, a per-device summary (deviceId, online, channel count, agentAttaches, lastAttachAt) for triage — agentAttaches climbing on an otherwise-idle paired device is the tell for two bridges fighting over one identity",
+        "the bridge rejects a duplicate open for a channel id it already serves (logging a warning) rather than building a second RelayChannel — every agent attach replays open for all live channels, so a takeover (or any re-announcement) re-delivers ids already held, and building a second link means a second full hello down a socket that never reconnected",
+        "RelayClient.connect() closes any pre-existing socket (and drops its channels) before dialling a new one, so one RelayClient instance can never hold two live sockets for the same device",
+        "a bridge with RELAY_URL set takes a single-instance lock (~/.lines-app/bridge.lock, pid+startedAt) right after resolving its device identity; if the recorded pid is alive the new process exits with a message naming the running pid and the lock file to remove if it's genuinely stale — the actual cure for two bridge processes sharing one device.json, with everything else above being containment",
+        "LINES_ALLOW_MULTIPLE_BRIDGES=1 is the deliberate escape hatch that skips the single-instance lock, for tests and any intentionally-run second bridge; it must never be set in a real deployment",
         "register is unauthenticated - the machine has no user yet and a code is worthless until claimed; re-registering an already-claimed AND UNREVOKED device is refused (409) rather than silently re-bound",
         "re-registering a REVOKED device clears its stale userId/revokedAt and issues a fresh code - otherwise a revoked machine could never be claimed again, since claim and verify both refuse a revoked row",
         "claim/verify answer the same 'unknown or expired code' for absent, expired, and revoked, so a distinct 'expired' reply can't confirm a guessed code had once been real",
@@ -1558,7 +1631,9 @@
         "newest bridge wins, so a reconnecting bridge can take over from a half-dead predecessor the relay has not noticed",
         "the relay persists nothing and logs no payload",
         "with RELAY_URL unset nothing dials and the local-only setup is unchanged",
-        "a browser may only reach a device it owns; if storage cannot verify a device's secret the relay refuses the connection rather than admitting it"
+        "a browser may only reach a device it owns; if storage cannot verify a device's secret the relay refuses the connection rather than admitting it",
+        "a browser socket carries a monotonic generation stamp; a frame arriving on a socket whose generation is no longer current is dropped rather than applied — switchDevice closes the old socket but does not detach its message handler, so a late frame from the previous machine could otherwise reach applyServerMessage after clearBootstrap()",
+        "machineOffline is surfaced by ConnectionBanner after bootstrap too, not only by the pre-bootstrap ConnectingMachine screen — relay-up-but-machine-gone otherwise rendered as a healthy 'connected' UI in which every action silently went nowhere"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
@@ -1589,13 +1664,18 @@
         "RelayChannel is a plain object, not an EventEmitter, so it cannot inherit the throw-on-unhandled-error hazard",
         "the relay is the auth edge and the bridge trusts the attested userId on relay channels; re-verifying would mean two failure modes and a hard dependency on the user's machine reaching Clerk's JWKS",
         "relay/ shares no types with the app and the bridge does not import the relay package; frame shapes are duplicated in relayClient.ts on purpose",
-        "reconnect uses exponential backoff with jitter, since a flat retry turns one relay restart into a synchronised stampede"
+        "reconnect uses exponential backoff with jitter, since a flat retry turns one relay restart into a synchronised stampede",
+        "terminate() on supersede is deliberately aggressive rather than a graceful close-and-drain: a superseded bridge has no readers left, so draining it only leaves a noisy half-open socket around longer — the trade-off is a louder log during a genuine flap, which is a feature during triage",
+        "the bridge closes its own pre-existing socket (and drops its channels) at the start of connect(), before dialling — belt-and-braces alongside the single-flight retryTimer, so RelayClient itself can never be the source of two live sockets for one device",
+        "the single-instance lock file lives beside device.json under the same APP_ROOT rather than a new path resolver, reusing the existing app-data-root convention (see app-data-root.md)",
+        "stale-lock detection is process.kill(pid, 0): ESRCH means nothing holds the pid, so the new process takes the lock; any other outcome (including EPERM, another OS user's live process) is treated as held"
       ],
       "relatedDecisions": [
         "turn-recovery",
         "production-deployment",
         "desktop-app",
-        "file-routes-over-ws"
+        "file-routes-over-ws",
+        "app-data-root"
       ]
     },
     {
@@ -1711,7 +1791,8 @@
         "hosted is the default; local mode requires LINES_LOCAL_MODE=1 and web/dist is not shipped",
         "a missing or too-old Claude Code refuses the turn with an actionable message in both the browser and the tray",
         "LINES_CLAUDE_PATH is exclusive: when set, no other location is tried",
-        "update checks only notify — the tray links the download page"
+        "update checks only notify — the tray links the download page",
+        "a bridge child refuses to start if another live process already holds this machine's single-instance lock (~/.lines-app/bridge.lock) — a second guard beneath the shell's own requestSingleInstanceLock, for a respawn racing a not-yet-exited previous bridge or a bridge started by hand alongside the packaged app; without it two bridge processes can share one device.json and the relay ends up superseding one of them, which is visible in every connected browser as a flicker until it does"
       ],
       "architecturalRules": [
         "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
@@ -1725,7 +1806,8 @@
         "the SDK's -darwin-arm64 platform package is deleted; every query passes pathToClaudeCodeExecutable so its resolver never runs",
         "the bridge and worker bundles must be ESM — server and shared use import.meta.dirname, which is undefined under CJS",
         "the version floor is ours or nobody's — the SDK performs no version handshake at all",
-        "releases use a second public R2 bucket, because public-read is a bucket-level setting"
+        "releases use a second public R2 bucket, because public-read is a bucket-level setting",
+        "the bridge lock lives beside device.json under the same APP_ROOT, reusing the existing app-data-root path helpers rather than adding a new resolver; a stale lock is detected via process.kill(pid, 0) (ESRCH means take it), and LINES_ALLOW_MULTIPLE_BRIDGES=1 is the deliberate escape hatch that must never be set in a real deployment"
       ],
       "relatedDecisions": [
         "hosted-machine-access",
@@ -1824,7 +1906,9 @@
       "businessRules": [
         "the web build stage also bakes VITE_DESKTOP_DOWNLOAD_URL; unlike the other three VITE_* args it may legitimately be empty (no desktop release yet), so its build-time assertion only fires when the value is set",
         "storage never gets a published port or Traefik exposure beyond its one router; only relay and the browser's device calls reach it, everything else is internal-network only",
-        "migrations run via `docker compose run --rm migrate` before the first `up` against a new database, using the direct (:5432) connection string"
+        "migrations run via `docker compose run --rm migrate` before the first `up` against a new database, using the direct (:5432) connection string",
+        "the same ordering applies to every later schema change, not just the first bring-up: migrate deploy must run against the live database before a new storage image serves traffic, or the new code 500s with a Prisma unknown-column/table error (P2021) against the old schema",
+        "the relay's health endpoint (GET / on the relay's own host) accepts an optional x-relay-secret header; a request presenting the correct RELAY_SHARED_SECRET gets a hubs array (per-device attach counts/timestamps) alongside the ordinary health body, used to triage a duplicate-bridge or flapping-relay-link report without touching Postgres — see hosted-machine-access"
       ],
       "architecturalRules": [
         "npm ci is scoped by --workspace rather than --omit=optional, since --omit=optional also drops @rollup/rollup-linux-x64-gnu (an optional dependency on the same platform-binary mechanism as the Claude SDK's native binary) and breaks vite build",

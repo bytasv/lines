@@ -74,6 +74,18 @@ edge, cert issuance for both the apex and `www`).
   against a new database — `prisma migrate deploy` uses the direct (`:5432`)
   connection string, and starting `storage` first lets it connect successfully
   against an empty schema while looking healthy.
+- The same ordering applies to every later schema change, not just first
+  bring-up: `migrate deploy` must run against the live database before a new
+  `storage` image serves traffic, or the new code 500s with a Prisma
+  unknown-column/table error (`P2021`) against the old schema. `~/.npmrc`'s
+  `ignore-scripts=true` (common on an ops machine) also means `prisma generate`
+  needs an explicit run — it doesn't fire on `npm i` there.
+- The relay's health endpoint (`GET /` on the relay's own host) accepts an
+  optional `x-relay-secret` header; a request presenting the correct
+  `RELAY_SHARED_SECRET` gets a `hubs` array (per-device attach counts and
+  timestamps) alongside the ordinary health body — the triage call for a
+  duplicate-bridge or flapping-relay-link report, with no Postgres access
+  needed. See [hosted-machine-access](hosted-machine-access.md).
 
 ## Architectural rules
 

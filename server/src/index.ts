@@ -212,6 +212,70 @@ const updates = new UpdateManager(
  * the bridge and absolutely never the worker — that would turn a relay blip into
  * a reconcile, an `interruptedAt` stamp, and an auto-continued turn.
  */
+/**
+ * Where the single-instance lock lives, beside the device identity it protects.
+ * Holds the pid and its start time so a stale file can be told from a live claim.
+ */
+const BRIDGE_LOCK_FILE = path.join(APP_ROOT, 'bridge.lock');
+
+/** True unless the OS says nothing holds this pid. EPERM means alive but not ours. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * One relay-linked bridge per machine.
+ *
+ * Two bridges sharing `device.json` both claim the same device, so the relay
+ * supersedes one on every dial — and a superseded bridge that keeps writing
+ * frames is what turned a freshly created session into a flicker loop between two
+ * `hello` snapshots. The relay now refuses frames from a superseded socket, but
+ * containment is not the cure: not starting the second process is.
+ *
+ * Escape hatch for tests (and anyone deliberately running two):
+ * LINES_ALLOW_MULTIPLE_BRIDGES=1.
+ */
+function claimBridgeLock(deviceId: string): void {
+  if (process.env.LINES_ALLOW_MULTIPLE_BRIDGES === '1') return;
+  try {
+    const held = JSON.parse(fs.readFileSync(BRIDGE_LOCK_FILE, 'utf8')) as {
+      pid?: number;
+      startedAt?: number;
+    };
+    if (held.pid && held.pid !== process.pid && pidAlive(held.pid)) {
+      const since = held.startedAt ? new Date(held.startedAt).toISOString() : 'unknown start time';
+      console.error(
+        `[bridge] another bridge is already running for device ${deviceId} (pid ${held.pid}, started ${since}).`,
+      );
+      console.error(`[bridge] stop that process, or delete ${BRIDGE_LOCK_FILE} if it is already gone.`);
+      process.exit(1);
+    }
+  } catch {
+    // Absent, truncated or unparseable: nothing is holding the lock, so take it.
+    // A corrupt file must never be the reason a user cannot start their bridge.
+  }
+  fs.mkdirSync(APP_ROOT, { recursive: true });
+  fs.writeFileSync(
+    BRIDGE_LOCK_FILE,
+    JSON.stringify({ pid: process.pid, startedAt: Date.now(), deviceId }),
+  );
+}
+
+/** Give the lock up on exit, so the next start doesn't have to reason about a pid. */
+function releaseBridgeLock(): void {
+  try {
+    const held = JSON.parse(fs.readFileSync(BRIDGE_LOCK_FILE, 'utf8')) as { pid?: number };
+    if (held.pid === process.pid) fs.rmSync(BRIDGE_LOCK_FILE, { force: true });
+  } catch {
+    // Never ours to remove, or already gone.
+  }
+}
+
 const RELAY_URL = process.env.RELAY_URL;
 if (RELAY_URL) {
   // Env first: the desktop app and the dev relay (RELAY_AUTH_DISABLED, where any
@@ -223,6 +287,7 @@ if (RELAY_URL) {
     process.env.LINES_DEVICE_ID && process.env.LINES_DEVICE_SECRET ? null : deviceIdentity();
   const deviceId = process.env.LINES_DEVICE_ID ?? stored!.id;
   const secret = process.env.LINES_DEVICE_SECRET ?? stored!.secret;
+  claimBridgeLock(deviceId);
   new RelayClient(RELAY_URL, deviceId, secret, {
     onChannel: (link, identity) => {
       void handleConnection(link, {}, identity);
@@ -823,6 +888,7 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 // Release the port promptly when tsx watch restarts us (SIGTERM) or on Ctrl-C.
 function shutdown() {
   clearRuntimeInfo('bridge');
+  releaseBridgeLock();
   for (const ctx of registry.all()) {
     // persist() is debounced — land any pending session state before we exit.
     ctx.sessions.flushPersist();
