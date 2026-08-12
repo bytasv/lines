@@ -293,6 +293,11 @@ be talking to it.
 - `OptionCard` (originally built as the interactive picker in `QuestionPrompt`) gained a
   `readOnly` prop instead of being duplicated into a second component — a settled answer should
   look exactly like the choice that produced it.
+- In the interactive `OptionCard`, the `Checkbox`/`Radio` is a non-interactive indicator only
+  (`readOnly`, `pointerEvents: none`, no `onChange`); the wrapping `UnstyledButton` is the sole
+  click target and carries `role`/`aria-checked`. Wiring `onChange` on the control too makes a
+  click on it fire the toggle twice (control + bubbled button), which cancels itself in
+  multi-select — do not re-add it.
 - The raw-input toggle is intentionally shown even for an empty (`{}`) input, unlike
   `PermissionPrompt`'s equivalent guard — consistency across every tool card was chosen over
   hiding a toggle that would do nothing.

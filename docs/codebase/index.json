@@ -829,7 +829,8 @@
         "a subagent cannot itself spawn another subagent (harness restriction), so nesting is one level deep in practice, though the data model is recursive",
         "a message whose parent_tool_use_id names a spawn block not present in the transcript falls back to the main sink instead of being dropped",
         "a spawn card leads with description, not the tool name; an unmapped or plugin-scoped subagent_type degrades to a generic agent badge (never hidden, never a crash)",
-        "the main agent and a subagent share the same badge icon but never the same color, so who is running reads from color alone before any label"
+        "the main agent and a subagent share the same badge icon but never the same color, so who is running reads from color alone before any label",
+        "in the interactive OptionCard, the checkbox/radio is a non-interactive indicator; the wrapping button is the sole click target, so onChange must not be added back to the control itself"
       ],
       "architecturalRules": [
         "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",

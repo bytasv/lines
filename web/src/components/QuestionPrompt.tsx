@@ -53,10 +53,33 @@ function OptionCard({
       }}
     >
       <Group gap="sm" wrap="nowrap" align="flex-start">
+        {/*
+          Indicator only. The wrapping button is the sole click target — wiring
+          `onChange` here too made a click on the control fire the toggle twice
+          (once from the input, once from the bubbled button click), which
+          cancelled itself in multi-select. `pointerEvents: none` is what keeps
+          the click on the wrapper: `readOnly` is inert on checkbox inputs.
+        */}
         {multi ? (
-          <Checkbox checked={checked} onChange={onToggle} readOnly={readOnly} size="xs" mt={2} tabIndex={-1} />
+          <Checkbox
+            checked={checked}
+            readOnly
+            size="xs"
+            mt={2}
+            tabIndex={-1}
+            aria-hidden
+            style={{ pointerEvents: 'none' }}
+          />
         ) : (
-          <Radio checked={checked} onChange={onToggle} readOnly={readOnly} size="xs" mt={2} tabIndex={-1} />
+          <Radio
+            checked={checked}
+            readOnly
+            size="xs"
+            mt={2}
+            tabIndex={-1}
+            aria-hidden
+            style={{ pointerEvents: 'none' }}
+          />
         )}
         <div>
           <Text size="sm" fw={checked ? 600 : 500}>
@@ -73,7 +96,12 @@ function OptionCard({
   );
   if (readOnly) return card;
   return (
-    <UnstyledButton onClick={onToggle} w="100%">
+    <UnstyledButton
+      onClick={onToggle}
+      w="100%"
+      role={multi ? 'checkbox' : 'radio'}
+      aria-checked={checked}
+    >
       {card}
     </UnstyledButton>
   );
