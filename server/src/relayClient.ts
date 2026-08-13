@@ -50,6 +50,22 @@ const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
 
 /**
+ * How long a socket must survive before it counts as a working link.
+ *
+ * Resetting the backoff on `open` alone is what let a supersede war run at the
+ * retry floor forever: the relay accepts every dial, so each one "succeeded" right
+ * before being kicked, and the exponent never accumulated. Env-tunable so tests
+ * can compress it (see LINES_RELAY_IDLE_MS above for the same reason).
+ */
+const RELAY_STABLE_MS = Number(process.env.LINES_RELAY_STABLE_MS ?? 10_000);
+/** Consecutive 1012 closes that mean "another bridge is claiming this device",
+ *  not "the relay restarted". */
+const SUPERSEDE_LIMIT = Number(process.env.LINES_SUPERSEDE_LIMIT ?? 5);
+/** The re-dial cap once that threshold is crossed. Two bridges fighting over one
+ *  identity then cost ~12 log lines an hour instead of two a second. */
+const SUPERSEDE_CAP_MS = Number(process.env.LINES_SUPERSEDE_CAP_MS ?? 300_000);
+
+/**
  * Silence that means the socket is dead even though the OS never said so.
  *
  * The relay pings every 20s, so a link with nothing to say still delivers a frame
@@ -147,6 +163,12 @@ export class RelayClient {
    *  single takeover is normal (a restart) and a climbing count is not: it means
    *  another process on this machine is claiming the same device. */
   private supersededCount = 0;
+  /** Supersedes with no stable socket in between — the run this backs off on. */
+  private consecutiveSupersedes = 0;
+  /** So the escalation is announced on the crossing, not on every re-dial. */
+  private escalated = false;
+  /** When the current socket opened, 0 if none is open. */
+  private openedAt = 0;
 
   constructor(
     private url: string,
@@ -177,7 +199,21 @@ export class RelayClient {
    */
   private retry(): void {
     if (this.disposed || this.retryTimer) return;
-    const backoff = Math.min(RECONNECT_BASE_MS * 2 ** this.attempt++, RECONNECT_CAP_MS);
+    // A run of supersedes is not a flap the relay will recover from on its own:
+    // something else on this machine holds the same identity, and only stopping it
+    // helps. So the cap goes up instead of the log filling.
+    const escalating = this.consecutiveSupersedes >= SUPERSEDE_LIMIT;
+    if (escalating && !this.escalated) {
+      this.escalated = true;
+      console.warn(
+        `[relay] superseded ${this.consecutiveSupersedes} times with no stable link — another bridge ` +
+          `on this machine is claiming device ${this.deviceId}. Backing off to ` +
+          `${Math.round(SUPERSEDE_CAP_MS / 1000)}s between dials; stop that bridge (see ` +
+          '~/.lines-app/bridge.lock) and this recovers on the next dial.',
+      );
+    }
+    const cap = escalating ? SUPERSEDE_CAP_MS : RECONNECT_CAP_MS;
+    const backoff = Math.min(RECONNECT_BASE_MS * 2 ** this.attempt++, cap);
     const delay = backoff / 2 + Math.random() * (backoff / 2);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
@@ -241,7 +277,9 @@ export class RelayClient {
     this.ws = ws;
 
     ws.on('open', () => {
-      this.attempt = 0;
+      // Deliberately no `attempt = 0` here: see RELAY_STABLE_MS. The close handler
+      // resets it, and only for a socket that lasted.
+      this.openedAt = Date.now();
       ws.send(JSON.stringify({ t: 'hello', version: RELAY_PROTOCOL_VERSION, appProtocol: 1 }));
       this.startHealthCheck(ws);
       this.callbacks.onStatus?.({ connected: true });
@@ -270,7 +308,19 @@ export class RelayClient {
       // /agent itself) and for a device it cannot verify. Retrying cannot fix
       // either, so it must not be silent. Backoff bounds the log volume.
       const text = reason.toString();
-      if (code === 1012) this.supersededCount++;
+      // A link that lasted is the only evidence the dial actually worked, so it is
+      // the only thing that clears the backoff. A supersede is by definition a
+      // short-lived socket, which is what makes the exponent accumulate at all.
+      if (this.openedAt && Date.now() - this.openedAt >= RELAY_STABLE_MS) {
+        this.attempt = 0;
+        this.consecutiveSupersedes = 0;
+        this.escalated = false;
+      }
+      this.openedAt = 0;
+      if (code === 1012) {
+        this.supersededCount++;
+        this.consecutiveSupersedes++;
+      }
       if (code !== 1000) {
         // The supersede count is the bridge-side tell for two processes sharing one
         // device identity: one line per takeover looks like an ordinary restart.

@@ -67,6 +67,13 @@ unbundled next to the code.
 - `openPairingWindow` — the data-URL window showing a pairing code
 - `UpdateManager.requestRestart` / `.busy` / `.current`
 - `loadConfig()` / `isLocalMode()` (`desktop/src/config.ts`)
+- `foreignBridgeLock()` — reads `~/.lines-app/bridge.lock`; null unless it names a different,
+  still-live pid (absent, corrupt, dead, or naming our own bridge are all "no collision")
+- `enterStandDown(holder)` — kills the tray's own bridge reference, flips the tray to "Paused",
+  and arms the ~5s recheck that re-spawns both children once the lock clears
+- `standDown` — `{ pid, instance } | null`; set exactly while another bridge owns this machine
+- `EXIT_BRIDGE_LOCK_HELD` (`78`) — duplicated from `server/src/index.ts` rather than imported,
+  the same precedent as `APP_ROOT` above it
 
 ## Data flow
 
@@ -83,12 +90,12 @@ web client needs no change to run under either.
 **Hosted mode** (the default, and the only path in a packaged build): the shell loads or mints
 this machine's identity (`server/src/device.ts`), registers it with the hosted storage server, and
 spawns the bridge with the relay URL, storage URL, and device credential in its env. The bridge
-itself takes this machine's single-instance lock (`~/.lines-app/bridge.lock`) right after
-resolving that identity, before it ever dials the relay — see
+itself takes this machine's single-instance lock (`~/.lines-app/bridge.lock`, `instance: 'desktop'`)
+unconditionally, before it ever dials the relay — see
 [hosted-machine-access](hosted-machine-access.md#one-bridge-speaks-at-a-time). A respawn racing a
 not-yet-exited previous bridge child, or a bridge started by hand alongside the packaged app, now
-exits immediately with a message naming the pid already holding the lock, rather than silently
-becoming a second `RelayClient` claiming the same device. It serves no
+exits immediately (`EXIT_BRIDGE_LOCK_HELD`, `78`) naming the pid already holding the lock, rather
+than silently becoming a second `RelayClient` claiming the same device. It serves no
 local UI — the tray menu opens the hosted web app instead of a local window. If registration
 returns a pairing code, a small `BrowserWindow` shows it as a data URL, independent of `web/dist`
 even existing. The code auto-refreshes every ~14 minutes while unpaired, and "Get a new code" in
@@ -117,6 +124,39 @@ The tray also shows this machine's `Claude Code` status (from `claudeCliStatus()
 login-item toggle (`app.setLoginItemSettings`), and enforces a single instance
 (`requestSingleInstanceLock`) so a second launch cannot double-register this machine's device
 identity.
+
+### Standing down
+
+The tray is the one supervisor the bridge lock is allowed to preempt — see
+[hosted-machine-access](hosted-machine-access.md#one-bridge-speaks-at-a-time) — so `main.ts`
+mirrors the collision from its side rather than treating it as a crash.
+
+Three entry points reach `enterStandDown`, all landing in the same `standDown` state:
+
+- **Startup** (`start()`): `foreignBridgeLock()` is checked before either child spawns. If it
+  names a live foreign pid, neither the worker nor the bridge is started at all — a worker of
+  ours would only add a second writer to the same `~/.lines-app` the other bridge already owns.
+- **Our bridge refused** (`spawnChild`'s exit handler, `code === EXIT_BRIDGE_LOCK_HELD`): the
+  ordinary case, when a dev bridge started after ours.
+- **Our bridge was preempted**: the dev bridge `SIGTERM`s ours, so the exit handler sees
+  `code === null` with no matching lock-held exit code — the tell here is a re-read of the lock
+  file showing a live foreign holder.
+
+While standing down: `bridge` is cleared, `applyRelayStatus({connected: false})` runs so the tray
+never claims a link that does not exist, and the tray's status line and its `Bridge:` menu item
+both read "Paused — another bridge owns this machine (pid N)". A ~5s recheck
+(`STAND_DOWN_RECHECK_MS`) polls `foreignBridgeLock()`; once it clears, both children spawn again
+(the worker only if it isn't already alive — see the note on the restart asymmetry below).
+
+**The worker is never touched by any of this.** Only the bridge collides on the lock and on the
+relay device identity; a worker holding a live turn must not be treated as part of the collision.
+This is the same asymmetry `spawnChild`'s restart logic already has for an ordinary crash: a dead
+worker is deliberately not respawned, because its queries are gone and a silent respawn would look
+like a healthy session that lost its turn.
+
+No desktop test harness exists in this repo (see Tests below); the stand-down path (both
+directions — Tilt already up when the tray launches, and the tray already running when `tilt up`
+starts) is verified manually.
 
 ### Updates
 
@@ -196,11 +236,21 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
 - `LINES_CLAUDE_PATH` is exclusive: set it, and no other location is tried.
 - Update checks only notify. The tray links the download page.
 - A bridge child refuses to start if another live process already holds this machine's
-  single-instance lock. This is a second, independent guard beneath the shell's own
-  `requestSingleInstanceLock` (which stops a second *Electron* process) — it also catches a
-  respawn racing a not-yet-exited previous bridge, or a bridge run by hand alongside the packaged
-  app. Without it, two bridge processes can share one `device.json`, and the relay resolves that
-  by superseding one of them — visible in every connected browser as a flicker until it does.
+  single-instance lock — **unless** that other process names `instance: 'desktop'` (i.e. it is a
+  previous tray bridge), in which case ours preempts it instead of refusing. This is a second,
+  independent guard beneath the shell's own `requestSingleInstanceLock` (which stops a second
+  *Electron* process) — it also catches a respawn racing a not-yet-exited previous bridge, or a
+  bridge run by hand alongside the packaged app. Without it, two bridge processes can share one
+  `device.json`, and the relay resolves that by superseding one of them — visible in every
+  connected browser as a flicker until it does.
+- When a *different* installation (a dev checkout, most commonly Tilt) holds the lock instead, the
+  tray's own bridge stands down rather than fighting for it: no bridge or worker spawns at startup,
+  or the running bridge exits/gets preempted and is not respawned, until the lock clears. The tray
+  reports this plainly ("Paused — another bridge owns this machine") rather than showing
+  "Connecting…" or silently retrying forever.
+- The worker is never part of a stand-down: only the bridge collides on the machine lock and the
+  relay device identity, and a worker mid-turn must not be torn down because a sibling process
+  collided on a resource the worker doesn't touch.
 
 ## Architectural rules
 
@@ -247,6 +297,14 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
   [app-data-root](app-data-root.md)). A stale lock is detected via `process.kill(pid, 0)`
   (`ESRCH` means take it); `LINES_ALLOW_MULTIPLE_BRIDGES=1` is the deliberate escape hatch that
   must never be set in a real deployment.
+- `foreignBridgeLock()`/`BRIDGE_LOCK_FILE`/`EXIT_BRIDGE_LOCK_HELD` are duplicated in `main.ts`
+  rather than imported from `server/src/index.ts` — the same precedent `APP_ROOT` already sets in
+  this file: the shell needs the two constants and a read, not the bridge's module graph.
+  `EXIT_BRIDGE_LOCK_HELD = 78` is a contract between the two files; changing it in one without the
+  other silently breaks the stand-down trigger.
+- `enterStandDown` is the only path that clears `bridge`/`worker` handles and arms the recheck
+  timer; both the startup check and `spawnChild`'s exit handler funnel into it rather than each
+  duplicating the tray-copy and recheck logic.
 
 ## Related decisions
 

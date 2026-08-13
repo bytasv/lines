@@ -46,6 +46,7 @@ None.
 
 - All persistent paths must derive from `APP_ROOT` / `userStoreRoot`; never hardcode the home-directory path elsewhere.
 - `createStore` keeps an in-memory, per-user transcript cache (raw lines + lazily-parsed events), revalidated by `statSync` mtime/size and bounded by count and byte size (LRU eviction). It assumes this process is the sole writer of `transcripts/*.jsonl`; a second writer would go stale silently between stat checks.
+- The sole-writer assumption is enforced, not just assumed: `~/.lines-app/bridge.lock` (`server/src/index.ts`) is claimed by every bridge unconditionally — relaying or not — so a second bridge process refuses to start rather than becoming that second writer. See [hosted-machine-access](hosted-machine-access.md#one-bridge-speaks-at-a-time) for the claim/preempt/refuse rules; `LINES_ALLOW_MULTIPLE_BRIDGES=1` is the documented way to run two anyway.
 - `sessions.json` writes are not pretty-printed and are debounced (see `SessionManager.persist`/`flushPersist` in `server/src/sessions.ts`) — a status-transition burst coalesces into one write instead of one synchronous whole-file rewrite per transition. Broadcasts still fire immediately; only the disk write is delayed.
 - `projects.json` migrates once at store construction, mirroring `GuardAllowlist`'s
   constructor migration: the pre-multi-root `string[]` form (or any junk an older
@@ -57,3 +58,5 @@ None.
 ## Related decisions
 
 - [multi-root-projects](multi-root-projects.md)
+- [hosted-machine-access](hosted-machine-access.md) — `bridge.lock`, the mechanism enforcing the
+  sole-writer rule above

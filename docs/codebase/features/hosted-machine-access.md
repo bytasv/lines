@@ -85,14 +85,16 @@ relay pipes frames between them, and the UI that gates all of it.
   `RELAY_AGENT_PING_MS`, `RELAY_AGENT_DEAD_MS`, `RELAY_REVERIFY_MS`, `LINES_RELAY_IDLE_MS`
 - `server/src/userContext.ts` — `BrowserLink`, `linkSendAction`, `broadcast`
 - `server/src/index.ts` — `BRIDGE_VERSION`, per-socket handlers, `claimBridgeLock`/
-  `releaseBridgeLock`, the single-instance `bridge.lock`, `LINES_ALLOW_MULTIPLE_BRIDGES`
+  `releaseBridgeLock`/`resolveRelayIdentity`, the single-instance `bridge.lock`,
+  `EXIT_BRIDGE_LOCK_HELD`, `LINES_ALLOW_MULTIPLE_BRIDGES`
 - `shared/types.ts` — `APP_PROTOCOL_VERSION`, `BridgeInfo`, `hello.bridge`
 - `web/src/store.ts` — `bridge`, `protocolSkew`
 - `relay/src/protocol.ts` — frames, shared by both ends
 - `relay/src/mux.ts` — `DeviceHub`, `HubRegistry`: pairing and routing, transport-free;
   `DeviceHub.ownerId`; `HubRegistry.drop`, whose caller is the re-verify tick
 - `server/src/relayClient.ts` — `RelayChannel` (a `BrowserLink`), reconnect, channel lifecycle,
-  the idle watchdog on its own socket, the duplicate-`open` guard, the supersede-count log
+  the idle watchdog on its own socket, the duplicate-`open` guard, the supersede-count log, the
+  supersede circuit breaker (`RELAY_STABLE_MS`/`SUPERSEDE_LIMIT`/`SUPERSEDE_CAP_MS`)
 - `storage/prisma/schema.prisma` — the `Device` model
 - `storage/src/index.ts` — the six device routes, plus CORS and the unauthenticated-path
   allowlist that fronts them
@@ -117,7 +119,9 @@ relay pipes frames between them, and the UI that gates all of it.
 
 - `RuntimeInfo` — `{ port, pid, startedAt, protocolVersion, token }`
 - `publishRuntimeInfo(name, info)` — atomic (temp + rename), mode `0600`
-- `readRuntimeInfo(name)` — null when missing, unparseable, or naming a dead pid
+- `readRuntimeInfo(name, instance?)` — null when missing, unparseable, or naming a dead pid;
+  `instance` defaults to the caller's own and is only overridden to cross-check *another*
+  install's published runtime file (the bridge lock's preempt check)
 - `clearRuntimeInfo(name)` — best-effort removal on clean exit
 - `watchRuntimeInfo(name, onChange)` — watches the *directory*, returns a disposer
 - `WORKER_TOKEN_HEADER` (`x-lines-worker-token`) — carries the token on connect
@@ -158,8 +162,16 @@ relay pipes frames between them, and the UI that gates all of it.
 - `Sink.terminate?()` — hard drop, skipping the close handshake; optional so a test sink need not
   implement it. Used on supersede, mirroring the existing dead-agent reap
 - `claimBridgeLock(deviceId)` / `releaseBridgeLock()` (`server/src/index.ts`) — this machine's
-  single-instance lock (`~/.lines-app/bridge.lock`); exits the process if another live pid already
-  holds it
+  single-instance lock (`~/.lines-app/bridge.lock`), claimed unconditionally (relaying or not);
+  `deviceId` is `null` for a bridge with no `RELAY_URL`. Preempts a live `instance: 'desktop'`
+  holder (`SIGTERM`, bounded wait, then take the lock); any other live holder gets a bounded
+  retry window (for a `tsx watch` successor meeting a still-exiting predecessor) before the
+  process exits `EXIT_BRIDGE_LOCK_HELD`
+- `EXIT_BRIDGE_LOCK_HELD` (`78`, `EX_CONFIG`) — the bridge's contract with the desktop shell: a
+  refusal, distinguishable from a crash, that tells `main.ts` to stand its own bridge down instead
+  of respawning on a timer
+- `resolveRelayIdentity()` (`server/src/index.ts`) — the env-or-`deviceIdentity()` resolution,
+  called only when `RELAY_URL` is set, so a local-only bridge never mints `device.json`
 - `socketGeneration` (`web/src/ws.ts`) — monotonic id per `new WebSocket(...)`; `onmessage` drops a
   frame whose generation is not current
 - `useDevices` — a small zustand store independent of the main `useStore`, because two unrelated
@@ -247,12 +259,40 @@ any socket it already holds before dialling a new one, so one `RelayClient` inst
 two live sockets for the same device.
 
 None of this fixes two bridges existing — it only stops the fallout from being visible. The actual
-cure is `claimBridgeLock`: right after resolving its device identity, a bridge started with
-`RELAY_URL` set writes (or checks) `~/.lines-app/bridge.lock` (pid + start time). If the recorded
-pid is still alive (`process.kill(pid, 0)`, `ESRCH` meaning take it), the new process exits with a
-message naming the running pid and the lock file to remove if it is genuinely stale.
+cure is `claimBridgeLock`, and it runs for **every** bridge, not only one with `RELAY_URL` set:
+`~/.lines-app` assumes a sole writer (see [app-data-root](app-data-root.md)), which is a
+local-store risk independent of the relay. The claim is atomic (`fs.writeFileSync` with the
+`'wx'` flag) rather than read-then-write, closing a TOCTOU window two bridges starting in the same
+instant could otherwise hit.
+
+On `EEXIST` there are three outcomes, checked in order:
+
+1. **Dead, corrupt, or our own pid** — nothing is really holding the lock, so take it over.
+2. **A live holder whose lock names `instance: 'desktop'`** — *preempt*. The tray app is the only
+   supervisor that can stand its own bridge down and re-arm it later, so a dev bridge (Tilt, a
+   terminal `npm run dev -w server`) always wins the machine. Before signalling, the pid is
+   cross-checked against that instance's own published `run/desktop/bridge.json`
+   (`readRuntimeInfo('bridge', 'desktop')`) — the lock file's word alone is not enough to
+   `SIGTERM` a pid, since pids get reused. Then `SIGTERM` (the same signal `tsx watch` and Tilt
+   already send; `shutdown()` releases the lock on it), and a bounded ~2s poll for the pid to
+   clear before taking the lock.
+3. **Any other live holder** — the same bounded ~2s poll runs first (without signalling anyone):
+   `tsx watch` starts the successor immediately after signalling the old child, and `shutdown()`
+   has its own 1.5s exit fallback, so a legitimate reload can meet a still-live predecessor.
+   Only once that window expires does the new process exit `EXIT_BRIDGE_LOCK_HELD` (`78`), naming
+   the holder's pid, instance, and whether it is relaying.
+
 `LINES_ALLOW_MULTIPLE_BRIDGES=1` is the deliberate escape hatch (tests, an intentional second
-bridge) and must never be set in a real deployment.
+bridge) and skips the lock entirely — it neither reads nor writes the file. It must never be set
+in a real deployment.
+
+The release side is registered only after a successful claim (`process.on('exit', ...)`, in
+addition to `shutdown()`'s explicit call), so a refused start never touches the incumbent's file.
+
+The desktop shell mirrors this from the other side: it reads the same lock file, and on either its
+own bridge exiting `EXIT_BRIDGE_LOCK_HELD` or a re-read showing a live foreign holder (the
+preempt case, where its bridge dies by `SIGTERM` with `code === null`), it stands its bridge down
+instead of respawning it — see [desktop-app](desktop-app.md#boot-and-modes).
 
 The relay's health endpoint (`GET /`) keeps its exact unauthenticated shape — `{ok, version,
 devices}` — for anyone; a request presenting the correct `x-relay-secret` (constant-time compared)
@@ -261,6 +301,23 @@ lastAttachAt}` summary. `agentAttaches` climbing on an otherwise-idle paired dev
 two bridges fighting over one identity, versus `agentAttaches: 1` pointing at a single flapping
 link instead — this is the triage tool for a report like "sessions keep flickering," without
 touching Postgres.
+
+The lock stops a *second local start*; it does nothing for a bridge already running elsewhere
+(a shipped desktop build that predates the lock, or the escape hatch) whose relay dial still gets
+superseded on every attempt. `RelayClient` resetting `attempt = 0` on every `'open'` used to mean
+that war ran at the retry floor (500–1000ms) forever — a supersede close always follows a
+successful open, so the backoff exponent never accumulated. `'open'` no longer resets it; only a
+socket that survives `RELAY_STABLE_MS` (10s) does, on its `'close'`, since that is the only
+evidence the dial actually worked. Each `1012` close increments a `consecutiveSupersedes` counter
+alongside the existing lifetime `supersededCount`; once it reaches `SUPERSEDE_LIMIT` (5, with no
+stable socket in between), `retry()` swaps its cap from `RECONNECT_CAP_MS` (30s) to
+`SUPERSEDE_CAP_MS` (5 minutes) and logs the crossing once, naming `~/.lines-app/bridge.lock` and
+the rival bridge as the thing to stop. A genuine relay flap that lands even one stable socket
+resets the counter and stays on the ordinary 30s cap. All three constants are env-tunable
+(`LINES_RELAY_STABLE_MS`, `LINES_SUPERSEDE_LIMIT`, `LINES_SUPERSEDE_CAP_MS`) so tests can compress
+them; this stays entirely inside `RelayClient` as a peripheral — it only slows its own re-dial and
+never parks, so it self-heals the moment the other bridge goes away, with no relay-side or
+protocol change.
 
 ### Pairing a machine
 
@@ -378,6 +435,15 @@ instead of retrying a device the relay will now refuse.
 - `server/src/relayClient.duplicateOpen.test.ts` — a repeated `open` for a channel id already
   served invokes `onChannel` exactly once and leaves one live link; a channel actually closed and
   reopened on the same id is still served as new.
+- `server/src/bridgeLock.test.ts` — spawns real bridge processes against a temp `HOME`: a
+  no-`RELAY_URL` bridge still claims the lock and mints no `device.json`; a second bridge exits
+  `78` leaving the incumbent's lock bytes untouched; a dead-pid or corrupt lock is taken over;
+  `LINES_ALLOW_MULTIPLE_BRIDGES=1` neither reads nor writes the file; an `instance: 'desktop'`
+  holder is preempted (`SIGTERM`, exits, lock ends up naming the newcomer).
+- `server/src/relayClient.supersede.test.ts` — a fake relay that accepts and immediately
+  `1012`-closes every dial: re-dial gaps grow and settle at the escalated cap; a socket held open
+  past `RELAY_STABLE_MS` resets the backoff. Real timers, compressed via the same env vars a
+  deployment leaves alone.
 - `storage/src/schema.credentials.test.ts` — `Device.secretHash` is the one allowlisted field,
   with its justification.
 - `storage/src/devices.unpair.test.ts` — the unpair route's failure modes. **Opt-in**: the only
@@ -391,8 +457,10 @@ instead of retrying a device the relay will now refuse.
 
 - The default local port is ephemeral. `LINES_WORKER_PORT` / `LINES_BRIDGE_PORT` pin a port only
   when explicitly set; Tilt sets both so its readiness probes have fixed targets.
-- `LINES_INSTANCE` separates concurrent installs. Tilt sets `dev`, so a dev checkout and an
-  installed app never publish over each other.
+- `LINES_INSTANCE` separates concurrent installs. The desktop shell sets `desktop`; a dev checkout
+  (Tilt included) leaves it unset, so it is `default`. Tilt deliberately sets nothing itself: its
+  `web` resource resolves `/__bridge` from this same variable, so pinning one for the bridge alone
+  would stop the dev server finding it.
 - The worker rejects any connection that cannot echo the published token, and checks this
   *before* the newest-bridge-wins takeover — otherwise any local process could terminate the real
   bridge just by connecting.
@@ -495,13 +563,24 @@ instead of retrying a device the relay will now refuse.
   browser socket that never reconnected.
 - `RelayClient.connect()` closes any pre-existing socket (and drops its channels) before dialling
   a new one, so one `RelayClient` instance can never hold two live sockets for the same device.
-- A bridge with `RELAY_URL` set takes a single-instance lock
-  (`~/.lines-app/bridge.lock`, pid + start time) right after resolving its device identity. A live
-  recorded pid refuses the new process with a message naming the running pid and the lock file to
-  remove if it is genuinely stale — the actual cure for two bridge processes sharing one
-  `device.json`; everything above is containment.
-- `LINES_ALLOW_MULTIPLE_BRIDGES=1` is the deliberate escape hatch that skips the lock, for tests
-  and any intentionally-run second bridge; it must never be set in a real deployment.
+- Every bridge takes this machine's single-instance lock (`~/.lines-app/bridge.lock`, pid + start
+  time + `instance` + `deviceId`) unconditionally — relaying or not, since the sole-writer
+  assumption on `~/.lines-app` (see [app-data-root](app-data-root.md)) isn't relay-specific. The
+  claim is atomic (`'wx'`), not read-then-write.
+- On a collision, a live `instance: 'desktop'` holder is preempted (`SIGTERM`, cross-checked
+  against its own published runtime file first) since the tray is the only supervisor that can
+  stand its bridge down and re-arm it; any other live holder gets a bounded ~2s retry window
+  (covering a `tsx watch` successor meeting a still-exiting predecessor) before the new process
+  exits `EXIT_BRIDGE_LOCK_HELD` (`78`) rather than `1` — a distinct code so the desktop shell can
+  tell "lock held" from a crash.
+- `LINES_ALLOW_MULTIPLE_BRIDGES=1` is the deliberate escape hatch that skips the lock entirely (no
+  read, no write), for tests and any intentionally-run second bridge; it must never be set in a
+  real deployment.
+- Resetting `RelayClient`'s reconnect backoff on `'open'` let a supersede war run at the retry
+  floor forever, since a supersede close always follows a successful open. Only a socket that
+  survives `RELAY_STABLE_MS` resets the backoff now; a run of `SUPERSEDE_LIMIT` consecutive
+  supersedes with no such socket escalates the re-dial cap to `SUPERSEDE_CAP_MS`, self-healing back
+  to the ordinary cap the moment a dial lands a stable link.
 - A browser socket carries a monotonic generation stamp; `onmessage` drops a frame whose
   generation is no longer current. `switchDevice` closes the old socket but does not detach its
   handler, so a late frame from the previous machine could otherwise still reach
@@ -605,6 +684,15 @@ instead of retrying a device the relay will now refuse.
 - Stale-lock detection is `process.kill(pid, 0)`: `ESRCH` means nothing holds the pid, so the new
   process takes the lock; any other outcome (including `EPERM`, another OS user's live process) is
   treated as held.
+- Only `instance: 'desktop'` is preemptible, and only after cross-checking the pid against that
+  instance's own `readRuntimeInfo('bridge', 'desktop')` — the lock file's word alone must never be
+  enough to `SIGTERM` a pid, since pids are reused; this narrows but does not close that gap.
+- `armLockRelease()` (`process.on('exit', releaseBridgeLock)`) is registered only after a
+  successful claim, never before — a refused start must not touch the incumbent's lock file on its
+  way out.
+- The supersede circuit breaker lives entirely in `RelayClient`, never in `index.ts` or the lock:
+  it is peripheral by the same rule as the rest of this client — it only slows its own retry and
+  never restarts or blocks anything else.
 
 ## Related decisions
 

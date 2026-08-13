@@ -36,6 +36,10 @@ preflight, no Prisma-generate step, and no per-process readiness signal.
 - `tilt_args_argv(frozen_names)` — rebuilds the full `tilt args` flag list for
   a given freeze state (used by both the CLI flag and the UI buttons)
 - `dotenv_keys` / `have` — preflight's key-name-only `.env` check
+- `dotenv_value` / `RELAY_TARGET` / `LOOPBACK_RELAY` / `LOCK_PROBE` — the bridge-lock collision
+  warning's helpers: `RELAY_URL`'s actual value (to tell a deployment from `--with-relay`'s
+  loopback relay), and a `node -e` one-liner that parses/liveness-checks `~/.lines-app/bridge.lock`
+  without ever failing the build on a stale or corrupt file
 
 ## Data flow
 
@@ -100,6 +104,17 @@ port isolation, `tilt down` orphan check).
 - `RELAY_URL` set without `STORAGE_URL` warns rather than failing preflight: the
   bridge would dial a hosted relay while syncing to the local storage default,
   splitting one machine's data across two databases.
+- When `RELAY_URL` in `.env` points at a non-loopback host (a real deployment, not
+  `--with-relay`'s local relay) and `~/.lines-app/bridge.lock` already names a live process, the
+  preflight warns rather than failing: naming the tray app by pid if it holds the lock (Tilt's
+  bridge will take the machine over and the tray will pause), or naming any other holder
+  (Tilt's bridge will refuse to start, exit 78) otherwise. A stale, absent, or unparseable lock is
+  silent — a leftover file must never block `tilt up`. See
+  [hosted-machine-access](hosted-machine-access.md#one-bridge-speaks-at-a-time).
+- `LINES_INSTANCE` is not set anywhere in this Tiltfile, on purpose — despite comments elsewhere
+  once claiming Tilt sets it to `dev`. `web/vite.config.ts` resolves `/__bridge` from the same
+  variable, so pinning it for the bridge alone would stop the dev server finding it; a dev
+  checkout runs under the unset default (`default`) the same as `npm run dev`.
 
 ## Architectural rules
 

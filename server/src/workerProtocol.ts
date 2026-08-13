@@ -46,8 +46,11 @@ export const WORKER_TOKEN_HEADER = 'x-lines-worker-token';
  *  (and dragging the whole bridge graph into the worker). */
 export const APP_ROOT = path.join(os.homedir(), '.lines-app');
 
-/** Separates concurrent Lines installs on one machine — a dev checkout (Tilt
- *  sets `dev`) and an installed app would otherwise publish over each other. */
+/** Separates concurrent Lines installs on one machine — the desktop shell sets
+ *  `desktop`, so an installed app and a dev checkout (which leaves this unset, and
+ *  so is `default`) do not publish over each other. Tilt deliberately sets nothing:
+ *  web/vite.config.ts resolves /__bridge from this same variable, so pinning it for
+ *  the bridge alone would stop the dev server finding it. */
 export const INSTANCE = process.env.LINES_INSTANCE ?? 'default';
 
 export const RUNTIME_DIR = path.join(APP_ROOT, 'run', INSTANCE);
@@ -65,7 +68,8 @@ export interface RuntimeInfo {
   token: string;
 }
 
-const runtimeFile = (name: RuntimeName) => path.join(RUNTIME_DIR, `${name}.json`);
+const runtimeFile = (name: RuntimeName, instance: string = INSTANCE) =>
+  path.join(APP_ROOT, 'run', instance, `${name}.json`);
 
 export const newRuntimeToken = () => randomBytes(32).toString('hex');
 
@@ -97,9 +101,13 @@ function pidAlive(pid: number): boolean {
  * A file that outlived a SIGKILL and now names an unrelated live pid still
  * reads as valid here — the handshake token is what makes that case fail
  * closed rather than connecting to a stranger.
+ *
+ * `instance` defaults to ours. The bridge passes another install's instance for
+ * exactly one reason: cross-checking a pid named by ~/.lines-app/bridge.lock
+ * before signalling it (server/src/index.ts).
  */
-export function readRuntimeInfo(name: RuntimeName): RuntimeInfo | null {
-  const file = runtimeFile(name);
+export function readRuntimeInfo(name: RuntimeName, instance?: string): RuntimeInfo | null {
+  const file = runtimeFile(name, instance);
   let info: RuntimeInfo;
   try {
     info = JSON.parse(fs.readFileSync(file, 'utf8')) as RuntimeInfo;

@@ -37,8 +37,10 @@ import * as workflowCommands from './workflowCommands.ts';
 import * as recipeCommands from './recipeCommands.ts';
 import {
   clearRuntimeInfo,
+  INSTANCE,
   newRuntimeToken,
   publishRuntimeInfo,
+  readRuntimeInfo,
   type McpToolResult,
 } from './workerProtocol.ts';
 
@@ -214,9 +216,37 @@ const updates = new UpdateManager(
  */
 /**
  * Where the single-instance lock lives, beside the device identity it protects.
- * Holds the pid and its start time so a stale file can be told from a live claim.
+ * Holds the pid, its start time and which install claimed it, so a stale file can
+ * be told from a live claim and a live claim can say *who* it belongs to.
  */
 const BRIDGE_LOCK_FILE = path.join(APP_ROOT, 'bridge.lock');
+
+/**
+ * `EX_CONFIG`: another bridge owns this machine. A contract with the desktop
+ * shell (desktop/src/main.ts), which uses it to stand the tray down and re-arm
+ * later instead of respawning us on a 1s timer forever.
+ */
+const EXIT_BRIDGE_LOCK_HELD = 78;
+
+/**
+ * How long we wait for an incumbent to go away before calling it a collision.
+ *
+ * `tsx watch` starts the successor as soon as it has signalled the old child, and
+ * `shutdown()` below has a 1.5s exit fallback — so under Tilt the new bridge
+ * legitimately meets a still-live predecessor. Without this wait, saving a file
+ * would turn into a hard start failure. It doubles as the wait on the preempt path.
+ */
+const LOCK_WAIT_MS = 2_000;
+const LOCK_POLL_MS = 100;
+
+interface BridgeLock {
+  pid: number;
+  startedAt: number;
+  /** null when this bridge does not relay — the lock is about the store too. */
+  deviceId: string | null;
+  /** LINES_INSTANCE of the holder: 'desktop' is the one we are allowed to preempt. */
+  instance: string;
+}
 
 /** True unless the OS says nothing holds this pid. EPERM means alive but not ours. */
 function pidAlive(pid: number): boolean {
@@ -229,44 +259,127 @@ function pidAlive(pid: number): boolean {
 }
 
 /**
- * One relay-linked bridge per machine.
+ * Block this thread. Only ever called while deciding the lock, which happens
+ * during module init: there is no listener to keep responsive yet, and an async
+ * claim would let the rest of this module boot against a lock we may still refuse.
+ */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** The lock as it is on disk, or null if it is absent, truncated or unparseable —
+ *  all of which mean nothing is holding it. */
+function readBridgeLock(): BridgeLock | null {
+  try {
+    const held = JSON.parse(fs.readFileSync(BRIDGE_LOCK_FILE, 'utf8')) as Partial<BridgeLock>;
+    if (typeof held.pid !== 'number') return null;
+    return {
+      pid: held.pid,
+      startedAt: typeof held.startedAt === 'number' ? held.startedAt : 0,
+      deviceId: typeof held.deviceId === 'string' ? held.deviceId : null,
+      instance: typeof held.instance === 'string' ? held.instance : 'unknown',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One bridge per machine, relaying or not.
  *
  * Two bridges sharing `device.json` both claim the same device, so the relay
  * supersedes one on every dial — and a superseded bridge that keeps writing
  * frames is what turned a freshly created session into a flicker loop between two
- * `hello` snapshots. The relay now refuses frames from a superseded socket, but
- * containment is not the cure: not starting the second process is.
+ * `hello` snapshots. But the lock is not relay-specific: `~/.lines-app` assumes a
+ * sole writer (docs/codebase/features/app-data-root.md), so a purely local second
+ * bridge is just as much a corruption risk.
+ *
+ * Three outcomes when the file already exists: take it (dead, corrupt or ours),
+ * preempt it (the desktop app, which can stand down and re-arm itself), or refuse
+ * and exit {@link EXIT_BRIDGE_LOCK_HELD}.
  *
  * Escape hatch for tests (and anyone deliberately running two):
- * LINES_ALLOW_MULTIPLE_BRIDGES=1.
+ * LINES_ALLOW_MULTIPLE_BRIDGES=1 — which neither reads nor writes the file.
  */
-function claimBridgeLock(deviceId: string): void {
+function claimBridgeLock(deviceId: string | null): void {
   if (process.env.LINES_ALLOW_MULTIPLE_BRIDGES === '1') return;
-  try {
-    const held = JSON.parse(fs.readFileSync(BRIDGE_LOCK_FILE, 'utf8')) as {
-      pid?: number;
-      startedAt?: number;
-    };
-    if (held.pid && held.pid !== process.pid && pidAlive(held.pid)) {
-      const since = held.startedAt ? new Date(held.startedAt).toISOString() : 'unknown start time';
-      console.error(
-        `[bridge] another bridge is already running for device ${deviceId} (pid ${held.pid}, started ${since}).`,
-      );
-      console.error(`[bridge] stop that process, or delete ${BRIDGE_LOCK_FILE} if it is already gone.`);
-      process.exit(1);
-    }
-  } catch {
-    // Absent, truncated or unparseable: nothing is holding the lock, so take it.
-    // A corrupt file must never be the reason a user cannot start their bridge.
-  }
   fs.mkdirSync(APP_ROOT, { recursive: true });
-  fs.writeFileSync(
-    BRIDGE_LOCK_FILE,
-    JSON.stringify({ pid: process.pid, startedAt: Date.now(), deviceId }),
+  const payload = JSON.stringify({
+    pid: process.pid,
+    startedAt: Date.now(),
+    deviceId,
+    instance: INSTANCE,
+  } satisfies BridgeLock);
+
+  // 'wx' is the whole point: one atomic syscall for the uncontended case, instead
+  // of a read followed by a write that two starting bridges can interleave.
+  try {
+    fs.writeFileSync(BRIDGE_LOCK_FILE, payload, { flag: 'wx' });
+    armLockRelease();
+    return;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+  }
+
+  const held = readBridgeLock();
+  // Dead, corrupt, or our own pid: nothing is holding the lock, so take it. A
+  // corrupt file must never be the reason a user cannot start their bridge.
+  if (!held || held.pid === process.pid || !pidAlive(held.pid)) {
+    fs.writeFileSync(BRIDGE_LOCK_FILE, payload);
+    armLockRelease();
+    return;
+  }
+
+  // Only the tray app is preemptible: it is the one supervisor that can stand its
+  // bridge down and bring it back when this one exits. Cross-check the published
+  // runtime file before signalling — pids are reused, and the lock's word alone is
+  // not enough to SIGTERM something.
+  const preemptible =
+    held.instance === 'desktop' && readRuntimeInfo('bridge', held.instance)?.pid === held.pid;
+  if (preemptible) {
+    console.warn(
+      `[bridge] preempting the desktop app's bridge (pid ${held.pid}) — it stands down and re-arms ` +
+        'itself once this bridge exits.',
+    );
+    try {
+      process.kill(held.pid, 'SIGTERM');
+    } catch {
+      // It went away between the liveness check and the signal; the wait settles it.
+    }
+  }
+
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  while (Date.now() < deadline) {
+    sleepSync(LOCK_POLL_MS);
+    if (pidAlive(held.pid)) continue;
+    // Its shutdown() removed the file, or it died without doing so: overwrite either way.
+    fs.writeFileSync(BRIDGE_LOCK_FILE, payload);
+    armLockRelease();
+    return;
+  }
+
+  const since = held.startedAt ? new Date(held.startedAt).toISOString() : 'unknown start time';
+  const role = held.deviceId ? `relaying as device ${held.deviceId}` : 'not relaying';
+  console.error(
+    `[bridge] another bridge already owns this machine: pid ${held.pid}, instance "${held.instance}", ` +
+      `${role}, started ${since}.`,
   );
+  console.error(
+    `[bridge] stop that process, delete ${BRIDGE_LOCK_FILE} if it is already gone, or set ` +
+      'LINES_ALLOW_MULTIPLE_BRIDGES=1 to run two bridges over one ~/.lines-app anyway.',
+  );
+  process.exit(EXIT_BRIDGE_LOCK_HELD);
 }
 
-/** Give the lock up on exit, so the next start doesn't have to reason about a pid. */
+/**
+ * Give the lock up however we go away, so the next start doesn't have to reason
+ * about a pid. Registered only after a successful claim: a refused start must
+ * never touch the holder's file. Sync fs and pid-guarded, so 'exit' is safe.
+ */
+function armLockRelease(): void {
+  process.on('exit', releaseBridgeLock);
+}
+
 function releaseBridgeLock(): void {
   try {
     const held = JSON.parse(fs.readFileSync(BRIDGE_LOCK_FILE, 'utf8')) as { pid?: number };
@@ -276,19 +389,31 @@ function releaseBridgeLock(): void {
   }
 }
 
-const RELAY_URL = process.env.RELAY_URL;
-if (RELAY_URL) {
-  // Env first: the desktop app and the dev relay (RELAY_AUTH_DISABLED, where any
-  // secret is accepted) both supply one explicitly. Otherwise fall back to this
-  // machine's own identity file, minting it if absent — which is what lets the
-  // bridge be started straight from Tilt or a terminal without a supervisor
-  // handing it credentials, and keeps the secret out of any process spec.
+/**
+ * Env first: the desktop app and the dev relay (RELAY_AUTH_DISABLED, where any
+ * secret is accepted) both supply one explicitly. Otherwise fall back to this
+ * machine's own identity file, minting it if absent — which is what lets the
+ * bridge be started straight from Tilt or a terminal without a supervisor handing
+ * it credentials, and keeps the secret out of any process spec.
+ */
+function resolveRelayIdentity(): { id: string; secret: string } {
   const stored =
     process.env.LINES_DEVICE_ID && process.env.LINES_DEVICE_SECRET ? null : deviceIdentity();
-  const deviceId = process.env.LINES_DEVICE_ID ?? stored!.id;
-  const secret = process.env.LINES_DEVICE_SECRET ?? stored!.secret;
-  claimBridgeLock(deviceId);
-  new RelayClient(RELAY_URL, deviceId, secret, {
+  return {
+    id: process.env.LINES_DEVICE_ID ?? stored!.id,
+    secret: process.env.LINES_DEVICE_SECRET ?? stored!.secret,
+  };
+}
+
+const RELAY_URL = process.env.RELAY_URL;
+// Resolved only when relaying: deviceIdentity() *mints* on read, and a local-only
+// install must not grow a credential file it never uses.
+const relayIdentity = RELAY_URL ? resolveRelayIdentity() : null;
+// Unconditional, unlike the relay link: the sole-writer rule on ~/.lines-app
+// applies to every bridge.
+claimBridgeLock(relayIdentity?.id ?? null);
+if (RELAY_URL) {
+  new RelayClient(RELAY_URL, relayIdentity!.id, relayIdentity!.secret, {
     onChannel: (link, identity) => {
       void handleConnection(link, {}, identity);
     },
@@ -299,7 +424,7 @@ if (RELAY_URL) {
     // tray is the only place a user can see that this machine is reachable.
     onStatus: reportRelayStatus,
   });
-  console.log(`[relay] dialling ${RELAY_URL} as device ${deviceId}`);
+  console.log(`[relay] dialling ${RELAY_URL} as device ${relayIdentity!.id}`);
 }
 
 // If the worker never shows up, in-flight statuses loaded from disk are stale.

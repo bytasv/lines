@@ -993,9 +993,12 @@
       "architecturalRules": [
         "all persistent paths derive from APP_ROOT / userStoreRoot; never hardcode the home-directory path elsewhere",
         "createStore keeps an in-memory, per-user transcript cache (raw lines + lazily-parsed events) revalidated by statSync mtime/size and bounded by count and byte size; it assumes this process is the sole writer of transcripts/*.jsonl",
-        "sessions.json writes are compact (not pretty-printed) and debounced via SessionManager.persist/flushPersist, coalescing a burst of status transitions into one write without delaying the broadcast"
+        "sessions.json writes are compact (not pretty-printed) and debounced via SessionManager.persist/flushPersist, coalescing a burst of status transitions into one write without delaying the broadcast",
+        "the sole-writer assumption is enforced, not just assumed: ~/.lines-app/bridge.lock is claimed by every bridge unconditionally (relaying or not), so a second bridge process refuses to start rather than becoming that second writer — see hosted-machine-access.md"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "hosted-machine-access"
+      ]
     },
     {
       "id": "prompt-mentions",
@@ -1101,7 +1104,11 @@
         "BRIDGE_CMD",
         "tilt_args_argv",
         "dotenv_keys",
-        "have"
+        "have",
+        "dotenv_value",
+        "RELAY_TARGET",
+        "LOOPBACK_RELAY",
+        "LOCK_PROBE"
       ],
       "tests": [],
       "businessRules": [
@@ -1113,7 +1120,9 @@
         "a pull that changes only package-lock.json triggers nothing; run tilt trigger install by hand",
         "pair-device (npm run pair -w server) is always declared but never auto_init - triggered by hand when a code expires or a machine is revoked, not part of bringing the stack up; idempotent, prints 'already paired' and exits 0 on a claimed device",
         "desktop-package (npm run package -w desktop) is the same shape as pair-device - manual, never part of tilt up - and exists so the DMG build is discoverable from Tilt at all",
-        "RELAY_URL set without STORAGE_URL warns rather than failing preflight - the bridge would dial a hosted relay while syncing to the local storage default, splitting one machine's data across two databases"
+        "RELAY_URL set without STORAGE_URL warns rather than failing preflight - the bridge would dial a hosted relay while syncing to the local storage default, splitting one machine's data across two databases",
+        "when RELAY_URL in .env points at a non-loopback host and ~/.lines-app/bridge.lock names a live process, preflight warns (naming the tray app if instance:'desktop', or naming any other holder as one that will refuse with exit 78) rather than failing; a stale/absent/unparseable lock is silent",
+        "LINES_INSTANCE is not set anywhere in this Tiltfile despite older comments claiming Tilt sets it to 'dev' — web/vite.config.ts resolves /__bridge from the same variable, so pinning it for the bridge alone would break dev-server discovery"
       ],
       "architecturalRules": [
         "no deps= on the four service resources — tsx watch/Vite own file-watching, not Tilt",
@@ -1586,6 +1595,9 @@
         "claimBridgeLock",
         "releaseBridgeLock",
         "BRIDGE_LOCK_FILE",
+        "EXIT_BRIDGE_LOCK_HELD",
+        "resolveRelayIdentity",
+        "readRuntimeInfo",
         "socketGeneration"
       ],
       "tests": [
@@ -1599,7 +1611,9 @@
         "server/src/workerHandshake.test.ts",
         "server/src/workerClient.test.ts",
         "server/src/relayEndToEnd.test.ts",
-        "server/src/relayClient.duplicateOpen.test.ts"
+        "server/src/relayClient.duplicateOpen.test.ts",
+        "server/src/bridgeLock.test.ts",
+        "server/src/relayClient.supersede.test.ts"
       ],
       "businessRules": [
         "fromAgent only accepts a frame from the socket the hub currently calls its agent; a superseded (or half-dead) bridge that keeps writing cannot inject state into a live browser channel or close a channel now owned by the bridge that replaced it",
@@ -1609,8 +1623,9 @@
         "the relay's public health endpoint (GET /) keeps its exact unauthenticated shape; presenting the correct x-relay-secret (constant-time compared) additionally returns hubs, a per-device summary (deviceId, online, channel count, agentAttaches, lastAttachAt) for triage — agentAttaches climbing on an otherwise-idle paired device is the tell for two bridges fighting over one identity",
         "the bridge rejects a duplicate open for a channel id it already serves (logging a warning) rather than building a second RelayChannel — every agent attach replays open for all live channels, so a takeover (or any re-announcement) re-delivers ids already held, and building a second link means a second full hello down a socket that never reconnected",
         "RelayClient.connect() closes any pre-existing socket (and drops its channels) before dialling a new one, so one RelayClient instance can never hold two live sockets for the same device",
-        "a bridge with RELAY_URL set takes a single-instance lock (~/.lines-app/bridge.lock, pid+startedAt) right after resolving its device identity; if the recorded pid is alive the new process exits with a message naming the running pid and the lock file to remove if it's genuinely stale — the actual cure for two bridge processes sharing one device.json, with everything else above being containment",
-        "LINES_ALLOW_MULTIPLE_BRIDGES=1 is the deliberate escape hatch that skips the single-instance lock, for tests and any intentionally-run second bridge; it must never be set in a real deployment",
+        "every bridge takes this machine's single-instance lock (~/.lines-app/bridge.lock, pid+startedAt+instance+deviceId) unconditionally, relaying or not, claimed atomically ('wx'); on collision a live instance:'desktop' holder is preempted (SIGTERM, cross-checked against its own published runtime file first) since the tray is the only supervisor that can stand down and re-arm, any other live holder gets a bounded ~2s retry window (for a tsx watch successor meeting a still-exiting predecessor) before the new process exits EXIT_BRIDGE_LOCK_HELD (78) naming the holder",
+        "LINES_ALLOW_MULTIPLE_BRIDGES=1 is the deliberate escape hatch that skips the single-instance lock entirely (no read, no write), for tests and any intentionally-run second bridge; it must never be set in a real deployment",
+        "RelayClient no longer resets its reconnect backoff on 'open' — only a socket that survives RELAY_STABLE_MS does, on close, since a supersede close always follows a successful open and the old reset let two bridges fight at the retry floor forever; SUPERSEDE_LIMIT consecutive supersedes with no stable socket escalates the re-dial cap to SUPERSEDE_CAP_MS, resetting the moment a dial lands a stable link",
         "register is unauthenticated - the machine has no user yet and a code is worthless until claimed; re-registering an already-claimed AND UNREVOKED device is refused (409) rather than silently re-bound",
         "re-registering a REVOKED device clears its stale userId/revokedAt and issues a fresh code - otherwise a revoked machine could never be claimed again, since claim and verify both refuse a revoked row",
         "claim/verify answer the same 'unknown or expired code' for absent, expired, and revoked, so a distinct 'expired' reply can't confirm a guessed code had once been real",
@@ -1635,7 +1650,7 @@
         "an absent hello.bridge means a bridge older than the field, which counts as skew",
         "hello also carries an optional worker: WorkerStatus, and workerStatus broadcasts later transitions; neither bumped APP_PROTOCOL_VERSION since both are additive and an older client tolerates their absence",
         "ephemeral by default; LINES_WORKER_PORT/LINES_BRIDGE_PORT pin a port only when explicitly set, which Tilt does so its readiness probes have fixed targets",
-        "LINES_INSTANCE separates concurrent installs (Tilt sets 'dev'), so a dev checkout and an installed app never publish over each other",
+        "LINES_INSTANCE separates concurrent installs — the desktop shell sets 'desktop', a dev checkout (Tilt included) leaves it unset ('default'); Tilt sets nothing itself since web/vite.config.ts resolves /__bridge from the same variable",
         "the worker rejects any connection that cannot echo the published token, checked before the newest-bridge-wins takeover so a local process cannot evict the real bridge by connecting",
         "a discovery file naming a dead pid is removed on read, not merely ignored",
         "PORT belongs to the storage server alone now; bridge and worker no longer read it",
@@ -1681,7 +1696,10 @@
         "terminate() on supersede is deliberately aggressive rather than a graceful close-and-drain: a superseded bridge has no readers left, so draining it only leaves a noisy half-open socket around longer — the trade-off is a louder log during a genuine flap, which is a feature during triage",
         "the bridge closes its own pre-existing socket (and drops its channels) at the start of connect(), before dialling — belt-and-braces alongside the single-flight retryTimer, so RelayClient itself can never be the source of two live sockets for one device",
         "the single-instance lock file lives beside device.json under the same APP_ROOT rather than a new path resolver, reusing the existing app-data-root convention (see app-data-root.md)",
-        "stale-lock detection is process.kill(pid, 0): ESRCH means nothing holds the pid, so the new process takes the lock; any other outcome (including EPERM, another OS user's live process) is treated as held"
+        "stale-lock detection is process.kill(pid, 0): ESRCH means nothing holds the pid, so the new process takes the lock; any other outcome (including EPERM, another OS user's live process) is treated as held",
+        "only instance:'desktop' is preemptible, and only after cross-checking the pid against readRuntimeInfo('bridge', 'desktop') — the lock file's word alone must never be enough to SIGTERM a pid, since pids are reused",
+        "armLockRelease (process.on('exit', releaseBridgeLock)) is registered only after a successful claim, so a refused start never touches the incumbent's lock file",
+        "the supersede circuit breaker lives entirely in RelayClient, never in index.ts or the lock — it only slows its own retry and never restarts or blocks anything else"
       ],
       "relatedDecisions": [
         "turn-recovery",
@@ -1786,7 +1804,10 @@
         "refreshClaudeCli",
         "claudeCliRefusalMessage",
         "loadConfig",
-        "isLocalMode"
+        "isLocalMode",
+        "foreignBridgeLock",
+        "enterStandDown",
+        "EXIT_BRIDGE_LOCK_HELD"
       ],
       "tests": [
         "server/src/updates.test.ts",
@@ -1805,7 +1826,9 @@
         "a missing or too-old Claude Code refuses the turn with an actionable message in both the browser and the tray",
         "LINES_CLAUDE_PATH is exclusive: when set, no other location is tried",
         "update checks only notify — the tray links the download page",
-        "a bridge child refuses to start if another live process already holds this machine's single-instance lock (~/.lines-app/bridge.lock) — a second guard beneath the shell's own requestSingleInstanceLock, for a respawn racing a not-yet-exited previous bridge or a bridge started by hand alongside the packaged app; without it two bridge processes can share one device.json and the relay ends up superseding one of them, which is visible in every connected browser as a flicker until it does"
+        "a bridge child refuses to start if another live process already holds this machine's single-instance lock, unless that holder is instance:'desktop' (a previous tray bridge) — in which case ours preempts it instead; this is a second guard beneath the shell's own requestSingleInstanceLock, for a respawn racing a not-yet-exited previous bridge or a bridge started by hand alongside the packaged app; without it two bridge processes can share one device.json and the relay ends up superseding one of them, which is visible in every connected browser as a flicker until it does",
+        "when a different installation (a dev checkout, most commonly Tilt) holds the lock instead, the tray's own bridge stands down rather than fighting for it — no bridge or worker spawns at startup, or the running bridge is not respawned after exiting/being preempted — until the lock clears, and the tray reports this plainly ('Paused — another bridge owns this machine') rather than 'Connecting…' or a silent retry loop",
+        "the worker is never part of a stand-down: only the bridge collides on the machine lock and the relay device identity, so a worker mid-turn is left alone when a sibling process collides on a resource the worker doesn't touch"
       ],
       "architecturalRules": [
         "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
@@ -1820,7 +1843,9 @@
         "the bridge and worker bundles must be ESM — server and shared use import.meta.dirname, which is undefined under CJS",
         "the version floor is ours or nobody's — the SDK performs no version handshake at all",
         "releases use a second public R2 bucket, because public-read is a bucket-level setting",
-        "the bridge lock lives beside device.json under the same APP_ROOT, reusing the existing app-data-root path helpers rather than adding a new resolver; a stale lock is detected via process.kill(pid, 0) (ESRCH means take it), and LINES_ALLOW_MULTIPLE_BRIDGES=1 is the deliberate escape hatch that must never be set in a real deployment"
+        "the bridge lock lives beside device.json under the same APP_ROOT, reusing the existing app-data-root path helpers rather than adding a new resolver; a stale lock is detected via process.kill(pid, 0) (ESRCH means take it), and LINES_ALLOW_MULTIPLE_BRIDGES=1 is the deliberate escape hatch that must never be set in a real deployment",
+        "foreignBridgeLock/BRIDGE_LOCK_FILE/EXIT_BRIDGE_LOCK_HELD are duplicated in main.ts rather than imported from server/src/index.ts, the same precedent APP_ROOT already sets in this file — EXIT_BRIDGE_LOCK_HELD=78 is a contract between the two files, changing it in one without the other silently breaks the stand-down trigger",
+        "enterStandDown is the only path that clears bridge/worker handles and arms the recheck timer; both the startup check and spawnChild's exit handler funnel into it rather than each duplicating the tray-copy and recheck logic"
       ],
       "relatedDecisions": [
         "hosted-machine-access",

@@ -178,6 +178,57 @@ if RELAYED and not have('STORAGE_URL'):
     warn('RELAY_URL is set but STORAGE_URL is not — the bridge will dial the ' +
          'hosted relay while syncing to localhost. Set STORAGE_URL to the same ' +
          'deployment (https://api.<domain>), or unset RELAY_URL for local-only.')
+
+# One machine, one relay identity. Tilt's bridge and the packaged tray app share
+# ~/.lines-app/device.json, so both dialling a *deployed* relay makes each dial
+# supersede the other. server/src/index.ts enforces one holder via
+# ~/.lines-app/bridge.lock; this only says out loud what that is about to do.
+#
+# Values, not just key names: the loopback test below needs the host to tell a
+# deployment from `--with-relay`'s local relay. Never printed, and RELAY_URL is
+# not a credential.
+def dotenv_value(path, key):
+    if not os.path.exists(path):
+        return ''
+    for raw in str(read_file(path)).splitlines():
+        line = raw.strip()
+        if line.startswith('#') or '=' not in line:
+            continue
+        parts = line.split('=', 1)
+        if parts[0].strip() == key:
+            return parts[1].strip()
+    return ''
+
+RELAY_TARGET = os.getenv('RELAY_URL', '') or dotenv_value(ENV_FILE, 'RELAY_URL')
+LOOPBACK_RELAY = ('127.0.0.1' in RELAY_TARGET or 'localhost' in RELAY_TARGET or
+                  '[::1]' in RELAY_TARGET)
+BRIDGE_LOCK_FILE = os.path.join(os.getenv('HOME', ''), '.lines-app', 'bridge.lock')
+
+# node rather than read_file + decode_json: decode_json fails the whole build on a
+# truncated lock, and an unparseable or stale lock must be silent — a leftover file
+# must never be what stops `tilt up`. Same call does the liveness test, and exits 0
+# with no output for every "nothing to say" case (local() fails the build on
+# nonzero). Prints: <pid> <instance> relaying|local-only.
+LOCK_PROBE = ' '.join([
+    'node -e',
+    '\'try{var h=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));',
+    'try{process.kill(h.pid,0)}catch(e){if(e.code!=="EPERM"){process.exit(0)}}',
+    'console.log([h.pid,h.instance||"unknown",h.deviceId?"relaying":"local-only"]',
+    '.join(" "))}catch(e){}\'',
+    shq(BRIDGE_LOCK_FILE),
+])
+
+if RELAYED and not LOOPBACK_RELAY and not WITH_RELAY and os.path.exists(BRIDGE_LOCK_FILE):
+    HOLDER = str(local(LOCK_PROBE, quiet=True, echo_off=True)).strip().split(' ')
+    if len(HOLDER) == 3:
+        if HOLDER[1] == 'desktop':
+            warn('the Lines tray app holds ~/.lines-app/bridge.lock (bridge pid %s, %s) — ' % (HOLDER[0], HOLDER[2]) +
+                 "Tilt's bridge will take this machine over (SIGTERM) and the tray will show " +
+                 '"Paused" until `tilt down`. Nothing to do; quit the tray app to avoid it.')
+        else:
+            warn('another bridge holds ~/.lines-app/bridge.lock (pid %s, instance "%s", %s) — ' % (HOLDER[0], HOLDER[1], HOLDER[2]) +
+                 "Tilt's bridge will refuse to start (exit 78). Stop that process, or set " +
+                 'LINES_ALLOW_MULTIPLE_BRIDGES=1 to share one ~/.lines-app anyway.')
 # PORT used to be read by BOTH the bridge and storage out of this one .env file,
 # so a single value collided. The bridge now reads LINES_BRIDGE_PORT, leaving
 # PORT to storage alone — nothing to warn about.

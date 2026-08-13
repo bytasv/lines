@@ -59,6 +59,17 @@ const ASSETS = app.isPackaged ? path.join(ROOT, 'assets') : path.resolve(__dirna
 const INSTANCE = process.env.LINES_INSTANCE ?? 'desktop';
 const APP_ROOT = path.join(os.homedir(), '.lines-app');
 const RUN_DIR = path.join(APP_ROOT, 'run', INSTANCE);
+/**
+ * The bridge's single-instance lock. Read here, never written: the bridge owns it.
+ *
+ * The path and the exit code are duplicated rather than imported from
+ * server/src/index.ts, exactly as APP_ROOT above is — this shell needs two
+ * constants, not the bridge's module graph.
+ */
+const BRIDGE_LOCK_FILE = path.join(APP_ROOT, 'bridge.lock');
+/** `EX_CONFIG` from server/src/index.ts: the bridge refused to start because
+ *  another one owns this machine. Distinct from a crash on purpose. */
+const EXIT_BRIDGE_LOCK_HELD = 78;
 /** Child stdout/stderr, so "Open logs" has something to reveal on a machine with no terminal. */
 const LOG_FILE = path.join(APP_ROOT, 'logs', `${INSTANCE}.log`);
 
@@ -118,6 +129,10 @@ let relayVerified = false;
 let relaySettleTimer: NodeJS.Timeout | null = null;
 /** When we last re-registered on our own, so a 1008 loop cannot hammer storage. */
 let lastRegisterAt = 0;
+/** Set while another bridge (a dev checkout under Tilt, normally) owns this
+ *  machine, so ours is deliberately not running. */
+let standDown: { pid: number; instance: string } | null = null;
+let standDownTimer: NodeJS.Timeout | null = null;
 let cli: ClaudeCliStatus = claudeCliStatus();
 let update: UpdateStatus = { state: 'idle' };
 
@@ -141,6 +156,12 @@ const PAIRING_REFRESH_MS = 14 * 60_000;
  * storage. This plus the `!pairingCode` guard bounds it.
  */
 const AUTO_REGISTER_MIN_MS = 30_000;
+
+/**
+ * How often we look for the other bridge to go away. Slow on purpose: this is a
+ * "someone ran `tilt up`" state, not a fault to race back from.
+ */
+const STAND_DOWN_RECHECK_MS = 5_000;
 
 function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
@@ -180,6 +201,76 @@ function appendLog(line: string) {
   }
 }
 
+/** True unless the OS says nothing holds this pid. EPERM means alive but not ours. */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * The bridge lock when a *different* live process holds it.
+ *
+ * Null for absent, corrupt, dead, or a lock naming our own bridge — none of those
+ * is a collision, and treating one as such would park the tray for nothing.
+ */
+function foreignBridgeLock(): { pid: number; instance: string } | null {
+  try {
+    const held = JSON.parse(fs.readFileSync(BRIDGE_LOCK_FILE, 'utf8')) as {
+      pid?: number;
+      instance?: string;
+    };
+    if (typeof held.pid !== 'number') return null;
+    if (held.pid === bridge?.pid) return null;
+    if (!pidAlive(held.pid)) return null;
+    return { pid: held.pid, instance: held.instance ?? 'unknown' };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Another bridge owns this machine: keep ours down and watch for the lock to clear.
+ *
+ * The worker is deliberately left exactly as it is. It may be holding a live turn,
+ * and it is the bridge — not the worker — that collides on the lock and on this
+ * machine's device identity. Same argument as the restart asymmetry in spawnChild.
+ */
+function enterStandDown(holder: { pid: number; instance: string }) {
+  standDown = holder;
+  bridge = null;
+  // Nothing of ours is dialling out, so the tray must not claim a link.
+  applyRelayStatus({ connected: false });
+  appendLog(`[bridge] standing down — pid ${holder.pid} (${holder.instance}) owns this machine\n`);
+  console.log(`[bridge] standing down — pid ${holder.pid} (${holder.instance}) owns this machine`);
+  if (!standDownTimer) {
+    standDownTimer = setInterval(() => {
+      const still = foreignBridgeLock();
+      if (still) {
+        // Ownership can pass from one process to another (a tsx watch restart)
+        // without ever being free; report whoever holds it now.
+        standDown = still;
+        updateTray();
+        return;
+      }
+      clearInterval(standDownTimer!);
+      standDownTimer = null;
+      standDown = null;
+      console.log('[bridge] machine lock is free — re-arming');
+      // The worker was never stood down, so only replace one that is actually gone.
+      if (!worker || worker.exitCode !== null || worker.killed) worker = spawnChild('worker', false);
+      bridge = spawnChild('bridge', true);
+      wireBridgeIpc();
+      updateTray();
+    }, STAND_DOWN_RECHECK_MS);
+    standDownTimer.unref();
+  }
+  updateTray();
+}
+
 /**
  * Packaged, the children are single-file esbuild bundles run by Electron's own
  * node (`ELECTRON_RUN_AS_NODE`). In a checkout they stay TypeScript under tsx, so
@@ -212,6 +303,15 @@ function spawnChild(name: 'worker' | 'bridge', ipc: boolean): ChildProcess {
     if (name === 'bridge') {
       // The relay link died with it; don't leave the tray claiming otherwise.
       applyRelayStatus({ connected: false });
+      // Two ways another bridge takes this machine: ours refused to start (78), or
+      // ours was preempted — SIGTERMed by the newcomer, so `code` is null and the
+      // lock is the only tell. Either way, respawning on a 1s timer would be a
+      // crash loop against a machine we do not own.
+      const holder = foreignBridgeLock();
+      if (holder || code === EXIT_BRIDGE_LOCK_HELD) {
+        enterStandDown(holder ?? { pid: 0, instance: 'unknown' });
+        return;
+      }
       setTimeout(() => {
         bridge = spawnChild('bridge', true);
         wireBridgeIpc();
@@ -534,6 +634,8 @@ async function unpairThisMachine(): Promise<void> {
 /** One line for the tray: what the relay link is actually doing. */
 function relayLabel(): string {
   if (!RELAY_MODE) return 'Local mode';
+  // No bridge of ours is running, so "Connecting…" would be a lie.
+  if (standDown) return 'Paused — another bridge owns this machine';
   if (relayVerified) return `Connected · ${hostLabel(config.webUrl)}`;
   if (relay?.connected) return 'Connecting…';
   // 1008 is the relay refusing this device: unclaimed, or revoked in the web app.
@@ -626,7 +728,12 @@ function updateTray() {
             },
           ]),
       { type: 'separator' as const },
-      { label: `Bridge: ${alive(bridge) ? 'running' : 'stopped'}`, enabled: false },
+      {
+        label: standDown
+          ? `Bridge: paused — another bridge owns this machine${standDown.pid ? ` (pid ${standDown.pid})` : ''}`
+          : `Bridge: ${alive(bridge) ? 'running' : 'stopped'}`,
+        enabled: false,
+      },
       { label: `Worker: ${alive(worker) ? 'running' : 'stopped'}`, enabled: false },
       ...(update.state === 'available'
         ? [
@@ -694,11 +801,20 @@ async function start() {
     await refreshPairingCode(false);
   }
 
-  // Worker first: the bridge dials it, and starting in this order avoids a
-  // pointless retry round on every launch.
-  worker = spawnChild('worker', false);
-  bridge = spawnChild('bridge', true);
-  wireBridgeIpc();
+  const holder = foreignBridgeLock();
+  if (holder) {
+    // Another bridge already owns ~/.lines-app — a dev checkout under Tilt, in
+    // practice. Spawn neither child: ours would refuse to start (exit 78) and a
+    // worker of ours would only compete for the same store. The recheck re-arms
+    // both once the lock clears.
+    enterStandDown(holder);
+  } else {
+    // Worker first: the bridge dials it, and starting in this order avoids a
+    // pointless retry round on every launch.
+    worker = spawnChild('worker', false);
+    bridge = spawnChild('bridge', true);
+    wireBridgeIpc();
+  }
 
   if (LOCAL_MODE) {
     uiPort = await startUiServer();
