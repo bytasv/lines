@@ -1487,6 +1487,91 @@
       ]
     },
     {
+      "id": "git-worktrees",
+      "name": "Git worktrees",
+      "doc": "features/git-worktrees.md",
+      "purpose": "Run a session in its own linked git worktree instead of sharing one checkout with every other session in the project; attribution to the parent tab without widening what the session's roots may reach. A per-session worktree starts detached and gets a lines/<title> branch once the session's auto-title resolves, so nothing is ever renamed.",
+      "entryPoints": [
+        "web/src/components/ProjectTabs.tsx",
+        "web/src/components/Sidebar.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/git.ts",
+        "server/src/worktrees.ts",
+        "server/src/worktreeCommands.ts",
+        "server/src/index.ts",
+        "server/src/sessions.ts",
+        "server/src/userContext.ts",
+        "server/src/store.ts",
+        "server/src/autoGuard.ts",
+        "web/src/store.ts",
+        "web/src/components/ProjectTabs.tsx",
+        "web/src/components/WorktreeModal.tsx",
+        "web/src/components/Sidebar.tsx",
+        "web/src/components/SessionView.tsx"
+      ],
+      "symbols": [
+        "WorktreeInfo",
+        "Project.worktrees",
+        "worktreePaths",
+        "projectPaths",
+        "findWorktree",
+        "rootsForCwd",
+        "runGit",
+        "WORKTREE_ROOT",
+        "LINES_BRANCH_PREFIX",
+        "defaultWorktreePath",
+        "uniqueWorktreePath",
+        "titleBranchName",
+        "parseWorktreeList",
+        "addWorktree",
+        "switchToNewBranch",
+        "removeWorktree",
+        "listWorktrees",
+        "createWorktree",
+        "worktreeForNewSession",
+        "nameWorktreeBranch",
+        "attachSession",
+        "reconcileWorktrees",
+        "WorktreeDeps",
+        "SessionManager.onAutoNamed"
+      ],
+      "tests": [
+        "server/src/worktrees.test.ts",
+        "server/src/worktreeCommands.test.ts",
+        "server/src/projectWorktrees.test.ts",
+        "server/src/autoGuard.worktree.test.ts",
+        "server/src/sessions.worktree.test.ts"
+      ],
+      "businessRules": [
+        "attribution, not capability: a worktree session's project tab widens, its roots never do — projectRoots must never return a worktree path",
+        "one path, one owner, and no nesting, extending the same rule multi-root-projects applies to roots",
+        "a per-session worktree starts detached; its branch is cut once the session's auto-title resolves and is never renamed after; a worktree the user named explicitly gets its branch immediately",
+        "every branch Lines mints on its own initiative is namespaced lines/… (LINES_BRANCH_PREFIX); a branch the user typed into the create form is untouched",
+        "removal is always explicit; git branch -d only when asked and only for a branch createdByLines; never -D",
+        "removal is refused while any non-archived session's cwd is inside the worktree, unless force",
+        "deleting or archiving a session never touches its worktree — the record renders 'orphaned', one click from Remove",
+        "git is the source of truth; Project.worktrees is a cache reconciled on openProject; a worktree adopted from outside Lines never gets createdByLines",
+        "explicit create fails on a taken path/branch; the per-session auto path uniquifies (-2, -3…) instead",
+        "a managed worktree (under WORKTREE_ROOT) is never added to the recent-directories list, since opening it as its own project tab would double-count every session in it"
+      ],
+      "architecturalRules": [
+        "runGit (throws, stderr in the message) is for mutating git only; the existing git() (swallows every failure to '') stays read-only",
+        "Lines' own worktree operations go through worktreeCommands, never Bash, so assessToolCall never sees them; the two new BASH_RULES entries govern only an agent running git itself",
+        "WorktreeDeps (run, repoRoot, ensureParent) is the one seam every command function takes, mirroring GitRun in worktrees.ts",
+        "defaultWorktreePath groups by repo basename under WORKTREE_ROOT, not full repo path, so a name collision is resolved by the existing uniquifier",
+        "SessionManager.onAutoNamed is a callback wired in userContext.ts, not a direct call from sessions.ts into worktreeCommands.ts, since that layer needs a whole UserContext"
+      ],
+      "relatedDecisions": [
+        "multi-root-projects",
+        "multi-repo-commits",
+        "permissions-and-plan-mode",
+        "app-data-root",
+        "session-and-project-ui"
+      ]
+    },
+    {
       "id": "docs-reader",
       "name": "Documentation reader",
       "doc": "features/docs-reader.md",

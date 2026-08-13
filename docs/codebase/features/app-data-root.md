@@ -23,6 +23,8 @@ Defines the machine-global directory that holds all server-side app state — pe
 - `loadTranscript(sessionId)` — cached parsed events, lazily built from the same cache entry
 - `loadProjects()`/`saveProjects()` — `projects.json`, sanitized to `Project[]` on
   every read (see [multi-root-projects](multi-root-projects.md))
+- `server/src/worktrees.ts` — `WORKTREE_ROOT` (`~/.lines-app/worktrees`), where a
+  Lines-managed git worktree's directory lives by default; see [git-worktrees](git-worktrees.md)
 
 ## Data flow
 
@@ -41,6 +43,9 @@ None.
 - The app data root is `~/.lines-app`.
 - The `local` user uses the flat root directly (legacy single-tenant layout); real user ids live under `~/.lines-app/users/{id}`.
 - Machine-wide assets (vendored plugins) live directly under the root and are shared across users.
+- A git worktree Lines creates for a session or on request defaults to
+  `~/.lines-app/worktrees/<repo>/<slug>` — app state, not a folder under the user's
+  own checkout — grouped by repo name so two projects can reuse the same branch name.
 
 ## Architectural rules
 
@@ -60,3 +65,4 @@ None.
 - [multi-root-projects](multi-root-projects.md)
 - [hosted-machine-access](hosted-machine-access.md) — `bridge.lock`, the mechanism enforcing the
   sole-writer rule above
+- [git-worktrees](git-worktrees.md) — `WORKTREE_ROOT`

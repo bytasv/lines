@@ -264,6 +264,10 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   never mistaken for one that worked.
 - A dropped non-prompt control message (delete included) sets `actionError`, rendered by the
   sidebar and dismissed by clicking it — replacing a `console.warn` nobody saw.
+- A server-side refusal (`{type:'error'}`, e.g. a rejected mutation) also sets `actionError`
+  instead of only logging to the console — see [git-worktrees](git-worktrees.md), whose worktree
+  removal/creation refusals were the case that made the gap visible; the same fix also
+  retroactively surfaces `compactContext`/`addGuardAllow` refusals that were silent before.
 - Auto-selection (no valid current selection in the target project) always excludes archived
   sessions; `completed` needs no separate check since the server always archives alongside it.
 - A project whose sessions are all archived auto-selects nothing (empty state) rather than
@@ -336,3 +340,5 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   reconnect (relay `open` replay on a bridge attach/takeover).
 - [cloud-sync-sessions](cloud-sync-sessions.md) — what actually makes a delete stick once the
   `deleteSession` message here reaches the bridge.
+- [git-worktrees](git-worktrees.md) — the `worktreePending` flag and `pendingCreate` re-arm added
+  for a work-tree session's slower create; the `actionError` fix above.

@@ -39,11 +39,17 @@ every root.
 
 ## Important symbols
 
-- `Project { path, extraRoots? }` — `path` is the project's identity (tab key,
+- `Project { path, extraRoots?, worktrees? }` — `path` is the project's identity (tab key,
   `activeProject`, every session's `cwd`, the project-key anchor); `extraRoots`
-  never contains `path`
+  never contains `path`. `worktrees` is a third, later-added kind of path — see
+  [git-worktrees](git-worktrees.md) — and is deliberately **not** a root: `projectRoots`
+  never returns a worktree path.
+- `projectPaths(project)` — roots plus worktree paths, for *attribution* (which tab a
+  directory belongs to); never used for capability (guard roots, `additionalDirectories`),
+  which stays `projectRoots`/`rootsForCwd` only.
 - `rootsForCwd(projects, cwd)` — every root a session at `cwd` may touch: its
-  project's roots (primary first) if `cwd` belongs to one, else `[cwd]`; never
+  project's roots (primary first) if `cwd` belongs to one, `[cwd]` if `cwd` is one of
+  its worktrees (confining a worktree session to its own checkout), else `[cwd]`; never
   empty
 - `SessionManager.rootsFor(meta)` — resolves roots at use time from the live
   projects list, never snapshotted onto `SessionMeta`, so adding a root applies
@@ -95,7 +101,9 @@ None yet for this pass; static (`tsc --noEmit`) verified across `server`, `web`,
 - Writes in an extra root auto-approve in `auto` mode exactly like the primary;
   the sensitive-path override (`~/.ssh`, `~/.aws`, `.env`) still wins regardless
   of which root a path resolves under.
-- One root belongs to exactly one project; roots may not nest within a project.
+- One root belongs to exactly one project; roots may not nest within a project. A
+  worktree path is held to the same one-owner/no-nesting rule against every project's
+  roots *and* worktrees — see [git-worktrees](git-worktrees.md).
 - An empty roots list escalates every file tool — the guard fails toward
   prompting, never toward silently trusting nothing.
 - `@mention`'s feature provider stays primary-root-only (`docs/codebase/index.json`
@@ -126,3 +134,6 @@ None yet for this pass; static (`tsc --noEmit`) verified across `server`, `web`,
 - [permissions-and-plan-mode](permissions-and-plan-mode.md)
 - [app-data-root](app-data-root.md)
 - [session-and-project-ui](session-and-project-ui.md)
+- [git-worktrees](git-worktrees.md) — a third path tier (attribution without
+  capability) layered onto `Project`, reusing this feature's one-owner/no-nesting
+  root validation.
