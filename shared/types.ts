@@ -17,7 +17,7 @@ export const APP_PROTOCOL_VERSION = 1;
  * socket removes that token from URLs (and so from logs and browser history),
  * and means a connection reached through a relay needs no HTTP surface at all.
  */
-export type FileRequestKind = 'file' | 'tree' | 'find' | 'docs' | 'attachment';
+export type FileRequestKind = 'file' | 'tree' | 'find' | 'docs' | 'attachment' | 'syncLog';
 
 export interface FileRequestParams {
   /** file/tree/docs: exactly one. find: one per project root. */
@@ -1058,11 +1058,48 @@ export interface AuthStatus {
   account?: { email?: string; organization?: string };
 }
 
+/**
+ * What kind of failure took the storage link down. Coarse on purpose: each class
+ * gets its own banner wording, and `auth` is the one the bridge waits out rather
+ * than reports (an expired Clerk token is not an outage).
+ */
+export type StorageErrorKind = 'auth' | 'network' | 'timeout' | 'server' | 'client';
+
 /** Bridge -> storage-server link health. `available: false` = the storage server / Supabase is unreachable. */
 export interface StorageStatus {
   available: boolean;
   /** Underlying error (Prisma/DB message or transport failure), when known. */
   reason?: string;
+  /** Class of the failure that took the link down. Absent while available. */
+  kind?: StorageErrorKind;
+  /** Epoch ms the outage started, as WorkerStatus.since. Absent while available. */
+  since?: number;
+  /** Consecutive failed requests in this outage. */
+  failures?: number;
+}
+
+/**
+ * One row of the bridge's `sync-log.jsonl`, written only on a failed request or
+ * an availability transition — the happy path costs no IO. Read back by the
+ * `syncLog` file request so a user can see (and paste) why sync went down.
+ */
+export interface SyncLogEntry {
+  /** ms epoch. */
+  at: number;
+  event: 'fail' | 'down' | 'up';
+  kind?: StorageErrorKind;
+  method?: string;
+  /** Request path, query stripped (a `?since=` cursor says nothing useful here). */
+  path?: string;
+  /** HTTP status, when the server answered at all. */
+  status?: number;
+  /** Request duration in ms. */
+  ms?: number;
+  reason?: string;
+  /** Consecutive failures counted at the time of the row. */
+  failures?: number;
+  /** `up` only: how long the outage lasted, ms. */
+  downMs?: number;
 }
 
 /** Bridge->worker socket health. App-wide: one worker per bridge, not per session. */

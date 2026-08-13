@@ -45,6 +45,8 @@ A cursor-less `/sessions` pull (no `marks.sessions` stored — a fresh or migrat
 
 Storage-side, a body over the `express.json({ limit: '2mb' })` cap now answers `413 { error: 'payload too large' }` instead of falling through to the generic 500 HTML error page, so `StorageSyncClient.req()` can parse the reason instead of raising the generic "cloud sync unavailable" banner.
 
+`req()`'s failure/success outcomes (including these) now also drive [storage-availability-banner](storage-availability-banner.md): each is classified into a `StorageErrorKind`, logged to `sync-log.jsonl`, and — for a 401/403 — held for `AUTH_GRACE_MS` before raising the banner at all, since an expired-token push looks identical to a real outage otherwise.
+
 ### Delete: local
 
 `SessionManager.deleteSession` records a tombstone (`deletedAt = Date.now()`) alongside forgetting the session's live state, transcript and queue, then broadcasts `sessionDeleted` as before. `sync.ts`'s broadcast observer routes that into `StorageSyncClient.deleteSession`, which queues the id in `pendingDeletes` and, if the client is enabled and not mid-pull, fires the `DELETE` immediately. If it can't fire yet — no token, or `applying` — the id simply waits: every later `pushSessions`/`pushSession` call drains `pendingDeletes` first.
@@ -99,3 +101,6 @@ A row with no `deletedAt` goes through `adoptSynced` as before, except it now ch
 - [hosted-machine-access](hosted-machine-access.md) — the relay/bridge-supersede half of the same
   underlying bug report (a stuck, undeletable session on a hosted deployment), fixed
   independently of the tombstones here.
+- [storage-availability-banner](storage-availability-banner.md) — what the "cloud sync unavailable"
+  banner this feature's failures can raise actually means, and why an expired token no longer
+  raises it immediately.

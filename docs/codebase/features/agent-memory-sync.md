@@ -55,7 +55,9 @@ None (repo has typecheck only, no test runner configured).
 - Push is triggered from the `SessionManager` result-sniffing callback in `userContext.ts`, not from `sessions.ts` or `worker.ts` — keeps the worker thin and sync concerns out of session/turn logic.
 - `MemorySyncer` takes an injectable `claudeDir` constructor argument so a scratch directory can stand in for `~/.claude` in future tests.
 - The path→slug derivation (`slugForPath`) and the `~/.claude/projects/<slug>/memory/` layout are Claude CLI/SDK-internal details, not a published contract — re-verify on SDK upgrades.
+- Like every other route on this client, a failed push/pull here feeds [storage-availability-banner](storage-availability-banner.md): the failure is classified, logged, and — for an expired-token 401 — held for a grace window before it raises the "cloud sync unavailable" banner at all, since a backgrounded browser tab throttling its auth-relay timer otherwise looks identical to a real outage.
 
 ## Related decisions
 
 - [multi-root-projects](multi-root-projects.md)
+- [storage-availability-banner](storage-availability-banner.md)

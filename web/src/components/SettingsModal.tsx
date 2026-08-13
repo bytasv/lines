@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   ActionIcon,
+  Alert,
+  Badge,
   Button,
   Divider,
   Group,
   Indicator,
+  Loader,
   Modal,
   ScrollArea,
   SegmentedControl,
@@ -15,8 +18,9 @@ import {
   Text,
   Tooltip,
 } from '@mantine/core';
-import { IconPlayerPlay } from '@tabler/icons-react';
-import type { PermissionMode } from '@lines/shared';
+import { useClipboard } from '@mantine/hooks';
+import { IconAlertCircle, IconCopy, IconPlayerPlay } from '@tabler/icons-react';
+import type { PermissionMode, SyncLogEntry } from '@lines/shared';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { GuardAllowlistSection } from './GuardAllowlistSection';
@@ -24,7 +28,7 @@ import { DevicesSection } from './DevicesSection';
 import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
 import { modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
-import { send } from '../ws';
+import { fileRequest, send } from '../ws';
 
 export type SettingsSection =
   | 'account'
@@ -33,6 +37,7 @@ export type SettingsSection =
   | 'transcript'
   | 'notifications'
   | 'allowlist'
+  | 'diagnostics'
   | 'docs';
 
 const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
@@ -46,6 +51,7 @@ const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   { value: 'transcript', label: 'Transcript' },
   { value: 'notifications', label: 'Notifications' },
   { value: 'allowlist', label: 'Auto-mode allowlist' },
+  { value: 'diagnostics', label: 'Sync' },
   { value: 'docs', label: 'Documentation' },
 ];
 
@@ -128,6 +134,7 @@ export function SettingsModal({
             {section === 'sessions' && <SessionsSection />}
             {section === 'transcript' && <TranscriptSection />}
             {section === 'notifications' && <NotificationsSection />}
+            {section === 'diagnostics' && <SyncLogSection />}
             {section === 'docs' && <DocsSection onClose={onClose} />}
             {section === 'allowlist' && (
               <GuardAllowlistSection
@@ -290,6 +297,127 @@ function TranscriptSection() {
       />
     </>
   );
+}
+
+/**
+ * Why cloud sync dropped. The bridge writes a row only for a failed storage
+ * request or an availability flip, so a healthy install shows an empty list —
+ * and a user seeing the amber pill has something concrete to copy into a report
+ * (the bridge console isn't reachable on a desktop or VPS install).
+ */
+function SyncLogSection() {
+  // The live status, not the one the route returns beside the rows: it is
+  // broadcast on every flip, so this pane can't go stale while it is open.
+  const status = useStore((s) => s.storageStatus);
+  const [entries, setEntries] = useState<SyncLogEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const clipboard = useClipboard({ timeout: 1500 });
+
+  useEffect(() => {
+    let cancelled = false;
+    fileRequest('syncLog', {})
+      .then(({ status: code, body }) => {
+        if (cancelled) return;
+        if (code !== 200) {
+          setError(`The bridge answered ${code}.`);
+          return;
+        }
+        setEntries((body as { entries?: SyncLogEntry[] })?.entries ?? []);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Newest first: an outage is read from its most recent row backwards.
+  const rows = entries ? [...entries].reverse() : [];
+
+  return (
+    <Stack gap="sm">
+      <Text size="sm" c="dimmed">
+        Cloud sync keeps your sessions, workflows and steps on the storage server. Local files
+        stay the source of truth, so an outage never loses work — these are the failures behind
+        the “cloud sync unavailable” notice.
+      </Text>
+
+      <Group gap="xs">
+        <Badge color={status?.available === false ? 'yellow' : 'green'} variant="light">
+          {status?.available === false ? `unavailable${status.kind ? ` · ${status.kind}` : ''}` : 'connected'}
+        </Badge>
+        {status?.available === false && status.reason && (
+          <Text size="xs" c="dimmed" style={{ minWidth: 0 }} truncate>
+            {status.reason}
+          </Text>
+        )}
+      </Group>
+
+      {error && (
+        <Alert color="red" icon={<IconAlertCircle size={16} />} variant="light">
+          {error}
+        </Alert>
+      )}
+
+      {!entries && !error ? (
+        <Group justify="center" p="md">
+          <Loader size="sm" />
+        </Group>
+      ) : rows.length === 0 ? (
+        <Text size="sm" c="dimmed">
+          No sync failures recorded.
+        </Text>
+      ) : (
+        <>
+          <Group>
+            <Button
+              size="xs"
+              variant="light"
+              leftSection={<IconCopy size={14} />}
+              onClick={() => clipboard.copy(rows.map((e) => JSON.stringify(e)).join('\n'))}
+            >
+              {clipboard.copied ? 'Copied' : 'Copy log'}
+            </Button>
+          </Group>
+          <Stack gap={4}>
+            {rows.map((entry, i) => (
+              <Group key={`${entry.at}-${i}`} gap="xs" wrap="nowrap" align="baseline">
+                <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
+                  {new Date(entry.at).toLocaleString()}
+                </Text>
+                <Badge size="xs" variant="light" color={EVENT_COLOR[entry.event]} style={{ flexShrink: 0 }}>
+                  {entry.event}
+                </Badge>
+                <Text size="xs" style={{ minWidth: 0 }}>
+                  {syncLogDetail(entry)}
+                </Text>
+              </Group>
+            ))}
+          </Stack>
+        </>
+      )}
+    </Stack>
+  );
+}
+
+const EVENT_COLOR: Record<SyncLogEntry['event'], string> = {
+  fail: 'gray',
+  down: 'yellow',
+  up: 'green',
+};
+
+/** One row as a line: what was tried, what came back, how long it took. */
+function syncLogDetail(entry: SyncLogEntry): string {
+  const parts: string[] = [];
+  if (entry.kind) parts.push(entry.kind);
+  if (entry.method && entry.path) parts.push(`${entry.method} ${entry.path}`);
+  if (entry.status !== undefined) parts.push(String(entry.status));
+  if (entry.ms !== undefined) parts.push(`${entry.ms}ms`);
+  if (entry.downMs !== undefined) parts.push(`down ${Math.round(entry.downMs / 1000)}s`);
+  if (entry.failures !== undefined) parts.push(`${entry.failures} failed`);
+  if (entry.reason) parts.push(entry.reason);
+  return parts.join(' · ');
 }
 
 function NotificationsSection() {

@@ -139,6 +139,9 @@ export function buildUserContext(
     () => ctx.clerkToken,
     (marks) => store.saveSyncWatermarks(marks),
     store.loadSyncWatermarks(),
+    // Why sync went down, on disk: the bridge console isn't reachable on a
+    // desktop/VPS install, so the `syncLog` file request reads this back.
+    (entry) => store.appendSyncLog(entry),
   );
   // Storage/Supabase reachability flips → tell this user's browsers so they can
   // show the "cloud sync unavailable" notice (local persistence still works).

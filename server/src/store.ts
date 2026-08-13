@@ -9,6 +9,7 @@ import type {
   RecipeDef,
   SessionMeta,
   StepDef,
+  SyncLogEntry,
   TranscriptEvent,
   UserUiSettings,
   WorkflowDef,
@@ -62,6 +63,9 @@ interface TranscriptEntry {
  *  byte cap is what actually binds; the count cap keeps the map small. */
 const MAX_CACHED_TRANSCRIPTS = 12;
 const MAX_CACHED_TRANSCRIPT_BYTES = 32 * 1024 * 1024;
+
+/** Cap for sync-log.jsonl; over it, the older half is dropped on the next append. */
+const MAX_SYNC_LOG_BYTES = 256 * 1024;
 
 /**
  * Tolerant JSONL split. Keeps only whole JSON objects: a crash mid-append can
@@ -177,6 +181,7 @@ export function createStore(root: string) {
   const SETTINGS_FILE = path.join(root, 'settings.json');
   const MEMORY_MANIFEST_FILE = path.join(root, 'memory-manifest.json');
   const WATERMARKS_FILE = path.join(root, 'sync-watermarks.json');
+  const SYNC_LOG_FILE = path.join(root, 'sync-log.jsonl');
 
   fs.mkdirSync(TRANSCRIPTS, { recursive: true });
   fs.mkdirSync(ATTACHMENTS, { recursive: true });
@@ -490,6 +495,42 @@ export function createStore(root: string) {
 
     saveSyncWatermarks(marks: SyncWatermarks) {
       writeJson(WATERMARKS_FILE, marks);
+    },
+
+    /**
+     * Append one storage-sync diagnostic row. Only failures and availability
+     * transitions are written, so the file grows slowly; the cap is a backstop
+     * against a storage server that is down for days, and keeps the newer half
+     * because that is the half anyone reporting an outage cares about.
+     */
+    appendSyncLog(entry: SyncLogEntry) {
+      try {
+        fs.appendFileSync(SYNC_LOG_FILE, JSON.stringify(entry) + '\n');
+        if (fs.statSync(SYNC_LOG_FILE).size <= MAX_SYNC_LOG_BYTES) return;
+        const lines = splitJsonl(fs.readFileSync(SYNC_LOG_FILE, 'utf8'));
+        fs.writeFileSync(SYNC_LOG_FILE, lines.slice(Math.ceil(lines.length / 2)).join('\n') + '\n');
+      } catch {
+        // Diagnostics are best-effort; losing a row must not break a sync path.
+      }
+    },
+
+    /** The newest `limit` rows, oldest first. Torn trailing lines are dropped, as readJson does. */
+    readSyncLog(limit = 200): SyncLogEntry[] {
+      let text: string;
+      try {
+        text = fs.readFileSync(SYNC_LOG_FILE, 'utf8');
+      } catch {
+        return [];
+      }
+      const entries: SyncLogEntry[] = [];
+      for (const line of splitJsonl(text).slice(-limit)) {
+        try {
+          entries.push(JSON.parse(line) as SyncLogEntry);
+        } catch {
+          // Unparseable row — dropped.
+        }
+      }
+      return entries;
     },
 
     rootDir: root,

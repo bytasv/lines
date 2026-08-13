@@ -153,12 +153,23 @@ function readAttachment(ctx: UserContext, params: FileRequestParams): FileRouteR
   };
 }
 
+/**
+ * The bridge's storage-sync diagnostics: why the "cloud sync unavailable" pill
+ * appeared, and whether it is still up. Rides this already-authenticated
+ * plumbing rather than a socket message of its own — it is a read of a file
+ * under the user's store root, like every other route here.
+ */
+function readSyncLog(ctx: UserContext): FileRouteResult {
+  return { status: 200, body: { entries: ctx.store.readSyncLog(200), status: ctx.sync.status } };
+}
+
 const ROUTES: Record<FileRequestKind, (ctx: UserContext, p: FileRequestParams) => FileRouteResult> = {
   file: readFile,
   tree: readTree,
   docs: readDocs,
   find: findFiles,
   attachment: readAttachment,
+  syncLog: readSyncLog,
 };
 
 /** Dispatch one request. An unknown kind is a client bug, not a path to serve. */

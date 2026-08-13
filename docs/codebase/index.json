@@ -888,7 +888,10 @@
         "project-scoped files are keyed by the machine-independent ProjectKeyRegistry key, falling back to a raw slug key when unresolved",
         "the ~/.claude/projects/<slug>/memory/ layout and path-to-slug derivation are Claude CLI/SDK-internal, not a published contract"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "multi-root-projects",
+        "storage-availability-banner"
+      ]
     },
     {
       "id": "cloud-sync-sessions",
@@ -958,7 +961,64 @@
       ],
       "relatedDecisions": [
         "agent-memory-sync",
-        "hosted-machine-access"
+        "hosted-machine-access",
+        "storage-availability-banner"
+      ]
+    },
+    {
+      "id": "storage-availability-banner",
+      "name": "Storage availability banner",
+      "doc": "features/storage-availability-banner.md",
+      "purpose": "Classify why the bridge's storage-server link is down, wait out a routine expired-token 401 instead of raising the \"cloud sync unavailable\" banner, actively re-probe once down so recovery is noticed within seconds, and persist a bounded failure log a user can read and copy from Settings without a bridge console.",
+      "entryPoints": [
+        "web/src/components/StorageBanner.tsx",
+        "web/src/components/SettingsModal.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/sync.ts",
+        "server/src/store.ts",
+        "server/src/userContext.ts",
+        "server/src/fileRoutes.ts",
+        "web/src/components/StorageBanner.tsx",
+        "web/src/components/SettingsModal.tsx"
+      ],
+      "symbols": [
+        "StorageErrorKind",
+        "classifyStatus",
+        "classifyError",
+        "StorageStatus.kind",
+        "StorageStatus.since",
+        "StorageStatus.failures",
+        "SyncLogEntry",
+        "StorageSyncClient.recordFailure",
+        "StorageSyncClient.recordSuccess",
+        "StorageSyncClient.startProbe",
+        "StorageSyncClient.stopProbe",
+        "Store.appendSyncLog",
+        "Store.readSyncLog"
+      ],
+      "tests": [
+        "server/src/sync.availability.test.ts",
+        "server/src/store.sync-log.test.ts"
+      ],
+      "businessRules": [
+        "a single auth (401/403) failure does not raise the banner; only AUTH_GRACE_MS (90s) of continuous auth failures does, and any 2xx/304 resets that clock",
+        "while down, a GET /settings probe fires every PROBE_INTERVAL_MS (15s) so recovery is reflected within seconds instead of waiting for the next incidental pull/push",
+        "the probe targets /settings, not /health, since /health sits above storage's Clerk gate and would falsely clear an auth-caused outage",
+        "sync-log.jsonl only grows on a failed request or an availability transition, capped at ~256 KB and trimmed to its newer half on overflow",
+        "a soft-error request still marks the link available and never touches the auth-grace clock, since a soft 401 is not evidence the token is good"
+      ],
+      "architecturalRules": [
+        "classifyStatus/classifyError are pure exported functions, unit-testable without constructing a client",
+        "appendLog is injected with the same shape and default (() => {}) as the existing persistMarks parameter, so sync.ts still imports no fs",
+        "the probe timer is unref()'d like every other StorageSyncClient timer, started only on the down transition and stopped only on the up transition",
+        "no storage-server change: no Prisma migration, no storage/ deploy coupling"
+      ],
+      "relatedDecisions": [
+        "cloud-sync-sessions",
+        "agent-memory-sync",
+        "file-routes-over-ws"
       ]
     },
     {

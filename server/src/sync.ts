@@ -1,9 +1,22 @@
-import type { GuardAllowlistBlob, MemoryFileMap, ProjectKeyMap, RecipeDef, SessionMeta, StepDef, StepRef, StorageStatus, WorkflowDef } from '@lines/shared';
+import type { GuardAllowlistBlob, MemoryFileMap, ProjectKeyMap, RecipeDef, SessionMeta, StepDef, StepRef, StorageErrorKind, StorageStatus, SyncLogEntry, WorkflowDef } from '@lines/shared';
 import type { SyncWatermarks } from './store.ts';
 
 const PUSH_DEBOUNCE_MS = 2_000;
 const PULL_MIN_SPACING_MS = 30_000;
 const FETCH_TIMEOUT_MS = 10_000;
+/**
+ * How long auth failures must persist before they count as an outage. The
+ * browser relays a fresh Clerk token every 50s and those tokens live ~60s, so a
+ * hidden tab (whose `setInterval` the browser throttles) routinely leaves the
+ * bridge holding an expired one — every push then 401s. Waiting this out keeps
+ * routine token turnover off the banner while a genuinely revoked session still
+ * surfaces within the window.
+ */
+const AUTH_GRACE_MS = 90_000;
+/** How often to re-probe storage while the link is down, so recovery is noticed. */
+const PROBE_INTERVAL_MS = 15_000;
+/** Storage error bodies can be whole Prisma dumps; the log keeps a usable prefix. */
+const REASON_MAX_CHARS = 300;
 /** Headroom under the storage server's 2mb JSON body limit, as memory.ts keeps for its map. */
 const SESSIONS_PUSH_MAX_BYTES = 1.5 * 1024 * 1024;
 
@@ -30,6 +43,23 @@ function statsMap(rows: unknown): Record<string, number> {
     out[`${row.ownerId}/${row.id}`] = row.runCount;
   }
   return out;
+}
+
+/** Failure class for an HTTP status the storage server actually answered with. */
+export function classifyStatus(status: number): StorageErrorKind {
+  if (status === 401 || status === 403) return 'auth';
+  if (status >= 500) return 'server';
+  return 'client';
+}
+
+/** Failure class for a transport throw. `AbortSignal.timeout` rejects with a TimeoutError. */
+export function classifyError(err: unknown): StorageErrorKind {
+  const name = err instanceof Error ? err.name : '';
+  return name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'network';
+}
+
+function truncate(reason: string): string {
+  return reason.length > REASON_MAX_CHARS ? `${reason.slice(0, REASON_MAX_CHARS)}…` : reason;
 }
 
 /** LWW stamp for a meta; undefined when it carries neither timestamp (legacy rows). */
@@ -78,6 +108,14 @@ export class StorageSyncClient {
   /** null = never contacted (unknown/disabled); true/false = last request outcome. */
   private available: boolean | null = null;
   private reason?: string;
+  private kind?: StorageErrorKind;
+  /** ms epoch the current outage began; undefined while up. */
+  private downSince?: number;
+  /** Consecutive failed requests, reset by any 2xx/304. */
+  private failures = 0;
+  /** ms epoch of the first auth failure not yet cleared by a success; null = none pending. */
+  private authFailingSince: number | null = null;
+  private probeTimer: NodeJS.Timeout | null = null;
   private lastPullAt = 0;
   /** Per-path spacing for the two cross-user scans, which are the most expensive queries we make. */
   private lastSharedPullAt = new Map<string, number>();
@@ -105,13 +143,23 @@ export class StorageSyncClient {
   private marks: SyncWatermarks;
   private marksDirty = false;
 
+  /** Injected like `persistMarks`, so this module keeps no `fs` import and tests can collect rows. */
+  private appendLog: (entry: SyncLogEntry) => void;
+  private readonly authGraceMs: number;
+  private readonly probeMs: number;
+
   constructor(
     private base: string,
     private tokenFn: () => string | null,
     private persistMarks: (marks: SyncWatermarks) => void = () => {},
     marks: SyncWatermarks = {},
+    appendLog: (entry: SyncLogEntry) => void = () => {},
+    opts?: { authGraceMs?: number; probeMs?: number },
   ) {
     this.marks = { ...marks };
+    this.appendLog = appendLog;
+    this.authGraceMs = opts?.authGraceMs ?? AUTH_GRACE_MS;
+    this.probeMs = opts?.probeMs ?? PROBE_INTERVAL_MS;
   }
 
   get enabled(): boolean {
@@ -530,6 +578,7 @@ export class StorageSyncClient {
     // every pull and would otherwise defeat both caches.
     const basePath = path.split('?')[0];
     const knownEtag = this.etags.get(basePath);
+    const started = Date.now();
     let res: Response;
     try {
       res = await fetch(`${this.base}${path}`, {
@@ -544,12 +593,18 @@ export class StorageSyncClient {
       });
     } catch (err) {
       // Transport failure: storage process down, connection refused, or timeout.
-      this.setAvailable(false, err instanceof Error ? err.message : String(err));
+      this.recordFailure({
+        kind: classifyError(err),
+        method,
+        path: basePath,
+        ms: Date.now() - started,
+        reason: truncate(err instanceof Error ? err.message : String(err)),
+      });
       throw err;
     }
     // 304: our cached view is current and the server sent no body at all.
     if (res.status === 304) {
-      this.setAvailable(true);
+      this.recordSuccess();
       return NOT_MODIFIED;
     }
     if (!res.ok) {
@@ -557,13 +612,21 @@ export class StorageSyncClient {
       const reason = await res.json().then((b) => (b as { error?: string })?.error).catch(() => undefined);
       if (opts?.softErrors) {
         // The link itself is fine — the server answered — so only this call fails.
+        // Not recordSuccess(): a soft 401 is still no evidence the token is good.
         this.setAvailable(true);
         throw new Error(reason ?? `storage ${method} ${path} → ${res.status}`);
       }
-      this.setAvailable(false, reason ?? `storage ${method} ${path} → ${res.status}`);
+      this.recordFailure({
+        kind: classifyStatus(res.status),
+        method,
+        path: basePath,
+        status: res.status,
+        ms: Date.now() - started,
+        reason: truncate(reason ?? `storage ${method} ${path} → ${res.status}`),
+      });
       throw new Error(`storage ${method} ${path} → ${res.status}`);
     }
-    this.setAvailable(true);
+    this.recordSuccess();
     const etag = res.headers.get('etag');
     if (etag) this.etags.set(basePath, etag);
     const cursorKey = CURSOR_KEYS[basePath];
@@ -578,16 +641,99 @@ export class StorageSyncClient {
 
   /** Current bridge->storage link health for a fresh client's hello (null before first contact). */
   get status(): StorageStatus {
-    return { available: this.available !== false, ...(this.reason ? { reason: this.reason } : {}) };
+    if (this.available !== false) return { available: true };
+    return {
+      available: false,
+      ...(this.reason ? { reason: this.reason } : {}),
+      ...(this.kind ? { kind: this.kind } : {}),
+      ...(this.downSince ? { since: this.downSince } : {}),
+      ...(this.failures ? { failures: this.failures } : {}),
+    };
+  }
+
+  /** A 2xx/304: the link is up *and* the token was accepted, so the auth grace resets too. */
+  private recordSuccess(): void {
+    this.authFailingSince = null;
+    // Before the counter reset, so the `up` row can report how many requests failed.
+    this.setAvailable(true);
+    this.failures = 0;
+  }
+
+  /**
+   * One failed request: always logged, but only sometimes an outage. An `auth`
+   * failure inside AUTH_GRACE_MS is a token that went stale between relays, not
+   * a broken link, so the banner waits it out (see AUTH_GRACE_MS).
+   */
+  private recordFailure(fail: { kind: StorageErrorKind } & Omit<SyncLogEntry, 'at' | 'event' | 'kind' | 'failures'>): void {
+    this.failures += 1;
+    this.log({ event: 'fail', ...fail, failures: this.failures });
+    if (fail.kind === 'auth' && this.available !== false) {
+      const now = Date.now();
+      this.authFailingSince ??= now;
+      if (now - this.authFailingSince < this.authGraceMs) return;
+    }
+    this.setAvailable(false, fail.reason, fail.kind);
   }
 
   /** Flip availability and notify only on a transition, so the client sees one banner per outage. */
-  private setAvailable(ok: boolean, reason?: string): void {
+  private setAvailable(ok: boolean, reason?: string, kind?: StorageErrorKind): void {
     if (this.available === ok) return;
+    const wasDown = this.available === false;
     this.available = ok;
     this.reason = ok ? undefined : reason;
-    if (ok) this.warned = false; // allow one fresh warn on the next outage
+    this.kind = ok ? undefined : kind;
+    if (ok) {
+      // `wasDown` and not `available !== null`: the first successful request of a
+      // process is not a recovery and has no outage to measure.
+      if (wasDown) {
+        this.log({
+          event: 'up',
+          ...(this.downSince !== undefined ? { downMs: Date.now() - this.downSince } : {}),
+          failures: this.failures,
+        });
+      }
+      this.downSince = undefined;
+      this.stopProbe();
+      this.warned = false; // allow one fresh warn on the next outage
+    } else {
+      this.downSince = Date.now();
+      this.log({ event: 'down', kind, reason, failures: this.failures });
+      // The one warning this outage gets. `warned` is claimed here so the
+      // callers' warnOnce doesn't add a second, less informative line.
+      this.warned = true;
+      console.warn(`[sync] storage unavailable (${kind ?? 'unknown'}): ${reason ?? 'no reason given'}`);
+      this.startProbe();
+    }
     this.onStatusChange?.(this.status);
+  }
+
+  /**
+   * While the link is down, retry on our own: pushes only fire on local change
+   * and pullAll is spaced 30s, so without this the banner can outlive the outage
+   * by minutes. `/settings` rather than `/health` — health sits *above* storage's
+   * Clerk gate, so it would clear an auth outage that is still real.
+   */
+  private startProbe(): void {
+    if (this.probeTimer) return;
+    this.probeTimer = setInterval(() => {
+      if (!this.enabled) return;
+      void this.req('GET', '/settings').catch(() => {});
+    }, this.probeMs).unref() as unknown as NodeJS.Timeout;
+  }
+
+  private stopProbe(): void {
+    if (!this.probeTimer) return;
+    clearInterval(this.probeTimer);
+    this.probeTimer = null;
+  }
+
+  /** Diagnostics are best-effort: a failing log must never break a sync path. */
+  private log(entry: Omit<SyncLogEntry, 'at'>): void {
+    try {
+      this.appendLog({ at: Date.now(), ...entry });
+    } catch {
+      // ignored
+    }
   }
 
   /** As warnOnce, for a local skip that says nothing about the link's health. */
