@@ -165,8 +165,8 @@
    Caveat: these vars leak to any Mantine component rendered inside markdown — a future
    custom renderer dropping a Button/Paper in here would inherit shrunken padding. */
 .md-body {
-  --mantine-spacing-xs: 4px; /* heading margin-bottom, table cell padding */
-  --mantine-spacing-sm: 6px; /* table cell padding */
+  --mantine-spacing-xs: 4px; /* heading margin-bottom, table caption margin */
+  --mantine-spacing-sm: 6px;
   --mantine-spacing-md: 8px; /* pre/hr/table/list/blockquote block margins */
   --mantine-spacing-lg: 6px; /* paragraph margin-bottom (was 16px) */
   --mantine-spacing-xl: 18px; /* list indent; heading margin-top base */
@@ -196,17 +196,48 @@
   border-left: 2px solid var(--mantine-color-default-border);
 }
 
-/* GFM tables: Mantine's Typography supplies borders and cell padding via the .md-body
-   spacing vars, so these rules only handle overflow — a table too wide for the column
-   scrolls horizontally instead of pushing the conversation column open. */
+/* GFM tables. Borders and their light/dark colour still come from Mantine's Typography;
+   everything density-related is overridden here, because Typography's defaults
+   (14px cells, 4px/6px padding, width:100%) read airy next to the rest of the compact
+   rhythm. Specificity: `.md-body th` (0,1,1) beats `:where(table) :where(th)` (0,1,0).
+   The wrapper scrolls a table too wide for the column instead of pushing the
+   conversation column open. */
 .md-body .md-table-wrap {
   overflow-x: auto;
   margin-bottom: var(--mantine-spacing-md);
 }
 
+/* width:auto shrinks a narrow table to its content rather than stretching it across
+   the column; max-width keeps a wide one inside the scrolling wrapper. The wrapper
+   owns the bottom margin, so Typography's table margin is zeroed. */
+.md-body .md-table-wrap table {
+  width: auto;
+  max-width: 100%;
+  margin-bottom: 0;
+}
+
 .md-body th,
 .md-body td {
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+/* Flush the outer edges so the table's text column lines up with the prose around it. */
+.md-body th:first-child,
+.md-body td:first-child {
+  padding-left: 0;
+}
+
+.md-body th:last-child,
+.md-body td:last-child {
+  padding-right: 0;
+}
+
+.md-body th {
+  font-weight: 600;
+  color: var(--mantine-color-dimmed);
 }
 
 /* GFM task lists render as <ul class="contains-task-list">, which Typography's

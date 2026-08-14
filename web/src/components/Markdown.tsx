@@ -20,8 +20,8 @@ const rehypePlugins: PluggableList = [
 
 /**
  * GitHub Flavored Markdown is on (`remarkGfm`): tables, strikethrough, task lists,
- * footnotes, autolink literals. Table styling comes from Mantine's Typography rules
- * driven by the `.md-body` spacing vars; only overflow is handled in `index.css`.
+ * footnotes, autolink literals. Tables inherit borders from Mantine's Typography;
+ * `index.css` overrides the density (cell padding, font size, shrink-to-fit width).
  *
  * `onLinkClick` lets a host (the documentation reader) route links itself
  * instead of opening the source preview. Omitted — as every transcript call site
