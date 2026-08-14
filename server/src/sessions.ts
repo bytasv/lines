@@ -559,6 +559,17 @@ export class SessionManager {
   /** How long consolidateStepOutput waits on its query before falling back to the
    *  last assistant text. A field so tests can shrink it. */
   consolidateTimeoutMs = 60_000;
+  /**
+   * Fired once the auto-titler has settled, with the title it produced — or `''`
+   * when it produced none (no token, a failed query). A work-tree session's branch
+   * is cut from this, so the empty case has to fire too, or the work tree would sit
+   * on detached HEAD forever.
+   *
+   * A callback rather than a direct call into worktreeCommands: that layer needs a
+   * whole `UserContext`, which this manager is only a part of. Wired in
+   * userContext.ts, exactly as `GuardAllowlist.onChange` is.
+   */
+  onAutoNamed?: (session: SessionMeta, title: string) => void;
 
   constructor(
     private store: Store,
@@ -1602,9 +1613,15 @@ export class SessionManager {
    * bridge on purpose — losing it to a restart only costs a title.
    */
   private async autoName(sessionId: string, prompt: string) {
+    // Every exit from here reports what the title ended up being, so a caller that
+    // is waiting on the name (the work-tree branch) is never left hanging.
+    const settled = (title: string) => {
+      const meta = this.sessions.get(sessionId);
+      if (meta) this.onAutoNamed?.(meta, title);
+    };
     try {
       const token = await this.ownerToken();
-      if (!token) return;
+      if (!token) return settled('');
 
       const q = query({
         prompt:
@@ -1629,13 +1646,15 @@ export class SessionManager {
           title = msg.result.trim().replace(/^["']|["']$/g, '').slice(0, 60);
         }
       }
-      if (!title) return;
+      if (!title) return settled('');
       const meta = this.sessions.get(sessionId);
       if (!meta) return;
       meta.name = title;
       this.upsert(meta);
+      settled(title);
     } catch (err) {
       console.warn('[autoName]', err);
+      settled('');
     }
   }
 

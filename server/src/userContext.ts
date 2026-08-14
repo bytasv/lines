@@ -1,5 +1,5 @@
 import type { ServerMessage, UserUiSettings } from '@lines/shared';
-import { projectRoots } from '@lines/shared';
+import { findWorktree, projectRoots } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
 import { AuthManager } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
@@ -9,6 +9,7 @@ import { WorkflowEngine } from './workflows.ts';
 import { RecipeEngine } from './recipes.ts';
 import { StorageSyncClient, THROTTLED } from './sync.ts';
 import { ProjectKeyRegistry } from './projectKeys.ts';
+import * as worktreeCommands from './worktreeCommands.ts';
 import { MemorySyncer } from './memory.ts';
 import type { WorkerClient } from './workerClient.ts';
 
@@ -367,6 +368,16 @@ export function buildUserContext(
     refreshSharedSteps,
     refreshSharedRecipes,
     touchedAt: Date.now(),
+  };
+  // Wired after ctx exists, since the command layer takes the whole context. A
+  // work tree cut for a session starts detached on purpose — this is where it gets
+  // the branch, once the title the branch should carry is known. Fire-and-forget:
+  // failing to name a branch must never disturb the turn that is already running.
+  sessions.onAutoNamed = (session, title) => {
+    if (!findWorktree(store.loadProjects(), session.cwd)) return;
+    void worktreeCommands.nameWorktreeBranch(ctx, session.cwd, title).catch((err) => {
+      console.warn('[worktrees] branch naming failed:', err);
+    });
   };
   // After ctx exists — its async broadcasts reference ctx-bound state (sync token).
   usage.start();

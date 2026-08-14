@@ -28,6 +28,33 @@ async function git(cwd: string, args: string[]): Promise<string> {
   }
 }
 
+/** `git worktree add` checks out a whole tree, which the 10s read budget can't cover. */
+const GIT_WRITE_TIMEOUT_MS = 120_000;
+
+/**
+ * Run a *mutating* git command, throwing git's own stderr on failure.
+ *
+ * The counterpart to `git()` above, which swallows every failure to '' because
+ * `diff --no-index` needs it. A write must fail loudly instead: its stderr *is*
+ * the diagnostic the user has to read ("already checked out", "contains modified
+ * files", "not fully merged"). Never route a read through here, or a write
+ * through `git()`.
+ */
+export async function runGit(
+  cwd: string,
+  args: string[],
+  timeout = GIT_WRITE_TIMEOUT_MS,
+): Promise<string> {
+  try {
+    const { stdout } = await pexec('git', args, { cwd, maxBuffer: MAX_BUFFER, timeout });
+    return stdout;
+  } catch (err) {
+    const e = err as { stderr?: unknown; message?: string };
+    const stderr = typeof e.stderr === 'string' ? e.stderr : '';
+    throw new Error((stderr || e.message || 'git failed').trim());
+  }
+}
+
 /** A non-destructive snapshot of the working tree at workflow start, so step
  *  diffs show only what the workflow changed — not pre-existing dirty state. */
 export interface DiffBaseline {

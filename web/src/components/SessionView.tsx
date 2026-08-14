@@ -1,13 +1,17 @@
 import { useEffect } from 'react';
-import { Alert, Button, Divider, Group, Stack, Text } from '@mantine/core';
+import { ActionIcon, Alert, Button, Divider, Group, Stack, Text, Tooltip } from '@mantine/core';
+import { useClipboard } from '@mantine/hooks';
 import {
   IconAlertTriangle,
+  IconCheck,
+  IconFolder,
+  IconGitBranch,
   IconLogin,
   IconPlayerPlay,
   IconPlayerSkipForward,
   IconRefresh,
 } from '@tabler/icons-react';
-import { isSessionActive } from '@lines/shared';
+import { findWorktree, isSessionActive } from '@lines/shared';
 import { useStore } from '../store';
 import { skippableFailedStep } from '../lib/format';
 import { send } from '../ws';
@@ -24,6 +28,8 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const loggedOut = useStore((s) => s.auth?.loggedIn === false);
   const openLoginModal = useStore((s) => s.openLoginModal);
   const connected = useStore((s) => s.connectionStatus === 'connected');
+  const projects = useStore((s) => s.projects);
+  const clipboard = useClipboard({ timeout: 1500 });
 
   useEffect(() => {
     if (!loaded) send({ type: 'loadTranscript', sessionId });
@@ -40,17 +46,45 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const workflow = session.workflow
     ? workflows.find((w) => w.id === session.workflow!.workflowId)
     : undefined;
+  // A work-tree session is confined to that checkout, which the path alone doesn't
+  // say — the branch is what makes it identifiable at a glance.
+  const worktree = findWorktree(projects, session.cwd)?.worktree;
 
   return (
     <Stack gap={0} h="100%">
       <Group px="md" py={8} justify="space-between">
         <Group gap="xs">
+          {/* Ahead of the name, where the path used to trail it: this is the one
+              control in the header, and a leading icon reads as one. The path itself
+              is noise — a managed work tree's is long and says nothing the branch
+              doesn't — but it stays one click away, since it is what you paste into a
+              terminal to get there. */}
+          <Tooltip
+            label={clipboard.copied ? 'Copied' : `${session.cwd} — click to copy`}
+            openDelay={200}
+            multiline
+            maw={420}
+            styles={{ tooltip: { wordBreak: 'break-all' } }}
+          >
+            <ActionIcon
+              variant="subtle"
+              color="gray"
+              size="sm"
+              aria-label="Copy working directory"
+              onClick={() => clipboard.copy(session.cwd)}
+            >
+              {clipboard.copied ? <IconCheck size={13} /> : <IconFolder size={13} />}
+            </ActionIcon>
+          </Tooltip>
           <Text fw={600} size="sm">
             {session.name}
           </Text>
-          <Text size="xs" c="dimmed" ff="monospace">
-            {session.cwd}
-          </Text>
+          {worktree && (
+            <Group gap={3} wrap="nowrap" c="dimmed">
+              <IconGitBranch size={12} />
+              <Text size="xs">{worktree.branch ?? 'detached'}</Text>
+            </Group>
+          )}
         </Group>
         {session.lastCostUsd != null && (
           <Text size="xs" c="dimmed">

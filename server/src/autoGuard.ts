@@ -60,6 +60,16 @@ const BASH_RULES: BashRule[] = [
   { pattern: /\bgit\s+reset\s+--hard/, reason: 'Hard git reset (discards work)' },
   { pattern: /\bgit\s+clean\b.*-[a-z]*f/, reason: 'git clean -f (deletes untracked files)' },
   { pattern: /\bgit\s+branch\s+-D\b/, reason: 'Force-deleting a branch' },
+  // Bash is deny-list only, so these auto-approve otherwise. `git worktree add`
+  // and `list` are deliberately left alone: add is creative, and flagging it would
+  // be inconsistent with `mkdir` outside the roots already being allowed. Lines'
+  // own worktree actions go through worktreeCommands, not Bash, so these govern
+  // only the agent running git itself.
+  {
+    pattern: /\bgit\s+worktree\s+(remove|prune)\b/,
+    reason: 'Removing a git worktree (deletes its working files)',
+  },
+  { pattern: /\bgit\s+branch\s+(-d|--delete)\b/, reason: 'Deleting a branch' },
   { pattern: /\bgit\s+(rebase|filter-branch|reflog\s+expire)\b/, reason: 'History rewrite' },
 
   // Remote code execution

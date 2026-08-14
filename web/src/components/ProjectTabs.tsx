@@ -20,6 +20,7 @@ import {
   IconFolderOpen,
   IconFolderPlus,
   IconFolders,
+  IconGitBranch,
   IconMoon,
   IconPlus,
   IconSettings,
@@ -27,9 +28,10 @@ import {
 } from '@tabler/icons-react';
 import { useState, type CSSProperties } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import type { Project } from '@lines/shared';
+import type { Project, WorktreeInfo } from '@lines/shared';
 import { projectRoots } from '@lines/shared';
 import { ConfirmModal } from './ConfirmModal';
+import { WorktreeModal } from './WorktreeModal';
 import { projectStatusMeta } from '../lib/format';
 import { sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
@@ -57,8 +59,23 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
   const status = active
     ? null
     : projectStatusMeta(sessionsInProject(sessions, projectKeys, project), seen);
+  const worktrees = project.worktrees ?? [];
   // The label stays the primary's basename; the tooltip is where every root fits.
-  const rootList = projectRoots(project).join('\n');
+  // Work trees get their own block: they are attributed to this tab but are not
+  // folders its sessions may write in, so listing them together would misread.
+  const rootList = [
+    ...projectRoots(project),
+    ...(worktrees.length
+      ? [
+          '',
+          'Worktrees:',
+          ...worktrees.map((w) => {
+            const named = w.sessionId ? sessions[w.sessionId] : undefined;
+            return `${named ? `${named.name} — ` : ''}${w.branch ?? 'detached'}`;
+          }),
+        ]
+      : []),
+  ].join('\n');
 
   const addFolder = () => {
     setFolderPickTarget(path);
@@ -69,6 +86,26 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
   // The root awaiting confirmation. Removal widens/narrows what every session in
   // this tab may write to, so it goes through the same gate as deleting a step.
   const [pendingRemove, setPendingRemove] = useState<string | null>(null);
+  // null = closed; `{ target: null }` = the create form; a path = manage that record.
+  const [worktreeModal, setWorktreeModal] = useState<{ target: string | null } | null>(null);
+
+  /** A record whose session is gone still holds files, so it is labelled, not hidden. */
+  const orphaned = (w: WorktreeInfo) => w.sessionId != null && !sessions[w.sessionId];
+
+  /**
+   * What to call a work tree. Its own name — `lines/wt-msrdj5nv` — says nothing,
+   * because it was minted before there was a prompt to name it after. Its session's
+   * name does, and the auto-titler rewrites that a few seconds in; reading it live
+   * off the session means the row improves on its own without touching git, which
+   * renaming a checked-out branch (or worse, its directory, which is the session's
+   * identity) would.
+   */
+  const worktreeLabel = (w: WorktreeInfo) => {
+    const branch = w.branch ?? 'detached';
+    const session = w.sessionId ? sessions[w.sessionId] : undefined;
+    if (orphaned(w)) return { title: branch, hint: 'orphaned' };
+    return session ? { title: session.name, hint: branch } : { title: branch, hint: null };
+  };
 
   return (
     <>
@@ -160,6 +197,34 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
                   </Text>
                 </Menu.Item>
               ))}
+              <Menu.Divider />
+              {/* Worktrees are a separate section from the folders above on purpose:
+                  they are attributed to this tab without widening what its sessions
+                  may write to. */}
+              <Menu.Item
+                leftSection={<IconGitBranch size={14} />}
+                onClick={() => setWorktreeModal({ target: null })}
+              >
+                New worktree…
+              </Menu.Item>
+              {worktrees.length > 0 && <Menu.Label>Worktrees</Menu.Label>}
+              {worktrees.map((w) => (
+                <Menu.Item
+                  key={w.path}
+                  leftSection={<IconGitBranch size={14} />}
+                  onClick={() => setWorktreeModal({ target: w.path })}
+                >
+                  <Text size="xs" truncate>
+                    {worktreeLabel(w).title}
+                    {worktreeLabel(w).hint && (
+                      <Text span c="dimmed">
+                        {' '}
+                        · {worktreeLabel(w).hint}
+                      </Text>
+                    )}
+                  </Text>
+                </Menu.Item>
+              ))}
             </Menu.Dropdown>
           </Menu>
           <CloseButton
@@ -185,6 +250,14 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
         }}
         onCancel={() => setPendingRemove(null)}
       />
+      {/* Outside the tab's Box for the same reason as the ConfirmModal above. */}
+      {worktreeModal && (
+        <WorktreeModal
+          project={project}
+          target={worktreeModal.target}
+          onClose={() => setWorktreeModal(null)}
+        />
+      )}
     </>
   );
 }

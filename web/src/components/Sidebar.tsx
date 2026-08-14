@@ -12,6 +12,7 @@ import {
   ScrollArea,
   SegmentedControl,
   Stack,
+  Switch,
   Text,
   Tooltip,
   UnstyledButton,
@@ -26,6 +27,7 @@ import {
   IconCoins,
   IconEye,
   IconEyeOff,
+  IconGitBranch,
   IconLink,
   IconPlus,
   IconRoute,
@@ -33,10 +35,10 @@ import {
 } from '@tabler/icons-react';
 import { useLocalStorage } from '@mantine/hooks';
 import type { CSSProperties } from 'react';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
-import { projectRoots } from '@lines/shared';
+import { findWorktree, projectPaths, projectRoots } from '@lines/shared';
 import { formatDuration, isWorkflowFinished, sessionRowMeta } from '../lib/format';
 import type { SidebarMode } from '../store';
 import { projectAt, sessionsInProject, useStore } from '../store';
@@ -66,6 +68,10 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
   // delete that never lands leaves the row visible rather than silently "working".
   const [deleting, setDeleting] = useState(false);
   const setActionError = useStore((s) => s.setActionError);
+  // A worktree session runs in a checkout of its own on its own branch, which the
+  // row otherwise gives no sign of — the cwd isn't shown here.
+  const projects = useStore((s) => s.projects);
+  const worktree = findWorktree(projects, session.cwd)?.worktree;
   const deleteSession = (opts: { confirmFirst: boolean }) => {
     if (opts.confirmFirst && !confirm(`Delete session "${session.name}"?`)) return;
     setActionError(null);
@@ -125,6 +131,15 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
                 />
               )}
             </Center>
+            {worktree && (
+              // Left of the name, in its own fixed slot so the names of worktree and
+              // non-worktree rows still line up. Center handles both axes.
+              <Tooltip label={`Worktree — ${worktree.branch ?? 'detached'}`} openDelay={400} withArrow>
+                <Center w={13} h={13} c="dimmed" style={{ flex: '0 0 13px' }}>
+                  <IconGitBranch size={12} />
+                </Center>
+              </Tooltip>
+            )}
             <Tooltip
               label={session.name}
               disabled={!overflowing}
@@ -277,14 +292,20 @@ function UnlinkedCheckouts({ activeKey }: { activeKey: string }) {
   const sessions = useStore((s) => s.sessions);
   const projectKeys = useStore((s) => s.projectKeys);
   const activeProject = useStore((s) => s.activeProject);
+  const projects = useStore((s) => s.projects);
 
   const dismissedCheckouts = useStore((s) => s.dismissedCheckouts);
   const setCheckoutDismissed = useStore((s) => s.setCheckoutDismissed);
 
   const { unlinked, dismissed } = useMemo(() => {
+    const known = new Set(projects.flatMap(projectPaths));
     const counts = new Map<string, number>();
     for (const s of Object.values(sessions)) {
       if (!s.cwd || s.cwd === activeProject || projectKeys[s.cwd]) continue;
+      // A directory this machine already attributes to a project is not a foreign
+      // checkout, keyed or not — a work tree of a remote-less repo has no key to
+      // resolve and used to be nagged about here.
+      if (known.has(s.cwd)) continue;
       counts.set(s.cwd, (counts.get(s.cwd) ?? 0) + 1);
     }
     const byCount = [...counts.entries()].sort((a, b) => b[1] - a[1]);
@@ -293,7 +314,7 @@ function UnlinkedCheckouts({ activeKey }: { activeKey: string }) {
       unlinked: byCount.filter(([cwd]) => !hidden.has(cwd)),
       dismissed: byCount.filter(([cwd]) => hidden.has(cwd)),
     };
-  }, [sessions, projectKeys, activeProject, dismissedCheckouts]);
+  }, [sessions, projectKeys, activeProject, projects, dismissedCheckouts]);
 
   const total = unlinked.reduce((n, [, count]) => n + count, 0);
   // Dismissing every candidate removes the hint entirely — the point of marking
@@ -406,6 +427,12 @@ export function Sidebar({
     defaultValue: '',
   });
   const lastWorkflow = [...workflows, ...sharedWorkflows].find((w) => w.id === lastChoice);
+  // Persisted like `lastChoice`: running every new session in its own checkout is a
+  // working habit, not a per-click decision.
+  const [worktreeMode, setWorktreeMode] = useLocalStorage<boolean>({
+    key: 'lines.newSessionWorktree',
+    defaultValue: false,
+  });
 
   const projectKeys = useStore((s) => s.projectKeys);
   const projects = useStore((s) => s.projects);
@@ -426,12 +453,21 @@ export function Sidebar({
   const markSessionCreatePending = useStore((s) => s.markSessionCreatePending);
   const actionError = useStore((s) => s.actionError);
   const setSidebarActionError = useStore((s) => s.setActionError);
+  const worktreePending = useStore((s) => s.worktreePending);
+  const setWorktreePending = useStore((s) => s.setWorktreePending);
   const createSession = (workflowId?: string) => {
     if (!activeProject) return;
     const last = list[0];
     // Records the intent that lets the resulting upsert take the selection; the
     // reducer no longer guesses from `createdAt` (a timestamp from another machine).
     markSessionCreatePending();
+    // `worktree add` is a multi-second git operation the server awaits before the
+    // session exists, so the button has to stay busy — a second click would cut a
+    // second work tree.
+    if (worktreeMode) {
+      setSidebarActionError(null);
+      setWorktreePending(true);
+    }
     send({
       type: 'createSession',
       name: 'New session',
@@ -440,9 +476,23 @@ export function Sidebar({
       permissionMode: newSessionDefaults.permissionMode,
       caveman: last?.caveman ?? { enabled: true, level: 'full' },
       workflowId,
+      // Empty object = let the server name the branch and the path.
+      ...(worktreeMode ? { worktree: {} } : {}),
     });
     setLastChoice(workflowId ?? '');
   };
+
+  // The dropdown spans the whole split button rather than a fixed 240px. Measured
+  // rather than hard-coded: the sidebar is drag-resizable, and `width="target"`
+  // would match the chevron half alone.
+  const [createRow, setCreateRow] = useState<HTMLDivElement | null>(null);
+  const [menuWidth, setMenuWidth] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    if (!createRow) return;
+    const observer = new ResizeObserver(([entry]) => setMenuWidth(entry.contentRect.width));
+    observer.observe(createRow);
+    return () => observer.disconnect();
+  }, [createRow]);
 
   const sidebarMode = useStore((s) => s.sidebarMode);
   const setSidebarMode = useStore((s) => s.setSidebarMode);
@@ -473,58 +523,81 @@ export function Sidebar({
         )}
       </Group>
       {sidebarMode === 'sessions' && (
-        <Box px="sm" pb="xs">
+        <Box px="sm" pb="xs" ref={setCreateRow}>
           <Button.Group style={{ width: '100%' }}>
             <Button
               style={{ flex: 1 }}
-              leftSection={<IconPlus size={14} />}
+              leftSection={worktreePending ? <Loader size={12} color="white" /> : <IconPlus size={14} />}
               onClick={() => createSession(lastWorkflow?.id)}
-              disabled={!activeProject}
+              disabled={!activeProject || worktreePending}
             >
               {lastWorkflow ? lastWorkflow.name : 'New session'}
+              {worktreeMode ? ' in worktree' : ''}
             </Button>
-            {(workflows.length > 0 || sharedWorkflows.length > 0) && (
-              <Menu position="bottom-end" width={240}>
-                <Menu.Target>
-                  <Button px={6} disabled={!activeProject}>
-                    <IconChevronDown size={14} />
-                  </Button>
-                </Menu.Target>
-                <Menu.Dropdown>
-                  <Menu.Item onClick={() => createSession()}>New session</Menu.Item>
-                  {workflows.length > 0 && (
-                    <>
-                      <Menu.Divider />
-                      <Menu.Label>With workflow</Menu.Label>
-                      {workflows.map((w) => (
-                        <Menu.Item key={w.id} onClick={() => createSession(w.id)}>
-                          {w.name}
-                        </Menu.Item>
-                      ))}
-                    </>
-                  )}
-                  {sharedWorkflows.length > 0 && (
-                    <>
-                      <Menu.Divider />
-                      <Menu.Label>Shared by others</Menu.Label>
-                      {sharedWorkflows.map((w) => (
-                        <Menu.Item
-                          key={w.id}
-                          onClick={() => createSession(w.id)}
-                          rightSection={
-                            <Text size="xs" c="dimmed" truncate maw={90}>
-                              {w.ownerName ?? 'Unknown'}
-                            </Text>
-                          }
-                        >
-                          {w.name}
-                        </Menu.Item>
-                      ))}
-                    </>
-                  )}
-                </Menu.Dropdown>
-              </Menu>
-            )}
+            {/* Always rendered now: the worktree toggle lives here, so the split
+                half can no longer depend on a workflow existing. */}
+            <Menu position="bottom-end" width={menuWidth ?? 240}>
+              <Menu.Target>
+                <Button px={6} disabled={!activeProject}>
+                  <IconChevronDown size={14} />
+                </Button>
+              </Menu.Target>
+              <Menu.Dropdown>
+                {/* A plain Box, not a Menu.Item: that renders its own <button>, and a
+                    Switch inside one is invalid markup whose click lands on either
+                    control depending on the pixel. Outside a Menu.Item it also keeps
+                    the dropdown open, so the toggle can be flipped and then used. */}
+                <Box px="sm" py={6}>
+                  <Switch
+                    size="xs"
+                    // Text left, control hard right, both vertically centred against
+                    // the two-line label — the row reads like a settings line rather
+                    // than a menu entry, which is what it is.
+                    labelPosition="left"
+                    label="Run in a new worktree"
+                    description="Work is committed to a separate branch"
+                    checked={worktreeMode}
+                    onChange={(e) => setWorktreeMode(e.currentTarget.checked)}
+                    styles={{
+                      body: { width: '100%', alignItems: 'center', justifyContent: 'space-between' },
+                      labelWrapper: { marginInlineEnd: 'var(--mantine-spacing-sm)' },
+                    }}
+                  />
+                </Box>
+                <Menu.Divider />
+                <Menu.Item onClick={() => createSession()}>New session</Menu.Item>
+                {workflows.length > 0 && (
+                  <>
+                    <Menu.Divider />
+                    <Menu.Label>With workflow</Menu.Label>
+                    {workflows.map((w) => (
+                      <Menu.Item key={w.id} onClick={() => createSession(w.id)}>
+                        {w.name}
+                      </Menu.Item>
+                    ))}
+                  </>
+                )}
+                {sharedWorkflows.length > 0 && (
+                  <>
+                    <Menu.Divider />
+                    <Menu.Label>Shared by others</Menu.Label>
+                    {sharedWorkflows.map((w) => (
+                      <Menu.Item
+                        key={w.id}
+                        onClick={() => createSession(w.id)}
+                        rightSection={
+                          <Text size="xs" c="dimmed" truncate maw={90}>
+                            {w.ownerName ?? 'Unknown'}
+                          </Text>
+                        }
+                      >
+                        {w.name}
+                      </Menu.Item>
+                    ))}
+                  </>
+                )}
+              </Menu.Dropdown>
+            </Menu>
           </Button.Group>
         </Box>
       )}

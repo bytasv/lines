@@ -22,7 +22,13 @@ import type {
   WorkerStatus,
   WorkflowDef,
 } from '@lines/shared';
-import { APP_PROTOCOL_VERSION, DEFAULT_MODEL, projectRoots, resolveModelId } from '@lines/shared';
+import {
+  APP_PROTOCOL_VERSION,
+  DEFAULT_MODEL,
+  projectPaths,
+  resolveModelId,
+  worktreePaths,
+} from '@lines/shared';
 import { send } from './ws';
 import type { AlertSound } from './lib/alerts';
 import {
@@ -312,6 +318,11 @@ export function projectAt(projects: Project[], path: string | null): Project | n
  * on another machine — where the same repo sits at a different absolute path —
  * still lands in this project. Unkeyed checkouts (no git remote) fall back to
  * exact path equality, which is the old behaviour.
+ *
+ * `projectPaths`, not `projectRoots`: a work-tree session belongs to this tab
+ * (attribution) without the tab's sessions gaining any right to write there. A
+ * keyed work tree already matched through the shared key; the path list is what
+ * covers a repo with no origin, where there is no key to share.
  */
 export function sessionsInProject(
   sessions: Record<string, SessionMeta>,
@@ -319,10 +330,10 @@ export function sessionsInProject(
   project: Project | null,
 ): SessionMeta[] {
   if (!project) return [];
-  const roots = projectRoots(project);
-  const keys = new Set(roots.map((r) => projectKeys[r]).filter((k): k is string => k != null));
+  const paths = projectPaths(project);
+  const keys = new Set(paths.map((r) => projectKeys[r]).filter((k): k is string => k != null));
   return Object.values(sessions).filter(
-    (s) => roots.includes(s.cwd) || keys.has(projectKeys[s.cwd]),
+    (s) => paths.includes(s.cwd) || keys.has(projectKeys[s.cwd]),
   );
 }
 
@@ -478,6 +489,13 @@ interface UiState {
    * intent can live here instead of on the wire.
    */
   folderPickTarget: string | null;
+  /**
+   * A `createSession` whose work tree is still being checked out. `worktree add`
+   * on a big repo can outlive `CREATE_INTENT_TTL_MS`, so the flag both disables the
+   * button (a second click would cut a second work tree) and re-arms the create
+   * intent when the `projects` broadcast shows the new path.
+   */
+  worktreePending: boolean;
   /** Model/mode applied to newly created sessions; persisted in localStorage. */
   newSessionDefaults: NewSessionDefaults;
   /** Play a chime + desktop notification when a session finishes or needs input. */
@@ -564,6 +582,7 @@ interface UiState {
   setFolderPickPending: (pending: boolean) => void;
   /** Aim the next folder pick at a project (adds a root) or at nothing (opens a project). */
   setFolderPickTarget: (project: string | null) => void;
+  setWorktreePending: (pending: boolean) => void;
   setNewSessionDefaults: (defaults: NewSessionDefaults) => void;
   /** Hide (or restore) an unresolvable checkout in the link hint. */
   setCheckoutDismissed: (cwd: string, dismissed: boolean) => void;
@@ -675,6 +694,7 @@ export const useStore = create<UiState>((set, get) => {
   selectedSessionId: sessionIdFromUrl(),
   folderPickPending: false,
   folderPickTarget: null,
+  worktreePending: false,
   newSessionDefaults: loadNewSessionDefaults(),
   alertsEnabled: loadAlertsEnabled(),
   alertSound: loadAlertSound(),
@@ -724,6 +744,10 @@ export const useStore = create<UiState>((set, get) => {
       helloSignature: null,
       seenSessionIds: new Set<string>(),
       pendingCreate: false,
+      // Goes with `pendingCreate` for the same reason: it describes a create in
+      // flight on the machine we are leaving, and leaving it set would keep the
+      // new machine's New session button disabled.
+      worktreePending: false,
     }),
   enqueuePrompt: (p) => set((state) => ({ queuedPrompts: [...state.queuedPrompts, p] })),
   drainQueuedPrompts: () => {
@@ -734,6 +758,7 @@ export const useStore = create<UiState>((set, get) => {
   selectSession: (id) => set({ selectedSessionId: id }),
   setFolderPickPending: (pending) => set({ folderPickPending: pending }),
   setFolderPickTarget: (project) => set({ folderPickTarget: project }),
+  setWorktreePending: (pending) => set({ worktreePending: pending }),
 
   openFilePreview: (raw) => {
     // Split off a trailing :line(:col); the path itself never ends in a digit-only segment.
@@ -1020,7 +1045,17 @@ export const useStore = create<UiState>((set, get) => {
         break;
       case 'projects': {
         const projects = toProjects(msg.projects);
+        const before = new Set(get().projects.flatMap(worktreePaths));
+        const grew = projects.flatMap(worktreePaths).some((p) => !before.has(p));
         set({ projects });
+        // The work tree the pending create asked for has landed, so the create
+        // intent is re-armed here: the server broadcasts `projects` immediately
+        // before creating the session, and a slow `worktree add` can otherwise
+        // outlive CREATE_INTENT_TTL_MS and leave the selection behind.
+        if (get().worktreePending && grew) {
+          set({ worktreePending: false });
+          get().markSessionCreatePending();
+        }
         // Re-validate the active tab (it may have just been closed).
         get().setActiveProject(pickActive(projects, get().activeProject));
         break;
@@ -1188,6 +1223,11 @@ export const useStore = create<UiState>((set, get) => {
         break;
       case 'error':
         console.error('[server]', msg.message);
+        // Surfaced, not just logged: a server refusal is the only description of
+        // what would have been lost (a dirty work tree, a branch that isn't merged),
+        // and it used to be console-only — which is how "Remove did nothing" stayed
+        // invisible. Also retires the same silence for compactContext/addGuardAllow.
+        set({ actionError: msg.message, worktreePending: false });
         break;
     }
     // Keep the app/dock badge and favicon in sync with session state.

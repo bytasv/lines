@@ -13,6 +13,7 @@ import type {
   TranscriptEvent,
   UserUiSettings,
   WorkflowDef,
+  WorktreeInfo,
 } from '@lines/shared';
 import { normalizeRootPath } from '@lines/shared';
 
@@ -111,7 +112,37 @@ function sanitizeProjects(raw: unknown): Project[] {
         extraRoots.push(root);
       }
     }
-    out.push(extraRoots.length ? { path, extraRoots } : { path });
+    // Work trees are attribution paths, not roots, but the path rules are the
+    // same: a record equal to the primary or to an extra root would make one
+    // directory answer to two notions at once.
+    const rawTrees = typeof item === 'string' ? undefined : (item as Project).worktrees;
+    const worktrees: WorktreeInfo[] = [];
+    if (Array.isArray(rawTrees)) {
+      for (const w of rawTrees) {
+        const raw = (w as WorktreeInfo | null)?.path;
+        if (typeof raw !== 'string') continue;
+        const dir = normalizeRootPath(raw);
+        if (!dir || dir === path || extraRoots.includes(dir)) continue;
+        if (worktrees.some((existing) => existing.path === dir)) continue;
+        const rec = w as WorktreeInfo;
+        worktrees.push({
+          path: dir,
+          // Carried only when correctly typed — a junk field is dropped, never repaired.
+          ...(typeof rec.branch === 'string' && rec.branch ? { branch: rec.branch } : {}),
+          ...(typeof rec.baseRef === 'string' && rec.baseRef ? { baseRef: rec.baseRef } : {}),
+          ...(typeof rec.createdAt === 'number' ? { createdAt: rec.createdAt } : {}),
+          ...(typeof rec.sessionId === 'string' && rec.sessionId ? { sessionId: rec.sessionId } : {}),
+          ...(rec.createdByLines === true ? { createdByLines: true } : {}),
+        });
+      }
+    }
+    // Omitted when empty, so a project without work trees keeps byte-identical
+    // JSON and the one-shot migration below stays a no-op on existing files.
+    out.push({
+      path,
+      ...(extraRoots.length ? { extraRoots } : {}),
+      ...(worktrees.length ? { worktrees } : {}),
+    });
   }
   return out;
 }

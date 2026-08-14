@@ -114,6 +114,91 @@ test('guard sync state round-trips, and a missing file reads as empty', () => {
   assert.deepEqual(store.loadGuardSync(), state);
 });
 
+/** projects.json is sanitized on every read; these write the file directly to get
+ *  the untrusted forms a real disk can hold. */
+function projectsFile(raw: unknown) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-projects-'));
+  const file = path.join(root, 'projects.json');
+  fs.writeFileSync(file, JSON.stringify(raw, null, 2));
+  return { file, load: () => createStore(root).loadProjects(), bytes: () => fs.readFileSync(file, 'utf8') };
+}
+
+test('a worktree record is kept only when its path is a usable string', () => {
+  const { load } = projectsFile([
+    {
+      path: '/repo',
+      worktrees: [
+        { path: '/wt/keep', branch: 'b' },
+        { path: 42 },
+        { path: '   ' },
+        { branch: 'no path' },
+        'not an object',
+      ],
+    },
+  ]);
+  assert.deepEqual(load()[0].worktrees, [{ path: '/wt/keep', branch: 'b' }]);
+});
+
+test('worktree paths are normalized and deduped, as roots are', () => {
+  const { load } = projectsFile([
+    { path: '/repo', worktrees: [{ path: '/wt/x/' }, { path: '/wt/x' }] },
+  ]);
+  assert.deepEqual(load()[0].worktrees, [{ path: '/wt/x' }]);
+});
+
+test('a worktree equal to the primary or to an extra root is dropped', () => {
+  const { load } = projectsFile([
+    {
+      path: '/repo',
+      extraRoots: ['/docs'],
+      // Either would make one directory answer to two notions at once.
+      worktrees: [{ path: '/repo' }, { path: '/docs' }, { path: '/wt/x' }],
+    },
+  ]);
+  assert.deepEqual(load()[0].worktrees, [{ path: '/wt/x' }]);
+});
+
+test('only correctly typed optional fields survive a worktree record', () => {
+  const { load } = projectsFile([
+    {
+      path: '/repo',
+      worktrees: [
+        {
+          path: '/wt/x',
+          branch: '',
+          baseRef: 7,
+          createdAt: 'yesterday',
+          sessionId: 's1',
+          createdByLines: 'yes',
+        },
+      ],
+    },
+  ]);
+  assert.deepEqual(load()[0].worktrees, [{ path: '/wt/x', sessionId: 's1' }]);
+});
+
+test('a non-array worktrees field is ignored rather than repaired', () => {
+  const { load } = projectsFile([{ path: '/repo', worktrees: 'nope' }]);
+  assert.equal('worktrees' in load()[0], false);
+});
+
+test('legacy and pre-worktree forms round-trip without gaining a worktrees key', () => {
+  assert.deepEqual(projectsFile(['/repo', '/other']).load(), [{ path: '/repo' }, { path: '/other' }]);
+  const objects = projectsFile([{ path: '/repo', extraRoots: ['/docs'] }]).load();
+  assert.deepEqual(objects, [{ path: '/repo', extraRoots: ['/docs'] }]);
+  assert.equal('worktrees' in objects[0], false);
+});
+
+/** The one-shot migration only rewrites when the sanitized form differs, so an
+ *  existing file that never had worktrees must stay byte-identical. */
+test('a project without worktrees is left untouched on load', () => {
+  const canonical = [{ path: '/repo', extraRoots: ['/docs'] }];
+  const p = projectsFile(canonical);
+  const before = p.bytes();
+  p.load();
+  assert.equal(p.bytes(), before);
+});
+
 test('sessions.json is written compactly', () => {
   const { store, root } = tmpStore();
   const meta = {

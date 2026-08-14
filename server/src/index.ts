@@ -35,6 +35,7 @@ import { reportRelayStatus, UpdateManager } from './updates.ts';
 import { createMcpDispatcher } from './mcpWorkflowTools.ts';
 import * as workflowCommands from './workflowCommands.ts';
 import * as recipeCommands from './recipeCommands.ts';
+import * as worktreeCommands from './worktreeCommands.ts';
 import {
   clearRuntimeInfo,
   INSTANCE,
@@ -611,13 +612,23 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
       break;
     }
     case 'createSession': {
+      // The work tree is cut first and awaited: cwd is identity (project-key
+      // anchor, recentDirs, roots, attribution) and is never rewritten, so it has
+      // to be the work tree from the very first upsert. A failed add therefore
+      // creates no session at all — one `error` message, no half state.
+      const worktree = msg.worktree
+        ? await worktreeCommands.worktreeForNewSession(ctx, msg.cwd, msg.worktree)
+        : null;
       const meta = sessions.createSession({
         name: msg.name,
-        cwd: msg.cwd,
+        cwd: worktree?.path ?? msg.cwd,
         model: msg.model,
         permissionMode: msg.permissionMode,
         caveman: msg.caveman,
       });
+      // Only nameable once the session exists; nothing depends on it beyond the
+      // UI's "orphaned" label.
+      if (worktree) worktreeCommands.attachSession(ctx, worktree.path, meta.id);
       // attach() re-broadcasts the session with workflow state populated.
       if (msg.workflowId) workflows.attach(meta.id, msg.workflowId);
       break;
@@ -783,6 +794,12 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
       // Broadcasts the key map itself when this checkout is newly identified.
       ctx.projectKeys.learn(dir);
       broadcast({ type: 'projects', projects });
+      // Fire-and-forget: git is the source of truth for work trees, so reopening a
+      // project is where records for deleted directories are dropped and work trees
+      // created outside Lines (an agent running `git worktree add`) are adopted.
+      void worktreeCommands.reconcileWorktrees(ctx, dir).catch((err) => {
+        console.warn('[worktrees] reconcile failed:', err);
+      });
       break;
     }
     case 'closeProject': {
@@ -838,6 +855,15 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
       broadcast({ type: 'projects', projects });
       break;
     }
+    // Both delegate to worktreeCommands, which the createSession path above also
+    // uses. Throws land in the existing handleMessage(...).catch → {type:'error'}
+    // envelope, so git's refusal text reaches the browser with no new error path.
+    case 'createWorktree':
+      await worktreeCommands.createWorktree(ctx, msg);
+      break;
+    case 'removeWorktree':
+      await worktreeCommands.removeWorktree(ctx, msg);
+      break;
     case 'linkProjectPath': {
       // Binds a path this machine can't resolve (a checkout that lives only on
       // another install) to a known key, so its sessions group with the rest.

@@ -929,7 +929,23 @@ export function searchDocs(
 // ---------------------------------------------------------------------------
 
 export type ClientMessage =
-  | { type: 'createSession'; name: string; cwd: string; model: string; permissionMode: PermissionMode; caveman: CavemanConfig; workflowId?: string }
+  | {
+      type: 'createSession';
+      name: string;
+      cwd: string;
+      model: string;
+      permissionMode: PermissionMode;
+      caveman: CavemanConfig;
+      workflowId?: string;
+      /**
+       * Opt-in: cut a fresh worktree+branch off `cwd`'s repo and run the session
+       * there. Rides on createSession rather than a message of its own because the
+       * session's cwd must *be* the worktree from the first upsert — cwd is
+       * identity (project-key anchor, recentDirs, roots, attribution) and is never
+       * rewritten. An object, not a boolean, so it can carry an explicit branch.
+       */
+      worktree?: { branch?: string; baseRef?: string };
+    }
   | { type: 'deleteSession'; sessionId: string }
   | { type: 'prompt'; sessionId: string; text: string; attachments?: PromptAttachment[]; mentions?: PromptMention[] }
   | { type: 'interrupt'; sessionId: string }
@@ -1013,6 +1029,13 @@ export type ClientMessage =
    *  overloading `openProject`, so "new tab" and "new root" never get confused. */
   | { type: 'addProjectRoot'; project: string; path: string }
   | { type: 'removeProjectRoot'; project: string; path: string }
+  /** Cut a linked work tree off a project's repo. Two explicit intents, as the
+   *  root messages above: creating a checkout and destroying one must never share
+   *  a payload shape. */
+  | { type: 'createWorktree'; project: string; branch: string; baseRef?: string; path?: string }
+  /** `git worktree remove` (its files go with it), plus `git branch -d` when asked.
+   *  `force` is the escalation offered only after git has refused once. */
+  | { type: 'removeWorktree'; project: string; path: string; deleteBranch?: boolean; force?: boolean }
   /** Manually bind a path to a project key — for a cwd that doesn't exist on this machine. */
   | { type: 'linkProjectPath'; path: string; key: string }
   | { type: 'authStartLogin' }
@@ -1160,15 +1183,44 @@ export interface UserUiSettings {
 export type ProjectKeyMap = Record<string, string>;
 
 /**
+ * One linked git work tree of a project's repo. A cache of git truth, not the
+ * source of it: `git worktree list` is authoritative, and a record whose
+ * directory is gone is dropped rather than repaired.
+ *
+ * An *attribution* path, never a capability root — see `projectPaths`.
+ */
+export interface WorktreeInfo {
+  /** Absolute; unique across the whole projects list. */
+  path: string;
+  /** Absent when detached. */
+  branch?: string;
+  /** Display only — what the branch was cut from. */
+  baseRef?: string;
+  /** Absent when discovered from git rather than created here. */
+  createdAt?: number;
+  /** Set by auto-per-session, so an orphan is nameable. */
+  sessionId?: string;
+  /** Only then may removal offer to delete the branch. */
+  createdByLines?: true;
+}
+
+/**
  * One project tab. `path` stays the project's identity — the tab key, the
  * `activeProject` value, every session's `cwd`, and the project-key anchor — so
  * spanning extra folders changes nothing that is persisted or synced elsewhere.
+ *
+ * `worktrees` is a third kind of path: attribution without capability. A worktree
+ * session shows in this tab, but the worktree is never one of the tab's roots —
+ * inheriting them would let the agent write in the parent checkout and undo the
+ * isolation the worktree exists for.
  */
 export interface Project {
   /** Absolute path; the project's identity — tab key, activeProject, session cwd, project-key anchor. */
   path: string;
   /** Extra absolute roots the agent may also work in. Never contains `path`. */
   extraRoots?: string[];
+  /** Linked work trees of this repo. Not roots — see `projectRoots` vs `projectPaths`. */
+  worktrees?: WorktreeInfo[];
 }
 
 /** Strip trailing slashes; '/' survives. The one normalizer every root path goes through. */
@@ -1181,6 +1233,37 @@ export function normalizeRootPath(raw: string): string {
 /** Every root the project spans, primary first. */
 export function projectRoots(p: Project): string[] {
   return [p.path, ...(p.extraRoots ?? [])];
+}
+
+/** Every linked work tree path of the project, in record order. */
+export function worktreePaths(p: Project): string[] {
+  return (p.worktrees ?? []).map((w) => w.path);
+}
+
+/**
+ * Every path attributed to the project: its roots first, then its work trees.
+ *
+ * The counterpart to `projectRoots`, and deliberately not a superset of it in
+ * meaning. `projectRoots` answers "what may a session here write to" (capability)
+ * and must never grow a worktree path. `projectPaths` answers "which tab does
+ * this directory belong to" (attribution) — session grouping, tab labels, the
+ * unlinked-checkout hint. Never pass this to the guard or to
+ * `additionalDirectories`.
+ */
+export function projectPaths(p: Project): string[] {
+  return [...projectRoots(p), ...worktreePaths(p)];
+}
+
+/** The project whose work tree `cwd` is, plus that record. */
+export function findWorktree(
+  projects: Project[],
+  cwd: string,
+): { project: Project; worktree: WorktreeInfo } | null {
+  for (const project of projects) {
+    const worktree = (project.worktrees ?? []).find((w) => w.path === cwd);
+    if (worktree) return { project, worktree };
+  }
+  return null;
 }
 
 /** The project owning `cwd` — primary match first, then extra-root match. */
@@ -1197,6 +1280,9 @@ export function findProject(projects: Project[], cwd: string): Project | null {
  * empty — an empty list would make the guard escalate every single file call.
  */
 export function rootsForCwd(projects: Project[], cwd: string): string[] {
+  // A worktree session is deliberately confined to its own checkout; inheriting the
+  // parent's roots would defeat the isolation. `[cwd]` keeps the never-empty rule.
+  if (findWorktree(projects, cwd)) return [cwd];
   const project = findProject(projects, cwd);
   return project ? projectRoots(project) : [cwd];
 }
