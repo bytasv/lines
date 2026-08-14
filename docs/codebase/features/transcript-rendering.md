@@ -47,11 +47,12 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   agent text (`case 'assistant'`, streaming) renders the same component with no wrapping `Paper`;
   `isRedundant` (drops a resolved `AskUserQuestion` permission item once its tool card carries the
   same information); `Item`'s `renderNested` closure passed to `ToolGroup`
-- `web/src/components/Markdown.tsx` — shared renderer (`rehypeColorSwatches`, `rehypeFilePaths`,
-  `rehypeHighlight`)
+- `web/src/components/Markdown.tsx` — shared renderer (`remarkGfm`, `rehypeColorSwatches`,
+  `rehypeFilePaths`, `rehypeHighlight`)
 - `web/src/index.css` — `.md-body` compact spacing vars, `.md-body pre code` wrap rules,
-  `.tx-row`/`.tx-streaming` borderless-row and caret styling, `.tx-static` (cursor-only change
-  for a non-expandable row), `.tx-task`
+  `.md-table-wrap` horizontal-scroll wrapper for GFM tables, `.tx-row`/`.tx-streaming`
+  borderless-row and caret styling, `.tx-static` (cursor-only change for a non-expandable row),
+  `.tx-task`
 - `web/src/lib/toolFields.ts` — `toolFields`, `toolSummary`, `parseQuestionAnswers`,
   `matchAnswerToOptions`, `BODY_CAP`
 - `web/src/components/ToolCallCard.tsx` — `ToolFields`, `RawInput`, the `expandable` gate, the
@@ -123,8 +124,9 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 ### Text
 
 `TranscriptItem` (`user.text` or `assistant.blocks[].text`) → `Markdown` → `ReactMarkdown` +
-rehype plugins (syntax highlight, file-path links, color swatches) → rendered inside the user
-`Paper` bubble, or directly (no wrapper) for agent text.
+`remarkGfm` (tables, strikethrough, task lists, footnotes, autolink literals) + rehype plugins
+(syntax highlight, file-path links, color swatches) → rendered inside the user `Paper` bubble, or
+directly (no wrapper) for agent text.
 
 ### Tool cards
 
@@ -182,7 +184,9 @@ be talking to it.
 
 ## Dependencies
 
-- Nothing beyond the existing `Markdown` component and its rehype plugin chain for text.
+- `remark-gfm` — the remark-side plugin enabling GFM (tables, strikethrough, task lists,
+  footnotes, autolink literals); otherwise nothing beyond the existing `Markdown` component and
+  its rehype plugin chain for text.
 - `.claude/agents/` reaches sessions through `settingSources`, matching how the whole Claude Code
   preset is inherited — there is no separate `agents` option in `buildQueryOptions`.
 - The spawn tool is auto-allowed by `server/src/autoGuard.ts`, so a spawn never prompts.
@@ -211,11 +215,13 @@ be talking to it.
 
 ## Business rules
 
-- User and agent text render markdown (headings, code fences, lists, color swatches) instead of
-  plain preformatted text; single newlines collapse and raw HTML tags are dropped.
+- User and agent text render markdown (headings, code fences, lists, GFM tables, color swatches)
+  instead of plain preformatted text; single newlines collapse and raw HTML tags are dropped.
 - Code blocks (`.md-body pre code`) wrap long lines (`white-space: pre-wrap`,
   `overflow-wrap: anywhere`) instead of scrolling horizontally, so they stay within the
   conversation column.
+- A GFM table wider than the conversation column scrolls horizontally inside its own
+  `.md-table-wrap` wrapper instead of widening the column, paralleling the code-block wrap rule.
 - Only the user prompt renders as a bubble (right-aligned `Paper`, capped at 80% column width).
   Agent output — answers, folded turns, tool groups/calls — is unwrapped and flush-left; nesting
   is shown by vertical order and the row's expand/collapse affordance, not by a box or
@@ -266,6 +272,14 @@ be talking to it.
   `:where(ul, ol):not([data-type='taskList'])`, specificity (0,2,0), which beats a `.md-body ul`
   override at (0,1,1) regardless of import order — only overriding the underlying
   `--mantine-spacing-*`/`--mantine-h*-font-size` vars sidesteps that.
+- Table borders, cell padding, and block margin come entirely from Mantine `Typography`'s own
+  table rules, driven by the same `.md-body` spacing vars above — no dedicated table CSS was
+  added; `.md-table-wrap` only handles horizontal overflow.
+- GFM task lists render as `<ul class="contains-task-list">`, which Typography's
+  `:where(ul, ol):not([data-type='taskList'])` rule still bullets. `.md-body
+  ul.contains-task-list { list-style: none }` ties that rule's specificity (0,2,0); `index.css`
+  importing after `@mantine/core/styles.css` decides it in our favor, the same mechanism as the
+  `.md-body pre` override above.
 - Collapsible transcript rows (agent turns, tool groups, tool calls) share one borderless row
   convention (`.tx-row` in `web/src/index.css`): no `Paper`/border, hover highlight via CSS,
   click/keyboard toggle on the row `Group`, no accumulating indentation — every row (top-level or

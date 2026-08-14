@@ -196,6 +196,27 @@
   border-left: 2px solid var(--mantine-color-default-border);
 }
 
+/* GFM tables: Mantine's Typography supplies borders and cell padding via the .md-body
+   spacing vars, so these rules only handle overflow — a table too wide for the column
+   scrolls horizontally instead of pushing the conversation column open. */
+.md-body .md-table-wrap {
+  overflow-x: auto;
+  margin-bottom: var(--mantine-spacing-md);
+}
+
+.md-body th,
+.md-body td {
+  overflow-wrap: anywhere;
+}
+
+/* GFM task lists render as <ul class="contains-task-list">, which Typography's
+   `:where(ul, ol):not([data-type='taskList'])` rule still bullets. Specificity ties at
+   (0,2,0); index.css is imported after @mantine/core/styles.css, so source order wins. */
+.md-body ul.contains-task-list {
+  list-style: none;
+  padding-left: 0;
+}
+
 /* Markdown code blocks */
 .md-body code {
   font-size: 12px;

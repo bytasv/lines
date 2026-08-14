@@ -794,6 +794,7 @@
         "Markdown",
         ".md-body",
         ".md-body pre code",
+        ".md-table-wrap",
         ".tx-row",
         "toolFields",
         "toolSummary",

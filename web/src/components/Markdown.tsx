@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { PluggableList } from 'unified';
+import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { Typography } from '@mantine/core';
 import { isExternalHref } from '@lines/shared';
@@ -9,6 +10,8 @@ import { rehypeColorSwatches } from '../lib/rehypeColorSwatches';
 import { InlineColorSwatch } from './InlineColorSwatch';
 import { useStore } from '../store';
 
+const remarkPlugins: PluggableList = [remarkGfm];
+
 const rehypePlugins: PluggableList = [
   [rehypeHighlight, { detect: false, aliases: { typescript: ['tsx', 'mts'], javascript: ['jsx', 'mjs'] } }],
   rehypeFilePaths,
@@ -16,6 +19,10 @@ const rehypePlugins: PluggableList = [
 ];
 
 /**
+ * GitHub Flavored Markdown is on (`remarkGfm`): tables, strikethrough, task lists,
+ * footnotes, autolink literals. Table styling comes from Mantine's Typography rules
+ * driven by the `.md-body` spacing vars; only overflow is handled in `index.css`.
+ *
  * `onLinkClick` lets a host (the documentation reader) route links itself
  * instead of opening the source preview. Omitted — as every transcript call site
  * does — behaviour is exactly the store's `openFilePreview`. Keep it referentially
@@ -31,6 +38,7 @@ export const Markdown = memo(function Markdown({
   return (
     <Typography fz="sm" className="md-body">
       <ReactMarkdown
+        remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
         components={{
           a({ className, children, href, node, ...props }) {
@@ -80,6 +88,14 @@ export const Markdown = memo(function Markdown({
               <span className={className} {...props}>
                 {children}
               </span>
+            );
+          },
+          // Wrapper scrolls a too-wide table instead of widening the conversation column.
+          table({ children, node, ...props }) {
+            return (
+              <div className="md-table-wrap">
+                <table {...props}>{children}</table>
+              </div>
             );
           },
         }}
