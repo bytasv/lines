@@ -9,7 +9,17 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 // Aliased: the global `Response` in scope here is undici's, not Express's.
 import type { ErrorRequestHandler, Request, Response as ExResponse } from 'express';
-import { RECIPE_IMAGE_MAX_BYTES, RECIPE_IMAGE_TYPES } from '@lines/shared';
+import {
+  RECIPE_IMAGE_MAX_BYTES,
+  RECIPE_IMAGE_TYPES,
+  SHARE_PRESETS,
+  capsForPreset,
+  parseShareCaps,
+  presetOfCaps,
+  type SharePreset,
+} from '@lines/shared';
+import { presenceOf } from './presence.ts';
+import { authorizeDevice, capsJson, profileOf, revokeGrantsForDevice } from './shares.ts';
 import { putRecipeImage, r2Configured, r2PublicBaseWarning } from './r2.ts';
 import { listSessions, putSession, putSessions, softDeleteSession, toWire } from './sessionRows.ts';
 
@@ -24,11 +34,8 @@ if (!process.env.CLERK_SECRET_KEY) {
   process.exit(0);
 }
 
-const [{ default: express }, { clerkMiddleware, getAuth }, { prisma }] = await Promise.all([
-  import('express'),
-  import('@clerk/express'),
-  import('./db.ts'),
-]);
+const [{ default: express }, { clerkClient, clerkMiddleware, getAuth }, { prisma }] =
+  await Promise.all([import('express'), import('@clerk/express'), import('./db.ts')]);
 
 // Fail fast with one actionable line instead of a raw code-frame trace. Catches
 // a missing Prisma client (postinstall skipped by `ignore-scripts`) and an
@@ -131,22 +138,34 @@ app.use((req, res, next) => {
  *     the machine dials storage directly, the same way it does to register. This
  *     is the path that makes a lockout unrecoverable-proof — without it a machine
  *     whose owner cannot reach the web app can never be re-paired.
+ *   /v1/devices/presence — called by the relay, machine to machine, as /verify is.
+ *     Only the relay knows which hubs have a bridge attached, and this is how that
+ *     reaches storage without giving the relay a query surface of its own. Same
+ *     shared-secret gate, same reasons to keep it off the public router.
+ *   /v1/devices/authorize — the relay's grant oracle, called with the *browser's*
+ *     verified user id (the relay checked the Clerk token itself). It answers
+ *     whether that user may reach a machine they do not own, so like /verify it is
+ *     shared-secret gated and internal-only.
  */
 const UNAUTHENTICATED_PATHS = new Set([
   '/v1/devices/register',
   '/v1/devices/verify',
   '/v1/devices/unpair',
+  '/v1/devices/presence',
+  '/v1/devices/authorize',
 ]);
 
 /**
  * Shared secret for relay→storage calls. Required in a deployment: without it
- * `/v1/devices/verify` would be an open oracle for testing device secrets.
+ * `/v1/devices/verify` would be an open oracle for testing device secrets, and
+ * `/v1/devices/presence` would let anyone flip a machine's liveness dot.
  */
 const RELAY_SHARED_SECRET = process.env.RELAY_SHARED_SECRET;
-app.use('/v1/devices/verify', (req, res, next) => {
+app.use(['/v1/devices/verify', '/v1/devices/presence', '/v1/devices/authorize'], (req, res, next) => {
   if (!RELAY_SHARED_SECRET) {
-    console.warn('[storage] RELAY_SHARED_SECRET not set — refusing device verification');
-    res.status(503).json({ error: 'device verification not configured' });
+    // originalUrl, not path: inside a mounted middleware the mount prefix is stripped.
+    console.warn(`[storage] RELAY_SHARED_SECRET not set — refusing ${req.originalUrl}`);
+    res.status(503).json({ error: 'relay calls are not configured' });
     return;
   }
   const presented = req.header('x-relay-secret') ?? '';
@@ -879,28 +898,105 @@ app.post('/v1/devices/claim', async (req, res) => {
   res.json({ id: claimed.id, name: claimed.name, platform: claimed.platform });
 });
 
-/** This user's devices. Never returns secretHash. */
+/**
+ * This user's devices. Never returns secretHash.
+ *
+ * `online` is the relay's attach/detach report gated on `lastSeenAt` freshness
+ * (presenceOf) — the browser gets a liveness claim it can act on, or `false`, and
+ * never the raw flag. It is the only health signal available for a machine this
+ * browser holds no socket to.
+ */
 app.get('/v1/devices', async (req, res) => {
-  const devices = await prisma.device.findMany({
-    where: { userId: userIdOf(req), revokedAt: null },
-    select: { id: true, name: true, platform: true, appProtocol: true, createdAt: true, lastSeenAt: true },
-    orderBy: { createdAt: 'asc' },
+  const userId = userIdOf(req);
+  const select = {
+    id: true,
+    name: true,
+    platform: true,
+    appProtocol: true,
+    createdAt: true,
+    lastSeenAt: true,
+    online: true,
+  } as const;
+
+  // Machines reachable through a live grant, alongside the ones this user owns.
+  // Two queries rather than a join: the grant tables carry no foreign key, and
+  // the id sets are small (shares are few by nature).
+  const [owned, members, shares] = await Promise.all([
+    prisma.device.findMany({ where: { userId, revokedAt: null }, select, orderBy: { createdAt: 'asc' } }),
+    prisma.deviceMember.findMany({ where: { userId, revokedAt: null } }),
+    prisma.sessionShare.findMany({ where: { userId, revokedAt: null } }),
+  ]);
+
+  // Session-scope grants collapse to one entry per machine carrying its sessions;
+  // a machine grant is strictly wider and wins over any session share on the same
+  // machine — the same precedence authorizeDevice applies.
+  const sharedIds = new Set([...members.map((m) => m.deviceId), ...shares.map((s) => s.deviceId)]);
+
+  const sharedRows = sharedIds.size
+    ? await prisma.device.findMany({
+        where: { id: { in: [...sharedIds] }, revokedAt: null },
+        select: { ...select, userId: true },
+      })
+    : [];
+  const ownerIds = [...new Set(sharedRows.map((row) => row.userId).filter((v): v is string => !!v))];
+  const profiles = new Map(
+    (await prisma.userProfile.findMany({ where: { userId: { in: ownerIds } } })).map((p) => [
+      p.userId,
+      { userId: p.userId, email: p.email, name: p.name, imageUrl: p.imageUrl },
+    ]),
+  );
+
+  const shared = sharedRows
+    .map(({ userId: ownerId, ...row }) => {
+      // The device row, not the grant, says who owns a machine. A grant whose
+      // denormalized ownerId no longer matches (the machine was unpaired and
+      // re-claimed by someone else) is dead, and must not point at the new owner.
+      const member = members.find((m) => m.deviceId === row.id && m.ownerId === ownerId);
+      const sessionShares = shares.filter((s) => s.deviceId === row.id && s.ownerId === ownerId);
+      if (!member && sessionShares.length === 0) return null;
+      return {
+        ...row,
+        online: presenceOf(row),
+        shared: true as const,
+        scope: member ? ('machine' as const) : ('session' as const),
+        caps: parseShareCaps(member ? member.caps : sessionShares[0].caps),
+        ...(member ? {} : { sessionIds: sessionShares.map((s) => s.sessionId) }),
+        ownerProfile: ownerId ? (profiles.get(ownerId) ?? null) : null,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null);
+
+  res.json({
+    devices: [...owned.map((row) => ({ ...row, online: presenceOf(row) })), ...shared],
   });
-  res.json({ devices });
 });
 
 /** Revoke. A tombstone rather than a delete, so the row stays as an audit trail. */
 app.delete('/v1/devices/:id', async (req, res) => {
   const userId = userIdOf(req);
-  // Scoped by userId in the where clause: another user's id simply matches nothing.
-  const { count } = await prisma.device.updateMany({
+  const at = new Date();
+  // Ownership is established BEFORE the cascade, not alongside it. The device
+  // update is scoped by userId and so matches nothing for someone else's machine,
+  // but the grant cascade is keyed on deviceId alone — running it unconditionally
+  // would let any signed-in user revoke the shares on a machine they merely know
+  // the id of.
+  const owned = await prisma.device.findFirst({
     where: { id: req.params.id, userId, revokedAt: null },
-    data: { revokedAt: new Date() },
+    select: { id: true },
   });
-  if (!count) {
+  if (!owned) {
     res.status(404).json({ error: 'unknown device' });
     return;
   }
+  // One transaction: a machine that leaves the account must not leave guests
+  // holding live access to it.
+  await prisma.$transaction([
+    prisma.device.updateMany({
+      where: { id: owned.id, userId, revokedAt: null },
+      data: { revokedAt: at },
+    }),
+    ...revokeGrantsForDevice(prisma, owned.id, at),
+  ]);
   res.json({ ok: true });
 });
 
@@ -937,8 +1033,14 @@ app.post('/v1/devices/unpair', async (req, res) => {
     return;
   }
   // A tombstone, identical to DELETE /v1/devices/:id: the row stays as an audit
-  // trail and drops out of GET /v1/devices, which filters revokedAt: null.
-  await prisma.device.update({ where: { id: device.id }, data: { revokedAt: new Date() } });
+  // trail and drops out of GET /v1/devices, which filters revokedAt: null. The
+  // same grant cascade applies — the caller proved possession of the device
+  // secret, which is exactly the authority the route already acts on.
+  const at = new Date();
+  await prisma.$transaction([
+    prisma.device.update({ where: { id: device.id }, data: { revokedAt: at } }),
+    ...revokeGrantsForDevice(prisma, device.id, at),
+  ]);
   res.json({ ok: true });
 });
 
@@ -966,6 +1068,505 @@ app.post('/v1/devices/verify', async (req, res) => {
   }
   await prisma.device.update({ where: { id: device.id }, data: { lastSeenAt: new Date() } });
   res.json({ userId: device.userId, appProtocol: device.appProtocol });
+});
+
+/**
+ * Report whether a machine's bridge is attached. Called by the relay on hub
+ * attach and detach, not by browsers.
+ *
+ * The relay is the only process that knows this, and it is also the most exposed
+ * one in the system — so it pushes the transition over the channel it already
+ * uses for /v1/devices/verify rather than growing a query surface of its own.
+ *
+ * `lastSeenAt` is stamped on both transitions: an attach is contact, and so is a
+ * clean detach. That timestamp is what makes the flag believable (presenceOf) and
+ * what a client falls back to when it is not.
+ */
+app.post('/v1/devices/presence', async (req, res) => {
+  const body = (req.body ?? {}) as { deviceId?: string; online?: boolean };
+  if (!body.deviceId || typeof body.online !== 'boolean') {
+    res.status(400).json({ error: 'deviceId and online are required' });
+    return;
+  }
+  // updateMany, not update: a revoked or unknown device simply matches nothing,
+  // and a presence report must never resurrect a tombstoned row.
+  const { count } = await prisma.device.updateMany({
+    where: { id: body.deviceId, revokedAt: null },
+    data: { online: body.online, lastSeenAt: new Date() },
+  });
+  if (!count) {
+    res.status(404).json({ error: 'unknown device' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+/**
+ * The relay's grant oracle: may this browser's user reach this machine?
+ *
+ * Called with a user id the relay has already verified from a Clerk token. It
+ * never sees or checks a device secret — that is /verify's job — so it answers
+ * only the membership question, and answers `{allowed:false}` with nothing else
+ * attached, so a probe learns nothing about a machine it cannot reach.
+ */
+app.post('/v1/devices/authorize', async (req, res) => {
+  const body = (req.body ?? {}) as { deviceId?: string; userId?: string };
+  if (!body.deviceId || !body.userId) {
+    res.status(400).json({ error: 'deviceId and userId are required' });
+    return;
+  }
+  const auth = await authorizeDevice(prisma, body.deviceId, body.userId);
+  // Self-heal a missing display identity. The profile is normally cached at
+  // invite and claim time, but a grant written before that existed — or one whose
+  // Clerk lookup failed then — would leave a guest permanently nameless in
+  // presence and on every prompt they send. Fill it in once, here, rather than
+  // rendering "Someone" forever.
+  if (auth.allowed && !auth.viewer) {
+    await cacheProfile(body.userId);
+    const viewer = await profileOf(prisma, body.userId);
+    res.json({ ...auth, viewer });
+    return;
+  }
+  res.json(auth);
+});
+
+/** Invite codes ride in a URL, so: URL-safe, and long enough not to be guessable. */
+const inviteCode = () => randomBytes(24).toString('base64url');
+const SHARE_INVITE_TTL_MIN = Number(process.env.SHARE_INVITE_TTL_MIN ?? 7 * 24 * 60);
+
+/** Cache a Clerk identity so a shared session can name people without a Clerk key. */
+async function cacheProfile(userId: string): Promise<void> {
+  try {
+    const user = await clerkClient.users.getUser(userId);
+    const email =
+      user.emailAddresses.find((e) => e.id === user.primaryEmailAddressId)?.emailAddress ?? null;
+    const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || null;
+    const data = { email, name, imageUrl: user.imageUrl ?? null, updatedAt: new Date() };
+    await prisma.userProfile.upsert({ where: { userId }, create: { userId, ...data }, update: data });
+  } catch (err) {
+    // Never fatal: a share works without a display name, and Clerk being slow or
+    // down must not block a grant that is otherwise valid.
+    console.warn(`[storage] could not cache profile for ${userId}:`, (err as Error).message);
+  }
+}
+
+/** The caller's *verified* Clerk emails, lowercased. Unverified never matches an invite. */
+async function verifiedEmails(userId: string): Promise<string[]> {
+  const user = await clerkClient.users.getUser(userId);
+  return user.emailAddresses
+    .filter((e) => e.verification?.status === 'verified')
+    .map((e) => e.emailAddress.toLowerCase());
+}
+
+/**
+ * Mint an invite. Verifies the caller owns the machine — and, for a session
+ * share, that the session exists under their own user — so an invite can never
+ * be minted against someone else's machine or session.
+ */
+app.post('/v1/shares/invite', async (req, res) => {
+  const userId = userIdOf(req);
+  const body = (req.body ?? {}) as {
+    deviceId?: string;
+    sessionId?: string | null;
+    inviteeEmail?: string | null;
+    preset?: SharePreset;
+  };
+  const preset = body.preset ?? 'view';
+  if (!body.deviceId || !SHARE_PRESETS[preset]) {
+    res.status(400).json({ error: 'deviceId and a valid preset are required' });
+    return;
+  }
+  const device = await prisma.device.findFirst({
+    where: { id: body.deviceId, userId, revokedAt: null },
+    select: { id: true },
+  });
+  if (!device) {
+    res.status(404).json({ error: 'unknown device' });
+    return;
+  }
+  if (body.sessionId) {
+    const session = await prisma.session.findFirst({
+      where: { userId, id: body.sessionId, deletedAt: null },
+      select: { id: true },
+    });
+    if (!session) {
+      res.status(404).json({ error: 'unknown session' });
+      return;
+    }
+  }
+  const code = inviteCode();
+  const expiresAt = new Date(Date.now() + SHARE_INVITE_TTL_MIN * 60_000);
+  await prisma.shareInvite.create({
+    data: {
+      code,
+      ownerId: userId,
+      deviceId: device.id,
+      sessionId: body.sessionId ?? null,
+      // Lowercased on both sides of the comparison, so case can never deny a
+      // legitimate invitee.
+      inviteeEmail: body.inviteeEmail ? body.inviteeEmail.trim().toLowerCase() : null,
+      caps: capsJson(capsForPreset(preset, body.sessionId ? 'session' : 'machine')),
+      expiresAt,
+    },
+  });
+  await cacheProfile(userId);
+  res.json({ code, expiresAt: expiresAt.toISOString() });
+});
+
+/** Grants this user made and holds, for the share overlay and the machine picker. */
+app.get('/v1/shares', async (req, res) => {
+  const userId = userIdOf(req);
+  const [grantedMembers, grantedShares, invites, receivedMembers, receivedShares] =
+    await Promise.all([
+      prisma.deviceMember.findMany({ where: { ownerId: userId, revokedAt: null } }),
+      prisma.sessionShare.findMany({ where: { ownerId: userId, revokedAt: null } }),
+      prisma.shareInvite.findMany({
+        where: { ownerId: userId, revokedAt: null, claimedBy: null, expiresAt: { gt: new Date() } },
+      }),
+      prisma.deviceMember.findMany({ where: { userId, revokedAt: null } }),
+      prisma.sessionShare.findMany({ where: { userId, revokedAt: null } }),
+    ]);
+
+  const ids = new Set<string>([
+    ...grantedMembers.map((m) => m.userId),
+    ...grantedShares.map((s) => s.userId),
+    ...receivedMembers.map((m) => m.ownerId),
+    ...receivedShares.map((s) => s.ownerId),
+  ]);
+  const profiles = new Map(
+    (await prisma.userProfile.findMany({ where: { userId: { in: [...ids] } } })).map((p) => [
+      p.userId,
+      { userId: p.userId, email: p.email, name: p.name, imageUrl: p.imageUrl },
+    ]),
+  );
+
+  res.json({
+    granted: [
+      ...grantedMembers.map((m) => ({
+        kind: 'machine' as const,
+        deviceId: m.deviceId,
+        userId: m.userId,
+        caps: parseShareCaps(m.caps),
+        preset: presetOfCaps(parseShareCaps(m.caps), 'machine'),
+        createdAt: m.createdAt,
+        profile: profiles.get(m.userId) ?? null,
+      })),
+      ...grantedShares.map((s) => ({
+        kind: 'session' as const,
+        deviceId: s.deviceId,
+        sessionId: s.sessionId,
+        userId: s.userId,
+        caps: parseShareCaps(s.caps),
+        preset: presetOfCaps(parseShareCaps(s.caps), 'session'),
+        createdAt: s.createdAt,
+        profile: profiles.get(s.userId) ?? null,
+      })),
+    ],
+    // Pending invites sit alongside accepted members so an unclaimed one is
+    // visible and revocable rather than invisible until someone uses it.
+    invites: invites.map((i) => ({
+      code: i.code,
+      deviceId: i.deviceId,
+      sessionId: i.sessionId,
+      inviteeEmail: i.inviteeEmail,
+      preset: presetOfCaps(parseShareCaps(i.caps), i.sessionId ? 'session' : 'machine'),
+      createdAt: i.createdAt,
+      expiresAt: i.expiresAt,
+    })),
+    received: [
+      ...receivedMembers.map((m) => ({
+        kind: 'machine' as const,
+        deviceId: m.deviceId,
+        ownerId: m.ownerId,
+        caps: parseShareCaps(m.caps),
+        profile: profiles.get(m.ownerId) ?? null,
+      })),
+      ...receivedShares.map((s) => ({
+        kind: 'session' as const,
+        deviceId: s.deviceId,
+        sessionId: s.sessionId,
+        ownerId: s.ownerId,
+        caps: parseShareCaps(s.caps),
+        profile: profiles.get(s.ownerId) ?? null,
+      })),
+    ],
+  });
+});
+
+/**
+ * Invitations waiting for *this* user, found by their verified email rather than
+ * by holding the link.
+ *
+ * Without this, an invitee who signs in before opening the link — or who loses
+ * it — reaches the "connect a machine" screen with no way forward and no sign
+ * that they have been invited to anything. Accepting a share must not depend on
+ * still having a URL.
+ *
+ * Only address-bound invites appear. A link-only invite is a bearer token
+ * addressed to nobody, so listing it for any signed-in user would turn "single
+ * use link" into "anyone with an account".
+ */
+app.get('/v1/shares/pending', async (req, res) => {
+  const userId = userIdOf(req);
+  const emails = await verifiedEmails(userId).catch(() => [] as string[]);
+  if (!emails.length) {
+    res.json({ invites: [] });
+    return;
+  }
+  const invites = await prisma.shareInvite.findMany({
+    where: {
+      inviteeEmail: { in: emails },
+      claimedBy: null,
+      revokedAt: null,
+      expiresAt: { gt: new Date() },
+      // Your own invite is not a pending invitation to you.
+      NOT: { ownerId: userId },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  const [devices, owners] = await Promise.all([
+    prisma.device.findMany({
+      where: { id: { in: invites.map((i) => i.deviceId) }, revokedAt: null },
+      select: { id: true, name: true },
+    }),
+    prisma.userProfile.findMany({ where: { userId: { in: invites.map((i) => i.ownerId) } } }),
+  ]);
+  const deviceName = new Map(devices.map((d) => [d.id, d.name]));
+  const profiles = new Map(
+    owners.map((p) => [p.userId, { userId: p.userId, email: p.email, name: p.name, imageUrl: p.imageUrl }]),
+  );
+  res.json({
+    invites: invites
+      // An invite whose machine has since been unpaired grants nothing; offering
+      // it would be a button that fails.
+      .filter((i) => deviceName.has(i.deviceId))
+      .map((i) => ({
+        code: i.code,
+        scope: i.sessionId ? 'session' : 'machine',
+        machineName: deviceName.get(i.deviceId) ?? null,
+        owner: profiles.get(i.ownerId) ?? null,
+        preset: presetOfCaps(parseShareCaps(i.caps), i.sessionId ? 'session' : 'machine'),
+        expiresAt: i.expiresAt,
+      })),
+  });
+});
+
+/**
+ * Preview for the /join page. Signed-in only, and deliberately says nothing an
+ * unauthenticated holder of a leaked link could use: never the invitee's email,
+ * and nothing at all once the invite is spent.
+ */
+app.get('/v1/shares/invite/:code', async (req, res) => {
+  const userId = userIdOf(req);
+  const invite = await prisma.shareInvite.findUnique({ where: { code: req.params.code } });
+  if (!invite || invite.revokedAt || invite.claimedBy || invite.expiresAt < new Date()) {
+    res.status(404).json({ error: 'unknown or expired invite' });
+    return;
+  }
+  const [device, owner] = await Promise.all([
+    prisma.device.findUnique({ where: { id: invite.deviceId }, select: { name: true } }),
+    profileOf(prisma, invite.ownerId),
+  ]);
+  const session = invite.sessionId
+    ? await prisma.session.findFirst({
+        where: { userId: invite.ownerId, id: invite.sessionId, deletedAt: null },
+        select: { data: true },
+      })
+    : null;
+  res.json({
+    code: invite.code,
+    scope: invite.sessionId ? 'session' : 'machine',
+    machineName: device?.name ?? null,
+    sessionName: (session?.data as { name?: string } | null)?.name ?? null,
+    owner,
+    preset: presetOfCaps(parseShareCaps(invite.caps), invite.sessionId ? 'session' : 'machine'),
+    /** So the page can say "this is your own invite" rather than a bare refusal. */
+    isOwn: invite.ownerId === userId,
+    expiresAt: invite.expiresAt,
+  });
+});
+
+/**
+ * Redeem an invite. Single use, enforced as a compare-and-set on `claimedBy` in
+ * the same transaction that writes the grant — a replayed code finds nothing to
+ * update and 409s rather than minting a second grant.
+ */
+app.post('/v1/shares/claim', async (req, res) => {
+  const userId = userIdOf(req);
+  const code = String((req.body as { code?: string } | null)?.code ?? '').trim();
+  const invite = await prisma.shareInvite.findUnique({ where: { code } });
+  if (!invite || invite.revokedAt || invite.expiresAt < new Date()) {
+    res.status(404).json({ error: 'unknown or expired invite' });
+    return;
+  }
+  if (invite.claimedBy) {
+    res.status(409).json({ error: 'this invite has already been used' });
+    return;
+  }
+  if (invite.ownerId === userId) {
+    res.status(400).json({ error: 'this is your own invite' });
+    return;
+  }
+  if (invite.inviteeEmail) {
+    // The likeliest real-world failure is signing up with a different address
+    // than the one invited, so the error names it instead of a bare denial.
+    // Unverified addresses never match: otherwise anyone could add the invitee's
+    // email to their own account and claim in their place.
+    const mine = await verifiedEmails(userId).catch(() => [] as string[]);
+    if (!mine.includes(invite.inviteeEmail)) {
+      res.status(403).json({
+        error: `This invite was sent to ${invite.inviteeEmail}. Sign in with that address to accept it.`,
+      });
+      return;
+    }
+  }
+  // The machine must still exist, still belong to the inviter, and still be live:
+  // an invite minted before an unpair must not grant access to whoever holds that
+  // device id now.
+  const device = await prisma.device.findFirst({
+    where: { id: invite.deviceId, userId: invite.ownerId, revokedAt: null },
+    select: { id: true },
+  });
+  if (!device) {
+    res.status(404).json({ error: 'that machine is no longer available' });
+    return;
+  }
+
+  const claimed = await prisma.$transaction(async (tx) => {
+    // Compare-and-set: `claimedBy: null` in the where clause is what makes two
+    // concurrent claims resolve to exactly one grant.
+    const { count } = await tx.shareInvite.updateMany({
+      where: { code: invite.code, claimedBy: null, revokedAt: null },
+      data: { claimedBy: userId, claimedAt: new Date() },
+    });
+    if (!count) return false;
+    const caps = invite.caps as Record<string, boolean>;
+    if (invite.sessionId) {
+      await tx.sessionShare.upsert({
+        where: {
+          deviceId_userId_sessionId: {
+            deviceId: invite.deviceId,
+            userId,
+            sessionId: invite.sessionId,
+          },
+        },
+        create: {
+          deviceId: invite.deviceId,
+          userId,
+          sessionId: invite.sessionId,
+          ownerId: invite.ownerId,
+          caps,
+        },
+        // Re-claiming a previously revoked grant clears the tombstone rather than
+        // failing on the primary key.
+        update: { caps, ownerId: invite.ownerId, revokedAt: null },
+      });
+    } else {
+      await tx.deviceMember.upsert({
+        where: { deviceId_userId: { deviceId: invite.deviceId, userId } },
+        create: { deviceId: invite.deviceId, userId, ownerId: invite.ownerId, caps },
+        update: { caps, ownerId: invite.ownerId, revokedAt: null },
+      });
+    }
+    return true;
+  });
+  if (!claimed) {
+    res.status(409).json({ error: 'this invite has already been used' });
+    return;
+  }
+  await cacheProfile(userId);
+  res.json({
+    ok: true,
+    deviceId: invite.deviceId,
+    sessionId: invite.sessionId,
+    scope: invite.sessionId ? 'session' : 'machine',
+  });
+});
+
+/**
+ * Narrow or widen a live grant without revoking and re-inviting. Owner only —
+ * scoped by ownerId in the where clause, so a grantee cannot raise their own.
+ */
+app.patch('/v1/shares/:kind/:id', async (req, res) => {
+  const ownerId = userIdOf(req);
+  const preset = (req.body as { preset?: SharePreset } | null)?.preset;
+  const granteeId = (req.body as { userId?: string } | null)?.userId;
+  const sessionId = (req.body as { sessionId?: string } | null)?.sessionId;
+  if (!preset || !SHARE_PRESETS[preset]) {
+    res.status(400).json({ error: 'a valid preset is required' });
+    return;
+  }
+  const { kind, id } = req.params;
+  if (kind === 'machine') {
+    if (!granteeId) {
+      res.status(400).json({ error: 'userId is required' });
+      return;
+    }
+    const { count } = await prisma.deviceMember.updateMany({
+      where: { deviceId: id, userId: granteeId, ownerId, revokedAt: null },
+      data: { caps: capsJson(capsForPreset(preset, 'machine')) },
+    });
+    res.status(count ? 200 : 404).json(count ? { ok: true } : { error: 'unknown grant' });
+    return;
+  }
+  if (kind === 'session') {
+    if (!granteeId || !sessionId) {
+      res.status(400).json({ error: 'userId and sessionId are required' });
+      return;
+    }
+    const { count } = await prisma.sessionShare.updateMany({
+      where: { deviceId: id, userId: granteeId, sessionId, ownerId, revokedAt: null },
+      data: { caps: capsJson(capsForPreset(preset, 'session')) },
+    });
+    res.status(count ? 200 : 404).json(count ? { ok: true } : { error: 'unknown grant' });
+    return;
+  }
+  res.status(400).json({ error: 'unknown share kind' });
+});
+
+/**
+ * Revoke a grant or an unclaimed invite. A tombstone, matching every other
+ * revocation here, and always scoped by ownerId: a grantee can revoke nothing.
+ */
+app.delete('/v1/shares/:kind/:id', async (req, res) => {
+  const ownerId = userIdOf(req);
+  const { kind, id } = req.params;
+  const granteeId = String(req.query.userId ?? '');
+  const sessionId = String(req.query.sessionId ?? '');
+  const at = new Date();
+
+  if (kind === 'invite') {
+    const { count } = await prisma.shareInvite.updateMany({
+      where: { code: id, ownerId, revokedAt: null },
+      data: { revokedAt: at },
+    });
+    res.status(count ? 200 : 404).json(count ? { ok: true } : { error: 'unknown invite' });
+    return;
+  }
+  if (kind === 'machine') {
+    const { count } = await prisma.deviceMember.updateMany({
+      where: { deviceId: id, userId: granteeId, ownerId, revokedAt: null },
+      data: { revokedAt: at },
+    });
+    res.status(count ? 200 : 404).json(count ? { ok: true } : { error: 'unknown grant' });
+    return;
+  }
+  if (kind === 'session') {
+    const { count } = await prisma.sessionShare.updateMany({
+      // No sessionId revokes every session share this user holds on the machine.
+      where: {
+        deviceId: id,
+        userId: granteeId,
+        ownerId,
+        revokedAt: null,
+        ...(sessionId ? { sessionId } : {}),
+      },
+      data: { revokedAt: at },
+    });
+    res.status(count ? 200 : 404).json(count ? { ok: true } : { error: 'unknown grant' });
+    return;
+  }
+  res.status(400).json({ error: 'unknown share kind' });
 });
 
 /** Constant-time compare of two hex digests of equal length. */

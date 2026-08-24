@@ -7,7 +7,13 @@
  * bridge, and a version the client can read is the prerequisite for degrading
  * gracefully instead of throwing on a message shape it does not know.
  */
-export const APP_PROTOCOL_VERSION = 1;
+/**
+ * 2: a bridge at this version understands the `grant` field on the relay's `open`
+ * frame and enforces `MESSAGE_AUTHZ`. The relay refuses to wire a guest to
+ * anything older (COLLAB_MIN_PROTOCOL), because a bridge that silently drops the
+ * grant would serve that guest as if they owned the machine.
+ */
+export const APP_PROTOCOL_VERSION = 2;
 
 /**
  * Workspace reads the browser makes over the WebSocket rather than plain HTTP.
@@ -141,6 +147,11 @@ export interface QueuedPrompt {
   attachments?: Attachment[];
   /** Display-only @mention badges; the expansion is already baked into `text`. */
   mentions?: PromptMention[];
+  /**
+   * Who wrote it. Load-bearing for a guest's `promptNeedsApproval` prompt: the
+   * owner releases it, but the transcript must credit the person who typed it.
+   */
+  actor?: Actor;
 }
 
 export interface CavemanConfig {
@@ -509,6 +520,12 @@ export interface SessionMeta {
   /** True until the name is either auto-generated from the first prompt or renamed by the user. */
   nameAuto?: boolean;
   claudeSessionId?: string;
+  /**
+   * Who sent the prompt driving the current turn. One field on the already-synced
+   * blob, changing once per turn — enough for the sidebar to say "your colleague
+   * is running this" without a second channel.
+   */
+  turnActor?: Actor;
   workflow?: WorkflowState;
   lastCostUsd?: number;
   totalCostUsd?: number;
@@ -640,6 +657,12 @@ export interface PermissionRequestData {
    * 'user' (the only resolution source that existed for cards the user saw).
    */
   resolvedBy?: PermissionResolutionSource;
+  /**
+   * Who answered it. Alongside `resolvedBy`, not folded into it: that field is
+   * provenance-of-decision (a user, a workflow advance, a recovery sweep), which
+   * is a different question from which person clicked. Absent means the host.
+   */
+  resolvedActor?: Actor;
   /** For AskUserQuestion: question text -> selected label(s) the user chose. */
   answers?: Record<string, string>;
   /**
@@ -925,6 +948,368 @@ export function searchDocs(
 }
 
 // ---------------------------------------------------------------------------
+// Session & machine sharing
+// ---------------------------------------------------------------------------
+
+/**
+ * What a guest may do on someone else's machine.
+ *
+ * A share is never boolean: a guest runs code on the host's computer, as the
+ * host's OS user, on the host's Anthropic plan. Every grant carries this flag
+ * set, and the bridge is what enforces it — storage and the relay only carry it.
+ *
+ * The UI exposes presets only (see SHARE_PRESETS); the flags exist so a finer
+ * grant can ship later without a migration.
+ */
+export interface ShareCaps {
+  /** Send prompts at all. */
+  prompt: boolean;
+  /** A guest prompt lands paused in the owner's queue instead of running. */
+  promptNeedsApproval: boolean;
+  /** Read workspace files, trees, docs — clamped to the shared session's roots. */
+  readFiles: boolean;
+  /** Stop, retry, continue, cancel a queued prompt. */
+  interrupt: boolean;
+  /** Answer a permission request. This is the one that runs arbitrary commands. */
+  approvePermissions: boolean;
+  /** Approve, force-advance, start or retry a workflow step. */
+  manageWorkflow: boolean;
+  setModel: boolean;
+  /** No preset grants this: permission mode is the guard around everything else. */
+  setPermissionMode: boolean;
+  /** Machine-scope grants only — a session share has no folder to create in. */
+  createSessions: boolean;
+}
+
+/** Every capability off. The base every grant is built from, so a new flag defaults denied. */
+export const NO_SHARE_CAPS: ShareCaps = {
+  prompt: false,
+  promptNeedsApproval: false,
+  readFiles: false,
+  interrupt: false,
+  approvePermissions: false,
+  manageWorkflow: false,
+  setModel: false,
+  setPermissionMode: false,
+  createSessions: false,
+};
+
+/** The three grants the UI offers. Stored as caps, so the preset is only a label. */
+export type SharePreset = 'view' | 'prompt' | 'collaborator';
+
+/** How wide a grant reaches. `owner` is the host themselves — never a stored row. */
+export type ShareScope = 'owner' | 'machine' | 'session';
+
+export const SHARE_PRESETS: Record<SharePreset, ShareCaps> = {
+  view: { ...NO_SHARE_CAPS, readFiles: true },
+  prompt: {
+    ...NO_SHARE_CAPS,
+    prompt: true,
+    // The default that makes "can prompt" safe to hand out: the owner releases
+    // each one from the queue UI they already have, and answers every permission.
+    promptNeedsApproval: true,
+    readFiles: true,
+  },
+  collaborator: {
+    ...NO_SHARE_CAPS,
+    prompt: true,
+    readFiles: true,
+    interrupt: true,
+    approvePermissions: true,
+    manageWorkflow: true,
+    setModel: true,
+  },
+};
+
+/**
+ * Caps for a preset at a given scope. `createSessions` is the only capability
+ * that depends on scope — there is nowhere to put a new session in a session
+ * share.
+ */
+export function capsForPreset(preset: SharePreset, scope: ShareScope): ShareCaps {
+  const caps = { ...SHARE_PRESETS[preset] };
+  if (preset === 'collaborator' && scope === 'machine') caps.createSessions = true;
+  return caps;
+}
+
+/**
+ * Read caps back out of a stored JSON blob, **failing closed**: anything missing,
+ * malformed, or not a boolean is denied rather than assumed.
+ *
+ * The load-bearing case is a capability added after a grant was written — an old
+ * row must not silently acquire it, which is exactly what spreading the stored
+ * object over a permissive default would do.
+ */
+export function parseShareCaps(value: unknown): ShareCaps {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  const caps = { ...NO_SHARE_CAPS };
+  for (const key of Object.keys(NO_SHARE_CAPS) as (keyof ShareCaps)[]) {
+    caps[key] = raw[key] === true;
+  }
+  return caps;
+}
+
+/** Which preset a stored cap set corresponds to, or null for a hand-tuned grant. */
+export function presetOfCaps(caps: ShareCaps, scope: ShareScope): SharePreset | null {
+  for (const preset of ['view', 'prompt', 'collaborator'] as SharePreset[]) {
+    const expected = capsForPreset(preset, scope);
+    if ((Object.keys(expected) as (keyof ShareCaps)[]).every((k) => expected[k] === caps[k])) {
+      return preset;
+    }
+  }
+  return null;
+}
+
+/**
+ * Who did a thing, for attribution in a shared session.
+ *
+ * Taken from the connection's attested identity, never from a message body — the
+ * same rule as presence. A prompt that could claim to be from someone else would
+ * make the whole transcript untrustworthy.
+ *
+ * Absent on every row written before sharing existed, which is why every reader
+ * falls back to the session's host rather than rendering "unknown".
+ */
+export interface Actor {
+  userId: string;
+  name: string | null;
+  imageUrl: string | null;
+}
+
+/** Display identity for a person in a shared session. Never client-supplied. */
+export interface ShareProfile {
+  userId: string;
+  email: string | null;
+  name: string | null;
+  imageUrl: string | null;
+}
+
+/**
+ * One person watching a session, as the bridge sees them.
+ *
+ * Ephemeral and bridge-local: presence lives in memory on the host, never in
+ * `SessionMeta`. A focus toggle riding the session blob would restamp
+ * `updatedAt` and write a Postgres row per keystroke.
+ *
+ * `profile` is the relay-attested identity, or null for the session's own host
+ * (whose display name the viewer already has from `hello.access.ownerProfile`).
+ * Never taken from a message body — attribution must not be spoofable.
+ */
+export interface PresenceViewer {
+  userId: string;
+  /** Distinguishes two tabs of the same person, so leaving one does not clear both. */
+  connId: string;
+  profile: ShareProfile | null;
+  /** This session is on screen for them. */
+  viewing: boolean;
+  /** Their composer has focus — they are probably typing. */
+  focused: boolean;
+  /** ms epoch of their last signal. */
+  lastSeenAt: number;
+}
+
+/**
+ * What one browser connection may do, attached to the socket rather than to the
+ * user: the same person can hold a wide grant on one machine and a narrow one on
+ * another, and the bridge answers per connection.
+ */
+export interface SocketAccess {
+  scope: ShareScope;
+  caps: ShareCaps;
+  /** Session scope only — exactly the sessions this connection may touch. */
+  sessionIds?: string[];
+  /** The host, for a guest's UI. Null for the owner's own connection. */
+  ownerProfile?: ShareProfile | null;
+  /**
+   * *This viewer's* display identity, resolved server-side from the cached
+   * UserProfile — never from a message body, so presence and attribution cannot
+   * be spoofed. Null for the machine's owner, whose name the client already knows
+   * from Clerk.
+   */
+  viewerProfile?: ShareProfile | null;
+}
+
+/** The owner's own connection: every capability, no session limit. */
+export const OWNER_ACCESS: SocketAccess = {
+  scope: 'owner',
+  caps: {
+    prompt: true,
+    promptNeedsApproval: false,
+    readFiles: true,
+    interrupt: true,
+    approvePermissions: true,
+    manageWorkflow: true,
+    setModel: true,
+    setPermissionMode: true,
+    createSessions: true,
+  },
+};
+
+/**
+ * What a message requires of the connection that sent it.
+ *
+ * - `owner` — never grantable to anyone, at any preset.
+ * - `connection` — about the socket itself (heartbeat, token relay), so every
+ *   connection may send it. Carries no access to the user's data.
+ * - `cap` — any grant holding the capability. Not session-scoped, so the
+ *   enforcement of *what* it may touch lives in the handler (see fileRequest,
+ *   clamped to the grant's roots).
+ * - `session` — session-scoped: the message's `sessionId` must be inside the
+ *   grant, and the capability (when not null) must be held.
+ * - `machine` — machine-scope grants only; a session share has no standing.
+ */
+export type MessageAuthz =
+  | { needs: 'owner' }
+  | { needs: 'connection' }
+  | { needs: 'cap'; cap: keyof ShareCaps }
+  | { needs: 'session'; cap: keyof ShareCaps | null }
+  | { needs: 'machine'; cap: keyof ShareCaps };
+
+/**
+ * Every client message, classified. **Do not weaken this to a partial map or a
+ * lookup with a fallback**: keying the Record on `ClientMessage['type']` means a
+ * message added later fails to compile until someone decides what it grants,
+ * which makes default-deny a property the compiler enforces rather than one a
+ * reviewer has to notice.
+ */
+export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
+  // --- the socket itself
+  ping: { needs: 'connection' },
+  auth: { needs: 'connection' },
+
+  // --- running a session
+  prompt: { needs: 'session', cap: 'prompt' },
+  interrupt: { needs: 'session', cap: 'interrupt' },
+  retryTurn: { needs: 'session', cap: 'interrupt' },
+  continueTurn: { needs: 'session', cap: 'interrupt' },
+  cancelQueued: { needs: 'session', cap: 'interrupt' },
+  // Destructive to the session's context, so it sits with the other turn-level
+  // controls rather than with reads.
+  compactContext: { needs: 'session', cap: 'interrupt' },
+  permissionResponse: { needs: 'session', cap: 'approvePermissions' },
+  setModel: { needs: 'session', cap: 'setModel' },
+  // No preset grants either of these: permission mode is the guard around
+  // everything else, and caveman rewrites the system prompt.
+  setPermissionMode: { needs: 'session', cap: 'setPermissionMode' },
+  setCaveman: { needs: 'session', cap: 'setPermissionMode' },
+
+  // --- watching a session. `cap: null` = any grant, including View only.
+  loadTranscript: { needs: 'session', cap: null },
+  // Any grant, View only included: being seen in a session you may watch is the
+  // point, and it grants nothing.
+  presence: { needs: 'session', cap: null },
+  ackSession: { needs: 'session', cap: null },
+  contextBreakdown: { needs: 'session', cap: 'readFiles' },
+
+  // --- workflow driving
+  workflowApprove: { needs: 'session', cap: 'manageWorkflow' },
+  workflowForceAdvance: { needs: 'session', cap: 'manageWorkflow' },
+  workflowStartStep: { needs: 'session', cap: 'manageWorkflow' },
+  workflowRetry: { needs: 'session', cap: 'manageWorkflow' },
+
+  // --- files. Scope enforcement is in the handler, not here.
+  fileRequest: { needs: 'cap', cap: 'readFiles' },
+
+  // --- creating sessions: machine scope only, since a session share has no
+  //     folder to create in.
+  createSession: { needs: 'machine', cap: 'createSessions' },
+
+  // --- owner only, permanently.
+  //     A guest must never reshape the host's library, projects, settings,
+  //     account or machine — and must never delete their sessions.
+  deleteSession: { needs: 'owner' },
+  archiveSession: { needs: 'owner' },
+  unarchiveSession: { needs: 'owner' },
+  completeSession: { needs: 'owner' },
+  saveWorkflow: { needs: 'owner' },
+  deleteWorkflow: { needs: 'owner' },
+  saveStep: { needs: 'owner' },
+  deleteStep: { needs: 'owner' },
+  stepVersions: { needs: 'owner' },
+  saveRecipe: { needs: 'owner' },
+  deleteRecipe: { needs: 'owner' },
+  recipeVersions: { needs: 'owner' },
+  uploadRecipeImage: { needs: 'owner' },
+  // Creates sessions *and* workflows from the owner's library — wider than
+  // createSession, so no preset reaches it.
+  runRecipe: { needs: 'owner' },
+  pickFolder: { needs: 'owner' },
+  openProject: { needs: 'owner' },
+  closeProject: { needs: 'owner' },
+  addProjectRoot: { needs: 'owner' },
+  removeProjectRoot: { needs: 'owner' },
+  createWorktree: { needs: 'owner' },
+  removeWorktree: { needs: 'owner' },
+  linkProjectPath: { needs: 'owner' },
+  authStartLogin: { needs: 'owner' },
+  authCompleteLogin: { needs: 'owner' },
+  authLogout: { needs: 'owner' },
+  saveSettings: { needs: 'owner' },
+  addGuardAllow: { needs: 'owner' },
+  removeGuardAllow: { needs: 'owner' },
+  reviewGuardAllowlist: { needs: 'owner' },
+  installUpdate: { needs: 'owner' },
+};
+
+/**
+ * May this connection send this message? One gate, consulted before any handler
+ * runs, denying by default.
+ *
+ * The refusal text is shown to the guest, so it says which capability is missing
+ * rather than a bare "unauthorized" — the commonest real case is a View-only
+ * guest trying to prompt, and "you can't do that" with no reason is unhelpable.
+ */
+export function authorizeMessage(
+  msg: ClientMessage,
+  access: SocketAccess,
+): { ok: true } | { ok: false; reason: string } {
+  const rule = MESSAGE_AUTHZ[msg.type];
+  // Not classified: deny. Unreachable while the Record above is exhaustive, and
+  // the point is that it stays true even if that guarantee is ever weakened.
+  if (!rule) return { ok: false, reason: 'That action is not available.' };
+  if (access.scope === 'owner') return { ok: true };
+
+  switch (rule.needs) {
+    case 'connection':
+      return { ok: true };
+    case 'owner':
+      return { ok: false, reason: 'Only the owner of this machine can do that.' };
+    case 'machine':
+      if (access.scope !== 'machine') {
+        return { ok: false, reason: 'That needs access to the whole machine, not one session.' };
+      }
+      return access.caps[rule.cap] ? { ok: true } : { ok: false, reason: denial(rule.cap) };
+    case 'cap':
+      return access.caps[rule.cap] ? { ok: true } : { ok: false, reason: denial(rule.cap) };
+    case 'session': {
+      const sessionId = (msg as { sessionId?: string }).sessionId;
+      if (!sessionId) return { ok: false, reason: 'That action is not available.' };
+      // A machine-scope grant covers every session on the machine; a session
+      // share covers exactly its list, so a sibling session is refused here.
+      if (access.scope === 'session' && !access.sessionIds?.includes(sessionId)) {
+        return { ok: false, reason: 'You do not have access to that session.' };
+      }
+      if (rule.cap && !access.caps[rule.cap]) return { ok: false, reason: denial(rule.cap) };
+      return { ok: true };
+    }
+  }
+}
+
+const DENIAL_REASONS: Record<keyof ShareCaps, string> = {
+  prompt: 'You have view-only access to this session.',
+  promptNeedsApproval: 'Your prompts need the owner’s approval.',
+  readFiles: 'You do not have access to files on this machine.',
+  interrupt: 'Only a collaborator can stop or retry a turn.',
+  approvePermissions: 'Only the owner can answer a permission request here.',
+  manageWorkflow: 'Only a collaborator can drive workflow steps.',
+  setModel: 'Only a collaborator can change the model.',
+  setPermissionMode: 'Only the owner of this machine can change that.',
+  createSessions: 'You cannot create sessions on this machine.',
+};
+
+const denial = (cap: keyof ShareCaps): string => DENIAL_REASONS[cap];
+
+// ---------------------------------------------------------------------------
 // Client -> Server
 // ---------------------------------------------------------------------------
 
@@ -1022,6 +1407,12 @@ export type ClientMessage =
   /** Compact this session's context now (manual compaction). */
   | { type: 'compactContext'; sessionId: string }
   | { type: 'loadTranscript'; sessionId: string }
+  /**
+   * "I am looking at this session" / "my composer has focus". Debounced hard on
+   * the client: writeDraft already fires per keystroke and this must not become
+   * one frame per character.
+   */
+  | { type: 'presence'; sessionId: string; viewing: boolean; focused: boolean }
   | { type: 'pickFolder' }
   | { type: 'openProject'; path: string }
   | { type: 'closeProject'; path: string }
@@ -1404,7 +1795,36 @@ export function diffAllowlists(
 export type ServerMessage =
   /** `bridge` is optional: once the web app is hosted it will meet bridges older
    *  than itself, and an absent field is exactly that case. */
-  | { type: 'hello'; bridge?: BridgeInfo; sessions: SessionMeta[]; workflows: WorkflowDef[]; sharedWorkflows: WorkflowDef[]; steps: StepDef[]; sharedSteps: StepDef[]; pinnedSteps: StepDef[]; recipes: RecipeDef[]; sharedRecipes: RecipeDef[]; recipeStats: Record<string, number>; models: ModelOption[]; recentDirs: string[]; projects: Project[]; projectKeys: ProjectKeyMap; usage: UsageSnapshot | null; auth: AuthStatus; storage: StorageStatus; worker?: WorkerStatus; settings?: UserUiSettings | null; guardAllowlist?: GuardAllowEntry[]; guardAllowlistReview?: GuardAllowlistReview | null }
+  | {
+      type: 'hello';
+      bridge?: BridgeInfo;
+      sessions: SessionMeta[];
+      workflows: WorkflowDef[];
+      sharedWorkflows: WorkflowDef[];
+      steps: StepDef[];
+      sharedSteps: StepDef[];
+      pinnedSteps: StepDef[];
+      recipes: RecipeDef[];
+      sharedRecipes: RecipeDef[];
+      recipeStats: Record<string, number>;
+      models: ModelOption[];
+      recentDirs: string[];
+      projects: Project[];
+      projectKeys: ProjectKeyMap;
+      usage: UsageSnapshot | null;
+      auth: AuthStatus;
+      storage: StorageStatus;
+      worker?: WorkerStatus;
+      settings?: UserUiSettings | null;
+      guardAllowlist?: GuardAllowEntry[];
+      guardAllowlistReview?: GuardAllowlistReview | null;
+      /**
+       * Present only on a guest connection, and the client's cue that this is
+       * somebody else's machine: what it may do, and whose it is. Absent means
+       * the owner's own connection, where everything above is fully populated.
+       */
+       access?: { scope: ShareScope; caps: ShareCaps; sessionIds?: string[]; ownerProfile: ShareProfile | null; deviceId: string | null };
+    }
   | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
   /** The whole auto-mode guard allowlist after any change (card, UI edit, accepted review). */
@@ -1414,6 +1834,11 @@ export type ServerMessage =
   | { type: 'usage'; usage: UsageSnapshot | null }
   | { type: 'authStatus'; auth: AuthStatus }
   | { type: 'storageStatus'; storage: StorageStatus }
+  /**
+   * Who is watching one session. Session-bearing on purpose: the Phase 1 scoped
+   * fan-out then delivers it to exactly that session's viewers and nobody else.
+   */
+  | { type: 'presence'; sessionId: string; viewers: PresenceViewer[] }
   /** Bridge->worker link health. No sessionId: one worker backs every session. */
   | { type: 'workerStatus'; worker: WorkerStatus }
   | { type: 'authLoginStarted'; authorizeUrl: string }

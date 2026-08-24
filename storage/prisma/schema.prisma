@@ -191,9 +191,93 @@ model Device {
 
   createdAt  DateTime  @default(now()) @map("created_at")
   lastSeenAt DateTime? @map("last_seen_at")
+  /// Whether a bridge is attached to this machine's hub, as last reported by the
+  /// relay on attach/detach (`POST /v1/devices/presence`). Storage cannot observe
+  /// this itself — only the relay holds hub liveness.
+  ///
+  /// Never read on its own: the relay is the only writer, so a relay crash would
+  /// leave this stuck true forever. It is believed only while `lastSeenAt` is
+  /// fresh — see presenceOf() in src/presence.ts.
+  online     Boolean   @default(false)
   /// Revocation is a tombstone, not a delete: the row stays as an audit trail.
   revokedAt  DateTime? @map("revoked_at")
 
   @@index([userId])
   @@map("devices")
+}
+
+/// Machine-scope grant: a guest may see and use every session on this device,
+/// subject to `caps`. The device's owner is never a row here — ownership is
+/// `Device.userId` and stays the fast path that consults no share table at all.
+model DeviceMember {
+  deviceId String @map("device_id")
+  /// The grantee.
+  userId   String @map("user_id")
+  /// Denormalized host user, so /v1/devices/authorize answers in one query.
+  ownerId  String @map("owner_id")
+  /// ShareCaps. Read through parseShareCaps(), which denies anything absent.
+  caps     Json
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  /// A tombstone, as Device.revokedAt: revocation must leave an audit trail.
+  revokedAt DateTime? @map("revoked_at")
+
+  @@id([deviceId, userId])
+  @@index([userId])
+  @@map("device_members")
+}
+
+/// Session-scope grant: exactly the listed session, on the listed machine.
+model SessionShare {
+  /// Which machine hosts it. Needed for relay routing — a session id alone does
+  /// not say which bridge to reach.
+  deviceId  String @map("device_id")
+  userId    String @map("user_id")
+  sessionId String @map("session_id") @db.Uuid
+  ownerId   String @map("owner_id")
+  caps      Json
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  revokedAt DateTime? @map("revoked_at")
+
+  @@id([deviceId, userId, sessionId])
+  @@index([userId])
+  @@map("session_shares")
+}
+
+/// One pending invite, covering the email and the link flow alike.
+model ShareInvite {
+  /// URL-safe random; the link is /join/<code>.
+  code     String  @id
+  ownerId  String  @map("owner_id")
+  deviceId String  @map("device_id")
+  /// Null = machine share.
+  sessionId String? @map("session_id") @db.Uuid
+  /// Lowercased. Null = anyone holding the link may claim it.
+  inviteeEmail String? @map("invitee_email")
+  caps         Json
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  expiresAt DateTime  @map("expires_at")
+  /// Single use: written in the same transaction as the grant, so a replay 409s.
+  claimedBy String?   @map("claimed_by")
+  claimedAt DateTime? @map("claimed_at")
+  revokedAt DateTime? @map("revoked_at")
+
+  @@index([ownerId])
+  @@index([inviteeEmail])
+  @@map("share_invites")
+}
+
+/// Display identity cache, so a shared session can name who is in it without
+/// every client holding a Clerk backend key. Written on invite and on claim.
+model UserProfile {
+  userId   String  @id @map("user_id")
+  email    String?
+  name     String?
+  imageUrl String? @map("image_url")
+
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("user_profiles")
 }
