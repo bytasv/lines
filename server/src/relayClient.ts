@@ -8,6 +8,7 @@
  * client is the same client, over a different pipe.
  */
 import { WebSocket } from 'ws';
+import { APP_PROTOCOL_VERSION } from '@lines/shared';
 import type { BrowserLink } from './userContext.ts';
 import type { RelayLinkStatus } from './updates.ts';
 
@@ -15,8 +16,26 @@ import type { RelayLinkStatus } from './updates.ts';
  *  ships to users' machines and must not depend on the relay package. */
 export const RELAY_PROTOCOL_VERSION = 1;
 
+/**
+ * A grant the relay attested, riding the `open` frame. Optional: an owner
+ * connection carries none, and that is the unchanged fast path.
+ *
+ * `caps` is a loose record, exactly as on the relay side. The bridge re-parses it
+ * through parseShareCaps(), which denies anything not explicitly `true`, so a
+ * malformed or hostile blob cannot widen a grant on the way in.
+ */
+export interface AttestedGrant {
+  hostUserId: string;
+  scope: 'owner' | 'machine' | 'session';
+  caps?: Record<string, boolean>;
+  sessionIds?: string[];
+  profile?: { userId: string; email: string | null; name: string | null; imageUrl: string | null } | null;
+  /** The connecting user's own identity, for presence and prompt attribution. */
+  viewerProfile?: { userId: string; email: string | null; name: string | null; imageUrl: string | null } | null;
+}
+
 type RelayToAgent =
-  | { t: 'open'; ch: string; userId: string; token: string | null }
+  | { t: 'open'; ch: string; userId: string; token: string | null; grant?: AttestedGrant }
   | { t: 'data'; ch: string; payload: string }
   | { t: 'close'; ch: string }
   | { t: 'token'; userId: string; token: string }
@@ -26,6 +45,8 @@ type RelayToAgent =
 export interface AttestedIdentity {
   userId: string;
   clerkToken: string | null;
+  /** Absent for the machine's owner; present means this connection is a guest. */
+  grant?: AttestedGrant;
 }
 
 export interface RelayClientCallbacks {
@@ -280,7 +301,13 @@ export class RelayClient {
       // Deliberately no `attempt = 0` here: see RELAY_STABLE_MS. The close handler
       // resets it, and only for a socket that lasted.
       this.openedAt = Date.now();
-      ws.send(JSON.stringify({ t: 'hello', version: RELAY_PROTOCOL_VERSION, appProtocol: 1 }));
+      // APP_PROTOCOL_VERSION, never a literal: the relay reads this to decide
+      // whether this bridge is new enough to be shared into (COLLAB_MIN_PROTOCOL).
+      // Hardcoded, it silently advertises an old contract and every guest
+      // connection is refused 1008 while the bridge itself looks healthy.
+      ws.send(
+        JSON.stringify({ t: 'hello', version: RELAY_PROTOCOL_VERSION, appProtocol: APP_PROTOCOL_VERSION }),
+      );
       this.startHealthCheck(ws);
       this.callbacks.onStatus?.({ connected: true });
     });
@@ -369,7 +396,13 @@ export class RelayClient {
         // bridge does not re-verify: a second verifier would mean two failure
         // modes, and would make every relayed connection depend on this machine
         // being able to reach Clerk's JWKS.
-        this.callbacks.onChannel(ch, { userId: frame.userId, clerkToken: frame.token });
+        this.callbacks.onChannel(ch, {
+          userId: frame.userId,
+          clerkToken: frame.token,
+          // Straight through, unexamined: the relay attested it, and the bridge is
+          // what enforces it. An absent grant means the owner's own connection.
+          ...(frame.grant ? { grant: frame.grant } : {}),
+        });
         break;
       }
       case 'data':

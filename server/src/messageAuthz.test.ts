@@ -1,0 +1,162 @@
+import assert from 'node:assert/strict';
+import { describe, test } from 'node:test';
+import {
+  MESSAGE_AUTHZ,
+  OWNER_ACCESS,
+  authorizeMessage,
+  capsForPreset,
+  parseShareCaps,
+  type ClientMessage,
+  type ShareCaps,
+  type SocketAccess,
+} from '@lines/shared';
+
+/**
+ * The default-deny gate every client message passes through.
+ *
+ * The exhaustive `Record<ClientMessage['type'], …>` makes an unclassified message
+ * a *compile* error, so this file covers what the compiler cannot: that the
+ * classifications are the intended ones, and that a guest cannot reach past their
+ * grant. The cases worth caring about are all negative.
+ */
+
+/** A grant with exactly the capabilities named — everything else denied. */
+const access = (caps: Partial<ShareCaps>, over: Partial<Omit<SocketAccess, 'caps'>> = {}): SocketAccess => ({
+  scope: 'machine',
+  ...over,
+  caps: parseShareCaps(caps),
+});
+
+const guest = (preset: 'view' | 'prompt' | 'collaborator', over: Partial<SocketAccess> = {}) => ({
+  scope: 'machine' as const,
+  caps: capsForPreset(preset, over.scope === 'session' ? 'session' : 'machine'),
+  ...over,
+});
+
+/** Minimal well-formed messages, enough for the gate (which reads type + sessionId). */
+const msg = (type: ClientMessage['type'], sessionId = 's1') =>
+  ({ type, sessionId }) as unknown as ClientMessage;
+
+describe('MESSAGE_AUTHZ', () => {
+  test('the owner may send every classified message', () => {
+    for (const type of Object.keys(MESSAGE_AUTHZ) as ClientMessage['type'][]) {
+      const verdict = authorizeMessage(msg(type), OWNER_ACCESS);
+      assert.equal(verdict.ok, true, `owner must be allowed to send ${type}`);
+    }
+  });
+
+  test('a guest with no capabilities may only watch and heartbeat', () => {
+    // Two classes survive an empty cap set, and only two: socket-level traffic,
+    // and the session reads classified `cap: null` — a grant with no capabilities
+    // is still a grant, and seeing the session is what it is for. Everything else
+    // must deny, which is the default-deny property.
+    const bare = access({});
+    for (const type of Object.keys(MESSAGE_AUTHZ) as ClientMessage['type'][]) {
+      const rule = MESSAGE_AUTHZ[type];
+      const allowedWithNoCaps =
+        rule.needs === 'connection' || (rule.needs === 'session' && rule.cap === null);
+      assert.equal(
+        authorizeMessage(msg(type), bare).ok,
+        allowedWithNoCaps,
+        `${type} with no capabilities should be ${allowedWithNoCaps ? 'allowed' : 'denied'}`,
+      );
+    }
+  });
+
+  test('the never-grantable set stays never-grantable, even for a collaborator', () => {
+    // Settings, the guard allowlist, project and worktree management, the Claude
+    // account, the step/recipe library, deleting a session, installing an update.
+    const ownerOnly = (Object.keys(MESSAGE_AUTHZ) as ClientMessage['type'][]).filter(
+      (t) => MESSAGE_AUTHZ[t].needs === 'owner',
+    );
+    // A canary: if someone reclassifies one of these away from owner-only, the
+    // count changes and this test says so out loud.
+    assert.ok(ownerOnly.includes('saveSettings'));
+    assert.ok(ownerOnly.includes('deleteSession'));
+    assert.ok(ownerOnly.includes('addGuardAllow'));
+    assert.ok(ownerOnly.includes('authLogout'));
+    assert.ok(ownerOnly.includes('installUpdate'));
+    assert.ok(ownerOnly.includes('pickFolder'));
+
+    for (const scope of ['machine', 'session'] as const) {
+      for (const type of ownerOnly) {
+        const verdict = authorizeMessage(msg(type), guest('collaborator', { scope, sessionIds: ['s1'] }));
+        assert.equal(verdict.ok, false, `${type} must stay owner-only at ${scope} scope`);
+      }
+    }
+  });
+
+  test('no preset can change the permission mode or caveman settings', () => {
+    // These are the guard around every other capability, so they are the one pair
+    // a Collaborator still cannot touch.
+    for (const preset of ['view', 'prompt', 'collaborator'] as const) {
+      for (const type of ['setPermissionMode', 'setCaveman'] as const) {
+        assert.equal(authorizeMessage(msg(type), guest(preset)).ok, false, `${preset} / ${type}`);
+      }
+    }
+  });
+
+  test('view only may watch but not act', () => {
+    const viewer = guest('view');
+    assert.equal(authorizeMessage(msg('loadTranscript'), viewer).ok, true);
+    assert.equal(authorizeMessage(msg('ackSession'), viewer).ok, true);
+    assert.equal(authorizeMessage(msg('prompt'), viewer).ok, false);
+    assert.equal(authorizeMessage(msg('interrupt'), viewer).ok, false);
+    assert.equal(authorizeMessage(msg('permissionResponse'), viewer).ok, false);
+  });
+
+  test('can prompt may prompt, but not stop, retry or approve', () => {
+    const prompter = guest('prompt');
+    assert.equal(authorizeMessage(msg('prompt'), prompter).ok, true);
+    assert.equal(authorizeMessage(msg('interrupt'), prompter).ok, false);
+    assert.equal(authorizeMessage(msg('retryTurn'), prompter).ok, false);
+    assert.equal(authorizeMessage(msg('permissionResponse'), prompter).ok, false);
+    assert.equal(authorizeMessage(msg('setModel'), prompter).ok, false);
+  });
+
+  test('a collaborator may drive a turn but still not delete the session', () => {
+    const collab = guest('collaborator');
+    assert.equal(authorizeMessage(msg('prompt'), collab).ok, true);
+    assert.equal(authorizeMessage(msg('interrupt'), collab).ok, true);
+    assert.equal(authorizeMessage(msg('permissionResponse'), collab).ok, true);
+    assert.equal(authorizeMessage(msg('workflowApprove'), collab).ok, true);
+    assert.equal(authorizeMessage(msg('setModel'), collab).ok, true);
+    assert.equal(authorizeMessage(msg('deleteSession'), collab).ok, false);
+  });
+
+  test('a session-scoped guest cannot reach a sibling session', () => {
+    // The single most important negative case: holding a share on one session
+    // must not be holding one on everything else on that machine.
+    const scoped = guest('collaborator', { scope: 'session', sessionIds: ['s1'] });
+    assert.equal(authorizeMessage(msg('prompt', 's1'), scoped).ok, true);
+    assert.equal(authorizeMessage(msg('prompt', 's2'), scoped).ok, false);
+    assert.equal(authorizeMessage(msg('loadTranscript', 's2'), scoped).ok, false);
+    assert.equal(authorizeMessage(msg('interrupt', 's2'), scoped).ok, false);
+  });
+
+  test('a session-scoped guest with an empty list reaches nothing', () => {
+    const empty = guest('collaborator', { scope: 'session', sessionIds: [] });
+    assert.equal(authorizeMessage(msg('prompt', 's1'), empty).ok, false);
+  });
+
+  test('a session-scoped grant cannot create sessions', () => {
+    // createSessions is machine-scope only: a session share has no folder to
+    // create in, and creating one would escape the grant entirely.
+    const scoped = guest('collaborator', { scope: 'session', sessionIds: ['s1'] });
+    assert.equal(authorizeMessage(msg('createSession'), scoped).ok, false);
+    const machine = guest('collaborator', { scope: 'machine' });
+    assert.equal(authorizeMessage(msg('createSession'), machine).ok, true);
+  });
+
+  test('a session-scoped message with no sessionId is denied, not defaulted', () => {
+    const scoped = guest('collaborator', { scope: 'session', sessionIds: ['s1'] });
+    assert.equal(authorizeMessage({ type: 'prompt' } as ClientMessage, scoped).ok, false);
+  });
+
+  test('a denial always carries a reason a person can act on', () => {
+    for (const type of Object.keys(MESSAGE_AUTHZ) as ClientMessage['type'][]) {
+      const verdict = authorizeMessage(msg(type), access({}));
+      if (!verdict.ok) assert.ok(verdict.reason.length > 10, `${type} needs a real reason`);
+    }
+  });
+});

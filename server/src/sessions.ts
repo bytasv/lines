@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type {
+  Actor,
   Attachment,
   AttachmentKind,
   CavemanConfig,
@@ -797,8 +798,14 @@ export class SessionManager {
     toolName: string,
     resolution: 'allow' | 'deny' | 'expired',
     source: PermissionResolutionSource,
+    actor?: Actor,
   ) {
-    console.log(`[permission] [session ${sessionId}] ${toolName || '?'} ${resolution} by ${source}`);
+    // Named in the host's log when it was not them: "who approved that" is the
+    // question asked after the fact, and the console is where it gets answered.
+    const who = actor ? ` (${actor.name ?? actor.userId})` : '';
+    console.log(
+      `[permission] [session ${sessionId}] ${toolName || '?'} ${resolution} by ${source}${who}`,
+    );
   }
 
   createSession(params: {
@@ -1101,6 +1108,13 @@ export class SessionManager {
     text: string,
     attachments: PromptAttachment[] = [],
     mentions: PromptMention[] = [],
+    /**
+     * A guest whose grant carries `promptNeedsApproval`. Their prompt is staged
+     * and the queue is left paused, so it waits for the owner to release it from
+     * the queue UI they already have. No new state machine: this is the same
+     * `queued` + `queuePaused` + `maybeFlush` path an interrupt leaves behind.
+     */
+    opts: { needsApproval?: boolean; actor?: Actor } = {},
   ) {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`unknown session ${sessionId}`);
@@ -1134,7 +1148,7 @@ export class SessionManager {
       if (!planReply.alsoQueue) return;
     }
 
-    if (meta.queued?.length || this.isBusy(meta)) {
+    if (opts.needsApproval || meta.queued?.length || this.isBusy(meta)) {
       const staged = this.stageAttachments(sessionId, attachments);
       (meta.queued ??= []).push({
         id: randomUUID(),
@@ -1143,6 +1157,16 @@ export class SessionManager {
         attachments: staged.length ? staged : undefined,
         mentions: mentions.length ? mentions : undefined,
       });
+      // Stamped on the queued item so a released prompt is still attributed to
+      // whoever wrote it, not to the owner who let it through.
+      if (opts.actor) meta.queued.at(-1)!.actor = opts.actor;
+      if (opts.needsApproval) {
+        // Paused, not flushed: the whole point of the preset is that the owner
+        // sees the prompt before it runs on their machine, on their plan.
+        meta.queuePaused = true;
+        this.upsert(meta);
+        return;
+      }
       // An explicit user send is the resume gesture after an interrupt/error.
       meta.queuePaused = undefined;
       this.upsert(meta);
@@ -1150,7 +1174,7 @@ export class SessionManager {
       return;
     }
 
-    this.prompt(sessionId, text, 'user', attachments, mentions);
+    this.prompt(sessionId, text, 'user', attachments, mentions, opts.actor);
   }
 
   /** Send the next queued prompt if the session is settled and not paused. */
@@ -1170,7 +1194,9 @@ export class SessionManager {
       })
       .filter((a): a is PromptAttachment => a !== null);
 
-    this.prompt(sessionId, item.text, 'user', attachments, item.mentions ?? []);
+    // item.actor, not the releasing user: the owner clicking "send" on a guest's
+    // queued prompt is not the author of it.
+    this.prompt(sessionId, item.text, 'user', attachments, item.mentions ?? [], item.actor);
   }
 
   /**
@@ -1313,6 +1339,9 @@ export class SessionManager {
     source: 'user' | 'workflow' = 'user',
     attachments: PromptAttachment[] = [],
     mentions: PromptMention[] = [],
+    /** Who sent it. Absent for the owner and for internal callers (workflows,
+     *  recovery), which read as the session's host on the way out. */
+    actor?: Actor,
   ) {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`unknown session ${sessionId}`);
@@ -1344,7 +1373,13 @@ export class SessionManager {
       source,
       ...(stored.length ? { attachments: stored } : {}),
       ...(mentions.length ? { mentions } : {}),
+      // Persisted in the append-only JSONL, so attribution survives a restart.
+      ...(actor ? { actor } : {}),
     });
+    // One field on the synced blob, so the sidebar can say who is running the
+    // turn. Cleared when nobody in particular sent it, rather than left stale.
+    if (actor) meta.turnActor = actor;
+    else delete meta.turnActor;
 
     // First real user prompt names the session from its topic. Guard flips
     // immediately so a slow title query can't fire twice or clobber a manual rename.
@@ -1930,6 +1965,8 @@ export class SessionManager {
     denyMessage?: string,
     alwaysAllow?: boolean,
     source: PermissionResolutionSource = 'user',
+    /** Who clicked. Absent for the owner and for every internal caller. */
+    actor?: Actor,
   ) {
     // Persist the exception first so it also covers the recovery path.
     if (allow && alwaysAllow) {
@@ -1981,11 +2018,18 @@ export class SessionManager {
       input: {},
       resolution: allow ? 'allow' : 'deny',
       resolvedBy,
+      ...(actor ? { resolvedActor: actor } : {}),
       answers,
       updatedInput,
       denyMessage: allow ? undefined : denyMessage,
     } satisfies PermissionRequestData);
-    this.logResolution(sessionId, original?.toolName ?? '', allow ? 'allow' : 'deny', resolvedBy);
+    this.logResolution(
+      sessionId,
+      original?.toolName ?? '',
+      allow ? 'allow' : 'deny',
+      resolvedBy,
+      actor,
+    );
 
     if (planStepGate) {
       meta0!.workflow!.advanceOnComplete = true;

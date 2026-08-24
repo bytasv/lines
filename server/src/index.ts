@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import dotenv from 'dotenv';
 
@@ -21,11 +22,19 @@ for (const envFile of [
   if (fs.existsSync(envFile)) dotenv.config({ path: envFile });
 }
 import { WebSocketServer, WebSocket } from 'ws';
-import type { ClientMessage, ServerMessage } from '@lines/shared';
-import { APP_PROTOCOL_VERSION, DEFAULT_MODELS, normalizeRootPath, projectRoots } from '@lines/shared';
+import type { Actor, ClientMessage, ServerMessage, SocketAccess } from '@lines/shared';
+import {
+  APP_PROTOCOL_VERSION,
+  DEFAULT_MODELS,
+  OWNER_ACCESS,
+  authorizeMessage,
+  normalizeRootPath,
+  parseShareCaps,
+  projectRoots,
+} from '@lines/shared';
 import { verifyToken } from '@clerk/backend';
 import { WORKER_LOST_MS, WorkerClient, type WorkerRpc } from './workerClient.ts';
-import { RelayClient } from './relayClient.ts';
+import { RelayClient, type AttestedGrant, type AttestedIdentity } from './relayClient.ts';
 import { deviceIdentity } from './device.ts';
 import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
@@ -118,8 +127,19 @@ async function verifyClerkUserId(token: string): Promise<string | null> {
 
 interface ConnState {
   userId: string;
+  /**
+   * Stable id for this connection, for presence. Two tabs of the same person are
+   * two connections, so closing one must not remove them from the other.
+   */
+  connId: string;
   /** Freshest verified Clerk token from this connection (handshake or relay). */
   clerkToken: string | null;
+  /**
+   * What this connection may do. `OWNER_ACCESS` for the machine's own user; a
+   * narrowed grant for a guest. Read by the authz gate in handleMessage, and by
+   * the file-read clamp.
+   */
+  access: SocketAccess;
 }
 // Keyed on the link object; relayClient will hold a strong ref per channel,
 // so a WeakMap entry lives exactly as long as its connection.
@@ -419,7 +439,17 @@ if (RELAY_URL) {
       void handleConnection(link, {}, identity);
     },
     onToken: (userId, token) => {
-      registry.get(userId).clerkToken = token;
+      // Only a user who owns a context here. A guest's token must never reach
+      // this: `registry.get` MINTS a context, so a guest token would both create
+      // ~/.lines-app/users/{guest} on someone else's machine and set a token that
+      // pushes this machine's sessions into the guest's Postgres rows.
+      //
+      // The non-obvious half of the same guard in handleConnection — a guest's
+      // token arrives here every ~50s from their browser's auth relay, so getting
+      // handleConnection right and missing this would leak anyway.
+      const ctx = registry.peek(userId);
+      if (!ctx) return;
+      ctx.clerkToken = token;
     },
     // Straight through to the desktop shell: it is the only consumer, and the
     // tray is the only place a user can see that this machine is reachable.
@@ -469,7 +499,7 @@ wss.on('connection', (ws, req) => {
 async function handleConnection(
   ws: BrowserLink,
   req: { url?: string },
-  attested?: { userId: string; clerkToken: string | null },
+  attested?: AttestedIdentity,
 ) {
   let userId = LOCAL_USER;
   let clerkToken: string | null = null;
@@ -487,47 +517,65 @@ async function handleConnection(
     userId = verified;
     clerkToken = token;
   }
-  const ctx = registry.get(userId);
-  conns.set(ws, { userId, clerkToken });
-  if (clerkToken) {
+
+  /**
+   * Whose state this connection serves.
+   *
+   * A guest reaches the *host's running session*, not a copy of it: transcripts
+   * and turns are host-local, so resolving a guest to their own context would
+   * hand them an empty machine. `hostUserId` is the relay's attestation, and the
+   * only thing that may pick a context other than the caller's own.
+   */
+  const grant = attested?.grant;
+  const isGuest = !!grant && grant.scope !== 'owner';
+  const hostUserId = isGuest ? grant.hostUserId : userId;
+  // `get` on the host (their context is the point), never on the guest — see
+  // registry.peek's comment. A guest that somehow arrives for a host with no
+  // context yet gets one built for the *host*, which is correct: it is the host's
+  // own data root either way.
+  const ctx = registry.get(hostUserId);
+
+  const access: SocketAccess = isGuest
+    ? {
+        scope: grant.scope,
+        // Re-parsed rather than trusted as-is: the wire type is a loose record,
+        // and parseShareCaps denies anything not explicitly true.
+        caps: parseShareCaps(grant.caps),
+        ...(grant.scope === 'session' ? { sessionIds: grant.sessionIds ?? [] } : {}),
+        ownerProfile: grant.profile ?? null,
+        viewerProfile: grant.viewerProfile ?? null,
+      }
+    : OWNER_ACCESS;
+
+  const connId = randomUUID();
+  conns.set(ws, { userId, connId, clerkToken, access });
+  // A guest's token is never installed on the host's context, and a guest never
+  // triggers a sync: either would push this machine's sessions up under the
+  // guest's Clerk identity, which is the worst outcome in this whole feature.
+  if (clerkToken && !isGuest) {
     ctx.clerkToken = clerkToken;
     // Pull remote state (rate-limited inside) and push local state up.
     void ctx.syncNow();
   }
-  ctx.sockets.add(ws);
-  const hello: ServerMessage = {
-    type: 'hello',
-    bridge: { version: BRIDGE_VERSION, appProtocol: APP_PROTOCOL_VERSION },
-    sessions: ctx.sessions.list(),
-    workflows: ctx.workflows.list(),
-    sharedWorkflows: ctx.workflows.listShared(),
-    steps: ctx.workflows.listSteps(),
-    sharedSteps: ctx.workflows.listSharedSteps(),
-    pinnedSteps: ctx.workflows.listPinnedSteps(),
-    recipes: ctx.recipes.listRecipes(),
-    sharedRecipes: ctx.recipes.listSharedRecipes(),
-    // From the local cache, so counts render before the first pull lands (and
-    // while storage is unreachable) instead of showing blanks.
-    recipeStats: ctx.recipes.allStats(),
-    models: DEFAULT_MODELS,
-    recentDirs: ctx.store.loadRecentDirs(),
-    projects: ctx.store.loadProjects(),
-    projectKeys: ctx.projectKeys.all(),
-    usage: ctx.usage.snapshot,
-    auth: ctx.auth.getStatus(),
-    storage: ctx.sync.status,
-    // So a browser connecting mid-outage learns about it without waiting for
-    // the next transition (which may never come).
-    worker: worker.status,
-    settings: ctx.store.loadSettings(),
-    guardAllowlist: ctx.guard.list(),
-    // Read from persisted state, so a pending review is on screen before the
-    // first pull lands (and survives the 30s pull spacing after a restart).
-    guardAllowlistReview: ctx.guard.review(),
-  };
-  ws.send(JSON.stringify(hello));
+  ctx.sockets.set(ws, access);
+  ws.send(JSON.stringify(buildHello(ctx, access, attested?.grant)));
 
-  ws.on('close', () => ctx.sockets.delete(ws));
+  if (isGuest) {
+    console.log(
+      `[share] guest ${userId} attached to ${hostUserId} (${access.scope}${
+        access.sessionIds ? `, ${access.sessionIds.length} session(s)` : ''
+      })`,
+    );
+  }
+
+  ws.on('close', () => {
+    ctx.sockets.delete(ws);
+    // Announce the departure before the socket is forgotten, or the avatar of
+    // someone who closed their tab sits in everyone else's header forever.
+    for (const sessionId of ctx.presence.drop(connId)) {
+      ctx.broadcast({ type: 'presence', sessionId, viewers: ctx.presence.viewers(sessionId) });
+    }
+  });
 
   // Without this an unhandled 'error' on the socket's EventEmitter throws and
   // takes the whole bridge down. Loopback hides it; over a relay, per-socket
@@ -556,6 +604,92 @@ async function handleConnection(
 }
 
 /**
+ * The state snapshot a connection opens with.
+ *
+ * For the owner this is everything, unchanged. For a guest it is deliberately
+ * thin: their sessions (scope-filtered), the health of the machine they are
+ * borrowing, and what they may do — and *nothing* about the host's library,
+ * projects, account, settings or usage. That narrowing does double duty: a shared
+ * machine's `hello` contributes only sessions, so a client holding two machines
+ * at once never has to merge two sets of owner state.
+ */
+function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGrant): ServerMessage {
+  const sessions =
+    access.scope === 'session'
+      ? ctx.sessions.list().filter((s) => access.sessionIds?.includes(s.id))
+      : ctx.sessions.list();
+
+  if (access.scope !== 'owner') {
+    return {
+      type: 'hello',
+      bridge: { version: BRIDGE_VERSION, appProtocol: APP_PROTOCOL_VERSION },
+      sessions,
+      // Empty, not omitted: the client's reducer expects the keys, and an empty
+      // list is the honest answer — a guest has no library on this machine.
+      workflows: [],
+      sharedWorkflows: [],
+      steps: [],
+      sharedSteps: [],
+      pinnedSteps: [],
+      recipes: [],
+      sharedRecipes: [],
+      recipeStats: {},
+      models: DEFAULT_MODELS,
+      recentDirs: [],
+      projects: [],
+      // Project *identity* only, which is machine-independent and is what lets a
+      // shared session group under the project the guest already has open. It
+      // names no path the guest may reach.
+      projectKeys: ctx.projectKeys.all(),
+      usage: null,
+      // The host's Claude account is theirs alone: a guest is told nothing about
+      // it, not even the email. Turns run on the host's token regardless.
+      auth: { loggedIn: false },
+      storage: ctx.sync.status,
+      worker: worker.status,
+      access: {
+        scope: access.scope,
+        caps: access.caps,
+        ...(access.sessionIds ? { sessionIds: access.sessionIds } : {}),
+        ownerProfile: access.ownerProfile ?? grant?.profile ?? null,
+        deviceId: relayIdentity?.id ?? null,
+      },
+    };
+  }
+
+  return {
+    type: 'hello',
+    bridge: { version: BRIDGE_VERSION, appProtocol: APP_PROTOCOL_VERSION },
+    sessions,
+    workflows: ctx.workflows.list(),
+    sharedWorkflows: ctx.workflows.listShared(),
+    steps: ctx.workflows.listSteps(),
+    sharedSteps: ctx.workflows.listSharedSteps(),
+    pinnedSteps: ctx.workflows.listPinnedSteps(),
+    recipes: ctx.recipes.listRecipes(),
+    sharedRecipes: ctx.recipes.listSharedRecipes(),
+    // From the local cache, so counts render before the first pull lands (and
+    // while storage is unreachable) instead of showing blanks.
+    recipeStats: ctx.recipes.allStats(),
+    models: DEFAULT_MODELS,
+    recentDirs: ctx.store.loadRecentDirs(),
+    projects: ctx.store.loadProjects(),
+    projectKeys: ctx.projectKeys.all(),
+    usage: ctx.usage.snapshot,
+    auth: ctx.auth.getStatus(),
+    storage: ctx.sync.status,
+    // So a browser connecting mid-outage learns about it without waiting for
+    // the next transition (which may never come).
+    worker: worker.status,
+    settings: ctx.store.loadSettings(),
+    guardAllowlist: ctx.guard.list(),
+    // Read from persisted state, so a pending review is on screen before the
+    // first pull lands (and survives the 30s pull spacing after a restart).
+    guardAllowlistReview: ctx.guard.review(),
+  };
+}
+
+/**
  * Run one workflow tool call for the session's owner and answer the worker.
  * Failures come back as an error result rather than a rejection: the model is
  * waiting on this call, and a thrown bridge error would park its turn until the
@@ -579,6 +713,50 @@ async function handleMcpToolRpc(ctx: UserContext, rpc: WorkerRpc): Promise<void>
 
 async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessage): Promise<void> {
   const { sessions, workflows, recipes, store, auth, broadcast } = ctx;
+
+  /**
+   * One gate, before the switch, for every message.
+   *
+   * The owner passes straight through — `authorizeMessage` returns ok for
+   * OWNER_ACCESS on its first line, so the unshared path costs one lookup. A
+   * guest is checked against MESSAGE_AUTHZ, their capabilities, and (for
+   * session-scoped messages) whether the session is inside their grant.
+   *
+   * A missing ConnState means a socket we never registered, which should be
+   * impossible — denied rather than defaulted to the owner.
+   */
+  const conn = conns.get(ws);
+  const verdict = conn
+    ? authorizeMessage(msg, conn.access)
+    : ({ ok: false, reason: 'This connection is not authorized.' } as const);
+  if (!verdict.ok) {
+    const sessionId = 'sessionId' in msg ? (msg as { sessionId?: string }).sessionId : undefined;
+    // One line, matching the [permission] convention: a denial is worth seeing in
+    // the host's log, and silence here would make a guest's "nothing happens"
+    // unexplainable from either side.
+    console.warn(`[share] denied ${msg.type} from ${conn?.userId ?? 'unknown'}: ${verdict.reason}`);
+    ws.send(JSON.stringify({ type: 'error', sessionId, message: verdict.reason } satisfies ServerMessage));
+    return;
+  }
+  // Narrowed by the guard above: no ConnState means we already returned.
+  const access = conn!.access;
+  /**
+   * Who is acting, for attribution. Taken from the connection's attested identity
+   * — never from the message body, so a prompt cannot claim to be someone else's.
+   *
+   * Recorded for the owner too, not just guests. Leaving it off meant a prompt's
+   * author was *inferred* from whoever was reading it later ("no actor means the
+   * host"), so the same message could render as two different people — and if a
+   * client's notion of itself was wrong, attribution lied confidently. The userId
+   * is the load-bearing part; `name` may be null here (the bridge has no Clerk
+   * lookup for its own owner) and the client resolves it from what it knows.
+   */
+  const actor: Actor = {
+    userId: conn!.userId,
+    name: access.viewerProfile?.name ?? access.viewerProfile?.email ?? null,
+    imageUrl: access.viewerProfile?.imageUrl ?? null,
+  };
+
   switch (msg.type) {
     case 'ping':
       // App-level heartbeat: browsers can't send WS protocol pings, so we answer this.
@@ -590,10 +768,30 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
       updates.requestRestart();
       ws.send(JSON.stringify({ type: 'updateStatus', status: updates.current() } satisfies ServerMessage));
       break;
+    case 'presence': {
+      // Identity comes from the connection, never the message: the body carries
+      // only what they are looking at, so a client cannot present as anyone else.
+      const changed = ctx.presence.signal({
+        sessionId: msg.sessionId,
+        connId: conn!.connId,
+        userId: conn!.userId,
+        // Null for the machine's owner — the client knows its own name from
+        // Clerk, and a guest's is attested by storage via the grant.
+        profile: access.viewerProfile ?? null,
+        viewing: msg.viewing,
+        focused: msg.focused,
+      });
+      // Only sessions whose viewer list actually changed: a repeated identical
+      // heartbeat must not fan a broadcast out to every watcher.
+      for (const sessionId of changed) {
+        broadcast({ type: 'presence', sessionId, viewers: ctx.presence.viewers(sessionId) });
+      }
+      break;
+    }
     case 'fileRequest': {
       // Replies on the originating link, never via broadcast: two tabs each have
       // their own in-flight reqIds.
-      const { status, body } = handleFileRequest(ctx, msg.kind, msg.params);
+      const { status, body } = handleFileRequest(ctx, msg.kind, msg.params, access);
       ws.send(JSON.stringify({ type: 'fileResponse', reqId: msg.reqId, status, body } satisfies ServerMessage));
       break;
     }
@@ -638,10 +836,16 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
       break;
     case 'prompt': {
       // A workflow-attached session consumes its first prompt as the task description.
-      if (workflows.startIfPending(msg.sessionId, msg.text, msg.attachments)) break;
+      // Both take the actor: they intercept the prompt before userPrompt sees it,
+      // so without it every prompt in a workflow-driven session — which is most of
+      // them — would be recorded with no author at all.
+      if (workflows.startIfPending(msg.sessionId, msg.text, msg.attachments, actor)) break;
       // A prompt sent while a step is parked iterates on that same step.
-      if (workflows.iterateIfWaiting(msg.sessionId, msg.text, msg.attachments)) break;
-      sessions.userPrompt(msg.sessionId, msg.text, msg.attachments, msg.mentions);
+      if (workflows.iterateIfWaiting(msg.sessionId, msg.text, msg.attachments, actor)) break;
+      sessions.userPrompt(msg.sessionId, msg.text, msg.attachments, msg.mentions, {
+        needsApproval: access.caps.promptNeedsApproval,
+        actor,
+      });
       break;
     }
     case 'interrupt':
@@ -689,6 +893,8 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
         msg.answers,
         msg.denyMessage,
         msg.alwaysAllow,
+        'user',
+        actor,
       );
       break;
     case 'workflowApprove':
@@ -1043,7 +1249,7 @@ function shutdown() {
   for (const ctx of registry.all()) {
     // persist() is debounced — land any pending session state before we exit.
     ctx.sessions.flushPersist();
-    for (const ws of ctx.sockets) ws.terminate();
+    for (const ws of ctx.sockets.keys()) ws.terminate();
   }
   wss.close();
   server.close(() => process.exit(0));

@@ -1,4 +1,4 @@
-import type { ServerMessage, UserUiSettings } from '@lines/shared';
+import type { ServerMessage, SocketAccess, UserUiSettings } from '@lines/shared';
 import { findWorktree, projectRoots } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
 import { AuthManager } from './auth.ts';
@@ -9,6 +9,7 @@ import { WorkflowEngine } from './workflows.ts';
 import { RecipeEngine } from './recipes.ts';
 import { StorageSyncClient, THROTTLED } from './sync.ts';
 import { ProjectKeyRegistry } from './projectKeys.ts';
+import { PresenceTracker } from './presence.ts';
 import * as worktreeCommands from './worktreeCommands.ts';
 import { MemorySyncer } from './memory.ts';
 import type { WorkerClient } from './workerClient.ts';
@@ -85,6 +86,48 @@ export function linkSendAction(msg: ServerMessage, bufferedAmount: number): 'sen
 }
 
 /**
+ * Which session a broadcast is about, or null when it is about the user rather
+ * than one of their sessions.
+ *
+ * The distinction is the whole of the fan-out rule below, so it is derived from
+ * the message shape in one place: anything carrying a `sessionId` is per-session,
+ * and everything else — settings, workflows, usage, auth, the guard allowlist,
+ * project lists, update status — describes the account.
+ */
+export function sessionIdOf(msg: ServerMessage): string | null {
+  return 'sessionId' in msg && typeof msg.sessionId === 'string'
+    ? msg.sessionId
+    : msg.type === 'sessionUpsert'
+      ? msg.session.id
+      : null;
+}
+
+/**
+ * May this socket receive this broadcast?
+ *
+ * Default-deny for anything account-wide: a guest is on someone else's machine,
+ * so `settings`, `workflows`, `usage`, `authStatus` and friends are none of their
+ * business — and several would leak the host's project paths or Claude account.
+ *
+ * The two exceptions are the machine's own health, `workerStatus` and
+ * `storageStatus`: a guest whose turns are about to fail needs to know why, and
+ * neither carries anything private.
+ */
+export function mayReceive(
+  msg: ServerMessage,
+  sessionId: string | null,
+  access: SocketAccess,
+): boolean {
+  if (access.scope === 'owner') return true;
+  if (sessionId) {
+    // A machine grant covers every session on the machine; a session share
+    // covers exactly its own.
+    return access.scope === 'machine' || !!access.sessionIds?.includes(sessionId);
+  }
+  return msg.type === 'workerStatus' || msg.type === 'storageStatus' || msg.type === 'pong';
+}
+
+/**
  * Everything the bridge holds for one user. Isolation is structural: each
  * context's SessionManager/WorkflowEngine only ever contain the owner's
  * state, so a client-supplied sessionId from another user no-ops for free.
@@ -100,8 +143,21 @@ export interface UserContext {
   usage: UsagePoller;
   /** cwd -> machine-independent project identity; groups sessions across installs. */
   projectKeys: ProjectKeyRegistry;
-  /** This user's live browser connections; broadcast fans out to these only. */
-  sockets: Set<BrowserLink>;
+  /**
+   * Who is watching which of this user's sessions. In memory only, and reset by a
+   * bridge restart — which is correct: nobody is watching anything across one.
+   */
+  presence: PresenceTracker;
+  /**
+   * This user's live browser connections, each with what it may see.
+   *
+   * A Map rather than a Set because the fan-out is now scoped: a guest socket
+   * must not receive messages about sessions outside its grant, nor any of the
+   * owner's account-wide state. The access lives here rather than on BrowserLink
+   * — that interface is a deliberately minimal structural contract (see
+   * browserLink.test.ts) and access data has no business in it.
+   */
+  sockets: Map<BrowserLink, SocketAccess>;
   broadcast: (msg: ServerMessage) => void;
   /** Freshest verified Clerk token (handshake or relay); null in local no-auth mode. */
   clerkToken: string | null;
@@ -134,7 +190,8 @@ export function buildUserContext(
 ): UserContext {
   const store = createStore(storeRoot);
   const guard = new GuardAllowlist(store);
-  const sockets = new Set<BrowserLink>();
+  const sockets = new Map<BrowserLink, SocketAccess>();
+  const presence = new PresenceTracker();
   const sync = new StorageSyncClient(
     STORAGE_URL,
     () => ctx.clerkToken,
@@ -162,8 +219,10 @@ export function buildUserContext(
     // intermediate versions away before they ever reach Postgres.
     else if (msg.type === 'recipes') sync.pushRecipes(recipes.listOwnRecipeVersions());
     const payload = JSON.stringify(msg);
-    for (const ws of sockets) {
+    const sessionId = sessionIdOf(msg);
+    for (const [ws, access] of sockets) {
       if (ws.readyState !== LINK_OPEN) continue;
+      if (!mayReceive(msg, sessionId, access)) continue;
       const action = linkSendAction(msg, ws.bufferedAmount);
       if (action === 'skip') continue;
       if (action === 'close') {
@@ -360,6 +419,7 @@ export function buildUserContext(
     usage,
     projectKeys,
     sockets,
+    presence,
     broadcast,
     clerkToken: null,
     sync,

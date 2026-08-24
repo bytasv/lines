@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, test } from 'node:test';
 import type { SessionMeta } from '@lines/shared';
+import { OWNER_ACCESS } from '@lines/shared';
 import { handleFileRequest } from './fileRoutes.ts';
 import type { UserContext } from './userContext.ts';
 
@@ -35,8 +36,10 @@ function ctx(): UserContext {
   } as unknown as UserContext;
 }
 
+/** These cases are the owner's, whose access is unrestricted — the guest clamp
+ *  has its own tests in guestAccess.test.ts. */
 const call = (kind: Parameters<typeof handleFileRequest>[1], params = {}) =>
-  handleFileRequest(ctx(), kind, params);
+  handleFileRequest(ctx(), kind, params, OWNER_ACCESS);
 
 test('file: reads a file inside a project root', () => {
   const res = call('file', { paths: [path.join(root, 'hello.txt')] });
@@ -109,5 +112,5 @@ test('attachment: path traversal is refused', () => {
 });
 
 test('an unknown kind is refused rather than served', () => {
-  assert.equal(handleFileRequest(ctx(), 'nope' as never, {}).status, 400);
+  assert.equal(handleFileRequest(ctx(), 'nope' as never, {}, OWNER_ACCESS).status, 400);
 });

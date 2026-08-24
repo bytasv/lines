@@ -13,7 +13,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import type { FileRequestKind, FileRequestParams } from '@lines/shared';
+import type { FileRequestKind, FileRequestParams, SocketAccess } from '@lines/shared';
 import { collectDocs } from './docsBundle.ts';
 import { searchFilesAcross } from './fileSearch.ts';
 import type { UserContext } from './userContext.ts';
@@ -44,13 +44,13 @@ const MIME: Record<string, string> = {
 };
 
 /** The single `paths[0]` every route but `find` and `attachment` takes. */
-function soleRoot(ctx: UserContext, params: FileRequestParams): string | null {
-  return resolveWorkspacePath(ctx, params.paths?.[0] ?? '');
+function soleRoot(ctx: UserContext, params: FileRequestParams, access: SocketAccess): string | null {
+  return resolveWorkspacePath(ctx, params.paths?.[0] ?? '', access);
 }
 
 /** A workspace file, for the clickable-path preview. */
-function readFile(ctx: UserContext, params: FileRequestParams): FileRouteResult {
-  const abs = soleRoot(ctx, params);
+function readFile(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
+  const abs = soleRoot(ctx, params, access);
   if (!abs) return { status: 403 };
   let stat: fs.Stats;
   try {
@@ -72,8 +72,8 @@ function readFile(ctx: UserContext, params: FileRequestParams): FileRouteResult 
 }
 
 /** One directory listing for the sidebar file tree. */
-function readTree(ctx: UserContext, params: FileRequestParams): FileRouteResult {
-  const abs = soleRoot(ctx, params);
+function readTree(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
+  const abs = soleRoot(ctx, params, access);
   if (!abs) return { status: 403 };
   let dirents: fs.Dirent[];
   try {
@@ -94,8 +94,8 @@ function readTree(ctx: UserContext, params: FileRequestParams): FileRouteResult 
  * only request. Not cached: the walk is small and the client holds the bundle
  * for the life of the page.
  */
-function readDocs(ctx: UserContext, params: FileRequestParams): FileRouteResult {
-  const abs = soleRoot(ctx, params);
+function readDocs(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
+  const abs = soleRoot(ctx, params, access);
   if (!abs) return { status: 403 };
   let stat: fs.Stats;
   try {
@@ -108,12 +108,12 @@ function readDocs(ctx: UserContext, params: FileRequestParams): FileRouteResult 
 }
 
 /** Rank project files by name for the composer's `@mention` search. */
-function findFiles(ctx: UserContext, params: FileRequestParams): FileRouteResult {
+function findFiles(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
   // One path per root. Any unresolvable root fails the whole request rather than
   // silently searching the rest: a partial result looks like "no match here" and
   // would quietly hide a whole folder from the mention list.
   const requested = params.paths ?? [];
-  const roots = requested.map((raw) => resolveWorkspacePath(ctx, raw));
+  const roots = requested.map((raw) => resolveWorkspacePath(ctx, raw, access));
   if (!roots.length || roots.some((root) => root === null)) return { status: 403 };
   const limit = Math.min(params.limit || FIND_MAX_LIMIT, FIND_MAX_LIMIT);
   return {
@@ -131,7 +131,7 @@ function findFiles(ctx: UserContext, params: FileRequestParams): FileRouteResult
  * the client turns it back into a blob URL. Symmetric with the upload path,
  * which is already base64.
  */
-function readAttachment(ctx: UserContext, params: FileRequestParams): FileRouteResult {
+function readAttachment(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
   const attachmentsRoot = ctx.store.attachmentsRoot;
   const abs = path.resolve(attachmentsRoot, params.rel ?? '');
   if (abs !== attachmentsRoot && !abs.startsWith(attachmentsRoot + path.sep)) {
@@ -159,11 +159,14 @@ function readAttachment(ctx: UserContext, params: FileRequestParams): FileRouteR
  * plumbing rather than a socket message of its own — it is a read of a file
  * under the user's store root, like every other route here.
  */
-function readSyncLog(ctx: UserContext): FileRouteResult {
+function readSyncLog(ctx: UserContext, _params: FileRequestParams, _access: SocketAccess): FileRouteResult {
   return { status: 200, body: { entries: ctx.store.readSyncLog(200), status: ctx.sync.status } };
 }
 
-const ROUTES: Record<FileRequestKind, (ctx: UserContext, p: FileRequestParams) => FileRouteResult> = {
+const ROUTES: Record<
+  FileRequestKind,
+  (ctx: UserContext, p: FileRequestParams, access: SocketAccess) => FileRouteResult
+> = {
   file: readFile,
   tree: readTree,
   docs: readDocs,
@@ -177,11 +180,16 @@ export function handleFileRequest(
   ctx: UserContext,
   kind: FileRequestKind,
   params: FileRequestParams,
+  /** The connection's grant. Every path is clamped to what it may reach. */
+  access: SocketAccess,
 ): FileRouteResult {
   const route = ROUTES[kind];
   if (!route) return { status: 400 };
+  // A guest has no store of their own on this machine, so the sync log — which
+  // is the host's storage-link history — is owner-only.
+  if (kind === 'syncLog' && access.scope !== 'owner') return { status: 403 };
   try {
-    return route(ctx, params);
+    return route(ctx, params, access);
   } catch (err) {
     console.error('[file]', kind, err);
     return { status: 500 };

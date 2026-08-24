@@ -48,6 +48,20 @@ export class UserRegistry {
     return ctx;
   }
 
+  /**
+   * A context only if it already exists. Unlike `get`, this never mints one.
+   *
+   * Load-bearing for sharing: a guest's user id must never cause a context (and
+   * so a `~/.lines-app/users/{guest}` directory, and a storage sync under their
+   * account) to appear on someone else's machine. Callers that hold a user id
+   * from *outside* — a relay token push, a browser handshake — use this.
+   */
+  peek(userId: string): UserContext | undefined {
+    const ctx = this.contexts.get(userId);
+    if (ctx) ctx.touchedAt = Date.now();
+    return ctx;
+  }
+
   /** Route a worker callback to the context owning the session. */
   forSession(sessionId: string): UserContext {
     return this.get(this.sessionOwner.get(sessionId) ?? this.defaultUserId);

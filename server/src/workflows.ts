@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  Actor,
   PromptAttachment,
   ServerMessage,
   SessionMeta,
@@ -436,7 +437,13 @@ export class WorkflowEngine {
    * Returns true if this prompt was consumed as the workflow's task description
    * (i.e. it kicked off step 0); false means the caller should treat it as normal chat.
    */
-  startIfPending(sessionId: string, userText: string, attachments?: PromptAttachment[]): boolean {
+  startIfPending(
+    sessionId: string,
+    userText: string,
+    attachments?: PromptAttachment[],
+    /** Who kicked the workflow off; the first step's turn is theirs. */
+    actor?: Actor,
+  ): boolean {
     const meta = this.sessions.get(sessionId);
     if (!meta?.workflow || meta.workflow.started) return false;
     meta.workflow.started = true;
@@ -446,7 +453,7 @@ export class WorkflowEngine {
     // dirty state. Fire-and-forget: the first fresh step is at least one approval
     // gap away, long after this resolves.
     void this.captureDiffBaseline(sessionId);
-    this.runStepSafely(sessionId, undefined, true, attachments);
+    this.runStepSafely(sessionId, undefined, true, attachments, actor);
     return true;
   }
 
@@ -499,6 +506,12 @@ export class WorkflowEngine {
     entry = false,
     /** Attachments the user sent with the task description — entry step only. */
     attachments?: PromptAttachment[],
+    /**
+     * Who caused this step to run, when a person did. Absent for the engine's own
+     * advances, which belong to nobody — the sidebar then shows no avatar rather
+     * than crediting whoever happened to start the workflow hours earlier.
+     */
+    actor?: Actor,
   ) {
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
@@ -623,7 +636,7 @@ export class WorkflowEngine {
       this.sessions.resetClaudeSession(sessionId);
     }
 
-    this.sessions.prompt(sessionId, prompt, 'workflow', attachments);
+    this.sessions.prompt(sessionId, prompt, 'workflow', attachments, [], actor);
   }
 
   /**
@@ -637,8 +650,9 @@ export class WorkflowEngine {
     feedback?: string,
     entry = false,
     attachments?: PromptAttachment[],
+    actor?: Actor,
   ) {
-    void this.runStep(sessionId, feedback, entry, attachments).catch((err) => {
+    void this.runStep(sessionId, feedback, entry, attachments, actor).catch((err) => {
       console.error(`[workflow ${sessionId}] step failed to start:`, err);
       const meta = this.sessions.get(sessionId);
       if (meta?.workflow) {
@@ -792,17 +806,31 @@ export class WorkflowEngine {
    * A free-text prompt sent while a step is parked at waiting-approval iterates
    * on the SAME step (never advances). Returns true if it consumed the prompt.
    */
-  iterateIfWaiting(sessionId: string, text: string, attachments?: PromptAttachment[]): boolean {
+  iterateIfWaiting(
+    sessionId: string,
+    text: string,
+    attachments?: PromptAttachment[],
+    /** Who typed it. This path intercepts a real person's prompt before
+     *  SessionManager.userPrompt ever sees it, so attribution has to be threaded
+     *  here too — otherwise every prompt in a workflow-driven session is authored
+     *  by nobody. */
+    actor?: Actor,
+  ): boolean {
     const meta = this.sessions.get(sessionId);
     if (!meta?.workflow) return false;
     const i = meta.workflow.stepIndex;
     if (meta.workflow.stepStatuses[i] !== 'waiting-approval') return false;
-    this.iterateStep(sessionId, text, attachments);
+    this.iterateStep(sessionId, text, attachments, actor);
     return true;
   }
 
   /** Re-run the current step as a plain follow-up turn (same conversation, no advance). */
-  private iterateStep(sessionId: string, text: string, attachments?: PromptAttachment[]) {
+  private iterateStep(
+    sessionId: string,
+    text: string,
+    attachments?: PromptAttachment[],
+    actor?: Actor,
+  ) {
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
     if (!meta || !meta.workflow || !wf) return;
@@ -815,7 +843,7 @@ export class WorkflowEngine {
       stepName: this.stepName(wf.steps[i]),
       event: 'retried',
     });
-    this.sessions.prompt(sessionId, text, 'workflow', attachments);
+    this.sessions.prompt(sessionId, text, 'workflow', attachments, [], actor);
   }
 
   approve(sessionId: string, stepIndex: number) {
