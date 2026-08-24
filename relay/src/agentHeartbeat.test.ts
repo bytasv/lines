@@ -144,10 +144,30 @@ test('a second bridge for one device supersedes the first, hard', async () => {
   second.ws.close();
 });
 
-/** Storage, stubbed, answering /v1/devices/verify from a scripted sequence. */
+/** Every presence report the stub storage received, in order. */
+const presenceReports: { deviceId: string; online: boolean }[] = [];
+
+/**
+ * Storage, stubbed, answering /v1/devices/verify from a scripted sequence.
+ *
+ * Presence reports are recorded and always answered 200, deliberately outside
+ * that sequence: they are fire-and-forget and arrive on their own schedule, so
+ * letting them consume scripted replies would make the verification tests depend
+ * on the interleaving of an unrelated call.
+ */
 async function startStubStorage(replies: { status: number; body?: unknown }[]): Promise<number> {
   let n = 0;
   const server = http.createServer((req, res) => {
+    if (req.url === '/v1/devices/presence') {
+      let body = '';
+      req.on('data', (c) => (body += String(c)));
+      req.on('end', () => {
+        presenceReports.push(JSON.parse(body) as { deviceId: string; online: boolean });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      return;
+    }
     const reply = replies[Math.min(n++, replies.length - 1)];
     res.writeHead(reply.status, { 'content-type': 'application/json' });
     res.end(JSON.stringify(reply.body ?? { error: 'unauthorized' }));
@@ -204,4 +224,60 @@ test('re-verify leaves a live device alone when storage cannot be asked', async 
 
   assert.equal(agent.closed(), null, 'a storage outage must never reap a live device');
   agent.ws.close();
+});
+
+const reportsFor = (device: string) => presenceReports.filter((r) => r.deviceId === device);
+
+/**
+ * Hub liveness only the relay can observe, pushed to storage so the web app can
+ * say something about a machine it holds no socket to. Without it "is that
+ * machine alive" is unanswerable before you type a prompt into it.
+ */
+test('attach and detach are reported to storage', async () => {
+  const storagePort = await startStubStorage([{ status: 200, body: { userId: 'u1' } }]);
+  const port = await startRelay({
+    RELAY_AUTH_DISABLED: '',
+    CLERK_SECRET_KEY: 'sk_test_not_used_on_the_agent_path',
+    RELAY_SHARED_SECRET: 'shared',
+    STORAGE_URL: `http://127.0.0.1:${storagePort}`,
+    RELAY_AGENT_PING_MS: '150',
+    RELAY_AGENT_DEAD_MS: '10000',
+  });
+  const agent = openAgent(port, 'd-presence', { answerPings: true });
+  await until(() => reportsFor('d-presence').length >= 1 || null, 'the attach report');
+  assert.deepEqual(reportsFor('d-presence')[0], { deviceId: 'd-presence', online: true });
+
+  agent.ws.close();
+  await until(() => reportsFor('d-presence').length >= 2 || null, 'the detach report');
+  assert.deepEqual(reportsFor('d-presence')[1], { deviceId: 'd-presence', online: false });
+});
+
+test('a takeover is never reported as the device going offline', async () => {
+  // The predecessor's socket closes *after* the replacement has attached, so a
+  // naive detach report would tell storage the machine is down while a healthy
+  // bridge is serving it — and leave the dot wrong until the next attach.
+  const storagePort = await startStubStorage([{ status: 200, body: { userId: 'u1' } }]);
+  const port = await startRelay({
+    RELAY_AUTH_DISABLED: '',
+    CLERK_SECRET_KEY: 'sk_test_not_used_on_the_agent_path',
+    RELAY_SHARED_SECRET: 'shared',
+    STORAGE_URL: `http://127.0.0.1:${storagePort}`,
+    RELAY_AGENT_PING_MS: '150',
+    RELAY_AGENT_DEAD_MS: '10000',
+  });
+  const first = openAgent(port, 'd-presence-dup', { answerPings: true });
+  await until(() => reportsFor('d-presence-dup').length >= 1 || null, 'the first attach report');
+
+  const second = openAgent(port, 'd-presence-dup', { answerPings: true });
+  await until(() => first.closed(), 'the predecessor to be hung up on');
+  await until(() => reportsFor('d-presence-dup').length >= 2 || null, 'the second attach report');
+  // Long enough for a stray detach report from the loser's close to land.
+  await sleep(300);
+
+  assert.deepEqual(
+    reportsFor('d-presence-dup').map((r) => r.online),
+    [true, true],
+    'a superseded socket closing must not report the live bridge offline',
+  );
+  second.ws.close();
 });

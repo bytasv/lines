@@ -33,10 +33,42 @@ export type LinkClass = 'ctrl' | 'bulk';
 /** Channel id, unique per agent connection. Assigned by the relay. */
 export type ChannelId = string;
 
+/**
+ * A grant the relay attested, riding the `open` frame.
+ *
+ * Optional on purpose: an older bridge ignores unknown fields, so adding this
+ * needs no RELAY_PROTOCOL_VERSION bump. What stops such a bridge being shared is
+ * the relay's COLLAB_MIN_PROTOCOL check, not the wire format.
+ *
+ * `caps` is a loose record rather than the typed ShareCaps: this module stays
+ * dependency-free, and the bridge re-parses it through parseShareCaps() — which
+ * denies anything not explicitly `true` — so a malformed blob cannot widen a
+ * grant on the way through.
+ */
+export interface AttestedGrant {
+  /** Whose context the bridge must serve this channel from — the *host*, not the guest. */
+  hostUserId: string;
+  scope: 'owner' | 'machine' | 'session';
+  caps?: Record<string, boolean>;
+  /** Session scope only. */
+  sessionIds?: string[];
+  /** Display identity of the host, so a guest's UI can name whose machine it is. */
+  profile?: { userId: string; email: string | null; name: string | null; imageUrl: string | null } | null;
+  /** The connecting user's own identity, for presence and prompt attribution. */
+  viewerProfile?: { userId: string; email: string | null; name: string | null; imageUrl: string | null } | null;
+}
+
 /** Relay -> bridge. */
 export type RelayToAgent =
   /** A browser connected. `userId` is relay-attested; see the note in relayClient. */
-  | { t: 'open'; ch: ChannelId; userId: string; token: string | null }
+  | {
+      t: 'open';
+      ch: ChannelId;
+      userId: string;
+      token: string | null;
+      /** Absent for an owner connection — the unchanged, unshared fast path. */
+      grant?: AttestedGrant;
+    }
   /** One app message, verbatim. */
   | { t: 'data'; ch: ChannelId; payload: string }
   /** The browser went away, or the relay gave up on it. */

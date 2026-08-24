@@ -5,7 +5,14 @@
  * One `DeviceHub` per paired device. Browsers attach as channels; at most one
  * bridge ("agent") is attached at a time, newest wins.
  */
-import { encode, type AgentToRelay, type ChannelId, type LinkClass, type RelayToAgent } from './protocol.ts';
+import {
+  encode,
+  type AgentToRelay,
+  type AttestedGrant,
+  type ChannelId,
+  type LinkClass,
+  type RelayToAgent,
+} from './protocol.ts';
 
 /** The bit of a socket the hub uses; keeps this module transport-free. */
 export interface Sink {
@@ -25,6 +32,13 @@ interface Channel {
   userId: string;
   cls: LinkClass;
   sink: Sink;
+  /**
+   * The grant this channel was opened under. Absent means owner — the fast path,
+   * which consults no share table and is re-checked only by the device's own
+   * re-verify. Present means a guest, whose grant is re-authorized on a much
+   * shorter clock so a revoke lands on a live socket.
+   */
+  grant?: AttestedGrant;
 }
 
 export class DeviceHub {
@@ -42,6 +56,12 @@ export class DeviceHub {
   agentAttaches = 0;
   /** ms epoch of the newest attach; 0 before the first one. */
   lastAttachAt = 0;
+  /**
+   * Browser<->bridge contract the attached bridge speaks, from its `hello`.
+   * Null before one arrives. Non-owner access requires a bridge new enough to
+   * enforce a grant, so this is what the /client gate reads.
+   */
+  appProtocol: number | null = null;
   private agent: Sink | null = null;
   private channels = new Map<ChannelId, Channel>();
   private nextId = 0;
@@ -95,7 +115,18 @@ export class DeviceHub {
       sink.send(encode({ t: 'token', userId, token }));
     }
     for (const ch of this.channels.values()) {
-      sink.send(encode({ t: 'open', ch: ch.id, userId: ch.userId, token: this.tokens.get(ch.userId) ?? null }));
+      // The grant goes with it. A re-announced guest channel that arrived without
+      // one would be indistinguishable from an owner connection to the bridge —
+      // a bridge restart would silently promote every guest on the machine.
+      sink.send(
+        encode({
+          t: 'open',
+          ch: ch.id,
+          userId: ch.userId,
+          token: this.tokens.get(ch.userId) ?? null,
+          ...(ch.grant ? { grant: ch.grant } : {}),
+        }),
+      );
     }
     this.broadcastToClients({ type: 'deviceOnline' });
     return previous && previous !== sink ? previous : null;
@@ -105,16 +136,25 @@ export class DeviceHub {
   detachAgent(sink: Sink): void {
     if (this.agent !== sink) return; // a superseded predecessor closing late
     this.agent = null;
+    // Forgotten with the bridge: a stale version from a process that is gone must
+    // not vouch for whatever attaches next.
+    this.appProtocol = null;
     this.broadcastToClients({ type: 'deviceOffline' });
   }
 
   /** Register a browser. Returns its channel id, or null if the id space is exhausted. */
-  openChannel(userId: string, cls: LinkClass, sink: Sink, token: string | null): ChannelId {
+  openChannel(
+    userId: string,
+    cls: LinkClass,
+    sink: Sink,
+    token: string | null,
+    grant?: AttestedGrant,
+  ): ChannelId {
     const id = `c${++this.nextId}`;
-    this.channels.set(id, { id, userId, cls, sink });
+    this.channels.set(id, { id, userId, cls, sink, grant });
     if (token) this.tokens.set(userId, token);
     if (this.agent) {
-      this.agent.send(encode({ t: 'open', ch: id, userId, token }));
+      this.agent.send(encode({ t: 'open', ch: id, userId, token, ...(grant ? { grant } : {}) }));
     } else {
       // Told immediately rather than left hanging: the client renders a
       // "device offline" state instead of an indefinite spinner.
@@ -126,6 +166,22 @@ export class DeviceHub {
   closeChannel(id: ChannelId): void {
     if (!this.channels.delete(id)) return;
     this.agent?.send(encode({ t: 'close', ch: id }));
+  }
+
+  /** Live guest channels, for the re-authorization sweep. Owners are not re-checked here. */
+  guestChannels(): { id: ChannelId; userId: string; grant: AttestedGrant }[] {
+    return [...this.channels.values()]
+      .filter((ch): ch is Channel & { grant: AttestedGrant } => !!ch.grant)
+      .map(({ id, userId, grant }) => ({ id, userId, grant }));
+  }
+
+  /** Drop one channel and tell its browser why. Used when a grant is revoked or narrowed. */
+  dropChannel(id: ChannelId, reason: string): void {
+    const ch = this.channels.get(id);
+    if (!ch) return;
+    this.channels.delete(id);
+    this.agent?.send(encode({ t: 'close', ch: id }));
+    ch.sink.close(1008, reason);
   }
 
   /** Browser -> bridge. Dropped silently when no bridge is attached. */
@@ -197,6 +253,13 @@ export class HubRegistry {
     return this.hubs.get(deviceId);
   }
 
+  /** Hubs holding at least one guest channel — the only ones the re-auth sweep costs anything for. */
+  withGuests(): { deviceId: string; hub: DeviceHub }[] {
+    return [...this.hubs.entries()]
+      .filter(([, hub]) => hub.guestChannels().length > 0)
+      .map(([deviceId, hub]) => ({ deviceId, hub }));
+  }
+
   sweep(): void {
     for (const [id, hub] of this.hubs) {
       if (!hub.online && hub.channelCount === 0) this.hubs.delete(id);
@@ -218,6 +281,8 @@ export class HubRegistry {
     channels: number;
     agentAttaches: number;
     lastAttachAt: number;
+    ownerId: string | null;
+    appProtocol: number | null;
   }> {
     return [...this.hubs.values()].map((hub) => ({
       deviceId: hub.deviceId,
@@ -225,6 +290,11 @@ export class HubRegistry {
       channels: hub.channelCount,
       agentAttaches: hub.agentAttaches,
       lastAttachAt: hub.lastAttachAt,
+      // Both gate inputs for /client. A connection refused as an unauthorized
+      // guest is otherwise indistinguishable from one refused for a stale
+      // bridge, and the logs cannot say which without them.
+      ownerId: hub.ownerId,
+      appProtocol: hub.appProtocol,
     }));
   }
 
