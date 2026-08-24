@@ -27,6 +27,14 @@ config.define_bool(
           'default: the bridge only dials when RELAY_URL is set.',
 )
 config.define_bool(
+    'relay-auth',
+    usage='Run the relay with real Clerk verification instead of the dev escape ' +
+          'hatch. Required to exercise session sharing: with auth off every ' +
+          'client binds to one user as OWNER, so the guest gate never runs and ' +
+          'no grant is ever attached. Needs CLERK_SECRET_KEY and ' +
+          'RELAY_SHARED_SECRET in .env.',
+)
+config.define_bool(
     'no-ui-buttons',
     usage='Skip the freeze/resume reload buttons. They come from ext://uibutton, ' +
           'which is fetched from GitHub the first time it is used — pass this to ' +
@@ -43,6 +51,8 @@ cfg = config.parse()
 WITH_STORAGE = not cfg.get('no-storage', False)
 WITH_STUDIO = cfg.get('with-studio', False)
 WITH_RELAY = cfg.get('with-relay', False)
+# Only meaningful with --with-relay; harmless otherwise.
+RELAY_AUTH = cfg.get('relay-auth', False)
 WITH_BUTTONS = not cfg.get('no-ui-buttons', False)
 
 # Whether the bridge reaches a hosted install is NOT a Tilt flag: it follows from
@@ -173,6 +183,34 @@ if not have('VITE_CLERK_PUBLISHABLE_KEY'):
 # RELAY_URL in .env is what makes this machine reachable from a hosted install.
 # Both halves have to agree: dialling a deployed relay while syncing to a local
 # storage server splits one machine's data across two databases.
+# Sharing needs three things agreeing, and each one fails as an unexplained
+# "connecting to your machine…" spinner rather than as an error. Say so up front.
+if RELAY_AUTH:
+    if not have('CLERK_SECRET_KEY'):
+        warn('--relay-auth needs CLERK_SECRET_KEY: with it unset the relay exits ' +
+             'at startup rather than accepting unverified clients.')
+    if not have('RELAY_SHARED_SECRET'):
+        warn('--relay-auth needs RELAY_SHARED_SECRET: without it the relay cannot ' +
+             'ask storage to authorize a guest, and every guest connection is ' +
+             'refused 1008 (fail-closed).')
+    if not have('VITE_BRIDGE_WS_URL'):
+        warn('VITE_BRIDGE_WS_URL is unset, so the browser resolves the bridge via ' +
+             '/__bridge and connects DIRECTLY, bypassing the relay — no relay means ' +
+             'no grant, so a guest silently lands in a context of their own. Set ' +
+             'VITE_BRIDGE_WS_URL=ws://127.0.0.1:%d/client' % RELAY_PORT)
+    # With auth on, the bridge no longer gets a synthetic device id (see the
+    # bridge resource): the relay verifies it against storage, so it has to be a
+    # real registered device. Unpaired, the bridge is refused 1008 on every dial
+    # and the browser spins on "connecting to your machine".
+    if not os.path.exists(os.path.join(os.getenv('HOME', ''), '.lines-app', 'device.json')):
+        warn('--relay-auth needs a paired machine: ~/.lines-app/device.json is ' +
+             'missing, so the bridge has no device id storage will verify. Pair ' +
+             'this machine from the web app first.')
+elif WITH_RELAY and have('VITE_BRIDGE_WS_URL'):
+    warn('The relay is running with auth OFF, so every client binds to one user ' +
+         'as the machine owner and session sharing cannot engage. Add --relay-auth ' +
+         'to exercise a guest connection.')
+
 RELAYED = have('RELAY_URL')
 if RELAYED and not have('STORAGE_URL'):
     warn('RELAY_URL is set but STORAGE_URL is not — the bridge will dial the ' +
@@ -295,6 +333,24 @@ local_resource(
     allow_parallel=True,
 )
 
+# Built up before the resource: Starlark allows only one ** per call, and this
+# needs three conditional groups.
+BRIDGE_ENV = {'LINES_BRIDGE_PORT': str(BRIDGE_PORT)}
+if not have('STORAGE_URL'):
+    BRIDGE_ENV['STORAGE_URL'] = 'http://localhost:%d' % STORAGE_PORT
+if WITH_RELAY:
+    BRIDGE_ENV['RELAY_URL'] = 'ws://127.0.0.1:%d' % RELAY_PORT
+    # The synthetic device credential is only valid against a relay with auth OFF,
+    # where verifyDevice() short-circuits and accepts any secret. With --relay-auth
+    # the relay asks storage to verify it, storage answers 403 for an unregistered
+    # id, and the bridge is refused 1008 on every dial while every other resource
+    # looks healthy. So under --relay-auth the bridge keeps its real, paired
+    # identity from ~/.lines-app/device.json — which is also the device the browser
+    # targets, and the only id whose hub.ownerId can match the signed-in user.
+    if not RELAY_AUTH:
+        BRIDGE_ENV['LINES_DEVICE_ID'] = 'tilt-dev'
+        BRIDGE_ENV['LINES_DEVICE_SECRET'] = 'tilt-dev'
+
 local_resource(
     'bridge',
     cmd='',
@@ -307,15 +363,7 @@ local_resource(
     # point it back at localhost. RELAY_URL is never injected unless --with-relay
     # wires up the loopback one — otherwise .env decides, and the device
     # credential comes from ~/.lines-app/device.json, so no secret reaches a spec.
-    serve_env=dict(
-        dict(
-            {'LINES_BRIDGE_PORT': str(BRIDGE_PORT)},
-            **({} if have('STORAGE_URL') else {'STORAGE_URL': 'http://localhost:%d' % STORAGE_PORT})
-        ),
-        **({'RELAY_URL': 'ws://127.0.0.1:%d' % RELAY_PORT,
-            'LINES_DEVICE_ID': 'tilt-dev',
-            'LINES_DEVICE_SECRET': 'tilt-dev'} if WITH_RELAY else {})
-    ),
+    serve_env=BRIDGE_ENV,
     # Deliberately NOT depending on worker/storage: the bridge reconnects to the
     # worker every 1s (workerClient.ts:74-79) and treats storage as best-effort
     # (sync.ts:295-308). A broken worker/storage still leaves a reachable UI.
@@ -337,8 +385,18 @@ if WITH_RELAY:
         'relay',
         cmd='',
         serve_cmd='npm run dev -w relay',
-        # Auth off: the Device table arrives in Phase 3. Dev-only, never deployed.
-        serve_env={'RELAY_PORT': str(RELAY_PORT), 'RELAY_AUTH_DISABLED': '1'},
+        # Auth off by default (dev-only, never deployed): any device secret is
+        # accepted and every client binds to one user.
+        #
+        # That also disables the *sharing* gate — with AUTH_DISABLED the /client
+        # handler never consults a grant and treats everyone as the machine's
+        # owner. So exercising a guest connection needs `--relay-auth`, which
+        # leaves Clerk verification on.
+        serve_env=(
+            {'RELAY_PORT': str(RELAY_PORT)}
+            if RELAY_AUTH
+            else {'RELAY_PORT': str(RELAY_PORT), 'RELAY_AUTH_DISABLED': '1'}
+        ),
         resource_deps=['install'],
         readiness_probe=probe(initial_delay_secs=2, period_secs=15,
                               http_get=http_get_action(port=RELAY_PORT, host='localhost', path='/')),

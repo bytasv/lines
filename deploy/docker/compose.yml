@@ -51,13 +51,14 @@ services:
       # them one route name apart from shadowing each other.
       traefik.enable: "true"
       traefik.docker.network: lines
-      # /v1/devices/verify trades a device secret for its owner's user id. The
-      # relay calls it over the internal network; nothing on the internet has any
-      # business reaching it, so the public router excludes that one path and it
-      # falls through to a 404. Rule negation needs Traefik v3 (running 3.7).
-      # Storage also requires a shared secret on that route — this is the second
+      # /v1/devices/verify trades a device secret for its owner's user id, and
+      # /v1/devices/presence writes a machine's liveness dot. Both are called by
+      # the relay over the internal network; nothing on the internet has any
+      # business reaching either, so the public router excludes those paths and
+      # they fall through to a 404. Rule negation needs Traefik v3 (running 3.7).
+      # Storage also requires a shared secret on both routes — this is the second
       # of the two locks, not the only one.
-      traefik.http.routers.lines-storage.rule: "Host(`api.${LINES_DOMAIN}`) && !Path(`/v1/devices/verify`)"
+      traefik.http.routers.lines-storage.rule: "Host(`api.${LINES_DOMAIN}`) && !Path(`/v1/devices/verify`) && !Path(`/v1/devices/presence`)"
       traefik.http.routers.lines-storage.entrypoints: websecure
       traefik.http.routers.lines-storage.tls: "true"
       traefik.http.routers.lines-storage.tls.certresolver: letsencrypt
