@@ -25,7 +25,7 @@ import { MachineDot } from './MachineDot';
 import { PresenceStack } from './PresenceStack';
 import { linkedMachineHealth } from '../lib/machineHealth';
 import { PRESET_COPY } from '../lib/shares';
-import { useClaudeLoginNeeded } from '../lib/can';
+import { useClaudeLoginNeeded, useSessionMachine, useSessionMachineHealth } from '../lib/can';
 import { SHARING_ENABLED } from '../lib/shares';
 import { rememberedDeviceId } from '../lib/storage';
 import { useDevices } from '../lib/devices';
@@ -37,10 +37,11 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   // the header says so — typing into a colleague's laptop unaware is the failure
   // this exists to prevent.
   const access = useStore((s) => s.access);
-  const machineOffline = useStore((s) => s.machineOffline);
-  const workerStatus = useStore((s) => s.workerStatus);
-  const storageStatus = useStore((s) => s.storageStatus);
   const [sharing, setSharing] = useState(false);
+  const remote = useSessionMachine(sessionId);
+  // The dot in this header describes the session's *own* machine, so a shared
+  // session on a dead laptop is obvious before you type into it.
+  const health = useSessionMachineHealth(sessionId);
   const devices = useDevices((d) => d.devices);
   const events = useStore((s) => s.transcripts[sessionId]);
   const loaded = useStore((s) => s.transcriptLoaded[sessionId]);
@@ -137,26 +138,32 @@ export function SessionView({ sessionId }: { sessionId: string }) {
           you may do there, has to be true for as long as you are looking at it.
           Deliberately not one of the global banners — those keep their own
           "exactly one at a time" precedence for the primary machine. */}
-      {access && (
+      {(access || remote.isRemote) && (
         <>
           <Divider />
           <Group px="md" py={6} gap="xs" wrap="nowrap" bg="var(--mantine-color-default-hover)">
             <MachineDot
               health={linkedMachineHealth({
-                bridgeAttached: !machineOffline,
-                worker: workerStatus,
-                storage: storageStatus,
+                bridgeAttached: health.bridgeAttached,
+                worker: health.worker,
+                storage: health.storage,
               })}
             />
             <Text size="xs" c="dimmed">
               Running on{' '}
-              {access.ownerProfile?.name ?? access.ownerProfile?.email ?? 'another person'}’s machine
+              {remote.ownerProfile?.name ??
+                access?.ownerProfile?.name ??
+                access?.ownerProfile?.email ??
+                'another person'}
+              ’s machine
             </Text>
-            <Badge size="xs" variant="light" color="gray">
-              {presetOfCaps(access.caps, access.scope) 
-                ? PRESET_COPY[presetOfCaps(access.caps, access.scope)!].label
-                : 'custom access'}
-            </Badge>
+            {access && (
+              <Badge size="xs" variant="light" color="gray">
+                {presetOfCaps(access.caps, access.scope)
+                  ? PRESET_COPY[presetOfCaps(access.caps, access.scope)!].label
+                  : 'custom access'}
+              </Badge>
+            )}
           </Group>
         </>
       )}

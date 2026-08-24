@@ -1,4 +1,4 @@
-import type { ShareCaps } from '@lines/shared';
+import type { ShareCaps, ShareProfile, StorageStatus, WorkerStatus } from '@lines/shared';
 import { useStore } from '../store';
 
 /**
@@ -42,4 +42,59 @@ export function useInScope(sessionId: string): boolean {
  */
 export function useClaudeLoginNeeded(): boolean {
   return useStore((s) => s.auth?.loggedIn === false && s.access === null);
+}
+
+/**
+ * The machine hosting a session, and whether it is the one the user is on.
+ *
+ * `projectKeys` groups sessions across installs by design, so a colleague's
+ * session in the same repo lands in *your* existing project tab — which is the
+ * right grouping and exactly why the row itself has to say whose machine it runs
+ * on. Without that, two identically-named sessions in one tab are
+ * indistinguishable, and typing into the wrong one is silent.
+ */
+export function useSessionMachine(sessionId: string): {
+  deviceId: string | null;
+  isRemote: boolean;
+  ownerProfile: ShareProfile | null;
+} {
+  return useStore((s) => {
+    const deviceId = s.sessionMachine[sessionId] ?? null;
+    const primary = s.primaryDeviceId ?? '';
+    return {
+      deviceId,
+      // Remote means "not the machine this UI is pointed at" — true for a shared
+      // machine's session sitting in the merged list.
+      isRemote: deviceId !== null && deviceId !== primary,
+      ownerProfile: (deviceId ? s.machines[deviceId]?.ownerProfile : null) ?? null,
+    };
+  });
+}
+
+/**
+ * The health of the machine hosting a session, from that machine's own slice.
+ *
+ * The scalars the banners read describe the *primary* machine by design. A
+ * session on a shared machine has to be judged by its own link, or the composer
+ * would happily accept a prompt for a laptop that is shut because the machine in
+ * front of you is fine.
+ */
+export function useSessionMachineHealth(sessionId: string): {
+  connected: boolean;
+  bridgeAttached: boolean;
+  worker: WorkerStatus | null;
+  storage: StorageStatus | null;
+} {
+  return useStore((s) => {
+    const deviceId = s.sessionMachine[sessionId] ?? s.primaryDeviceId ?? '';
+    const slice = s.machines[deviceId];
+    return {
+      // No slice yet means no `hello` from it — treat as not connected rather
+      // than assuming health we have no evidence for.
+      connected: slice?.connectionStatus === 'connected',
+      bridgeAttached: slice ? !slice.machineOffline : false,
+      worker: slice?.worker ?? null,
+      storage: slice?.storage ?? null,
+    };
+  });
 }

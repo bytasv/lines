@@ -41,7 +41,7 @@ import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
 import { findWorktree, projectPaths, projectRoots } from '@lines/shared';
 import { formatDuration, isWorkflowFinished, sessionRowMeta } from '../lib/format';
-import { useCan, useIsGuest } from '../lib/can';
+import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode } from '../store';
 import { projectAt, sessionsInProject, useStore } from '../store';
@@ -68,6 +68,11 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
   // the hover controls, rather than getting ones that answer with an error.
   const guest = useIsGuest();
   const identify = useIdentityResolver();
+  // Whose machine this session runs on. A left accent in a colour reserved for
+  // "somebody else's machine", plus their avatar — so a shared session is never
+  // mistaken for a local one sitting next to it in the same project tab.
+  const remote = useSessionMachine(session.id);
+  const host = remote.isRemote ? identify(remote.ownerProfile?.userId, remote.ownerProfile) : null;
   // Whose turn is running, when it is not yours. One field on the synced meta, so
   // this survives a reload and a bridge restart.
   const turnActor = session.turnActor
@@ -110,6 +115,12 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
         textDecoration: 'none',
         color: 'inherit',
         background: selected ? 'var(--mantine-color-default-hover)' : undefined,
+        ...(host
+          ? {
+              borderLeft: '2px solid var(--mantine-color-grape-5)',
+              paddingInlineStart: 'calc(var(--mantine-spacing-sm) - 2px)',
+            }
+          : {}),
       }}
     >
       <Group gap="xs" wrap="nowrap" justify="space-between">
@@ -117,6 +128,22 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
           <Group gap={5} wrap="nowrap">
             {/* Whose turn is running, when it is not yours. One field on the
                 synced meta, so this survives a reload and a bridge restart. */}
+            {host && (
+              <Tooltip label={`Runs on ${host.name}’s machine`} openDelay={300} withArrow>
+                <Avatar
+                  src={host.imageUrl ?? undefined}
+                  size={14}
+                  radius="xl"
+                  color={host.color}
+                  variant="filled"
+                  style={{ flexShrink: 0 }}
+                >
+                  <Text size="8px" fw={700}>
+                    {host.initials}
+                  </Text>
+                </Avatar>
+              </Tooltip>
+            )}
             {turnActor && !turnActor.self && (
               <Tooltip label={`${turnActor.name} is running this turn`} openDelay={300} withArrow>
                 <Avatar

@@ -29,7 +29,7 @@ import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/m
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { buildExpandedPrompt, uniqueMentions } from '../lib/mentions';
 import { linkedMachineHealth } from '../lib/machineHealth';
-import { useCan } from '../lib/can';
+import { useCan, useSessionMachine, useSessionMachineHealth } from '../lib/can';
 import { usePresence } from '../lib/presence';
 import { ContextWindowIndicator } from './ContextWindowIndicator';
 import { MentionInput } from './MentionInput';
@@ -125,13 +125,16 @@ export function Composer({ session }: { session: SessionMeta }) {
   const models = useStore((s) => s.models);
   const projects = useStore((s) => s.projects);
   const connectionStatus = useStore((s) => s.connectionStatus);
-  const machineOffline = useStore((s) => s.machineOffline);
-  const workerStatus = useStore((s) => s.workerStatus);
-  const storageStatus = useStore((s) => s.storageStatus);
   const queuedCount = useStore((s) => s.queuedPrompts.filter((q) => q.sessionId === session.id).length);
   // A guest's grant decides which of these controls exist. All true on your own
   // machine; the bridge refuses anything that slips through regardless.
   const canPrompt = useCan('prompt');
+  // The one that actually matters: an accented composer makes typing a prompt
+  // into somebody else's machine unaware impossible.
+  const remote = useSessionMachine(session.id);
+  // This session's own machine, not the one the UI is on: a shared session may be
+  // hosted on a laptop that is asleep while the machine in front of you is fine.
+  const health = useSessionMachineHealth(session.id);
   const canInterrupt = useCan('interrupt');
   const canSetModel = useCan('setModel');
   const canSetMode = useCan('setPermissionMode');
@@ -164,14 +167,13 @@ export function Composer({ session }: { session: SessionMeta }) {
    * machine behind it is not — the relay drops a frame for a detached bridge in
    * silence, so without this the prompt just disappears.
    */
-  const machineBlock =
-    connectionStatus === 'connected'
-      ? linkedMachineHealth({
-          bridgeAttached: !machineOffline,
-          worker: workerStatus,
-          storage: storageStatus,
-        }).block
-      : null;
+  const machineBlock = health.connected
+    ? linkedMachineHealth({
+        bridgeAttached: health.bridgeAttached,
+        worker: health.worker,
+        storage: health.storage,
+      }).block
+    : null;
 
   // "I am looking at this session, and my composer has focus." Debounced inside.
   usePresence(session.id, composerFocused);
@@ -248,7 +250,11 @@ export function Composer({ session }: { session: SessionMeta }) {
       w="100%"
       style={{
         position: 'relative',
-        borderColor: dragging ? 'var(--mantine-primary-color-filled)' : undefined,
+        borderColor: dragging
+          ? 'var(--mantine-primary-color-filled)'
+          : remote.isRemote
+            ? 'var(--mantine-color-grape-5)'
+            : undefined,
       }}
       onDragEnter={(e) => {
         if (!e.dataTransfer.types.includes('Files')) return;

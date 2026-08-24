@@ -34,6 +34,13 @@ import {
   worktreePaths,
 } from '@lines/shared';
 import { send } from './ws';
+import {
+  emptyMachine,
+  mergeMachineSessions,
+  prunableDraftIds,
+  shouldClaimSelection,
+  type MachineSlice,
+} from './lib/machines';
 
 /**
  * The `access` block a guest's `hello` carries. Named here rather than inlined so
@@ -163,12 +170,25 @@ export function writeDraft(sessionId: string, value: MentionValue) {
   localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
 }
 
-/** Drop drafts for sessions that no longer exist (called on each `hello`). */
-function pruneDrafts(liveSessionIds: Set<string>) {
+/** Every session id with a stored draft, so the caller can decide which may go. */
+function draftSessionIds(): string[] {
+  return Object.keys(loadDrafts());
+}
+
+/**
+ * Delete exactly the named drafts.
+ *
+ * Takes the ids to *remove*, not the ids to keep. It used to take the live set and
+ * drop everything else, which is correct for one machine and destructive for two:
+ * a draft belonging to a machine whose link is not open has no live session to
+ * match, so an unscoped pass deletes text the user typed and never sent.
+ */
+function pruneDrafts(doomedSessionIds: Set<string>) {
+  if (doomedSessionIds.size === 0) return;
   const drafts = loadDrafts();
   let changed = false;
-  for (const id of Object.keys(drafts)) {
-    if (!liveSessionIds.has(id)) {
+  for (const id of doomedSessionIds) {
+    if (drafts[id]) {
       delete drafts[id];
       changed = true;
     }
@@ -226,19 +246,15 @@ export async function writeDraftAttachments(sessionId: string, attachments: Prom
   }
 }
 
-/** Drop staged attachments for sessions that no longer exist (called on each `hello`). */
-async function pruneDraftAttachments(liveSessionIds: Set<string>): Promise<void> {
+/** Delete exactly the named sessions' staged attachments. Same rule as pruneDrafts. */
+async function pruneDraftAttachments(doomedSessionIds: Set<string>): Promise<void> {
+  if (doomedSessionIds.size === 0) return;
   try {
     const db = await openDraftAttachmentsDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(DRAFT_ATTACHMENTS_STORE, 'readwrite');
       const store = tx.objectStore(DRAFT_ATTACHMENTS_STORE);
-      const req = store.getAllKeys();
-      req.onsuccess = () => {
-        for (const key of req.result as string[]) {
-          if (!liveSessionIds.has(key)) store.delete(key);
-        }
-      };
+      for (const id of doomedSessionIds) store.delete(id);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
@@ -322,6 +338,17 @@ function withSeen(seen: Set<string>, ids: string[]): Set<string> {
 }
 
 /** The open project with this path, if any — what `sessionsInProject` wants. */
+/**
+ * Whether a device id is the machine the UI is on.
+ *
+ * A direct local bridge has no device id at all, so before anything is chosen the
+ * empty key *is* the primary — otherwise a local install would never update the
+ * scalars the banners read.
+ */
+function isPrimary(state: { primaryDeviceId: string | null }, deviceId: string): boolean {
+  return deviceId === (state.primaryDeviceId ?? '');
+}
+
 export function projectAt(projects: Project[], path: string | null): Project | null {
   return path ? projects.find((p) => p.path === path) ?? null : null;
 }
@@ -436,6 +463,28 @@ interface UiState {
    * reconcile or persist here.
    */
   presence: Record<string, PresenceViewer[]>;
+  /**
+   * Per-machine state, keyed by device id ('' for a direct local bridge).
+   *
+   * `connectionStatus`, `machineOffline`, `bootstrapped`, `workerStatus` and
+   * `storageStatus` are kept as scalars *derived from the primary machine* rather
+   * than replaced: ConnectionBanner/WorkerBanner/StorageBanner have a documented
+   * "exactly one renders at a time" precedence, and making them per-machine-aware
+   * wholesale would rewrite that rule mid-flight. A non-primary machine's health
+   * belongs on the session row and header instead.
+   */
+  machines: Record<string, MachineSlice>;
+  /** The machine the UI is on; null before one is chosen. */
+  primaryDeviceId: string | null;
+  /**
+   * Which machine hosts each session, stamped by the reducer from the link a
+   * frame arrived on.
+   *
+   * Deliberately not a field on SessionMeta: that blob syncs to Postgres, and
+   * which machine a session is running on is not a property of its persisted
+   * metadata — it is a property of this client's current connections.
+   */
+  sessionMachine: Record<string, string>;
   /**
    * Everyone this client has learned a name for, by user id.
    *
@@ -590,8 +639,11 @@ interface UiState {
   /** Open editor tabs per project path; persisted in localStorage. */
   openFiles: Record<string, OpenFilesState>;
 
-  applyServerMessage: (msg: ServerMessage) => void;
-  setConnectionStatus: (status: ConnectionStatus) => void;
+  /** `deviceId` is the link the frame arrived on — '' for a direct bridge. */
+  applyServerMessage: (msg: ServerMessage, deviceId?: string) => void;
+  setConnectionStatus: (status: ConnectionStatus, deviceId?: string) => void;
+  /** Point the UI at a machine; its slice becomes the source of the legacy scalars. */
+  setPrimaryMachine: (deviceId: string) => void;
   /** A control message could not be delivered; null clears the notice. */
   setActionError: (message: string | null) => void;
   /**
@@ -600,7 +652,7 @@ interface UiState {
    */
   markSessionCreatePending: () => void;
   /** Relay control frames — the machine's bridge attached or went away. */
-  setMachineOffline: (offline: boolean) => void;
+  setMachineOffline: (offline: boolean, deviceId?: string) => void;
   /**
    * Drop back to "nothing loaded yet". Called when the socket is repointed at a
    * different machine: everything held here describes the old one, and showing it
@@ -707,6 +759,9 @@ export const useStore = create<UiState>((set, get) => {
   access: null,
   presence: {},
   profiles: {},
+  machines: {},
+  primaryDeviceId: null,
+  sessionMachine: {},
   actionError: null,
   helloSignature: null,
   seenSessionIds: new Set<string>(),
@@ -763,8 +818,41 @@ export const useStore = create<UiState>((set, get) => {
   autoContinueInterrupted: loadAutoContinueInterrupted(),
   openFiles: loadOpenFiles(),
 
-  setConnectionStatus: (status) => set({ connectionStatus: status }),
-  setMachineOffline: (offline) => set({ machineOffline: offline }),
+  setConnectionStatus: (status, deviceId) =>
+    set((state) => {
+      const id = deviceId ?? state.primaryDeviceId ?? '';
+      const slice = { ...(state.machines[id] ?? emptyMachine(id)), connectionStatus: status };
+      return {
+        machines: { ...state.machines, [id]: slice },
+        // Derived, not replaced: the banners keep their existing precedence, which
+        // is scoped to the machine the user is looking at.
+        ...(isPrimary(state, id) ? { connectionStatus: status } : {}),
+      };
+    }),
+  setPrimaryMachine: (deviceId) =>
+    set((state) => {
+      const slice = state.machines[deviceId] ?? emptyMachine(deviceId);
+      // Re-derive every scalar from the machine now in front of the user, so the
+      // banners describe it rather than whichever machine spoke last.
+      return {
+        primaryDeviceId: deviceId,
+        machines: { ...state.machines, [deviceId]: slice },
+        connectionStatus: slice.connectionStatus,
+        machineOffline: slice.machineOffline,
+        bootstrapped: slice.bootstrapped,
+        workerStatus: slice.worker,
+        storageStatus: slice.storage,
+      };
+    }),
+  setMachineOffline: (offline, deviceId) =>
+    set((state) => {
+      const id = deviceId ?? state.primaryDeviceId ?? '';
+      const slice = { ...(state.machines[id] ?? emptyMachine(id)), machineOffline: offline };
+      return {
+        machines: { ...state.machines, [id]: slice },
+        ...(isPrimary(state, id) ? { machineOffline: offline } : {}),
+      };
+    }),
   setActionError: (message) => set({ actionError: message }),
   markSessionCreatePending: () => {
     if (createIntentTimer) clearTimeout(createIntentTimer);
@@ -1002,7 +1090,11 @@ export const useStore = create<UiState>((set, get) => {
     });
   },
 
-  applyServerMessage: (msg) => {
+  applyServerMessage: (msg, deviceId) => {
+    /** The link this frame arrived on. '' is a direct bridge. */
+    const from = deviceId ?? get().primaryDeviceId ?? '';
+    /** Is this the machine whose state the banners and account UI describe? */
+    const fromPrimary = from === (get().primaryDeviceId ?? '');
     switch (msg.type) {
       case 'hello': {
         const incoming: Record<string, SessionMeta> = {};
@@ -1014,14 +1106,36 @@ export const useStore = create<UiState>((set, get) => {
         // time a bridge attaches — so a takeover delivers one to a browser that never
         // reconnected. Re-applying it replaced `sessions` and blanked the transcript
         // and breakdown caches, which reloaded transcripts and fed the next round.
-        const repeat = signature === get().helloSignature;
-        set((state) => ({
-          bootstrapped: true,
+        const repeat = signature === get().helloSignature && fromPrimary;
+        set((state) => {
+          // Fold this machine's sessions in rather than replacing the map: with two
+          // links open, a wholesale replace means whichever machine said hello last
+          // wins and the other's sessions disappear from the sidebar.
+          const merged = mergeMachineSessions({
+            sessions: state.sessions,
+            sessionMachine: state.sessionMachine,
+            deviceId: from,
+            incoming: Object.values(incoming),
+          });
+          const slice: MachineSlice = {
+            ...(state.machines[from] ?? emptyMachine(from)),
+            bootstrapped: true,
+            machineOffline: false,
+            connectionStatus: 'connected',
+            worker: msg.worker ?? null,
+            storage: msg.storage ?? null,
+            scope: msg.access?.scope ?? 'owner',
+            ownerProfile: msg.access?.ownerProfile ?? null,
+          };
+          return {
+          machines: { ...state.machines, [from]: slice },
+          sessionMachine: merged.sessionMachine,
+          bootstrapped: fromPrimary ? true : state.bootstrapped,
           // A `hello` is proof the bridge is there, whatever the relay last said.
-          machineOffline: false,
-          helloSignature: signature,
+          machineOffline: fromPrimary ? false : state.machineOffline,
+          helloSignature: fromPrimary ? signature : state.helloSignature,
           seenSessionIds: withSeen(state.seenSessionIds, Object.keys(incoming)),
-          ...(repeat ? {} : { sessions: incoming }),
+          ...(repeat ? {} : { sessions: merged.sessions }),
           workflows: msg.workflows,
           sharedWorkflows: msg.sharedWorkflows ?? [],
           steps: msg.steps ?? [],
@@ -1080,14 +1194,25 @@ export const useStore = create<UiState>((set, get) => {
           // heartbeat timeout: reconnect loop. Skipped entirely on a repeat, where
           // there is by definition nothing new to reload.
           ...(repeat ? {} : { transcriptLoaded: {}, contextBreakdowns: {} }),
-        }));
+          };
+        });
         const sessions = get().sessions;
         const { selectedSessionId } = get();
         if (selectedSessionId && !sessions[selectedSessionId]) {
           set({ selectedSessionId: null });
         }
-        pruneDrafts(new Set(Object.keys(sessions)));
-        void pruneDraftAttachments(new Set(Object.keys(sessions)));
+        // Scoped to THIS machine's sessions. Unscoped, one machine's hello deletes
+        // the drafts of another machine's sessions — unsent text the user typed,
+        // which nothing can recover. See prunableDraftIds for the exact rule.
+        const live = new Set(Object.keys(incoming));
+        const doomed = prunableDraftIds({
+          draftIds: draftSessionIds(),
+          sessionMachine: get().sessionMachine,
+          deviceId: from,
+          live,
+        });
+        pruneDrafts(new Set(doomed));
+        void pruneDraftAttachments(new Set(doomed));
         if (msg.settings) applySettings(msg.settings);
         break;
       }
@@ -1132,9 +1257,18 @@ export const useStore = create<UiState>((set, get) => {
           // clock even slightly ahead made every upsert look "just created" — so any
           // session re-entering the map stole the selection. `seenSessionIds` is the
           // other half: a session this browser already knows is never new again.
-          const claim = state.pendingCreate && !state.seenSessionIds.has(msg.session.id);
+          // Plus the machine: a session created on a machine the user is not
+          // looking at must never pull their view across to it.
+          const claim = shouldClaimSelection({
+            fromPrimary,
+            pendingCreate: state.pendingCreate,
+            alreadySeen: state.seenSessionIds.has(msg.session.id),
+          });
           return {
             sessions: { ...state.sessions, [msg.session.id]: msg.session },
+            // Stamped from the link it arrived on, so `send` can route this
+            // session's messages back to the machine that actually hosts it.
+            sessionMachine: { ...state.sessionMachine, [msg.session.id]: from },
             seenSessionIds: withSeen(state.seenSessionIds, [msg.session.id]),
             pendingCreate: claim ? false : state.pendingCreate,
             selectedSessionId: claim ? msg.session.id : state.selectedSessionId,
@@ -1282,10 +1416,24 @@ export const useStore = create<UiState>((set, get) => {
         });
         break;
       case 'storageStatus':
-        set({ storageStatus: msg.storage });
+        set((state) => ({
+          machines: {
+            ...state.machines,
+            [from]: { ...(state.machines[from] ?? emptyMachine(from)), storage: msg.storage },
+          },
+          // Only the machine in front of the user drives the banner, whose
+          // "exactly one at a time" precedence is scoped to it by design.
+          ...(fromPrimary ? { storageStatus: msg.storage } : {}),
+        }));
         break;
       case 'workerStatus':
-        set({ workerStatus: msg.worker });
+        set((state) => ({
+          machines: {
+            ...state.machines,
+            [from]: { ...(state.machines[from] ?? emptyMachine(from)), worker: msg.worker },
+          },
+          ...(fromPrimary ? { workerStatus: msg.worker } : {}),
+        }));
         break;
       case 'authLoginStarted':
         set({ authorizeUrl: msg.authorizeUrl, authError: null });

@@ -7,7 +7,7 @@ import '@mantine/core/styles.css';
 import './index.css';
 import { theme } from './theme';
 import { App } from './App';
-import { connect, reconnectNow, setTokenProvider, switchDevice } from './ws';
+import { connect, connectMachine, reconnectNow, setTokenProvider, switchDevice } from './ws';
 import {
   CLERK_ENABLED,
   CLERK_PUBLISHABLE_KEY,
@@ -58,6 +58,20 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  /**
+   * Hold a link to every machine shared with this user, not just the one in
+   * front of them: a shared session has to be visible in the sidebar alongside
+   * your own, which means its machine's `hello` has to have arrived.
+   *
+   * Shares are few by nature, and ws.ts caps the link count and idle-disconnects
+   * the ones you are not looking at — each link heartbeats once a second.
+   */
+  useEffect(() => {
+    for (const device of devices ?? []) {
+      if (device.shared) void connectMachine(device.id);
+    }
+  }, [devices]);
 
   // Leave the pairing form as soon as the account gains a machine, so a
   // successful claim lands in the app instead of sitting on a stale form.
