@@ -87,6 +87,15 @@ function Shell() {
   }, []);
 
   const hasProjects = projects.length > 0;
+  /**
+   * A guest has no project list — the host's folders are not theirs to open — so
+   * `hasProjects` is false and, on its own, would collapse the sidebar and put a
+   * folder picker where the shared session should be. What matters is whether
+   * there is anything to *show*, which for a guest is the sessions they hold.
+   */
+  const guest = useStore((s) => s.access !== null);
+  const sessionCount = useStore((s) => Object.keys(s.sessions).length);
+  const hasWorkspace = hasProjects || (guest && sessionCount > 0);
 
   const openWorkflowEditor = (view: WorkflowEditorView) => {
     setWorkflowEditorView(view);
@@ -131,7 +140,7 @@ function Shell() {
       navbar={{
         width: sidebarWidth,
         breakpoint: 'xs',
-        collapsed: { desktop: !hasProjects, mobile: !hasProjects },
+        collapsed: { desktop: !hasWorkspace, mobile: !hasWorkspace },
       }}
       padding={0}
     >
@@ -146,7 +155,7 @@ function Shell() {
           onEditWorkflows={() => openWorkflowEditor('workflows')}
           onBrowseRecipes={() => openWorkflowEditor('recipes')}
         />
-        {hasProjects && (
+        {hasWorkspace && (
           <Box
             onMouseDown={startResize}
             className="sidebar-resize-handle"
@@ -156,8 +165,24 @@ function Shell() {
       </AppShell.Navbar>
       <AppShell.Main>
         <Box h={`calc(100vh - ${HEADER_HEIGHT}px)`}>
-          {!hasProjects ? (
-            <ProjectPicker />
+          {!hasWorkspace ? (
+            // A guest cannot open a project on somebody else's machine, so the
+            // picker would be a dead end offering an action they do not have.
+            guest ? (
+              <Center h="100%">
+                <Stack align="center" gap="xs" maw={420}>
+                  <IconMessageChatbot size={48} stroke={1.2} opacity={0.4} />
+                  <Title order={4} c="dimmed">
+                    Nothing shared with you yet
+                  </Title>
+                  <Text size="sm" c="dimmed" ta="center">
+                    When someone shares a session on this machine it appears here.
+                  </Text>
+                </Stack>
+              </Center>
+            ) : (
+              <ProjectPicker />
+            )
           ) : sidebarMode === 'files' ? (
             <FilesView />
           ) : selectedSessionId && selectedSession ? (
@@ -172,8 +197,11 @@ function Shell() {
                   No session selected
                 </Title>
                 <Text size="sm" c="dimmed">
-                  Hit “New session” in the sidebar — it starts right away in{' '}
-                  {activeProject?.split('/').filter(Boolean).pop() ?? 'the active project'}.
+                  {guest
+                    ? 'Pick a shared session from the sidebar.'
+                    : `Hit “New session” in the sidebar — it starts right away in ${
+                        activeProject?.split('/').filter(Boolean).pop() ?? 'the active project'
+                      }.`}
                 </Text>
               </Stack>
             </Center>

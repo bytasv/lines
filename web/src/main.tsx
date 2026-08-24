@@ -8,7 +8,13 @@ import './index.css';
 import { theme } from './theme';
 import { App } from './App';
 import { connect, reconnectNow, setTokenProvider, switchDevice } from './ws';
-import { CLERK_ENABLED, CLERK_PUBLISHABLE_KEY, setOwnerId, setOwnerName } from './lib/clerk';
+import {
+  CLERK_ENABLED,
+  CLERK_PUBLISHABLE_KEY,
+  setOwnerId,
+  setOwnerImageUrl,
+  setOwnerName,
+} from './lib/clerk';
 import {
   chooseDevice,
   DEVICE_PAIRING_ENABLED,
@@ -24,6 +30,7 @@ import {
   ConnectMachineLoading,
 } from './components/ConnectMachine';
 import { ConnectingMachine } from './components/ConnectingMachine';
+import { JoinPage } from './components/JoinPage';
 import { LandingPage } from './components/LandingPage';
 import { useStore } from './store';
 
@@ -127,6 +134,7 @@ function AuthedConnect() {
   useEffect(() => {
     setOwnerName(user?.fullName || user?.username || user?.primaryEmailAddress?.emailAddress || null);
     setOwnerId(user?.id ?? null);
+    setOwnerImageUrl(user?.imageUrl ?? null);
   }, [user]);
   if (!DEVICE_PAIRING_ENABLED) return <App />;
   return (
@@ -145,6 +153,12 @@ function Root() {
             it is the only way a signed-in user can re-read it, since every other
             path renders the app for them. Do not wrap this in an auth gate. */}
         <Route path="/welcome" element={<LandingPage />} />
+        {/* Outside the auth gate on purpose, as /welcome is: the page renders its
+            own signed-out state (which deliberately names nobody) and its own
+            sign-in, because the invitee may have no account yet. Routing it
+            through the gate would send them to the landing page and lose the
+            code. */}
+        <Route path="/join/:code" element={<JoinPage />} />
         {/* App mounts its own <Routes> underneath this splat (descendant routes),
             so /docs/* and /session/:id keep resolving against the full path. */}
         <Route

@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { ActionIcon, Alert, Button, Divider, Group, Stack, Text, Tooltip } from '@mantine/core';
+import { useEffect, useState } from 'react';
+import { ActionIcon, Alert, Badge, Button, Divider, Group, Stack, Text, Tooltip } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import {
   IconAlertTriangle,
@@ -8,6 +8,7 @@ import {
   IconGitBranch,
   IconLogin,
   IconPlayerPlay,
+  IconShare,
   IconPlayerSkipForward,
   IconRefresh,
 } from '@tabler/icons-react';
@@ -19,13 +20,32 @@ import { Transcript } from './Transcript';
 import { Composer } from './Composer';
 import { QueuedMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
+import { ShareModal } from './ShareModal';
+import { MachineDot } from './MachineDot';
+import { PresenceStack } from './PresenceStack';
+import { linkedMachineHealth } from '../lib/machineHealth';
+import { PRESET_COPY } from '../lib/shares';
+import { useClaudeLoginNeeded } from '../lib/can';
+import { SHARING_ENABLED } from '../lib/shares';
+import { rememberedDeviceId } from '../lib/storage';
+import { useDevices } from '../lib/devices';
+import { presetOfCaps } from '@lines/shared';
 
 export function SessionView({ sessionId }: { sessionId: string }) {
   const session = useStore((s) => s.sessions[sessionId]);
+  // Null on your own machine. Present means this session is somebody else's, and
+  // the header says so — typing into a colleague's laptop unaware is the failure
+  // this exists to prevent.
+  const access = useStore((s) => s.access);
+  const machineOffline = useStore((s) => s.machineOffline);
+  const workerStatus = useStore((s) => s.workerStatus);
+  const storageStatus = useStore((s) => s.storageStatus);
+  const [sharing, setSharing] = useState(false);
+  const devices = useDevices((d) => d.devices);
   const events = useStore((s) => s.transcripts[sessionId]);
   const loaded = useStore((s) => s.transcriptLoaded[sessionId]);
   const workflows = useStore((s) => s.workflows);
-  const loggedOut = useStore((s) => s.auth?.loggedIn === false);
+  const loggedOut = useClaudeLoginNeeded();
   const openLoginModal = useStore((s) => s.openLoginModal);
   const connected = useStore((s) => s.connectionStatus === 'connected');
   const projects = useStore((s) => s.projects);
@@ -49,6 +69,9 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   // A work-tree session is confined to that checkout, which the path alone doesn't
   // say — the branch is what makes it identifiable at a glance.
   const worktree = findWorktree(projects, session.cwd)?.worktree;
+  const deviceId = rememberedDeviceId();
+  // Named in the modal title, so "share the whole machine" says which machine.
+  const machineName = devices?.find((d) => d.id === deviceId)?.name ?? null;
 
   return (
     <Stack gap={0} h="100%">
@@ -86,12 +109,57 @@ export function SessionView({ sessionId }: { sessionId: string }) {
             </Group>
           )}
         </Group>
-        {session.lastCostUsd != null && (
-          <Text size="xs" c="dimmed">
-            last turn ${session.lastCostUsd.toFixed(4)}
-          </Text>
-        )}
+        <Group gap="xs" wrap="nowrap">
+          <PresenceStack sessionId={sessionId} />
+          {session.lastCostUsd != null && (
+            <Text size="xs" c="dimmed">
+              last turn ${session.lastCostUsd.toFixed(4)}
+            </Text>
+          )}
+          {/* Owner only: sharing somebody else's session is not a grant anyone
+              holds, and there is no storage to record a grant in a local install. */}
+          {!access && SHARING_ENABLED && (
+            <Tooltip label="Share this session" withArrow>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                aria-label="Share this session"
+                onClick={() => setSharing(true)}
+              >
+                <IconShare size={14} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+        </Group>
       </Group>
+      {/* A persistent bar, not a toast: which machine a session runs on, and what
+          you may do there, has to be true for as long as you are looking at it.
+          Deliberately not one of the global banners — those keep their own
+          "exactly one at a time" precedence for the primary machine. */}
+      {access && (
+        <>
+          <Divider />
+          <Group px="md" py={6} gap="xs" wrap="nowrap" bg="var(--mantine-color-default-hover)">
+            <MachineDot
+              health={linkedMachineHealth({
+                bridgeAttached: !machineOffline,
+                worker: workerStatus,
+                storage: storageStatus,
+              })}
+            />
+            <Text size="xs" c="dimmed">
+              Running on{' '}
+              {access.ownerProfile?.name ?? access.ownerProfile?.email ?? 'another person'}’s machine
+            </Text>
+            <Badge size="xs" variant="light" color="gray">
+              {presetOfCaps(access.caps, access.scope) 
+                ? PRESET_COPY[presetOfCaps(access.caps, access.scope)!].label
+                : 'custom access'}
+            </Badge>
+          </Group>
+        </>
+      )}
       <Divider />
       {workflow && session.workflow && <WorkflowStepper session={session} workflow={workflow} />}
       {session.status === 'error' && session.errorMessage && (
@@ -156,6 +224,15 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       <Transcript sessionId={sessionId} events={events ?? []} stepCount={workflow?.steps.length} />
       <QueuedMessages session={session} />
       <Composer session={session} />
+      {sharing && deviceId && (
+        <ShareModal
+          opened={sharing}
+          onClose={() => setSharing(false)}
+          deviceId={deviceId}
+          machineName={machineName}
+          session={{ id: session.id, name: session.name }}
+        />
+      )}
     </Stack>
   );
 }

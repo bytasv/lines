@@ -130,6 +130,29 @@ export function projectStatusMeta(
   return best;
 }
 
+/**
+ * What a machine is doing right now, for the machine list and picker: how many
+ * of its sessions are mid-turn, and how many are waiting on the user.
+ *
+ * Derived from the sessions the client already holds rather than reported by the
+ * bridge, and counted through `sessionRowMeta` so a machine's summary and its
+ * session rows can never disagree about what "actionable" means. Archived
+ * sessions are skipped, exactly as `projectStatusMeta` skips them.
+ *
+ * Takes a plain array: `format.ts` never imports the store, and per-machine
+ * grouping belongs to the caller.
+ */
+export function machineActivity(sessions: SessionMeta[]): { running: number; actionable: number } {
+  let running = 0;
+  let actionable = 0;
+  for (const session of sessions) {
+    if (session.archived) continue;
+    if (session.status === 'running') running++;
+    else if (sessionRowMeta(session).actionable) actionable++;
+  }
+  return { running, actionable };
+}
+
 /** Green under 50%, amber to 80%, red above — mirrors ClaudeUsageBar's thresholds. */
 export function usageColor(pct: number): string {
   return pct >= 80 ? 'red' : pct >= 50 ? 'yellow' : 'teal';

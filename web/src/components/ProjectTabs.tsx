@@ -34,6 +34,7 @@ import { ConfirmModal } from './ConfirmModal';
 import { WorktreeModal } from './WorktreeModal';
 import { projectStatusMeta } from '../lib/format';
 import { sessionsInProject, useStore } from '../store';
+import { useIsGuest } from '../lib/can';
 import { send } from '../ws';
 import { BrandMark } from './BrandMark';
 import { SettingsModal } from './SettingsModal';
@@ -352,6 +353,7 @@ function SettingsButton() {
   const [opened, setOpened] = useState(false);
   // A dismissed allowlist review still needs a way back in; the gear is it.
   const guardReview = useStore((s) => s.guardReview);
+  const guest = useIsGuest();
   return (
     <>
       <Tooltip label={guardReview ? 'Settings — allowlist needs review' : 'Settings'}>
@@ -370,7 +372,10 @@ function SettingsButton() {
       <SettingsModal
         opened={opened}
         onClose={() => setOpened(false)}
-        initialSection={guardReview ? 'allowlist' : 'account'}
+        // A guest lands on Machines, the one pane that is theirs rather than the
+        // host's — and their only way back to their own machine. Hiding the gear
+        // outright would strand them on somebody else's computer.
+        initialSection={guest ? 'devices' : guardReview ? 'allowlist' : 'account'}
       />
     </>
   );

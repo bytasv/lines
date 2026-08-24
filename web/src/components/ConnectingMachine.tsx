@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Button, Loader, Stack, Text, Title } from '@mantine/core';
+import { Button, Group, Loader, Stack, Text, Title } from '@mantine/core';
 import { IconDeviceLaptop, IconPlus, IconRefresh, IconUnlink } from '@tabler/icons-react';
 import type { Device } from '../lib/storage';
+import { unlinkedMachineHealth } from '../lib/machineHealth';
 import { useStore } from '../store';
+import { MachineDot } from './MachineDot';
 import { GateHint, GateShell } from './GateShell';
 
 /** After this long, a connection that has not landed is worth explaining rather than just spinning. */
@@ -107,17 +109,33 @@ export function ConnectingMachine({
                 <Text size="xs" c="dimmed" ta="center">
                   Or use a different machine:
                 </Text>
-                {others.map((device) => (
-                  <Button
-                    key={device.id}
-                    variant="light"
-                    size="xs"
-                    leftSection={<IconDeviceLaptop size={14} />}
-                    onClick={() => onSwitch(device.id)}
-                  >
-                    {device.name}
-                  </Button>
-                ))}
+                {others.map((device) => {
+                  // No socket to these, so the only honest signal is the relay's
+                  // presence report — and "seen 2h ago" once that goes stale.
+                  // Switching to a machine that is also asleep is the dead end
+                  // this screen exists to avoid.
+                  const health = unlinkedMachineHealth(device);
+                  return (
+                    <Button
+                      key={device.id}
+                      variant="light"
+                      size="xs"
+                      leftSection={<IconDeviceLaptop size={14} />}
+                      rightSection={
+                        <Group gap={5} wrap="nowrap">
+                          <Text size="xs" c="dimmed">
+                            {health.label}
+                          </Text>
+                          <MachineDot health={health} />
+                        </Group>
+                      }
+                      justify="space-between"
+                      onClick={() => onSwitch(device.id)}
+                    >
+                      {device.name}
+                    </Button>
+                  );
+                })}
               </Stack>
             )}
 

@@ -28,6 +28,9 @@ import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttach
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { buildExpandedPrompt, uniqueMentions } from '../lib/mentions';
+import { linkedMachineHealth } from '../lib/machineHealth';
+import { useCan } from '../lib/can';
+import { usePresence } from '../lib/presence';
 import { ContextWindowIndicator } from './ContextWindowIndicator';
 import { MentionInput } from './MentionInput';
 import { send } from '../ws';
@@ -122,7 +125,17 @@ export function Composer({ session }: { session: SessionMeta }) {
   const models = useStore((s) => s.models);
   const projects = useStore((s) => s.projects);
   const connectionStatus = useStore((s) => s.connectionStatus);
+  const machineOffline = useStore((s) => s.machineOffline);
+  const workerStatus = useStore((s) => s.workerStatus);
+  const storageStatus = useStore((s) => s.storageStatus);
   const queuedCount = useStore((s) => s.queuedPrompts.filter((q) => q.sessionId === session.id).length);
+  // A guest's grant decides which of these controls exist. All true on your own
+  // machine; the bridge refuses anything that slips through regardless.
+  const canPrompt = useCan('prompt');
+  const canInterrupt = useCan('interrupt');
+  const canSetModel = useCan('setModel');
+  const canSetMode = useCan('setPermissionMode');
+  const needsApproval = useStore((s) => s.access?.caps.promptNeedsApproval === true);
   // Prompt text plus the inline @mention pill ranges painted over it. Seeded from
   // the persisted draft — SessionView is keyed by session id, so this component
   // remounts per session and the lazy initializer is enough to restore.
@@ -135,13 +148,36 @@ export function Composer({ session }: { session: SessionMeta }) {
   const attachmentsLoaded = useRef(false);
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [composerFocused, setComposerFocused] = useState(false);
   const dragDepth = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const interruptible = isSessionInterruptible(session.status);
   const awaitingApproval = session.status === 'waiting-approval';
 
+  /**
+   * Why this session's machine cannot take a prompt right now, or null.
+   *
+   * A link that is merely down is not one of those cases: `send` queues prompts
+   * and replays them on reconnect, which is the whole point of the offline hint
+   * below. The blocking cases are the ones where the socket is fine and the
+   * machine behind it is not — the relay drops a frame for a detached bridge in
+   * silence, so without this the prompt just disappears.
+   */
+  const machineBlock =
+    connectionStatus === 'connected'
+      ? linkedMachineHealth({
+          bridgeAttached: !machineOffline,
+          worker: workerStatus,
+          storage: storageStatus,
+        }).block
+      : null;
+
+  // "I am looking at this session, and my composer has focus." Debounced inside.
+  usePresence(session.id, composerFocused);
+
   const nothingToSend = !prompt.text.trim() && attachments.length === 0;
+  const cannotSend = nothingToSend || machineBlock !== null || !canPrompt;
 
   // Focus the prompt on a freshly created session (reuses the store's 5s justCreated heuristic).
   useEffect(() => {
@@ -177,7 +213,9 @@ export function Composer({ session }: { session: SessionMeta }) {
   };
 
   const submit = () => {
-    if (nothingToSend) return;
+    // Guards ⌘/Enter too, not just the buttons — the keyboard path is the one
+    // that would otherwise send into a machine that cannot run it.
+    if (cannotSend) return;
     // Bake the @mention expansions into the text (so workflow-first-prompt and
     // offline queueing see it too); `mentions` rides along display-only.
     const expanded = buildExpandedPrompt(prompt.text.trim(), prompt.ranges);
@@ -269,6 +307,28 @@ export function Composer({ session }: { session: SessionMeta }) {
           {queuedCount > 0 ? ` · ${queuedCount} queued` : ''}
         </Text>
       )}
+      {!canPrompt && (
+        <Text size="xs" c="dimmed" px={6} pb={6}>
+          You have view-only access to this session.
+        </Text>
+      )}
+      {canPrompt && needsApproval && (
+        // Said before sending, not after: a prompt that silently waits for
+        // somebody else to release it reads as a broken send.
+        <Text size="xs" c="dimmed" px={6} pb={6}>
+          Your prompts wait for the owner to release them.
+        </Text>
+      )}
+      {machineBlock && (
+        // Named, not dimmed: this is why the send button is dead, and the
+        // alternative is a prompt that looks sent and never runs. Deliberately not
+        // a banner — ConnectionBanner/WorkerBanner/StorageBanner keep their own
+        // "exactly one at a time" precedence, and machine health belongs on the
+        // surface you are about to type into.
+        <Text size="xs" c="orange" px={6} pb={6}>
+          {machineBlock}
+        </Text>
+      )}
       <input
         ref={fileInputRef}
         type="file"
@@ -291,6 +351,7 @@ export function Composer({ session }: { session: SessionMeta }) {
             : 'Message Claude… (↵ to send, ⇧↵ for newline)'
         }
         textareaRef={textareaRef}
+        onFocusChange={setComposerFocused}
         onPasteFiles={(files) => void addFiles(files)}
       />
       <Group justify="space-between" px={4} pt={4}>
@@ -302,6 +363,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           </Tooltip>
           <SegmentedControl
             size="xs"
+            disabled={!canSetMode}
             data={PERMISSION_MODE_SEGMENTS}
             value={session.permissionMode}
             onChange={(v) =>
@@ -310,6 +372,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           />
           <Select
             w={130}
+            disabled={!canSetModel}
             comboboxProps={modelComboboxProps}
             data={modelSelectData(models, session.model)}
             renderOption={renderModelOption}
@@ -320,6 +383,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           <Tooltip label="Caveman mode — compressed replies, fewer tokens">
             <Switch
               label="🦴"
+              disabled={!canSetMode}
               checked={session.caveman.enabled}
               onChange={(e) =>
                 send({
@@ -362,7 +426,7 @@ export function Composer({ session }: { session: SessionMeta }) {
                   variant="subtle"
                   size="lg"
                   onClick={submit}
-                  disabled={nothingToSend}
+                  disabled={cannotSend}
                 >
                   <IconSend size={16} />
                 </ActionIcon>
@@ -375,7 +439,13 @@ export function Composer({ session }: { session: SessionMeta }) {
                     : 'Interrupt'
                 }
               >
-                <ActionIcon color="gray" variant="default" size="lg" onClick={() => send({ type: 'interrupt', sessionId: session.id })}>
+                <ActionIcon
+                  color="gray"
+                  variant="default"
+                  size="lg"
+                  disabled={!canInterrupt}
+                  onClick={() => send({ type: 'interrupt', sessionId: session.id })}
+                >
                   <IconPlayerStop size={16} />
                 </ActionIcon>
               </Tooltip>
@@ -386,7 +456,7 @@ export function Composer({ session }: { session: SessionMeta }) {
                 variant="filled"
                 size="lg"
                 onClick={submit}
-                disabled={nothingToSend}
+                disabled={cannotSend}
               >
                 <IconSend size={16} />
               </ActionIcon>
@@ -396,7 +466,7 @@ export function Composer({ session }: { session: SessionMeta }) {
               variant="filled"
               size="lg"
               onClick={submit}
-              disabled={nothingToSend}
+              disabled={cannotSend}
             >
               <IconSend size={16} />
             </ActionIcon>

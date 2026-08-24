@@ -1,4 +1,5 @@
 import type {
+  Actor,
   Attachment,
   ContextCompactData,
   FileSnapshotData,
@@ -69,7 +70,19 @@ export interface LiveActivity {
 }
 
 export type TranscriptItem =
-  | { kind: 'user'; key: string; text: string; source: 'user' | 'workflow'; attachments?: Attachment[]; mentions?: PromptMention[] }
+  | {
+      kind: 'user';
+      key: string;
+      text: string;
+      source: 'user' | 'workflow';
+      attachments?: Attachment[];
+      mentions?: PromptMention[];
+      /** Who sent it. Absent on every row written before sharing existed, and on
+       *  the owner's own prompts — both read as the session's host. */
+      actor?: Actor;
+      /** ms epoch, for the hover detail on an authored bubble. */
+      ts: number;
+    }
   | { kind: 'assistant'; key: string; blocks: AssistantBlock[]; isAnswer?: boolean }
   | ToolGroupItem
   | AgentTurnItem
@@ -246,6 +259,7 @@ export function buildTranscript(
           source?: 'user' | 'workflow';
           attachments?: Attachment[];
           mentions?: PromptMention[];
+          actor?: Actor;
         };
         items.push({
           kind: 'user',
@@ -254,6 +268,8 @@ export function buildTranscript(
           source: data.source ?? 'user',
           attachments: data.attachments,
           mentions: data.mentions,
+          actor: data.actor,
+          ts: event.ts,
         });
         break;
       }

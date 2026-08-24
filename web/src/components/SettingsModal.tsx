@@ -29,6 +29,7 @@ import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
 import { modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { fileRequest, send } from '../ws';
+import { useIsGuest } from '../lib/can';
 
 export type SettingsSection =
   | 'account'
@@ -55,6 +56,14 @@ const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   { value: 'docs', label: 'Documentation' },
 ];
 
+/**
+ * Machines is the only pane a guest may see: it lists *their* account's machines
+ * and is how they get back to one of their own. Every other pane reads or writes
+ * the host's state — settings, the guard allowlist, their Claude account, their
+ * sync log — all of which the bridge refuses to a guest anyway.
+ */
+const GUEST_SECTIONS = SETTINGS_SECTIONS.filter((s) => s.value === 'devices');
+
 export function SettingsModal({
   opened,
   onClose,
@@ -66,6 +75,8 @@ export function SettingsModal({
 }) {
   const guardReview = useStore((s) => s.guardReview);
   const openGuardReview = useStore((s) => s.openGuardReview);
+  const guest = useIsGuest();
+  const sections = guest ? GUEST_SECTIONS : SETTINGS_SECTIONS;
   const [section, setSection] = useState<SettingsSection>(initialSection);
 
   // Snapshot in a ref so a guardReview that clears mid-edit cannot yank the
@@ -94,7 +105,7 @@ export function SettingsModal({
     >
       <Group align="stretch" gap={0} wrap="nowrap" style={{ flex: 1, minHeight: 0 }}>
         <Stack gap="xs" w={200} p="md" style={{ flexShrink: 0 }}>
-          {SETTINGS_SECTIONS.map((s) => {
+          {sections.map((s) => {
             const button = (
               <Button
                 fullWidth

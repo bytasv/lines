@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ActionIcon,
+  Avatar,
   Badge,
   Box,
   Button,
@@ -27,6 +28,9 @@ import {
 import type { PermissionRequestData, PermissionResolutionSource } from '@lines/shared';
 import { KEEP_PLANNING_MESSAGE } from '@lines/shared';
 import { send } from '../ws';
+import { useStore } from '../store';
+import { useCan } from '../lib/can';
+import { useIdentityResolver } from '../lib/identity';
 import { QuestionPrompt } from './QuestionPrompt';
 import { Markdown } from './Markdown';
 import { MonacoDiffModal } from './MonacoDiffModal';
@@ -67,12 +71,44 @@ function ResolutionBadge({
   children: React.ReactNode;
 }) {
   const note = data.resolvedBy ? SOURCE_NOTE[data.resolvedBy] : undefined;
+  const identify = useIdentityResolver();
+  // Who clicked, when it was not you. "Approved by Antanas" is the thing you most
+  // want to know after the fact — a permission ran a command on this machine.
+  const actor = data.resolvedActor;
+  const who = actor ? identify(actor.userId, actor) : null;
+  const byWhom = who && !who.self ? who.name : null;
   const badge = (
-    <Badge color={color} variant="light">
+    <Badge
+      color={color}
+      variant="light"
+      leftSection={
+        who && byWhom ? (
+          <Avatar
+            src={who.imageUrl ?? undefined}
+            size={12}
+            radius="xl"
+            color={who.color}
+            variant="filled"
+          >
+            <Text size="7px" fw={700}>
+              {who.initials}
+            </Text>
+          </Avatar>
+        ) : undefined
+      }
+    >
       {children}
+      {byWhom ? ` · ${byWhom}` : ''}
     </Badge>
   );
-  return note ? <Tooltip label={note}>{badge}</Tooltip> : badge;
+  const label = [note, byWhom ? `Answered by ${byWhom}` : null].filter(Boolean).join('\n');
+  return label ? (
+    <Tooltip label={label} multiline styles={{ tooltip: { whiteSpace: 'pre-line' } }}>
+      {badge}
+    </Tooltip>
+  ) : (
+    badge
+  );
 }
 
 function respond(
@@ -539,6 +575,32 @@ export function PermissionPrompt({
   const p = toolPresentation(data);
 
   return (
+    <PermissionCard sessionId={sessionId} data={data} resolution={resolution} p={p} />
+  );
+}
+
+/**
+ * The card body, split out so the guest branch is a single early return rather
+ * than a conditional threaded through every button.
+ */
+function PermissionCard({
+  sessionId,
+  data,
+  resolution,
+  p,
+}: {
+  sessionId: string;
+  data: PermissionRequestData;
+  resolution?: Resolution;
+  p: ReturnType<typeof toolPresentation>;
+}) {
+  // A guest without `approvePermissions` sees the request read-only. Answering it
+  // runs a command on the host's machine, as them, so no preset below
+  // Collaborator reaches it — and a button that always errors is worse than none.
+  const canApprove = useCan('approvePermissions');
+  const owner = useStore((s) => s.access?.ownerProfile ?? null);
+
+  return (
     <Paper
       withBorder
       radius="md"
@@ -562,7 +624,12 @@ export function PermissionPrompt({
           prompt to continue.
         </Text>
       )}
-      {!resolution && (
+      {!resolution && !canApprove && (
+        <Text size="xs" c="dimmed" mt={4}>
+          Waiting for {owner?.name ?? owner?.email ?? 'the owner'} to approve this.
+        </Text>
+      )}
+      {!resolution && canApprove && (
         <>
           {data.guardReason && (
             <Text size="xs" c="orange" mb={6}>

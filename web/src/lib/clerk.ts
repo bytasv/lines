@@ -27,3 +27,19 @@ export function setOwnerId(id: string | null): void {
 export function getOwnerId(): string | null {
   return ownerId;
 }
+
+/**
+ * Current user's Clerk avatar, for attributing their own prompts.
+ *
+ * The bridge cannot supply this: it records an actor for the owner but has no
+ * Clerk lookup for itself, so `name` and `imageUrl` arrive null and the client is
+ * the only place that knows them. Without this, your own messages render as
+ * initials while everyone else's show a picture.
+ */
+let ownerImageUrl: string | null = null;
+export function setOwnerImageUrl(url: string | null): void {
+  ownerImageUrl = url;
+}
+export function getOwnerImageUrl(): string | null {
+  return ownerImageUrl;
+}

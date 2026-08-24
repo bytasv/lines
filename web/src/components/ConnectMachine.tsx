@@ -1,9 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Alert,
+  Avatar,
   Button,
   Card,
   Code,
+  Divider,
+  Group,
   List,
   Loader,
   Stack,
@@ -14,6 +17,15 @@ import {
 import { IconAlertCircle } from '@tabler/icons-react';
 import { claimDevice } from '../lib/storage';
 import { useDevices } from '../lib/devices';
+import {
+  PRESET_COPY,
+  SHARING_ENABLED,
+  claimInvite,
+  pendingInvites,
+  type PendingInvite,
+} from '../lib/shares';
+import { rememberDeviceId } from '../lib/storage';
+import { switchDevice } from '../ws';
 import { DownloadDesktopApp } from './DownloadDesktopApp';
 import { GateShell } from './GateShell';
 import { PairingDiagram } from './PairingDiagram';
@@ -59,6 +71,11 @@ export function ConnectMachine() {
             This site is the interface; your machine does the work.
           </Text>
         </Stack>
+
+        {/* Before the pairing instructions, because an invitee needs no machine
+            of their own at all — telling them to install a desktop app first
+            would be answering a question they never asked. */}
+        <PendingInvitations />
 
         <Card withBorder radius="md" p="md">
           <PairingDiagram />
@@ -106,6 +123,99 @@ export function ConnectMachine() {
         </Card>
       </Stack>
     </GateShell>
+  );
+}
+
+/**
+ * Invitations waiting for this user, offered here because this screen is where an
+ * invitee lands if they sign in before opening their link — or after losing it.
+ *
+ * Without this the screen is a dead end for them: it asks them to install Lines
+ * and pair a computer, when what they actually hold is access to somebody else's.
+ * Renders nothing at all when there are none, so the ordinary pairing flow is
+ * untouched.
+ */
+function PendingInvitations() {
+  const refresh = useDevices((s) => s.refresh);
+  const [invites, setInvites] = useState<PendingInvite[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!SHARING_ENABLED) return;
+    // Failure is silent: this is an extra affordance, and an error here must not
+    // bury the pairing form that is this screen's actual job.
+    pendingInvites()
+      .then((r) => setInvites(r.invites))
+      .catch(() => setInvites([]));
+  }, []);
+
+  const accept = async (invite: PendingInvite) => {
+    setBusy(invite.code);
+    setError(null);
+    try {
+      const { deviceId } = await claimInvite(invite.code);
+      rememberDeviceId(deviceId);
+      switchDevice(deviceId);
+      // The gate re-renders off the device list, so this is what takes them in.
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusy(null);
+    }
+  };
+
+  if (!invites?.length) return null;
+
+  return (
+    <Card withBorder radius="md" p="lg">
+      <Stack gap="md">
+        <Stack gap={2}>
+          <Title order={5}>You’ve been invited</Title>
+          <Text size="sm" c="dimmed">
+            You don’t need a machine of your own to accept — the work runs on theirs.
+          </Text>
+        </Stack>
+        {error && (
+          <Alert color="red" icon={<IconAlertCircle size={16} />} variant="light">
+            {error}
+          </Alert>
+        )}
+        {invites.map((invite) => {
+          const who = invite.owner?.name ?? invite.owner?.email ?? 'Someone';
+          return (
+            <Group key={invite.code} gap="sm" wrap="nowrap">
+              <Avatar src={invite.owner?.imageUrl ?? undefined} radius="xl" size={32}>
+                {who.slice(0, 1).toUpperCase()}
+              </Avatar>
+              <Stack gap={0} style={{ flex: 1, minWidth: 0 }}>
+                <Text size="sm" truncate>
+                  {who} shared {invite.scope === 'session' ? 'a session' : 'their machine'}
+                  {invite.machineName ? ` on ${invite.machineName}` : ''}
+                </Text>
+                {invite.preset && (
+                  <Text size="xs" c="dimmed" truncate>
+                    {PRESET_COPY[invite.preset].label} · {PRESET_COPY[invite.preset].detail}
+                  </Text>
+                )}
+              </Stack>
+              <Button
+                size="xs"
+                onClick={() => void accept(invite)}
+                loading={busy === invite.code}
+                disabled={busy !== null}
+              >
+                Accept
+              </Button>
+            </Group>
+          );
+        })}
+        <Divider />
+        <Text size="xs" c="dimmed">
+          Or pair a machine of your own below.
+        </Text>
+      </Stack>
+    </Card>
   );
 }
 

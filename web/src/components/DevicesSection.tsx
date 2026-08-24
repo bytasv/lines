@@ -23,8 +23,17 @@ import {
   type Device,
 } from '../lib/storage';
 import { useDevices } from '../lib/devices';
+import { machineActivity } from '../lib/format';
+import { useIsGuest } from '../lib/can';
+import {
+  lastSeenLabel,
+  linkedMachineHealth,
+  unlinkedMachineHealth,
+  type MachineHealth,
+} from '../lib/machineHealth';
 import { switchDevice } from '../ws';
 import { DownloadDesktopApp } from './DownloadDesktopApp';
+import { MachineDot } from './MachineDot';
 
 /**
  * The machines this account can run agent turns on.
@@ -44,8 +53,28 @@ export function DevicesSection() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const connected = useStore((s) => s.connectionStatus === 'connected');
+  // Health of the machine this browser is actually linked to comes off the socket,
+  // not off the device row: the row is an HTTP snapshot, and only the link knows
+  // whether the bridge is attached and whether its worker answers.
+  const machineOffline = useStore((s) => s.machineOffline);
+  const worker = useStore((s) => s.workerStatus);
+  const storageStatus = useStore((s) => s.storageStatus);
   const activeId = rememberedDeviceId();
   const error = actionError ?? storeError;
+  const activeHealth: MachineHealth | null = connected
+    ? linkedMachineHealth({ bridgeAttached: !machineOffline, worker, storage: storageStatus })
+    : null;
+  // Only for the linked machine: the client holds no sessions for the others, and
+  // an absent count must not read as "nothing running there".
+  //
+  // Suppressed entirely for a guest: they hold only the sessions they were
+  // granted, so a count would describe their slice while reading as the host
+  // machine's total.
+  const sessions = useStore((s) => s.sessions);
+  const guest = useIsGuest();
+  const activity = guest
+    ? { running: 0, actionable: 0 }
+    : machineActivity(Object.values(sessions));
 
   useEffect(() => {
     void load();
@@ -118,6 +147,10 @@ export function DevicesSection() {
       ) : (
         devices.map((device) => {
           const active = device.id === activeId;
+          // Three states, kept apart: linked (the socket is the source of truth),
+          // and not linked (the relay's presence report, which decays to "last
+          // seen" rather than claiming anything once it goes stale).
+          const health = active && activeHealth ? activeHealth : unlinkedMachineHealth(device);
           return (
             <Card key={device.id} withBorder padding="sm" radius="sm">
               <Group justify="space-between" wrap="nowrap">
@@ -125,9 +158,17 @@ export function DevicesSection() {
                   <IconDeviceLaptop size={20} opacity={0.6} />
                   <Stack gap={2} style={{ minWidth: 0 }}>
                     <Group gap={6} wrap="nowrap">
+                      <MachineDot health={health} />
                       <Text size="sm" fw={500} truncate>
                         {device.name}
                       </Text>
+                      {device.shared && (
+                        // Somebody else's computer. Named, because everything you
+                        // run there happens on their machine, as them.
+                        <Badge size="xs" color="grape" variant="light">
+                          {device.ownerProfile?.name ?? device.ownerProfile?.email ?? 'shared with you'}
+                        </Badge>
+                      )}
                       {active && (
                         // Active means "this browser points here". Connected means
                         // the socket is actually open — with the machine asleep the
@@ -139,7 +180,16 @@ export function DevicesSection() {
                       )}
                     </Group>
                     <Text size="xs" c="dimmed">
-                      {device.platform ?? 'unknown platform'} · {lastSeenLabel(device.lastSeenAt)}
+                      {device.platform ?? 'unknown platform'} · {health.label}
+                      {/* "offline" says the state; "seen 5m ago" says how stale it
+                          is. The unknown state already reads as the latter. */}
+                      {health.state !== 'unknown' && health.state !== 'online'
+                        ? ` · ${lastSeenLabel(device.lastSeenAt)}`
+                        : ''}
+                      {active && activity.running > 0 ? ` · ${activity.running} running` : ''}
+                      {active && activity.actionable > 0
+                        ? ` · ${activity.actionable} needs you`
+                        : ''}
                     </Text>
                   </Stack>
                 </Group>
@@ -149,6 +199,7 @@ export function DevicesSection() {
                       Use this
                     </Button>
                   )}
+                  {device.shared ? null : (
                   <Tooltip label="Revoke access" withArrow>
                     <ActionIcon
                       variant="subtle"
@@ -160,6 +211,7 @@ export function DevicesSection() {
                       <IconTrash size={16} />
                     </ActionIcon>
                   </Tooltip>
+                  )}
                 </Group>
               </Group>
             </Card>
@@ -216,16 +268,4 @@ export function DevicesSection() {
       </Text>
     </Stack>
   );
-}
-
-/** Relative, because the exact timestamp of a heartbeat is never what you want to know. */
-function lastSeenLabel(iso: string | null): string {
-  if (!iso) return 'never connected';
-  const ms = Date.now() - new Date(iso).getTime();
-  if (ms < 120_000) return 'seen just now';
-  const minutes = Math.round(ms / 60_000);
-  if (minutes < 60) return `seen ${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `seen ${hours}h ago`;
-  return `seen ${Math.round(hours / 24)}d ago`;
 }

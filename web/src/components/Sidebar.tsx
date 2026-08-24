@@ -1,5 +1,6 @@
 import {
   ActionIcon,
+  Avatar,
   Badge,
   Box,
   Button,
@@ -40,6 +41,8 @@ import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
 import { findWorktree, projectPaths, projectRoots } from '@lines/shared';
 import { formatDuration, isWorkflowFinished, sessionRowMeta } from '../lib/format';
+import { useCan, useIsGuest } from '../lib/can';
+import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode } from '../store';
 import { projectAt, sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
@@ -61,6 +64,15 @@ function useOverflow() {
 
 function SessionRow({ session, selected }: { session: SessionMeta; selected: boolean }) {
   const status = sessionRowMeta(session);
+  // deleteSession/archiveSession are permanently owner-only: a guest never gets
+  // the hover controls, rather than getting ones that answer with an error.
+  const guest = useIsGuest();
+  const identify = useIdentityResolver();
+  // Whose turn is running, when it is not yours. One field on the synced meta, so
+  // this survives a reload and a bridge restart.
+  const turnActor = session.turnActor
+    ? identify(session.turnActor.userId, session.turnActor)
+    : null;
   const { overflowing, check } = useOverflow();
   const [hovered, setHovered] = useState(false);
   // A delete that has been sent but not echoed back. No optimistic removal: the
@@ -103,6 +115,24 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
       <Group gap="xs" wrap="nowrap" justify="space-between">
         <Box style={{ minWidth: 0 }}>
           <Group gap={5} wrap="nowrap">
+            {/* Whose turn is running, when it is not yours. One field on the
+                synced meta, so this survives a reload and a bridge restart. */}
+            {turnActor && !turnActor.self && (
+              <Tooltip label={`${turnActor.name} is running this turn`} openDelay={300} withArrow>
+                <Avatar
+                  src={turnActor.imageUrl ?? undefined}
+                  size={14}
+                  radius="xl"
+                  color={turnActor.color}
+                  variant="filled"
+                  style={{ flexShrink: 0 }}
+                >
+                  <Text size="8px" fw={700}>
+                    {turnActor.initials}
+                  </Text>
+                </Avatar>
+              </Tooltip>
+            )}
             <Center w={wide ? 14 : 10} style={{ flex: wide ? '0 0 14px' : '0 0 10px' }}>
               {session.completed ? (
                 <IconCircleCheck size={14} color="var(--mantine-color-green-6)" style={{ flexShrink: 0 }} />
@@ -201,7 +231,7 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
           </Group>
         </Box>
         <Group gap={2} wrap="nowrap">
-          {session.archived ? (
+          {guest ? null : session.archived ? (
             <>
               <Tooltip label="Unarchive session">
                 <ActionIcon
@@ -416,7 +446,9 @@ export function Sidebar({
   const workflows = useStore((s) => s.workflows);
   const sharedWorkflows = useStore((s) => s.sharedWorkflows);
   const selectedSessionId = useStore((s) => s.selectedSessionId);
+  const canCreate = useCan('createSessions');
   const activeProject = useStore((s) => s.activeProject);
+  const access = useStore((s) => s.access);
   const [showArchived, setShowArchived] = useLocalStorage<boolean>({
     key: 'lines.showArchived',
     defaultValue: true,
@@ -440,6 +472,20 @@ export function Sidebar({
   const roots = project ? projectRoots(project) : [];
   const activeProjectKey = activeProject ? projectKeys[activeProject] ?? null : null;
   const projectSessions = sessionsInProject(sessions, projectKeys, project);
+  /**
+   * Sessions shared with this user that no project tab covers.
+   *
+   * A guest gets no project list — the host's folders are not theirs to browse —
+   * so `sessionsInProject` matches nothing and every shared session would be
+   * held in the store and rendered nowhere. They get a group of their own rather
+   * than a synthesised project tab, which would imply the guest can open files
+   * and start sessions in a folder they have no standing in.
+   */
+  const shared = access
+    ? Object.values(sessions)
+        .filter((s) => !s.archived && !projectSessions.some((p) => p.id === s.id))
+        .sort((a, b) => b.createdAt - a.createdAt)
+    : [];
   const list = projectSessions
     .filter((s) => !s.archived)
     .sort((a, b) => b.createdAt - a.createdAt);
@@ -522,7 +568,9 @@ export function Sidebar({
           </Group>
         )}
       </Group>
-      {sidebarMode === 'sessions' && (
+      {/* A guest creates sessions only with an explicit machine-scope grant: a
+          session share has no folder to create in, and the bridge refuses it. */}
+      {sidebarMode === 'sessions' && canCreate && (
         <Box px="sm" pb="xs" ref={setCreateRow}>
           <Button.Group style={{ width: '100%' }}>
             <Button
@@ -634,12 +682,22 @@ export function Sidebar({
           )
         ) : (
           <Stack gap={2} pb="sm">
+            {shared.length > 0 && (
+              <>
+                <Text size="xs" fw={600} c="dimmed" tt="uppercase" px="sm" pt={4} pb={2}>
+                  Shared with me
+                </Text>
+                {shared.map((s) => (
+                  <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
+                ))}
+              </>
+            )}
             {list.map((s) => (
               <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
             ))}
-            {list.length === 0 && archived.length === 0 && (
+            {list.length === 0 && archived.length === 0 && shared.length === 0 && (
               <Text size="xs" c="dimmed" ta="center" pt="lg">
-                No sessions in this project yet
+                {access ? 'Nothing has been shared with you yet' : 'No sessions in this project yet'}
               </Text>
             )}
             {archived.length > 0 && (

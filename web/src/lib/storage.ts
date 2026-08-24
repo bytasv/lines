@@ -10,6 +10,8 @@
  * pairing exists, so these are never called.
  */
 
+import type { ShareProfile } from '@lines/shared';
+
 export const STORAGE_URL: string | undefined = import.meta.env.VITE_STORAGE_URL;
 export const DEVICE_PAIRING_ENABLED = Boolean(STORAGE_URL);
 
@@ -37,6 +39,20 @@ export interface Device {
   name: string;
   platform: string | null;
   lastSeenAt: string | null;
+  /**
+   * Whether the relay has a bridge attached for this machine. The only liveness
+   * signal for a machine this browser holds no socket to — and already gated on
+   * `lastSeenAt` freshness by storage, so a crashed relay reports false rather
+   * than leaving every machine stuck online. Read through `unlinkedMachineHealth`,
+   * which also refuses to believe a row that has gone stale in memory.
+   */
+  online: boolean;
+  /** Present when this machine is somebody else's, reached through a grant. */
+  shared?: boolean;
+  scope?: 'machine' | 'session';
+  /** Session-scope grants only: exactly the sessions you may see there. */
+  sessionIds?: string[];
+  ownerProfile?: ShareProfile | null;
 }
 
 /** Set by main.tsx from Clerk, so these helpers need no React context. */
@@ -44,6 +60,15 @@ let tokenProvider: (() => Promise<string | null>) | null = null;
 
 export function setStorageTokenProvider(fn: () => Promise<string | null>): void {
   tokenProvider = fn;
+}
+
+/**
+ * Shared with the share routes (lib/shares.ts), which need the same Clerk token
+ * and the same error unwrapping. Exported rather than duplicated so there is one
+ * place that knows how to talk to storage.
+ */
+export async function storageCall<T>(path: string, init?: RequestInit): Promise<T> {
+  return call<T>(path, init);
 }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -112,7 +137,15 @@ export function chooseDevice(devices: Device[]): Device | null {
   if (devices.length === 0) return null;
   const remembered = devices.find((d) => d.id === rememberedDeviceId());
   if (remembered) return remembered;
-  return [...devices].sort(
+  // Never *prefer* somebody else's machine, however recently it was seen: landing
+  // there unasked would show a colleague's sessions as though they were yours.
+  //
+  // But do fall back to one. Someone invited into a session before pairing a
+  // machine of their own has nothing else to connect to, and showing them the
+  // pairing screen would strand them — Settings, where the machine list lives,
+  // is behind this very gate.
+  const own = devices.filter((d) => !d.shared);
+  return [...(own.length ? own : devices)].sort(
     (a, b) => new Date(b.lastSeenAt ?? 0).getTime() - new Date(a.lastSeenAt ?? 0).getTime(),
   )[0];
 }
@@ -121,8 +154,10 @@ export function chooseDevice(devices: Device[]): Device | null {
  * Bind a machine to this account with the code it printed. The code is consumed
  * on use, so a retry with the same one fails as unknown.
  */
-export async function claimDevice(code: string): Promise<Device> {
-  return call<Device>('/v1/devices/claim', {
+export async function claimDevice(code: string): Promise<Pick<Device, 'id' | 'name' | 'platform'>> {
+  // Narrower than Device on purpose: the claim reply carries identity only, with
+  // no liveness in it — the machine is not necessarily even attached yet.
+  return call<Pick<Device, 'id' | 'name' | 'platform'>>('/v1/devices/claim', {
     method: 'POST',
     body: JSON.stringify({ code: code.trim().toUpperCase() }),
   });

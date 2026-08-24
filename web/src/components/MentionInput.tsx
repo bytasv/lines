@@ -56,6 +56,7 @@ export function MentionInput({
   roots,
   placeholder,
   textareaRef,
+  onFocusChange,
   onPasteFiles,
 }: {
   value: MentionValue;
@@ -66,6 +67,12 @@ export function MentionInput({
   roots: string[];
   placeholder: string;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
+  /**
+   * Composer focus, for presence — a focused peer is probably typing, which is
+   * the one presence signal worth showing beyond "who is here". Optional so
+   * callers that do not care are unchanged.
+   */
+  onFocusChange?: (focused: boolean) => void;
   onPasteFiles: (files: File[]) => void;
 }) {
   const { text, ranges } = value;
@@ -317,6 +324,8 @@ export function MentionInput({
           )}
           <Textarea
             ref={textareaRef}
+            onFocus={() => onFocusChange?.(true)}
+            onBlur={() => onFocusChange?.(false)}
             placeholder={placeholder}
             autosize
             minRows={2}

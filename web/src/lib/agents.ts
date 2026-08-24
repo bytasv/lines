@@ -137,6 +137,11 @@ export function agentMeta(subagentType?: string): AgentMeta {
   };
 }
 
+// `personMeta` and the person palette live in ./identityRule, which is kept free
+// of React and JSX so the attribution rule can be unit-tested. Re-exported here
+// because this is where callers look for it, beside `agentMeta`.
+export { personMeta, type PersonMeta } from './identityRule';
+
 /** A glanceable option on a Task call, rendered as a tooltipped icon. */
 export interface TaskFlag {
   key: string;

@@ -10,10 +10,14 @@ import type {
   Project,
   ProjectKeyMap,
   PromptAttachment,
+  PresenceViewer,
   PromptMention,
   RecipeDef,
   ServerMessage,
   SessionMeta,
+  ShareCaps,
+  ShareProfile,
+  ShareScope,
   StepDef,
   StorageStatus,
   TranscriptEvent,
@@ -30,6 +34,18 @@ import {
   worktreePaths,
 } from '@lines/shared';
 import { send } from './ws';
+
+/**
+ * The `access` block a guest's `hello` carries. Named here rather than inlined so
+ * selectors below and the components that read them share one shape.
+ */
+export interface GuestAccess {
+  scope: ShareScope;
+  caps: ShareCaps;
+  sessionIds?: string[];
+  ownerProfile: ShareProfile | null;
+  deviceId: string | null;
+}
 import type { AlertSound } from './lib/alerts';
 import {
   countAttention,
@@ -406,6 +422,31 @@ interface UiState {
    */
   bootstrapped: boolean;
   /**
+   * Present only when this browser is talking to somebody else's machine: what
+   * we may do there, and whose it is. Null on your own machine.
+   *
+   * The UI narrows from this and the shared `MESSAGE_AUTHZ`/caps table rather
+   * than from hand-written conditionals, so a capability the bridge would refuse
+   * is not offered in the first place.
+   */
+  access: GuestAccess | null;
+  /**
+   * Who else is watching each session, keyed by session id. Ephemeral: the bridge
+   * holds it in memory and re-sends on every change, so there is nothing to
+   * reconcile or persist here.
+   */
+  presence: Record<string, PresenceViewer[]>;
+  /**
+   * Everyone this client has learned a name for, by user id.
+   *
+   * The third source of display identity, alongside Clerk (for yourself) and
+   * `access.ownerProfile` (for the host). Fed by presence, whose viewer entries
+   * carry server-attested profiles — which is what lets a *historical* prompt
+   * whose recorded actor has no name render correctly as soon as that person is
+   * seen in the session. Grows only; a name once learned is never unlearned.
+   */
+  profiles: Record<string, ShareProfile>;
+  /**
    * The relay says no bridge is attached for this machine — it is asleep, off, or
    * not running Lines. Distinct from a failed socket: the socket is fine, the
    * machine behind it is not, and waiting cannot fix that. It is what lets the
@@ -663,6 +704,9 @@ export const useStore = create<UiState>((set, get) => {
   connectionStatus: 'reconnecting',
   bootstrapped: false,
   machineOffline: false,
+  access: null,
+  presence: {},
+  profiles: {},
   actionError: null,
   helloSignature: null,
   seenSessionIds: new Set<string>(),
@@ -741,6 +785,13 @@ export const useStore = create<UiState>((set, get) => {
     set({
       bootstrapped: false,
       machineOffline: false,
+      // Goes with the rest: it describes the machine we are leaving, and carrying
+      // a guest's narrowed access onto a machine we own would hide our own UI.
+      access: null,
+      // Whoever was watching was watching the *previous* machine's sessions.
+      presence: {},
+      // Names are keyed by user id, which is machine-independent, so they stay
+      // valid across a switch and are worth keeping.
       helloSignature: null,
       seenSessionIds: new Set<string>(),
       pendingCreate: false,
@@ -991,12 +1042,25 @@ export const useStore = create<UiState>((set, get) => {
           // Absent on a bridge older than this field — degrades to "no strip".
           workerStatus: msg.worker ?? null,
           bridge: msg.bridge ?? null,
+          // Present only from somebody else's machine. Absent means our own, so
+          // it must reset rather than persist from a previous connection.
+          access: msg.access ?? null,
+          profiles: msg.access?.ownerProfile
+            ? { ...state.profiles, [msg.access.ownerProfile.userId]: msg.access.ownerProfile }
+            : state.profiles,
           // Absent `bridge` means a bridge older than this field — treat as skew.
           protocolSkew: msg.bridge?.appProtocol !== APP_PROTOCOL_VERSION,
           // Logged out? Open the login flow — but only on the first hello with
           // that news, so reconnects don't reopen a dismissed modal.
-          loginModalOpen:
-            state.loginModalOpen || (!msg.auth.loggedIn && state.auth?.loggedIn !== false),
+          // Never on somebody else's machine. A guest's hello reports
+          // `loggedIn: false` because the host's Claude account is none of their
+          // business — but that is "not your concern", not "you must sign in",
+          // and turns there run on the host's token either way. Prompting a guest
+          // to connect an account would be asking them to fix something they
+          // cannot see and do not own.
+          loginModalOpen: msg.access
+            ? false
+            : state.loginModalOpen || (!msg.auth.loggedIn && state.auth?.loggedIn !== false),
           guardAllowlist: msg.guardAllowlist ?? [],
           guardReview: msg.guardAllowlistReview ?? null,
           // Same "auto-open on genuinely new news" rule as the login modal: a
@@ -1199,10 +1263,23 @@ export const useStore = create<UiState>((set, get) => {
       case 'authStatus':
         // Success closes the modal; a logout (or dead refresh token) reopens it.
         set(
-          msg.auth.loggedIn
+          msg.auth.loggedIn || get().access
             ? { auth: msg.auth, loginModalOpen: false, authorizeUrl: null, authError: null }
             : { auth: msg.auth, loginModalOpen: true },
         );
+        break;
+      case 'presence':
+        set((state) => {
+          const profiles = { ...state.profiles };
+          for (const viewer of msg.viewers) {
+            // Only entries that actually carry a label: an all-null profile is no
+            // better than not knowing, and would shadow a good one learned later.
+            if (viewer.profile && (viewer.profile.name || viewer.profile.email)) {
+              profiles[viewer.userId] = viewer.profile;
+            }
+          }
+          return { presence: { ...state.presence, [msg.sessionId]: msg.viewers }, profiles };
+        });
         break;
       case 'storageStatus':
         set({ storageStatus: msg.storage });

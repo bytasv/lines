@@ -47,6 +47,8 @@ import {
 import { useAttachmentUrl } from '../lib/files';
 import { mentionKindMeta } from '../lib/mentions';
 import { formatTokens, skippableFailedStep } from '../lib/format';
+import { useClaudeLoginNeeded } from '../lib/can';
+import { PromptAuthor } from './PromptAuthor';
 import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
 import { PermissionPrompt } from './PermissionPrompt';
@@ -224,7 +226,7 @@ function UserText({ text }: { text: string }) {
  */
 function FailedTurnActions({ sessionId }: { sessionId: string }) {
   const needsSignIn = useStore((s) => s.sessions[sessionId]?.errorKind === 'auth');
-  const loggedOut = useStore((s) => s.auth?.loggedIn === false);
+  const loggedOut = useClaudeLoginNeeded();
   const openLoginModal = useStore((s) => s.openLoginModal);
   const skipStep = useStore((s) => {
     const session = s.sessions[sessionId];
@@ -288,7 +290,11 @@ function Item({
     case 'user':
       // The only bubble in the transcript: a bubble means "a human said this".
       return (
-        <Box style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        // Right-aligned even for a peer's prompt, deliberately: agent output is
+        // flush-left by established convention, so a left-aligned peer bubble
+        // would read as the agent talking. Authorship is carried by the avatar
+        // and its colour instead of by side.
+        <Box style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, alignItems: 'flex-end' }}>
           <Paper
             radius="md"
             px="sm"
@@ -328,6 +334,7 @@ function Item({
               </Group>
             )}
           </Paper>
+          <PromptAuthor actor={item.actor} ts={item.ts} />
         </Box>
       );
     case 'assistant':
