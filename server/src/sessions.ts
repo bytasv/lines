@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type {
@@ -10,6 +11,8 @@ import type {
   ContextCompactBlockInfo,
   ContextCompactData,
   ContextUsage,
+  FileChange,
+  FilesChangedData,
   FileSnapshotData,
   PermissionMode,
   PermissionRequestData,
@@ -17,6 +20,8 @@ import type {
   PromptAttachment,
   PromptMention,
   ServerMessage,
+  SessionDiffRepo,
+  SessionDiffResponse,
   SessionErrorKind,
   SessionMeta,
   SessionStatus,
@@ -35,6 +40,16 @@ import {
   subagentParentId,
 } from '@lines/shared';
 import type { Store } from './store.ts';
+import {
+  captureBaseline,
+  captureBaselines,
+  changedBetween,
+  changedFiles,
+  groupByRepo,
+  refExists,
+  repoBranch,
+  type RepoBaseline,
+} from './git.ts';
 import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
 import {
   ALWAYS_ASK_TOOLS,
@@ -378,6 +393,62 @@ export function scanTurnActivity(events: TranscriptEvent[]): {
   return { toolCalls, toolErrors, finalText };
 }
 
+/** Tools whose `file_path` argument names a file the agent wrote. */
+const FILE_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+
+/**
+ * Absolute paths this session is known to have changed, for bucketing its review
+ * diff into "yours" and "everything else dirty in this repo".
+ *
+ * Two sources, unioned:
+ *
+ * - `files-changed` events — the authoritative one. Each is a git snapshot window
+ *   around a turn, so it sees every mechanism (a shell redirect, a script, an MCP
+ *   tool), not just file-tool calls.
+ * - `tool_use` arguments — a backstop for turns with no window: one that crashed
+ *   before settling, or a session that predates the feature. Unlike
+ *   `scanTurnActivity`, subagent blocks are **included** — a Task subagent's
+ *   writes are this session's changes.
+ *
+ * `ambiguous` holds paths that only ever arrived through a window another session
+ * was live in. A path a tool call names is claimed outright: that is direct
+ * evidence, and it outranks the window's uncertainty.
+ */
+export function collectChangedPaths(
+  events: TranscriptEvent[],
+  roots: string[],
+): { paths: string[]; ambiguous: string[] } {
+  const paths = new Set<string>();
+  const ambiguous = new Set<string>();
+  for (const ev of events) {
+    if (ev.kind === 'files-changed') {
+      const data = ev.data as FilesChangedData;
+      for (const repo of data?.repos ?? []) {
+        for (const rel of repo.rels ?? []) {
+          (repo.ambiguous ? ambiguous : paths).add(path.resolve(repo.repo, rel));
+        }
+      }
+      continue;
+    }
+    if (ev.kind !== 'sdk') continue;
+    const msg = ev.data as { type?: string; message?: { content?: unknown } };
+    if (msg.type !== 'assistant') continue;
+    const content = msg.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content as Record<string, unknown>[]) {
+      if (block.type !== 'tool_use' || typeof block.name !== 'string') continue;
+      if (!FILE_WRITE_TOOLS.has(block.name)) continue;
+      const file = (block.input as { file_path?: unknown } | undefined)?.file_path;
+      if (typeof file !== 'string' || !file) continue;
+      // A relative path from the agent is relative to its cwd, which is the
+      // session's primary root.
+      paths.add(path.isAbsolute(file) ? path.resolve(file) : path.resolve(roots[0] ?? '', file));
+    }
+  }
+  for (const p of paths) ambiguous.delete(p);
+  return { paths: [...paths], ambiguous: [...ambiguous] };
+}
+
 /**
  * Index of the `started` marker that opened `stepIndex`, scanning backwards so a
  * re-entered step resolves to its latest pass. Falls back to the newest `started`
@@ -520,6 +591,10 @@ interface LiveState {
    *  `assistant` messages can describe either side of the boundary, so none of
    *  them is a trustworthy occupancy reading — compact_metadata is. */
   compactedInTurn?: boolean;
+  /** Working-tree snapshot taken as the in-flight turn started, one per commit
+   *  unit — the open end of the attribution window closed at settle. Live only:
+   *  a turn that never settles simply leaves no window (see collectChangedPaths). */
+  turnBaselines?: RepoBaseline[];
 }
 
 export type TurnCompleteListener = (
@@ -828,7 +903,34 @@ export class SessionManager {
     };
     this.store.addRecentDir(params.cwd);
     this.upsert(meta);
+    // The floor the session review diff is taken against. Fire-and-forget: a
+    // worktree for a new session is created *before* the session, so `cwd` is
+    // already final here, and nothing reads the baseline until a turn settles.
+    void this.captureSessionBaseline(meta.id);
     return meta;
+  }
+
+  /**
+   * Snapshot every commit unit this session spans, once. Never overwrites an
+   * existing capture — re-running it would move the floor and silently drop work
+   * the session had already done out of its own review diff.
+   */
+  private async captureSessionBaseline(sessionId: string) {
+    try {
+      const meta = this.sessions.get(sessionId);
+      if (!meta || meta.diffBaselines?.length) return;
+      const baselines = await captureBaselines(this.rootsFor(meta));
+      if (!baselines.length) return;
+      // Re-read: the session can have been deleted, or adopted from storage with
+      // a baseline of its own, while the snapshot was running.
+      const live = this.sessions.get(sessionId);
+      if (!live || live.diffBaselines?.length) return;
+      live.diffBaselines = baselines;
+      live.diffBaselineAt = Date.now();
+      this.upsert(live);
+    } catch (err) {
+      console.warn('[diffBaseline]', err);
+    }
   }
 
   deleteSession(id: string) {
@@ -873,6 +975,177 @@ export class SessionManager {
    */
   private rootsFor(meta: SessionMeta): string[] {
     return rootsForCwd(this.store.loadProjects(), meta.cwd);
+  }
+
+  /**
+   * The floor a session's review diff is taken against, one per commit unit, and
+   * where it came from. Resolution order:
+   *
+   * 1. `meta.diffBaselines` — captured at session creation, authoritative.
+   * 2. the workflow's own snapshot — so a session already running across the
+   *    deploy that introduced (1) still gets a correct diff.
+   * 3. a synthesized HEAD per commit unit, flagged `synthetic` so the UI can say
+   *    "no baseline was recorded — this is all uncommitted work in the repo"
+   *    rather than presenting somebody else's dirty tree as this session's.
+   */
+  private async baselinesFor(
+    meta: SessionMeta,
+  ): Promise<{ baselines: RepoBaseline[]; source: 'session' | 'workflow' | 'synthetic' }> {
+    if (meta.diffBaselines?.length) return { baselines: meta.diffBaselines, source: 'session' };
+    const workflow = meta.workflow?.diffBaselines;
+    if (workflow?.length) return { baselines: workflow, source: 'workflow' };
+    const legacy = meta.workflow?.diffBaseline;
+    if (legacy) return { baselines: [{ repo: meta.cwd, ...legacy }], source: 'workflow' };
+    const { repos } = await groupByRepo(this.rootsFor(meta));
+    return {
+      baselines: repos.map((r) => ({ repo: r.root, ref: 'HEAD', untracked: [] })),
+      source: 'synthetic',
+    };
+  }
+
+  /**
+   * This session's changes, file by file, per commit unit — what the review modal
+   * renders. Assembled here rather than in fileRoutes.ts because the baseline
+   * chain, the session's roots and its transcript all live on this class; the
+   * route stays a permission clamp over it.
+   *
+   * No content, and no `MAX_DIFF_CHARS` cap: the list is bounded by the number of
+   * changed files, contents load one file at a time on click, and nothing on this
+   * path reaches a model.
+   */
+  async changeSummary(sessionId: string): Promise<SessionDiffResponse | null> {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return null;
+    const roots = this.rootsFor(meta);
+    const { baselines, source } = await this.baselinesFor(meta);
+    const { orphans } = await groupByRepo(roots);
+    const { paths, ambiguous } = collectChangedPaths(this.store.loadTranscript(sessionId), roots);
+    const mine = new Set(paths);
+    const unclear = new Set(ambiguous);
+
+    const repos: SessionDiffRepo[] = [];
+    for (const baseline of baselines) {
+      const { files, stale, untrackedOmitted } = await changedFiles(baseline.repo, baseline);
+      const attributed: FileChange[] = [];
+      const other: FileChange[] = [];
+      for (const file of files) {
+        const abs = path.resolve(baseline.repo, file.rel);
+        if (mine.has(abs)) attributed.push(file);
+        else if (unclear.has(abs)) attributed.push({ ...file, ambiguous: true });
+        else other.push(file);
+      }
+      repos.push({
+        repo: baseline.repo,
+        branch: await repoBranch(baseline.repo),
+        baseline: stale ? 'stale' : source,
+        attributed,
+        other,
+        ...(untrackedOmitted ? { untrackedOmitted } : {}),
+      });
+    }
+    return { repos, orphans };
+  }
+
+  /**
+   * The commit-ish one of this session's repos is diffed against, for loading a
+   * single file's "before" side. Null when `repo` is not one of its commit units —
+   * which is also the containment check for the file route.
+   */
+  async baselineRefFor(sessionId: string, repo: string): Promise<string | null> {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return null;
+    const { baselines } = await this.baselinesFor(meta);
+    const match = baselines.find((b) => b.repo === repo);
+    if (!match) return null;
+    return (await refExists(repo, match.ref)) ? match.ref : 'HEAD';
+  }
+
+  /**
+   * Open this turn's attribution window: a snapshot of every commit unit, taken
+   * as the turn starts and diffed against a second one at settle.
+   *
+   * Fire-and-forget, and lossy on purpose — a turn that settles before this
+   * resolves simply records no window, and `collectChangedPaths` falls back to
+   * scanning its tool calls.
+   */
+  private async openTurnWindow(sessionId: string) {
+    try {
+      const meta = this.sessions.get(sessionId);
+      if (!meta) return;
+      const baselines = await captureBaselines(this.rootsFor(meta));
+      const state = this.live.get(sessionId);
+      if (state) state.turnBaselines = baselines;
+    } catch (err) {
+      console.warn('[turnWindow]', err);
+    }
+  }
+
+  /**
+   * Close the window a turn opened and record what changed on disk inside it, as
+   * one `files-changed` event. Same fire-and-forget class as summarizeTurn: never
+   * awaited, so it can't delay a queue flush or a workflow advance.
+   *
+   * Skipped when the turn made no tool calls — a pure-conversation turn changed
+   * nothing, and proving that would still cost two snapshots per repo.
+   */
+  private async recordFilesChanged(sessionId: string, resultSeq: number) {
+    try {
+      const state = this.live.get(sessionId);
+      const start = state?.turnBaselines;
+      if (state) state.turnBaselines = undefined; // one window per turn, closed here
+      if (!start?.length) return;
+      const meta = this.sessions.get(sessionId);
+      if (!meta) return;
+
+      const events = withoutCompactSpans(this.store.loadTranscript(sessionId));
+      let lastUserIdx = -1;
+      for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i].kind === 'user') {
+          lastUserIdx = i;
+          break;
+        }
+      }
+      if (!scanTurnActivity(events.slice(Math.max(lastUserIdx, 0))).toolCalls.length) return;
+
+      const shared = await this.sharedRepos(sessionId);
+      const repos: FilesChangedData['repos'] = [];
+      for (const from of start) {
+        const to: RepoBaseline = { repo: from.repo, ...(await captureBaseline(from.repo)) };
+        const rels = await changedBetween(from.repo, from, to);
+        if (!rels.length) continue;
+        repos.push({ repo: from.repo, rels, ...(shared.has(from.repo) ? { ambiguous: true } : {}) });
+      }
+      if (repos.length) {
+        this.emitEvent(sessionId, 'files-changed', { resultSeq, repos } satisfies FilesChangedData);
+      }
+    } catch (err) {
+      console.warn('[filesChanged]', err);
+    }
+  }
+
+  /**
+   * Commit units this session shares with another session that was live during
+   * the window. Sessions in their own worktrees can't collide; sessions sharing a
+   * checkout can, and a write from one lands inside the other's snapshot window
+   * too. Those paths are reported as unclear rather than claimed — guessing here
+   * would be worse than saying so.
+   *
+   * Only sessions still active at settle are counted: nothing records when a turn
+   * elsewhere *ended*, so a session that ran and finished entirely inside the
+   * window is missed and its writes are attributed here.
+   */
+  private async sharedRepos(sessionId: string): Promise<Set<string>> {
+    const meta = this.sessions.get(sessionId);
+    const shared = new Set<string>();
+    if (!meta) return shared;
+    const mine = new Set((await groupByRepo(this.rootsFor(meta))).repos.map((r) => r.root));
+    for (const other of this.sessions.values()) {
+      if (other.id === sessionId || !isSessionActive(other.status)) continue;
+      for (const repo of (await groupByRepo(this.rootsFor(other))).repos) {
+        if (mine.has(repo.root)) shared.add(repo.root);
+      }
+    }
+    return shared;
   }
 
   /**
@@ -1397,6 +1670,10 @@ export class SessionManager {
     // row's elapsed time survives reloads.
     meta.turnSource = source;
     meta.turnStartedAt = Date.now();
+    // Opens this turn's attribution window (see recordFilesChanged). Never
+    // awaited — a slow `git stash create` must not delay the prompt reaching the
+    // worker; a window that loses the race just isn't recorded.
+    void this.openTurnWindow(sessionId);
     meta.interruptedAt = undefined; // any prompt clears the crash-interrupted flag
     this.interrupting.delete(sessionId); // a new turn supersedes any in-flight interrupt
     // A user prompt after a force-advance (before the interrupted turn settled)
@@ -2432,6 +2709,8 @@ export class SessionManager {
       this.onTurnComplete?.(sessionId, source, interrupted, failed);
       this.maybeFlush(sessionId);
       void this.summarizeTurn(sessionId, resultSeq);
+      // Closes the attribution window this turn opened. Same class again.
+      void this.recordFilesChanged(sessionId, resultSeq);
       // Same class as summarizeTurn: fire-and-forget once the turn has settled.
       // Never awaited — the queue flush and workflow advance above must not wait
       // on a CLI control request.

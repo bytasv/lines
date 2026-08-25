@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import type { FileChange, FileChangeStatus } from '@lines/shared';
 
 const pexec = promisify(execFile);
 const MAX_BUFFER = 12 * 1024 * 1024;
@@ -143,6 +144,157 @@ export async function captureBaselines(roots: string[]): Promise<RepoBaseline[]>
     out.push({ repo: repo.root, ...(await captureBaseline(repo.root)) });
   }
   return out;
+}
+
+/**
+ * Does `ref` still name a commit in `repo`?
+ *
+ * A `git stash create` snapshot is a *dangling* commit, so a `git gc` in a
+ * long-lived session can prune it. `git()` swallows every failure to '', which
+ * would turn a pruned baseline into a silent "nothing changed" — this is what
+ * lets a caller fall back to HEAD and say so instead.
+ */
+export async function refExists(repo: string, ref: string): Promise<boolean> {
+  return !!(await git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).trim();
+}
+
+/** One changed file, as `git diff --name-status` sees it. */
+export interface NameStatusEntry {
+  rel: string;
+  status: FileChangeStatus;
+}
+
+/**
+ * Parse `git diff --name-status`. Pure, so it is testable without a repo — the
+ * `parseWorktreeList` precedent in worktrees.ts.
+ *
+ * A rename becomes two rows (the old path deleted, the new one added) and a copy
+ * becomes one add: the review list is a list of paths, and it has no rename row
+ * to put a `R100` in. `T` (typechange) and `U` (unmerged) read as modifications.
+ */
+export function parseNameStatus(out: string): NameStatusEntry[] {
+  const entries: NameStatusEntry[] = [];
+  for (const line of out.split('\n')) {
+    const parts = line.split('\t');
+    const code = (parts[0] ?? '').trim();
+    if (!code) continue;
+    if (code[0] === 'R' || code[0] === 'C') {
+      const [, from, to] = parts;
+      if (code[0] === 'R' && from) entries.push({ rel: from, status: 'D' });
+      if (to) entries.push({ rel: to, status: 'A' });
+      continue;
+    }
+    const rel = parts[1];
+    if (!rel) continue;
+    entries.push({ rel, status: code[0] === 'A' ? 'A' : code[0] === 'D' ? 'D' : 'M' });
+  }
+  return entries;
+}
+
+/**
+ * `git diff --numstat` collapses a rename into one path spec: `old => new`, or
+ * `dir/{a => b}.ts` when the paths share a prefix and a suffix. Only the new path
+ * has a row in the review list, so that is what we key the counts on.
+ */
+function numstatPath(spec: string): string {
+  const braced = spec.match(/^(.*)\{(.*) => (.*)\}(.*)$/);
+  // `dir/{ => sub}/f.ts` leaves a doubled separator once the empty side is dropped.
+  if (braced) return `${braced[1]}${braced[3]}${braced[4]}`.replace(/\/\/+/g, '/');
+  const arrow = spec.split(' => ');
+  return arrow.length === 2 ? arrow[1] : spec;
+}
+
+/**
+ * Parse `git diff --numstat` into per-path line counts. Pure, like
+ * `parseNameStatus`. Binary files report `-`/`-` (git counts bytes, not lines)
+ * and land as 0/0 rather than NaN.
+ */
+export function parseNumstat(out: string): Map<string, { added: number; removed: number }> {
+  const stats = new Map<string, { added: number; removed: number }>();
+  for (const line of out.split('\n')) {
+    const [added, removed, ...rest] = line.split('\t');
+    if (!rest.length || !rest.join('')) continue;
+    stats.set(numstatPath(rest.join('\t')), {
+      added: added === '-' ? 0 : Number(added) || 0,
+      removed: removed === '-' ? 0 : Number(removed) || 0,
+    });
+  }
+  return stats;
+}
+
+/**
+ * Every file changed in `repo` since `baseline`, as a structured list rather than
+ * diff text — the review UI loads contents one file at a time, so this response
+ * stays bounded no matter how large the working tree is.
+ *
+ * `MAX_DIFF_CHARS` is deliberately not applied: that cap exists to protect a
+ * model's context window, and nothing on this path reaches a model.
+ */
+export async function changedFiles(
+  repo: string,
+  baseline: DiffBaseline | undefined,
+): Promise<{ files: FileChange[]; stale: boolean; untrackedOmitted: number }> {
+  const wanted = baseline?.ref ?? 'HEAD';
+  // Only a snapshot ref can go stale; HEAD is missing only in an empty repo,
+  // which is the pre-existing gap repoDiff already has.
+  const stale = wanted !== 'HEAD' && !(await refExists(repo, wanted));
+  const ref = stale ? 'HEAD' : wanted;
+
+  const stats = parseNumstat(await git(repo, ['diff', '--numstat', ref]));
+  const files: FileChange[] = parseNameStatus(await git(repo, ['diff', '--name-status', ref])).map(
+    (entry) => ({ ...entry, ...(stats.get(entry.rel) ?? { added: 0, removed: 0 }) }),
+  );
+
+  // A pruned ref cost us the tracked floor, not the untracked one — that list is
+  // plain paths, so it still tells new files from pre-existing ones.
+  const preexisting = new Set(baseline?.untracked ?? []);
+  const untracked = (await listUntracked(repo)).filter((f) => !preexisting.has(f));
+  for (const rel of untracked.slice(0, MAX_UNTRACKED)) {
+    const counted = parseNumstat(
+      await git(repo, ['diff', '--no-index', '--numstat', '--', '/dev/null', rel]),
+    );
+    files.push({ rel, status: 'A', added: [...counted.values()][0]?.added ?? 0, removed: 0 });
+  }
+
+  return { files, stale, untrackedOmitted: Math.max(0, untracked.length - MAX_UNTRACKED) };
+}
+
+/**
+ * A file's contents at `ref`, or '' when it did not exist there (a file the
+ * session created). The "after" side is the file on disk, which the caller reads
+ * under its own size and binary rules.
+ */
+export async function showFile(repo: string, ref: string, rel: string): Promise<string> {
+  return git(repo, ['show', `${ref}:${rel}`]);
+}
+
+/**
+ * Paths that changed in `repo` between two snapshots of the same working tree —
+ * the per-turn attribution window. Tracked files come from diffing the two
+ * snapshot commits; new files are the set difference of their untracked listings.
+ *
+ * Because both ends are git snapshots, this catches every on-disk change the turn
+ * produced regardless of what made it (a shell redirect, a script, an MCP tool),
+ * and a file edited then restored cancels out to nothing.
+ */
+export async function changedBetween(
+  repo: string,
+  from: DiffBaseline,
+  to: DiffBaseline,
+): Promise<string[]> {
+  const rels = new Set<string>();
+  // A pruned or absent ref costs us the tracked half, not the untracked one.
+  if (await refExists(repo, from.ref)) {
+    for (const rel of (await git(repo, ['diff', '--name-only', from.ref, to.ref]))
+      .split('\n')
+      .map((f) => f.trim())
+      .filter(Boolean)) {
+      rels.add(rel);
+    }
+  }
+  const before = new Set(from.untracked);
+  for (const rel of to.untracked) if (!before.has(rel)) rels.add(rel);
+  return [...rels];
 }
 
 /**

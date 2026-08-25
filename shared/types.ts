@@ -23,16 +23,76 @@ export const APP_PROTOCOL_VERSION = 2;
  * socket removes that token from URLs (and so from logs and browser history),
  * and means a connection reached through a relay needs no HTTP surface at all.
  */
-export type FileRequestKind = 'file' | 'tree' | 'find' | 'docs' | 'attachment' | 'syncLog';
+export type FileRequestKind =
+  | 'file'
+  | 'tree'
+  | 'find'
+  | 'docs'
+  | 'attachment'
+  | 'syncLog'
+  | 'sessionDiff'
+  | 'sessionDiffFile';
 
 export interface FileRequestParams {
-  /** file/tree/docs: exactly one. find: one per project root. */
+  /** file/tree/docs: exactly one. find: one per project root.
+   *  sessionDiffFile: the repo root the file lives in. */
   paths?: string[];
   /** find only. */
   q?: string;
   limit?: number;
-  /** attachment only: path relative to the user's attachments root. */
+  /** attachment: path relative to the user's attachments root.
+   *  sessionDiffFile: path relative to `paths[0]`. */
   rel?: string;
+  /** sessionDiff / sessionDiffFile: which session's changes to read. */
+  sessionId?: string;
+}
+
+export type FileChangeStatus = 'A' | 'M' | 'D';
+
+/** One changed file in a session's review diff. */
+export interface FileChange {
+  /** Path relative to its repo root. */
+  rel: string;
+  status: FileChangeStatus;
+  added: number;
+  removed: number;
+  /** Another session was live in the same work tree while this change landed, so
+   *  it is reported rather than claimed. */
+  ambiguous?: boolean;
+}
+
+/** One commit unit's section of a session review diff. */
+export interface SessionDiffRepo {
+  /** Absolute work-tree root (`git rev-parse --show-toplevel`). */
+  repo: string;
+  branch: string | null;
+  /**
+   * Where the diff's floor came from:
+   * - 'session'   — the snapshot taken when the session was created.
+   * - 'workflow'  — a workflow's own snapshot, for a session that predates the
+   *                 session-level one.
+   * - 'synthetic' — none recorded, so this is the repo's whole uncommitted state.
+   * - 'stale'     — one was recorded but `git gc` pruned it; fell back to HEAD.
+   */
+  baseline: 'session' | 'workflow' | 'synthetic' | 'stale';
+  /** Changed by this session, as far as its turn windows and tool calls know. */
+  attributed: FileChange[];
+  /** The rest of the repo's uncommitted state — in a shared checkout this may be
+   *  another session's work, or the user's own. */
+  other: FileChange[];
+  /** Untracked files beyond the per-repo listing cap, left out of `other`. */
+  untrackedOmitted?: number;
+}
+
+export interface SessionDiffResponse {
+  repos: SessionDiffRepo[];
+  /** Session roots that aren't inside a work tree — never a commit unit. */
+  orphans: string[];
+}
+
+export interface SessionDiffFileResponse {
+  before: string;
+  after: string;
 }
 
 /** Bodies mirror the old JSON responses; `attachment` returns base64 bytes. */
@@ -586,6 +646,16 @@ export interface SessionMeta {
   queuePaused?: boolean;
   /** ms epoch when a crash/restart killed an in-flight turn; cleared by the next prompt. */
   interruptedAt?: number;
+  /**
+   * Working-tree snapshot taken when the session was created, one per commit unit
+   * (`git rev-parse --show-toplevel`) — the floor the session review diff is taken
+   * against, so it shows this session's work rather than every uncommitted change
+   * in the repo. Same non-destructive `git stash create` snapshot the workflow
+   * path takes; a few hundred bytes per repo on this synced blob.
+   */
+  diffBaselines?: { repo: string; ref: string; untracked: string[] }[];
+  /** ms epoch the baselines above were captured. */
+  diffBaselineAt?: number;
 }
 
 export interface ModelOption {
@@ -611,8 +681,17 @@ export interface TranscriptEvent {
    * - 'workflow'  : workflow step transition marker
    * - 'turn-summary': one-line summary of a completed turn's tool activity
    * - 'context-compact': context compaction requested / finished
+   * - 'files-changed': paths a completed turn changed on disk
    */
-  kind: 'user' | 'sdk' | 'file-snapshot' | 'permission' | 'workflow' | 'turn-summary' | 'context-compact';
+  kind:
+    | 'user'
+    | 'sdk'
+    | 'file-snapshot'
+    | 'permission'
+    | 'workflow'
+    | 'turn-summary'
+    | 'context-compact'
+    | 'files-changed';
   data: unknown;
 }
 
@@ -620,6 +699,29 @@ export interface TurnSummaryData {
   /** seq of the sdk 'result' event this summarizes. */
   resultSeq: number;
   summary: string;
+}
+
+/**
+ * What one turn changed on disk, measured by bracketing the turn with two git
+ * snapshots rather than by reading its tool calls — so a write made through the
+ * shell, a script, or an MCP tool is recorded just the same.
+ *
+ * A transcript event, deliberately not a field on `SessionMeta`: that blob is
+ * synced, and per-turn path lists would grow it without bound. Transcript events
+ * are already per-session, persisted, and dropped with the session.
+ */
+export interface FilesChangedData {
+  /** seq of the sdk 'result' event that closed this window. */
+  resultSeq: number;
+  repos: {
+    /** Absolute work-tree root. */
+    repo: string;
+    /** Paths relative to `repo`. */
+    rels: string[];
+    /** Another session was live in this work tree during the window, so these
+     *  paths are reported as unclear rather than attributed. */
+    ambiguous?: boolean;
+  }[];
 }
 
 export interface FileSnapshotData {

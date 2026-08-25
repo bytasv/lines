@@ -99,26 +99,26 @@ describe('guest file scope', () => {
     }
   });
 
-  test('the file route enforces the clamp, not just the resolver', () => {
+  test('the file route enforces the clamp, not just the resolver', async () => {
     const read = (p: string, access: SocketAccess) =>
       handleFileRequest(ctx(), 'file', { paths: [p] }, access);
 
-    assert.equal(read(path.join(shared, 'ok.txt'), sessionGuest).status, 200);
+    assert.equal((await read(path.join(shared, 'ok.txt'), sessionGuest)).status, 200);
     // 403, not 404: the path exists and is readable — it is simply not theirs.
-    assert.equal(read(path.join(private_, 'secret.txt'), sessionGuest).status, 403);
-    assert.equal(read(path.join(private_, 'secret.txt'), OWNER_ACCESS).status, 200);
+    assert.equal((await read(path.join(private_, 'secret.txt'), sessionGuest)).status, 403);
+    assert.equal((await read(path.join(private_, 'secret.txt'), OWNER_ACCESS)).status, 200);
   });
 
-  test('find refuses a root outside the grant rather than searching the rest', () => {
+  test('find refuses a root outside the grant rather than searching the rest', async () => {
     // A partial result would read as "no matches in that folder", quietly hiding
     // the refusal — so any out-of-scope root fails the whole request.
-    const res = handleFileRequest(ctx(), 'find', { paths: [shared, private_], q: 'x' }, sessionGuest);
+    const res = await handleFileRequest(ctx(), 'find', { paths: [shared, private_], q: 'x' }, sessionGuest);
     assert.equal(res.status, 403);
   });
 
-  test('the sync log is owner-only', () => {
+  test('the sync log is owner-only', async () => {
     // It is the host's storage-link history, and a guest has no store here at all.
-    assert.equal(handleFileRequest(ctx(), 'syncLog', {}, sessionGuest).status, 403);
-    assert.equal(handleFileRequest(ctx(), 'syncLog', {}, machineGuest).status, 403);
+    assert.equal((await handleFileRequest(ctx(), 'syncLog', {}, sessionGuest)).status, 403);
+    assert.equal((await handleFileRequest(ctx(), 'syncLog', {}, machineGuest)).status, 403);
   });
 });

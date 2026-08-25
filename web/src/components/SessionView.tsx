@@ -4,6 +4,7 @@ import { useClipboard } from '@mantine/hooks';
 import {
   IconAlertTriangle,
   IconCheck,
+  IconFileDiff,
   IconFolder,
   IconGitBranch,
   IconLogin,
@@ -21,6 +22,7 @@ import { Composer } from './Composer';
 import { QueuedMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
 import { ShareModal } from './ShareModal';
+import { SessionDiffModal } from './SessionDiffModal';
 import { MachineDot } from './MachineDot';
 import { PresenceStack } from './PresenceStack';
 import { linkedMachineHealth } from '../lib/machineHealth';
@@ -38,6 +40,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   // this exists to prevent.
   const access = useStore((s) => s.access);
   const [sharing, setSharing] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const remote = useSessionMachine(sessionId);
   // The dot in this header describes the session's *own* machine, so a shared
   // session on a dead laptop is obvious before you type into it.
@@ -117,6 +120,20 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               last turn ${session.lastCostUsd.toFixed(4)}
             </Text>
           )}
+          {/* Opens on click rather than prefetching a count: the diff is a `git
+              diff` per repo, and paying for one every time a session is selected
+              would be a poor trade for a badge. */}
+          <Tooltip label="Review this session’s changes" withArrow>
+            <ActionIcon
+              variant="subtle"
+              color="gray"
+              size="sm"
+              aria-label="Review this session’s changes"
+              onClick={() => setReviewing(true)}
+            >
+              <IconFileDiff size={14} />
+            </ActionIcon>
+          </Tooltip>
           {/* Owner only: sharing somebody else's session is not a grant anyone
               holds, and there is no storage to record a grant in a local install. */}
           {!access && SHARING_ENABLED && (
@@ -231,6 +248,9 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       <Transcript sessionId={sessionId} events={events ?? []} stepCount={workflow?.steps.length} />
       <QueuedMessages session={session} />
       <Composer session={session} />
+      {reviewing && (
+        <SessionDiffModal opened={reviewing} onClose={() => setReviewing(false)} sessionId={sessionId} />
+      )}
       {sharing && deviceId && (
         <ShareModal
           opened={sharing}

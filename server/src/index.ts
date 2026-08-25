@@ -791,7 +791,7 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
     case 'fileRequest': {
       // Replies on the originating link, never via broadcast: two tabs each have
       // their own in-flight reqIds.
-      const { status, body } = handleFileRequest(ctx, msg.kind, msg.params, access);
+      const { status, body } = await handleFileRequest(ctx, msg.kind, msg.params, access);
       ws.send(JSON.stringify({ type: 'fileResponse', reqId: msg.reqId, status, body } satisfies ServerMessage));
       break;
     }
