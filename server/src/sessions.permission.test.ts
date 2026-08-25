@@ -210,6 +210,28 @@ test('a guard auto-approval is recorded as auto', async () => {
   );
 });
 
+test('bypass mode resolves a tool call without a card', async () => {
+  const h = harness({ mode: 'bypassPermissions' });
+  await h.sessions.handleWorkerRpc(canUseTool('r1', 'Bash'));
+
+  assert.deepEqual(h.answered, [{ behavior: 'allow', updatedInput: { command: 'ls' } }]);
+  assert.deepEqual(
+    h.cards().map((c) => [c.resolution, c.resolvedBy]),
+    [['allow', 'auto']],
+    'recorded as an auto-allow, never as a pending request',
+  );
+  assert.notEqual(h.s1().status, 'waiting-permission');
+});
+
+test('bypass mode still parks an always-ask tool on a card', async () => {
+  const h = harness({ mode: 'bypassPermissions' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+
+  assert.deepEqual(h.answered, []);
+  assert.equal(h.s1().status, 'waiting-permission');
+});
+
 test('a second answer for an already-resolved request changes nothing', () => {
   const h = harness({
     mode: 'plan',

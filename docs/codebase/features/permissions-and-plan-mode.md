@@ -188,12 +188,24 @@ session actually runs in `acceptEdits`, and the bridge guard decides per tool ca
 auto-approve or prompt (see the `PermissionMode` doc comment in `shared/types.ts`). The guard's
 exceptions to that per-call decision are a user-visible, editable list — the allowlist below.
 
+`'bypassPermissions'` is bridge-enforced too, for a different reason: the worker always registers
+a `canUseTool` callback, so the SDK's own bypass fast-path never runs and *our* handlers decide
+every call. Both `handlePreToolUse` and `handleCanUseTool` carry a `bypassPermissions` branch that
+auto-allows outright — placed after the `ALWAYS_ASK_TOOLS` and Lines-MCP-write returns, so those
+two carve-outs still prompt, and before the guard, so bypass never pays for `assessToolCall`.
+Without those branches Bypass behaved exactly like Manual. `buildQueryOptions` also passes
+`allowDangerouslySkipPermissions: true` unconditionally — the SDK requires it before it will
+accept the mode at all, and setting it at spawn is what lets a *mid-session* switch to Bypass
+take effect on the running query instead of being rejected into a `worker.ts` `console.warn`.
+
 ### Resolution provenance
 
 `handlePreToolUse` returns an explicit `permissionDecision: 'ask'` for any `ALWAYS_ASK_TOOLS`
 call, in every permission mode, instead of merely skipping its own auto-allow branch — a bare
-`continue: true` would let `bypassPermissions` or a `settings.json` `permissions.allow` entry
-resolve the tool before `canUseTool` runs at all. The same hook mirrors a model-initiated
+`continue: true` would let `bypassPermissions` (whose own branch sits right below it) or a
+`settings.json` `permissions.allow` entry resolve the tool before `canUseTool` runs at all. That
+explicit `'ask'` is the only thing keeping plan approval and clarifying questions in front of a
+human under Bypass. The same hook mirrors a model-initiated
 `EnterPlanMode` into `meta.permissionMode = 'plan'`, the inverse of the mirroring
 `resolvePermission` already does on approval, so a query restart respawns still gated.
 
@@ -227,7 +239,7 @@ last-write-wins and gets pushed back over the remote one).
 
 ### Plan-file auto-approve
 
-`handlePreToolUse`/`handleCanUseTool` check, outside `auto` permission mode:
+`handlePreToolUse`/`handleCanUseTool` check, outside `auto` and `bypassPermissions` mode:
 `isSafeReadOnly(...) || isSafePlanWrite(...)` → if either is true, auto-approve (same
 `resolution: 'allow', auto: true` transcript event and `permissionDecision: 'allow'` /
 `{ behavior: 'allow' }` return used by the existing observation-only path) instead of prompting.
@@ -295,14 +307,18 @@ quoted reply under a `kept planning` badge.
 ## Tests
 
 - `server/src/autoGuard.plan.test.ts` — the hook returns `permissionDecision: 'ask'` for both
-  `ALWAYS_ASK_TOOLS` in every `PermissionMode`, including `bypassPermissions`; `isPlanPath`
+  `ALWAYS_ASK_TOOLS` in every `PermissionMode`, including `bypassPermissions`; under
+  `bypassPermissions` the hook allows a `Bash` call the guard would otherwise prompt for but
+  still asks for a Lines workflow write; `isPlanPath`
   containment (home plans dir, `<cwd>/.claude/plans`, out-of-tree paths, and the classic
   `.../plans/../../../.ssh/id_rsa` traversal), plus the `isSafeReadOnly`/`isSafePlanWrite`/
   `assessToolCall` cases.
 - `server/src/sessions.permission.test.ts` — `resolvedBy` stamped per source; a duplicate
   resolution is a no-op; `findPermissionResolution` returns the newest answer; resend replay
   re-asks a synthesized allow but replays a user/plan-reply one (and a legacy resolution with no
-  `resolvedBy`); `EnterPlanMode` mirrors `meta.permissionMode`; `planReplyDecision`
+  `resolvedBy`); a `bypassPermissions` session resolves `Bash` straight to `allow` with no card
+  and no `waiting-permission`, while `ExitPlanMode` still parks; `EnterPlanMode` mirrors
+  `meta.permissionMode`; `planReplyDecision`
   fall-through conditions, request-id selection (live vs. transcript-scan fallback), and the
   attachments/no-attachments reason-text branches.
 - `server/src/sessions.reconcile.test.ts` — an unresolved `ExitPlanMode` card blocks

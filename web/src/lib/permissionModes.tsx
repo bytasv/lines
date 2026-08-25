@@ -33,7 +33,7 @@ export const PERMISSION_MODES: PermissionModeItem[] = [
   {
     value: 'bypassPermissions',
     label: 'Bypass',
-    description: 'Runs every tool without asking, no guard. Sandbox only.',
+    description: 'Runs every tool without asking. Plan approval and questions still ask. Sandbox only.',
   },
 ];
 

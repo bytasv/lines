@@ -903,6 +903,13 @@ export class SessionManager {
       ...(extraRoots.length ? { additionalDirectories: extraRoots } : {}),
       model: resolveModelId(meta.model),
       permissionMode: sdkPermissionMode(meta.permissionMode),
+      // Only *permits* bypassPermissions to be selected — the bridge's own
+      // permission handlers are the real gate, and they keep the always-ask
+      // tools and Lines workflow writes prompting even under bypass. Set
+      // unconditionally so a live setPermissionMode('bypassPermissions') on an
+      // already-running query is accepted instead of rejected (worker.ts only
+      // warns), which is what made a mid-session switch to Bypass do nothing.
+      allowDangerouslySkipPermissions: true,
       includePartialMessages: true,
       resume: meta.claudeSessionId,
       systemPrompt: {
@@ -2519,6 +2526,29 @@ export class SessionManager {
   }
 
   /**
+   * Record a tool call the bridge approved on its own. Every auto-allow branch
+   * in both permission handlers goes through here so the transcript can never
+   * end up with one of them silently unrecorded. A resend is already in the
+   * transcript from the first delivery — re-emitting would double the event.
+   */
+  private recordAutoAllow(
+    sessionId: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    resend: boolean,
+  ) {
+    if (resend) return;
+    this.emitEvent(sessionId, 'permission', {
+      requestId: randomUUID(),
+      toolName,
+      input,
+      resolution: 'allow',
+      auto: true,
+      resolvedBy: 'auto',
+    } satisfies PermissionRequestData);
+  }
+
+  /**
    * PreToolUse hook body. The auto-mode guard lives here, NOT only in
    * canUseTool: allow rules from user settings resolve before canUseTool,
    * but hooks run before the whole permission flow — so this is the only
@@ -2546,16 +2576,7 @@ export class SessionManager {
           },
         };
       }
-      if (!resend) {
-        this.emitEvent(sessionId, 'permission', {
-          requestId: randomUUID(),
-          toolName,
-          input: toolInput,
-          resolution: 'allow',
-          auto: true,
-          resolvedBy: 'auto',
-        } satisfies PermissionRequestData);
-      }
+      this.recordAutoAllow(sessionId, toolName, toolInput, resend);
       return {
         continue: true,
         hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
@@ -2587,6 +2608,19 @@ export class SessionManager {
       };
     }
 
+    // Bypass: allow everything the two carve-outs above didn't already claim.
+    // The SDK's own bypass fast-path never applies here — worker.ts always
+    // registers canUseTool — so without this branch Bypass behaved exactly like
+    // Manual. Deliberately above the guard: bypass skips assessToolCall, so it
+    // never pays for the roots/allowlist resolution below.
+    if (meta?.permissionMode === 'bypassPermissions') {
+      this.recordAutoAllow(sessionId, toolName, toolInput, resend);
+      return {
+        continue: true,
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
+      };
+    }
+
     // Resolved once per invocation: every guard call below wants the same list,
     // and rootsFor re-reads the projects file on each call.
     const roots = meta ? this.rootsFor(meta) : [];
@@ -2605,16 +2639,7 @@ export class SessionManager {
             },
           };
         }
-        if (!resend) {
-          this.emitEvent(sessionId, 'permission', {
-            requestId: randomUUID(),
-            toolName,
-            input: toolInput,
-            resolution: 'allow',
-            auto: true,
-            resolvedBy: 'auto',
-          } satisfies PermissionRequestData);
-        }
+        this.recordAutoAllow(sessionId, toolName, toolInput, resend);
         return {
           continue: true,
           hookSpecificOutput: {
@@ -2632,16 +2657,7 @@ export class SessionManager {
       // so an approved plan re-prompts on each Read/Grep. Let observation-only
       // calls and plan-file authoring through silently (still recorded);
       // Bash and edits to project files are untouched.
-      if (!resend) {
-        this.emitEvent(sessionId, 'permission', {
-          requestId: randomUUID(),
-          toolName,
-          input: toolInput,
-          resolution: 'allow',
-          auto: true,
-          resolvedBy: 'auto',
-        } satisfies PermissionRequestData);
-      }
+      this.recordAutoAllow(sessionId, toolName, toolInput, resend);
       return {
         continue: true,
         hookSpecificOutput: {
@@ -2698,35 +2714,24 @@ export class SessionManager {
     // reads auto-allow in every mode, writes always reach the card below.
     if (isLinesMcpTool(toolName)) {
       if (isReadOnlyLinesTool(toolName)) {
-        if (!resend) {
-          this.emitEvent(sessionId, 'permission', {
-            requestId: randomUUID(),
-            toolName,
-            input,
-            resolution: 'allow',
-            auto: true,
-            resolvedBy: 'auto',
-          } satisfies PermissionRequestData);
-        }
+        this.recordAutoAllow(sessionId, toolName, input, resend);
         return { behavior: 'allow', updatedInput: input };
       }
     } else {
       const meta = this.sessions.get(sessionId);
       // One resolution for both guard branches — rootsFor re-reads the projects file.
       const roots = meta ? this.rootsFor(meta) : [];
+      // Bypass allows every tool but the always-ask pair (and the Lines writes
+      // handled above). Repeated here rather than left to the hook because the
+      // PreToolUse hook fails closed into 'ask', which lands right here.
+      if (meta?.permissionMode === 'bypassPermissions' && !ALWAYS_ASK_TOOLS.has(toolName)) {
+        this.recordAutoAllow(sessionId, toolName, input, resend);
+        return { behavior: 'allow', updatedInput: input };
+      }
       if (meta?.permissionMode === 'auto' && !ALWAYS_ASK_TOOLS.has(toolName)) {
         const verdict = assessToolCall(toolName, input, roots, this.guard.list());
         if (!verdict.dangerous) {
-          if (!resend) {
-            this.emitEvent(sessionId, 'permission', {
-              requestId: randomUUID(),
-              toolName,
-              input,
-              resolution: 'allow',
-              auto: true,
-              resolvedBy: 'auto',
-            } satisfies PermissionRequestData);
-          }
+          this.recordAutoAllow(sessionId, toolName, input, resend);
           return { behavior: 'allow', updatedInput: input };
         }
         guardReason = verdict.reason;
@@ -2737,16 +2742,7 @@ export class SessionManager {
       ) {
         // Other modes: observation-only calls and plan-file writes still
         // auto-approve (see handlePreToolUse) so post-plan reads don't ask again.
-        if (!resend) {
-          this.emitEvent(sessionId, 'permission', {
-            requestId: randomUUID(),
-            toolName,
-            input,
-            resolution: 'allow',
-            auto: true,
-            resolvedBy: 'auto',
-          } satisfies PermissionRequestData);
-        }
+        this.recordAutoAllow(sessionId, toolName, input, resend);
         return { behavior: 'allow', updatedInput: input };
       }
     }

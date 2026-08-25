@@ -145,6 +145,20 @@ const preToolUse = (toolName: string): WorkerRpc => ({
   payload: { tool_name: toolName, tool_input: {} },
 });
 
+test('bypass mode allows a tool the guard would otherwise prompt for', async () => {
+  const h = hookHarness('bypassPermissions');
+  await h.sessions.handleWorkerRpc(preToolUse('Bash'));
+  const answer = h.answered[0] as { hookSpecificOutput?: { permissionDecision?: string } };
+  assert.equal(answer.hookSpecificOutput?.permissionDecision, 'allow');
+});
+
+test('bypass mode still asks for a Lines workflow write', async () => {
+  const h = hookHarness('bypassPermissions');
+  await h.sessions.handleWorkerRpc(preToolUse('mcp__lines__save_step'));
+  const answer = h.answered[0] as { hookSpecificOutput?: { permissionDecision?: string } };
+  assert.equal(answer.hookSpecificOutput?.permissionDecision, 'ask');
+});
+
 test('the hook forces a prompt for always-ask tools in every mode', async () => {
   const modes: PermissionMode[] = ['default', 'plan', 'auto', 'bypassPermissions'];
   for (const mode of modes) {
