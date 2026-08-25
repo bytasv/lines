@@ -296,6 +296,9 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 - Any other tool (or no tool recorded) → label "needs permission", yellow badge (the unchanged
   default).
 - Notification body mirrors the sidebar label (capitalized) for `waiting-permission` sessions.
+- Archived sessions in the sidebar render 20 at a time behind a "Show N more" button instead
+  of the full archived list, since `lines.showArchived` defaults to on and a long-lived
+  project can accumulate hundreds of them.
 
 ## Architectural rules
 
@@ -329,6 +332,12 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   short-circuit.
 - `send()` (`ws.ts`) returns `boolean` instead of `void`, so a caller can tell "sent" apart from
   "dropped" without re-deriving socket state itself.
+- `SessionRow` is memoized — selecting a different session, or any `sessions` map update (e.g.
+  a live turn ticking status), otherwise re-rendered every row in the list regardless of the
+  size of the session being switched to. The memo relies on `session` keeping its object
+  identity when unchanged, which `sessionUpsert` already guarantees by only replacing the entry
+  that changed. See [transcript-performance](transcript-performance.md) for the other half of
+  "switching sessions feels slow."
 
 ## Related decisions
 
@@ -338,6 +347,8 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 - [prompt-mentions](prompt-mentions.md) — the `MentionValue` the text draft persists.
 - [hosted-machine-access](hosted-machine-access.md) — why a `hello` can repeat with no browser
   reconnect (relay `open` replay on a bridge attach/takeover).
+- [transcript-performance](transcript-performance.md) — the sidebar re-render cost measured
+  alongside the transcript's own session-switch cost.
 - [cloud-sync-sessions](cloud-sync-sessions.md) — what actually makes a delete stick once the
   `deleteSession` message here reaches the bridge.
 - [git-worktrees](git-worktrees.md) — the `worktreePending` flag and `pendingCreate` re-arm added

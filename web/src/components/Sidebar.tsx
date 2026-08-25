@@ -36,7 +36,7 @@ import {
 } from '@tabler/icons-react';
 import { useLocalStorage } from '@mantine/hooks';
 import type { CSSProperties } from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
 import { findWorktree, projectPaths, projectRoots } from '@lines/shared';
@@ -47,6 +47,16 @@ import type { SidebarMode } from '../store';
 import { projectAt, sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
 import { FileTree } from './FileTree';
+
+/**
+ * Archived rows rendered before the "show more" step. Uncapped, a project with a
+ * few hundred finished sessions paid for every one of them on the first paint and
+ * on every re-render — and `showArchived` defaults to on.
+ */
+const ARCHIVED_PAGE = 20;
+
+/** One formatter for the whole list: `toLocaleDateString` builds a new one per call. */
+const rowDate = new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
 function stop(e: { preventDefault: () => void; stopPropagation: () => void }) {
   e.preventDefault(); // don't follow the row link
@@ -62,7 +72,20 @@ function useOverflow() {
   return { overflowing, check };
 }
 
-function SessionRow({ session, selected }: { session: SessionMeta; selected: boolean }) {
+/**
+ * One sidebar row. Memoized because this list is long — a project with a few
+ * hundred sessions renders a few hundred of these, each carrying ~4 Mantine
+ * Tooltips — and it re-rendered in full on every selection change and on every
+ * `sessions` map update, i.e. continuously through a live turn. `session` objects
+ * keep their identity unless that session actually changed, so the memo holds.
+ */
+const SessionRow = memo(function SessionRow({
+  session,
+  selected,
+}: {
+  session: SessionMeta;
+  selected: boolean;
+}) {
   const status = sessionRowMeta(session);
   // deleteSession/archiveSession are permanently owner-only: a guest never gets
   // the hover controls, rather than getting ones that answer with an error.
@@ -230,7 +253,7 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
             ) : (
               <>
                 <Text size="xs" c="dimmed">
-                  {new Date(session.createdAt).toLocaleDateString('en-GB')}
+                  {rowDate.format(session.createdAt)}
                 </Text>
                 {session.totalCostUsd != null && (
                   <Text size="xs" c="dimmed">
@@ -338,7 +361,7 @@ function SessionRow({ session, selected }: { session: SessionMeta; selected: boo
       </Group>
     </UnstyledButton>
   );
-}
+});
 
 /**
  * Directories that hold sessions but have no project key — checkouts that live
@@ -480,6 +503,7 @@ export function Sidebar({
     key: 'lines.showArchived',
     defaultValue: true,
   });
+  const [archivedShown, setArchivedShown] = useState(ARCHIVED_PAGE);
   // '' = raw session, otherwise workflow id.
   const [lastChoice, setLastChoice] = useLocalStorage<string>({
     key: 'lines.lastNewSessionChoice',
@@ -492,6 +516,12 @@ export function Sidebar({
     key: 'lines.newSessionWorktree',
     defaultValue: false,
   });
+
+  // A project switch starts the archived list over: the point of the cap is that
+  // the first paint of a tab is cheap.
+  useEffect(() => {
+    setArchivedShown(ARCHIVED_PAGE);
+  }, [activeProject]);
 
   const projectKeys = useStore((s) => s.projectKeys);
   const projects = useStore((s) => s.projects);
@@ -729,7 +759,10 @@ export function Sidebar({
             )}
             {archived.length > 0 && (
               <>
-                <Group gap={4} justify="space-between" wrap="nowrap" px="sm" pt="sm">
+                {/* The active list above ends without a marker of its own, so the
+                    rule is what says "everything below here is finished". */}
+                <Divider mt="xs" mx="sm" />
+                <Group gap={4} justify="space-between" wrap="nowrap" px="sm" pt={4}>
                   <Text size="xs" fw={600} c="dimmed" tt="uppercase">
                     Archived ({archived.length})
                   </Text>
@@ -750,10 +783,24 @@ export function Sidebar({
                     </ActionIcon>
                   </Tooltip>
                 </Group>
-                {showArchived &&
-                  archived.map((s) => (
-                    <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
-                  ))}
+                {showArchived && (
+                  <>
+                    {archived.slice(0, archivedShown).map((s) => (
+                      <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
+                    ))}
+                    {archived.length > archivedShown && (
+                      <Button
+                        variant="subtle"
+                        size="compact-xs"
+                        color="gray"
+                        onClick={() => setArchivedShown((n) => n + ARCHIVED_PAGE)}
+                      >
+                        Show {Math.min(ARCHIVED_PAGE, archived.length - archivedShown)} more of{' '}
+                        {archived.length - archivedShown}
+                      </Button>
+                    )}
+                  </>
+                )}
               </>
             )}
             {activeProjectKey && <UnlinkedCheckouts activeKey={activeProjectKey} />}

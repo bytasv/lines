@@ -292,6 +292,13 @@ be talking to it.
   [session-collaboration](session-collaboration.md#attribution). Historical rows and the owner's
   own prompt carry no recorded actor and resolve to the session's host, so this is a pure
   read-side change with no migration.
+- Code-block syntax highlighting (`rehype-highlight`) is deferred: a `Markdown` document's
+  first paint renders without it, then an idle callback (2s timeout fallback) upgrades it in
+  place — the highlighter only adds classes inside an already-laid-out `<pre>`, so the upgrade
+  cannot reflow the transcript around it. A document with no fenced or indented code block
+  skips the deferral and renders with the full plugin set immediately, since there is nothing
+  for a second pass to add. See [transcript-performance](transcript-performance.md) for the
+  measured cost this addresses.
 
 ## Architectural rules
 
@@ -342,10 +349,36 @@ be talking to it.
   disclosure, the raw-input toggle every tool card has) are deliberately plain `useState`, not
   sticky: they live inside the collapsed body itself, so resetting on close is the expected
   behavior, not a bug.
-- No virtualization (`react-window` or similar) is used for the transcript list — this was a
-  deliberate choice before lazy-mounted bodies existed, and it still holds afterward: once a
-  collapsed row's body costs nothing to render, the remaining per-row cost (a header line) is
-  cheap enough at the transcript sizes seen in practice that windowing isn't needed.
+- `react-window` (or similar list virtualization) is still rejected for the transcript list —
+  it would break `updateProgress`'s workflow-step-marker scan, the `scrollHeight`-based
+  auto-pin and its `ResizeObserver`, and browser find-in-page. What changed instead is a
+  simple tail window (last ~40 top-level items, growing on idle backfill or on scrolling near
+  the top) that keeps every `ScrollArea`/find-in-page/auto-pin guarantee intact — lazy-mounted
+  bodies alone stopped being enough once a real session's Markdown mount cost dominated a
+  session switch. See [transcript-performance](transcript-performance.md) for the mechanism
+  and the measurement behind it.
+- `reconcileItems` (`transcript.ts`) hands a rebuilt item back its previous object identity
+  when every field `buildTranscript` can later mutate in place is unchanged —
+  `ToolBlock.result`/`isError`/`snapshot`/`children`, permission `.resolution`/`.data`,
+  `ResultItem.summary`, and streaming/assistant text. This is what makes `memo` on
+  `Item`/`AgentTurn`/`ToolGroup`/`ToolCallCard` actually skip work (a rebuild recreates every
+  item from scratch otherwise) and what lets the `toolDiffCache` `WeakMap` (keyed on the
+  `ToolBlock` object) survive a rebuild instead of recomputing every whole-file diff on every
+  event. Missing a mutated field here means a changed row silently keeps rendering its old
+  content — the field list above is meant to stay exhaustive against whatever
+  `buildTranscript` writes post-creation.
+- The `renderNested` callback threaded from `Transcript` into `ToolGroup`/`ToolCallCard` must
+  stay referentially stable across renders (it's a `useCallback` keyed on `sessionId`, reached
+  through a ref so it can call itself for a nested subagent transcript) — a fresh closure
+  every render defeats those components' `memo` silently: nothing errors, the row just never
+  skips a reconcile.
+- The workflow progress bar (`updateProgress`) reads which steps have started from the item
+  list itself (a `'workflow'` item with event `'started'`), not from the positions of rendered
+  `[data-workflow-step]` DOM markers — the tail window can clip an early marker out of the DOM
+  entirely, and a clipped-but-started step reports its segment as fully filled (its bounds
+  collapse to 0) rather than 0% filled. Clicking a stepper step that isn't currently mounted
+  goes through `revealWorkflowStep()`/`REVEAL_STEP_EVENT` (`web/src/lib/workflowReveal.ts`)
+  instead of a direct `querySelector` — see [workflow-step-lifecycle](workflow-step-lifecycle.md).
 - `toolFields` degrades instead of failing: an unclassifiable value becomes a capped `json` field
   rather than throwing or being skipped, because tool input shapes (especially MCP tools) are not
   controlled by this code and drift freely.
@@ -398,3 +431,7 @@ be talking to it.
   reading.
 - [session-collaboration](session-collaboration.md) — the author avatar and identity resolution
   behind every user bubble.
+- [transcript-performance](transcript-performance.md) — event batching and the tail window that
+  `reconcileItems`/the row memos above make effective.
+- [workflow-step-lifecycle](workflow-step-lifecycle.md) — the stepper's jump-to-step against a
+  windowed transcript.

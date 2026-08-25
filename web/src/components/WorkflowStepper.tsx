@@ -6,6 +6,7 @@ import { isSessionActive, isStepRef } from '@lines/shared';
 import { formatDuration } from '../lib/format';
 import { useStore } from '../store';
 import { send } from '../ws';
+import { revealWorkflowStep } from '../lib/workflowReveal';
 import { ConfirmModal } from './ConfirmModal';
 
 function StepIcon({
@@ -151,10 +152,9 @@ export function WorkflowStepper({
               onClick={
                 clickable
                   ? () =>
-                      // Jump to the step's start marker in the transcript.
-                      document
-                        .querySelector(`[data-workflow-step="${i}"]`)
-                        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                      // Jump to the step's start marker in the transcript, which
+                      // may still be outside its rendered window.
+                      revealWorkflowStep(i)
                   : undefined
               }
             >

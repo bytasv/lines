@@ -374,7 +374,8 @@
         "server/src/sessions.turns.test.ts",
         "server/src/workflows.substitution.test.ts",
         "web/src/lib/format.ts",
-        "web/src/components/Sidebar.tsx"
+        "web/src/components/Sidebar.tsx",
+        "web/src/lib/workflowReveal.ts"
       ],
       "symbols": [
         "SessionManager.interrupt",
@@ -440,7 +441,8 @@
         "a plan revised by Edit after the deliverable-producing Write still contributes its current on-disk text to the hand-off, via collectTurns reading the plan file (gated by isPlanPath) instead of the last captured Write content",
         "icon precedence: session.completed -> outline check, status running -> Loader, status.actionable -> pulsing dot, isWorkflowFinished -> filled check, otherwise plain dot",
         "actionable states always win over the finished checkmark so a session needing the user is never masked as done",
-        "force-advance (mark last running step completed) also sets the last step done, so a force-finished workflow shows the filled check too"
+        "force-advance (mark last running step completed) also sets the last step done, so a force-finished workflow shows the filled check too",
+        "clicking a step in the stepper still jumps the transcript to that step's start marker, but the marker may not be mounted (Transcript.tsx windows a long transcript to its tail): the click asks revealWorkflowStep() to scroll directly if the marker exists, otherwise it fires an event the transcript handles by dropping its window and scrolling once the marker mounts"
       ],
       "architecturalRules": [
         "interrupt() stays intent-free \u2014 no caller may infer \"advance\" from \"stop\"",
@@ -469,7 +471,8 @@
       ],
       "relatedDecisions": [
         "turn-recovery",
-        "session-and-project-ui"
+        "session-and-project-ui",
+        "transcript-performance"
       ]
     },
     {
@@ -738,7 +741,8 @@
         "seenSessionIds is maintained by both the hello reducer and sessionUpsert, so a session that leaves and re-enters the map \u2014 deleted then resurrected, or replayed by a duplicate hello \u2014 is never treated as new again",
         "a repeated hello (same session/project signature as the last one applied) is inert: sessions, transcriptLoaded and contextBreakdowns are left untouched, while every other field (usage, worker/storage health, auth) still applies as normal \u2014 the relay replays open (and its full hello) for every live channel on any bridge attach or takeover, and wholesale-replacing state on each one is what turned two alternating bridge snapshots into a self-sustaining flicker loop across sessions and transcript reloads",
         "send() (ws.ts) returns false when the socket is not open and the message is not a prompt (prompts alone queue for replay); the caller sets actionError so a dropped control message \u2014 e.g. a delete sent while disconnected \u2014 is visible instead of a console.warn nobody saw",
-        "deleting a session shows a loading state on its own row and leaves the row in place until the sessionDeleted echo removes it \u2014 no optimistic removal, so a delete that silently failed to send is never mistaken for one that worked"
+        "deleting a session shows a loading state on its own row and leaves the row in place until the sessionDeleted echo removes it \u2014 no optimistic removal, so a delete that silently failed to send is never mistaken for one that worked",
+        "archived sessions in the sidebar render 20 at a time behind a 'Show N more' button instead of the full archived list, since lines.showArchived defaults to on and a long-lived project can accumulate hundreds of them"
       ],
       "architecturalRules": [
         "text drafts use a single lines.drafts JSON map keyed by session id, following the existing store.ts convention (e.g. lines.openFiles) rather than one key per session",
@@ -753,7 +757,8 @@
         "concurrent permission asks on the same session: last askPermission call wins the label/color, consistent with pre-existing status-overwrite behavior",
         "sessionRowMeta is the single row-presentation entry point: waitingPermissionMeta first, then the interrupted-turn-recovery yellow state, then the plain per-status table (moved into format.ts from Sidebar.tsx)",
         "helloSignature is a cheap string (each session's id:updatedAt joined, plus project paths) rather than a hash of the whole hello payload, precisely so volatile fields (usage, worker/storage health) stay outside it and keep applying on every hello regardless of the short-circuit",
-        "store changes here (the hello short-circuit, pendingCreate/seenSessionIds) are pure reducer logic with no web test harness backing them (web/ has no test runner) \u2014 the highest-risk, least-covered part of this feature; verified manually"
+        "store changes here (the hello short-circuit, pendingCreate/seenSessionIds) are pure reducer logic with no web test harness backing them (web/ has no test runner) \u2014 the highest-risk, least-covered part of this feature; verified manually",
+        "SessionRow is memoized \u2014 selecting a different session or any sessions-map update (e.g. a live turn ticking status) otherwise re-rendered every row in the list regardless of the size of the session being switched to; the memo relies on `session` keeping its object identity when unchanged, which sessionUpsert already guarantees by only replacing the entry that changed"
       ],
       "relatedDecisions": [
         "hosted-machine-access",
@@ -792,7 +797,8 @@
         "web/src/lib/transcript.ts",
         "web/src/lib/agents.ts",
         "web/src/components/TaskCall.tsx",
-        "web/src/components/ActivityRow.tsx"
+        "web/src/components/ActivityRow.tsx",
+        "web/src/lib/workflowReveal.ts"
       ],
       "symbols": [
         "Markdown",
@@ -817,7 +823,10 @@
         "parseTaskInput",
         "agentMeta",
         "MAIN_AGENT_META",
-        "taskFlags"
+        "taskFlags",
+        "reconcileItems",
+        "buildTranscript",
+        "foldAgentTurns"
       ],
       "tests": [
         "server/src/sessions.turns.test.ts",
@@ -837,7 +846,8 @@
         "a message whose parent_tool_use_id names a spawn block not present in the transcript falls back to the main sink instead of being dropped",
         "a spawn card leads with description, not the tool name; an unmapped or plugin-scoped subagent_type degrades to a generic agent badge (never hidden, never a crash)",
         "the main agent and a subagent share the same badge icon but never the same color, so who is running reads from color alone before any label",
-        "in the interactive OptionCard, the checkbox/radio is a non-interactive indicator; the wrapping button is the sole click target, so onChange must not be added back to the control itself"
+        "in the interactive OptionCard, the checkbox/radio is a non-interactive indicator; the wrapping button is the sole click target, so onChange must not be added back to the control itself",
+        "code-block syntax highlighting (rehype-highlight) is deferred: first paint renders without it, then an idle callback (2s timeout fallback) upgrades the document in place \u2014 the highlighter only adds classes inside an already-laid-out <pre>, so it cannot reflow the transcript; a document with no code block skips the deferral and renders with the full plugin set immediately"
       ],
       "architecturalRules": [
         "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
@@ -845,7 +855,7 @@
         "compact markdown rhythm overrides Mantine spacing variables scoped to .md-body rather than CSS selectors, because Typography's list rule outranks a .md-body ul selector override on specificity",
         "collapsible transcript rows (agent turns, tool groups, tool calls) share one borderless .tx-row convention: no Paper/border, CSS-only hover, and no accumulating indentation",
         "a collapsed row's body unmounts instead of only being CSS-hidden, so per-row state that must survive collapse/expand lives in a module-scope sticky map, not component state; sub-toggles inside an already-expanded body (a spawn card's prompt disclosure, every tool card's raw-input toggle) are deliberately plain useState, not sticky, since resetting on close is expected there.",
-        "no virtualization is used for the transcript list; lazy-mounted bodies keep per-row cost low enough that this still holds",
+        "react-window (or similar list virtualization) is still rejected \u2014 it would break updateProgress's workflow-step-marker scan, the scrollHeight-based auto-pin/ResizeObserver, and find-in-page; a simple tail window (last ~40 top-level items, growing on idle backfill or scroll-to-top) supersedes lazy-mounted bodies alone once a real session's markdown mount cost dominates \u2014 see transcript-performance.md",
         "toolFields degrades instead of failing: an unclassifiable value becomes a capped json field rather than throwing or being skipped, since tool input shapes (especially MCP tools) are not controlled by this code",
         "OptionCard gained a readOnly prop instead of being duplicated into a second component, so a settled answer looks exactly like the choice that produced it",
         "the raw-input toggle shows even for an empty ({}) input, unlike PermissionPrompt's equivalent guard \u2014 consistency across every tool card was chosen over hiding a no-op toggle",
@@ -854,10 +864,15 @@
         "the spawn tool's name is not a stable literal: the harness emits 'Agent', the SDK's own AgentInput type and docs call it 'Task', and both appear in persisted transcripts, so every consumer matches via isAgentTool() rather than one string",
         "agentMeta/MAIN_AGENT_META is the single source of truth for agent icon/color, read by both the settled card and the live ActivityRow so they cannot drift apart",
         "parseTaskInput never throws and never assumes a field is present, since AgentInput gains fields the map won't know about (effort is the live example) \u2014 this is why the raw-input toggle stays reachable behind every spawn card",
-        "nested rendering is threaded down as a renderNested callback rather than a new shared module, since ToolCallCard cannot import Transcript.tsx's Item without an import cycle"
+        "nested rendering is threaded down as a renderNested callback rather than a new shared module, since ToolCallCard cannot import Transcript.tsx's Item without an import cycle",
+        "reconcileItems (transcript.ts) hands a rebuilt item back its previous object identity when every field buildTranscript can later mutate in place is unchanged (ToolBlock.result/isError/snapshot/children, permission .resolution/.data, ResultItem.summary, streaming/assistant text) \u2014 this is what lets memo on Item/AgentTurn/ToolGroup/ToolCallCard skip work and what lets the toolDiffCache WeakMap survive a rebuild instead of recomputing every whole-file diff per event; missing a mutated field here means a changed row silently keeps rendering its old content",
+        "the renderNested callback threaded from Transcript into ToolGroup/ToolCallCard must stay referentially stable across renders (a useCallback keyed on sessionId, reached through a ref so it can call itself for a nested subagent transcript) \u2014 a fresh closure every render defeats those components' memo silently, with nothing erroring",
+        "the workflow progress bar (updateProgress) reads which steps have started from the item list itself (a 'workflow' item with event 'started'), not from rendered [data-workflow-step] DOM marker positions, since the tail window can clip an early marker out of the DOM entirely; a clipped-but-started step's segment reports as fully filled rather than 0% filled; clicking a stepper step whose marker isn't mounted goes through revealWorkflowStep()/REVEAL_STEP_EVENT (web/src/lib/workflowReveal.ts) instead of a direct querySelector"
       ],
       "relatedDecisions": [
-        "session-collaboration"
+        "session-collaboration",
+        "transcript-performance",
+        "workflow-step-lifecycle"
       ]
     },
     {
@@ -2291,6 +2306,56 @@
         "hosted-machine-access",
         "session-and-project-ui",
         "turn-recovery"
+      ]
+    },
+    {
+      "id": "transcript-performance",
+      "name": "Transcript live-update performance",
+      "doc": "features/transcript-performance.md",
+      "purpose": "Why a live turn or a session switch used to freeze the UI for a beat, and the three independent fixes: batching WebSocket transcript events into one render per frame, keeping rebuilt transcript items referentially stable so memoization and diff caches survive a rebuild, and windowing a long transcript's initial mount.",
+      "entryPoints": [
+        "web/src/store.ts",
+        "web/src/components/Transcript.tsx"
+      ],
+      "files": [
+        "web/src/store.ts",
+        "web/src/lib/transcript.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/components/ToolGroup.tsx",
+        "web/src/components/ToolCallCard.tsx",
+        "web/src/components/Markdown.tsx",
+        "web/src/lib/workflowReveal.ts"
+      ],
+      "symbols": [
+        "flushPendingEvents",
+        "scheduleFlush",
+        "pendingEvents",
+        "reconcileItems",
+        "INITIAL_WINDOW",
+        "showEarlier",
+        "revealWorkflowStep",
+        "REVEAL_STEP_EVENT"
+      ],
+      "tests": [],
+      "businessRules": [
+        "a live turn's transcript renders at most once per animation frame, not once per WebSocket event",
+        "a hidden tab accumulates its transcript backlog without rendering at all (no animation frames fire while hidden) and commits it as a single render on refocus, rather than replaying the whole backlog as N sequential renders",
+        "a long session's initial mount renders only its last ~40 top-level items; the rest backfill on idle, or immediately on scrolling near the top, with a 'Show earlier messages' button as the always-available affordance",
+        "windowing applies to workflow sessions too; the progress bar and stepper jump-to-step both stay correct against a clipped list (see transcript-rendering.md and workflow-step-lifecycle.md)"
+      ],
+      "architecturalRules": [
+        "contract: nothing outside applyServerMessage may read `transcripts`/`lastEventAt` and assume it's settled \u2014 every non-'event' message flushes the pending buffer first (flushPendingEvents at the top of applyServerMessage), so a new message handler that reads transcripts without going through applyServerMessage's switch breaks this silently",
+        "case 'event' only pushes into a per-session pending buffer and schedules a flush via requestAnimationFrame; it performs no `set()` itself \u2014 the buffer, the scheduled-flush handle, and flushPendingEvents all live inside the store's `create` closure since they close over `set`",
+        "the buffer's flush replicates the prior per-event dedupe (one Set<seq> per session per flush, built once instead of a linear scan per event) and the prior 'a complete SDK message supersedes the stream deltas that built up to it' rule, applied once over the whole batch at its last complete message's index rather than once per event \u2014 this must keep producing the same resulting array the old per-event path would have, since it's the only place that rule is expressed",
+        "a setTimeout fallback for the flush arms only when requestAnimationFrame is unavailable; it must never arm merely because the tab is hidden, since a hidden-tab timer firing would defeat the backlog-until-refocus behavior that's the point of batching on rAF in the first place",
+        "reconcileItems (transcript.ts) is what makes a rebuild cheap for React, not buildTranscript itself \u2014 buildTranscript's own cost was measured at 3-5ms even on a 5540-event/14MB real session, so it was never the dominant cost of a session switch; see transcript-rendering.md's reconcileItems rule for the exhaustive list of fields it must compare",
+        "the tail window and the markdown highlight deferral (Markdown.tsx) are the two changes that actually addressed the measured session-switch cost \u2014 a 278-row folded session can hold ~90 full Markdown documents, each a synchronous remark/rehype/rehype-highlight parse, all committed in one pass on ErrorBoundary remount (App.tsx keys SessionView by selectedSessionId); windowing bounds how many of those mount at once, and the highlight deferral cuts the cost of each one that does",
+        "the sidebar's own re-render cost (SessionRow memoization, archived-session pagination \u2014 session-and-project-ui.md) is a second, independent contributor to 'switching sessions feels slow' that has nothing to do with the size of the session being switched to \u2014 it re-rendered every row on every selection change regardless"
+      ],
+      "relatedDecisions": [
+        "transcript-rendering",
+        "workflow-step-lifecycle",
+        "session-and-project-ui"
       ]
     }
   ]

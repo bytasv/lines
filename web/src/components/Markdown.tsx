@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { PluggableList } from 'unified';
 import remarkGfm from 'remark-gfm';
@@ -12,11 +12,33 @@ import { useStore } from '../store';
 
 const remarkPlugins: PluggableList = [remarkGfm];
 
-const rehypePlugins: PluggableList = [
-  [rehypeHighlight, { detect: false, aliases: { typescript: ['tsx', 'mts'], javascript: ['jsx', 'mjs'] } }],
-  rehypeFilePaths,
-  rehypeColorSwatches,
+const highlightPlugin: PluggableList[number] = [
+  rehypeHighlight,
+  { detect: false, aliases: { typescript: ['tsx', 'mts'], javascript: ['jsx', 'mjs'] } },
 ];
+
+/**
+ * Two plugin sets, because syntax highlighting is the expensive one and it is the
+ * one nobody misses for a frame.
+ *
+ * Measured on a real 5540-event session, which mounts 93 of these at once on a
+ * session switch: the whole set costs ~305 ms, ~190 ms of which is
+ * rehype-highlight. So the first paint runs without it and an idle callback
+ * upgrades the document in place — highlighting only adds `<span>`s inside a
+ * `<pre>`, so the upgrade cannot reflow the transcript around it.
+ */
+const litePlugins: PluggableList = [rehypeFilePaths, rehypeColorSwatches];
+
+const fullPlugins: PluggableList = [highlightPlugin, rehypeFilePaths, rehypeColorSwatches];
+
+/**
+ * Whether this document has anything for the highlighter to act on — a fence or an
+ * indented block. Without one, deferring would buy a second parse for nothing, so
+ * those documents go straight to the full set.
+ */
+function hasCodeBlock(text: string): boolean {
+  return text.includes('```') || /^ {4}\S/m.test(text);
+}
 
 /**
  * GitHub Flavored Markdown is on (`remarkGfm`): tables, strikethrough, task lists,
@@ -35,11 +57,25 @@ export const Markdown = memo(function Markdown({
   text: string;
   onLinkClick?: (href: string) => void;
 }) {
+  // Starts true when there is nothing to defer, so those documents render once.
+  const [highlighted, setHighlighted] = useState(() => !hasCodeBlock(text));
+  useEffect(() => {
+    if (highlighted) return;
+    // Timeout bound: a transcript that never goes idle (a long streaming turn)
+    // must still end up highlighted.
+    if (typeof requestIdleCallback !== 'function') {
+      const t = setTimeout(() => setHighlighted(true), 200);
+      return () => clearTimeout(t);
+    }
+    const handle = requestIdleCallback(() => setHighlighted(true), { timeout: 2000 });
+    return () => cancelIdleCallback(handle);
+  }, [highlighted]);
+
   return (
     <Typography fz="sm" className="md-body">
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
-        rehypePlugins={rehypePlugins}
+        rehypePlugins={highlighted ? fullPlugins : litePlugins}
         components={{
           a({ className, children, href, node, ...props }) {
             const filepath = (node?.properties?.dataFilepath as string | undefined) ?? undefined;

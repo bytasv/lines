@@ -727,6 +727,92 @@ export const useStore = create<UiState>((set, get) => {
     });
   };
 
+  // --- Transcript event coalescing ------------------------------------------
+  // Live events arrive one socket frame at a time, and every `set()` here costs a
+  // full buildTranscript pass plus a React reconcile of the whole transcript. So
+  // frames buffer and land as ONE `set()` per animation frame. A hidden tab gets
+  // no animation frames at all, which is the point: its backlog accumulates in a
+  // plain array and commits as a single render on refocus instead of replaying as
+  // N sequential renders.
+  //
+  // Contract: nothing outside `applyServerMessage` may read `transcripts` and
+  // expect it settled. Every non-'event' message flushes first (see below).
+  const pendingEvents = new Map<string, TranscriptEvent[]>();
+  let flushFrame: number | null = null;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const isSdkStream = (e: TranscriptEvent) =>
+    e.kind === 'sdk' && (e.data as { type?: string } | null)?.type === 'stream_event';
+
+  const flushPendingEvents = () => {
+    if (flushFrame != null) {
+      cancelAnimationFrame(flushFrame);
+      flushFrame = null;
+    }
+    if (flushTimer != null) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    if (pendingEvents.size === 0) return;
+    const batches = [...pendingEvents];
+    pendingEvents.clear();
+    set((state) => {
+      const transcripts = { ...state.transcripts };
+      const lastEventAt = { ...state.lastEventAt };
+      const now = Date.now();
+      let changed = false;
+      for (const [sessionId, batch] of batches) {
+        const existing = transcripts[sessionId] ?? [];
+        // One Set per flush instead of a linear scan per event: duplicates happen
+        // (history replay racing live events) and the scan was O(n·k).
+        const seen = new Set(existing.map((e) => e.seq));
+        const fresh: TranscriptEvent[] = [];
+        // A complete (non-stream) SDK message supersedes the deltas that built up
+        // to it. Applied once over the batch, at its *last* complete message —
+        // which subsumes every earlier one, exactly as the per-event rule did.
+        let lastComplete = -1;
+        for (const event of batch) {
+          if (seen.has(event.seq)) continue;
+          seen.add(event.seq);
+          if (event.kind === 'sdk' && !isSdkStream(event)) lastComplete = fresh.length;
+          fresh.push(event);
+        }
+        if (fresh.length === 0) continue;
+        const base = lastComplete >= 0 ? existing.filter((e) => !isSdkStream(e)) : existing;
+        const tail =
+          lastComplete >= 0 ? fresh.filter((e, i) => i >= lastComplete || !isSdkStream(e)) : fresh;
+        transcripts[sessionId] = [...base, ...tail];
+        lastEventAt[sessionId] = now;
+        changed = true;
+      }
+      if (!changed) return state;
+      return { transcripts, lastEventAt };
+    });
+  };
+
+  const scheduleFlush = () => {
+    if (flushFrame != null || flushTimer != null) return;
+    if (typeof requestAnimationFrame === 'function') {
+      flushFrame = requestAnimationFrame(() => {
+        flushFrame = null;
+        flushPendingEvents();
+      });
+    } else {
+      // Fallback for an environment with no rAF at all — the buffer must still drain.
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        flushPendingEvents();
+      }, 16);
+    }
+  };
+
+  if (typeof document !== 'undefined') {
+    // rAF stays parked while hidden; refocus is where the backlog commits.
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) flushPendingEvents();
+    });
+  }
+
   /** Apply settings from the server (hello or another tab/instance) without re-sending. */
   const applySettings = (s: UserUiSettings) => {
     set((state) => ({
@@ -1095,6 +1181,10 @@ export const useStore = create<UiState>((set, get) => {
     const from = deviceId ?? get().primaryDeviceId ?? '';
     /** Is this the machine whose state the banners and account UI describe? */
     const fromPrimary = from === (get().primaryDeviceId ?? '');
+    // Any handler that reads or replaces `transcripts` — 'transcript', 'hello',
+    // 'sessionDeleted' — must see a settled array, so drain the coalescing buffer
+    // before anything but another 'event'.
+    if (msg.type !== 'event') flushPendingEvents();
     switch (msg.type) {
       case 'hello': {
         const incoming: Record<string, SessionMeta> = {};
@@ -1355,23 +1445,15 @@ export const useStore = create<UiState>((set, get) => {
         // `sessionUpsert`'s just-created heuristic (which a slow spawn loses).
         set({ selectedSessionId: msg.sessionId });
         break;
-      case 'event':
-        set((state) => {
-          const existing = state.transcripts[msg.sessionId] ?? [];
-          // Drop duplicates (e.g. history replay racing live events).
-          if (existing.some((e) => e.seq === msg.event.seq)) return state;
-          // A complete (non-stream) SDK message supersedes the deltas that built
-          // up to it — drop them so long turns don't accumulate stream events.
-          const isSdkStream = (e: TranscriptEvent) =>
-            e.kind === 'sdk' && (e.data as { type?: string } | null)?.type === 'stream_event';
-          const base =
-            msg.event.kind === 'sdk' && !isSdkStream(msg.event) ? existing.filter((e) => !isSdkStream(e)) : existing;
-          return {
-            transcripts: { ...state.transcripts, [msg.sessionId]: [...base, msg.event] },
-            lastEventAt: { ...state.lastEventAt, [msg.sessionId]: Date.now() },
-          };
-        });
+      case 'event': {
+        // Buffered, not applied: flushPendingEvents does the dedupe, the
+        // supersede rule and the single `set()` one animation frame from now.
+        const batch = pendingEvents.get(msg.sessionId);
+        if (batch) batch.push(msg.event);
+        else pendingEvents.set(msg.sessionId, [msg.event]);
+        scheduleFlush();
         break;
+      }
       case 'transcript':
         set((state) => {
           const live = state.transcripts[msg.sessionId] ?? [];

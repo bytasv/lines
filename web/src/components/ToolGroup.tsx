@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Badge, Box, Collapse, Group, Loader, Stack, Text } from '@mantine/core';
 import { IconChevronDown, IconChevronRight } from '@tabler/icons-react';
 import type { ReactNode } from 'react';
@@ -10,7 +10,13 @@ import { ToolCallCard } from './ToolCallCard';
 // survives Transcript remount (switching sessions) and transcript rebuilds.
 const stickyOverrides = new Map<string, boolean>();
 
-export function ToolGroup({
+/**
+ * Memoized: the group's header alone walks every tool call and diffs the edits.
+ * `group` keeps its identity across rebuilds that didn't touch it (reconcileItems),
+ * and `renderNested` is stable by construction in Transcript — without both, this
+ * memo silently does nothing.
+ */
+export const ToolGroup = memo(function ToolGroup({
   group,
   active,
   sessionId,
@@ -100,4 +106,4 @@ export function ToolGroup({
       </Collapse>
     </Box>
   );
-}
+});

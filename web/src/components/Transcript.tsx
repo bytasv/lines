@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   Badge,
   Box,
@@ -40,10 +49,12 @@ import { send } from '../ws';
 import {
   buildTranscript,
   foldAgentTurns,
+  reconcileItems,
   turnToolStats,
   type AgentTurnItem,
   type TranscriptItem,
 } from '../lib/transcript';
+import { REVEAL_STEP_EVENT } from '../lib/workflowReveal';
 import { useAttachmentUrl } from '../lib/files';
 import { mentionKindMeta } from '../lib/mentions';
 import { formatTokens, skippableFailedStep } from '../lib/format';
@@ -266,10 +277,16 @@ function FailedTurnActions({ sessionId }: { sessionId: string }) {
   );
 }
 
-function Item({
+/**
+ * One transcript row. Memoized: {@link reconcileItems} hands unchanged items back
+ * across rebuilds, so with stable props an untouched row skips reconciliation
+ * entirely — which is the whole point of the structural sharing upstream.
+ */
+const Item = memo(function Item({
   item,
   sessionId,
   onImage,
+  renderNested,
   retryKey,
   activeGroupKey,
   activeTurnKey,
@@ -277,6 +294,9 @@ function Item({
   item: TranscriptItem;
   sessionId: string;
   onImage: (src: string) => void;
+  /** Renders a subagent's items inside a Task card. Owned by Transcript so it stays
+   *  referentially stable — a fresh closure would defeat ToolGroup's memo. */
+  renderNested: (items: TranscriptItem[]) => ReactNode;
   /** Key of the trailing failed result that should show a Retry button, if any. */
   retryKey?: string | null;
   /** Key of the tool-group that is the agent's current (live) work — rendered expanded. */
@@ -359,11 +379,7 @@ function Item({
           sessionId={sessionId}
           // A subagent's items are rendered by this same component; passing the
           // renderer down avoids an import cycle (Transcript → ToolGroup → card).
-          renderNested={(nested) =>
-            nested.map((child) => (
-              <Item key={child.key} item={child} sessionId={sessionId} onImage={onImage} />
-            ))
-          }
+          renderNested={renderNested}
         />
       );
     case 'agent-turn':
@@ -373,6 +389,7 @@ function Item({
           active={item.key === activeTurnKey}
           sessionId={sessionId}
           onImage={onImage}
+          renderNested={renderNested}
           retryKey={retryKey}
           activeGroupKey={activeGroupKey}
         />
@@ -418,7 +435,7 @@ function Item({
     case 'context-compact':
       return <ContextCompactMarker data={item.data} />;
   }
-}
+});
 
 /**
  * A permission item whose tool card already says everything it would.
@@ -438,11 +455,12 @@ function isRedundant(item: { data: PermissionRequestData; resolution?: string })
 // so it survives Transcript remount and rebuilds; `t*` keys never collide with `g*` groups.
 const turnOverrides = new Map<string, boolean>();
 
-function AgentTurn({
+const AgentTurn = memo(function AgentTurn({
   turn,
   active,
   sessionId,
   onImage,
+  renderNested,
   retryKey,
   activeGroupKey,
 }: {
@@ -450,6 +468,7 @@ function AgentTurn({
   active: boolean;
   sessionId: string;
   onImage: (src: string) => void;
+  renderNested: (items: TranscriptItem[]) => ReactNode;
   retryKey?: string | null;
   activeGroupKey?: string | null;
 }) {
@@ -534,6 +553,7 @@ function AgentTurn({
                 item={child}
                 sessionId={sessionId}
                 onImage={onImage}
+                renderNested={renderNested}
                 retryKey={retryKey}
                 activeGroupKey={activeGroupKey}
               />
@@ -543,7 +563,10 @@ function AgentTurn({
       </Collapse>
     </Box>
   );
-}
+});
+
+/** Top-level items rendered on first paint, and the size of each backfill step. */
+const INITIAL_WINDOW = 40;
 
 export function Transcript({
   sessionId,
@@ -556,18 +579,28 @@ export function Transcript({
   stepCount?: number;
 }) {
   const compactionLevel = useStore((s) => s.compactionLevel);
+  // Previous built/folded lists, so a rebuild can hand back the objects it didn't
+  // change (see reconcileItems). Refs, not state: this is a cache keyed by the
+  // very inputs the memo below is keyed on, so writing it during render is idempotent.
+  const builtRef = useRef<TranscriptItem[]>([]);
+  const foldedRef = useRef<TranscriptItem[]>([]);
   // Flat item list. Full level ('full') leaves tools ungrouped (1-tool groups render bare);
   // otherwise consecutive tools fold into tool-groups. Auto-allowed permission one-liners
   // are redundant (their tool shows in the group card) so drop them; real prompts stay.
   const { built, live } = useMemo(() => {
     const { items, live } = buildTranscript(events, compactionLevel !== 'full');
-    return { built: items.filter((it) => !(it.kind === 'permission' && isRedundant(it))), live };
+    const kept = items.filter((it) => !(it.kind === 'permission' && isRedundant(it)));
+    builtRef.current = reconcileItems(builtRef.current, kept);
+    return { built: builtRef.current, live };
   }, [events, compactionLevel]);
   // Compact level additionally folds each agent turn into a collapsible super-group.
-  const items = useMemo(
-    () => (compactionLevel === 'compact' ? foldAgentTurns(built) : built),
-    [built, compactionLevel],
-  );
+  // The fold allocates fresh agent-turn wrappers around already-reused children, so
+  // it needs its own reconcile pass.
+  const items = useMemo(() => {
+    if (compactionLevel !== 'compact') return built;
+    foldedRef.current = reconcileItems(foldedRef.current, foldAgentTurns(built));
+    return foldedRef.current;
+  }, [built, compactionLevel]);
   const status = useStore((s) => s.sessions[sessionId]?.status);
   const turnStartedAt = useStore((s) => s.sessions[sessionId]?.turnStartedAt);
   const lastEventAt = useStore((s) => s.lastEventAt[sessionId]);
@@ -649,6 +682,73 @@ export function Transcript({
   // so a collapse/expand doesn't get mistaken for a user scrolling up.
   const suppressUnpinUntilRef = useRef(0);
 
+  // ToolGroup / ToolCallCard are memoized, so the nested renderer has to keep one
+  // identity across commits or their memo does nothing. It reaches itself through
+  // a ref because a subagent's transcript can hold further Task cards.
+  const renderNestedRef = useRef<(nested: TranscriptItem[]) => ReactNode>(() => null);
+  const renderNested = useCallback(
+    (nested: TranscriptItem[]) =>
+      nested.map((child) => (
+        <Item
+          key={child.key}
+          item={child}
+          sessionId={sessionId}
+          onImage={setLightbox}
+          renderNested={renderNestedRef.current}
+        />
+      )),
+    [sessionId],
+  );
+  renderNestedRef.current = renderNested;
+
+  // Tail window. A cold mount of a long session commits every row in one
+  // synchronous pass — the visible freeze on a session switch. Render the tail
+  // first and backfill on idle until the list is whole.
+  const [windowSize, setWindowSize] = useState(INITIAL_WINDOW);
+  const hidden = Math.max(0, items.length - windowSize);
+  const visibleItems = hidden > 0 ? items.slice(hidden) : items;
+  // Which workflow steps have started, read off the item list rather than the
+  // rendered [data-workflow-step] markers — the list is complete even while the
+  // window is clipping, so the progress bar stays right on a workflow session.
+  const startedSteps = useMemo(() => {
+    const set = new Set<number>();
+    for (const it of items) {
+      if (it.kind === 'workflow' && it.data.event === 'started') set.add(it.data.stepIndex);
+    }
+    return set;
+  }, [items]);
+  // Set just before the window grows: the rows that appear above the viewport
+  // would otherwise push the content down and jump the view.
+  const anchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+
+  const showEarlier = () => {
+    const el = viewportRef.current;
+    if (el) anchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+    setWindowSize((n) => n + INITIAL_WINDOW);
+  };
+
+  // The stepper asked for a step whose start marker is still outside the window.
+  // Drop the window and scroll to it once it has mounted (below).
+  const [revealStep, setRevealStep] = useState<number | null>(null);
+  useEffect(() => {
+    const onReveal = (e: Event) => {
+      setWindowSize(Number.MAX_SAFE_INTEGER);
+      setRevealStep((e as CustomEvent<number>).detail);
+    };
+    window.addEventListener(REVEAL_STEP_EVENT, onReveal);
+    return () => window.removeEventListener(REVEAL_STEP_EVENT, onReveal);
+  }, []);
+  useEffect(() => {
+    if (revealStep == null) return;
+    const marker = viewportRef.current?.querySelector(`[data-workflow-step="${revealStep}"]`);
+    if (!marker) return;
+    setRevealStep(null);
+    // Not smooth: the window just grew by hundreds of rows, so an animated scroll
+    // would race the reflow.
+    marker.scrollIntoView({ block: 'start' });
+    pinnedRef.current = false;
+  }, [revealStep, visibleItems]);
+
   const updateProgress = () => {
     const el = viewportRef.current;
     if (!el) return;
@@ -668,25 +768,30 @@ export function Transcript({
     const pos = Math.min(el.scrollTop, maxScroll);
 
     // Segment boundaries in scroll coordinates: step i spans [bounds[i], bounds[i+1]].
-    // Steps without a start marker yet haven't run — their segments stay empty.
+    // Which steps ran comes from the item list, not from the DOM: the tail window
+    // clips earlier markers away, and a clipped step is a step that already ran.
     const started = new Array<boolean>(n).fill(false);
     started[0] = true; // pre-marker content belongs to step 1
     const bounds = new Array<number>(n + 1).fill(maxScroll);
     bounds[0] = 0;
     if (n > 1) {
+      for (const i of startedSteps) if (i >= 0 && i < n) started[i] = true;
+      const placed = new Array<boolean>(n + 1).fill(false);
+      placed[0] = true;
       const viewportTop = el.getBoundingClientRect().top;
       el.querySelectorAll<HTMLElement>('[data-workflow-step]').forEach((marker) => {
         const i = Number(marker.dataset.workflowStep);
-        if (i >= 0 && i < n) {
-          started[i] = true;
-          if (i > 0) {
-            bounds[i] = Math.min(
-              maxScroll,
-              marker.getBoundingClientRect().top - viewportTop + el.scrollTop,
-            );
-          }
+        if (i > 0 && i < n) {
+          placed[i] = true;
+          bounds[i] = Math.min(
+            maxScroll,
+            marker.getBoundingClientRect().top - viewportTop + el.scrollTop,
+          );
         }
       });
+      // A step that ran but whose marker is above the window starts at the very
+      // top: all of its content is off the list, so scrolling past it is done.
+      for (let i = 1; i < n; i++) if (started[i] && !placed[i]) bounds[i] = 0;
       // Keep boundaries monotonic in case markers render out of order.
       for (let i = 1; i <= n; i++) bounds[i] = Math.max(bounds[i], bounds[i - 1]);
     }
@@ -724,8 +829,33 @@ export function Transcript({
       // honor the unpin outside the brief window after such a reflow.
       pinnedRef.current = false;
     }
+    // Reaching the top of a clipped list is a request for more of it.
+    if (hidden > 0 && el.scrollTop < 200) showEarlier();
     updateProgress();
   };
+
+  // Backfill the window after first paint, one step per idle slot, so find-in-page
+  // and the progress bar converge to the complete list.
+  useEffect(() => {
+    if (hidden === 0) return;
+    const idle = typeof requestIdleCallback === 'function';
+    const handle = idle ? requestIdleCallback(showEarlier) : setTimeout(showEarlier, 200);
+    return () => {
+      if (idle) cancelIdleCallback(handle as number);
+      else clearTimeout(handle as ReturnType<typeof setTimeout>);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hidden]);
+
+  // Hold the viewport still across a window growth. Must run before the [items]
+  // effect's pin check, hence layout: the rows are already laid out, not painted.
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    const anchor = anchorRef.current;
+    if (!el || !anchor) return;
+    anchorRef.current = null;
+    el.scrollTop = anchor.scrollTop + (el.scrollHeight - anchor.scrollHeight);
+  }, [visibleItems]);
 
   useEffect(() => {
     if (pinnedRef.current) {
@@ -788,12 +918,20 @@ export function Transcript({
               Send a prompt to start.
             </Text>
           )}
-          {items.map((item) => (
+          {/* Truthful about the clipping, and the only affordance a keyboard user
+              has while the idle backfill is still catching up. */}
+          {hidden > 0 && (
+            <Button variant="subtle" size="compact-xs" onClick={showEarlier}>
+              Show earlier messages ({hidden})
+            </Button>
+          )}
+          {visibleItems.map((item) => (
             <Item
               key={item.key}
               item={item}
               sessionId={sessionId}
               onImage={setLightbox}
+              renderNested={renderNested}
               retryKey={retryKey}
               activeGroupKey={activeGroupKey}
               activeTurnKey={activeTurnKey}

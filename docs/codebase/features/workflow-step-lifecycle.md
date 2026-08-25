@@ -496,9 +496,12 @@ installed icon, no new package). No other new dependencies.
      user is never masked as "done"
   4. `isWorkflowFinished(session)` → green **filled** `IconCircleCheckFilled`, 14px
   5. otherwise → plain `.status-dot`
-- A force-advance ("Mark as completed" on the last running step) also sets the last step
-  `'done'`, so a force-finished workflow shows the filled check too — intended, not a special
-  case.
+- Clicking a step in the stepper still jumps the transcript to that step's start marker, but
+  the marker may not be mounted — `Transcript.tsx` windows a long transcript to its tail (see
+  [transcript-performance](transcript-performance.md)). The click asks `revealWorkflowStep()`
+  (`web/src/lib/workflowReveal.ts`) to scroll directly if the marker exists, otherwise it fires
+  `REVEAL_STEP_EVENT`, which the transcript handles by dropping its window and scrolling once
+  the marker mounts.
 
 ## Architectural rules
 
@@ -581,3 +584,5 @@ installed icon, no new package). No other new dependencies.
   per-repo diff split budget in detail.
 - [session-and-project-ui](session-and-project-ui.md) — the sidebar status badge and project
   tab dot the finished-workflow icon shares its precedence chain with.
+- [transcript-performance](transcript-performance.md) — the tail-windowed transcript the
+  stepper's jump-to-step has to cooperate with.
