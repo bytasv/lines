@@ -15,8 +15,10 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   being deleted, since tool input shapes are free-form and unbounded (arbitrary MCP tools, an SDK
   type that gains fields before this code knows about them). Two tool kinds get further,
   kind-specific treatment on top of the shared field list: a call with a diff to show (a
-  successful edit) drops its expand affordance entirely, and `AskUserQuestion` renders as the
-  same read-only option-card review the live prompt uses instead of a field list.
+  successful edit) drops its expand affordance entirely, and a settled (answered, non-error)
+  `AskUserQuestion` drops the row entirely and renders as just the read-only option-card review the
+  live prompt uses — always visible, never behind a chevron, isolated from tool grouping and
+  turn-folding so it always sits as its own top-level transcript item.
 - **Subagent nesting** — attribute SDK messages to the agent that actually produced them, and
   render a subagent spawn as a run (agent identity and description first) instead of a bare tool
   badge. The harness already runs the Claude Code preset with `settingSources: ['user','project']`
@@ -33,8 +35,9 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 
 - `web/src/components/Transcript.tsx` (`Item`, `case 'user'` and `case 'assistant'`)
 - Any expanded tool card in the transcript (`web/src/components/ToolCallCard.tsx`)
-- A resolved `AskUserQuestion` call, either as its tool card or (before it was deduped) the
-  separate "Claude asked" summary below it
+- A settled `AskUserQuestion` call, rendered bare as its own top-level review — no chevron, never
+  grouped or folded away; before it was deduped this coexisted with a separate "Claude asked"
+  summary below it, which still appears for a denied/expired question
 - A prompt that causes the agent to spawn a subagent (e.g. "use the Explore agent to map
   server/src")
 - `web/src/lib/transcript.ts` (`buildTranscript`) — nests rendering
@@ -57,13 +60,14 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   `matchAnswerToOptions`, `BODY_CAP`
 - `web/src/components/ToolCallCard.tsx` — `ToolFields`, `RawInput`, the `expandable` gate, the
   one-liner (`toolSummary`); branches to `TaskHeader`/`TaskBody` for a spawn call, `.tx-task`
-  container class, nested tool tally
+  container class, nested tool tally; a settled `AskUserQuestion` short-circuits before any of
+  that and returns bare `QuestionReview`
 - `web/src/components/QuestionPrompt.tsx` — `OptionCard`'s `readOnly` mode, `QuestionReview`
 - `shared/types.ts` — `subagentParentId`
 - `server/src/sessions.ts` — `handleWorkerEvent` (context-usage gate), `collectTurns`
   (turn-output scan), `scanTurnActivity` (turn-summary scan, extracted from `summarizeTurn`)
 - `web/src/lib/transcript.ts` — `ToolBlock.children`, `LiveActivity.subagent` / `subagentType`,
-  `Sink`, `sinkFor`, `buildTranscript`
+  `Sink`, `sinkFor`, `buildTranscript`, `isQuestionTool`
 - `web/src/lib/agents.ts` — `isAgentTool`, `parseTaskInput`, `agentMeta`, `MAIN_AGENT_META`,
   `taskFlags`
 - `web/src/components/TaskCall.tsx` — `TaskHeader` (badge + description + flags), `TaskBody`
@@ -99,6 +103,8 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 - `QuestionReview` — renders an answered/denied `AskUserQuestion` call using `OptionCard` in
   `readOnly` mode: the exact cards the live prompt offered, with what was picked still checked and
   everything else dimmed
+- `isQuestionTool(name)` — true for `'AskUserQuestion'`; used to isolate the call into its own
+  single-tool group at every grouping level and to mark that group a `foldAgentTurns` boundary
 - `subagentParentId(msg)` — pure predicate; returns the owning spawn call's id, or `null` for
   main-agent messages
 - `Sink` / `sinkFor(parentId)` — per-agent assistant-message accumulator (`items`, `openGroup`,
@@ -134,17 +140,34 @@ directly (no wrapper) for agent text.
 edit tool with a diff and no error, `expandable` is false: no chevron, no click/keyboard toggle,
 just a 13px spacer so the badge column still lines up with every other row — the Monaco diff
 button already covers what the body would show. Every other tool card's body renders `ToolFields`
-(for a spawn call, `TaskBody`'s prompt disclosure instead; for `AskUserQuestion`,
-`QuestionReview` instead), followed by an always-present `RawInput` toggle that lazily serializes
-`tool.input` only once opened. The field the row's one-liner already showed is dropped from the
-body unless it needed its own code block (a Bash heredoc, a Write's content) — showing a Read's
-path twice, once in the badge row and again in the body, would be pure duplication.
+(for a spawn call, `TaskBody`'s prompt disclosure instead; for a pending or errored
+`AskUserQuestion`, `QuestionReview` instead), followed by an always-present `RawInput` toggle that
+lazily serializes `tool.input` only once opened. The field the row's one-liner already showed is
+dropped from the body unless it needed its own code block (a Bash heredoc, a Write's content) —
+showing a Read's path twice, once in the badge row and again in the body, would be pure
+duplication.
 
-For `AskUserQuestion` specifically: `Transcript.tsx`'s permission-item filter, previously just
-`!data.auto`, is `isRedundant()`, which also drops a `resolution: 'allow'` question — its tool
-card, via `QuestionReview`, already shows the full question/answer review. A denied or expired
-question keeps its separate "Claude asked" card, since that copy ("re-send your prompt and Claude
-will ask again") exists nowhere else.
+A settled `AskUserQuestion` (answered, not pending, not an error, with a non-empty `questions`
+array) skips all of that: `ToolCallCard` returns bare `QuestionReview` before building the row at
+all — no badge, no chevron, no `Collapse`, nothing to click. A pending question keeps the ordinary
+collapsible card (the live `PermissionPrompt` below it is the interactive copy; an always-open
+card here would duplicate it), and so does an error (the result text is the point) or a malformed
+call (nothing to review, so the card stays rather than vanishing).
+
+That bare review also never gets buried: `buildTranscript` isolates every `AskUserQuestion` call
+into its own single-tool group regardless of the session's tool-grouping level (`isolated =
+!groupTools || isQuestionTool(tool.name)`), which `ToolGroup` renders as an ungrouped card since a
+one-tool group carries no group chrome. `foldAgentTurns` treats that single-tool question group as
+a boundary, the same way it already treats a pending `ExitPlanMode` — so at Compact level the
+question always renders as its own top-level item between two folded turn halves, never hidden
+inside one.
+
+For `Transcript.tsx`'s permission-item filter: previously just `!data.auto`, it is now
+`isRedundant()`, which also drops a `resolution: 'allow'` question — its tool card, via
+`QuestionReview`, already shows the full question/answer review. A denied or expired question
+keeps its separate "Claude asked" card, since that copy ("re-send your prompt and Claude will ask
+again") exists nowhere else, and keeps the ordinary collapsible tool card too (the early-return
+only applies to a non-error settled question).
 
 ### Subagents
 
@@ -201,9 +224,14 @@ be talking to it.
   against real persisted transcript strings during development. Verification is otherwise manual:
   expand a Bash/Read/Edit/Grep/WebFetch/MCP card and confirm a field list instead of JSON, confirm
   the raw-input toggle reproduces byte-identical JSON, confirm a successful edit has no chevron,
-  confirm an answered question shows exactly one review (the tool card, not also the separate
-  summary), and spawn a subagent to confirm nesting, live label/icon/colour match, agent badge on
-  reload, context ring, and reload back-compat.
+  and spawn a subagent to confirm nesting, live label/icon/colour match, agent badge on reload,
+  context ring, and reload back-compat. For `AskUserQuestion`: confirm an answered question shows
+  the option cards already picked with no click needed, no chevron, and no separate "Claude asked"
+  card below it (exactly one review on screen); confirm it sits as its own top-level item between
+  two folded turns at Compact level; confirm a still-pending question stays an ordinary collapsed
+  card with the live `QuestionPrompt` as the only interactive copy; confirm a denied/expired
+  question is unchanged (collapsible card plus the separate "Claude asked" re-send card); confirm
+  the placement and open state survive a tool-grouping-level switch and a page reload.
 - `server/src/sessions.turns.test.ts` — a subagent's final text landing after the main agent's
   does not become the turn output; a subagent's `ExitPlanMode`/plan-file write does not turn an
   ordinary turn into a plan turn; `scanTurnActivity` drops a subagent's tool calls while keeping
@@ -230,10 +258,17 @@ be talking to it.
   one toggle away for every tool, with no exceptions (it is the safety net for shapes `toolFields`
   can't classify well).
 - A tool call already fully explained elsewhere in the row loses its expand affordance rather than
-  offering an empty or redundant body: a successful edit (diff button covers it) and a resolved
-  `AskUserQuestion` (its own card carries the review) are the two current cases.
+  offering an empty or redundant body: a successful edit (diff button covers it) loses only the
+  chevron. A settled (answered, non-error) `AskUserQuestion` goes further and loses the row too —
+  it renders as just the always-open review, since that review is the entire point of the card.
 - An `AskUserQuestion` call's answer is read from its tool result's prose, not from its input —
   the input only ever contains the questions asked.
+- Every `AskUserQuestion` call — pending, answered, or errored — is isolated into its own
+  single-tool group at every tool-grouping level and treated as a `foldAgentTurns` boundary (like
+  a pending `ExitPlanMode`), so the question always renders as its own top-level transcript item:
+  never grouped with neighbouring tool calls, never folded inside a Compact-level agent turn. Only
+  once it settles successfully does the card itself also drop its row (previous rule); while
+  pending or on error it is still top-level, just an ordinary collapsible card there.
 - A subagent's assistant text and tool calls are never counted as main-agent output: workflow step
   output (`collectTurns`), the turn summary (`scanTurnActivity`), and the live context-usage
   reading (`handleWorkerEvent`) are all derived from main-agent messages only.
@@ -345,8 +380,15 @@ be talking to it.
 - `.tx-task`'s container accent uses `box-shadow: inset` plus an asymmetric `margin-inline` (not a
   real border) so the chevron stays in the single column `.tx-row` maintains for every other row,
   at every nesting depth.
-- `foldAgentTurns` needed no change: subagent items live inside `ToolBlock.children`, never in the
-  top-level item array it operates on.
+- `foldAgentTurns` needed no change for subagent nesting: subagent items live inside
+  `ToolBlock.children`, never in the top-level item array it operates on.
+- `buildTranscript` isolates an `AskUserQuestion` call into its own single-tool group the same way
+  Full-level tool grouping does (`sink.openGroup = null` before and after), rather than adding a
+  second isolation mechanism — a one-tool group already renders bare via `ToolGroup`'s existing
+  `group.tools.length === 1` check, so no new rendering path was needed either.
+- `foldAgentTurns`' boundary check gained one clause (a single-tool `AskUserQuestion` group) rather
+  than a new concept: it already treated a pending `ExitPlanMode` permission item as a boundary, so
+  a question uses the same mechanism instead of a parallel one.
 
 ## Related decisions
 

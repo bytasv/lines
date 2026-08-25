@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { memo, useState, type ReactNode } from 'react';
 import {
   ActionIcon,
   Badge,
@@ -13,7 +13,7 @@ import {
 } from '@mantine/core';
 import { IconChevronDown, IconChevronRight, IconZoomScan } from '@tabler/icons-react';
 import type { ToolBlock, ToolGroupItem, TranscriptItem } from '../lib/transcript';
-import { groupSummary, isEditTool, toolDiff } from '../lib/transcript';
+import { groupSummary, isEditTool, isQuestionTool, toolDiff } from '../lib/transcript';
 import { isAgentTool } from '../lib/agents';
 import { BODY_CAP, toolFields, toolSummary, type ToolField } from '../lib/toolFields';
 import { MonacoDiffModal } from './MonacoDiffModal';
@@ -115,7 +115,12 @@ function RawInput({ input }: { input: Record<string, unknown> }) {
 // the card unmounting — which now happens whenever its group collapses.
 const stickyExpanded = new Map<string, boolean>();
 
-export function ToolCallCard({
+/**
+ * Memoized on the tool block: a card whose block was reused by reconcileItems has
+ * nothing new to render, and its diff (asked for here, in the group header and in
+ * the folded turn's totals) stays cached alongside it.
+ */
+export const ToolCallCard = memo(function ToolCallCard({
   tool,
   renderNested,
 }: {
@@ -143,13 +148,29 @@ export function ToolCallCard({
   // An Agent/Task call reads as a subagent *run*: its own header, its own container,
   // and the subagent's tool tally instead of nothing.
   const isAgent = isAgentTool(tool.name);
-  const isQuestion = tool.name === 'AskUserQuestion';
+  const isQuestion = isQuestionTool(tool.name);
   const children = tool.children ?? [];
   const nested = children.length > 0 ? nestedTools(children) : [];
   // A successful edit has nothing behind the chevron the diff button doesn't show
   // better — the body would be the file content it already renders plus a
   // "File updated successfully" line. Errors stay expandable: that text is the point.
   const expandable = !(editTool && diff && !tool.isError);
+
+  // An answered question is the record of a decision, not a step — it renders as
+  // the review itself: always open, no row, no chevron. The row would only repeat
+  // what QuestionReview shows anyway (each question's header badge and text).
+  // Pending keeps the normal card — the live prompt below it is the interactive
+  // copy — and so do errors, whose result text is the point. A malformed input
+  // (no questions to review) also stays a card rather than vanishing.
+  if (
+    isQuestion &&
+    !pending &&
+    !tool.isError &&
+    Array.isArray(tool.input.questions) &&
+    tool.input.questions.length > 0
+  ) {
+    return <QuestionReview input={tool.input} result={tool.result} />;
+  }
 
   return (
     <Box className={isAgent ? 'tx-task' : undefined}>
@@ -300,4 +321,4 @@ export function ToolCallCard({
       )}
     </Box>
   );
-}
+});

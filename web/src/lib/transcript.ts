@@ -113,14 +113,25 @@ interface SdkContentBlock {
   is_error?: boolean;
 }
 
+/**
+ * Tool-result strings, memoized per content object. buildTranscript re-runs from
+ * scratch on every rebuild and a long session's results are most of its bytes,
+ * so re-serializing them per pass was the bulk of the churn. Keyed on the SDK
+ * content object, which lives in the event log and is never mutated.
+ */
+const contentStringCache = new WeakMap<object, string>();
+
 function contentToString(content: unknown): string {
   if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((b: SdkContentBlock) => (b?.type === 'text' ? (b.text ?? '') : ''))
-      .join('');
-  }
-  return content == null ? '' : JSON.stringify(content, null, 2);
+  if (content == null) return '';
+  if (typeof content !== 'object') return JSON.stringify(content, null, 2);
+  const cached = contentStringCache.get(content);
+  if (cached !== undefined) return cached;
+  const out = Array.isArray(content)
+    ? content.map((b: SdkContentBlock) => (b?.type === 'text' ? (b.text ?? '') : '')).join('')
+    : JSON.stringify(content, null, 2);
+  contentStringCache.set(content, out);
+  return out;
 }
 
 /**
@@ -218,13 +229,21 @@ export function buildTranscript(
   /** Compaction whose 'done' hasn't landed yet, so it can be upgraded in place. */
   let openCompact: ContextCompactItem | null = null;
 
+  /** Last snapshot of `file`, scanning back — no array copy per lookup. */
+  const lastSnapshotFor = (file: string, unclaimedOnly: boolean): FileSnapshotData | undefined => {
+    for (let i = snapshots.length - 1; i >= 0; i--) {
+      const s = snapshots[i];
+      if (s.filePath === file && (!unclaimedOnly || !s.toolUseId)) return s;
+    }
+    return undefined;
+  };
+
   const attachSnapshot = (tool: ToolBlock) => {
     // Prefer exact tool_use_id match, fall back to file path (hook input ids can be absent).
     let snap = snapshots.find((s) => s.toolUseId && s.toolUseId === tool.id);
     if (!snap) {
       const file = String(tool.input.file_path ?? tool.input.notebook_path ?? '');
-      snap = [...snapshots].reverse().find((s) => s.filePath === file && !s.toolUseId);
-      if (!snap) snap = [...snapshots].reverse().find((s) => s.filePath === file);
+      snap = lastSnapshotFor(file, true) ?? lastSnapshotFor(file, false);
     }
     if (snap) tool.snapshot = snap;
   };
@@ -392,8 +411,10 @@ export function buildTranscript(
                   sessionPlanWrite = tool;
                 }
                 // Full level (groupTools=false): each tool is its own 1-tool group,
-                // which ToolGroup renders as a bare card — i.e. ungrouped.
-                if (!groupTools) sink.openGroup = null;
+                // which ToolGroup renders as a bare card — i.e. ungrouped. A question
+                // takes the same path at every level: never buried in a group.
+                const isolated = !groupTools || isQuestionTool(tool.name);
+                if (isolated) sink.openGroup = null;
                 if (!sink.openGroup) {
                   sink.openGroup = {
                     kind: 'tool-group',
@@ -404,7 +425,7 @@ export function buildTranscript(
                   sink.items.push(sink.openGroup);
                 }
                 sink.openGroup.tools.push(tool);
-                if (!groupTools) sink.openGroup = null;
+                if (isolated) sink.openGroup = null;
               }
             }
             flush();
@@ -529,12 +550,172 @@ export function buildTranscript(
 }
 
 /**
+ * Structural sharing across rebuilds: every item in `next` that is content-equal
+ * to its `prev` twin is replaced by the `prev` object, so an unchanged row keeps
+ * its identity. Two things depend on that identity:
+ *
+ * - the memoized row components (`Item`, `AgentTurn`, `ToolGroup`, `ToolCallCard`)
+ *   can only skip a subtree whose props are referentially equal;
+ * - {@link toolDiffCache} is a WeakMap on `ToolBlock` objects, so a reused block
+ *   keeps its computed diff instead of recomputing a whole-file diff per event.
+ *
+ * Neither can serve stale content: the equality checks below cover every field
+ * buildTranscript writes *after* creating an item (tool `result`/`isError`/
+ * `snapshot`/`children`, permission `resolution`/`data`, result `summary`,
+ * streaming/assistant text), so a changed item is never reused.
+ *
+ * Returns `prev` itself when nothing moved, keeping the caller's memo stable too.
+ */
+export function reconcileItems(prev: TranscriptItem[], next: TranscriptItem[]): TranscriptItem[] {
+  if (prev === next || prev.length === 0) return next;
+  const byKey = new Map<string, TranscriptItem>();
+  for (const it of prev) byKey.set(it.key, it);
+  let unchanged = prev.length === next.length;
+  const out = next.map((item, i) => {
+    const old = byKey.get(item.key);
+    const reused = old ? reuseItem(old, item) : item;
+    if (reused !== prev[i]) unchanged = false;
+    return reused;
+  });
+  return unchanged ? prev : out;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
+function shallowEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (const k of keys) if (a[k] !== b[k]) return false;
+  return true;
+}
+
+/**
+ * Permission data is respread whenever a resolution lands (and for ExitPlanMode,
+ * when the plan text is stitched in), so referential equality alone would never
+ * reuse those rows. One level, plus `input` — a false negative here only costs a
+ * re-render.
+ */
+function samePermissionData(a: PermissionRequestData, b: PermissionRequestData): boolean {
+  if (a === b) return true;
+  const ra = a as unknown as Record<string, unknown>;
+  const rb = b as unknown as Record<string, unknown>;
+  const keys = Object.keys(ra);
+  if (keys.length !== Object.keys(rb).length) return false;
+  for (const k of keys) {
+    if (ra[k] === rb[k]) continue;
+    if (k === 'input' && isRecord(ra[k]) && isRecord(rb[k]) && shallowEqual(ra[k], rb[k])) continue;
+    return false;
+  }
+  return true;
+}
+
+/** The previous object when content-equal, else the fresh one (nested reuse applied). */
+function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
+  if (old === next) return old;
+  if (old.kind !== next.kind) return next;
+  switch (next.kind) {
+    case 'user': {
+      const o = old as typeof next;
+      // attachments/mentions/actor come straight off the event data, so they keep
+      // their identity across rebuilds.
+      return o.text === next.text &&
+        o.source === next.source &&
+        o.ts === next.ts &&
+        o.attachments === next.attachments &&
+        o.mentions === next.mentions &&
+        o.actor === next.actor
+        ? o
+        : next;
+    }
+    case 'assistant': {
+      const o = old as typeof next;
+      if (o.isAnswer !== next.isAnswer || o.blocks.length !== next.blocks.length) return next;
+      for (let i = 0; i < next.blocks.length; i++) {
+        if (o.blocks[i].type !== next.blocks[i].type || o.blocks[i].text !== next.blocks[i].text) {
+          return next;
+        }
+      }
+      return o;
+    }
+    case 'streaming':
+      return (old as typeof next).text === next.text ? old : next;
+    case 'system-init':
+      return (old as typeof next).model === next.model ? old : next;
+    case 'result': {
+      const o = old as ResultItem;
+      return o.costUsd === next.costUsd &&
+        o.durationMs === next.durationMs &&
+        o.isError === next.isError &&
+        o.error === next.error &&
+        o.summary === next.summary
+        ? o
+        : next;
+    }
+    case 'permission': {
+      const o = old as typeof next;
+      return o.resolution === next.resolution && samePermissionData(o.data, next.data) ? o : next;
+    }
+    case 'workflow':
+      return (old as typeof next).data === next.data ? old : next;
+    case 'context-compact':
+      return (old as ContextCompactItem).data === next.data ? old : next;
+    case 'tool-group': {
+      const o = old as ToolGroupItem;
+      if (o.labelText !== next.labelText) return next;
+      const tools = reuseTools(o.tools, next.tools);
+      return tools === o.tools ? o : { ...next, tools };
+    }
+    case 'agent-turn': {
+      const o = old as AgentTurnItem;
+      const items = reconcileItems(o.items, next.items);
+      return items === o.items ? o : { ...next, items };
+    }
+  }
+}
+
+function reuseTools(prev: ToolBlock[], next: ToolBlock[]): ToolBlock[] {
+  const byId = new Map<string, ToolBlock>();
+  for (const t of prev) byId.set(t.id, t);
+  let unchanged = prev.length === next.length;
+  const out = next.map((tool, i) => {
+    const old = byId.get(tool.id);
+    const reused = old ? reuseTool(old, tool) : tool;
+    if (reused !== prev[i]) unchanged = false;
+    return reused;
+  });
+  return unchanged ? prev : out;
+}
+
+function reuseTool(old: ToolBlock, next: ToolBlock): ToolBlock {
+  if (old === next) return old;
+  if (
+    old.name !== next.name ||
+    old.result !== next.result ||
+    old.isError !== next.isError ||
+    old.snapshot !== next.snapshot
+  ) {
+    return next;
+  }
+  // Normally the same SDK block object; the shallow compare covers a tool_use with
+  // no input at all, where buildTranscript substitutes a fresh `{}` each pass.
+  if (old.input !== next.input && !shallowEqual(old.input, next.input)) return next;
+  if (!old.children && !next.children) return old;
+  if (!old.children || !next.children) return next;
+  const children = reconcileItems(old.children, next.children);
+  return children === old.children ? old : { ...next, children };
+}
+
+/**
  * Compact level: fold each agent turn (everything the agent produced between one
  * user prompt and the next boundary) into a single collapsible `agent-turn` item.
  * User prompts, session-init, and workflow dividers are boundaries that stay visible.
  * A lone agent item passes through un-wrapped (avoids chrome around a single answer).
  * The plan-review card is also a boundary so a pending plan is always presented
- * as its own item — exploration folds away, the plan stays visible.
+ * as its own item — exploration folds away, the plan stays visible. An
+ * AskUserQuestion card gets the same treatment: the question and the answer are a
+ * decision the reader comes back to, not a step inside a turn.
  */
 export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
   const out: TranscriptItem[] = [];
@@ -573,7 +754,8 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
       it.kind === 'system-init' ||
       it.kind === 'workflow' ||
       it.kind === 'context-compact' ||
-      (it.kind === 'permission' && it.data.toolName === 'ExitPlanMode');
+      (it.kind === 'permission' && it.data.toolName === 'ExitPlanMode') ||
+      (it.kind === 'tool-group' && it.tools.length === 1 && isQuestionTool(it.tools[0].name));
     if (isBoundary) {
       flush();
       out.push(it);
@@ -680,6 +862,11 @@ export function isEditTool(name: string): boolean {
   return name === 'Edit' || name === 'Write' || name === 'MultiEdit' || name === 'NotebookEdit';
 }
 
+/** Its own card, its own turn boundary — a question is a decision, not a step. */
+export function isQuestionTool(name: string): boolean {
+  return name === 'AskUserQuestion';
+}
+
 export interface ToolDiff {
   diff: { filePath: string; before: string; after: string };
   stats: { added: number; removed: number };
@@ -689,8 +876,9 @@ export interface ToolDiff {
  * Diff + line stats for one edit tool call, memoized per ToolBlock. The same
  * block is asked for its diff several times per commit — the card, its group's
  * +N/−N total, and the folded turn's total — and every one of those recomputes
- * a whole-file diff. Keyed on the object, so a rebuilt transcript produces
- * fresh blocks and can never serve a stale diff.
+ * a whole-file diff. Keyed on the object: {@link reconcileItems} hands an
+ * unchanged block back across rebuilds so the entry survives, and a block whose
+ * `input` or `snapshot` moved is never reused — so this can't serve a stale diff.
  */
 const toolDiffCache = new WeakMap<ToolBlock, ToolDiff | null>();
 
