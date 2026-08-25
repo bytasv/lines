@@ -66,6 +66,12 @@ a step that inherits the conversation rather than resetting it.
 captured against), so a workflow already in flight across a deploy keeps a
 correct diff instead of silently falling back to `HEAD`.
 
+This `WorkflowState.diffBaselines`/`baselinesFor` pair is **unchanged** by
+[session-change-tracking](session-change-tracking.md), which added a separate,
+higher-priority baseline on `SessionMeta` itself for its own read-only review
+UI. The two are independent: a workflow's `{diff}` hand-off still resolves
+exclusively through `WorkflowEngine.baselinesFor` as described here.
+
 ## Dependencies
 
 - `git rev-parse --show-toplevel` / `--abbrev-ref HEAD`, both new primitives in
@@ -124,6 +130,9 @@ truncation.
 - [multi-root-projects](multi-root-projects.md)
 - [workflow-step-lifecycle](workflow-step-lifecycle.md) —
   owns the rest of `substituteTokens`/`usesHandoffTokens`
+- [session-change-tracking](session-change-tracking.md) — a separate,
+  session-level baseline built on the same `groupByRepo`/`captureBaselines`
+  primitives, for a read-only change review UI rather than a workflow hand-off
 
 ## Risks / open items
 

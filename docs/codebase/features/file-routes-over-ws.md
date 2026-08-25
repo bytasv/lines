@@ -32,7 +32,9 @@ WebSocket multiplexer.
 
 ## Important symbols
 
-- `handleFileRequest(ctx, kind, params)` → `{ status, body }`
+- `handleFileRequest(ctx, kind, params, access)` → `Promise<{ status, body }>`
+  — async since [session-change-tracking](session-change-tracking.md) added
+  two kinds that read git; every other handler still resolves synchronously
 - `fileRequest(kind, params)` — client side, promise keyed by `reqId`
 - `useAttachmentUrl(rel)` — base64 → blob URL, revoked on unmount
 - `ClientMessage.fileRequest` / `ServerMessage.fileResponse`
@@ -73,9 +75,10 @@ an open socket — there is no unauthenticated fallback.
 
 ## Architectural rules
 
-- The handlers are pure `{ status, body }` functions in their own module, not
-  `http.ServerResponse` writers — that is what lets them serve a relay channel,
-  and what makes them testable without a socket (index.ts listens on import).
+- The handlers are pure `{ status, body }` (or `Promise<{ status, body }>`)
+  functions in their own module, not `http.ServerResponse` writers — that is
+  what lets them serve a relay channel, and what makes them testable without a
+  socket (index.ts listens on import).
 - `fileResponse` is handled in `ws.ts` before `applyServerMessage` and returns
   early; the store never sees it.
 - The bridge's only remaining HTTP surface is its status page, so `corsFor`,
@@ -89,3 +92,6 @@ an open socket — there is no unauthenticated fallback.
 - [hosted-machine-access](hosted-machine-access.md) — the connection these ride on
 - [permissions-and-plan-mode](permissions-and-plan-mode.md) — the plan-directory
   exception in the containment check
+- [session-change-tracking](session-change-tracking.md) — `sessionDiff`/
+  `sessionDiffFile`, the two kinds that made dispatch async and added the
+  `sessionInReach` grant clamp on top of the `readFiles` capability

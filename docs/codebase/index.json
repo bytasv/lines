@@ -2357,6 +2357,71 @@
         "workflow-step-lifecycle",
         "session-and-project-ui"
       ]
+    },
+    {
+      "id": "session-change-tracking",
+      "name": "Session change tracking",
+      "doc": "features/session-change-tracking.md",
+      "purpose": "A per-session git baseline captured once at creation, per-turn attribution of which changed files belong to this session (mechanism-agnostic, via git snapshot windows), and a read-only review UI that lists every changed file and diffs it on demand, without routing diff content through a model.",
+      "entryPoints": [
+        "server/src/sessions.ts",
+        "web/src/components/SessionView.tsx",
+        "web/src/components/SessionDiffModal.tsx"
+      ],
+      "files": [
+        "server/src/git.ts",
+        "server/src/sessions.ts",
+        "server/src/fileRoutes.ts",
+        "shared/types.ts",
+        "web/src/lib/sessionDiff.ts",
+        "web/src/components/SessionDiffModal.tsx",
+        "web/src/components/SessionView.tsx"
+      ],
+      "symbols": [
+        "refExists",
+        "parseNameStatus",
+        "parseNumstat",
+        "changedFiles",
+        "showFile",
+        "changedBetween",
+        "collectChangedPaths",
+        "SessionManager.captureSessionBaseline",
+        "SessionManager.baselinesFor",
+        "SessionManager.changeSummary",
+        "SessionManager.baselineRefFor",
+        "SessionManager.openTurnWindow",
+        "SessionManager.recordFilesChanged",
+        "SessionManager.sharedRepos",
+        "SessionMeta.diffBaselines",
+        "FilesChangedData"
+      ],
+      "tests": [
+        "server/src/git.sessionDiff.test.ts",
+        "server/src/sessions.changedPaths.test.ts",
+        "server/src/fileRoutes.test.ts",
+        "server/src/guestAccess.test.ts"
+      ],
+      "businessRules": [
+        "one baseline per session, captured once at creation, never recaptured or overwritten",
+        "baseline resolution order is session baseline, then workflow baseline, then a synthesized HEAD flagged synthetic",
+        "a pruned snapshot ref falls back to HEAD and is flagged stale rather than silently rendering as no changes",
+        "a path is ambiguous only when every source that saw it is an overlapped turn window; a direct tool_use claim always wins",
+        "sessionDiff/sessionDiffFile require the session itself to be inside the connection's grant, not just the readFiles capability",
+        "no MAX_DIFF_CHARS-style cap applies on this path, since nothing here reaches a model",
+        "workflow {diff} behavior is unchanged: WorkflowState.diffBaselines is still written and read exactly as before"
+      ],
+      "architecturalRules": [
+        "diff assembly (baseline resolution, attribution, bucketing) lives on SessionManager, not in fileRoutes.ts, which stays a thin permission clamp",
+        "git.ts stays pure git with no prompt formatting; parseNameStatus/parseNumstat are exported pure functions",
+        "per-turn attribution is a transcript event ('files-changed'), never a SessionMeta field, and is deliberately never rendered as a transcript card",
+        "handleFileRequest and its ROUTES map are async; every pre-existing handler still resolves synchronously"
+      ],
+      "relatedDecisions": [
+        "multi-repo-commits",
+        "file-routes-over-ws",
+        "transcript-rendering",
+        "session-collaboration"
+      ]
     }
   ]
 }
