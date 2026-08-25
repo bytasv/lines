@@ -1,4 +1,5 @@
 import type { ShareCaps, ShareProfile, StorageStatus, WorkerStatus } from '@lines/shared';
+import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../store';
 
 /**
@@ -53,22 +54,29 @@ export function useClaudeLoginNeeded(): boolean {
  * on. Without that, two identically-named sessions in one tab are
  * indistinguishable, and typing into the wrong one is silent.
  */
+/*
+ * Both machine hooks below build a fresh object per call, so they must compare
+ * shallowly: zustand v5 feeds the selector straight to useSyncExternalStore,
+ * which treats a new reference as new state and re-renders forever.
+ */
 export function useSessionMachine(sessionId: string): {
   deviceId: string | null;
   isRemote: boolean;
   ownerProfile: ShareProfile | null;
 } {
-  return useStore((s) => {
-    const deviceId = s.sessionMachine[sessionId] ?? null;
-    const primary = s.primaryDeviceId ?? '';
-    return {
-      deviceId,
-      // Remote means "not the machine this UI is pointed at" — true for a shared
-      // machine's session sitting in the merged list.
-      isRemote: deviceId !== null && deviceId !== primary,
-      ownerProfile: (deviceId ? s.machines[deviceId]?.ownerProfile : null) ?? null,
-    };
-  });
+  return useStore(
+    useShallow((s) => {
+      const deviceId = s.sessionMachine[sessionId] ?? null;
+      const primary = s.primaryDeviceId ?? '';
+      return {
+        deviceId,
+        // Remote means "not the machine this UI is pointed at" — true for a shared
+        // machine's session sitting in the merged list.
+        isRemote: deviceId !== null && deviceId !== primary,
+        ownerProfile: (deviceId ? s.machines[deviceId]?.ownerProfile : null) ?? null,
+      };
+    }),
+  );
 }
 
 /**
@@ -85,16 +93,18 @@ export function useSessionMachineHealth(sessionId: string): {
   worker: WorkerStatus | null;
   storage: StorageStatus | null;
 } {
-  return useStore((s) => {
-    const deviceId = s.sessionMachine[sessionId] ?? s.primaryDeviceId ?? '';
-    const slice = s.machines[deviceId];
-    return {
-      // No slice yet means no `hello` from it — treat as not connected rather
-      // than assuming health we have no evidence for.
-      connected: slice?.connectionStatus === 'connected',
-      bridgeAttached: slice ? !slice.machineOffline : false,
-      worker: slice?.worker ?? null,
-      storage: slice?.storage ?? null,
-    };
-  });
+  return useStore(
+    useShallow((s) => {
+      const deviceId = s.sessionMachine[sessionId] ?? s.primaryDeviceId ?? '';
+      const slice = s.machines[deviceId];
+      return {
+        // No slice yet means no `hello` from it — treat as not connected rather
+        // than assuming health we have no evidence for.
+        connected: slice?.connectionStatus === 'connected',
+        bridgeAttached: slice ? !slice.machineOffline : false,
+        worker: slice?.worker ?? null,
+        storage: slice?.storage ?? null,
+      };
+    }),
+  );
 }
