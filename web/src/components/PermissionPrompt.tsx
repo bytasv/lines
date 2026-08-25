@@ -5,6 +5,7 @@ import {
   Badge,
   Box,
   Button,
+  Center,
   Code,
   Collapse,
   Group,
@@ -20,6 +21,7 @@ import {
   IconChevronRight,
   IconFilePencil,
   IconMap,
+  IconPointFilled,
   IconShieldQuestion,
   IconTerminal2,
   IconWorld,
@@ -441,7 +443,19 @@ function PlanApproval({
           }}
         >
           <Group gap="xs" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
-            {hasPlan && (expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />)}
+            {/* The chevron's slot always exists — a prompt carrying no plan marks it
+                with a dot so its icon and title stay in the same column. */}
+            {hasPlan ? (
+              expanded ? (
+                <IconChevronDown size={13} />
+              ) : (
+                <IconChevronRight size={13} />
+              )
+            ) : (
+              <Center w={13} h={13} c="dimmed" style={{ flexShrink: 0 }}>
+                <IconPointFilled size={6} opacity={0.35} />
+              </Center>
+            )}
             <IconMap size={16} color="var(--mantine-color-sandstone-5)" />
             <Text size="sm" fw={600}>
               Claude finished planning

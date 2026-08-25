@@ -4,6 +4,7 @@ import {
   Badge,
   Box,
   Button,
+  Center,
   Code,
   Collapse,
   Group,
@@ -11,7 +12,12 @@ import {
   Text,
   Tooltip,
 } from '@mantine/core';
-import { IconChevronDown, IconChevronRight, IconZoomScan } from '@tabler/icons-react';
+import {
+  IconChevronDown,
+  IconChevronRight,
+  IconPointFilled,
+  IconZoomScan,
+} from '@tabler/icons-react';
 import type { ToolBlock, ToolGroupItem, TranscriptItem } from '../lib/transcript';
 import { groupSummary, isEditTool, isQuestionTool, toolDiff } from '../lib/transcript';
 import { isAgentTool } from '../lib/agents';
@@ -194,8 +200,9 @@ export const ToolCallCard = memo(function ToolCallCard({
         }
       >
         <Group gap="xs" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
-          {/* The chevron's slot is held open even when there is nothing to expand, so
-              every row's badge stays in the same column. */}
+          {/* A row with nothing to expand marks the chevron's slot with a dot rather
+              than leaving it blank: every row's badge stays in the same column, and
+              the gap reads as a deliberate end rather than a missing control. */}
           {expandable ? (
             expanded ? (
               <IconChevronDown size={13} />
@@ -203,7 +210,9 @@ export const ToolCallCard = memo(function ToolCallCard({
               <IconChevronRight size={13} />
             )
           ) : (
-            <Box w={13} style={{ flexShrink: 0 }} />
+            <Center w={13} h={13} c="dimmed" style={{ flexShrink: 0 }}>
+              <IconPointFilled size={6} opacity={0.35} />
+            </Center>
           )}
           {isAgent ? (
             <TaskHeader tool={tool} nested={nested} />

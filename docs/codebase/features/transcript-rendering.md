@@ -138,8 +138,9 @@ directly (no wrapper) for agent text.
 
 `ToolCallCard` computes `isTask`/`isQuestion` alongside the existing `editTool` check. For an
 edit tool with a diff and no error, `expandable` is false: no chevron, no click/keyboard toggle,
-just a 13px spacer so the badge column still lines up with every other row — the Monaco diff
-button already covers what the body would show. Every other tool card's body renders `ToolFields`
+just a dimmed dot in that 13px slot so the badge column still lines up with every other row — the
+Monaco diff button already covers what the body would show. `PermissionPrompt`'s plan-approval row
+uses the same dot when there is no plan to expand. Every other tool card's body renders `ToolFields`
 (for a spawn call, `TaskBody`'s prompt disclosure instead; for a pending or errored
 `AskUserQuestion`, `QuestionReview` instead), followed by an always-present `RawInput` toggle that
 lazily serializes `tool.input` only once opened. The field the row's one-liner already showed is
