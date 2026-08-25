@@ -342,3 +342,8 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   `deleteSession` message here reaches the bridge.
 - [git-worktrees](git-worktrees.md) — the `worktreePending` flag and `pendingCreate` re-arm added
   for a work-tree session's slower create; the `actionError` fix above.
+- [multi-machine-client](multi-machine-client.md) — `shouldClaimSelection` reuses
+  `pendingCreate`/`seenSessionIds` unchanged, adding only a primary-machine check; the sidebar row
+  gains a host avatar/accent for a session on another machine.
+- [session-collaboration](session-collaboration.md) — `SessionMeta.turnActor`, the sidebar's
+  "someone else is running this turn" chip.

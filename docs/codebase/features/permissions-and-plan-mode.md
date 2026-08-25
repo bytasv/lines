@@ -398,6 +398,10 @@ quoted reply under a `kept planning` badge.
   attachments can't ride a `tool_result`); the real text and attachments are queued separately
   and delivered as the next turn once the deny settles the busy query.
 - The plan card's badge shows `kept planning` (not `denied`) for a denied `ExitPlanMode` request.
+- A shared session's resolution badge additionally names *who* answered, when it was not the
+  viewer: `resolvedActor` (see [session-collaboration](session-collaboration.md)) rides alongside
+  `resolvedBy` on the same event, and a guest without `approvePermissions` sees the card
+  read-only — "waiting for {owner} to approve" — instead of the action buttons.
 
 ## Architectural rules
 
@@ -408,6 +412,10 @@ quoted reply under a `kept planning` badge.
   so the hover target fills the segment instead of shrinking to the text).
 - `resolvedBy` is optional and every reader treats a missing value as `'user'` — the only source
   that existed for any card a user could have seen before this field was added.
+- `resolvedActor` sits **alongside** `resolvedBy`, never folded into it: `resolvedBy` is
+  provenance-of-*decision* (a user, a workflow advance, a recovery sweep), which is a different
+  question from *which person* clicked. See
+  [session-collaboration](session-collaboration.md#attribution).
 - `findPermissionResolution` scans backwards (newest wins), matching the existing convention in
   `exitPlanRequestId`.
 - The workflow plan-step gate's recorded `resolution: 'allow'` was already not a record of the
@@ -484,3 +492,5 @@ quoted reply under a `kept planning` badge.
   disk when reconstructing a step's deliverable.
 - [agent-memory-sync](agent-memory-sync.md) — the one-blob-per-user storage precedent the
   allowlist sync follows.
+- [session-collaboration](session-collaboration.md) — `resolvedActor`, and the
+  `approvePermissions` capability that gates a guest's card to read-only.

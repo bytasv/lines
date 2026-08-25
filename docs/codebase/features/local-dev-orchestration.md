@@ -115,6 +115,14 @@ port isolation, `tilt down` orphan check).
   once claiming Tilt sets it to `dev`. `web/vite.config.ts` resolves `/__bridge` from the same
   variable, so pinning it for the bridge alone would stop the dev server finding it; a dev
   checkout runs under the unset default (`default`) the same as `npm run dev`.
+- `--with-relay` alone still runs the relay with `RELAY_AUTH_DISABLED=1`: every client binds to
+  one user as the machine's owner, so [session-collaboration](session-collaboration.md)'s guest
+  gate never runs and no share can be exercised locally. `--relay-auth` leaves Clerk verification
+  on instead, and preflight warns if it is missing `CLERK_SECRET_KEY`, `RELAY_SHARED_SECRET`, or
+  `VITE_BRIDGE_WS_URL` (whose absence sends the browser straight to the bridge, bypassing the
+  relay entirely, so a guest silently lands in a context of their own) — or if the relay is
+  running auth-off while the browser is pointed at it, all of which otherwise present as an
+  unexplained "connecting to your machine…" spinner rather than an error.
 
 ## Architectural rules
 
@@ -142,4 +150,5 @@ port isolation, `tilt down` orphan check).
 
 ## Related decisions
 
-None.
+- [session-collaboration](session-collaboration.md) — why sharing needs `--relay-auth`, not just
+  `--with-relay`.

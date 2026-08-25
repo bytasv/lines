@@ -83,6 +83,10 @@ A row with no `deletedAt` goes through `adoptSynced` as before, except it now ch
 - `applyRemoteDelete` records a tombstone even for a session this machine never held, so a slower third machine's later push can't resurrect it here either.
 - A delete issued while pulled state is being applied, or before there's a token to send it with, is queued (`pendingDeletes`) rather than dropped, and rides the next flush/sync instead of being lost.
 - A bulk push (reconnect) filters out any session whose delete is still unconfirmed, so the whole-list push can't undo a delete that raced it.
+- A guest connection (see [session-collaboration](session-collaboration.md)) never sets
+  `ctx.clerkToken` and never calls `syncNow()` — every push above is keyed to the *host's*
+  `UserContext`, and a guest's token reaching it would push the host's sessions to Postgres under
+  the guest's own account.
 
 ## Architectural rules
 

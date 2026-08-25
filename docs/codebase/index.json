@@ -145,7 +145,7 @@
         "ExitPlanMode and AskUserQuestion always still prompt the user regardless of target path",
         "credential paths (~/.ssh, ~/.aws, .env) always escalate even if nested under a plans directory",
         "any other out-of-cwd file access is unaffected and still escalates",
-        "/file (and by extension /tree/find) can read any plan directory reachable from isPlanPath, not just the requesting session's own plan file — a deliberate widening of a route previously confined to project/session roots, scoped to plan directories only",
+        "/file (and by extension /tree/find) can read any plan directory reachable from isPlanPath, not just the requesting session's own plan file \u2014 a deliberate widening of a route previously confined to project/session roots, scoped to plan directories only",
         "a resolved plan card renders collapsed by default but is always reopenable via its header",
         "action buttons never render once a request is resolved, in the inline card or the fullscreen modal",
         "fullscreen focus mode opens read-only for a resolved plan",
@@ -158,7 +158,7 @@
         "the plan card's badge shows 'kept planning' (not 'denied') for a denied ExitPlanMode request"
       ],
       "architecturalRules": [
-        "single shared PERMISSION_MODES list — no component defines its own label/description array",
+        "single shared PERMISSION_MODES list \u2014 no component defines its own label/description array",
         "SegmentedControl has no per-segment tooltip prop, so per-item tooltips wrap each segment's label in a Tooltip-wrapped full-width span",
         "resolvedBy is optional and every reader treats a missing value as 'user'",
         "findPermissionResolution scans backwards (newest wins), matching the existing convention in exitPlanRequestId",
@@ -168,21 +168,22 @@
         "the web store never caches the allowlist in localStorage; it is server-authoritative and arrives on every hello",
         "removing an entry has no confirmation modal since it only narrows the guard and fails safe",
         "the review modal is mounted at the app root, not inside Settings, so a divergence reaches the user without requiring a gear click",
-        "assessToolCall's self-worker-source check (isSelfWorkerSource) runs before the blanket tool allowlist short-circuit — the first guard verdict an allowlist entry cannot disarm; keep it ordered first in any refactor",
+        "assessToolCall's self-worker-source check (isSelfWorkerSource) runs before the blanket tool allowlist short-circuit \u2014 the first guard verdict an allowlist entry cannot disarm; keep it ordered first in any refactor",
         "isPlanPath resolves the path and anchors containment checks to real directories, not a substring match on the plan-dir marker, so path traversal cannot pass as a plan path",
         "isInside does not resolve symlinks; a symlink planted inside a plan directory pointing elsewhere is accepted as a pre-existing limitation",
         "auto-approved plan writes remain visible as tool_use blocks in the transcript, but the auto-approval permission event is filtered from the UI like other auto-approved calls",
         "PLAN_DIR_MARKER/isPlanFilePath live in shared/types.ts, not autoGuard.ts, so the web client can reuse the same plan-path hint without importing server code",
-        "resolveWorkspacePath/workspaceRoots/resolveWorkspaceParam live in server/src/workspacePaths.ts, not server/src/index.ts, so they're importable by their own test — index.ts starts listening as a side effect of being imported",
-        "~/.claude/plans is per-OS-user, not per-app-user: under AUTH_ENABLED every signed-in app user on the same machine shares that directory, so this exception can cross app-user boundaries — accepted for now",
+        "resolveWorkspacePath/workspaceRoots/resolveWorkspaceParam live in server/src/workspacePaths.ts, not server/src/index.ts, so they're importable by their own test \u2014 index.ts starts listening as a side effect of being imported",
+        "~/.claude/plans is per-OS-user, not per-app-user: under AUTH_ENABLED every signed-in app user on the same machine shares that directory, so this exception can cross app-user boundaries \u2014 accepted for now",
         "the plan-file fallback builds data.input.plan/planPath from the transcript alone; the rendered card layers a live filesystem read (useFileContent against /file) on top whenever it's open, falling back to the transcript-only text before that fetch resolves or on failure",
         "the plan-file write is tracked turn-scoped (lastPlanWrite) for text stitching, with a non-reset session-wide fallback (sessionPlanWrite) only consulted when the turn-scoped write is absent",
         "expanded (inline collapse) and focus (fullscreen) are independent state; an effect keyed only on resolution forces both closed once a request resolves",
         "the card's live read means a resolved card can show text the user never approved; the 'updated since approval' hint is the mitigation, not a faithful-approval guarantee",
         "the plan-reply path picks the request id via a single backwards scan (same shape as findPermissionRequest/findPermissionResolution), never a bulk deny-everything-pending pass, so a concurrent unrelated permission card is never touched",
-        "the no-attachments plan-reply path never emits a 'user' transcript event or calls prompt() directly — both would open a new turn boundary and corrupt turn-scoped bookkeeping (collectTurns, permissionWaitMs)"
+        "the no-attachments plan-reply path never emits a 'user' transcript event or calls prompt() directly \u2014 both would open a new turn boundary and corrupt turn-scoped bookkeeping (collectTurns, permissionWaitMs)"
       ],
       "relatedDecisions": [
+        "session-collaboration",
         "turn-recovery"
       ]
     },
@@ -190,7 +191,7 @@
       "id": "usage-and-cost",
       "name": "Usage and cost",
       "doc": "features/usage-and-cost.md",
-      "purpose": "Plan-usage chip, spend split by model, per-session cost/token/duration in the sidebar, and per-step spend in the workflow stepper — all fed by one accumulate-on-result pass.",
+      "purpose": "Plan-usage chip, spend split by model, per-session cost/token/duration in the sidebar, and per-step spend in the workflow stepper \u2014 all fed by one accumulate-on-result pass.",
       "covers": [
         "usage-indicator",
         "usage-by-model",
@@ -245,7 +246,7 @@
         "a stale snapshot survives transient fetch failures; staleness is shown via 'Updated Xm ago', never by hiding the chip",
         "hello may carry usage: null before the poller's first fetch completes (e.g. after a server restart); a logged-in client keeps its previously held snapshot instead of clearing it",
         "rows keyed by resolveModelId(meta.model), so a retired stored model id folds into its replacement's row",
-        "helper-query spend (autoName, summarizeTurn, step-output consolidation) is excluded — the table is chat-turn spend only, not full account spend",
+        "helper-query spend (autoName, summarizeTurn, step-output consolidation) is excluded \u2014 the table is chat-turn spend only, not full account spend",
         "costByModel is additive and never backfilled; existing sessions show nothing until their next turn settles",
         "the global rollup is derived client-side from the sessions the store already holds, so deleting a session removes its spend",
         "a result carrying neither cost nor usage opens no row",
@@ -261,7 +262,7 @@
       ],
       "architecturalRules": [
         "reuses the existing accumulate-on-result pass in server/src/sessions.ts that already owns totalCostUsd/totalTokens, instead of a new tracking mechanism",
-        "no new persistence and no new ws message — costByModel travels inside the existing SessionMeta blob",
+        "no new persistence and no new ws message \u2014 costByModel travels inside the existing SessionMeta blob",
         "totalTokens and totalDurationMs accumulate on the SDK result message the same way totalCostUsd already does, rather than introducing a separate tracking mechanism",
         "duration is sourced from the SDK result event's duration_ms, not clock math against turnStartedAt, so it excludes idle time by construction",
         "permission-wait time is deducted via LiveState.permissionWaitMs (measured from askPermission call to resolution) rather than switching to the SDK's duration_api_ms, which would also strip genuine tool-execution time",
@@ -323,7 +324,7 @@
         "newest-first, gap-tolerant version list",
         "own steps show full history; foreign steps show published versions only, with the exact pinned version always unioned in",
         "pin/restore is disabled for the currently active version",
-        "workflow re-pin changes only which immutable version a ref points to; step-library restore creates a brand-new head version with old content — history is never rewritten",
+        "workflow re-pin changes only which immutable version a ref points to; step-library restore creates a brand-new head version with old content \u2014 history is never rewritten",
         "both popovers fetch history on open, not on mount, and re-fetch on every reopen",
         "diff list scrolls independently (ScrollArea.Autosize, mah 280) once it exceeds popover height, so the Update button stays reachable regardless of diff length",
         "Update all re-pins every outdated ref step directly, skipping the per-field diff review",
@@ -331,7 +332,7 @@
         "loadFrom collapses every step of the loaded workflow by default; a step opens only via explicit selection"
       ],
       "architecturalRules": [
-        "immutable step versions are never deleted or edited, on disk or in storage — only the head list and published flag change",
+        "immutable step versions are never deleted or edited, on disk or in storage \u2014 only the head list and published flag change",
         "the storage route enforces the foreign-publish filter server-side; client-side version union never bypasses it",
         "init effect tracks the open transition via a prevOpened ref and skips its workflows[0] fallback whenever a draft already exists and this isn't the open transition, to avoid racing the id-reconciliation effect after a new-workflow save",
         "new-workflow id reconciliation matches by name plus deep step equality, not step count alone"
@@ -412,16 +413,16 @@
         "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
         "a user prompt sent after a force-advance but before the interrupted turn settles clears the 'interrupted' flag and its step stamp",
         "step output hand-off after a force-advance goes through the same (now-bounded) consolidation as a normal advance",
-        "a step configured with autoAdvance: true still parks after Stop — Stop overrides the step's own configuration",
+        "a step configured with autoAdvance: true still parks after Stop \u2014 Stop overrides the step's own configuration",
         "a plan-approval advance already pending when Stop is pressed is discarded, not delayed: both the flag and its step stamp are cleared",
-        "a failed turn (is_error result or a crashed query) also never autoAdvances — it parks the step with stepFailure: 'turn' instead, keeping the error status alive for Retry",
+        "a failed turn (is_error result or a crashed query) also never autoAdvances \u2014 it parks the step with stepFailure: 'turn' instead, keeping the error status alive for Retry",
         "the affordance only ever targets the workflow's current step; other steps show no hover state",
         "confirmation copy differs by state: a running step warns its turn is stopped and the last-said text becomes the output; the last step's copy says the workflow finishes",
         "one click on Mark as completed always ends with the workflow on the next step (or done), via a normal settle or the watchdog",
         "each affordance only ever targets the workflow current step, and only while it is genuinely stalled",
-        "starting a stalled pending step runs it exactly as a normal advance would — same fresh-start behavior, same hand-off",
+        "starting a stalled pending step runs it exactly as a normal advance would \u2014 same fresh-start behavior, same hand-off",
         "resuming a stalled done step re-runs its consolidation, so the outputs entry the dead advance never published is filled in first",
-        "resuming needs no confirmation dialog — the step is already done, so nothing is being overridden",
+        "resuming needs no confirmation dialog \u2014 the step is already done, so nothing is being overridden",
         "the last step reading done is a finished workflow, never a stall; it gets no affordance",
         "the Approve button shows a loader and is disabled for the entire consolidation window, not just until the next step's status arrives",
         "the button is also disabled while disconnected, since a dropped WS message would otherwise leave the click looking like it did nothing",
@@ -442,21 +443,21 @@
         "force-advance (mark last running step completed) also sets the last step done, so a force-finished workflow shows the filled check too"
       ],
       "architecturalRules": [
-        "interrupt() stays intent-free — no caller may infer \"advance\" from \"stop\"",
+        "interrupt() stays intent-free \u2014 no caller may infer \"advance\" from \"stop\"",
         "only forceAdvance sets advanceOnComplete (+ advanceOnCompleteStep); a plain Stop leaves it unset and arms no watchdog",
         "whether a settle may consume advanceOnComplete is decided by the advanceOnCompleteStep stamp matching the current step index, not by turnSource",
         "an interrupted settle always parks unless it is also the forced (stamped force-advance) exception, overriding both autoAdvance and a pending plan-approval advance",
-        "never advance synchronously under a live turn — flag advanceOnComplete and wait for the turn to settle, with a watchdog as the only fallback",
+        "never advance synchronously under a live turn \u2014 flag advanceOnComplete and wait for the turn to settle, with a watchdog as the only fallback",
         "the handleWorkerEnded settle fallback must stay gated on the interrupting set (routine non-error ended events exist)",
-        "never call advance() directly on a running step while its turn is active — set advanceOnComplete (+ advanceOnCompleteStep) then call SessionManager.interrupt(); interrupt() no longer implies an advance",
+        "never call advance() directly on a running step while its turn is active \u2014 set advanceOnComplete (+ advanceOnCompleteStep) then call SessionManager.interrupt(); interrupt() no longer implies an advance",
         "the advanceOnCompleteStep stamp, not turnSource, decides whether a settle or the watchdog may consume a pending flag",
         "the watchdog clears turnSource when it fires, so a late arrival from the abandoned turn is ignored by the stamp check",
-        "both recoveries are guarded no-ops the user must trigger — the engine never self-heals a stalled step automatically",
+        "both recoveries are guarded no-ops the user must trigger \u2014 the engine never self-heals a stalled step automatically",
         "reuses runStep step-entry behavior (pending) and advance() (done) rather than duplicating hand-off or consolidation logic",
-        "a done-at-current-index recovery keys off advancing, never isSessionActive — advance() sets no session status, so the leftover status says nothing about whether an advance is live",
+        "a done-at-current-index recovery keys off advancing, never isSessionActive \u2014 advance() sets no session status, so the leftover status says nothing about whether an advance is live",
         "advance() must persist the stepIndex bump itself; leaving it to a later broadcast makes the unrecoverable done-at-current-index shape the durable state for the whole consolidation window",
         "the in-flight flag is server-owned broadcast state, never local optimistic UI state",
-        "clearing the flag rides the next status broadcast rather than issuing its own — no await may be inserted between the clear and that broadcast",
+        "clearing the flag rides the next status broadcast rather than issuing its own \u2014 no await may be inserted between the clear and that broadcast",
         "cleared on process restart (constructor load loop) and on hand-off (adoptSynced), never in reconcileWithWorker, which runs far more often and would falsely clear a live advance",
         "runStep's silent early returns now persistMeta before returning, so the cleared flag and bumped stepIndex always reach the client",
         "advance() persists the stepIndex bump immediately rather than letting it ride runStep later broadcast",
@@ -587,18 +588,18 @@
         "the sidebar row shows the same yellow interrupted dot/badge as the banner via sessionRowMeta, reusing the banner's exact guard, and persists through ackSession the same way",
         "the socket may be down for WORKER_LOST_MS (20s) before it's treated as a real outage, well past an ordinary tsx-watch reconnect (~1-2s)",
         "the worker-lost path flags sessions but never auto-continues them, even with autoContinueInterrupted on; the next real hello resumes them",
-        "reconcileWithWorker skips a session that has neither live state nor a local on-disk transcript (SessionManager.ranHere) — it only exists here because storage sync (adoptSynced) adopted it from another machine, and demoting/restamping/auto-continuing it would broadcast and cloud-push a turn this machine never ran; a session with an actual worker report for this pass is still fully reconciled even with no local transcript, since a live report is itself evidence",
+        "reconcileWithWorker skips a session that has neither live state nor a local on-disk transcript (SessionManager.ranHere) \u2014 it only exists here because storage sync (adoptSynced) adopted it from another machine, and demoting/restamping/auto-continuing it would broadcast and cloud-push a turn this machine never ran; a session with an actual worker report for this pass is still fully reconciled even with no local transcript, since a live report is itself evidence",
         "a cold-start protocol mismatch never sets everConnected, so the outage clock never starts; it's surfaced by WorkerStatus.mismatch instead",
-        "exactly one of ConnectionBanner/WorkerBanner/StorageBanner renders at a time; bridge-down outranks worker-down outranks storage-down",
+        "exactly one of ConnectionBanner/WorkerBanner/StorageBanner renders at a time; bridge-down outranks worker-down outranks storage-down; scoped to the primary machine only (see multi-machine-client)",
         "every recoverable failure ends on a failure row with a working Retry, in a plain session and inside a running workflow alike",
         "a failed turn never autoAdvances; it parks the step as failed instead, unless an explicit stamped force-advance is already pending",
         "Retry re-runs the right thing: a step that never got a prompt is re-rendered from WorkflowState ('pre-run'); a step whose turn failed is re-sent as a follow-up on the same conversation ('turn')",
-        "no auto-retry or backoff — a transient failure (e.g. a 529) is an ordinary failed turn with a manual button",
+        "no auto-retry or backoff \u2014 a transient failure (e.g. a 529) is an ordinary failed turn with a manual button",
         "stepFailure is persisted, so a reload while parked in the failed state still shows Retry",
         "an auth-classified turn failure attempts exactly one token refresh, then always rewrites the banner to name the next action (Retry, Sign in, or check your connection) instead of leaving raw CLI text with only Retry",
         "errorKind: 'auth' is set only for the signed-out outcome; refreshed/refresh-failed clear it",
         "the login modal opens off the existing authStatus broadcast, not a new message type, and unlike the hello auto-open it is not deduped",
-        "retry stays entirely manual; nothing auto-resumes a failed turn, even after a silent refresh or a fresh sign-in — a login landing later or from another device must not fire N queued turns",
+        "retry stays entirely manual; nothing auto-resumes a failed turn, even after a silent refresh or a fresh sign-in \u2014 a login landing later or from another device must not fire N queued turns",
         "errorKind is never set when no AuthManager is wired (ambient-token mode)",
         "every query crash (auth-related or not) still writes a synthetic result event with the raw CLI text preserved verbatim, even after the banner is revised",
         "a clean ended (no error) writes no synthetic result",
@@ -617,7 +618,7 @@
       "architecturalRules": [
         "adding a field to LiveSessionInfo is not a protocol bump; busy is optional so an old worker stays demote-only instead of losing its socket mid-turn",
         "reconcileWithWorker is the only place that stamps interruptedAt",
-        "a result for a flagged session means the flag was wrong (buffered result lands after reconcile) — clear it there rather than adding handshake ordering",
+        "a result for a flagged session means the flag was wrong (buffered result lands after reconcile) \u2014 clear it there rather than adding handshake ordering",
         "onStatusChange (UI health) is kept separate from onWorkerLost (session reconcile) rather than merged",
         "isSelfWorkerSource's check runs before the guard's blanket tool allowlist short-circuit, not after",
         "isSelfWorkerSource is self-locating (import.meta.dirname) rather than threading session/bridge identity into assessToolCall",
@@ -640,13 +641,14 @@
         "the no-AuthManager branch of pushTurn returns before the first await, keeping that path synchronous for tests that assert an immediate push",
         "the proactive backoff computes its first rung explicitly (null ? RETRY : min(x*2, CAP)) rather than doubling a default, which would skip the 60s rung",
         "getAccessTokenSync() remains on AuthManager but has no production caller; it is kept for the sync-status shape tests rely on",
-        "the no-local-history skip is narrow and scoped to reconcileWithWorker only — it does not change adoptSynced or what counts as this instance owning a session; it exists because a flapping worker or duplicate bridge (see hosted-machine-access) turned every reconcile pass into a broadcast/cloud-push storm across sessions this machine never actually ran, feeding the very kind of loop this feature exists to break rather than amplify"
+        "the no-local-history skip is narrow and scoped to reconcileWithWorker only \u2014 it does not change adoptSynced or what counts as this instance owning a session; it exists because a flapping worker or duplicate bridge (see hosted-machine-access) turned every reconcile pass into a broadcast/cloud-push storm across sessions this machine never actually ran, feeding the very kind of loop this feature exists to break rather than amplify"
       ],
       "relatedDecisions": [
-        "session-and-project-ui",
-        "workflow-step-lifecycle",
         "context-window",
-        "hosted-machine-access"
+        "hosted-machine-access",
+        "multi-machine-client",
+        "session-and-project-ui",
+        "workflow-step-lifecycle"
       ]
     },
     {
@@ -715,7 +717,7 @@
         "persisted text draft is the full MentionValue (text + ranges), not plain text, so restored pills/expansions stay intact",
         "staged attachments persist too, in IndexedDB rather than localStorage (base64 file data can run tens of MB)",
         "an empty text draft or attachment list is deleted from storage rather than stored empty",
-        "Composer's focus effect fires only when session.createdAt is under 5s old; this is its own independent heuristic and no longer shares a threshold with the store's session-select-on-create logic (see session-create-auto-select below) — focus and selection now solve different problems on purpose",
+        "Composer's focus effect fires only when session.createdAt is under 5s old; this is its own independent heuristic and no longer shares a threshold with the store's session-select-on-create logic (see session-create-auto-select below) \u2014 focus and selection now solve different problems on purpose",
         "switching to an older existing session does not steal focus",
         "auto-selection always excludes archived sessions; completed needs no separate check since the server always archives alongside it",
         "a project whose sessions are all archived auto-selects nothing (empty state) rather than opening an archived one",
@@ -731,12 +733,12 @@
         "AskUserQuestion -> label 'needs answer', teal badge",
         "any other tool -> label 'needs permission', yellow badge (unchanged default)",
         "notification body mirrors the sidebar label (capitalized) for waiting-permission sessions",
-        "a sessionUpsert only takes the selection when pendingCreate is true AND the session id is not already in seenSessionIds — replaces a comparison of session.createdAt (stamped on the bridge machine) against Date.now() (the browser's clock): hosted, those are different machines, and even a slightly-ahead bridge clock made every upsert look 'just created' forever, so any session re-entering the map stole the selection",
+        "a sessionUpsert only takes the selection when pendingCreate is true AND the session id is not already in seenSessionIds \u2014 replaces a comparison of session.createdAt (stamped on the bridge machine) against Date.now() (the browser's clock): hosted, those are different machines, and even a slightly-ahead bridge clock made every upsert look 'just created' forever, so any session re-entering the map stole the selection",
         "pendingCreate is set by markSessionCreatePending() (called by every createSession sender: the sidebar's New session button/menu, and the recipe-run path already selects explicitly via its own sessionId and does not need it) and expires on its own after 15s if no matching upsert ever arrives",
-        "seenSessionIds is maintained by both the hello reducer and sessionUpsert, so a session that leaves and re-enters the map — deleted then resurrected, or replayed by a duplicate hello — is never treated as new again",
-        "a repeated hello (same session/project signature as the last one applied) is inert: sessions, transcriptLoaded and contextBreakdowns are left untouched, while every other field (usage, worker/storage health, auth) still applies as normal — the relay replays open (and its full hello) for every live channel on any bridge attach or takeover, and wholesale-replacing state on each one is what turned two alternating bridge snapshots into a self-sustaining flicker loop across sessions and transcript reloads",
-        "send() (ws.ts) returns false when the socket is not open and the message is not a prompt (prompts alone queue for replay); the caller sets actionError so a dropped control message — e.g. a delete sent while disconnected — is visible instead of a console.warn nobody saw",
-        "deleting a session shows a loading state on its own row and leaves the row in place until the sessionDeleted echo removes it — no optimistic removal, so a delete that silently failed to send is never mistaken for one that worked"
+        "seenSessionIds is maintained by both the hello reducer and sessionUpsert, so a session that leaves and re-enters the map \u2014 deleted then resurrected, or replayed by a duplicate hello \u2014 is never treated as new again",
+        "a repeated hello (same session/project signature as the last one applied) is inert: sessions, transcriptLoaded and contextBreakdowns are left untouched, while every other field (usage, worker/storage health, auth) still applies as normal \u2014 the relay replays open (and its full hello) for every live channel on any bridge attach or takeover, and wholesale-replacing state on each one is what turned two alternating bridge snapshots into a self-sustaining flicker loop across sessions and transcript reloads",
+        "send() (ws.ts) returns false when the socket is not open and the message is not a prompt (prompts alone queue for replay); the caller sets actionError so a dropped control message \u2014 e.g. a delete sent while disconnected \u2014 is visible instead of a console.warn nobody saw",
+        "deleting a session shows a loading state on its own row and leaves the row in place until the sessionDeleted echo removes it \u2014 no optimistic removal, so a delete that silently failed to send is never mistaken for one that worked"
       ],
       "architecturalRules": [
         "text drafts use a single lines.drafts JSON map keyed by session id, following the existing store.ts convention (e.g. lines.openFiles) rather than one key per session",
@@ -751,12 +753,14 @@
         "concurrent permission asks on the same session: last askPermission call wins the label/color, consistent with pre-existing status-overwrite behavior",
         "sessionRowMeta is the single row-presentation entry point: waitingPermissionMeta first, then the interrupted-turn-recovery yellow state, then the plain per-status table (moved into format.ts from Sidebar.tsx)",
         "helloSignature is a cheap string (each session's id:updatedAt joined, plus project paths) rather than a hash of the whole hello payload, precisely so volatile fields (usage, worker/storage health) stay outside it and keep applying on every hello regardless of the short-circuit",
-        "store changes here (the hello short-circuit, pendingCreate/seenSessionIds) are pure reducer logic with no web test harness backing them (web/ has no test runner) — the highest-risk, least-covered part of this feature; verified manually"
+        "store changes here (the hello short-circuit, pendingCreate/seenSessionIds) are pure reducer logic with no web test harness backing them (web/ has no test runner) \u2014 the highest-risk, least-covered part of this feature; verified manually"
       ],
       "relatedDecisions": [
+        "hosted-machine-access",
+        "multi-machine-client",
+        "session-collaboration",
         "turn-recovery",
-        "workflow-step-lifecycle",
-        "hosted-machine-access"
+        "workflow-step-lifecycle"
       ]
     },
     {
@@ -824,7 +828,7 @@
         "only the user prompt renders as a bubble (right-aligned, capped at 80% column width); agent output is unwrapped and flush-left with nesting shown by order/expand affordance, not indentation",
         "every tool's expanded body shows a structured field list, never raw JSON by default; raw JSON is one toggle away for every tool with no exceptions",
         "a tool call already fully explained elsewhere in the row loses its expand affordance instead of showing an empty/redundant body: a successful edit (diff button covers it) and a resolved AskUserQuestion (its own card carries the review) are the current cases",
-        "an AskUserQuestion call's answer is read from its tool result's prose, not its input — the input only ever contains the questions asked",
+        "an AskUserQuestion call's answer is read from its tool result's prose, not its input \u2014 the input only ever contains the questions asked",
         "a subagent's assistant text and tool calls are never counted as main-agent output: workflow step output, the turn summary, and the live context-usage reading are all derived from main-agent messages only",
         "a subagent's tool calls and text nest under its spawning card, never inline in the main transcript or folded into the main agent's tool group",
         "a subagent cannot itself spawn another subagent (harness restriction), so nesting is one level deep in practice, though the data model is recursive",
@@ -842,15 +846,17 @@
         "no virtualization is used for the transcript list; lazy-mounted bodies keep per-row cost low enough that this still holds",
         "toolFields degrades instead of failing: an unclassifiable value becomes a capped json field rather than throwing or being skipped, since tool input shapes (especially MCP tools) are not controlled by this code",
         "OptionCard gained a readOnly prop instead of being duplicated into a second component, so a settled answer looks exactly like the choice that produced it",
-        "the raw-input toggle shows even for an empty ({}) input, unlike PermissionPrompt's equivalent guard — consistency across every tool card was chosen over hiding a no-op toggle",
+        "the raw-input toggle shows even for an empty ({}) input, unlike PermissionPrompt's equivalent guard \u2014 consistency across every tool card was chosen over hiding a no-op toggle",
         "existing transcripts already carry parent_tool_use_id on disk (persisted verbatim by the worker), so this feature is a pure read-side reinterpretation with no new capture and no migration",
         "no agents option was added to buildQueryOptions; subagent definitions are inherited via settingSources, the same mechanism that already inherits the rest of the preset",
         "the spawn tool's name is not a stable literal: the harness emits 'Agent', the SDK's own AgentInput type and docs call it 'Task', and both appear in persisted transcripts, so every consumer matches via isAgentTool() rather than one string",
         "agentMeta/MAIN_AGENT_META is the single source of truth for agent icon/color, read by both the settled card and the live ActivityRow so they cannot drift apart",
-        "parseTaskInput never throws and never assumes a field is present, since AgentInput gains fields the map won't know about (effort is the live example) — this is why the raw-input toggle stays reachable behind every spawn card",
+        "parseTaskInput never throws and never assumes a field is present, since AgentInput gains fields the map won't know about (effort is the live example) \u2014 this is why the raw-input toggle stays reachable behind every spawn card",
         "nested rendering is threaded down as a renderNested callback rather than a new shared module, since ToolCallCard cannot import Transcript.tsx's Item without an import cycle"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "session-collaboration"
+      ]
     },
     {
       "id": "agent-memory-sync",
@@ -940,12 +946,12 @@
         "a single session whose own JSON exceeds the push budget is dropped from the cloud push (with a one-time warning), never blocking its siblings; its local copy is untouched",
         "a rejected chunk's sessions are retried on the next flush, not dropped",
         "a storage 413 (entity.too.large) answers JSON {error: 'payload too large'} instead of a generic 500 HTML page",
-        "a session delete is a soft delete (Session.deletedAt) in storage, never a hard delete — a hard delete leaves peers nothing to adopt, so whichever machine still holds the row pushes it right back on its next sync",
+        "a session delete is a soft delete (Session.deletedAt) in storage, never a hard delete \u2014 a hard delete leaves peers nothing to adopt, so whichever machine still holds the row pushes it right back on its next sync",
         "DELETE is idempotent: a repeat keeps the original deletedAt stamp rather than advancing it, since the bridge retries a delete until storage confirms it and moving the tombstone forward each retry would re-notify every peer",
-        "GET /sessions serves tombstoned rows inside the ordinary delta window (carrying deletedAt in ms) — that is the only way a peer learns about a delete at all",
+        "GET /sessions serves tombstoned rows inside the ordinary delta window (carrying deletedAt in ms) \u2014 that is the only way a peer learns about a delete at all",
         "PUT (bulk or single) refuses to resurrect a row whose deletedAt is at or after the pushed updatedAt; a write genuinely newer than the delete does bring the row back and clears the tombstone",
         "the bridge keeps its own tombstone map (id -> deletedAt ms), persisted alongside sessions.json and pruned past ~30 days on load",
-        "adoptSynced returns early when a pulled session's stamp does not beat an existing local tombstone — the branch the ordinary LWW check never reached before, since that check only ran when a local copy of the session already existed",
+        "adoptSynced returns early when a pulled session's stamp does not beat an existing local tombstone \u2014 the branch the ordinary LWW check never reached before, since that check only ran when a local copy of the session already existed",
         "applyRemoteDelete records a tombstone even for a session this machine never held, so a slower third machine's later push can't resurrect it here either",
         "a delete issued while pulled state is being applied, or before there is a token to send it with, is queued (pendingDeletes) rather than dropped, and rides the next flush/sync instead of being lost",
         "a bulk push (reconnect) filters out any session whose delete is still unconfirmed, so the whole-list push can't undo a delete that raced it"
@@ -953,9 +959,9 @@
       "architecturalRules": [
         "SESSIONS_PUSH_MAX_BYTES (1.5MB) mirrors the same headroom-under-2mb constant style as TOTAL_MAX_BYTES in server/src/memory.ts",
         "chunk sends are sequential inside the debounce timer callback, not parallel, so one failure doesn't strand the rest silently",
-        "pushSessions owns the dedup filter; userContext.ts's syncNow still hands it the full session list — sync.ts keeps sole ownership of what actually goes on the wire",
-        "the real growth driver (WorkflowState.outputs/lastStepOutput, uncapped in server/src/workflows.ts) is not capped by this change — deferred as a follow-up",
-        "the row-level rules (LWW upsert, soft delete, resurrect guard, wire shape) live in storage/src/sessionRows.ts rather than inline in the /sessions routes, so they're unit-testable without a Clerk token — /sessions itself stays Clerk-gated and just calls through",
+        "pushSessions owns the dedup filter; userContext.ts's syncNow still hands it the full session list \u2014 sync.ts keeps sole ownership of what actually goes on the wire",
+        "the real growth driver (WorkflowState.outputs/lastStepOutput, uncapped in server/src/workflows.ts) is not capped by this change \u2014 deferred as a follow-up",
+        "the row-level rules (LWW upsert, soft delete, resurrect guard, wire shape) live in storage/src/sessionRows.ts rather than inline in the /sessions routes, so they're unit-testable without a Clerk token \u2014 /sessions itself stays Clerk-gated and just calls through",
         "flushSessions re-checks pendingDeletes per chunk, after the batch was drained but before each chunk's own await, so a delete issued while an earlier chunk is in flight is not undone by a later one",
         "SessionManager's sessions map and tombstone map are always written together (a single writeState), so they can never desync on disk",
         "deleteSession and applyRemoteDelete share a private forget() that only tears down live state that actually exists, so a remote tombstone for a session this machine never ran costs nothing"
@@ -963,6 +969,7 @@
       "relatedDecisions": [
         "agent-memory-sync",
         "hosted-machine-access",
+        "session-collaboration",
         "storage-availability-banner"
       ]
     },
@@ -1055,7 +1062,7 @@
         "all persistent paths derive from APP_ROOT / userStoreRoot; never hardcode the home-directory path elsewhere",
         "createStore keeps an in-memory, per-user transcript cache (raw lines + lazily-parsed events) revalidated by statSync mtime/size and bounded by count and byte size; it assumes this process is the sole writer of transcripts/*.jsonl",
         "sessions.json writes are compact (not pretty-printed) and debounced via SessionManager.persist/flushPersist, coalescing a burst of status transitions into one write without delaying the broadcast",
-        "the sole-writer assumption is enforced, not just assumed: ~/.lines-app/bridge.lock is claimed by every bridge unconditionally (relaying or not), so a second bridge process refuses to start rather than becoming that second writer — see hosted-machine-access.md"
+        "the sole-writer assumption is enforced, not just assumed: ~/.lines-app/bridge.lock is claimed by every bridge unconditionally (relaying or not), so a second bridge process refuses to start rather than becoming that second writer \u2014 see hosted-machine-access.md"
       ],
       "relatedDecisions": [
         "hosted-machine-access"
@@ -1183,18 +1190,20 @@
         "desktop-package (npm run package -w desktop) is the same shape as pair-device - manual, never part of tilt up - and exists so the DMG build is discoverable from Tilt at all",
         "RELAY_URL set without STORAGE_URL warns rather than failing preflight - the bridge would dial a hosted relay while syncing to the local storage default, splitting one machine's data across two databases",
         "when RELAY_URL in .env points at a non-loopback host and ~/.lines-app/bridge.lock names a live process, preflight warns (naming the tray app if instance:'desktop', or naming any other holder as one that will refuse with exit 78) rather than failing; a stale/absent/unparseable lock is silent",
-        "LINES_INSTANCE is not set anywhere in this Tiltfile despite older comments claiming Tilt sets it to 'dev' — web/vite.config.ts resolves /__bridge from the same variable, so pinning it for the bridge alone would break dev-server discovery"
+        "LINES_INSTANCE is not set anywhere in this Tiltfile despite older comments claiming Tilt sets it to 'dev' \u2014 web/vite.config.ts resolves /__bridge from the same variable, so pinning it for the bridge alone would break dev-server discovery"
       ],
       "architecturalRules": [
-        "no deps= on the four service resources — tsx watch/Vite own file-watching, not Tilt",
+        "no deps= on the four service resources \u2014 tsx watch/Vite own file-watching, not Tilt",
         "PORT is injected per resource via serve_env, never a shared env block",
         "preflight reads .env key names only, never values, into any Tilt spec/log/UI button",
         "the Freeze/Resume UI buttons and the --no-reload CLI flag are two entry points into one FROZEN state, reconciled by re-invoking tilt args with the full current flag set rather than mutating Tilt state directly",
-        "no resource watches a file its own cmd writes — install's deps list the five workspace manifests but omit package-lock.json, which npm install itself rewrites and would retrigger the resource forever",
+        "no resource watches a file its own cmd writes \u2014 install's deps list the five workspace manifests but omit package-lock.json, which npm install itself rewrites and would retrigger the resource forever",
         "resource_deps gates only the first build after tilt up; a later re-run of install does not cascade to prisma-generate or the four service resources",
         "whether the bridge talks to a hosted install is not a Tilt flag - it follows RELAY_URL in .env, read by the bridge's own dotenv; STORAGE_URL is injected into serve_env only as a default, so an explicit .env value is never overridden"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "session-collaboration"
+      ]
     },
     {
       "id": "context-window",
@@ -1260,9 +1269,9 @@
         "a hover-triggered summary refresh only broadcasts/syncs when the summary actually changed",
         "resetting a session's Claude conversation (workflow fresh-start step) stamps contextResetAt; readings older than that render as stale until the next turn reports",
         "Lines does not set autoCompactEnabled and has no control over the CLI's own background auto-compaction; the hover card's auto-compact row is a straight passthrough of the CLI's own settingSources-resolved setting, shown even when off",
-        "Lines never fires compaction itself — only a manual button and a passive warning badge, since it is irreversible, lossy, and billable; this is distinct from the CLI's own background auto-compaction, which Lines does not control",
+        "Lines never fires compaction itself \u2014 only a manual button and a passive warning badge, since it is irreversible, lossy, and billable; this is distinct from the CLI's own background auto-compaction, which Lines does not control",
         "the manual button's disabled state always carries a specific reason (turn running, workflow step parked, no session yet, no reading yet, or the SDK explicitly reported the compaction failed) via one shared contextCompactBlock predicate",
-        "the unsupported latch requires an explicit SDK compact_result:'failed' — a turn settling with neither a boundary nor a status verdict is inconclusive and leaves the button enabled",
+        "the unsupported latch requires an explicit SDK compact_result:'failed' \u2014 a turn settling with neither a boundary nor a status verdict is inconclusive and leaves the button enabled",
         "the unsupported latch is scoped to the CLI conversation that produced it: cleared on resetClaudeSession, on bridge restart, and when adopting a synced session, so it never survives past the process/conversation that saw the failure",
         "a workflow step parked waiting-approval blocks the manual button but not the CLI's own background auto-compaction",
         "a compaction is invisible to every workflow turn scan (consolidateStepOutput, lastAssistantText, summarizeTurn, retryTurn) via withoutCompactSpans, but never stripped from permission bookkeeping"
@@ -1271,10 +1280,10 @@
         "the bridge-worker protocol gained a generic ask/askResult request-response method rather than a one-off message type, so future control requests do not require another PROTOCOL_VERSION bump (which restarts the worker and drops in-flight turns)",
         "the worker returns raw SDK JSON from ask; all normalization lives in server/src/contextBreakdown.ts as pure, defensively-coerced functions, keeping the worker's import graph unchanged",
         "the existing cumulative fields (lastTokens, totalTokens) are untouched; this feature adds a parallel occupancy reading rather than altering the billing one",
-        "compactContext is a dedicated SessionManager method, not a call to prompt() — a compaction carries no 'user' transcript event and must not auto-name the session or touch the queue",
+        "compactContext is a dedicated SessionManager method, not a call to prompt() \u2014 a compaction carries no 'user' transcript event and must not auto-name the session or touch the queue",
         "one shared predicate (contextCompactBlock) backs the server-side guard, the button's disabled state, and its tooltip",
-        "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact — all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)",
-        "the browser's buildTranscript mirrors withoutCompactSpans: events inside an open compact span are dropped from the rendered transcript, not just hidden by the marker pair — except a failed result, which closes the span like a 'user' event does"
+        "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact \u2014 all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)",
+        "the browser's buildTranscript mirrors withoutCompactSpans: events inside an open compact span are dropped from the rendered transcript, not just hidden by the marker pair \u2014 except a failed result, which closes the span like a 'user' event does"
       ],
       "relatedDecisions": [
         "turn-recovery"
@@ -1546,15 +1555,15 @@
         "server/src/sessions.worktree.test.ts"
       ],
       "businessRules": [
-        "attribution, not capability: a worktree session's project tab widens, its roots never do — projectRoots must never return a worktree path",
+        "attribution, not capability: a worktree session's project tab widens, its roots never do \u2014 projectRoots must never return a worktree path",
         "one path, one owner, and no nesting, extending the same rule multi-root-projects applies to roots",
         "a per-session worktree starts detached; its branch is cut once the session's auto-title resolves and is never renamed after; a worktree the user named explicitly gets its branch immediately",
-        "every branch Lines mints on its own initiative is namespaced lines/… (LINES_BRANCH_PREFIX); a branch the user typed into the create form is untouched",
+        "every branch Lines mints on its own initiative is namespaced lines/\u2026 (LINES_BRANCH_PREFIX); a branch the user typed into the create form is untouched",
         "removal is always explicit; git branch -d only when asked and only for a branch createdByLines; never -D",
         "removal is refused while any non-archived session's cwd is inside the worktree, unless force",
-        "deleting or archiving a session never touches its worktree — the record renders 'orphaned', one click from Remove",
+        "deleting or archiving a session never touches its worktree \u2014 the record renders 'orphaned', one click from Remove",
         "git is the source of truth; Project.worktrees is a cache reconciled on openProject; a worktree adopted from outside Lines never gets createdByLines",
-        "explicit create fails on a taken path/branch; the per-session auto path uniquifies (-2, -3…) instead",
+        "explicit create fails on a taken path/branch; the per-session auto path uniquifies (-2, -3\u2026) instead",
         "a managed worktree (under WORKTREE_ROOT) is never added to the recent-directories list, since opening it as its own project tab would double-count every session in it"
       ],
       "architecturalRules": [
@@ -1764,14 +1773,14 @@
       "businessRules": [
         "fromAgent only accepts a frame from the socket the hub currently calls its agent; a superseded (or half-dead) bridge that keeps writing cannot inject state into a live browser channel or close a channel now owned by the bridge that replaced it",
         "attachAgent terminates (not just closes) the predecessor it supersedes, so a takeover cannot leave the loser's socket lingering OPEN on the relay",
-        "the per-agent re-verify tick and health/ping interval both bail out the instant their own socket is no longer the hub's agent, so a superseded socket's still-running timer can never drop the hub — or evict the browser channels — out from under the bridge that replaced it",
+        "the per-agent re-verify tick and health/ping interval both bail out the instant their own socket is no longer the hub's agent, so a superseded socket's still-running timer can never drop the hub \u2014 or evict the browser channels \u2014 out from under the bridge that replaced it",
         "a duplicate agent attach for a device (attachAgent superseding a live one) logs distinctly from a first attach, naming the running attach count",
-        "the relay's public health endpoint (GET /) keeps its exact unauthenticated shape; presenting the correct x-relay-secret (constant-time compared) additionally returns hubs, a per-device summary (deviceId, online, channel count, agentAttaches, lastAttachAt) for triage — agentAttaches climbing on an otherwise-idle paired device is the tell for two bridges fighting over one identity",
-        "the bridge rejects a duplicate open for a channel id it already serves (logging a warning) rather than building a second RelayChannel — every agent attach replays open for all live channels, so a takeover (or any re-announcement) re-delivers ids already held, and building a second link means a second full hello down a socket that never reconnected",
+        "the relay's public health endpoint (GET /) keeps its exact unauthenticated shape; presenting the correct x-relay-secret (constant-time compared) additionally returns hubs, a per-device summary (deviceId, online, channel count, agentAttaches, lastAttachAt) for triage \u2014 agentAttaches climbing on an otherwise-idle paired device is the tell for two bridges fighting over one identity",
+        "the bridge rejects a duplicate open for a channel id it already serves (logging a warning) rather than building a second RelayChannel \u2014 every agent attach replays open for all live channels, so a takeover (or any re-announcement) re-delivers ids already held, and building a second link means a second full hello down a socket that never reconnected",
         "RelayClient.connect() closes any pre-existing socket (and drops its channels) before dialling a new one, so one RelayClient instance can never hold two live sockets for the same device",
         "every bridge takes this machine's single-instance lock (~/.lines-app/bridge.lock, pid+startedAt+instance+deviceId) unconditionally, relaying or not, claimed atomically ('wx'); on collision a live instance:'desktop' holder is preempted (SIGTERM, cross-checked against its own published runtime file first) since the tray is the only supervisor that can stand down and re-arm, any other live holder gets a bounded ~2s retry window (for a tsx watch successor meeting a still-exiting predecessor) before the new process exits EXIT_BRIDGE_LOCK_HELD (78) naming the holder",
         "LINES_ALLOW_MULTIPLE_BRIDGES=1 is the deliberate escape hatch that skips the single-instance lock entirely (no read, no write), for tests and any intentionally-run second bridge; it must never be set in a real deployment",
-        "RelayClient no longer resets its reconnect backoff on 'open' — only a socket that survives RELAY_STABLE_MS does, on close, since a supersede close always follows a successful open and the old reset let two bridges fight at the retry floor forever; SUPERSEDE_LIMIT consecutive supersedes with no stable socket escalates the re-dial cap to SUPERSEDE_CAP_MS, resetting the moment a dial lands a stable link",
+        "RelayClient no longer resets its reconnect backoff on 'open' \u2014 only a socket that survives RELAY_STABLE_MS does, on close, since a supersede close always follows a successful open and the old reset let two bridges fight at the retry floor forever; SUPERSEDE_LIMIT consecutive supersedes with no stable socket escalates the re-dial cap to SUPERSEDE_CAP_MS, resetting the moment a dial lands a stable link",
         "register is unauthenticated - the machine has no user yet and a code is worthless until claimed; re-registering an already-claimed AND UNREVOKED device is refused (409) rather than silently re-bound",
         "re-registering a REVOKED device clears its stale userId/revokedAt and issues a fresh code - otherwise a revoked machine could never be claimed again, since claim and verify both refuse a revoked row",
         "claim/verify answer the same 'unknown or expired code' for absent, expired, and revoked, so a distinct 'expired' reply can't confirm a guessed code had once been real",
@@ -1796,7 +1805,7 @@
         "an absent hello.bridge means a bridge older than the field, which counts as skew",
         "hello also carries an optional worker: WorkerStatus, and workerStatus broadcasts later transitions; neither bumped APP_PROTOCOL_VERSION since both are additive and an older client tolerates their absence",
         "ephemeral by default; LINES_WORKER_PORT/LINES_BRIDGE_PORT pin a port only when explicitly set, which Tilt does so its readiness probes have fixed targets",
-        "LINES_INSTANCE separates concurrent installs — the desktop shell sets 'desktop', a dev checkout (Tilt included) leaves it unset ('default'); Tilt sets nothing itself since web/vite.config.ts resolves /__bridge from the same variable",
+        "LINES_INSTANCE separates concurrent installs \u2014 the desktop shell sets 'desktop', a dev checkout (Tilt included) leaves it unset ('default'); Tilt sets nothing itself since web/vite.config.ts resolves /__bridge from the same variable",
         "the worker rejects any connection that cannot echo the published token, checked before the newest-bridge-wins takeover so a local process cannot evict the real bridge by connecting",
         "a discovery file naming a dead pid is removed on read, not merely ignored",
         "PORT belongs to the storage server alone now; bridge and worker no longer read it",
@@ -1806,13 +1815,13 @@
         "the relay persists nothing and logs no payload",
         "with RELAY_URL unset nothing dials and the local-only setup is unchanged",
         "a browser may only reach a device it owns; if storage cannot verify a device's secret the relay refuses the connection rather than admitting it",
-        "a browser socket carries a monotonic generation stamp; a frame arriving on a socket whose generation is no longer current is dropped rather than applied — switchDevice closes the old socket but does not detach its message handler, so a late frame from the previous machine could otherwise reach applyServerMessage after clearBootstrap()",
-        "machineOffline is surfaced by ConnectionBanner after bootstrap too, not only by the pre-bootstrap ConnectingMachine screen — relay-up-but-machine-gone otherwise rendered as a healthy 'connected' UI in which every action silently went nowhere"
+        "a browser socket carries a monotonic generation stamp; a frame arriving on a socket whose generation is no longer current is dropped rather than applied \u2014 switchDevice closes the old socket but does not detach its message handler, so a late frame from the previous machine could otherwise reach applyServerMessage after clearBootstrap()",
+        "machineOffline is surfaced by ConnectionBanner after bootstrap too, not only by the pre-bootstrap ConnectingMachine screen \u2014 relay-up-but-machine-gone otherwise rendered as a healthy 'connected' UI in which every action silently went nowhere"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
         "the relay holds no database credentials and never queries Postgres directly - it asks storage, the only process with DB credentials at all",
-        "the cross-user check (hub.ownerId === userId) lives on the /client gate, not deeper in routing, so it fails closed at the earliest point",
+        "the /client gate has two branches, both failing closed at the earliest point: the owner check (hub.ownerId === userId) is unchanged and never consults storage; anyone else must hold a grant from POST /v1/devices/authorize (see session-collaboration)",
         "POST /v1/devices/verify is machine-to-machine with no Clerk token, so it is gated by a constant-time-compared RELAY_SHARED_SECRET instead, and excluded from storage's public router in a hosted deployment even with the secret guessed; unset, storage refuses verification with 503 rather than falling open",
         "device identity (mint, hash, register) lives in server/src/device.ts, shared by the desktop app and the CLI pairing script, so the two cannot drift on the credential format",
         "Clerk token providers are installed during render, not inside useEffect - child effects (DeviceGate) run before parent effects (AuthedConnect), so an effect-based registration meant the device list's first fetch and the first socket connect both fired with no token attached",
@@ -1839,20 +1848,22 @@
         "the relay is the auth edge and the bridge trusts the attested userId on relay channels; re-verifying would mean two failure modes and a hard dependency on the user's machine reaching Clerk's JWKS",
         "relay/ shares no types with the app and the bridge does not import the relay package; frame shapes are duplicated in relayClient.ts on purpose",
         "reconnect uses exponential backoff with jitter, since a flat retry turns one relay restart into a synchronised stampede",
-        "terminate() on supersede is deliberately aggressive rather than a graceful close-and-drain: a superseded bridge has no readers left, so draining it only leaves a noisy half-open socket around longer — the trade-off is a louder log during a genuine flap, which is a feature during triage",
-        "the bridge closes its own pre-existing socket (and drops its channels) at the start of connect(), before dialling — belt-and-braces alongside the single-flight retryTimer, so RelayClient itself can never be the source of two live sockets for one device",
+        "terminate() on supersede is deliberately aggressive rather than a graceful close-and-drain: a superseded bridge has no readers left, so draining it only leaves a noisy half-open socket around longer \u2014 the trade-off is a louder log during a genuine flap, which is a feature during triage",
+        "the bridge closes its own pre-existing socket (and drops its channels) at the start of connect(), before dialling \u2014 belt-and-braces alongside the single-flight retryTimer, so RelayClient itself can never be the source of two live sockets for one device",
         "the single-instance lock file lives beside device.json under the same APP_ROOT rather than a new path resolver, reusing the existing app-data-root convention (see app-data-root.md)",
         "stale-lock detection is process.kill(pid, 0): ESRCH means nothing holds the pid, so the new process takes the lock; any other outcome (including EPERM, another OS user's live process) is treated as held",
-        "only instance:'desktop' is preemptible, and only after cross-checking the pid against readRuntimeInfo('bridge', 'desktop') — the lock file's word alone must never be enough to SIGTERM a pid, since pids are reused",
+        "only instance:'desktop' is preemptible, and only after cross-checking the pid against readRuntimeInfo('bridge', 'desktop') \u2014 the lock file's word alone must never be enough to SIGTERM a pid, since pids are reused",
         "armLockRelease (process.on('exit', releaseBridgeLock)) is registered only after a successful claim, so a refused start never touches the incumbent's lock file",
-        "the supersede circuit breaker lives entirely in RelayClient, never in index.ts or the lock — it only slows its own retry and never restarts or blocks anything else"
+        "the supersede circuit breaker lives entirely in RelayClient, never in index.ts or the lock \u2014 it only slows its own retry and never restarts or blocks anything else"
       ],
       "relatedDecisions": [
-        "turn-recovery",
-        "production-deployment",
+        "app-data-root",
         "desktop-app",
         "file-routes-over-ws",
-        "app-data-root"
+        "multi-machine-client",
+        "production-deployment",
+        "session-collaboration",
+        "turn-recovery"
       ]
     },
     {
@@ -1971,9 +1982,9 @@
         "hosted is the default; local mode requires LINES_LOCAL_MODE=1 and web/dist is not shipped",
         "a missing or too-old Claude Code refuses the turn with an actionable message in both the browser and the tray",
         "LINES_CLAUDE_PATH is exclusive: when set, no other location is tried",
-        "update checks only notify — the tray links the download page",
-        "a bridge child refuses to start if another live process already holds this machine's single-instance lock, unless that holder is instance:'desktop' (a previous tray bridge) — in which case ours preempts it instead; this is a second guard beneath the shell's own requestSingleInstanceLock, for a respawn racing a not-yet-exited previous bridge or a bridge started by hand alongside the packaged app; without it two bridge processes can share one device.json and the relay ends up superseding one of them, which is visible in every connected browser as a flicker until it does",
-        "when a different installation (a dev checkout, most commonly Tilt) holds the lock instead, the tray's own bridge stands down rather than fighting for it — no bridge or worker spawns at startup, or the running bridge is not respawned after exiting/being preempted — until the lock clears, and the tray reports this plainly ('Paused — another bridge owns this machine') rather than 'Connecting…' or a silent retry loop",
+        "update checks only notify \u2014 the tray links the download page",
+        "a bridge child refuses to start if another live process already holds this machine's single-instance lock, unless that holder is instance:'desktop' (a previous tray bridge) \u2014 in which case ours preempts it instead; this is a second guard beneath the shell's own requestSingleInstanceLock, for a respawn racing a not-yet-exited previous bridge or a bridge started by hand alongside the packaged app; without it two bridge processes can share one device.json and the relay ends up superseding one of them, which is visible in every connected browser as a flicker until it does",
+        "when a different installation (a dev checkout, most commonly Tilt) holds the lock instead, the tray's own bridge stands down rather than fighting for it \u2014 no bridge or worker spawns at startup, or the running bridge is not respawned after exiting/being preempted \u2014 until the lock clears, and the tray reports this plainly ('Paused \u2014 another bridge owns this machine') rather than 'Connecting\u2026' or a silent retry loop",
         "the worker is never part of a stand-down: only the bridge collides on the machine lock and the relay device identity, so a worker mid-turn is left alone when a sibling process collides on a resource the worker doesn't touch"
       ],
       "architecturalRules": [
@@ -1983,14 +1994,14 @@
         "the desktop app and Tilt share the same LINES_INSTANCE/port-discovery contract, so a dev checkout and an installed app never collide",
         "device identity lives in server/src/device.ts, not duplicated in the shell, so it and npm run pair -w server cannot drift on the credential format",
         "ROOT resolves to process.resourcesPath when packaged, the repo root otherwise, which is the one branch letting a dev checkout and an installed app share this file",
-        "electron-builder's identity: null skips bundle signing entirely, leaving no _CodeSignature/CodeResources, which macOS reports as \"damaged\" with no Open Anyway path — afterPack.mjs seals the bundle and verifies it so a broken one fails the build",
+        "electron-builder's identity: null skips bundle signing entirely, leaving no _CodeSignature/CodeResources, which macOS reports as \"damaged\" with no Open Anyway path \u2014 afterPack.mjs seals the bundle and verifies it so a broken one fails the build",
         "the agent SDK ships unbundled because sdk.mjs resolves through createRequire(import.meta.url)",
         "the SDK's -darwin-arm64 platform package is deleted; every query passes pathToClaudeCodeExecutable so its resolver never runs",
-        "the bridge and worker bundles must be ESM — server and shared use import.meta.dirname, which is undefined under CJS",
-        "the version floor is ours or nobody's — the SDK performs no version handshake at all",
+        "the bridge and worker bundles must be ESM \u2014 server and shared use import.meta.dirname, which is undefined under CJS",
+        "the version floor is ours or nobody's \u2014 the SDK performs no version handshake at all",
         "releases use a second public R2 bucket, because public-read is a bucket-level setting",
         "the bridge lock lives beside device.json under the same APP_ROOT, reusing the existing app-data-root path helpers rather than adding a new resolver; a stale lock is detected via process.kill(pid, 0) (ESRCH means take it), and LINES_ALLOW_MULTIPLE_BRIDGES=1 is the deliberate escape hatch that must never be set in a real deployment",
-        "foreignBridgeLock/BRIDGE_LOCK_FILE/EXIT_BRIDGE_LOCK_HELD are duplicated in main.ts rather than imported from server/src/index.ts, the same precedent APP_ROOT already sets in this file — EXIT_BRIDGE_LOCK_HELD=78 is a contract between the two files, changing it in one without the other silently breaks the stand-down trigger",
+        "foreignBridgeLock/BRIDGE_LOCK_FILE/EXIT_BRIDGE_LOCK_HELD are duplicated in main.ts rather than imported from server/src/index.ts, the same precedent APP_ROOT already sets in this file \u2014 EXIT_BRIDGE_LOCK_HELD=78 is a contract between the two files, changing it in one without the other silently breaks the stand-down trigger",
         "enterStandDown is the only path that clears bridge/worker handles and arms the recheck timer; both the startup check and spawnChild's exit handler funnel into it rather than each duplicating the tray-copy and recheck logic"
       ],
       "relatedDecisions": [
@@ -2098,9 +2109,9 @@
         "storage never gets a published port or Traefik exposure beyond its one router; only relay and the browser's device calls reach it, everything else is internal-network only",
         "migrations run via `docker compose run --rm migrate` before the first `up` against a new database, using the direct (:5432) connection string",
         "the same ordering applies to every later schema change, not just the first bring-up: migrate deploy must run against the live database before a new storage image serves traffic, or the new code 500s with a Prisma unknown-column/table error (P2021) against the old schema",
-        "the relay's health endpoint (GET / on the relay's own host) accepts an optional x-relay-secret header; a request presenting the correct RELAY_SHARED_SECRET gets a hubs array (per-device attach counts/timestamps) alongside the ordinary health body, used to triage a duplicate-bridge or flapping-relay-link report without touching Postgres — see hosted-machine-access",
-        "the deploy SSH key's VPS-side authorized_keys entry forces /root/deploy-lines.sh regardless of the command CI sends — that key can run nothing else on the box; the script takes three stdin lines (GHCR token, GHCR actor, image tag)",
-        "check-migration-safety.sh gates on added migration files (--diff-filter=A) between the push's before/after SHAs; editing an already-applied migration to add something destructive bypasses it — accepted because Prisma migrations are append-only by convention",
+        "the relay's health endpoint (GET / on the relay's own host) accepts an optional x-relay-secret header; a request presenting the correct RELAY_SHARED_SECRET gets a hubs array (per-device attach counts/timestamps) alongside the ordinary health body, used to triage a duplicate-bridge or flapping-relay-link report without touching Postgres \u2014 see hosted-machine-access",
+        "the deploy SSH key's VPS-side authorized_keys entry forces /root/deploy-lines.sh regardless of the command CI sends \u2014 that key can run nothing else on the box; the script takes three stdin lines (GHCR token, GHCR actor, image tag)",
+        "check-migration-safety.sh gates on added migration files (--diff-filter=A) between the push's before/after SHAs; editing an already-applied migration to add something destructive bypasses it \u2014 accepted because Prisma migrations are append-only by convention",
         "images are pinned to the pushing commit's SHA: build pushes :latest and :<sha>, deploy-lines.sh exports TAG=<sha> from the third stdin line, and compose.yml reads ${TAG:-latest}; rollback is `TAG=<old-sha> docker compose --env-file lines.env up -d` with no rebuild, and an old two-line stdin caller still works and falls back to latest"
       ],
       "architecturalRules": [
@@ -2108,11 +2119,176 @@
         "the relay's Traefik router carries no StripPrefix middleware - relay/src/index.ts matches url.pathname exactly, so a rewritten path closes the socket with 1008",
         "storage's public router excludes /v1/devices/verify by rule, on top of that route's own shared-secret gate - defense in depth: a network-level exclusion and an application-level check, either could fail without the other",
         "the storage image installs openssl explicitly - node:22-slim ships without libssl and Prisma's query engine otherwise falls back to a guessed build and warns at every boot",
-        "the four VITE_* build args exist in two places kept in sync by hand: GitHub Actions secrets (CI image build) and lines.env on the VPS (manual build only) — nothing checks the two agree"
+        "the four VITE_* build args exist in two places kept in sync by hand: GitHub Actions secrets (CI image build) and lines.env on the VPS (manual build only) \u2014 nothing checks the two agree"
+      ],
+      "relatedDecisions": [
+        "desktop-app",
+        "hosted-machine-access",
+        "session-collaboration"
+      ]
+    },
+    {
+      "id": "session-collaboration",
+      "name": "Session collaboration",
+      "doc": "features/session-collaboration.md",
+      "purpose": "Invite another signed-in user into one session, or onto a whole machine, so they can prompt the same running agent, with live presence and attribution, without ever getting a copy of the host's data. Inverts the app's single-owner assumption: access becomes a capability set enforced by a compiler-checked default-deny table instead of a boolean owner check.",
+      "entryPoints": [
+        "web/src/components/SessionView.tsx",
+        "web/src/components/ShareModal.tsx",
+        "web/src/components/JoinPage.tsx",
+        "web/src/components/ConnectMachine.tsx",
+        "storage/src/index.ts",
+        "relay/src/index.ts",
+        "server/src/index.ts"
+      ],
+      "files": [
+        "shared/types.ts",
+        "storage/prisma/schema.prisma",
+        "storage/src/shares.ts",
+        "storage/src/presence.ts",
+        "storage/src/index.ts",
+        "relay/src/authorize.ts",
+        "relay/src/index.ts",
+        "relay/src/mux.ts",
+        "relay/src/protocol.ts",
+        "server/src/relayClient.ts",
+        "server/src/index.ts",
+        "server/src/userContext.ts",
+        "server/src/presence.ts",
+        "server/src/userRegistry.ts",
+        "server/src/workspacePaths.ts",
+        "server/src/fileRoutes.ts",
+        "server/src/sessions.ts",
+        "server/src/workflows.ts",
+        "web/src/lib/shares.ts",
+        "web/src/lib/can.ts",
+        "web/src/lib/identityRule.ts",
+        "web/src/lib/identity.ts",
+        "web/src/lib/presence.ts",
+        "web/src/components/PresenceStack.tsx",
+        "web/src/components/PromptAuthor.tsx",
+        "web/src/components/QueuedMessages.tsx",
+        "web/src/components/PermissionPrompt.tsx"
+      ],
+      "symbols": [
+        "ShareCaps",
+        "SHARE_PRESETS",
+        "capsForPreset",
+        "parseShareCaps",
+        "MESSAGE_AUTHZ",
+        "authorizeMessage",
+        "authorizeDevice",
+        "authorizeClient",
+        "PresenceTracker",
+        "resolveIdentity",
+        "personMeta",
+        "Actor",
+        "SocketAccess"
+      ],
+      "tests": [
+        "storage/src/shares.test.ts",
+        "storage/src/devices.presence.test.ts",
+        "relay/src/clientAuthorize.test.ts",
+        "relay/src/agentHeartbeat.test.ts",
+        "server/src/messageAuthz.test.ts",
+        "server/src/guestAccess.test.ts",
+        "server/src/broadcastScope.test.ts",
+        "server/src/presence.test.ts",
+        "server/src/attribution.test.ts",
+        "server/src/attribution.identity.test.ts"
+      ],
+      "businessRules": [
+        "three presets (view, prompt, collaborator); no preset ever grants setPermissionMode",
+        "never grantable at any preset: settings, guard allowlist, project/worktree management, login/logout, device unpair, workflow/step/recipe authoring, installUpdate, deleteSession, pickFolder",
+        "a machine-scope grant covers every session on the machine and outranks a session share on the same machine",
+        "several session shares on one machine intersect to the narrowest capability set, never the union",
+        "revoking a share, or unpairing/deleting the device, tombstones every grant on that device in one transaction",
+        "a guest never gets a UserContext of their own and never sets clerkToken or triggers syncNow",
+        "a guest's file access is clamped to the cwds of their granted sessions; the ~/.claude/plans auto-approve exception is owner-only",
+        "revocation of a live guest channel has a bound, up to GUEST_REAUTH_MS (60s)",
+        "a promptNeedsApproval guest's prompt lands queuePaused on the owner's existing queue, no new state machine",
+        "presence and attribution identity always come from the connection's attested identity, never a client-supplied field",
+        "a historical row or the owner's own prompt with no recorded actor is attributed to the session's host"
+      ],
+      "architecturalRules": [
+        "MESSAGE_AUTHZ is an exhaustive Record keyed on ClientMessage['type'] so an unclassified message is a compile error, not a review gap",
+        "SocketAccess lives on the sockets Map's value, never on BrowserLink, which stays a minimal structural contract",
+        "the relay's owner fast path never touches storage",
+        "the relay holds no database credentials and forwards an opaque grant it never inspects",
+        "parseShareCaps denies by default on anything not an explicit true",
+        "presence is bridge-local and ephemeral, never rides SessionMeta, needs no relay or storage support",
+        "resolvedActor sits alongside resolvedBy, never folded into it",
+        "a peer's prompt bubble stays right-aligned like the owner's; authorship is carried by avatar/colour, not by side",
+        "personMeta's palette is deliberately disjoint from agentMeta's"
       ],
       "relatedDecisions": [
         "hosted-machine-access",
-        "desktop-app"
+        "multi-machine-client",
+        "transcript-rendering",
+        "permissions-and-plan-mode",
+        "cloud-sync-sessions"
+      ]
+    },
+    {
+      "id": "multi-machine-client",
+      "name": "Multi-machine client",
+      "doc": "features/multi-machine-client.md",
+      "purpose": "Hold a live link to more than one machine at once, so a browser can show its own sessions and a session shared with it side by side, without the two ever bleeding into each other. Replaces web/src/ws.ts's single module-level socket with one MachineLink per machine, and rewrites three reducers (hello merge, draft pruning, auto-select) that were correct for one machine and destructive for two.",
+      "entryPoints": [
+        "web/src/main.tsx",
+        "web/src/ws.ts",
+        "web/src/components/Sidebar.tsx",
+        "web/src/components/SessionView.tsx",
+        "web/src/components/Composer.tsx",
+        "web/src/components/DevicesSection.tsx"
+      ],
+      "files": [
+        "web/src/lib/machines.ts",
+        "web/src/ws.ts",
+        "web/src/store.ts",
+        "web/src/lib/can.ts",
+        "web/src/lib/machineHealth.ts",
+        "web/src/components/MachineDot.tsx",
+        "web/src/components/DevicesSection.tsx",
+        "web/src/components/ConnectingMachine.tsx",
+        "web/src/components/Sidebar.tsx",
+        "web/src/components/Composer.tsx",
+        "web/src/components/SessionView.tsx"
+      ],
+      "symbols": [
+        "MachineSlice",
+        "mergeMachineSessions",
+        "prunableDraftIds",
+        "shouldClaimSelection",
+        "MachineLink",
+        "linkFor",
+        "linkForMessage",
+        "useSessionMachine",
+        "useSessionMachineHealth",
+        "linkedMachineHealth",
+        "unlinkedMachineHealth"
+      ],
+      "tests": [
+        "server/src/machineMerge.test.ts"
+      ],
+      "businessRules": [
+        "the primary machine's connectionStatus/machineOffline/bootstrapped/workerStatus/storageStatus are the only values the global banners read",
+        "a shared machine connects automatically up to LINK_CAP; an idle non-primary link disconnects after IDLE_DISCONNECT_MS",
+        "sessionMachine is per-client in-memory state, never persisted or synced",
+        "auto-selecting a freshly created session additionally requires the creating frame to have come from the primary machine"
+      ],
+      "architecturalRules": [
+        "every cross-machine merge/prune/select rule lives in web/src/lib/machines.ts as a plain function, unit-testable without a socket, a store, or React",
+        "prunableDraftIds/pruneDrafts/pruneDraftAttachments take the ids to delete, not the ids to keep",
+        "MachineLink owns every piece of per-socket state that used to be a ws.ts module global; socketGeneration now holds per link",
+        "useSessionMachine/useSessionMachineHealth must be wrapped in useShallow or zustand v5 re-renders without end on their freshly built return object",
+        "web/src/lib/machines.ts is imported directly by a server/-side test file so it can run under node:test without a browser"
+      ],
+      "relatedDecisions": [
+        "session-collaboration",
+        "hosted-machine-access",
+        "session-and-project-ui",
+        "turn-recovery"
       ]
     }
   ]

@@ -252,12 +252,21 @@ be talking to it.
   plugin-defined string that the seed map can never fully cover.
 - The main agent and a subagent share the same badge icon but never the same colour (blue vs
   violet), so which one is running/spoke reads from colour alone before any label is read.
+- Every user bubble carries an author avatar (`PromptAuthor`), solo sessions included — see
+  [session-collaboration](session-collaboration.md#attribution). Historical rows and the owner's
+  own prompt carry no recorded actor and resolve to the session's host, so this is a pure
+  read-side change with no migration.
 
 ## Architectural rules
 
 - User and agent transcript text share one markdown renderer (`Markdown`) rather than each having
   its own text-rendering path; `ColorizedText.tsx` (the prior plain-text-plus-swatch twin) was
   deleted as dead code.
+- A peer's user bubble stays right-aligned, exactly like the owner's own — it is never flipped to
+  the left the way a real messaging app would. Agent output is already flush-left by convention,
+  so a left-aligned prompt would read as the agent talking; authorship is carried by the avatar
+  and its colour instead of by side. Deliberate deviation, recorded here so it is not "fixed"
+  later.
 - `Markdown` also takes an optional `onLinkClick` prop, added for the
   [docs-reader](docs-reader.md) so it can route links inside its own page instead of the
   source-file preview. Every transcript call site passes nothing, so its rendering is unchanged
@@ -344,3 +353,5 @@ be talking to it.
 - [docs-reader](docs-reader.md) — the one consumer of `Markdown`'s `onLinkClick`.
 - [context-window](context-window.md) — the main-agent-only restriction on the fallback occupancy
   reading.
+- [session-collaboration](session-collaboration.md) — the author avatar and identity resolution
+  behind every user bubble.

@@ -1,0 +1,303 @@
+# Session collaboration
+
+## Purpose
+
+Invite another signed-in user into one session, or onto a whole machine, so they can prompt the
+same running agent — with live presence (who is watching, who is typing) and attribution (whose
+prompt is whose) — without ever getting their own copy of the host's data.
+
+This inverts the app's original single-owner assumption: a browser reached a machine only when
+`hub.ownerId === userId`, and the bridge resolved every connection to its own isolated
+`UserContext`. Three things had to hold for that inversion to be safe:
+
+- **A guest reaches the host's running session, not a copy.** Transcripts and turns are
+  host-local; only `SessionMeta` syncs to Postgres. A guest connection resolves to the *host's*
+  `UserContext` — never mints one of their own — or the transcript they see would be empty.
+- **Access is a capability set, not a boolean.** A guest runs code on the host's machine, as the
+  host's OS user, on the host's Anthropic token. Every grant carries a `ShareCaps` flag set,
+  defaulting to the most restrictive preset (`view`).
+- **A denial is enforced by the compiler, not by review.** `MESSAGE_AUTHZ` classifies every
+  `ClientMessage['type']` in an exhaustive `Record`; a message type added later without a
+  classification fails to compile.
+
+Three share presets cover the UI (`view`, `prompt`, `collaborator`); the capability flags exist
+underneath so a finer grant can ship later with no migration. Invites work by email (claimable
+only by that address's *verified* Clerk email, so it works before the invitee even has an
+account) or by a single-use link.
+
+## Entry points
+
+- Share button in the session header (`web/src/components/SessionView.tsx`) — owner only, hosted
+  builds only (`SHARING_ENABLED`)
+- `web/src/components/ShareModal.tsx` — presets, invite by email/link, member list, revoke
+- `web/src/components/JoinPage.tsx` — `/join/:code`, the redeem flow including sign-up
+- The pairing screen's "You've been invited" card (`web/src/components/ConnectMachine.tsx`) —
+  discovers a pending invite by the caller's verified email, for someone who signs in without
+  the link
+- `POST /v1/shares/invite`, `GET /v1/shares`, `GET /v1/shares/pending`,
+  `GET /v1/shares/invite/:code`, `POST /v1/shares/claim`, `PATCH`/`DELETE /v1/shares/:kind/:id`
+  (`storage/src/index.ts`)
+- `POST /v1/devices/authorize` — the relay's grant oracle, shared-secret gated, called only by
+  the relay
+- Every `ClientMessage` a guest can send — gated by `MESSAGE_AUTHZ` before any handler runs
+  (`server/src/index.ts` `handleMessage`)
+- `{ type: 'presence', sessionId, viewing, focused }` — sent by `web/src/lib/presence.ts`'s
+  `usePresence` hook (debounced, plus a heartbeat)
+
+## Files
+
+- `shared/types.ts` — `ShareCaps`, `NO_SHARE_CAPS`, `SharePreset`, `ShareScope`,
+  `SHARE_PRESETS`/`capsForPreset`/`parseShareCaps`/`presetOfCaps`, `ShareProfile`, `Actor`,
+  `SocketAccess`/`OWNER_ACCESS`, `MessageAuthz`/`MESSAGE_AUTHZ`/`authorizeMessage`,
+  `PresenceViewer`, the `hello.access` block, `SessionMeta.turnActor`, `QueuedPrompt.actor`,
+  `PermissionRequestData.resolvedActor`, the `presence` client/server messages
+- `storage/prisma/schema.prisma` — `DeviceMember`, `SessionShare`, `ShareInvite`, `UserProfile`,
+  `Device.online`
+- `storage/src/shares.ts` — `authorizeDevice` (the relay's oracle body), `profileOf`,
+  `revokeGrantsForDevice`, `capsJson`
+- `storage/src/presence.ts` — `presenceOf` (the `Device.online` freshness gate)
+- `storage/src/index.ts` — the `/v1/shares/*` and `/v1/devices/authorize`/`presence` routes;
+  `cacheProfile`/`verifiedEmails` (Clerk lookups); the unpair/revoke grant cascade
+- `relay/src/authorize.ts` — `authorizeClient`, extracted for testing without a socket
+- `relay/src/index.ts` — `handleClient`'s owner-fast-path/guest-grant branch,
+  `reauthorizeGuests` (the `GUEST_REAUTH_MS` sweep), `reportPresence`
+- `relay/src/mux.ts` — `Channel.grant`, `openChannel`'s grant param, `guestChannels`,
+  `dropChannel`
+- `relay/src/protocol.ts` — `AttestedGrant` on the `open` frame
+- `server/src/relayClient.ts` — the bridge-side `AttestedGrant`/`AttestedIdentity` duplicate
+  (deliberately not shared with `relay/`)
+- `server/src/index.ts` — `handleConnection`'s guest-vs-owner resolution, `buildHello`, the
+  `handleMessage` authz gate, `conns` (now carries `access`+`connId`), the `presence` case
+- `server/src/userContext.ts` — `sockets: Map<BrowserLink, SocketAccess>`, `sessionIdOf`,
+  `mayReceive` (the scoped broadcast fan-out), `PresenceTracker`
+- `server/src/presence.ts` — `PresenceTracker`
+- `server/src/userRegistry.ts` — `UserRegistry.peek` (never mints a context)
+- `server/src/workspacePaths.ts` — `workspaceRoots`/`resolveWorkspacePath` clamped to a guest's
+  granted session cwds; the `~/.claude/plans` auto-approve exception narrowed to owner-only
+- `server/src/fileRoutes.ts` — every route takes `access`; `syncLog` is owner-only
+- `server/src/sessions.ts` — `userPrompt`/`prompt` take an `actor`; `QueuedPrompt.actor`;
+  `resolvePermission`/`logResolution` take an actor for `resolvedActor`
+- `server/src/workflows.ts` — `startIfPending`/`iterateIfWaiting`/`runStep`/`runStepSafely` take
+  an actor (a workflow-attached session intercepts a prompt *before* `userPrompt` ever runs)
+- `web/src/lib/shares.ts` — the HTTP client for every `/v1/shares/*` route, `PRESET_COPY`
+- `web/src/lib/can.ts` — `useCan`, `useIsGuest`, `useInScope`, `useClaudeLoginNeeded` (guest UI
+  narrowing, all reading the same `access` the bridge enforces)
+- `web/src/lib/identityRule.ts` — `resolveIdentity` (pure), `personMeta`, the person palette
+- `web/src/lib/identity.ts` — `useIdentityResolver` (binds the pure rule to the store + Clerk)
+- `web/src/lib/presence.ts` — `usePresence`, `usePeers`
+- `web/src/components/PresenceStack.tsx`, `PromptAuthor.tsx` — the avatar surfaces
+- `web/src/components/QueuedMessages.tsx` — per-item author, "waiting for X" framing
+- `web/src/components/PermissionPrompt.tsx` — the resolved-card "approved by X" badge
+
+## Symbols
+
+- `ShareCaps` — the flag set: `prompt`, `promptNeedsApproval`, `readFiles`, `interrupt`,
+  `approvePermissions`, `manageWorkflow`, `setModel`, `setPermissionMode` (no preset grants
+  this), `createSessions` (machine scope only)
+- `parseShareCaps(value)` — reads a stored JSON blob back into `ShareCaps`, **failing closed**:
+  anything missing, malformed, or not literally `true` is denied. The load-bearing case is a
+  capability added after a grant was written — an old row must not silently acquire it
+- `MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz>` — every message classified as
+  `owner`, `connection` (heartbeat/token relay, any connection may send it), `cap` (any grant
+  holding it), `session` (session-scoped, `cap: null` means any grant including View only), or
+  `machine` (machine-scope grants only)
+- `authorizeMessage(msg, access)` — the one gate `handleMessage` consults before its switch; a
+  denial names the missing capability rather than a bare "unauthorized"
+- `authorizeDevice(prisma, deviceId, userId)` — owner (fast, no share tables) → machine member →
+  session shares (several intersect to the *narrowest*, never the union); a stale grant (the
+  device was unpaired and re-claimed) is refused
+- `authorizeClient` (relay) — deliberately stricter than the device `verifyDevice`: every
+  non-answer (timeout, non-200, malformed body, an owner-shaped answer for a non-owner, a
+  session grant with no sessions) denies, because this is an initial grant rather than
+  protecting an already-established link
+- `PresenceTracker` — keyed by connection, not user, so two tabs of one person are two viewers;
+  never touches `SessionMeta`
+- `resolveIdentity(ctx, userId, profile)` — pure attribution rule: resolves what "no actor"
+  means first (the session's host — them, or you), then the record's own attested profile, then
+  the host's cached profile, then a presence-learned one, then Clerk for yourself, then a stable
+  shortened id. Never blank, never keyed on the name (so two unnamed people can't collapse to
+  one colour)
+- `Actor` — `{ userId, name, imageUrl }`, taken from the connection's attested identity, never a
+  message body
+
+## Data flow
+
+### Minting and claiming a grant
+
+`POST /v1/shares/invite` verifies the caller owns the device (and, for a session share, the
+session) before minting a code. `POST /v1/shares/claim` is a compare-and-set on
+`claimedBy: null` in the same transaction that writes the `DeviceMember`/`SessionShare` row, so a
+replayed code 409s rather than minting a second grant. An email-bound invite is checked against
+the claimer's *verified* Clerk emails — unverified never matches, or anyone could add the
+invitee's address to their own account and claim in their place.
+
+### The relay gate
+
+`handleClient`'s owner path (`hub.ownerId === userId`) is byte-for-byte unchanged and never
+consults storage. Anyone else calls `authorizeClient`, which POSTs
+`{ deviceId, userId }` to `/v1/devices/authorize` and gets back `{ allowed, ownerId, scope, caps,
+sessionIds?, profile, viewer }` — `profile` is the host's identity for the guest's UI, `viewer` is
+the *caller's own* identity, resolved server-side so presence/attribution can't be spoofed. A
+grant additionally requires the bridge to speak `COLLAB_MIN_PROTOCOL`: an older bridge silently
+drops the unknown `grant` field and would serve the guest as the owner, so the version check runs
+before the grant lookup. The grant rides the `open` frame's optional fields, which is what lets
+this ship without a `RELAY_PROTOCOL_VERSION` bump. `reauthorizeGuests` re-checks every live guest
+channel on `GUEST_REAUTH_MS` (60s) and closes one whose grant narrowed or vanished; owner channels
+keep the existing 300s device re-verify.
+
+### The bridge resolves a guest to the host's context
+
+`handleConnection` reads `attested.grant.hostUserId` and calls `registry.get(hostUserId)` — never
+`registry.get(guestUserId)`. Two guards close the leak that would otherwise follow: a guest
+connection never sets `ctx.clerkToken` and never calls `syncNow()`, and the relay's `onToken`
+handler uses `registry.peek()` (never mints) instead of `registry.get()` for the same reason — a
+guest's token arrives there too, every ~50s, from their browser's own auth relay.
+
+`buildHello` gives a guest their sessions (scope-filtered), the machine's health, and
+`access: { scope, caps, sessionIds?, ownerProfile, deviceId }` — and nothing account-wide:
+`workflows`, `steps`, `recipes`, `usage`, `auth`, `settings`, `guardAllowlist`, `projects` are all
+empty/omitted for a guest.
+
+### The authz gate and scoped broadcast
+
+`handleMessage` builds one `Actor` per connection (present for the owner too, not only guests —
+see Attribution below) and calls `authorizeMessage(msg, access)` before its switch. A denial
+replies `{type:'error', sessionId, message}` on the originating socket and logs one
+`[share] denied …` line.
+
+`UserContext.sockets` is `Map<BrowserLink, SocketAccess>`, not a `Set`. `broadcast` derives
+`sessionIdOf(msg)` and calls `mayReceive(msg, sessionId, access)` per socket: a session-bearing
+message reaches only sockets whose scope covers it; an account-wide message (no session id)
+reaches the owner only, except `workerStatus`/`storageStatus` — a guest whose turns are about to
+fail needs to know why, and neither carries anything private.
+
+### Presence
+
+`usePresence` sends `{type:'presence', sessionId, viewing, focused}` on a 250ms settle plus a
+25s heartbeat, and an explicit `viewing: false` on unmount. `PresenceTracker.signal` is keyed by
+connection id; moving to another session removes the connection from the old one in the same
+call, so switching sessions leaves no ghost viewer behind. The broadcast (`{type:'presence',
+sessionId, viewers}`) is session-bearing, so the existing scoped fan-out delivers it to exactly
+that session's viewers — no new routing needed.
+
+### Attribution
+
+An `Actor` is built for *every* connection, owner included — the earlier design (actor only for
+guests, "no actor" inferred as "the host") let the same message render as two different people
+depending on who read it. `Actor.name`/`imageUrl` are null for the owner (the bridge has no Clerk
+lookup for its own owner); the client fills those in from its own Clerk session.
+
+The actor threads through `SessionManager.prompt`/`userPrompt` into the persisted `'user'`
+transcript event and `SessionMeta.turnActor`. A workflow-attached session intercepts a prompt at
+`startIfPending`/`iterateIfWaiting` *before* `userPrompt` ever runs — since most sessions run a
+workflow, both had to take the actor too, or almost no prompt would ever be attributed. A
+released queued prompt (`QueuedPrompt.actor`) credits the person who wrote it, not the owner who
+released it.
+
+On the client, `resolveIdentity` is the single source every surface (presence avatars, prompt
+bubbles, the queued-message list, the resolved-permission badge, the sidebar's turn-actor chip)
+resolves a person through — so they can never disagree about who somebody is.
+
+## Dependencies
+
+- Clerk, for verified emails (invite binding) and each user's own name/avatar/id
+- [hosted-machine-access](hosted-machine-access.md) — the device-verify/pairing machinery this
+  extends; the relay's owner fast path is unchanged by this feature
+- [multi-machine-client](multi-machine-client.md) — holding a shared machine's link alongside
+  your own, and the session-row/composer differentiation for a remote session
+- `web/src/lib/agents.ts` — `personMeta`'s palette is deliberately disjoint from `agentMeta`'s
+  (asserted by a test reading both files as source)
+
+## Tests
+
+- `storage/src/shares.test.ts` — capability parsing (fail-closed), preset round-trips, and (opt-in
+  on `STORAGE_TEST_DATABASE_URL`) the full grant matrix: owner/member/session-share/revoked/stale
+  grant, intersection over union for overlapping session shares, unpair cascading to every grant
+- `storage/src/devices.presence.test.ts` — `presenceOf`'s freshness gate (the relay-crash case);
+  the `/v1/devices/presence` route (opt-in)
+- `relay/src/clientAuthorize.test.ts` — `authorizeClient` against every shape of non-answer; the
+  `/client` socket gate with a junk/absent token
+- `relay/src/agentHeartbeat.test.ts` — presence reports on attach/detach; a takeover never reports
+  the live bridge offline
+- `server/src/messageAuthz.test.ts` — the owner passes every message; a capability-less guest
+  passes only `connection` and `cap: null` session reads; every never-grantable message stays
+  owner-only at every preset/scope; a session-scoped guest cannot reach a sibling session
+- `server/src/guestAccess.test.ts` — file-read clamp to granted session cwds, `~/.claude/plans`
+  denied to a guest, traversal refused, `find` refuses a whole request rather than a partial
+  result, `syncLog` owner-only
+- `server/src/broadcastScope.test.ts` — `sessionIdOf` (including the `sessionUpsert` nested-id
+  case), `mayReceive` for every message shape at every scope
+- `server/src/presence.test.ts` — ghost-free session switching, two-tab independence, an
+  identical heartbeat producing no broadcast
+- `server/src/attribution.test.ts` / `attribution.identity.test.ts` — the actor is unconditional
+  (not owner-conditional); every human-prompt entry point (`startIfPending`, `iterateIfWaiting`,
+  `userPrompt`) is passed the actor; `resolveIdentity`'s fallback chain, including the "own
+  avatar with no attested profile" and "recorded id resolves identically for any reader" cases
+
+## Business rules
+
+- Three presets: `view` (read only), `prompt` (queues paused for owner release, always with
+  `readFiles`), `collaborator` (prompt/interrupt/approve/model/workflow, plus `createSessions` at
+  machine scope). No preset ever grants `setPermissionMode` — it is the guard around every other
+  capability.
+- Never grantable at any preset: settings, the guard allowlist, project/worktree management,
+  login/logout, device unpair, workflow/step/recipe authoring, `installUpdate`, `deleteSession`,
+  `pickFolder`.
+- A machine-scope grant covers every session on the machine and outranks a session share on the
+  same machine.
+- Several session shares on one machine intersect to the *narrowest* set of capabilities, never
+  the union — a view-only session must never inherit a collaborator session's caps.
+- Revoking a share, or unpairing/deleting the device, tombstones every `DeviceMember`/
+  `SessionShare`/unclaimed `ShareInvite` on that device in one transaction. A device id is
+  re-registerable, so a grant that outlived its device would attach to whoever claims that id
+  next.
+- A guest never gets a `UserContext` of their own on the host's machine, and never sets
+  `clerkToken` or triggers `syncNow` — the host's sessions must never be pushed to Postgres under
+  the guest's identity.
+- A guest's file access is clamped to the cwds of the sessions their grant covers, never the
+  host's whole project list; the `~/.claude/plans` auto-approve exception is owner-only.
+- Revocation has a bound, up to `GUEST_REAUTH_MS` (60s), on an already-open guest socket.
+- A `promptNeedsApproval` guest's prompt lands `queuePaused: true` on the owner's existing queue
+  — no new state machine; the owner's own next send resumes it.
+- Presence and attribution identity always come from the connection's attested identity, never
+  from a client-supplied message field.
+- A historical row (or the owner's own prompt) with no recorded actor is attributed to the
+  session's host — a pure read-side reinterpretation, not a migration.
+
+## Architectural rules
+
+- `MESSAGE_AUTHZ` is an exhaustive `Record` keyed on `ClientMessage['type']` specifically so a
+  message type added later without a classification is a **compile** error, not a review gap. Do
+  not weaken it to a partial map or a lookup with a fallback.
+- `SocketAccess` lives on the `sockets` Map's value, never on `BrowserLink` — that interface is a
+  deliberately minimal structural contract (see `browserLink.test.ts`).
+- The relay's owner fast path never touches storage; latency and failure surface for the
+  overwhelmingly common case are unchanged by this feature.
+- The relay holds no database credentials and no notion of capabilities — it forwards an opaque
+  grant it never inspects, matching its existing "never parse an app message" rule.
+- `parseShareCaps` denies by default on anything not an explicit `true`; a permissive default
+  (spreading the stored blob over `NO_SHARE_CAPS`) would let a capability added later be
+  silently inherited by every existing grant.
+- Presence is bridge-local and ephemeral by design — it never rides `SessionMeta`, so it never
+  writes to Postgres and needs no relay or storage support at all: every viewer of a session,
+  owner and guest alike, is already on the same host `UserContext`.
+- `resolvedActor` sits alongside `resolvedBy`, never folded into it: `resolvedBy` is
+  provenance-of-decision (user vs. workflow-advance vs. recovery), a different question from
+  which person clicked.
+- A peer's prompt bubble stays right-aligned like the owner's — see
+  [transcript-rendering](transcript-rendering.md#peer-attribution) — because agent output is
+  already flush-left by convention; authorship is carried by avatar/colour, not by side.
+- `personMeta`'s palette is deliberately disjoint from `agentMeta`'s, so a human can never be
+  mistaken for an agent at a glance.
+
+## Related decisions
+
+- [hosted-machine-access](hosted-machine-access.md) — the `/client` gate this feature makes
+  membership-based instead of ownership-only, and the device-verify machinery the grant oracle
+  sits beside.
+- [multi-machine-client](multi-machine-client.md) — holding a shared machine's link, and the
+  session-row/composer visual differentiation for a session that is not on the primary machine.
+- [transcript-rendering](transcript-rendering.md) — the bubble convention attribution builds on.
+- [permissions-and-plan-mode](permissions-and-plan-mode.md) — `resolvedActor` alongside
+  `resolvedBy`.
+- [cloud-sync-sessions](cloud-sync-sessions.md) — why a guest connection must never sync.

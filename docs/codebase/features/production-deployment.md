@@ -55,8 +55,9 @@ before a desktop release exists (see [desktop-app](desktop-app.md)).
 At runtime, Traefik routes by `Host()`/`PathPrefix()` label rules on the
 existing Docker socket provider: `web` takes the apex host, `relay` takes
 `/agent` and `/client` on the same host (with a `www` redirect router), and
-`storage` gets its own subdomain (`api.<domain>`) with `/v1/devices/verify`
-excluded from that router — see Architectural rules. `storage` carries no
+`storage` gets its own subdomain (`api.<domain>`) with `/v1/devices/verify`,
+`/v1/devices/presence`, and `/v1/devices/authorize` excluded from that router —
+see Architectural rules. `storage` carries no
 Traefik labels for any other exclusion; it is reachable at all only because
 `relay` and the browser need it, and its full route surface is otherwise
 intentionally public (Clerk-authenticated) on that one subdomain.
@@ -128,9 +129,10 @@ tagged with the pushed commit SHA).
   matches `url.pathname` exactly against `/agent`/`/client`, so rewriting the
   path closes the socket with `1008` — the container-routing equivalent of the
   classic nginx trailing-slash trap.
-- `storage`'s public router excludes `/v1/devices/verify` by rule (Traefik v3
-  `!Path(...)`), on top of that route's own shared-secret gate (see
-  [hosted-machine-access](hosted-machine-access.md)) — defense in depth, not redundancy: one
+- `storage`'s public router excludes `/v1/devices/verify`, `/presence`, and `/authorize` by rule
+  (Traefik v3 chained `!Path(...)`), on top of each route's own shared-secret gate (see
+  [hosted-machine-access](hosted-machine-access.md) and
+  [session-collaboration](session-collaboration.md)) — defense in depth, not redundancy: one
   is a network-level exclusion, the other an application-level credential
   check, and either alone would leave the route reachable if the other broke.
 - The image installs `openssl` explicitly in the `storage` stage: `node:22-slim`
@@ -149,3 +151,7 @@ tagged with the pushed commit SHA).
   including the CORS and shared-secret rules this deploy depends on
 - [desktop-app](desktop-app.md) — the other half of the split (nothing in this doc
   runs an agent), and where `VITE_DESKTOP_DOWNLOAD_URL` comes from
+- [session-collaboration](session-collaboration.md) — `RELAY_SHARED_SECRET` now also gates
+  `/v1/devices/presence`/`authorize`; `SHARE_INVITE_TTL_MIN` and `DEVICE_PRESENCE_TTL_MS` are new
+  optional env vars, both defaulted. A packaged desktop bridge older than the feature's minimum
+  app protocol is refused as a guest by the relay, independent of this deploy.

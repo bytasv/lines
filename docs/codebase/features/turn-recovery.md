@@ -522,7 +522,8 @@ message type, no new modal, no new client state, no DB migration.
 - Exactly one of `ConnectionBanner`, `WorkerBanner`, `StorageBanner` renders at a time — all
   three share the same fixed position. `ConnectionBanner` (browser↔bridge down) outranks both;
   `WorkerBanner` (agent worker down) outranks `StorageBanner` (cloud sync paused), since a dead
-  agent is worse than paused sync.
+  agent is worse than paused sync. See [Multi-machine](#multi-machine) below — this rule is now
+  scoped to the primary machine.
 - Every recoverable failure (crashed query, `is_error` result, workflow pre-run failure, a push
   that never left the bridge) ends on a failure row with a working Retry button — in a plain
   session and inside a running workflow alike.
@@ -684,6 +685,16 @@ message type, no new modal, no new client state, no DB migration.
 - **Known limitation:** in Compact view the failed row sits inside a collapsed `AgentTurn`, so
   `SessionView`'s alert is the always-visible affordance; this is pre-existing.
 
+### Multi-machine
+
+A browser can hold live links to more than one machine at once (see
+[multi-machine-client](multi-machine-client.md)). The three banners above read only the
+**primary** machine's `connectionStatus`/`workerStatus`/`storageStatus` — a non-primary machine
+going offline, or its worker dying, never triggers `ConnectionBanner`/`WorkerBanner` for a user
+looking at their own, healthy machine. That health surfaces on the affected session's row and
+header instead. The precedence rule itself (`ConnectionBanner` > `WorkerBanner` > `StorageBanner`)
+is unchanged — it now simply always describes the primary.
+
 ## Related decisions
 
 - [session-and-project-ui](session-and-project-ui.md) — how these statuses render in the
@@ -697,3 +708,5 @@ message type, no new modal, no new client state, no DB migration.
   lands while a span is still open.
 - [hosted-machine-access](hosted-machine-access.md) — the duplicate-bridge scenario the
   no-local-history reconcile skip guards against.
+- [multi-machine-client](multi-machine-client.md) — holding several machines' links at once, and
+  why the banner precedence above is scoped to the primary.

@@ -528,7 +528,11 @@ instead of retrying a device the relay will now refuse.
   is constant-time, and unknown id / never-claimed / wrong secret all answer the same opaque 403 —
   a distinct reply would confirm a guessed id had once been real. It returns **no** pairing code:
   `register`'s revoked-row exception is the one code-issuing path.
-- `GET /v1/devices` never returns `secretHash`.
+- `GET /v1/devices` never returns `secretHash`. It also unions in machines reachable through a
+  live share (tagged `shared: true`, with the host's profile and grant scope) and an `online`
+  flag derived from the relay's presence report — see
+  [session-collaboration](session-collaboration.md) and
+  [multi-machine-client](multi-machine-client.md).
 - Pairing a new machine only becomes the active one automatically if there was no machine active
   before; otherwise silently switching a working session to a different computer would be worse
   than an extra "Use this" click.
@@ -649,13 +653,17 @@ instead of retrying a device the relay will now refuse.
 - Only the device secret's hash is stored, never the plaintext.
 - The relay holds no database credentials and never queries Postgres directly — it asks storage,
   which is the only process with DB credentials at all.
-- The cross-user check (`hub.ownerId === userId`) lives on the `/client` gate, not deeper in
-  routing, so it fails closed at the earliest point.
-- `POST /v1/devices/verify` is called machine-to-machine by the relay with no Clerk token to
-  present, so it sits behind a constant-time-compared shared secret (`RELAY_SHARED_SECRET`)
-  instead of the Clerk gate, and is excluded from storage's public router in a hosted deployment
-  so it is unreachable from the internet even with the secret guessed. Unset, storage refuses
-  verification with 503 rather than falling open.
+- The `/client` gate now has two branches, not one, and both fail closed at the earliest point:
+  the owner check (`hub.ownerId === userId`) is byte-for-byte what it always was and never
+  consults storage; anyone else must hold a grant from `POST /v1/devices/authorize`, checked
+  before routing proceeds. See [session-collaboration](session-collaboration.md) for the grant
+  model and why a non-owner additionally needs the bridge to speak a minimum app protocol.
+- `POST /v1/devices/verify`, `/presence`, and `/authorize` are all called machine-to-machine by
+  the relay with no Clerk token to present, so all three sit behind the same
+  constant-time-compared shared secret (`RELAY_SHARED_SECRET`) instead of the Clerk gate, and are
+  excluded from storage's public router in a hosted deployment so none is reachable from the
+  internet even with the secret guessed. Unset, storage refuses all three with 503/401 rather
+  than falling open.
 - Device identity (mint, hash, register) lives in `server/src/device.ts` rather than duplicated
   in the desktop app and the CLI pairing script, so the two cannot drift on the credential
   format.
