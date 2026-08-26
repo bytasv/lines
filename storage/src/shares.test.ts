@@ -7,7 +7,14 @@ import { after, before, describe, test } from 'node:test';
 import dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { capsForPreset, parseShareCaps, presetOfCaps, type ShareCaps } from '@lines/shared';
-import { authorizeDevice, capsJson } from './shares.ts';
+import {
+  authorizeDevice,
+  capsJson,
+  forgetShareContact,
+  normalizeEmail,
+  recordShareContact,
+  revokeGrantsForDevice,
+} from './shares.ts';
 
 /**
  * The grant model, and `authorizeDevice` in particular — the answer the relay
@@ -110,6 +117,25 @@ describe('share capabilities', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Address normalization — one function, because two would drift
+// ---------------------------------------------------------------------------
+
+describe('normalizeEmail', () => {
+  test('trims and lowercases, so case can never split one person into two', () => {
+    assert.equal(normalizeEmail('  Vy@Example.COM '), 'vy@example.com');
+    assert.equal(normalizeEmail('vy@example.com'), 'vy@example.com');
+  });
+
+  test('nothing at all is null, never an empty string', () => {
+    // A `''` contact row would be a permanent empty suggestion, and a `''`
+    // inviteeEmail would be an invite bound to an address nobody can hold.
+    for (const blank of ['', '   ', null, undefined]) {
+      assert.equal(normalizeEmail(blank), null);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Grants — the relay's oracle, against a real database
 // ---------------------------------------------------------------------------
 
@@ -180,6 +206,7 @@ describe('grants', { skip }, () => {
       await prisma.sessionShare.deleteMany({ where: { deviceId: { in: devices } } });
       await prisma.shareInvite.deleteMany({ where: { deviceId: { in: devices } } });
       await prisma.userProfile.deleteMany({ where: { userId: { in: users } } });
+      await prisma.shareContact.deleteMany({ where: { ownerId: { in: users } } });
       await prisma.device.deleteMany({ where: { id: { in: devices } } });
       await prisma.$disconnect();
     }
@@ -392,5 +419,94 @@ describe('grants', { skip }, () => {
     const ok = await call(RELAY_SECRET);
     assert.equal(ok.status, 200);
     assert.equal(((await ok.json()) as { allowed: boolean }).allowed, true);
+  });
+
+  // -------------------------------------------------------------------------
+  // The address book. Driven through the same functions the routes call, since
+  // /v1/contacts and /v1/shares/invite are behind Clerk auth this suite has no
+  // token for.
+  // -------------------------------------------------------------------------
+
+  const contactOf = (ownerId: string, email: string) =>
+    prisma!.shareContact.findUnique({ where: { ownerId_email: { ownerId, email } } });
+
+  test('inviting an address remembers it, normalized', async () => {
+    const owner = user();
+    await recordShareContact(prisma!, owner, '  Colleague@Example.COM ');
+    const row = await contactOf(owner, 'colleague@example.com');
+    assert.ok(row, 'the invitee must be remembered under the lowercased address');
+    assert.equal(row.userId, null, 'nobody has claimed anything yet');
+  });
+
+  test('a second invite to the same address touches one row rather than adding another', async () => {
+    const owner = user();
+    await recordShareContact(prisma!, owner, 'again@example.com');
+    const first = await contactOf(owner, 'again@example.com');
+    await sleep(5);
+    await recordShareContact(prisma!, owner, 'AGAIN@example.com');
+    const rows = await prisma!.shareContact.findMany({ where: { ownerId: owner } });
+    assert.equal(rows.length, 1, 'the composite key is owner + address');
+    assert.ok(
+      rows[0].lastUsedAt > first!.lastUsedAt,
+      'the second invite must move the address back to the top of the list',
+    );
+    assert.deepEqual(rows[0].createdAt, first!.createdAt, 'and must not restamp when it was learned');
+  });
+
+  test('revoking every grant on a machine leaves the address behind', async () => {
+    // The whole reason this table exists rather than a list derived from grants:
+    // the address of somebody you just revoked is the one you most want offered.
+    const owner = user();
+    const guest = user();
+    const id = await machine(owner);
+    await prisma!.deviceMember.create({
+      data: { deviceId: id, userId: guest, ownerId: owner, caps: capsJson(capsForPreset('view', 'machine')) },
+    });
+    await recordShareContact(prisma!, owner, 'revoked@example.com', guest);
+
+    await prisma!.$transaction(revokeGrantsForDevice(prisma!, id));
+
+    assert.deepEqual(await authorizeDevice(prisma!, id, guest), { allowed: false });
+    const row = await contactOf(owner, 'revoked@example.com');
+    assert.ok(row, 'the grant is gone; the address must not be');
+    assert.equal(row.userId, guest, 'and it still knows who to name');
+  });
+
+  test('claiming a link-only invite records the claimer on the owner', async () => {
+    // A link invite carries no address, so the claim is the only moment the owner
+    // learns one — and it arrives with a user id, which an email invite does not.
+    const owner = user();
+    const claimer = user();
+    await recordShareContact(prisma!, owner, 'Claimer@Example.com', claimer);
+    const row = await contactOf(owner, 'claimer@example.com');
+    assert.ok(row);
+    assert.equal(row.userId, claimer);
+    assert.equal(
+      await contactOf(claimer, 'claimer@example.com'),
+      null,
+      'the book belongs to the owner who shared, not to the person who claimed',
+    );
+  });
+
+  test('a later email invite keeps the name a claim earned', async () => {
+    const owner = user();
+    const claimer = user();
+    await recordShareContact(prisma!, owner, 'both@example.com', claimer);
+    await recordShareContact(prisma!, owner, 'both@example.com');
+    assert.equal((await contactOf(owner, 'both@example.com'))?.userId, claimer);
+  });
+
+  test('forgetting an address is scoped to one owner', async () => {
+    const mine = user();
+    const theirs = user();
+    const shared = 'shared@example.com';
+    await recordShareContact(prisma!, mine, shared);
+    await recordShareContact(prisma!, theirs, shared);
+
+    assert.equal(await forgetShareContact(prisma!, mine, shared), 1);
+    assert.equal(await contactOf(mine, shared), null);
+    assert.ok(await contactOf(theirs, shared), "another account's identical address must survive");
+    // Idempotent rather than throwing: the caller answers 404 off the count.
+    assert.equal(await forgetShareContact(prisma!, mine, shared), 0);
   });
 });

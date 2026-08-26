@@ -281,3 +281,22 @@ model UserProfile {
 
   @@map("user_profiles")
 }
+
+/// People this account has shared with, so the share overlay can offer them
+/// again. Deliberately outlives grants and invites: revoking access must not
+/// make the address unretypeable. A convenience list, not an audit trail —
+/// unlike grants, removal here is a hard delete.
+model ShareContact {
+  ownerId String @map("owner_id")
+  /// Lowercased, as ShareInvite.inviteeEmail.
+  email   String
+  /// Set once they claim: lets the row show a name and avatar from UserProfile.
+  userId  String? @map("user_id")
+
+  createdAt  DateTime @default(now()) @map("created_at")
+  lastUsedAt DateTime @default(now()) @map("last_used_at")
+
+  @@id([ownerId, email])
+  @@index([ownerId, lastUsedAt])
+  @@map("share_contacts")
+}

@@ -35,8 +35,11 @@ account) or by a single-use link.
   discovers a pending invite by the caller's verified email, for someone who signs in without
   the link
 - `POST /v1/shares/invite`, `GET /v1/shares`, `GET /v1/shares/pending`,
-  `GET /v1/shares/invite/:code`, `POST /v1/shares/claim`, `PATCH`/`DELETE /v1/shares/:kind/:id`
+  `GET /v1/shares/invite/:code`, `POST /v1/shares/claim`, `PATCH`/`DELETE /v1/shares/:kind/:id`,
+  `GET /v1/contacts`, `DELETE /v1/contacts/:email`, `DELETE /v1/contacts`
   (`storage/src/index.ts`)
+- Settings → Collaborators (`web/src/components/CollaboratorsSection.tsx`) — the address book
+  behind the share modal's email field: list, forget one, clear all
 - `POST /v1/devices/authorize` — the relay's grant oracle, shared-secret gated, called only by
   the relay
 - Every `ClientMessage` a guest can send — gated by `MESSAGE_AUTHZ` before any handler runs
@@ -52,12 +55,14 @@ account) or by a single-use link.
   `PresenceViewer`, the `hello.access` block, `SessionMeta.turnActor`, `QueuedPrompt.actor`,
   `PermissionRequestData.resolvedActor`, the `presence` client/server messages
 - `storage/prisma/schema.prisma` — `DeviceMember`, `SessionShare`, `ShareInvite`, `UserProfile`,
-  `Device.online`
+  `ShareContact` (the collaborator address book), `Device.online`
 - `storage/src/shares.ts` — `authorizeDevice` (the relay's oracle body), `profileOf`,
-  `revokeGrantsForDevice`, `capsJson`
+  `revokeGrantsForDevice`, `capsJson`, `normalizeEmail`, `recordShareContact`,
+  `forgetShareContact`
 - `storage/src/presence.ts` — `presenceOf` (the `Device.online` freshness gate)
 - `storage/src/index.ts` — the `/v1/shares/*` and `/v1/devices/authorize`/`presence` routes;
-  `cacheProfile`/`verifiedEmails` (Clerk lookups); the unpair/revoke grant cascade
+  `cacheProfile`/`verifiedEmails` (Clerk lookups); the unpair/revoke grant cascade; the
+  `/v1/contacts` routes and the contact upsert on invite-mint and on claim
 - `relay/src/authorize.ts` — `authorizeClient`, extracted for testing without a socket
 - `relay/src/index.ts` — `handleClient`'s owner-fast-path/guest-grant branch,
   `reauthorizeGuests` (the `GUEST_REAUTH_MS` sweep), `reportPresence`
@@ -79,7 +84,8 @@ account) or by a single-use link.
   `resolvePermission`/`logResolution` take an actor for `resolvedActor`
 - `server/src/workflows.ts` — `startIfPending`/`iterateIfWaiting`/`runStep`/`runStepSafely` take
   an actor (a workflow-attached session intercepts a prompt *before* `userPrompt` ever runs)
-- `web/src/lib/shares.ts` — the HTTP client for every `/v1/shares/*` route, `PRESET_COPY`
+- `web/src/lib/shares.ts` — the HTTP client for every `/v1/shares/*` route, `PRESET_COPY`,
+  `ShareContact`, `listContacts`/`forgetContact`/`clearContacts` (the `/v1/contacts` routes)
 - `web/src/lib/can.ts` — `useCan`, `useIsGuest`, `useInScope`, `useClaudeLoginNeeded` (guest UI
   narrowing, all reading the same `access` the bridge enforces)
 - `web/src/lib/identityRule.ts` — `resolveIdentity` (pure), `personMeta`, the person palette
@@ -88,6 +94,8 @@ account) or by a single-use link.
 - `web/src/components/PresenceStack.tsx`, `PromptAuthor.tsx` — the avatar surfaces
 - `web/src/components/QueuedMessages.tsx` — per-item author, "waiting for X" framing
 - `web/src/components/PermissionPrompt.tsx` — the resolved-card "approved by X" badge
+- `web/src/components/CollaboratorsSection.tsx` — Settings pane over the same
+  `/v1/contacts` client; list, forget one, clear all
 
 ## Symbols
 
@@ -106,6 +114,14 @@ account) or by a single-use link.
 - `authorizeDevice(prisma, deviceId, userId)` — owner (fast, no share tables) → machine member →
   session shares (several intersect to the *narrowest*, never the union); a stale grant (the
   device was unpaired and re-claimed) is refused
+- `normalizeEmail(value)` — trim + lowercase, shared by `ShareInvite.inviteeEmail` and
+  `ShareContact.email` so the two can never disagree about what "the same address" means;
+  blank normalizes to `null`, never `''`
+- `recordShareContact(prisma, ownerId, email, userId?)` — upserts the address book row on invite
+  mint and on claim; never fatal (catches and warns, like `cacheProfile`), and only ever fills
+  `userId` in, never clears a name a prior claim earned
+- `forgetShareContact(prisma, ownerId, email)` — hard delete, scoped by `ownerId`, so two
+  accounts holding the same address never affect each other's list
 - `authorizeClient` (relay) — deliberately stricter than the device `verifyDevice`: every
   non-answer (timeout, non-200, malformed body, an owner-shaped answer for a non-owner, a
   session grant with no sessions) denies, because this is an initial grant rather than
@@ -130,6 +146,20 @@ session) before minting a code. `POST /v1/shares/claim` is a compare-and-set on
 replayed code 409s rather than minting a second grant. An email-bound invite is checked against
 the claimer's *verified* Clerk emails — unverified never matches, or anyone could add the
 invitee's address to their own account and claim in their place.
+
+### The collaborator address book
+
+Recorded at the two moments an owner learns a real address, and nowhere else — the book is not
+derived from `listShares()`, because a claimed-then-revoked grant or an expired unclaimed invite
+must still be offered back. `POST /v1/shares/invite` upserts a `ShareContact` when `inviteeEmail`
+is set (a link-only invite records nothing yet — there is no address until someone claims it).
+`POST /v1/shares/claim` upserts one on the invite's *owner*, keyed by `invite.inviteeEmail` when
+present, otherwise the claimer's primary email just cached into `UserProfile` — this is what lets
+a link invite still populate the book, and the only path that has a `userId` to attach. Both
+writes are non-fatal, matching `cacheProfile`: a lagging migration or a slow write must not fail
+an otherwise-valid invite or claim. `ShareModal` reads `GET /v1/contacts` alongside `GET
+/v1/shares` and fails that half soft — a contacts fetch that errors leaves the suggestion list
+empty rather than blanking the grant list.
 
 ### The relay gate
 
@@ -210,9 +240,13 @@ resolves a person through — so they can never disagree about who somebody is.
 
 ## Tests
 
-- `storage/src/shares.test.ts` — capability parsing (fail-closed), preset round-trips, and (opt-in
-  on `STORAGE_TEST_DATABASE_URL`) the full grant matrix: owner/member/session-share/revoked/stale
-  grant, intersection over union for overlapping session shares, unpair cascading to every grant
+- `storage/src/shares.test.ts` — capability parsing (fail-closed), preset round-trips,
+  `normalizeEmail`, and (opt-in on `STORAGE_TEST_DATABASE_URL`) the full grant matrix:
+  owner/member/session-share/revoked/stale grant, intersection over union for overlapping
+  session shares, unpair cascading to every grant, and the address book: mint/claim recording a
+  contact, a repeat mint touching one row instead of duplicating, a revoked grant leaving the
+  contact behind, a claim's `userId` surviving a later email-only mint, and `forgetShareContact`
+  scoped by owner
 - `storage/src/devices.presence.test.ts` — `presenceOf`'s freshness gate (the relay-crash case);
   the `/v1/devices/presence` route (opt-in)
 - `relay/src/clientAuthorize.test.ts` — `authorizeClient` against every shape of non-answer; the
@@ -263,6 +297,11 @@ resolves a person through — so they can never disagree about who somebody is.
   from a client-supplied message field.
 - A historical row (or the owner's own prompt) with no recorded actor is attributed to the
   session's host — a pure read-side reinterpretation, not a migration.
+- The collaborator address book (`ShareContact`) is decoupled from grant state on purpose:
+  revoking a share, letting an invite expire unclaimed, or the invite being claimed-then-revoked
+  never removes the remembered address — that is exactly the case the book exists to survive.
+  Removing a contact (one, or all) is a hard delete, not a tombstone; it only clears a
+  suggestion and never touches a grant.
 
 ## Architectural rules
 

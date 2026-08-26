@@ -19,7 +19,15 @@ import {
   type SharePreset,
 } from '@lines/shared';
 import { presenceOf } from './presence.ts';
-import { authorizeDevice, capsJson, profileOf, revokeGrantsForDevice } from './shares.ts';
+import {
+  authorizeDevice,
+  capsJson,
+  forgetShareContact,
+  normalizeEmail,
+  profileOf,
+  recordShareContact,
+  revokeGrantsForDevice,
+} from './shares.ts';
 import { putRecipeImage, r2Configured, r2PublicBaseWarning } from './r2.ts';
 import { listSessions, putSession, putSessions, softDeleteSession, toWire } from './sessionRows.ts';
 
@@ -1196,20 +1204,24 @@ app.post('/v1/shares/invite', async (req, res) => {
   }
   const code = inviteCode();
   const expiresAt = new Date(Date.now() + SHARE_INVITE_TTL_MIN * 60_000);
+  // Lowercased on both sides of the comparison, so case can never deny a
+  // legitimate invitee — and shared with the contact row, so the two cannot drift.
+  const inviteeEmail = normalizeEmail(body.inviteeEmail);
   await prisma.shareInvite.create({
     data: {
       code,
       ownerId: userId,
       deviceId: device.id,
       sessionId: body.sessionId ?? null,
-      // Lowercased on both sides of the comparison, so case can never deny a
-      // legitimate invitee.
-      inviteeEmail: body.inviteeEmail ? body.inviteeEmail.trim().toLowerCase() : null,
+      inviteeEmail,
       caps: capsJson(capsForPreset(preset, body.sessionId ? 'session' : 'machine')),
       expiresAt,
     },
   });
   await cacheProfile(userId);
+  // Remembered here rather than derived from the invite later: an invite expires
+  // in a week and a grant can be revoked, but the address stays worth offering.
+  await recordShareContact(prisma, userId, inviteeEmail);
   res.json({ code, expiresAt: expiresAt.toISOString() });
 });
 
@@ -1475,6 +1487,11 @@ app.post('/v1/shares/claim', async (req, res) => {
     return;
   }
   await cacheProfile(userId);
+  // The owner now knows this person, whichever way the invite reached them. A
+  // link-only invite carries no address, so fall back to the primary email just
+  // cached — that is the whole reason claiming a link records anything at all.
+  const claimer = invite.inviteeEmail ?? (await profileOf(prisma, userId))?.email ?? null;
+  await recordShareContact(prisma, invite.ownerId, claimer, userId);
   res.json({
     ok: true,
     deviceId: invite.deviceId,
@@ -1567,6 +1584,63 @@ app.delete('/v1/shares/:kind/:id', async (req, res) => {
     return;
   }
   res.status(400).json({ error: 'unknown share kind' });
+});
+
+/**
+ * The collaborator address book: people this account has shared with, newest
+ * first, so the share overlay can offer them instead of asking for an address
+ * from memory.
+ *
+ * Not derived from grants or invites on purpose — those are revoked, claimed or
+ * expired within a week, and the address of someone whose access you revoked is
+ * exactly the one you still want offered.
+ */
+app.get('/v1/contacts', async (req, res) => {
+  const ownerId = userIdOf(req);
+  const contacts = await prisma.shareContact.findMany({
+    where: { ownerId },
+    orderBy: { lastUsedAt: 'desc' },
+    take: 50,
+  });
+  // Only the ones who have claimed carry a user id, so only they can be named.
+  const ids = contacts.map((c) => c.userId).filter((id): id is string => Boolean(id));
+  const profiles = new Map(
+    (await prisma.userProfile.findMany({ where: { userId: { in: ids } } })).map((p) => [p.userId, p]),
+  );
+  res.json({
+    contacts: contacts.map((c) => {
+      const profile = c.userId ? profiles.get(c.userId) : null;
+      return {
+        email: c.email,
+        name: profile?.name ?? null,
+        imageUrl: profile?.imageUrl ?? null,
+        userId: c.userId,
+        lastUsedAt: c.lastUsedAt,
+      };
+    }),
+  });
+});
+
+/**
+ * Forget one collaborator. A real delete, not a tombstone: this list exists only
+ * to be offered back, so "remove" has to mean the address stops being kept.
+ */
+app.delete('/v1/contacts/:email', async (req, res) => {
+  const ownerId = userIdOf(req);
+  const email = normalizeEmail(req.params.email);
+  if (!email) {
+    res.status(400).json({ error: 'an email is required' });
+    return;
+  }
+  const count = await forgetShareContact(prisma, ownerId, email);
+  res.status(count ? 200 : 404).json(count ? { ok: true } : { error: 'unknown contact' });
+});
+
+/** Forget everyone. Scoped by ownerId, so it can only ever empty your own list. */
+app.delete('/v1/contacts', async (req, res) => {
+  const ownerId = userIdOf(req);
+  const { count } = await prisma.shareContact.deleteMany({ where: { ownerId } });
+  res.json({ ok: true, count });
 });
 
 /** Constant-time compare of two hex digests of equal length. */

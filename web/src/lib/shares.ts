@@ -128,6 +128,34 @@ export function revokeInvite(code: string): Promise<{ ok: true }> {
   return storageCall(`/v1/shares/invite/${encodeURIComponent(code)}`, { method: 'DELETE' });
 }
 
+/**
+ * Somebody this account has shared with before. Kept server-side rather than
+ * derived from the grant list: grants get revoked and invites expire, and that is
+ * precisely when you still want the address offered back.
+ */
+export interface ShareContact {
+  /** Lowercased, and the primary key of the row alongside the owner. */
+  email: string;
+  /** Only known once they have claimed something. */
+  name: string | null;
+  imageUrl: string | null;
+  userId: string | null;
+  lastUsedAt: string;
+}
+
+export function listContacts(): Promise<{ contacts: ShareContact[] }> {
+  return storageCall<{ contacts: ShareContact[] }>('/v1/contacts');
+}
+
+/** A real delete — the list only exists to be offered back. */
+export function forgetContact(email: string): Promise<{ ok: true }> {
+  return storageCall(`/v1/contacts/${encodeURIComponent(email)}`, { method: 'DELETE' });
+}
+
+export function clearContacts(): Promise<{ ok: true; count: number }> {
+  return storageCall('/v1/contacts', { method: 'DELETE' });
+}
+
 /** The link an invite code turns into. Same origin as the app, so it just works. */
 export const joinUrl = (code: string): string => `${location.origin}/join/${code}`;
 

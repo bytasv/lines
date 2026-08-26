@@ -2156,7 +2156,8 @@
         "web/src/components/ConnectMachine.tsx",
         "storage/src/index.ts",
         "relay/src/index.ts",
-        "server/src/index.ts"
+        "server/src/index.ts",
+        "web/src/components/CollaboratorsSection.tsx"
       ],
       "files": [
         "shared/types.ts",
@@ -2185,7 +2186,8 @@
         "web/src/components/PresenceStack.tsx",
         "web/src/components/PromptAuthor.tsx",
         "web/src/components/QueuedMessages.tsx",
-        "web/src/components/PermissionPrompt.tsx"
+        "web/src/components/PermissionPrompt.tsx",
+        "web/src/components/CollaboratorsSection.tsx"
       ],
       "symbols": [
         "ShareCaps",
@@ -2200,7 +2202,10 @@
         "resolveIdentity",
         "personMeta",
         "Actor",
-        "SocketAccess"
+        "SocketAccess",
+        "normalizeEmail",
+        "recordShareContact",
+        "forgetShareContact"
       ],
       "tests": [
         "storage/src/shares.test.ts",
@@ -2225,7 +2230,8 @@
         "revocation of a live guest channel has a bound, up to GUEST_REAUTH_MS (60s)",
         "a promptNeedsApproval guest's prompt lands queuePaused on the owner's existing queue, no new state machine",
         "presence and attribution identity always come from the connection's attested identity, never a client-supplied field",
-        "a historical row or the owner's own prompt with no recorded actor is attributed to the session's host"
+        "a historical row or the owner's own prompt with no recorded actor is attributed to the session's host",
+        "the collaborator address book (ShareContact) is decoupled from grant state on purpose \u2014 revoking a share or letting an invite expire never removes the remembered address; removing a contact is a hard delete, not a tombstone, and only clears the suggestion, never a grant"
       ],
       "architecturalRules": [
         "MESSAGE_AUTHZ is an exhaustive Record keyed on ClientMessage['type'] so an unclassified message is a compile error, not a review gap",

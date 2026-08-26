@@ -25,7 +25,9 @@ import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { GuardAllowlistSection } from './GuardAllowlistSection';
 import { DevicesSection } from './DevicesSection';
+import { CollaboratorsSection } from './CollaboratorsSection';
 import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
+import { SHARING_ENABLED } from '../lib/shares';
 import { modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { fileRequest, send } from '../ws';
@@ -34,6 +36,7 @@ import { useIsGuest } from '../lib/can';
 export type SettingsSection =
   | 'account'
   | 'devices'
+  | 'collaborators'
   | 'sessions'
   | 'transcript'
   | 'notifications'
@@ -47,6 +50,11 @@ const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   // which is the one and only device — a list of one it cannot revoke is noise.
   ...(DEVICE_PAIRING_ENABLED
     ? [{ value: 'devices' as SettingsSection, label: 'Machines' }]
+    : []),
+  // Same reasoning: with no storage server there is nothing to share and nobody
+  // to have shared with.
+  ...(SHARING_ENABLED
+    ? [{ value: 'collaborators' as SettingsSection, label: 'Collaborators' }]
     : []),
   { value: 'sessions', label: 'Sessions' },
   { value: 'transcript', label: 'Transcript' },
@@ -142,6 +150,7 @@ export function SettingsModal({
           <Stack gap="xs" p="md" maw={620}>
             {section === 'account' && <AccountSection onClose={onClose} />}
             {section === 'devices' && <DevicesSection />}
+            {section === 'collaborators' && <CollaboratorsSection />}
             {section === 'sessions' && <SessionsSection />}
             {section === 'transcript' && <TranscriptSection />}
             {section === 'notifications' && <NotificationsSection />}

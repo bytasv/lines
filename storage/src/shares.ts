@@ -138,6 +138,59 @@ export async function authorizeDevice(
 }
 
 /**
+ * The one normalization for an invitee address, so the invite row and the
+ * contact row can never disagree about what "the same person" means. Lowercased
+ * because case must never deny a legitimate invitee; empty is null, not `''`.
+ */
+export function normalizeEmail(value: string | null | undefined): string | null {
+  const trimmed = (value ?? '').trim().toLowerCase();
+  return trimmed || null;
+}
+
+/**
+ * Remember, or touch, a collaborator on this owner's address book.
+ *
+ * Never fatal, in the same spirit as the profile cache: this is bookkeeping for
+ * a convenience list, and a lagging migration or a slow write must not fail an
+ * invite or a claim that is otherwise valid.
+ */
+export async function recordShareContact(
+  prisma: PrismaClient,
+  ownerId: string,
+  email: string | null | undefined,
+  userId?: string | null,
+): Promise<void> {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return;
+  try {
+    const now = new Date();
+    await prisma.shareContact.upsert({
+      where: { ownerId_email: { ownerId, email: normalized } },
+      create: { ownerId, email: normalized, userId: userId ?? null, lastUsedAt: now },
+      // userId only ever fills in — a claim learns it, and a later email-only
+      // invite to the same address must not erase the name it earned.
+      update: { lastUsedAt: now, ...(userId ? { userId } : {}) },
+    });
+  } catch (err) {
+    console.warn(`[storage] could not record contact for ${ownerId}:`, (err as Error).message);
+  }
+}
+
+/**
+ * Forget one address. A hard delete, and `deleteMany` rather than `delete` so the
+ * ownerId scope is part of the query: a contact is keyed by owner *and* email, so
+ * two accounts can hold the same address and one must never delete the other's.
+ */
+export async function forgetShareContact(
+  prisma: PrismaClient,
+  ownerId: string,
+  email: string,
+): Promise<number> {
+  const { count } = await prisma.shareContact.deleteMany({ where: { ownerId, email } });
+  return count;
+}
+
+/**
  * Tombstone every grant that points at a device, in one transaction with
  * whatever revoked it.
  *

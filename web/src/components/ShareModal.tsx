@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActionIcon,
   Alert,
   Anchor,
+  Autocomplete,
   Avatar,
   Button,
   Divider,
@@ -16,6 +17,7 @@ import {
   TextInput,
   Tooltip,
 } from '@mantine/core';
+import type { AutocompleteProps } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import { IconAlertTriangle, IconTrash } from '@tabler/icons-react';
 import type { SharePreset } from '@lines/shared';
@@ -23,13 +25,38 @@ import {
   PRESET_COPY,
   createInvite,
   joinUrl,
+  listContacts,
   listShares,
   revokeGrant,
   revokeInvite,
   setGrantPreset,
+  type ShareContact,
   type ShareGrant,
   type ShareInvite,
 } from '../lib/shares';
+import type { DescribedItem } from '../lib/modelSelect';
+
+/** One suggestion in the email field: the address, with a name under it if known. */
+type ContactOption = DescribedItem;
+
+/**
+ * Local rather than `renderOptionWithDescription`: that one is typed against
+ * `SelectProps['renderOption']` (a `ComboboxItem`) and will not assign to
+ * Autocomplete's, whose option is only a `ComboboxGenericItem`.
+ */
+const renderContactOption: AutocompleteProps['renderOption'] = ({ option }) => {
+  const contact = option as ContactOption;
+  return (
+    <div>
+      <Text size="sm">{contact.label}</Text>
+      {contact.description && (
+        <Text size="xs" c="dimmed">
+          {contact.description}
+        </Text>
+      )}
+    </div>
+  );
+};
 
 /**
  * Share one session, or a whole machine.
@@ -64,6 +91,10 @@ export function ShareModal({
   const [email, setEmail] = useState('');
   const [grants, setGrants] = useState<ShareGrant[] | null>(null);
   const [invites, setInvites] = useState<ShareInvite[]>([]);
+  // The account's address book, so the email field can offer people already
+  // shared with instead of asking for an address from memory. Account-wide and
+  // independent of grant state — that is the point of it.
+  const [contacts, setContacts] = useState<ShareContact[]>([]);
   const [link, setLink] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,8 +104,18 @@ export function ShareModal({
 
   const load = async () => {
     setError(null);
+    // Two requests, in parallel, and only one of them may fail loudly: the
+    // suggestion list is a convenience, and losing it must not blank out the
+    // answer to "who can see this".
+    const contactsPromise = listContacts().then(
+      (r) => r.contacts,
+      () => [] as ShareContact[],
+    );
     try {
-      const { granted, invites: pending } = await listShares();
+      const [{ granted, invites: pending }, known] = await Promise.all([
+        listShares(),
+        contactsPromise,
+      ]);
       // Only this scope's grants: a machine share and a session share on the same
       // machine are different rows, and mixing them in one list would make
       // "who can see this session" unanswerable.
@@ -88,6 +129,7 @@ export function ShareModal({
           sessionId ? i.sessionId === sessionId : !i.sessionId && i.deviceId === deviceId,
         ),
       );
+      setContacts(known);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -140,6 +182,27 @@ export function ShareModal({
     }
   };
 
+  // Contacts already on this scope are dropped: re-suggesting somebody who can
+  // already see this is a dead click that ends in "already has access". Compared
+  // lowercased on both sides — a profile email and a contact row can differ in
+  // case, and a case-sensitive miss would suggest a duplicate.
+  const contactOptions = useMemo<ContactOption[]>(() => {
+    const here = new Set(
+      [
+        ...(grants ?? []).map((g) => g.profile?.email),
+        ...invites.map((i) => i.inviteeEmail),
+      ]
+        .filter((e): e is string => Boolean(e))
+        .map((e) => e.toLowerCase()),
+    );
+    return contacts
+      .filter((c) => !here.has(c.email.toLowerCase()))
+      .slice(0, 8)
+      // The label is what Mantine inserts into the input on submit, so it has to
+      // stay the bare address. The name goes in the description instead.
+      .map((c) => ({ value: c.email, label: c.email, description: c.name ?? undefined }));
+  }, [contacts, grants, invites]);
+
   const title =
     scope === 'session' && session ? `Share “${session.name}”` : `Share ${machineName ?? 'this machine'}`;
 
@@ -157,10 +220,12 @@ export function ShareModal({
             Invite by email
           </Text>
           <Group gap="xs" wrap="nowrap">
-            <TextInput
+            <Autocomplete
               placeholder="colleague@company.com"
+              data={contactOptions}
+              renderOption={renderContactOption}
               value={email}
-              onChange={(e) => setEmail(e.currentTarget.value)}
+              onChange={setEmail}
               onKeyDown={(e) => e.key === 'Enter' && email.trim() && void mint(true)}
               style={{ flex: 1 }}
               type="email"
