@@ -10,6 +10,7 @@
     "dev": "node scripts/build.mjs --shell-only && LINES_LOCAL_MODE=1 electron dist/main.cjs",
     "package": "npm run build && electron-builder --mac --arm64",
     "release": "node scripts/release.mjs",
+    "ship": "node scripts/ship.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

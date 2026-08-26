@@ -1,0 +1,92 @@
+name: Release desktop
+
+# Manual only. There is no tag convention and no release on push: a desktop
+# release is a deliberate act that starts with a version bump in
+# desktop/package.json, and macOS runners bill at 10x.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and sign, publish nothing
+        type: boolean
+        default: false
+      force:
+        description: Publish even if this version is already released
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-desktop
+  cancel-in-progress: false
+
+jobs:
+  # Everything that can fail without a Mac runs here, because ubuntu bills at 1x
+  # and macOS at 10x: a stale version or a type error should cost ~1 quota
+  # minute, not ~120. ship.mjs re-runs the version check on the mac anyway — this
+  # job exists to fail cheaply, not to be the only check.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck -w desktop
+      - name: Check the version is not already published
+        if: ${{ !inputs.force }}
+        env:
+          # Reads the public feed; no credentials involved.
+          R2_RELEASE_PUBLIC_BASE_URL: ${{ secrets.R2_RELEASE_PUBLIC_BASE_URL }}
+        run: node desktop/scripts/check-unreleased.mjs
+
+  release:
+    needs: guard
+    # macos-latest is arm64 and a *standard* runner, so it draws on included
+    # minutes. Larger or x64 macOS runners are always billed — do not switch.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # The electron download dominates a cold install.
+          cache: npm
+      # No --ignore-scripts: electron's postinstall fetches the binary itself.
+      - run: npm ci
+
+      # The same entry point as a local release, so CI cannot drift from the
+      # runbook. ship.mjs derives LINES_UPDATE_FEED_URL and LINES_DOWNLOAD_URL
+      # from R2_RELEASE_PUBLIC_BASE_URL, so they are spelled out in one place
+      # instead of two. afterPack.mjs ad-hoc signs and verifies inside the
+      # package step; codesign ships with the GitHub macOS image.
+      - name: Ship
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_RELEASE_BUCKET: ${{ secrets.R2_RELEASE_BUCKET }}
+          R2_RELEASE_PUBLIC_BASE_URL: ${{ secrets.R2_RELEASE_PUBLIC_BASE_URL }}
+        run: |
+          flags=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then flags="$flags --dry-run"; fi
+          if [ "${{ inputs.force }}" = "true" ]; then flags="$flags --force"; fi
+          # `--` is npm's argument separator; without it npm keeps the flags.
+          # Omitted entirely when there are none, since ship.mjs rejects
+          # arguments it does not recognise.
+          if [ -n "$flags" ]; then
+            npm run ship -w desktop -- $flags
+          else
+            npm run ship -w desktop
+          fi
+
+      # So a dry run still leaves something installable to test by hand, and a
+      # failed publish leaves the artifact to inspect.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lines-desktop-dmg
+          path: desktop/release/*.dmg
+          retention-days: 7
+          if-no-files-found: warn

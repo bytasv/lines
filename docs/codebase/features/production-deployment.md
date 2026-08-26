@@ -52,6 +52,12 @@ if the WS URL is not actually present in the output; the download URL gets the
 same assertion but only when set, since an empty value is the legitimate state
 before a desktop release exists (see [desktop-app](desktop-app.md)).
 
+`VITE_DESKTOP_DOWNLOAD_URL` is set once, to the stable alias
+(`${R2_RELEASE_PUBLIC_BASE_URL}/desktop/Lines-latest.dmg`), not per release — a desktop release
+re-publishes that same key, so it never needs a matching web rebuild. Before the alias existed this
+was a versioned filename hand-pasted after every release, forcing a `web` rebuild in lockstep with
+`desktop-app`'s release step; that ordering no longer exists.
+
 At runtime, Traefik routes by `Host()`/`PathPrefix()` label rules on the
 existing Docker socket provider: `web` takes the apex host, `relay` takes
 `/agent` and `/client` on the same host (with a `www` redirect router), and

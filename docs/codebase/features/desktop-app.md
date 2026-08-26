@@ -29,8 +29,13 @@ unbundled next to the code.
 - `server/src/updates.ts` — the bridge-side half of update state
 - `desktop/scripts/build.mjs` — the three esbuild bundles, the pruned SDK tree, `config.json`
 - `desktop/scripts/afterPack.mjs` — ad-hoc signs the packed bundle
-- `desktop/scripts/release.mjs` — uploads artifacts to the public R2 bucket
-- `desktop/package.json` — the `build` block (electron-builder config) and `package`/`release`
+- `desktop/scripts/release.mjs` — uploads artifacts to the public R2 bucket, plus the stable
+  download alias
+- `desktop/scripts/ship.mjs` — the one-command release: version guard, clean build, publish
+- `desktop/scripts/check-unreleased.mjs` — refuses to publish a version already at the edge
+- `.github/workflows/release-desktop.yml` — `workflow_dispatch` that runs `ship.mjs` on a
+  GitHub-hosted mac runner
+- `desktop/package.json` — the `build` block (electron-builder config) and `package`/`release`/`ship`
   scripts
 
 ## Files
@@ -44,6 +49,12 @@ unbundled next to the code.
 - `shared/types.ts` — `UpdateStatus`, `installUpdate`, `updateStatus`
 - `server/src/claudeCli.ts` — finds the machine's `claude`, with a version floor
 - `desktop/assets/` — `trayTemplate.png` (+`@2x`), `icon.icns`, `icon.png`
+- `desktop/scripts/ship.mjs` — orchestrates `check-unreleased.mjs`, `package`, `release` behind one
+  command, local or CI
+- `desktop/scripts/check-unreleased.mjs` — compares `desktop/package.json`'s version against the
+  published `latest-mac.yml`
+- `.github/workflows/release-desktop.yml` — the manual dispatch job; a cheap ubuntu `guard` job
+  ahead of the mac `release` job
 - `deploy/README.md` — the release procedure and the two-bucket rule
 
 ## Symbols
@@ -184,6 +195,32 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
 `ELECTRON_RUN_AS_NODE=1`. Every `query()` is handed `pathToClaudeCodeExecutable` from
 `claudeCliStatus()`.
 
+### Releasing
+
+`npm run ship -w desktop` is the one command for the whole release, local or CI — the same entry
+point either way, so the two never drift into two procedures. It: runs `check-unreleased.mjs`
+(skippable with `--force`), clears `desktop/release/`, runs `package`, then runs `release` (skippable
+with `--dry-run`). Both `LINES_UPDATE_FEED_URL` and `LINES_DOWNLOAD_URL` are derived from
+`R2_RELEASE_PUBLIC_BASE_URL` rather than hand-set, so a build-time URL cannot be typed wrong without
+also breaking the derivation everywhere else.
+
+`check-unreleased.mjs` fetches the published `latest-mac.yml`, compares its `version:` line against
+`desktop/package.json`, and exits 1 on a match — the version bump is still a manual edit
+(`desktop/package.json` + a `chore(desktop): release X` commit); this only catches forgetting it. A
+missing feed (first release, or an unreachable base URL) is treated as "proceed".
+
+`release.mjs` uploads the versioned artifacts, then re-uploads the DMG a second time under a fixed
+key (`desktop/Lines-latest.dmg`, `Cache-Control: no-cache`) — the alias `VITE_DESKTOP_DOWNLOAD_URL`
+points at, so the web app never needs a per-release edit. It refuses outright if more than one
+`.dmg` sits in `desktop/release/`, since a leftover would otherwise be published as *that* alias for
+every user. The alias upload is last, so a partial failure leaves it pointing at the previous good
+build rather than a release whose update feed never finished publishing.
+
+`.github/workflows/release-desktop.yml` (`workflow_dispatch`, `dry_run`/`force` inputs) runs the
+same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behind a cheap ubuntu
+`guard` job that runs `typecheck` and `check-unreleased.mjs` first — a stale version fails there at
+1x billing rather than on the 10x mac runner.
+
 ## Dependencies
 
 - `UpdateManager` needs nothing from the shell to exist: `supervised` is false whenever
@@ -201,7 +238,8 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
 - `server/src/sessions.claudeCli.test.ts` — a push carries `pathToClaudeCodeExecutable`; a
   missing CLI refuses the turn with the install message.
 - No harness covers the packaging scripts or the shell itself — verified by building and
-  installing.
+  installing. `ship.mjs`/`check-unreleased.mjs`/`release-desktop.yml` are included: verified by a
+  real dispatch (dry run, then a real one) rather than a test.
 
 ## Business rules
 
@@ -251,6 +289,14 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
 - The worker is never part of a stand-down: only the bridge collides on the machine lock and the
   relay device identity, and a worker mid-turn must not be torn down because a sibling process
   collided on a resource the worker doesn't touch.
+- A release is refused when `desktop/package.json`'s version is already published, unless the
+  caller explicitly passes `--force` (or the workflow's `force` input) — artifacts are immutable at
+  the edge (one-year max-age), so a same-version re-upload can leave stale bytes cached rather than
+  replacing them.
+- `npm run ship -w desktop` is destructive on purpose: it deletes `desktop/release/` before every
+  build, since that directory is electron-builder output and nothing else is meant to live there.
+- The desktop release pipeline is manual-dispatch only — no tag convention, no release on push to
+  `main` — since a release starts with a deliberate version-bump commit, not a merge.
 
 ## Architectural rules
 
@@ -292,6 +338,17 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
   both `.env` paths and falls back to a build-time version constant.
 - **Releases go to their own public bucket.** Public-read is a bucket-level setting, so sharing
   the recipe-image bucket would publish user uploads in order to publish an installer.
+- **A local release and a CI release are the same code path on purpose.** Both run
+  `desktop/scripts/ship.mjs`; a script the workflow calls but a person could not also run by hand
+  would be a second procedure to keep in sync, and the local one is what you reach for when CI is
+  broken.
+- `ship.mjs` derives `LINES_UPDATE_FEED_URL`/`LINES_DOWNLOAD_URL` from `R2_RELEASE_PUBLIC_BASE_URL`
+  rather than taking them as separate inputs — a hand-typed feed URL that's wrong bakes a dead
+  updater into the shipped app, and nothing catches it until a user's copy silently stops finding
+  releases.
+- `release-desktop.yml`'s `guard` job runs on `ubuntu-latest` (1x billing) specifically so a stale
+  version or a type error is cheap; the `release` job runs on `macos-latest` (10x billing, arm64,
+  a *standard* runner — larger/x64 mac runners are always billed, never included).
 - The bridge lock file lives beside `device.json` under the same `APP_ROOT`, reusing the existing
   app-data-root path helpers rather than adding a new resolver (see
   [app-data-root](app-data-root.md)). A stale lock is detected via `process.kill(pid, 0)`
@@ -327,4 +384,8 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
   their ports, the identity and registration it performs in hosted mode, what `RELAY_URL`
   connects to, and `hello`'s protocol version, which the update flow exists to keep from drifting
   too far.
-- [production-deployment](production-deployment.md) — the hosted side the installed app talks to.
+- [production-deployment](production-deployment.md) — the hosted side the installed app talks to;
+  `VITE_DESKTOP_DOWNLOAD_URL` there is now set once, to the stable alias, rather than per release.
+- The five `R2_RELEASE_*`/`R2_ACCOUNT_ID`/etc. credentials now live in two places — the VPS
+  `lines.env` (manual release) and GitHub Actions secrets (CI release) — same token, wider blast
+  radius; scope it to both R2 buckets and rotate on the usual schedule.

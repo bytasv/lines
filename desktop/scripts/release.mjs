@@ -19,6 +19,11 @@
  *
  * Uploads everything electron-builder produced: the DMG (the human download),
  * the zip and `latest-mac.yml` (what electron-updater reads), and the blockmaps.
+ *
+ * The DMG goes up twice: once under its versioned name (what `latest-mac.yml`
+ * points at, immutable forever) and once as a fixed alias key, which is the only
+ * thing the web app's download button ever needs to know. Without the alias
+ * every release forces a `VITE_DESKTOP_DOWNLOAD_URL` edit and a web rebuild.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,6 +35,8 @@ const REPO = path.resolve(DESKTOP, '..');
 const RELEASE_DIR = path.join(DESKTOP, 'release');
 /** Everything lives under one prefix, which is also the update feed URL. */
 const PREFIX = 'desktop';
+/** Stable download link: same bytes as the versioned DMG, name that never moves. */
+const ALIAS = 'Lines-latest.dmg';
 
 const { config } = require('dotenv');
 config({ path: path.join(REPO, '.env') });
@@ -100,6 +107,22 @@ if (!files.length) {
   process.exit(1);
 }
 
+/**
+ * A DMG left over from an earlier build is indistinguishable from this one's
+ * here, and it would be published as the alias — the download link for everyone,
+ * pointing at the wrong version. `npm run ship -w desktop` clears the directory
+ * first; a bare `npm run release` in a dirty tree is what this catches.
+ */
+const dmgs = files.filter((name) => name.endsWith('.dmg'));
+if (dmgs.length !== 1) {
+  console.error(
+    `Expected exactly one .dmg in ${RELEASE_DIR}, found ${dmgs.length}: ${dmgs.join(', ') || '(none)'}\n` +
+      'Clear the directory and repackage — `npm run ship -w desktop` does both.',
+  );
+  process.exit(1);
+}
+const [dmg] = dmgs;
+
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const client = new S3Client({
   region: 'auto',
@@ -110,8 +133,7 @@ const client = new S3Client({
   },
 });
 
-for (const name of files) {
-  const key = `${PREFIX}/${name}`;
+async function upload(name, { key = `${PREFIX}/${name}`, cacheControl } = {}) {
   await client.send(
     new PutObjectCommand({
       Bucket: process.env.R2_RELEASE_BUCKET,
@@ -119,13 +141,39 @@ for (const name of files) {
       Body: fs.readFileSync(path.join(RELEASE_DIR, name)),
       ContentType: CONTENT_TYPES[path.extname(name)],
       // latest-mac.yml is polled: a cached copy would hide a release for hours.
-      CacheControl: name.endsWith('.yml') ? 'no-cache' : 'public, max-age=31536000, immutable',
+      CacheControl: cacheControl ?? (name.endsWith('.yml') ? 'no-cache' : 'public, max-age=31536000, immutable'),
     }),
   );
   console.log(`uploaded ${key}`);
 }
 
+for (const name of files) await upload(name);
+
+/**
+ * Last, deliberately. The alias and the versioned DMG are two objects that can
+ * disagree; uploading the alias after everything else means a partial failure
+ * leaves it pointing at the previous good build rather than at a release whose
+ * update feed never landed.
+ *
+ * `no-cache` for the same reason `latest-mac.yml` has it — an immutable alias
+ * would serve this build for a year after the next one ships.
+ */
+await upload(dmg, { key: `${PREFIX}/${ALIAS}`, cacheControl: 'no-cache' });
+
 const base = `${publicBase.replace(/\/$/, '')}/${PREFIX}`;
+const aliasUrl = `${base}/${ALIAS}`;
 console.log(`\nUpdate feed  LINES_UPDATE_FEED_URL=${base}`);
-const dmg = files.find((name) => name.endsWith('.dmg'));
-if (dmg) console.log(`Download     VITE_DESKTOP_DOWNLOAD_URL=${base}/${encodeURIComponent(dmg)}`);
+console.log(`Download     VITE_DESKTOP_DOWNLOAD_URL=${aliasUrl}`);
+console.log(`Versioned    ${base}/${encodeURIComponent(dmg)}`);
+
+// Surfaces the same three lines on the workflow run page; a no-op locally.
+if (process.env.GITHUB_STEP_SUMMARY) {
+  fs.appendFileSync(
+    process.env.GITHUB_STEP_SUMMARY,
+    `### Desktop release published\n\n` +
+      `| | |\n| --- | --- |\n` +
+      `| Download (stable) | ${aliasUrl} |\n` +
+      `| Versioned | ${base}/${encodeURIComponent(dmg)} |\n` +
+      `| Update feed | ${base} |\n`,
+  );
+}
