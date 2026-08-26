@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { isAuthFailureMessage } from './auth.ts';
+import { authRecoveryMessage } from './sessions.ts';
 import {
   classifyTurnFailure,
   turnFailureAdvice,
@@ -75,11 +76,18 @@ test('an overflowing prompt reads as a context problem, not a bad request', () =
 test('advice and hints cannot re-classify themselves into a loop', () => {
   // Every one of these strings can end up in errorMessage and be re-classified on
   // the next failure; a self-match would rewrite the banner forever.
-  const strings = KINDS.flatMap((kind) => [
-    turnFailureAdvice(kind, { inWorkflow: true }),
-    turnFailureAdvice(kind, { inWorkflow: false }),
-    turnFailureRetryHint(kind),
-  ]).filter((s): s is string => s !== null);
+  const strings = [
+    ...KINDS.flatMap((kind) => [
+      turnFailureAdvice(kind, { inWorkflow: true }),
+      turnFailureAdvice(kind, { inWorkflow: false }),
+      turnFailureRetryHint(kind),
+    ]),
+    // The auth banners ride in errorMessage the same way and are re-classified on
+    // the next failure, so they are under the same constraint.
+    authRecoveryMessage({ outcome: 'refreshed' }),
+    authRecoveryMessage({ outcome: 'signed-out' }),
+    authRecoveryMessage({ outcome: 'refresh-failed', error: new Error('Token refresh failed (500)') }),
+  ].filter((s): s is string => s !== null);
 
   for (const text of strings) {
     assert.equal(classifyTurnFailure(text), null, text);

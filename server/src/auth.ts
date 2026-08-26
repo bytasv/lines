@@ -66,10 +66,18 @@ const AUTH_FAILURE_PATTERNS = [
   /authentication_error/i,
   /invalid bearer token/i,
   /oauth authentication failed/i,
+  /authentication_failed/i,
   /\boauth\b[^.\n]*\btoken\b[^.\n]*\bexpired\b/i,
+  /\boauth\b[^.\n]*\btoken\b[^.\n]*\brevoked\b/i,
+  /\boauth\b[^.\n]*\bsession\b[^.\n]*\bexpired\b/i,
   /\b401\b[^\n]*\bunauthorized\b/i,
   /\bunauthorized\b[^\n]*\b401\b/i,
+  // Revoked tokens arrive as 403, not 401. Anchored to the surrounding wording
+  // for the same reason as the 401 pair: a bare /403/ would match tool output.
+  /\b403\b[^\n]*\bforbidden\b/i,
+  /\bforbidden\b[^\n]*\b403\b/i,
   /please run \/login/i,
+  /please login again/i,
   /re-?authenticate to continue/i,
 ];
 
@@ -204,6 +212,20 @@ export class AuthManager {
   /** Return a valid access token, refreshing if near expiry. Throws AuthRequiredError if logged out. */
   async ensureFreshToken(): Promise<string> {
     if (!this.auth) throw new AuthRequiredError();
+    // Join a refresh already in flight rather than reading the token it is
+    // replacing. This is what makes a Retry one click after handleTokenRejected:
+    // a token revoked server-side still has a far-off expiresAt, so the margin
+    // check below would hand the freshly-spawned child the same dead credential.
+    if (this.refreshInFlight) {
+      try {
+        return await this.refreshInFlight;
+      } catch {
+        // A 5xx or an offline token endpoint says nothing about the token in
+        // hand — fall through and use it rather than refusing the turn. Unless
+        // that refresh was a self-logout (400/401), which leaves no token.
+        if (!this.auth) throw new AuthRequiredError();
+      }
+    }
     if (this.auth.expiresAt - Date.now() >= REFRESH_MARGIN_MS) return this.auth.accessToken;
     return this.refresh();
   }

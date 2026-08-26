@@ -72,6 +72,7 @@ function harness(stepCount: number, workflow: Partial<WorkflowState> = {}, autoA
   sessions.attachWorker({
     push: () => {},
     interrupt: () => {},
+    close: () => {},
     setModel: () => {},
     setPermissionMode: () => {},
   } as never);

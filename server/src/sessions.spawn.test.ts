@@ -40,12 +40,13 @@ function harness(ensureFreshToken: () => Promise<string>) {
   const broadcasts: ServerMessage[] = [];
   const sessions = new SessionManager(store, new GuardAllowlist(store), (msg) => broadcasts.push(msg), auth);
   const pushes: Push[] = [];
+  const closes: string[] = [];
   sessions.attachWorker({
     push: (sessionId: string, _message: unknown, options: Record<string, unknown>) =>
       pushes.push({ sessionId, options }),
-    close: () => {},
+    close: (sessionId: string) => closes.push(sessionId),
   } as unknown as WorkerClient);
-  return { sessions, broadcasts, pushes, transcript: () => store.loadTranscript('s1') };
+  return { sessions, broadcasts, pushes, closes, transcript: () => store.loadTranscript('s1') };
 }
 
 /** The trailing transcript event, which is what the web Retry button keys off. */
@@ -100,6 +101,47 @@ test('every spawn carries the OAuth token', async () => {
 
   assert.equal(h.pushes.length, 2);
   for (const push of h.pushes) assert.equal(tokenEnv(push), 'tok');
+});
+
+test('a query the bridge cannot vouch for is recycled before the push', async () => {
+  // A bridge restart leaves queryTokens empty while the worker's query is still
+  // live and pinned to whatever token it was spawned with — which may since have
+  // rotated. A fresh manager over an existing session is exactly that state.
+  const h = harness(async () => 'current-token');
+
+  h.sessions.prompt('s1', 'hello');
+  await settle();
+
+  assert.deepEqual(h.closes, ['s1']);
+  assert.equal(h.pushes.length, 1);
+  assert.equal(tokenEnv(h.pushes[0]!), 'current-token');
+});
+
+test('a query known to hold the current token is not recycled', async () => {
+  // The no-churn half: without this, every push would re-spawn the CLI child.
+  const h = harness(async () => 'tok');
+
+  h.sessions.prompt('s1', 'one');
+  await settle();
+  h.sessions.prompt('s1', 'two');
+  await settle();
+
+  assert.deepEqual(h.closes, ['s1']); // the first push only
+  assert.equal(h.pushes.length, 2);
+});
+
+test('a rotated token recycles the query it no longer matches', async () => {
+  let n = 0;
+  const h = harness(async () => `tok-${++n}`);
+
+  h.sessions.prompt('s1', 'one');
+  await settle();
+  h.sessions.prompt('s1', 'two');
+  await settle();
+
+  assert.deepEqual(h.closes, ['s1', 's1']);
+  assert.equal(tokenEnv(h.pushes[0]!), 'tok-1');
+  assert.equal(tokenEnv(h.pushes[1]!), 'tok-2');
 });
 
 test('a refresh failure fails the turn with the reason', async () => {

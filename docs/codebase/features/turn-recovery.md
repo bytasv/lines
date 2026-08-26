@@ -89,10 +89,10 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   wiring `onStatusChange` to every context's broadcast)
 - `server/src/userContext.ts` (field-merge of sync-pulled settings)
 - `server/src/sessions.ts` (`SessionManager.failTurn` (public), `lastPromptForRetry`,
-  `pushTurn`, `pushTurnSafely`, `pushWithToken`, `ownerToken`, `buildQueryOptions`,
-  `authRefusalMessage`, `recoverAuthFailure`, `authRecoveryMessage`, `setStatus`, the
-  `result`-branch status/errorMessage assignment, `handleWorkerEnded`'s error branch,
-  `TurnCompleteListener`)
+  `pushTurn`, `pushTurnSafely`, `pushWithToken`, `dropFailedQuery`, `ownerToken`,
+  `buildQueryOptions`, `authRefusalMessage`, `recoverAuthFailure`, `authRecoveryMessage`,
+  `setStatus`, the `result`-branch status/errorMessage assignment, `handleWorkerEnded`'s
+  error branch, `TurnCompleteListener`)
 - `server/src/workflows.ts` (`WorkflowEngine.retryIfFailed`, `runStepSafely`,
   `onWorkflowTurnComplete`, the two pre-run failure sites in `runStep`)
 - `server/src/auth.ts` (`ensureFreshToken`, `scheduleProactiveRefresh` backoff,
@@ -145,10 +145,17 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `SessionManager.failTurn(sessionId, error)` — the single funnel that shows a turn as failed:
   emits a synthetic `result` event, then sets status `'error'` + `errorMessage`; also one of
   the two classification points, calling `classifyFailure` after `setStatus`
-- `SessionManager.classifyFailure(sessionId, error)` (private) — tries `recoverAuthFailure`
-  first (auth wins outright); if that reports no match, tries `classifyTurnFailure` and, on a
-  hit, rewrites the banner via `turnFailureAdvice`. Synchronous, unlike the auth path — no
-  refresh to await — so it always lands before `WorkflowEngine`'s failed-park
+- `SessionManager.classifyFailure(sessionId, error)` (private) — first calls
+  `dropFailedQuery(sessionId)` unconditionally, then tries `recoverAuthFailure` (auth wins
+  outright); if that reports no match, tries `classifyTurnFailure` and, on a hit, rewrites the
+  banner via `turnFailureAdvice`. The classification half is synchronous, unlike the auth
+  refresh — no refresh to await — so it always lands before `WorkflowEngine`'s failed-park
+- `SessionManager.dropFailedQuery(sessionId)` (private) — closes the session's worker query for
+  any failed turn, recognised or not, unless the session is mid-turn
+  (`isSessionInterruptible`), which never happens from this call site today. Runs before
+  classification so the very next push — a plain Retry, no second click needed — cannot reuse
+  the child that just failed, regardless of whether `queryTokens` says it matches or the error
+  text was ever recognised as auth
 - `classifyTurnFailure(message): TurnFailureKind | null` (`turnFailure.ts`) — first matching
   kind wins, checked in order `'filtered'` → `'context'` → `'invalid'` → `'overloaded'`; `null`
   leaves the raw text and plain Retry, same as before this feature existed
@@ -169,9 +176,10 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `WorkflowMarkerData.failed` — set on a `'waiting-approval'` marker whose park was a failure,
   so the divider reads "failed, retry or approve to skip"
 - `isAuthFailureMessage(message)` — narrow regex match over SDK/CLI error text
-  (`invalid_grant`, `authentication_error`, `invalid bearer token`, `401 Unauthorized`,
-  `oauth … token … expired`, `oauth authentication failed`, `please run /login`,
-  `re-authenticate to continue`)
+  (`invalid_grant`, `authentication_error`, `authentication_failed`, `invalid bearer token`,
+  `401 Unauthorized`, `403 Forbidden`, `oauth … token … expired`, `oauth … token … revoked`,
+  `oauth … session … expired`, `oauth authentication failed`, `please run /login`,
+  `please login again`, `re-authenticate to continue`)
 - `AuthManager.handleTokenRejected(): Promise<TokenRejection>` — no-op-but-reports when
   already logged out (`{ outcome: 'signed-out' }`), else one `forceRefresh()`; success is
   `{ outcome: 'refreshed' }`, a dead refresh token is `{ outcome: 'signed-out' }`, any other
@@ -184,7 +192,9 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   for a non-auth-classified message (or no `AuthManager`), which is what lets `classifyFailure`
   fall through to `classifyTurnFailure`. Otherwise returns `true` and, async, awaits
   `handleTokenRejected()` and rewrites the failed turn's `errorMessage`/`errorKind` via
-  `setStatus` — but only if the session is still showing that exact error
+  `setStatus` — but only if the session is still showing that exact error. No longer closes the
+  query itself; `dropFailedQuery` in `classifyFailure` already did that for every failure, auth
+  or not
 - `authRecoveryMessage(rejection)` — the three actionable strings ("…has been renewed. Retry to
   continue.", "…could not be renewed. Sign in to Claude, then Retry.", or the shared
   `authRefusalMessage` text for a transient failure)
@@ -198,6 +208,11 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   button never appears for a click the server would refuse
 - `SessionManager.pushTurn(meta, message)` — async; resolves a token via `ensureFreshToken()`
   before the spawn, and refuses the turn if it cannot get one
+- `AuthManager.ensureFreshToken()` — joins an already-in-flight refresh (from
+  `handleTokenRejected`) rather than reading `expiresAt` against the margin, so a Retry that
+  lands mid-recovery gets the token the refresh is producing, not the one being replaced; a
+  failed join (5xx, offline) falls back to the token in hand, unless that refresh was itself a
+  self-logout, which raises `AuthRequiredError`
 - `SessionManager.pushTurnSafely(meta, message)` — the fire-and-forget wrapper both call sites
   use, so a throw past `pushTurn`'s own handling cannot become an unhandled rejection
 - `authRefusalMessage(err)` — the two user-facing refusal strings (not signed in vs. refresh
@@ -302,7 +317,9 @@ key off.
 Turn fails → the failure is classified in exactly two places: `failTurn` (query crash, a push
 that never reached the worker, workflow pre-run failures) and the `result` branch of
 `handleWorkerEvent` (an `is_error`/non-`success` SDK result, which bypasses `failTurn` by
-design). Both call `recoverAuthFailure(sessionId, resultErrorText(msg))`:
+design). Both go through `classifyFailure`, which first calls `dropFailedQuery` — closing the
+session's worker query regardless of what the failure text says, so the child that just failed
+cannot be reused — then calls `recoverAuthFailure(sessionId, resultErrorText(msg))`:
 
 - not auth-classified, or no `AuthManager` wired (ambient-token mode) → no-op; the raw
   text-plus-Retry behavior, unchanged.
@@ -333,6 +350,30 @@ Independently, `failTurn` still emits a synthetic SDK-shaped event
 before flipping the status to `error`, so `transcript.ts` builds a `ResultItem` and the
 transcript keeps the raw CLI text as the durable diagnostic record — only the banner changes,
 never the transcript row.
+
+### A worker query outlives the bridge, so a failed turn always drops it
+
+The worker is a separate long-lived process; the bridge (tsx watch, crash, deploy) restarts
+independently of it. `queryTokens` — which access token each live query was spawned with — lives
+only in bridge memory, so a restart empties it while the worker's live queries survive. A query
+whose entry the bridge cannot vouch for is `undefined`, not a known mismatch, and `pushWithToken`
+treats only a *known* match as safe to reuse — so an unvouched-for query is recycled on its next
+push, the same as one wired to a genuinely different token.
+
+That covers the next push, but not the turn that is failing right now: a query already live when
+the token it holds gets rejected (proactively refreshed, revoked server-side, or rejected by
+`handleTokenRejected`) is not touched by that guard until something pushes to it again. So
+`dropFailedQuery` runs unconditionally inside `classifyFailure`, before either classification
+branch: it closes the query for **every** failed turn, whether or not the error text is
+recognised and whether or not `queryTokens` believes the current token matches. A single Retry
+click after any failure therefore always spawns a fresh child (`resume` keeps the conversation),
+rather than depending on the failure being classified correctly first.
+
+`AuthManager.ensureFreshToken` closes the other half of the same race: a Retry that lands while
+`handleTokenRejected`'s recovery refresh is still in flight now joins that refresh instead of
+reading the token it is in the process of replacing (the margin check on `expiresAt` alone would
+hand the newly-spawned child the very token being rotated out, since a server-side revocation
+does not change `expiresAt`).
 
 ### Non-auth failure classification
 
@@ -391,9 +432,12 @@ A turn push resolves its own credential before spawning:
 
 `prompt`/`compactContext` → `pushTurnSafely` → `pushTurn` → `auth.ensureFreshToken()`
 
-- token resolved (refreshing in-margin) → `pushWithToken` → recycle the query if it was spawned
-  with a different token → `worker.push` with
-  `env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token }`.
+- token resolved (refreshing in-margin, or joining an in-flight recovery refresh — see
+  `ensureFreshToken` above) → `pushWithToken` → recycle the query **unless** `queryTokens`
+  is known to hold this exact token → `worker.push` with
+  `env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token }`. `queryTokens` lives in bridge
+  memory only, while the worker's live queries survive a bridge restart — so an entry this
+  bridge cannot vouch for (`undefined`, after a restart) is treated as unsafe, not as a match.
 - `AuthRequiredError` (logged out) → `failTurn` with "Not signed in to Claude. Sign in, then
   Retry." **and** a re-broadcast of `{ type: 'authStatus', auth: { loggedIn: false } }`, which
   `store.ts` force-opens the login modal on — reopening a dismissed one.
@@ -446,12 +490,16 @@ message type, no new modal, no new client state, no DB migration.
   raw text and `errorKind: undefined`; an auth-shaped message wins over a coincidental 400 in
   the same text; `failTurn` classifies non-auth failures the same way as a `result`; a Retry
   after a `'filtered'` failure appends the hint to the re-sent prompt, and a Retry after
-  `'overloaded'`/an unrecognised failure re-sends the prompt untouched.
+  `'overloaded'`/an unrecognised failure re-sends the prompt untouched. Also: a revoked-token
+  message (401 or the CLI's 403 wording) is recognised as auth, not left raw; any failed
+  turn — recognised or not — closes the session's query (`dropFailedQuery`, asserted via the
+  fake `WorkerClient.close`).
 - `server/src/turnFailure.test.ts` — each kind matches representative CLI/SDK error text; an
   unrelated failure and a filter-vs-generic-400 precedence case both resolve correctly; every
-  string returned by `turnFailureAdvice` and `turnFailureRetryHint` is rejected by both
-  `classifyTurnFailure` and `isAuthFailureMessage` (the anti-reclassification rule);
-  `inWorkflow: false` omits the skip sentence; no kind's advice implies an automatic retry.
+  string returned by `turnFailureAdvice`, `turnFailureRetryHint`, and (exported for this test)
+  `authRecoveryMessage` is rejected by both `classifyTurnFailure` and `isAuthFailureMessage`
+  (the anti-reclassification rule); `inWorkflow: false` omits the skip sentence; no kind's
+  advice implies an automatic retry.
 - `server/src/workflows.advance.test.ts` — a failed result parks the step, keeps the error
   status, and does not `autoAdvance`; spend still accumulates onto the step slot; a normal park
   carries no `stepFailure`. Also: a classified (non-auth) failure's rewritten banner and
@@ -464,9 +512,17 @@ message type, no new modal, no new client state, no DB migration.
   instead. No web test infra beyond typecheck exists yet — the Skip step button and the
   Sign-in gate are manual-verified via the `verify` skill.
 - `server/src/auth.failure.test.ts` — auth classification and recovery outcomes;
-  proactive-refresh retry scheduling and the widened failure patterns.
+  proactive-refresh retry scheduling and the widened failure patterns (the reported
+  401-revoked wording, the CLI's 403 form, `authentication_failed`, "OAuth session expired",
+  "please login again", with negative cases guarding each against a false-positive tool
+  output). Also: `ensureFreshToken` joins an in-flight recovery refresh and returns its result
+  rather than the stale token; a failed (5xx) recovery refresh still yields the token already
+  in hand instead of blocking the turn.
 - `server/src/sessions.spawn.test.ts` — a turn while logged out is refused instead of falling
-  back to ambient credentials; a stale token is refreshed before the query spawns.
+  back to ambient credentials; a stale token is refreshed before the query spawns; a query the
+  bridge cannot vouch for (no `queryTokens` entry, simulating a bridge restart) is recycled
+  before its next push; a query known to hold the current token is not recycled (no-churn
+  case); a rotated token recycles the query it no longer matches.
 - The settings field-merge in `userContext.ts` is uncovered — `buildUserContext` wires sync,
   stores and a worker together with no seam. Verified by hand.
 
@@ -585,6 +641,13 @@ message type, no new modal, no new client state, no DB migration.
   `{ type: 'workflowApprove', sessionId, stepIndex }` message, gated by the same conditions
   (`skippableFailedStep` mirrors `retryIfFailed`'s gate) — there is no separate skip code path
   to keep in sync.
+- A query the bridge cannot vouch for is recycled, not reused: `pushWithToken` only skips the
+  recycle when `queryTokens` is known to hold this exact token; an absent entry (e.g. after a
+  bridge restart, while the worker's query is still live) is treated as unsafe, never as a
+  match.
+- Any failed turn drops that session's query, whether or not the failure was recognised and
+  whether or not `queryTokens` believed the current token matched — so a Retry after any
+  failure re-spawns instead of risking a repeat of the same failure on the same child.
 
 ## Architectural rules
 
@@ -684,6 +747,20 @@ message type, no new modal, no new client state, no DB migration.
   amplifier for exactly the kind of loop this feature exists to break, not feed.
 - **Known limitation:** in Compact view the failed row sits inside a collapsed `AgentTurn`, so
   `SessionView`'s alert is the always-visible affordance; this is pre-existing.
+- `queryTokens` is bridge-memory only and is never persisted, while the worker's live queries
+  outlive a bridge restart — this asymmetry (the same one already documented for interrupted-turn
+  recovery: the worker keeps running turns the bridge no longer remembers) is why
+  `pushWithToken`'s recycle guard must fail closed on an unknown entry rather than treat
+  "unknown" as "safe".
+- `dropFailedQuery` is unconditional and sits in `classifyFailure`, ahead of both
+  `recoverAuthFailure` and `classifyTurnFailure`, specifically because it must not depend on
+  either classifier being right: SDK/CLI wording drifting out of `AUTH_FAILURE_PATTERNS` (as it
+  already has once) or `queryTokens` happening to hold a match despite a server-side revocation
+  must never leave a wedged query alive for a second Retry to hit again.
+- `ensureFreshToken` joining `refreshInFlight` (rather than only checking `expiresAt`) is what
+  makes a single Retry enough: `handleTokenRejected`'s recovery refresh and a Retry's own
+  `ensureFreshToken` call can race, and `expiresAt` alone cannot tell a merely-unexpired token
+  from one that was just revoked server-side.
 
 ### Multi-machine
 

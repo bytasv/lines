@@ -51,9 +51,15 @@ function harness(
   );
   // index.ts wires a worker before any client can prompt; the model and permission
   // setters forward to it, so an unwired manager is not a state production has.
-  sessions.attachWorker({ setModel: () => {}, close: () => {}, push: () => {}, interrupt: () => {} } as never);
+  const closes: string[] = [];
+  sessions.attachWorker({
+    setModel: () => {},
+    close: (sessionId: string) => closes.push(sessionId),
+    push: () => {},
+    interrupt: () => {},
+  } as never);
   const transcript = () => store.loadTranscript('s1');
-  return { sessions, broadcasts, transcript, rejections: () => rejections };
+  return { sessions, broadcasts, transcript, closes, rejections: () => rejections };
 }
 
 /** Let the recovery promise and its banner rewrite settle. */
@@ -103,6 +109,43 @@ test('a rejected-token crash notifies auth so the login modal can open', () => {
   const h = harness();
   h.sessions.handleWorkerEnded('s1', 'API Error: 401 Unauthorized');
   assert.equal(h.rejections(), 1);
+});
+
+/** A revoked token: the wording that fell through raw before, on the 403 the CLI
+ *  raises it on as well as the reported 401. */
+const CLI_REVOKED = 'Failed to authenticate. API Error: 401 OAuth access token has been revoked.';
+
+test('a revoked token is recognised as an auth failure, not left raw', async () => {
+  const h = harness({ outcome: 'refreshed' });
+  h.sessions.handleWorkerEvent('s1', {
+    type: 'result',
+    subtype: 'error_during_execution',
+    is_error: true,
+    result: CLI_REVOKED,
+  });
+  await drain();
+
+  assert.equal(h.rejections(), 1);
+  assert.match(h.sessions.get('s1')!.errorMessage!, /Retry to continue/);
+});
+
+test('an auth failure drops the query, so Retry cannot reuse the child that failed', async () => {
+  const h = harness({ outcome: 'refreshed' });
+  h.sessions.handleWorkerEnded('s1', CLI_REVOKED);
+  await drain();
+
+  assert.deepEqual(h.closes, ['s1']);
+});
+
+test('any failed turn drops its query, so one Retry is enough even unclassified', async () => {
+  // The wording-independent half: a child the API has started rejecting is wedged
+  // whether or not we recognise what it said, so no failure keeps its query.
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', failedResult('Claude Code process exited with code 1'));
+  await drain();
+
+  assert.deepEqual(h.closes, ['s1']);
+  assert.equal(h.rejections(), 0); // still no token refresh — only auth acts
 });
 
 test('a recovered token rewrites the banner to say Retry will now work', async () => {

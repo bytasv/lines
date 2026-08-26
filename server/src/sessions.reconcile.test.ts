@@ -75,6 +75,7 @@ function managerOver(
       pushed.push(id);
     },
     interrupt: () => {},
+    close: () => {},
   } as never);
   return {
     sessions,

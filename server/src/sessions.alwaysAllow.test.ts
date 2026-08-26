@@ -50,7 +50,7 @@ function harness(toolName: string, input: Record<string, unknown>) {
   const changes: GuardAllowEntry[][] = [];
   guard.onChange = (entries) => changes.push(entries);
   const sessions = new SessionManager(store, guard, () => {});
-  sessions.attachWorker({ push: () => {}, interrupt: () => {} } as never);
+  sessions.attachWorker({ push: () => {}, interrupt: () => {}, close: () => {} } as never);
   return { sessions, guard, changes, writes: () => writes };
 }
 

@@ -126,7 +126,7 @@ function authRefusalMessage(err: unknown): string {
  * can take in this app. These strings deliberately avoid every word
  * AUTH_FAILURE_PATTERNS matches, so re-showing one cannot re-classify itself.
  */
-function authRecoveryMessage(rejection: TokenRejection): string {
+export function authRecoveryMessage(rejection: TokenRejection): string {
   switch (rejection.outcome) {
     case 'refreshed':
       return 'The Claude login expired mid-turn and has been renewed. Retry to continue.';
@@ -1229,8 +1229,8 @@ export class SessionManager {
   }
 
   /**
-   * Send a message to the session's worker query, dropping that query first if
-   * it was spawned with a different access token.
+   * Send a message to the session's worker query, dropping that query first
+   * unless it is known to have been spawned with this same access token.
    *
    * The worker reuses a live query for a session and ignores the options of
    * later pushes, so the token handed over at spawn time is the one the CLI
@@ -1291,10 +1291,13 @@ export class SessionManager {
     });
   }
 
-  /** Recycle the query if it was spawned with a different token, then push. */
+  /** Recycle the query unless it is *known* to have been spawned with this token,
+   *  then push. Unknown is not safe: queryTokens lives in bridge memory only while
+   *  the worker outlives the bridge, so after a bridge restart a still-live query
+   *  can be pinned to a token that has since rotated — reusing it 401s that one
+   *  session forever while every other session runs fine on the current token. */
   private pushWithToken(meta: SessionMeta, message: Record<string, unknown>, accessToken: string | null) {
-    const spawnedWith = this.queryTokens.get(meta.id);
-    if (spawnedWith !== undefined && spawnedWith !== accessToken) this.closeQuery(meta.id);
+    if (this.queryTokens.get(meta.id) !== accessToken) this.closeQuery(meta.id);
     this.queryTokens.set(meta.id, accessToken);
     // Every session gets the workflow tool surface; the manifest is static, and
     // the calls it produces are routed back to this user's context by the bridge.
@@ -1325,6 +1328,7 @@ export class SessionManager {
    * and its plain Retry, which is what every failure used to get.
    */
   private classifyFailure(sessionId: string, error: string) {
+    this.dropFailedQuery(sessionId);
     if (this.recoverAuthFailure(sessionId, error)) return;
     const kind = classifyTurnFailure(error);
     if (!kind) return;
@@ -1339,10 +1343,36 @@ export class SessionManager {
   }
 
   /**
+   * Drop the query of a turn that just failed, so the *first* Retry re-spawns
+   * instead of re-entering the child that failed.
+   *
+   * Unconditional by design. The CLI child keeps the token it was spawned with for
+   * its whole life, so a child the API has started rejecting stays wedged: every
+   * Retry reproduces the identical error. Gating this on recognising the error text
+   * is what made that permanent once — `queryTokens` can legitimately match the
+   * current token (a credential revoked server-side without the app rotating it),
+   * and a wording we do not match classifies as nothing at all. Neither condition
+   * is observable from here, so no failure is treated as safe to reuse.
+   *
+   * Costs one `resume` on the next push after a failed turn — the same thing
+   * recycleIdleQueries already does on every login/logout/refresh, and cheap
+   * against a turn that has already failed.
+   */
+  private dropFailedQuery(sessionId: string) {
+    const meta = this.sessions.get(sessionId);
+    // Defensive: both callers settle the status before classifying, so this never
+    // fires today. It is the invariant that matters — a query mid-turn is not a
+    // failed turn's to close, whatever a later caller does.
+    if (!meta || isSessionInterruptible(meta.status)) return;
+    this.closeQuery(sessionId);
+  }
+
+  /**
    * A turn failed on what looks like a rejected token: attempt exactly one
    * recovery, then rewrite the banner to name the action the user must take. The
    * raw CLI text stays in the transcript as the durable record; only the banner
-   * changes. Nothing is auto-resumed — Retry stays the user's call.
+   * changes. Nothing is auto-resumed — Retry stays the user's call, and
+   * dropFailedQuery has already made that one click enough.
    *
    * Returns whether this failure was an auth failure at all, so classifyFailure
    * knows not to look further.

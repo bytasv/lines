@@ -568,7 +568,8 @@
         "turnFailureAdvice",
         "turnFailureRetryHint",
         "TurnFailureKind",
-        "skippableFailedStep"
+        "skippableFailedStep",
+        "SessionManager.dropFailedQuery"
       ],
       "tests": [
         "server/src/sessions.reconcile.test.ts",
@@ -616,7 +617,9 @@
         "a content-filter, context-overflow, invalid-request or overloaded failure never implies an automatic retry, backoff, or step advance",
         "auth wins outright when a failure text matches both an auth pattern and a turnFailureKind pattern",
         "the retry hint rides only the re-sent prompt text, never the stored transcript event for the original failed turn",
-        "Skip step and the stepper's Approve button send the identical workflowApprove message under the identical gate"
+        "Skip step and the stepper's Approve button send the identical workflowApprove message under the identical gate",
+        "a query the bridge cannot vouch for (e.g. no queryTokens entry after a bridge restart) is recycled, not reused",
+        "any failed turn drops that session's query, recognised or not, so a single Retry cannot reuse the child that just failed"
       ],
       "architecturalRules": [
         "adding a field to LiveSessionInfo is not a protocol bump; busy is optional so an old worker stays demote-only instead of losing its socket mid-turn",
@@ -644,7 +647,9 @@
         "the no-AuthManager branch of pushTurn returns before the first await, keeping that path synchronous for tests that assert an immediate push",
         "the proactive backoff computes its first rung explicitly (null ? RETRY : min(x*2, CAP)) rather than doubling a default, which would skip the 60s rung",
         "getAccessTokenSync() remains on AuthManager but has no production caller; it is kept for the sync-status shape tests rely on",
-        "the no-local-history skip is narrow and scoped to reconcileWithWorker only \u2014 it does not change adoptSynced or what counts as this instance owning a session; it exists because a flapping worker or duplicate bridge (see hosted-machine-access) turned every reconcile pass into a broadcast/cloud-push storm across sessions this machine never actually ran, feeding the very kind of loop this feature exists to break rather than amplify"
+        "the no-local-history skip is narrow and scoped to reconcileWithWorker only \u2014 it does not change adoptSynced or what counts as this instance owning a session; it exists because a flapping worker or duplicate bridge (see hosted-machine-access) turned every reconcile pass into a broadcast/cloud-push storm across sessions this machine never actually ran, feeding the very kind of loop this feature exists to break rather than amplify",
+        "queryTokens is bridge-memory only and never persisted, while the worker's live queries outlive a bridge restart \u2014 the same asymmetry already documented for interrupted-turn recovery, and why the recycle guard must fail closed on an unknown entry",
+        "ensureFreshToken joins an in-flight recovery refresh (refreshInFlight) rather than only checking expiresAt, since expiresAt alone cannot distinguish a merely-unexpired token from one just revoked server-side"
       ],
       "relatedDecisions": [
         "context-window",

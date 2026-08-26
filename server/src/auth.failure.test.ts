@@ -18,6 +18,14 @@ test('isAuthFailureMessage matches rejected-token error text', () => {
     'Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.',
     'OAuth authentication failed',
     'Invalid API key · Please run /login',
+    // A revoked token: the reported wording, plus the 403 the CLI raises it on.
+    // Says "revoked", not "expired", and carries no literal "Unauthorized".
+    'Failed to authenticate. API Error: 401 OAuth access token has been revoked.',
+    'API Error: 403 {"type":"error","error":{"message":"OAuth token has been revoked"}}',
+    'API Error: 403 Forbidden',
+    'Failed to authenticate: OAuth session expired and could not be refreshed',
+    '{"type":"authentication_failed","message":"..."}',
+    'Your account does not have access to Claude. Please login again to continue.',
   ];
   for (const message of positives) {
     assert.equal(isAuthFailureMessage(message), true, message);
@@ -35,6 +43,10 @@ test('isAuthFailureMessage ignores ordinary failures', () => {
     // A prompt or tool output quoting the word must not log the user out.
     'The endpoint returns unauthorized for anonymous callers — add a test.',
     'Error: 4011 rows written',
+    // The words the revoked/403 patterns key off, but not about our token.
+    'Bash tool failed: the deploy key was revoked by the admin — rotate it.',
+    'The endpoint returns 403 for anonymous callers — add a test.',
+    'Error: 4031 rows written',
   ];
   for (const message of negatives) {
     assert.equal(isAuthFailureMessage(message), false, message);
@@ -133,6 +145,30 @@ test('ensureFreshToken refreshes a token inside the refresh margin', async (t) =
   assert.equal(await manager.ensureFreshToken(), 'new-access');
   assert.equal(calls.count, 1);
   assert.equal(stored()?.accessToken, 'new-access');
+});
+
+test('ensureFreshToken joins a recovery refresh instead of handing back the rejected token', async (t) => {
+  const calls = stubFetch(t, okToken);
+  // Far from expiry — the case the margin check alone gets wrong: a token revoked
+  // server-side is still "fresh" by the clock, so a Retry racing the recovery used
+  // to spawn its new query on the same dead credential.
+  const { manager } = makeManager({ ...LIVE_AUTH });
+
+  const recovery = manager.handleTokenRejected();
+  assert.equal(await manager.ensureFreshToken(), 'new-access');
+
+  assert.deepEqual(await recovery, { outcome: 'refreshed' });
+  assert.equal(calls.count, 1);
+});
+
+test('a failed recovery refresh still yields the token in hand, rather than refusing the turn', async (t) => {
+  // A 5xx at the token endpoint says nothing about whether the access token works.
+  stubFetch(t, () => new Response('boom', { status: 500 }));
+  const { manager } = makeManager({ ...LIVE_AUTH });
+
+  const recovery = manager.handleTokenRejected();
+  assert.equal(await manager.ensureFreshToken(), 'old-access');
+  assert.equal((await recovery).outcome, 'refresh-failed');
 });
 
 test('ensureFreshToken throws AuthRequiredError when logged out', async (t) => {
