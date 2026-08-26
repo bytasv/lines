@@ -13,6 +13,7 @@
  * quota minute instead of a full macOS build.
  *
  *   node desktop/scripts/check-unreleased.mjs
+ *   node desktop/scripts/check-unreleased.mjs --force   # skip the check on purpose
  *
  * Needs only `R2_RELEASE_PUBLIC_BASE_URL` — it reads the public feed, so no
  * credentials are involved.
@@ -27,6 +28,14 @@ const REPO = path.resolve(DESKTOP, '..');
 
 const { config } = require('dotenv');
 config({ path: path.join(REPO, '.env') });
+
+// The workflow skips this step entirely when its `force` input is set, but the
+// failure message points at `--force`, so honour it here too rather than
+// advertising a flag only one of the two callers understands.
+if (process.argv.includes('--force')) {
+  console.log('--force: skipping the already-published check.');
+  process.exit(0);
+}
 
 const publicBase = process.env.R2_RELEASE_PUBLIC_BASE_URL;
 if (!publicBase) {
