@@ -591,6 +591,12 @@ interface LiveState {
    *  `assistant` messages can describe either side of the boundary, so none of
    *  them is a trustworthy occupancy reading — compact_metadata is. */
   compactedInTurn?: boolean;
+  /** The status a manual compaction interrupted, put back when it settles. A
+   *  compaction runs as an ordinary 'running' turn, so without this the settle
+   *  branch would land a parked step on 'done' and wipe a failed step's red banner.
+   *  Only set for statuses that carry step-lifecycle meaning (waiting-approval,
+   *  error); an idle/done session settles the normal way. */
+  compactResume?: { status: SessionStatus; errorMessage?: string; errorKind?: SessionErrorKind };
   /** Working-tree snapshot taken as the in-flight turn started, one per commit
    *  unit — the open end of the attribution window closed at settle. Live only:
    *  a turn that never settles simply leaves no window (see collectChangedPaths). */
@@ -1751,6 +1757,16 @@ export class SessionManager {
       phase: 'requested',
       trigger: 'manual',
     } satisfies ContextCompactData);
+    // A compaction must not move the step lifecycle. Remember what the 'running'
+    // below is about to cover — a parked step, or a failed one with its red banner —
+    // so the settle can put it back (see restoreCompactedStatus).
+    if (meta.status === 'waiting-approval' || meta.status === 'error') {
+      this.liveState(sessionId).compactResume = {
+        status: meta.status,
+        errorMessage: meta.errorMessage,
+        errorKind: meta.errorKind,
+      };
+    }
     meta.turnSource = 'user';
     meta.turnStartedAt = Date.now();
     this.setStatus(sessionId, 'running');
@@ -1770,9 +1786,12 @@ export class SessionManager {
    * it, or the query died. Neither proves compaction is unavailable, so no
    * `contextCompact` record is written — only the transcript span is closed, so a
    * later turn scan isn't bounded by an orphan marker.
+   *
+   * Returns true when it put back a status the compaction had covered — the caller
+   * must not then settle the session itself (see interrupt).
    */
-  private abandonCompaction(sessionId: string, error: string) {
-    if (!this.compacting.delete(sessionId)) return;
+  private abandonCompaction(sessionId: string, error: string): boolean {
+    if (!this.compacting.delete(sessionId)) return false;
     this.liveState(sessionId).compactedInTurn = undefined;
     this.emitEvent(sessionId, 'context-compact', {
       phase: 'done',
@@ -1780,6 +1799,37 @@ export class SessionManager {
       ok: false,
       error,
     } satisfies ContextCompactData);
+    // No `result` is coming on most of these paths (a dead query, a stop), so the
+    // restore has to happen here rather than in the settle branch.
+    const restored = this.restoreCompactedStatus(sessionId);
+    if (restored) this.persistMeta(sessionId);
+    return restored;
+  }
+
+  /**
+   * Put back the status a manual compaction covered with its 'running' turn: a
+   * parked step stays parked, a failed step keeps its red banner and Retry.
+   *
+   * Idempotent — the first caller consumes the record — so abandonCompaction and the
+   * `result` settle branch can both call it. Persisting is the caller's job, so the
+   * settle branch can fold it into the single upsert it already does.
+   *
+   * A compaction that *failed* is not reported here: that surfaces through the
+   * context-compact transcript span and the `contextCompact` record (which flips the
+   * button to `unsupported`). The session's own status is not repurposed for it.
+   */
+  private restoreCompactedStatus(sessionId: string): boolean {
+    const live = this.live.get(sessionId);
+    const resume = live?.compactResume;
+    if (!resume) return false;
+    live.compactResume = undefined;
+    const meta = this.sessions.get(sessionId);
+    // Only undo our own 'running': anything else means the session moved on.
+    if (!meta || !isSessionInterruptible(meta.status)) return false;
+    meta.status = resume.status;
+    meta.errorMessage = resume.errorMessage;
+    meta.errorKind = resume.errorKind;
+    return true;
   }
 
   /**
@@ -2074,7 +2124,7 @@ export class SessionManager {
     const meta = this.sessions.get(sessionId);
     this.interrupting.add(sessionId);
     // A stopped compaction is a user decision, not a broken mechanism.
-    this.abandonCompaction(sessionId, 'interrupted');
+    const reparked = this.abandonCompaction(sessionId, 'interrupted');
     this.worker.interrupt(sessionId);
     // Deny anything waiting on the user so the query is not stuck; user
     // explicitly stopped, so close the cards too.
@@ -2082,7 +2132,11 @@ export class SessionManager {
     // Keep the queue but suspend auto-flush; the next user send resumes it.
     if (meta?.queued?.length) meta.queuePaused = true;
     if (meta) meta.turnStartedAt = undefined;
-    this.setStatus(sessionId, 'idle');
+    // Stopping a compaction that ran over a parked/failed step settles nothing about
+    // the step — abandonCompaction has already put that status back, and 'idle' here
+    // would drop the park and leave the step with no way to be approved.
+    if (reparked) this.persistMeta(sessionId);
+    else this.setStatus(sessionId, 'idle');
   }
 
   /**
@@ -2440,28 +2494,40 @@ export class SessionManager {
       // `busy: undefined` = a worker too old to report it; demote-only, as before.
       const noTurn = !info || info.busy === false;
       if (noTurn && (meta.status === 'running' || meta.status === 'waiting-permission')) {
-        meta.status = 'idle';
+        // A step that reads 'waiting-approval' with the session 'running' can only be
+        // a manual compaction over the park (see compactContext) — nothing else runs a
+        // turn on a parked step. Re-park rather than demote: `compactResume` is
+        // per-process and died with the bridge, so the park is re-derived here. And no
+        // Continue banner, because auto-continue's nudge ("continue the task from
+        // there") would read as an approval nobody gave.
+        const reparked =
+          meta.workflow?.stepStatuses[meta.workflow.stepIndex] === 'waiting-approval';
+        meta.status = reparked ? 'waiting-approval' : 'idle';
         meta.turnSource = undefined;
         meta.turnStartedAt = undefined;
         meta.pendingPermissionTool = undefined;
-        this.liveState(meta.id).permissionWaitMs = 0;
+        const live = this.liveState(meta.id);
+        live.permissionWaitMs = 0;
+        live.compactResume = undefined;
         // The turn died with the worker; don't auto-fire followups.
         if (meta.queued?.length) meta.queuePaused = true;
-        // Flag for the Continue banner. A workflow step left 'running' here is
-        // kept 'running' (not false-parked at waiting-approval as if it had
-        // finished) — Continue resumes it as a workflow turn, and its eventual
-        // result parks the step for approve/retry the normal way.
-        meta.interruptedAt = Date.now();
-        // A plan-approval / question card still open is the user's to answer, and
-        // auto-continue's nudge ("continue the task from there") would read as an
-        // approval nobody gave. Keep the banner and the clickable card; park the
-        // session instead — `flagged` is exactly the auto-continue list below.
-        if (hasUnresolvedAlwaysAsk(this.store.loadTranscript(meta.id))) {
-          console.log(
-            `[permission] [session ${meta.id}] auto-continue skipped: an always-ask card is unanswered`,
-          );
-        } else {
-          flagged.push(meta.id);
+        if (!reparked) {
+          // Flag for the Continue banner. A workflow step left 'running' here is
+          // kept 'running' (not false-parked at waiting-approval as if it had
+          // finished) — Continue resumes it as a workflow turn, and its eventual
+          // result parks the step for approve/retry the normal way.
+          meta.interruptedAt = Date.now();
+          // A plan-approval / question card still open is the user's to answer, and
+          // auto-continue's nudge ("continue the task from there") would read as an
+          // approval nobody gave. Keep the banner and the clickable card; park the
+          // session instead — `flagged` is exactly the auto-continue list below.
+          if (hasUnresolvedAlwaysAsk(this.store.loadTranscript(meta.id))) {
+            console.log(
+              `[permission] [session ${meta.id}] auto-continue skipped: an always-ask card is unanswered`,
+            );
+          } else {
+            flagged.push(meta.id);
+          }
         }
         changed = true;
       }
@@ -2654,7 +2720,15 @@ export class SessionManager {
       // No boundary and no status verdict: inconclusive, not unsupported. Close the
       // span so a later turn scan isn't bounded by an orphan marker, but write no
       // record — condemning the mechanism on silence is what wedged the button.
+      // Whether this turn was a manual compaction over a parked/failed step. Read
+      // before the calls below consume the record — a failed *compaction* must not
+      // become the session's failure banner (it reports through its own channels).
+      const compactionTurn = this.live.get(sessionId)?.compactResume !== undefined;
       this.abandonCompaction(sessionId, 'no-compact-boundary');
+      // A compaction that reached a boundary or a verdict already left `compacting`,
+      // so the call above was a no-op for it — restore the covered status here. The
+      // status is then no longer 'running', so the settle branch below leaves it be.
+      this.restoreCompactedStatus(sessionId);
       // The SDK can surface a rejected token as an error result instead of throwing;
       // Retry already renders for these, only the login prompt is missing.
       const failed = msg.is_error === true || (msg.subtype != null && msg.subtype !== 'success');
@@ -2734,7 +2808,9 @@ export class SessionManager {
       // After the upsert, so the revision guard can tell "still my banner" from
       // "the session moved on". This branch bypasses failTurn by design (the SDK
       // reported the result itself), so it classifies here instead.
-      if (failed) this.classifyFailure(sessionId, resultText);
+      // Skipped for a compaction over a parked/failed step: it would overwrite the
+      // status just restored with a banner about the compaction, not about the work.
+      if (failed && !compactionTurn) this.classifyFailure(sessionId, resultText);
       const interrupted = this.interrupting.delete(sessionId); // turn settled normally
       this.onTurnComplete?.(sessionId, source, interrupted, failed);
       this.maybeFlush(sessionId);

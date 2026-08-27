@@ -2097,7 +2097,7 @@ export function effectiveContextTokens(
 
 export type ContextCompactBlockCode =
   | 'turn-running'
-  | 'step-parked'
+  | 'step-advancing'
   | 'no-session'
   | 'no-reading'
   | 'unsupported';
@@ -2121,17 +2121,21 @@ const NOTHING_TO_COMPACT = "Send a message first — there's nothing to compact 
 export function contextCompactBlock(
   meta: Pick<
     SessionMeta,
-    'status' | 'claudeSessionId' | 'contextSummary' | 'contextUsage' | 'contextCompact'
+    'status' | 'claudeSessionId' | 'contextSummary' | 'contextUsage' | 'contextCompact' | 'workflow'
   >,
 ): ContextCompactBlockInfo | null {
   if (meta.status === 'running' || meta.status === 'waiting-permission') {
     return { code: 'turn-running', reason: 'Finish the current turn first.' };
   }
-  if (meta.status === 'waiting-approval') {
+  // A step parked at waiting-approval compacts fine: every hand-off reads the
+  // on-disk transcript (withoutCompactSpans), never the CLI's live context, and the
+  // park is put back when the compaction settles (see sessions.compactContext). A
+  // *live advance* is the real conflict — it is consolidating the step's output and
+  // is about to prompt the next step, which a compaction would race.
+  if (meta.workflow?.advancing) {
     return {
-      code: 'step-parked',
-      reason:
-        'This workflow step is waiting for approval — approve or force-advance it first, then compact.',
+      code: 'step-advancing',
+      reason: "This step's output is being wrapped up — try again in a moment.",
     };
   }
   // worker.push creates the query lazily, so '/compact' on a session that never

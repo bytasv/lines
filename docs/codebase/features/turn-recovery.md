@@ -244,8 +244,13 @@ instance is the one running it now.
 Reconcile then moves in both directions for every session that passes that check. `busy: true` on
 a session we believe is idle calls `markTurnLive` (status back to `running`, keep a known
 `turnStartedAt`, clear `interruptedAt`). Absent from the list, or `busy: false`, on a session we
-believe is `running`/`waiting-permission` demotes it to `idle`, pauses any queue, and stamps
-`interruptedAt`. `busy: undefined` demotes only.
+believe is `running`/`waiting-permission` demotes it — to `idle`, pausing any queue and stamping
+`interruptedAt`, *unless* its current workflow step already reads `waiting-approval`: the only
+turn that runs on an already-parked step is a manual context compaction (see
+[context-window](context-window.md#compaction)), so that case re-parks at `waiting-approval`
+instead and stamps no `interruptedAt` — no Continue banner, and nothing added to `flagged`,
+since auto-continue's nudge would read as an approval nobody gave. `busy: undefined` demotes
+only.
 
 `continueTurn` expires the dead turn's orphaned permission cards, releases `queuePaused`, and
 re-prompts with a synthetic nudge, resuming through `claudeSessionId`. A turn interrupted
@@ -469,10 +474,12 @@ message type, no new modal, no new client state, no DB migration.
   preserved, a meta with no `caveman` resumes, one failing session doesn't stop the others,
   `result`/archive clear the flag, an unresolved `ExitPlanMode` card blocks auto-continue and
   is not expired by `continueTurn`, an ordinary tool's card still expires), the worker-lost
-  case (reconciled with an empty live list, `autoContinue: false`, never auto-resumed), and the
+  case (reconciled with an empty live list, `autoContinue: false`, never auto-resumed), the
   no-local-history skip (a session with no live state and no transcript on this instance is left
   alone; a session with an actual worker report is still fully reconciled even with no local
-  transcript).
+  transcript), and a bridge death mid-compaction re-parking a `waiting-approval` step instead of
+  demoting it (no `interruptedAt`, not auto-continued) — see
+  [workflow-step-lifecycle](workflow-step-lifecycle.md#compacting-a-parked-step).
 - `server/src/workerClient.test.ts` — `onWorkerLost` fires once at the deadline and not on a
   reconnect inside it; `onStatusChange` publishes a disconnected status once per outage, a
   connected status once on recovery, nothing on an in-deadline reconnect, and a `mismatch`
@@ -571,6 +578,14 @@ message type, no new modal, no new client state, no DB migration.
   cloud-push a turn this machine never ran. A session with an actual worker report for this pass
   is still fully reconciled even with no local transcript, since a live report is itself
   evidence.
+- A session demoted by `reconcileWithWorker` whose current workflow step already reads
+  `waiting-approval` re-parks at `waiting-approval` instead of `idle` — that shape can only be a
+  manual compaction the dead bridge was running over the park (`LiveState.compactResume` itself
+  is lost with the process, so the park is re-derived from `WorkflowState.stepStatuses`, not
+  trusted from state that died with the bridge). No `interruptedAt` is stamped and the session is
+  not added to `flagged`, for the same "auto-continue would read as an unwanted approval" reason
+  as an unresolved `ALWAYS_ASK_TOOLS` card — see
+  [workflow-step-lifecycle](workflow-step-lifecycle.md#compacting-a-parked-step).
 - A cold-start protocol mismatch (a worker that has never once answered compatibly) cannot be
   caught by the lost deadline: `everConnected` never becomes `true`, so the outage clock never
   starts. It is instead surfaced the moment the mismatched `hello` is seen, via

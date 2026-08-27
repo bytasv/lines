@@ -56,7 +56,9 @@ reads as "done" without opening the session.
   `WorkflowMarkerData.event`, `ClientMessage` variants
   `workflowForceAdvance`/`workflowStartStep`)
 - `server/src/sessions.ts` (`consolidateStepOutput` and its timeout, plan-approval stamp
-  sites, user-prompt clear, constructor load loop, `adoptSynced`, `reconcileWithWorker`)
+  sites, user-prompt clear, constructor load loop, `adoptSynced`, `reconcileWithWorker`,
+  `compactContext`/`abandonCompaction`/`restoreCompactedStatus` — see
+  [context-window](context-window.md#compaction))
 - `server/src/workflows.ts`
 - `server/src/index.ts`
 - `server/src/git.ts` (`workingTreeDiff`/`multiRepoDiff`, `MAX_DIFF_CHARS` — see
@@ -69,6 +71,8 @@ reads as "done" without opening the session.
 - `web/src/lib/format.ts` (`isWorkflowFinished`)
 - `web/src/components/Sidebar.tsx` (`SessionRow` icon branch order)
 - `server/src/workflows.advance.test.ts`
+- `server/src/sessions.compact.test.ts`
+- `server/src/sessions.reconcile.test.ts`
 
 ## Symbols
 
@@ -96,6 +100,9 @@ reads as "done" without opening the session.
 - `WorkflowEngine.onWorkflowTurnComplete`
 - `WorkflowEngine.armSettleWatchdog` / `clearSettleWatchdog`
 - `WorkflowEngine.forceAdvanceSettleMs`
+- `WorkflowEngine.iterateIfWaiting`
+- `SessionManager.compactContext` / `abandonCompaction` / `restoreCompactedStatus`
+- `LiveState.compactResume` — see [context-window](context-window.md) for the compaction side
 - `substituteTokens`
 - `usesHandoffTokens`
 - `isWorkflowFinished(session)` — true when `session.workflow` is present, `started`,
@@ -137,6 +144,28 @@ which skips `setStatus('waiting-approval')` so the `'error'` status and `errorMe
 failure already wrote stay live for Retry, and stamps `WorkflowState.stepFailure = 'turn'`
 instead. A stamped force-advance still wins over a failure the same way it wins over an
 interrupt.
+
+### Compacting a parked step
+
+A step parked `waiting-approval` (or, for a failed step, `error`) can run one more turn without
+leaving that state: a manual context compaction — see
+[context-window](context-window.md#compaction). `SessionManager.compactContext` moves the
+session to `running` for the duration and snapshots what it covered
+(`LiveState.compactResume`); the same status comes back once the compaction settles, and
+`stepStatuses[i]` never changes. This is safe because a compaction touches no step hand-off —
+`{previous}`/`{outputs.*}` and every other consolidation read the on-disk transcript, never the
+CLI's live context.
+
+For the duration, every gate that would otherwise trigger on the step's `stepStatuses[i] ===
+'waiting-approval'` alone also checks the session status, and refuses while it reads `running`:
+`WorkflowEngine.approve`, `forceAdvance`'s `waiting-approval` branch, `retryIfFailed`, and
+`iterateIfWaiting` (a typed prompt). A prompt sent during the compaction therefore falls through
+to `SessionManager.userPrompt` and queues instead of iterating; `onWorkflowTurnComplete` drains
+it into the same step (`iterateStep`, same as the ordinary "queued follow-up survives the park"
+path) the moment the compaction settles and finds the step still parked with nothing else
+running. The stepper mirrors this: `WorkflowStepper` derives `compacting = waiting &&
+isSessionInterruptible(session.status)` and disables the Approve/checkmark affordance for the
+duration, so the button never offers a click the server would refuse.
 
 ### Force-advance: manual escape hatch
 
@@ -395,7 +424,14 @@ installed icon, no new package). No other new dependencies.
   the client and disk on its own; flag raised synchronously before the consolidation await;
   cleared on successful advance (both non-last and last step); cleared on a consolidation
   failure; cleared by the constructor load loop after a simulated crash; cleared by
-  `adoptSynced()`; left alone by `reconcileWithWorker()`.
+  `adoptSynced()`; left alone by `reconcileWithWorker()`; approve/force-advance are refused and
+  a typed prompt queues (instead of iterating) while a parked step compacts; a prompt queued
+  during that compaction drains into the same step on settle.
+- `server/src/sessions.compact.test.ts` — status restore around a compaction over a parked or
+  failed step: settles back to the same status (not `done`), a stopped or dead-query compaction
+  restores it too, and a compaction that itself fails does not overwrite it.
+- `server/src/sessions.reconcile.test.ts` — a bridge death mid-compaction re-parks a
+  `waiting-approval` step instead of demoting it to `idle` with a Continue banner.
 - `server/src/sessions.turns.test.ts` — `collectTurns` (plan-mode capture, both harness
   shapes; plans-file write with no `ExitPlanMode`; revised plan; plain-text turn; a plan
   revised by `Edit` resolving from disk; an unreadable plan file degrading to the captured
@@ -425,6 +461,11 @@ installed icon, no new package). No other new dependencies.
   `'interrupted'` flag and its step stamp (the user chose to keep working on the step).
 - Deny-pending-permissions and queue-pause semantics of interrupt are unchanged; queued
   messages stay held until the next explicit user send or an `iterateIfWaiting` follow-up.
+- A parked step's status (`waiting-approval`, or `error` for a failed step) survives a manual
+  compaction turn — approve/force-advance/retry/prompt are all held while it runs, and a
+  typed prompt queues instead of iterating, draining into the same step (never advancing) once
+  the compaction settles. See "Compacting a parked step" above and
+  [context-window](context-window.md).
 - The force-advance affordance, and both stall-recovery affordances, only ever target the
   workflow's current step — other steps show no hover state — and each applies only while the
   step is genuinely running/stalled, never to skip ahead or re-run a step that already

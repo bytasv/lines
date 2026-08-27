@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { SessionMeta, TranscriptEvent } from '@lines/shared';
+import type { SessionMeta, TranscriptEvent, WorkflowState } from '@lines/shared';
 import { contextCompactBlock, effectiveContextTokens } from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import {
@@ -238,16 +238,41 @@ const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   ...over,
 });
 
+/** A workflow session sitting on step 0, in whatever step state the test needs. */
+const parked = (over: Partial<WorkflowState> = {}): Partial<SessionMeta> => ({
+  workflow: {
+    workflowId: 'wf',
+    stepIndex: 0,
+    stepStatuses: ['waiting-approval'],
+    started: true,
+    ...over,
+  },
+});
+
 test('compaction is allowed on a settled session with a reading', () => {
   assert.equal(contextCompactBlock(meta()), null);
   assert.equal(contextCompactBlock(meta({ status: 'done' })), null);
+});
+
+test('a parked workflow step does not block compaction', () => {
+  // The hand-off reads the on-disk transcript, not the CLI's live context, and the
+  // park is restored on settle — so a full context window is compactable right where
+  // a long workflow session actually sits.
+  assert.equal(contextCompactBlock(meta({ status: 'waiting-approval', ...parked() })), null);
+  // Same for a step that failed: its banner survives the compaction.
+  assert.equal(
+    contextCompactBlock(
+      meta({ status: 'error', errorMessage: 'boom', ...parked({ stepFailure: 'turn' }) }),
+    ),
+    null,
+  );
 });
 
 test('every block code reports itself with a reason', () => {
   const cases: [Partial<SessionMeta>, string][] = [
     [{ status: 'running' }, 'turn-running'],
     [{ status: 'waiting-permission' }, 'turn-running'],
-    [{ status: 'waiting-approval' }, 'step-parked'],
+    [{ status: 'waiting-approval', ...parked({ advancing: true }) }, 'step-advancing'],
     [{ claudeSessionId: undefined }, 'no-session'],
     [{ contextUsage: undefined }, 'no-reading'],
     [{ contextCompact: { at: 200, trigger: 'manual', ok: false } }, 'unsupported'],
@@ -284,19 +309,25 @@ test('a boundary-less success does not read as a failure', () => {
 // ---------------------------------------------------------------------------
 
 /** A SessionManager over a throwaway store, with a worker that swallows pushes. */
-function harness() {
+function harness(over: Partial<SessionMeta> = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-compact-'));
-  fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta()]));
+  fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta(over)]));
   const store = createStore(root);
   const sessions = new SessionManager(store, new GuardAllowlist(store), () => {});
-  sessions.attachWorker({ push: () => {}, close: () => {} } as unknown as WorkerClient);
+  sessions.attachWorker({
+    push: () => {},
+    close: () => {},
+    interrupt: () => {},
+  } as unknown as WorkerClient);
   return sessions;
 }
 
 /** Start a manual compaction, then feed the turn's messages back in. */
-function compacting() {
-  const sessions = harness();
+function compacting(over: Partial<SessionMeta> = {}) {
+  const sessions = harness(over);
   assert.deepEqual(sessions.compactContext('s'), { ok: true });
+  // Whatever it covers, the compaction itself runs as an ordinary live turn.
+  assert.equal(sessions.get('s')!.status, 'running');
   return sessions;
 }
 
@@ -339,4 +370,56 @@ test('a fresh CLI conversation clears a latched verdict', () => {
   sessions.handleWorkerEvent('s', status({ compact_result: 'failed', compact_error: 'no can do' }));
   sessions.resetClaudeSession('s');
   assert.equal(sessions.get('s')?.contextCompact, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// A compaction moves no step: whatever status its 'running' turn covered comes
+// back when it settles, on every path that ends the turn.
+// ---------------------------------------------------------------------------
+
+test('a compaction over a parked step settles back to waiting-approval', () => {
+  const sessions = compacting({ status: 'waiting-approval', ...parked() });
+  sessions.handleWorkerEvent('s', status({ compact_result: 'success' }));
+  sessions.handleWorkerEvent('s', { type: 'result', subtype: 'success' });
+  const after = sessions.get('s')!;
+  assert.equal(after.status, 'waiting-approval'); // not 'done'
+  assert.equal(after.workflow?.stepStatuses[0], 'waiting-approval');
+});
+
+test("a compaction over a failed step keeps the step's banner", () => {
+  const sessions = compacting({
+    status: 'error',
+    errorMessage: 'the turn failed',
+    ...parked({ stepFailure: 'turn' }),
+  });
+  sessions.handleWorkerEvent('s', { type: 'result', subtype: 'success' });
+  const after = sessions.get('s')!;
+  assert.equal(after.status, 'error');
+  assert.equal(after.errorMessage, 'the turn failed');
+});
+
+test('a compaction that itself fails does not become the session failure', () => {
+  const sessions = compacting({ status: 'waiting-approval', ...parked() });
+  sessions.handleWorkerEvent('s', { type: 'result', subtype: 'error_during_execution', is_error: true, result: 'nope' });
+  const after = sessions.get('s')!;
+  assert.equal(after.status, 'waiting-approval');
+  assert.equal(after.errorMessage, undefined);
+});
+
+test('stopping a compaction leaves the parked step parked', () => {
+  const sessions = compacting({ status: 'waiting-approval', ...parked() });
+  sessions.interrupt('s'); // no `result` will follow
+  assert.equal(sessions.get('s')!.status, 'waiting-approval'); // not 'idle'
+});
+
+test('a query that dies mid-compaction leaves the parked step parked', () => {
+  const sessions = compacting({ status: 'waiting-approval', ...parked() });
+  sessions.handleWorkerEnded('s');
+  assert.equal(sessions.get('s')!.status, 'waiting-approval');
+});
+
+test('a compaction on a plain session still settles to done', () => {
+  const sessions = compacting();
+  sessions.handleWorkerEvent('s', { type: 'result', subtype: 'success' });
+  assert.equal(sessions.get('s')!.status, 'done');
 });

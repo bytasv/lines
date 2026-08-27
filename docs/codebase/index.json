@@ -373,6 +373,8 @@
         "server/src/workflows.advance.test.ts",
         "server/src/sessions.turns.test.ts",
         "server/src/workflows.substitution.test.ts",
+        "server/src/sessions.compact.test.ts",
+        "server/src/sessions.reconcile.test.ts",
         "web/src/lib/format.ts",
         "web/src/components/Sidebar.tsx",
         "web/src/lib/workflowReveal.ts"
@@ -403,12 +405,17 @@
         "substituteTokens",
         "usesHandoffTokens",
         "isPlanPath",
-        "isWorkflowFinished"
+        "isWorkflowFinished",
+        "WorkflowEngine.iterateIfWaiting",
+        "SessionManager.compactContext",
+        "SessionManager.restoreCompactedStatus"
       ],
       "tests": [
         "server/src/workflows.advance.test.ts",
         "server/src/sessions.turns.test.ts",
-        "server/src/workflows.substitution.test.ts"
+        "server/src/workflows.substitution.test.ts",
+        "server/src/sessions.compact.test.ts",
+        "server/src/sessions.reconcile.test.ts"
       ],
       "businessRules": [
         "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
@@ -417,6 +424,7 @@
         "a step configured with autoAdvance: true still parks after Stop \u2014 Stop overrides the step's own configuration",
         "a plan-approval advance already pending when Stop is pressed is discarded, not delayed: both the flag and its step stamp are cleared",
         "a failed turn (is_error result or a crashed query) also never autoAdvances \u2014 it parks the step with stepFailure: 'turn' instead, keeping the error status alive for Retry",
+        "a parked step (waiting-approval, or error for a failed step) can run a manual context compaction without leaving that state; approve/force-advance/retry/prompt are all held for the duration and a typed prompt queues instead of iterating, draining into the same step (never advancing) once the compaction settles \u2014 see context-window",
         "the affordance only ever targets the workflow's current step; other steps show no hover state",
         "confirmation copy differs by state: a running step warns its turn is stopped and the last-said text becomes the output; the last step's copy says the workflow finishes",
         "one click on Mark as completed always ends with the workflow on the next step (or done), via a normal settle or the watchdog",
@@ -472,7 +480,8 @@
       "relatedDecisions": [
         "turn-recovery",
         "session-and-project-ui",
-        "transcript-performance"
+        "transcript-performance",
+        "context-window"
       ]
     },
     {
@@ -569,7 +578,9 @@
         "turnFailureRetryHint",
         "TurnFailureKind",
         "skippableFailedStep",
-        "SessionManager.dropFailedQuery"
+        "SessionManager.dropFailedQuery",
+        "LiveState.compactResume",
+        "SessionManager.restoreCompactedStatus"
       ],
       "tests": [
         "server/src/sessions.reconcile.test.ts",
@@ -580,7 +591,8 @@
         "server/src/auth.failure.test.ts",
         "server/src/sessions.spawn.test.ts",
         "server/src/auth.concurrentLogin.test.ts",
-        "server/src/turnFailure.test.ts"
+        "server/src/turnFailure.test.ts",
+        "server/src/sessions.compact.test.ts"
       ],
       "businessRules": [
         "auto-continue only resumes sessions flagged by the reconcile that is running; a stale flag keeps its banner",
@@ -593,6 +605,7 @@
         "the socket may be down for WORKER_LOST_MS (20s) before it's treated as a real outage, well past an ordinary tsx-watch reconnect (~1-2s)",
         "the worker-lost path flags sessions but never auto-continues them, even with autoContinueInterrupted on; the next real hello resumes them",
         "reconcileWithWorker skips a session that has neither live state nor a local on-disk transcript (SessionManager.ranHere) \u2014 it only exists here because storage sync (adoptSynced) adopted it from another machine, and demoting/restamping/auto-continuing it would broadcast and cloud-push a turn this machine never ran; a session with an actual worker report for this pass is still fully reconciled even with no local transcript, since a live report is itself evidence",
+        "a session demoted by reconcileWithWorker whose current workflow step already reads waiting-approval re-parks at waiting-approval instead of idle (the only turn that runs on an already-parked step is a manual compaction) \u2014 no interruptedAt is stamped and it is not added to flagged, so auto-continue's nudge cannot read as an approval nobody gave; see workflow-step-lifecycle",
         "a cold-start protocol mismatch never sets everConnected, so the outage clock never starts; it's surfaced by WorkerStatus.mismatch instead",
         "exactly one of ConnectionBanner/WorkerBanner/StorageBanner renders at a time; bridge-down outranks worker-down outranks storage-down; scoped to the primary machine only (see multi-machine-client)",
         "every recoverable failure ends on a failure row with a working Retry, in a plain session and inside a running workflow alike",
@@ -1273,12 +1286,17 @@
         "withoutCompactSpans",
         "extractCompactBoundary",
         "extractCompactStatus",
-        "SessionManager.compactContext"
+        "SessionManager.compactContext",
+        "SessionManager.abandonCompaction",
+        "SessionManager.restoreCompactedStatus",
+        "LiveState.compactResume"
       ],
       "tests": [
         "server/src/sessions.context.test.ts",
         "server/src/contextBreakdown.test.ts",
-        "server/src/sessions.compact.test.ts"
+        "server/src/sessions.compact.test.ts",
+        "server/src/workflows.advance.test.ts",
+        "server/src/sessions.reconcile.test.ts"
       ],
       "businessRules": [
         "occupancy is sourced from the SDK's /context control request (getContextUsage()) when a live query exists, never from result.usage, which is cumulative across every API call in the turn rather than a point-in-time reading",
@@ -1292,10 +1310,12 @@
         "resetting a session's Claude conversation (workflow fresh-start step) stamps contextResetAt; readings older than that render as stale until the next turn reports",
         "Lines does not set autoCompactEnabled and has no control over the CLI's own background auto-compaction; the hover card's auto-compact row is a straight passthrough of the CLI's own settingSources-resolved setting, shown even when off",
         "Lines never fires compaction itself \u2014 only a manual button and a passive warning badge, since it is irreversible, lossy, and billable; this is distinct from the CLI's own background auto-compaction, which Lines does not control",
-        "the manual button's disabled state always carries a specific reason (turn running, workflow step parked, no session yet, no reading yet, or the SDK explicitly reported the compaction failed) via one shared contextCompactBlock predicate",
+        "the manual button's disabled state always carries a specific reason (turn running, a workflow step's approved output is being consolidated, no session yet, no reading yet, or the SDK explicitly reported the compaction failed) via one shared contextCompactBlock predicate",
         "the unsupported latch requires an explicit SDK compact_result:'failed' \u2014 a turn settling with neither a boundary nor a status verdict is inconclusive and leaves the button enabled",
         "the unsupported latch is scoped to the CLI conversation that produced it: cleared on resetClaudeSession, on bridge restart, and when adopting a synced session, so it never survives past the process/conversation that saw the failure",
-        "a workflow step parked waiting-approval blocks the manual button but not the CLI's own background auto-compaction",
+        "a workflow step parked waiting-approval does not block the manual button \u2014 every step hand-off reads the on-disk transcript (withoutCompactSpans), never the CLI's live context; only a live advance (WorkflowState.advancing) blocks, since it is about to prompt the next step",
+        "a compaction over a parked or failed step runs as an ordinary 'running' turn, so its status is snapshotted (LiveState.compactResume) and restored on every path that ends the turn \u2014 the result settle branch, abandonCompaction (stop, dead query), and reconcileWithWorker re-deriving the park from stepStatuses after a bridge restart \u2014 so the session never strands on 'done' or loses a failed step's banner",
+        "while a parked step compacts, WorkflowEngine holds approve/force-advance/retry and queues a typed prompt instead of pushing a second turn under the in-flight /compact; a queued prompt drains into the same step (never advances) once the compaction settles",
         "a compaction is invisible to every workflow turn scan (consolidateStepOutput, lastAssistantText, summarizeTurn, retryTurn) via withoutCompactSpans, but never stripped from permission bookkeeping"
       ],
       "architecturalRules": [
@@ -1305,10 +1325,12 @@
         "compactContext is a dedicated SessionManager method, not a call to prompt() \u2014 a compaction carries no 'user' transcript event and must not auto-name the session or touch the queue",
         "one shared predicate (contextCompactBlock) backs the server-side guard, the button's disabled state, and its tooltip",
         "naming: transcript event kind 'context-compact', payload ContextCompactData, SessionMeta.contextCompact \u2014 all contextCompact-prefixed, distinct from the unrelated compactionLevel (transcript display density)",
-        "the browser's buildTranscript mirrors withoutCompactSpans: events inside an open compact span are dropped from the rendered transcript, not just hidden by the marker pair \u2014 except a failed result, which closes the span like a 'user' event does"
+        "the browser's buildTranscript mirrors withoutCompactSpans: events inside an open compact span are dropped from the rendered transcript, not just hidden by the marker pair \u2014 except a failed result, which closes the span like a 'user' event does",
+        "LiveState.compactResume (the status a compaction covered) is deliberately not a SessionMeta field \u2014 per-process scratch, never synced or persisted, so a bridge restart loses it cleanly and reconcileWithWorker re-derives the park from WorkflowState.stepStatuses instead of trusting a resurrected copy"
       ],
       "relatedDecisions": [
-        "turn-recovery"
+        "turn-recovery",
+        "workflow-step-lifecycle"
       ]
     },
     {

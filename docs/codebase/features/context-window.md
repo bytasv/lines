@@ -121,6 +121,19 @@ boundary nor a status verdict having arrived, the outcome is inconclusive, not u
 `abandonCompaction` closes the transcript span (so scans aren't left inside an open span
 forever) but writes no `contextCompact` record, leaving the button enabled for the next attempt.
 
+A compaction can run on a workflow step parked `waiting-approval`, or on a session sitting at
+`error` with a failed step's red banner — the manual button is not blocked there (see Business
+rules). Both cases run as an ordinary `running` turn, which would otherwise land on `done` at
+settle and erase the park or the banner. `compactContext` snapshots the covered status onto
+`LiveState.compactResume` (`{status, errorMessage, errorKind}`, per-process, never persisted);
+`restoreCompactedStatus` puts it back on every path that ends the turn — the `result` settle
+branch, `abandonCompaction` (covers a stopped compaction and a query that dies mid-compaction),
+and, if the bridge itself dies mid-compaction, `reconcileWithWorker` re-derives the park from
+`WorkflowState.stepStatuses` instead (`compactResume` is lost with the process) — see
+[turn-recovery](turn-recovery.md). While the turn is live, `WorkflowEngine` holds every step
+control (approve, force-advance, retry, a typed prompt) so nothing races the in-flight
+`/compact` — see [workflow-step-lifecycle](workflow-step-lifecycle.md).
+
 The browser renders `'context-compact'` transcript events as a divider line ("Compacting…", then
 upgraded in place to "Compacted: X → Y tokens" or an error), and the indicator recomputes its
 ring/warning from `effectiveContextTokens` on every `SessionMeta` update.
@@ -148,9 +161,15 @@ ring/warning from `effectiveContextTokens` on every `SessionMeta` update.
 - `server/src/sessions.compact.test.ts` — `withoutCompactSpans` (matched span, unmatched
   `requested` bounded to the next `user` event not end-of-array, findStepStart/collectTurns
   same-array regression), `extractCompactBoundary`, `extractCompactStatus`,
-  `effectiveContextTokens` precedence, `contextCompactBlock` per block code, and the latch
+  `effectiveContextTokens` precedence, `contextCompactBlock` per block code, the latch
   lifecycle (a silent turn writes no record, an explicit SDK failure/success does, a fresh CLI
-  conversation clears a latched verdict).
+  conversation clears a latched verdict), and status restore (a parked step's compaction settles
+  back to `waiting-approval` not `done`, a failed step's banner survives, a compaction that
+  itself fails does not become the session failure, stopping/killing the query mid-compaction
+  still restores the park).
+- `server/src/workflows.advance.test.ts` — step controls (approve, force-advance, a typed
+  prompt) refuse while a parked step is compacting; a prompt queued during the compaction drains
+  into the same step (never advances) once it settles.
 
 ## Business rules
 
@@ -187,19 +206,24 @@ ring/warning from `effectiveContextTokens` on every `SessionMeta` update.
   is distinct from the CLI's own background auto-compaction, which Lines does not control and
   may or may not fire on its own schedule.
 - The manual button is disabled whenever `contextCompactBlock` returns non-null, and the tooltip
-  always states which of five reasons applies: a turn is running, a workflow step is parked
-  awaiting approval, the session has never run a turn, there is no occupancy reading yet, or the
-  SDK explicitly reported the compaction as failed (`unsupported`, carrying the SDK's own error
-  text when one was given).
+  always states which of five reasons applies: a turn is running, a workflow step's approved
+  output is being consolidated (`step-advancing`), the session has never run a turn, there is no
+  occupancy reading yet, or the SDK explicitly reported the compaction as failed (`unsupported`,
+  carrying the SDK's own error text when one was given).
 - The `unsupported` latch requires an explicit SDK `compact_result: 'failed'` — a turn that
   settles with neither a boundary nor a status verdict is inconclusive and leaves the button
   enabled. The latch is also scoped to the CLI conversation that produced it: it is cleared on
   `resetClaudeSession`, on bridge-process restart (a previous process's verdict proves nothing
   about this one), and when a synced session adopts a remote update — so a genuinely unsupported
   setup re-latches on the next attempt rather than staying disabled forever.
-- A workflow step parked `waiting-approval` blocks the manual button (compacting out from under
-  a pending step would corrupt its hand-off) but does not block the CLI's own background
-  auto-compaction from firing and self-correcting the ring.
+- A workflow step parked `waiting-approval` does *not* block the manual button — every
+  step hand-off (`lastAssistantText`, `consolidateStepOutput`, `{previous}`/`{outputs.*}`) reads
+  the on-disk transcript through `withoutCompactSpans`, never the CLI's live context, so
+  compacting under a parked step cannot corrupt it. The one real conflict is a *live advance*
+  (`WorkflowState.advancing`) — an approve is consolidating the step's output and about to
+  prompt the next step, which a compaction would race — and that blocks with the
+  `step-advancing` code instead. Same is true of the CLI's own background auto-compaction, which
+  Lines never blocks regardless.
 - A compaction is invisible to every workflow turn scan (`consolidateStepOutput`,
   `lastAssistantText`, `summarizeTurn`, `retryTurn`) — it carries no `'user'` event of its own,
   so an unstripped span would register as a spurious extra "attempt" whose output is the
@@ -225,6 +249,11 @@ ring/warning from `effectiveContextTokens` on every `SessionMeta` update.
 - Naming: transcript event kind `'context-compact'`, its payload `ContextCompactData`,
   `SessionMeta.contextCompact` — all `contextCompact`-prefixed, distinct from the unrelated
   `compactionLevel` (transcript display density) already in `UserUiSettings`.
+- `LiveState.compactResume` (the status a compaction covered) is deliberately not a
+  `SessionMeta` field — it is per-process scratch state read back within the same compaction,
+  never synced or persisted, so a bridge restart mid-compaction loses it cleanly rather than
+  going stale on disk; `reconcileWithWorker` re-derives the park from `WorkflowState.stepStatuses`
+  instead of trusting a resurrected copy.
 - The browser's `buildTranscript` (`web/src/lib/transcript.ts`) mirrors the server's
   `withoutCompactSpans`: while a `'requested'` marker is open, every event but the matching
   `'done'` (or the next `'user'` event, bounding a crash mid-compaction) is dropped from the

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Box, Button, Center, Group, Loader, Paper, Stack, Text, ThemeIcon, Tooltip } from '@mantine/core';
 import { IconCheck, IconCoins, IconPlayerPlay } from '@tabler/icons-react';
 import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@lines/shared';
-import { isSessionActive, isStepRef } from '@lines/shared';
+import { isSessionActive, isSessionInterruptible, isStepRef } from '@lines/shared';
 import { formatDuration } from '../lib/format';
 import { useStore } from '../store';
 import { send } from '../ws';
@@ -98,6 +98,10 @@ export function WorkflowStepper({
 
   const currentStatus = state.stepStatuses[state.stepIndex];
   const waiting = currentStatus === 'waiting-approval';
+  /** A parked step with a live turn over it can only be a manual compaction — nothing
+   *  else runs a turn on a parked step. The server refuses approve/force-advance for
+   *  the duration (see WorkflowEngine.approve), so the button must not offer it. */
+  const compacting = waiting && isSessionInterruptible(session.status);
   /** Server-owned: an approve is in flight and the step's output is being consolidated. */
   const advancing = !!state.advancing;
   /** A force-advance stopped the live turn and the advance waits on it settling. */
@@ -167,7 +171,11 @@ export function WorkflowStepper({
                     : status === 'running'
                       ? 'Mark as completed'
                       : status === 'waiting-approval'
-                        ? 'Proceed to next step'
+                        ? // Frozen while a compaction runs over the park: approve
+                          // would be refused server-side, so offer nothing.
+                          compacting
+                          ? undefined
+                          : 'Proceed to next step'
                         : stalled
                           ? 'Start this step'
                           : resumable
@@ -243,23 +251,25 @@ export function WorkflowStepper({
         <Paper withBorder radius="md" p="sm" mt="xs" style={{ borderColor: 'var(--mantine-color-sandstone-6)' }}>
           <Group justify="space-between" wrap="wrap" gap="xs">
             <Text size="sm" fw={600}>
-              {advancing
-                ? `“${currentName}” approved — wrapping up its output…`
-                : stopping
-                  ? `“${currentName}” is stopping — the next step starts as soon as it settles.`
-                  : stalled
-                    ? `“${currentName}” never started and nothing is running — start it to continue.`
-                    : resumable
-                      ? `“${currentName}” is done but the next step never started — continue to resume the hand-off.`
-                      : `“${currentName}” finished — approve to continue, or send a message to keep iterating.`}
+              {compacting
+                ? `“${currentName}” is compacting its context — it stays waiting for your approval.`
+                : advancing
+                  ? `“${currentName}” approved — wrapping up its output…`
+                  : stopping
+                    ? `“${currentName}” is stopping — the next step starts as soon as it settles.`
+                    : stalled
+                      ? `“${currentName}” never started and nothing is running — start it to continue.`
+                      : resumable
+                        ? `“${currentName}” is done but the next step never started — continue to resume the hand-off.`
+                        : `“${currentName}” finished — approve to continue, or send a message to keep iterating.`}
             </Text>
             {/* Busy state is server-owned (state.advancing) so every tab agrees and the
                 loader can't hang on a dropped message. Disabled offline: ws.ts silently
                 drops non-prompt messages when the socket is closed. */}
             <Button
               size="xs"
-              leftSection={advancing || stopping ? <Loader size={14} /> : undefined}
-              disabled={advancing || stopping || !connected}
+              leftSection={compacting || advancing || stopping ? <Loader size={14} /> : undefined}
+              disabled={compacting || advancing || stopping || !connected}
               onClick={() =>
                 stalled
                   ? setConfirmIndex(state.stepIndex)

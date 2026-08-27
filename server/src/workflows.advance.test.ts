@@ -535,6 +535,76 @@ test('a classified failure banner survives the park that follows it', () => {
   assert.match(m.errorMessage!, /approve the step/);
 });
 
+// ---------------------------------------------------------------------------
+// A manual compaction is the one turn that runs over a *parked* step. The step
+// controls freeze for its duration, and the park comes back when it settles.
+// ---------------------------------------------------------------------------
+
+/** Step 0 parked, with a manual compaction live over it. */
+function compactingParked(stepCount = 2) {
+  const h = harness(stepCount);
+  const m = h.s1();
+  // What contextCompactBlock needs before it will allow a manual compaction: a CLI
+  // conversation to compact, and an occupancy reading to compact it against.
+  m.claudeSessionId = 'cli-1';
+  m.contextUsage = {
+    inputTokens: 10,
+    cacheReadTokens: 1_000,
+    cacheCreationTokens: 100,
+    outputTokens: 20,
+    model: 'claude-opus-5',
+    at: 1,
+  };
+  assert.deepEqual(h.sessions.compactContext('s1'), { ok: true });
+  assert.equal(h.s1().status, 'running');
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval');
+  return h;
+}
+
+test('a prompt sent during a parked compaction queues instead of iterating', () => {
+  const h = compactingParked();
+  assert.equal(
+    h.workflows.iterateIfWaiting('s1', 'also do X'),
+    false,
+    'the engine declines, so index.ts falls through to userPrompt',
+  );
+  h.sessions.userPrompt('s1', 'also do X');
+  assert.equal(h.s1().queued?.length, 1);
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval', 'no second turn was pushed');
+});
+
+test('approve and force-advance are refused while a parked step compacts', () => {
+  const h = compactingParked();
+  h.workflows.approve('s1', 0);
+  assert.equal(h.s1().workflow?.advancing, undefined, 'no advance was started');
+  h.workflows.forceAdvance('s1', 0); // routes to approve for a parked step
+  assert.equal(h.s1().workflow?.advancing, undefined);
+  assert.equal(h.s1().workflow?.stepIndex, 0);
+});
+
+test('a prompt queued during a parked compaction re-runs the same step on settle', () => {
+  const h = compactingParked();
+  h.sessions.userPrompt('s1', 'also do X');
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+
+  assert.equal(h.s1().queued?.length ?? 0, 0, 'drained, not stranded');
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'running', 'iterated, never advanced');
+  assert.equal(h.s1().workflow?.stepIndex, 0);
+  assert.equal(markerEvents(h).at(-1), 'retried');
+});
+
+test('a parked compaction with nothing queued settles straight back to the park', () => {
+  const h = compactingParked();
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+
+  assert.equal(h.s1().status, 'waiting-approval');
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval');
+  assert.equal(h.s1().workflow?.stepIndex, 0);
+  // Approve works again the moment it settles.
+  h.workflows.approve('s1', 0);
+  assert.equal(h.s1().workflow?.advancing, true);
+});
+
 test('advancing clears on the wire when the workflow vanishes mid-advance', async () => {
   const h = harness(2);
   h.sessions.consolidateStepOutput = async () => {

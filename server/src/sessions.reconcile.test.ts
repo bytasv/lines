@@ -154,6 +154,34 @@ test('a live-but-finished query demotes a running session to idle', () => {
   assert.ok((m.interruptedAt ?? 0) > 0);
 });
 
+test('a bridge death mid-compaction re-parks the step instead of demoting it', () => {
+  // The only turn that runs on a step already reading 'waiting-approval' is a manual
+  // compaction. Demoting to idle would put a Continue banner on a session nobody
+  // interrupted — and auto-continue would then nudge a step nobody approved.
+  const h = harness(
+    'running',
+    {
+      turnSource: 'user',
+      turnStartedAt: 9,
+      workflow: {
+        workflowId: 'wf1',
+        started: true,
+        stepIndex: 0,
+        stepStatuses: ['waiting-approval', 'pending'],
+      },
+    },
+    autoContinue,
+  );
+  h.sessions.reconcileWithWorker([{ sessionId: 's1', busy: false }]);
+
+  const m = h.s1();
+  assert.equal(m.status, 'waiting-approval');
+  assert.equal(m.turnSource, undefined);
+  assert.equal(m.turnStartedAt, undefined);
+  assert.equal(m.interruptedAt, undefined, 'no Continue banner');
+  assert.equal(m.workflow?.stepStatuses[0], 'waiting-approval');
+});
+
 test('a session missing from the live list is still demoted', () => {
   const h = harness('running', {}, noAutoContinue);
   h.sessions.reconcileWithWorker([]);

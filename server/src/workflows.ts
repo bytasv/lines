@@ -11,7 +11,7 @@ import type {
   WorkflowMarkerData,
   WorkflowState,
 } from '@lines/shared';
-import { isSessionActive, isStepRef, rootsForCwd } from '@lines/shared';
+import { isSessionActive, isSessionInterruptible, isStepRef, rootsForCwd } from '@lines/shared';
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
 import {
@@ -682,7 +682,24 @@ export class WorkflowEngine {
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     const step = wf.steps[i];
-    if (!step || meta.workflow.stepStatuses[i] !== 'running') return;
+    if (!step) return;
+    if (meta.workflow.stepStatuses[i] !== 'running') {
+      // A parked step can still run a turn: a manual compaction (see
+      // sessions.compactContext). Anything the user typed during it was queued, and
+      // nothing releases it — maybeFlush skips 'waiting-approval', which the settle
+      // has just restored. Drain it into the same step, exactly as the park path
+      // below does, rather than letting it strand.
+      // isSessionInterruptible, not isSessionActive: the restored status *is* the park
+      // (or 'error' for a failed step), and both are active. Only a live turn blocks.
+      if (
+        meta.workflow.stepStatuses[i] === 'waiting-approval' &&
+        !isSessionInterruptible(meta.status)
+      ) {
+        const held = this.sessions.takeQueuedText(sessionId);
+        if (held) this.iterateStep(sessionId, held.text, held.attachments);
+      }
+      return;
+    }
 
     // A pending advance only counts for the step it was flagged for: an abandoned
     // turn settling late (see the force-advance watchdog) must not advance or park
@@ -818,6 +835,12 @@ export class WorkflowEngine {
   ): boolean {
     const meta = this.sessions.get(sessionId);
     if (!meta?.workflow) return false;
+    // A parked step can have a live turn over it — a manual compaction. Pushing a
+    // second turn under it would race the in-flight `/compact`, so fall through to
+    // SessionManager.userPrompt, which stages the prompt on the queue;
+    // onWorkflowTurnComplete drains it back into this step when the compaction
+    // settles. isSessionInterruptible, not isSessionActive: the park itself is active.
+    if (isSessionInterruptible(meta.status)) return false;
     const i = meta.workflow.stepIndex;
     if (meta.workflow.stepStatuses[i] !== 'waiting-approval') return false;
     this.iterateStep(sessionId, text, attachments, actor);
@@ -854,6 +877,10 @@ export class WorkflowEngine {
     // card): only act when it targets the step that is actually parked now.
     if (stepIndex !== i) return;
     if (meta.workflow.stepStatuses[i] !== 'waiting-approval') return;
+    // A live turn over a parked step is a manual compaction (see compactContext).
+    // Advancing under it would consolidate the step's output while the CLI is still
+    // rewriting its own context, and then prompt the next step into the same query.
+    if (isSessionInterruptible(meta.status)) return;
     const wf = this.resolve(meta.workflow.workflowId);
     this.marker(sessionId, {
       stepIndex: i,
@@ -891,6 +918,10 @@ export class WorkflowEngine {
       // means nothing is coming to finish this one — re-enter advance, which
       // re-consolidates the output and starts the next step.
       if (meta.workflow.advancing) return;
+      // Deliberately isSessionInterruptible and not isSessionActive: this branch has
+      // to survive the stale 'waiting-approval' a died-mid-advance session carries
+      // (see WorkflowStepper's `resumable`). A *live* turn here is a compaction.
+      if (isSessionInterruptible(meta.status)) return;
       const done = this.resolve(meta.workflow.workflowId);
       // The last step reading 'done' is a finished workflow, not a stall.
       if (!done || i + 1 >= done.steps.length) return;
