@@ -3,36 +3,14 @@ import {
   IconPuzzle,
   type Icon,
 } from '@tabler/icons-react';
-import type { PromptMention } from '@lines/shared';
+import type { MentionCandidate, MentionRange, PromptMention } from '@lines/shared';
 import { fetchTree, searchFiles } from './files';
 import { loadFeatures, type FeatureEntry } from './features';
 
-/**
- * A mention candidate as offered in the autocomplete popover. Extends the
- * display-only {@link PromptMention} with the agent-facing `expansion` text,
- * which the composer bakes into the prompt on send (never sent as sidecar data).
- */
-export interface MentionCandidate extends PromptMention {
-  expansion: string;
-}
-
-/**
- * A committed mention pinned to the `[start, end)` span of the prompt text it
- * renders as an inline pill for — the span covers the display token
- * (`@Model selector`), excluding the trailing space. The text stays
- * authoritative; ranges are a derived view {@link remapRanges} realigns on every
- * edit. Sorted and non-overlapping.
- */
-export interface MentionRange extends MentionCandidate {
-  start: number;
-  end: number;
-}
-
-/** Prompt text plus the mention ranges painted over it — the composer's draft state. */
-export interface MentionValue {
-  text: string;
-  ranges: MentionRange[];
-}
+// The draft types live in shared/types.ts — a queued prompt persists a
+// MentionValue so it stays re-editable, so they cross the wire. Re-exported here
+// because this module is where every composer already imports them from.
+export type { MentionCandidate, MentionRange, MentionValue } from '@lines/shared';
 
 /**
  * A source of mentionable entities for one `kind`. New kinds slot in by adding a

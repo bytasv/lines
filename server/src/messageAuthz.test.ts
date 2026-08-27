@@ -114,6 +114,17 @@ describe('MESSAGE_AUTHZ', () => {
     assert.equal(authorizeMessage(msg('setModel'), prompter).ok, false);
   });
 
+  test('editQueued follows prompt, not interrupt', () => {
+    // Named on purpose: editQueued sits at `prompt` while cancelQueued sits at
+    // `interrupt`, which reads as an inconsistency worth "tidying up". It is not.
+    // The Can prompt preset is the one whose prompts land paused for approval, so
+    // moving this to `interrupt` would deny a guest the fix of their own pending
+    // prompt — the main reason the message exists.
+    assert.equal(authorizeMessage(msg('editQueued'), guest('prompt')).ok, true);
+    assert.equal(authorizeMessage(msg('editQueued'), guest('collaborator')).ok, true);
+    assert.equal(authorizeMessage(msg('editQueued'), guest('view')).ok, false);
+  });
+
   test('a collaborator may drive a turn but still not delete the session', () => {
     const collab = guest('collaborator');
     assert.equal(authorizeMessage(msg('prompt'), collab).ok, true);

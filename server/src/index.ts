@@ -845,6 +845,7 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
       sessions.userPrompt(msg.sessionId, msg.text, msg.attachments, msg.mentions, {
         needsApproval: access.caps.promptNeedsApproval,
         actor,
+        draft: msg.draft,
       });
       break;
     }
@@ -863,6 +864,24 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
     case 'cancelQueued':
       sessions.cancelQueued(msg.sessionId, msg.queuedId);
       break;
+    case 'editQueued': {
+      // The cap gate already ran; this can still refuse on the item (not yours to
+      // rewrite, already flushed, nothing left after the edit).
+      const edit = sessions.editQueued(msg.sessionId, msg.queuedId, msg, {
+        actor,
+        isOwner: access.scope === 'owner',
+      });
+      if (!edit.ok) {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            sessionId: msg.sessionId,
+            message: edit.reason,
+          } satisfies ServerMessage),
+        );
+      }
+      break;
+    }
     case 'ackSession':
       sessions.ackSession(msg.sessionId);
       break;

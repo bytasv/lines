@@ -14,6 +14,7 @@ import type {
   FileChange,
   FilesChangedData,
   FileSnapshotData,
+  MentionValue,
   PermissionMode,
   PermissionRequestData,
   PermissionResolutionSource,
@@ -1430,7 +1431,7 @@ export class SessionManager {
      * the queue UI they already have. No new state machine: this is the same
      * `queued` + `queuePaused` + `maybeFlush` path an interrupt leaves behind.
      */
-    opts: { needsApproval?: boolean; actor?: Actor } = {},
+    opts: { needsApproval?: boolean; actor?: Actor; draft?: MentionValue } = {},
   ) {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`unknown session ${sessionId}`);
@@ -1472,6 +1473,10 @@ export class SessionManager {
         text,
         attachments: staged.length ? staged : undefined,
         mentions: mentions.length ? mentions : undefined,
+        // Only when it carries pills: with no mentions the expansion is a no-op
+        // and `text` already *is* the draft, so storing one would duplicate the
+        // prompt body on the synced session blob for nothing.
+        draft: opts.draft?.ranges.length ? opts.draft : undefined,
       });
       // Stamped on the queued item so a released prompt is still attributed to
       // whoever wrote it, not to the owner who let it through.
@@ -1548,6 +1553,78 @@ export class SessionManager {
     }
     if (meta.queued.length === 0) meta.queuePaused = undefined;
     this.upsert(meta);
+  }
+
+  /**
+   * Rewrite a queued prompt in place, before it is sent.
+   *
+   * Two things this deliberately does not do. It never clears `queuePaused`:
+   * unlike userPrompt, where an explicit send is the resume gesture, an owner
+   * *editing* a guest's pending-approval prompt must not silently approve and run
+   * it. And it never reorders or restamps the item, so FIFO is preserved.
+   *
+   * The `prompt` cap gets you here (see MESSAGE_AUTHZ); this adds the item-level
+   * check, because a flushed prompt is attributed to `item.actor` and rewriting a
+   * peer's would put words in their mouth.
+   */
+  editQueued(
+    sessionId: string,
+    queuedId: string,
+    patch: {
+      text: string;
+      mentions?: PromptMention[];
+      draft?: MentionValue;
+      addAttachments?: PromptAttachment[];
+      removeAttachments?: string[];
+    },
+    // The full Actor, not just an id: an edit by somebody other than the author
+    // is stamped on the item and has to render as a person.
+    editor: { actor: Actor; isOwner: boolean },
+  ): { ok: true } | { ok: false; reason: string } {
+    const meta = this.sessions.get(sessionId);
+    const item = meta?.queued?.find((q) => q.id === queuedId);
+    // Covers the flush-while-editing race: the turn settled and the item went out
+    // while its editor was open.
+    if (!meta || !item) return { ok: false, reason: 'That queued prompt is no longer in the queue.' };
+
+    // No actor means it predates attribution — treat it as the machine owner's.
+    const isAuthor = !!item.actor && item.actor.userId === editor.actor.userId;
+    if (!isAuthor && !editor.isOwner) {
+      return { ok: false, reason: 'Only the person who wrote that prompt can edit it.' };
+    }
+
+    const removed = new Set(patch.removeAttachments ?? []);
+    // Matched against the item's own refs, never used as a path: an arbitrary url
+    // from the client must not become a delete primitive over another session.
+    const kept = (item.attachments ?? []).filter((a) => !removed.has(a.url));
+    const dropped = (item.attachments ?? []).filter((a) => removed.has(a.url));
+    const text = patch.text.trim();
+    if (!text && kept.length === 0 && !patch.addAttachments?.length) {
+      return { ok: false, reason: 'An edited prompt needs text or an attachment.' };
+    }
+
+    for (const a of dropped) {
+      const file = a.url.split('/').pop();
+      if (file) fs.rmSync(`${this.store.attachmentsRoot}/${sessionId}/${file}`, { force: true });
+    }
+    const staged = patch.addAttachments?.length
+      ? this.stageAttachments(sessionId, patch.addAttachments)
+      : [];
+    const attachments = [...kept, ...staged];
+
+    item.text = text;
+    item.attachments = attachments.length ? attachments : undefined;
+    item.mentions = patch.mentions?.length ? patch.mentions : undefined;
+    item.draft = patch.draft?.ranges.length ? patch.draft : undefined;
+    // Recorded only when somebody else did it — an author fixing their own typo
+    // is not something the queue needs to announce.
+    if (!isAuthor) {
+      item.editedAt = Date.now();
+      item.editedBy = editor.actor;
+    }
+
+    this.upsert(meta);
+    return { ok: true };
   }
 
   /**

@@ -1110,7 +1110,8 @@
       "purpose": "Reference a documented feature or project file inline in the composer prompt via @mention, expanded to context text at send time.",
       "entryPoints": [
         "web/src/components/Composer.tsx",
-        "web/src/components/MentionInput.tsx"
+        "web/src/components/MentionInput.tsx",
+        "web/src/components/QueuedMessages.tsx"
       ],
       "files": [
         "web/src/components/MentionInput.tsx",
@@ -1119,6 +1120,7 @@
         "web/src/lib/files.ts",
         "server/src/fileSearch.ts",
         "server/src/index.ts",
+        "server/src/sessions.ts",
         "server/src/workspacePaths.ts",
         "shared/types.ts",
         "web/src/components/Transcript.tsx",
@@ -1135,13 +1137,15 @@
         "buildExpandedPrompt",
         "uniqueMentions",
         "mentionProviders",
-        "searchFiles"
+        "searchFiles",
+        "MentionCandidate"
       ],
       "tests": [],
       "businessRules": [
         "mentions are expanded into plain prompt text client-side before send; server and worker never resolve mentions[], only the sidecar for display",
         "a stale feature/file reference degrades to a harmless stale text block rather than blocking send",
-        "/find respects .gitignore via git ls-files, falls back to a bounded walk outside a repo, capped at 20000 files"
+        "/find respects .gitignore via git ls-files, falls back to a bounded walk outside a repo, capped at 20000 files",
+        "a queued prompt's draft (pre-expansion MentionValue) is stored only when it has mentions; QueuedMessages.tsx re-edits it via a second MentionInput mount"
       ],
       "architecturalRules": [
         "new mention kinds are added as one more MentionProvider entry, no switch-over-kind elsewhere",
@@ -1149,7 +1153,9 @@
         "no contenteditable/rich-text dependency; pills are a cosmetic mirror-div overlay behind a plain textarea",
         "/find, /file, /tree share one corsFor() helper and one resolveWorkspacePath() root restriction (now in server/src/workspacePaths.ts), which also allows a plan-directory path outside every root (isPlanPath)"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "session-collaboration"
+      ]
     },
     {
       "id": "workflow-task-attachments",
@@ -2036,9 +2042,9 @@
         "a bridge child refuses to start if another live process already holds this machine's single-instance lock, unless that holder is instance:'desktop' (a previous tray bridge) \u2014 in which case ours preempts it instead; this is a second guard beneath the shell's own requestSingleInstanceLock, for a respawn racing a not-yet-exited previous bridge or a bridge started by hand alongside the packaged app; without it two bridge processes can share one device.json and the relay ends up superseding one of them, which is visible in every connected browser as a flicker until it does",
         "when a different installation (a dev checkout, most commonly Tilt) holds the lock instead, the tray's own bridge stands down rather than fighting for it \u2014 no bridge or worker spawns at startup, or the running bridge is not respawned after exiting/being preempted \u2014 until the lock clears, and the tray reports this plainly ('Paused \u2014 another bridge owns this machine') rather than 'Connecting\u2026' or a silent retry loop",
         "the worker is never part of a stand-down: only the bridge collides on the machine lock and the relay device identity, so a worker mid-turn is left alone when a sibling process collides on a resource the worker doesn't touch",
-        "a release is refused when desktop/package.json's version is already published, unless --force (or the workflow's force input) is passed — artifacts are immutable at the edge",
+        "a release is refused when desktop/package.json's version is already published, unless --force (or the workflow's force input) is passed \u2014 artifacts are immutable at the edge",
         "npm run ship -w desktop deletes desktop/release/ before every build",
-        "the desktop release pipeline is manual workflow_dispatch only — no tag convention, no release on push to main"
+        "the desktop release pipeline is manual workflow_dispatch only \u2014 no tag convention, no release on push to main"
       ],
       "architecturalRules": [
         "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
@@ -2056,7 +2062,7 @@
         "the bridge lock lives beside device.json under the same APP_ROOT, reusing the existing app-data-root path helpers rather than adding a new resolver; a stale lock is detected via process.kill(pid, 0) (ESRCH means take it), and LINES_ALLOW_MULTIPLE_BRIDGES=1 is the deliberate escape hatch that must never be set in a real deployment",
         "foreignBridgeLock/BRIDGE_LOCK_FILE/EXIT_BRIDGE_LOCK_HELD are duplicated in main.ts rather than imported from server/src/index.ts, the same precedent APP_ROOT already sets in this file \u2014 EXIT_BRIDGE_LOCK_HELD=78 is a contract between the two files, changing it in one without the other silently breaks the stand-down trigger",
         "enterStandDown is the only path that clears bridge/worker handles and arms the recheck timer; both the startup check and spawnChild's exit handler funnel into it rather than each duplicating the tray-copy and recheck logic",
-        "a local release and a CI release both run desktop/scripts/ship.mjs — the same code path, so they cannot drift into two procedures",
+        "a local release and a CI release both run desktop/scripts/ship.mjs \u2014 the same code path, so they cannot drift into two procedures",
         "ship.mjs derives LINES_UPDATE_FEED_URL/LINES_DOWNLOAD_URL from R2_RELEASE_PUBLIC_BASE_URL rather than taking them as separate inputs",
         "release-desktop.yml's guard job runs on ubuntu-latest (1x billing) so a stale version or type error is cheap; release runs on macos-latest (10x billing, arm64, a standard runner)"
       ],
@@ -2066,7 +2072,7 @@
         "electron is pinned exact so electron-builder can resolve its version from a hoisted workspace",
         "arm64 only; x64/universal is a one-line mac.target change",
         "production-deployment's VITE_DESKTOP_DOWNLOAD_URL is now set once, to the stable alias, rather than per release",
-        "the R2 release credentials now live in two places (VPS lines.env and GitHub Actions secrets) — same token, wider blast radius"
+        "the R2 release credentials now live in two places (VPS lines.env and GitHub Actions secrets) \u2014 same token, wider blast radius"
       ]
     },
     {
@@ -2164,7 +2170,7 @@
       "tests": [],
       "businessRules": [
         "the web build stage also bakes VITE_DESKTOP_DOWNLOAD_URL; unlike the other three VITE_* args it may legitimately be empty (no desktop release yet), so its build-time assertion only fires when the value is set",
-        "VITE_DESKTOP_DOWNLOAD_URL is set once, to the stable R2 alias (Lines-latest.dmg), not per release — a desktop release republishes that key so web never needs a rebuild in lockstep",
+        "VITE_DESKTOP_DOWNLOAD_URL is set once, to the stable R2 alias (Lines-latest.dmg), not per release \u2014 a desktop release republishes that key so web never needs a rebuild in lockstep",
         "storage never gets a published port or Traefik exposure beyond its one router; only relay and the browser's device calls reach it, everything else is internal-network only",
         "migrations run via `docker compose run --rm migrate` before the first `up` against a new database, using the direct (:5432) connection string",
         "the same ordering applies to every later schema change, not just the first bring-up: migrate deploy must run against the live database before a new storage image serves traffic, or the new code 500s with a Prisma unknown-column/table error (P2021) against the old schema",
@@ -2247,7 +2253,8 @@
         "SocketAccess",
         "normalizeEmail",
         "recordShareContact",
-        "forgetShareContact"
+        "forgetShareContact",
+        "editQueued"
       ],
       "tests": [
         "storage/src/shares.test.ts",
@@ -2259,7 +2266,8 @@
         "server/src/broadcastScope.test.ts",
         "server/src/presence.test.ts",
         "server/src/attribution.test.ts",
-        "server/src/attribution.identity.test.ts"
+        "server/src/attribution.identity.test.ts",
+        "server/src/sessions.queue.test.ts"
       ],
       "businessRules": [
         "three presets (view, prompt, collaborator); no preset ever grants setPermissionMode",
@@ -2273,7 +2281,8 @@
         "a promptNeedsApproval guest's prompt lands queuePaused on the owner's existing queue, no new state machine",
         "presence and attribution identity always come from the connection's attested identity, never a client-supplied field",
         "a historical row or the owner's own prompt with no recorded actor is attributed to the session's host",
-        "the collaborator address book (ShareContact) is decoupled from grant state on purpose \u2014 revoking a share or letting an invite expire never removes the remembered address; removing a contact is a hard delete, not a tombstone, and only clears the suggestion, never a grant"
+        "the collaborator address book (ShareContact) is decoupled from grant state on purpose \u2014 revoking a share or letting an invite expire never removes the remembered address; removing a contact is a hard delete, not a tombstone, and only clears the suggestion, never a grant",
+        "a queued prompt may be edited in place by its author or the machine owner (prompt cap, not interrupt); editing never clears queuePaused, and an edit by someone other than the author is recorded (editedAt/editedBy) but still flushes attributed to the author"
       ],
       "architecturalRules": [
         "MESSAGE_AUTHZ is an exhaustive Record keyed on ClientMessage['type'] so an unclassified message is a compile error, not a review gap",

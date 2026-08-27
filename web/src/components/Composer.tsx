@@ -36,7 +36,7 @@ import { MentionInput } from './MentionInput';
 import { send } from '../ws';
 
 /** Read a File into a raw-base64 PromptAttachment (strips the data: URI prefix). */
-function fileToAttachment(file: File): Promise<PromptAttachment> {
+export function fileToAttachment(file: File): Promise<PromptAttachment> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -233,6 +233,9 @@ export function Composer({ session }: { session: SessionMeta }) {
       text: expanded,
       attachments,
       mentions: wireMentions.length ? wireMentions : undefined,
+      // Kept only if the server queues this prompt, so the queue row can be
+      // re-opened in a composer with its pills instead of the expanded text.
+      draft: prompt.ranges.length ? prompt : undefined,
     });
     setPrompt({ text: '', ranges: [] });
     setAttachments([]);

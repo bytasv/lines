@@ -53,7 +53,8 @@ account) or by a single-use link.
   `SHARE_PRESETS`/`capsForPreset`/`parseShareCaps`/`presetOfCaps`, `ShareProfile`, `Actor`,
   `SocketAccess`/`OWNER_ACCESS`, `MessageAuthz`/`MESSAGE_AUTHZ`/`authorizeMessage`,
   `PresenceViewer`, the `hello.access` block, `SessionMeta.turnActor`, `QueuedPrompt.actor`,
-  `PermissionRequestData.resolvedActor`, the `presence` client/server messages
+  `QueuedPrompt.editedAt`/`editedBy`, `PermissionRequestData.resolvedActor`, the `presence`
+  client/server messages
 - `storage/prisma/schema.prisma` — `DeviceMember`, `SessionShare`, `ShareInvite`, `UserProfile`,
   `ShareContact` (the collaborator address book), `Device.online`
 - `storage/src/shares.ts` — `authorizeDevice` (the relay's oracle body), `profileOf`,
@@ -81,7 +82,8 @@ account) or by a single-use link.
   granted session cwds; the `~/.claude/plans` auto-approve exception narrowed to owner-only
 - `server/src/fileRoutes.ts` — every route takes `access`; `syncLog` is owner-only
 - `server/src/sessions.ts` — `userPrompt`/`prompt` take an `actor`; `QueuedPrompt.actor`;
-  `resolvePermission`/`logResolution` take an actor for `resolvedActor`
+  `resolvePermission`/`logResolution` take an actor for `resolvedActor`; `editQueued` (rewrite a
+  queued prompt in place — author or owner only, never clears `queuePaused`)
 - `server/src/workflows.ts` — `startIfPending`/`iterateIfWaiting`/`runStep`/`runStepSafely` take
   an actor (a workflow-attached session intercepts a prompt *before* `userPrompt` ever runs)
 - `web/src/lib/shares.ts` — the HTTP client for every `/v1/shares/*` route, `PRESET_COPY`,
@@ -92,7 +94,8 @@ account) or by a single-use link.
 - `web/src/lib/identity.ts` — `useIdentityResolver` (binds the pure rule to the store + Clerk)
 - `web/src/lib/presence.ts` — `usePresence`, `usePeers`
 - `web/src/components/PresenceStack.tsx`, `PromptAuthor.tsx` — the avatar surfaces
-- `web/src/components/QueuedMessages.tsx` — per-item author, "waiting for X" framing
+- `web/src/components/QueuedMessages.tsx` — per-item author, "waiting for X" framing, the edit
+  affordance (`QueuedEditor`, a `MentionInput` mount) and its "edited" badge
 - `web/src/components/PermissionPrompt.tsx` — the resolved-card "approved by X" badge
 - `web/src/components/CollaboratorsSection.tsx` — Settings pane over the same
   `/v1/contacts` client; list, forget one, clear all
@@ -111,6 +114,9 @@ account) or by a single-use link.
   `machine` (machine-scope grants only)
 - `authorizeMessage(msg, access)` — the one gate `handleMessage` consults before its switch; a
   denial names the missing capability rather than a bare "unauthorized"
+- `SessionManager.editQueued(sessionId, queuedId, patch, editor)` — rewrites a queued prompt's
+  text/mentions/draft/attachments in place; refuses an item that is not the editor's own unless
+  they are the machine owner, and never touches `queuePaused` or the item's queue position
 - `authorizeDevice(prisma, deviceId, userId)` — owner (fast, no share tables) → machine member →
   session shares (several intersect to the *narrowest*, never the union); a stale grant (the
   device was unpaired and re-claimed) is refused
@@ -224,6 +230,16 @@ workflow, both had to take the actor too, or almost no prompt would ever be attr
 released queued prompt (`QueuedPrompt.actor`) credits the person who wrote it, not the owner who
 released it.
 
+A queued-but-unsent prompt can be edited in place before it flushes — the author may fix their own,
+and the owner may edit anything in their queue (the review case: a guest's `promptNeedsApproval`
+prompt, before it runs on the owner's machine as them). An edit by someone other than the author
+stamps `QueuedPrompt.editedAt`/`editedBy` rather than passing silently, and the item still flushes
+attributed to the original author, never the editor. `editQueued` is authorized at the `prompt`
+cap, not the `interrupt` cap `cancelQueued` uses — rewriting your own not-yet-sent prompt is the
+same authority as writing it, and a `prompt`-preset guest (the one whose prompts land paused) has
+`prompt` but not `interrupt`. Editing never clears `queuePaused`: only an explicit send resumes a
+paused queue, so an owner's edit of a pending prompt must not double as approving it.
+
 On the client, `resolveIdentity` is the single source every surface (presence avatars, prompt
 bubbles, the queued-message list, the resolved-permission badge, the sidebar's turn-actor chip)
 resolves a person through — so they can never disagree about who somebody is.
@@ -255,7 +271,16 @@ resolves a person through — so they can never disagree about who somebody is.
   the live bridge offline
 - `server/src/messageAuthz.test.ts` — the owner passes every message; a capability-less guest
   passes only `connection` and `cap: null` session reads; every never-grantable message stays
-  owner-only at every preset/scope; a session-scoped guest cannot reach a sibling session
+  owner-only at every preset/scope; a session-scoped guest cannot reach a sibling session;
+  `editQueued` is allowed at the `prompt` preset and denied at `view`, the deliberate divergence
+  from `cancelQueued`'s `interrupt`
+- `server/src/sessions.queue.test.ts` — `editQueued`: text/mentions/draft replaced without moving
+  the item or its `ts`; a mention-less draft is not persisted; editing never clears `queuePaused`;
+  an edit by someone other than the author stamps `editedAt`/`editedBy`; attachment add/remove
+  deltas (unlink on disk, `[...kept, ...staged]` ordering, a url outside the item's own refs is
+  ignored); author-only / owner / no-actor-is-owner-only authority; an unknown id is refused
+  leaving the queue untouched; emptying text with no attachments left is refused. Also covers
+  `cancelQueued`'s attachment cleanup, previously untested
 - `server/src/guestAccess.test.ts` — file-read clamp to granted session cwds, `~/.claude/plans`
   denied to a guest, traversal refused, `find` refuses a whole request rather than a partial
   result, `syncLog` owner-only
@@ -293,6 +318,12 @@ resolves a person through — so they can never disagree about who somebody is.
 - Revocation has a bound, up to `GUEST_REAUTH_MS` (60s), on an already-open guest socket.
 - A `promptNeedsApproval` guest's prompt lands `queuePaused: true` on the owner's existing queue
   — no new state machine; the owner's own next send resumes it.
+- A queued prompt may be edited in place before it flushes: the author may edit their own, and the
+  machine owner may edit any item, but no one else. `editQueued` is authorized at the `prompt` cap
+  — deliberately not `cancelQueued`'s `interrupt` — so a `prompt`-preset guest can still fix their
+  own pending prompt. Editing never clears `queuePaused` or reorders the queue; an edit by someone
+  other than the author is recorded (`editedAt`/`editedBy`), but the released prompt is still
+  attributed to the author, not the editor.
 - Presence and attribution identity always come from the connection's attested identity, never
   from a client-supplied message field.
 - A historical row (or the owner's own prompt) with no recorded actor is attributed to the

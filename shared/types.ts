@@ -198,6 +198,37 @@ export interface PromptMention {
   detail?: string; // feature purpose / secondary line
 }
 
+/**
+ * A mention candidate as offered in the autocomplete popover. Extends the
+ * display-only {@link PromptMention} with the agent-facing `expansion` text,
+ * which the composer bakes into the prompt on send (never sent as sidecar data).
+ */
+export interface MentionCandidate extends PromptMention {
+  expansion: string;
+}
+
+/**
+ * A committed mention pinned to the `[start, end)` span of the prompt text it
+ * renders as an inline pill for — the span covers the display token
+ * (`@Model selector`), excluding the trailing space. The text stays
+ * authoritative; ranges are a derived view the composer realigns on every edit.
+ * Sorted and non-overlapping.
+ */
+export interface MentionRange extends MentionCandidate {
+  start: number;
+  end: number;
+}
+
+/**
+ * Prompt text plus the mention ranges painted over it — the composer's draft
+ * state. Lives here rather than in the web app because a queued prompt persists
+ * one (see {@link QueuedPrompt.draft}), so it crosses the wire.
+ */
+export interface MentionValue {
+  text: string;
+  ranges: MentionRange[];
+}
+
 /** A prompt sent while the session was busy; held server-side and flushed after the current turn. */
 export interface QueuedPrompt {
   id: string;
@@ -212,6 +243,22 @@ export interface QueuedPrompt {
    * owner releases it, but the transcript must credit the person who typed it.
    */
   actor?: Actor;
+  /**
+   * The composer's pre-expansion draft, so the item can be re-edited with its
+   * pills intact — `text` is already expanded, and re-seeding an editor from it
+   * would show the user the expansion block and append a second one on save.
+   * Written only when there are mentions: without them `text` *is* the draft,
+   * and `queued` rides the synced session blob.
+   */
+  draft?: MentionValue;
+  /** When the item was last rewritten in place. Absent = never edited. */
+  editedAt?: number;
+  /**
+   * Who rewrote it, when that is not the author. An owner reviewing a guest's
+   * pending-approval prompt may edit it, and the released prompt still runs
+   * attributed to the guest — so the rewrite has to be visible, not silent.
+   */
+  editedBy?: Actor;
 }
 
 export interface CavemanConfig {
@@ -1285,6 +1332,13 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   retryTurn: { needs: 'session', cap: 'interrupt' },
   continueTurn: { needs: 'session', cap: 'interrupt' },
   cancelQueued: { needs: 'session', cap: 'interrupt' },
+  // Deliberately `prompt`, not the `interrupt` cancelQueued sits at: rewriting a
+  // prompt that has not been sent yet is the same authority as writing it, and
+  // the Can prompt preset — the one whose prompts land paused for approval —
+  // grants `prompt` without `interrupt`. Under `interrupt` the main use case, a
+  // guest fixing their own pending prompt, would be denied. Who may edit *which*
+  // item (author, or the owner) is a second check in SessionManager.editQueued.
+  editQueued: { needs: 'session', cap: 'prompt' },
   // Destructive to the session's context, so it sits with the other turn-level
   // controls rather than with reads.
   compactContext: { needs: 'session', cap: 'interrupt' },
@@ -1434,11 +1488,32 @@ export type ClientMessage =
       worktree?: { branch?: string; baseRef?: string };
     }
   | { type: 'deleteSession'; sessionId: string }
-  | { type: 'prompt'; sessionId: string; text: string; attachments?: PromptAttachment[]; mentions?: PromptMention[] }
+  | {
+      type: 'prompt';
+      sessionId: string;
+      text: string;
+      attachments?: PromptAttachment[];
+      mentions?: PromptMention[];
+      /** Pre-expansion draft, kept only if the prompt is queued (see {@link QueuedPrompt.draft}). */
+      draft?: MentionValue;
+    }
   | { type: 'interrupt'; sessionId: string }
   | { type: 'retryTurn'; sessionId: string }
   | { type: 'continueTurn'; sessionId: string }
   | { type: 'cancelQueued'; sessionId: string; queuedId: string }
+  | {
+      type: 'editQueued';
+      sessionId: string;
+      queuedId: string;
+      /** Expanded text, exactly what `prompt` carries. */
+      text: string;
+      mentions?: PromptMention[];
+      /** Pre-expansion draft, so the next edit still has its pills. */
+      draft?: MentionValue;
+      addAttachments?: PromptAttachment[];
+      /** `Attachment.url`s to drop — a delta, so an omitted field cannot wipe the set. */
+      removeAttachments?: string[];
+    }
   | { type: 'ackSession'; sessionId: string }
   | { type: 'archiveSession'; sessionId: string }
   | { type: 'unarchiveSession'; sessionId: string }

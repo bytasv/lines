@@ -18,12 +18,13 @@ Let the user type `@` in the composer to reference a documented feature or a pro
 - `server/src/fileSearch.ts` (`searchFilesAcross`, `FileHit` — multi-root, globally-ranked file-name search)
 - `server/src/fileRoutes.ts` (`find`/`file`/`tree` handlers, reached over the WebSocket — see [file-routes-over-ws](file-routes-over-ws.md))
 - `server/src/workspacePaths.ts` (`workspaceRoots`/`resolveWorkspacePath`/`resolveWorkspaceParam`)
-- `shared/types.ts` (`PromptMention`, `FindResponse`)
-- `web/src/components/Transcript.tsx`, `web/src/components/QueuedMessages.tsx` (mention badges on sent/queued messages)
+- `shared/types.ts` (`PromptMention`, `MentionCandidate`, `MentionRange`, `MentionValue`, `FindResponse`, `QueuedPrompt.draft`)
+- `web/src/components/Transcript.tsx` (mention badges on sent messages)
+- `web/src/components/QueuedMessages.tsx` (mention badges on queued messages; also a second `MentionInput` mount — `QueuedEditor`, re-editing a queued prompt in place)
 
 ## Symbols
 
-- `MentionInput`, `MentionValue`, `MentionRange`
+- `MentionInput`, `MentionValue`, `MentionRange` (`MentionValue`/`MentionRange`/`MentionCandidate` are defined in `shared/types.ts` — plain data, no icon/React deps — and re-exported from `web/src/lib/mentions.ts`, which still owns `mentionKindMeta`)
 - `findMentionToken`, `diffEdit`, `remapRanges`, `snapCaretOut`, `buildExpandedPrompt`, `uniqueMentions`
 - `mentionProviders`, `MentionProvider` (search context is now `{ cwd, roots }`, not just `cwd`), `MentionCandidate`
 - `searchFiles(root, query, limit)` / `searchFilesAcross(roots, query, limit)` — `web/src/lib/files.ts`'s WebSocket client and `server/src/fileSearch.ts`'s ranker share the `searchFiles` name; the ranker's multi-root entry point is `searchFilesAcross`
@@ -36,6 +37,8 @@ Selecting a candidate inserts an inline pill: a `MentionRange` (`start`/`end` ch
 
 On send, `buildExpandedPrompt` appends one reference block to the prompt text (feature name + doc path + entry points, or a file path) — this expanded text is what actually reaches the agent. The structured `mentions[]` (`kind`/`id`/`label`/`detail`) rides along on the WS message as a display-only sidecar, rendered as badges in the transcript and queued-message views; it is never parsed or resolved server-side.
 
+If the prompt lands in the server-side queue (session busy, or a guest's `promptNeedsApproval` grant — see [session-collaboration](session-collaboration.md)), the composer's own pre-expansion `MentionValue` rides along as `QueuedPrompt.draft`, but only when it has mentions — a mention-less prompt's `text` already *is* its draft, so nothing extra is stored on the synced session blob. `QueuedMessages.tsx`'s edit affordance seeds a second `MentionInput` from that draft (falling back to `{ text: item.text, ranges: [] }` for an item queued before drafts existed, or one with no mentions), so pills survive a re-edit; saving re-runs the same `buildExpandedPrompt`/`uniqueMentions` pair `Composer.submit` uses and writes the new draft back, so a second edit still has pills.
+
 ## Tests
 
 None.
@@ -45,6 +48,7 @@ None.
 - Mentions are resolved client-side and expanded into plain prompt text before the message leaves the browser — the server and worker never see or resolve `mentions[]`; they only see the already-expanded text, identically for a live send, a queued (offline) send, and a workflow's first prompt.
 - A stale feature/file reference (moved path, renamed feature) produces a stale-but-harmless text block rather than blocking send — `docs/codebase/index.json` is documented as possibly-stale, so mention resolution is best-effort, not a correctness guarantee.
 - The `find` project file search respects `.gitignore` (backed by `git ls-files`), falling back to a bounded directory walk outside a git repo, capped at 20,000 candidate files.
+- A queued prompt's `draft` is stored only when it carries at least one mention range — re-editing a mention-less queued prompt seeds the composer from its plain `text` instead.
 
 ## Architectural rules
 
@@ -56,3 +60,4 @@ None.
 ## Related decisions
 
 - [multi-root-projects](multi-root-projects.md)
+- [session-collaboration](session-collaboration.md) — `QueuedPrompt.draft` and the queue's edit affordance
