@@ -18,7 +18,7 @@ import { IconGripVertical, IconInfoCircle, IconPlayerPlay, IconStack2 } from '@t
 import { DragDropContext, Draggable, Droppable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
 import type { PermissionMode, RecipeDef } from '@lines/shared';
-import { isBundle } from '@lines/shared';
+import { DEFAULT_COMPRESS_RESPONSES, isBundle } from '@lines/shared';
 import { useStore } from '../../store';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../../lib/modelSelect';
 import { PERMISSION_MODES, renderPermissionModeOption } from '../../lib/permissionModes';
@@ -102,7 +102,7 @@ export function RecipeRunModal({
     // would only offer them a way to run somewhere they aren't looking.
     const cwd = activeProject;
     if (!cwd) return;
-    // Caveman config is a per-project habit, not a recipe property: inherit the
+    // Compression is a per-project habit, not a recipe property: inherit the
     // project's latest session, matching how the sidebar creates sessions.
     const latest = Object.values(sessions)
       .filter((s) => s.cwd === cwd)
@@ -114,7 +114,7 @@ export function RecipeRunModal({
       cwd,
       model,
       permissionMode,
-      caveman: latest?.caveman ?? { enabled: true, level: 'full' },
+      compressResponses: latest?.compressResponses ?? DEFAULT_COMPRESS_RESPONSES,
       ...(multi ? { bundleName: bundleName.trim() || defaultBundleName(order) } : {}),
       ...(synthesizesWorkflow ? { autoAdvance: !review } : {}),
       ...(!synthesizesWorkflow && workflowId ? { workflowId } : {}),

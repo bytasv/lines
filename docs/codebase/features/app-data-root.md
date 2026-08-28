@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines the machine-global directory that holds all server-side app state — per-user stores (sessions, transcripts, workflows, auth, settings) and machine-wide assets (vendored plugins).
+Defines the machine-global directory that holds all server-side app state — per-user stores (sessions, transcripts, workflows, auth, settings).
 
 ## Entry points
 
@@ -12,7 +12,6 @@ Defines the machine-global directory that holds all server-side app state — pe
 
 - `server/src/store.ts` — root constant, `userStoreRoot`, `createStore`
 - `server/src/index.ts` — picks the flat root for the implicit `local` user vs `userStoreRoot(userId)` for real users
-- `server/src/caveman.ts` — vendored plugin checkout stored directly under the root (machine-wide, shared by all users)
 
 ## Important symbols
 
@@ -42,7 +41,11 @@ None.
 
 - The app data root is `~/.lines-app`.
 - The `local` user uses the flat root directly (legacy single-tenant layout); real user ids live under `~/.lines-app/users/{id}`.
-- Machine-wide assets (vendored plugins) live directly under the root and are shared across users.
+- No machine-wide asset lives under the root any more: response compression (see
+  [turn-recovery](turn-recovery.md)) is a vendored constant in `server/src/caveman.ts`,
+  not a runtime checkout. `~/.lines-app/plugins/` may still exist on a machine that ran
+  an older build that git-cloned a plugin there; it is a legacy directory nothing
+  reads or writes, left in place rather than deleted on upgrade.
 - A git worktree Lines creates for a session or on request defaults to
   `~/.lines-app/worktrees/<repo>/<slug>` — app state, not a folder under the user's
   own checkout — grouped by repo name so two projects can reuse the same branch name.

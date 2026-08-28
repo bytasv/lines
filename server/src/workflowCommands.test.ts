@@ -240,7 +240,7 @@ test('workflowInUse names the sessions currently running a workflow', () => {
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    caveman: { enabled: false, level: 'full' },
+    compressResponses: false,
   });
   h.workflows.attach(meta.id, saved.id);
 

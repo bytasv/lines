@@ -90,7 +90,7 @@ export function runRecipe(ctx: UserContext, msg: RunRecipeMsg): string | null {
     cwd: msg.cwd,
     model: msg.model,
     permissionMode: msg.permissionMode,
-    caveman: msg.caveman,
+    compressResponses: msg.compressResponses,
   });
   // The name is deliberate, so the auto-titler must not overwrite it.
   meta.nameAuto = false;

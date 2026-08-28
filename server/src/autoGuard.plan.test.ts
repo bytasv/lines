@@ -121,7 +121,7 @@ function hookHarness(permissionMode: PermissionMode) {
         cwd,
         model: 'claude-opus-5',
         permissionMode,
-        caveman: { enabled: false, level: 'full' },
+        compressResponses: false,
         status: 'running',
         createdAt: 1,
       } as SessionMeta,

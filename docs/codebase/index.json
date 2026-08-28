@@ -515,6 +515,7 @@
         "server/src/index.ts",
         "server/src/sessions.ts",
         "server/src/autoGuard.ts",
+        "server/src/caveman.ts",
         "shared/types.ts",
         "web/src/store.ts",
         "web/src/components/SessionView.tsx",
@@ -580,7 +581,9 @@
         "skippableFailedStep",
         "SessionManager.dropFailedQuery",
         "LiveState.compactResume",
-        "SessionManager.restoreCompactedStatus"
+        "SessionManager.restoreCompactedStatus",
+        "COMPRESS_RESPONSES_PROMPT",
+        "adoptLegacyCompress"
       ],
       "tests": [
         "server/src/sessions.reconcile.test.ts",
@@ -592,7 +595,8 @@
         "server/src/sessions.spawn.test.ts",
         "server/src/auth.concurrentLogin.test.ts",
         "server/src/turnFailure.test.ts",
-        "server/src/sessions.compact.test.ts"
+        "server/src/sessions.compact.test.ts",
+        "server/src/caveman.test.ts"
       ],
       "businessRules": [
         "auto-continue only resumes sessions flagged by the reconcile that is running; a stale flag keeps its banner",
@@ -626,6 +630,7 @@
         "compactContext still returns a synchronous { ok: true }; an auth refusal after that point surfaces through failTurn, not the { ok: false, code, reason } union",
         "a transiently failed proactive refresh retries on a 60s-doubling ladder capped at 15 minutes; a dead refresh token logs out instead, stopping the chain",
         "accessToken: null in buildQueryOptions is reachable only when no AuthManager is wired at all (tests / embedding), never for a real signed-in user",
+        "SessionMeta.compressResponses gates COMPRESS_RESPONSES_PROMPT directly in buildQueryOptions — on means the ruleset is in systemPrompt.append, off means neither it nor a plugins key is present; no runtime git clone, no machine-global flag file; a legacy caveman: { enabled, level } meta is migrated once by adoptLegacyCompress on load and on adoptSynced, and a meta with neither field resumes uncompressed",
         "logins are tracked per OAuth state, so two started at once each keep their own PKCE verifier; completing one clears the rest, unfinished ones expire after 30 minutes, and a paste with no #state falls back to the newest",
         "a content-filter, context-overflow, invalid-request or overloaded failure never implies an automatic retry, backoff, or step advance",
         "auth wins outright when a failure text matches both an auth pattern and a turnFailureKind pattern",
@@ -1074,8 +1079,7 @@
       ],
       "files": [
         "server/src/store.ts",
-        "server/src/index.ts",
-        "server/src/caveman.ts"
+        "server/src/index.ts"
       ],
       "symbols": [
         "APP_ROOT",
@@ -1091,7 +1095,7 @@
       "businessRules": [
         "app data root is ~/.lines-app",
         "'local' user uses the flat root; real user ids live under ~/.lines-app/users/{id}",
-        "machine-wide assets (vendored plugins) live directly under the root, shared across users"
+        "no machine-wide asset lives under the root any more; ~/.lines-app/plugins/ is a legacy directory an older build git-cloned into, left in place on upgrade rather than deleted, and nothing reads or writes it"
       ],
       "architecturalRules": [
         "all persistent paths derive from APP_ROOT / userStoreRoot; never hardcode the home-directory path elsewhere",

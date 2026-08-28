@@ -822,7 +822,7 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
         cwd: worktree?.path ?? msg.cwd,
         model: msg.model,
         permissionMode: msg.permissionMode,
-        caveman: msg.caveman,
+        compressResponses: msg.compressResponses,
       });
       // Only nameable once the session exists; nothing depends on it beyond the
       // UI's "orphaned" label.
@@ -900,8 +900,8 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
     case 'setPermissionMode':
       sessions.setPermissionMode(msg.sessionId, msg.mode);
       break;
-    case 'setCaveman':
-      sessions.setCaveman(msg.sessionId, msg.caveman);
+    case 'setCompressResponses':
+      sessions.setCompressResponses(msg.sessionId, msg.compressResponses);
       break;
     case 'permissionResponse':
       sessions.resolvePermission(

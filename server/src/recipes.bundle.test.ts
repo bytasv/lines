@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { CavemanConfig, ClientMessage, RecipeContent, ServerMessage } from '@lines/shared';
+import type { ClientMessage, RecipeContent, ServerMessage } from '@lines/shared';
 import { isStepRef, RECIPE_BUNDLE_MAX } from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { RecipeEngine } from './recipes.ts';
@@ -16,7 +16,7 @@ import type { WorkerClient } from './workerClient.ts';
 import { WorkflowEngine } from './workflows.ts';
 
 const USER = 'u1';
-const CAVEMAN: CavemanConfig = { enabled: false, level: 'full' };
+const COMPRESS = false;
 
 const content = (title: string, over: Partial<RecipeContent> = {}): RecipeContent => ({
   title,
@@ -65,7 +65,7 @@ const runMsg = (
   cwd: h.root,
   model: 'claude-sonnet-5',
   permissionMode: 'acceptEdits',
-  caveman: CAVEMAN,
+  compressResponses: COMPRESS,
   ...over,
 });
 

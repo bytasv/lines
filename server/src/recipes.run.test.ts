@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { CavemanConfig, ClientMessage, RecipeContent, RecipeDef, ServerMessage } from '@lines/shared';
+import type { ClientMessage, RecipeContent, RecipeDef, ServerMessage } from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { RecipeEngine } from './recipes.ts';
 import * as commands from './recipeCommands.ts';
@@ -15,7 +15,7 @@ import type { WorkerClient } from './workerClient.ts';
 import { WorkflowEngine } from './workflows.ts';
 
 const USER = 'u1';
-const CAVEMAN: CavemanConfig = { enabled: false, level: 'full' };
+const COMPRESS = false;
 
 const content = (over: Partial<RecipeContent> = {}): RecipeContent => ({
   title: 'Auth management',
@@ -73,7 +73,7 @@ const runMsg = (
   cwd: h.root,
   model: 'claude-opus-5',
   permissionMode: 'default',
-  caveman: CAVEMAN,
+  compressResponses: COMPRESS,
   ...over,
 });
 

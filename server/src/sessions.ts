@@ -6,7 +6,6 @@ import type {
   Actor,
   Attachment,
   AttachmentKind,
-  CavemanConfig,
   ContextBreakdown,
   ContextCompactBlockInfo,
   ContextCompactData,
@@ -14,6 +13,7 @@ import type {
   FileChange,
   FilesChangedData,
   FileSnapshotData,
+  LegacySessionMeta,
   MentionValue,
   PermissionMode,
   PermissionRequestData,
@@ -51,7 +51,7 @@ import {
   repoBranch,
   type RepoBaseline,
 } from './git.ts';
-import { cavemanPromptFallback, getCavemanPluginPath } from './caveman.ts';
+import { COMPRESS_RESPONSES_PROMPT } from './caveman.ts';
 import {
   ALWAYS_ASK_TOOLS,
   allowEntryFor,
@@ -614,6 +614,18 @@ export type TurnCompleteListener = (
   failed: boolean,
 ) => void;
 
+/**
+ * Pre-rename metas carried `caveman: { enabled, level }`; the levels are gone.
+ * Metas enter unnormalized both from `sessions.json` and from storage sync, so
+ * both entry points read the old field once and settle it.
+ */
+function adoptLegacyCompress(meta: SessionMeta) {
+  if (typeof meta.compressResponses === 'boolean') return;
+  // False when neither field exists: a meta written before the toggle existed
+  // ran uncompressed, and nothing about a restart should change that.
+  meta.compressResponses = (meta as LegacySessionMeta).caveman?.enabled ?? false;
+}
+
 export class SessionManager {
   private sessions = new Map<string, SessionMeta>();
   /**
@@ -666,6 +678,7 @@ export class SessionManager {
       if (meta.workflow) meta.workflow.advancing = false;
       // A verdict from a previous process proved nothing durable about this one.
       if (meta.contextCompact?.ok === false) meta.contextCompact = undefined;
+      adoptLegacyCompress(meta);
       this.sessions.set(meta.id, meta);
     }
     // Pruned by the store on load, so an old tombstone doesn't suppress a session
@@ -771,6 +784,7 @@ export class SessionManager {
     // A failure verdict belongs to the CLI conversation that produced it, on
     // whichever device that was — it must not disable the button here.
     if (meta.contextCompact?.ok === false) meta.contextCompact = undefined;
+    adoptLegacyCompress(meta);
     this.sessions.set(meta.id, meta);
     this.persist();
     this.broadcast({ type: 'sessionUpsert', session: meta });
@@ -895,7 +909,7 @@ export class SessionManager {
     cwd: string;
     model: string;
     permissionMode: PermissionMode;
-    caveman: CavemanConfig;
+    compressResponses: boolean;
   }): SessionMeta {
     const meta: SessionMeta = {
       id: randomUUID(),
@@ -903,7 +917,7 @@ export class SessionManager {
       cwd: params.cwd,
       model: params.model,
       permissionMode: params.permissionMode,
-      caveman: params.caveman,
+      compressResponses: params.compressResponses,
       status: 'idle',
       createdAt: Date.now(),
       nameAuto: true,
@@ -1160,15 +1174,11 @@ export class SessionManager {
    * non-serializable callbacks (canUseTool, hooks, stderr) on its side.
    */
   private buildQueryOptions(meta: SessionMeta, accessToken: string | null): Record<string, unknown> {
-    // Optional-chained throughout: a meta written before `caveman` existed, or
-    // adopted wholesale from storage by adoptSynced, has no such object.
-    const pluginPath = meta.caveman?.enabled ? getCavemanPluginPath() : null;
+    // The ruleset goes straight into the system prompt: on means the rules are
+    // there, unconditionally, with nothing to clone and no machine-global state
+    // that a second session could contradict.
     const appendParts: string[] = [];
-    if (meta.caveman?.enabled && !pluginPath) {
-      appendParts.push(cavemanPromptFallback(meta.caveman.level));
-    } else if (meta.caveman?.enabled && meta.caveman.level !== 'full') {
-      appendParts.push(`Caveman level: ${meta.caveman.level}. Apply /caveman ${meta.caveman.level} intensity.`);
-    }
+    if (meta.compressResponses) appendParts.push(COMPRESS_RESPONSES_PROMPT);
 
     // cwd stays this session's own root so settingSources and CLAUDE.md
     // resolution keep pointing at it; the project's other roots ride along as
@@ -1198,7 +1208,6 @@ export class SessionManager {
         ...(appendParts.length > 0 ? { append: appendParts.join('\n\n') } : {}),
       },
       settingSources: ['user', 'project'],
-      ...(pluginPath ? { plugins: [{ type: 'local', path: pluginPath }] } : {}),
       // App-managed login is the only credential path: pushTurn refuses the turn
       // unless it holds a token, so this is always set in the real app. Never
       // let a signed-in user inherit the ambient ~/.claude CLI login — that is a
@@ -2270,7 +2279,7 @@ export class SessionManager {
   }
 
   /**
-   * The query that asked this permission is gone (worker crash, caveman
+   * The query that asked this permission is gone (worker crash, compression
    * toggle) — the CLI turn died with it. Recover by resuming the session and
    * telling Claude what the user decided, so no re-prompt is needed even
    * hours later.
@@ -2385,11 +2394,11 @@ export class SessionManager {
     this.worker.setPermissionMode(sessionId, sdkPermissionMode(mode));
   }
 
-  /** Caveman toggling requires new query options; restart the query (resume keeps context). */
-  setCaveman(sessionId: string, caveman: CavemanConfig) {
+  /** Toggling compression requires new query options; restart the query (resume keeps context). */
+  setCompressResponses(sessionId: string, compressResponses: boolean) {
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
-    meta.caveman = caveman;
+    meta.compressResponses = compressResponses;
     this.upsert(meta);
     this.flushPending(sessionId); // cards stay open; answers recover via resume
     this.worker.close(sessionId);
@@ -3047,7 +3056,7 @@ export class SessionManager {
 
     // The model asked to enter plan mode itself. That tool is invisible to us
     // otherwise, so meta.permissionMode would stay 'default' and any query
-    // restart (worker restart, caveman toggle) would respawn out of plan mode with
+    // restart (worker restart, compression toggle) would respawn out of plan mode with
     // edits no longer gated. Mirror it, the inverse of the approval-side mirroring
     // in resolvePermission.
     if (toolName === 'EnterPlanMode' && meta && meta.permissionMode !== 'plan') {

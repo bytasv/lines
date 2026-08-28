@@ -88,10 +88,9 @@ const CAN_SELF_INSTALL = false;
 
 /**
  * A GUI-launched macOS app inherits a minimal PATH — no Homebrew, often no
- * `git`, no `rg`, no user-installed node. The agent shells out to all of them
- * (and `caveman.ts` git-clones a plugin), so resolve the login shell's PATH once
- * and hand it to the children. Without this the app works from a terminal and
- * mysteriously fails from the dock.
+ * `git`, no `rg`, no user-installed node. The agent shells out to all of them, so
+ * resolve the login shell's PATH once and hand it to the children. Without this
+ * the app works from a terminal and mysteriously fails from the dock.
  */
 function loginShellPath(): string {
   if (process.platform === 'win32') return process.env.PATH ?? '';

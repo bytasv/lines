@@ -111,7 +111,7 @@ function harness(opts: { mode?: PermissionMode; events?: TranscriptEvent[] } = {
         cwd,
         model: 'claude-opus-5',
         permissionMode: opts.mode ?? 'default',
-        caveman: { enabled: false, level: 'full' },
+        compressResponses: false,
         status: 'running',
         createdAt: 1,
       } as SessionMeta,

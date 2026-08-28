@@ -22,7 +22,7 @@ import {
   IconX,
   IconZoomIn,
 } from '@tabler/icons-react';
-import type { CavemanLevel, PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
+import type { PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
 import { isSessionInterruptible, rootsForCwd } from '@lines/shared';
 import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
@@ -389,37 +389,25 @@ export function Composer({ session }: { session: SessionMeta }) {
             onChange={(v) => v && send({ type: 'setModel', sessionId: session.id, model: v })}
             allowDeselect={false}
           />
-          <Tooltip label="Caveman mode — compressed replies, fewer tokens">
+          <Tooltip
+            label="Claude replies in a terse, compressed register — articles, filler and pleasantries dropped, technical detail kept — which cuts output tokens. Code, commits and security warnings stay in normal prose. Ruleset adapted from the MIT caveman project."
+            withArrow
+            multiline
+            w={280}
+          >
             <Switch
-              label="🦴"
+              label="Compress"
               disabled={!canSetMode}
-              checked={session.caveman.enabled}
+              checked={session.compressResponses}
               onChange={(e) =>
                 send({
-                  type: 'setCaveman',
+                  type: 'setCompressResponses',
                   sessionId: session.id,
-                  caveman: { ...session.caveman, enabled: e.currentTarget.checked },
+                  compressResponses: e.currentTarget.checked,
                 })
               }
             />
           </Tooltip>
-          {session.caveman.enabled && (
-            <Select
-              w={80}
-              size="xs"
-              data={['lite', 'full', 'ultra']}
-              value={session.caveman.level}
-              onChange={(v) =>
-                v &&
-                send({
-                  type: 'setCaveman',
-                  sessionId: session.id,
-                  caveman: { ...session.caveman, level: v as CavemanLevel },
-                })
-              }
-              allowDeselect={false}
-            />
-          )}
         </Group>
         <Group gap="xs">
           <ContextWindowIndicator session={session} />

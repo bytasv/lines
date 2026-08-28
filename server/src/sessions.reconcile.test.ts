@@ -22,7 +22,7 @@ const meta = (status: SessionStatus, extra: Partial<SessionMeta> = {}): SessionM
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    caveman: { enabled: false, level: 'full' },
+    compressResponses: false,
     status,
     createdAt: 1,
     ...extra,
@@ -336,10 +336,41 @@ test('continueTurn expires ordinary cards but leaves an always-ask one open', ()
   assert.deepEqual(expired.map((c) => c.requestId), ['b1']);
 });
 
-test('a session meta with no caveman field resumes without throwing', () => {
-  const h = harness('running', { caveman: undefined });
-  assert.doesNotThrow(() => h.sessions.reconcileWithWorker([]));
-  assert.deepEqual(h.pushed, ['s1']);
+/**
+ * A meta from before the rename: `caveman: { enabled, level }` and no
+ * `compressResponses`. Reaches the manager both from sessions.json and, since
+ * storage keeps the whole blob, from sync.
+ */
+const legacy = (caveman?: { enabled?: boolean; level?: string }, extra: Record<string, unknown> = {}) =>
+  ({
+    ...meta('idle'),
+    compressResponses: undefined,
+    ...(caveman ? { caveman } : {}),
+    ...extra,
+  }) as unknown as SessionMeta;
+
+test('a legacy caveman meta keeps its setting under the new name', () => {
+  const on = managerOver([legacy({ enabled: true, level: 'full' })]);
+  assert.equal(on.get('s1').compressResponses, true);
+
+  const off = managerOver([legacy({ enabled: false, level: 'full' })]);
+  assert.equal(off.get('s1').compressResponses, false);
+});
+
+test('a meta with neither field resumes uncompressed rather than throwing', () => {
+  const m = managerOver([legacy(undefined, { status: 'running' })]);
+  assert.equal(m.get('s1').compressResponses, false);
+  assert.doesNotThrow(() => m.sessions.reconcileWithWorker([]));
+  assert.deepEqual(m.pushed, ['s1']);
+});
+
+test('a legacy meta adopted from storage is migrated too', () => {
+  const m = managerOver([meta('idle')]);
+  m.sessions.adoptSynced(legacy({ enabled: true }, { id: 's2', name: 's2', updatedAt: 2 }));
+  assert.equal(m.get('s2').compressResponses, true);
+
+  m.sessions.adoptSynced(legacy(undefined, { id: 's3', name: 's3', updatedAt: 2 }));
+  assert.equal(m.get('s3').compressResponses, false);
 });
 
 test('one session failing to resume does not stop the others', async () => {

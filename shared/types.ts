@@ -164,8 +164,6 @@ export function resultErrorText(msg: { result?: unknown; errors?: unknown }): st
   return '';
 }
 
-export type CavemanLevel = 'lite' | 'full' | 'ultra';
-
 /** How an attachment is presented to the model. */
 export type AttachmentKind = 'image' | 'document' | 'text';
 
@@ -259,11 +257,6 @@ export interface QueuedPrompt {
    * attributed to the guest — so the rewrite has to be visible, not silent.
    */
   editedBy?: Actor;
-}
-
-export interface CavemanConfig {
-  enabled: boolean;
-  level: CavemanLevel;
 }
 
 /** The runnable/editable fields of a step. */
@@ -615,13 +608,17 @@ export type ModelSpendMap = Record<string, ModelSpend>;
  */
 export type SessionErrorKind = 'auth' | 'filtered' | 'context' | 'invalid' | 'overloaded';
 
+/** What a new session gets when there is no earlier session to inherit from. */
+export const DEFAULT_COMPRESS_RESPONSES = true;
+
 export interface SessionMeta {
   id: string;
   name: string;
   cwd: string;
   model: string;
   permissionMode: PermissionMode;
-  caveman: CavemanConfig;
+  /** Append the compression ruleset to this session's system prompt. */
+  compressResponses: boolean;
   status: SessionStatus;
   createdAt: number;
   /** True until the name is either auto-generated from the first prompt or renamed by the user. */
@@ -703,6 +700,15 @@ export interface SessionMeta {
   diffBaselines?: { repo: string; ref: string; untracked: string[] }[];
   /** ms epoch the baselines above were captured. */
   diffBaselineAt?: number;
+}
+
+/**
+ * A meta written before `compressResponses` existed. Both `sessions.json` and the
+ * storage server's `Session.data` blob hold whole `SessionMeta`s, so the old
+ * `caveman` object still arrives on load and on sync.
+ */
+export interface LegacySessionMeta extends SessionMeta {
+  caveman?: { enabled?: boolean };
 }
 
 export interface ModelOption {
@@ -1345,9 +1351,9 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   permissionResponse: { needs: 'session', cap: 'approvePermissions' },
   setModel: { needs: 'session', cap: 'setModel' },
   // No preset grants either of these: permission mode is the guard around
-  // everything else, and caveman rewrites the system prompt.
+  // everything else, and compression rewrites the system prompt.
   setPermissionMode: { needs: 'session', cap: 'setPermissionMode' },
-  setCaveman: { needs: 'session', cap: 'setPermissionMode' },
+  setCompressResponses: { needs: 'session', cap: 'setPermissionMode' },
 
   // --- watching a session. `cap: null` = any grant, including View only.
   loadTranscript: { needs: 'session', cap: null },
@@ -1476,7 +1482,7 @@ export type ClientMessage =
       cwd: string;
       model: string;
       permissionMode: PermissionMode;
-      caveman: CavemanConfig;
+      compressResponses: boolean;
       workflowId?: string;
       /**
        * Opt-in: cut a fresh worktree+branch off `cwd`'s repo and run the session
@@ -1520,7 +1526,7 @@ export type ClientMessage =
   | { type: 'completeSession'; sessionId: string }
   | { type: 'setModel'; sessionId: string; model: string }
   | { type: 'setPermissionMode'; sessionId: string; mode: PermissionMode }
-  | { type: 'setCaveman'; sessionId: string; caveman: CavemanConfig }
+  | { type: 'setCompressResponses'; sessionId: string; compressResponses: boolean }
   | {
       type: 'permissionResponse';
       sessionId: string;
@@ -1571,7 +1577,7 @@ export type ClientMessage =
       cwd: string;
       model: string;
       permissionMode: PermissionMode;
-      caveman: CavemanConfig;
+      compressResponses: boolean;
       /** Bundle runs only — the name of the workflow that gets created. */
       bundleName?: string;
       /** Bundle runs only: false parks for review between recipes. */

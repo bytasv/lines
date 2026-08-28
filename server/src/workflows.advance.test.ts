@@ -37,7 +37,7 @@ const meta = (workflow: WorkflowState): SessionMeta =>
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    caveman: { enabled: false, level: 'full' },
+    compressResponses: false,
     status: 'waiting-approval',
     createdAt: 1,
     workflow,

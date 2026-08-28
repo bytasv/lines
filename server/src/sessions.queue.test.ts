@@ -38,7 +38,7 @@ const meta = (over: Partial<SessionMeta> = {}): SessionMeta =>
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    caveman: { enabled: false, level: 'full' },
+    compressResponses: false,
     // Busy, so userPrompt takes the queue branch instead of starting a real turn.
     status: 'running',
     createdAt: 1,

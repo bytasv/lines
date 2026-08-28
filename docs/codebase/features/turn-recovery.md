@@ -102,6 +102,9 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   `turnFailureRetryHint`, the four `TURN_FAILURE_PATTERNS` groups)
 - `server/src/autoGuard.ts` (`isSelfWorkerSource` — always-ask on edits to the worker's own
   source)
+- `server/src/caveman.ts` (`COMPRESS_RESPONSES_PROMPT` — vendored response-compression
+  ruleset, appended to `systemPrompt.append` by `buildQueryOptions` when
+  `SessionMeta.compressResponses` is on; a plain constant, no I/O)
 - `shared/types.ts` (`SessionMeta.interruptedAt`, `UserUiSettings.autoContinueInterrupted`,
   `WorkerStatus`, `WorkflowState.stepFailure`, `WorkflowMarkerData.failed`,
   `SessionErrorKind`, `SessionMeta.errorKind`, `resultErrorText`, `TurnFailureKind`)
@@ -468,10 +471,16 @@ message type, no new modal, no new client state, no DB migration.
 
 ## Tests
 
+- `server/src/caveman.test.ts` — the ruleset carries its safety carve-outs (security
+  warnings, irreversible actions, multi-step ambiguity, clarify-on-request), the
+  code/commits/PRs-normal boundary, and the persistence clause, so a future trim can't
+  silently drop any of them.
 - `server/src/sessions.reconcile.test.ts` — promote/demote/old-worker matrix, event-based
   healing, stop-ordering, `withQueuedPushes`, the auto-continue cases (fresh flag resumes,
   absent setting resumes, explicit `false` does not, stale flag does not, workflow source
-  preserved, a meta with no `caveman` resumes, one failing session doesn't stop the others,
+  preserved, a legacy `caveman` meta migrates to `compressResponses` (on load and via
+  `adoptSynced`) and a meta with neither field resumes uncompressed rather than throwing,
+  one failing session doesn't stop the others,
   `result`/archive clear the flag, an unresolved `ExitPlanMode` card blocks auto-continue and
   is not expired by `continueTurn`, an ordinary tool's card still expires), the worker-lost
   case (reconciled with an empty live list, `autoContinue: false`, never auto-resumed), the
@@ -529,7 +538,9 @@ message type, no new modal, no new client state, no DB migration.
   back to ambient credentials; a stale token is refreshed before the query spawns; a query the
   bridge cannot vouch for (no `queryTokens` entry, simulating a bridge restart) is recycled
   before its next push; a query known to hold the current token is not recycled (no-churn
-  case); a rotated token recycles the query it no longer matches.
+  case); a rotated token recycles the query it no longer matches; `compressResponses: true`
+  puts `COMPRESS_RESPONSES_PROMPT` in the spawned query's `systemPrompt.append`, and `false`
+  sends neither the ruleset nor a `plugins` key.
 - The settings field-merge in `userContext.ts` is uncovered — `buildUserContext` wires sync,
   stores and a worker together with no seam. Verified by hand.
 
@@ -643,6 +654,12 @@ message type, no new modal, no new client state, no DB migration.
   `#state` falls back to the newest in-flight login.
 - `accessToken: null` in `buildQueryOptions` is reachable only when no `AuthManager` is wired at
   all (tests / embedding), not for any real signed-in user.
+- `SessionMeta.compressResponses` gates `COMPRESS_RESPONSES_PROMPT` directly in
+  `buildQueryOptions`: on means the ruleset is in `systemPrompt.append`, off means neither it
+  nor a `plugins` key is present. No runtime git clone, no machine-global flag file, no
+  per-machine default that can silently disagree with the toggle — a legacy
+  `caveman: { enabled, level }` meta (pre-rename) is read once via `adoptLegacyCompress` on
+  load and on `adoptSynced`, and a meta with neither field resumes uncompressed.
 - A content-filter, context-overflow, invalid-request or overloaded failure never implies an
   automatic retry, backoff, or step advance — same rule as every other failure in this feature.
   The banner only ever names an action for the user to take by hand.

@@ -86,11 +86,11 @@ describe('MESSAGE_AUTHZ', () => {
     }
   });
 
-  test('no preset can change the permission mode or caveman settings', () => {
+  test('no preset can change the permission mode or compression settings', () => {
     // These are the guard around every other capability, so they are the one pair
     // a Collaborator still cannot touch.
     for (const preset of ['view', 'prompt', 'collaborator'] as const) {
-      for (const type of ['setPermissionMode', 'setCaveman'] as const) {
+      for (const type of ['setPermissionMode', 'setCompressResponses'] as const) {
         assert.equal(authorizeMessage(msg(type), guest(preset)).ok, false, `${preset} / ${type}`);
       }
     }

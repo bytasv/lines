@@ -242,7 +242,7 @@ test('update_workflow names the sessions a change lands under', async () => {
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    caveman: { enabled: false, level: 'full' },
+    compressResponses: false,
   });
   h.workflows.attach(meta.id, saved.id);
 

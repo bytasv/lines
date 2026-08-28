@@ -39,7 +39,12 @@ import type { CSSProperties } from 'react';
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
-import { findWorktree, projectPaths, projectRoots } from '@lines/shared';
+import {
+  DEFAULT_COMPRESS_RESPONSES,
+  findWorktree,
+  projectPaths,
+  projectRoots,
+} from '@lines/shared';
 import { formatDuration, isWorkflowFinished, sessionRowMeta } from '../lib/format';
 import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
 import { useIdentityResolver } from '../lib/identity';
@@ -550,7 +555,7 @@ export function Sidebar({
     .filter((s) => s.archived)
     .sort((a, b) => (b.archivedAt ?? b.createdAt) - (a.archivedAt ?? a.createdAt));
 
-  // Model/mode come from the settings modal (header gear); caveman still
+  // Model/mode come from the settings modal (header gear); compression still
   // inherits from the project's latest session.
   const newSessionDefaults = useStore((s) => s.newSessionDefaults);
   const markSessionCreatePending = useStore((s) => s.markSessionCreatePending);
@@ -577,7 +582,7 @@ export function Sidebar({
       cwd: activeProject,
       model: newSessionDefaults.model,
       permissionMode: newSessionDefaults.permissionMode,
-      caveman: last?.caveman ?? { enabled: true, level: 'full' },
+      compressResponses: last?.compressResponses ?? DEFAULT_COMPRESS_RESPONSES,
       workflowId,
       // Empty object = let the server name the branch and the path.
       ...(worktreeMode ? { worktree: {} } : {}),
