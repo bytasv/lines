@@ -25,7 +25,7 @@ shows the model name plus a one-line description to help users pick between mode
 
 ## Important symbols
 
-- `ModelOption` — `{ id, label, description? }`
+- `ModelOption` — `{ id, label, description?, contextWindow? }`
 - `modelSelectData()` — maps `ModelOption[]` to Mantine `Select` data with descriptions; given `ensureId`, appends a disabled "No longer available" entry if that id isn't in `models`
 - `renderModelOption` — alias of `renderOptionWithDescription` (Mantine `renderOption` renderer: label + dimmed description), shared with the [permissions-and-plan-mode](permissions-and-plan-mode.md) dropdowns
 - `modelComboboxProps` — widens the dropdown popover for narrow inputs without widening the input itself; also reused by the permission-mode workflow Selects

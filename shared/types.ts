@@ -608,17 +608,12 @@ export type ModelSpendMap = Record<string, ModelSpend>;
  */
 export type SessionErrorKind = 'auth' | 'filtered' | 'context' | 'invalid' | 'overloaded';
 
-/** What a new session gets when there is no earlier session to inherit from. */
-export const DEFAULT_COMPRESS_RESPONSES = true;
-
 export interface SessionMeta {
   id: string;
   name: string;
   cwd: string;
   model: string;
   permissionMode: PermissionMode;
-  /** Append the compression ruleset to this session's system prompt. */
-  compressResponses: boolean;
   status: SessionStatus;
   createdAt: number;
   /** True until the name is either auto-generated from the first prompt or renamed by the user. */
@@ -700,15 +695,6 @@ export interface SessionMeta {
   diffBaselines?: { repo: string; ref: string; untracked: string[] }[];
   /** ms epoch the baselines above were captured. */
   diffBaselineAt?: number;
-}
-
-/**
- * A meta written before `compressResponses` existed. Both `sessions.json` and the
- * storage server's `Session.data` blob hold whole `SessionMeta`s, so the old
- * `caveman` object still arrives on load and on sync.
- */
-export interface LegacySessionMeta extends SessionMeta {
-  caveman?: { enabled?: boolean };
 }
 
 export interface ModelOption {
@@ -1348,12 +1334,14 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // Destructive to the session's context, so it sits with the other turn-level
   // controls rather than with reads.
   compactContext: { needs: 'session', cap: 'interrupt' },
+  // Destructive to the session's context *and* to its transcript, so it sits with
+  // compactContext and interrupt rather than with prompt. Deliberately not `prompt`
+  // (which editQueued uses): rewinding discards turns somebody else may have run.
+  rewindSession: { needs: 'session', cap: 'interrupt' },
   permissionResponse: { needs: 'session', cap: 'approvePermissions' },
   setModel: { needs: 'session', cap: 'setModel' },
-  // No preset grants either of these: permission mode is the guard around
-  // everything else, and compression rewrites the system prompt.
+  // No preset grants this: permission mode is the guard around everything else.
   setPermissionMode: { needs: 'session', cap: 'setPermissionMode' },
-  setCompressResponses: { needs: 'session', cap: 'setPermissionMode' },
 
   // --- watching a session. `cap: null` = any grant, including View only.
   loadTranscript: { needs: 'session', cap: null },
@@ -1482,7 +1470,6 @@ export type ClientMessage =
       cwd: string;
       model: string;
       permissionMode: PermissionMode;
-      compressResponses: boolean;
       workflowId?: string;
       /**
        * Opt-in: cut a fresh worktree+branch off `cwd`'s repo and run the session
@@ -1526,7 +1513,6 @@ export type ClientMessage =
   | { type: 'completeSession'; sessionId: string }
   | { type: 'setModel'; sessionId: string; model: string }
   | { type: 'setPermissionMode'; sessionId: string; mode: PermissionMode }
-  | { type: 'setCompressResponses'; sessionId: string; compressResponses: boolean }
   | {
       type: 'permissionResponse';
       sessionId: string;
@@ -1577,7 +1563,6 @@ export type ClientMessage =
       cwd: string;
       model: string;
       permissionMode: PermissionMode;
-      compressResponses: boolean;
       /** Bundle runs only — the name of the workflow that gets created. */
       bundleName?: string;
       /** Bundle runs only: false parks for review between recipes. */
@@ -1589,6 +1574,16 @@ export type ClientMessage =
   | { type: 'contextBreakdown'; sessionId: string }
   /** Compact this session's context now (manual compaction). */
   | { type: 'compactContext'; sessionId: string }
+  /**
+   * Rewind the session to the `kind: 'user'` transcript event at `seq`: everything
+   * from that event on is dropped and the CLI conversation is re-pointed at the
+   * truncated history.
+   *
+   * `edit` decides what happens to the rewound prompt itself. True answers with
+   * `rewound` so the composer can prefill it for editing and re-sending; false
+   * (the default) discards it with the rest of the tail. Neither ever re-submits.
+   */
+  | { type: 'rewindSession'; sessionId: string; seq: number; edit?: boolean }
   | { type: 'loadTranscript'; sessionId: string }
   /**
    * "I am looking at this session" / "my composer has focus". Debounced hard on
@@ -1732,6 +1727,11 @@ export interface UserUiSettings {
    * unattended turns.
    */
   autoContinueInterrupted?: boolean;
+  /** Append the response-compression ruleset to every session's system prompt.
+   *  On unless explicitly `false` — absent means enabled. Global: sessions no
+   *  longer carry their own toggle, so changing it applies the next time each
+   *  session's worker starts a fresh query (not to one already running). */
+  compressResponses?: boolean;
   alertsEnabled?: boolean;
   alertSound?: string;
   /**
@@ -2052,6 +2052,15 @@ export type ServerMessage =
   | { type: 'contextBreakdown'; sessionId: string; breakdown: ContextBreakdown | null }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }
   | { type: 'transcript'; sessionId: string; events: TranscriptEvent[] }
+  /**
+   * Answer to a `rewindSession` that asked to edit, on the asking link only: the
+   * rewound prompt, for the composer to prefill. The matching
+   * `transcriptTruncated` goes to everyone, so a second tab drops the same tail
+   * without also being handed the text.
+   */
+  | { type: 'rewound'; sessionId: string; seq: number; prompt: RewindPrompt }
+  /** Everything at or after `seq` is gone from this session's transcript. */
+  | { type: 'transcriptTruncated'; sessionId: string; seq: number }
   | { type: 'folderPicked'; path: string | null }
   | { type: 'error'; sessionId?: string; message: string }
   /** Reply to one fileRequest. `status` mirrors the HTTP codes the client already
@@ -2083,9 +2092,9 @@ export function subagentParentId(msg: unknown): string | null {
 }
 
 export const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'claude-opus-5', label: 'Opus 5', description: 'Powerful model for complex work', contextWindow: 200_000 },
-  { id: 'claude-fable-5', label: 'Fable 5', description: 'Most intelligent, Mythos-class tier', contextWindow: 200_000 },
-  { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability', contextWindow: 200_000 },
+  { id: 'claude-opus-5', label: 'Opus 5', description: 'Powerful model for complex work', contextWindow: 1_000_000 },
+  { id: 'claude-fable-5-1', label: 'Fable 5.1', description: 'For demanding reasoning and long-horizon agentic work', contextWindow: 1_000_000 },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability', contextWindow: 1_000_000 },
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, for lightweight tasks', contextWindow: 200_000 },
 ];
 
@@ -2098,6 +2107,7 @@ export const DEFAULT_MODEL = 'claude-opus-5';
  */
 export const LEGACY_MODEL_MAP: Record<string, string> = {
   'claude-opus-4-8': 'claude-opus-5',
+  'claude-fable-5': 'claude-fable-5-1',
 };
 
 /** True when `id` is one of the currently offered models. */
@@ -2240,6 +2250,59 @@ export function canCompactContext(
   meta: Parameters<typeof contextCompactBlock>[0],
 ): boolean {
   return contextCompactBlock(meta) === null;
+}
+
+/**
+ * The prompt a rewind hands back for the composer to prefill. Attachments are
+ * rehydrated from disk exactly as a retry rehydrates them.
+ *
+ * `mentions` is display metadata carried for completeness — `text` is already
+ * the expanded form that was sent, so the composer restores text and
+ * attachments only and cannot rebuild the inline pill ranges from it.
+ */
+export interface RewindPrompt {
+  text: string;
+  mentions?: PromptMention[];
+  attachments: PromptAttachment[];
+}
+
+export type RewindBlockCode = 'turn-running' | 'no-session' | 'no-message' | 'fork-failed';
+
+/** Why a rewind can't run — `reason` goes straight into a tooltip or an error toast. */
+export interface RewindBlockInfo {
+  code: RewindBlockCode;
+  reason: string;
+}
+
+/**
+ * The single predicate behind the rewind gate, in the same shape as
+ * {@link contextCompactBlock}: the server guard, the transcript affordance's
+ * `disabled` and its tooltip all read this. Returns null when a rewind is allowed.
+ *
+ * The two block codes it cannot decide from the meta alone — `no-message` (the
+ * seq is not a `'user'` event) and `fork-failed` — are raised by the server.
+ *
+ * A started workflow is deliberately NOT a blocker: changing your mind halfway
+ * through a workflow is a main reason to rewind. The engine rolls its own step
+ * bookkeeping back to whatever the truncated transcript still shows
+ * (WorkflowEngine.rollbackToTranscript) and parks the session on that step.
+ */
+export function rewindBlock(
+  meta: Pick<SessionMeta, 'status' | 'claudeSessionId' | 'workflow'>,
+): RewindBlockInfo | null {
+  // Only a *live* turn, exactly as contextCompactBlock decides it. Deliberately
+  // not isSessionActive, which also folds in 'waiting-approval': a session parked
+  // for approval has already settled its turn, and reporting it as "finish the
+  // current turn first" made the affordance look permanently broken.
+  if (meta.status === 'running' || meta.status === 'waiting-permission') {
+    return { code: 'turn-running', reason: 'Finish the current turn first.' };
+  }
+  // worker.push creates the query lazily, so there is no CLI conversation to
+  // re-point at a truncated history until a turn has actually run.
+  if (!meta.claudeSessionId) {
+    return { code: 'no-session', reason: "Send a message first — there's nothing to rewind yet." };
+  }
+  return null;
 }
 
 /**

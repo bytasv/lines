@@ -112,6 +112,7 @@ test('the model is only checked under strictModel', () => {
   assert.deepEqual(messages(validateStepContent(content({ model: '' }), { strictModel: true })), ['Required']);
   // A legacy alias still resolves, so it is not an error.
   assert.deepEqual(validateStepContent(content({ model: 'claude-opus-4-8' }), { strictModel: true }), []);
+  assert.deepEqual(validateStepContent(content({ model: 'claude-fable-5' }), { strictModel: true }), []);
 });
 
 /**

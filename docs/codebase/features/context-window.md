@@ -142,8 +142,9 @@ ring/warning from `effectiveContextTokens` on every `SessionMeta` update.
 
 - `@anthropic-ai/claude-agent-sdk`'s `Query.getContextUsage()` control request (worker-only;
   requires a live query for the session).
-- `ModelOption.contextWindow` (hardcoded 200k on `DEFAULT_MODELS`) as the fallback-path
-  denominator only — the SDK breakdown's own `maxTokens` is used whenever it's available.
+- `ModelOption.contextWindow` (per-model on `DEFAULT_MODELS` — 1M for current-generation models,
+  200K for Haiku 4.5) as the fallback-path denominator only — the SDK breakdown's own `maxTokens`
+  is used whenever it's available.
 - The SDK's undocumented `/compact`-via-prompt-text dispatch — can silently change or disappear
   in a future `@anthropic-ai/claude-agent-sdk` bump.
 - `SDKStatusMessage` (`system`/`status`, carrying `compact_result`/`compact_error`) — the
