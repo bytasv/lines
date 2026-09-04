@@ -33,6 +33,9 @@ export function WorkflowList({
   onSelect: (w: WorkflowDef) => void;
   onNew: (preset: WorkflowPreset | null) => void;
 }) {
+  // An id in both lists is the user's own (a stale shared snapshot, or their own
+  // published row pulled back under a second identity) — render it once, above.
+  const foreign = sharedWorkflows.filter((s) => !workflows.some((w) => w.id === s.id));
   return (
     <Stack gap="xs" w={240} style={{ flexShrink: 0 }} h="100%">
       <ScrollArea style={{ flex: 1 }} type="hover">
@@ -53,12 +56,12 @@ export function WorkflowList({
               </Group>
             </Button>
           ))}
-          {sharedWorkflows.length > 0 && (
+          {foreign.length > 0 && (
             <>
               <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="xs">
                 Shared by others
               </Text>
-              {sharedWorkflows.map((w) => (
+              {foreign.map((w) => (
                 <Button
                   key={w.id}
                   variant={w.id === selectedId ? 'light' : 'subtle'}

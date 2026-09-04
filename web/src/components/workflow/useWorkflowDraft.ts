@@ -90,6 +90,12 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // The wire JSON of a save that has been sent but not yet seen coming back in a
+  // `workflows` broadcast. The draft stays dirty until then, so a write the
+  // bridge refused (a foreign id) never renders as "Saved".
+  const [savePending, setSavePending] = useState<string | null>(null);
+  // Step ids published from this draft whose stored StepDef hasn't arrived yet.
+  const pendingPublish = useRef<Set<string>>(new Set());
 
   // Exact immutable versions available for resolving a ref, keyed `${ownerId}/${id}/${version}`.
   // Fetched histories are folded in so a re-pin to an older version resolves before any round-trip.
@@ -138,6 +144,10 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
       setBaseline(d ? JSON.stringify(toWire(d)) : null);
       setCollapsed(new Set(d?.steps.map((s) => s._uid) ?? []));
       setSubmitAttempted(false);
+      // Switching drafts abandons any unconfirmed save: a broadcast for the old
+      // one must not set a baseline on the new draft.
+      setSavePending(null);
+      pendingPublish.current.clear();
     },
     [toDraft],
   );
@@ -158,7 +168,11 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened, workflows.length, sharedWorkflows.length]);
 
-  const readOnly = !!draft?.id && sharedWorkflows.some((w) => w.id === draft.id);
+  // Own list wins, mirroring WorkflowEngine.resolve: the same id can sit in both
+  // lists (a stale shared snapshot, or a second identity's published copy), and
+  // treating that as foreign hid the Save button on the user's own workflow.
+  const readOnly =
+    !!draft?.id && !workflows.some((w) => w.id === draft.id) && sharedWorkflows.some((w) => w.id === draft.id);
 
   const dirty = useMemo(
     () => (draft && baseline ? JSON.stringify(toWire(draft)) !== baseline : false),
@@ -223,10 +237,20 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
   /** Is this ref owned by the current user (so it can be edited/re-published)? */
   const ownsRef = (s: DraftStep) => !!s.ref && steps.some((st) => st.id === s.ref!.stepId);
 
+  /**
+   * The published head a ref tracks. The `${ownerId}/${stepId}` key is the exact
+   * answer; the fallback covers a ref whose `ownerId` drifted from the one the
+   * bridge stamps steps with — without it such a ref reads as owned yet is never
+   * offered its new version. Re-pinning writes the head's owner back (below), so
+   * the next save heals the ref.
+   */
+  const headFor = (r: DraftRef): StepDef | undefined =>
+    headMap.get(`${r.ownerId}/${r.stepId}`) ?? steps.find((st) => st.id === r.stepId);
+
   /** Head version available for a ref, if newer than the pinned one. */
   const updateFor = (s: DraftStep): StepDef | undefined => {
     if (!s.ref) return undefined;
-    const head = headMap.get(`${s.ref.ownerId}/${s.ref.stepId}`);
+    const head = headFor(s.ref);
     return head && head.version > s.ref.version ? head : undefined;
   };
 
@@ -238,9 +262,15 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
         ...d,
         steps: d.steps.map((s) => {
           if (s._uid !== u || !s.ref) return s;
-          const head = headMap.get(`${s.ref.ownerId}/${s.ref.stepId}`);
+          const head = headFor(s.ref);
           if (!head) return s;
-          return { ...contentOf(head), _uid: s._uid, ref: { ...s.ref, ownerName: head.ownerName, version: head.version } };
+          return {
+            ...contentOf(head),
+            _uid: s._uid,
+            // ownerId too, not just the version: a re-pin is where a drifted ref
+            // gets its owner corrected to the one the head is actually stored under.
+            ref: { ...s.ref, ownerId: head.ownerId, ownerName: head.ownerName, version: head.version },
+          };
         }),
       };
     });
@@ -253,9 +283,13 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
         ...d,
         steps: d.steps.map((s) => {
           if (!s.ref) return s;
-          const head = headMap.get(`${s.ref.ownerId}/${s.ref.stepId}`);
+          const head = headFor(s.ref);
           if (!head || head.version <= s.ref.version) return s;
-          return { ...contentOf(head), _uid: s._uid, ref: { ...s.ref, ownerName: head.ownerName, version: head.version } };
+          return {
+            ...contentOf(head),
+            _uid: s._uid,
+            ref: { ...s.ref, ownerId: head.ownerId, ownerName: head.ownerName, version: head.version },
+          };
         }),
       };
     });
@@ -294,7 +328,12 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
                 ? {
                     ...contentOf(def),
                     _uid: s._uid,
-                    ref: { ...s.ref, ownerName: def.ownerName ?? s.ref.ownerName, version: def.version },
+                    ref: {
+                      ...s.ref,
+                      ownerId: def.ownerId,
+                      ownerName: def.ownerName ?? s.ref.ownerName,
+                      version: def.version,
+                    },
                   }
                 : s,
             ),
@@ -310,6 +349,10 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
     const prevHead = steps.find((s) => s.id === stepId);
     const version = prevHead ? prevHead.version + 1 : 1;
     send({ type: 'saveStep', step: contentOf(step), stepId, published: prevHead?.published ?? false, ownerName: getOwnerName() ?? undefined });
+    // Optimistic ref so the card flips to "pinned" immediately; the owner and
+    // version the bridge actually stored are adopted from the next `steps`
+    // broadcast (see below) rather than guessed from here.
+    pendingPublish.current.add(stepId);
     setDraft((d) =>
       d
         ? {
@@ -323,6 +366,39 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
         : d,
     );
   };
+
+  // Adopt the stored StepDef for a just-published step: its `ownerId` is the
+  // bridge's, which is the only one a later resolve/update lookup will match.
+  useEffect(() => {
+    if (pendingPublish.current.size === 0) return;
+    const landed = [...pendingPublish.current]
+      .map((id) => steps.find((s) => s.id === id))
+      .filter((s): s is StepDef => !!s);
+    if (landed.length === 0) return;
+    for (const head of landed) pendingPublish.current.delete(head.id);
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            steps: d.steps.map((s) => {
+              const head = s.ref && landed.find((h) => h.id === s.ref!.stepId);
+              return head && s.ref
+                ? {
+                    ...s,
+                    ref: {
+                      ...s.ref,
+                      ownerId: head.ownerId,
+                      ownerName: head.ownerName ?? s.ref.ownerName,
+                      version: head.version,
+                    },
+                  }
+                : s;
+            }),
+          }
+        : d,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [steps]);
 
   /** Detach an owned ref into an editable inline step; re-publishing bumps its version. */
   const editStep = (u: string) =>
@@ -396,24 +472,42 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
     setSubmitAttempted(true);
     const v = validate(draft, resolveRef);
     if (!v.ok) return false;
-    send({ type: 'saveWorkflow', workflow: toWire(draft), ownerName: getOwnerName() ?? undefined });
-    setBaseline(JSON.stringify(toWire(draft)));
+    const wire = toWire(draft);
+    send({ type: 'saveWorkflow', workflow: wire, ownerName: getOwnerName() ?? undefined });
+    // Baseline is NOT advanced here: the bridge can refuse the write (and says so
+    // via `actionError`), and an optimistic baseline reported that as saved.
+    setSavePending(JSON.stringify(wire));
     setSubmitAttempted(false);
     return true;
   };
 
+  // A save is confirmed by the broadcast that carries it back, matched on
+  // content — the bridge restamps `updatedAt`/`ownerId`, so the blob is never
+  // byte-identical.
+  useEffect(() => {
+    if (!savePending || !draft?.id) return;
+    const attempt = JSON.parse(savePending) as WorkflowDef;
+    const match = workflows.find((w) => w.id === draft.id);
+    if (!match || match.name !== attempt.name) return;
+    if (stepsKey(match.steps) !== stepsKey(attempt.steps)) return;
+    setBaseline(savePending);
+    setSavePending(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflows, savePending, draft?.id]);
+
   // Reconcile a just-saved NEW workflow (id:'') with the server-assigned id.
   useEffect(() => {
-    if (!draft || selectedId !== null || draft.id || baseline === null) return;
-    if (JSON.stringify(toWire(draft)) !== baseline) return;
-    const draftSteps = JSON.stringify(toWire(draft).steps);
+    if (!draft || selectedId !== null || draft.id || savePending === null) return;
+    if (JSON.stringify(toWire(draft)) !== savePending) return;
+    const draftSteps = stepsKey(toWire(draft).steps);
     const match = workflows
-      .filter((w) => w.name === draft.name && JSON.stringify(w.steps) === draftSteps)
+      .filter((w) => w.name === draft.name && stepsKey(w.steps) === draftSteps)
       .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0];
     if (match) {
       setSelectedId(match.id);
       setDraft((d) => (d ? { ...d, id: match.id, updatedAt: match.updatedAt } : d));
       setBaseline(JSON.stringify(toWire({ ...draft, id: match.id, updatedAt: match.updatedAt })));
+      setSavePending(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflows]);
@@ -488,6 +582,18 @@ type PendingAction =
   | { kind: 'select'; target: WorkflowDef }
   | { kind: 'new'; preset: WorkflowPreset | null }
   | null;
+
+/**
+ * Content key for matching a saved workflow against the attempt that produced
+ * it. Ref owner stamps are excluded: the bridge is the authority on `ownerId`
+ * (it heals a drifted one on save), so a corrected owner is a confirmation of
+ * this save, not a different workflow.
+ */
+function stepsKey(steps: WorkflowStep[]): string {
+  return JSON.stringify(
+    steps.map((s) => (isStepRef(s) ? { kind: s.kind, stepId: s.stepId, version: s.version } : s)),
+  );
+}
 
 /** Serialize a draft to the wire shape: refs → StepRef, inline → StepContent. */
 function toWire(d: DraftWorkflow): WorkflowDef {

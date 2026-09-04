@@ -189,6 +189,12 @@ export function StepLibrary() {
   }, [steps.length]);
 
   const readOnly = !!draft && selected?.startsWith('shared:') === true;
+  // Own library wins: a step id that also came back in the shared pull is this
+  // user's own, and belongs in the owned section only.
+  const foreignSteps = useMemo(
+    () => sharedSteps.filter((s) => !steps.some((own) => own.id === s.id)),
+    [sharedSteps, steps],
+  );
   const dirty = useMemo(
     () => (draft && baseline ? snapshot(draft) !== baseline : false),
     [draft, baseline],
@@ -276,10 +282,10 @@ export function StepLibrary() {
               {steps.length === 0 && (
                 <Text size="xs" c="dimmed" py="sm" ta="center">No steps yet.</Text>
               )}
-              {sharedSteps.length > 0 && (
+              {foreignSteps.length > 0 && (
                 <>
                   <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="xs">Shared by others</Text>
-                  {sharedSteps.map((s) => (
+                  {foreignSteps.map((s) => (
                     <Button
                       key={`shared:${s.ownerId}/${s.id}`}
                       variant={selected === `shared:${s.ownerId}/${s.id}` ? 'light' : 'subtle'}

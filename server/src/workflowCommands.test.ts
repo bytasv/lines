@@ -8,7 +8,7 @@ import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
 import type { UserContext } from './userContext.ts';
-import { DEFAULT_WORKFLOW, WorkflowEngine } from './workflows.ts';
+import { DEFAULT_WORKFLOW, ForeignWorkflowError, WorkflowEngine } from './workflows.ts';
 import * as commands from './workflowCommands.ts';
 import type { StorageSyncClient } from './sync.ts';
 import type { WorkerClient } from './workerClient.ts';
@@ -145,11 +145,11 @@ test('an unknown reference reports not-found and lists what the user does own', 
 });
 
 /**
- * Regression for the silent no-op: `WorkflowEngine.save()` returns its input
- * unchanged for an id owned by a shared workflow, so a caller that skips
- * resolveWorkflowRef would report a successful save of nothing at all.
+ * resolveWorkflowRef is the good error message; the engine is the guard. Both
+ * legs are asserted here — a caller that skips the check gets a throw, never a
+ * successful-looking save of nothing.
  */
-test('a foreign workflow is refused before save() can silently no-op', () => {
+test('a foreign workflow is refused, by the check and by save() itself', () => {
   const h = harness();
   const foreign: WorkflowDef = {
     id: 'foreign-1',
@@ -166,11 +166,10 @@ test('a foreign workflow is refused before save() can silently no-op', () => {
     assert.equal(!result.ok && result.reason, 'foreign', ref);
   }
 
-  // And prove the thing being guarded against is real.
+  // And the engine refuses it outright rather than pretending to save it.
   const before = h.workflows.list().length;
-  const returned = h.workflows.save({ ...foreign, name: 'Hijacked' });
-  assert.equal(returned.name, 'Hijacked', 'save() hands the input straight back');
-  assert.equal(h.workflows.list().length, before, 'but stored nothing');
+  assert.throws(() => h.workflows.save({ ...foreign, name: 'Hijacked' }), ForeignWorkflowError);
+  assert.equal(h.workflows.list().length, before, 'stored nothing');
 });
 
 test('readWorkflowView resolves pinned refs and reports the ones it cannot', () => {
@@ -240,7 +239,6 @@ test('workflowInUse names the sessions currently running a workflow', () => {
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    compressResponses: false,
   });
   h.workflows.attach(meta.id, saved.id);
 

@@ -286,8 +286,10 @@ app.get('/workflows/shared', async (req, res) => {
     where: { published: true, NOT: { userId } },
     select: { data: true, userId: true },
   });
-  // Guarantee ownerId even for blobs saved before the column existed.
-  res.json(rows.map((r) => ({ ...(r.data as object), ownerId: (r.data as { ownerId?: string }).ownerId ?? r.userId })));
+  // The row's `user_id` is the authority on ownership, so it overrides whatever
+  // the blob claims: a stale (or forged) `ownerId` inside `data` is exactly what
+  // the bridge's own-beats-shared filter must not be fooled by.
+  res.json(rows.map((r) => ({ ...(r.data as object), ownerId: r.userId })));
 });
 
 /**
@@ -366,11 +368,13 @@ app.get('/steps/shared', async (req, res) => {
     SELECT count(*) AS count, max(updated_at) AS max FROM step_versions
     WHERE published AND user_id <> ${userId}`;
   if (servedFromEtag(req, res, tag)) return;
-  const rows = await prisma.$queryRaw<{ data: unknown }[]>`
-    SELECT DISTINCT ON (user_id, id) data FROM step_versions
+  const rows = await prisma.$queryRaw<{ data: unknown; userId: string }[]>`
+    SELECT DISTINCT ON (user_id, id) data, user_id AS "userId" FROM step_versions
     WHERE published AND user_id <> ${userId}
     ORDER BY user_id, id, version DESC`;
-  res.json(rows.map((r) => r.data));
+  // `ownerId` from the row's `user_id`, as /workflows/shared: the blob is not
+  // trusted to say who owns it.
+  res.json(rows.map((r) => ({ ...(r.data as object), ownerId: r.userId })));
 });
 
 app.put('/steps', async (req, res) => {

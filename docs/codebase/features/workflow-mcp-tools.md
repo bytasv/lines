@@ -50,6 +50,8 @@ permission-gated through the existing card, reads are not.
 - `resolveWorkflowRef(ctx, ref)` — id or unique case-insensitive name match among
   **owned** workflows only; returns `{ok:false, reason:'not-found'|'ambiguous'|
   'foreign', candidates}` instead of guessing
+- `ForeignWorkflowError` (`server/src/workflows.ts`) — thrown by
+  `WorkflowEngine.save()` for an id it classifies as foreign (see Business rules)
 - `isLinesMcpTool` / `isReadOnlyLinesTool` — read the manifest's `readOnly` flag,
   the single source of truth for which tools skip the permission card
 
@@ -110,10 +112,16 @@ permission-gated through the existing card, reads are not.
 - `update_workflow`'s `steps` argument replaces the whole list; there is no
   patch-by-index. Reading via `get_workflow` first is expected practice — the
   manifest's `instructions` field says so.
-- `WorkflowEngine.save()` silently returns its input unchanged for an id owned
-  by a shared (foreign) workflow — `resolveWorkflowRef` must, and does, catch
-  this **before** `saveWorkflow` runs, or the model would report a successful
-  save of nothing.
+- `WorkflowEngine.save()` throws `ForeignWorkflowError` for an id it classifies
+  as foreign — an id owned only by the shared map, never by the own map and
+  never stamped with this user's own id. `resolveWorkflowRef` should still run
+  **before** `saveWorkflow`, for the better, candidate-naming error message;
+  the throw is the guard of last resort, not the primary UX.
+- "Foreign" is own-beats-shared: an id present in *both* maps (a stale shared
+  snapshot of the user's own published row, or the same id republished under a
+  second identity of theirs) is writable. See
+  [workflow-step-versioning](workflow-step-versioning.md) for the full
+  ownership-classification rule this shares with the browser editor.
 - Every list/read tool caps its result at 100 rows (default 50) so an answer
   cannot blow out the model's context.
 - A bridge that goes away mid-tool-call answers after `MCP_TOOL_FALLBACK_MS`
@@ -160,3 +168,6 @@ permission-gated through the existing card, reads are not.
   message type" instinct where possible, but still bumped the version since an
   old worker silently running with no tools was judged worse than a loud
   mismatch.
+- [workflow-step-versioning](workflow-step-versioning.md) — the own-beats-shared
+  ownership classification and `StepRef.ownerId` drift-healing that
+  `WorkflowEngine.save()`/`ForeignWorkflowError` share with the browser editor.

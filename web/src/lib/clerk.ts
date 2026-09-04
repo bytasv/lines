@@ -24,8 +24,21 @@ let ownerId: string | null = null;
 export function setOwnerId(id: string | null): void {
   ownerId = id;
 }
+
+/**
+ * The owner id the bridge itself stamps onto everything it stores, learned from
+ * `hello`. Preferred over the Clerk id because it is the one that ends up in
+ * `StepDef.ownerId`: the bridge uses `ctx.userId`, which is the literal `local`
+ * with bridge auth off — and the browser's Clerk id is `''` when Clerk is
+ * disabled in the web build. Stamping refs with the browser's guess is what made
+ * a ref point at an owner no step was ever saved under.
+ */
+let bridgeOwnerId: string | null = null;
+export function setBridgeOwnerId(id: string | null): void {
+  bridgeOwnerId = id;
+}
 export function getOwnerId(): string | null {
-  return ownerId;
+  return bridgeOwnerId ?? ownerId;
 }
 
 /**

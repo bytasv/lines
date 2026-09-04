@@ -13,6 +13,7 @@ import type {
   PresenceViewer,
   PromptMention,
   RecipeDef,
+  RewindPrompt,
   ServerMessage,
   SessionMeta,
   ShareCaps,
@@ -67,6 +68,7 @@ import {
   requestNotifyPermission,
   setBadge,
 } from './lib/alerts';
+import { setBridgeOwnerId } from './lib/clerk';
 import { updateFavicon } from './lib/favicon';
 import { sessionRowMeta } from './lib/format';
 import type { MentionValue } from './lib/mentions';
@@ -78,6 +80,7 @@ const OPEN_FILES_KEY = 'lines.openFiles';
 const COMPACTION_LEVEL_KEY = 'lines.compactionLevel';
 const TURN_SUMMARIES_ENABLED_KEY = 'lines.turnSummariesEnabled';
 const AUTO_CONTINUE_KEY = 'lines.autoContinueInterrupted';
+const COMPRESS_RESPONSES_KEY = 'lines.compressResponses';
 const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
 const DRAFTS_KEY = 'lines.drafts';
 
@@ -122,6 +125,11 @@ function loadTurnSummariesEnabled(): boolean {
 /** On unless explicitly turned off, matching the bridge-side default. */
 function loadAutoContinueInterrupted(): boolean {
   return localStorage.getItem(AUTO_CONTINUE_KEY) !== 'false';
+}
+
+/** On unless explicitly turned off, matching the bridge-side default. */
+function loadCompressResponses(): boolean {
+  return localStorage.getItem(COMPRESS_RESPONSES_KEY) !== 'false';
 }
 
 function loadOpenFiles(): Record<string, OpenFilesState> {
@@ -568,6 +576,9 @@ interface UiState {
   transcriptLoaded: Record<string, boolean>;
   /** ms epoch of the last event seen per session (not persisted) — wedged-agent detection. */
   lastEventAt: Record<string, number>;
+  /** Prompt a rewind handed back, waiting for that session's composer to pick it
+   *  up (see takeComposerPrefill). Only ever set on the tab that asked. */
+  composerPrefill: Record<string, RewindPrompt>;
   /** Live `/context` breakdown per session from the last hover fetch. Ephemeral:
    *  the detail is only meaningful while the session has a live query. */
   contextBreakdowns: Record<string, { breakdown: ContextBreakdown | null; at: number; loading: boolean }>;
@@ -636,6 +647,8 @@ interface UiState {
   turnSummariesEnabled: boolean;
   /** Let the bridge resume a turn that died with the app, instead of waiting for the Continue banner. */
   autoContinueInterrupted: boolean;
+  /** Append the response-compression ruleset to every session's system prompt. Global. */
+  compressResponses: boolean;
   /** Open editor tabs per project path; persisted in localStorage. */
   openFiles: Record<string, OpenFilesState>;
 
@@ -665,6 +678,9 @@ interface UiState {
   selectSession: (id: string | null) => void;
   /** Fetch the live `/context` breakdown for a session (hover-triggered). */
   requestContextBreakdown: (sessionId: string) => void;
+  /** Consume a session's rewind prefill — returns it and clears it, so the text is
+   *  handed to the composer exactly once and a remount cannot re-apply it. */
+  takeComposerPrefill: (sessionId: string) => RewindPrompt | null;
   /**
    * Register/settle a recipe screenshot upload. The `recipeImageUploaded` reply
    * carries only an uploadId, so the sender records the file name here first;
@@ -698,6 +714,7 @@ interface UiState {
   setCompactionLevel: (level: CompactionLevel) => void;
   setTurnSummariesEnabled: (on: boolean) => void;
   setAutoContinueInterrupted: (on: boolean) => void;
+  setCompressResponses: (on: boolean) => void;
   openFileTab: (path: string) => void;
   closeFileTab: (path: string) => void;
   setActiveFileTab: (path: string) => void;
@@ -719,6 +736,7 @@ export const useStore = create<UiState>((set, get) => {
         compactionLevel: s.compactionLevel,
         turnSummariesEnabled: s.turnSummariesEnabled,
         autoContinueInterrupted: s.autoContinueInterrupted,
+        compressResponses: s.compressResponses,
         alertsEnabled: s.alertsEnabled,
         alertSound: s.alertSound,
         dismissedCheckouts: s.dismissedCheckouts,
@@ -821,6 +839,7 @@ export const useStore = create<UiState>((set, get) => {
       compactionLevel: s.compactionLevel ?? state.compactionLevel,
       turnSummariesEnabled: s.turnSummariesEnabled ?? state.turnSummariesEnabled,
       autoContinueInterrupted: s.autoContinueInterrupted ?? state.autoContinueInterrupted,
+      compressResponses: s.compressResponses ?? state.compressResponses,
       alertsEnabled: s.alertsEnabled ?? state.alertsEnabled,
       alertSound: (s.alertSound as AlertSound | undefined) ?? state.alertSound,
       dismissedCheckouts: s.dismissedCheckouts ?? state.dismissedCheckouts,
@@ -831,6 +850,7 @@ export const useStore = create<UiState>((set, get) => {
     if (s.compactionLevel) localStorage.setItem(COMPACTION_LEVEL_KEY, s.compactionLevel);
     if (s.turnSummariesEnabled != null) localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(s.turnSummariesEnabled));
     if (s.autoContinueInterrupted != null) localStorage.setItem(AUTO_CONTINUE_KEY, String(s.autoContinueInterrupted));
+    if (s.compressResponses != null) localStorage.setItem(COMPRESS_RESPONSES_KEY, String(s.compressResponses));
     if (s.alertsEnabled != null) persistAlertsEnabled(s.alertsEnabled);
     if (s.alertSound) persistAlertSound(s.alertSound as AlertSound);
     if (s.dismissedCheckouts) {
@@ -875,6 +895,7 @@ export const useStore = create<UiState>((set, get) => {
   transcripts: {},
   transcriptLoaded: {},
   lastEventAt: {},
+  composerPrefill: {},
   contextBreakdowns: {},
   selectedSessionId: sessionIdFromUrl(),
   folderPickPending: false,
@@ -902,6 +923,7 @@ export const useStore = create<UiState>((set, get) => {
   compactionLevel: loadCompactionLevel(),
   turnSummariesEnabled: loadTurnSummariesEnabled(),
   autoContinueInterrupted: loadAutoContinueInterrupted(),
+  compressResponses: loadCompressResponses(),
   openFiles: loadOpenFiles(),
 
   setConnectionStatus: (status, deviceId) =>
@@ -1049,6 +1071,12 @@ export const useStore = create<UiState>((set, get) => {
     pushSettings();
   },
 
+  setCompressResponses: (on) => {
+    localStorage.setItem(COMPRESS_RESPONSES_KEY, String(on));
+    set({ compressResponses: on });
+    pushSettings();
+  },
+
   openFileTab: (path) => {
     const project = get().activeProject;
     if (!project) return;
@@ -1148,6 +1176,17 @@ export const useStore = create<UiState>((set, get) => {
       },
     }));
     send({ type: 'contextBreakdown', sessionId });
+  },
+
+  takeComposerPrefill: (sessionId) => {
+    const prefill = get().composerPrefill[sessionId];
+    if (!prefill) return null;
+    set((state) => {
+      const composerPrefill = { ...state.composerPrefill };
+      delete composerPrefill[sessionId];
+      return { composerPrefill };
+    });
+    return prefill;
   },
 
   setActiveProject: (path) => {
@@ -1303,6 +1342,10 @@ export const useStore = create<UiState>((set, get) => {
         });
         pruneDrafts(new Set(doomed));
         void pruneDraftAttachments(new Set(doomed));
+        // Owner connections only: a guest's hello carries no account-wide field,
+        // and adopting somebody else's machine id here would stamp this user's
+        // own library with it.
+        if (!msg.access) setBridgeOwnerId(msg.userId ?? null);
         if (msg.settings) applySettings(msg.settings);
         break;
       }
@@ -1472,6 +1515,29 @@ export const useStore = create<UiState>((set, get) => {
               : {}),
           };
         });
+        break;
+      case 'transcriptTruncated':
+        // Dropped locally rather than re-fetched: `case 'transcript'` above MERGES
+        // by seq with whatever is in state, so a plain reload would fold the stale
+        // tail straight back in. The buffer was already drained at the top of
+        // applyServerMessage, so no pending batch can resurrect it either.
+        set((state) => {
+          const existing = state.transcripts[msg.sessionId];
+          if (!existing) return state;
+          return {
+            transcripts: {
+              ...state.transcripts,
+              [msg.sessionId]: existing.filter((e) => e.seq < msg.seq),
+            },
+          };
+        });
+        break;
+      case 'rewound':
+        // Stashed, not applied: the composer for this session picks it up (and
+        // clears it) via takeComposerPrefill.
+        set((state) => ({
+          composerPrefill: { ...state.composerPrefill, [msg.sessionId]: msg.prompt },
+        }));
         break;
       case 'usage':
         set({ usage: msg.usage });

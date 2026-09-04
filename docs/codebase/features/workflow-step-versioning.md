@@ -29,6 +29,18 @@ across three triggers: opening the modal, an incoming `workflows` broadcast, and
 just-saved new workflow with its server-assigned id. It prevents a live draft from being silently
 replaced by an unrelated workflow.
 
+Ownership classification decides, both here and in
+[workflow-mcp-tools](workflow-mcp-tools.md), whether a workflow/step is treated as the user's own
+or as someone else's read-only publish. Own always beats shared: an id or step present in both
+the own and shared maps — a stale `/workflows/shared` (or `/steps/shared`) snapshot of the user's
+own row, or the same id republished under a second Clerk identity of theirs — is owned, editable,
+and never rendered under "Shared by others". A `StepRef.ownerId` that drifted from the id the
+bridge itself stamps (mismatched Clerk-vs-bridge identity, or Clerk disabled in the web build) is
+healed rather than left permanently unresolvable: `updateFor`/re-pin fall back to an own-head
+lookup by `stepId` alone, and every `WorkflowEngine.save()` (plus a one-time pass at boot)
+rewrites such a ref's `ownerId` back to the owner once the exact pinned version is confirmed in
+that user's own step history.
+
 ## Entry points
 
 - `web/src/components/workflow/StepCard.tsx` (`UpdatePopover`; `VersionHistoryPopover`, opened
@@ -47,6 +59,8 @@ replaced by an unrelated workflow.
   init effect, id-reconciliation effect, `loadFrom`, `doNew`, `save`)
 - `web/src/components/workflow/WorkflowEditor.tsx` (wires `updateDef` prop and the banner's
   bulk-update button)
+- `web/src/components/workflow/WorkflowList.tsx`, `web/src/components/Sidebar.tsx` (filter
+  "Shared by others" against the owned list)
 - `shared/types.ts` (`stepVersions` client/server message pair)
 - `storage/src/index.ts` (`GET /steps/:ownerId/:id/versions`)
 - `server/src/sync.ts` (`StorageSyncClient.pullStepVersions`)
@@ -55,6 +69,8 @@ replaced by an unrelated workflow.
   `addStepVersions`, `persistSteps`)
 - `server/src/index.ts` (`stepVersions` message handler)
 - `web/src/store.ts` (`stepVersions` slice, `Record<"ownerId/stepId", StepDef[]>`)
+- `server/src/workflows.ts` (`ForeignWorkflowError`, `isOwnRow`, `isForeign`, `normalizeRefs` —
+  the own-beats-shared classification and ref-healing this feature's "own vs. shared" UI reflects)
 
 ## Symbols
 
@@ -129,9 +145,31 @@ On modal open, an effect picks the previously-selected workflow (or first owned 
 subsequent `workflows` broadcast is matched back to the draft by name + deep step equality in a
 separate reconciliation effect, which stitches the server-assigned id onto the draft.
 
+A save otherwise stays dirty (baseline unchanged) until that same matching finds the draft's own
+id in a `workflows` broadcast — the bridge can refuse a write (a genuinely foreign id throws
+`ForeignWorkflowError`), and an optimistically-advanced baseline used to render a dropped save as
+"Saved" with no error visible. The content key used to match excludes a ref's `ownerId`/
+`ownerName` on purpose: `WorkflowEngine.save()` can heal a drifted ref as part of the same write,
+so the echoed workflow is never byte-identical to what was sent.
+
+### Ownership classification
+
+`readOnly` is true only when the draft's id is absent from the user's own `workflows` list *and*
+present in `sharedWorkflows` — own beats shared, matching `WorkflowEngine.resolve()`/`isForeign`.
+`updateFor`/`updateStepToLatest`/`updateAllToLatest`/`pinStepToVersion` resolve a ref's head via
+`${ownerId}/${stepId}` first, falling back to an own-head lookup by `stepId` alone so a drifted
+`ownerId` still surfaces its update; all four write the resolved head's `ownerId` back onto the
+ref, which is what lets a save heal the drift permanently. `WorkflowList`/`StepLibrary`/`Sidebar`
+each filter their "Shared by others" section against the owned list for the same reason — an id
+in both must render once, under Owned.
+
 ## Tests
 
-None.
+- `server/src/workflows.ownership.test.ts` — the own-beats-shared classification and ref-healing
+  this feature's ownership rules build on (`WorkflowEngine` side only).
+
+The web draft/editor side (`useWorkflowDraft.ts`, `WorkflowEditor.tsx`, `StepCard.tsx`,
+`StepLibrary.tsx`) has no test runner — unchanged from before.
 
 ## Business rules
 

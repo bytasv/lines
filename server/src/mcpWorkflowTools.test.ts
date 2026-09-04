@@ -123,6 +123,21 @@ test('get_workflow can read a foreign published workflow that writes would refus
   assert.equal(h.workflows.listShared()[0]!.name, 'Theirs');
 });
 
+test('a workflow held in BOTH maps is writable — own beats shared', async () => {
+  const h = harness();
+  const mine = commands.saveWorkflow(h.ctx, {
+    workflow: { id: '', name: 'Implement v2', steps: [content()] } as WorkflowDef,
+  });
+  // What a stale /workflows/shared snapshot looks like: the user's own row,
+  // pulled back under another Clerk identity of theirs.
+  h.workflows.setShared([{ ...mine, ownerId: 'u2', published: true }]);
+
+  const write = await h.call('update_workflow', { workflow: mine.id, name: 'Implement v3' });
+  assert.equal(write.isError, undefined, text(write));
+  assert.equal(h.workflows.list().find((w) => w.id === mine.id)?.name, 'Implement v3');
+  assert.equal(h.workflows.listShared().length, 0, 'not offered as shared either');
+});
+
 test('an ambiguous name is refused with both candidates named', async () => {
   const h = harness();
   for (let i = 0; i < 2; i++) {
@@ -242,7 +257,6 @@ test('update_workflow names the sessions a change lands under', async () => {
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    compressResponses: false,
   });
   h.workflows.attach(meta.id, saved.id);
 

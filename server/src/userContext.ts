@@ -307,8 +307,11 @@ export function buildUserContext(
 
   const refreshShared = async () => {
     const list = await sync.pullShared();
+    // The engine's view, not the raw pull: it drops rows that are really this
+    // user's own (see WorkflowEngine.listShared), and broadcasting `list` would
+    // hand the client back exactly the ones just filtered out.
     if (list && workflows.setShared(list)) {
-      broadcast({ type: 'sharedWorkflows', workflows: list });
+      broadcast({ type: 'sharedWorkflows', workflows: workflows.listShared() });
     }
   };
 

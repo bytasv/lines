@@ -40,7 +40,6 @@ import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
 import {
-  DEFAULT_COMPRESS_RESPONSES,
   findWorktree,
   projectPaths,
   projectRoots,
@@ -515,6 +514,9 @@ export function Sidebar({
     defaultValue: '',
   });
   const lastWorkflow = [...workflows, ...sharedWorkflows].find((w) => w.id === lastChoice);
+  // An id present in both lists is owned — it must not also appear under
+  // "Shared by others", where picking it would read as running someone else's.
+  const foreignWorkflows = sharedWorkflows.filter((s) => !workflows.some((w) => w.id === s.id));
   // Persisted like `lastChoice`: running every new session in its own checkout is a
   // working habit, not a per-click decision.
   const [worktreeMode, setWorktreeMode] = useLocalStorage<boolean>({
@@ -565,7 +567,6 @@ export function Sidebar({
   const setWorktreePending = useStore((s) => s.setWorktreePending);
   const createSession = (workflowId?: string) => {
     if (!activeProject) return;
-    const last = list[0];
     // Records the intent that lets the resulting upsert take the selection; the
     // reducer no longer guesses from `createdAt` (a timestamp from another machine).
     markSessionCreatePending();
@@ -582,7 +583,6 @@ export function Sidebar({
       cwd: activeProject,
       model: newSessionDefaults.model,
       permissionMode: newSessionDefaults.permissionMode,
-      compressResponses: last?.compressResponses ?? DEFAULT_COMPRESS_RESPONSES,
       workflowId,
       // Empty object = let the server name the branch and the path.
       ...(worktreeMode ? { worktree: {} } : {}),
@@ -687,11 +687,11 @@ export function Sidebar({
                     ))}
                   </>
                 )}
-                {sharedWorkflows.length > 0 && (
+                {foreignWorkflows.length > 0 && (
                   <>
                     <Menu.Divider />
                     <Menu.Label>Shared by others</Menu.Label>
-                    {sharedWorkflows.map((w) => (
+                    {foreignWorkflows.map((w) => (
                       <Menu.Item
                         key={w.id}
                         onClick={() => createSession(w.id)}

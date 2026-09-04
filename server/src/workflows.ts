@@ -173,6 +173,19 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
   ],
 };
 
+/**
+ * Thrown by {@link WorkflowEngine.save} for an id that belongs to another user's
+ * published workflow. It used to return the input unchanged, which made a
+ * dropped write indistinguishable from a successful one — both to the MCP tool
+ * surface and to the browser, which then rendered "Saved".
+ */
+export class ForeignWorkflowError extends Error {
+  constructor(workflowId: string) {
+    super(`Workflow ${workflowId} belongs to another user and is read-only here — duplicate it first.`);
+    this.name = 'ForeignWorkflowError';
+  }
+}
+
 export class WorkflowEngine {
   private workflows = new Map<string, WorkflowDef>();
   /** Other users' published workflows — read-only, never persisted or pushed. */
@@ -205,6 +218,12 @@ export class WorkflowEngine {
     for (const s of this.store.loadStepVersions()) {
       this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
     }
+    // Heal refs whose ownerId drifted from this user's id before anything reads
+    // them: a drifted ref resolves nowhere, so its step renders as owned yet is
+    // never offered its new version (see normalizeRefs).
+    let healed = false;
+    for (const wf of this.workflows.values()) if (this.normalizeRefs(wf)) healed = true;
+    if (healed) this.persist();
     if (!this.workflows.has(DEFAULT_WORKFLOW.id)) {
       this.workflows.set(DEFAULT_WORKFLOW.id, DEFAULT_WORKFLOW);
       this.persist();
@@ -215,15 +234,121 @@ export class WorkflowEngine {
     sessions.setTurnCompleteListener((sessionId, source, interrupted, failed) =>
       this.onWorkflowTurnComplete(sessionId, source, interrupted, failed),
     );
+    // A rewind truncates the transcript out from under WorkflowState, which lives
+    // on the meta and would otherwise still point at a step whose start marker is
+    // gone (see rollbackToTranscript).
+    sessions.setRewindListener((sessionId) => this.rollbackToTranscript(sessionId));
+  }
+
+  /**
+   * Roll a rewound session's workflow back to what its truncated transcript still
+   * shows, and park it there. Called by SessionManager.rewindSession; returns true
+   * when it settled the session itself.
+   *
+   * WorkflowState is on the SessionMeta, not in the transcript, so a rewind that
+   * only truncated events would leave `stepIndex` pointing at a step whose
+   * 'started' marker no longer exists — `findStepStart` would then return -1 and
+   * every hand-off would be cut from the wrong slice. The surviving markers are
+   * the authority: the newest one names the step the session is back inside.
+   *
+   * The step is parked at waiting-approval rather than re-run, which is what makes
+   * the edit-and-resend flow work: a typed prompt iterates that same step
+   * (iterateIfWaiting) and Approve advances, so the user changes their mind
+   * mid-workflow without the engine racing them.
+   *
+   * Per-step spend (stepCostsUsd/stepTokens/stepDurationsMs) is deliberately kept,
+   * exactly as a retry keeps it — the turns really ran. `lastStepOutput` is cleared
+   * instead of recomputed: absent, the `{previous}` hand-off falls back to
+   * lastAssistantText, which reads the truncated transcript and is right by
+   * construction.
+   */
+  rollbackToTranscript(sessionId: string): boolean {
+    const meta = this.sessions.get(sessionId);
+    const wf = meta?.workflow;
+    if (!meta || !wf?.started) return false;
+
+    // A pending advance, an in-flight consolidation and a failure verdict all
+    // belong to turns that no longer exist.
+    wf.advanceOnComplete = undefined;
+    wf.advanceOnCompleteStep = undefined;
+    wf.advancing = false;
+    wf.stepFailure = undefined;
+    wf.lastStepOutput = undefined;
+
+    let stepIndex: number | null = null;
+    for (const event of this.store.loadTranscript(sessionId)) {
+      if (event.kind !== 'workflow') continue;
+      const data = event.data as WorkflowMarkerData;
+      // 'retried' opens a step's turn the same way 'started' does; the other
+      // markers only ever close one, so they say nothing about where we are.
+      if (data.event === 'started' || data.event === 'retried') stepIndex = data.stepIndex;
+    }
+
+    // No surviving marker: the rewind went back past the very first step, i.e. to
+    // the task description that kicks the workflow off. Put it back to the shape
+    // attach() left it in, so the next prompt starts it again.
+    if (stepIndex === null) {
+      wf.started = false;
+      wf.task = undefined;
+      wf.stepIndex = 0;
+      wf.stepStatuses = wf.stepStatuses.map(() => 'pending');
+      wf.outputs = undefined;
+      // diffBaselines is kept: it is a floor on the working tree, and the files on
+      // disk did not roll back with the transcript.
+      this.sessions.setStatus(sessionId, 'idle');
+      return true;
+    }
+
+    wf.stepIndex = stepIndex;
+    wf.stepStatuses = wf.stepStatuses.map((_, i) =>
+      i < stepIndex! ? 'done' : i === stepIndex ? 'waiting-approval' : 'pending',
+    );
+    // Outputs published by a step that no longer counts as finished would still be
+    // substituted into a later `{outputs.<name>}`, silently handing on work that
+    // was rewound away.
+    const def = this.resolve(wf.workflowId);
+    if (wf.outputs && def) {
+      for (let i = stepIndex; i < def.steps.length; i++) {
+        const name = this.stepContent(def.steps[i])?.outputName?.trim();
+        if (name) delete wf.outputs[name];
+      }
+    }
+    this.sessions.setStatus(sessionId, 'waiting-approval');
+    this.marker(sessionId, {
+      stepIndex,
+      stepName: this.stepName(def?.steps[stepIndex]),
+      event: 'waiting-approval',
+    });
+    return true;
   }
 
   list(): WorkflowDef[] {
     return [...this.workflows.values()];
   }
 
-  /** This user's view of other users' published workflows. */
+  /**
+   * True when a pulled row is this user's own workflow wearing a stranger's
+   * clothes: either it says so (`ownerId`), or the own map already holds that id.
+   *
+   * The second half is what makes the rule robust — a row pulled before storage
+   * derived `ownerId` from its `user_id` column can carry a stale or absent
+   * owner, and a second Clerk identity on the same machine publishes rows whose
+   * `user_id` legitimately isn't the connected one. Own always beats shared.
+   */
+  private isOwnRow(w: { id: string; ownerId?: string }): boolean {
+    return w.ownerId === this.userId || this.workflows.has(w.id);
+  }
+
+  /**
+   * This user's view of other users' published workflows.
+   *
+   * Filtered at *read* time, not only when a pull lands: with storage
+   * unreachable `setShared` is never called again, and a stale snapshot would
+   * otherwise keep presenting an owned workflow as somebody else's for the whole
+   * life of the process.
+   */
   listShared(): WorkflowDef[] {
-    return [...this.shared.values()];
+    return [...this.shared.values()].filter((w) => !this.isOwnRow(w));
   }
 
   /** Owned first, then shared — resolves a session's attached workflow either way. */
@@ -231,9 +356,19 @@ export class WorkflowEngine {
     return this.workflows.get(id) ?? this.shared.get(id);
   }
 
+  /** True only for an id this user genuinely cannot write. */
+  private isForeign(id: string): boolean {
+    const shared = this.shared.get(id);
+    return !!shared && !this.isOwnRow(shared);
+  }
+
   /** Replace the shared set from a storage pull; returns true if it changed. */
   setShared(list: WorkflowDef[]): boolean {
-    const next = new Map(list.filter((w) => w.id).map((w) => [w.id, w] as const));
+    const next = new Map(
+      list.filter((w) => w.id && !this.isOwnRow(w)).map((w) => [w.id, w] as const),
+    );
+    // Compared after filtering, so a delta made up only of dropped self-owned
+    // rows doesn't rebroadcast an unchanged view.
     if (next.size === this.shared.size && [...next].every(([id, w]) => {
       const cur = this.shared.get(id);
       return cur && (cur.updatedAt ?? 0) === (w.updatedAt ?? 0);
@@ -297,9 +432,21 @@ export class WorkflowEngine {
       .sort((a, b) => b.version - a.version);
   }
 
-  /** Replace the shared-step library; returns true if it changed. */
+  /**
+   * Replace the shared-step library; returns true if it changed.
+   *
+   * A row claiming this user as its owner is dropped rather than adopted: the
+   * foreign library is by definition other people's, and letting such a row
+   * through also put it in `stepVersions`, from where `listOwnStepVersions` fed
+   * it to `sync.pushSteps` — i.e. this bridge re-published somebody else's step
+   * as ours (easy to hit when both sides are stamped the literal `local`).
+   */
   setSharedSteps(list: StepDef[]): boolean {
-    const next = new Map(list.filter((s) => s.id && s.ownerId).map((s) => [`${s.ownerId}/${s.id}`, s] as const));
+    const next = new Map(
+      list
+        .filter((s) => s.id && s.ownerId && s.ownerId !== this.userId)
+        .map((s) => [`${s.ownerId}/${s.id}`, s] as const),
+    );
     const changed =
       next.size !== this.sharedSteps.size ||
       [...next].some(([k, s]) => (this.sharedSteps.get(k)?.version ?? -1) !== s.version);
@@ -367,13 +514,39 @@ export class WorkflowEngine {
     return this.stepVersions.get(stepKey(step.ownerId, step.stepId, step.version));
   }
 
+  /**
+   * Point a ref back at this user when its `ownerId` drifted — the browser used
+   * to stamp new refs with its Clerk id while the bridge stamps steps with
+   * `ctx.userId` (the literal `local` with auth off, `''` with Clerk disabled in
+   * the web build), so the two disagree and the ref resolves nowhere.
+   *
+   * Deliberately narrow: only for a step this user owns *and* only when the exact
+   * pinned version is already in their own history. It can never invent a version
+   * or repoint a genuinely foreign pin. Returns true if anything changed.
+   */
+  private normalizeRefs(workflow: WorkflowDef): boolean {
+    let changed = false;
+    for (const step of workflow.steps) {
+      if (!isStepRef(step)) continue;
+      if (step.ownerId === this.userId) continue;
+      if (!this.steps.has(step.stepId)) continue;
+      if (!this.stepVersions.has(stepKey(this.userId, step.stepId, step.version))) continue;
+      step.ownerId = this.userId;
+      changed = true;
+    }
+    return changed;
+  }
+
   save(workflow: WorkflowDef): WorkflowDef {
     // A shared (foreign) workflow is read-only: saving its id would fork it under
     // this user silently. Duplicating instead arrives with a fresh (empty) id.
-    if (workflow.id && !this.workflows.has(workflow.id) && this.shared.has(workflow.id)) {
-      return workflow;
+    // Thrown rather than returned unchanged — the caller has to be able to tell a
+    // refused write from a successful one.
+    if (workflow.id && this.isForeign(workflow.id)) {
+      throw new ForeignWorkflowError(workflow.id);
     }
     if (!workflow.id) workflow.id = randomUUID();
+    this.normalizeRefs(workflow);
     workflow.updatedAt = Date.now(); // LWW key for cross-instance sync
     workflow.ownerId = this.userId; // authoritative — never trust a client-sent owner
     this.workflows.set(workflow.id, workflow);

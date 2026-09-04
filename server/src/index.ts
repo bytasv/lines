@@ -660,6 +660,10 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
   return {
     type: 'hello',
     bridge: { version: BRIDGE_VERSION, appProtocol: APP_PROTOCOL_VERSION },
+    // Owner-only, like everything else below it: whoever this bridge stamps its
+    // own writes as. The client prefers it over its Clerk id so a step it
+    // publishes and the step the bridge stores agree on an owner.
+    userId: ctx.userId,
     sessions,
     workflows: ctx.workflows.list(),
     sharedWorkflows: ctx.workflows.listShared(),
@@ -822,7 +826,6 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
         cwd: worktree?.path ?? msg.cwd,
         model: msg.model,
         permissionMode: msg.permissionMode,
-        compressResponses: msg.compressResponses,
       });
       // Only nameable once the session exists; nothing depends on it beyond the
       // UI's "orphaned" label.
@@ -851,6 +854,9 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
     }
     case 'interrupt':
       sessions.interrupt(msg.sessionId);
+      break;
+    case 'stopBackgroundTasks':
+      sessions.stopBackgroundTasks(msg.sessionId);
       break;
     case 'retryTurn':
       // A failed workflow step re-runs through the engine, which knows whether to
@@ -899,9 +905,6 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
       break;
     case 'setPermissionMode':
       sessions.setPermissionMode(msg.sessionId, msg.mode);
-      break;
-    case 'setCompressResponses':
-      sessions.setCompressResponses(msg.sessionId, msg.compressResponses);
       break;
     case 'permissionResponse':
       sessions.resolvePermission(
@@ -1178,6 +1181,36 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
             type: 'error',
             sessionId: msg.sessionId,
             message: result.reason,
+          } satisfies ServerMessage),
+        );
+      }
+      break;
+    }
+    case 'rewindSession': {
+      const result = await sessions.rewindSession(msg.sessionId, msg.seq, { edit: msg.edit });
+      // The block reason is written for a human — surfaced verbatim, exactly as
+      // compactContext does with the gate its own button already reads.
+      if (!result.ok) {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            sessionId: msg.sessionId,
+            message: result.reason,
+          } satisfies ServerMessage),
+        );
+        break;
+      }
+      // The prompt goes back to whoever asked (it belongs in *their* composer) and
+      // only when they asked to edit. The `transcriptTruncated` fan-out is not sent
+      // from here: rewindSession broadcasts it itself, so it cannot be ordered
+      // after the events a workflow rollback emits (see SessionManager.onRewind).
+      if (result.prompt) {
+        ws.send(
+          JSON.stringify({
+            type: 'rewound',
+            sessionId: msg.sessionId,
+            seq: msg.seq,
+            prompt: result.prompt,
           } satisfies ServerMessage),
         );
       }

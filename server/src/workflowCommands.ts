@@ -20,9 +20,9 @@ import type { UserContext } from './userContext.ts';
  * Save a workflow the user owns. `ownerName` is cosmetic (the owner's display
  * label); `ownerId` is stamped authoritatively inside the engine.
  *
- * Callers that accept an id from outside must run {@link resolveWorkflowRef}
- * first — the engine silently returns the input unchanged for an id belonging to
- * someone else's shared workflow.
+ * Callers that accept an id from outside should run {@link resolveWorkflowRef}
+ * first, for the better error message: the engine itself throws
+ * `ForeignWorkflowError` for an id belonging to someone else's shared workflow.
  */
 export function saveWorkflow(
   ctx: UserContext,
@@ -78,9 +78,9 @@ export type WorkflowRefResult =
  * than a disambiguation dialog, and is restricted to owned workflows: a foreign
  * name match would otherwise resolve to something the caller cannot write.
  *
- * The 'foreign' case is the one that matters. `WorkflowEngine.save()` returns its
- * input unchanged for an id that belongs to a shared workflow — no error, no
- * write — so a caller that skips this check reports a successful save of nothing.
+ * The 'foreign' case is what turns a refused write into an answer the model can
+ * act on: `WorkflowEngine.save()` throws for such an id, so skipping this check
+ * surfaces a raw error instead of naming the workflow and its owner.
  */
 export function resolveWorkflowRef(ctx: UserContext, ref: string): WorkflowRefResult {
   const needle = ref.trim();

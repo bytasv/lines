@@ -299,7 +299,8 @@
         "web/src/components/workflow/useWorkflowDraft.ts",
         "web/src/components/workflow/StepCard.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
-        "web/src/components/workflow/WorkflowEditor.tsx"
+        "web/src/components/workflow/WorkflowEditor.tsx",
+        "server/src/workflows.ownership.test.ts"
       ],
       "symbols": [
         "VersionHistoryPopover",
@@ -317,9 +318,14 @@
         "useWorkflowDraft.updateFor",
         "useWorkflowDraft.updateStepToLatest",
         "useWorkflowDraft.updateAllToLatest",
-        "useWorkflowDraft"
+        "useWorkflowDraft",
+        "WorkflowEngine.isOwnRow",
+        "WorkflowEngine.isForeign",
+        "WorkflowEngine.normalizeRefs"
       ],
-      "tests": [],
+      "tests": [
+        "server/src/workflows.ownership.test.ts"
+      ],
       "businessRules": [
         "newest-first, gap-tolerant version list",
         "own steps show full history; foreign steps show published versions only, with the exact pinned version always unioned in",
@@ -329,7 +335,8 @@
         "diff list scrolls independently (ScrollArea.Autosize, mah 280) once it exceeds popover height, so the Update button stays reachable regardless of diff length",
         "Update all re-pins every outdated ref step directly, skipping the per-field diff review",
         "a workflows/sharedWorkflows length change while the modal is already open with a live draft must not re-trigger the pick-a-workflow fallback",
-        "loadFrom collapses every step of the loaded workflow by default; a step opens only via explicit selection"
+        "loadFrom collapses every step of the loaded workflow by default; a step opens only via explicit selection",
+        "own beats shared: an id/step present in both the own and shared maps is owned, editable, and never rendered under \"Shared by others\"; a StepRef.ownerId drifted from the bridge's own id is healed on re-pin/update and on WorkflowEngine.save(), plus once at boot"
       ],
       "architecturalRules": [
         "immutable step versions are never deleted or edited, on disk or in storage \u2014 only the head list and published flag change",
@@ -337,7 +344,9 @@
         "init effect tracks the open transition via a prevOpened ref and skips its workflows[0] fallback whenever a draft already exists and this isn't the open transition, to avoid racing the id-reconciliation effect after a new-workflow save",
         "new-workflow id reconciliation matches by name plus deep step equality, not step count alone"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "workflow-mcp-tools"
+      ]
     },
     {
       "id": "workflow-step-lifecycle",
@@ -481,7 +490,8 @@
         "turn-recovery",
         "session-and-project-ui",
         "transcript-performance",
-        "context-window"
+        "context-window",
+        "session-rewind"
       ]
     },
     {
@@ -583,7 +593,7 @@
         "LiveState.compactResume",
         "SessionManager.restoreCompactedStatus",
         "COMPRESS_RESPONSES_PROMPT",
-        "adoptLegacyCompress"
+        "UserUiSettings.compressResponses"
       ],
       "tests": [
         "server/src/sessions.reconcile.test.ts",
@@ -630,7 +640,7 @@
         "compactContext still returns a synchronous { ok: true }; an auth refusal after that point surfaces through failTurn, not the { ok: false, code, reason } union",
         "a transiently failed proactive refresh retries on a 60s-doubling ladder capped at 15 minutes; a dead refresh token logs out instead, stopping the chain",
         "accessToken: null in buildQueryOptions is reachable only when no AuthManager is wired at all (tests / embedding), never for a real signed-in user",
-        "SessionMeta.compressResponses gates COMPRESS_RESPONSES_PROMPT directly in buildQueryOptions — on means the ruleset is in systemPrompt.append, off means neither it nor a plugins key is present; no runtime git clone, no machine-global flag file; a legacy caveman: { enabled, level } meta is migrated once by adoptLegacyCompress on load and on adoptSynced, and a meta with neither field resumes uncompressed",
+        "UserUiSettings.compressResponses gates COMPRESS_RESPONSES_PROMPT directly in buildQueryOptions \u2014 on means the ruleset is in systemPrompt.append, off means neither it nor a plugins key is present; one user-level setting rather than a per-session one, read from the store on every push so a Settings flip lands on each session's next query with nothing cached on the meta; on unless explicitly false",
         "logins are tracked per OAuth state, so two started at once each keep their own PKCE verifier; completing one clears the rest, unfinished ones expire after 30 minutes, and a paste with no #state falls back to the newest",
         "a content-filter, context-overflow, invalid-request or overloaded failure never implies an automatic retry, backoff, or step advance",
         "auth wins outright when a failure text matches both an auth pattern and a turnFailureKind pattern",
@@ -674,7 +684,8 @@
         "hosted-machine-access",
         "multi-machine-client",
         "session-and-project-ui",
-        "workflow-step-lifecycle"
+        "workflow-step-lifecycle",
+        "session-rewind"
       ]
     },
     {
@@ -1362,7 +1373,8 @@
         "shared/types.ts",
         "server/src/sessions.ts",
         "server/src/index.ts",
-        "web/src/components/PermissionPrompt.tsx"
+        "web/src/components/PermissionPrompt.tsx",
+        "server/src/workflows.ts"
       ],
       "symbols": [
         "McpToolManifest",
@@ -1376,22 +1388,25 @@
         "resolveWorkflowRef",
         "isLinesMcpTool",
         "isReadOnlyLinesTool",
-        "workflowToolPresentation"
+        "workflowToolPresentation",
+        "ForeignWorkflowError"
       ],
       "tests": [
         "server/src/workerMcp.test.ts",
         "server/src/workflowCommands.test.ts",
         "server/src/workflowValidation.test.ts",
         "server/src/mcpWorkflowTools.test.ts",
-        "server/src/sessions.mcpGating.test.ts"
+        "server/src/sessions.mcpGating.test.ts",
+        "server/src/workflows.ownership.test.ts"
       ],
       "businessRules": [
         "mutations address a workflow by id, or by a name unique among owned workflows; a name match against another user's published workflow is refused as read-only, never silently forked",
         "create_workflow/update_workflow/save_step are rejected before WorkflowEngine.save() on a shared workflowValidation.ts failure, with one actionable error string",
         "update_workflow's steps argument replaces the whole list, no patch-by-index",
-        "resolveWorkflowRef must catch the id-belongs-to-a-shared-workflow case before saveWorkflow runs, since WorkflowEngine.save() silently no-ops for it",
+        "resolveWorkflowRef should still run before saveWorkflow for the better, candidate-naming error message; WorkflowEngine.save() itself throws ForeignWorkflowError for an id it classifies as foreign, as the guard of last resort",
         "list/read tools cap results at 100 rows (default 50)",
-        "a bridge gone mid-call answers after MCP_TOOL_FALLBACK_MS (30s) with an error result rather than parking the turn indefinitely"
+        "a bridge gone mid-call answers after MCP_TOOL_FALLBACK_MS (30s) with an error result rather than parking the turn indefinitely",
+        "\"foreign\" is own-beats-shared: an id present in both the own and shared maps (a stale shared snapshot of the user's own row, or the same id republished under a second identity) is writable, not foreign"
       ],
       "architecturalRules": [
         "tool names/descriptions/schemas live entirely on the bridge (mcpWorkflowTools.ts) and are hot-reloadable; only the workflow-agnostic conversion (workerMcp.ts) and protocol shape (workerProtocol.ts) sit in the worker's minimal import graph",
@@ -1403,7 +1418,8 @@
       ],
       "relatedDecisions": [
         "permissions-and-plan-mode",
-        "context-window"
+        "context-window",
+        "workflow-step-versioning"
       ]
     },
     {
@@ -2304,7 +2320,8 @@
         "multi-machine-client",
         "transcript-rendering",
         "permissions-and-plan-mode",
-        "cloud-sync-sessions"
+        "cloud-sync-sessions",
+        "session-rewind"
       ]
     },
     {
@@ -2482,6 +2499,70 @@
         "file-routes-over-ws",
         "transcript-rendering",
         "session-collaboration"
+      ]
+    },
+    {
+      "id": "session-rewind",
+      "name": "Session rewind",
+      "doc": "features/session-rewind.md",
+      "purpose": "Recover a session whose context overflowed mid-conversation by truncating its transcript from a chosen sent message on, re-pointing the CLI conversation at the truncated history in place (SDK forkSession), and either discarding that message or handing its text back to the composer to edit and resend.",
+      "entryPoints": [
+        "web/src/components/Transcript.tsx",
+        "web/src/components/Composer.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/sessions.ts",
+        "server/src/store.ts",
+        "server/src/workflows.ts",
+        "server/src/index.ts",
+        "web/src/store.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/components/Composer.tsx"
+      ],
+      "symbols": [
+        "rewindBlock",
+        "RewindPrompt",
+        "RewindBlockCode",
+        "RewindBlockInfo",
+        "SessionManager.rewindSession",
+        "RewindListener",
+        "SessionManager.setRewindListener",
+        "SessionManager.reloadAttachments",
+        "Store.truncateTranscript",
+        "WorkflowEngine.rollbackToTranscript",
+        "composerPrefill",
+        "takeComposerPrefill"
+      ],
+      "tests": [
+        "server/src/sessions.rewind.test.ts",
+        "server/src/workflows.rewind.test.ts",
+        "server/src/store.test.ts",
+        "server/src/sessions.reconcile.test.ts"
+      ],
+      "businessRules": [
+        "truncate-in-place only: no branching, no alternate-history tree; the discarded tail is recoverable only by hand from the sidecar file",
+        "never auto-resubmits; Edit only prefills the composer, the user must send it themselves",
+        "a started workflow does not block a rewind \u2014 rollbackToTranscript keeps WorkflowState in sync with whatever the truncated transcript still shows",
+        "cumulative session spend and per-step spend are deliberately not rewound \u2014 that money was really spent",
+        "Edit reloads attachments from disk only when edit: true was requested; a plain Delete never pays that read",
+        "the confirm dialog states plainly what is lost: the message is deleted either way (only Edit keeps its text, in the composer, not the transcript), everything after it is deleted too, and it is irreversible with no refund; a first-prompt rewind with no anchor also says Claude's memory of the session is cleared completely; a started workflow names the step it parks back on",
+        "Copy of the message's own text is never gated by rewindBlock"
+      ],
+      "architecturalRules": [
+        "fork-then-truncate ordering: forkSession is awaited eagerly inside rewindSession, before any local mutation, so a fork failure leaves Lines' own transcript untouched",
+        "rewindSession broadcasts transcriptTruncated itself rather than the index.ts WS handler, so it is ordered before any event a rewind listener emits while settling (e.g. a workflow park marker)",
+        "RewindListener mirrors TurnCompleteListener's shape \u2014 one optional hook SessionManager calls, registered once by WorkflowEngine's constructor \u2014 rather than adding a SessionManager -> WorkflowEngine dependency edge",
+        "store.truncateTranscript invalidates the transcript cache rather than trimming the cached entry in place, since entry.lines/entry.parsed are handed to live readers by reference",
+        "the dropped tail is archived to a transcripts/<sessionId>.rewind-<ts>.jsonl sidecar before the live file is rewritten (archive-then-truncate); no read path or cleanup job consumes these files, and they accumulate with repeated rewinds",
+        "the rewinding in-flight claim is taken synchronously before rewindSession's first await, mirroring the compacting guard",
+        "RewindPrompt's attachment rehydration reuses SessionManager.reloadAttachments, extracted out of lastPromptForRetry so both paths reload identically"
+      ],
+      "relatedDecisions": [
+        "turn-recovery",
+        "context-window",
+        "session-collaboration",
+        "workflow-step-lifecycle"
       ]
     }
   ]

@@ -608,6 +608,19 @@ export type ModelSpendMap = Record<string, ModelSpend>;
  */
 export type SessionErrorKind = 'auth' | 'filtered' | 'context' | 'invalid' | 'overloaded';
 
+/**
+ * One live background task (a backgrounded subagent or Bash command), taken from
+ * the SDK's `background_tasks_changed` level payload. The payload names every
+ * live task, so this is a record rather than a bare count — the two can't drift.
+ */
+export interface BackgroundTaskInfo {
+  /** SDK `task_id`. */
+  id: string;
+  /** SDK `task_type` (e.g. 'subagent', 'bash'). */
+  type: string;
+  description: string;
+}
+
 export interface SessionMeta {
   id: string;
   name: string;
@@ -685,6 +698,17 @@ export interface SessionMeta {
   queuePaused?: boolean;
   /** ms epoch when a crash/restart killed an in-flight turn; cleared by the next prompt. */
   interruptedAt?: number;
+  /**
+   * Background tasks (subagents, Bash) still running inside this session's CLI
+   * process after its turn settled. Live-only: per-process, never restored from
+   * disk — a bridge restart starts empty and repopulates from the worker's
+   * `hello` (see LiveSessionInfo.backgroundTasks) or the next membership change.
+   *
+   * Deliberately not folded into `status`: the turn lifecycle (queue flush,
+   * workflow advance, turn-complete accounting) all keys off the turn settling,
+   * and this describes work outside it.
+   */
+  backgroundTasks?: BackgroundTaskInfo[];
   /**
    * Working-tree snapshot taken when the session was created, one per commit unit
    * (`git rev-parse --show-toplevel`) — the floor the session review diff is taken
@@ -1321,6 +1345,7 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // --- running a session
   prompt: { needs: 'session', cap: 'prompt' },
   interrupt: { needs: 'session', cap: 'interrupt' },
+  stopBackgroundTasks: { needs: 'session', cap: 'interrupt' },
   retryTurn: { needs: 'session', cap: 'interrupt' },
   continueTurn: { needs: 'session', cap: 'interrupt' },
   cancelQueued: { needs: 'session', cap: 'interrupt' },
@@ -1491,6 +1516,9 @@ export type ClientMessage =
       draft?: MentionValue;
     }
   | { type: 'interrupt'; sessionId: string }
+  /** Stop every background task the session's CLI process still owns. Separate
+   *  from `interrupt`, which only kills the foreground turn. */
+  | { type: 'stopBackgroundTasks'; sessionId: string }
   | { type: 'retryTurn'; sessionId: string }
   | { type: 'continueTurn'; sessionId: string }
   | { type: 'cancelQueued'; sessionId: string; queuedId: string }
@@ -1981,6 +2009,13 @@ export type ServerMessage =
   | {
       type: 'hello';
       bridge?: BridgeInfo;
+      /**
+       * The user id this bridge stamps its own writes with — the socket's
+       * authenticated identity, which is `local` with bridge auth off. Owner
+       * connections only (a guest is told nothing account-wide), and the client
+       * prefers it over its Clerk id so the two sides cannot disagree about who
+       * owns a step. */
+      userId?: string;
       sessions: SessionMeta[];
       workflows: WorkflowDef[];
       sharedWorkflows: WorkflowDef[];
