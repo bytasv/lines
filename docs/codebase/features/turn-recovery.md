@@ -200,6 +200,10 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `resultErrorText(msg)` — the error text of an SDK `result` message: prefers `msg.result`,
   falls back to `msg.errors[]` joined with `\n` (an `SDKResultError` carries no `result` at
   all). Shared between server and web so both read a failure the same way
+- `isStoppedResult(r)` (`shared/types.ts`) — reads the bridge-added `stopped` field a `result`
+  event is stamped with when it settles a turn the user interrupted. Not an SDK field: the SDK
+  reports an interrupt as an ordinary `is_error` result, indistinguishable from a real failure
+  without this stamp. `ResultItem.stopped` carries the same reading into the rendered item
 - `SessionManager.recoverAuthFailure(sessionId, error): boolean` — returns `false` immediately
   for a non-auth-classified message (or no `AuthManager`), which is what lets `classifyFailure`
   fall through to `classifyTurnFailure`. Otherwise returns `true` and, async, awaits
@@ -372,6 +376,30 @@ before flipping the status to `error`, so `transcript.ts` builds a `ResultItem` 
 transcript keeps the raw CLI text as the durable diagnostic record — only the banner changes,
 never the transcript row.
 
+### A stopped turn is not a failed turn
+
+The SDK reports a user-initiated interrupt as an ordinary error `result`
+(`subtype: 'error_during_execution'`, `is_error: true`, no `result` field — only `errors[]`) —
+the same shape as a genuine failure. The SDK's own `terminal_reason` field is unpublished, so
+it is never consulted; the only trustworthy record that the user actually asked for the stop is
+`SessionManager.interrupting`, the set `interrupt()` adds to. `handleWorkerEvent` reads it at
+the moment it persists the `result` event: `stopped = msg.type === 'result' &&
+this.interrupting.has(sessionId)`, and stamps `{ ...msg, stopped: true }` onto the durable
+record before it is written — the transcript store only appends, so the stamp must happen
+before persistence, not decided afterward. `failed` is then gated on `!stopped`, so a stopped
+turn skips `classifyFailure` entirely: no `dropFailedQuery` (the interrupted query is healthy,
+so dropping it only cost the next prompt a `resume` respawn), no `recoverAuthFailure`, no
+banner. `status` settles to `'idle'` (already set synchronously by `interrupt()`), not
+`'error'`, and `errorMessage`/`errorKind` stay unset. `WorkflowEngine.onWorkflowTurnComplete`
+still receives `failed: false` for this turn, so it parks the step the same way an ordinary
+Stop does (see [workflow-step-lifecycle](workflow-step-lifecycle.md)), not as a failed step.
+
+On the client, `isFailedResult` checks `isStoppedResult` first and returns `false` immediately
+when it is set, so `ResultItem.isError` is `false` and the row reads "turn stopped" (dimmed)
+instead of "turn failed" (red) — `Transcript.tsx`'s retry affordance keys off `isError`, so it
+disappears with no extra logic. The stamp is written into the persisted event, not computed
+only for the live broadcast, so a page reload renders the same neutral row.
+
 ### A worker query outlives the bridge, so a failed turn always drops it
 
 The worker is a separate long-lived process; the bridge (tsx watch, crash, deploy) restarts
@@ -385,10 +413,11 @@ That covers the next push, but not the turn that is failing right now: a query a
 the token it holds gets rejected (proactively refreshed, revoked server-side, or rejected by
 `handleTokenRejected`) is not touched by that guard until something pushes to it again. So
 `dropFailedQuery` runs unconditionally inside `classifyFailure`, before either classification
-branch: it closes the query for **every** failed turn, whether or not the error text is
-recognised and whether or not `queryTokens` believes the current token matches. A single Retry
-click after any failure therefore always spawns a fresh child (`resume` keeps the conversation),
-rather than depending on the failure being classified correctly first.
+branch: it closes the query for **every failed turn** — but not a stopped one (see "A stopped
+turn is not a failed turn" above) — whether or not the error text is recognised and whether or
+not `queryTokens` believes the current token matches. A single Retry click after any failure
+therefore always spawns a fresh child (`resume` keeps the conversation), rather than depending
+on the failure being classified correctly first.
 
 `AuthManager.ensureFreshToken` closes the other half of the same race: a Retry that lands while
 `handleTokenRejected`'s recovery refresh is still in flight now joins that refresh instead of
@@ -512,7 +541,12 @@ message type, no new modal, no new client state, no DB migration.
 - `server/src/sessions.ended.test.ts` — a failed result marks the session errored with a
   Retry-able banner and still settles the turn's spend/listener; a crashed query settles the
   turn so a workflow step doesn't dangle; a push rejection fails the turn instead of wedging
-  the session at `running`; the no-`AuthManager` path still pushes. Also: each of the four
+  the session at `running`; the no-`AuthManager` path still pushes. Also: a turn settled by
+  `interrupt()` followed by the SDK's own `is_error` interrupt result is stamped `stopped` and
+  reads `status: 'idle'` with no `errorMessage`/`errorKind` and its query kept open (not
+  dropped); the identical result with no preceding `interrupt()` is still a genuine failure
+  (`status: 'error'`, query dropped); the `stopped` stamp is consumed by the one `result` it
+  was computed for and cannot bleed into a later, unrelated failure on the same session. Also: each of the four
   non-auth kinds rewrites the banner and sets `errorKind`; an unrecognised failure keeps its
   raw text and `errorKind: undefined`; an auth-shaped message wins over a coincidental 400 in
   the same text; `failTurn` classifies non-auth failures the same way as a `result`; a Retry
@@ -559,6 +593,10 @@ message type, no new modal, no new client state, no DB migration.
 
 ## Business rules
 
+- A turn the user stopped is never classified as a failure: the row reads "turn stopped"
+  (neutral) rather than "turn failed" (red), gets no Retry button, and the interrupted query is
+  not dropped. Cost, tokens, duration, and any files the turn changed before the Stop are still
+  recorded — the turn genuinely ran and may have edited files.
 - Auto-continue only fires for sessions flagged by the reconcile that is running. A flag left
   from an earlier crash keeps its banner, so a restart can't fan out into a pile of unattended
   turns.
@@ -696,6 +734,17 @@ message type, no new modal, no new client state, no DB migration.
 
 ## Architectural rules
 
+- `SessionManager.interrupting` is the only authoritative signal that a `result` settling a turn
+  was a user-initiated Stop. The SDK's `terminal_reason` (`'aborted_streaming'` /
+  `'aborted_tools'`) is unpublished and deliberately not consulted — `interrupting` is set by
+  this bridge's own `interrupt()` call, not inferred from SDK output.
+- The `stopped` stamp is computed and applied at the point `handleWorkerEvent` persists the
+  `result` event (a shallow copy, never a mutation of `msg`), because the transcript store only
+  appends — a verdict decided later in the same function's `result` branch could never reach the
+  already-written durable record.
+- `stopped` is additive and reset-free: it does not require the `interrupting` entry to survive
+  past the one `result` it stamps, so a leftover flag can never neutralise a later genuine
+  failure on the same session.
 - Adding a field to `LiveSessionInfo` is not a protocol bump; adding a message type is. `busy`
   was added as an optional field on purpose, so an old worker keeps working (demote-only)
   instead of having its socket closed with turns in flight.

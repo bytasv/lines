@@ -1027,15 +1027,33 @@ export class SessionManager {
    * 3. a synthesized HEAD per commit unit, flagged `synthetic` so the UI can say
    *    "no baseline was recorded — this is all uncommitted work in the repo"
    *    rather than presenting somebody else's dirty tree as this session's.
+   *
+   * Public because `WorkflowEngine` resolves against the same chain — a step's
+   * `{diff}`/`{changed}` must not fall back to `[]` (which renders as nothing at
+   * all) when a workflow's own snapshot was never captured.
+   *
+   * @param prefer Which snapshot wins when both exist. The review UI wants the
+   *   session's own floor; a workflow step wants "since this run started", which
+   *   is the workflow's — a workflow started in a long-lived session has a much
+   *   later floor than the session's, and diffing from the session's would drag
+   *   pre-existing work into the step.
    */
-  private async baselinesFor(
+  async baselinesFor(
     meta: SessionMeta,
+    prefer: 'session' | 'workflow' = 'session',
   ): Promise<{ baselines: RepoBaseline[]; source: 'session' | 'workflow' | 'synthetic' }> {
-    if (meta.diffBaselines?.length) return { baselines: meta.diffBaselines, source: 'session' };
-    const workflow = meta.workflow?.diffBaselines;
-    if (workflow?.length) return { baselines: workflow, source: 'workflow' };
+    const session = meta.diffBaselines?.length
+      ? { baselines: meta.diffBaselines, source: 'session' as const }
+      : null;
+    const snapshot = meta.workflow?.diffBaselines;
     const legacy = meta.workflow?.diffBaseline;
-    if (legacy) return { baselines: [{ repo: meta.cwd, ...legacy }], source: 'workflow' };
+    const workflow = snapshot?.length
+      ? { baselines: snapshot, source: 'workflow' as const }
+      : legacy
+        ? { baselines: [{ repo: meta.cwd, ...legacy }], source: 'workflow' as const }
+        : null;
+    const resolved = prefer === 'workflow' ? (workflow ?? session) : (session ?? workflow);
+    if (resolved) return resolved;
     const { repos } = await groupByRepo(this.rootsFor(meta));
     return {
       baselines: repos.map((r) => ({ repo: r.root, ref: 'HEAD', untracked: [] })),
@@ -2944,10 +2962,21 @@ export class SessionManager {
     }
     if (meta && metaChanged) this.upsert(meta);
 
+    // The SDK reports a user interrupt as an ordinary error result, so `interrupting`
+    // is the only record that the user asked for the stop. Stamp it here, before the
+    // event is written: the store only appends, so a verdict decided in the result
+    // branch below could never reach the durable record. A shallow copy, not a
+    // mutation — everything downstream keeps reading the raw `msg`.
+    const stopped = msg.type === 'result' && this.interrupting.has(sessionId);
     // Stream deltas are broadcast live but not written to disk;
     // the complete assistant message that follows is the durable record.
     const persist = msg.type !== 'stream_event';
-    const resultSeq = this.emitEvent(sessionId, 'sdk', msg, persist);
+    const resultSeq = this.emitEvent(
+      sessionId,
+      'sdk',
+      stopped ? { ...msg, stopped: true } : msg,
+      persist,
+    );
 
     // Each assistant message overwrites the reading; the last one before the
     // result describes the turn's final prompt. Held live rather than upserted
@@ -3062,7 +3091,11 @@ export class SessionManager {
       this.restoreCompactedStatus(sessionId);
       // The SDK can surface a rejected token as an error result instead of throwing;
       // Retry already renders for these, only the login prompt is missing.
-      const failed = msg.is_error === true || (msg.subtype != null && msg.subtype !== 'success');
+      // A stopped turn is not a failed turn, though the SDK reports the interrupt in
+      // exactly that shape: it needs no banner, no Retry, no classification — and
+      // above all no dropFailedQuery, since an interrupt leaves the query healthy.
+      const failed =
+        !stopped && (msg.is_error === true || (msg.subtype != null && msg.subtype !== 'success'));
       // A failure result carries its reason in `errors[]`, not `result` — reading
       // only `result` degraded every one of them to 'The turn failed.'
       const resultText = resultErrorText(msg as { result?: unknown; errors?: unknown });

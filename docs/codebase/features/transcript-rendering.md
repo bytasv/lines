@@ -375,7 +375,7 @@ plus the server-side tracking and the composer/sidebar/alert surfaces, live in
 - `reconcileItems` (`transcript.ts`) hands a rebuilt item back its previous object identity
   when every field `buildTranscript` can later mutate in place is unchanged —
   `ToolBlock.result`/`isError`/`snapshot`/`children`, permission `.resolution`/`.data`,
-  `ResultItem.summary`, and streaming/assistant text. This is what makes `memo` on
+  `ResultItem.summary`/`stopped`, and streaming/assistant text. This is what makes `memo` on
   `Item`/`AgentTurn`/`ToolGroup`/`ToolCallCard` actually skip work (a rebuild recreates every
   item from scratch otherwise) and what lets the `toolDiffCache` `WeakMap` (keyed on the
   `ToolBlock` object) survive a rebuild instead of recomputing every whole-file diff on every

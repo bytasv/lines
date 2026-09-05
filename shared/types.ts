@@ -164,6 +164,15 @@ export function resultErrorText(msg: { result?: unknown; errors?: unknown }): st
   return '';
 }
 
+/**
+ * Whether a `result` ended a turn the user stopped. `stopped` is not an SDK field:
+ * the bridge stamps it onto the raw payload before persisting, because the SDK
+ * reports an interrupt as an ordinary error result and only the bridge knows the
+ * user asked for it. Additive — absent on records written before this existed, and
+ * on every result the bridge did not stamp.
+ */
+export const isStoppedResult = (r: { stopped?: unknown }): boolean => r.stopped === true;
+
 /** How an attachment is presented to the model. */
 export type AttachmentKind = 'image' | 'document' | 'text';
 
@@ -738,7 +747,9 @@ export interface TranscriptEvent {
   /**
    * kind:
    * - 'user'      : user prompt text
-   * - 'sdk'       : raw SDK message (assistant / system / result / stream_event ...)
+   * - 'sdk'       : raw SDK message (assistant / system / result / stream_event ...),
+   *                 carrying one bridge-added field: `stopped` on a result the user
+   *                 stopped (see isStoppedResult). Nothing else here is ours.
    * - 'file-snapshot': pre-edit file content captured for a tool_use (for diffs)
    * - 'permission': permission request / resolution
    * - 'workflow'  : workflow step transition marker

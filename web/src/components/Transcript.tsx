@@ -574,7 +574,9 @@ const Item = memo(function Item({
         <Stack gap={2} align="center">
           <Group gap="xs" justify="center">
             <Text size="xs" c={item.isError ? 'red' : 'dimmed'} ta="center">
-              {item.isError ? 'turn failed' : 'turn done'}
+              {/* A stopped turn is the user's own doing, not a failure: neutral, and
+                  Retry drops out on its own because `isError` is false. */}
+              {item.stopped ? 'turn stopped' : item.isError ? 'turn failed' : 'turn done'}
               {item.costUsd != null ? ` · $${item.costUsd.toFixed(4)}` : ''}
               {item.durationMs != null ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''}
             </Text>

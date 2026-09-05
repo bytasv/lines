@@ -432,7 +432,7 @@
         "step output hand-off after a force-advance goes through the same (now-bounded) consolidation as a normal advance",
         "a step configured with autoAdvance: true still parks after Stop \u2014 Stop overrides the step's own configuration",
         "a plan-approval advance already pending when Stop is pressed is discarded, not delayed: both the flag and its step stamp are cleared",
-        "a failed turn (is_error result or a crashed query) also never autoAdvances \u2014 it parks the step with stepFailure: 'turn' instead, keeping the error status alive for Retry",
+        "a failed turn (is_error result or a crashed query) also never autoAdvances \u2014 it parks the step with stepFailure: 'turn' instead, keeping the error status alive for Retry; a turn the user stopped is excluded even though the SDK can report it in the identical is_error shape \u2014 that settle reports failed: false and takes the ordinary Stop park, with no stepFailure and no error status",
         "a parked step (waiting-approval, or error for a failed step) can run a manual context compaction without leaving that state; approve/force-advance/retry/prompt are all held for the duration and a typed prompt queues instead of iterating, draining into the same step (never advancing) once the compaction settles \u2014 see context-window",
         "the affordance only ever targets the workflow's current step; other steps show no hover state",
         "confirmation copy differs by state: a running step warns its turn is stopped and the last-said text becomes the output; the last step's copy says the workflow finishes",
@@ -566,6 +566,8 @@
         "SessionManager.TurnCompleteListener",
         "isFailedResult",
         "resultErrorText",
+        "isStoppedResult",
+        "ResultItem.stopped",
         "SessionMeta.errorKind",
         "isAuthFailureMessage",
         "AuthManager.handleTokenRejected",
@@ -610,6 +612,7 @@
         "server/src/caveman.test.ts"
       ],
       "businessRules": [
+        "a turn the user stopped is not classified as a failure: no dropFailedQuery, no red banner, no Retry \u2014 the stopped result is recorded verbatim but the turn settles clean",
         "auto-continue only resumes sessions flagged by the reconcile that is running; a stale flag keeps its banner",
         "autoContinueInterrupted is on unless explicitly false; absent (or no settings.json) means enabled",
         "a resume that throws is contained per session: logged, session put back into the flagged state, later sessions still resume",
@@ -651,6 +654,7 @@
         "any failed turn drops that session's query, recognised or not, so a single Retry cannot reuse the child that just failed"
       ],
       "architecturalRules": [
+        "SessionManager.interrupting is the only authoritative Stop signal; the SDK's terminal_reason is unpublished and never consulted",
         "adding a field to LiveSessionInfo is not a protocol bump; busy is optional so an old worker stays demote-only instead of losing its socket mid-turn",
         "reconcileWithWorker is the only place that stamps interruptedAt",
         "a result for a flagged session means the flag was wrong (buffered result lands after reconcile) \u2014 clear it there rather than adding handshake ordering",

@@ -145,6 +145,14 @@ failure already wrote stay live for Retry, and stamps `WorkflowState.stepFailure
 instead. A stamped force-advance still wins over a failure the same way it wins over an
 interrupt.
 
+The SDK reports a Stop the same way it reports a genuine failure — an `is_error` `result` — so
+without a correction every Stop inside a workflow step would park with `stepFailure: 'turn'`
+instead of a clean `waiting-approval`. `SessionManager` stamps that `result` `stopped: true`
+before persisting it (see [turn-recovery](turn-recovery.md#a-stopped-turn-is-not-a-failed-turn))
+and reports `failed: false` for it, so this settle takes the `interrupted` branch above, not
+this one — the `if (interrupted && !forced) … else if (!failed && autoAdvance)` ordering is what
+guarantees the park stays clean regardless of `failed`'s value.
+
 ### Compacting a parked step
 
 A step parked `waiting-approval` (or, for a failed step, `error`) can run one more turn without
@@ -406,8 +414,11 @@ installed icon, no new package). No other new dependencies.
 ## Tests
 
 - `server/src/workflows.advance.test.ts` — Stop does not flag an advance (and does not arm
-  the watchdog); a stopped step parks on the SDK result and on `ended`-without-result; Stop
-  parks an `autoAdvance: true` step on both settle paths; Stop discards a pending
+  the watchdog); a stopped step parks on the SDK result and on `ended`-without-result, both when
+  the result reports `subtype: 'success'` and when it reports the SDK's actual interrupt shape
+  (`is_error` result stamped `stopped`) — including for an `autoAdvance: true` step, proving the
+  clean park does not depend on `failed`; a step that genuinely fails (no `stopped` stamp) still
+  parks with `stepFailure: 'turn'`. Stop discards a pending
   plan-approval advance (flag and stamp both cleared); `autoAdvance` still advances on a
   normal (non-interrupted) settle; a plan-approval advance still fires on a normal settle; a
   queued follow-up survives the park; force-advance still advances a running step;
@@ -453,7 +464,9 @@ installed icon, no new package). No other new dependencies.
 - A step configured with `autoAdvance: true` still parks after Stop — Stop overrides the
   step's own auto-advance configuration, since Stop is explicit intent to halt. A failed turn
   (`failed = true`) overrides `autoAdvance` the same way, for the same reason: there's no
-  deliverable to hand on.
+  deliverable to hand on. A turn the user stopped is not `failed`, even when the SDK reports it
+  in the identical `is_error` shape a real failure uses — it parks the same clean way as any
+  other Stop (see [turn-recovery](turn-recovery.md#a-stopped-turn-is-not-a-failed-turn)).
 - A plan-approval advance already pending when Stop is pressed is discarded, not merely
   delayed: `advanceOnComplete` and `advanceOnCompleteStep` are both cleared, so no later
   settle can replay it.

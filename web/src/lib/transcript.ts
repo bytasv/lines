@@ -9,7 +9,12 @@ import type {
   TurnSummaryData,
   WorkflowMarkerData,
 } from '@lines/shared';
-import { isPlanFilePath, resultErrorText, subagentParentId } from '@lines/shared';
+import {
+  isPlanFilePath,
+  isStoppedResult,
+  resultErrorText,
+  subagentParentId,
+} from '@lines/shared';
 
 export interface ToolBlock {
   type: 'tool';
@@ -47,6 +52,9 @@ export interface ResultItem {
   costUsd?: number;
   durationMs?: number;
   isError: boolean;
+  /** The user stopped this turn. Mutually exclusive with `isError`: a stop arrives in
+   *  the same shape as a failure, and the row reads neutrally rather than red. */
+  stopped: boolean;
   /** Why the turn failed, kept only for failures so the row can say so — from the
    *  result text, or from `errors[]` when the SDK carried no `result` at all. */
   error?: string;
@@ -173,8 +181,11 @@ function withPlanFileText(
 }
 
 /** A `result` that ended its turn in failure — the shape both the rendered result
- *  item and the compaction-span escape key off. */
-function isFailedResult(r: { is_error?: boolean; subtype?: string }): boolean {
+ *  item and the compaction-span escape key off. A turn the user stopped is reported
+ *  by the SDK in the same shape but is not a failure; the bridge's `stopped` stamp
+ *  is what tells the two apart. */
+function isFailedResult(r: { is_error?: boolean; subtype?: string; stopped?: unknown }): boolean {
+  if (isStoppedResult(r)) return false;
   return Boolean(r.is_error) || (r.subtype != null && r.subtype !== 'success');
 }
 
@@ -527,6 +538,7 @@ export function buildTranscript(
               subtype?: string;
               result?: unknown;
               errors?: unknown;
+              stopped?: unknown;
             };
             const isError = isFailedResult(r);
             const errorText = resultErrorText(r);
@@ -536,6 +548,7 @@ export function buildTranscript(
               costUsd: r.total_cost_usd,
               durationMs: r.duration_ms,
               isError,
+              stopped: isStoppedResult(r),
               // Only on failures: a successful turn's `result` is the assistant's
               // own final text, already rendered above.
               ...(isError && errorText ? { error: errorText } : {}),
@@ -713,6 +726,7 @@ function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
       return o.costUsd === next.costUsd &&
         o.durationMs === next.durationMs &&
         o.isError === next.isError &&
+        o.stopped === next.stopped &&
         o.error === next.error &&
         o.summary === next.summary
         ? o

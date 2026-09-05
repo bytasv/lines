@@ -209,6 +209,50 @@ test('a stopped step parks on the SDK result', () => {
   assert.equal(h.s1().workflow?.stepIndex, 0);
 });
 
+/** How the SDK reports a user interrupt: an error result, indistinguishable from a
+ *  real failure except for the bridge's own record that the user asked for it. */
+const interruptResult = () => ({
+  type: 'result',
+  subtype: 'error_during_execution',
+  is_error: true,
+  errors: ['Interrupted by user'],
+});
+
+/** The trailing workflow marker, which is what the transcript row reads. */
+const lastMarker = (h: ReturnType<typeof harness>) =>
+  h.events.filter((e) => e.kind === 'workflow').at(-1)!.data as WorkflowMarkerData;
+
+test('a stopped step parks clean when the SDK reports the interrupt as an error', () => {
+  const h = running(2);
+  h.sessions.interrupt('s1');
+  h.sessions.handleWorkerEvent('s1', interruptResult());
+
+  assert.deepEqual(h.s1().workflow?.stepStatuses, ['waiting-approval', 'pending']);
+  assert.equal(h.s1().status, 'waiting-approval');
+  assert.equal(h.s1().workflow?.stepFailure, undefined);
+  assert.equal(lastMarker(h).failed, undefined);
+});
+
+test('Stop still parks an autoAdvance step reported as an error', () => {
+  // The `interrupted && !forced` branch comes first, so the advance is never reached
+  // — the park does not depend on `failed` being true.
+  const h = running(2, { autoAdvance: true });
+  h.sessions.interrupt('s1');
+  h.sessions.handleWorkerEvent('s1', interruptResult());
+
+  assert.equal(h.s1().workflow?.stepIndex, 0);
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval');
+});
+
+test('a step that really failed still parks with stepFailure', () => {
+  const h = running(2);
+  h.sessions.handleWorkerEvent('s1', interruptResult());
+
+  assert.equal(h.s1().workflow?.stepFailure, 'turn');
+  assert.equal(h.s1().status, 'error');
+  assert.equal(lastMarker(h).failed, true);
+});
+
 test('a stopped step parks when the query ends without a result', () => {
   const h = running(2);
   h.sessions.interrupt('s1');
@@ -617,4 +661,69 @@ test('advancing clears on the wire when the workflow vanishes mid-advance', asyn
   const last = h.upserts.at(-1)!;
   assert.equal(last.workflow?.advancing, false, 'the cleared flag reached the client');
   assert.equal(last.workflow?.stepIndex, 1, 'and the bumped index with it');
+});
+
+test('{changed} and {diff} resolve in an inheriting (non-fresh-start) step, never blank', async () => {
+  // Regression: {diff} used to be gated on `freshStart && entry && i > 0`, so a
+  // Commit-style step that stays in the running conversation (freshStart: false)
+  // got '' silently. Both tokens must now resolve regardless of freshStart.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-advance-'));
+  const wf: WorkflowDef = {
+    id: 'wf1',
+    name: 'commit flow',
+    steps: [
+      {
+        name: 'Step 1',
+        promptTemplate: 'do step 1{feedback}',
+        model: 'claude-sonnet-5',
+        permissionMode: 'default',
+        autoAdvance: false,
+        freshStart: false,
+      },
+      {
+        name: 'Commit',
+        promptTemplate: 'Stage: {changed}\nDiff: {diff}{feedback}',
+        model: 'claude-sonnet-5',
+        permissionMode: 'default',
+        autoAdvance: false,
+        // Inheriting step — no fresh start — but {changed}/{diff} must still resolve.
+        freshStart: false,
+      },
+    ],
+  };
+  const state: WorkflowState = {
+    workflowId: 'wf1',
+    started: true,
+    stepIndex: 0,
+    stepStatuses: ['waiting-approval', 'pending'],
+  };
+  fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta(state)]));
+  fs.writeFileSync(path.join(root, 'workflows.json'), JSON.stringify([wf]));
+
+  const pushed: Record<string, unknown>[] = [];
+  const store = createStore(root);
+  const sessions = new SessionManager(store, new GuardAllowlist(store), () => {});
+  sessions.attachWorker({
+    push: (_id: string, message: Record<string, unknown>) => pushed.push(message),
+    interrupt: () => {},
+    close: () => {},
+    setModel: () => {},
+    setPermissionMode: () => {},
+  } as never);
+  const workflows = new WorkflowEngine(store, sessions, () => {}, 'u1');
+  // Stub the resolver instead of shelling out to git — meta.cwd is /tmp here, and
+  // an empty baseline list is exactly what a workflow with no captured snapshot
+  // resolves to, exercising the same "no files changed" / "no tracked changes"
+  // fallback text a real synthetic-baseline run would produce.
+  (sessions as unknown as { baselinesFor: () => Promise<unknown> }).baselinesFor = async () => ({
+    baselines: [],
+    source: 'workflow',
+  });
+
+  workflows.approve('s1', 0);
+  await settle();
+
+  const text = JSON.stringify(pushed.at(-1));
+  assert.match(text, /Stage: No files changed since this workflow run started\./);
+  assert.match(text, /Diff: No tracked changes since this workflow run started\./);
 });

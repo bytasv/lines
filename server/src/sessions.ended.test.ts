@@ -70,7 +70,13 @@ async function drain() {
 const lastResult = (events: TranscriptEvent[]) => {
   const last = events.at(-1);
   assert.equal(last?.kind, 'sdk');
-  return last!.data as { type?: string; is_error?: boolean; subtype?: string; result?: string };
+  return last!.data as {
+    type?: string;
+    is_error?: boolean;
+    subtype?: string;
+    result?: string;
+    stopped?: unknown;
+  };
 };
 
 test('a crashed query writes a failed result so the transcript can offer Retry', () => {
@@ -333,6 +339,70 @@ test('a Retry re-sends the prompt untouched where re-phrasing would not help', (
     h.sessions.handleWorkerEvent('s1', failedResult(text));
     assert.equal(h.sessions.lastPromptForRetry('s1')!.text, 'go on', text);
   }
+});
+
+/** How the SDK reports a user interrupt: an error result with no `result` at all. */
+const interruptResult = () => ({
+  type: 'result',
+  subtype: 'error_during_execution',
+  is_error: true,
+  errors: ['Interrupted by user'],
+});
+
+test('a stopped turn is recorded as stopped, not failed', async () => {
+  const h = harness();
+  h.sessions.interrupt('s1');
+  h.sessions.handleWorkerEvent('s1', interruptResult());
+  await drain();
+  h.sessions.flushPersist();
+
+  // Annotated, never rewritten: the raw SDK verdict stays verbatim beside the stamp.
+  const result = lastResult(h.transcript());
+  assert.equal(result.stopped, true);
+  assert.equal(result.is_error, true);
+  assert.equal(result.subtype, 'error_during_execution');
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.status, 'idle');
+  assert.equal(meta.errorMessage, undefined);
+  assert.equal(meta.errorKind, undefined);
+});
+
+test('a stopped turn keeps its query', async () => {
+  // An interrupt leaves the CLI child healthy, so dropping it only buys the next
+  // prompt a resume respawn.
+  const h = harness();
+  h.sessions.interrupt('s1');
+  h.sessions.handleWorkerEvent('s1', interruptResult());
+  await drain();
+
+  assert.deepEqual(h.closes, []);
+});
+
+test('a genuine error result is still a failed turn', async () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', interruptResult());
+  await drain();
+  h.sessions.flushPersist();
+
+  assert.equal(lastResult(h.transcript()).stopped, undefined);
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.status, 'error');
+  assert.equal(meta.errorMessage, 'Interrupted by user');
+  assert.deepEqual(h.closes, ['s1']);
+});
+
+test('the Stop flag is consumed exactly once', async () => {
+  // A dangling flag would neutralise the next genuine failure.
+  const h = harness();
+  h.sessions.interrupt('s1');
+  h.sessions.handleWorkerEvent('s1', interruptResult());
+  await drain();
+  h.sessions.handleWorkerEvent('s1', interruptResult());
+  await drain();
+  h.sessions.flushPersist();
+
+  assert.equal(lastResult(h.transcript()).stopped, undefined);
 });
 
 test('a clean end writes no synthetic result', () => {
