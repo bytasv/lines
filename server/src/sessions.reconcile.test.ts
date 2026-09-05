@@ -336,43 +336,6 @@ test('continueTurn expires ordinary cards but leaves an always-ask one open', ()
   assert.deepEqual(expired.map((c) => c.requestId), ['b1']);
 });
 
-/**
- * A meta from before the rename: `caveman: { enabled, level }` and no
- * `compressResponses`. Reaches the manager both from sessions.json and, since
- * storage keeps the whole blob, from sync.
- */
-const legacy = (caveman?: { enabled?: boolean; level?: string }, extra: Record<string, unknown> = {}) =>
-  ({
-    ...meta('idle'),
-    compressResponses: undefined,
-    ...(caveman ? { caveman } : {}),
-    ...extra,
-  }) as unknown as SessionMeta;
-
-test('a legacy caveman meta keeps its setting under the new name', () => {
-  const on = managerOver([legacy({ enabled: true, level: 'full' })]);
-  assert.equal(on.get('s1').compressResponses, true);
-
-  const off = managerOver([legacy({ enabled: false, level: 'full' })]);
-  assert.equal(off.get('s1').compressResponses, false);
-});
-
-test('a meta with neither field resumes uncompressed rather than throwing', () => {
-  const m = managerOver([legacy(undefined, { status: 'running' })]);
-  assert.equal(m.get('s1').compressResponses, false);
-  assert.doesNotThrow(() => m.sessions.reconcileWithWorker([]));
-  assert.deepEqual(m.pushed, ['s1']);
-});
-
-test('a legacy meta adopted from storage is migrated too', () => {
-  const m = managerOver([meta('idle')]);
-  m.sessions.adoptSynced(legacy({ enabled: true }, { id: 's2', name: 's2', updatedAt: 2 }));
-  assert.equal(m.get('s2').compressResponses, true);
-
-  m.sessions.adoptSynced(legacy(undefined, { id: 's3', name: 's3', updatedAt: 2 }));
-  assert.equal(m.get('s3').compressResponses, false);
-});
-
 test('one session failing to resume does not stop the others', async () => {
   const m = managerOver(
     [meta('running', { id: 'bad', name: 'bad' }), meta('running', { id: 'good', name: 'good' })],
@@ -454,4 +417,36 @@ test('a queued push counts as live so its session survives reconcile', () => {
     { sessionId: 'a', claudeSessionId: 'c-a', busy: true },
     { sessionId: 'b', busy: true },
   ]);
+});
+
+/**
+ * A rewind drops the session's query and truncates its transcript. The reconcile
+ * that follows must read that as an ordinary settled session, not as a turn that
+ * died with the app — otherwise the Continue banner offers to resume a turn the
+ * user deliberately discarded.
+ */
+test('a rewound session reconciles cleanly', async () => {
+  const events: TranscriptEvent[] = [
+    { seq: 0, ts: 0, kind: 'user', data: { text: 'first' } },
+    { seq: 1, ts: 1, kind: 'sdk', data: { type: 'assistant', uuid: 'uuid-1' } },
+    { seq: 2, ts: 2, kind: 'user', data: { text: 'the oversized one' } },
+    { seq: 3, ts: 3, kind: 'sdk', data: { type: 'assistant', uuid: 'uuid-2' } },
+  ];
+  const h = harness(
+    'error',
+    { claudeSessionId: 'cli-1', errorKind: 'context', errorMessage: 'Prompt is too long' },
+    noAutoContinue,
+    events,
+  );
+  h.sessions.forkSession = async () => ({ sessionId: 'cli-2' });
+  assert.equal((await h.sessions.rewindSession('s1', 2)).ok, true);
+
+  // The worker has no query for this session any more — the rewind closed it.
+  h.sessions.reconcileWithWorker([]);
+
+  const m = h.s1();
+  assert.equal(m.status, 'idle');
+  assert.equal(m.interruptedAt, undefined, 'nothing was interrupted — the turns were discarded');
+  assert.equal(m.claudeSessionId, 'cli-2');
+  assert.deepEqual(h.cards('s1'), [], 'the discarded query leaves no orphaned permission cards');
 });

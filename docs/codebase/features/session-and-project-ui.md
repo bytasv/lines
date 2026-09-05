@@ -67,7 +67,9 @@ and how status is surfaced in the sidebar row and the project tab.
 - `web/src/components/ProjectTabs.tsx` — `ProjectTab` folder/dot swap and tooltip
 - `server/src/sessions.ts` — `askPermission`, `setStatus`, `reconcileWithWorker`, `adoptSynced`
 - `web/src/components/Sidebar.tsx` — badge label/color lookup
-- `web/src/lib/alerts.ts` — notification body text
+- `web/src/lib/alerts.ts` — notification body text; `maybeAlert`'s background-tasks early return
+  (see [background-tasks](background-tasks.md))
+- `web/src/components/Composer.tsx` — Stop-button gating against `session.backgroundTasks`
 
 ## Symbols
 
@@ -98,7 +100,9 @@ and how status is surfaced in the sidebar row and the project tab.
 - `waitingPermissionMeta(tool)` — maps a pending tool name to `{ label, color }`
 - `sessionRowMeta(session)` — maps a full session to `{ color, label, actionable }` for the
   sidebar row: `waitingPermissionMeta` first, then the [turn-recovery](turn-recovery.md) yellow
-  interrupted state, then the plain status table. Sits alongside a separate sibling predicate,
+  interrupted state, then a settled session's own live
+  [background-tasks](background-tasks.md#business-rules) row (`actionable: false`), then the plain
+  status table. Sits alongside a separate sibling predicate,
   `isWorkflowFinished` (also in `format.ts`), which is not part of this return shape — see
   [workflow-step-lifecycle](workflow-step-lifecycle.md). The sidebar row's icon has a fourth
   branch (finished-workflow filled checkmark) beyond what `sessionRowMeta` alone drives
@@ -299,6 +303,11 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 - Archived sessions in the sidebar render 20 at a time behind a "Show N more" button instead
   of the full archived list, since `lines.showArchived` defaults to on and a long-lived
   project can accumulate hundreds of them.
+- A settled session that still owns a live background task (see
+  [background-tasks](background-tasks.md)) shows a non-actionable "background work" sidebar row,
+  ranked below `waiting-permission` and the interrupted state — both of those need the user,
+  background work does not — and the composer's Stop button stays enabled for it (sending
+  `stopBackgroundTasks` instead of `interrupt`) even though the session reads as settled.
 
 ## Architectural rules
 
@@ -358,3 +367,6 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   gains a host avatar/accent for a session on another machine.
 - [session-collaboration](session-collaboration.md) — `SessionMeta.turnActor`, the sidebar's
   "someone else is running this turn" chip.
+- [background-tasks](background-tasks.md) — the sidebar's "background work" row, the composer's
+  Stop-button gating, and why it's ranked below `waiting-permission`/interrupted but above the
+  plain status table.

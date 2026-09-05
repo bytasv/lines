@@ -91,7 +91,23 @@ export type TranscriptItem =
   | ResultItem
   | { kind: 'permission'; key: string; data: PermissionRequestData; resolution?: 'allow' | 'deny' | 'expired' }
   | { kind: 'workflow'; key: string; data: WorkflowMarkerData }
-  | ContextCompactItem;
+  | ContextCompactItem
+  | TaskItem;
+
+/**
+ * One background task (a backgrounded subagent or Bash command). `task_started`
+ * opens it and `task_notification` resolves it in place — same idiom as the
+ * compaction span above, so a task is one row rather than two.
+ */
+export interface TaskItem {
+  kind: 'task';
+  key: string;
+  taskId: string;
+  description: string;
+  subagentType?: string;
+  /** Set by the task's `task_notification`; absent while it is still running. */
+  outcome?: { status: 'completed' | 'failed' | 'stopped'; summary: string };
+}
 
 /** One compaction. A 'requested' marker renders as "Compacting…" and is upgraded
  *  in place when its 'done' arrives, so a span is one line, not two. */
@@ -228,6 +244,9 @@ export function buildTranscript(
   let sessionPlanWrite: ToolBlock | null = null;
   /** Compaction whose 'done' hasn't landed yet, so it can be upgraded in place. */
   let openCompact: ContextCompactItem | null = null;
+  /** Unresolved background tasks by task_id — a map, not a single slot like
+   *  openCompact, because tasks can overlap. */
+  const openTasks = new Map<string, TaskItem>();
 
   /** Last snapshot of `file`, scanning back — no array copy per lookup. */
   const lastSnapshotFor = (file: string, unclaimedOnly: boolean): FileSnapshotData | undefined => {
@@ -353,13 +372,59 @@ export function buildTranscript(
         const msg = event.data as Record<string, unknown> & { type: string };
         switch (msg.type) {
           case 'system': {
-            if ((msg as { subtype?: string }).subtype === 'init') {
+            const subtype = (msg as { subtype?: string }).subtype;
+            if (subtype === 'init') {
               items.push({
                 kind: 'system-init',
                 key: `s${event.seq}`,
                 model: String((msg as { model?: string }).model ?? ''),
               });
+              break;
             }
+            // Ambient/housekeeping tasks are hidden from the inline transcript on
+            // the SDK's own instruction.
+            if ((msg as { skip_transcript?: boolean }).skip_transcript) break;
+            if (subtype === 'task_started') {
+              const t = msg as { task_id?: string; description?: string; subagent_type?: string };
+              const item: TaskItem = {
+                kind: 'task',
+                key: `t${event.seq}`,
+                taskId: String(t.task_id ?? ''),
+                description: String(t.description ?? ''),
+                subagentType: t.subagent_type,
+              };
+              openTasks.set(item.taskId, item);
+              items.push(item);
+              break;
+            }
+            if (subtype === 'task_notification') {
+              const t = msg as {
+                task_id?: string;
+                status?: 'completed' | 'failed' | 'stopped';
+                summary?: string;
+              };
+              const taskId = String(t.task_id ?? '');
+              const outcome = {
+                status: t.status ?? 'completed',
+                summary: String(t.summary ?? ''),
+              } as const;
+              const open = openTasks.get(taskId);
+              if (open) {
+                open.outcome = outcome;
+                openTasks.delete(taskId);
+                break;
+              }
+              // Its `task_started` was skipped or truncated away — a standalone
+              // resolved row beats dropping the only trace the task left.
+              items.push({
+                kind: 'task',
+                key: `t${event.seq}`,
+                taskId,
+                description: '',
+                outcome,
+              });
+            }
+            // task_progress / task_updated are too chatty for the inline transcript.
             break;
           }
           case 'assistant': {
@@ -661,6 +726,14 @@ function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
       return (old as typeof next).data === next.data ? old : next;
     case 'context-compact':
       return (old as ContextCompactItem).data === next.data ? old : next;
+    case 'task': {
+      const o = old as TaskItem;
+      return o.description === next.description &&
+        o.outcome?.status === next.outcome?.status &&
+        o.outcome?.summary === next.outcome?.summary
+        ? o
+        : next;
+    }
     case 'tool-group': {
       const o = old as ToolGroupItem;
       if (o.labelText !== next.labelText) return next;

@@ -26,6 +26,12 @@ session and a workflow session. Before this, a failure inside a workflow step le
 `waiting-approval` status made `retryTurn`'s busy guard refuse the click even if one had
 rendered), and some pre-run failures wrote no failure row at all.
 
+For the one failure Retry cannot fix — a context-length overflow where the oversized prompt
+that caused it is still in the CLI's own history, so an identical re-send just overflows again —
+there is a third recovery path: [session-rewind](session-rewind.md) truncates the session's
+transcript from a chosen sent message on and re-points the CLI conversation at the truncated
+history, in place.
+
 Beyond auth, four more failure shapes get the same actionable-banner treatment: a
 content-filter refusal, a context-length overflow, a malformed/invalid request, and an
 overloaded/rate-limited API. Each rewrites the raw CLI text into a banner naming what's
@@ -80,7 +86,8 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 
 ## Files
 
-- `server/src/workerProtocol.ts` (`LiveSessionInfo.busy`)
+- `server/src/workerProtocol.ts` (`LiveSessionInfo.busy`, `LiveSessionInfo.backgroundTasks` — see
+  [background-tasks](background-tasks.md))
 - `server/src/worker.ts` (`SessionState.busy`, `hello` live list)
 - `server/src/workerClient.ts` (`WORKER_LOST_MS`, `onWorkerLost`, `onStatusChange`,
   `WorkerClient.status`)
@@ -104,11 +111,13 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   source)
 - `server/src/caveman.ts` (`COMPRESS_RESPONSES_PROMPT` — vendored response-compression
   ruleset, appended to `systemPrompt.append` by `buildQueryOptions` when
-  `SessionMeta.compressResponses` is on; a plain constant, no I/O)
+  `UserUiSettings.compressResponses` is on; a plain constant, no I/O)
 - `shared/types.ts` (`SessionMeta.interruptedAt`, `UserUiSettings.autoContinueInterrupted`,
-  `WorkerStatus`, `WorkflowState.stepFailure`, `WorkflowMarkerData.failed`,
-  `SessionErrorKind`, `SessionMeta.errorKind`, `resultErrorText`, `TurnFailureKind`)
-- `web/src/store.ts` (`autoContinueInterrupted`, `pushSettings`/`applySettings`,
+  `UserUiSettings.compressResponses`, `WorkerStatus`, `WorkflowState.stepFailure`,
+  `WorkflowMarkerData.failed`, `SessionErrorKind`, `SessionMeta.errorKind`,
+  `resultErrorText`, `TurnFailureKind`)
+- `web/src/store.ts` (`autoContinueInterrupted`, `compressResponses`,
+  `pushSettings`/`applySettings`,
   `workerStatus`, `authStatus` handler that opens/force-opens the login modal — unchanged)
 - `web/src/components/SessionView.tsx`, `web/src/components/SettingsModal.tsx`
 - `web/src/components/Sidebar.tsx`, `web/src/lib/format.ts` (`sessionRowMeta`)
@@ -226,6 +235,10 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   proactive-refresh retry ladder
 - `SessionManager.ranHere(id)` (private) — true when this instance has live state for the
   session or a non-empty local transcript; the scope guard for `reconcileWithWorker`'s skip below
+- `SessionManager.recycleIdleQueries()` — restarts every query that isn't mid-turn, on login/
+  logout/token-refresh and project-root changes; skips a session whose `LiveState.backgroundTasks`
+  is non-empty (see [background-tasks](background-tasks.md)), since closing that query would kill
+  the CLI child and every task it owns
 
 ## Data flow
 
@@ -478,9 +491,7 @@ message type, no new modal, no new client state, no DB migration.
 - `server/src/sessions.reconcile.test.ts` — promote/demote/old-worker matrix, event-based
   healing, stop-ordering, `withQueuedPushes`, the auto-continue cases (fresh flag resumes,
   absent setting resumes, explicit `false` does not, stale flag does not, workflow source
-  preserved, a legacy `caveman` meta migrates to `compressResponses` (on load and via
-  `adoptSynced`) and a meta with neither field resumes uncompressed rather than throwing,
-  one failing session doesn't stop the others,
+  preserved, one failing session doesn't stop the others,
   `result`/archive clear the flag, an unresolved `ExitPlanMode` card blocks auto-continue and
   is not expired by `continueTurn`, an ordinary tool's card still expires), the worker-lost
   case (reconciled with an empty live list, `autoContinue: false`, never auto-resumed), the
@@ -538,9 +549,11 @@ message type, no new modal, no new client state, no DB migration.
   back to ambient credentials; a stale token is refreshed before the query spawns; a query the
   bridge cannot vouch for (no `queryTokens` entry, simulating a bridge restart) is recycled
   before its next push; a query known to hold the current token is not recycled (no-churn
-  case); a rotated token recycles the query it no longer matches; `compressResponses: true`
-  puts `COMPRESS_RESPONSES_PROMPT` in the spawned query's `systemPrompt.append`, and `false`
-  sends neither the ruleset nor a `plugins` key.
+  case); a rotated token recycles the query it no longer matches; an absent
+  `settings.json` still puts `COMPRESS_RESPONSES_PROMPT` in the spawned query's
+  `systemPrompt.append` (on by default), `compressResponses: false` sends neither the
+  ruleset nor a `plugins` key, and flipping the setting between two turns changes only the
+  second query's options.
 - The settings field-merge in `userContext.ts` is uncovered — `buildUserContext` wires sync,
   stores and a worker together with no seam. Verified by hand.
 
@@ -654,12 +667,12 @@ message type, no new modal, no new client state, no DB migration.
   `#state` falls back to the newest in-flight login.
 - `accessToken: null` in `buildQueryOptions` is reachable only when no `AuthManager` is wired at
   all (tests / embedding), not for any real signed-in user.
-- `SessionMeta.compressResponses` gates `COMPRESS_RESPONSES_PROMPT` directly in
+- `UserUiSettings.compressResponses` gates `COMPRESS_RESPONSES_PROMPT` directly in
   `buildQueryOptions`: on means the ruleset is in `systemPrompt.append`, off means neither it
-  nor a `plugins` key is present. No runtime git clone, no machine-global flag file, no
-  per-machine default that can silently disagree with the toggle — a legacy
-  `caveman: { enabled, level }` meta (pre-rename) is read once via `adoptLegacyCompress` on
-  load and on `adoptSynced`, and a meta with neither field resumes uncompressed.
+  nor a `plugins` key is present. One user-level setting, not a per-session one — read from
+  the store on every push, so a Settings flip lands on each session's next query with
+  nothing cached on the meta and nothing to restart. On unless explicitly `false`, so a
+  fresh install and an install predating the setting both compress.
 - A content-filter, context-overflow, invalid-request or overloaded failure never implies an
   automatic retry, backoff, or step advance — same rule as every other failure in this feature.
   The banner only ever names an action for the user to take by hand.
@@ -793,6 +806,11 @@ message type, no new modal, no new client state, no DB migration.
   makes a single Retry enough: `handleTokenRejected`'s recovery refresh and a Retry's own
   `ensureFreshToken` call can race, and `expiresAt` alone cannot tell a merely-unexpired token
   from one that was just revoked server-side.
+- A query owning live background tasks is never recycled, even when its session reads as fully
+  settled — see [background-tasks](background-tasks.md). This is a second, independent exemption
+  from `recycleIdleQueries()`'s existing interruptible-status gate, not a change to it: a session
+  can be both "not interruptible" (turn over) and "not safe to recycle" (background work still
+  running) at once, and the two checks stay separate for that reason.
 
 ### Multi-machine
 
@@ -819,3 +837,8 @@ is unchanged — it now simply always describes the primary.
   no-local-history reconcile skip guards against.
 - [multi-machine-client](multi-machine-client.md) — holding several machines' links at once, and
   why the banner precedence above is scoped to the primary.
+- [session-rewind](session-rewind.md) — the third recovery path, for a context overflow Retry
+  cannot fix because the oversized prompt is still in the CLI's history.
+- [background-tasks](background-tasks.md) — the second `recycleIdleQueries()` exemption, the
+  `LiveSessionInfo.backgroundTasks` field, and the `hello`-driven hydration path that reuses the
+  same worker-survives-a-bridge-restart asymmetry documented above.

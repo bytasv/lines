@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  ActionIcon,
   Badge,
   Box,
   Button,
@@ -24,14 +25,18 @@ import {
   Text,
   Tooltip,
 } from '@mantine/core';
-import { useHover } from '@mantine/hooks';
+import { useClipboard, useHover } from '@mantine/hooks';
 import {
   IconArchive,
+  IconArrowBackUp,
   IconArrowDown,
+  IconCheck,
   IconChevronDown,
   IconChevronRight,
+  IconCopy,
   IconFile,
   IconLogin,
+  IconPencil,
   IconPlayerSkipForward,
   IconRefresh,
   IconRoute,
@@ -44,6 +49,7 @@ import type {
   TranscriptEvent,
   WorkflowMarkerData,
 } from '@lines/shared';
+import { rewindBlock } from '@lines/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
 import {
@@ -64,6 +70,7 @@ import { Markdown } from './Markdown';
 import { ToolGroup } from './ToolGroup';
 import { PermissionPrompt } from './PermissionPrompt';
 import { ActivityRow } from './ActivityRow';
+import { ConfirmModal } from './ConfirmModal';
 
 function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
   const label =
@@ -277,6 +284,203 @@ function FailedTurnActions({ sessionId }: { sessionId: string }) {
   );
 }
 
+/** What a confirmed rewind does with the message it rewound to. */
+type RewindIntent = 'edit' | 'rewind';
+
+/**
+ * A sent prompt, with its Copy / Edit / Rewind actions revealed under the bubble
+ * on hover. Edit and Rewind both discard this message and everything after it;
+ * Edit additionally hands the text back to the composer. Copy is a plain
+ * clipboard read and is never gated.
+ *
+ * Its own component because the hover/confirm state needs hooks, which the
+ * switch in {@link Item} cannot host.
+ */
+function UserBubble({
+  item,
+  sessionId,
+  onImage,
+}: {
+  item: Extract<TranscriptItem, { kind: 'user' }>;
+  sessionId: string;
+  onImage: (src: string) => void;
+}) {
+  const { hovered, ref } = useHover<HTMLDivElement>();
+  const clipboard = useClipboard({ timeout: 1500 });
+  /** The action awaiting confirmation, or null when the dialog is closed. */
+  const [confirming, setConfirming] = useState<RewindIntent | null>(null);
+  /** No earlier assistant reply to fork the CLI conversation at, so a rewind here
+   *  clears Claude's memory of the session outright. Said in the dialog rather
+   *  than done silently. */
+  const [fullReset, setFullReset] = useState(false);
+  // A primitive (the reason string, or null) rather than the meta object: this
+  // selector runs on every store change and every user bubble holds one, so
+  // returning anything with a fresh identity would re-render the whole transcript.
+  const blockReason = useStore((s) => {
+    const meta = s.sessions[sessionId];
+    if (!meta) return 'That session is gone.';
+    if (s.connectionStatus !== 'connected') return 'Reconnecting…';
+    return rewindBlock(meta)?.reason ?? null;
+  });
+  // A boolean, for the same reason the block reason is a string: a stable
+  // selector result keeps this bubble out of unrelated re-renders.
+  const inWorkflow = useStore((s) => s.sessions[sessionId]?.workflow?.started === true);
+  const seq = Number(item.key.slice(1));
+
+  const openConfirm = (intent: RewindIntent) => {
+    // Read at click time, not subscribed: the transcript changes on every event
+    // and this is needed once, for one line of dialog copy.
+    const events = useStore.getState().transcripts[sessionId] ?? [];
+    setFullReset(
+      !events.some((e) => {
+        if (e.seq >= seq || e.kind !== 'sdk') return false;
+        const d = e.data as { type?: string; uuid?: string } | null;
+        return d?.type === 'assistant' && !!d.uuid;
+      }),
+    );
+    setConfirming(intent);
+  };
+
+  /** Shared by both actions: what is deleted is identical, and only the fate of
+   *  this message's own text differs. Both sentences say "deleted" rather than
+   *  "rewound to" — the ambiguity being avoided is whether the message survives. */
+  const lostCopy =
+    'Every reply and prompt after it is deleted too, and Claude forgets those turns. ' +
+    'This cannot be undone, and what the deleted turns already cost is not refunded.' +
+    (inWorkflow
+      ? ' The workflow goes back to the step this message belongs to and waits there; later steps and anything they published are discarded.'
+      : '') +
+    (fullReset
+      ? " There is no earlier reply to go back to, so Claude's memory of this session is cleared completely."
+      : '');
+
+  /** Icon-only, so the tooltip carries the whole explanation — and it has to say
+   *  what is *deleted*, since both actions truncate and only Edit gives the text
+   *  back. A blocked action shows the block reason there instead, rather than
+   *  leaving a dead button unexplained. `label` is the short name, for screen
+   *  readers and nothing else. */
+  const action = (intent: RewindIntent, Icon: typeof IconPencil, label: string, hint: string) => (
+    <Tooltip label={blockReason ?? hint} key={intent}>
+      {/* A span so the tooltip still fires over a disabled control. */}
+      <span style={{ display: 'inline-flex' }}>
+        <ActionIcon
+          size="sm"
+          variant="subtle"
+          color="gray"
+          aria-label={label}
+          disabled={blockReason !== null}
+          onClick={() => openConfirm(intent)}
+        >
+          <Icon size={14} />
+        </ActionIcon>
+      </span>
+    </Tooltip>
+  );
+
+  return (
+    <Stack ref={ref} gap={6} align="flex-end">
+      <Box style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, alignItems: 'flex-end' }}>
+        <Paper
+          radius="md"
+          px="sm"
+          py={6}
+          bg="var(--mantine-color-default-hover)"
+          // minWidth: 0 is load-bearing twice — it stops a wide code block from
+          // growing the flex item, and since used width is
+          // max(min-width, min(max-width, width)), a default min-width: auto
+          // (min-content) would beat maxWidth: 80% for one long unbreakable token.
+          style={{ maxWidth: '80%', minWidth: 0, overflowWrap: 'anywhere' }}
+        >
+          {item.text && <UserText text={item.text} />}
+          {item.mentions && item.mentions.length > 0 && (
+            <Group gap={6} mt={item.text ? 6 : 0}>
+              {item.mentions.map((m) => {
+                const meta = mentionKindMeta[m.kind];
+                const Icon = meta?.icon;
+                return (
+                  <Badge
+                    key={`${m.kind}:${m.id}`}
+                    variant="light"
+                    color={meta?.color ?? 'gray'}
+                    leftSection={Icon ? <Icon size={11} /> : undefined}
+                    style={{ textTransform: 'none' }}
+                  >
+                    {m.label}
+                  </Badge>
+                );
+              })}
+            </Group>
+          )}
+          {item.attachments && item.attachments.length > 0 && (
+            <Group gap="xs" mt={item.text ? 6 : 0}>
+              {item.attachments.map((att) => (
+                <AttachmentTile key={att.url} att={att} onImage={onImage} />
+              ))}
+            </Group>
+          )}
+        </Paper>
+        <PromptAuthor actor={item.actor} ts={item.ts} />
+      </Box>
+      {/* Under the bubble, right-aligned so it sits beneath the avatar. The row
+          keeps its height when hidden: revealing it on hover must not shift the
+          transcript under the pointer. */}
+      <Group
+        gap={4}
+        h={28}
+        pr={30}
+        justify="flex-end"
+        style={{
+          opacity: hovered || confirming ? 1 : 0,
+          transition: 'opacity 120ms',
+          pointerEvents: hovered || confirming ? 'auto' : 'none',
+        }}
+      >
+        <Tooltip label={clipboard.copied ? 'Copied' : 'Copy message'}>
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="gray"
+            aria-label="Copy message"
+            // Never gated: reading your own text back is not a session action.
+            onClick={() => clipboard.copy(item.text)}
+          >
+            {clipboard.copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+          </ActionIcon>
+        </Tooltip>
+        {action(
+          'edit',
+          IconPencil,
+          'Edit',
+          'Edit and resend — deletes this message and everything after it, and puts its text back in the composer',
+        )}
+        {action(
+          'rewind',
+          IconArrowBackUp,
+          'Delete from here',
+          'Delete this message and everything after it — the text is not kept',
+        )}
+      </Group>
+      <ConfirmModal
+        opened={confirming !== null}
+        title={confirming === 'rewind' ? 'Delete from this message?' : 'Edit this message?'}
+        message={
+          confirming === 'rewind'
+            ? `This message is deleted and its text is not kept. ${lostCopy}`
+            : `This message is deleted, but its text comes back in the composer to edit and send again. ${lostCopy}`
+        }
+        confirmLabel={confirming === 'rewind' ? 'Delete' : 'Edit'}
+        confirmColor="red"
+        onConfirm={() => {
+          const edit = confirming === 'edit';
+          setConfirming(null);
+          send({ type: 'rewindSession', sessionId, seq, edit });
+        }}
+        onCancel={() => setConfirming(null)}
+      />
+    </Stack>
+  );
+}
+
 /**
  * One transcript row. Memoized: {@link reconcileItems} hands unchanged items back
  * across rebuilds, so with stable props an untouched row skips reconciliation
@@ -309,54 +513,11 @@ const Item = memo(function Item({
   switch (item.kind) {
     case 'user':
       // The only bubble in the transcript: a bubble means "a human said this".
-      return (
-        // Right-aligned even for a peer's prompt, deliberately: agent output is
-        // flush-left by established convention, so a left-aligned peer bubble
-        // would read as the agent talking. Authorship is carried by the avatar
-        // and its colour instead of by side.
-        <Box style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, alignItems: 'flex-end' }}>
-          <Paper
-            radius="md"
-            px="sm"
-            py={6}
-            bg="var(--mantine-color-default-hover)"
-            // minWidth: 0 is load-bearing twice — it stops a wide code block from
-            // growing the flex item, and since used width is
-            // max(min-width, min(max-width, width)), a default min-width: auto
-            // (min-content) would beat maxWidth: 80% for one long unbreakable token.
-            style={{ maxWidth: '80%', minWidth: 0, overflowWrap: 'anywhere' }}
-          >
-            {item.text && <UserText text={item.text} />}
-            {item.mentions && item.mentions.length > 0 && (
-              <Group gap={6} mt={item.text ? 6 : 0}>
-                {item.mentions.map((m) => {
-                  const meta = mentionKindMeta[m.kind];
-                  const Icon = meta?.icon;
-                  return (
-                    <Badge
-                      key={`${m.kind}:${m.id}`}
-                      variant="light"
-                      color={meta?.color ?? 'gray'}
-                      leftSection={Icon ? <Icon size={11} /> : undefined}
-                      style={{ textTransform: 'none' }}
-                    >
-                      {m.label}
-                    </Badge>
-                  );
-                })}
-              </Group>
-            )}
-            {item.attachments && item.attachments.length > 0 && (
-              <Group gap="xs" mt={item.text ? 6 : 0}>
-                {item.attachments.map((att) => (
-                  <AttachmentTile key={att.url} att={att} onImage={onImage} />
-                ))}
-              </Group>
-            )}
-          </Paper>
-          <PromptAuthor actor={item.actor} ts={item.ts} />
-        </Box>
-      );
+      // Right-aligned even for a peer's prompt, deliberately: agent output is
+      // flush-left by established convention, so a left-aligned peer bubble
+      // would read as the agent talking. Authorship is carried by the avatar
+      // and its colour instead of by side.
+      return <UserBubble item={item} sessionId={sessionId} onImage={onImage} />;
     case 'assistant':
       // Agent output is unwrapped and flush-left — no bubble, no icon gutter.
       return (
@@ -434,6 +595,18 @@ const Item = memo(function Item({
       return <WorkflowMarker data={item.data} />;
     case 'context-compact':
       return <ContextCompactMarker data={item.data} />;
+    case 'task':
+      // One dimmed row in the same register as session-init: a background task is
+      // context, not a card. The live truth is the strip above the composer —
+      // this is the durable record that the task happened at all.
+      return (
+        <Text size="xs" c={item.outcome?.status === 'failed' ? 'red' : 'dimmed'} ta="center">
+          background task
+          {item.outcome ? ` ${item.outcome.status}` : ''}
+          {' · '}
+          {item.outcome?.summary || item.description || item.subagentType || 'running'}
+        </Text>
+      );
   }
 });
 

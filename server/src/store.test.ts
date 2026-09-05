@@ -207,10 +207,79 @@ test('sessions.json is written compactly', () => {
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    compressResponses: false,
     status: 'idle',
     createdAt: 1,
   } as SessionMeta;
   store.saveSessions([meta]);
   assert.equal(fs.readFileSync(path.join(root, 'sessions.json'), 'utf8').includes('\n'), false);
+});
+
+// ---------------------------------------------------------------------------
+// truncateTranscript (session rewind)
+// ---------------------------------------------------------------------------
+
+test('truncateTranscript keeps everything before the cut and reports what went', () => {
+  const { store } = tmpStore();
+  for (const seq of [0, 1, 2, 3]) store.appendTranscript('s1', ev(seq));
+  assert.equal(store.truncateTranscript('s1', 2), 2);
+  assert.deepEqual(
+    store.loadTranscript('s1').map((e) => e.seq),
+    [0, 1],
+  );
+});
+
+test('the dropped lines are archived to a rewind sidecar', () => {
+  const { store, root } = tmpStore();
+  for (const seq of [0, 1, 2]) store.appendTranscript('s1', ev(seq));
+  store.truncateTranscript('s1', 1);
+  const dir = path.join(root, 'transcripts');
+  const sidecar = fs.readdirSync(dir).find((f) => f.startsWith('s1.rewind-'));
+  assert.ok(sidecar, 'a sidecar must be written');
+  const archived = fs
+    .readFileSync(path.join(dir, sidecar!), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => (JSON.parse(l) as TranscriptEvent).seq);
+  assert.deepEqual(archived, [1, 2]);
+});
+
+/** `loadTranscript` hands out `entry.parsed` by reference, so a truncation that
+ *  trimmed the cache in place would mutate an array a live reader still holds. */
+test('a truncation invalidates the cache instead of mutating a shared array', () => {
+  const { store } = tmpStore();
+  for (const seq of [0, 1, 2]) store.appendTranscript('s1', ev(seq));
+  const held = store.loadTranscript('s1');
+  store.truncateTranscript('s1', 1);
+  assert.equal(held.length, 3, "a reader's array must not be trimmed under it");
+  assert.equal(store.loadTranscript('s1').length, 1);
+  assert.notEqual(store.loadTranscript('s1'), held);
+});
+
+test('a seq past the end truncates nothing', () => {
+  const { store } = tmpStore();
+  store.appendTranscript('s1', ev(0));
+  assert.equal(store.truncateTranscript('s1', 5), 0);
+  assert.equal(store.loadTranscript('s1').length, 1);
+});
+
+test('appends after a truncation land on the truncated file', () => {
+  const { store } = tmpStore();
+  for (const seq of [0, 1, 2]) store.appendTranscript('s1', ev(seq));
+  store.truncateTranscript('s1', 1);
+  store.appendTranscript('s1', ev(1));
+  assert.deepEqual(
+    store.loadTranscript('s1').map((e) => e.seq),
+    [0, 1],
+  );
+});
+
+test('deleting a session takes its rewind sidecars with it', () => {
+  const { store, root } = tmpStore();
+  for (const seq of [0, 1]) store.appendTranscript('s1', ev(seq));
+  store.truncateTranscript('s1', 1);
+  store.deleteTranscript('s1');
+  assert.deepEqual(
+    fs.readdirSync(path.join(root, 'transcripts')).filter((f) => f.startsWith('s1')),
+    [],
+  );
 });

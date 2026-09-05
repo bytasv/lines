@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { ServerMessage, SessionMeta, TranscriptEvent } from '@lines/shared';
+import type { ServerMessage, SessionMeta, TranscriptEvent, UserUiSettings } from '@lines/shared';
 import { AuthRequiredError, type AuthManager } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
 import { COMPRESS_RESPONSES_PROMPT } from './caveman.ts';
@@ -18,7 +18,6 @@ const meta = (id: string, extra: Partial<SessionMeta> = {}): SessionMeta =>
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    compressResponses: false,
     status: 'idle',
     createdAt: 1,
     ...extra,
@@ -30,9 +29,14 @@ interface Push {
 }
 
 /** A manager over a throwaway store, with every worker push recorded. */
-function harness(ensureFreshToken: () => Promise<string>, extra: Partial<SessionMeta> = {}) {
+function harness(
+  ensureFreshToken: () => Promise<string>,
+  extra: Partial<SessionMeta> = {},
+  settings?: UserUiSettings,
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-spawn-'));
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta('s1', extra)]));
+  if (settings) fs.writeFileSync(path.join(root, 'settings.json'), JSON.stringify(settings));
   const store = createStore(root);
   const auth = {
     getAccessTokenSync: () => null,
@@ -48,7 +52,7 @@ function harness(ensureFreshToken: () => Promise<string>, extra: Partial<Session
       pushes.push({ sessionId, options }),
     close: (sessionId: string) => closes.push(sessionId),
   } as unknown as WorkerClient);
-  return { sessions, broadcasts, pushes, closes, transcript: () => store.loadTranscript('s1') };
+  return { sessions, store, broadcasts, pushes, closes, transcript: () => store.loadTranscript('s1') };
 }
 
 /** The trailing transcript event, which is what the web Retry button keys off. */
@@ -146,8 +150,8 @@ test('a rotated token recycles the query it no longer matches', async () => {
   assert.equal(tokenEnv(h.pushes[1]!), 'tok-2');
 });
 
-test('a compressed session carries the ruleset in its system prompt', async () => {
-  const h = harness(async () => 'tok', { compressResponses: true });
+test('compression is on with no setting written, and carries the ruleset', async () => {
+  const h = harness(async () => 'tok');
 
   h.sessions.prompt('s1', 'hello');
   await settle();
@@ -156,8 +160,8 @@ test('a compressed session carries the ruleset in its system prompt', async () =
   assert.ok(prompt.append?.includes(COMPRESS_RESPONSES_PROMPT));
 });
 
-test('an uncompressed session sends neither the ruleset nor a plugin', async () => {
-  const h = harness(async () => 'tok');
+test('compression turned off sends neither the ruleset nor a plugin', async () => {
+  const h = harness(async () => 'tok', {}, { compressResponses: false });
 
   h.sessions.prompt('s1', 'hello');
   await settle();
@@ -167,6 +171,20 @@ test('an uncompressed session sends neither the ruleset nor a plugin', async () 
   // Nothing is cloned or loaded from disk any more, so the key must be gone
   // rather than empty.
   assert.ok(!('plugins' in options));
+});
+
+test('a compression toggle reaches the next turn without touching the session', async () => {
+  const h = harness(async () => 'tok', {}, { compressResponses: false });
+
+  h.sessions.prompt('s1', 'hello');
+  await settle();
+  h.store.saveSettings({ compressResponses: true });
+  h.sessions.prompt('s1', 'again');
+  await settle();
+
+  assert.equal((h.pushes[0]!.options.systemPrompt as { append?: string }).append, undefined);
+  const second = h.pushes[1]!.options.systemPrompt as { append?: string };
+  assert.ok(second.append?.includes(COMPRESS_RESPONSES_PROMPT));
 });
 
 test('a refresh failure fails the turn with the reason', async () => {

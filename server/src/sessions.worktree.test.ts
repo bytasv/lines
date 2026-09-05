@@ -20,7 +20,6 @@ const meta = (id: string, cwd: string): SessionMeta =>
     cwd,
     model: 'claude-opus-5',
     permissionMode: 'default',
-    compressResponses: false,
     status: 'idle',
     createdAt: 1,
   }) as SessionMeta;

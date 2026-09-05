@@ -240,6 +240,12 @@ same authority as writing it, and a `prompt`-preset guest (the one whose prompts
 `prompt` but not `interrupt`. Editing never clears `queuePaused`: only an explicit send resumes a
 paused queue, so an owner's edit of a pending prompt must not double as approving it.
 
+This is a structurally different operation from [session-rewind](session-rewind.md)'s Edit
+action, despite both landing text back in the composer: `editQueued` rewrites a prompt that has
+not sent yet and is authorized at `prompt`; rewind's Edit discards an *already-sent* prompt
+(and every reply and prompt after it) and is authorized at `interrupt`, the same cap as
+`compactContext`. Neither generalizes to the other.
+
 On the client, `resolveIdentity` is the single source every surface (presence avatars, prompt
 bubbles, the queued-message list, the resolved-permission badge, the sidebar's turn-actor chip)
 resolves a person through — so they can never disagree about who somebody is.

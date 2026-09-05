@@ -1,6 +1,6 @@
 /**
- * The response-compression ruleset, appended to a session's system prompt while
- * `SessionMeta.compressResponses` is on.
+ * The response-compression ruleset, appended to every session's system prompt
+ * while `UserUiSettings.compressResponses` is on.
  *
  * Adapted from the caveman project's skill text:
  *   https://github.com/JuliusBrussee/caveman — `skills/caveman/SKILL.md`

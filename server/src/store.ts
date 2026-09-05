@@ -435,10 +435,62 @@ export function createStore(root: string) {
       return entry.parsed;
     },
 
+    /**
+     * Drop every event from `fromSeq` on (a session rewind), returning how many
+     * lines went. The dropped lines are appended to a
+     * `transcripts/<sessionId>.rewind-<ts>.jsonl` sidecar first, so the discarded
+     * tail is recoverable by hand; nothing reads those files back.
+     *
+     * The cut index is found by parsing lines rather than by indexing into
+     * `parsed`, which drops unparseable rows and so is not index-aligned with
+     * `lines`. The cache entry is invalidated rather than trimmed in place:
+     * `entry.lines`/`entry.parsed` are handed out by reference to live readers.
+     */
+    truncateTranscript(sessionId: string, fromSeq: number): number {
+      const entry = transcriptEntry(sessionId);
+      if (!entry) return 0;
+      let cut = -1;
+      for (let i = 0; i < entry.lines.length; i++) {
+        let seq: unknown;
+        try {
+          seq = (JSON.parse(entry.lines[i]) as TranscriptEvent).seq;
+        } catch {
+          continue; // torn line — never the anchor, and kept where it lies
+        }
+        if (typeof seq === 'number' && seq >= fromSeq) {
+          cut = i;
+          break;
+        }
+      }
+      if (cut < 0) return 0;
+      const dropped = entry.lines.slice(cut);
+      const kept = entry.lines.slice(0, cut);
+      // Archive before truncating: a crash between the two costs a duplicate
+      // sidecar, the other order costs the turns themselves.
+      fs.appendFileSync(
+        path.join(TRANSCRIPTS, `${sessionId}.rewind-${Date.now()}.jsonl`),
+        dropped.join('\n') + '\n',
+      );
+      fs.writeFileSync(transcriptFile(sessionId), kept.length ? kept.join('\n') + '\n' : '');
+      transcriptCache.delete(sessionId);
+      return dropped.length;
+    },
+
     deleteTranscript(sessionId: string) {
       transcriptCache.delete(sessionId);
       fs.rmSync(transcriptFile(sessionId), { force: true });
       fs.rmSync(path.join(ATTACHMENTS, sessionId), { recursive: true, force: true });
+      // Rewind sidecars hold prompts and replies of this same session, so a delete
+      // that left them behind would not be a delete.
+      try {
+        for (const name of fs.readdirSync(TRANSCRIPTS)) {
+          if (name.startsWith(`${sessionId}.rewind-`)) {
+            fs.rmSync(path.join(TRANSCRIPTS, name), { force: true });
+          }
+        }
+      } catch {
+        // Best-effort: the transcript itself is already gone.
+      }
     },
 
     /** Persist an attachment's base64 to disk; returns the stored file basename. */

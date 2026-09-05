@@ -24,7 +24,6 @@ const meta = (id: string, extra: Partial<SessionMeta> = {}): SessionMeta =>
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    compressResponses: false,
     status: 'idle',
     createdAt: 1,
     updatedAt: 1,

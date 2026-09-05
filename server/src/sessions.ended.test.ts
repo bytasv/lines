@@ -16,7 +16,6 @@ const meta = (id: string): SessionMeta =>
     cwd: '/tmp',
     model: 'claude-opus-5',
     permissionMode: 'default',
-    compressResponses: false,
     status: 'running',
     createdAt: 1,
   }) as SessionMeta;

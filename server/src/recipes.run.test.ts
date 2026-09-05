@@ -15,7 +15,6 @@ import type { WorkerClient } from './workerClient.ts';
 import { WorkflowEngine } from './workflows.ts';
 
 const USER = 'u1';
-const COMPRESS = false;
 
 const content = (over: Partial<RecipeContent> = {}): RecipeContent => ({
   title: 'Auth management',
@@ -73,7 +72,6 @@ const runMsg = (
   cwd: h.root,
   model: 'claude-opus-5',
   permissionMode: 'default',
-  compressResponses: COMPRESS,
   ...over,
 });
 

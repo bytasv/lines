@@ -627,3 +627,6 @@ installed icon, no new package). No other new dependencies.
   tab dot the finished-workflow icon shares its precedence chain with.
 - [transcript-performance](transcript-performance.md) — the tail-windowed transcript the
   stepper's jump-to-step has to cooperate with.
+- [session-rewind](session-rewind.md) — a rewind mid-workflow parks the current step at
+  `waiting-approval` the same way as here, but re-derives `stepIndex`/`stepStatuses` from the
+  surviving transcript's markers rather than from a live turn settling.

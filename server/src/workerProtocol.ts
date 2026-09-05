@@ -18,7 +18,8 @@ import { randomBytes } from 'node:crypto';
 // v4 = ephemeral ports + the runtime-discovery handshake below. A v3 bridge and
 // a v4 worker cannot find each other at all, which the version check in
 // workerClient.ts reports as the protocol mismatch it is.
-export const PROTOCOL_VERSION = 4;
+// v5 = the `stopTask` message (background tasks).
+export const PROTOCOL_VERSION = 5;
 
 /** Explicit pin for local dev; unset means "bind :0 and let the OS pick", which
  *  is the default so two Lines instances can never fight over a port. */
@@ -240,6 +241,10 @@ export type BridgeToWorker =
       tools?: McpToolManifest;
     }
   | { type: 'interrupt'; sessionId: string }
+  /** Stop one background task (a backgrounded subagent or Bash command). The CLI
+   *  answers with a `task_notification` carrying `status: 'stopped'`, so nothing
+   *  here has to guess when the task actually died. */
+  | { type: 'stopTask'; sessionId: string; taskId: string }
   | { type: 'setModel'; sessionId: string; model: string }
   /** `mode` is pre-mapped to an SDK mode by the bridge (our 'auto' -> 'acceptEdits'). */
   | { type: 'setPermissionMode'; sessionId: string; mode: string }
@@ -260,6 +265,13 @@ export interface LiveSessionInfo {
    * this field is not a protocol bump (see the note above AskMethod).
    */
   busy?: boolean;
+  /**
+   * Background tasks the session's CLI process still owns, as last reported by
+   * `background_tasks_changed`. `undefined` = a worker too old to report it; the
+   * bridge then leaves its own set alone, exactly as `busy: undefined` only
+   * demotes. Survives a bridge restart, which the bridge's own live state does not.
+   */
+  backgroundTasks?: { task_id: string; task_type: string; description: string }[];
 }
 
 export type WorkerToBridge =

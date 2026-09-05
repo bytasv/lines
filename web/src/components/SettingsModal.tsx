@@ -247,6 +247,8 @@ function SessionsSection() {
   const setDefaults = useStore((s) => s.setNewSessionDefaults);
   const autoContinueInterrupted = useStore((s) => s.autoContinueInterrupted);
   const setAutoContinueInterrupted = useStore((s) => s.setAutoContinueInterrupted);
+  const compressResponses = useStore((s) => s.compressResponses);
+  const setCompressResponses = useStore((s) => s.setCompressResponses);
 
   return (
     <>
@@ -281,6 +283,16 @@ function SessionsSection() {
         onChange={(e) => setAutoContinueInterrupted(e.currentTarget.checked)}
         label="Auto-continue interrupted turns"
         description="Resume a turn that died with the app instead of waiting for the Continue button"
+      />
+      {/* Global, not a newSessionDefaults member — hence its own subgroup. */}
+      <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
+        Response style
+      </Text>
+      <Switch
+        checked={compressResponses}
+        onChange={(e) => setCompressResponses(e.currentTarget.checked)}
+        label="Compress"
+        description="Claude replies in a terse, compressed register — articles, filler and pleasantries dropped, technical detail kept — which cuts output tokens. Code, commits and security warnings stay in normal prose. Ruleset adapted from the MIT caveman project. Applies to every session; a change takes effect the next time a session starts a fresh turn."
       />
     </>
   );

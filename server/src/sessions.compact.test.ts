@@ -230,7 +230,6 @@ const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   cwd: '/tmp',
   model: 'claude-opus-5',
   permissionMode: 'default',
-  compressResponses: false,
   status: 'idle',
   createdAt: 0,
   claudeSessionId: 'cli-1',

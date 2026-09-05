@@ -112,6 +112,10 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   so concurrent subagents can't merge into one tool group
 - `ToolBlock.children` — a spawn block's nested `TranscriptItem[]`, populated by its subagent's
   sink
+- `TaskItem` / `openTasks` — a background task's transcript row and the `taskId`-keyed map that
+  resolves it in place when its `task_notification` lands; see
+  [background-tasks](background-tasks.md), which also covers the `Composer`/sidebar/alert
+  surfaces this doc doesn't
 - `scanTurnActivity(events)` — pure; the tool-call/error/final-text scan behind the turn summary,
   subagent-excluded
 - `isAgentTool(name)` — true for `'Agent'` or `'Task'`; the harness names the spawn tool `Agent`,
@@ -205,6 +209,17 @@ disclosure. `ActivityRow` renders the identical `agentMeta`/`MAIN_AGENT_META` ic
 colour) while the turn is still running, so the live row and the card that replaces it always
 match; the main agent's row is icon-only (no label prefix) since the session is already known to
 be talking to it.
+
+### Background tasks
+
+`buildTranscript`'s `system` switch also handles `task_started` and `task_notification` (both
+skipped when the SDK marks a task `skip_transcript: true`, and `task_progress`/`task_updated` are
+always ignored as too chatty for the inline transcript). `task_started` opens a `TaskItem`,
+tracked in a `taskId`-keyed `openTasks` map; the matching `task_notification` resolves it in
+place by setting `outcome`, the same idiom `openCompact` already uses for a compaction span,
+generalized to a map since background tasks — unlike a compaction span — can overlap. Full detail,
+plus the server-side tracking and the composer/sidebar/alert surfaces, live in
+[background-tasks](background-tasks.md).
 
 ## Dependencies
 
@@ -435,3 +450,5 @@ be talking to it.
   `reconcileItems`/the row memos above make effective.
 - [workflow-step-lifecycle](workflow-step-lifecycle.md) — the stepper's jump-to-step against a
   windowed transcript.
+- [background-tasks](background-tasks.md) — the `task_started`/`task_notification` handling this
+  doc's `system` switch grew, and the resolve-in-place idiom borrowed from `openCompact`.

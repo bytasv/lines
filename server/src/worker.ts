@@ -76,6 +76,10 @@ interface SessionState {
   /** A pushed turn has not produced its `result` yet. Reported in hello so the
    *  bridge can reconcile a status in either direction, not just demote. */
   busy: boolean;
+  /** Last `background_tasks_changed` payload for this query — the live set of
+   *  backgrounded subagents/Bash commands. Reported in hello because the bridge's
+   *  own copy dies with the bridge while these CLI children do not. */
+  backgroundTasks?: { task_id: string; task_type: string; description: string }[];
 }
 
 interface PendingRpc {
@@ -284,6 +288,16 @@ async function pump(sessionId: string, state: SessionState, q: Query) {
       const msg = message as Record<string, unknown> & { type: string; session_id?: string };
       if (typeof msg.session_id === 'string') state.claudeSessionId = msg.session_id;
       if (msg.type === 'result') state.busy = false; // turn settled; query stays open
+      // Level signal, REPLACE semantics; nothing is emitted at CLI startup, so an
+      // `init` resets the set. Recorded verbatim — the worker interprets nothing.
+      if (msg.type === 'system') {
+        const subtype = (msg as { subtype?: string }).subtype;
+        if (subtype === 'background_tasks_changed') {
+          state.backgroundTasks = (msg as { tasks?: SessionState['backgroundTasks'] }).tasks ?? [];
+        } else if (subtype === 'init') {
+          state.backgroundTasks = undefined;
+        }
+      }
       send({ type: 'event', sessionId, message: msg });
     }
     send({ type: 'ended', sessionId });
@@ -311,6 +325,12 @@ function handleBridgeMessage(msg: BridgeToWorker) {
     }
     case 'interrupt':
       sessions.get(msg.sessionId)?.query.interrupt().catch((err) => console.warn('[worker] interrupt', err));
+      break;
+    case 'stopTask':
+      sessions
+        .get(msg.sessionId)
+        ?.query.stopTask(msg.taskId)
+        .catch((err) => console.warn('[worker] stopTask', err));
       break;
     case 'setModel':
       sessions.get(msg.sessionId)?.query.setModel(msg.model).catch((err) => console.warn('[worker] setModel', err));
@@ -375,6 +395,7 @@ function handleConnection(ws: WebSocket, req: IncomingMessage) {
         sessionId,
         claudeSessionId: s.claudeSessionId,
         busy: s.busy,
+        backgroundTasks: s.backgroundTasks,
       })),
     } satisfies WorkerToBridge),
   );

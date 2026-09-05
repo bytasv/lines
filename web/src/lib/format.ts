@@ -13,6 +13,10 @@ const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
 /** Interrupted turns have no `SessionStatus` of their own — they stay `idle`. */
 const INTERRUPTED_META = { color: 'yellow', label: 'interrupted' };
 
+/** A settled turn whose CLI process still owns background tasks — see
+ *  `SessionMeta.backgroundTasks`. Not a status: the turn really is over. */
+const BACKGROUND_WORK_META = { color: 'blue', label: 'background work' };
+
 /**
  * Dot color + badge label for a sidebar session row. Precedence mirrors the
  * banner order in `SessionView`: a pending permission first, then an
@@ -30,6 +34,12 @@ export function sessionRowMeta(session: SessionMeta): {
   // Same guard as the Continue banner — keep the two in step.
   if (session.interruptedAt && !isSessionActive(session.status) && session.status !== 'error') {
     return { ...INTERRUPTED_META, actionable: true };
+  }
+  // Below the two above on purpose: both of those need the user, and this does
+  // not. Deliberately not actionable either — a background task is informational,
+  // and a project folder must not light up for it.
+  if (session.backgroundTasks?.length && !isSessionActive(session.status)) {
+    return { ...BACKGROUND_WORK_META, actionable: false };
   }
   const meta = STATUS_META[session.status] ?? STATUS_META.idle;
   const { status } = session;

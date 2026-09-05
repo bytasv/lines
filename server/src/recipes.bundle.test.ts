@@ -16,7 +16,6 @@ import type { WorkerClient } from './workerClient.ts';
 import { WorkflowEngine } from './workflows.ts';
 
 const USER = 'u1';
-const COMPRESS = false;
 
 const content = (title: string, over: Partial<RecipeContent> = {}): RecipeContent => ({
   title,
@@ -65,7 +64,6 @@ const runMsg = (
   cwd: h.root,
   model: 'claude-sonnet-5',
   permissionMode: 'acceptEdits',
-  compressResponses: COMPRESS,
   ...over,
 });
 

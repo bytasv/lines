@@ -263,6 +263,10 @@ export function maybeAlert(
   if (!prev || prev.status === next.status) return;
   if (!ALERT_STATUSES.includes(next.status)) return;
   if (next.archived) return;
+  // Work is still running, just not in the turn that settled — a "finished" chime
+  // now would be a lie. The notification turn the task produces settles later,
+  // with the set empty, and chimes normally.
+  if (next.backgroundTasks?.length) return;
   // User is already looking at this session.
   if (document.hasFocus() && opts.selectedSessionId === next.id) return;
   playSound(opts.sound);

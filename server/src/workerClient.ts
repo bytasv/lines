@@ -321,6 +321,12 @@ export class WorkerClient {
     this.send({ type: 'interrupt', sessionId });
   }
 
+  /** Stop one background task. Fire-and-forget like every other control message:
+   *  the CLI reports the kill through `task_notification` / the level signal. */
+  stopTask(sessionId: string, taskId: string) {
+    this.send({ type: 'stopTask', sessionId, taskId });
+  }
+
   setModel(sessionId: string, model: string) {
     this.send({ type: 'setModel', sessionId, model });
   }

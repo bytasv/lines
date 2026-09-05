@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { forkSession, query } from '@anthropic-ai/claude-agent-sdk';
 import type {
   Actor,
   Attachment,
   AttachmentKind,
+  BackgroundTaskInfo,
   ContextBreakdown,
   ContextCompactBlockInfo,
   ContextCompactData,
@@ -13,13 +14,14 @@ import type {
   FileChange,
   FilesChangedData,
   FileSnapshotData,
-  LegacySessionMeta,
   MentionValue,
   PermissionMode,
   PermissionRequestData,
   PermissionResolutionSource,
   PromptAttachment,
   PromptMention,
+  RewindBlockInfo,
+  RewindPrompt,
   ServerMessage,
   SessionDiffRepo,
   SessionDiffResponse,
@@ -37,6 +39,7 @@ import {
   KEEP_PLANNING_MESSAGE,
   resolveModelId,
   resultErrorText,
+  rewindBlock,
   rootsForCwd,
   subagentParentId,
 } from '@lines/shared';
@@ -602,7 +605,24 @@ interface LiveState {
    *  unit — the open end of the attribution window closed at settle. Live only:
    *  a turn that never settles simply leaves no window (see collectChangedPaths). */
   turnBaselines?: RepoBaseline[];
+  /** Live background tasks, replaced wholesale from `background_tasks_changed`.
+   *  Per-CLI-process: cleared on `init`, on `ended`, and whenever the query closes
+   *  (see setBackgroundTasks). */
+  backgroundTasks?: BackgroundTaskInfo[];
 }
+
+/**
+ * Fired by {@link SessionManager.rewindSession} once the transcript is truncated
+ * and broadcast, and before the session settles — the window in which a listener
+ * may roll its own derived state back to what the surviving transcript shows, and
+ * emit events of its own (they land after the truncation on the wire, so the
+ * client keeps them).
+ *
+ * Returns true when the listener settled the session itself, e.g. parked it on a
+ * workflow step; the caller must not then set 'idle' over that park. Same
+ * contract as restoreCompactedStatus.
+ */
+export type RewindListener = (sessionId: string) => boolean;
 
 export type TurnCompleteListener = (
   sessionId: string,
@@ -613,18 +633,6 @@ export type TurnCompleteListener = (
    *  step parks as failed instead of auto-advancing. */
   failed: boolean,
 ) => void;
-
-/**
- * Pre-rename metas carried `caveman: { enabled, level }`; the levels are gone.
- * Metas enter unnormalized both from `sessions.json` and from storage sync, so
- * both entry points read the old field once and settle it.
- */
-function adoptLegacyCompress(meta: SessionMeta) {
-  if (typeof meta.compressResponses === 'boolean') return;
-  // False when neither field exists: a meta written before the toggle existed
-  // ran uncompressed, and nothing about a restart should change that.
-  meta.compressResponses = (meta as LegacySessionMeta).caveman?.enabled ?? false;
-}
 
 export class SessionManager {
   private sessions = new Map<string, SessionMeta>();
@@ -642,9 +650,13 @@ export class SessionManager {
    *  concurrent request, and its survival past the turn's `result` is how we
    *  detect that no compaction happened (see handleWorkerEvent). */
   private compacting = new Set<string>();
+  /** Sessions with a rewind in flight. Claimed before the fork's await, so two
+   *  rapid requests cannot both pass the gate (see rewindSession). */
+  private rewinding = new Set<string>();
   /** Access token each live worker query was spawned with (see pushTurn). */
   private queryTokens = new Map<string, string | null>();
   private onTurnComplete: TurnCompleteListener | null = null;
+  private onRewind: RewindListener | null = null;
   private worker!: WorkerClient;
   /** In-flight `/context` fetches, so a hover during the post-turn refresh reuses
    *  it instead of issuing a second control request. */
@@ -654,6 +666,9 @@ export class SessionManager {
   /** How long consolidateStepOutput waits on its query before falling back to the
    *  last assistant text. A field so tests can shrink it. */
   consolidateTimeoutMs = 60_000;
+  /** The SDK's session fork, used by rewindSession. A field so a test can stand in
+   *  for it without a real CLI session on disk. */
+  forkSession: typeof forkSession = forkSession;
   /**
    * Fired once the auto-titler has settled, with the title it produced — or `''`
    * when it produced none (no token, a failed query). A work-tree session's branch
@@ -678,7 +693,10 @@ export class SessionManager {
       if (meta.workflow) meta.workflow.advancing = false;
       // A verdict from a previous process proved nothing durable about this one.
       if (meta.contextCompact?.ok === false) meta.contextCompact = undefined;
-      adoptLegacyCompress(meta);
+      // Background tasks are per-CLI-process and live-only. A persisted set
+      // describes children of a process this one has no handle on; the worker's
+      // `hello` repopulates it for the ones that really are still running.
+      meta.backgroundTasks = undefined;
       this.sessions.set(meta.id, meta);
     }
     // Pruned by the store on load, so an old tombstone doesn't suppress a session
@@ -698,6 +716,10 @@ export class SessionManager {
 
   setTurnCompleteListener(fn: TurnCompleteListener) {
     this.onTurnComplete = fn;
+  }
+
+  setRewindListener(fn: RewindListener) {
+    this.onRewind = fn;
   }
 
   list(): SessionMeta[] {
@@ -784,7 +806,6 @@ export class SessionManager {
     // A failure verdict belongs to the CLI conversation that produced it, on
     // whichever device that was — it must not disable the button here.
     if (meta.contextCompact?.ok === false) meta.contextCompact = undefined;
-    adoptLegacyCompress(meta);
     this.sessions.set(meta.id, meta);
     this.persist();
     this.broadcast({ type: 'sessionUpsert', session: meta });
@@ -909,7 +930,6 @@ export class SessionManager {
     cwd: string;
     model: string;
     permissionMode: PermissionMode;
-    compressResponses: boolean;
   }): SessionMeta {
     const meta: SessionMeta = {
       id: randomUUID(),
@@ -917,7 +937,6 @@ export class SessionManager {
       cwd: params.cwd,
       model: params.model,
       permissionMode: params.permissionMode,
-      compressResponses: params.compressResponses,
       status: 'idle',
       createdAt: Date.now(),
       nameAuto: true,
@@ -1174,11 +1193,11 @@ export class SessionManager {
    * non-serializable callbacks (canUseTool, hooks, stderr) on its side.
    */
   private buildQueryOptions(meta: SessionMeta, accessToken: string | null): Record<string, unknown> {
-    // The ruleset goes straight into the system prompt: on means the rules are
-    // there, unconditionally, with nothing to clone and no machine-global state
-    // that a second session could contradict.
+    // Global, not per-session: read fresh on every push, so a Settings toggle
+    // takes effect the next time this session's worker starts a query, with
+    // nothing cached on the meta itself. On unless explicitly `false`.
     const appendParts: string[] = [];
-    if (meta.compressResponses) appendParts.push(COMPRESS_RESPONSES_PROMPT);
+    if (this.store.loadSettings()?.compressResponses !== false) appendParts.push(COMPRESS_RESPONSES_PROMPT);
 
     // cwd stays this session's own root so settingSources and CLAUDE.md
     // resolution keep pointing at it; the project's other roots ride along as
@@ -1231,10 +1250,59 @@ export class SessionManager {
    * has already settled its turn, so its query is as safe to drop as an idle
    * one — and skipping those was how a plan-mode session could sit on a dead
    * token across a re-login and keep 401ing.
+   *
+   * Second exemption: a settled session whose CLI process still owns background
+   * tasks. Those outlive the turn, so "not interruptible" no longer means "no
+   * work in flight" — see backgroundTasks below.
    */
   recycleIdleQueries() {
     for (const meta of this.sessions.values()) {
-      if (!isSessionInterruptible(meta.status)) this.closeQuery(meta.id);
+      if (isSessionInterruptible(meta.status)) continue;
+      // Closing the query kills the CLI child, and with it every background task
+      // it owns — silently, with no notification and no transcript trace.
+      if (this.live.get(meta.id)?.backgroundTasks?.length) continue;
+      this.closeQuery(meta.id);
+    }
+  }
+
+  /**
+   * Replace the session's live background-task set, mirroring it onto the meta.
+   * The SDK's `background_tasks_changed` is a level signal with REPLACE
+   * semantics, so this never pairs `task_started`/`task_notification` edges: a
+   * missed bookend must not wedge a stale running indicator, and the ordering
+   * between the level and the edges is unspecified.
+   *
+   * Upserts only when membership actually changed — the level fires per
+   * transition, and re-broadcasting the meta each time would re-render every
+   * sidebar row for nothing.
+   */
+  private setBackgroundTasks(sessionId: string, list: BackgroundTaskInfo[]) {
+    // Clearing a session that has no live state at all is a no-op — and materializing
+    // one costs a transcript read per session, which recycleIdleQueries would pay
+    // for the whole list on every token refresh.
+    if (!list.length && !this.live.has(sessionId)) return;
+    const state = this.liveState(sessionId);
+    const before = state.backgroundTasks ?? [];
+    const same =
+      before.length === list.length && before.every((t, i) => t.id === list[i].id);
+    state.backgroundTasks = list.length ? list : undefined;
+    if (same) return;
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    meta.backgroundTasks = list.length ? list : undefined;
+    this.upsert(meta);
+  }
+
+  /**
+   * Stop every background task this session's CLI process still owns. Deliberately
+   * does not clear the set: `background_tasks_changed` is its only writer, and the
+   * CLI emits one (plus a `task_notification` with `status: 'stopped'`) once the
+   * task is really dead. Clearing optimistically would only resurrect the entries
+   * on the next level emission.
+   */
+  stopBackgroundTasks(sessionId: string) {
+    for (const task of this.live.get(sessionId)?.backgroundTasks ?? []) {
+      this.worker.stopTask(sessionId, task.id);
     }
   }
 
@@ -1242,6 +1310,8 @@ export class SessionManager {
   private closeQuery(sessionId: string) {
     this.worker.close(sessionId);
     this.queryTokens.delete(sessionId);
+    // The CLI child that owned them is gone.
+    this.setBackgroundTasks(sessionId, []);
   }
 
   /**
@@ -1667,13 +1737,7 @@ export class SessionManager {
       | undefined;
     if (!data || (!data.text && !data.attachments?.length)) return null;
 
-    const attachments = (data.attachments ?? [])
-      .map((a) => {
-        const file = a.url.split('/').pop()!;
-        const b64 = this.store.loadAttachmentBase64(sessionId, file);
-        return b64 ? { name: a.name, mediaType: a.mediaType, data: b64 } : null;
-      })
-      .filter((a): a is PromptAttachment => a !== null);
+    const attachments = this.reloadAttachments(sessionId, data.attachments);
 
     // For the failures where the phrasing is what failed, say so in the re-sent
     // prompt: an identical retry of a blocked or oversized turn just fails again.
@@ -1684,6 +1748,156 @@ export class SessionManager {
       source: data.source ?? 'user',
       attachments,
     };
+  }
+
+  /**
+   * Read a stored prompt's attachments back off disk as re-sendable base64. One
+   * that has since been removed is dropped rather than failing the whole prompt.
+   * Shared by lastPromptForRetry and rewindSession so both reload identically.
+   */
+  private reloadAttachments(sessionId: string, attachments: Attachment[] | undefined): PromptAttachment[] {
+    return (attachments ?? [])
+      .map((a) => {
+        const file = a.url.split('/').pop()!;
+        const b64 = this.store.loadAttachmentBase64(sessionId, file);
+        return b64 ? { name: a.name, mediaType: a.mediaType, data: b64 } : null;
+      })
+      .filter((a): a is PromptAttachment => a !== null);
+  }
+
+  /**
+   * Rewind the session to the `'user'` transcript event at `seq`: everything from
+   * that event on is discarded. The escape hatch for a context overflow, where
+   * Retry cannot help because the oversized prompt is still in the CLI's own
+   * history.
+   *
+   * `opts.edit` decides the fate of the rewound prompt: it comes back in the
+   * returned `prompt` for the composer to prefill, or is discarded with the rest
+   * of the tail (`prompt: null`). Attachments are only reloaded for the edit case,
+   * since that read is the expensive half.
+   *
+   * Ordered fork-then-truncate on purpose: `forkSession` copies the CLI transcript
+   * up to the anchor into a new session file, so a fork that fails aborts with
+   * Lines' transcript untouched. The next ordinary prompt() resumes the fork
+   * through the existing `resume:` line in buildQueryOptions — no new query option
+   * and no one-shot state to persist.
+   *
+   * Rewinding to the session's very first prompt has no assistant message to
+   * anchor on; that degrades to resetClaudeSession, which is already exactly the
+   * right thing there (no prior turns to keep).
+   *
+   * Cumulative spend (totalCostUsd/totalTokens) is deliberately NOT rewound —
+   * that money was really spent, so the counter stays ahead of the visible
+   * transcript.
+   */
+  async rewindSession(
+    sessionId: string,
+    seq: number,
+    opts: { edit?: boolean } = {},
+  ): Promise<{ ok: true; prompt: RewindPrompt | null } | ({ ok: false } & RewindBlockInfo)> {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) {
+      return { ok: false, code: 'no-session', reason: "Send a message first — there's nothing to rewind yet." };
+    }
+    const block = rewindBlock(meta);
+    if (block) return { ok: false, ...block };
+    // Claimed before the first await, so a double-click cannot get two rewinds
+    // past the gate and fork twice off an already-stale claudeSessionId.
+    if (this.rewinding.has(sessionId)) {
+      return { ok: false, code: 'turn-running', reason: 'A rewind is already running.' };
+    }
+
+    const events = this.store.loadTranscript(sessionId);
+    const index = events.findIndex((e) => e.seq === seq);
+    const target = index >= 0 ? events[index] : undefined;
+    if (!target || target.kind !== 'user') {
+      return { ok: false, code: 'no-message', reason: 'That message can no longer be rewound to.' };
+    }
+    const data = target.data as { text?: string; mentions?: PromptMention[]; attachments?: Attachment[] };
+    const prompt: RewindPrompt | null = opts.edit
+      ? {
+          // No turnFailureRetryHint here, unlike a retry: the user is about to edit
+          // the text by hand, which is the very thing the hint exists to ask for.
+          text: data.text ?? '',
+          ...(data.mentions?.length ? { mentions: data.mentions } : {}),
+          attachments: this.reloadAttachments(sessionId, data.attachments),
+        }
+      : null;
+
+    // The CLI anchor: the nearest preceding assistant message, whose uuid is what
+    // the SDK documents upToMessageId against. Already on disk — handleWorkerEvent
+    // writes every non-stream SDK message verbatim.
+    let anchor: string | undefined;
+    for (let i = index - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.kind !== 'sdk') continue;
+      const d = e.data as { type?: string; uuid?: string } | null;
+      if (d?.type === 'assistant' && typeof d.uuid === 'string' && d.uuid) {
+        anchor = d.uuid;
+        break;
+      }
+    }
+
+    this.rewinding.add(sessionId);
+    try {
+      if (anchor) {
+        const fork = await this.forkSession(meta.claudeSessionId!, {
+          upToMessageId: anchor,
+          dir: meta.cwd,
+        });
+        // Re-read: the session can have been deleted while the fork ran.
+        const live = this.sessions.get(sessionId);
+        if (!live) {
+          return { ok: false, code: 'no-session', reason: 'That session is gone.' };
+        }
+        live.claudeSessionId = fork.sessionId;
+        this.closeQuery(sessionId);
+      } else {
+        // Nothing before this prompt to keep — the blunter reset is the honest
+        // outcome, and the confirm dialog says so before we get here.
+        this.resetClaudeSession(sessionId);
+      }
+    } catch (err) {
+      console.warn('[rewind]', err);
+      return {
+        ok: false,
+        code: 'fork-failed',
+        reason: `Could not rewind this session's history (${err instanceof Error ? err.message : String(err)}).`,
+      };
+    } finally {
+      this.rewinding.delete(sessionId);
+    }
+
+    this.store.truncateTranscript(sessionId, seq);
+    // The next emitEvent picks the numbering back up where the discarded tail began.
+    this.liveState(sessionId).seq = seq;
+    // Broadcast from here, not from the WS handler: the listener below may emit
+    // events of its own, and a truncation frame sent after them would tell every
+    // client to drop exactly those (they carry seq >= this one).
+    this.broadcast({ type: 'transcriptTruncated', sessionId, seq });
+    // Reject the discarded query's callbacks without writing resolution events —
+    // the events they would land in are exactly the ones just truncated away.
+    this.flushPending(sessionId);
+
+    // Derived state that outlives the transcript — a workflow's step bookkeeping —
+    // is rolled back by its owner, which may also settle the session itself.
+    const settled = this.onRewind?.(sessionId) ?? false;
+
+    const after = this.sessions.get(sessionId);
+    if (after) {
+      // Same treatment resetClaudeSession applies, for the same reason: the
+      // occupancy reading describes a conversation that is gone, and a new CLI
+      // conversation is a new compaction verdict.
+      after.contextResetAt = Date.now();
+      after.contextCompact = undefined;
+      // Clears errorMessage/errorKind too, which is the point — the failed turn
+      // that prompted the rewind is no longer in the transcript. Skipped when the
+      // listener parked the session: 'idle' would drop that park and leave a
+      // workflow step with no way to be approved.
+      if (settled) this.persistMeta(sessionId);
+      else this.setStatus(sessionId, 'idle');
+    }
+    return { ok: true, prompt };
   }
 
   /**
@@ -1934,6 +2148,8 @@ export class SessionManager {
     // didn't do in the old one says nothing about this one.
     meta.contextCompact = undefined;
     this.worker.close(sessionId);
+    // Same reason as closeQuery: the CLI child that owned them is gone.
+    this.setBackgroundTasks(sessionId, []);
   }
 
   /**
@@ -2394,16 +2610,6 @@ export class SessionManager {
     this.worker.setPermissionMode(sessionId, sdkPermissionMode(mode));
   }
 
-  /** Toggling compression requires new query options; restart the query (resume keeps context). */
-  setCompressResponses(sessionId: string, compressResponses: boolean) {
-    const meta = this.sessions.get(sessionId);
-    if (!meta) return;
-    meta.compressResponses = compressResponses;
-    this.upsert(meta);
-    this.flushPending(sessionId); // cards stay open; answers recover via resume
-    this.worker.close(sessionId);
-  }
-
   /**
    * Record and deliver a decision on one permission request. `source` says who
    * decided: it defaults to 'user' because every wire-level caller is a click,
@@ -2577,6 +2783,20 @@ export class SessionManager {
         this.markTurnLive(meta);
         changed = true;
       }
+      // The worker outlives the bridge, so its copy is the authority on which CLI
+      // children are still running. `undefined` = a worker too old to say; leave
+      // our own set alone, exactly as `busy: undefined` only demotes. Routed
+      // through the helper, which upserts on its own when membership changed.
+      if (info?.backgroundTasks) {
+        this.setBackgroundTasks(
+          meta.id,
+          info.backgroundTasks.map((t) => ({
+            id: t.task_id,
+            type: t.task_type,
+            description: t.description,
+          })),
+        );
+      }
       // `busy: undefined` = a worker too old to report it; demote-only, as before.
       const noTurn = !info || info.busy === false;
       if (noTurn && (meta.status === 'running' || meta.status === 'waiting-permission')) {
@@ -2742,6 +2962,31 @@ export class SessionManager {
     ) {
       const reading = extractContextUsage(msg, meta.model, Date.now());
       if (reading) this.liveState(sessionId).contextUsage = reading;
+    }
+
+    // Background tasks (backgrounded subagents / Bash commands) outlive the turn
+    // that started them. The level signal names every live one, so the set is
+    // replaced wholesale; `init` means the CLI process (re)started, which emits
+    // nothing of its own, so the set resets there.
+    if (msg.type === 'system') {
+      const subtype = (msg as { subtype?: string }).subtype;
+      if (subtype === 'background_tasks_changed') {
+        const tasks = ((msg as { tasks?: unknown }).tasks ?? []) as {
+          task_id?: unknown;
+          task_type?: unknown;
+          description?: unknown;
+        }[];
+        this.setBackgroundTasks(
+          sessionId,
+          tasks.map((t) => ({
+            id: String(t.task_id ?? ''),
+            type: String(t.task_type ?? ''),
+            description: String(t.description ?? ''),
+          })),
+        );
+      } else if (subtype === 'init') {
+        this.setBackgroundTasks(sessionId, []);
+      }
     }
 
     // A compaction — ours or the CLI's own auto-compaction, which fires without
@@ -2913,6 +3158,8 @@ export class SessionManager {
   handleWorkerEnded(sessionId: string, error?: string) {
     // Cards stay open; answers recover via the resume path.
     this.flushPending(sessionId);
+    // The query is gone, so every background task it owned went with it.
+    this.setBackgroundTasks(sessionId, []);
     // A dead query says nothing about whether compaction is supported — close the
     // span, keep the button enabled.
     this.abandonCompaction(sessionId, error ? 'query-failed' : 'query-ended');

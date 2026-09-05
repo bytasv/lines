@@ -8,7 +8,6 @@ import {
   SegmentedControl,
   Select,
   Stack,
-  Switch,
   Text,
   Tooltip,
 } from '@mantine/core';
@@ -156,6 +155,10 @@ export function Composer({ session }: { session: SessionMeta }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const interruptible = isSessionInterruptible(session.status);
+  // Background tasks (backgrounded subagents / Bash) outlive the turn, so a
+  // settled session can still have work to stop. Deliberately does not gate Send:
+  // the CLI runs a new turn concurrently with a background task.
+  const bgTasks = session.backgroundTasks?.length ?? 0;
   const awaitingApproval = session.status === 'waiting-approval';
 
   /**
@@ -206,6 +209,24 @@ export function Composer({ session }: { session: SessionMeta }) {
   useEffect(() => {
     if (attachmentsLoaded.current) void writeDraftAttachments(session.id, attachments);
   }, [session.id, attachments]);
+
+  // A rewind hands the sent prompt back for editing. Subscribed rather than read
+  // once on mount: the rewind usually happens in the session already on screen,
+  // so this composer is mounted before the reply arrives. Taking it clears it, so
+  // the effect's second run (with no prefill) is a no-op.
+  //
+  // `mentions` is not restored: the stored text is the expanded form, so there
+  // are no pill ranges left to paint over it.
+  const prefill = useStore((s) => s.composerPrefill[session.id]);
+  const takeComposerPrefill = useStore((s) => s.takeComposerPrefill);
+  useEffect(() => {
+    if (!prefill) return;
+    takeComposerPrefill(session.id);
+    // Overwrites whatever was typed, deliberately: the user asked for this text back.
+    setPrompt({ text: prefill.text, ranges: [] });
+    setAttachments(prefill.attachments);
+    textareaRef.current?.focus();
+  }, [prefill, session.id, takeComposerPrefill]);
 
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files);
@@ -389,25 +410,6 @@ export function Composer({ session }: { session: SessionMeta }) {
             onChange={(v) => v && send({ type: 'setModel', sessionId: session.id, model: v })}
             allowDeselect={false}
           />
-          <Tooltip
-            label="Claude replies in a terse, compressed register — articles, filler and pleasantries dropped, technical detail kept — which cuts output tokens. Code, commits and security warnings stay in normal prose. Ruleset adapted from the MIT caveman project."
-            withArrow
-            multiline
-            w={280}
-          >
-            <Switch
-              label="Compress"
-              disabled={!canSetMode}
-              checked={session.compressResponses}
-              onChange={(e) =>
-                send({
-                  type: 'setCompressResponses',
-                  sessionId: session.id,
-                  compressResponses: e.currentTarget.checked,
-                })
-              }
-            />
-          </Tooltip>
         </Group>
         <Group gap="xs">
           <ContextWindowIndicator session={session} />
@@ -416,11 +418,17 @@ export function Composer({ session }: { session: SessionMeta }) {
               ${session.totalCostUsd.toFixed(3)}
             </Text>
           )}
-          {interruptible ? (
+          {interruptible || bgTasks > 0 ? (
             <>
-              <Tooltip label="Queue message — sends after the current turn">
+              <Tooltip
+                label={
+                  interruptible
+                    ? 'Queue message — sends after the current turn'
+                    : 'Send — the background task keeps running'
+                }
+              >
                 <ActionIcon
-                  variant="subtle"
+                  variant={interruptible ? 'subtle' : 'filled'}
                   size="lg"
                   onClick={submit}
                   disabled={cannotSend}
@@ -430,10 +438,12 @@ export function Composer({ session }: { session: SessionMeta }) {
               </Tooltip>
               <Tooltip
                 label={
-                  session.workflow?.started &&
-                  session.workflow.stepStatuses[session.workflow.stepIndex] === 'running'
-                    ? 'Stop — the step will wait for your review'
-                    : 'Interrupt'
+                  !interruptible
+                    ? 'Stop background work'
+                    : session.workflow?.started &&
+                        session.workflow.stepStatuses[session.workflow.stepIndex] === 'running'
+                      ? 'Stop — the step will wait for your review'
+                      : 'Interrupt'
                 }
               >
                 <ActionIcon
@@ -441,7 +451,13 @@ export function Composer({ session }: { session: SessionMeta }) {
                   variant="default"
                   size="lg"
                   disabled={!canInterrupt}
-                  onClick={() => send({ type: 'interrupt', sessionId: session.id })}
+                  onClick={() =>
+                    send(
+                      interruptible
+                        ? { type: 'interrupt', sessionId: session.id }
+                        : { type: 'stopBackgroundTasks', sessionId: session.id },
+                    )
+                  }
                 >
                   <IconPlayerStop size={16} />
                 </ActionIcon>

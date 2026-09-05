@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ActionIcon, Alert, Badge, Button, Divider, Group, Stack, Text, Tooltip } from '@mantine/core';
+import { ActionIcon, Alert, Badge, Button, Divider, Group, Loader, Stack, Text, Tooltip } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import {
   IconAlertTriangle,
@@ -246,6 +246,23 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         </Alert>
       )}
       <Transcript sessionId={sessionId} events={events ?? []} stepCount={workflow?.steps.length} />
+      {/* The live truth about work that outlived the turn. The transcript keeps its
+          own task rows, but those are a record — this strip is what a page reload
+          rebuilds from, and what tells you the session is not as idle as it reads.
+          A background agent can sit running for minutes before its first nested
+          message lands, so the description is the only thing to show. */}
+      {!!session.backgroundTasks?.length && (
+        <Group px="md" py={6} gap={6} wrap="nowrap" bg="var(--mantine-color-default-hover)">
+          <Loader size={12} />
+          <Text size="xs" c="dimmed" truncate>
+            {session.backgroundTasks.length === 1
+              ? '1 background task'
+              : `${session.backgroundTasks.length} background tasks`}
+            {' · '}
+            {session.backgroundTasks.map((t) => t.description).join(', ')}
+          </Text>
+        </Group>
+      )}
       <QueuedMessages session={session} />
       <Composer session={session} />
       {reviewing && (

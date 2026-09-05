@@ -86,13 +86,11 @@ describe('MESSAGE_AUTHZ', () => {
     }
   });
 
-  test('no preset can change the permission mode or compression settings', () => {
-    // These are the guard around every other capability, so they are the one pair
-    // a Collaborator still cannot touch.
+  test('no preset can change the permission mode', () => {
+    // It is the guard around every other capability, so it is the one control a
+    // Collaborator still cannot touch.
     for (const preset of ['view', 'prompt', 'collaborator'] as const) {
-      for (const type of ['setPermissionMode', 'setCompressResponses'] as const) {
-        assert.equal(authorizeMessage(msg(type), guest(preset)).ok, false, `${preset} / ${type}`);
-      }
+      assert.equal(authorizeMessage(msg('setPermissionMode'), guest(preset)).ok, false, preset);
     }
   });
 
