@@ -598,11 +598,17 @@ const Item = memo(function Item({
     case 'context-compact':
       return <ContextCompactMarker data={item.data} />;
     case 'task':
-      // One dimmed row in the same register as session-init: a background task is
-      // context, not a card. The live truth is the strip above the composer —
-      // this is the durable record that the task happened at all.
+      // One dimmed row in the same register as session-init, and only for an orphan —
+      // a task whose launching tool card is known renders as state on that card
+      // instead. Clamped to one line: a `summary` can be the whole backgrounded
+      // script, and a centered dimmed one-liner is the register this row is in.
       return (
-        <Text size="xs" c={item.outcome?.status === 'failed' ? 'red' : 'dimmed'} ta="center">
+        <Text
+          size="xs"
+          c={item.outcome?.status === 'failed' ? 'red' : 'dimmed'}
+          ta="center"
+          lineClamp={1}
+        >
           background task
           {item.outcome ? ` ${item.outcome.status}` : ''}
           {' · '}

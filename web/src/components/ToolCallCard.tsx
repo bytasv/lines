@@ -150,7 +150,9 @@ export const ToolCallCard = memo(function ToolCallCard({
   const entry = toolDiff(tool);
   const diff = entry?.diff ?? null;
   const stats = entry?.stats ?? null;
-  const pending = tool.result === undefined && !editTool;
+  // A backgrounded call is handed its result the instant it launches ("Async agent
+  // launched successfully"), so the task's own state is what says whether it is done.
+  const pending = (tool.result === undefined || tool.background?.status === 'running') && !editTool;
   // An Agent/Task call reads as a subagent *run*: its own header, its own container,
   // and the subagent's tool tally instead of nothing.
   const isAgent = isAgentTool(tool.name);
@@ -238,6 +240,13 @@ export const ToolCallCard = memo(function ToolCallCard({
           {pending && (
             <Badge variant="dot" color="yellow">
               running
+            </Badge>
+          )}
+          {/* Terminal non-happy states only: a `completed` background task is already
+              told by the card's result and children. */}
+          {tool.background && !['running', 'completed'].includes(tool.background.status) && (
+            <Badge variant="dot" color={tool.background.status === 'failed' ? 'red' : 'gray'}>
+              {tool.background.status}
             </Badge>
           )}
         </Group>

@@ -51,7 +51,7 @@ function managerOver(metas: SessionMeta[]) {
     stopTask: (id: string, taskId: string) => stopped.push([id, taskId]),
     close: (id: string) => closed.push(id),
   } as never);
-  return { sessions, closed, stopped, upserts, get: (id: string) => sessions.get(id)! };
+  return { sessions, store, closed, stopped, upserts, get: (id: string) => sessions.get(id)! };
 }
 
 /** A manager over one session in `status`. */
@@ -70,6 +70,14 @@ const task = (id: string, description = `task ${id}`, type = 'subagent') => ({
   task_id: id,
   task_type: type,
   description,
+});
+
+const notification = (id: string, status = 'completed') => ({
+  type: 'system',
+  subtype: 'task_notification',
+  task_id: id,
+  status,
+  summary: `${id} done`,
 });
 
 test('background_tasks_changed replaces the set wholesale', () => {
@@ -146,7 +154,7 @@ test('a settled session with no background task is still recycled', () => {
   assert.deepEqual(h.closed, ['s1']);
 });
 
-test('stopBackgroundTasks stops each live task and clears nothing', () => {
+test('stopBackgroundTasks stops each live task and clears the set', () => {
   const h = harness('done');
   h.sessions.handleWorkerEvent('s1', changed(task('a'), task('b')));
   h.sessions.stopBackgroundTasks('s1');
@@ -154,8 +162,41 @@ test('stopBackgroundTasks stops each live task and clears nothing', () => {
     ['s1', 'a'],
     ['s1', 'b'],
   ]);
-  // The level signal is the only writer: the CLI reports the kill itself.
-  assert.deepEqual(h.s1().backgroundTasks?.map((t) => t.id), ['a', 'b']);
+  // Cleared optimistically: a task the CLI already forgot sends no level signal,
+  // and the user would otherwise have no way to clear the strip at all.
+  assert.equal(h.s1().backgroundTasks, undefined);
+
+  // A task that really is still alive comes back on the next level emission —
+  // the recoverable flicker this trades the wedge for.
+  h.sessions.handleWorkerEvent('s1', changed(task('a')));
+  assert.deepEqual(h.s1().backgroundTasks?.map((t) => t.id), ['a']);
+});
+
+test('a task_notification removes its own id and leaves the others', () => {
+  const h = harness('done');
+  h.sessions.handleWorkerEvent('s1', changed(task('a'), task('b')));
+  const before = h.upserts.length;
+  h.sessions.handleWorkerEvent('s1', notification('a'));
+  assert.deepEqual(h.s1().backgroundTasks?.map((t) => t.id), ['b']);
+  assert.equal(h.upserts.length, before + 1);
+});
+
+test('a task_notification for an unknown id is a strict no-op', () => {
+  const h = harness('done');
+  h.sessions.handleWorkerEvent('s1', changed(task('a')));
+  const before = h.upserts.length;
+  // The set only ever shrinks: a notification may never add an id the level
+  // signal never named.
+  h.sessions.handleWorkerEvent('s1', notification('zzz'));
+  assert.deepEqual(h.s1().backgroundTasks?.map((t) => t.id), ['a']);
+  assert.equal(h.upserts.length, before);
+});
+
+test('the last task_notification empties the set', () => {
+  const h = harness('done');
+  h.sessions.handleWorkerEvent('s1', changed(task('a')));
+  h.sessions.handleWorkerEvent('s1', notification('a'));
+  assert.equal(h.s1().backgroundTasks, undefined);
 });
 
 test('a result with live tasks still settles the turn', () => {
@@ -189,4 +230,46 @@ test('a worker too old to report background tasks leaves the set alone', () => {
   h.sessions.handleWorkerEvent('s1', changed(task('a')));
   h.sessions.reconcileWithWorker([{ sessionId: 's1', busy: false }]);
   assert.deepEqual(h.s1().backgroundTasks?.map((t) => t.id), ['a']);
+});
+
+test('the ephemeral system subtypes are broadcast but never written to disk', () => {
+  const h = harness('done');
+  const before = h.store.loadTranscript('s1').length;
+  for (const subtype of [
+    'task_progress',
+    'task_updated',
+    'thinking_tokens',
+    'status',
+    'hook_started',
+    'hook_response',
+  ]) {
+    h.sessions.handleWorkerEvent('s1', { type: 'system', subtype });
+  }
+  assert.equal(h.store.loadTranscript('s1').length, before);
+});
+
+test('a status carrying a compact verdict is still persisted', () => {
+  const h = harness('done');
+  const before = h.store.loadTranscript('s1').length;
+  h.sessions.handleWorkerEvent('s1', {
+    type: 'system',
+    subtype: 'status',
+    compact_result: { result: 'success' },
+  });
+  assert.equal(h.store.loadTranscript('s1').length, before + 1);
+});
+
+test('task_started and task_notification are still persisted', () => {
+  const h = harness('done');
+  const before = h.store.loadTranscript('s1').length;
+  // `task_started` is now the only durable proof a call was backgrounded, and the
+  // notification is what resolves the card it opened.
+  h.sessions.handleWorkerEvent('s1', {
+    type: 'system',
+    subtype: 'task_started',
+    task_id: 'a',
+    tool_use_id: 'toolu_1',
+  });
+  h.sessions.handleWorkerEvent('s1', notification('a'));
+  assert.equal(h.store.loadTranscript('s1').length, before + 2);
 });

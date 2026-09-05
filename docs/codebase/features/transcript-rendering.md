@@ -66,8 +66,9 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 - `shared/types.ts` — `subagentParentId`
 - `server/src/sessions.ts` — `handleWorkerEvent` (context-usage gate), `collectTurns`
   (turn-output scan), `scanTurnActivity` (turn-summary scan, extracted from `summarizeTurn`)
-- `web/src/lib/transcript.ts` — `ToolBlock.children`, `LiveActivity.subagent` / `subagentType`,
-  `Sink`, `sinkFor`, `buildTranscript`, `isQuestionTool`
+- `web/src/lib/transcript.ts` — `ToolBlock.children`, `ToolBlock.background`,
+  `LiveActivity.subagent` / `subagentType`, `Sink`, `sinkFor`, `buildTranscript`, `isQuestionTool`,
+  `reuseTool`'s `background` compare
 - `web/src/lib/agents.ts` — `isAgentTool`, `parseTaskInput`, `agentMeta`, `MAIN_AGENT_META`,
   `taskFlags`
 - `web/src/components/TaskCall.tsx` — `TaskHeader` (badge + description + flags), `TaskBody`
@@ -112,10 +113,12 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   so concurrent subagents can't merge into one tool group
 - `ToolBlock.children` — a spawn block's nested `TranscriptItem[]`, populated by its subagent's
   sink
-- `TaskItem` / `openTasks` — a background task's transcript row and the `taskId`-keyed map that
-  resolves it in place when its `task_notification` lands; see
-  [background-tasks](background-tasks.md), which also covers the `Composer`/sidebar/alert
-  surfaces this doc doesn't
+- `ToolBlock.background` / `TaskItem` / `openTasks` — a background task resolves onto its
+  launching tool card (`ToolBlock.background`) when `task_started` names one by `tool_use_id`, and
+  only falls back to the standalone `TaskItem` row when it doesn't; `openTasks` is the
+  `taskId`-keyed map that resolves whichever of the two in place when the matching
+  `task_notification` lands. See [background-tasks](background-tasks.md), which also covers the
+  `Composer`/sidebar/alert surfaces this doc doesn't
 - `scanTurnActivity(events)` — pure; the tool-call/error/final-text scan behind the turn summary,
   subagent-excluded
 - `isAgentTool(name)` — true for `'Agent'` or `'Task'`; the harness names the spawn tool `Agent`,
@@ -126,8 +129,12 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   missing `description` falls back to the prompt's first line, never throws
 - `agentMeta(subagentType)` / `MAIN_AGENT_META` — the single source of truth for an agent's badge
   icon and colour, read by both `TaskHeader` and `ActivityRow`
-- `taskFlags(call)` — the non-default options on a spawn call (`run_in_background`, `isolation`,
-  non-default `mode`) as tooltipped icons; empty when the call has none
+- `taskFlags(call)` — the non-default options on a spawn call (`background`, `isolation`,
+  non-default `mode`) as tooltipped icons; empty when the call has none. `call.background` is
+  fed at the `TaskHeader` call site from `tool.background != null` (the matched
+  `task_started`/`task_notification` state), not from `parseTaskInput`'s own
+  `input.run_in_background === true` alone — that input field is absent from every real
+  backgrounded call observed in practice, so the flag would never render without this
 
 ## Data flow
 
@@ -176,9 +183,10 @@ only applies to a non-error settled question).
 
 ### Subagents
 
-Worker → bridge: every SDK message (including subagent ones) is forwarded and persisted verbatim,
-`parent_tool_use_id` included — this predates the feature, so existing transcripts already carry
-the field and gain nesting on reload with no migration.
+Worker → bridge: every SDK message (including subagent ones) is forwarded, and — aside from stream
+deltas and the ephemeral system subtypes described below — persisted verbatim, `parent_tool_use_id`
+included; this predates the feature, so existing transcripts already carry the field and gain
+nesting on reload with no migration.
 
 Server (`handleWorkerEvent`): an `assistant` message only updates the live `contextUsage` reading
 when `subagentParentId` is null. `collectTurns` skips any `sdk` event with a non-null
@@ -213,13 +221,36 @@ be talking to it.
 ### Background tasks
 
 `buildTranscript`'s `system` switch also handles `task_started` and `task_notification` (both
-skipped when the SDK marks a task `skip_transcript: true`, and `task_progress`/`task_updated` are
-always ignored as too chatty for the inline transcript). `task_started` opens a `TaskItem`,
-tracked in a `taskId`-keyed `openTasks` map; the matching `task_notification` resolves it in
-place by setting `outcome`, the same idiom `openCompact` already uses for a compaction span,
-generalized to a map since background tasks — unlike a compaction span — can overlap. Full detail,
-plus the server-side tracking and the composer/sidebar/alert surfaces, live in
-[background-tasks](background-tasks.md).
+skipped when the SDK marks a task `skip_transcript: true`; `task_progress`/`task_updated` are
+always ignored as too chatty for the inline transcript). `task_started` first looks up the
+launching `Task`/`Bash` tool card by `tool_use_id`; found (the common case — the card always
+precedes its task), it sets `card.background = { taskId, status: 'running' }` in place rather than
+pushing a second row, and registers the card in a `taskId`-keyed `openTasks` map. Not found, it
+falls back to opening a standalone `TaskItem` and pushing it, the prior behavior. The matching
+`task_notification` resolves whichever `openTasks` holds — the same resolve-in-place idiom
+`openCompact` already uses for a compaction span, generalized to a map since background tasks —
+unlike a compaction span — can overlap. `reuseTool`'s structural-sharing compare includes
+`background.status`/`background.taskId` alongside `result`/`isError`/`snapshot`, since a
+notification flipping the status changes none of those other fields — without it the card would
+never re-render past `running` on a live session, a bug invisible to a check that starts by
+reloading. A backgrounded subagent's own `stream_event` deltas are excluded from the shared
+`ActivityRow` state (an early exit keyed on the parent tool block's `background` field), since
+letting them through made the row flip between concurrent background agents and contradict the
+(correctly labeled) background card. Full detail, plus the server-side tracking and the
+composer/sidebar/alert surfaces, live in [background-tasks](background-tasks.md).
+
+### Persisted-event filter
+
+Not every SDK message the bridge forwards live is written to the transcript file. Stream deltas
+never were (see `reconcileItems` note below); as of this feature, a module-level
+`EPHEMERAL_SYSTEM_SUBTYPES` set in `server/src/sessions.ts` (`task_progress`, `task_updated`,
+`thinking_tokens`, `status`, `hook_started`, `hook_response`) is excluded from disk too, in
+`handleWorkerEvent`'s `persist` gate — these subtypes are still broadcast live (so the client's
+`lastEventAt` freshness clock stays honest through long silences) but nothing in `buildTranscript`
+or elsewhere reads them back from a reloaded transcript, and they made up roughly half of every
+transcript file's lines. One subtype is exempted from the drop: a `system/status` message carrying
+a `compact_result` field is the authoritative compaction verdict and is always persisted, matching
+the separate durable `context-compact` event this doc's compaction handling already relies on.
 
 ## Dependencies
 
@@ -256,6 +287,10 @@ plus the server-side tracking and the composer/sidebar/alert surfaces, live in
 - `server/src/sessions.context.test.ts` — `subagentParentId` recognizes a subagent message and
   returns `null` for a main-agent one; documents the gate `handleWorkerEvent` applies (the
   extractor itself is agent-agnostic).
+- `server/src/sessions.backgroundTasks.test.ts` — covers the `EPHEMERAL_SYSTEM_SUBTYPES` persist
+  filter (broadcast but absent from `store.loadTranscript`, with the `compact_result` exemption and
+  `task_started`/`task_notification` still landing on disk); see
+  [background-tasks](background-tasks.md) for the rest of that file's coverage.
 
 ## Business rules
 
@@ -307,6 +342,16 @@ plus the server-side tracking and the composer/sidebar/alert surfaces, live in
   [session-collaboration](session-collaboration.md#attribution). Historical rows and the owner's
   own prompt carry no recorded actor and resolve to the session's host, so this is a pure
   read-side change with no migration.
+- A backgrounded call's transcript state lives on its own launching tool card
+  (`ToolBlock.background`), never as a second row, whenever `task_started` names that card by
+  `tool_use_id`; only a genuine orphan (no matching card) still renders the standalone dimmed row,
+  which is capped to one line since a `task_notification.summary` can be an entire shell script.
+- A background subagent's `stream_event` deltas never drive the shared `ActivityRow` state — only
+  a foreground agent's do.
+- A system event whose subtype nothing renders and nothing derives state from
+  (`task_progress`/`task_updated`/`thinking_tokens`/`status`/`hook_started`/`hook_response`) is
+  still broadcast live but is no longer written to the transcript file, except a `status` carrying
+  a `compact_result`, which is the authoritative compaction verdict.
 - Code-block syntax highlighting (`rehype-highlight`) is deferred: a `Markdown` document's
   first paint renders without it, then an idle callback (2s timeout fallback) upgrades it in
   place — the highlighter only adds classes inside an already-laid-out `<pre>`, so the upgrade
@@ -438,6 +483,11 @@ plus the server-side tracking and the composer/sidebar/alert surfaces, live in
 - `foldAgentTurns`' boundary check gained one clause (a single-tool `AskUserQuestion` group) rather
   than a new concept: it already treated a pending `ExitPlanMode` permission item as a boundary, so
   a question uses the same mechanism instead of a parallel one.
+- `EPHEMERAL_SYSTEM_SUBTYPES` (`server/src/sessions.ts`) is a single greppable module constant
+  rather than a scattered set of per-subtype checks, precisely because "does anything read this
+  back" is a claim that can go stale — one name a future change can grep for before adding to (or
+  removing from) the drop set. The `compact_result` exemption is the existing precedent that this
+  drop set is not blanket.
 
 ## Related decisions
 

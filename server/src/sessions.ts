@@ -241,6 +241,18 @@ const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
  *  that a crash can only ever lose the tail of one turn's transitions. */
 const PERSIST_DEBOUNCE_MS = 250;
 
+/** system subtypes nothing renders and nothing derives state from. Still broadcast
+ *  (they keep the client's `lastEventAt` clock honest) but never written to disk:
+ *  they are ~half of every transcript's lines and cost a reload for nothing. */
+const EPHEMERAL_SYSTEM_SUBTYPES = new Set([
+  'thinking_tokens',
+  'status',
+  'hook_started',
+  'hook_response',
+  'task_progress',
+  'task_updated',
+]);
+
 interface PermissionAnswer {
   allow: boolean;
   updatedInput?: Record<string, unknown>;
@@ -1286,9 +1298,17 @@ export class SessionManager {
   /**
    * Replace the session's live background-task set, mirroring it onto the meta.
    * The SDK's `background_tasks_changed` is a level signal with REPLACE
-   * semantics, so this never pairs `task_started`/`task_notification` edges: a
-   * missed bookend must not wedge a stale running indicator, and the ordering
-   * between the level and the edges is unspecified.
+   * semantics and is the *only* thing that may put an id **into** the set.
+   * Everything else — `init`, `closeQuery`, `handleWorkerEnded`,
+   * `resetClaudeSession`, `task_notification` and `stopBackgroundTasks` — may
+   * only take ids **out**, so membership is monotone toward empty between level
+   * emissions.
+   *
+   * That keeps the original rule's intent (a missed bookend must not wedge a
+   * stale running indicator) in a stronger form: every failure mode of a
+   * removal-only edge is a *premature empty*, which the next level emission
+   * repairs in one message. A non-empty wedge, by contrast, was only clearable
+   * by restarting the CLI — observed lasting 661 events.
    *
    * Upserts only when membership actually changed — the level fires per
    * transition, and re-broadcasting the meta each time would re-render every
@@ -1312,16 +1332,21 @@ export class SessionManager {
   }
 
   /**
-   * Stop every background task this session's CLI process still owns. Deliberately
-   * does not clear the set: `background_tasks_changed` is its only writer, and the
-   * CLI emits one (plus a `task_notification` with `status: 'stopped'`) once the
-   * task is really dead. Clearing optimistically would only resurrect the entries
-   * on the next level emission.
+   * Stop every background task this session's CLI process still owns, then clear
+   * the set optimistically — this is the user's manual escape hatch.
+   *
+   * A task the CLI has already forgotten makes `stopTask` a no-op, so no level
+   * signal ever comes and the strip, sidebar badge, Stop button and chime
+   * suppression stay on with nothing the user can do about it. Clearing here can
+   * at worst flicker an entry back on the next `background_tasks_changed` — which
+   * is the level signal correctly reporting a task that really is still alive.
+   * A recoverable flicker beats an unrecoverable wedge.
    */
   stopBackgroundTasks(sessionId: string) {
     for (const task of this.live.get(sessionId)?.backgroundTasks ?? []) {
       this.worker.stopTask(sessionId, task.id);
     }
+    this.setBackgroundTasks(sessionId, []);
   }
 
   /** Close a session's worker query and forget the token it was spawned with. */
@@ -2970,7 +2995,15 @@ export class SessionManager {
     const stopped = msg.type === 'result' && this.interrupting.has(sessionId);
     // Stream deltas are broadcast live but not written to disk;
     // the complete assistant message that follows is the durable record.
-    const persist = msg.type !== 'stream_event';
+    // Same for the ephemeral system subtypes: nothing reads them back.
+    const persist =
+      msg.type !== 'stream_event' &&
+      !(
+        msg.type === 'system' &&
+        EPHEMERAL_SYSTEM_SUBTYPES.has(String((msg as { subtype?: string }).subtype)) &&
+        // A `status` carrying a compact verdict is the authoritative compaction outcome.
+        (msg as { compact_result?: unknown }).compact_result === undefined
+      );
     const resultSeq = this.emitEvent(
       sessionId,
       'sdk',
@@ -3015,6 +3048,16 @@ export class SessionManager {
         );
       } else if (subtype === 'init') {
         this.setBackgroundTasks(sessionId, []);
+      } else if (subtype === 'task_notification') {
+        // Removal only — never an add. See setBackgroundTasks' contract.
+        const id = String((msg as { task_id?: unknown }).task_id ?? '');
+        const live = this.live.get(sessionId)?.backgroundTasks;
+        if (id && live?.some((t) => t.id === id)) {
+          this.setBackgroundTasks(
+            sessionId,
+            live.filter((t) => t.id !== id),
+          );
+        }
       }
     }
 

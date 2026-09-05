@@ -813,7 +813,7 @@
       "id": "transcript-rendering",
       "name": "Transcript rendering",
       "doc": "features/transcript-rendering.md",
-      "purpose": "How the transcript is drawn: one shared markdown renderer with a bubble only for user prompts, structured per-tool field lists instead of raw JSON, and subagent runs nested under their spawning card.",
+      "purpose": "How the transcript is drawn: one shared markdown renderer with a bubble only for user prompts, structured per-tool field lists instead of raw JSON, subagent runs nested under their spawning card, a backgrounded call's state living on its own launching card instead of a duplicate row, and an EPHEMERAL_SYSTEM_SUBTYPES filter that keeps roughly half of every transcript file's lines off disk.",
       "covers": [
         "transcript-markdown-rendering",
         "tool-call-structured-input",
@@ -868,7 +868,8 @@
         "reconcileItems",
         "buildTranscript",
         "foldAgentTurns",
-        "TaskItem"
+        "TaskItem",
+        "ToolBlock.background"
       ],
       "tests": [
         "server/src/sessions.turns.test.ts",
@@ -889,7 +890,10 @@
         "a spawn card leads with description, not the tool name; an unmapped or plugin-scoped subagent_type degrades to a generic agent badge (never hidden, never a crash)",
         "the main agent and a subagent share the same badge icon but never the same color, so who is running reads from color alone before any label",
         "in the interactive OptionCard, the checkbox/radio is a non-interactive indicator; the wrapping button is the sole click target, so onChange must not be added back to the control itself",
-        "code-block syntax highlighting (rehype-highlight) is deferred: first paint renders without it, then an idle callback (2s timeout fallback) upgrades the document in place \u2014 the highlighter only adds classes inside an already-laid-out <pre>, so it cannot reflow the transcript; a document with no code block skips the deferral and renders with the full plugin set immediately"
+        "code-block syntax highlighting (rehype-highlight) is deferred: first paint renders without it, then an idle callback (2s timeout fallback) upgrades the document in place \u2014 the highlighter only adds classes inside an already-laid-out <pre>, so it cannot reflow the transcript; a document with no code block skips the deferral and renders with the full plugin set immediately",
+        "a backgrounded call's transcript state lives on its own launching tool card (ToolBlock.background), never as a second row, whenever task_started names that card by tool_use_id; only a genuine orphan still renders the standalone dimmed row, capped to one line since task_notification.summary can be an entire shell script",
+        "a background subagent's stream_event deltas never drive the shared ActivityRow state \u2014 only a foreground agent's do",
+        "a system event whose subtype nothing renders or derives state from is still broadcast live but no longer written to the transcript file, except a status event carrying a compact_result, which is the authoritative compaction verdict"
       ],
       "architecturalRules": [
         "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
@@ -2578,7 +2582,7 @@
       "id": "background-tasks",
       "name": "Background tasks",
       "doc": "features/background-tasks.md",
-      "purpose": "Track live SDK background tasks (a backgrounded subagent or Bash command) per session as server-side state, exempt a session that owns one from idle-query recycling (previously a silent data-loss bug), and surface them via a transcript row, a composer Stop path distinct from interrupt, a live strip, and a sidebar row.",
+      "purpose": "Track live SDK background tasks (a backgrounded subagent or Bash command) per session as server-side state, exempt a session that owns one from idle-query recycling (previously a silent data-loss bug), and surface them as state on the tool card that launched them (falling back to a standalone transcript row only for a genuine orphan) plus a composer Stop path distinct from interrupt, a live strip, and a sidebar row.",
       "covers": [],
       "entryPoints": [
         "server/src/sessions.ts",
@@ -2598,7 +2602,9 @@
         "web/src/components/SessionView.tsx",
         "web/src/components/Composer.tsx",
         "web/src/lib/alerts.ts",
-        "web/src/lib/format.ts"
+        "web/src/lib/format.ts",
+        "web/src/components/ToolCallCard.tsx",
+        "web/src/components/TaskCall.tsx"
       ],
       "symbols": [
         "BackgroundTaskInfo",
@@ -2609,21 +2615,23 @@
         "LiveSessionInfo.backgroundTasks",
         "WorkerClient.stopTask",
         "TaskItem",
-        "BACKGROUND_WORK_META"
+        "BACKGROUND_WORK_META",
+        "ToolBlock.background"
       ],
       "tests": [
         "server/src/sessions.backgroundTasks.test.ts"
       ],
       "businessRules": [
         "the live set is never restored from a persisted SessionMeta.backgroundTasks on load \u2014 a background task belongs to a specific CLI process, and a value surviving a restart in sessions.json describes a process nothing here has a handle on any more",
-        "background_tasks_changed (the level signal) is the only writer of the live set; task_started/task_notification only drive the transcript row and never mutate it, so a missed bookend can never wedge a stale running indicator",
+        "background_tasks_changed is the only thing that may put an id into the live set (strengthened from \u201cis the only writer\u201d); everything else \u2014 init, closeQuery, handleWorkerEnded, resetClaudeSession, task_notification, and stopBackgroundTasks \u2014 may only take ids out, so membership is monotone toward empty between level emissions. A missed bookend now fails as a premature empty (self-corrected by the next level emission) instead of a permanent non-empty (observed wedged for 661 events in one real session, clearable only by a CLI restart)",
         "a settled session that still owns a live background task is never recycled by recycleIdleQueries \u2014 closing its query would kill the CLI child and the task with it, silently",
-        "stopBackgroundTasks never clears the set itself; only a subsequent background_tasks_changed, driven by the CLI's own task_notification: 'stopped', does",
+        "stopBackgroundTasks stops each live task and then clears the set itself, optimistically \u2014 the user's manual escape hatch for a task the CLI has already forgotten (previously it deliberately left the set alone; a still-alive task now just flickers back on the next background_tasks_changed, which is accepted as better than an unrecoverable wedge)",
         "a result arriving while background tasks are still live still settles the turn normally (done/error) \u2014 the turn lifecycle is unaffected by background work outside it",
         "a queued prompt can still flush into a session while a background task runs \u2014 the CLI handles a new foreground turn concurrently with a background one",
         "the composer's Send action is never blocked by a live background task; only Stop's target message (interrupt vs stopBackgroundTasks) changes based on whether a turn is also live",
         "the sidebar's background-work row is not actionable and is checked after waiting-permission and the interrupted-turn state, both of which do need the user",
-        "the finish chime/notification is suppressed while backgroundTasks is non-empty; it fires normally for the eventual notification turn once the set has emptied"
+        "the finish chime/notification is suppressed while backgroundTasks is non-empty; it fires normally for the eventual notification turn once the set has emptied",
+        "a task that vanishes silently (no task_notification, no further background_tasks_changed naming it) is not self-healing under this invariant \u2014 the user still needs to click Stop; fully self-healing that needs per-task timestamps plus a timer, out of scope here"
       ],
       "architecturalRules": [
         "SessionStatus is deliberately not overloaded to represent background work \u2014 a separate SessionMeta field keeps the turn lifecycle (workflow advance, queue flush, turn-complete accounting) byte-identical",
@@ -2631,7 +2639,9 @@
         "all writers of LiveState.backgroundTasks go through the single private setBackgroundTasks helper, which owns the compare-then-upsert \u2014 no call site broadcasts on its own",
         "adding stopTask to BridgeToWorker is a protocol bump (v4 -> v5), unlike an added field on an existing message, which is safely ignorable by an old worker",
         "worker.ts stays thin: it records the background_tasks_changed/init payload and forwards it in hello, but does not interpret it, the same convention busy already follows",
-        "the transcript's openTasks map is keyed by taskId rather than a single slot like openCompact, because background tasks can overlap"
+        "the transcript's openTasks map is keyed by taskId rather than a single slot like openCompact, because background tasks can overlap",
+        "run_in_background is absent from every real backgrounded call's input observed in practice, so the taskFlags clock-icon flag is fed from ToolBlock.background at the TaskHeader call site instead of from parseTaskInput's own input.run_in_background alone",
+        "task_progress/task_updated/thinking_tokens/status(no compact verdict)/hook_started/hook_response system events are broadcast but no longer written to the transcript file (EPHEMERAL_SYSTEM_SUBTYPES in server/src/sessions.ts) \u2014 roughly half of every transcript file's lines, and nothing reads them back on reload"
       ],
       "relatedDecisions": [
         "turn-recovery",

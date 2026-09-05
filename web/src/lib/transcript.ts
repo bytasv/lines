@@ -27,6 +27,11 @@ export interface ToolBlock {
   /** Items built from messages whose `parent_tool_use_id` is this block's id — i.e.
    *  the transcript of the subagent this `Task` call spawned. */
   children?: TranscriptItem[];
+  /** This call was backgrounded: its `system/task_started` / `task_notification`,
+   *  matched to this block by `tool_use_id`. The card owns the state — no separate
+   *  row is pushed when this is set. The tool's own `result` says nothing here: a
+   *  backgrounded Agent gets "Async agent launched successfully" the instant it starts. */
+  background?: { taskId: string; status: 'running' | 'completed' | 'failed' | 'stopped' };
 }
 
 export type AssistantBlock =
@@ -256,8 +261,10 @@ export function buildTranscript(
   /** Compaction whose 'done' hasn't landed yet, so it can be upgraded in place. */
   let openCompact: ContextCompactItem | null = null;
   /** Unresolved background tasks by task_id — a map, not a single slot like
-   *  openCompact, because tasks can overlap. */
-  const openTasks = new Map<string, TaskItem>();
+   *  openCompact, because tasks can overlap. The value is the launching tool card
+   *  whenever the task named one (the common case), and a standalone `TaskItem`
+   *  only for a genuine orphan. */
+  const openTasks = new Map<string, TaskItem | ToolBlock>();
 
   /** Last snapshot of `file`, scanning back — no array copy per lookup. */
   const lastSnapshotFor = (file: string, unclaimedOnly: boolean): FileSnapshotData | undefined => {
@@ -396,15 +403,30 @@ export function buildTranscript(
             // the SDK's own instruction.
             if ((msg as { skip_transcript?: boolean }).skip_transcript) break;
             if (subtype === 'task_started') {
-              const t = msg as { task_id?: string; description?: string; subagent_type?: string };
+              const t = msg as {
+                task_id?: string;
+                description?: string;
+                subagent_type?: string;
+                tool_use_id?: string;
+              };
+              const taskId = String(t.task_id ?? '');
+              // The launching `tool_use` block always precedes its task, so the card
+              // is already built and can own the state — no second surface for the
+              // same fact. A miss degrades to the standalone row below.
+              const card = toolBlocks.get(String(t.tool_use_id ?? ''));
+              if (card) {
+                card.background = { taskId, status: 'running' };
+                openTasks.set(taskId, card);
+                break;
+              }
               const item: TaskItem = {
                 kind: 'task',
                 key: `t${event.seq}`,
-                taskId: String(t.task_id ?? ''),
+                taskId,
                 description: String(t.description ?? ''),
                 subagentType: t.subagent_type,
               };
-              openTasks.set(item.taskId, item);
+              openTasks.set(taskId, item);
               items.push(item);
               break;
             }
@@ -413,20 +435,27 @@ export function buildTranscript(
                 task_id?: string;
                 status?: 'completed' | 'failed' | 'stopped';
                 summary?: string;
+                tool_use_id?: string;
               };
               const taskId = String(t.task_id ?? '');
               const outcome = {
                 status: t.status ?? 'completed',
                 summary: String(t.summary ?? ''),
               } as const;
-              const open = openTasks.get(taskId);
+              // The second lookup matters: a backgrounded Bash can send a
+              // notification with no `task_started` of its own.
+              const open = openTasks.get(taskId) ?? toolBlocks.get(String(t.tool_use_id ?? ''));
               if (open) {
-                open.outcome = outcome;
+                if ('kind' in open) open.outcome = outcome;
+                // The summary is deliberately dropped: it is either the verbatim
+                // script the card already shows or its own description.
+                else open.background = { taskId, status: outcome.status };
                 openTasks.delete(taskId);
                 break;
               }
-              // Its `task_started` was skipped or truncated away — a standalone
-              // resolved row beats dropping the only trace the task left.
+              // Its `task_started` was skipped or truncated away and no tool block
+              // claims it — a standalone resolved row beats dropping the only trace
+              // the task left.
               items.push({
                 kind: 'task',
                 key: `t${event.seq}`,
@@ -562,6 +591,12 @@ export function buildTranscript(
             // clobber the main agent's streaming tail.
             const parentId = subagentParentId(msg);
             const subagent = parentId !== null;
+            // A backgrounded subagent's phase is not the foreground turn's phase. Letting it
+            // drive `live` clobbers the main agent's row, and two background agents flip
+            // between each other. Their progress lives in their own Task cards and in the
+            // strip above the composer. If `task_started` hasn't landed yet this degrades to
+            // today's behaviour, which is safe.
+            if (parentId && toolBlocks.get(parentId)?.background) break;
             // The Task call names which agent this is, so the row can say "Explore: …".
             const type = parentId ? toolBlocks.get(parentId)?.input.subagent_type : undefined;
             const who = {
@@ -781,7 +816,12 @@ function reuseTool(old: ToolBlock, next: ToolBlock): ToolBlock {
     old.name !== next.name ||
     old.result !== next.result ||
     old.isError !== next.isError ||
-    old.snapshot !== next.snapshot
+    old.snapshot !== next.snapshot ||
+    // A backgrounded call's status is the only field that moves once its result
+    // has landed — without this the card would never leave `running` on a live
+    // session, while reading correctly after a reload.
+    old.background?.status !== next.background?.status ||
+    old.background?.taskId !== next.background?.taskId
   ) {
     return next;
   }

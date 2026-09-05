@@ -16,7 +16,10 @@ import { groupSummary, type ToolBlock } from '../lib/transcript';
 export function TaskHeader({ tool, nested }: { tool: ToolBlock; nested: ToolBlock[] }) {
   const call = parseTaskInput(tool.input);
   const meta = agentMeta(call.subagentType);
-  const flags = taskFlags(call);
+  // `run_in_background` is absent from every real backgrounded call's input, so the
+  // task state matched onto the block is the only reliable signal. The clock glyph is
+  // then the durable "this ran in the background" trace on a completed card.
+  const flags = taskFlags({ ...call, background: call.background || tool.background != null });
   const hasMeta = flags.length > 0 || call.model !== undefined || call.name !== undefined;
 
   return (

@@ -15,13 +15,20 @@ onto `SessionMeta` so every client sees it; exempts a session that owns one from
 adds a stop path distinct from the turn-level `interrupt`; and surfaces the set in the transcript,
 a composer Stop button, a live strip above the composer, and the sidebar.
 
+A backgrounded call's transcript state lives on the `Task`/`Bash` tool card that launched it
+(`ToolBlock.background`), not as a separate row — a separate row duplicated the same fact the card
+already showed, and a card given an instant "launched successfully" tool result read as finished
+while its subagent was still streaming into it. A standalone row survives only for a genuine orphan
+(no matching tool card).
+
 ## Entry points
 
 - The SDK's `system/background_tasks_changed` message on a session's live query — level signal,
   REPLACE semantics, emitted whenever membership changes (task start, completion, kill, a
   foreground call being backgrounded)
 - The SDK's `system/task_started` and `system/task_notification` messages — edge bookends for the
-  transcript row only, never used to derive "is work running"
+  transcript state only, never used to derive "is work running" for the live set. Matched onto the
+  launching tool card by `tool_use_id` (falling back to a standalone row when no card matches).
 - `server/src/sessions.ts` `handleWorkerEvent` (the `system` branch) and `reconcileWithWorker`
 - `web/src/components/Composer.tsx` — Stop button, gated on `interruptible || bgTasks > 0`
 - `web/src/components/SessionView.tsx` — the live strip above the composer
@@ -42,10 +49,13 @@ a composer Stop button, a live strip above the composer, and the sidebar.
   `background_tasks_changed`/`init`, the `hello` report, `case 'stopTask'`
 - `server/src/workerClient.ts` — `WorkerClient.stopTask`
 - `server/src/index.ts` — `case 'stopBackgroundTasks'`
-- `web/src/lib/transcript.ts` — `TaskItem`, the `openTasks` map, the `task_started`/
-  `task_notification` cases in `buildTranscript`'s `system` switch, the `'task'` case in
-  `reconcileItem`
-- `web/src/components/Transcript.tsx` — the `case 'task'` row
+- `web/src/lib/transcript.ts` — `ToolBlock.background`, `TaskItem`, the `openTasks` map (now keyed
+  to either a `ToolBlock` or a `TaskItem`), the `task_started`/`task_notification` cases in
+  `buildTranscript`'s `system` switch, the `'task'` case in `reconcileItem`, the `background`
+  compare in `reuseTool`, the backgrounded-subagent early exit in the `stream_event` case
+- `web/src/components/Transcript.tsx` — the `case 'task'` row (orphan fallback only)
+- `web/src/components/ToolCallCard.tsx` — the `pending`/badge treatment of `tool.background`
+- `web/src/components/TaskCall.tsx` — `TaskHeader` feeding `taskFlags` from `tool.background`
 - `web/src/components/SessionView.tsx` — the background-work strip
 - `web/src/components/Composer.tsx` — `bgTasks`, the Stop-button gating and its
   `stopBackgroundTasks` send
@@ -68,9 +78,14 @@ a composer Stop button, a live strip above the composer, and the sidebar.
 - `LiveSessionInfo.backgroundTasks` (`workerProtocol.ts`) — worker→bridge report in `hello`;
   `undefined` means a worker too old to say (demote-only, same convention as `LiveSessionInfo.busy`)
 - `BridgeToWorker`'s `stopTask` message — new in protocol v5
-- `TaskItem` (`web/src/lib/transcript.ts`) — transcript row kind: `taskId`, `description`,
-  `subagentType?`, and an `outcome?: { status, summary }` filled in by the matching
-  `task_notification`
+- `ToolBlock.background` (`web/src/lib/transcript.ts`) — `{ taskId, status }` matched onto the
+  launching tool card by `tool_use_id`; the card owns the running/completed/failed/stopped state
+  instead of a separate row. Deliberately drops `task_notification.summary` — it is either the
+  verbatim script the Bash card already shows or the Bash `description` itself, never new
+  information
+- `TaskItem` (`web/src/lib/transcript.ts`) — orphan-only transcript row kind (no `task_started`,
+  or no tool card to match): `taskId`, `description`, `subagentType?`, and an
+  `outcome?: { status, summary }` filled in by the matching `task_notification`
 
 ## Data flow
 
@@ -107,21 +122,47 @@ foreground turn): `Composer` sends `{ type: 'stopBackgroundTasks', sessionId }` 
 isn't `interruptible` but has live tasks; `index.ts` routes it to
 `SessionManager.stopBackgroundTasks`, which calls `WorkerClient.stopTask(sessionId, taskId)` for
 every id currently in the set. That message reaches `worker.ts`'s `case 'stopTask'`, which calls
-the SDK `Query.stopTask(taskId)`. Nothing here clears the local set — `background_tasks_changed`
-is the only writer, and the CLI reports the kill itself (plus a `task_notification` with
-`status: 'stopped'`) once the task actually dies. Clearing optimistically on the stop request
-would resurrect the entries on the next level emission if the CLI hadn't caught up yet.
+the SDK `Query.stopTask(taskId)`. `stopBackgroundTasks` then clears the local set itself,
+optimistically — this is the user's manual escape hatch: a task the CLI has already forgotten
+makes `stopTask` a no-op, so no level signal ever arrives and without this clear the strip, sidebar
+badge and chime suppression would stay on with nothing the user could do about it. At worst this
+flickers a still-genuinely-alive entry back in on the next `background_tasks_changed` — a
+recoverable flicker, traded for an unrecoverable wedge. See Business rules for the invariant this
+now upholds.
 
 ### Transcript rendering
 
-`task_started` opens a `TaskItem` (skipped entirely when the SDK marks it
-`skip_transcript: true`, e.g. ambient housekeeping tasks) and is tracked in a `taskId`-keyed
-`openTasks` map inside `buildTranscript`. The matching `task_notification` resolves that item in
-place by setting its `outcome`, rather than pushing a second card — the same resolve-in-place
-idiom the compaction span (`openCompact`) already uses, generalized from a single slot to a map
-because tasks can overlap. A `task_notification` whose `task_started` was never seen (skipped, or
-a truncated transcript) pushes a standalone already-resolved card instead of being dropped.
-`task_progress`/`task_updated` are ignored — too chatty for the inline transcript.
+`task_started` (skipped entirely when the SDK marks it `skip_transcript: true`, e.g. ambient
+housekeeping tasks) first looks up the launching tool card by `tool_use_id` in `toolBlocks` — the
+`tool_use` block for a `Task`/`Bash` call always precedes its `task_started`, so the card exists by
+the time the task fires. Found, it sets `card.background = { taskId, status: 'running' }` and
+registers the card (not a new row) in the `taskId`-keyed `openTasks` map; nothing is pushed. Not
+found (compacted-away or rewound transcript), it falls back to opening a standalone `TaskItem` and
+pushing it, exactly as before.
+
+The matching `task_notification` resolves whichever `openTasks` holds — falling back to a second
+`toolBlocks` lookup by its own `tool_use_id`, since a backgrounded Bash call has been observed
+sending a notification with no `task_started` of its own. A `ToolBlock` target gets
+`background.status` updated in place; a `TaskItem` target gets its `outcome` set, the same
+resolve-in-place idiom the compaction span (`openCompact`) already uses, generalized from a single
+slot to a map because tasks can overlap. Neither matching — the standalone-row fallback, unchanged.
+
+`reuseTool` (structural-sharing reconcile) compares `background.status`/`background.taskId`
+alongside `result`/`isError`/`snapshot`: a `task_notification` flipping the status changes none of
+the other fields, so without this compare the card would never re-render past `running` on a live
+session, while reading correctly after a reload — a bug invisible to any check that starts by
+reloading.
+
+`task_progress`/`task_updated` are still ignored by `buildTranscript` — too chatty for the inline
+transcript — and, separately, are no longer written to disk at all (see
+[transcript-rendering](transcript-rendering.md)'s `EPHEMERAL_SYSTEM_SUBTYPES`).
+
+A background subagent's own `stream_event` deltas no longer drive the shared live-activity row
+(`ActivityRow`): `buildTranscript`'s `stream_event` case exits early when the event's
+`parent_tool_use_id` names a tool block with `background` set. Before this, a session running two
+concurrent background Explore agents had its activity row flip between "Explore: …" for each of
+them every few hundred ms, contradicting the (correctly labeled) background card and strip. A
+background agent's progress is now visible only in its own card and the strip.
 
 ### UI surfaces
 
@@ -136,6 +177,11 @@ background work does not) and marks it `actionable: false`, so it never lights u
 `maybeAlert` (`alerts.ts`) returns early while `next.backgroundTasks?.length` is non-zero, so the
 finish chime doesn't fire mid-background-work; the notification turn's own eventual `result`
 settles normally once the set is empty and chimes as usual.
+
+The orphan `TaskItem` row (the only case that still renders standalone) is capped to one line
+(`lineClamp={1}`): `task_notification.summary` for a backgrounded Bash task has been observed as
+the entire multi-line shell script, and this row's dimmed-centered register is a one-liner, not a
+transcript card.
 
 ## Dependencies
 
@@ -153,14 +199,24 @@ settles normally once the set is empty and chimes as usual.
   wholesale (including shrinking and emptying it); the record carries `type`/`description`, not
   just the id; `system/init`, `handleWorkerEnded`, `resetClaudeSession` and `closeQuery` each
   clear the set; the meta is broadcast on a membership change and only on one;
-  `recycleIdleQueries()` skips a settled session with a live task and still closes one without;
-  `stopBackgroundTasks` issues one `stopTask` per live id and does not clear the set itself; a
+  `recycleIdleQueries()` skips a settled session with a live task and still closes one without; a
   `result` arriving with live tasks still settles the turn to `done`; a persisted
   `backgroundTasks` value never survives load from disk; `reconcileWithWorker` repopulates the set
-  from `hello`, and leaves it alone when the worker reports `undefined`
-- No web test infrastructure — the transcript row, the composer Stop gating, the live strip and
-  the sidebar row are manual-verification only (`verify` skill), same as the rest of the
-  transcript/composer/sidebar surface
+  from `hello`, and leaves it alone when the worker reports `undefined`. Also now: `task_notification`
+  removes its own id and leaves the others (one extra broadcast); a `task_notification` for an
+  unknown id is a strict no-op (set and broadcast count both unchanged — the monotone-toward-empty
+  invariant asserted directly); the last `task_notification` empties the set; `stopBackgroundTasks`
+  stops each live task **and clears the set**, with a follow-on `background_tasks_changed` proving
+  a still-live task comes back; an ephemeral system subtype (`task_progress`, `task_updated`,
+  `thinking_tokens`, `status`, `hook_started`, `hook_response`) is broadcast but never reaches
+  `store.loadTranscript`; a `status` carrying `compact_result` is still persisted;
+  `task_started`/`task_notification` are still persisted (guards against a future over-eager
+  addition to the drop set)
+- No web test infrastructure — the transcript card state, the composer Stop gating, the live strip
+  and the sidebar row are manual-verification only (`verify` skill), same as the rest of the
+  transcript/composer/sidebar surface. Verifying the card dedup and the live `running` badge
+  specifically requires watching a live task settle — reading correctly after a page reload does
+  not prove the `reuseTool` compare is wired up.
 
 ## Business rules
 
@@ -169,15 +225,31 @@ settles normally once the set is empty and chimes as usual.
   restart in `sessions.json` describes a process nothing here has a handle on any more. The
   worker's `hello` (via `reconcileWithWorker`) or the next `background_tasks_changed` repopulate
   it for whichever tasks are genuinely still running.
-- The level signal (`background_tasks_changed`) is the only writer of the live set. `task_started`
-  and `task_notification` never mutate it — they only drive the transcript row. A missed bookend
-  (a `task_started` skipped as ambient, or a truncated transcript) must never wedge a stale
-  "running" indicator, and the ordering between the level signal and the edge events is
-  unspecified by the SDK.
+- **Strengthened invariant** (renegotiates the previous rule below): `background_tasks_changed` is
+  the only thing that may put an id **into** the live set. Everything else — `init`, `closeQuery`,
+  `handleWorkerEnded`, `resetClaudeSession`, and now `task_notification` and
+  `stopBackgroundTasks` — may only take ids **out**. Membership is monotone toward empty between
+  level emissions. This keeps the original rule's intent (a missed bookend must never wedge a
+  stale "running" indicator) in a stronger form: every failure mode of a removal-only edge is a
+  *premature empty*, self-corrected by the next level emission in one message, whereas the old
+  rule's failure mode was a *permanent non-empty* — observed in a real session where two
+  concurrent background Explore agents left the level signal naming only one of them; the set,
+  the sidebar badge, the Stop button and the chime suppression all stayed on for 661 more events
+  across three complete turns, clearable only by a CLI restart (`system/init`).
 - A settled session (not interruptible) that still owns a background task is never recycled —
   closing its query would kill the CLI child and the task with it, silently.
-- `stopBackgroundTasks` never clears the set itself; only a subsequent `background_tasks_changed`
-  (driven by the CLI's own `task_notification: 'stopped'`) does.
+- `stopBackgroundTasks` stops each live task, then clears the set itself, optimistically — the
+  user's manual escape hatch for a task the CLI has already forgotten (where `stopTask` is a no-op
+  and no level signal ever arrives to clear the set otherwise). A task that really is still alive
+  flickers back on the next `background_tasks_changed`; that flicker is accepted since a
+  recoverable flicker beats an unrecoverable wedge. (Previously this method deliberately did not
+  clear the set, on the theory that clearing would "only resurrect the entries on the next level
+  emission" — under the strengthened invariant above, that resurrection *is* the level signal
+  working, not a bug.)
+- A task that vanishes silently — no `task_notification`, no further `background_tasks_changed`
+  naming it — is not self-healing under this invariant; the user still needs to click Stop. Fixing
+  that needs per-task timestamps driven off `task_progress` plus a timer, out of scope here (see
+  Open verification).
 - A `result` arriving while background tasks are still live still settles the turn normally
   (`done`/`error`) — the turn lifecycle (workflow advance, queue flush, spend accounting) is
   unaffected by background work outside it.
@@ -213,7 +285,19 @@ settles normally once the set is empty and chimes as usual.
   `SessionState` and forwards it in `hello`, but does not interpret it — the same convention
   `busy` already follows.
 - The `openTasks` map in `buildTranscript` is keyed by `taskId`, not a single slot like
-  `openCompact`, because background tasks (unlike compaction spans) can overlap.
+  `openCompact`, because background tasks (unlike compaction spans) can overlap. Its value is
+  either the launching `ToolBlock` (the common case, which owns `background` in place) or a
+  standalone `TaskItem` (the orphan fallback) — never both for the same id.
+- `run_in_background` is absent from every real backgrounded call's input observed in practice
+  (`parseTaskInput`'s `input.run_in_background === true` never matches a live launch) — the
+  `taskFlags` clock-icon flag it feeds is instead sourced from `ToolBlock.background` at the
+  `TaskHeader` call site, so it renders as a durable "this ran in the background" trace on a
+  completed card even though the underlying input field never carries the signal.
+- `task_progress`/`task_updated`/`thinking_tokens`/`status`(no compact verdict)/`hook_started`/
+  `hook_response` system events are broadcast (keeping the client's `lastEventAt` honest) but no
+  longer written to the transcript file (`EPHEMERAL_SYSTEM_SUBTYPES` in `server/src/sessions.ts`;
+  see [transcript-rendering](transcript-rendering.md)) — roughly half of every transcript file's
+  lines, and nothing reads them back on reload.
 
 ## Related decisions
 
@@ -227,6 +311,13 @@ settles normally once the set is empty and chimes as usual.
   the "background work" row is appended to beneath `waiting-permission` and the interrupted state.
 
 ## Open verification
+
+**Residual gap in the wedge fix:** a task that vanishes silently — the CLI stops reporting it in
+`background_tasks_changed` with no `task_notification` ever sent for it — is not self-healing under
+the current removal-only invariant; the strip/badge/Stop button stay on for that task until the
+user clicks Stop themselves (which now works, per the change above, but is still a click). Fully
+self-healing this needs per-task timestamps driven off `task_progress` plus a timer to expire a
+task that has gone quiet — a new abstraction, deliberately out of scope for this change.
 
 The claim that the CLI auto-re-invokes the model (a fresh assistant turn, `origin.kind:
 'task-notification'`) once a background task's `task_notification` lands is read from SDK type
