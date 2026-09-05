@@ -54,7 +54,7 @@ account) or by a single-use link.
   `SocketAccess`/`OWNER_ACCESS`, `MessageAuthz`/`MESSAGE_AUTHZ`/`authorizeMessage`,
   `PresenceViewer`, the `hello.access` block, `SessionMeta.turnActor`, `QueuedPrompt.actor`,
   `QueuedPrompt.editedAt`/`editedBy`, `PermissionRequestData.resolvedActor`, the `presence`
-  client/server messages
+  client/server messages, `ClientMessage.interjectQueued`, `InterjectData`
 - `storage/prisma/schema.prisma` — `DeviceMember`, `SessionShare`, `ShareInvite`, `UserProfile`,
   `ShareContact` (the collaborator address book), `Device.online`
 - `storage/src/shares.ts` — `authorizeDevice` (the relay's oracle body), `profileOf`,
@@ -83,7 +83,9 @@ account) or by a single-use link.
 - `server/src/fileRoutes.ts` — every route takes `access`; `syncLog` is owner-only
 - `server/src/sessions.ts` — `userPrompt`/`prompt` take an `actor`; `QueuedPrompt.actor`;
   `resolvePermission`/`logResolution` take an actor for `resolvedActor`; `editQueued` (rewrite a
-  queued prompt in place — author or owner only, never clears `queuePaused`)
+  queued prompt in place — author or owner only, never clears `queuePaused`); `interjectQueued`
+  (release one queued item into the running turn — see
+  [turn-interjection](turn-interjection.md))
 - `server/src/workflows.ts` — `startIfPending`/`iterateIfWaiting`/`runStep`/`runStepSafely` take
   an actor (a workflow-attached session intercepts a prompt *before* `userPrompt` ever runs)
 - `web/src/lib/shares.ts` — the HTTP client for every `/v1/shares/*` route, `PRESET_COPY`,
@@ -330,6 +332,11 @@ resolves a person through — so they can never disagree about who somebody is.
   own pending prompt. Editing never clears `queuePaused` or reorders the queue; an edit by someone
   other than the author is recorded (`editedAt`/`editedBy`), but the released prompt is still
   attributed to the author, not the editor.
+- A queued prompt may also be released early, into the turn that is already running ("Send now" —
+  see [turn-interjection](turn-interjection.md)), also authorized at `prompt`. Same attribution
+  rule as an ordinary flush: it runs as the item's author, not whoever pressed the button. A
+  `promptNeedsApproval` guest cannot use it on their own item — only the owner can release it,
+  same as an ordinary approval.
 - Presence and attribution identity always come from the connection's attested identity, never
   from a client-supplied message field.
 - A historical row (or the owner's own prompt) with no recorded actor is attributed to the
@@ -377,3 +384,5 @@ resolves a person through — so they can never disagree about who somebody is.
 - [permissions-and-plan-mode](permissions-and-plan-mode.md) — `resolvedActor` alongside
   `resolvedBy`.
 - [cloud-sync-sessions](cloud-sync-sessions.md) — why a guest connection must never sync.
+- [turn-interjection](turn-interjection.md) — releasing a queued item into the turn already
+  running, built on this feature's queue, `MESSAGE_AUTHZ`, and attribution.

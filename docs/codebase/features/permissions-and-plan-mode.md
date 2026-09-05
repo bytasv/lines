@@ -496,7 +496,9 @@ quoted reply under a `kept planning` badge.
   deny-everything-pending pass, so a concurrent unrelated permission card is never touched.
 - It never emits a `user` transcript event or calls `prompt()` directly for the typed text on the
   no-attachments path — both would open a new turn boundary and corrupt turn-scoped bookkeeping
-  (`collectTurns`, `permissionWaitMs`).
+  (`collectTurns`, `permissionWaitMs`). [turn-interjection](turn-interjection.md) follows the same
+  rule from the other direction: its release path is deliberately not routed through `prompt()`
+  either, for the same reason.
 
 ## Related decisions
 
@@ -510,3 +512,6 @@ quoted reply under a `kept planning` badge.
   allowlist sync follows.
 - [session-collaboration](session-collaboration.md) — `resolvedActor`, and the
   `approvePermissions` capability that gates a guest's card to read-only.
+- [turn-interjection](turn-interjection.md) — `waiting-permission` is excluded from Send now in
+  v1 for the same open question this feature has never resolved: whether the CLI drains stdin
+  while parked inside `canUseTool`.

@@ -342,6 +342,11 @@ the separate durable `context-compact` event this doc's compaction handling alre
   [session-collaboration](session-collaboration.md#attribution). Historical rows and the owner's
   own prompt carry no recorded actor and resolve to the session's host, so this is a pure
   read-side change with no migration.
+- A queued prompt released into a running turn ("Send now") renders as `InterjectionRow`, the one
+  human-authored transcript row that is not a bubble: right-aligned and carrying `PromptAuthor`
+  like a user prompt, but outlined rather than filled, since the filled bubble means "this opened
+  a turn" and an interjection did not. It has no Edit/Delete-from-here — it is not a rewind
+  anchor. See [turn-interjection](turn-interjection.md).
 - A backgrounded call's transcript state lives on its own launching tool card
   (`ToolBlock.background`), never as a second row, whenever `task_started` names that card by
   `tool_use_id`; only a genuine orphan (no matching card) still renders the standalone dimmed row,
@@ -502,3 +507,5 @@ the separate durable `context-compact` event this doc's compaction handling alre
   windowed transcript.
 - [background-tasks](background-tasks.md) — the `task_started`/`task_notification` handling this
   doc's `system` switch grew, and the resolve-in-place idiom borrowed from `openCompact`.
+- [turn-interjection](turn-interjection.md) — `InterjectionRow`, and why it must not clear the
+  subagent sinks or `foldAgentTurns`'s buffer the way `'user'` does.

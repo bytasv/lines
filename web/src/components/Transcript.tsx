@@ -30,6 +30,7 @@ import {
   IconArchive,
   IconArrowBackUp,
   IconArrowDown,
+  IconBolt,
   IconCheck,
   IconChevronDown,
   IconChevronRight,
@@ -495,6 +496,101 @@ function UserBubble({
 }
 
 /**
+ * A queued prompt the user sent into the turn that was already running.
+ *
+ * Deliberately not a {@link UserBubble}. It is human-authored, so it keeps the
+ * right alignment and the avatar — but it is *outlined rather than filled*,
+ * because the filled bubble means "this opened a turn" and this did not. It is
+ * also not a rewind anchor: rewindSession truncates from a `kind:'user'` seq, and
+ * there is nothing mid-turn to go back to. So no Edit, no Delete from here —
+ * copy is the only action, the same one UserBubble never gates.
+ */
+function InterjectionRow({ item }: { item: Extract<TranscriptItem, { kind: 'interject' }> }) {
+  const { hovered, ref } = useHover<HTMLDivElement>();
+  const clipboard = useClipboard({ timeout: 1500 });
+  return (
+    <Stack ref={ref} gap={2} align="flex-end">
+      {/* Same width: 100% trick as UserBubble — the outer align="flex-end" would
+          otherwise resolve maxWidth against the text's own width. */}
+      <Box
+        style={{
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: 6,
+          alignItems: 'flex-end',
+          width: '100%',
+        }}
+      >
+        {/* Outside the bubble, so the bubble holds only what the user wrote. The
+            whole explanation lives in its tooltip — measured, not guessed: the
+            model reads it on its next inference, after the tool call that was
+            already running returns. Promising anything faster would have someone
+            watch a 3-minute Bash and think it was lost. */}
+        <Tooltip label="Sent into this turn — Claude reads it after the current step">
+          <IconBolt size={14} style={{ flexShrink: 0, marginBottom: 5, opacity: 0.6 }} />
+        </Tooltip>
+        <Paper
+          radius="md"
+          px="sm"
+          py={4}
+          withBorder
+          bg="transparent"
+          style={{ maxWidth: '80%', minWidth: 0, overflowWrap: 'anywhere' }}
+        >
+          <UserText text={item.text} />
+          {item.mentions && item.mentions.length > 0 && (
+            <Group gap={6} mt={6}>
+              {item.mentions.map((m) => {
+                const meta = mentionKindMeta[m.kind];
+                const Icon = meta?.icon;
+                return (
+                  <Badge
+                    key={`${m.kind}:${m.id}`}
+                    variant="light"
+                    color={meta?.color ?? 'gray'}
+                    leftSection={Icon ? <Icon size={11} /> : undefined}
+                    style={{ textTransform: 'none' }}
+                  >
+                    {m.label}
+                  </Badge>
+                );
+              })}
+            </Group>
+          )}
+        </Paper>
+        <PromptAuthor actor={item.actor} ts={item.ts} />
+      </Box>
+      {/* Under the bubble and right-aligned, as UserBubble's actions are. Keeps its
+          height when hidden: revealing it on hover must not shift the transcript
+          under the pointer. */}
+      <Group
+        gap={4}
+        h={24}
+        pr={30}
+        justify="flex-end"
+        style={{
+          opacity: hovered ? 1 : 0,
+          transition: 'opacity 120ms',
+          pointerEvents: hovered ? 'auto' : 'none',
+        }}
+      >
+        <Tooltip label={clipboard.copied ? 'Copied' : 'Copy message'}>
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            color="gray"
+            aria-label="Copy message"
+            onClick={() => clipboard.copy(item.text)}
+          >
+            {clipboard.copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+          </ActionIcon>
+        </Tooltip>
+      </Group>
+    </Stack>
+  );
+}
+
+/**
  * One transcript row. Memoized: {@link reconcileItems} hands unchanged items back
  * across rebuilds, so with stable props an untouched row skips reconciliation
  * entirely — which is the whole point of the structural sharing upstream.
@@ -531,6 +627,8 @@ const Item = memo(function Item({
       // would read as the agent talking. Authorship is carried by the avatar
       // and its colour instead of by side.
       return <UserBubble item={item} sessionId={sessionId} onImage={onImage} />;
+    case 'interject':
+      return <InterjectionRow item={item} />;
     case 'assistant':
       // Agent output is unwrapped and flush-left — no bubble, no icon gutter.
       return (
@@ -837,6 +935,8 @@ export function Transcript({
   const activityStartedAt = useMemo(() => {
     if (turnStartedAt != null) return turnStartedAt;
     for (let i = events.length - 1; i >= 0; i--) {
+      // 'user' only, never 'interject': an interjection joins the turn that is
+      // already running, so the elapsed clock must keep counting from its prompt.
       if (events[i].kind === 'user') return events[i].ts;
     }
     return undefined;

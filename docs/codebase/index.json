@@ -184,7 +184,8 @@
       ],
       "relatedDecisions": [
         "session-collaboration",
-        "turn-recovery"
+        "turn-recovery",
+        "turn-interjection"
       ]
     },
     {
@@ -919,7 +920,8 @@
         "session-collaboration",
         "transcript-performance",
         "workflow-step-lifecycle",
-        "background-tasks"
+        "background-tasks",
+        "turn-interjection"
       ]
     },
     {
@@ -2334,7 +2336,8 @@
         "transcript-rendering",
         "permissions-and-plan-mode",
         "cloud-sync-sessions",
-        "session-rewind"
+        "session-rewind",
+        "turn-interjection"
       ]
     },
     {
@@ -2647,6 +2650,70 @@
         "turn-recovery",
         "transcript-rendering",
         "session-and-project-ui"
+      ]
+    },
+    {
+      "id": "turn-interjection",
+      "name": "Turn interjection",
+      "doc": "features/turn-interjection.md",
+      "purpose": "Release a queued prompt into the turn that is already running (\"Send now\") instead of waiting for it to settle, using the SDK's undocumented priority steering knob.",
+      "entryPoints": [
+        "web/src/components/QueuedMessages.tsx",
+        "server/src/sessions.ts",
+        "server/src/index.ts",
+        "web/src/components/Transcript.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/sessions.ts",
+        "server/src/index.ts",
+        "server/src/workerClient.ts",
+        "web/src/lib/transcript.ts",
+        "web/src/components/Transcript.tsx",
+        "web/src/components/QueuedMessages.tsx",
+        "server/scripts/spike-interject.ts"
+      ],
+      "symbols": [
+        "SessionManager.interjectQueued",
+        "SessionManager.canInterject",
+        "pushTurn",
+        "InterjectData",
+        "TranscriptEvent.kind",
+        "WorkerClient.linkOpen"
+      ],
+      "dependencies": [],
+      "tests": [
+        "server/src/sessions.queue.test.ts",
+        "server/src/sessions.compact.test.ts",
+        "server/src/sessions.turns.test.ts",
+        "server/src/messageAuthz.test.ts"
+      ],
+      "businessRules": [
+        "sending happens from the queue row, never from the composer \u2014 typing while busy still queues",
+        "an interjection never opens a turn and is never a rewind anchor",
+        "it runs attributed to the item's author, not whoever pressed the button",
+        "a promptNeedsApproval guest cannot release their own item",
+        "items with attachments are refused in v1",
+        "refused during compaction, interrupt, rewind, workflow advance, or a closed link, leaving the item queued to flush normally",
+        "releasing one item never releases the rest of the queue, and never clears queuePaused unless the queue empties",
+        "interjected work bills to the original turn's result, so a step's cost includes it",
+        "no MIN_INTERJECT_VERSION: priority 'next' and an absent priority measured identically"
+      ],
+      "architecturalRules": [
+        "separate TranscriptEvent kind ('interject') rather than a flag on 'user', so every turn-boundary scan keyed on kind === 'user' stays correct untouched",
+        "the push reuses the queryTokens entry instead of re-resolving a token, because pushWithToken closes the query on a mismatch",
+        "no new SessionStatus value and no new SessionMeta field",
+        "priority rides inside the opaque push.message, so worker.ts and PROTOCOL_VERSION are untouched",
+        "the {ok:false, code} union mirrors compactContext so a lost race reads as 'still queued', not as an error",
+        "the CLI behaviour and the priority:'next' choice come from a measurement (server/scripts/spike-interject.ts), not an inference from the SDK's types"
+      ],
+      "relatedDecisions": [
+        "session-collaboration",
+        "transcript-rendering",
+        "workflow-step-lifecycle",
+        "context-window",
+        "turn-recovery",
+        "permissions-and-plan-mode"
       ]
     }
   ]
