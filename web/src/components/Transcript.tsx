@@ -379,14 +379,27 @@ function UserBubble({
 
   return (
     <Stack ref={ref} gap={6} align="flex-end">
-      <Box style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, alignItems: 'flex-end' }}>
+      {/* width: 100% is load-bearing: the outer Stack's align="flex-end" would
+          otherwise shrink this row to fit, and the bubble's maxWidth: 80% below
+          would resolve against the text's own width instead of the column. */}
+      <Box
+        style={{
+          display: 'flex',
+          justifyContent: 'flex-end',
+          gap: 6,
+          alignItems: 'flex-end',
+          width: '100%',
+        }}
+      >
         <Paper
           radius="md"
           px="sm"
           py={6}
           bg="var(--mantine-color-default-hover)"
-          // minWidth: 0 is load-bearing twice — it stops a wide code block from
-          // growing the flex item, and since used width is
+          // maxWidth: 80% resolves against the full-width row above, so the
+          // bubble caps at 80% of the transcript column and hugs its text below
+          // that. minWidth: 0 is load-bearing twice — it stops a wide code block
+          // from growing the flex item, and since used width is
           // max(min-width, min(max-width, width)), a default min-width: auto
           // (min-content) would beat maxWidth: 80% for one long unbreakable token.
           style={{ maxWidth: '80%', minWidth: 0, overflowWrap: 'anywhere' }}
