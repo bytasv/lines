@@ -157,6 +157,37 @@
   animation: tx-caret 1s step-end infinite;
 }
 
+/* Passages of a plan the user has commented on.
+
+   Painted with the CSS Custom Highlight API rather than wrapping the text in
+   <mark>: the plan body is React-rendered markdown that re-renders on mount (lite
+   -> full plugins) and again whenever the plan file is re-read from disk, so any
+   DOM we injected would be reconciled away. A Highlight is a set of Ranges held
+   outside the DOM, styled from here, and it survives none of that — it is simply
+   recomputed, with nothing to clean up.
+
+   Only background-color, color, text-decoration and text-shadow are honoured on
+   ::highlight() — no borders, no padding, no font-weight. Both `color` values are
+   pinned to near-black rather than inherited: the fill is opaque and identical in
+   light and dark, so inheriting would make the text invisible in dark mode.
+
+   Unsupported browsers (the API is behind neither a flag nor a polyfill here)
+   silently paint nothing, which is the pre-feature appearance. */
+::highlight(lines-plan-comment) {
+  background-color: var(--mantine-color-yellow-4);
+  color: var(--mantine-color-dark-9);
+  text-decoration: underline 2px var(--mantine-color-orange-7);
+  text-underline-offset: 2px;
+}
+
+/* The one under the pointer, or whose row in the comment list is. */
+::highlight(lines-plan-comment-active) {
+  background-color: var(--mantine-color-orange-5);
+  color: var(--mantine-color-dark-9);
+  text-decoration: underline 2px var(--mantine-color-orange-9);
+  text-underline-offset: 2px;
+}
+
 /* Compact markdown rhythm, shared by every consumer of <Markdown>.
    Implemented as scoped Mantine spacing VARS, not selector overrides: Typography's
    list rule is `:where(ul, ol):not([data-type='taskList'])` = specificity (0,2,0),

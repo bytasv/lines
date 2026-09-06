@@ -7,6 +7,7 @@ import type {
   GuardAllowlistReview,
   ModelOption,
   PermissionMode,
+  PlanComment,
   Project,
   ProjectKeyMap,
   PromptAttachment,
@@ -30,6 +31,7 @@ import type {
 import {
   APP_PROTOCOL_VERSION,
   DEFAULT_MODEL,
+  normalizePlanComments,
   projectPaths,
   resolveModelId,
   worktreePaths,
@@ -84,6 +86,7 @@ const AUTO_CONTINUE_KEY = 'lines.autoContinueInterrupted';
 const COMPRESS_RESPONSES_KEY = 'lines.compressResponses';
 const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
 const DRAFTS_KEY = 'lines.drafts';
+const PLAN_COMMENTS_KEY = 'lines.planComments';
 
 export type SidebarMode = 'sessions' | 'files';
 
@@ -208,6 +211,68 @@ function pruneDrafts(doomedSessionIds: Set<string>) {
     }
   }
   if (changed) localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+}
+
+// ---------------------------------------------------------------------------
+// Plan comments — notes the user attached to passages of a plan while reviewing
+// it, before deciding. Persisted for the same reason composer drafts are: the
+// plan card is unmounted and remounted freely (the transcript windows its tail),
+// so component-local state would lose a half-finished review to a scroll.
+//
+// Keyed by session *and* requestId: a session can hold several plan rounds, and
+// comments belong to the plan they were written against, never to the next one.
+// ---------------------------------------------------------------------------
+
+type PlanCommentStore = Record<string, Record<string, PlanComment[]>>;
+
+function loadPlanComments(): PlanCommentStore {
+  try {
+    const raw = localStorage.getItem(PLAN_COMMENTS_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    const out: PlanCommentStore = {};
+    for (const [sessionId, byRequest] of Object.entries(parsed)) {
+      if (!byRequest || typeof byRequest !== 'object') continue;
+      for (const [requestId, list] of Object.entries(byRequest as Record<string, unknown>)) {
+        // Same gate the server runs on the wire payload, so what is stored can
+        // never be wider than what would survive being sent.
+        const comments = normalizePlanComments(list);
+        if (comments.length) (out[sessionId] ??= {})[requestId] = comments;
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/** The stored comments for one plan card, or an empty list. */
+export function readPlanComments(sessionId: string, requestId: string): PlanComment[] {
+  return loadPlanComments()[sessionId]?.[requestId] ?? [];
+}
+
+/** Persist a card's comments; an empty list removes the entry rather than storing it. */
+export function writePlanComments(sessionId: string, requestId: string, comments: PlanComment[]) {
+  const all = loadPlanComments();
+  if (comments.length) (all[sessionId] ??= {})[requestId] = comments;
+  else {
+    delete all[sessionId]?.[requestId];
+    if (all[sessionId] && Object.keys(all[sessionId]).length === 0) delete all[sessionId];
+  }
+  localStorage.setItem(PLAN_COMMENTS_KEY, JSON.stringify(all));
+}
+
+/** Delete exactly the named sessions' comments. Same rule as pruneDrafts. */
+function prunePlanComments(doomedSessionIds: Set<string>) {
+  if (doomedSessionIds.size === 0) return;
+  const all = loadPlanComments();
+  let changed = false;
+  for (const id of doomedSessionIds) {
+    if (all[id]) {
+      delete all[id];
+      changed = true;
+    }
+  }
+  if (changed) localStorage.setItem(PLAN_COMMENTS_KEY, JSON.stringify(all));
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,6 +1422,7 @@ export const useStore = create<UiState>((set, get) => {
           live,
         });
         pruneDrafts(new Set(doomed));
+        prunePlanComments(new Set(doomed));
         void pruneDraftAttachments(new Set(doomed));
         // Owner connections only: a guest's hello carries no account-wide field,
         // and adopting somebody else's machine id here would stamp this user's

@@ -26,8 +26,10 @@ see [Data flow](#data-flow) for the measurement and its result. `SDKUserMessage.
 
 - `shared/types.ts` — `ClientMessage.interjectQueued`, its `MESSAGE_AUTHZ` row, `InterjectData`,
   `TranscriptEvent.kind` gains `'interject'`
-- `server/src/sessions.ts` — `canInterject`, `interjectQueued`, the `intoLiveTurn` branch through
-  `pushTurn`/`pushTurnSafely`/`pushWithToken`
+- `server/src/sessions.ts` — `canInterject`, `interjectQueued`, `pushIntoLiveTurn` (the shared
+  `intoLiveTurn` push both `interjectQueued` and the plan-comments approval path in
+  [permissions-and-plan-mode](permissions-and-plan-mode.md) call), the `intoLiveTurn` branch
+  through `pushTurn`/`pushTurnSafely`/`pushWithToken`
 - `server/src/index.ts` — the `interjectQueued` case
 - `server/src/workerClient.ts` — `linkOpen` getter
 - `web/src/lib/transcript.ts` — the `'interject'` `TranscriptItem` case in `buildTranscript`,
@@ -51,6 +53,12 @@ see [Data flow](#data-flow) for the measurement and its result. `SDKUserMessage.
 - `pushTurn`/`pushTurnSafely(meta, message, { intoLiveTurn })` — `intoLiveTurn` skips token
   resolution and reuses `queryTokens.get(meta.id)` as-is; a normal push that saw a rotated token
   would `closeQuery` first, which would kill the very turn the interjection is joining
+- `SessionManager.pushIntoLiveTurn(meta, text)` — the exact `pushTurnSafely(..., { intoLiveTurn:
+  true })` call this feature makes, extracted to a private helper so a second caller (plan
+  comments delivered on approval, see [permissions-and-plan-mode](permissions-and-plan-mode.md))
+  does not duplicate the `priority: 'next'` measurement or its rationale. `interjectQueued` is
+  still the first and only caller that also removes a queue item and clears `queuePaused`; the
+  second caller has no queue item to remove.
 - `InterjectData` — `{ text, mentions?, actor? }`; no `source` field, unlike `'user'` — an
   interjection is always human-authored
 - `WorkerClient.linkOpen` — `this.ready && ws.readyState === OPEN`, deliberately not

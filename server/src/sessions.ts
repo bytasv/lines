@@ -19,6 +19,7 @@ import type {
   PermissionMode,
   PermissionRequestData,
   PermissionResolutionSource,
+  PlanComment,
   PromptAttachment,
   PromptMention,
   RewindBlockInfo,
@@ -34,6 +35,7 @@ import type {
 import {
   addSpend,
   contextCompactBlock,
+  formatPlanComments,
   isPlanFilePath,
   isSessionActive,
   isSessionInterruptible,
@@ -1793,11 +1795,24 @@ export class SessionManager {
     } satisfies InterjectData);
     this.upsert(meta);
 
+    this.pushIntoLiveTurn(meta, item.text);
+    return { ok: true };
+  }
+
+  /**
+   * Deliver one user text into the turn that is already running, rather than
+   * opening a turn for it.
+   *
+   * Two callers: "Send now" (a queued prompt lifted into the live turn) and an
+   * approved plan carrying comments. Both have already established that
+   * `canInterject` holds — this does the push and nothing else.
+   */
+  private pushIntoLiveTurn(meta: SessionMeta, text: string) {
     this.pushTurnSafely(
       meta,
       {
         type: 'user',
-        message: { role: 'user', content: [{ type: 'text', text: item.text }] },
+        message: { role: 'user', content: [{ type: 'text', text }] },
         parent_tool_use_id: null,
         // The SDK's streaming-input steering knob, undocumented outside sdk.d.ts.
         // Measured against CLI 2.1.260, 3 runs per arm (server/scripts/spike-interject.ts):
@@ -1821,7 +1836,6 @@ export class SessionManager {
       },
       { intoLiveTurn: true },
     );
-    return { ok: true };
   }
 
   /**
@@ -2817,6 +2831,13 @@ export class SessionManager {
     source: PermissionResolutionSource = 'user',
     /** Who clicked. Absent for the owner and for every internal caller. */
     actor?: Actor,
+    /**
+     * ExitPlanMode only: the notes the user left on passages of the plan.
+     * Already normalized by the caller. On a deny they *are* the reason (the
+     * passed `denyMessage` is ignored); on an allow they are delivered into the
+     * turn the approval starts, since an SDK allow carries no text.
+     */
+    planComments?: PlanComment[],
   ) {
     // Persist the exception first so it also covers the recovery path.
     if (allow && alwaysAllow) {
@@ -2860,6 +2881,14 @@ export class SessionManager {
     // The recorded 'allow' of a gated plan step is the user's decision, not the
     // SDK's answer (the tool itself is denied below) — resolvedBy says which.
     const resolvedBy: PermissionResolutionSource = planStepGate ? 'workflow-advance' : source;
+
+    // Comments belong to a plan review and nowhere else; anything attached to
+    // another tool's card is dropped rather than smuggled into its reason.
+    const comments = original?.toolName === 'ExitPlanMode' ? (planComments ?? []) : [];
+    // The server owns the wording on a deny, so "Refine with comments" and the
+    // typed composer reply read identically to the model — whatever the client
+    // sent as `denyMessage` is discarded.
+    if (!allow && comments.length) denyMessage = formatPlanComments(comments, 'refine');
     // updatedInput is recorded so a worker rpc re-send after a bridge restart
     // can be answered from the transcript with the exact approved input.
     this.emitEvent(sessionId, 'permission', {
@@ -2889,7 +2918,11 @@ export class SessionManager {
         allow: false,
         denyMessage:
           'The user approved this plan. Do not implement anything now — end your turn. ' +
-          'The workflow will proceed to the next step.',
+          'The workflow will proceed to the next step.' +
+          // Folded into the gate message rather than interjected: this turn is
+          // ending so the workflow can advance, and a pushed message would land
+          // in a turn with nothing left to steer. The next step reads them here.
+          (comments.length ? `\n\n${formatPlanComments(comments, 'approve')}` : ''),
       });
       return;
     }
@@ -2912,6 +2945,40 @@ export class SessionManager {
           meta.permissionMode = 'default';
           this.upsert(meta);
         }
+      }
+    }
+
+    // An approval carrying comments. The SDK's allow arm has no message field —
+    // only deny carries text — so the approval stays a real allow and the notes
+    // are delivered separately, into the turn the approval just started. The
+    // push is synchronous with the resolve above, before the CLI has
+    // round-tripped the model, so they land with the approval rather than after
+    // the implementation is underway.
+    if (allow && comments.length) {
+      const meta = this.sessions.get(sessionId);
+      const text = formatPlanComments(comments, 'approve');
+      if (meta && this.canInterject(sessionId)) {
+        this.emitEvent(sessionId, 'interject', {
+          text,
+          ...(actor ? { actor } : {}),
+        } satisfies InterjectData);
+        // No upsert: unlike "Send now" this removes nothing from the queue, so
+        // there is no meta change for a broadcast to carry.
+        this.pushIntoLiveTurn(meta, text);
+      } else if (meta) {
+        // The turn has already settled, or the worker link is down —
+        // `canInterject` refuses either. Staged as an ordinary queued prompt (the
+        // shape userPrompt uses) rather than dropped: the comments arrive as the
+        // next turn instead of vanishing. `queuePaused` is left alone, so a
+        // guest's held queue stays held.
+        (meta.queued ??= []).push({
+          id: randomUUID(),
+          ts: Date.now(),
+          text,
+          ...(actor ? { actor } : {}),
+        });
+        this.upsert(meta);
+        this.maybeFlush(sessionId);
       }
     }
   }

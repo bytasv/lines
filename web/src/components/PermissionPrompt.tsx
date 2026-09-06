@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import {
   ActionIcon,
   Avatar,
@@ -12,7 +12,9 @@ import {
   Modal,
   Paper,
   ScrollArea,
+  Stack,
   Text,
+  Textarea,
   Tooltip,
 } from '@mantine/core';
 import {
@@ -21,16 +23,19 @@ import {
   IconChevronRight,
   IconFilePencil,
   IconMap,
+  IconMessagePlus,
+  IconPencil,
   IconPointFilled,
   IconShieldQuestion,
   IconTerminal2,
+  IconTrash,
   IconWorld,
   IconZoomScan,
 } from '@tabler/icons-react';
-import type { PermissionRequestData, PermissionResolutionSource } from '@lines/shared';
-import { KEEP_PLANNING_MESSAGE } from '@lines/shared';
+import type { PermissionRequestData, PermissionResolutionSource, PlanComment } from '@lines/shared';
+import { KEEP_PLANNING_MESSAGE, normalizePlanComments } from '@lines/shared';
 import { send } from '../ws';
-import { useStore } from '../store';
+import { readPlanComments, useStore, writePlanComments } from '../store';
 import { useCan } from '../lib/can';
 import { useIdentityResolver } from '../lib/identity';
 import { QuestionPrompt } from './QuestionPrompt';
@@ -118,8 +123,10 @@ function respond(
   requestId: string,
   allow: boolean,
   denyMessage?: string,
+  /** ExitPlanMode only; the server re-validates and owns the deny wording. */
+  planComments?: PlanComment[],
 ) {
-  send({ type: 'permissionResponse', sessionId, requestId, allow, denyMessage });
+  send({ type: 'permissionResponse', sessionId, requestId, allow, denyMessage, planComments });
 }
 
 /** Per-tool presentation: title, icon, body, and button labels. */
@@ -329,10 +336,626 @@ function planReplyText(data: PermissionRequestData): string | undefined {
   return at === -1 ? undefined : msg.slice(at + marker.length).trim() || undefined;
 }
 
+/**
+ * The words that resolved a plan card — a typed composer reply, or the notes sent
+ * with "Refine with comments" — attributed to whoever wrote them.
+ *
+ * The label was a hardcoded "You:", which is wrong the moment the session is
+ * shared: a collaborator's refinement rendered as the reader's own words. The
+ * actor is the one the server stamped on the resolution, resolved through the same
+ * identity map {@link ResolutionBadge} uses, so a name and an avatar here agree
+ * with the badge above.
+ */
+function PlanReply({ data, text }: { data: PermissionRequestData; text: string }) {
+  const identify = useIdentityResolver();
+  const actor = data.resolvedActor;
+  const who = actor ? identify(actor.userId, actor) : null;
+  // No actor at all is a transcript written before it was recorded; "You" is the
+  // assumption those cards were rendered under, so it stays their fallback.
+  const byOther = who && !who.self ? who : null;
+  return (
+    <Group
+      gap={6}
+      wrap="nowrap"
+      align="flex-start"
+      mt={8}
+      pl="sm"
+      style={{ borderLeft: '2px solid var(--mantine-color-default-border)' }}
+    >
+      {byOther && (
+        <Avatar
+          src={byOther.imageUrl ?? undefined}
+          size={14}
+          radius="xl"
+          color={byOther.color}
+          variant="filled"
+          style={{ flexShrink: 0, marginTop: 1 }}
+        >
+          <Text size="7px" fw={700}>
+            {byOther.initials}
+          </Text>
+        </Avatar>
+      )}
+      <Text size="xs" c="dimmed" style={{ whiteSpace: 'pre-wrap', minWidth: 0 }}>
+        <Text span size="xs" fw={600} c="dimmed">
+          {byOther ? byOther.name : 'You'}:{' '}
+        </Text>
+        {text}
+      </Text>
+    </Group>
+  );
+}
+
 /** First non-empty plan line, markdown decoration stripped — the collapsed card's headline. */
 function planHeadline(plan: string): string {
   const line = plan.split('\n').find((l) => l.trim().length > 0)?.replace(/^[#*\s>-]+/, '').trim() ?? '';
   return line.length > 100 ? line.slice(0, 100) + '…' : line;
+}
+
+// ---------------------------------------------------------------------------
+// Painting commented passages back onto the plan
+//
+// Registered with the CSS Custom Highlight API (styled in index.css), never by
+// mutating the DOM: the plan body is React-rendered markdown that re-renders on
+// mount and again on every live re-read of the plan file, so injected <mark>
+// wrappers would be reconciled away — and mutating it from an observer would
+// re-trigger the observer. A Highlight is a set of Ranges held outside the DOM,
+// so a re-render costs a recomputation and nothing else.
+// ---------------------------------------------------------------------------
+
+const HIGHLIGHT_ALL = 'lines-plan-comment';
+const HIGHLIGHT_ACTIVE = 'lines-plan-comment-active';
+
+/**
+ * Ranges by plan-body instance. The registry is global while the card renders the
+ * plan twice — inline and in focus mode — so the two contribute to one Highlight
+ * instead of overwriting each other's. Ranges in a hidden copy simply paint nothing.
+ */
+const planHighlights = new Map<string, { all: Range[]; active: Range[] }>();
+
+function republishPlanHighlights() {
+  // Firefox <140, Safari <17.2 and any non-browser test environment.
+  if (typeof CSS === 'undefined' || !('highlights' in CSS)) return;
+  const sets = [...planHighlights.values()];
+  const all = sets.flatMap((s) => s.all);
+  const active = sets.flatMap((s) => s.active);
+  if (all.length) CSS.highlights.set(HIGHLIGHT_ALL, new Highlight(...all));
+  else CSS.highlights.delete(HIGHLIGHT_ALL);
+  if (active.length) CSS.highlights.set(HIGHLIGHT_ACTIVE, new Highlight(...active));
+  else CSS.highlights.delete(HIGHLIGHT_ACTIVE);
+}
+
+/** Block-level ancestor of a text node, for deciding where a line break belongs. */
+function blockOf(node: Text): Element | null {
+  return node.parentElement?.closest('p,li,h1,h2,h3,h4,h5,h6,pre,blockquote,td,th,figcaption') ?? null;
+}
+
+/**
+ * The rendered text of `root`, whitespace-collapsed, alongside the (node, offset)
+ * every surviving character came from — enough to turn a string match back into a
+ * DOM Range.
+ *
+ * Collapsing is what makes a stored quote findable at all. `selection.toString()`
+ * reports a line break between two block elements; the concatenated text nodes
+ * have nothing between them. Normalizing both sides to single spaces (and
+ * inserting one wherever a block boundary is crossed) puts them in the same shape.
+ */
+function flattenText(root: HTMLElement): { text: string; at: { node: Text; offset: number }[] } {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let text = '';
+  const at: { node: Text; offset: number }[] = [];
+  // Leading whitespace has nothing to separate, so it starts suppressed.
+  let pendingSpace = false;
+  let started = false;
+  let prevBlock: Element | null = null;
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const node = n as Text;
+    // The floating comment icon and its overlay are inside the wrapper too; their
+    // text is chrome, not plan.
+    if (node.parentElement?.closest('[data-plan-chrome]')) continue;
+    const block = blockOf(node);
+    if (started && block !== prevBlock) pendingSpace = true;
+    prevBlock = block;
+    const raw = node.nodeValue ?? '';
+    for (let i = 0; i < raw.length; i++) {
+      if (/\s/.test(raw[i])) {
+        if (started) pendingSpace = true;
+        continue;
+      }
+      if (pendingSpace) {
+        // Anchored to the character it precedes, so a Range never starts on a
+        // separator that has no node of its own.
+        text += ' ';
+        at.push({ node, offset: i });
+        pendingSpace = false;
+      }
+      text += raw[i];
+      at.push({ node, offset: i });
+      started = true;
+    }
+  }
+  return { text, at };
+}
+
+/** The same collapse `flattenText` applies, for the stored quote. */
+function collapseWhitespace(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Locate each comment's quote in the rendered plan.
+ *
+ * Best-effort by design: the plan file is re-read from disk while the card is
+ * open, so a passage the agent has since rewritten is simply not found and not
+ * painted. The comment still rides in the list below and still reaches the model
+ * — losing the highlight is the whole of the degradation.
+ *
+ * Occurrences are claimed left to right, so two comments on the same repeated
+ * phrase land on different instances of it rather than stacking on the first.
+ */
+function locateQuotes(
+  root: HTMLElement,
+  comments: PlanComment[],
+): Map<string, Range> {
+  const found = new Map<string, Range>();
+  if (comments.length === 0) return found;
+  const { text, at } = flattenText(root);
+  if (!text) return found;
+  let claimedTo = 0;
+  for (const c of comments) {
+    const needle = collapseWhitespace(c.quote);
+    if (!needle) continue;
+    // Retry from the top: comments are stored in the order they were written,
+    // which need not be the order the passages appear in.
+    let start = text.indexOf(needle, claimedTo);
+    if (start === -1) start = text.indexOf(needle);
+    if (start === -1) continue;
+    const end = start + needle.length - 1;
+    const from = at[start];
+    const to = at[end];
+    if (!from || !to) continue;
+    const range = document.createRange();
+    try {
+      range.setStart(from.node, from.offset);
+      range.setEnd(to.node, to.offset + 1);
+    } catch {
+      // A node detached between the walk and here (a re-render mid-loop). The
+      // observer that scheduled this run will schedule another.
+      continue;
+    }
+    found.set(c.id, range);
+    claimedTo = end + 1;
+  }
+  return found;
+}
+
+/**
+ * The plan body, with a select-to-comment affordance over it.
+ *
+ * Own component rather than a helper because the card renders the plan twice —
+ * inline and in focus mode — and each copy needs its own selection, its own
+ * floating icon and its own overlay. Sharing one piece of state between them
+ * would put the icon of one over the text of the other.
+ *
+ * All coordinates are wrapper-relative, never viewport: the inline copy sits
+ * inside a `ScrollArea`, so a viewport offset would slide off the passage it
+ * points at the moment the user scrolls.
+ */
+function CommentablePlan({
+  text,
+  readOnly,
+  onAdd,
+  comments,
+  activeId,
+  onHover,
+  onEditComment,
+  onDeleteComment,
+  scrollToActive,
+  fz,
+}: {
+  text: string;
+  /** A resolved card is a record, not a review — no affordance on it. */
+  readOnly?: boolean;
+  onAdd: (quote: string, note: string) => void;
+  /** Painted onto the plan body wherever their quotes can still be found. */
+  comments: PlanComment[];
+  /** The comment to emphasize, whether its row or its passage is under the pointer. */
+  activeId?: string | null;
+  /** Reports the passage the pointer is over, so the matching row lights up too. */
+  onHover?: (id: string | null) => void;
+  /** Rewrite a note from the hover bubble; same handler the list row uses. */
+  onEditComment?: (id: string, note: string) => void;
+  onDeleteComment?: (id: string) => void;
+  /** Only the copy the user is looking at may scroll to the active passage. */
+  scrollToActive?: boolean;
+  fz?: string;
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [pending, setPending] = useState<{ quote: string; left: number; top: number } | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [note, setNote] = useState('');
+  // Identifies this copy's contribution to the shared highlight registry.
+  const instanceId = useId();
+  /** Where each comment's quote currently sits, refreshed on every paint. */
+  const locatedRef = useRef<Map<string, Range>>(new Map());
+  /** The comment whose passage the pointer is over, with its anchor. */
+  const [peek, setPeek] = useState<{ comment: PlanComment; left: number; top: number } | null>(null);
+  /** The bubble has been switched from reading the note to rewriting it. */
+  const [peekEditing, setPeekEditing] = useState(false);
+  const [peekDraft, setPeekDraft] = useState('');
+  /** Grace period before the bubble closes, so it can be moved onto. */
+  const hideTimer = useRef<number | null>(null);
+  // Read by the close timer, which captured `peekEditing` when it was scheduled —
+  // an edit started *after* that would otherwise be closed out from under itself.
+  const peekEditingRef = useRef(false);
+  peekEditingRef.current = peekEditing;
+  useEffect(() => () => cancelHide(), []);
+
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    // Only the first paint of each run may scroll. Later ones come from the
+    // observer — a markdown re-render fires a burst of them, and scrolling on
+    // every one would fight the user for the scrollbar.
+    let mayScroll = true;
+    const paint = () => {
+      const found = locateQuotes(wrap, comments);
+      const active = activeId ? found.get(activeId) : undefined;
+      planHighlights.set(instanceId, {
+        // The active one is painted by its own rule; leaving it in both would
+        // stack two translucent fills on the same text.
+        all: [...found.entries()].filter(([id]) => id !== activeId).map(([, r]) => r),
+        active: active ? [active] : [],
+      });
+      republishPlanHighlights();
+      // Kept for the pointer hit-test below. A Range is live, so the rects it
+      // reports stay correct as the card scrolls or reflows.
+      locatedRef.current = found;
+      if (active && scrollToActive && mayScroll) {
+        // 'nearest' is a no-op when the passage is already on screen, so hovering
+        // a comment whose text is visible never jolts the view.
+        active.startContainer.parentElement?.scrollIntoView({ block: 'nearest' });
+      }
+      mayScroll = false;
+    };
+    paint();
+    // The markdown re-renders after mount (lite -> full plugins) and again on
+    // every live re-read of the plan file, replacing the nodes the Ranges point
+    // at. Painting mutates no DOM, so watching for that cannot loop.
+    const observer = new MutationObserver(paint);
+    observer.observe(wrap, { childList: true, subtree: true, characterData: true });
+    return () => {
+      observer.disconnect();
+      planHighlights.delete(instanceId);
+      republishPlanHighlights();
+    };
+  }, [text, comments, activeId, scrollToActive, instanceId]);
+
+  const close = () => {
+    setEditing(false);
+    setPending(null);
+    setNote('');
+  };
+
+  const captureSelection = () => {
+    // While the overlay is open the selection is stale by definition — clicking
+    // into the textarea collapses it — so nothing may clear the anchor it is
+    // positioned against.
+    // peekEditing included: dragging a selection while a note is open would
+    // otherwise throw the half-written note away to make room for a new one.
+    if (readOnly || editing || peekEditing) return;
+    const wrap = wrapRef.current;
+    const sel = window.getSelection();
+    if (!wrap || !sel || sel.isCollapsed || sel.rangeCount === 0) {
+      setPending(null);
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    // Another copy of the plan, or something else on the page entirely.
+    if (!wrap.contains(range.commonAncestorContainer)) {
+      setPending(null);
+      return;
+    }
+    const quote = sel.toString().trim();
+    if (!quote) {
+      setPending(null);
+      return;
+    }
+    const rect = range.getBoundingClientRect();
+    const wrapRect = wrap.getBoundingClientRect();
+    // A selection that started on an existing highlight would otherwise leave its
+    // bubble sitting under the comment icon.
+    clearHover();
+    setPending({
+      quote,
+      left: rect.right - wrapRect.left,
+      top: rect.bottom - wrapRect.top,
+    });
+  };
+
+  /**
+   * Which commented passage is under the pointer, resolved geometrically.
+   *
+   * A CSS Highlight is not an element — it has no box and receives no events — so
+   * hovering it has to be hit-tested against the Ranges' client rects. Same
+   * approach MentionInput uses for its pill mirror, and one rect per wrapped line
+   * for the same reason.
+   */
+  const trackHover = (e: React.MouseEvent) => {
+    const wrap = wrapRef.current;
+    // Mid-selection or mid-write, a bubble under the cursor is in the way. And
+    // while a note is being rewritten, drifting over a *different* passage must
+    // not swap the bubble out and discard it.
+    if (!wrap || editing || pending || peekEditing) return;
+    // The pointer is on the bubble itself, which sits over the very passage that
+    // opened it. Hit-testing here would miss and close the thing being reached for.
+    if ((e.target as Element | null)?.closest?.('[data-plan-peek]')) return;
+    const { clientX, clientY } = e;
+    const wrapRect = wrap.getBoundingClientRect();
+    for (const [id, range] of locatedRef.current) {
+      for (const rect of range.getClientRects()) {
+        if (
+          clientX >= rect.left &&
+          clientX <= rect.right &&
+          clientY >= rect.top &&
+          clientY <= rect.bottom
+        ) {
+          const comment = comments.find((c) => c.id === id);
+          if (!comment) continue;
+          cancelHide();
+          const left = rect.left - wrapRect.left;
+          const top = rect.bottom - wrapRect.top;
+          setPeek((p) =>
+            p && p.comment.id === id && p.left === left && p.top === top
+              ? p
+              : { comment, left, top },
+          );
+          onHover?.(id);
+          return;
+        }
+      }
+    }
+    scheduleHide();
+  };
+
+  const cancelHide = () => {
+    if (hideTimer.current !== null) {
+      window.clearTimeout(hideTimer.current);
+      hideTimer.current = null;
+    }
+  };
+
+  /**
+   * Close the bubble, but not instantly.
+   *
+   * Reaching the bubble means crossing the few pixels of uncommented text between
+   * the passage and it — a hit-test miss that, closed eagerly, would snatch the
+   * bubble away every time somebody tried to press one of its buttons.
+   */
+  const scheduleHide = () => {
+    // An open editor is dismissed by Save, Cancel or Esc, never by the pointer
+    // wandering off the half-written note.
+    if (peekEditing) return;
+    if (hideTimer.current !== null) return;
+    hideTimer.current = window.setTimeout(() => {
+      hideTimer.current = null;
+      if (peekEditingRef.current) return;
+      setPeek(null);
+      onHover?.(null);
+    }, 220);
+  };
+
+  const clearHover = () => {
+    cancelHide();
+    setPeek(null);
+    setPeekEditing(false);
+    onHover?.(null);
+  };
+
+  const savePeek = () => {
+    const body = peekDraft.trim();
+    if (!peek || !body) return;
+    onEditComment?.(peek.comment.id, body);
+    setPeekEditing(false);
+    // The note in `peek` is a snapshot taken when the bubble opened; the next
+    // paint re-reads it from the updated list.
+    setPeek((p) => (p ? { ...p, comment: { ...p.comment, note: body } } : p));
+  };
+
+  const save = () => {
+    const body = note.trim();
+    if (!pending || !body) return;
+    onAdd(pending.quote, body);
+    // The passage has been captured — leaving it highlighted would suggest a
+    // second comment is being written against it.
+    window.getSelection()?.removeAllRanges();
+    close();
+  };
+
+  return (
+    <Box
+      ref={wrapRef}
+      style={{ position: 'relative' }}
+      fz={fz}
+      onMouseUp={captureSelection}
+      // Keyboard selection (shift+arrows) never fires a mouseup.
+      onKeyUp={captureSelection}
+      onMouseMove={trackHover}
+      onMouseLeave={scheduleHide}
+    >
+      <Markdown text={text} />
+      {peek && (
+        <Paper
+          withBorder
+          shadow="md"
+          radius="sm"
+          p={8}
+          data-plan-chrome
+          data-plan-peek
+          onMouseEnter={cancelHide}
+          onMouseLeave={scheduleHide}
+          style={{
+            position: 'absolute',
+            left: peek.left,
+            // Butted right up against the passage: every pixel of gap is a place
+            // the pointer can land and start the close timer.
+            top: peek.top + 2,
+            zIndex: 5,
+            width: peekEditing ? 300 : undefined,
+            maxWidth: 320,
+          }}
+        >
+          <Group gap={6} wrap="nowrap" mb={2} justify="space-between">
+            <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
+              <IconMessagePlus size={12} color="var(--mantine-color-orange-6)" />
+              <Text size="10px" c="dimmed" tt="uppercase" fw={700}>
+                Your comment
+              </Text>
+            </Group>
+            {!peekEditing && (
+              <Group gap={2} wrap="nowrap">
+                <ActionIcon
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  aria-label="Edit comment"
+                  onClick={() => {
+                    cancelHide();
+                    setPeekDraft(peek.comment.note);
+                    setPeekEditing(true);
+                  }}
+                >
+                  <IconPencil size={12} />
+                </ActionIcon>
+                <ActionIcon
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  aria-label="Delete comment"
+                  onClick={() => {
+                    onDeleteComment?.(peek.comment.id);
+                    // Its passage is about to stop being highlighted, so the
+                    // bubble anchored to it has nothing left to point at.
+                    clearHover();
+                  }}
+                >
+                  <IconTrash size={12} />
+                </ActionIcon>
+              </Group>
+            )}
+          </Group>
+          {peekEditing ? (
+            <>
+              <Textarea
+                autosize
+                minRows={2}
+                maxRows={6}
+                size="xs"
+                autoFocus
+                value={peekDraft}
+                onChange={(e) => setPeekDraft(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setPeekEditing(false);
+                  }
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    e.preventDefault();
+                    savePeek();
+                  }
+                }}
+              />
+              <Group gap="xs" justify="flex-end" mt={6}>
+                <Button
+                  size="compact-xs"
+                  variant="subtle"
+                  color="gray"
+                  onClick={() => setPeekEditing(false)}
+                >
+                  Cancel
+                </Button>
+                <Button size="compact-xs" disabled={!peekDraft.trim()} onClick={savePeek}>
+                  Save
+                </Button>
+              </Group>
+            </>
+          ) : (
+            <Text size="xs" style={{ whiteSpace: 'pre-wrap' }}>
+              {peek.comment.note}
+            </Text>
+          )}
+        </Paper>
+      )}
+      {pending && !editing && (
+        <Tooltip label="Comment on this passage">
+          <ActionIcon
+            size="sm"
+            variant="filled"
+            data-plan-chrome
+            style={{ position: 'absolute', left: pending.left, top: pending.top + 4, zIndex: 3 }}
+            // The click must not collapse the selection before we have read it.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => setEditing(true)}
+            aria-label="Comment on this passage"
+          >
+            <IconMessagePlus size={14} />
+          </ActionIcon>
+        </Tooltip>
+      )}
+      {pending && editing && (
+        <Paper
+          withBorder
+          shadow="md"
+          radius="sm"
+          p={8}
+          data-plan-chrome
+          style={{
+            position: 'absolute',
+            // Pulled back from the anchor so a selection ending at the right
+            // edge does not push the overlay outside the card.
+            left: Math.max(0, pending.left - 240),
+            top: pending.top + 4,
+            zIndex: 4,
+            width: 280,
+          }}
+        >
+          <Text size="10px" c="dimmed" lineClamp={2}>
+            “{pending.quote}”
+          </Text>
+          <Textarea
+            autosize
+            minRows={2}
+            maxRows={6}
+            size="xs"
+            mt={4}
+            data-autofocus
+            autoFocus
+            placeholder="What should change here?"
+            value={note}
+            onChange={(e) => setNote(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                close();
+              }
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                save();
+              }
+            }}
+          />
+          <Group gap="xs" justify="flex-end" mt={6}>
+            <Button size="compact-xs" variant="subtle" color="gray" onClick={close}>
+              Cancel
+            </Button>
+            <Button size="compact-xs" disabled={!note.trim()} onClick={save}>
+              Save
+            </Button>
+          </Group>
+        </Paper>
+      )}
+    </Box>
+  );
 }
 
 /**
@@ -404,20 +1027,197 @@ function PlanApproval({
     if (hasPlan) setExpanded((v) => !v);
   };
 
-  const approve = () => respond(sessionId, data.requestId, true);
-  const keepPlanning = () => respond(sessionId, data.requestId, false, KEEP_PLANNING_MESSAGE);
+  // Seeded from localStorage and written back on every change: this card is
+  // unmounted and remounted freely as the transcript windows its tail, so
+  // component-local state would lose a half-finished review to a scroll.
+  const [comments, setComments] = useState<PlanComment[]>(() =>
+    resolution ? [] : readPlanComments(sessionId, data.requestId),
+  );
+  useEffect(() => {
+    // A resolved card's requestId is dead — drop its draft rather than
+    // persisting comments no button can send any more.
+    writePlanComments(sessionId, data.requestId, resolution ? [] : comments);
+  }, [comments, resolution, sessionId, data.requestId]);
+
+  // Which comment's passage to emphasize in the plan body. Hovering the row is
+  // the whole interaction: the list says what was said, the highlight says where.
+  const [activeId, setActiveId] = useState<string | null>(null);
+  // The comment row currently open for rewriting, and the text in its box.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+
+  const addComment = (quote: string, note: string) =>
+    // The same gate the server runs, so the cap and the truncation the model
+    // will see are the ones the user sees on the card.
+    setComments((prev) => normalizePlanComments([...prev, { id: crypto.randomUUID(), quote, note }]));
+  const removeComment = (id: string) => setComments((prev) => prev.filter((c) => c.id !== id));
+  /**
+   * Rewrite one comment's note in place.
+   *
+   * The quote is deliberately not editable: it is the anchor the highlight is
+   * located by, and it is the record of what the user actually selected. Editing
+   * it would either unmoor the highlight or quietly misattribute a passage. To
+   * comment on different text, select that text.
+   */
+  const updateComment = (id: string, note: string) =>
+    setComments((prev) =>
+      normalizePlanComments(prev.map((c) => (c.id === id ? { ...c, note } : c))),
+    );
+
+  const startEdit = (c: PlanComment) => {
+    setEditingId(c.id);
+    setEditDraft(c.note);
+  };
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditDraft('');
+  };
+  const saveEdit = (id: string) => {
+    const body = editDraft.trim();
+    // Matches the create overlay: an empty note is not a comment, so Save is
+    // disabled rather than silently deleting the row out from under the user.
+    if (!body) return;
+    updateComment(id, body);
+    cancelEdit();
+  };
+
+  /**
+   * Which passage the plan body emphasizes. Editing outranks hovering: with the
+   * caret in a Textarea the pointer is somewhere else entirely, and losing the
+   * highlight would leave you rewriting a note with no idea which passage it is on.
+   */
+  const emphasizedId = editingId ?? activeId;
+
+  const commented = comments.length > 0;
+  // Only when there are comments: with none this is exactly the message the card
+  // sent before this feature existed.
+  const payload = commented ? comments : undefined;
+  const approve = () => respond(sessionId, data.requestId, true, undefined, payload);
+  const keepPlanning = () =>
+    respond(sessionId, data.requestId, false, KEEP_PLANNING_MESSAGE, payload);
   const reply = planReplyText(data);
 
-  const actions = (
+  // One definition, rendered at two sizes — the inline card and the focus-mode
+  // footer used to carry their own copies of these buttons and could drift.
+  const renderActions = (size: 'xs' | 'sm') => (
     <Group gap="xs">
-      <Button size="xs" onClick={approve}>
-        Approve plan &amp; start
+      <Button size={size} onClick={approve}>
+        {commented ? `Approve with comments (${comments.length})` : 'Approve plan & start'}
       </Button>
-      <Button size="xs" variant="default" onClick={keepPlanning}>
-        Keep planning
+      <Button size={size} variant="default" onClick={keepPlanning}>
+        {commented ? `Refine with comments (${comments.length})` : 'Keep planning'}
       </Button>
     </Group>
   );
+
+  const commentList = commented ? (
+    <Box mt="sm">
+      <Text size="xs" fw={600} c="dimmed" mb={4}>
+        {comments.length} comment{comments.length === 1 ? '' : 's'}
+      </Text>
+      <Stack gap={6}>
+        {comments.map((c) => (
+          <Group
+            key={c.id}
+            gap="xs"
+            wrap="nowrap"
+            align="flex-start"
+            onMouseEnter={() => setActiveId(c.id)}
+            onMouseLeave={() => setActiveId((id) => (id === c.id ? null : id))}
+          >
+            <Box
+              style={{
+                minWidth: 0,
+                flex: 1,
+                paddingLeft: 8,
+                // Matches ::highlight(lines-plan-comment-active) in index.css, so
+                // the row and the passage it points at read as one thing.
+                borderLeft: `2px solid ${
+                  emphasizedId === c.id
+                    ? 'var(--mantine-color-orange-5)'
+                    : 'var(--mantine-color-default-border)'
+                }`,
+              }}
+            >
+              {c.quote && (
+                <Text size="10px" c="dimmed" lineClamp={1}>
+                  “{c.quote}”
+                </Text>
+              )}
+              {editingId === c.id ? (
+                <>
+                  <Textarea
+                    autosize
+                    minRows={2}
+                    maxRows={6}
+                    size="xs"
+                    mt={2}
+                    autoFocus
+                    value={editDraft}
+                    onChange={(e) => setEditDraft(e.currentTarget.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        e.preventDefault();
+                        cancelEdit();
+                      }
+                      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                        e.preventDefault();
+                        saveEdit(c.id);
+                      }
+                    }}
+                  />
+                  <Group gap="xs" justify="flex-end" mt={4}>
+                    <Button size="compact-xs" variant="subtle" color="gray" onClick={cancelEdit}>
+                      Cancel
+                    </Button>
+                    <Button
+                      size="compact-xs"
+                      disabled={!editDraft.trim()}
+                      onClick={() => saveEdit(c.id)}
+                    >
+                      Save
+                    </Button>
+                  </Group>
+                </>
+              ) : (
+                <Text
+                  size="xs"
+                  style={{ whiteSpace: 'pre-wrap', cursor: 'text' }}
+                  // The text itself is the target most people reach for; the
+                  // pencil is there for the ones who look for a control.
+                  onClick={() => startEdit(c)}
+                >
+                  {c.note}
+                </Text>
+              )}
+            </Box>
+            {editingId !== c.id && (
+              <>
+                <ActionIcon
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  onClick={() => startEdit(c)}
+                  aria-label="Edit comment"
+                >
+                  <IconPencil size={12} />
+                </ActionIcon>
+                <ActionIcon
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  onClick={() => removeComment(c.id)}
+                  aria-label="Delete comment"
+                >
+                  <IconTrash size={12} />
+                </ActionIcon>
+              </>
+            )}
+          </Group>
+        ))}
+      </Stack>
+    </Box>
+  ) : null;
 
   return (
     <>
@@ -498,29 +1298,31 @@ function PlanApproval({
             </ActionIcon>
           </Tooltip>
         </Group>
-        {resolution && reply && (
-          <Text
-            size="xs"
-            c="dimmed"
-            mt={8}
-            pl="sm"
-            style={{
-              whiteSpace: 'pre-wrap',
-              borderLeft: '2px solid var(--mantine-color-default-border)',
-            }}
-          >
-            You: {reply}
-          </Text>
-        )}
+        {resolution && reply && <PlanReply data={data} text={reply} />}
         <Collapse expanded={expanded} transitionDuration={150}>
           <ScrollArea.Autosize mah={320} type="auto">
             {/* Not default-hover: that shade now reads as a user bubble. */}
             <Paper bg="var(--mantine-color-default)" radius="md" px="sm" py={4}>
-              <Markdown text={shown} />
+              <CommentablePlan
+                text={shown}
+                readOnly={!!resolution}
+                onAdd={addComment}
+                comments={comments}
+                activeId={emphasizedId}
+                onHover={setActiveId}
+
+                onEditComment={updateComment}
+
+                onDeleteComment={removeComment}
+                // The focus-mode copy is on top when it is open; only the one the
+                // user can actually see may scroll itself.
+                scrollToActive={!focus}
+              />
             </Paper>
           </ScrollArea.Autosize>
           {/* Buttons never render for a dead requestId. */}
-          {!resolution && <Box mt="sm">{actions}</Box>}
+          {!resolution && commentList}
+          {!resolution && <Box mt="sm">{renderActions('xs')}</Box>}
         </Collapse>
       </Paper>
 
@@ -543,8 +1345,22 @@ function PlanApproval({
             </Button>
           </Group>
           <ScrollArea style={{ flex: 1 }}>
-            <Box maw={760} mx="auto" px="xl" pb="xl" fz="md">
-              <Markdown text={shown} />
+            <Box maw={760} mx="auto" px="xl" pb="xl">
+              <CommentablePlan
+                text={shown}
+                readOnly={!!resolution}
+                onAdd={addComment}
+                comments={comments}
+                activeId={emphasizedId}
+                onHover={setActiveId}
+
+                onEditComment={updateComment}
+
+                onDeleteComment={removeComment}
+                scrollToActive={focus}
+                fz="md"
+              />
+              {!resolution && commentList}
             </Box>
           </ScrollArea>
           {/* A resolved plan opens read-only — the footer and its border go with the buttons. */}
@@ -554,12 +1370,7 @@ function PlanApproval({
               py="md"
               style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}
             >
-              <Button size="sm" onClick={approve}>
-                Approve plan &amp; start
-              </Button>
-              <Button variant="default" size="sm" onClick={keepPlanning}>
-                Keep planning
-              </Button>
+              {renderActions('sm')}
             </Group>
           )}
         </Box>

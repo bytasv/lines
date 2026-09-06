@@ -890,6 +890,78 @@ export interface PermissionRequestData {
 export const KEEP_PLANNING_MESSAGE =
   'The user is not ready to proceed — stay in plan mode and refine the plan based on their next message.';
 
+/**
+ * One note the user attached to a passage of the plan while reviewing it.
+ *
+ * Anchored by `quote`, never by an offset: the plan markdown is re-rendered on
+ * mount and the card re-reads the plan file from disk every time it opens, so a
+ * character offset drifts while an excerpt does not.
+ */
+export interface PlanComment {
+  id: string;
+  /** The selected passage, verbatim. */
+  quote: string;
+  /** What the user wants done about it. */
+  note: string;
+}
+
+const PLAN_COMMENT_QUOTE_MAX = 280;
+const PLAN_COMMENT_NOTE_MAX = 2000;
+const PLAN_COMMENTS_MAX = 20;
+
+/**
+ * Canonical form of a plan-comment list. The single gate every writer runs
+ * through — the same role `normalizeAllowEntry` plays for guard entries, and
+ * here for the same reason: the server runs it on the untrusted wire payload,
+ * and the web client runs the identical rules before sending, so what the user
+ * sees on the card is what the model gets.
+ *
+ * A comment with no note is dropped rather than rejected: an empty note is a
+ * selection the user never finished, which carries nothing for the model.
+ */
+export function normalizePlanComments(raw: unknown): PlanComment[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PlanComment[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const src = item as { id?: unknown; quote?: unknown; note?: unknown };
+    const note = typeof src.note === 'string' ? src.note.trim() : '';
+    if (!note) continue;
+    const quote = typeof src.quote === 'string' ? src.quote.trim() : '';
+    out.push({
+      id: typeof src.id === 'string' && src.id ? src.id.slice(0, 64) : String(out.length + 1),
+      quote: quote.slice(0, PLAN_COMMENT_QUOTE_MAX),
+      note: note.slice(0, PLAN_COMMENT_NOTE_MAX),
+    });
+    if (out.length === PLAN_COMMENTS_MAX) break;
+  }
+  return out;
+}
+
+/**
+ * The one place the wording of a commented plan decision lives, so the two
+ * buttons on the card and the server that answers them cannot drift.
+ *
+ * 'refine' reuses the `KEEP_PLANNING_MESSAGE` prefix and the
+ * `"The user's message:\n"` marker the typed-composer reply already uses, which
+ * is what lets `planReplyText` render the comments back on the resolved card
+ * with no client-side special case.
+ */
+export function formatPlanComments(comments: PlanComment[], mode: 'approve' | 'refine'): string {
+  if (comments.length === 0) return '';
+  const body = comments
+    .map((c, i) => (c.quote ? `${i + 1}. On "${c.quote}": ${c.note}` : `${i + 1}. ${c.note}`))
+    .join('\n');
+  if (mode === 'refine') {
+    return `${KEEP_PLANNING_MESSAGE}\n\nThe user's message:\n${body}`;
+  }
+  const n = comments.length;
+  return (
+    `The user approved the plan and left ${n} comment${n === 1 ? '' : 's'} on it. ` +
+    `Apply them as you implement — they amend the plan, they do not replace it.\n\n${body}`
+  );
+}
+
 /** AskUserQuestion tool input shape (subset we render). */
 export interface AskUserQuestionInput {
   questions: {
@@ -1602,6 +1674,13 @@ export type ClientMessage =
       denyMessage?: string;
       /** Add this request's pattern to the auto-mode guard allowlist. */
       alwaysAllow?: boolean;
+      /**
+       * ExitPlanMode only: notes the user attached to passages of the plan. On an
+       * approval they ride into the running turn as an interjection; on a deny the
+       * server builds the reason from them, ignoring `denyMessage`. Re-validated
+       * server-side with `normalizePlanComments` — the client is not trusted.
+       */
+      planComments?: PlanComment[];
     }
   | { type: 'workflowApprove'; sessionId: string; stepIndex: number }
   /** Mark the current step done from the stepper, whether it is parked or still running. */

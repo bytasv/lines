@@ -9,8 +9,14 @@ import type {
   SessionMeta,
   SessionStatus,
   TranscriptEvent,
+  WorkflowState,
 } from '@lines/shared';
-import { KEEP_PLANNING_MESSAGE } from '@lines/shared';
+import {
+  KEEP_PLANNING_MESSAGE,
+  formatPlanComments,
+  normalizePlanComments,
+  type PlanComment,
+} from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { planReplyDecision, SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -93,6 +99,65 @@ test('attachments: the reason never repeats the text the queued turn will carry'
 });
 
 // ---------------------------------------------------------------------------
+// Plan comments — the validation gate and the single-sourced wording
+// ---------------------------------------------------------------------------
+
+test('a comment with no note is dropped, not rejected', () => {
+  const got = normalizePlanComments([
+    { id: 'a', quote: 'q', note: '  ' },
+    { id: 'b', quote: 'q2', note: ' keep me ' },
+    { id: 'c', quote: 'q3' },
+  ]);
+  assert.deepEqual(got, [{ id: 'b', quote: 'q2', note: 'keep me' }]);
+});
+
+test('a non-array payload normalizes to nothing', () => {
+  assert.deepEqual(normalizePlanComments(undefined), []);
+  assert.deepEqual(normalizePlanComments('nope'), []);
+  assert.deepEqual(normalizePlanComments([null, 3, 'x']), []);
+});
+
+test('an oversized quote and note are truncated', () => {
+  const [got] = normalizePlanComments([
+    { id: 'a', quote: 'q'.repeat(500), note: 'n'.repeat(5000) },
+  ]);
+  assert.equal(got.quote.length, 280);
+  assert.equal(got.note.length, 2000);
+});
+
+test('the list is capped', () => {
+  const many = Array.from({ length: 50 }, (_, i) => ({ id: `c${i}`, quote: 'q', note: 'n' }));
+  assert.equal(normalizePlanComments(many).length, 20);
+});
+
+test('refine wording keeps the prefix and marker planReplyText parses', () => {
+  const comments: PlanComment[] = [{ id: 'a', quote: 'step 3', note: 'add a rollback' }];
+  const text = formatPlanComments(comments, 'refine');
+  assert.ok(text.startsWith(KEEP_PLANNING_MESSAGE));
+  assert.ok(text.includes("The user's message:\n"));
+  assert.ok(text.includes('On "step 3": add a rollback'));
+});
+
+test('approve wording names the count and carries the same body', () => {
+  const text = formatPlanComments(
+    [
+      { id: 'a', quote: 'step 3', note: 'add a rollback' },
+      { id: 'b', quote: 'step 4', note: 'skip it' },
+    ],
+    'approve',
+  );
+  assert.ok(text.includes('2 comments'));
+  assert.ok(!text.startsWith(KEEP_PLANNING_MESSAGE), 'an approval is not a keep-planning');
+  assert.ok(text.includes('On "step 3": add a rollback'));
+  assert.ok(text.includes('On "step 4": skip it'));
+});
+
+test('an empty list formats to nothing at all', () => {
+  assert.equal(formatPlanComments([], 'approve'), '');
+  assert.equal(formatPlanComments([], 'refine'), '');
+});
+
+// ---------------------------------------------------------------------------
 // Resolution provenance and idempotency (the whole point: only a human answer
 // may move an always-ask request, and the transcript must record which did)
 // ---------------------------------------------------------------------------
@@ -100,7 +165,9 @@ test('attachments: the reason never repeats the text the queued turn will carry'
 const cwd = '/tmp';
 
 /** A manager over a throwaway store with one session and a seeded transcript. */
-function harness(opts: { mode?: PermissionMode; events?: TranscriptEvent[] } = {}) {
+function harness(
+  opts: { mode?: PermissionMode; events?: TranscriptEvent[]; workflow?: WorkflowState } = {},
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-provenance-'));
   fs.writeFileSync(
     path.join(root, 'sessions.json'),
@@ -113,6 +180,7 @@ function harness(opts: { mode?: PermissionMode; events?: TranscriptEvent[] } = {
         permissionMode: opts.mode ?? 'default',
         status: 'running',
         createdAt: 1,
+        ...(opts.workflow ? { workflow: opts.workflow } : {}),
       } as SessionMeta,
     ]),
   );
@@ -127,22 +195,45 @@ function harness(opts: { mode?: PermissionMode; events?: TranscriptEvent[] } = {
   const sessions = new SessionManager(store, new GuardAllowlist(store), () => {});
   const answered: unknown[] = [];
   const pushes: string[] = [];
+  const pushed: Record<string, unknown>[] = [];
   sessions.attachWorker({
-    push: (id: string) => pushes.push(id),
+    push: (id: string, message: Record<string, unknown>) => {
+      pushes.push(id);
+      pushed.push(message);
+    },
     close: () => {},
     interrupt: () => {},
     rpcResult: (_id: string, result: unknown) => answered.push(result),
+    // canInterject refuses a closed link outright, so an interjection test needs
+    // this open. Everything else ignores it.
+    linkOpen: true,
   } as unknown as WorkerClient);
   return {
     sessions,
     answered,
     pushes,
+    pushed,
     s1: () => sessions.get('s1')!,
+    /**
+     * Pretend this bridge spawned the running query. `canInterject` only steers a
+     * query whose token it remembers, and nothing in this harness ever pushes a
+     * turn, so the map it consults stays empty otherwise.
+     */
+    goLive: () =>
+      (sessions as unknown as { queryTokens: Map<string, string | null> }).queryTokens.set(
+        's1',
+        null,
+      ),
     cards: () =>
       store
         .loadTranscript('s1')
         .filter((e) => e.kind === 'permission')
         .map((e) => e.data as PermissionRequestData),
+    interjections: () =>
+      store
+        .loadTranscript('s1')
+        .filter((e) => e.kind === 'interject')
+        .map((e) => e.data as { text: string }),
   };
 }
 
@@ -295,6 +386,115 @@ test('a legacy resolution with no resolvedBy still counts as the user', async ()
   await h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode', true));
 
   assert.deepEqual(h.answered, [{ behavior: 'allow', updatedInput: { command: 'ls' } }]);
+});
+
+// ---------------------------------------------------------------------------
+// Plan comments, end to end through resolvePermission
+// ---------------------------------------------------------------------------
+
+const NOTES: PlanComment[] = [{ id: 'a', quote: 'step 3', note: 'add a rollback' }];
+
+/** resolvePermission's trailing params are positional; this names the two that matter. */
+const answerPlan = (
+  h: ReturnType<typeof harness>,
+  allow: boolean,
+  comments: PlanComment[],
+  denyMessage?: string,
+) =>
+  h.sessions.resolvePermission(
+    's1',
+    'p1',
+    allow,
+    undefined,
+    undefined,
+    denyMessage,
+    undefined,
+    'user',
+    undefined,
+    comments,
+  );
+
+test('approving a plan with comments allows it and steers the turn it started', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  h.goLive();
+  answerPlan(h, true, NOTES);
+  await settle();
+
+  const last = h.cards().at(-1)!;
+  assert.equal(last.resolution, 'allow', 'an approval stays a real allow');
+  assert.equal(last.resolvedBy, 'user');
+  const text = h.interjections().at(-1)?.text ?? '';
+  assert.match(text, /step 3/);
+  assert.match(text, /add a rollback/);
+  assert.deepEqual(h.s1().queued ?? [], [], 'delivered into the turn, not left for the next one');
+});
+
+test('comments on an approval reach the queue when the turn cannot be steered', async () => {
+  // No goLive(): this bridge does not know the query, which is one of the
+  // conditions canInterject refuses on.
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  answerPlan(h, true, NOTES);
+  await settle();
+
+  assert.deepEqual(h.interjections(), [], 'nothing was pushed into the turn');
+  assert.match(h.s1().queued?.[0]?.text ?? '', /add a rollback/, 'staged, never dropped');
+});
+
+test('refining with comments builds the deny reason from them, not from the client', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  h.goLive();
+  answerPlan(h, false, NOTES, 'whatever the client sent');
+  await settle();
+
+  const last = h.cards().at(-1)!;
+  assert.equal(last.resolution, 'deny');
+  assert.ok(last.denyMessage?.startsWith(KEEP_PLANNING_MESSAGE));
+  assert.match(last.denyMessage!, /On "step 3": add a rollback/);
+  assert.ok(!last.denyMessage!.includes('whatever the client sent'));
+  assert.deepEqual(h.interjections(), [], 'a refusal never interjects');
+});
+
+test('a workflow plan-step gate folds comments into its message and never interjects', async () => {
+  const h = harness({
+    mode: 'plan',
+    workflow: {
+      workflowId: 'wf1',
+      started: true,
+      stepIndex: 0,
+      stepStatuses: ['running'],
+    },
+  });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  h.goLive();
+  answerPlan(h, true, NOTES);
+  await settle();
+
+  assert.equal(h.cards().at(-1)?.resolvedBy, 'workflow-advance');
+  assert.deepEqual(h.interjections(), [], 'the step is ending — there is no turn to steer');
+  const gate = JSON.stringify(h.answered.at(-1));
+  assert.match(gate, /The user approved this plan/);
+  assert.match(gate, /add a rollback/);
+});
+
+test('an empty comment list resolves exactly as it did before the feature', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  h.goLive();
+  answerPlan(h, true, []);
+  await settle();
+
+  assert.equal(h.cards().at(-1)?.resolution, 'allow');
+  assert.deepEqual(h.interjections(), []);
+  assert.deepEqual(h.s1().queued ?? [], []);
+  assert.equal(h.s1().permissionMode, 'default', 'plan mode still mirrored off on approval');
 });
 
 test('a model-initiated EnterPlanMode is mirrored into the session mode', async () => {

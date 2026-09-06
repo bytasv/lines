@@ -28,6 +28,7 @@ import {
   DEFAULT_MODELS,
   OWNER_ACCESS,
   authorizeMessage,
+  normalizePlanComments,
   normalizeRootPath,
   parseShareCaps,
   projectRoots,
@@ -925,7 +926,22 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
     case 'setPermissionMode':
       sessions.setPermissionMode(msg.sessionId, msg.mode);
       break;
-    case 'permissionResponse':
+    case 'permissionResponse': {
+      /**
+       * Plan comments are model-visible input, which is what the `prompt` cap
+       * governs — this message only needs `approvePermissions`. So the approve or
+       * deny itself always goes through, and the comments are dropped for anyone
+       * who could not have typed them into the composer instead. Asked through
+       * `authorizeMessage` rather than re-derived, so the owner short-circuit and
+       * the session-scope check stay single-sourced with MESSAGE_AUTHZ.
+       *
+       * `promptNeedsApproval` is refused for the same reason interjectQueued
+       * refuses it on its first line: a guest whose prompts wait for the owner
+       * must not reach the owner's running turn by another door.
+       */
+      const mayPrompt =
+        authorizeMessage({ type: 'prompt', sessionId: msg.sessionId, text: '' }, access).ok &&
+        !access.caps.promptNeedsApproval;
       sessions.resolvePermission(
         msg.sessionId,
         msg.requestId,
@@ -936,8 +952,10 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
         msg.alwaysAllow,
         'user',
         actor,
+        mayPrompt ? normalizePlanComments(msg.planComments) : [],
       );
       break;
+    }
     case 'workflowApprove':
       workflows.approve(msg.sessionId, msg.stepIndex);
       break;

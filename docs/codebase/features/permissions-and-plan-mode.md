@@ -1,7 +1,7 @@
 # Permissions and plan mode
 
 Covers: `permission-mode-selector`, `permission-resolution-provenance`, `guard-allowlist`,
-`plan-file-auto-approve`, `plan-review-card`, `plan-reply-keeps-planning`.
+`plan-file-auto-approve`, `plan-review-card`, `plan-reply-keeps-planning`, `plan-comments`.
 
 ## Purpose
 
@@ -42,6 +42,12 @@ deliverable is written and reviewed.
   and clicked "Keep planning". The typed message itself now counts as "Keep planning": it denies
   the pending `ExitPlanMode` request with the user's own text as the reason, unblocking the
   query.
+- **Plan comments** — select a passage inside the plan card, attach a note to it instead of
+  abandoning the card to retype the whole thing in the composer. With at least one comment
+  attached, the card's two actions become **Approve with comments** (a real allow; the comments
+  are delivered into the turn the approval starts, since the SDK's allow arm carries no message)
+  and **Refine with comments** (a deny built server-side from the comments, ignoring whatever the
+  client sent as `denyMessage`). With zero comments the card is unchanged from before this existed.
 
 ## Entry points
 
@@ -66,6 +72,10 @@ deliverable is written and reviewed.
 - A `file` request over the WebSocket, when the resolved path falls outside every
   project/session root but inside a plan directory
 - Composer send while a plan-review card is open; "Keep planning" button on the plan card
+- Selecting text inside `PlanApproval`'s rendered plan (inline card or fullscreen focus mode) —
+  the floating comment icon, its overlay, and the comment list underneath
+- Hovering a highlighted (commented) passage in the plan body, or a row in the comment list
+- `permissionResponse`'s `planComments` field, consumed only on an `ExitPlanMode` resolution
 
 ## Files
 
@@ -74,7 +84,8 @@ deliverable is written and reviewed.
   guard entry/blob/review types, `normalizeAllowEntry` and the other validators, the
   `addGuardAllow`/`removeGuardAllow`/`reviewGuardAllowlist` and
   `guardAllowlist`/`guardAllowlistReview` wire messages; `PLAN_DIR_MARKER`, `isPlanFilePath`;
-  `PermissionRequestData.denyMessage`, `KEEP_PLANNING_MESSAGE`
+  `PermissionRequestData.denyMessage`, `KEEP_PLANNING_MESSAGE`; `PlanComment`,
+  `normalizePlanComments`, `formatPlanComments`; `ClientMessage.permissionResponse.planComments`
 - `web/src/lib/permissionModes.tsx` — shared mode list, segmented-control data, dropdown render
   helper
 - `web/src/lib/modelSelect.tsx` — `renderOptionWithDescription` (label + dimmed description
@@ -86,7 +97,9 @@ deliverable is written and reviewed.
   approves/prompts per tool call; all resolution sites, `hasUnresolvedAlwaysAsk`,
   `unresolvedPermissions`, `findPermissionResolution`; `handlePreToolUse`, `handleCanUseTool`,
   `collectTurns`; `resolvePermission`'s "Always allow" branch; `planReplyDecision`, `userPrompt`,
-  `recoverOrphanedPermission`
+  `recoverOrphanedPermission`; `pushIntoLiveTurn` (extracted from `interjectQueued`, see
+  [turn-interjection](turn-interjection.md)); `resolvePermission`'s `planComments` handling
+  (gate branch, allow+interject, deny wording, queue fallback)
 - `server/src/autoGuard.ts` — `GuardAllowlist` (CRUD, load-time migration, the review
   lifecycle); re-exports `ALWAYS_ASK_TOOLS`/`GuardAllowEntry` from `shared/types.ts` for
   existing importers; `isPlanPath` (exported), `isSafeReadOnly`, `isSafePlanWrite`,
@@ -96,18 +109,24 @@ deliverable is written and reviewed.
 - `server/src/sync.ts` — `pushGuardAllowlist`, the isolated `/guard-allowlist` pull
 - `server/src/userContext.ts` — wires `guard.onChange`/`guard.onReview` to broadcast + push, and
   calls `reviewRemote` before the push block in `syncNow`
-- `server/src/index.ts` — `hello` fields, the three guard message cases
+- `server/src/index.ts` — `hello` fields, the three guard message cases; the `permissionResponse`
+  case's `prompt`-capability gate on `planComments`
 - `server/src/workspacePaths.ts` — `resolveWorkspacePath`, `workspaceRoots` (the
   `file`/`tree`/`find` root gate; its plan-directory exception is `isPlanPath`)
 - `storage/prisma/schema.prisma`, `storage/src/index.ts` — the `guard_allowlist` table and its
   `GET`/`PUT /guard-allowlist` endpoints
-- `web/src/store.ts` — `guardAllowlist`/`guardReview` state, actions, message cases
+- `web/src/store.ts` — `guardAllowlist`/`guardReview` state, actions, message cases;
+  `readPlanComments`/`writePlanComments`/`prunePlanComments` (per-session, per-`requestId`
+  `localStorage` drafts, mirroring the composer-draft helpers)
 - `web/src/components/GuardAllowlistSection.tsx`,
   `web/src/components/GuardAllowlistReviewModal.tsx`, `web/src/lib/guardEntries.ts`
 - `web/src/lib/transcript.ts` — carries `resolvedBy` from the resolution event onto the merged
   transcript item; `buildTranscript` (`permission` case), `withPlanFileText`; the permission-card
   merge copies `denyMessage` onto the resolved card
-- `web/src/components/PermissionPrompt.tsx` — `ResolutionBadge`, `SOURCE_NOTE`, `PlanApproval`
+- `web/src/components/PermissionPrompt.tsx` — `ResolutionBadge`, `SOURCE_NOTE`, `PlanApproval`,
+  `PlanReply` (resolved-card reply attribution); `CommentablePlan` (selection-to-comment
+  affordance, the hover bubble), `locateQuotes`/`flattenText` (quote-to-`Range` anchoring for the
+  CSS Custom Highlight paint)
 - `web/src/lib/files.ts` — `useFileContent` (the plan card's live re-read)
 
 ## Symbols
@@ -173,6 +192,27 @@ deliverable is written and reviewed.
 - `KEEP_PLANNING_MESSAGE` — shared reason prefix used by both the button and the typed-reply path
 - `PermissionRequestData.denyMessage` — the deny reason, persisted on the resolution transcript
   event so it survives reload/restart and can be replayed or displayed later
+- `PlanComment` — `{ id, quote, note }`; anchored by the selected text itself, never by an
+  offset, because the plan markdown re-renders and the card re-reads the plan file from disk
+- `normalizePlanComments(raw)` — the single validation gate a plan-comment list runs through
+  (drops an empty-note entry, truncates `quote`/`note`, caps the list at 20); run server-side on
+  the wire payload and by the web client before it ever sends one, the same role
+  `normalizeAllowEntry` plays for guard entries
+- `formatPlanComments(comments, mode)` — the only place the wording of a commented plan decision
+  lives; `'refine'` wraps `KEEP_PLANNING_MESSAGE` and the `"The user's message:\n"` marker
+  `planReplyText` already parses, `'approve'` states the count and applies-not-replaces framing
+- `pushIntoLiveTurn(meta, text)` — the `pushTurnSafely(..., { intoLiveTurn: true })` call
+  extracted out of `interjectQueued` so a second caller (an approved plan carrying comments) can
+  reuse it without duplicating the `priority: 'next'` reasoning; see
+  [turn-interjection](turn-interjection.md)
+- `readPlanComments`/`writePlanComments`/`prunePlanComments` — `localStorage` drafts keyed by
+  session id *and* `requestId`, so comments belong to the plan round they were written against
+- `CommentablePlan` — wraps a rendered plan copy with select-to-comment (an `ActionIcon` at the
+  selection, an overlay `Textarea`) and the highlight paint/hover-bubble machinery; rendered once
+  for the inline card and once for fullscreen focus mode, each its own instance
+- `locateQuotes(root, comments)` / `flattenText(root)` — best-effort re-location of each comment's
+  stored quote inside the currently-rendered plan text, for painting the highlight; a passage the
+  agent has since rewritten simply isn't found, and its highlight is silently dropped
 
 ## Data flow
 
@@ -285,6 +325,53 @@ that persisted `denyMessage` instead of a generic denial string. The web transcr
 `denyMessage` from the resolution event onto the existing card, and `PlanApproval` shows it as a
 quoted reply under a `kept planning` badge.
 
+### Plan comments
+
+Comments are drafted client-side only: `CommentablePlan` writes each one to
+`readPlanComments`/`writePlanComments` on every change, keyed by session id and `requestId`, so a
+card that unmounts and remounts (the transcript windows its tail) never loses a half-finished
+review. Nothing syncs a draft between viewers before it is sent — each reviewer sees only their
+own drafts until they click one of the two buttons.
+
+Clicking either button sends `permissionResponse` with `planComments` attached (only when the
+list is non-empty; with zero comments the message is identical to before this feature). The
+server re-validates with `normalizePlanComments` — the client's list is never trusted — and, since
+`permissionResponse` is gated on `approvePermissions` while a text channel to the model is a
+`prompt`-cap concern, drops the comments (keeping the approve/deny itself) unless the actor also
+holds `prompt` and does not carry `promptNeedsApproval`.
+
+`resolvePermission` then branches on the resolved tool and mode:
+
+- **Workflow plan-step gate:** the comments are appended, formatted via
+  `formatPlanComments(comments, 'approve')`, onto the gate's existing deny message ("do not
+  implement — end your turn"). No interjection: the turn is ending so the workflow can advance,
+  and a pushed message would land in a turn with nothing left to steer.
+- **Ordinary allow (Approve with comments):** the resolve stays a real `{ allow: true }` — the
+  SDK's allow arm has no message field, only deny carries text. If `canInterject(sessionId)`
+  holds (the same gate [turn-interjection](turn-interjection.md) uses: a running, non-compacting,
+  non-rewinding turn on a query this bridge knows it spawned, with the worker link open now), an
+  `'interject'` transcript event is written and `pushIntoLiveTurn` delivers
+  `formatPlanComments(comments, 'approve')` into the turn the approval just started — synchronous
+  with the resolve, before the CLI has round-tripped the model. If `canInterject` is false (the
+  turn already settled, or the worker link is down), the text is staged as an ordinary queued
+  prompt instead (the same shape `userPrompt` uses) and delivered as the next turn, never dropped.
+- **Deny (Refine with comments):** the deny reason is built server-side from
+  `formatPlanComments(comments, 'refine')`, discarding whatever `denyMessage` the client sent, so
+  "Refine with comments" and a typed composer reply read identically to the model. Reusing the
+  `KEEP_PLANNING_MESSAGE` prefix and the `"The user's message:\n"` marker means `planReplyText`
+  renders the comments back on the resolved card with no client-side special case.
+
+The plan body paints each comment's quote back onto the rendered text using the CSS Custom
+Highlight API (`::highlight()` in `web/src/index.css`) rather than by injecting a `<mark>`
+wrapper: a `Highlight` is a set of `Range`s held outside the DOM, so it survives the plan
+markdown's own re-renders (on mount, and on every live re-read of the plan file) with nothing to
+reconcile. `locateQuotes` re-finds each quote by whitespace-collapsed string match on every
+re-render (via a `MutationObserver`); a quote the agent has since rewritten simply isn't found,
+and only its highlight is lost — the comment itself still shows in the list and still reaches the
+model. Hovering a highlighted passage is hit-tested geometrically against the `Range`s'
+`getClientRects()` (a `Range` has no box and receives no native hover), and pops up the comment's
+note in a small bubble with the same edit/delete actions the list row has.
+
 ## Dependencies
 
 - Mantine `@mantine/core` `SegmentedControl` (ReactNode label) and `Select` (`renderOption`,
@@ -303,6 +390,12 @@ quoted reply under a `kept planning` badge.
   `recoverOrphanedPermission` machinery — no new resolution channel.
 - [turn-recovery](turn-recovery.md) — auto-continue and card expiry both defer to
   `hasUnresolvedAlwaysAsk`.
+- [turn-interjection](turn-interjection.md) — plan comments' approve path reuses
+  `pushIntoLiveTurn` and `canInterject` rather than building its own delivery mechanism; a second
+  caller alongside "Send now", not a queue-button-only path.
+- CSS Custom Highlight API (`CSS.highlights`, `::highlight()`) — no polyfill; unsupported browsers
+  (pre Chrome 105 / Safari 17.2 / Firefox 140) silently render the pre-feature appearance, guarded
+  by an `'highlights' in CSS` check.
 
 ## Tests
 
@@ -320,7 +413,15 @@ quoted reply under a `kept planning` badge.
   and no `waiting-permission`, while `ExitPlanMode` still parks; `EnterPlanMode` mirrors
   `meta.permissionMode`; `planReplyDecision`
   fall-through conditions, request-id selection (live vs. transcript-scan fallback), and the
-  attachments/no-attachments reason-text branches.
+  attachments/no-attachments reason-text branches; `normalizePlanComments` (empty-note drop,
+  truncation, cap) and `formatPlanComments` (the refine wording still contains
+  `KEEP_PLANNING_MESSAGE` and the marker `planReplyText` parses); approve-with-comments resolves
+  `allow`/`resolvedBy: 'user'` with a matching `'interject'` transcript event; comments on an
+  approval whose turn cannot be steered land in the queue instead of being dropped;
+  refine-with-comments produces a `deny` whose `denyMessage` is server-built from the comments,
+  never the client's; a workflow plan-step gate with comments still resolves
+  `resolvedBy: 'workflow-advance'` with no `'interject'` event, the comments folded into the gate's
+  deny message instead; an empty comment list resolves exactly as before this feature existed.
 - `server/src/sessions.reconcile.test.ts` — an unresolved `ExitPlanMode` card blocks
   auto-continue and survives `continueTurn`'s expiry; an ordinary tool's card still expires.
 - `server/src/autoGuard.allowlist.test.ts` — validator rules (through `assessToolCall`, not just
@@ -418,6 +519,25 @@ quoted reply under a `kept planning` badge.
   viewer: `resolvedActor` (see [session-collaboration](session-collaboration.md)) rides alongside
   `resolvedBy` on the same event, and a guest without `approvePermissions` sees the card
   read-only — "waiting for {owner} to approve" — instead of the action buttons.
+- The card's two actions only relabel (to "Approve with comments (N)" / "Refine with comments
+  (N)") and only send `planComments` when at least one comment is attached; with zero comments the
+  wire message and the button labels are identical to before this feature existed.
+- A plan comment is a `{ quote, note }` pair, never a character offset — the plan markdown
+  re-renders on mount and the card re-reads the plan file from disk on every open, so an offset
+  would drift while a stored excerpt does not.
+- A plan-step gated by a workflow folds its comments into the gate's existing deny message and
+  never interjects — the step's turn is ending so the workflow can advance, and a pushed message
+  would land in a turn with nothing left to steer.
+- Plan comments require the `prompt` capability in addition to `approvePermissions`, and are
+  dropped outright for an actor with `promptNeedsApproval` — comments are a text channel to the
+  model, which is what `prompt` (not `approvePermissions`) governs; the approve/deny decision
+  itself is unaffected either way.
+- A comment's `quote` is never editable from the UI, only its `note` — the quote is both the
+  highlight's anchor and the record of what was actually selected; to comment on different text,
+  select that text instead.
+- A quote that no longer matches the live plan text (the agent has since rewritten that passage)
+  silently drops its highlight; the comment itself is untouched in the list and still reaches the
+  model on Approve/Refine.
 
 ## Architectural rules
 
@@ -499,6 +619,26 @@ quoted reply under a `kept planning` badge.
   (`collectTurns`, `permissionWaitMs`). [turn-interjection](turn-interjection.md) follows the same
   rule from the other direction: its release path is deliberately not routed through `prompt()`
   either, for the same reason.
+- The wording of a commented plan decision lives solely in `formatPlanComments` — the two button
+  labels, the interjected text, and the deny reason all derive from it, so the model-facing wording
+  can never drift between the approve and refine paths.
+- On a deny, the server always rebuilds `denyMessage` from the comments via `formatPlanComments`
+  and discards whatever the client sent in that field — the wording is server-owned, never
+  client-supplied, the same posture `resolvePermission` already took before comments existed.
+- `pushIntoLiveTurn` is the exact `pushTurnSafely(..., { intoLiveTurn: true })` call
+  `interjectQueued` used inline, extracted so the plan-comments approval path is a second caller
+  rather than a duplicate of the `priority: 'next'` reasoning documented in
+  [turn-interjection](turn-interjection.md).
+- Plan-comment drafts follow the existing composer-draft `localStorage` pattern
+  (`web/src/store.ts`) rather than a new persistence mechanism, keyed by session id and
+  `requestId` so a draft never leaks onto a later, unrelated plan card.
+- When `canInterject` is false, comments are staged through the same `meta.queued` shape
+  `userPrompt` builds (not a bespoke queue entry), so `maybeFlush` delivers them as an ordinary
+  next turn with no new delivery path to maintain.
+- The highlight paint uses the CSS Custom Highlight API rather than DOM mutation
+  (`<mark>`-wrapping matched text) specifically because the plan markdown re-renders on mount and
+  on every live re-read of the plan file — a `Highlight`'s `Range`s live outside the DOM and need
+  no cleanup or reconciliation across either re-render.
 
 ## Related decisions
 
