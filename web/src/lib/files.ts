@@ -31,14 +31,23 @@ export async function fetchTree(dir: string): Promise<TreeEntry[]> {
   return (body as TreeResponse).entries;
 }
 
-/** Ranked file-name matches for `query` across every project root, each hit relative to its own root. */
+/**
+ * Ranked file-name matches for `query` across every project root, each hit
+ * relative to its own root. Gitignored files stay out unless `includeIgnored`.
+ */
 export async function searchFiles(
   roots: string[],
   query: string,
   limit: number,
+  includeIgnored = false,
 ): Promise<{ root: string; rel: string }[]> {
   // One path per root — the bridge 403s if any fails to resolve.
-  const { status, body } = await fileRequest('find', { paths: roots, q: query, limit });
+  const { status, body } = await fileRequest('find', {
+    paths: roots,
+    q: query,
+    limit,
+    includeIgnored,
+  });
   if (status !== 200) fail(status, {}, 'Failed to search files');
   return (body as FindResponse).files;
 }

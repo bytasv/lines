@@ -76,6 +76,7 @@ import type { MentionValue } from './lib/mentions';
 const ACTIVE_PROJECT_KEY = 'lines.activeProject';
 const NEW_SESSION_DEFAULTS_KEY = 'lines.newSessionDefaults';
 const SIDEBAR_MODE_KEY = 'lines.sidebarMode';
+const HIDE_IGNORED_KEY = 'lines.hideIgnored';
 const OPEN_FILES_KEY = 'lines.openFiles';
 const COMPACTION_LEVEL_KEY = 'lines.compactionLevel';
 const TURN_SUMMARIES_ENABLED_KEY = 'lines.turnSummariesEnabled';
@@ -111,6 +112,11 @@ export interface OpenFilesState {
 
 function loadSidebarMode(): SidebarMode {
   return localStorage.getItem(SIDEBAR_MODE_KEY) === 'files' ? 'files' : 'sessions';
+}
+
+/** On by default: `.env` and build output are noise until you ask for them. */
+function loadHideIgnored(): boolean {
+  return localStorage.getItem(HIDE_IGNORED_KEY) !== 'false';
 }
 
 function loadCompactionLevel(): CompactionLevel {
@@ -641,6 +647,9 @@ interface UiState {
   guardReviewDismissedAt: number | null;
   /** What the left sidebar shows: session list or project file tree. */
   sidebarMode: SidebarMode;
+  /** Keep gitignored files out of the file tree and the Cmd+P palette. Persisted
+   *  in localStorage, local-only (never synced — it is a per-browser view choice). */
+  hideIgnored: boolean;
   /** Transcript compaction level; persisted in localStorage. */
   compactionLevel: CompactionLevel;
   /** Show server-generated 1-2 sentence turn summaries in Compact view; off shows agent narration instead. */
@@ -715,6 +724,7 @@ interface UiState {
   setTurnSummariesEnabled: (on: boolean) => void;
   setAutoContinueInterrupted: (on: boolean) => void;
   setCompressResponses: (on: boolean) => void;
+  setHideIgnored: (on: boolean) => void;
   openFileTab: (path: string) => void;
   closeFileTab: (path: string) => void;
   setActiveFileTab: (path: string) => void;
@@ -920,6 +930,7 @@ export const useStore = create<UiState>((set, get) => {
   guardReviewOpen: false,
   guardReviewDismissedAt: null,
   sidebarMode: loadSidebarMode(),
+  hideIgnored: loadHideIgnored(),
   compactionLevel: loadCompactionLevel(),
   turnSummariesEnabled: loadTurnSummariesEnabled(),
   autoContinueInterrupted: loadAutoContinueInterrupted(),
@@ -1051,6 +1062,11 @@ export const useStore = create<UiState>((set, get) => {
     localStorage.setItem(SIDEBAR_MODE_KEY, mode);
     set({ sidebarMode: mode });
     pushSettings();
+  },
+
+  setHideIgnored: (on) => {
+    localStorage.setItem(HIDE_IGNORED_KEY, String(on));
+    set({ hideIgnored: on });
   },
 
   setCompactionLevel: (level) => {

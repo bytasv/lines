@@ -71,13 +71,12 @@ test('file: a missing path is 403, not a crash', async () => {
   assert.equal((await call('file', {})).status, 403);
 });
 
-test('tree: lists entries, hiding dotfiles and node_modules', async () => {
+test('tree: lists entries including dotfiles, hiding node_modules', async () => {
   const res = await call('tree', { paths: [root] });
   assert.equal(res.status, 200);
   const names = (res.body as { entries: { name: string }[] }).entries.map((e) => e.name);
-  assert.deepEqual(names, ['sub', 'binary.bin', 'hello.txt']); // dirs first, then alpha
+  assert.deepEqual(names, ['sub', '.hidden', 'binary.bin', 'hello.txt']); // dirs first, then alpha
   assert.ok(!names.includes('node_modules'));
-  assert.ok(!names.includes('.hidden'));
 });
 
 test('tree: 403 outside every root', async () => {

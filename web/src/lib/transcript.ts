@@ -96,6 +96,16 @@ export type TranscriptItem =
       /** ms epoch, for the hover detail on an authored bubble. */
       ts: number;
     }
+  /** A queued prompt released into the running turn ("Send now"). Human-authored
+   *  like `user`, but it opens no turn and is not a rewind anchor. */
+  | {
+      kind: 'interject';
+      key: string;
+      text: string;
+      mentions?: PromptMention[];
+      actor?: Actor;
+      ts: number;
+    }
   | { kind: 'assistant'; key: string; blocks: AssistantBlock[]; isAnswer?: boolean }
   | ToolGroupItem
   | AgentTurnItem
@@ -301,6 +311,9 @@ export function buildTranscript(
         event.kind === 'sdk' &&
         (event.data as { type?: string }).type === 'result' &&
         isFailedResult(event.data as { is_error?: boolean; subtype?: string });
+      // Only 'user' closes an orphan span, never 'interject': the server refuses
+      // to interject while `compacting` (see canInterject), so one cannot appear
+      // inside a span in the first place. Do not "fix" this by adding it here.
       if (event.kind !== 'user' && !failed) continue;
       openCompact = null;
     }
@@ -323,6 +336,31 @@ export function buildTranscript(
           text: data.text,
           source: data.source ?? 'user',
           attachments: data.attachments,
+          mentions: data.mentions,
+          actor: data.actor,
+          ts: event.ts,
+        });
+        break;
+      }
+      case 'interject': {
+        // Written fresh, deliberately not a copy of the 'user' case's four resets.
+        // The group is closed so the row lands between tool cards rather than
+        // inside one — but the sinks stay open (clearing them would strand a live
+        // subagent's remaining output inline instead of under its Task card, and
+        // long subagent-heavy turns are exactly the ones people hurry along),
+        // `main.lastText` stays (it is the next group's labelText), and
+        // `lastPlanWrite` stays (an earlier plan write must still stitch onto a
+        // later ExitPlanMode card).
+        main.openGroup = null;
+        const data = event.data as {
+          text: string;
+          mentions?: PromptMention[];
+          actor?: Actor;
+        };
+        items.push({
+          kind: 'interject',
+          key: `i${event.seq}`,
+          text: data.text,
           mentions: data.mentions,
           actor: data.actor,
           ts: event.ts,
@@ -742,6 +780,15 @@ function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
         ? o
         : next;
     }
+    case 'interject': {
+      const o = old as typeof next;
+      return o.text === next.text &&
+        o.ts === next.ts &&
+        o.mentions === next.mentions &&
+        o.actor === next.actor
+        ? o
+        : next;
+    }
     case 'assistant': {
       const o = old as typeof next;
       if (o.isAnswer !== next.isAnswer || o.blocks.length !== next.blocks.length) return next;
@@ -878,6 +925,9 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
   for (const it of items) {
     const isBoundary =
       it.kind === 'user' ||
+      // Not a turn boundary, but a rendering one: an interjection folded into the
+      // agent-turn card above it would appear to have happened before itself.
+      it.kind === 'interject' ||
       it.kind === 'system-init' ||
       it.kind === 'workflow' ||
       it.kind === 'context-compact' ||

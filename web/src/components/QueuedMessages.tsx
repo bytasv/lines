@@ -10,7 +10,7 @@ import {
   Text,
   Tooltip,
 } from '@mantine/core';
-import { IconPaperclip, IconPencil, IconX } from '@tabler/icons-react';
+import { IconBolt, IconPaperclip, IconPencil, IconX } from '@tabler/icons-react';
 import type {
   Attachment,
   MentionValue,
@@ -313,6 +313,18 @@ export function QueuedMessages({ session }: { session: SessionMeta }) {
         // `interrupt` the X uses — see MESSAGE_AUTHZ.editQueued.
         const canEdit = canPrompt && (who.self || isOwnerView);
         const editor = identify(item.editedBy?.userId, item.editedBy);
+        // Only while a turn is actually running: with nothing to interject into,
+        // a button that silently degraded into an ordinary send would be worse
+        // than no button. The two near-miss cases are disabled rather than
+        // hidden, so the rule is learnable from the tooltip.
+        const showSendNow = canPrompt && session.status === 'running';
+        const sendNowBlocked = item.attachments?.length
+          ? // Refused server-side in v1: the staged files would have to be
+            // re-read into a multi-block content array mid-turn.
+            'Attachments send after this turn.'
+          : needsApproval
+            ? `Only ${ownerName} can send this now.`
+            : null;
         return (
           <Paper
             key={item.id}
@@ -365,7 +377,45 @@ export function QueuedMessages({ session }: { session: SessionMeta }) {
                     </Group>
                   )}
                 </Stack>
+                {/* Order is the danger ranking: Send now is the only one of the
+                    three that reaches the model, so it leads. */}
                 <Group gap={2} wrap="nowrap">
+                  {showSendNow && (
+                    <Tooltip
+                      label={
+                        // Measured latency, not a promise of instant delivery: the
+                        // model picks it up on its next inference, once the step
+                        // that is already running finishes.
+                        sendNowBlocked ??
+                        'Send now — Claude reads it once the current step finishes'
+                      }
+                      withArrow
+                      openDelay={300}
+                    >
+                      {/* A span so the tooltip still fires over a disabled control. */}
+                      <span style={{ display: 'inline-flex' }}>
+                        <ActionIcon
+                          variant="subtle"
+                          color="gray"
+                          size="sm"
+                          aria-label="Send now"
+                          disabled={sendNowBlocked !== null}
+                          // No optimistic removal, matching the X and the editor:
+                          // the row goes when `sessionUpsert` lands, and a refusal
+                          // leaves it exactly where it was.
+                          onClick={() =>
+                            send({
+                              type: 'interjectQueued',
+                              sessionId: session.id,
+                              queuedId: item.id,
+                            })
+                          }
+                        >
+                          <IconBolt size={14} />
+                        </ActionIcon>
+                      </span>
+                    </Tooltip>
+                  )}
                   {canEdit && (
                     <Tooltip label="Edit this prompt" withArrow openDelay={300}>
                       <ActionIcon

@@ -14,6 +14,7 @@ import type {
 import { createStore } from './store.ts';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
+import type { WorkerClient } from './workerClient.ts';
 
 /**
  * The server-side prompt queue: editing an item in place, and the file cleanup
@@ -45,12 +46,23 @@ const meta = (over: Partial<SessionMeta> = {}): SessionMeta =>
   }) as SessionMeta;
 
 /** A manager over a throwaway store, seeded with one session. */
-function harness(over: Partial<SessionMeta> = {}) {
+function harness(over: Partial<SessionMeta> = {}, workerOpts: { linkOpen?: boolean } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-queue-'));
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta(over)]));
   const store = createStore(root);
   const broadcasts: ServerMessage[] = [];
   const sessions = new SessionManager(store, new GuardAllowlist(store), (m) => broadcasts.push(m));
+  const pushes: Record<string, unknown>[] = [];
+  const closes: string[] = [];
+  sessions.attachWorker({
+    push: (_sid: string, message: unknown) => pushes.push(message as Record<string, unknown>),
+    close: (sid: string) => closes.push(sid),
+    interrupt: () => {},
+    // The one guard against a push being buffered into a *future* query.
+    get linkOpen() {
+      return workerOpts.linkOpen ?? true;
+    },
+  } as unknown as WorkerClient);
   /** Write a real attachment file and return the ref a queued item would hold. */
   const stage = (name: string): Attachment => {
     const file = store.saveAttachment(SID, name, Buffer.from(name).toString('base64'));
@@ -59,7 +71,19 @@ function harness(over: Partial<SessionMeta> = {}) {
   const onDisk = (att: Attachment) =>
     fs.existsSync(`${store.attachmentsRoot}/${SID}/${att.url.split('/').pop()}`);
   const queue = () => sessions.get(SID)!.queued ?? [];
-  return { sessions, store, broadcasts, stage, onDisk, queue };
+  const events = () => store.loadTranscript(SID);
+  /**
+   * Start a real turn, so the session has a query this bridge knows it spawned
+   * (`queryTokens`) — canInterject refuses without one. Everything captured
+   * during setup is dropped, so assertions see only what the interjection did.
+   */
+  const live = () => {
+    sessions.prompt(SID, 'go');
+    pushes.length = 0;
+    closes.length = 0;
+    return events().length;
+  };
+  return { sessions, store, broadcasts, stage, onDisk, queue, events, pushes, closes, live };
 }
 
 /** Put items straight on the queue — the in-memory meta is the same object get() returns. */
@@ -360,5 +384,181 @@ describe('cancelQueued', () => {
     h.sessions.cancelQueued(SID, 'q1');
     assert.equal(h.queue().length, 0);
     assert.equal(h.sessions.get(SID)!.queuePaused, undefined);
+  });
+});
+
+/**
+ * "Send now": a queued prompt delivered into the turn that is already running.
+ *
+ * Two failure modes drive most of these cases. A refusal must leave the item
+ * queued, so the worst outcome is always the pre-existing behaviour (it flushes
+ * when the turn settles). And the push must never rotate the access token, since
+ * pushWithToken closes the query on a mismatch — which would silently *end* the
+ * turn the interjection was joining.
+ */
+describe('interjectQueued', () => {
+  const send = (h: ReturnType<typeof harness>, id = 'q1', needsApproval = false) =>
+    h.sessions.interjectQueued(SID, id, { actor: OWNER, needsApproval });
+
+  test('delivers into the live turn without opening a new one', () => {
+    const h = harness();
+    const before = h.live();
+    seed(h.sessions, [item({ text: 'also check the tests' })]);
+
+    assert.deepEqual(send(h), { ok: true });
+    assert.equal(h.queue().length, 0);
+
+    assert.equal(h.pushes.length, 1);
+    assert.deepEqual(h.pushes[0], {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: 'also check the tests' }] },
+      parent_tool_use_id: null,
+      // Measured, not chosen: 'now' makes the CLI end the running turn and start
+      // a new one (two results). See the comment in interjectQueued.
+      priority: 'next',
+    });
+
+    const added = h.events().slice(before);
+    assert.deepEqual(
+      added.map((e) => e.kind),
+      ['interject'],
+    );
+    assert.equal((added[0].data as { text: string }).text, 'also check the tests');
+  });
+
+  test('runs as its author, not as whoever pressed the button', () => {
+    const h = harness();
+    const before = h.live();
+    seed(h.sessions, [item({ actor: BOB, mentions: [] })]);
+
+    // The owner releases Bob's prompt; the transcript must still credit Bob.
+    assert.deepEqual(send(h), { ok: true });
+    const added = h.events().slice(before);
+    assert.deepEqual((added[0].data as { actor?: Actor }).actor, BOB);
+  });
+
+  test('leaves every turn field alone', () => {
+    const h = harness();
+    h.live();
+    seed(h.sessions, [item()]);
+    const before = structuredClone(h.sessions.get(SID)!);
+
+    assert.deepEqual(send(h), { ok: true });
+
+    const after = h.sessions.get(SID)!;
+    for (const key of [
+      'turnSource',
+      'turnStartedAt',
+      'turnActor',
+      'status',
+      'interruptedAt',
+      'workflow',
+    ] as const) {
+      assert.deepEqual(after[key], before[key], `interjection moved ${key}`);
+    }
+  });
+
+  test('never recycles the query — a rotated token would kill the live turn', () => {
+    const h = harness();
+    h.live();
+    seed(h.sessions, [item()]);
+    assert.deepEqual(send(h), { ok: true });
+    assert.deepEqual(h.closes, []);
+  });
+
+  test('the rest of the queue keeps waiting for the turn', () => {
+    const h = harness();
+    h.live();
+    seed(h.sessions, [item({ id: 'q1' }), item({ id: 'q2', text: 'later' })]);
+
+    assert.deepEqual(send(h, 'q2'), { ok: true });
+    assert.deepEqual(
+      h.queue().map((q) => q.id),
+      ['q1'],
+    );
+    // One push, not two: no maybeFlush side effect.
+    assert.equal(h.pushes.length, 1);
+  });
+
+  test('releasing one item is not a release of the queue', () => {
+    const h = harness({ queuePaused: true });
+    h.live();
+    seed(h.sessions, [item({ id: 'q1' }), item({ id: 'q2' })]);
+    assert.deepEqual(send(h, 'q2'), { ok: true });
+    assert.equal(h.sessions.get(SID)!.queuePaused, true);
+  });
+
+  test('emptying the queue clears the pause', () => {
+    const h = harness({ queuePaused: true });
+    h.live();
+    seed(h.sessions, [item()]);
+    assert.deepEqual(send(h), { ok: true });
+    assert.equal(h.sessions.get(SID)!.queuePaused, undefined);
+  });
+
+  for (const status of ['idle', 'done', 'waiting-approval'] as const) {
+    test(`a ${status} session is 'settled' and the item stays queued`, () => {
+      const h = harness();
+      const before = h.live();
+      h.sessions.get(SID)!.status = status;
+      seed(h.sessions, [item()]);
+
+      const res = send(h);
+      assert.equal(res.ok, false);
+      assert.equal(res.ok === false && res.code, 'settled');
+      assert.equal(h.queue().length, 1);
+      assert.equal(h.pushes.length, 0);
+      assert.equal(h.events().length, before);
+    });
+  }
+
+  test('a guest whose prompts need approval cannot release their own', () => {
+    const h = harness();
+    const before = h.live();
+    seed(h.sessions, [item({ actor: ALICE })]);
+
+    const res = h.sessions.interjectQueued(SID, 'q1', { actor: ALICE, needsApproval: true });
+    assert.equal(res.ok, false);
+    assert.equal(res.ok === false && res.code, 'refused');
+    assert.equal(h.queue().length, 1);
+    assert.equal(h.pushes.length, 0);
+    // Nothing emitted either: the refusal is the first line, before any write.
+    assert.equal(h.events().length, before);
+  });
+
+  test('an item with attachments is refused and keeps its staged file', () => {
+    const h = harness();
+    h.live();
+    const att = h.stage('notes.txt');
+    seed(h.sessions, [item({ attachments: [att] })]);
+
+    const res = send(h);
+    assert.equal(res.ok, false);
+    assert.equal(res.ok === false && res.code, 'refused');
+    assert.equal(h.queue().length, 1);
+    assert.equal(h.onDisk(att), true);
+    assert.equal(h.pushes.length, 0);
+  });
+
+  test('an unknown id leaves the queue untouched', () => {
+    const h = harness();
+    h.live();
+    seed(h.sessions, [item()]);
+    const res = send(h, 'nope');
+    assert.equal(res.ok, false);
+    assert.equal(res.ok === false && res.code, 'refused');
+    assert.equal(h.queue().length, 1);
+    assert.equal(h.pushes.length, 0);
+  });
+
+  test('a closed worker link refuses rather than buffering into a future query', () => {
+    const h = harness({}, { linkOpen: false });
+    h.live();
+    seed(h.sessions, [item()]);
+    const res = send(h);
+    assert.equal(res.ok, false);
+    assert.equal(res.ok === false && res.code, 'settled');
+    assert.equal(h.queue().length, 1);
+    assert.equal(h.pushes.length, 0);
   });
 });

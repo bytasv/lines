@@ -888,6 +888,25 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
       }
       break;
     }
+    case 'interjectQueued': {
+      const res = sessions.interjectQueued(msg.sessionId, msg.queuedId, {
+        actor,
+        needsApproval: access.caps.promptNeedsApproval,
+      });
+      // 'settled' means the turn ended between the click and this arriving. The
+      // item is still queued and maybeFlush is about to send it — not an error
+      // worth putting on screen.
+      if (!res.ok && res.code === 'refused') {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            sessionId: msg.sessionId,
+            message: res.reason,
+          } satisfies ServerMessage),
+        );
+      }
+      break;
+    }
     case 'ackSession':
       sessions.ackSession(msg.sessionId);
       break;

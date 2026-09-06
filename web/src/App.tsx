@@ -16,6 +16,7 @@ import type { WorkflowEditorView } from './components/workflow/WorkflowEditor';
 import { MonacoPreviewModal } from './components/MonacoPreviewModal';
 import { LoginModal } from './components/LoginModal';
 import { GuardAllowlistReviewModal } from './components/GuardAllowlistReviewModal';
+import { FilePalette } from './components/FilePalette';
 import { FilesView } from './components/FilesView';
 import { DocsPage } from './components/docs/DocsPage';
 import { send } from './ws';
@@ -40,7 +41,9 @@ export function App() {
       </Routes>
       {/* Global overlays live outside the routes: the documentation reader opens
           source previews and the sign-in modal too, and they are portalled, so
-          AppShell parentage never mattered. */}
+          AppShell parentage never mattered. The Cmd+P palette is here for the
+          same reason — the shortcut works wherever you are. */}
+      <FilePalette />
       <MonacoPreviewModal />
       <LoginModal />
       <GuardAllowlistReviewModal />

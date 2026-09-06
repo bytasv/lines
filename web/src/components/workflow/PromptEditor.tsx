@@ -71,7 +71,7 @@ export function PromptEditor({
           <Tooltip
             label={
               (freshStart ? '' : 'Turn on “Fresh start” to use this. ') +
-              "Replaced with the previous step's final message (e.g. its plan). A fresh-start step whose template uses {previous}, {diff} or any {outputs.…} is assumed to carry its own context — the automatic hand-off block is not prepended."
+              "Replaced with the previous step's final message (e.g. its plan). A fresh-start step whose template uses {previous}, {diff}, {changed} or any {outputs.…} is assumed to carry its own context — the automatic hand-off block is not prepended."
             }
             withArrow
             multiline
@@ -88,25 +88,38 @@ export function PromptEditor({
             </Button>
           </Tooltip>
           <Tooltip
-            label={
-              (freshStart ? '' : 'Turn on “Fresh start” to use this. ') +
-              'Replaced with the working-tree git diff (the changes so far). Empty when nothing has changed yet.'
-            }
+            label="Replaced with the working-tree git diff since this workflow run started. Resolves whether or not “Fresh start” is on. Truncated past a size cap — a step that must never miss a changed file should use {changed} instead."
             withArrow
             multiline
-            w={240}
+            w={260}
           >
             <Button
               size="compact-xs"
               variant="light"
-              color={freshStart ? 'grape' : 'gray'}
+              color="gray"
               onClick={() => insert('{diff}')}
-              styles={{ label: { fontFamily: 'var(--mantine-font-family-monospace)', opacity: freshStart ? 1 : 0.55 } }}
+              styles={{ label: { fontFamily: 'var(--mantine-font-family-monospace)' } }}
             >
               {'{diff}'}
             </Button>
           </Tooltip>
-          {/* Not dimmed with freshStart off, unlike {previous}/{diff}: the workspace
+          <Tooltip
+            label="Replaced with every file changed since this workflow run started, one repo-relative path per line with its git status (A/M/D) — never truncated, so a step staging or reviewing files can use it as the authoritative list. Resolves whether or not “Fresh start” is on."
+            withArrow
+            multiline
+            w={260}
+          >
+            <Button
+              size="compact-xs"
+              variant="light"
+              color="gray"
+              onClick={() => insert('{changed}')}
+              styles={{ label: { fontFamily: 'var(--mantine-font-family-monospace)' } }}
+            >
+              {'{changed}'}
+            </Button>
+          </Tooltip>
+          {/* Not dimmed with freshStart off, unlike {previous}: the workspace
               shape is just as useful to a step that continues the same session. */}
           <Tooltip
             label="Replaced with the workspace shape: every folder this project spans, each with its repo root and branch (or “not a git repository”). Use it to scope commands per repo, e.g. git -C <repo root>."
@@ -125,7 +138,7 @@ export function PromptEditor({
             </Button>
           </Tooltip>
           <Tooltip
-            label="Replaced with the named output of an earlier step. Give a step an “Output name”, then reference it here — works across the whole workflow this step runs in, not just the previous step. A fresh-start step whose template uses {previous}, {diff} or any {outputs.…} is assumed to carry its own context — the automatic hand-off block is not prepended."
+            label="Replaced with the named output of an earlier step. Give a step an “Output name”, then reference it here — works across the whole workflow this step runs in, not just the previous step. A fresh-start step whose template uses {previous}, {diff}, {changed} or any {outputs.…} is assumed to carry its own context — the automatic hand-off block is not prepended."
             withArrow
             multiline
             w={260}

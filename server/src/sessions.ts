@@ -14,6 +14,7 @@ import type {
   FileChange,
   FilesChangedData,
   FileSnapshotData,
+  InterjectData,
   MentionValue,
   PermissionMode,
   PermissionRequestData,
@@ -1375,8 +1376,28 @@ export class SessionManager {
    * on the stale token.
    *
    * Callers fire-and-forget through pushTurnSafely, never awaiting.
+   *
+   * `intoLiveTurn` (interjectQueued) short-circuits all of that: the message is
+   * joining a query that is already running, so it reuses the token that query
+   * was spawned with instead of resolving a fresh one. Going the normal way,
+   * pushWithToken would see a rotated token and `closeQuery` — killing the very
+   * turn the interjection is joining.
    */
-  private async pushTurn(meta: SessionMeta, message: Record<string, unknown>) {
+  private async pushTurn(
+    meta: SessionMeta,
+    message: Record<string, unknown>,
+    opts: { intoLiveTurn?: boolean } = {},
+  ) {
+    if (opts.intoLiveTurn) {
+      this.worker.push(
+        meta.id,
+        message,
+        this.buildQueryOptions(meta, this.queryTokens.get(meta.id) ?? null),
+        LINES_TOOL_MANIFEST,
+      );
+      return;
+    }
+
     // No AuthManager wired (tests / embedding): keep the pre-app-login
     // behaviour. Returns before any await, so that path stays synchronous.
     if (!this.auth) {
@@ -1411,9 +1432,17 @@ export class SessionManager {
 
   /** pushTurn is fire-and-forget, so a throw past its own handling must not
    *  become an unhandled rejection. */
-  private pushTurnSafely(meta: SessionMeta, message: Record<string, unknown>) {
-    void this.pushTurn(meta, message).catch((err) => {
+  private pushTurnSafely(
+    meta: SessionMeta,
+    message: Record<string, unknown>,
+    opts: { intoLiveTurn?: boolean } = {},
+  ) {
+    void this.pushTurn(meta, message, opts).catch((err) => {
       console.error(`[session ${meta.id}] push failed:`, err);
+      // An interjection has no turn of its own to fail: the turn it was joining is
+      // still healthy, and synthesizing an error `result` over it would show a
+      // Retry button on a session that is mid-run.
+      if (opts.intoLiveTurn) return;
       // The turn never reached the worker, so no `result` and no `ended` is coming:
       // without a synthetic failure the session sits at 'running' forever.
       this.failTurn(meta.id, `Failed to start the turn: ${err instanceof Error ? err.message : String(err)}`);
@@ -1675,6 +1704,124 @@ export class SessionManager {
     }
     if (meta.queued.length === 0) meta.queuePaused = undefined;
     this.upsert(meta);
+  }
+
+  /**
+   * May a queued prompt be delivered into the turn that is running right now?
+   *
+   * Narrower than either existing predicate on purpose. Not `isSessionActive`,
+   * which folds in `waiting-approval` (a parked step, no live turn). Not
+   * `isSessionInterruptible`, which folds in `waiting-permission` (the CLI is
+   * parked inside canUseTool and may not be draining stdin at all — excluded in
+   * v1, see the feature doc's arm D).
+   */
+  private canInterject(sessionId: string): boolean {
+    const meta = this.sessions.get(sessionId);
+    if (!meta || meta.status !== 'running') return false;
+    // A compaction runs as a plain 'running' turn, but withoutCompactSpans drops
+    // everything until the next 'user' event — an interjection would reach the
+    // model and be invisible to collectTurns, lastAssistantText and
+    // consolidateStepOutput. Silent, so it is refused rather than mitigated.
+    if (this.compacting.has(sessionId)) return false;
+    if (this.interrupting.has(sessionId)) return false; // a Stop is in flight
+    if (this.rewinding.has(sessionId)) return false; // the transcript is moving under us
+    if (meta.workflow?.advancing) return false; // mid-consolidateStepOutput; the turn is over
+    // Only interject into a query this bridge knows it spawned.
+    if (!this.queryTokens.has(sessionId)) return false;
+    // `linkOpen`, not `status.connected`: WorkerClient buffers a send made while
+    // the socket is down and replays it on the next `hello`, where ensureSession
+    // builds a *fresh* query — the interjection would open an unattributed turn
+    // with no 'user' event, while its queue row is already gone.
+    return this.worker.linkOpen;
+  }
+
+  /**
+   * "Send now": lift a queued prompt out of the queue and deliver it into the
+   * running turn instead of waiting for the turn to settle.
+   *
+   * Synchronous from the status check through to the push — nothing is awaited in
+   * between, so the turn cannot settle underneath a half-applied release.
+   *
+   * A lost race is `code: 'settled'`, not an error: the item is left queued and
+   * maybeFlush is about to send it the ordinary way, which is exactly the product
+   * behaviour that existed before this button. Only 'refused' is worth a message.
+   *
+   * What it deliberately does *not* touch (compare prompt()): turnSource,
+   * turnStartedAt, turnActor, openTurnWindow (reopening resets the turn baselines,
+   * so recordFilesChanged would lose the turn's earlier edits), maybeAutoName,
+   * interruptedAt, the in-flight-interrupt flag, the workflow force-advance flag,
+   * setStatus, archived/completed reactivation, and the 'user' emitEvent. It also
+   * never calls maybeFlush: the rest of the queue keeps waiting for the turn.
+   */
+  interjectQueued(
+    sessionId: string,
+    queuedId: string,
+    by: { actor?: Actor; needsApproval: boolean },
+  ): { ok: true } | { ok: false; code: 'refused' | 'settled'; reason: string } {
+    // First line, before anything is removed, emitted or pushed. This is the
+    // owner gate MESSAGE_AUTHZ cannot express: a guest on the Can prompt preset
+    // must not release their own held prompt onto the owner's machine.
+    if (by.needsApproval) {
+      return { ok: false, code: 'refused', reason: 'Your prompts need the owner to send them.' };
+    }
+
+    const meta = this.sessions.get(sessionId);
+    const item = meta?.queued?.find((q) => q.id === queuedId);
+    if (!meta || !item) {
+      return { ok: false, code: 'refused', reason: 'That queued prompt is no longer in the queue.' };
+    }
+    // Refused in v1: the staged files would have to be re-read into a multi-block
+    // content array mid-turn, and their only cleanup path is cancelQueued's rmSync.
+    if (item.attachments?.length) {
+      return { ok: false, code: 'refused', reason: 'Prompts with attachments send after this turn.' };
+    }
+    if (!this.canInterject(sessionId)) {
+      return { ok: false, code: 'settled', reason: 'The turn is no longer running; it stays queued.' };
+    }
+
+    meta.queued = meta.queued!.filter((q) => q.id !== queuedId);
+    // Same rule as cancelQueued: an empty queue has nothing left to hold back.
+    // Otherwise `queuePaused` is left alone — mirroring editQueued, releasing one
+    // item is not a release of the queue.
+    if (meta.queued.length === 0) meta.queuePaused = undefined;
+    // item.actor, not whoever pressed the button: the same attribution rule
+    // maybeFlush follows when the owner releases a guest's prompt.
+    this.emitEvent(sessionId, 'interject', {
+      text: item.text,
+      ...(item.mentions?.length ? { mentions: item.mentions } : {}),
+      ...(item.actor ? { actor: item.actor } : {}),
+    } satisfies InterjectData);
+    this.upsert(meta);
+
+    this.pushTurnSafely(
+      meta,
+      {
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text: item.text }] },
+        parent_tool_use_id: null,
+        // The SDK's streaming-input steering knob, undocumented outside sdk.d.ts.
+        // Measured against CLI 2.1.260, 3 runs per arm (server/scripts/spike-interject.ts):
+        //
+        //   absent   1 result, model reads it inside the turn
+        //   'next'   1 result, model reads it inside the turn
+        //   'now'    2 results — the CLI ends the running turn at the next safe
+        //            point and starts a fresh one for this message
+        //
+        // So NOT 'now', which is the opposite of what the button promises: it
+        // synthesizes an `error_during_execution` over a healthy turn (the CLI's
+        // own `[ede_diagnostic] result_type=user` — a turn whose last message is
+        // a bare user text is not a legal turn ending) and parks a workflow step
+        // as failed. 'next' rather than omitting the field because a CLI that
+        // does not know it drops it and degrades to the identical default —
+        // which is why this needs no MIN_INTERJECT_VERSION floor.
+        //
+        // Rides inside the opaque `push.message`, so worker.ts and
+        // PROTOCOL_VERSION stay untouched.
+        priority: 'next',
+      },
+      { intoLiveTurn: true },
+    );
+    return { ok: true };
   }
 
   /**

@@ -162,6 +162,17 @@ export class WorkerClient {
     return { connected: true };
   }
 
+  /**
+   * Is the socket usable *right now*? Deliberately not `status.connected`, which
+   * stays optimistic for WORKER_LOST_MS after a real disconnect — fine for a
+   * badge, wrong for the one caller that must not have its message buffered:
+   * a push replayed on the next `hello` lands in a *fresh* query (see
+   * SessionManager.canInterject).
+   */
+  get linkOpen(): boolean {
+    return this.ready && this.ws?.readyState === WebSocket.OPEN;
+  }
+
   /** Fires `onStatusChange` only when the derived status actually moved. */
   private publishStatus() {
     const next = this.status;

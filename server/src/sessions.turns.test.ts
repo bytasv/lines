@@ -99,6 +99,45 @@ test('findStepStart re-entering a step uses its latest pass', () => {
   );
 });
 
+/**
+ * An interjection is a separate event kind precisely so every scan keyed on
+ * `kind === 'user'` stays correct without being edited. These pin that down: one
+ * turn, not two, so consolidateStepOutput's `turns.length <= 1` short-circuit
+ * still fires and no consolidation query runs.
+ */
+const interject = (text: string) => ev('interject', { text });
+
+test('an interjection does not split the turn it was delivered into', () => {
+  const events = [user('go'), assistant(text('a')), interject('also the tests'), assistant(text('b'))];
+  const turns = collectTurns(events, 0);
+  assert.equal(turns.length, 1);
+  assert.equal(turns.at(-1)?.output, 'b');
+});
+
+test('a step slice containing an interjection is still a single turn', () => {
+  const events = [
+    started(1),
+    user('one'),
+    assistant(text('a')),
+    interject('and this'),
+    assistant(text('b')),
+  ];
+  assert.equal(collectTurns(events, findStepStart(events, 1)).length, 1);
+});
+
+test('scanTurnActivity is unchanged by an interjection', () => {
+  const withOut = [user('go'), assistant(idTool('t1', 'Bash', { command: 'ls' }))];
+  const withIn = [
+    user('go'),
+    interject('hurry'),
+    assistant(idTool('t2', 'Bash', { command: 'ls' })),
+  ];
+  assert.deepEqual(
+    scanTurnActivity(withIn).toolCalls.map((t) => t.name),
+    scanTurnActivity(withOut).toolCalls.map((t) => t.name),
+  );
+});
+
 test('unresolvedPermissionIds returns requests with no recorded resolution', () => {
   const events = [
     askPermission('a'),

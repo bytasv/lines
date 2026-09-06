@@ -40,6 +40,9 @@ export interface FileRequestParams {
   /** find only. */
   q?: string;
   limit?: number;
+  /** find: also match gitignored files (`.env`, build output). Defaults to false —
+   *  the `@mention` menu never asks for them, only the file palette's toggle does. */
+  includeIgnored?: boolean;
   /** attachment: path relative to the user's attachments root.
    *  sessionDiffFile: path relative to `paths[0]`. */
   rel?: string;
@@ -747,6 +750,10 @@ export interface TranscriptEvent {
   /**
    * kind:
    * - 'user'      : user prompt text
+   * - 'interject' : a queued prompt released into the *running* turn ("Send now").
+   *                 Deliberately its own kind and not a flag on 'user': every turn
+   *                 scan treats a 'user' event as "a turn starts here", and an
+   *                 interjection starts nothing.
    * - 'sdk'       : raw SDK message (assistant / system / result / stream_event ...),
    *                 carrying one bridge-added field: `stopped` on a result the user
    *                 stopped (see isStoppedResult). Nothing else here is ours.
@@ -759,6 +766,7 @@ export interface TranscriptEvent {
    */
   kind:
     | 'user'
+    | 'interject'
     | 'sdk'
     | 'file-snapshot'
     | 'permission'
@@ -767,6 +775,21 @@ export interface TranscriptEvent {
     | 'context-compact'
     | 'files-changed';
   data: unknown;
+}
+
+/**
+ * A queued prompt delivered into the turn that was already running, rather than
+ * waiting for it to settle.
+ *
+ * No `source` field, unlike a 'user' event: an interjection is always
+ * human-authored. Workflows and recovery re-prompt, they never interject.
+ */
+export interface InterjectData {
+  text: string;
+  /** Display-only @mention badges; the expansion is already baked into `text`. */
+  mentions?: PromptMention[];
+  /** The item's author, not whoever pressed Send now (see maybeFlush's rule). */
+  actor?: Actor;
 }
 
 export interface TurnSummaryData {
@@ -899,6 +922,10 @@ export interface FileContentResponse {
 export interface TreeEntry {
   name: string;
   type: 'file' | 'dir';
+  /** Gitignored, so the tree can dim it or hide it. Omitted when it isn't — the
+   *  listing always carries the mark and the client decides what to do with it,
+   *  which is what makes the "Hide ignored" toggle instant instead of a refetch. */
+  ignored?: boolean;
 }
 
 /** Response body of the bridge's GET /tree endpoint (project file tree). */
@@ -1367,6 +1394,12 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // guest fixing their own pending prompt, would be denied. Who may edit *which*
   // item (author, or the owner) is a second check in SessionManager.editQueued.
   editQueued: { needs: 'session', cap: 'prompt' },
+  // `prompt` for the same reason editQueued is: this *delivers* a prompt, so it
+  // is the authority to write one, not the authority to interrupt. What this
+  // table cannot express is "prompt but **not** `promptNeedsApproval`" — a guest
+  // whose prompts are held for review must not release their own by pressing
+  // Send now. That refusal is the first line of SessionManager.interjectQueued.
+  interjectQueued: { needs: 'session', cap: 'prompt' },
   // Destructive to the session's context, so it sits with the other turn-level
   // controls rather than with reads.
   compactContext: { needs: 'session', cap: 'interrupt' },
@@ -1546,6 +1579,10 @@ export type ClientMessage =
       /** `Attachment.url`s to drop — a delta, so an omitted field cannot wipe the set. */
       removeAttachments?: string[];
     }
+  /** "Send now": lift a queued item out of the queue and deliver it into the
+   *  running turn. Names the item, never resends its text — same shape as
+   *  cancelQueued. */
+  | { type: 'interjectQueued'; sessionId: string; queuedId: string }
   | { type: 'ackSession'; sessionId: string }
   | { type: 'archiveSession'; sessionId: string }
   | { type: 'unarchiveSession'; sessionId: string }

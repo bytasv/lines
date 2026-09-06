@@ -58,7 +58,7 @@ const STEP: JsonSchemaNode = {
     promptTemplate: {
       type: 'string',
       description:
-        'The prompt sent to the agent. Tokens: {task} (the run description), {feedback}, {previous} (previous step output), {diff} (working-tree diff), {roots} (the workspace folders, their git repos and branches), {outputs.<name>} (a named output published by an EARLIER step).',
+        'The prompt sent to the agent. Tokens: {task} (the run description), {feedback}, {previous} (previous step output), {diff} (working-tree diff since this run started, truncated past a size cap), {changed} (every file changed since this run started, one path per line with its git status — never truncated, the authoritative list for a step that stages or reviews files), {roots} (the workspace folders, their git repos and branches), {outputs.<name>} (a named output published by an EARLIER step).',
     },
     model: { type: 'string', description: `Model id, e.g. ${DEFAULT_MODEL}. Defaults to ${DEFAULT_MODEL}.` },
     permissionMode: {

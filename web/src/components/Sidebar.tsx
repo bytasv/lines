@@ -605,6 +605,9 @@ export function Sidebar({
   const sidebarMode = useStore((s) => s.sidebarMode);
   const setSidebarMode = useStore((s) => s.setSidebarMode);
   const openFileTab = useStore((s) => s.openFileTab);
+  // The same flag the Cmd+P palette reads, so one toggle governs both views.
+  const hideIgnored = useStore((s) => s.hideIgnored);
+  const setHideIgnored = useStore((s) => s.setHideIgnored);
   const activeFile = useStore((s) =>
     activeProject ? s.openFiles[activeProject]?.active ?? null : null,
   );
@@ -615,6 +618,18 @@ export function Sidebar({
         <Text size="xs" fw={600} c="dimmed" tt="uppercase">
           {sidebarMode === 'files' ? 'Files' : 'Sessions'}
         </Text>
+        {sidebarMode === 'files' && (
+          <Switch
+            size="xs"
+            checked={hideIgnored}
+            onChange={(e) => setHideIgnored(e.currentTarget.checked)}
+            label={
+              <Text size="xs" c="dimmed">
+                Hide ignored
+              </Text>
+            }
+          />
+        )}
         {sidebarMode === 'sessions' && (
           <Group gap={2}>
             <Tooltip label="Recipes">

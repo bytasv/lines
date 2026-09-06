@@ -11,6 +11,7 @@
  * user-facing messages, and they name these outcomes as well as anything else
  * would.
  */
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { FileRequestKind, FileRequestParams, SocketAccess } from '@lines/shared';
@@ -28,7 +29,11 @@ export interface FileRouteResult {
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const FIND_MAX_LIMIT = 25;
 
-/** Directory entries hidden from the file tree. */
+/**
+ * Directory entries hidden from the file tree. Dot-entries are not on the list:
+ * an editor shows `.github/`, `.claude/`, `.env.example`, and a project whose
+ * config lives in dot-directories is otherwise unbrowsable.
+ */
 const TREE_IGNORE = new Set(['node_modules', '.git']);
 
 const MIME: Record<string, string> = {
@@ -82,12 +87,38 @@ function readTree(ctx: UserContext, params: FileRequestParams, access: SocketAcc
   } catch {
     return { status: 404 };
   }
-  const entries = dirents
-    .filter((d) => !d.name.startsWith('.') && !TREE_IGNORE.has(d.name))
-    .filter((d) => d.isDirectory() || d.isFile())
-    .map((d) => ({ name: d.name, type: d.isDirectory() ? ('dir' as const) : ('file' as const) }))
+  const kept = dirents.filter((d) => !TREE_IGNORE.has(d.name) && (d.isDirectory() || d.isFile()));
+  const ignored = ignoredNames(abs, kept);
+  const entries = kept
+    .map((d) => ({
+      name: d.name,
+      type: d.isDirectory() ? ('dir' as const) : ('file' as const),
+      ...(ignored.has(d.name) && { ignored: true }),
+    }))
     .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1));
   return { status: 200, body: { entries } };
+}
+
+/**
+ * Which of `dirents` git ignores, in one `check-ignore` per directory rather
+ * than one per entry. An empty set outside a repo (or when git is unavailable),
+ * which reads as "nothing is ignored" — the same thing the search side does.
+ */
+function ignoredNames(dir: string, dirents: fs.Dirent[]): Set<string> {
+  if (!dirents.length) return new Set();
+  try {
+    const out = execFileSync('git', ['-C', dir, 'check-ignore', '--stdin'], {
+      input: dirents.map((d) => d.name).join('\n'),
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 5_000,
+    });
+    return new Set(out.split('\n').filter(Boolean));
+  } catch {
+    // Exit code 1 means "none of them are ignored", which throws here like any
+    // other failure; both answers are the same empty set.
+    return new Set();
+  }
 }
 
 /**
@@ -119,7 +150,14 @@ function findFiles(ctx: UserContext, params: FileRequestParams, access: SocketAc
   const limit = Math.min(params.limit || FIND_MAX_LIMIT, FIND_MAX_LIMIT);
   return {
     status: 200,
-    body: { files: searchFilesAcross(roots as string[], params.q ?? '', limit) },
+    body: {
+      files: searchFilesAcross(
+        roots as string[],
+        params.q ?? '',
+        limit,
+        params.includeIgnored === true,
+      ),
+    },
   };
 }
 

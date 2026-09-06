@@ -307,28 +307,51 @@ test('a boundary-less success does not read as a failure', () => {
 // outlives the CLI conversation that produced it.
 // ---------------------------------------------------------------------------
 
-/** A SessionManager over a throwaway store, with a worker that swallows pushes. */
-function harness(over: Partial<SessionMeta> = {}) {
+/** A SessionManager over a throwaway store, with a worker that records pushes. */
+function harness(over: Partial<SessionMeta> = {}, pushes: unknown[] = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-compact-'));
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta(over)]));
   const store = createStore(root);
   const sessions = new SessionManager(store, new GuardAllowlist(store), () => {});
   sessions.attachWorker({
-    push: () => {},
+    push: (_sid: string, message: unknown) => pushes.push(message),
     close: () => {},
     interrupt: () => {},
+    // Only read by canInterject; the compaction path never looks at it.
+    get linkOpen() {
+      return true;
+    },
   } as unknown as WorkerClient);
   return sessions;
 }
 
 /** Start a manual compaction, then feed the turn's messages back in. */
-function compacting(over: Partial<SessionMeta> = {}) {
-  const sessions = harness(over);
+function compacting(over: Partial<SessionMeta> = {}, pushes: unknown[] = []) {
+  const sessions = harness(over, pushes);
   assert.deepEqual(sessions.compactContext('s'), { ok: true });
   // Whatever it covers, the compaction itself runs as an ordinary live turn.
   assert.equal(sessions.get('s')!.status, 'running');
   return sessions;
 }
+
+/**
+ * A compaction looks like an ordinary `running` turn, so "Send now" has to be
+ * refused explicitly. Without this, the interjection would reach the model and
+ * then be dropped by withoutCompactSpans — invisible to collectTurns,
+ * lastAssistantText and consolidateStepOutput. Silent, which is why it is tested.
+ */
+test('a queued prompt cannot be interjected into a compaction', () => {
+  const pushes: unknown[] = [];
+  const sessions = compacting({}, pushes);
+  sessions.get('s')!.queued = [{ id: 'q1', ts: 1, text: 'and check the tests' }];
+  pushes.length = 0;
+
+  const res = sessions.interjectQueued('s', 'q1', { needsApproval: false });
+  assert.equal(res.ok, false);
+  assert.equal(res.ok === false && res.code, 'settled');
+  assert.equal(sessions.get('s')!.queued!.length, 1);
+  assert.deepEqual(pushes, []);
+});
 
 const status = (over: Record<string, unknown>) => ({
   type: 'system' as const,

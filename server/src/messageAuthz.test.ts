@@ -123,6 +123,17 @@ describe('MESSAGE_AUTHZ', () => {
     assert.equal(authorizeMessage(msg('editQueued'), guest('view')).ok, false);
   });
 
+  test('interjectQueued is a prompt, and its owner gate is not in this table', () => {
+    // The split a future reader will get wrong. This table says "may you deliver a
+    // prompt at all" — View only cannot, Can prompt can. What it *cannot* express
+    // is "prompt but not `promptNeedsApproval`": a Can prompt guest passes here and
+    // is then refused by SessionManager.interjectQueued's first line, so they can
+    // never release their own held prompt onto the owner's machine. That refusal is
+    // asserted in sessions.queue.test.ts, not here.
+    assert.equal(authorizeMessage(msg('interjectQueued'), guest('view')).ok, false);
+    assert.equal(authorizeMessage(msg('interjectQueued'), guest('prompt')).ok, true);
+  });
+
   test('a collaborator may drive a turn but still not delete the session', () => {
     const collab = guest('collaborator');
     assert.equal(authorizeMessage(msg('prompt'), collab).ok, true);

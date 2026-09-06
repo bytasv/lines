@@ -1168,14 +1168,20 @@
         "uniqueMentions",
         "mentionProviders",
         "searchFiles",
-        "MentionCandidate"
+        "MentionCandidate",
+        "normalizeQuery",
+        "subsequenceMatch"
       ],
-      "tests": [],
+      "tests": [
+        "server/src/fileSearch.test.ts",
+        "server/src/fileRoutes.test.ts"
+      ],
       "businessRules": [
         "mentions are expanded into plain prompt text client-side before send; server and worker never resolve mentions[], only the sidecar for display",
         "a stale feature/file reference degrades to a harmless stale text block rather than blocking send",
-        "/find respects .gitignore via git ls-files, falls back to a bounded walk outside a repo, capped at 20000 files",
-        "a queued prompt's draft (pre-expansion MentionValue) is stored only when it has mentions; QueuedMessages.tsx re-edits it via a second MentionInput mount"
+        "the find project file search excludes gitignored files by default (includeIgnored opts back in, see file-quick-open); dotfiles and dot-directories are always candidates; falls back to a bounded walk outside a repo, capped at 20000 files",
+        "a queued prompt's draft (pre-expansion MentionValue) is stored only when it has mentions; QueuedMessages.tsx re-edits it via a second MentionInput mount",
+        "file-match ranking is tiered (basename-prefix, basename-substring, path-substring, basename-subsequence, path-subsequence); a query's whitespace is stripped and a backslash is read as a path separator before matching"
       ],
       "architecturalRules": [
         "new mention kinds are added as one more MentionProvider entry, no switch-over-kind elsewhere",
@@ -1184,7 +1190,8 @@
         "/find, /file, /tree share one corsFor() helper and one resolveWorkspacePath() root restriction (now in server/src/workspacePaths.ts), which also allows a plan-directory path outside every root (isPlanPath)"
       ],
       "relatedDecisions": [
-        "session-collaboration"
+        "session-collaboration",
+        "file-quick-open"
       ]
     },
     {
@@ -2714,6 +2721,51 @@
         "context-window",
         "turn-recovery",
         "permissions-and-plan-mode"
+      ]
+    },
+    {
+      "id": "file-quick-open",
+      "name": "Quick file open (Cmd+P)",
+      "doc": "features/file-quick-open.md",
+      "purpose": "Jump to any project file from anywhere in the app via Cmd/Ctrl+P, reusing the @mention file ranker in a floating palette.",
+      "entryPoints": [
+        "web/src/components/FilePalette.tsx",
+        "web/src/App.tsx"
+      ],
+      "files": [
+        "web/src/components/FilePalette.tsx",
+        "web/src/lib/files.ts",
+        "server/src/fileSearch.ts",
+        "server/src/fileRoutes.ts",
+        "shared/types.ts",
+        "web/src/store.ts",
+        "web/src/components/FileTree.tsx",
+        "web/src/components/Sidebar.tsx"
+      ],
+      "symbols": [
+        "FilePalette",
+        "hideIgnored",
+        "setHideIgnored",
+        "includeIgnored",
+        "TreeEntry.ignored"
+      ],
+      "tests": [
+        "server/src/fileSearch.test.ts",
+        "server/src/fileRoutes.test.ts"
+      ],
+      "businessRules": [
+        "Cmd+P searches only the active project's roots (rootsForCwd), not every open project tab",
+        "a hit always opens in the preview overlay, never a files-mode tab, regardless of which sidebar mode is active when the palette opens",
+        "hideIgnored defaults to on and is local-only (not part of synced settings)"
+      ],
+      "architecturalRules": [
+        "the palette is a global overlay mounted in App.tsx alongside MonacoPreviewModal/LoginModal, not scoped under any route, so the shortcut works from the docs reader too",
+        "hideIgnored is a single store field read by both surfaces (palette, sidebar tree) rather than two independent toggles"
+      ],
+      "relatedDecisions": [
+        "prompt-mentions",
+        "multi-root-projects",
+        "file-routes-over-ws"
       ]
     }
   ]

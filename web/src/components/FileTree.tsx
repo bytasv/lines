@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Group, Loader, Text, Tree, mergeAsyncChildren, useTree } from '@mantine/core';
 import type { TreeNodeData } from '@mantine/core';
 import { IconChevronRight, IconFile, IconFolder, IconFolderOpen } from '@tabler/icons-react';
 import type { TreeEntry } from '@lines/shared';
+import { useStore } from '../store';
 import { fetchTree } from '../lib/files';
 
 interface FileTreeProps {
@@ -17,8 +18,18 @@ function toNodes(parent: string, entries: TreeEntry[]): TreeNodeData[] {
   return entries.map((e) => ({
     value: parent === '/' ? `/${e.name}` : `${parent}/${e.name}`,
     label: e.name,
+    // `nodeProps` is Mantine's passthrough bag; the ignore mark rides along so
+    // the toggle below is a filter over data already in hand, not a refetch.
+    nodeProps: { ignored: e.ignored === true },
     ...(e.type === 'dir' && { hasChildren: true }),
   }));
+}
+
+/** The tree minus its gitignored entries (and, with them, their subtrees). */
+function withoutIgnored(nodes: TreeNodeData[]): TreeNodeData[] {
+  return nodes
+    .filter((n) => !n.nodeProps?.ignored)
+    .map((n) => (n.children ? { ...n, children: withoutIgnored(n.children) } : n));
 }
 
 /** Whether `value`'s children have already been loaded into the tree data. */
@@ -34,6 +45,7 @@ function hasLoadedChildren(nodes: TreeNodeData[], value: string): boolean {
 
 /** Lazily loading project file tree; each directory is fetched on first expand. */
 export function FileTree({ root, onFileClick, selectedPath }: FileTreeProps) {
+  const hideIgnored = useStore((s) => s.hideIgnored);
   const [data, setData] = useState<TreeNodeData[]>([]);
   const [error, setError] = useState<string | null>(null);
   // Controlled expanded state: reveal uses functional updates so sequential
@@ -120,6 +132,8 @@ export function FileTree({ root, onFileClick, selectedPath }: FileTreeProps) {
     };
   }, [selectedPath, root, revealPath]);
 
+  const visible = useMemo(() => (hideIgnored ? withoutIgnored(data) : data), [data, hideIgnored]);
+
   if (error) {
     return (
       <Text size="xs" c="red" p="sm">
@@ -130,10 +144,16 @@ export function FileTree({ root, onFileClick, selectedPath }: FileTreeProps) {
 
   return (
     <Tree
-      data={data}
+      data={visible}
       tree={tree}
       levelOffset={14}
-      renderNode={({ node, expanded, hasChildren, isLoading, elementProps }) => (
+      renderNode={({ node, expanded, hasChildren, isLoading, elementProps }) => {
+        // Dot-entries and gitignored ones are listed like anything else but sit
+        // back visually, the way an editor greys what it does not expect you to
+        // browse. (An ignored node only renders at all with the toggle off.)
+        const dimmed =
+          String(node.label ?? '').startsWith('.') || node.nodeProps?.ignored === true;
+        return (
         <Group
           gap={4}
           wrap="nowrap"
@@ -142,6 +162,7 @@ export function FileTree({ root, onFileClick, selectedPath }: FileTreeProps) {
           style={{
             ...elementProps.style,
             borderRadius: 6,
+            opacity: dimmed ? 0.55 : undefined,
             background: elementProps['data-selected']
               ? 'var(--mantine-color-default-hover)'
               : undefined,
@@ -175,7 +196,8 @@ export function FileTree({ root, onFileClick, selectedPath }: FileTreeProps) {
           </Text>
           {isLoading && <Loader size={10} />}
         </Group>
-      )}
+        );
+      }}
     />
   );
 }
