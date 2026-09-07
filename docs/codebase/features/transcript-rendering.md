@@ -441,9 +441,11 @@ the separate durable `context-compact` event this doc's compaction handling alre
   list itself (a `'workflow'` item with event `'started'`), not from the positions of rendered
   `[data-workflow-step]` DOM markers — the tail window can clip an early marker out of the DOM
   entirely, and a clipped-but-started step reports its segment as fully filled (its bounds
-  collapse to 0) rather than 0% filled. Clicking a stepper step that isn't currently mounted
-  goes through `revealWorkflowStep()`/`REVEAL_STEP_EVENT` (`web/src/lib/workflowReveal.ts`)
-  instead of a direct `querySelector` — see [workflow-step-lifecycle](workflow-step-lifecycle.md).
+  collapse to 0) rather than 0% filled. Clicking a stepper step always dispatches
+  `revealWorkflowStep()`/`REVEAL_STEP_EVENT` (`web/src/lib/workflowReveal.ts`); `Transcript.tsx`'s
+  listener decides the rest — scroll to the marker in place if it's already mounted in that
+  transcript's own viewport, otherwise drop the tail window and scroll once it mounts — see
+  [workflow-step-lifecycle](workflow-step-lifecycle.md).
 - `toolFields` degrades instead of failing: an unclassifiable value becomes a capped `json` field
   rather than throwing or being skipped, because tool input shapes (especially MCP tools) are not
   controlled by this code and drift freely.

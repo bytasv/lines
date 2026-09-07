@@ -552,10 +552,12 @@ installed icon, no new package). No other new dependencies.
   5. otherwise → plain `.status-dot`
 - Clicking a step in the stepper still jumps the transcript to that step's start marker, but
   the marker may not be mounted — `Transcript.tsx` windows a long transcript to its tail (see
-  [transcript-performance](transcript-performance.md)). The click asks `revealWorkflowStep()`
-  (`web/src/lib/workflowReveal.ts`) to scroll directly if the marker exists, otherwise it fires
-  `REVEAL_STEP_EVENT`, which the transcript handles by dropping its window and scrolling once
-  the marker mounts.
+  [transcript-performance](transcript-performance.md)). The click always dispatches
+  `revealWorkflowStep()`'s `REVEAL_STEP_EVENT` (`web/src/lib/workflowReveal.ts`) — a pure
+  dispatcher, no DOM lookup of its own — and `Transcript.tsx`'s listener decides the rest: if the
+  marker already exists in that transcript's own viewport it unpins the transcript from
+  follow-the-stream and scrolls straight to it, otherwise it drops the tail window and scrolls
+  once the marker mounts.
 
 ## Architectural rules
 

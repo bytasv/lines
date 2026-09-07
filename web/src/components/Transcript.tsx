@@ -860,6 +860,27 @@ const AgentTurn = memo(function AgentTurn({
 /** Top-level items rendered on first paint, and the size of each backfill step. */
 const INITIAL_WINDOW = 40;
 
+/**
+ * How long after a scroll gesture follow-the-stream stays out of the way. A
+ * wheel notch or trackpad flick moves ~10px, well inside onScroll's 60px
+ * near-bottom tolerance, so a single event can't unpin; the distance has to
+ * accumulate across the gesture, which it can't if the autoscroll resets it to
+ * zero between events. Spans the gaps between events in one deliberate gesture
+ * (trackpad inertia is continuous; a slow hand-rolled scroll is not).
+ */
+const GESTURE_HOLD_MS = 500;
+
+/** Keys that move the viewport, so pressing one counts as a scroll gesture. */
+const SCROLL_KEYS = new Set([
+  'ArrowUp',
+  'ArrowDown',
+  'PageUp',
+  'PageDown',
+  'Home',
+  'End',
+  ' ',
+]);
+
 export function Transcript({
   sessionId,
   events,
@@ -979,6 +1000,10 @@ export function Transcript({
   // follow-the-stream can't hold the view down through a resize burst that
   // never lapses while a turn streams.
   const suppressUnpinUntilRef = useRef(0);
+  // While > now, a scroll gesture is in progress and nothing follows the stream:
+  // the user's scrolling has to be free to move the view away from the bottom
+  // before onScroll can see it as an unpin. See GESTURE_HOLD_MS.
+  const gestureUntilRef = useRef(0);
   // ScrollArea shell, not the viewport: a scrollbar-thumb drag lands on a
   // sibling of the viewport, so a viewport-only listener would miss it.
   const scrollShellRef = useRef<HTMLDivElement>(null);
@@ -1128,7 +1153,13 @@ export function Transcript({
     el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
     pinnedRef.current = true;
     setHasNewContent(false);
+    // Reached the bottom on purpose (the "new content" button) — resume
+    // following now rather than after the gesture hold lapses.
+    gestureUntilRef.current = 0;
   };
+
+  /** Follow-the-stream stands down while the user is working the scroller. */
+  const following = () => pinnedRef.current && Date.now() >= gestureUntilRef.current;
 
   const onScroll = () => {
     const el = viewportRef.current;
@@ -1172,9 +1203,9 @@ export function Transcript({
   }, [visibleItems]);
 
   useEffect(() => {
-    if (pinnedRef.current) {
+    if (following()) {
       scrollToBottom();
-    } else if (items.length > 0) {
+    } else if (!pinnedRef.current && items.length > 0) {
       setHasNewContent(true);
     }
     updateProgress();
@@ -1189,7 +1220,7 @@ export function Transcript({
     const content = contentRef.current;
     if (!viewport || !content) return;
     const observer = new ResizeObserver(() => {
-      if (pinnedRef.current) {
+      if (following()) {
         // Keep following through the resize burst (collapse/expand animation)
         // and hold off the scroll-driven unpin it would otherwise trigger.
         suppressUnpinUntilRef.current = Date.now() + 200;
@@ -1205,26 +1236,47 @@ export function Transcript({
 
   // A streaming turn resizes the content on nearly every frame, so the 200ms
   // immunity window above is re-armed faster than it can lapse and onScroll
-  // never gets to unpin. Any real gesture revokes it, which is enough: the
-  // gesture's own scroll event is dispatched before the next resize callback,
-  // so onScroll sees a lapsed window and decides the pin as usual. Clearing the
-  // window is all this does — pin/unpin policy stays in onScroll. Capture phase
-  // so a nested scroller (a table wrap, a code block) or a stopPropagation
-  // inside a row can't hide the gesture.
+  // never gets to unpin. A gesture revokes that window *and* holds off
+  // follow-the-stream for GESTURE_HOLD_MS, which is the part that makes a
+  // gentle scroll work: without it the autoscroll returns the view to the
+  // bottom between events, so the distance never crosses onScroll's 60px
+  // tolerance and only one aggressive flick could ever escape. Pin/unpin policy
+  // itself stays in onScroll. Capture phase so a nested scroller (a table wrap,
+  // a code block) or a stopPropagation inside a row can't hide the gesture.
   useEffect(() => {
     const shell = scrollShellRef.current;
     if (!shell) return;
-    const onGesture = () => {
+    const hold = () => {
       suppressUnpinUntilRef.current = 0;
+      gestureUntilRef.current = Date.now() + GESTURE_HOLD_MS;
     };
-    const events = ['wheel', 'touchmove', 'pointerdown', 'keydown'] as const;
-    for (const type of events) {
-      shell.addEventListener(type, onGesture, { capture: true, passive: true });
-    }
+    // Upward only: a wheel-down is either a no-op at the bottom or a move
+    // toward it, and holding follow off for it would stall the stream for
+    // GESTURE_HOLD_MS and then jump. Also skips a table's horizontal scroll.
+    const onWheel = (e: Event) => {
+      if ((e as WheelEvent).deltaY < 0) hold();
+    };
+    // A press outside the viewport is the scrollbar (the thumb is a sibling of
+    // it); inside is a row's own control, and a chevron click must still leave
+    // the turn's Collapse animation glued to the bottom.
+    const onPointerDown = (e: Event) => {
+      if (!viewportRef.current?.contains(e.target as Node)) hold();
+    };
+    // Only keys that scroll — a transcript row can hold a text input, and
+    // typing in one is not a request to stop following.
+    const onKeyDown = (e: Event) => {
+      if (SCROLL_KEYS.has((e as KeyboardEvent).key)) hold();
+    };
+    const opts = { capture: true, passive: true } as const;
+    shell.addEventListener('wheel', onWheel, opts);
+    shell.addEventListener('touchmove', hold, opts);
+    shell.addEventListener('pointerdown', onPointerDown, opts);
+    shell.addEventListener('keydown', onKeyDown, opts);
     return () => {
-      for (const type of events) {
-        shell.removeEventListener(type, onGesture, { capture: true });
-      }
+      shell.removeEventListener('wheel', onWheel, { capture: true });
+      shell.removeEventListener('touchmove', hold, { capture: true });
+      shell.removeEventListener('pointerdown', onPointerDown, { capture: true });
+      shell.removeEventListener('keydown', onKeyDown, { capture: true });
     };
   }, []);
 
