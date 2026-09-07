@@ -178,6 +178,20 @@ Update state flows bridge → shell → bridge: the shell pushes `updateStatus` 
 (`autoDownload: false`); an available update surfaces in the tray as a link to the download page
 rather than an in-place install, since `CAN_SELF_INSTALL` is false until the build is signed.
 
+Detecting an update was, until recently, only a tray-menu line nobody opens. Three more surfaces
+now announce it: a native macOS notification (`notifyUpdateAvailable`, deduped per version in
+memory — `notifiedUpdateVersion` — so the 6-hourly re-check doesn't re-nag for a version already
+shown; a fresh app launch with an update still pending notifies once, which is the intended
+reminder), a persistent `tray.setTitle(' ●')` marker set from `updateTray()` (macOS-only, cleared
+by any non-`'available'` state), and, for a browser, the blue `UpdateBanner` pill (see
+[turn-recovery](turn-recovery.md#multi-machine) for its place in the banner-precedence stack).
+`buildHello`'s owner branch carries `update: updates.current()` so a browser opened *after*
+detection still learns about it — the guest branch omits the field, since `installUpdate` is
+owner-gated and a guest has no business updating somebody else's machine. Setting
+`LINES_FAKE_UPDATE_VERSION` short-circuits `startUpdateChecks()` straight to the `'available'`
+state (skipping the real feed check entirely) — the only practical way to exercise the whole chain
+without a packaged build and a published release.
+
 ### Packaging
 
 `npm run package -w desktop` runs `build.mjs`, then electron-builder.
@@ -252,6 +266,13 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
   code signing exists (Squirrel.Mac verifies the replacement app's signature, and macOS
   quarantine compounds it for an ad-hoc bundle), so it opens the download page instead of
   pretending to update in place.
+- The update notification fires at most once per version (in-memory `notifiedUpdateVersion`
+  guard), not once per state transition — the 6h re-check re-fires `update-available` with the
+  same version, and without the guard the user is nagged four times a day.
+- `UpdateBanner` (web) is gated off for a guest (`access` non-null): the `hello` a guest receives
+  never carries `update` in the first place (owner-only in `buildHello`), so this is a second,
+  belt-and-suspenders guard against the same broadcast a guest socket still physically receives
+  from `UpdateManager`'s fan-out.
 - Device registration failing at boot (storage unreachable) is not fatal: the bridge's own
   `RelayClient` retries the relay forever, so a machine that registers late still comes up once
   storage is reachable again.

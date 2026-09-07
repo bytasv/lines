@@ -781,6 +781,9 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
     // So a browser connecting mid-outage learns about it without waiting for
     // the next transition (which may never come).
     worker: worker.status,
+    // Same reason as `worker`, and owner-only: `installUpdate` is owner-gated,
+    // and a guest has no business being told to update this machine.
+    update: updates.current(),
     settings: ctx.store.loadSettings(),
     guardAllowlist: ctx.guard.list(),
     // Read from persisted state, so a pending review is on screen before the

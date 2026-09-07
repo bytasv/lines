@@ -1,4 +1,11 @@
-import type { SessionMeta, ShareProfile, ShareScope, StorageStatus, WorkerStatus } from '@lines/shared';
+import type {
+  SessionMeta,
+  ShareProfile,
+  ShareScope,
+  StorageStatus,
+  UpdateStatus,
+  WorkerStatus,
+} from '@lines/shared';
 
 /**
  * Per-machine state and the merge rules that keep two machines' sessions apart.
@@ -24,6 +31,8 @@ export interface MachineSlice {
   bootstrapped: boolean;
   worker: WorkerStatus | null;
   storage: StorageStatus | null;
+  /** Desktop update this machine is offering; null until a `hello` or transition says so. */
+  update: UpdateStatus | null;
   /** Whose machine it is, when it is not ours. */
   ownerProfile: ShareProfile | null;
 }
@@ -36,6 +45,7 @@ export const emptyMachine = (deviceId: string): MachineSlice => ({
   bootstrapped: false,
   worker: null,
   storage: null,
+  update: null,
   ownerProfile: null,
 });
 

@@ -2460,6 +2460,12 @@ export type ServerMessage =
       auth: AuthStatus;
       storage: StorageStatus;
       worker?: WorkerStatus;
+      /**
+       * Desktop update state, so a browser opened *after* detection learns about
+       * it — `updateStatus` is only pushed on a transition. Owner connections
+       * only: a guest must not be nagged to update somebody else's machine.
+       */
+      update?: UpdateStatus;
       settings?: UserUiSettings | null;
       guardAllowlist?: GuardAllowEntry[];
       guardAllowlistReview?: GuardAllowlistReview | null;

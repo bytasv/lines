@@ -134,6 +134,8 @@ let standDown: { pid: number; instance: string } | null = null;
 let standDownTimer: NodeJS.Timeout | null = null;
 let cli: ClaudeCliStatus = claudeCliStatus();
 let update: UpdateStatus = { state: 'idle' };
+/** Version we have already posted a notification for, so a re-check stays quiet. */
+let notifiedUpdateVersion: string | null = null;
 
 /**
  * The relay accepts our socket *before* asking storage whether this device is
@@ -351,6 +353,27 @@ function setUpdateStatus(status: UpdateStatus) {
   updateTray();
 }
 
+/**
+ * Announce a newly detected version once, natively.
+ *
+ * The tray menu already lists the update, but nobody opens the tray menu, so a
+ * shipped release went unnoticed. Deduped per version rather than per state
+ * transition: the 6h re-check re-fires `update-available` with the same version,
+ * and nagging four times a day is how a notification gets muted. The dedup is
+ * memory-only on purpose — a fresh launch with an update still pending posts one
+ * reminder, which is the behaviour we want.
+ */
+function notifyUpdateAvailable(version: string) {
+  if (version === notifiedUpdateVersion || !Notification.isSupported()) return;
+  notifiedUpdateVersion = version;
+  const notification = new Notification({
+    title: `Lines ${version} is available`,
+    body: 'Click to download. Sessions keep running until you install it.',
+  });
+  notification.on('click', () => void shell.openExternal(config.downloadUrl));
+  notification.show();
+}
+
 function restartForUpdate() {
   if (!CAN_SELF_INSTALL) {
     // Deliberately inert: an ad-hoc signed bundle cannot be replaced in place,
@@ -368,12 +391,22 @@ function restartForUpdate() {
  * cannot install is just wasted bandwidth and a misleading "ready" state.
  */
 function startUpdateChecks() {
+  // Real checks need a packaged build against a live feed, which makes every
+  // update surface (notification, tray marker, banner) unexercisable in dev.
+  // This is the only practical way to verify or regression-check them.
+  if (process.env.LINES_FAKE_UPDATE_VERSION) {
+    const version = process.env.LINES_FAKE_UPDATE_VERSION;
+    setUpdateStatus({ state: 'available', version });
+    notifyUpdateAvailable(version);
+    return;
+  }
   if (!config.updateFeedUrl || !app.isPackaged) return;
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.setFeedURL({ provider: 'generic', url: config.updateFeedUrl });
   autoUpdater.on('update-available', (info: { version: string }) => {
     setUpdateStatus({ state: 'available', version: info.version });
+    notifyUpdateAvailable(info.version);
   });
   autoUpdater.on('update-not-available', () => setUpdateStatus({ state: 'idle' }));
   autoUpdater.on('error', (err: Error) => setUpdateStatus({ state: 'error', message: err.message }));
@@ -692,6 +725,11 @@ function applyDockIcon() {
 
 function updateTray() {
   if (!tray) return;
+  // A persistent marker beside the icon, so a pending update is visible without
+  // opening the menu. `setTitle` is macOS-only, like applyDockIcon's guard; a
+  // dock badge is not an option because hosted mode hides the dock tile. Setting
+  // '' on any other state is what clears it (including available -> idle).
+  if (process.platform === 'darwin') tray.setTitle(update.state === 'available' ? ' ●' : '');
   const alive = (c: ChildProcess | null) => Boolean(c && c.exitCode === null && !c.killed);
   const open = RELAY_MODE
     ? // Hosted mode serves no local UI; the app lives at the public URL.

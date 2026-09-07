@@ -27,6 +27,7 @@ import type {
   StepDef,
   StorageStatus,
   TranscriptEvent,
+  UpdateStatus,
   UsageSnapshot,
   UserUiSettings,
   WorkerStatus,
@@ -689,6 +690,9 @@ interface UiState {
   /** Bridge->worker link health; null until first `hello`, and on a bridge too
    *  old to send it. `connected: false` shows the worker banner. */
   workerStatus: WorkerStatus | null;
+  /** Desktop update the primary machine is offering; null until the first `hello`.
+   *  `state: 'available'` shows the update banner. */
+  updateStatus: UpdateStatus | null;
   /** Which bridge we're talking to; null until the first hello, and on a bridge
    *  too old to send it. */
   bridge: BridgeInfo | null;
@@ -1030,6 +1034,7 @@ export const useStore = create<UiState>((set, get) => {
   auth: null,
   storageStatus: null,
   workerStatus: null,
+  updateStatus: null,
   bridge: null,
   protocolSkew: false,
   authorizeUrl: null,
@@ -1077,6 +1082,7 @@ export const useStore = create<UiState>((set, get) => {
         bootstrapped: slice.bootstrapped,
         workerStatus: slice.worker,
         storageStatus: slice.storage,
+        updateStatus: slice.update,
       };
     }),
   setMachineOffline: (offline, deviceId) =>
@@ -1415,6 +1421,7 @@ export const useStore = create<UiState>((set, get) => {
             connectionStatus: 'connected',
             worker: msg.worker ?? null,
             storage: msg.storage ?? null,
+            update: msg.update ?? null,
             scope: msg.access?.scope ?? 'owner',
             ownerProfile: msg.access?.ownerProfile ?? null,
           };
@@ -1446,6 +1453,10 @@ export const useStore = create<UiState>((set, get) => {
           storageStatus: msg.storage ?? null,
           // Absent on a bridge older than this field — degrades to "no strip".
           workerStatus: msg.worker ?? null,
+          // Gated on `fromPrimary`, unlike its neighbours: a guest `hello` never
+          // carries `update`, so an ungated read would let a second machine's
+          // hello wipe a pending update off the primary.
+          updateStatus: fromPrimary ? msg.update ?? null : state.updateStatus,
           bridge: msg.bridge ?? null,
           // Present only from somebody else's machine. Absent means our own, so
           // it must reset rather than persist from a previous connection.
@@ -1787,6 +1798,15 @@ export const useStore = create<UiState>((set, get) => {
             [from]: { ...(state.machines[from] ?? emptyMachine(from)), worker: msg.worker },
           },
           ...(fromPrimary ? { workerStatus: msg.worker } : {}),
+        }));
+        break;
+      case 'updateStatus':
+        set((state) => ({
+          machines: {
+            ...state.machines,
+            [from]: { ...(state.machines[from] ?? emptyMachine(from)), update: msg.status },
+          },
+          ...(fromPrimary ? { updateStatus: msg.status } : {}),
         }));
         break;
       case 'authLoginStarted':

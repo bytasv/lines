@@ -564,7 +564,8 @@
         "web/src/lib/transcript.ts",
         "server/src/auth.ts",
         "web/src/components/LoginModal.tsx",
-        "server/src/turnFailure.ts"
+        "server/src/turnFailure.ts",
+        "web/src/components/UpdateBanner.tsx"
       ],
       "symbols": [
         "LiveSessionInfo.busy",
@@ -621,7 +622,8 @@
         "SessionManager.restoreCompactedStatus",
         "COMPRESS_RESPONSES_PROMPT",
         "UserUiSettings.compressResponses",
-        "SessionManager.recycleIdleQueries"
+        "SessionManager.recycleIdleQueries",
+        "UpdateBanner"
       ],
       "tests": [
         "server/src/sessions.reconcile.test.ts",
@@ -650,7 +652,7 @@
         "reconcileWithWorker skips a session that has neither live state nor a local on-disk transcript (SessionManager.ranHere) — it only exists here because storage sync (adoptSynced) adopted it from another machine, and demoting/restamping/auto-continuing it would broadcast and cloud-push a turn this machine never ran; a session with an actual worker report for this pass is still fully reconciled even with no local transcript, since a live report is itself evidence",
         "a session demoted by reconcileWithWorker whose current workflow step already reads waiting-approval re-parks at waiting-approval instead of idle (the only turn that runs on an already-parked step is a manual compaction) — no interruptedAt is stamped and it is not added to flagged, so auto-continue's nudge cannot read as an approval nobody gave; see workflow-step-lifecycle",
         "a cold-start protocol mismatch never sets everConnected, so the outage clock never starts; it's surfaced by WorkerStatus.mismatch instead",
-        "exactly one of ConnectionBanner/WorkerBanner/StorageBanner renders at a time; bridge-down outranks worker-down outranks storage-down; scoped to the primary machine only (see multi-machine-client)",
+        "exactly one of ConnectionBanner/WorkerBanner/StorageBanner/UpdateBanner renders at a time; bridge-down outranks worker-down outranks storage-down outranks update-available; scoped to the primary machine only (see multi-machine-client)",
         "every recoverable failure ends on a failure row with a working Retry, in a plain session and inside a running workflow alike",
         "a failed turn never autoAdvances; it parks the step as failed instead, unless an explicit stamped force-advance is already pending",
         "Retry re-runs the right thing: a step that never got a prompt is re-rendered from WorkflowState ('pre-run'); a step whose turn failed is re-sent as a follow-up on the same conversation ('turn')",
@@ -2086,7 +2088,9 @@
         "isLocalMode",
         "foreignBridgeLock",
         "enterStandDown",
-        "EXIT_BRIDGE_LOCK_HELD"
+        "EXIT_BRIDGE_LOCK_HELD",
+        "notifyUpdateAvailable",
+        "notifiedUpdateVersion"
       ],
       "tests": [
         "server/src/updates.test.ts",
@@ -2110,7 +2114,9 @@
         "the worker is never part of a stand-down: only the bridge collides on the machine lock and the relay device identity, so a worker mid-turn is left alone when a sibling process collides on a resource the worker doesn't touch",
         "a release is refused when desktop/package.json's version is already published, unless --force (or the workflow's force input) is passed — artifacts are immutable at the edge",
         "npm run ship -w desktop deletes desktop/release/ before every build",
-        "the desktop release pipeline is manual workflow_dispatch only — no tag convention, no release on push to main"
+        "the desktop release pipeline is manual workflow_dispatch only — no tag convention, no release on push to main",
+        "an update notification fires at most once per version (in-memory dedup), not once per state transition, so the 6h re-check does not re-nag for the same version",
+        "buildHello's update field is owner-only; a guest never learns about a pending update on a machine they don't own"
       ],
       "architecturalRules": [
         "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
@@ -2414,7 +2420,7 @@
         "server/src/machineMerge.test.ts"
       ],
       "businessRules": [
-        "the primary machine's connectionStatus/machineOffline/bootstrapped/workerStatus/storageStatus are the only values the global banners read",
+        "the primary machine's connectionStatus/machineOffline/bootstrapped/workerStatus/storageStatus/updateStatus are the only values the global banners read",
         "a shared machine connects automatically up to LINK_CAP; an idle non-primary link disconnects after IDLE_DISCONNECT_MS",
         "sessionMachine is per-client in-memory state, never persisted or synced",
         "auto-selecting a freshly created session additionally requires the creating frame to have come from the primary machine"
