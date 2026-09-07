@@ -260,6 +260,30 @@ const EPHEMERAL_SYSTEM_SUBTYPES = new Set([
   'task_updated',
 ]);
 
+/**
+ * system subtypes a background task emits on its own schedule. A background task
+ * outlives the turn that started it, so — unlike every other worker event — one of
+ * these arriving on a settled session is *not* proof that a turn is live, and
+ * healing the status on it (see handleWorkerEvent) wedged the session at 'running'
+ * forever: the turn's `result` had already been and gone, and nothing else was
+ * coming to settle it a second time. That also made such a session read as
+ * interruptible, so recycleIdleQueries skipped it long after its task was done.
+ */
+const BACKGROUND_TASK_SYSTEM_SUBTYPES = new Set([
+  'background_tasks_changed',
+  'task_notification',
+  'task_progress',
+  'task_updated',
+]);
+
+/** True for an event that proves a *background task* is alive, not a turn. */
+function isBackgroundTaskSignal(msg: { type: string }): boolean {
+  return (
+    msg.type === 'system' &&
+    BACKGROUND_TASK_SYSTEM_SUBTYPES.has(String((msg as { subtype?: unknown }).subtype))
+  );
+}
+
 interface PermissionAnswer {
   allow: boolean;
   updatedInput?: Record<string, unknown>;
@@ -3367,11 +3391,14 @@ export class SessionManager {
     // that says otherwise is stale (see markTurnLive) — heal it. A `result` on
     // an inactive session means the turn is over; let it settle below instead.
     // `interrupting` is read live, not snapshotted: an event racing a Stop must
-    // not resurrect the turn the user just killed.
+    // not resurrect the turn the user just killed. A background-task signal is
+    // excluded outright: it proves a task is alive, not a turn, and those keep
+    // arriving after the turn that spawned them has settled.
     if (
       meta &&
       !isSessionActive(meta.status) &&
       msg.type !== 'result' &&
+      !isBackgroundTaskSignal(msg) &&
       !this.interrupting.has(sessionId)
     ) {
       this.markTurnLive(meta);
