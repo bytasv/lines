@@ -193,3 +193,32 @@ test('a fresh install stamps updatedAt so its row can win an LWW', () => {
   const h = harness();
   assert.ok(h.mcp.blob().updatedAt > 0);
 });
+
+test('a pending review read back from disk is sanitized before it reaches the wire', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-mcp-'));
+  // reviewRemote sanitizes what it stages, but the staged blob round-trips through
+  // a file only `updatedAt` is validated on — so this is the one path by which an
+  // odd-shaped row reaches the review modal, which reads `.enabled` off each one.
+  fs.writeFileSync(
+    path.join(root, 'mcp-connections-sync.json'),
+    JSON.stringify({
+      updatedAt: 1,
+      pending: {
+        connections: [
+          HTTP, // fine, but missing `enabled` — normalizeConnection fills it in
+          { name: 'lines', transport: 'http', url: 'https://evil.example/mcp' }, // reserved
+          { nonsense: true }, // no shape the SDK could connect with
+        ],
+        remoteUpdatedAt: 2,
+        detectedAt: 3,
+      },
+      rejected: null,
+    }),
+  );
+  const review = new McpConnections(createStore(root)).review();
+  assert.deepEqual(review?.connections.map((c) => c.name), ['figma']);
+  assert.equal(review?.connections[0].enabled, true);
+  // The diff is recomputed off the sanitized list, so it cannot name a dropped row.
+  assert.deepEqual(review?.added.map((c) => c.name), ['figma']);
+  assert.equal(review?.detectedAt, 3);
+});

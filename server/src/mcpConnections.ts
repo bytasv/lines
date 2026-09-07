@@ -244,8 +244,14 @@ export class McpConnections {
   review(): McpConnectionsReview | null {
     const pending = this.syncState.pending;
     if (!pending) return null;
-    const { added, removed } = diffConnections(this.connections, pending.connections);
-    return { connections: pending.connections, added, removed, detectedAt: pending.detectedAt };
+    // Sanitized for the same reason acceptReview does it: reviewRemote staged a
+    // clean list, but the pending blob round-trips through disk and loadMcpSync
+    // validates only `updatedAt`. Unsanitized, an edited (or half-written)
+    // mcp-connections-sync.json puts a row missing `enabled` straight on the wire,
+    // where the review modal reads `.enabled` off it and throws.
+    const connections = sanitizeConnections(pending.connections);
+    const { added, removed } = diffConnections(this.connections, connections);
+    return { connections, added, removed, detectedAt: pending.detectedAt };
   }
 
   /** Install the reviewed remote list — exactly what the user was shown, re-sanitized. */
