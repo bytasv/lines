@@ -619,9 +619,12 @@ test('a prompt sent during a parked compaction queues instead of iterating', () 
 test('approve and force-advance are refused while a parked step compacts', () => {
   const h = compactingParked();
   h.workflows.approve('s1', 0);
-  assert.equal(h.s1().workflow?.advancing, undefined, 'no advance was started');
+  // Falsy, not strictly undefined: the constructor load loop writes an explicit
+  // `false` (see 'a flag persisted by a crashed process is cleared on load'), so the rule
+  // under test is "no advance was started", not "the flag was never touched".
+  assert.ok(!h.s1().workflow?.advancing, 'no advance was started');
   h.workflows.forceAdvance('s1', 0); // routes to approve for a parked step
-  assert.equal(h.s1().workflow?.advancing, undefined);
+  assert.ok(!h.s1().workflow?.advancing);
   assert.equal(h.s1().workflow?.stepIndex, 0);
 });
 
