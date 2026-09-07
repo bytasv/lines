@@ -9,10 +9,10 @@ const DISMISSED_KEY = 'lines.updateDismissed';
  * Indigo pill shown when the desktop shell has spotted a newer release.
  *
  * News, not an outage, which is why it is the calmest colour and the only one of
- * the four pills that can be dismissed. All of them render at the same fixed
+ * the pills that can be dismissed. All of them render at the same fixed
  * coordinates, so exactly one may show: this ranks *below* every failure banner
- * (bridge-down, then worker-down, then storage-down — see StorageBanner), and
- * hides for a guest, whose machine this isn't.
+ * (bridge-down, then contract skew, then worker-down, then storage-down — see
+ * StorageBanner), and hides for a guest, whose machine this isn't.
  *
  * The action is a plain download link rather than the owner-gated `installUpdate`
  * message: with self-install off, a restart request only opens the download page
@@ -25,9 +25,11 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
   const storage = useStore((s) => s.storageStatus);
   const connection = useStore((s) => s.connectionStatus);
   const access = useStore((s) => s.access);
+  const skew = useStore((s) => s.protocolSkew);
   const [dismissed, setDismissed] = useState(() => localStorage.getItem(DISMISSED_KEY));
 
   if (connection !== 'connected') return null;
+  if (skew) return null;
   if (worker?.connected === false || storage?.available === false) return null;
   if (access) return null;
   if (status?.state !== 'available' || !DESKTOP_DOWNLOAD_URL) return null;

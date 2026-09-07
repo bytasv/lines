@@ -8,6 +8,7 @@ import { SessionView } from './components/SessionView';
 import { ProjectTabs } from './components/ProjectTabs';
 import { ConnectionBanner } from './components/ConnectionBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { SkewBanner } from './components/SkewBanner';
 import { StorageBanner } from './components/StorageBanner';
 import { WorkerBanner } from './components/WorkerBanner';
 import { UpdateBanner } from './components/UpdateBanner';
@@ -154,6 +155,7 @@ function Shell() {
         <ProjectTabs />
       </AppShell.Header>
       <ConnectionBanner headerHeight={HEADER_HEIGHT} />
+      <SkewBanner headerHeight={HEADER_HEIGHT} />
       <StorageBanner headerHeight={HEADER_HEIGHT} />
       <WorkerBanner headerHeight={HEADER_HEIGHT} />
       <UpdateBanner headerHeight={HEADER_HEIGHT} />

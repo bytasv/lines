@@ -10,7 +10,9 @@ import { SettingsModal } from './SettingsModal';
  * persistence still works — only cross-machine cloud sync is paused. Hidden
  * while the browser<->bridge link itself is down (that red banner wins), or
  * while the agent worker is down (WorkerBanner wins — a dead agent outranks
- * paused sync, and all three pills share one fixed position).
+ * paused sync, and all the pills share one fixed position), or while the client
+ * and the bridge disagree on the wire contract (SkewBanner wins — this status
+ * was read off messages the client may be misreading).
  *
  * Clicking opens Settings → Sync, where the failure rows behind the pill live:
  * the reason used to be a hover `title` and nothing else, which is why nobody
@@ -20,9 +22,10 @@ export function StorageBanner({ headerHeight }: { headerHeight: number }) {
   const status = useStore((s) => s.storageStatus);
   const worker = useStore((s) => s.workerStatus);
   const connection = useStore((s) => s.connectionStatus);
+  const skew = useStore((s) => s.protocolSkew);
   const [settingsOpen, setSettingsOpen] = useState(false);
   if (connection !== 'connected' || status?.available !== false) return null;
-  if (worker?.connected === false) return null;
+  if (worker?.connected === false || skew) return null;
 
   return (
     <>

@@ -9,13 +9,17 @@ import { useStore } from '../store';
  *
  * More severe than StorageBanner's amber (agent turns are dead, not just cloud
  * sync), less than ConnectionBanner's red (the browser still has a bridge).
- * All three render at the same fixed coordinates, so exactly one may show:
- * bridge-down wins over this, and this wins over storage (see StorageBanner).
+ * All of them render at the same fixed coordinates, so exactly one may show:
+ * bridge-down wins over this, then contract skew (SkewBanner — this status was
+ * read off messages the client may be misreading), and this wins over storage
+ * (see StorageBanner).
  */
 export function WorkerBanner({ headerHeight }: { headerHeight: number }) {
   const status = useStore((s) => s.workerStatus);
   const connection = useStore((s) => s.connectionStatus);
+  const skew = useStore((s) => s.protocolSkew);
   if (connection !== 'connected' || status?.connected !== false) return null;
+  if (skew) return null;
 
   // A version pair alone doesn't say which process is stale, so name both and
   // give the remedy for the common case (worker restarted onto a new protocol

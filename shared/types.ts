@@ -2,18 +2,32 @@
  * Browser <-> bridge wire contract, distinct from the bridge <-> worker
  * PROTOCOL_VERSION in server/src/workerProtocol.ts.
  *
- * These two halves ship together today, so nothing enforces this yet. It exists
- * because once the web app is hosted it will ship ahead of every installed
+ * These two halves ship together today, so nothing *enforces* this yet — but skew
+ * is no longer silent either: the client compares this constant against the
+ * bridge's `hello` and says so in a header pill (`protocolSkew`, SkewBanner).
+ * It exists because the hosted web app ships independently of every installed
  * bridge, and a version the client can read is the prerequisite for degrading
  * gracefully instead of throwing on a message shape it does not know.
+ *
+ * When to bump:
+ *  - a new message type, or a new required field: bump.
+ *  - **removing or renaming a field a client renders: bump.** This is the case
+ *    that was missed. Dropping `SessionMeta.caveman` was wire-compatible in the
+ *    types and still crashed every browser holding an older bundle, which read
+ *    `session.caveman.enabled` on a meta that no longer had the field.
+ *  - adding an *optional* field: free, no bump. An older client ignores it.
  */
 /**
  * 2: a bridge at this version understands the `grant` field on the relay's `open`
  * frame and enforces `MESSAGE_AUTHZ`. The relay refuses to wire a guest to
  * anything older (COLLAB_MIN_PROTOCOL), because a bridge that silently drops the
- * grant would serve that guest as if they owned the machine.
+ * grant would serve that guest as if they owned the machine. A `>=` gate, so
+ * every version above still clears it.
+ *
+ * 3: `SessionMeta.caveman` is gone (a client older than this renders it and
+ * throws), along with the rest of the removals since 2.
  */
-export const APP_PROTOCOL_VERSION = 2;
+export const APP_PROTOCOL_VERSION = 3;
 
 /**
  * Workspace reads the browser makes over the WebSocket rather than plain HTTP.

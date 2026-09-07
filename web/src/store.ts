@@ -698,7 +698,9 @@ interface UiState {
   bridge: BridgeInfo | null;
   /** The bridge speaks a contract this client doesn't. Hosted builds ship ahead
    *  of installed bridges, so this is the expected steady state after a deploy,
-   *  not an error — the UI degrades rather than throwing. */
+   *  not an error — the UI degrades rather than throwing. Shows SkewBanner, which
+   *  outranks the worker/storage/update pills. Primary machine only, like
+   *  `bridge` and `updateStatus`. */
   protocolSkew: boolean;
   /** Authorize URL of the in-progress login, set once the server answers authStartLogin. */
   authorizeUrl: string | null;
@@ -1083,6 +1085,11 @@ export const useStore = create<UiState>((set, get) => {
         workerStatus: slice.worker,
         storageStatus: slice.storage,
         updateStatus: slice.update,
+        bridge: slice.bridge,
+        // Only meaningful once that machine has said `hello`: before it, a null
+        // `bridge` is "not asked yet", not a pre-versioning bridge, and reading it
+        // as skew would flash the pill on every machine switch.
+        protocolSkew: slice.bootstrapped && slice.bridge?.appProtocol !== APP_PROTOCOL_VERSION,
       };
     }),
   setMachineOffline: (offline, deviceId) =>
@@ -1422,6 +1429,7 @@ export const useStore = create<UiState>((set, get) => {
             worker: msg.worker ?? null,
             storage: msg.storage ?? null,
             update: msg.update ?? null,
+            bridge: msg.bridge ?? null,
             scope: msg.access?.scope ?? 'owner',
             ownerProfile: msg.access?.ownerProfile ?? null,
           };
@@ -1457,7 +1465,11 @@ export const useStore = create<UiState>((set, get) => {
           // carries `update`, so an ungated read would let a second machine's
           // hello wipe a pending update off the primary.
           updateStatus: fromPrimary ? msg.update ?? null : state.updateStatus,
-          bridge: msg.bridge ?? null,
+          // Gated on `fromPrimary`, like `update` above and for the same reason:
+          // these two describe the bridge the banners speak about, so a second
+          // machine's hello must not retag them (and SkewBanner reads both, which
+          // only reads straight if they move together).
+          bridge: fromPrimary ? msg.bridge ?? null : state.bridge,
           // Present only from somebody else's machine. Absent means our own, so
           // it must reset rather than persist from a previous connection.
           access: msg.access ?? null,
@@ -1465,7 +1477,9 @@ export const useStore = create<UiState>((set, get) => {
             ? { ...state.profiles, [msg.access.ownerProfile.userId]: msg.access.ownerProfile }
             : state.profiles,
           // Absent `bridge` means a bridge older than this field — treat as skew.
-          protocolSkew: msg.bridge?.appProtocol !== APP_PROTOCOL_VERSION,
+          protocolSkew: fromPrimary
+            ? msg.bridge?.appProtocol !== APP_PROTOCOL_VERSION
+            : state.protocolSkew,
           // Logged out? Open the login flow — but only on the first hello with
           // that news, so reconnects don't reopen a dismissed modal.
           // Never on somebody else's machine. A guest's hello reports
@@ -1544,7 +1558,10 @@ export const useStore = create<UiState>((set, get) => {
         }));
         break;
       case 'mcpConnections':
-        set({ mcpConnections: msg.connections });
+        // `?? []`, matching the hello reducer: a bridge that omits the field (or
+        // sends it null) must not put `undefined` where the settings list maps
+        // over rows and reads `.enabled` off each one.
+        set({ mcpConnections: msg.connections ?? [] });
         break;
       case 'mcpConnectionsReview':
         set((state) => ({

@@ -19,6 +19,20 @@ import type { StorageStatus, WorkerStatus } from '@lines/shared';
  * Pure and store-free on purpose, exactly as `format.ts` is: the callers differ
  * (the settings list reads HTTP rows, the composer reads socket state) and both
  * must reach the same verdict.
+ *
+ * The header pills follow one precedence, and it is the order this file's
+ * sub-health checks mirror below:
+ *
+ *   ConnectionBanner (link/machine down)
+ *     > SkewBanner (client and bridge disagree on the wire contract)
+ *       > WorkerBanner > StorageBanner > UpdateBanner
+ *
+ * Skew sits second there because every claim under it is read off messages the
+ * client may be misreading. It is deliberately absent from the verdicts below,
+ * though: skew does not stop a turn from running, so it is no reason to `block`
+ * a composer — and ranking it above the worker check *here* would answer
+ * `block: null` for a machine whose worker is dead, re-enabling a composer whose
+ * prompts the relay drops in silence.
  */
 
 export type MachineHealthState =

@@ -1,4 +1,5 @@
 import type {
+  BridgeInfo,
   SessionMeta,
   ShareProfile,
   ShareScope,
@@ -33,6 +34,11 @@ export interface MachineSlice {
   storage: StorageStatus | null;
   /** Desktop update this machine is offering; null until a `hello` or transition says so. */
   update: UpdateStatus | null;
+  /** Which bridge this machine is running; null until its `hello`, and on a bridge
+   *  too old to send the field — which is itself skew (see SkewBanner). Per-machine
+   *  because the pill describes the machine in front of the user, and two links can
+   *  be held at once. */
+  bridge: BridgeInfo | null;
   /** Whose machine it is, when it is not ours. */
   ownerProfile: ShareProfile | null;
 }
@@ -46,6 +52,7 @@ export const emptyMachine = (deviceId: string): MachineSlice => ({
   worker: null,
   storage: null,
   update: null,
+  bridge: null,
   ownerProfile: null,
 });
 
