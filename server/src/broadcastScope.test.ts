@@ -33,6 +33,10 @@ const ACCOUNT_WIDE: ServerMessage[] = [
   { type: 'usage', usage: null } as unknown as ServerMessage,
   { type: 'authStatus', auth: { loggedIn: true } } as unknown as ServerMessage,
   { type: 'guardAllowlist', entries: [] } as unknown as ServerMessage,
+  // Names and URLs of the host's third-party servers — account-wide, so a guest
+  // socket never receives it.
+  { type: 'mcpConnections', connections: [] } as unknown as ServerMessage,
+  { type: 'mcpConnectionsReview', review: null } as unknown as ServerMessage,
   { type: 'projects', projects: [] } as unknown as ServerMessage,
 ];
 

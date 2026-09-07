@@ -875,6 +875,14 @@ export interface PermissionRequestData {
   /** Why the auto-mode guard flagged this call for manual review. */
   guardReason?: string;
   /**
+   * Set instead of a tool call when an MCP server asked the user for something
+   * — in practice an OAuth authorization URL. Carried on the permission card
+   * rather than in a mechanism of its own: this needs resolution provenance,
+   * dedupe of a second answer and replay after a bridge restart, all of which
+   * the card already solves.
+   */
+  elicitation?: McpElicitation;
+  /**
    * On 'deny' resolutions: the reason shown back to the model. Persisted so the
    * card can render it and a re-delivered request after a bridge restart replays
    * the same reason instead of a generic one.
@@ -1539,6 +1547,18 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   addGuardAllow: { needs: 'owner' },
   removeGuardAllow: { needs: 'owner' },
   reviewGuardAllowlist: { needs: 'owner' },
+  // MCP connections run third-party code (or ship the host's credentials to a
+  // third party) inside every session on this machine — owner only, permanently.
+  addMcpConnection: { needs: 'owner' },
+  updateMcpConnection: { needs: 'owner' },
+  removeMcpConnection: { needs: 'owner' },
+  reviewMcpConnections: { needs: 'owner' },
+  // Reports the host's configured servers (names, urls, errors), so it is owner
+  // only for the same reason the Connections pane itself is.
+  mcpServerStatus: { needs: 'owner' },
+  // Sends the host's browser to a third party and stores a credential on their
+  // machine. Owner only, permanently.
+  authorizeMcpConnection: { needs: 'owner' },
   installUpdate: { needs: 'owner' },
 };
 
@@ -1775,6 +1795,32 @@ export type ClientMessage =
   | { type: 'removeGuardAllow'; entry: GuardAllowEntry }
   /** Resolve a pending remote-divergence review: accept installs it, reject keeps local. */
   | { type: 'reviewGuardAllowlist'; accept: boolean }
+  /**
+   * MCP connection edits. Intent messages for the same reason the guard's are:
+   * the bridge holds header values the client has never seen, so a whole-list
+   * payload from a stale tab would erase them.
+   *
+   * `headers` carries the secret values for `connection.headerKeys`. It travels
+   * client -> bridge only and is written to a local-only file; nothing ever
+   * sends one back.
+   */
+  | { type: 'addMcpConnection'; connection: McpConnectionInput; headers?: Record<string, string> }
+  | {
+      type: 'updateMcpConnection';
+      id: string;
+      connection: McpConnectionInput;
+      headers?: Record<string, string>;
+    }
+  | { type: 'removeMcpConnection'; id: string }
+  | { type: 'reviewMcpConnections'; accept: boolean }
+  /** Read how each MCP server is doing in one session; answered by `mcpServerStatus`. */
+  | { type: 'mcpServerStatus'; sessionId: string }
+  /**
+   * Start an OAuth handshake for one MCP server, using `sessionId`'s live query.
+   * Answered by `mcpAuthStarted`. The session matters: the CLI process that runs
+   * this leg holds the PKCE verifier, so the callback must come back to it.
+   */
+  | { type: 'authorizeMcpConnection'; sessionId: string; name: string }
   /** Read a workspace file/tree/docs bundle, search files, or fetch an attachment.
    *  `reqId` is echoed on the matching fileResponse. */
   | { type: 'fileRequest'; reqId: string; kind: FileRequestKind; params: FileRequestParams }
@@ -2130,6 +2176,260 @@ export function diffAllowlists(
   };
 }
 
+// ---------------------------------------------------------------------------
+// MCP connections
+// ---------------------------------------------------------------------------
+
+export type McpTransport = 'http' | 'sse' | 'stdio';
+
+/**
+ * A third-party MCP server the user added from Settings, spliced into every
+ * session's query options.
+ *
+ * `headerKeys` carries header *names* only. Values are credentials (a personal
+ * access token is exactly what a header on an HTTP MCP server is for), so they
+ * live in a local-only file on the bridge and never reach this shape — which is
+ * the shape that is synced to storage and broadcast to browsers. The UI writes a
+ * value and never reads one back, like a password field.
+ */
+export interface McpConnection {
+  id: string;
+  /** The MCP namespace: tools arrive as `mcp__<name>__<tool>`. */
+  name: string;
+  transport: McpTransport;
+  /** http/sse only. */
+  url?: string;
+  /** stdio only. */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  /** Names of headers whose values are held locally; http/sse only. */
+  headerKeys?: string[];
+  /** Per-server tool-call timeout in ms. */
+  timeout?: number;
+  /** Off keeps the row but ships no tool definitions into any session. */
+  enabled: boolean;
+}
+
+/** Header values for one connection, keyed by header name. Never synced, never broadcast. */
+export type McpConnectionSecrets = Record<string, Record<string, string>>;
+
+/** The synced form. `updatedAt` only orders writes at the storage row —
+ *  divergence detection is a set difference, never a timestamp comparison. */
+export interface McpConnectionsBlob {
+  connections: McpConnection[];
+  updatedAt: number;
+}
+
+/** A remote list awaiting explicit accept/reject. `connections` is what accept installs verbatim. */
+export interface McpConnectionsReview {
+  connections: McpConnection[];
+  /** In remote, not local — would be added or changed. */
+  added: McpConnection[];
+  /** In local, not remote — would be removed or replaced. */
+  removed: McpConnection[];
+  /** ms epoch the divergence was first staged; a stable client dedupe key. */
+  detectedAt: number;
+}
+
+export type McpConnectionError =
+  | 'empty-name'
+  | 'bad-name'
+  | 'reserved-name'
+  | 'bad-transport'
+  | 'bad-url'
+  | 'empty-command'
+  | 'bad-header-name'
+  | 'too-many-headers'
+  | 'bad-timeout';
+
+/**
+ * Server names a user connection may not take. `lines` is the in-process
+ * workflow-tools server (`LINES_MCP_SERVER` in server/src/mcpWorkflowTools.ts);
+ * a connection under that name would shadow every `mcp__lines__*` tool.
+ *
+ * Duplicated here rather than imported because that module lives on the bridge
+ * and pulls the whole bridge graph in with it. `mcpConnections.test.ts` asserts
+ * the two agree, so the copy cannot drift.
+ */
+export const RESERVED_MCP_SERVER_NAMES = ['lines'];
+
+/** MCP namespaces are used verbatim in tool names, so the charset is narrow. */
+const MCP_NAME_RE = /^[a-z][a-z0-9_-]{0,63}$/;
+const MCP_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const MCP_HEADER_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const MCP_HEADERS_MAX = 10;
+const MCP_TIMEOUT_MIN = 1000;
+const MCP_TIMEOUT_MAX = 600_000;
+
+/** Cap on the stored list, shared by the add gate and the storage route. */
+export const MCP_CONNECTIONS_MAX = 50;
+
+/** Unvalidated connection as it arrives from a form, disk, or a storage row. */
+export type McpConnectionInput = {
+  id?: string;
+  name?: unknown;
+  transport?: unknown;
+  url?: unknown;
+  command?: unknown;
+  args?: unknown;
+  env?: unknown;
+  headerKeys?: unknown;
+  timeout?: unknown;
+  enabled?: unknown;
+};
+
+function randomConnectionId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return uuid;
+  return `mcp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function stringMap(raw: unknown, keyRe?: RegExp): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v !== 'string') continue;
+    if (keyRe && !keyRe.test(k)) continue;
+    out[k] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * Canonical form of a connection, or why it was refused. The single gate every
+ * writer runs through — the Settings form, the wire handler, the load migration
+ * and remote ingest — so a hand-typed row can never reach the SDK in a shape it
+ * cannot build a server from. Mints an id when the input has none, which is how
+ * the add path and the client's pre-send check share one function.
+ */
+export function normalizeConnection(
+  raw: McpConnectionInput,
+): { connection: McpConnection } | { error: McpConnectionError } {
+  const src = (raw ?? {}) as McpConnectionInput;
+  const name = (typeof src.name === 'string' ? src.name : '').trim().toLowerCase();
+  if (!name) return { error: 'empty-name' };
+  if (!MCP_NAME_RE.test(name)) return { error: 'bad-name' };
+  if (RESERVED_MCP_SERVER_NAMES.includes(name)) return { error: 'reserved-name' };
+
+  const transport = src.transport;
+  if (transport !== 'http' && transport !== 'sse' && transport !== 'stdio') {
+    return { error: 'bad-transport' };
+  }
+
+  const id = typeof src.id === 'string' && MCP_ID_RE.test(src.id) ? src.id : randomConnectionId();
+  const connection: McpConnection = { id, name, transport, enabled: src.enabled !== false };
+
+  if (typeof src.timeout === 'number' && Number.isFinite(src.timeout)) {
+    if (src.timeout < MCP_TIMEOUT_MIN || src.timeout > MCP_TIMEOUT_MAX) return { error: 'bad-timeout' };
+    connection.timeout = Math.round(src.timeout);
+  }
+
+  if (transport === 'stdio') {
+    const command = (typeof src.command === 'string' ? src.command : '').trim();
+    if (!command) return { error: 'empty-command' };
+    connection.command = command;
+    if (Array.isArray(src.args)) {
+      const args = src.args.filter((a): a is string => typeof a === 'string');
+      if (args.length) connection.args = args;
+    }
+    const env = stringMap(src.env);
+    if (env) connection.env = env;
+    return { connection };
+  }
+
+  const url = (typeof src.url === 'string' ? src.url : '').trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { error: 'bad-url' };
+  }
+  // Only the two schemes the SDK's HTTP/SSE transports can speak. A `file:` or
+  // `javascript:` URL here would be a config that can never connect at best.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { error: 'bad-url' };
+  connection.url = parsed.toString();
+
+  if (Array.isArray(src.headerKeys)) {
+    const keys: string[] = [];
+    for (const raw of src.headerKeys) {
+      if (typeof raw !== 'string') continue;
+      const key = raw.trim();
+      if (!key) continue;
+      if (!MCP_HEADER_RE.test(key)) return { error: 'bad-header-name' };
+      if (!keys.includes(key)) keys.push(key);
+    }
+    if (keys.length > MCP_HEADERS_MAX) return { error: 'too-many-headers' };
+    if (keys.length) connection.headerKeys = keys;
+  }
+  return { connection };
+}
+
+/**
+ * Content equality, ignoring key order — the only comparison divergence
+ * detection uses. Ids are minted once and travel with the row, so an edited
+ * connection is a remove plus an add in the diff, exactly as a re-typed guard
+ * entry is.
+ */
+export function sameConnection(a: McpConnection, b: McpConnection): boolean {
+  const key = (c: McpConnection) =>
+    JSON.stringify([
+      c.id,
+      c.name,
+      c.transport,
+      c.url ?? '',
+      c.command ?? '',
+      c.args ?? [],
+      Object.entries(c.env ?? {}).sort(),
+      [...(c.headerKeys ?? [])].sort(),
+      c.timeout ?? 0,
+      c.enabled,
+    ]);
+  return key(a) === key(b);
+}
+
+/** Human-readable row label, e.g. "figma · https://mcp.figma.com/mcp". */
+export function describeConnection(c: McpConnection): string {
+  return `${c.name} · ${c.transport === 'stdio' ? (c.command ?? '') : (c.url ?? '')}`;
+}
+
+/** Set difference in both directions — what a remote list would add and drop. */
+export function diffConnections(
+  local: McpConnection[],
+  remote: McpConnection[],
+): { added: McpConnection[]; removed: McpConnection[] } {
+  return {
+    added: remote.filter((r) => !local.some((l) => sameConnection(l, r))),
+    removed: local.filter((l) => !remote.some((r) => sameConnection(r, l))),
+  };
+}
+
+/**
+ * One MCP server's connection state, as the SDK reports it. A trimmed
+ * `McpServerStatus`: `serverInfo` and per-tool annotations are dropped, and
+ * `tools` becomes names only — everything the Settings pane actually renders.
+ */
+export interface McpServerStatusInfo {
+  name: string;
+  status: 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled';
+  error?: string;
+  scope?: string;
+  tools?: string[];
+}
+
+/**
+ * An MCP server asking the user for something mid-turn. Only `mode: 'url'` is
+ * rendered — that is the SDK's supported OAuth path, where the CLI owns the
+ * token exchange and all Lines does is show the link and report accept/decline.
+ * A `form` request is declined on the bridge and never reaches a card.
+ */
+export interface McpElicitation {
+  serverName: string;
+  message: string;
+  mode: 'url';
+  url: string;
+}
+
 export type ServerMessage =
   /** `bridge` is optional: once the web app is hosted it will meet bridges older
    *  than itself, and an absent field is exactly that case. */
@@ -2163,6 +2463,8 @@ export type ServerMessage =
       settings?: UserUiSettings | null;
       guardAllowlist?: GuardAllowEntry[];
       guardAllowlistReview?: GuardAllowlistReview | null;
+      mcpConnections?: McpConnection[];
+      mcpConnectionsReview?: McpConnectionsReview | null;
       /**
        * Present only on a guest connection, and the client's cue that this is
        * somebody else's machine: what it may do, and whose it is. Absent means
@@ -2176,6 +2478,38 @@ export type ServerMessage =
   | { type: 'guardAllowlist'; entries: GuardAllowEntry[] }
   /** A remote allowlist awaiting the user's accept/reject; null once resolved. */
   | { type: 'guardAllowlistReview'; review: GuardAllowlistReview | null }
+  /** The whole MCP connection list after any change. Header *values* are never in it. */
+  | { type: 'mcpConnections'; connections: McpConnection[] }
+  /** A remote connection list awaiting the user's accept/reject; null once resolved. */
+  | { type: 'mcpConnectionsReview'; review: McpConnectionsReview | null }
+  /**
+   * How each MCP server is doing in one session. Session-bearing so the scoped
+   * fan-out delivers it to that session's viewers; `servers` is last-known when
+   * no query is live, since the detailed read needs one.
+   */
+  | { type: 'mcpServerStatus'; sessionId: string; servers: McpServerStatusInfo[] }
+  /**
+   * Answer to `authorizeMcpConnection`. `authUrl` is where the user must go;
+   * `error` means the handshake could not start — including the case where this
+   * SDK build no longer exposes the (untyped) OAuth methods at all, which is why
+   * the copy is server-supplied rather than a client-side string.
+   */
+  | {
+      type: 'mcpAuthStarted';
+      sessionId: string;
+      name: string;
+      authUrl?: string;
+      error?: string;
+    }
+  /** Fired once the browser redirect has been exchanged, with the resulting state. */
+  | {
+      type: 'mcpAuthCompleted';
+      sessionId: string;
+      name: string;
+      ok: boolean;
+      error?: string;
+      servers?: McpServerStatusInfo[];
+    }
   | { type: 'usage'; usage: UsageSnapshot | null }
   | { type: 'authStatus'; auth: AuthStatus }
   | { type: 'storageStatus'; storage: StorageStatus }

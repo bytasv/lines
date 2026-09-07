@@ -1,4 +1,4 @@
-import type { GuardAllowlistBlob, MemoryFileMap, ProjectKeyMap, RecipeDef, SessionMeta, StepDef, StepRef, StorageErrorKind, StorageStatus, SyncLogEntry, WorkflowDef } from '@lines/shared';
+import type { GuardAllowlistBlob, McpConnectionsBlob, MemoryFileMap, ProjectKeyMap, RecipeDef, SessionMeta, StepDef, StepRef, StorageErrorKind, StorageStatus, SyncLogEntry, WorkflowDef } from '@lines/shared';
 import type { SyncWatermarks } from './store.ts';
 
 const PUSH_DEBOUNCE_MS = 2_000;
@@ -88,6 +88,8 @@ export interface PulledState {
   memory: MemoryFileMap | null;
   /** null = no row yet (or this one request failed); never applied without a review. */
   guardAllowlist: GuardAllowlistBlob | null;
+  /** Same contract as `guardAllowlist`. Header *values* are never in this blob. */
+  mcpConnections: McpConnectionsBlob | null;
 }
 
 /**
@@ -172,7 +174,7 @@ export class StorageSyncClient {
     if (Date.now() - this.lastPullAt < PULL_MIN_SPACING_MS) return THROTTLED;
     this.lastPullAt = Date.now();
     try {
-      const [workflows, steps, recipes, recipeStats, sessions, settings, projectKeys, memory, guardAllowlist] = await Promise.all([
+      const [workflows, steps, recipes, recipeStats, sessions, settings, projectKeys, memory, guardAllowlist, mcpConnections] = await Promise.all([
         this.req('GET', this.delta('/workflows', 'workflows')),
         this.req('GET', this.delta('/steps', 'steps')),
         this.req('GET', this.delta('/recipes', 'recipes')),
@@ -188,6 +190,10 @@ export class StorageSyncClient {
         // 500 — and that would otherwise abort the whole pull and stop workflows,
         // steps, sessions, settings, project keys and memory from syncing too.
         this.req('GET', '/guard-allowlist').catch(() => null),
+        // Individually caught for the same reason, and more sharply: this is the
+        // newest table of all, so every storage server that has not run the
+        // migration yet answers 500 here.
+        this.req('GET', '/mcp-connections').catch(() => null),
       ]);
       this.warned = false;
       // `body` guards against a 304 leaking into the applied state: only the two
@@ -204,6 +210,7 @@ export class StorageSyncClient {
         projectKeys: (body(projectKeys) ?? {}) as ProjectKeyMap,
         memory: (body(memory) ?? null) as MemoryFileMap | null,
         guardAllowlist: (body(guardAllowlist) ?? null) as GuardAllowlistBlob | null,
+        mcpConnections: (body(mcpConnections) ?? null) as McpConnectionsBlob | null,
       };
     } catch (err) {
       this.warnOnce('pull', err);
@@ -533,6 +540,17 @@ export class StorageSyncClient {
   pushGuardAllowlist(blob: GuardAllowlistBlob): void {
     if (!this.enabled || this.applying) return;
     void this.req('PUT', '/guard-allowlist', blob).catch((err) => this.warnOnce('push guard allowlist', err));
+  }
+
+  /**
+   * Undebounced like the allowlist: connection edits are human-paced and few.
+   *
+   * `blob` must be `McpConnections.blob()`, which carries header names only —
+   * nothing here strips values, because nothing upstream may produce one.
+   */
+  pushMcpConnections(blob: McpConnectionsBlob): void {
+    if (!this.enabled || this.applying) return;
+    void this.req('PUT', '/mcp-connections', blob).catch((err) => this.warnOnce('push mcp connections', err));
   }
 
   /**

@@ -5,6 +5,10 @@ import type {
   ContextBreakdown,
   GuardAllowEntry,
   GuardAllowlistReview,
+  McpConnection,
+  McpConnectionInput,
+  McpConnectionsReview,
+  McpServerStatusInfo,
   ModelOption,
   PermissionMode,
   PlanComment,
@@ -710,6 +714,28 @@ interface UiState {
   guardReviewOpen: boolean;
   /** `detectedAt` of a review the user dismissed with Escape, so a reconnect doesn't re-pop it. */
   guardReviewDismissedAt: number | null;
+  /**
+   * User-managed MCP servers. Server-authoritative and never cached in
+   * localStorage, for the same two reasons as the guard allowlist — and one more:
+   * the bridge holds header values this client has never seen, so it is also
+   * deliberately absent from `pushSettings()`.
+   */
+  mcpConnections: McpConnection[];
+  /** A remote connection list awaiting accept/reject; null when there is nothing to review. */
+  mcpReview: McpConnectionsReview | null;
+  mcpReviewOpen: boolean;
+  /** `detectedAt` of a review dismissed with Escape, so a reconnect doesn't re-pop it. */
+  mcpReviewDismissedAt: number | null;
+  /** Last MCP status read, per session id. Last-known on purpose: a session with
+   *  no live query cannot be asked, and blank would read as "all fine". */
+  mcpStatus: Record<string, McpServerStatusInfo[]>;
+  /**
+   * In-flight or just-finished OAuth handshakes, keyed by server name. Holds the
+   * authorization URL to offer, or why the handshake could not start — including
+   * "this SDK build no longer exposes the OAuth methods", which is why the text
+   * is whatever the server sent rather than a string chosen here.
+   */
+  mcpAuth: Record<string, { pending?: boolean; authUrl?: string; error?: string; ok?: boolean }>;
   /** What the left sidebar shows: session list or project file tree. */
   sidebarMode: SidebarMode;
   /** Keep gitignored files out of the file tree and the Cmd+P palette. Persisted
@@ -784,6 +810,25 @@ interface UiState {
   openGuardReview: () => void;
   /** Leaves the review pending (the Settings banner stays) and remembers the dismissal. */
   closeGuardReview: () => void;
+  /** Add a connection. `headers` are secret values; they go up and never come back. */
+  addMcpConnection: (connection: McpConnectionInput, headers?: Record<string, string>) => void;
+  updateMcpConnection: (
+    id: string,
+    connection: McpConnectionInput,
+    headers?: Record<string, string>,
+  ) => void;
+  removeMcpConnection: (id: string) => void;
+  /** Resolve the pending review: accept installs the remote list, reject keeps this one. */
+  resolveMcpReview: (accept: boolean) => void;
+  openMcpReview: () => void;
+  /** Leaves the review pending (the Settings banner stays) and remembers the dismissal. */
+  closeMcpReview: () => void;
+  /** Ask one session how its MCP servers are doing; the reply lands in `mcpStatus`. */
+  requestMcpStatus: (sessionId: string) => void;
+  /** Start an OAuth handshake for one server, using a session's live query. */
+  authorizeMcpConnection: (sessionId: string, name: string) => void;
+  /** Clear a finished/failed authorization notice for one server. */
+  clearMcpAuth: (name: string) => void;
   setSidebarMode: (mode: SidebarMode) => void;
   setCompactionLevel: (level: CompactionLevel) => void;
   setTurnSummariesEnabled: (on: boolean) => void;
@@ -994,6 +1039,12 @@ export const useStore = create<UiState>((set, get) => {
   guardReview: null,
   guardReviewOpen: false,
   guardReviewDismissedAt: null,
+  mcpConnections: [],
+  mcpReview: null,
+  mcpReviewOpen: false,
+  mcpReviewDismissedAt: null,
+  mcpStatus: {},
+  mcpAuth: {},
   sidebarMode: loadSidebarMode(),
   hideIgnored: loadHideIgnored(),
   compactionLevel: loadCompactionLevel(),
@@ -1122,6 +1173,36 @@ export const useStore = create<UiState>((set, get) => {
       guardReviewOpen: false,
       guardReviewDismissedAt: state.guardReview?.detectedAt ?? state.guardReviewDismissedAt,
     })),
+
+  // Intent messages, not a list save, for the same reason the guard's are — and
+  // one more: the bridge holds header values this client cannot round-trip.
+  addMcpConnection: (connection, headers) => send({ type: 'addMcpConnection', connection, headers }),
+  updateMcpConnection: (id, connection, headers) =>
+    send({ type: 'updateMcpConnection', id, connection, headers }),
+  removeMcpConnection: (id) => send({ type: 'removeMcpConnection', id }),
+  resolveMcpReview: (accept) => {
+    // Closed optimistically; the server's `mcpConnectionsReview: null` confirms it
+    // (and closes any other tab showing the same modal).
+    set({ mcpReviewOpen: false });
+    send({ type: 'reviewMcpConnections', accept });
+  },
+  openMcpReview: () => set({ mcpReviewOpen: true }),
+  closeMcpReview: () =>
+    set((state) => ({
+      mcpReviewOpen: false,
+      mcpReviewDismissedAt: state.mcpReview?.detectedAt ?? state.mcpReviewDismissedAt,
+    })),
+  requestMcpStatus: (sessionId) => send({ type: 'mcpServerStatus', sessionId }),
+  authorizeMcpConnection: (sessionId, name) => {
+    set((state) => ({ mcpAuth: { ...state.mcpAuth, [name]: { pending: true } } }));
+    send({ type: 'authorizeMcpConnection', sessionId, name });
+  },
+  clearMcpAuth: (name) =>
+    set((state) => {
+      const next = { ...state.mcpAuth };
+      delete next[name];
+      return { mcpAuth: next };
+    }),
 
   setSidebarMode: (mode) => {
     localStorage.setItem(SIDEBAR_MODE_KEY, mode);
@@ -1394,6 +1475,13 @@ export const useStore = create<UiState>((set, get) => {
             state.guardReviewOpen ||
             (msg.guardAllowlistReview != null &&
               msg.guardAllowlistReview.detectedAt !== state.guardReviewDismissedAt),
+          mcpConnections: msg.mcpConnections ?? [],
+          mcpReview: msg.mcpConnectionsReview ?? null,
+          // Same auto-open-on-new-news rule as the allowlist review above.
+          mcpReviewOpen:
+            state.mcpReviewOpen ||
+            (msg.mcpConnectionsReview != null &&
+              msg.mcpConnectionsReview.detectedAt !== state.mcpReviewDismissedAt),
           activeProject: pickActive(projects, state.activeProject),
           // Transcripts may have missed events while the socket was down, so the
           // open session reloads (SessionView re-sends loadTranscript on `hello`).
@@ -1442,6 +1530,42 @@ export const useStore = create<UiState>((set, get) => {
           guardReview: msg.review,
           guardReviewOpen:
             msg.review != null && msg.review.detectedAt !== state.guardReviewDismissedAt,
+        }));
+        break;
+      case 'mcpConnections':
+        set({ mcpConnections: msg.connections });
+        break;
+      case 'mcpConnectionsReview':
+        set((state) => ({
+          mcpReview: msg.review,
+          mcpReviewOpen:
+            msg.review != null && msg.review.detectedAt !== state.mcpReviewDismissedAt,
+        }));
+        break;
+      case 'mcpServerStatus':
+        set((state) => ({
+          mcpStatus: { ...state.mcpStatus, [msg.sessionId]: msg.servers },
+        }));
+        break;
+      case 'mcpAuthStarted':
+        set((state) => ({
+          mcpAuth: {
+            ...state.mcpAuth,
+            [msg.name]: msg.authUrl ? { authUrl: msg.authUrl } : { error: msg.error },
+          },
+        }));
+        break;
+      case 'mcpAuthCompleted':
+        set((state) => ({
+          mcpAuth: {
+            ...state.mcpAuth,
+            [msg.name]: msg.ok ? { ok: true } : { error: msg.error },
+          },
+          // The exchange re-reads status as its last step, so adopt it rather
+          // than making the pane ask again.
+          mcpStatus: msg.servers
+            ? { ...state.mcpStatus, [msg.sessionId]: msg.servers }
+            : state.mcpStatus,
         }));
         break;
       case 'projectKeys':

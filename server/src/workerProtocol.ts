@@ -164,7 +164,7 @@ export function watchRuntimeInfo(name: RuntimeName, onChange: () => void): () =>
   };
 }
 
-export type RpcKind = 'canUseTool' | 'preToolUse' | 'mcpTool';
+export type RpcKind = 'canUseTool' | 'preToolUse' | 'mcpTool' | 'elicitation';
 
 /**
  * Closed subset of JSON Schema used by the tool manifest below. Deliberately
@@ -209,6 +209,31 @@ export interface McpToolManifest {
   tools: McpToolSpec[];
 }
 
+/**
+ * Combine the user's own MCP servers (plain serializable config, carried on
+ * `push.options`) with the Lines in-process server the worker just built.
+ *
+ * The Lines entry is written LAST and that ordering is load-bearing: a user
+ * connection sharing its name would otherwise silently take over the
+ * `mcp__lines__*` namespace, breaking every workflow with no error message.
+ * Bridge-side validation refuses that name, but this is the invariant, so it is
+ * enforced where the merge actually happens.
+ *
+ * Lives here rather than in worker.ts so a test can import it without starting
+ * a worker; it is protocol shape, not behaviour.
+ */
+export function mergeMcpServers<T>(
+  fromOptions: unknown,
+  linesServerName: string,
+  linesServer: T,
+): Record<string, unknown> {
+  const user =
+    fromOptions && typeof fromOptions === 'object' && !Array.isArray(fromOptions)
+      ? (fromOptions as Record<string, unknown>)
+      : {};
+  return { ...user, [linesServerName]: linesServer };
+}
+
 /** MCP `CallToolResult`, narrowed to the text content our tools return. */
 export interface McpToolResult {
   content: { type: 'text'; text: string }[];
@@ -216,11 +241,49 @@ export interface McpToolResult {
 }
 
 /**
+ * The runtime-only half of `Query` that MCP OAuth needs.
+ *
+ * These three exist in the SDK bundle but are absent from `sdk.d.ts`, so nothing
+ * type-checks a call to them. They live here rather than in mcpAuth.ts because
+ * the worker must probe them (it is the only side holding a Query) and the
+ * worker's import graph is deliberately confined to this module — see the header
+ * of worker.ts. mcpAuth.ts imports the list from here, so the canary test and the
+ * call site cannot disagree about what is being relied on.
+ */
+export interface McpAuthApi {
+  /** Leg 1: returns the URL the user must visit. `redirectUri` is honoured verbatim. */
+  mcpAuthenticate(serverName: string, redirectUri?: string): Promise<unknown>;
+  /** Leg 2: hand back the full callback URL the browser landed on. */
+  mcpSubmitOAuthCallbackUrl(serverName: string, callbackUrl: string): Promise<unknown>;
+}
+
+/** Probed at runtime and asserted by mcpAuth.contract.test.ts. */
+export const MCP_AUTH_METHODS = ['mcpAuthenticate', 'mcpSubmitOAuthCallbackUrl'] as const;
+
+export type McpAuthSupport = { ok: true; api: McpAuthApi } | { ok: false; missing: string[] };
+
+/**
+ * Is this Query still able to drive an OAuth handshake?
+ *
+ * Probed per call, not once at boot: the claim that matters is "the method exists
+ * on the handle about to be used", so a renamed or dropped method degrades into a
+ * reportable answer instead of a TypeError mid-turn.
+ */
+export function mcpAuthSupport(q: unknown): McpAuthSupport {
+  if (!q || (typeof q !== 'object' && typeof q !== 'function')) {
+    return { ok: false, missing: [...MCP_AUTH_METHODS] };
+  }
+  const candidate = q as Record<string, unknown>;
+  const missing = MCP_AUTH_METHODS.filter((name) => typeof candidate[name] !== 'function');
+  return missing.length ? { ok: false, missing } : { ok: true, api: q as McpAuthApi };
+}
+
+/**
  * Bridge->worker requests that expect exactly one `askResult`. Methods read the
  * live Query handle (which only the worker owns); adding one here is not a
  * protocol bump, adding a message type is.
  */
-export type AskMethod = 'contextUsage';
+export type AskMethod = 'contextUsage' | 'mcpStatus' | 'mcpAuthStart' | 'mcpAuthCallback';
 
 export type BridgeToWorker =
   /**
@@ -252,8 +315,14 @@ export type BridgeToWorker =
   | { type: 'close'; sessionId: string }
   /** Answer to a worker->bridge rpc. Unknown/settled ids are ignored. */
   | { type: 'rpcResult'; id: string; result: unknown }
-  /** Read something off the live Query handle; answered by exactly one `askResult`. */
-  | { type: 'ask'; id: string; sessionId: string; method: AskMethod };
+  /**
+   * Read something off (or drive something on) the live Query handle; answered by
+   * exactly one `askResult`. `params` carries per-method arguments — adding it is
+   * not a protocol bump for the same reason a new `AskMethod` value is not: an
+   * older worker ignores a field it does not read, and the methods that need
+   * arguments are exactly the ones it does not implement.
+   */
+  | { type: 'ask'; id: string; sessionId: string; method: AskMethod; params?: Record<string, unknown> };
 
 export interface LiveSessionInfo {
   sessionId: string;

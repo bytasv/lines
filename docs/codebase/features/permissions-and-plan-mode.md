@@ -192,6 +192,11 @@ deliverable is written and reviewed.
 - `KEEP_PLANNING_MESSAGE` — shared reason prefix used by both the button and the typed-reply path
 - `PermissionRequestData.denyMessage` — the deny reason, persisted on the resolution transcript
   event so it survives reload/restart and can be replayed or displayed later
+- `PermissionRequestData.elicitation` — set instead of a tool call when an MCP server (not the
+  model) is asking the user for something, in practice an OAuth authorization URL. The card this
+  produces reuses every mechanism on this page (resolution provenance, resend replay, dedupe of a
+  second answer) rather than a parallel pending-request channel; see
+  [mcp-connections](mcp-connections.md)
 - `PlanComment` — `{ id, quote, note }`; anchored by the selected text itself, never by an
   offset, because the plan markdown re-renders and the card re-reads the plan file from disk
 - `normalizePlanComments(raw)` — the single validation gate a plan-comment list runs through
@@ -655,3 +660,6 @@ note in a small bubble with the same edit/delete actions the list row has.
 - [turn-interjection](turn-interjection.md) — `waiting-permission` is excluded from Send now in
   v1 for the same open question this feature has never resolved: whether the CLI drains stdin
   while parked inside `canUseTool`.
+- [mcp-connections](mcp-connections.md) — a second producer of `PermissionRequestData`
+  (`elicitation` instead of a tool call), reusing this page's resolution machinery rather than
+  building its own.

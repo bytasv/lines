@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import type { SyncLogEntry } from '@lines/shared';
-import { StorageSyncClient, classifyError, classifyStatus } from './sync.ts';
+import { StorageSyncClient, THROTTLED, classifyError, classifyStatus } from './sync.ts';
 
 /**
  * The "cloud sync unavailable" banner used to have exactly one input — a
@@ -111,6 +111,26 @@ test("a 500 takes its reason from the server's error body", async (t) => {
   assert.equal(h.sync.status.kind, 'server');
   assert.match(String(h.sync.status.reason), /P2021/);
   assert.equal(h.rows[0].status, 500);
+});
+
+test('an unmigrated mcp_connections table degrades the pull instead of aborting it', async (t) => {
+  const h = harness(t);
+  // A storage server running without the newest migration answers 500 for that
+  // one route. Every other resource must still come back, and the failure must
+  // surface as a `server` status rather than a null pull.
+  h.respond(() =>
+    h.calls.at(-1)?.includes('/mcp-connections')
+      ? json({ error: 'P2021: The table `public.mcp_connections` does not exist' }, 500)
+      : json([]),
+  );
+
+  const pulled = await h.sync.pullAll();
+
+  assert.ok(pulled !== null && pulled !== THROTTLED, 'the pull must not abort');
+  assert.ok(Array.isArray(pulled.workflows));
+  assert.equal(pulled.mcpConnections, null);
+  assert.equal(h.sync.status.kind, 'server');
+  assert.match(String(h.sync.status.reason), /P2021/);
 });
 
 test('a non-JSON 5xx body falls back to a synthesized reason', async (t) => {

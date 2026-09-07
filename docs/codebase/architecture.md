@@ -57,7 +57,10 @@ A relayed connection is presented to the bridge as an ordinary `BrowserLink`, so
 - **In the relay** — nothing. It persists no state and logs no payload.
 - **In `~/.claude/`** — the CLI's own settings, agents, skills and plan files, inherited through
   `settingSources` rather than reimplemented. Lines never treats the ambient `~/.claude` login as
-  a credential.
+  a credential. This is also why hand-edited `.mcp.json` / user-settings MCP servers keep working
+  unmodified — the UI-managed connection list
+  ([mcp-connections](features/mcp-connections.md)) is additive on top of that path, not a
+  replacement for it.
 
 Every state change the browser needs travels as a `sessionUpsert`-shaped broadcast; `hello` is a
 complete snapshot, which is why dropping a stream delta or closing a wedged link is safe.

@@ -27,6 +27,8 @@ import {
   WORKER_PORT,
   WORKER_TOKEN_HEADER,
   clearRuntimeInfo,
+  mcpAuthSupport,
+  mergeMcpServers,
   newRuntimeToken,
   publishRuntimeInfo,
   type BridgeToWorker,
@@ -121,6 +123,47 @@ function send(msg: WorkerToBridge) {
 }
 
 /**
+ * Dispatch one `ask` against a live Query. Split out of handleAsk so the reply
+ * plumbing stays one shape regardless of which method ran.
+ *
+ * The two OAuth methods are guarded by `mcpAuthSupport` rather than called
+ * directly: they exist in the SDK bundle but not in its typings, so an upgrade
+ * that renames them must surface as a reportable error here instead of a
+ * TypeError. `mcp-auth-unsupported` is what the bridge turns into UI copy.
+ */
+async function runAsk(
+  msg: Extract<BridgeToWorker, { type: 'ask' }>,
+  state: SessionState,
+): Promise<unknown> {
+  const q = state.query;
+  const params = msg.params ?? {};
+  switch (msg.method) {
+    case 'mcpStatus':
+      return q.mcpServerStatus();
+    case 'mcpAuthStart': {
+      const support = mcpAuthSupport(q);
+      if (!support.ok) throw new Error(`mcp-auth-unsupported:${support.missing.join(',')}`);
+      return support.api.mcpAuthenticate(String(params.serverName ?? ''), String(params.redirectUri ?? ''));
+    }
+    case 'mcpAuthCallback': {
+      const support = mcpAuthSupport(q);
+      if (!support.ok) throw new Error(`mcp-auth-unsupported:${support.missing.join(',')}`);
+      await support.api.mcpSubmitOAuthCallbackUrl(
+        String(params.serverName ?? ''),
+        String(params.callbackUrl ?? ''),
+      );
+      // Reconnect on this side: the token is now stored, but the server is still
+      // parked in `needs-auth` until something re-dials it. Typed API, so no probe.
+      await q.reconnectMcpServer(String(params.serverName ?? ''));
+      return q.mcpServerStatus();
+    }
+    case 'contextUsage':
+    default:
+      return q.getContextUsage();
+  }
+}
+
+/**
  * Read something off a live Query handle for the bridge. Replies bypass send():
  * the outbox is for session events, and an ask the bridge already timed out on
  * is worthless.
@@ -135,8 +178,7 @@ async function handleAsk(msg: Extract<BridgeToWorker, { type: 'ask' }>) {
     return;
   }
   try {
-    const value = await state.query.getContextUsage();
-    reply({ type: 'askResult', id: msg.id, ok: true, value });
+    reply({ type: 'askResult', id: msg.id, ok: true, value: await runAsk(msg, state) });
   } catch (err) {
     reply({ type: 'askResult', id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
   }
@@ -190,6 +232,10 @@ function unavailableResult(kind: RpcKind, message: string): unknown {
       return { behavior: 'deny', message };
     case 'mcpTool':
       return { content: [{ type: 'text', text: message }], isError: true } satisfies McpToolResult;
+    case 'elicitation':
+      // Cancel, not decline: the user never saw the request, so this is "nobody
+      // answered", which is what the MCP server should be told.
+      return { action: 'cancel' };
     default:
       return { continue: true };
   }
@@ -248,6 +294,14 @@ function ensureSession(
     },
     canUseTool: (toolName: string, input: Record<string, unknown>, opts: { signal: AbortSignal }) =>
       rpcCall(sessionId, 'canUseTool', { toolName, input }, opts.signal),
+    // An MCP server asking the user for something — in practice an OAuth
+    // authorization URL. Lives here for the same reason canUseTool does: it is a
+    // function, so it cannot ride the serialized options, and the decision itself
+    // belongs to the bridge.
+    onElicitation: (request: Record<string, unknown>, opts: { signal: AbortSignal }) =>
+      rpcCall(sessionId, 'elicitation', { request }, opts.signal) as Promise<{
+        action: 'accept' | 'decline' | 'cancel';
+      }>,
     hooks: {
       PreToolUse: [
         {
@@ -262,15 +316,21 @@ function ensureSession(
     // One server instance per session, never a cached singleton: the handler has
     // to close over this sessionId so the bridge can route the call to the
     // owning user context. MCP's own `extra` carries no Lines session id.
+    //
+    // MERGED over whatever `options.mcpServers` carried (the user's own
+    // connections, which are plain serializable config), never a replacement for
+    // it — see mergeMcpServers for why the Lines entry has to win.
     ...(tools
       ? {
-          mcpServers: {
-            [tools.serverName]: buildMcpServer(
+          mcpServers: mergeMcpServers(
+            options.mcpServers,
+            tools.serverName,
+            buildMcpServer(
               tools,
               (toolName, args, signal) =>
                 rpcCall(sessionId, 'mcpTool', { tool: toolName, args }, signal) as Promise<McpToolResult>,
             ),
-          },
+          ),
         }
       : {}),
   };

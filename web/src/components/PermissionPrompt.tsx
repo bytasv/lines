@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import {
   ActionIcon,
+  Anchor,
   Avatar,
   Badge,
   Box,
@@ -139,6 +140,29 @@ function toolPresentation(data: PermissionRequestData): {
   body: React.ReactNode;
 } {
   const input = data.input;
+
+  // An MCP server asking for authorization, not a tool call. Checked first
+  // because such a request carries no tool name at all.
+  if (data.elicitation) {
+    const { serverName, message, url } = data.elicitation;
+    return {
+      icon: <IconWorld size={16} color="var(--mantine-color-yellow-6)" />,
+      title: `${serverName || 'An MCP server'} needs authorization`,
+      allowLabel: 'Done — I authorized it',
+      denyLabel: 'Cancel',
+      body: (
+        <Stack gap={6}>
+          {message && <Text size="sm">{message}</Text>}
+          <Anchor href={url} target="_blank" rel="noreferrer noopener" size="sm">
+            Authorize {serverName || 'server'} ↗
+          </Anchor>
+          <Text size="xs" c="dimmed">
+            Opens in a new tab. Come back and confirm once you have signed in.
+          </Text>
+        </Stack>
+      ),
+    };
+  }
 
   switch (data.toolName) {
     case 'Bash':

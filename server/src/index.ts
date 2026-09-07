@@ -43,6 +43,7 @@ import type { BrowserLink, UserContext } from './userContext.ts';
 import { handleFileRequest } from './fileRoutes.ts';
 import { reportRelayStatus, UpdateManager } from './updates.ts';
 import { createMcpDispatcher } from './mcpWorkflowTools.ts';
+import { McpAuthPending } from './mcpAuth.ts';
 import * as workflowCommands from './workflowCommands.ts';
 import * as recipeCommands from './recipeCommands.ts';
 import * as worktreeCommands from './worktreeCommands.ts';
@@ -163,7 +164,12 @@ const worker = new WorkerClient({
   onHello: (live) => registry.onWorkerLive(live),
   onEvent: (sessionId, message) =>
     registry.forSession(sessionId).sessions.handleWorkerEvent(sessionId, message),
-  onEnded: (sessionId, error) => registry.forSession(sessionId).sessions.handleWorkerEnded(sessionId, error),
+  onEnded: (sessionId, error) => {
+    // The PKCE verifier died with that CLI process, so any handshake it started
+    // can never complete — drop the state rather than leave it claimable.
+    mcpAuthPending.forgetSession(sessionId);
+    registry.forSession(sessionId).sessions.handleWorkerEnded(sessionId, error);
+  },
   onRpc: (rpc) => {
     const ctx = registry.forSession(rpc.sessionId);
     // Workflow tool calls are the bridge's own business, not the session's —
@@ -473,12 +479,101 @@ setTimeout(() => {
 }, 15_000).unref();
 
 
+/** Handshakes waiting on their browser redirect. Per-bridge, in memory only. */
+const mcpAuthPending = new McpAuthPending();
+
+/** The port the OS actually gave us, needed to build the OAuth redirect URI. */
+let boundPort = 0;
+
+/** Path the MCP OAuth redirect comes back to. Also embedded in the auth URL. */
+const MCP_OAUTH_CALLBACK_PATH = '/mcp-oauth/callback';
+
+/** Bare page for the redirect landing — no app shell, and never echoes the code. */
+function oauthPage(res: http.ServerResponse, status: number, heading: string, detail: string) {
+  res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(
+    `<!doctype html><meta charset="utf-8"><title>${heading}</title>` +
+      `<body style="font:15px/1.5 system-ui;margin:0;display:grid;place-items:center;height:100vh">` +
+      `<div style="max-width:32rem;padding:2rem;text-align:center">` +
+      `<h1 style="font-size:1.1rem;margin:0 0 .5rem">${heading}</h1>` +
+      `<p style="color:#555;margin:0">${detail}</p></div></body>`,
+  );
+}
+
 /**
- * The bridge's only HTTP surface is this status page. Workspace reads moved onto
- * the WebSocket (see fileRoutes.ts), which removed the Clerk token from query
- * strings and left nothing here needing CORS or an auth gate.
+ * Completing an MCP OAuth handshake is the one thing besides the status page that
+ * needs an HTTP surface here: an OAuth provider redirects a *browser*, so it
+ * cannot carry the app's own token, and the flow cannot run over the WebSocket.
+ *
+ * `state` is therefore the only credential on this route. That is standard OAuth
+ * CSRF defence and adequate — the value is 256-bit, minted by the CLI, matched in
+ * constant time, single-use and TTL-bounded (see McpAuthPending) — but it is the
+ * reason the handler below refuses anything it cannot match rather than trying to
+ * be helpful, and never reflects the authorization code back into the page.
  */
-const server = http.createServer((_req, res) => {
+async function handleOAuthCallback(req: http.IncomingMessage, res: http.ServerResponse) {
+  const url = new URL(req.url ?? '/', `http://127.0.0.1:${boundPort}`);
+  const state = url.searchParams.get('state') ?? '';
+  const providerError = url.searchParams.get('error');
+  const claimed = state ? mcpAuthPending.claim(state) : null;
+  if (!claimed) {
+    // Unknown, expired, or already used. Deliberately one message for all three:
+    // distinguishing them tells an attacker which states exist.
+    oauthPage(res, 400, 'This authorization link is no longer valid', 'Start the authorization again from Lines.');
+    return;
+  }
+  const ctx = registry.peek(claimed.userId);
+  if (!ctx) {
+    oauthPage(res, 410, 'Authorization could not be completed', 'That Lines session is no longer loaded.');
+    return;
+  }
+  if (providerError) {
+    ctx.broadcast({
+      type: 'mcpAuthCompleted',
+      sessionId: claimed.sessionId,
+      name: claimed.serverName,
+      ok: false,
+      error: `${claimed.serverName} refused the authorization (${providerError}).`,
+    });
+    oauthPage(res, 200, 'Authorization was declined', 'You can close this tab and try again from Lines.');
+    return;
+  }
+  const result = await ctx.sessions.completeMcpAuth(claimed.sessionId, claimed.serverName, url.toString());
+  if ('error' in result) {
+    ctx.broadcast({
+      type: 'mcpAuthCompleted',
+      sessionId: claimed.sessionId,
+      name: claimed.serverName,
+      ok: false,
+      error: result.error,
+    });
+    oauthPage(res, 200, 'Authorization could not be completed', 'Lines has the details — check the Connections pane.');
+    return;
+  }
+  ctx.broadcast({
+    type: 'mcpAuthCompleted',
+    sessionId: claimed.sessionId,
+    name: claimed.serverName,
+    ok: true,
+    servers: result.servers,
+  });
+  oauthPage(res, 200, `${claimed.serverName} is connected`, 'You can close this tab and go back to Lines.');
+}
+
+/**
+ * The bridge's HTTP surface: a status page, plus the MCP OAuth redirect landing
+ * above. Workspace reads moved onto the WebSocket (see fileRoutes.ts), which
+ * removed the Clerk token from query strings and left nothing else here needing
+ * CORS or an auth gate.
+ */
+const server = http.createServer((req, res) => {
+  if ((req.url ?? '').startsWith(MCP_OAUTH_CALLBACK_PATH)) {
+    void handleOAuthCallback(req, res).catch((err) => {
+      console.warn('[mcp-auth] callback failed:', err);
+      if (!res.headersSent) oauthPage(res, 500, 'Something went wrong', 'Check the Lines bridge log.');
+    });
+    return;
+  }
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ ok: true, sessions: registry.get(LOCAL_USER).sessions.list().length }));
 });
@@ -691,6 +786,9 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
     // Read from persisted state, so a pending review is on screen before the
     // first pull lands (and survives the 30s pull spacing after a restart).
     guardAllowlistReview: ctx.guard.review(),
+    // Header names only — `blob()`'s list is what the client ever sees, never a value.
+    mcpConnections: ctx.mcp.list(),
+    mcpConnectionsReview: ctx.mcp.review(),
   };
 }
 
@@ -714,6 +812,16 @@ async function handleMcpToolRpc(ctx: UserContext, rpc: WorkerRpc): Promise<void>
     };
   }
   worker.rpcResult(rpc.id, result);
+}
+
+/** One wording for every refusal `McpConnections` can return. */
+function sendMcpError(ws: BrowserLink, reason: string): void {
+  ws.send(
+    JSON.stringify({
+      type: 'error',
+      message: `Cannot save that connection (${reason})`,
+    } satisfies ServerMessage),
+  );
 }
 
 async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessage): Promise<void> {
@@ -1195,6 +1303,87 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
       if (msg.accept) ctx.guard.acceptReview();
       else ctx.guard.rejectReview();
       break;
+    case 'addMcpConnection': {
+      // Broadcasts and pushes through mcp.onChange. The client runs the same
+      // shared validator, so a rejection here is version skew — except for the
+      // two the client cannot check (a name already taken, the list being full).
+      const result = ctx.mcp.add(msg.connection, msg.headers);
+      if (!result.ok) sendMcpError(ws, result.reason);
+      break;
+    }
+    case 'updateMcpConnection': {
+      const result = ctx.mcp.update(msg.id, msg.connection, msg.headers);
+      if (!result.ok) sendMcpError(ws, result.reason);
+      break;
+    }
+    case 'removeMcpConnection':
+      ctx.mcp.remove(msg.id);
+      break;
+    case 'reviewMcpConnections':
+      if (msg.accept) ctx.mcp.acceptReview();
+      else ctx.mcp.rejectReview();
+      break;
+    case 'authorizeMcpConnection': {
+      // Loopback, because that is what the CLI's OAuth client registers and what
+      // the provider redirects to. It follows that the browser doing the
+      // authorizing has to be on this machine — a relayed browser elsewhere
+      // cannot reach it, which the UI says out loud rather than hanging.
+      const redirectUri = `http://127.0.0.1:${boundPort}${MCP_OAUTH_CALLBACK_PATH}`;
+      const started = await sessions.startMcpAuth(msg.sessionId, msg.name, redirectUri);
+      if ('error' in started) {
+        ws.send(
+          JSON.stringify({
+            type: 'mcpAuthStarted',
+            sessionId: msg.sessionId,
+            name: msg.name,
+            error: started.error,
+          } satisfies ServerMessage),
+        );
+        break;
+      }
+      // Register before answering, so a fast redirect cannot beat the record.
+      // No state means the provider will not echo one, and without it the
+      // callback route has nothing to authenticate — refuse rather than accept an
+      // unauthenticated exchange.
+      if (!started.state) {
+        ws.send(
+          JSON.stringify({
+            type: 'mcpAuthStarted',
+            sessionId: msg.sessionId,
+            name: msg.name,
+            error: 'That server did not return an OAuth state parameter, so Lines cannot verify the callback safely.',
+          } satisfies ServerMessage),
+        );
+        break;
+      }
+      mcpAuthPending.start(started.state, {
+        userId: ctx.userId,
+        sessionId: msg.sessionId,
+        serverName: msg.name,
+      });
+      ws.send(
+        JSON.stringify({
+          type: 'mcpAuthStarted',
+          sessionId: msg.sessionId,
+          name: msg.name,
+          authUrl: started.authUrl,
+        } satisfies ServerMessage),
+      );
+      break;
+    }
+    case 'mcpServerStatus': {
+      // Answered on the asking link only, not broadcast: it names the host's
+      // configured servers, and a session guest has no business with those.
+      const servers = await sessions.mcpServerStatus(msg.sessionId);
+      ws.send(
+        JSON.stringify({
+          type: 'mcpServerStatus',
+          sessionId: msg.sessionId,
+          servers,
+        } satisfies ServerMessage),
+      );
+      break;
+    }
     case 'contextBreakdown': {
       // Resolves null rather than throwing: a failed control request must not pop
       // the generic error toast every time the user hovers the chip.
@@ -1307,6 +1496,9 @@ function listen() {
     // The bound port, not PORT: the default is 0, so the OS picked one.
     // Publishing is what lets the dev server (and later the tray app) find us.
     const { port } = server.address() as { port: number };
+    // Remembered for the OAuth redirect URI: PORT defaults to 0, so the only
+    // truthful source for "where a browser can reach us" is what we actually got.
+    boundPort = port;
     publishRuntimeInfo('bridge', {
       port,
       pid: process.pid,

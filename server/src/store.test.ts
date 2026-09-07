@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { SessionMeta, TranscriptEvent } from '@lines/shared';
+import type { McpConnection, SessionMeta, TranscriptEvent } from '@lines/shared';
 import { createStore } from './store.ts';
 
 /** Fixed mtime, restored after an out-of-band write so the cache's stat check
@@ -112,6 +112,50 @@ test('guard sync state round-trips, and a missing file reads as empty', () => {
   };
   store.saveGuardSync(state);
   assert.deepEqual(store.loadGuardSync(), state);
+});
+
+test('MCP connections and their sync state round-trip, missing files read as empty', () => {
+  const { store } = tmpStore();
+  assert.deepEqual(store.loadMcpConnections<unknown[]>([]), []);
+  assert.deepEqual(store.loadMcpSync(), { updatedAt: 0, pending: null, rejected: null });
+  const connections: McpConnection[] = [
+    { id: 'a', name: 'figma', transport: 'http', url: 'https://x.example/mcp', enabled: true },
+  ];
+  store.saveMcpConnections(connections);
+  assert.deepEqual(store.loadMcpConnections<unknown[]>([]), connections);
+  const state = {
+    updatedAt: 7,
+    pending: { connections, remoteUpdatedAt: 3, detectedAt: 5 },
+    rejected: { connections: [], rejectedAt: 6 },
+  };
+  store.saveMcpSync(state);
+  assert.deepEqual(store.loadMcpSync(), state);
+});
+
+test('MCP secrets round-trip, are 0600, and stay out of the connections file', () => {
+  const { root, store } = tmpStore();
+  assert.deepEqual(store.loadMcpSecrets(), {});
+  store.saveMcpConnections([
+    { id: 'a', name: 'figma', transport: 'http', url: 'https://x.example/mcp', enabled: true },
+  ]);
+  store.saveMcpSecrets({ a: { Authorization: 'Bearer secret-token' } });
+  assert.deepEqual(store.loadMcpSecrets(), { a: { Authorization: 'Bearer secret-token' } });
+  // The synced file must never carry a value.
+  assert.equal(
+    fs.readFileSync(path.join(root, 'mcp-connections.json'), 'utf8').includes('secret-token'),
+    false,
+  );
+  const mode = fs.statSync(path.join(root, 'mcp-secrets.json')).mode & 0o777;
+  assert.equal(mode, 0o600);
+});
+
+test('a non-string secret value is dropped rather than handed to the SDK', () => {
+  const { root, store } = tmpStore();
+  fs.writeFileSync(
+    path.join(root, 'mcp-secrets.json'),
+    JSON.stringify({ a: { Good: 'v', Bad: 42 }, b: 'not-an-object' }),
+  );
+  assert.deepEqual(store.loadMcpSecrets(), { a: { Good: 'v' } });
 });
 
 /** projects.json is sanitized on every read; these write the file directly to get

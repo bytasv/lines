@@ -973,8 +973,15 @@ export function Transcript({
   // that add no items (e.g. a turn's Collapse expanding on a status change).
   const contentRef = useRef<HTMLDivElement>(null);
   // While > now, onScroll ignores unpin — set right after a reflow-driven scroll
-  // so a collapse/expand doesn't get mistaken for a user scrolling up.
+  // so a collapse/expand doesn't get mistaken for a user scrolling up. It is
+  // immunity for *browser-initiated* scrolls only and must never outlast the
+  // user: a real gesture clears it (see the scrollShellRef listener below), so
+  // follow-the-stream can't hold the view down through a resize burst that
+  // never lapses while a turn streams.
   const suppressUnpinUntilRef = useRef(0);
+  // ScrollArea shell, not the viewport: a scrollbar-thumb drag lands on a
+  // sibling of the viewport, so a viewport-only listener would miss it.
+  const scrollShellRef = useRef<HTMLDivElement>(null);
 
   // ToolGroup / ToolCallCard are memoized, so the nested renderer has to keep one
   // identity across commits or their memo does nothing. It reaches itself through
@@ -1026,8 +1033,20 @@ export function Transcript({
   const [revealStep, setRevealStep] = useState<number | null>(null);
   useEffect(() => {
     const onReveal = (e: Event) => {
+      const step = (e as CustomEvent<number>).detail;
+      // Already mounted in *this* viewport: scroll straight to it. Growing the
+      // window would remount the whole transcript for a jump that needs no
+      // extra rows. Unpin first, or a live turn's autoscroll fights the
+      // animation and snaps the view back to the bottom.
+      const marker = viewportRef.current?.querySelector(`[data-workflow-step="${step}"]`);
+      if (marker) {
+        pinnedRef.current = false;
+        suppressUnpinUntilRef.current = 0;
+        marker.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
       setWindowSize(Number.MAX_SAFE_INTEGER);
-      setRevealStep((e as CustomEvent<number>).detail);
+      setRevealStep(step);
     };
     window.addEventListener(REVEAL_STEP_EVENT, onReveal);
     return () => window.removeEventListener(REVEAL_STEP_EVENT, onReveal);
@@ -1041,6 +1060,7 @@ export function Transcript({
     // would race the reflow.
     marker.scrollIntoView({ block: 'start' });
     pinnedRef.current = false;
+    suppressUnpinUntilRef.current = 0;
   }, [revealStep, visibleItems]);
 
   const updateProgress = () => {
@@ -1183,8 +1203,33 @@ export function Transcript({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // A streaming turn resizes the content on nearly every frame, so the 200ms
+  // immunity window above is re-armed faster than it can lapse and onScroll
+  // never gets to unpin. Any real gesture revokes it, which is enough: the
+  // gesture's own scroll event is dispatched before the next resize callback,
+  // so onScroll sees a lapsed window and decides the pin as usual. Clearing the
+  // window is all this does — pin/unpin policy stays in onScroll. Capture phase
+  // so a nested scroller (a table wrap, a code block) or a stopPropagation
+  // inside a row can't hide the gesture.
+  useEffect(() => {
+    const shell = scrollShellRef.current;
+    if (!shell) return;
+    const onGesture = () => {
+      suppressUnpinUntilRef.current = 0;
+    };
+    const events = ['wheel', 'touchmove', 'pointerdown', 'keydown'] as const;
+    for (const type of events) {
+      shell.addEventListener(type, onGesture, { capture: true, passive: true });
+    }
+    return () => {
+      for (const type of events) {
+        shell.removeEventListener(type, onGesture, { capture: true });
+      }
+    };
+  }, []);
+
   return (
-    <Box style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+    <Box ref={scrollShellRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
       {stepCount == null && (
         <Box
           ref={progressTrackRef}

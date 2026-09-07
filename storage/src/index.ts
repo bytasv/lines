@@ -742,6 +742,78 @@ app.put('/guard-allowlist', async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- MCP connections ---------------------------------------------------------
+
+/** Hard cap on a stored list. Authoritative validation is the bridge's (normalizeConnection). */
+const MCP_MAX_CONNECTIONS = 50;
+
+app.get('/mcp-connections', async (req, res) => {
+  const row = await prisma.mcpConnections.findUnique({ where: { userId: userIdOf(req) } });
+  res.json(row?.data ?? null);
+});
+
+app.put('/mcp-connections', async (req, res) => {
+  const userId = userIdOf(req);
+  const body = req.body as { connections?: unknown; updatedAt?: unknown } | null;
+  if (!body || !Array.isArray(body.connections)) {
+    res.status(400).json({ error: 'body must hold a connections array' });
+    return;
+  }
+  // Light shape filter only, as PUT /guard-allowlist does: the bridge re-validates
+  // every row on ingest before it can reach a UI, and that is where the real rules
+  // live. `headers` is stripped rather than trusted — header values are
+  // credentials and must never be stored here, whatever a client sends.
+  // A type alias, not an interface: Prisma's Json input type needs an implicit
+  // index signature, which only object type literals get.
+  type StoredConnection = {
+    id: string;
+    name: string;
+    transport: 'http' | 'sse' | 'stdio';
+    enabled: boolean;
+    url?: string;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    headerKeys?: string[];
+    timeout?: number;
+  };
+  const connections: StoredConnection[] = [];
+  for (const raw of body.connections.slice(0, MCP_MAX_CONNECTIONS)) {
+    const c = raw as Record<string, unknown> | null;
+    if (!c || typeof c.id !== 'string' || typeof c.name !== 'string' || !c.name) continue;
+    if (c.transport !== 'http' && c.transport !== 'sse' && c.transport !== 'stdio') continue;
+    const row: StoredConnection = {
+      id: c.id,
+      name: c.name,
+      transport: c.transport,
+      enabled: c.enabled !== false,
+    };
+    if (typeof c.url === 'string') row.url = c.url;
+    if (typeof c.command === 'string') row.command = c.command;
+    if (Array.isArray(c.args)) row.args = c.args.filter((a): a is string => typeof a === 'string');
+    if (c.env && typeof c.env === 'object' && !Array.isArray(c.env)) {
+      const env: Record<string, string> = {};
+      for (const [k, v] of Object.entries(c.env as Record<string, unknown>)) {
+        if (typeof v === 'string') env[k] = v;
+      }
+      row.env = env;
+    }
+    if (Array.isArray(c.headerKeys)) {
+      row.headerKeys = c.headerKeys.filter((k): k is string => typeof k === 'string');
+    }
+    if (typeof c.timeout === 'number') row.timeout = c.timeout;
+    connections.push(row);
+  }
+  const data = { connections, updatedAt: typeof body.updatedAt === 'number' ? body.updatedAt : Date.now() };
+  await prisma.mcpConnections.upsert({
+    where: { userId },
+    create: { userId, data, updatedAt: updatedAtOf(data) },
+    update: { data, updatedAt: updatedAtOf(data) },
+    select: { userId: true },
+  });
+  res.json({ ok: true });
+});
+
 // --- agent memory ------------------------------------------------------------
 
 const MEMORY_KEY_RE = /^(user|project|slug)\//;

@@ -15,6 +15,8 @@ import type {
   FilesChangedData,
   FileSnapshotData,
   InterjectData,
+  McpElicitation,
+  McpServerStatusInfo,
   MentionValue,
   PermissionMode,
   PermissionRequestData,
@@ -75,6 +77,8 @@ import {
 import { claudeCliRefusalMessage, claudeCliStatus } from './claudeCli.ts';
 import { classifyTurnFailure, turnFailureAdvice, turnFailureRetryHint } from './turnFailure.ts';
 import { isLinesMcpTool, isReadOnlyLinesTool, LINES_TOOL_MANIFEST } from './mcpWorkflowTools.ts';
+import type { McpConnections } from './mcpConnections.ts';
+import { normalizeAuthStart, unsupportedReason } from './mcpAuth.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
 import {
@@ -591,6 +595,45 @@ function exitPlanRequestId(events: TranscriptEvent[], livePendingIds: string[]):
   return newestUnresolved;
 }
 
+const MCP_STATUSES = new Set(['connected', 'failed', 'needs-auth', 'pending', 'disabled']);
+
+/**
+ * SDK `McpServerStatus[]` — from `system:init` or from `Query.mcpServerStatus()`
+ * — narrowed to what the UI renders. Unknown statuses become 'pending' rather
+ * than being dropped: the row exists, we just don't recognise its state.
+ */
+function normalizeMcpStatuses(raw: unknown): McpServerStatusInfo[] {
+  if (!Array.isArray(raw)) return [];
+  const out: McpServerStatusInfo[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const src = item as {
+      name?: unknown;
+      status?: unknown;
+      error?: unknown;
+      scope?: unknown;
+      tools?: unknown;
+    };
+    const name = typeof src.name === 'string' ? src.name : '';
+    if (!name) continue;
+    const status =
+      typeof src.status === 'string' && MCP_STATUSES.has(src.status)
+        ? (src.status as McpServerStatusInfo['status'])
+        : 'pending';
+    const entry: McpServerStatusInfo = { name, status };
+    if (typeof src.error === 'string' && src.error) entry.error = src.error;
+    if (typeof src.scope === 'string' && src.scope) entry.scope = src.scope;
+    if (Array.isArray(src.tools)) {
+      const tools = src.tools
+        .map((t) => (t && typeof t === 'object' ? String((t as { name?: unknown }).name ?? '') : ''))
+        .filter(Boolean);
+      if (tools.length) entry.tools = tools;
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
 /** SDK PermissionResult shape returned to the worker's canUseTool rpc. */
 type PermissionResult =
   | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
@@ -624,6 +667,12 @@ interface LiveState {
    *  Per-CLI-process: cleared on `init`, on `ended`, and whenever the query closes
    *  (see setBackgroundTasks). */
   backgroundTasks?: BackgroundTaskInfo[];
+  /** MCP connection states, last reported. `system:init` carries `name` and
+   *  `status` only, so this is the cheap always-available signal; the richer read
+   *  (`error`, `scope`, `tools`) needs a live query and goes through the worker
+   *  `ask`. Kept as last-known so an idle session shows something rather than
+   *  blank. */
+  mcpServers?: McpServerStatusInfo[];
 }
 
 /**
@@ -701,6 +750,9 @@ export class SessionManager {
     private guard: GuardAllowlist,
     private broadcast: (msg: ServerMessage) => void,
     private auth?: AuthManager,
+    /** User-added MCP servers. Optional so tests and embeddings can omit it —
+     *  absent simply means a session gets the Lines workflow tools and nothing else. */
+    private mcp?: McpConnections,
   ) {
     for (const meta of this.store.loadSessions()) {
       // An advance in flight belonged to the previous process — nothing is
@@ -1240,8 +1292,16 @@ export class SessionManager {
     // options stay byte-identical to before.
     const extraRoots = this.rootsFor(meta).filter((root) => root !== meta.cwd);
 
+    // Enabled user connections only, with their header values attached here and
+    // nowhere else. The worker merges the Lines in-process server on top of this
+    // map (see ensureSession), so a connection can never shadow it.
+    //
+    // NOTE: this object now carries credentials. Nothing may log it whole.
+    const mcpServers = this.mcp?.serverConfigs() ?? {};
+
     return {
       cwd: meta.cwd,
+      ...(Object.keys(mcpServers).length ? { mcpServers } : {}),
       ...(extraRoots.length ? { additionalDirectories: extraRoots } : {}),
       model: resolveModelId(meta.model),
       permissionMode: sdkPermissionMode(meta.permissionMode),
@@ -2671,12 +2731,18 @@ export class SessionManager {
     state.pendingPermissions.clear();
   }
 
-  /** Look up the original (unresolved) permission request in the transcript. */
+  /**
+   * Look up the original (unresolved) permission request in the transcript.
+   *
+   * `toolName` is the marker that tells a request event from its resolution
+   * event, which carries an empty one — except for an MCP elicitation, which is
+   * a request with no tool at all and is identified by its `elicitation` field.
+   */
   private findPermissionRequest(sessionId: string, requestId: string): PermissionRequestData | null {
     for (const event of this.store.loadTranscript(sessionId)) {
       if (event.kind !== 'permission') continue;
       const data = event.data as PermissionRequestData;
-      if (data.requestId === requestId && data.toolName) return data;
+      if (data.requestId === requestId && (data.toolName || data.elicitation)) return data;
     }
     return null;
   }
@@ -2729,6 +2795,23 @@ export class SessionManager {
         resolvedBy: 'recovery',
       } satisfies PermissionRequestData);
       this.logResolution(sessionId, original?.toolName ?? '', 'expired', 'recovery');
+      return;
+    }
+
+    // An MCP authorization request whose query is gone. There is nothing to
+    // recover: the OAuth exchange belonged to the CLI process that died, and the
+    // server it was for has no pending request any more. Record the answer and
+    // stop — injecting a prompt about it would tell the model to retry something
+    // that no longer exists.
+    if (original.elicitation) {
+      this.emitEvent(sessionId, 'permission', {
+        requestId,
+        toolName: '',
+        input: {},
+        resolution: 'expired',
+        resolvedBy: 'recovery',
+      } satisfies PermissionRequestData);
+      this.logResolution(sessionId, '', 'expired', 'recovery');
       return;
     }
 
@@ -3176,6 +3259,101 @@ export class SessionManager {
     return fetch;
   }
 
+  /**
+   * How each MCP server is doing in one session.
+   *
+   * Prefers the live read (`Query.mcpServerStatus()`, which carries the error
+   * text and the tool list) and falls back to what `system:init` last reported.
+   * Never rejects: an idle session has no query to ask, and a blank pane would be
+   * indistinguishable from "everything is fine".
+   */
+  async mcpServerStatus(sessionId: string): Promise<McpServerStatusInfo[]> {
+    const last = this.live.get(sessionId)?.mcpServers ?? [];
+    try {
+      const servers = normalizeMcpStatuses(await this.worker.mcpStatus(sessionId));
+      // An empty answer from a live query is not news worth overwriting a real
+      // reading with — a query that has not finished starting its servers yet
+      // answers exactly that.
+      if (!servers.length) return last;
+      this.liveState(sessionId).mcpServers = servers;
+      return servers;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message !== 'no-live-session' && message !== 'worker-unavailable') {
+        console.warn(`[mcp ${sessionId.slice(0, 8)}]`, message);
+      }
+      return last;
+    }
+  }
+
+  /**
+   * OAuth leg 1: ask this session's live query to start a handshake for one MCP
+   * server, and return the URL the user must visit.
+   *
+   * Requires a live query, so the caller has to have one: the CLI process that
+   * runs this leg holds the PKCE verifier, and only it can complete leg 2.
+   */
+  async startMcpAuth(
+    sessionId: string,
+    serverName: string,
+    redirectUri: string,
+  ): Promise<{ authUrl: string; state?: string } | { error: string }> {
+    let raw: unknown;
+    try {
+      raw = await this.worker.mcpAuthStart(sessionId, serverName, redirectUri);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // The shim's own signal, turned into copy a user can act on.
+      if (message.startsWith('mcp-auth-unsupported:')) {
+        return { error: unsupportedReason(message.slice('mcp-auth-unsupported:'.length).split(',')) };
+      }
+      if (message === 'no-live-session') {
+        return { error: 'Start a turn in this session first — authorizing needs a running query.' };
+      }
+      if (message === 'worker-unavailable') {
+        return { error: 'The Lines worker is not reachable right now.' };
+      }
+      console.warn(`[mcp-auth ${sessionId.slice(0, 8)}]`, message);
+      return { error: `Could not start authorization: ${message}` };
+    }
+    const normalized = normalizeAuthStart(raw);
+    if ('error' in normalized) return { error: normalized.error };
+    return {
+      authUrl: normalized.start.authUrl,
+      ...(normalized.start.state ? { state: normalized.start.state } : {}),
+    };
+  }
+
+  /**
+   * OAuth leg 2: hand the browser's callback URL back to the same query, then
+   * report the server's state once it has been re-dialed.
+   */
+  async completeMcpAuth(
+    sessionId: string,
+    serverName: string,
+    callbackUrl: string,
+  ): Promise<{ servers: McpServerStatusInfo[] } | { error: string }> {
+    try {
+      const raw = await this.worker.mcpAuthCallback(sessionId, serverName, callbackUrl);
+      const servers = normalizeMcpStatuses(raw);
+      if (servers.length) this.liveState(sessionId).mcpServers = servers;
+      return { servers };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.startsWith('mcp-auth-unsupported:')) {
+        return { error: unsupportedReason(message.slice('mcp-auth-unsupported:'.length).split(',')) };
+      }
+      if (message === 'no-live-session') {
+        return {
+          error:
+            'The session that started this authorization has ended, so the exchange could not complete. Start a turn and authorize again.',
+        };
+      }
+      console.warn(`[mcp-auth ${sessionId.slice(0, 8)}]`, message);
+      return { error: `Authorization did not complete: ${message}` };
+    }
+  }
+
   handleWorkerEvent(sessionId: string, msg: Record<string, unknown> & { type: string }) {
     // Capture the CLI session id for resume-after-restart.
     const claudeSessionId = msg.session_id as string | undefined;
@@ -3262,6 +3440,13 @@ export class SessionManager {
         );
       } else if (subtype === 'init') {
         this.setBackgroundTasks(sessionId, []);
+        // `init` is the only unsolicited report of MCP connection state. It is
+        // lossy (name and status, nothing else) but it is the only one available
+        // once the query goes idle, so it is kept rather than discarded.
+        const servers = (msg as { mcp_servers?: unknown }).mcp_servers;
+        if (Array.isArray(servers)) {
+          this.liveState(sessionId).mcpServers = normalizeMcpStatuses(servers);
+        }
       } else if (subtype === 'task_notification') {
         // Removal only — never an add. See setBackgroundTasks' contract.
         const id = String((msg as { task_id?: unknown }).task_id ?? '');
@@ -3520,7 +3705,9 @@ export class SessionManager {
       const result =
         rpc.kind === 'preToolUse'
           ? this.handlePreToolUse(rpc.sessionId, rpc.payload, rpc.resend)
-          : await this.handleCanUseTool(rpc.sessionId, rpc.id, rpc.payload, rpc.resend);
+          : rpc.kind === 'elicitation'
+            ? await this.handleElicitation(rpc.sessionId, rpc.id, rpc.payload, rpc.resend)
+            : await this.handleCanUseTool(rpc.sessionId, rpc.id, rpc.payload, rpc.resend);
       this.worker.rpcResult(rpc.id, result);
     } catch (err) {
       console.error('[rpc]', err);
@@ -3528,9 +3715,70 @@ export class SessionManager {
         rpc.id,
         rpc.kind === 'canUseTool'
           ? { behavior: 'deny', message: `Bridge error: ${err instanceof Error ? err.message : String(err)}` }
-          : { continue: true },
+          : rpc.kind === 'elicitation'
+            ? { action: 'cancel' }
+            : { continue: true },
       );
     }
+  }
+
+  /**
+   * onElicitation body: an MCP server is asking the user for something.
+   *
+   * Only `mode: 'url'` is surfaced — the SDK's supported OAuth path, where the
+   * CLI owns the token exchange and completion arrives as
+   * `system:elicitation_complete`. A `form` request is declined here rather than
+   * rendered: Lines has no form surface, and accepting one with empty content
+   * would answer for the user.
+   *
+   * The card itself is the ordinary permission card (see `askPermission`), which
+   * already solves resolution provenance, dedupe of a second answer, and replay
+   * after a bridge restart.
+   */
+  private async handleElicitation(
+    sessionId: string,
+    requestId: string,
+    payload: Record<string, unknown>,
+    resend: boolean,
+  ): Promise<{ action: 'accept' | 'decline' | 'cancel' }> {
+    const raw = (payload.request ?? {}) as {
+      serverName?: unknown;
+      message?: unknown;
+      mode?: unknown;
+      url?: unknown;
+    };
+    const serverName = typeof raw.serverName === 'string' ? raw.serverName : '';
+    const url = typeof raw.url === 'string' ? raw.url : '';
+    if (raw.mode !== 'url' || !url) {
+      console.warn(`[mcp] declined a ${String(raw.mode ?? 'form')}-mode elicitation from ${serverName || 'an MCP server'}`);
+      return { action: 'decline' };
+    }
+    const elicitation: McpElicitation = {
+      serverName,
+      message: typeof raw.message === 'string' ? raw.message : '',
+      mode: 'url',
+      url,
+    };
+
+    // Re-delivered after a bridge restart: replay the answer the user already
+    // gave, exactly as handleCanUseTool does.
+    if (resend) {
+      const resolved = this.findPermissionResolution(sessionId, requestId);
+      if (resolved) return { action: resolved.resolution === 'allow' ? 'accept' : 'decline' };
+    }
+    const skipEmit = resend && this.findPermissionRequest(sessionId, requestId) !== null;
+    const answer = await this.askPermission(
+      sessionId,
+      requestId,
+      // No tool is being called, so the name stays empty and `elicitation` is
+      // what the card renders from.
+      '',
+      {},
+      undefined,
+      skipEmit,
+      elicitation,
+    );
+    return { action: answer.allow ? 'accept' : 'decline' };
   }
 
   /**
@@ -3772,6 +4020,8 @@ export class SessionManager {
     input: Record<string, unknown>,
     guardReason?: string,
     skipEmit = false,
+    /** Set instead of a tool call when an MCP server is the one asking. */
+    elicitation?: McpElicitation,
   ): Promise<PermissionAnswer> {
     const state = this.liveState(sessionId);
     if (!skipEmit) {
@@ -3780,10 +4030,17 @@ export class SessionManager {
         toolName,
         input,
         guardReason,
+        ...(elicitation ? { elicitation } : {}),
       } satisfies PermissionRequestData);
     }
     const pendingMeta = this.sessions.get(sessionId);
-    if (pendingMeta) pendingMeta.pendingPermissionTool = toolName;
+    // An elicitation carries no tool name, and the sidebar row reads this field
+    // to say what a parked session is waiting on.
+    if (pendingMeta) {
+      pendingMeta.pendingPermissionTool = elicitation
+        ? `Authorize ${elicitation.serverName || 'an MCP server'}`
+        : toolName;
+    }
     this.setStatus(sessionId, 'waiting-permission');
     const waitStart = Date.now();
     return new Promise<PermissionAnswer>((resolve) => {

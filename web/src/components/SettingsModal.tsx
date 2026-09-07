@@ -24,6 +24,7 @@ import type { PermissionMode, SyncLogEntry } from '@lines/shared';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { GuardAllowlistSection } from './GuardAllowlistSection';
+import { McpConnectionsSection } from './McpConnectionsSection';
 import { DevicesSection } from './DevicesSection';
 import { CollaboratorsSection } from './CollaboratorsSection';
 import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
@@ -41,6 +42,7 @@ export type SettingsSection =
   | 'transcript'
   | 'notifications'
   | 'allowlist'
+  | 'connections'
   | 'diagnostics'
   | 'docs';
 
@@ -60,6 +62,7 @@ const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   { value: 'transcript', label: 'Transcript' },
   { value: 'notifications', label: 'Notifications' },
   { value: 'allowlist', label: 'Auto-mode allowlist' },
+  { value: 'connections', label: 'Connections' },
   { value: 'diagnostics', label: 'Sync' },
   { value: 'docs', label: 'Documentation' },
 ];
@@ -67,8 +70,9 @@ const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
 /**
  * Machines is the only pane a guest may see: it lists *their* account's machines
  * and is how they get back to one of their own. Every other pane reads or writes
- * the host's state — settings, the guard allowlist, their Claude account, their
- * sync log — all of which the bridge refuses to a guest anyway.
+ * the host's state — settings, the guard allowlist, their MCP connections, their
+ * Claude account, their sync log — all of which the bridge refuses to a guest
+ * anyway.
  */
 const GUEST_SECTIONS = SETTINGS_SECTIONS.filter((s) => s.value === 'devices');
 
@@ -83,6 +87,8 @@ export function SettingsModal({
 }) {
   const guardReview = useStore((s) => s.guardReview);
   const openGuardReview = useStore((s) => s.openGuardReview);
+  const mcpReview = useStore((s) => s.mcpReview);
+  const openMcpReview = useStore((s) => s.openMcpReview);
   const guest = useIsGuest();
   const sections = guest ? GUEST_SECTIONS : SETTINGS_SECTIONS;
   const [section, setSection] = useState<SettingsSection>(initialSection);
@@ -132,9 +138,12 @@ export function SettingsModal({
                 key={s.value}
                 size={6}
                 color="yellow"
-                // Only the allowlist item carries the pending-review dot; the
+                // Only the two review-bearing items carry the pending dot; the
                 // rest wrap a disabled Indicator so the rail stays uniform.
-                disabled={s.value !== 'allowlist' || !guardReview}
+                disabled={
+                  !(s.value === 'allowlist' && guardReview) &&
+                  !(s.value === 'connections' && mcpReview)
+                }
                 offset={2}
                 // Block, not Indicator's default inline-block: the wrapped
                 // Button has to fill the rail.
@@ -161,6 +170,14 @@ export function SettingsModal({
                 onOpenReview={() => {
                   onClose();
                   openGuardReview();
+                }}
+              />
+            )}
+            {section === 'connections' && (
+              <McpConnectionsSection
+                onOpenReview={() => {
+                  onClose();
+                  openMcpReview();
                 }}
               />
             )}

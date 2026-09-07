@@ -74,6 +74,13 @@ describe('MESSAGE_AUTHZ', () => {
     assert.ok(ownerOnly.includes('saveSettings'));
     assert.ok(ownerOnly.includes('deleteSession'));
     assert.ok(ownerOnly.includes('addGuardAllow'));
+    // MCP connections run third-party code inside every session on the machine,
+    // and their status report names the host's servers.
+    assert.ok(ownerOnly.includes('addMcpConnection'));
+    assert.ok(ownerOnly.includes('updateMcpConnection'));
+    assert.ok(ownerOnly.includes('removeMcpConnection'));
+    assert.ok(ownerOnly.includes('reviewMcpConnections'));
+    assert.ok(ownerOnly.includes('mcpServerStatus'));
     assert.ok(ownerOnly.includes('authLogout'));
     assert.ok(ownerOnly.includes('installUpdate'));
     assert.ok(ownerOnly.includes('pickFolder'));

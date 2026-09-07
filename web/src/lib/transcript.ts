@@ -932,6 +932,9 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
       it.kind === 'workflow' ||
       it.kind === 'context-compact' ||
       (it.kind === 'permission' && it.data.toolName === 'ExitPlanMode') ||
+      // An MCP authorization request is the same kind of thing: the turn cannot
+      // continue until the user acts on it, so it must not fold away.
+      (it.kind === 'permission' && !!it.data.elicitation && !it.resolution) ||
       (it.kind === 'tool-group' && it.tools.length === 1 && isQuestionTool(it.tools[0].name));
     if (isBoundary) {
       flush();

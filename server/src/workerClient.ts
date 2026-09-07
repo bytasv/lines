@@ -359,7 +359,11 @@ export class WorkerClient {
    * disconnected: it would resolve minutes later against a caller that has long
    * given up, and leak a pending entry. Callers treat rejection as "no data".
    */
-  private ask(sessionId: string, method: AskMethod): Promise<unknown> {
+  private ask(
+    sessionId: string,
+    method: AskMethod,
+    params?: Record<string, unknown>,
+  ): Promise<unknown> {
     const ws = this.ws;
     if (!this.ready || ws?.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error('worker-unavailable'));
@@ -372,12 +376,43 @@ export class WorkerClient {
       }, ASK_TIMEOUT_MS);
       timer.unref();
       this.pendingAsks.set(id, { resolve, reject, timer });
-      ws.send(JSON.stringify({ type: 'ask', id, sessionId, method } satisfies BridgeToWorker));
+      ws.send(
+        JSON.stringify({
+          type: 'ask',
+          id,
+          sessionId,
+          method,
+          ...(params ? { params } : {}),
+        } satisfies BridgeToWorker),
+      );
     });
   }
 
   /** Raw SDKControlGetContextUsageResponse from the session's live query. */
   contextUsage(sessionId: string): Promise<unknown> {
     return this.ask(sessionId, 'contextUsage');
+  }
+
+  /** Raw `McpServerStatus[]` from the session's live query. */
+  mcpStatus(sessionId: string): Promise<unknown> {
+    return this.ask(sessionId, 'mcpStatus');
+  }
+
+  /**
+   * OAuth leg 1: start a handshake for one MCP server and get back the URL the
+   * user must visit. Raw, undocumented SDK response — `normalizeAuthStart` in
+   * mcpAuth.ts is what validates it.
+   */
+  mcpAuthStart(sessionId: string, serverName: string, redirectUri: string): Promise<unknown> {
+    return this.ask(sessionId, 'mcpAuthStart', { serverName, redirectUri });
+  }
+
+  /**
+   * OAuth leg 2: hand the browser's callback URL back to the CLI that started the
+   * handshake. Must be the same session as leg 1 — the PKCE verifier lives in
+   * that CLI process.
+   */
+  mcpAuthCallback(sessionId: string, serverName: string, callbackUrl: string): Promise<unknown> {
+    return this.ask(sessionId, 'mcpAuthCallback', { serverName, callbackUrl });
   }
 }

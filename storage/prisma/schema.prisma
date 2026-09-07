@@ -99,6 +99,19 @@ model GuardAllowlist {
   @@map("guard_allowlist")
 }
 
+// User-managed MCP servers, one blob per user — same shape and same
+// never-applied-silently contract as GuardAllowlist.
+//
+// Header VALUES are never here: the blob carries header names only, and the
+// values stay in a local-only file on each bridge (see server/src/store.ts).
+model McpConnections {
+  userId    String   @id @map("user_id")
+  data      Json // McpConnectionsBlob
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("mcp_connections")
+}
+
 model Session {
   userId String @map("user_id")
   id     String @db.Uuid

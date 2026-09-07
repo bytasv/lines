@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { APP_ROOT } from './workerProtocol.ts';
 import type {
   GuardAllowEntry,
+  McpConnection,
+  McpConnectionSecrets,
   Project,
   ProjectKeyMap,
   RecipeDef,
@@ -27,6 +29,16 @@ export interface GuardSyncState {
 }
 
 const EMPTY_GUARD_SYNC: GuardSyncState = { updatedAt: 0, pending: null, rejected: null };
+
+/** MCP-connection sync bookkeeping. Same three fields, same meanings, and kept out
+ *  of the connections file for the same reason — see GuardSyncState. */
+export interface McpSyncState {
+  updatedAt: number;
+  pending: { connections: McpConnection[]; remoteUpdatedAt: number; detectedAt: number } | null;
+  rejected: { connections: McpConnection[]; rejectedAt: number } | null;
+}
+
+const EMPTY_MCP_SYNC: McpSyncState = { updatedAt: 0, pending: null, rejected: null };
 
 /** Machine-global app root. Per-user stores live under `${APP_ROOT}/users/{userId}`;
  * machine-wide assets (vendored plugins) and the `run/<instance>/` port-discovery
@@ -209,6 +221,14 @@ export function createStore(root: string) {
   // the entries in an envelope would make an older build's loader call .some() on
   // an object and throw on startup.
   const GUARD_SYNC_FILE = path.join(root, 'guard-allowlist-sync.json');
+  // Same bare-array / separate-envelope split as the guard's two files, for the
+  // same forward-compatibility reason.
+  const MCP_FILE = path.join(root, 'mcp-connections.json');
+  const MCP_SYNC_FILE = path.join(root, 'mcp-connections-sync.json');
+  // Header values for HTTP/SSE connections — personal access tokens, in practice.
+  // A third file, never read by sync.ts and never broadcast, so a connection that
+  // travels to another machine arrives without its credential.
+  const MCP_SECRETS_FILE = path.join(root, 'mcp-secrets.json');
   const SETTINGS_FILE = path.join(root, 'settings.json');
   const MEMORY_MANIFEST_FILE = path.join(root, 'memory-manifest.json');
   const WATERMARKS_FILE = path.join(root, 'sync-watermarks.json');
@@ -558,6 +578,53 @@ export function createStore(root: string) {
 
     saveGuardSync(state: GuardSyncState) {
       writeJson(GUARD_SYNC_FILE, state);
+    },
+
+    loadMcpConnections<T>(fallback: T): T {
+      return readJson(MCP_FILE, fallback);
+    },
+
+    saveMcpConnections(connections: unknown) {
+      writeJson(MCP_FILE, connections);
+    },
+
+    loadMcpSync(): McpSyncState {
+      const raw = readJson<Partial<McpSyncState>>(MCP_SYNC_FILE, EMPTY_MCP_SYNC);
+      return {
+        updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : 0,
+        pending: raw.pending ?? null,
+        rejected: raw.rejected ?? null,
+      };
+    },
+
+    saveMcpSync(state: McpSyncState) {
+      writeJson(MCP_SYNC_FILE, state);
+    },
+
+    /** Header values, keyed connection id -> header name. Local only. */
+    loadMcpSecrets(): McpConnectionSecrets {
+      const raw = readJson<Record<string, unknown>>(MCP_SECRETS_FILE, {});
+      const out: McpConnectionSecrets = {};
+      for (const [id, headers] of Object.entries(raw)) {
+        if (!headers || typeof headers !== 'object' || Array.isArray(headers)) continue;
+        const entry: Record<string, string> = {};
+        for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
+          if (typeof value === 'string') entry[name] = value;
+        }
+        if (Object.keys(entry).length) out[id] = entry;
+      }
+      return out;
+    },
+
+    saveMcpSecrets(secrets: McpConnectionSecrets) {
+      // 0600 like AUTH_FILE, and chmod'd too in case the file already exists:
+      // these are bearer credentials for third-party services.
+      fs.writeFileSync(MCP_SECRETS_FILE, JSON.stringify(secrets, null, 2), { mode: 0o600 });
+      try {
+        fs.chmodSync(MCP_SECRETS_FILE, 0o600);
+      } catch {
+        // best-effort on platforms without POSIX perms
+      }
     },
 
     // Last-synced state of every memory file, keyed by absolute path, so the

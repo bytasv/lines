@@ -3,6 +3,7 @@ import { findWorktree, projectRoots } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
 import { AuthManager } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
+import { McpConnections } from './mcpConnections.ts';
 import { SessionManager } from './sessions.ts';
 import { UsagePoller } from './usage.ts';
 import { WorkflowEngine } from './workflows.ts';
@@ -137,6 +138,8 @@ export interface UserContext {
   store: Store;
   auth: AuthManager;
   guard: GuardAllowlist;
+  /** User-managed MCP servers, spliced into every session's query options. */
+  mcp: McpConnections;
   sessions: SessionManager;
   workflows: WorkflowEngine;
   recipes: RecipeEngine;
@@ -190,6 +193,7 @@ export function buildUserContext(
 ): UserContext {
   const store = createStore(storeRoot);
   const guard = new GuardAllowlist(store);
+  const mcp = new McpConnections(store);
   const sockets = new Map<BrowserLink, SocketAccess>();
   const presence = new PresenceTracker();
   const sync = new StorageSyncClient(
@@ -251,6 +255,17 @@ export function buildUserContext(
   };
   guard.onReview = (review) => broadcast({ type: 'guardAllowlistReview', review });
 
+  // Same three lines, same reasoning as the guard's — including the suppression
+  // of the push while a review is pending.
+  const pushMcp = () => {
+    if (!mcp.pendingReview) sync.pushMcpConnections(mcp.blob());
+  };
+  mcp.onChange = (connections) => {
+    broadcast({ type: 'mcpConnections', connections });
+    pushMcp();
+  };
+  mcp.onReview = (review) => broadcast({ type: 'mcpConnectionsReview', review });
+
   const projectKeys = new ProjectKeyRegistry(store, (keys) => {
     sync.pushProjectKeys(keys);
     broadcast({ type: 'projectKeys', projectKeys: keys });
@@ -282,6 +297,7 @@ export function buildUserContext(
       }
     },
     auth,
+    mcp,
   );
   sessions.attachWorker(worker);
 
@@ -380,6 +396,8 @@ export function buildUserContext(
         // it is about to ask the user about. reviewRemote never mutates entries,
         // so it cannot push from inside this applying window.
         guard.reviewRemote(pulled.guardAllowlist);
+        // Same ordering requirement, same never-mutates guarantee.
+        mcp.reviewRemote(pulled.mcpConnections);
         projectKeys.merge(pulled.projectKeys);
         // Adopted sessions may name checkouts this machine has but has never opened.
         projectKeys.learnAll(sessions.list().map((s) => s.cwd));
@@ -404,6 +422,7 @@ export function buildUserContext(
       const local = store.loadSettings();
       if (local) sync.pushSettings(local);
       pushGuard();
+      pushMcp();
     }
     // Populate other users' published workflows + step library on connect/reconnect.
     await refreshShared();
@@ -416,6 +435,7 @@ export function buildUserContext(
     store,
     auth,
     guard,
+    mcp,
     sessions,
     workflows,
     recipes,
