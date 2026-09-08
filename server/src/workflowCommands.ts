@@ -11,7 +11,7 @@
  * sync client this module drives, so a value import would be a cycle.
  */
 import type { StepContent, StepDef, WorkflowDef, WorkflowStep } from '@lines/shared';
-import { isStepRef } from '@lines/shared';
+import { formatTimestamp, isStepRef } from '@lines/shared';
 import type { UserContext } from './userContext.ts';
 
 // ---- mutations ----
@@ -165,6 +165,13 @@ function clampLimit(limit?: number): number {
   return Math.min(Math.floor(limit), MAX_LIMIT);
 }
 
+/**
+ * Timestamps in these views are formatted `YYYY-MM-DD HH:MM` strings rather than
+ * ms epochs: the only consumers are the MCP tool surface (where a raw epoch is a
+ * conversion the model has to do by hand) and this module's tests. The browser
+ * reads the numeric fields off the wire types instead — see `stepVersionsView`,
+ * which deliberately stays numeric.
+ */
 export interface WorkflowSummary {
   id: string;
   name: string;
@@ -172,7 +179,8 @@ export interface WorkflowSummary {
   published: boolean;
   owned: boolean;
   ownerName?: string;
-  updatedAt?: number;
+  updatedAt?: string;
+  createdAt?: string;
 }
 
 export function listWorkflowsView(
@@ -198,7 +206,8 @@ function summary(w: WorkflowDef, owned: boolean): WorkflowSummary {
     published: w.published === true,
     owned,
     ownerName: w.ownerName,
-    updatedAt: w.updatedAt,
+    updatedAt: formatTimestamp(w.updatedAt),
+    createdAt: formatTimestamp(w.createdAt),
   };
 }
 
@@ -264,6 +273,10 @@ export interface StepSummary {
   published: boolean;
   owned: boolean;
   outputName?: string;
+  /** The step id's creation, shared by every version of it (see `StepDef.createdAt`). */
+  createdAt?: string;
+  /** This head version's own mint time. */
+  updatedAt?: string;
 }
 
 export function listStepsView(
@@ -291,7 +304,19 @@ function stepSummary(s: StepDef, owned: boolean): StepSummary {
     published: s.published,
     owned,
     ...(s.outputName ? { outputName: s.outputName } : {}),
+    createdAt: formatTimestamp(s.createdAt),
+    updatedAt: formatTimestamp(s.updatedAt),
   };
+}
+
+/** A step's full content with its timestamps formatted for a tool result. */
+export type StepView = Omit<StepDef, 'createdAt' | 'updatedAt'> & {
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export function stepView(s: StepDef): StepView {
+  return { ...s, createdAt: formatTimestamp(s.createdAt), updatedAt: formatTimestamp(s.updatedAt) };
 }
 
 /**
@@ -299,6 +324,16 @@ function stepSummary(s: StepDef, owned: boolean): StepSummary {
  * another author's library entry and `version` an older pinned version.
  */
 export function readStepView(
+  ctx: UserContext,
+  stepId: string,
+  ownerId?: string,
+  version?: number,
+): StepView | undefined {
+  const found = readStepDef(ctx, stepId, ownerId, version);
+  return found && stepView(found);
+}
+
+function readStepDef(
   ctx: UserContext,
   stepId: string,
   ownerId?: string,
@@ -317,6 +352,11 @@ export function readStepView(
  * A step's version history, newest first. Pulls remote history first and adopts
  * it, so re-pins resolve — the local cache only holds versions this install has
  * seen. Offline, the cached view is the answer.
+ *
+ * Returns raw `StepDef`s, timestamps included as ms epochs: this one feeds the
+ * browser (`index.ts`'s `stepVersions` reply), whose version popover needs
+ * numbers for its relative-time labels. The MCP boundary applies `stepView`
+ * itself.
  */
 export async function stepVersionsView(
   ctx: UserContext,

@@ -21,6 +21,7 @@ import { IconAlertTriangle, IconChevronDown, IconCopy, IconPlus, IconTrash } fro
 import { DragDropContext, Draggable, Droppable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
 import type { StepDef } from '@lines/shared';
+import { formatTimestamp } from '@lines/shared';
 import { useStore } from '../../store';
 import { ConfirmModal } from '../ConfirmModal';
 import { WORKFLOW_PRESETS } from '../../lib/workflowPresets';
@@ -187,6 +188,13 @@ export function WorkflowEditor({
                   error={submitAttempted ? validation?.name : undefined}
                   onChange={(e) => wf.patchDraft({ name: e.currentTarget.value })}
                 />
+                {/* Nothing at all for an unsaved new workflow — it has no birthday yet. */}
+                {draft.createdAt !== undefined && (
+                  <Stack gap={0} pb={8} style={{ whiteSpace: 'nowrap' }}>
+                    <Text size="xs" c="dimmed">Created {formatTimestamp(draft.createdAt)}</Text>
+                    <Text size="xs" c="dimmed">Updated {formatTimestamp(draft.updatedAt)}</Text>
+                  </Stack>
+                )}
                 {readOnly ? (
                   <Text size="xs" c="dimmed" pb={8} style={{ whiteSpace: 'nowrap' }}>
                     Shared by {draft.ownerName ?? 'another user'}

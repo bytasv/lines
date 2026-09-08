@@ -218,6 +218,18 @@ function updatedAtOf(data: unknown): Date {
 }
 
 /**
+ * Client-stamped creation time, falling back to the payload's `updatedAt` rather
+ * than to now: an old bridge re-pushing every row it holds (see
+ * `server/src/userContext.ts`) sends no `createdAt`, and it has to land on the
+ * same value the migration's backfill derived. Merged with `LEAST` on conflict,
+ * so a late guess can never move a known creation time forward.
+ */
+function createdAtOf(data: unknown): Date {
+  const ms = (data as { createdAt?: number } | null)?.createdAt;
+  return typeof ms === 'number' ? new Date(ms) : updatedAtOf(data);
+}
+
+/**
  * Rows are stamped with a *client-supplied* `updatedAt` (see `updatedAtOf`), so
  * the column is not monotonic with commit order: a row can be committed after a
  * pull yet carry an earlier timestamp. The cursor therefore rewinds by this much
@@ -253,10 +265,13 @@ app.get('/workflows', async (req, res) => {
   const since = sinceOf(req);
   const rows = await prisma.workflow.findMany({
     where: { userId: userIdOf(req), ...(since ? { updatedAt: { gte: since } } : {}) },
-    select: { data: true, updatedAt: true },
+    select: { data: true, updatedAt: true, createdAt: true },
   });
   stampCursor(res, rows);
-  res.json(rows.map((r) => r.data));
+  // The column is the authority on creation time, so it is injected over whatever
+  // the blob carries — that is what makes it survive a push from a client that
+  // does not know the field at all.
+  res.json(rows.map((r) => ({ ...(r.data as object), createdAt: r.createdAt.getTime() })));
 });
 
 /**
@@ -305,17 +320,24 @@ app.put('/workflows', async (req, res) => {
     res.json({ ok: true, count: 0 });
     return;
   }
+  // The two adjacent timestamptz arrays are positional: array order, the `AS u(…)`
+  // alias order and the SELECT list must all agree. Swapping them is type-valid
+  // and Postgres would accept it silently, so they are edited as one hunk.
   await prisma.$executeRaw`
-    INSERT INTO workflows (user_id, id, data, published, updated_at)
-    SELECT ${userId}, u.id, u.data::jsonb, u.published, u.updated_at
+    INSERT INTO workflows (user_id, id, data, published, updated_at, created_at)
+    SELECT ${userId}, u.id, u.data::jsonb, u.published, u.updated_at, u.created_at
     FROM UNNEST(
       ${valid.map((wf) => wf.id!)}::text[],
       ${valid.map((wf) => JSON.stringify(wf))}::text[],
       ${valid.map((wf) => wf.published === true)}::bool[],
-      ${valid.map((wf) => updatedAtOf(wf).toISOString())}::timestamptz[]
-    ) AS u(id, data, published, updated_at)
+      ${valid.map((wf) => updatedAtOf(wf).toISOString())}::timestamptz[],
+      ${valid.map((wf) => createdAtOf(wf).toISOString())}::timestamptz[]
+    ) AS u(id, data, published, updated_at, created_at)
     ON CONFLICT (user_id, id) DO UPDATE
-      SET data = EXCLUDED.data, published = EXCLUDED.published, updated_at = EXCLUDED.updated_at`;
+      SET data = EXCLUDED.data, published = EXCLUDED.published, updated_at = EXCLUDED.updated_at,
+          -- Earliest wins: idempotent across peers, and a push with no creation
+          -- time of its own (an old bridge) can never move it forward.
+          created_at = LEAST(workflows.created_at, EXCLUDED.created_at)`;
   res.json({ ok: true, count: valid.length });
 });
 
@@ -348,17 +370,34 @@ app.get('/steps', async (req, res) => {
   // bridge's LWW-on-version adopt ignores those.
   const since = sinceOf(req);
   const userId = userIdOf(req);
+  //
+  // `created_at` comes from a grouped subquery over the *whole* lineage rather
+  // than from the head row or a window function: a step's creation is when its id
+  // was first written, and with `?since=` a window would only ever see the rows
+  // inside the delta and report a birth that is too recent.
   const rows = since
-    ? await prisma.$queryRaw<{ data: unknown; updatedAt: Date }[]>`
-        SELECT DISTINCT ON (user_id, id) data, updated_at AS "updatedAt" FROM step_versions
-        WHERE user_id = ${userId} AND updated_at >= ${since}
-        ORDER BY user_id, id, version DESC`
-    : await prisma.$queryRaw<{ data: unknown; updatedAt: Date }[]>`
-        SELECT DISTINCT ON (user_id, id) data, updated_at AS "updatedAt" FROM step_versions
-        WHERE user_id = ${userId}
-        ORDER BY user_id, id, version DESC`;
+    ? await prisma.$queryRaw<{ data: unknown; updatedAt: Date; createdAt: Date }[]>`
+        SELECT DISTINCT ON (sv.user_id, sv.id) sv.data, sv.updated_at AS "updatedAt",
+               m.created_at AS "createdAt"
+        FROM step_versions sv
+        JOIN (
+          SELECT user_id, id, min(created_at) AS created_at FROM step_versions
+          WHERE user_id = ${userId} GROUP BY user_id, id
+        ) m ON m.user_id = sv.user_id AND m.id = sv.id
+        WHERE sv.user_id = ${userId} AND sv.updated_at >= ${since}
+        ORDER BY sv.user_id, sv.id, sv.version DESC`
+    : await prisma.$queryRaw<{ data: unknown; updatedAt: Date; createdAt: Date }[]>`
+        SELECT DISTINCT ON (sv.user_id, sv.id) sv.data, sv.updated_at AS "updatedAt",
+               m.created_at AS "createdAt"
+        FROM step_versions sv
+        JOIN (
+          SELECT user_id, id, min(created_at) AS created_at FROM step_versions
+          WHERE user_id = ${userId} GROUP BY user_id, id
+        ) m ON m.user_id = sv.user_id AND m.id = sv.id
+        WHERE sv.user_id = ${userId}
+        ORDER BY sv.user_id, sv.id, sv.version DESC`;
   stampCursor(res, rows);
-  res.json(rows.map((r) => r.data));
+  res.json(rows.map((r) => ({ ...(r.data as object), createdAt: r.createdAt.getTime() })));
 });
 
 /** Every other user's published steps, head version only — the library. */
@@ -387,18 +426,26 @@ app.put('/steps', async (req, res) => {
     res.json({ ok: true, count: 0 });
     return;
   }
+  // `created_at` is fed from `updatedAtOf`, NOT `createdAtOf`: the blob's
+  // `createdAt` is the *lineage's* birth, and the bridge re-pushes the whole
+  // history on every step change — feeding it in would collapse every version
+  // row's `created_at` to the same instant and destroy the evidence the lineage
+  // minimum is derived from. The two adjacent timestamptz arrays are positional;
+  // array, alias and SELECT order must all agree (see PUT /workflows).
   await prisma.$executeRaw`
-    INSERT INTO step_versions (user_id, id, version, data, published, updated_at)
-    SELECT ${userId}, u.id, u.version, u.data::jsonb, u.published, u.updated_at
+    INSERT INTO step_versions (user_id, id, version, data, published, updated_at, created_at)
+    SELECT ${userId}, u.id, u.version, u.data::jsonb, u.published, u.updated_at, u.created_at
     FROM UNNEST(
       ${valid.map((s) => s.id!)}::text[],
       ${valid.map((s) => s.version!)}::int[],
       ${valid.map((s) => JSON.stringify(s))}::text[],
       ${valid.map((s) => s.published !== false)}::bool[],
+      ${valid.map((s) => updatedAtOf(s).toISOString())}::timestamptz[],
       ${valid.map((s) => updatedAtOf(s).toISOString())}::timestamptz[]
-    ) AS u(id, version, data, published, updated_at)
+    ) AS u(id, version, data, published, updated_at, created_at)
     ON CONFLICT (user_id, id, version) DO UPDATE
-      SET data = EXCLUDED.data, published = EXCLUDED.published, updated_at = EXCLUDED.updated_at`;
+      SET data = EXCLUDED.data, published = EXCLUDED.published, updated_at = EXCLUDED.updated_at,
+          created_at = LEAST(step_versions.created_at, EXCLUDED.created_at)`;
   res.json({ ok: true, count: valid.length });
 });
 

@@ -58,6 +58,10 @@ async function buildShell() {
     outfile: path.join(DIST, 'main.cjs'),
     format: 'cjs',
     external: ['electron', 'electron-updater'],
+    // `dev` runs `electron dist/main.cjs` — a *file* argument, so Electron never
+    // reads desktop/package.json and `app.getVersion()` answers with Electron's
+    // own version. This is the only way the tray can state the real one.
+    define: { __LINES_VERSION__: JSON.stringify(VERSION) },
   });
 }
 

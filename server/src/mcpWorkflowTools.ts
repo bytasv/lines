@@ -1,6 +1,8 @@
 /**
- * The workflow/step tools a Lines session can call on itself, so workflows can be
- * discussed and edited in conversation instead of only in the editor modal.
+ * The tools a Lines session can call on itself: workflows and steps, so they can
+ * be discussed and edited in conversation instead of only in the editor modal,
+ * plus the MCP connections of the user running the session, so the agent can
+ * notice that the tools a task needs are missing and offer to set the server up.
  *
  * Bridge-side on purpose. The manifest is data (see workerProtocol.ts): the
  * worker turns it into a live MCP server and forwards each call back here, which
@@ -10,7 +12,7 @@
  * Every write validates against the same shared rules the editor uses and goes
  * through workflowCommands.ts, so this surface cannot diverge from the browser's.
  */
-import type { StepContent, WorkflowDef, WorkflowStep } from '@lines/shared';
+import type { McpConnection, StepContent, WorkflowDef, WorkflowStep } from '@lines/shared';
 import {
   DEFAULT_MODEL,
   formatWorkflowIssues,
@@ -92,29 +94,49 @@ const STEPS: JsonSchemaNode = {
   description: 'The full ordered step list — this replaces the existing steps, it is not a patch.',
 };
 
+/**
+ * The connection-proposal surface's own limits, stated on the schema so the
+ * model does not waste a call learning them, and re-enforced in the dispatcher
+ * because these arguments can originate from a page the agent read:
+ *
+ *  - **No `stdio`.** A proposed local command is arbitrary code execution, not a
+ *    URL. `command`/`args`/`env` are absent from the schema and refused below.
+ *  - **No headers and no credential values.** They would land in the transcript
+ *    and in the synced connection blob. OAuth or nothing; a server that needs a
+ *    static token stays a manual add in Settings.
+ */
+const PROPOSED_TRANSPORT: JsonSchemaNode = {
+  type: 'string',
+  enum: ['http', 'sse'],
+  description: "'http' for a streamable-HTTP endpoint (the usual one), 'sse' for a legacy SSE one.",
+};
+
 const READ_TOOLS: McpToolSpec[] = [
   {
     name: 'list_workflows',
-    description: 'List workflows with their id, name and step count. Start here before editing anything.',
+    description:
+      'List workflows with their id, name, step count and their `createdAt`/`updatedAt` times (local, `YYYY-MM-DD HH:MM`). Start here before editing anything.',
     readOnly: true,
     inputSchema: { type: 'object', properties: { scope: SCOPE, limit: LIMIT } },
   },
   {
     name: 'get_workflow',
     description:
-      'Read one workflow in full: every step with its prompt template, model, permission mode and flags. Pinned library steps are resolved to the content that will actually run.',
+      'Read one workflow in full: every step with its prompt template, model, permission mode and flags, plus the workflow\'s `createdAt`/`updatedAt` times (local, `YYYY-MM-DD HH:MM`). Pinned library steps are resolved to the content that will actually run.',
     readOnly: true,
     inputSchema: { type: 'object', required: ['workflow'], properties: { workflow: WORKFLOW_REF } },
   },
   {
     name: 'list_steps',
-    description: "List reusable published steps — yours, or other users' shared library.",
+    description:
+      "List reusable published steps — yours, or other users' shared library. Each row carries `createdAt` (when the step was first created) and `updatedAt` (when its current version was minted), local, `YYYY-MM-DD HH:MM`.",
     readOnly: true,
     inputSchema: { type: 'object', properties: { scope: SCOPE, limit: LIMIT } },
   },
   {
     name: 'get_step',
-    description: 'Read one reusable step in full.',
+    description:
+      'Read one reusable step in full, with `createdAt`/`updatedAt` (local, `YYYY-MM-DD HH:MM`). `createdAt` is when the step itself was first created, not when this version was minted — every version of one step reports the same value, so identical dates down a version list are correct. `updatedAt` is that version\'s own mint time.',
     readOnly: true,
     inputSchema: {
       type: 'object',
@@ -138,6 +160,13 @@ const READ_TOOLS: McpToolSpec[] = [
         ownerId: { type: 'string', description: "Another author's step. Defaults to your own." },
       },
     },
+  },
+  {
+    name: 'list_mcp_connections',
+    description:
+      "The MCP servers this user has added, with their transport, URL, whether they are on, and this session's connection status where one is known. Call this when a task needs tools you cannot see (Linear, Sentry, a design tool) — it tells you whether the server is missing, switched off, or connected but not authorized.",
+    readOnly: true,
+    inputSchema: { type: 'object', properties: {} },
   },
 ];
 
@@ -201,6 +230,35 @@ const WRITE_TOOLS: McpToolSpec[] = [
       'Remove one of your reusable steps from the library. Workflows pinned to a version of it keep working.',
     inputSchema: { type: 'object', required: ['stepId'], properties: { stepId: { type: 'string' } } },
   },
+  {
+    name: 'add_mcp_connection',
+    description:
+      "Propose an MCP server for the user to approve, after list_mcp_connections showed it is missing. Look the endpoint up in the vendor's own documentation and pass that documentation page as `source` — the approval card shows the URL verbatim next to a trust check, and the user is the one who decides. Only http/sse endpoints that sign in with OAuth: Lines cannot accept a local command, a header or a token here, so say so and let the user add that kind from Settings themselves.",
+    inputSchema: {
+      type: 'object',
+      required: ['name', 'transport', 'url', 'source'],
+      properties: {
+        name: {
+          type: 'string',
+          description:
+            'The MCP namespace to install it under — its tools arrive as mcp__<name>__<tool>. Lowercase letters, digits, - and _.',
+        },
+        transport: PROPOSED_TRANSPORT,
+        url: { type: 'string', description: "The server's HTTPS endpoint, exactly as documented." },
+        source: {
+          type: 'string',
+          description:
+            'Where you found this endpoint — the documentation URL. Shown to the user on the approval card, so it must be the page you actually read.',
+        },
+      },
+    },
+  },
+  {
+    name: 'authorize_mcp_connection',
+    description:
+      'Sign the user in to one of their http/sse MCP servers. Shows them the provider sign-in link and waits for the handshake to land, after which that server\'s tools are usable in this same turn. Use it after add_mcp_connection, or when list_mcp_connections reports needs-auth.',
+    inputSchema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } },
+  },
 ];
 
 export const LINES_TOOL_MANIFEST: McpToolManifest = {
@@ -209,9 +267,17 @@ export const LINES_TOOL_MANIFEST: McpToolManifest = {
     'Lines workflows: ordered lists of prompt steps a session runs one at a time, parking for approval between them. ' +
     'Use these tools when the user wants to see or change their own workflows and reusable steps. ' +
     'Read before writing (list_workflows, then get_workflow), and send `steps` back whole — it replaces the list. ' +
-    'Every write asks the user for approval, so make one deliberate call rather than a series of guesses.',
+    'Every write asks the user for approval, so make one deliberate call rather than a series of guesses. ' +
+    'The mcp_connection tools cover the third-party MCP servers this user has added: when a task needs tools ' +
+    'you cannot see, check list_mcp_connections before telling the user it cannot be done.',
   tools: [...READ_TOOLS, ...WRITE_TOOLS],
 };
+
+/**
+ * The proposal tool by its full name, so `SessionManager` can vet its URL before
+ * raising the card without restating the string.
+ */
+export const ADD_MCP_CONNECTION_TOOL = `${TOOL_PREFIX}add_mcp_connection`;
 
 const SPECS = new Map(LINES_TOOL_MANIFEST.tools.map((t) => [t.name, t] as const));
 
@@ -230,6 +296,24 @@ export type McpToolDispatcher = (
   toolName: string,
   args: Record<string, unknown>,
 ) => Promise<McpToolResult>;
+
+/** How an agent-driven authorization ended. `pending` = the user has not finished signing in. */
+export type McpAuthorizeOutcome =
+  | { authorized: true; alreadyAuthorized?: boolean }
+  | { pending: true }
+  | { error: string };
+
+/**
+ * The calling session, for the two tools that are about *this* session rather
+ * than about stored data. Supplied by the bridge (see `handleMcpToolRpc`), which
+ * owns the OAuth callback route the handshake completes through; absent in tests
+ * and in any caller with no session, where those tools decline rather than guess.
+ */
+export interface McpToolSession {
+  sessionId: string;
+  /** Run OAuth leg 1 for one connection and wait for the browser redirect to settle. */
+  authorize: (serverName: string) => Promise<McpAuthorizeOutcome>;
+}
 
 // ---- result helpers ----
 
@@ -323,12 +407,51 @@ function refError(ref: string, result: Extract<commands.WorkflowRefResult, { ok:
   }
 }
 
+/** Why `McpConnections` refused a row, phrased for the model rather than as a code. */
+function connectionRefusal(reason: string): string {
+  switch (reason) {
+    case 'duplicate-name':
+      return 'A connection with that name already exists — read list_mcp_connections and use the existing one.';
+    case 'reserved-name':
+      return 'That name is reserved by Lines itself. Propose a different namespace.';
+    case 'bad-name':
+      return 'That name is not a valid MCP namespace: lowercase letters, digits, - and _, starting with a letter.';
+    case 'empty-name':
+      return 'A connection needs a name.';
+    case 'bad-url':
+      return 'That is not a URL Lines can build an MCP server from. Pass the documented https endpoint.';
+    case 'too-many':
+      return 'This user already has the maximum number of connections. Ask them to remove one from Settings.';
+    default:
+      return `Lines refused that connection (${reason}).`;
+  }
+}
+
+/** Argument names that carry a local command or a credential — never accepted from the agent. */
+const REFUSED_PROPOSAL_ARGS = ['command', 'args', 'env', 'headers', 'headerKeys'];
+
+/** One connection as the model sees it — no header names, no ids, nothing secret. */
+function connectionView(
+  connection: McpConnection,
+  status: { status: string; error?: string; tools?: string[] } | undefined,
+): Record<string, unknown> {
+  return {
+    name: connection.name,
+    transport: connection.transport,
+    ...(connection.transport === 'stdio' ? { command: connection.command } : { url: connection.url }),
+    enabled: connection.enabled,
+    ...(status
+      ? { status: status.status, ...(status.error ? { error: status.error } : {}), tools: status.tools ?? [] }
+      : {}),
+  };
+}
+
 /**
  * The tool handlers for one user, closed over their context. Built per rpc: the
  * worker's MCP server is per session, and the bridge routes each call to the
  * context that owns that session.
  */
-export function createMcpDispatcher(ctx: UserContext): McpToolDispatcher {
+export function createMcpDispatcher(ctx: UserContext, session?: McpToolSession): McpToolDispatcher {
   /** Resolve a `workflow` argument to something writable, or the error to return. */
   const owned = (ref: string): { workflow: WorkflowDef } | { error: string } => {
     const result = commands.resolveWorkflowRef(ctx, ref);
@@ -364,7 +487,22 @@ export function createMcpDispatcher(ctx: UserContext): McpToolDispatcher {
 
       case 'list_step_versions': {
         const versions = await commands.stepVersionsView(ctx, str(args.ownerId) || ctx.userId, str(args.stepId));
-        return ok(versions);
+        // Formatted here, not in the view: that view also answers the browser,
+        // which needs the numeric timestamps.
+        return ok(versions.map(commands.stepView));
+      }
+
+      case 'list_mcp_connections': {
+        const connections = ctx.mcp.list();
+        // The status reading this session already has: never warmed from here, so
+        // a read cannot spawn a CLI child for a session that is not running one.
+        const statuses = session ? await ctx.sessions.mcpServerStatus(session.sessionId) : [];
+        const byName = new Map(statuses.map((s) => [s.name, s] as const));
+        return ok({
+          connections: connections.map((c) => connectionView(c, byName.get(c.name))),
+          // Said explicitly so a missing `status` is not read as "disconnected".
+          statusKnown: session !== undefined,
+        });
       }
 
       // ---- writes ----
@@ -429,7 +567,7 @@ export function createMcpDispatcher(ctx: UserContext): McpToolDispatcher {
           published: bool(args.published, false),
           ownerName: commands.ownerDisplayName(ctx),
         });
-        return ok({ saved: true, step: saved });
+        return ok({ saved: true, step: commands.stepView(saved) });
       }
 
       case 'delete_step': {
@@ -439,6 +577,80 @@ export function createMcpDispatcher(ctx: UserContext): McpToolDispatcher {
         }
         commands.deleteStep(ctx, stepId);
         return ok({ deleted: true, stepId });
+      }
+
+      // ---- MCP connections ----
+      //
+      // Reached only after the user approved the card (every non-readOnly Lines
+      // tool always raises one — see handlePreToolUse/handleCanUseTool), so the
+      // checks here are about what Lines will accept at all, not about consent.
+      case 'add_mcp_connection': {
+        const transport = str(args.transport);
+        // Refused before the shared validator, and phrased as a rule rather than
+        // a validation error: a local command proposed from something the agent
+        // read is arbitrary code execution, and a credential passed here would be
+        // written into the transcript and the synced connection list.
+        if (transport === 'stdio') {
+          return fail(
+            'Lines does not accept a stdio (local command) MCP server from an agent proposal — that is arbitrary code execution. Tell the user to add it themselves in Settings → Connections.',
+          );
+        }
+        if (transport !== 'http' && transport !== 'sse') {
+          return fail("`transport` must be 'http' or 'sse'.");
+        }
+        const refused = REFUSED_PROPOSAL_ARGS.filter((key) => args[key] !== undefined);
+        if (refused.length) {
+          return fail(
+            `Lines does not accept ${refused.join(', ')} from an agent proposal — OAuth only, no credential values. If this server needs a header or a token, tell the user to add it in Settings → Connections.`,
+          );
+        }
+        const source = str(args.source).trim();
+        if (!source) {
+          return fail('`source` is required: pass the documentation URL you read this endpoint from.');
+        }
+        // The same gate the Settings form and the wire handler use, so the
+        // reserved-name, duplicate-name and URL rules cannot diverge here.
+        const added = ctx.mcp.add({ name: str(args.name), transport, url: str(args.url), enabled: true });
+        if (!added.ok) return fail(connectionRefusal(added.reason));
+        // onChange has already broadcast the list, pushed it to storage and
+        // pushed the server onto every live query (see buildUserContext), so the
+        // tools are live in this turn — nothing restarts.
+        return ok({
+          added: true,
+          connection: connectionView(added.connection, undefined),
+          next: `Call authorize_mcp_connection with name "${added.connection.name}" to sign the user in, then use its tools.`,
+        });
+      }
+
+      case 'authorize_mcp_connection': {
+        if (!session) return fail('Authorization needs a running session.');
+        const name = str(args.name).trim().toLowerCase();
+        const connection = ctx.mcp.list().find((c) => c.name === name);
+        if (!connection) {
+          return fail(`No connection named "${name}". Read list_mcp_connections first.`);
+        }
+        if (connection.transport === 'stdio') {
+          return fail(
+            `"${name}" is a local (stdio) server, which takes its credentials from its own environment — there is nothing to authorize.`,
+          );
+        }
+        if (!connection.enabled) {
+          return fail(`"${name}" is switched off. Ask the user to enable it in Settings → Connections.`);
+        }
+        const outcome = await session.authorize(name);
+        if ('error' in outcome) return fail(outcome.error);
+        if ('pending' in outcome) {
+          return ok({
+            authorized: false,
+            pending: true,
+            message: `Still waiting on the ${name} sign-in. Ask the user to finish it in the tab that opened, then call authorize_mcp_connection again.`,
+          });
+        }
+        return ok({
+          authorized: true,
+          ...(outcome.alreadyAuthorized ? { alreadyAuthorized: true } : {}),
+          message: `${name} is authorized on this machine. Its tools are usable now.`,
+        });
       }
 
       default:

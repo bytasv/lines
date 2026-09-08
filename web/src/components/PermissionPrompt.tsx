@@ -26,6 +26,7 @@ import {
   IconMap,
   IconMessagePlus,
   IconPencil,
+  IconPlugConnected,
   IconPointFilled,
   IconShieldQuestion,
   IconTerminal2,
@@ -33,7 +34,12 @@ import {
   IconWorld,
   IconZoomScan,
 } from '@tabler/icons-react';
-import type { PermissionRequestData, PermissionResolutionSource, PlanComment } from '@lines/shared';
+import type {
+  McpVetting,
+  PermissionRequestData,
+  PermissionResolutionSource,
+  PlanComment,
+} from '@lines/shared';
 import { KEEP_PLANNING_MESSAGE, normalizePlanComments } from '@lines/shared';
 import { send } from '../ws';
 import { readPlanComments, useStore, writePlanComments } from '../store';
@@ -200,6 +206,8 @@ function toolPresentation(data: PermissionRequestData): {
       };
 
     default: {
+      const connection = mcpConnectionPresentation(data);
+      if (connection) return connection;
       const workflowEdit = workflowToolPresentation(data.toolName, input);
       if (workflowEdit) return workflowEdit;
       if (isEditTool(data.toolName)) {
@@ -233,6 +241,77 @@ function toolPresentation(data: PermissionRequestData): {
 
 /** Lines' own workflow-editing MCP tools, as the model sees them. */
 const WORKFLOW_TOOL_PREFIX = 'mcp__lines__';
+
+const VETTING_COLOR: Record<McpVetting['level'], string> = {
+  known: 'teal',
+  unknown: 'yellow',
+  suspicious: 'red',
+};
+
+const VETTING_LABEL: Record<McpVetting['level'], string> = {
+  known: 'Recognised endpoint',
+  unknown: 'Not recognised',
+  suspicious: 'Looks wrong',
+};
+
+/**
+ * The agent proposing an MCP server, which is the one card where the URL itself
+ * is the thing being approved — a granted server contributes tools to every
+ * session afterwards, and the agent may have read this endpoint off a web page.
+ *
+ * So: the URL verbatim and never abbreviated (the domain is what the user is
+ * judging), the source the agent cited, and the bridge's trust check as a badge.
+ * The check is advisory — it colours the card and nothing else.
+ */
+function mcpConnectionPresentation(
+  data: PermissionRequestData,
+): ReturnType<typeof toolPresentation> | null {
+  if (data.toolName !== `${WORKFLOW_TOOL_PREFIX}add_mcp_connection`) return null;
+  const input = data.input;
+  const name = String(input.name ?? '');
+  const transport = String(input.transport ?? '');
+  const url = String(input.url ?? '');
+  const source = data.vetting?.source ?? (typeof input.source === 'string' ? input.source : '');
+  const vetting = data.vetting;
+
+  return {
+    icon: <IconPlugConnected size={16} color="var(--mantine-color-yellow-6)" />,
+    title: `Claude wants to connect an MCP server (${name || 'unnamed'})`,
+    allowLabel: 'Add connection',
+    denyLabel: 'Deny',
+    body: (
+      <Stack gap={6}>
+        {/* Never truncated: the host is the whole decision. */}
+        <Text size="sm" ff="monospace" style={{ wordBreak: 'break-all' }}>
+          {url}
+        </Text>
+        <Text size="xs" c="dimmed">
+          Namespace <Code>{name}</Code> · {transport || 'http'} · signs in with OAuth
+        </Text>
+        {vetting && (
+          <Group gap={6} wrap="nowrap" align="flex-start">
+            <Badge size="xs" variant="light" color={VETTING_COLOR[vetting.level]} style={{ flexShrink: 0 }}>
+              {VETTING_LABEL[vetting.level]}
+            </Badge>
+            <Text size="xs" c="dimmed" style={{ minWidth: 0 }}>
+              {vetting.reason}
+            </Text>
+          </Group>
+        )}
+        {source && (
+          <Text size="xs" c="dimmed" style={{ wordBreak: 'break-all' }}>
+            Claude says it found this at {source}
+          </Text>
+        )}
+        <Text size="xs" c="dimmed">
+          A check, not a verdict — read the domain yourself. Once added, this server’s tools are
+          available to every session, and you authorize it from a browser on the machine running
+          Lines.
+        </Text>
+      </Stack>
+    ),
+  };
+}
 
 const WORKFLOW_TOOL_TITLES: Record<string, { title: string; allowLabel: string }> = {
   create_workflow: { title: 'Claude wants to create a workflow', allowLabel: 'Create workflow' },

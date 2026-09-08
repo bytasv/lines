@@ -15,6 +15,9 @@ import type { WorkerClient } from './workerClient.ts';
 
 const USER = 'u1';
 
+/** The one display shape every view formats timestamps into: `YYYY-MM-DD HH:MM`. */
+const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/;
+
 const content = (over: Partial<StepContent> = {}): StepContent => ({
   name: 'Plan',
   promptTemplate: 'Plan {task}',
@@ -192,6 +195,8 @@ test('readWorkflowView resolves pinned refs and reports the ones it cannot', () 
 
   const view = commands.readWorkflowView(h.ctx, saved);
   assert.equal(view.stepCount, 3);
+  assert.match(view.createdAt!, TIMESTAMP_RE);
+  assert.match(view.updatedAt!, TIMESTAMP_RE);
   assert.deepEqual(view.steps.map((s) => s.name), ['Shared Plan', 'Inline']);
   assert.deepEqual(view.steps[0]!.pinned, { stepId: published.id, ownerId: USER, version: 1 });
   assert.deepEqual(view.unresolvedSteps, [{ index: 1, stepId: 'ghost', ownerId: 'u2', version: 9 }]);
@@ -200,16 +205,59 @@ test('readWorkflowView resolves pinned refs and reports the ones it cannot', () 
 test('list views scope to owned, shared, or both', () => {
   const h = harness();
   h.workflows.setShared([{ id: 'f1', name: 'Foreign', steps: [], ownerId: 'u2' }]);
+  const mine = commands.saveWorkflow(h.ctx, {
+    workflow: { id: '', name: 'Mine', steps: [content()] } as WorkflowDef,
+  });
 
   const owned = commands.listWorkflowsView(h.ctx, 'owned');
   assert.equal(owned.every((w) => w.owned), true);
   assert.equal(owned.some((w) => w.id === 'f1'), false);
+  const row = owned.find((w) => w.id === mine.id)!;
+  assert.match(row.createdAt!, TIMESTAMP_RE);
+  assert.match(row.updatedAt!, TIMESTAMP_RE);
 
   const shared = commands.listWorkflowsView(h.ctx, 'shared');
   assert.deepEqual(shared.map((w) => w.id), ['f1']);
   assert.equal(shared[0]!.owned, false);
+  // A row with no timestamps at all formats to empty strings, never to a fake date.
+  assert.equal(shared[0]!.createdAt, '');
+  assert.equal(shared[0]!.updatedAt, '');
 
   assert.equal(commands.listWorkflowsView(h.ctx, 'all').length, owned.length + 1);
+});
+
+test('view timestamps are zero-padded local YYYY-MM-DD HH:MM', () => {
+  const h = harness();
+  const saved = commands.saveWorkflow(h.ctx, {
+    workflow: { id: '', name: 'Padded', steps: [content()] } as WorkflowDef,
+  });
+  // Single-digit month, day, hour and minute — the padding case. Local-time
+  // construction, because the format is local too. An earlier createdAt is
+  // adopted by the engine's earliest-wins rule.
+  const known = new Date(2021, 0, 5, 3, 7).getTime();
+  commands.saveWorkflow(h.ctx, { workflow: { ...saved, createdAt: known } });
+
+  const row = commands.listWorkflowsView(h.ctx, 'owned').find((w) => w.id === saved.id)!;
+  assert.equal(row.createdAt, '2021-01-05 03:07');
+});
+
+test('step views carry the formatted pair; the version history stays numeric', async () => {
+  const h = harness();
+  const step = commands.saveStep(h.ctx, { step: content(), published: true });
+
+  const listed = commands.listStepsView(h.ctx, 'owned').find((s) => s.id === step.id)!;
+  assert.match(listed.createdAt!, TIMESTAMP_RE);
+  assert.match(listed.updatedAt!, TIMESTAMP_RE);
+
+  const read = commands.readStepView(h.ctx, step.id)!;
+  assert.match(read.createdAt!, TIMESTAMP_RE);
+  assert.match(read.updatedAt!, TIMESTAMP_RE);
+
+  // The regression guard for the browser: index.ts hands this straight to the
+  // version popover, whose relative-time labels need ms epochs.
+  const versions = await commands.stepVersionsView(h.ctx, USER, step.id);
+  assert.equal(typeof versions[0]!.updatedAt, 'number');
+  assert.equal(typeof versions[0]!.createdAt, 'number');
 });
 
 test('a list limit is clamped rather than trusted', () => {

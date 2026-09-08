@@ -319,6 +319,12 @@ export interface StepDef extends StepContent {
   version: number;
   published: boolean;
   updatedAt?: number;
+  /**
+   * ms epoch of when this step *id* was first created — identical across every
+   * version of the same step, and only ever moved earlier. The mint time of one
+   * particular version is that immutable row's `updatedAt`.
+   */
+  createdAt?: number;
 }
 
 /** A consumer's pinned reference to another author's published step version. */
@@ -364,6 +370,8 @@ export interface WorkflowDef {
   steps: WorkflowStep[];
   /** ms epoch of the last save — last-write-wins key for cross-instance sync. */
   updatedAt?: number;
+  /** ms epoch of the first save. Never restamped, and only ever moved earlier. */
+  createdAt?: number;
   /** Owner opted in to sharing this workflow with every other user on the instance. */
   published?: boolean;
   /** Clerk userId of the owner — authoritative, stamped server-side on save. */
@@ -896,6 +904,15 @@ export interface PermissionRequestData {
    * the card already solves.
    */
   elicitation?: McpElicitation;
+  /**
+   * Bridge-computed trust assessment of an MCP server the *agent* proposed, so
+   * the user approves against a signal rather than a bare URL. Same precedent as
+   * `guardReason`: advisory, computed once before the card is raised, and
+   * persisted with it so a reload still shows the badge on a pending card.
+   *
+   * Advisory at every level — no level skips or auto-approves the card.
+   */
+  vetting?: McpVetting;
   /**
    * On 'deny' resolutions: the reason shown back to the model. Persisted so the
    * card can render it and a re-delivered request after a bridge restart replays
@@ -2452,6 +2469,23 @@ export interface McpElicitation {
   url: string;
 }
 
+/**
+ * How much a proposed MCP server endpoint can be trusted, as assessed on the
+ * bridge (see server/src/mcpVetting.ts) before the approval card is raised.
+ *
+ * Exists because an agent-proposed URL can come from a page the agent read, so
+ * the user needs something to judge besides the domain string. Deliberately a
+ * check and not a verdict: `known` changes the card's colour and copy and
+ * nothing else — the decision is always the user's.
+ */
+export interface McpVetting {
+  level: 'known' | 'unknown' | 'suspicious';
+  /** One line, shown under the badge. */
+  reason: string;
+  /** Where the agent said it found the endpoint (a documentation URL). */
+  source?: string;
+}
+
 export type ServerMessage =
   /** `bridge` is optional: once the web app is hosted it will meet bridges older
    *  than itself, and an absent field is exactly that case. */
@@ -2851,6 +2885,13 @@ export function rewindBlock(
  * imports only types from here, so nothing of ours is read at its top level.
  */
 export { addSpend, mergeSpend, sortedSpend } from './usageByModel.ts';
+
+/**
+ * Timestamp display, re-exported for the same reason: it formats the
+ * `createdAt`/`updatedAt` fields declared here. Safe above the cycle-sensitive
+ * block below — `formatTime.ts` imports nothing at all.
+ */
+export { formatTimestamp } from './formatTime.ts';
 
 /**
  * Workflow/step validation, re-exported so a caller gets the rules from the same

@@ -221,6 +221,10 @@ function ConnectionRow({
             size="compact-xs"
             variant={unauthorized ? 'light' : 'subtle'}
             disabled={!sessionId}
+            // Mantine's button label clips rather than overflows, so a shrinkable
+            // button next to the flex: 1 caveat below loses its tail — which bit
+            // the longer 'Re-authorize…' string. The caveat wraps instead.
+            style={{ flexShrink: 0 }}
             onClick={() => sessionId && authorizeMcpConnection(sessionId, connection.name)}
           >
             {unauthorized ? 'Authorize…' : 'Re-authorize…'}
@@ -267,7 +271,16 @@ function ConnectionRow({
           <Text size="xs" c="red" style={{ flex: 1 }}>
             {auth.error}
           </Text>
-          <Anchor component="button" type="button" size="xs" c="dimmed" onClick={() => clearMcpAuth(connection.name)}>
+          <Anchor
+            component="button"
+            type="button"
+            size="xs"
+            c="dimmed"
+            // Same clipping as the Authorize button: a long provider error would
+            // otherwise squeeze this link out of reach.
+            style={{ flexShrink: 0 }}
+            onClick={() => clearMcpAuth(connection.name)}
+          >
             Dismiss
           </Anchor>
         </Group>

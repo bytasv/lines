@@ -17,6 +17,7 @@ import type {
   InterjectData,
   McpElicitation,
   McpServerStatusInfo,
+  McpVetting,
   MentionValue,
   PermissionMode,
   PermissionRequestData,
@@ -76,8 +77,14 @@ import {
 } from './contextBreakdown.ts';
 import { claudeCliRefusalMessage, claudeCliStatus } from './claudeCli.ts';
 import { classifyTurnFailure, turnFailureAdvice, turnFailureRetryHint } from './turnFailure.ts';
-import { isLinesMcpTool, isReadOnlyLinesTool, LINES_TOOL_MANIFEST } from './mcpWorkflowTools.ts';
+import {
+  ADD_MCP_CONNECTION_TOOL,
+  isLinesMcpTool,
+  isReadOnlyLinesTool,
+  LINES_TOOL_MANIFEST,
+} from './mcpWorkflowTools.ts';
 import type { McpConnections } from './mcpConnections.ts';
+import { vetMcpUrl } from './mcpVetting.ts';
 import { normalizeAuthStart, unsupportedReason, PENDING_TTL_MS } from './mcpAuth.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
@@ -2600,6 +2607,64 @@ export class SessionManager {
   }
 
   /**
+   * The trust check behind an agent-proposed MCP connection, as another one-shot
+   * helper query (same shape as consolidateQuery). Passed to `vetMcpUrl` rather
+   * than built there so that module never imports the query stack.
+   *
+   * `baseQueryOptions` is `allowedTools: []`, `maxTurns: 1`, `settingSources: []`
+   * — which is the security property here, not merely thrift: the judge cannot
+   * fetch the candidate page, so the page cannot talk it into trusting itself.
+   */
+  private vettingJudge = async (prompt: string, systemPrompt: string): Promise<string | null> => {
+    const token = await this.ownerToken();
+    if (!token) return null;
+    const q = query({
+      prompt,
+      options: baseQueryOptions(token, 'claude-sonnet-5', systemPrompt) as never,
+    });
+    let answer: string | null = null;
+    for await (const message of q) {
+      const msg = message as { type: string; result?: string };
+      if (msg.type === 'result' && typeof msg.result === 'string') answer = msg.result.trim();
+    }
+    return answer;
+  };
+
+  /**
+   * Show one MCP server's sign-in link as the ordinary url-mode card and hand
+   * back both the user's answer and a way to drop the card once the handshake
+   * has settled on its own — which is the usual ending, since the browser
+   * redirect lands without anyone clicking anything here.
+   *
+   * Used by the agent-driven `authorize_mcp_connection`; the Settings pane has
+   * its own link and does not need a card.
+   */
+  promptMcpAuthorization(
+    sessionId: string,
+    serverName: string,
+    authUrl: string,
+  ): { answered: Promise<boolean>; close: () => void } {
+    const requestId = randomUUID();
+    const answered = this.askPermission(
+      sessionId,
+      requestId,
+      '',
+      {},
+      undefined,
+      false,
+      {
+        serverName,
+        message: `Sign in to ${serverName} to finish connecting it. Lines completes the handshake when the tab redirects back.`,
+        mode: 'url',
+        url: authUrl,
+      },
+    ).then((answer) => answer.allow);
+    // handleRpcCancel is exactly this operation — emit an 'expired' resolution and
+    // release the waiter — for a card whose reason to exist has gone away.
+    return { answered, close: () => this.handleRpcCancel(requestId) };
+  }
+
+  /**
    * Token for the bridge-side helper queries (autoName/summarizeTurn/
    * consolidateStepOutput): they run outside the worker, so they need the
    * owner's OAuth token explicitly. Refreshes like a real turn rather than
@@ -4194,7 +4259,34 @@ export class SessionManager {
     // On a resend whose card is already in the transcript (unanswered), don't
     // emit a duplicate request — just re-register the resolver.
     const skipEmit = resend && this.findPermissionRequest(sessionId, requestId) !== null;
-    const answer = await this.askPermission(sessionId, requestId, toolName, input, guardReason, skipEmit);
+
+    // An agent-proposed MCP server: the URL may have come from a page the agent
+    // read, so the card carries a trust check next to it. Advisory only — there
+    // is no level at which the card is skipped (see mcpVetting.ts). Computed
+    // only for a card that is about to be emitted; a re-delivered one already
+    // carries the verdict in the transcript.
+    let vetting: McpVetting | undefined;
+    if (!skipEmit && toolName === ADD_MCP_CONNECTION_TOOL) {
+      vetting = await vetMcpUrl(
+        {
+          name: String(input.name ?? ''),
+          url: String(input.url ?? ''),
+          ...(typeof input.source === 'string' && input.source ? { source: input.source } : {}),
+        },
+        this.vettingJudge,
+      );
+    }
+
+    const answer = await this.askPermission(
+      sessionId,
+      requestId,
+      toolName,
+      input,
+      guardReason,
+      skipEmit,
+      undefined,
+      vetting,
+    );
     const finalInput = answer.updatedInput ?? input;
     return answer.allow
       ? { behavior: 'allow', updatedInput: finalInput }
@@ -4210,6 +4302,8 @@ export class SessionManager {
     skipEmit = false,
     /** Set instead of a tool call when an MCP server is the one asking. */
     elicitation?: McpElicitation,
+    /** Trust check for an agent-proposed MCP server; advisory, never a gate. */
+    vetting?: McpVetting,
   ): Promise<PermissionAnswer> {
     const state = this.liveState(sessionId);
     if (!skipEmit) {
@@ -4219,6 +4313,7 @@ export class SessionManager {
         input,
         guardReason,
         ...(elicitation ? { elicitation } : {}),
+        ...(vetting ? { vetting } : {}),
       } satisfies PermissionRequestData);
     }
     const pendingMeta = this.sessions.get(sessionId);

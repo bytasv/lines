@@ -19,6 +19,7 @@ model Workflow {
   // query can index on it instead of filtering a JSON path.
   published Boolean  @default(false)
   updatedAt DateTime @default(now()) @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
 
   @@id([userId, id])
   @@index([published])
@@ -36,6 +37,10 @@ model StepVersion {
   data      Json // StepDef
   published Boolean  @default(false)
   updatedAt DateTime @default(now()) @map("updated_at")
+  // This row's own insert time. A *lineage's* creation is `min(created_at)` over
+  // (user_id, id) — every version of one step shares one birthday, and it is not
+  // this per-row value (see GET /steps).
+  createdAt DateTime @default(now()) @map("created_at")
 
   @@id([userId, id, version])
   // Both reads are `DISTINCT ON (user_id, id) … ORDER BY user_id, id, version DESC`,

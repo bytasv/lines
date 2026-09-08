@@ -96,6 +96,27 @@ test('status from the shell is broadcast with the live busy flag folded in', () 
   assert.equal(mgr.current().restartBlocked, true);
 });
 
+test('a failed check reaches the browser as an error with its message intact', () => {
+  // The shell now emits 'error' routinely — a rejected checkForUpdates, a dev
+  // build with no feed, an updater that would not start — rather than only in
+  // theory, and the banner has nothing else to render from.
+  const { mgr, sent } = manager([session('running')]);
+  process.emit(
+    'message',
+    { type: 'updateStatus', status: { state: 'error', message: 'getaddrinfo ENOTFOUND' } } as never,
+    undefined,
+  );
+
+  const msg = sent.at(-1) as { type: string; status: { state: string; message: string; restartBlocked: boolean } };
+  assert.equal(msg.type, 'updateStatus');
+  assert.equal(msg.status.state, 'error');
+  assert.equal(msg.status.message, 'getaddrinfo ENOTFOUND');
+  // Folded in the same way as on any other state, so an error does not read as
+  // "safe to restart".
+  assert.equal(msg.status.restartBlocked, true);
+  assert.equal(mgr.current().state, 'error');
+});
+
 test('relay transitions reach the shell over the same channel', () => {
   withSend((calls) => {
     reportRelayStatus({ connected: true });

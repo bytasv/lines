@@ -41,6 +41,20 @@ function sameContent(a: StepContent, b: StepContent): boolean {
 }
 
 /**
+ * Merge rule for `createdAt` at every layer: earliest wins. Idempotent and
+ * order-independent, so two peers converge whichever way round their pushes
+ * land — and a blob that dropped the field can never erase a known birthday.
+ */
+function earliest(...values: (number | undefined)[]): number | undefined {
+  let out: number | undefined;
+  for (const v of values) {
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    if (out === undefined || v < out) out = v;
+  }
+  return out;
+}
+
+/**
  * True when a template threads the hand-off in itself — via `{previous}`/`{diff}`/
  * `{changed}` or any `{outputs.*}` — so `runStep` must not also auto-prepend it.
  * Tested against the template: after substitution the tokens are gone.
@@ -294,9 +308,30 @@ export class WorkflowEngine {
     // never offered its new version (see normalizeRefs).
     let healed = false;
     for (const wf of this.workflows.values()) if (this.normalizeRefs(wf)) healed = true;
+    // Rows written before creation time was recorded get one now, from the best
+    // evidence on disk: the workflow's own last save, and for a step head the
+    // oldest version of its lineage. Healed here rather than at read time so the
+    // value is durable — otherwise every boot would derive a different answer as
+    // `updatedAt` moves.
+    for (const wf of this.workflows.values()) {
+      if (wf.createdAt !== undefined) continue;
+      wf.createdAt = wf.updatedAt ?? Date.now();
+      healed = true;
+    }
     if (healed) this.persist();
+    let healedSteps = false;
+    for (const s of this.steps.values()) {
+      if (s.createdAt !== undefined) continue;
+      s.createdAt = this.lineageCreatedAt(s.id) ?? s.updatedAt ?? Date.now();
+      healedSteps = true;
+    }
+    if (healedSteps) this.persistSteps();
     if (!this.workflows.has(DEFAULT_WORKFLOW.id)) {
-      this.workflows.set(DEFAULT_WORKFLOW.id, DEFAULT_WORKFLOW);
+      // A shallow copy, never the module-level const itself: `save()` restamps the
+      // object it is handed in place, so seeding by reference would leak one
+      // user's timestamps into every other UserContext in this process.
+      // `updatedAt` stays undefined — a seed has to lose LWW to any remote row.
+      this.workflows.set(DEFAULT_WORKFLOW.id, { ...DEFAULT_WORKFLOW, createdAt: Date.now() });
       this.persist();
     }
     // Every settle is forwarded, source included: a user-source turn is normally a
@@ -491,9 +526,35 @@ export class WorkflowEngine {
     return this.refs().filter((r) => !this.stepVersions.has(stepKey(r.ownerId, r.stepId, r.version)));
   }
 
-  /** Adopt resolved immutable versions (own history from a pull, or foreign pins). */
+  /**
+   * When the step *id* behind these cached versions was first created, as far as
+   * this bridge can tell: the earliest `createdAt` any version carries, else the
+   * oldest version's own mint time. Covers a head that `deleteStep` removed while
+   * its versions stayed cached, which is why it reads the version map and not
+   * `this.steps`.
+   */
+  private lineageCreatedAt(id: string): number | undefined {
+    let out: number | undefined;
+    for (const s of this.stepVersions.values()) {
+      if (s.ownerId !== this.userId || s.id !== id) continue;
+      out = earliest(out, s.createdAt ?? s.updatedAt);
+    }
+    return out;
+  }
+
+  /**
+   * Adopt resolved immutable versions (own history from a pull, or foreign pins).
+   *
+   * A known `createdAt` is kept: `POST /steps/resolve` answers from the raw blob
+   * with no column injection, so a pin resolved through it can arrive without the
+   * field and must not wipe what is already cached.
+   */
   addStepVersions(list: StepDef[]): void {
-    for (const s of list) this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
+    for (const s of list) {
+      const key = stepKey(s.ownerId, s.id, s.version);
+      const createdAt = earliest(this.stepVersions.get(key)?.createdAt, s.createdAt);
+      this.stepVersions.set(key, createdAt === undefined ? s : { ...s, createdAt });
+    }
   }
 
   /** Cached versions of one step, newest first (best-effort local view). */
@@ -533,8 +594,12 @@ export class WorkflowEngine {
     for (const s of list) {
       const cur = this.steps.get(s.id);
       if (!cur || s.version >= cur.version) {
-        this.steps.set(s.id, s);
-        this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
+        // Content is last-write-wins, but creation time only ever moves earlier —
+        // a peer (or an older bridge) pushing a blob without it must not erase it.
+        const createdAt = earliest(cur?.createdAt, s.createdAt, this.lineageCreatedAt(s.id));
+        const merged = createdAt === undefined ? s : { ...s, createdAt };
+        this.steps.set(s.id, merged);
+        this.stepVersions.set(stepKey(merged.ownerId, merged.id, merged.version), merged);
         changed = true;
       }
     }
@@ -558,6 +623,9 @@ export class WorkflowEngine {
       version,
       published,
       updatedAt: Date.now(),
+      // Carried forward across version bumps: this is the step id's birthday, not
+      // this version's mint time (that is `updatedAt` on this immutable row).
+      createdAt: head?.createdAt ?? this.lineageCreatedAt(id) ?? Date.now(),
     };
     this.steps.set(id, step);
     this.stepVersions.set(stepKey(step.ownerId, id, version), step);
@@ -616,7 +684,18 @@ export class WorkflowEngine {
     if (workflow.id && this.isForeign(workflow.id)) {
       throw new ForeignWorkflowError(workflow.id);
     }
-    if (!workflow.id) workflow.id = randomUUID();
+    if (!workflow.id) {
+      workflow.id = randomUUID();
+      // A fresh id is always born now, whatever the caller sent: both `duplicate()`
+      // in the editor and `create_workflow` build the new workflow by spreading an
+      // existing one, and the copy must not inherit the original's birthday.
+      workflow.createdAt = Date.now();
+    } else {
+      // Re-read from the stored row, so an older client, an MCP `{ ...target }`
+      // spread or a peer blob that dropped the field cannot lose the creation time.
+      workflow.createdAt =
+        earliest(this.workflows.get(workflow.id)?.createdAt, workflow.createdAt) ?? Date.now();
+    }
     this.normalizeRefs(workflow);
     workflow.updatedAt = Date.now(); // LWW key for cross-instance sync
     workflow.ownerId = this.userId; // authoritative — never trust a client-sent owner
@@ -637,7 +716,12 @@ export class WorkflowEngine {
     for (const workflow of list) {
       const cur = this.workflows.get(workflow.id);
       if (cur && (workflow.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) continue;
-      this.workflows.set(workflow.id, workflow);
+      // The content is adopted wholesale (LWW), but creation time only ever moves
+      // earlier — a newer remote row missing `createdAt` must not erase ours.
+      this.workflows.set(
+        workflow.id,
+        cur ? { ...workflow, createdAt: earliest(cur.createdAt, workflow.createdAt) } : workflow,
+      );
       changed = true;
     }
     if (!changed) return;

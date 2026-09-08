@@ -8,10 +8,11 @@
  * The bridge and worker stay two processes on purpose: the worker holds every
  * live Claude query, so a bridge crash or restart must not take a turn with it.
  *
- * Hosted is the default. The installed app serves no UI of its own: the user
- * works in the hosted web app, and this process exists to run the agent locally
- * and keep an outbound connection open. `LINES_LOCAL_MODE=1` brings back the
- * purely local app (own web server, own window), which is now a dev-only path —
+ * Hosted is the default. The app hosts no UI of its own: the user works in the
+ * hosted web app — either in their browser or in a plain `BrowserWindow` pointed
+ * at the same public URL — and this process exists to run the agent locally and
+ * keep an outbound connection open. `LINES_LOCAL_MODE=1` brings back the purely
+ * local app (own web server, own window), which is now a dev-only path —
  * `web/dist` is not in the DMG.
  */
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
@@ -19,7 +20,19 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { app, BrowserWindow, Menu, Notification, Tray, dialog, nativeImage, shell } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  Notification,
+  Tray,
+  dialog,
+  nativeImage,
+  powerMonitor,
+  session,
+  shell,
+  type MenuItemConstructorOptions,
+} from 'electron';
 import { autoUpdater } from 'electron-updater';
 import type { UpdateStatus } from '@lines/shared';
 
@@ -72,6 +85,15 @@ const BRIDGE_LOCK_FILE = path.join(APP_ROOT, 'bridge.lock');
 const EXIT_BRIDGE_LOCK_HELD = 78;
 /** Child stdout/stderr, so "Open logs" has something to reveal on a machine with no terminal. */
 const LOG_FILE = path.join(APP_ROOT, 'logs', `${INSTANCE}.log`);
+/**
+ * The shell's own preferences. Named for the shell rather than its content,
+ * unlike every bridge-owned file beside it (`device.json`, `projects.json`), so
+ * a future store file cannot claim the name.
+ *
+ * Same root as the log the tray already reveals: a second location under
+ * `app.getPath('userData')` would only double where you have to look.
+ */
+const PREFS_FILE = path.join(APP_ROOT, 'desktop.json');
 
 const LOCAL_MODE = isLocalMode();
 const RELAY_MODE = !LOCAL_MODE;
@@ -85,6 +107,28 @@ const config = loadConfig(ROOT);
  * `identity`) together once signing exists — nothing else changes.
  */
 const CAN_SELF_INSTALL = false;
+
+/**
+ * Injected by esbuild, because `electron dist/main.cjs` passes a *file* — Electron
+ * never reads desktop/package.json, so `app.getVersion()` answers with Electron's
+ * own version unpackaged. Undefined under tsx, hence the `typeof` guard; same
+ * pattern as `server/src/index.ts`.
+ */
+declare const __LINES_VERSION__: string | undefined;
+
+/**
+ * The running version, as shown in the tray.
+ *
+ * Packaged, `app.getVersion()` *is* desktop/package.json's version — the exact
+ * value electron-updater compares the feed against — so the displayed version and
+ * the updater's basis cannot disagree. Both are logged at boot so a mismatch is
+ * visible rather than inferred.
+ */
+const APP_VERSION = app.isPackaged
+  ? app.getVersion()
+  : typeof __LINES_VERSION__ === 'string'
+    ? __LINES_VERSION__
+    : app.getVersion();
 
 /**
  * A GUI-launched macOS app inherits a minimal PATH — no Homebrew, often no
@@ -136,6 +180,28 @@ let cli: ClaudeCliStatus = claudeCliStatus();
 let update: UpdateStatus = { state: 'idle' };
 /** Version we have already posted a notification for, so a re-check stays quiet. */
 let notifiedUpdateVersion: string | null = null;
+/** True once the updater is wired to a real feed and checks are actually running. */
+let updatesEnabled = false;
+/** Why they are not, when they are not — a tray row, never silence. */
+let updatesDisabledReason: string | null = null;
+/** A check is in flight; drives the transient `Checking for updates…` row. */
+let checking = false;
+/**
+ * When the last check settled, success or failure. Shell-local rather than a new
+ * `UpdateStatus` field: the browser can neither trigger a check nor act on one,
+ * so widening the wire protocol would earn nothing.
+ */
+let lastCheckAt: number | null = null;
+/** The single pending post-failure retry, so an offline machine cannot loop. */
+let checkRetryTimer: NodeJS.Timeout | null = null;
+/**
+ * Check a real feed from an unpackaged run. `AppUpdater` gates every check on
+ * `app.isPackaged || forceDevUpdateConfig`, so without this the whole network
+ * path is unexercisable outside a DMG — which is how a broken release shipped.
+ */
+const FORCE_UPDATE_CHECK = process.env.LINES_FORCE_UPDATE_CHECK === '1';
+/** Where "Open Lines" goes. Read once at boot from {@link PREFS_FILE}. */
+let openIn: 'desktop' | 'browser' = 'desktop';
 
 /**
  * The relay accepts our socket *before* asking storage whether this device is
@@ -163,6 +229,27 @@ const AUTO_REGISTER_MIN_MS = 30_000;
  * "someone ran `tilt up`" state, not a fault to race back from.
  */
 const STAND_DOWN_RECHECK_MS = 5_000;
+
+/** Between automatic checks. */
+const UPDATE_CHECK_MS = 6 * 60 * 60_000;
+
+/**
+ * After a failed automatic check, try once more.
+ *
+ * Start-at-login fires the first check while Wi-Fi is still associating, and
+ * without this the next attempt is six hours away. Deliberately a single armed
+ * timer rather than a repeating one: an offline laptop would otherwise retry
+ * every five minutes forever for no benefit.
+ */
+const UPDATE_RETRY_MS = 5 * 60_000;
+
+/**
+ * How stale the last check has to be for a wake from sleep to re-check.
+ *
+ * A `setInterval` does not fire while the machine sleeps — a laptop closed
+ * nightly can go days without the 6h timer ever coming due.
+ */
+const UPDATE_RESUME_STALE_MS = 60 * 60_000;
 
 function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return {
@@ -199,6 +286,37 @@ function appendLog(line: string) {
     fs.appendFileSync(LOG_FILE, line);
   } catch {
     /* logging is not worth crashing over */
+  }
+}
+
+/**
+ * A line from the shell itself, to both the log file and stdout.
+ *
+ * `console.log` alone is unreachable from a packaged LSUIElement app — there is
+ * no terminal attached — so anything that has to be diagnosable after the fact
+ * goes through here, where "Open logs" can reveal it.
+ */
+function shellLog(line: string) {
+  appendLog(`${line}\n`);
+  console.log(line);
+}
+
+/** Shell preferences, best-effort: a read-only home must not break the tray. */
+function loadPrefs() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')) as { openIn?: unknown };
+    if (raw.openIn === 'browser' || raw.openIn === 'desktop') openIn = raw.openIn;
+  } catch {
+    /* absent or corrupt: the default stands */
+  }
+}
+
+function savePrefs() {
+  try {
+    fs.mkdirSync(APP_ROOT, { recursive: true });
+    fs.writeFileSync(PREFS_FILE, `${JSON.stringify({ openIn }, null, 2)}\n`);
+  } catch (err) {
+    shellLog(`[prefs] could not save: ${(err as Error).message}`);
   }
 }
 
@@ -364,6 +482,14 @@ function setUpdateStatus(status: UpdateStatus) {
  * reminder, which is the behaviour we want.
  */
 function notifyUpdateAvailable(version: string) {
+  // macOS can drop a notification from an ad-hoc signed bundle, and Electron's
+  // `'failed'` event is Windows-only — so delivery is undetectable from in here.
+  // Recording what we attempted is the only way to tell "never posted" from
+  // "posted and swallowed", and the tray row is the surface that does not depend
+  // on it either way.
+  shellLog(
+    `[update] notify version=${version} supported=${Notification.isSupported()} deduped=${version === notifiedUpdateVersion}`,
+  );
   if (version === notifiedUpdateVersion || !Notification.isSupported()) return;
   notifiedUpdateVersion = version;
   const notification = new Notification({
@@ -389,35 +515,173 @@ function restartForUpdate() {
 /**
  * Update checks only. `autoDownload` stays off because a downloaded update we
  * cannot install is just wasted bandwidth and a misleading "ready" state.
+ *
+ * Every exit from this function leaves a state the tray can render. A release
+ * that announced itself to nobody is what motivated that: previously a rejected
+ * check only `console.warn`ed and left `'idle'`, which reads to the user as "you
+ * are up to date" — a claim the shell had no evidence for.
  */
 function startUpdateChecks() {
-  // Real checks need a packaged build against a live feed, which makes every
-  // update surface (notification, tray marker, banner) unexercisable in dev.
-  // This is the only practical way to verify or regression-check them.
+  // Wired before every guard, so the reason a check never happened lands in the
+  // log too. electron-updater accepts this four-method duck type, so there is no
+  // `electron-log` dependency.
+  autoUpdater.logger = {
+    info: (m: unknown) => shellLog(`[update] ${String(m)}`),
+    warn: (m: unknown) => shellLog(`[update] warn ${String(m)}`),
+    error: (m: unknown) => shellLog(`[update] error ${String(m)}`),
+    debug: (m: unknown) => shellLog(`[update] debug ${String(m)}`),
+  };
+  shellLog(
+    `[update] boot version=${APP_VERSION} appGetVersion=${app.getVersion()} packaged=${app.isPackaged} feed=${config.updateFeedUrl || '(none)'} force=${FORCE_UPDATE_CHECK}`,
+  );
+
+  // Real checks need a live feed, which makes every update surface (notification,
+  // tray marker, banner) unexercisable without a release. This is the only
+  // practical way to verify or regression-check them.
   if (process.env.LINES_FAKE_UPDATE_VERSION) {
     const version = process.env.LINES_FAKE_UPDATE_VERSION;
+    shellLog(`[update] LINES_FAKE_UPDATE_VERSION=${version} — skipping the real check`);
     setUpdateStatus({ state: 'available', version });
     notifyUpdateAvailable(version);
     return;
   }
-  if (!config.updateFeedUrl || !app.isPackaged) return;
-  autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = false;
-  autoUpdater.setFeedURL({ provider: 'generic', url: config.updateFeedUrl });
-  autoUpdater.on('update-available', (info: { version: string }) => {
-    setUpdateStatus({ state: 'available', version: info.version });
-    notifyUpdateAvailable(info.version);
-  });
-  autoUpdater.on('update-not-available', () => setUpdateStatus({ state: 'idle' }));
-  autoUpdater.on('error', (err: Error) => setUpdateStatus({ state: 'error', message: err.message }));
-  const check = () => {
-    autoUpdater.checkForUpdates().catch((err: Error) => {
-      // Offline is the common case and must stay quiet in the tray.
-      console.warn('[update] check failed:', err.message);
+
+  // Both guards are stateful rather than a bare `return`: "this build has no feed"
+  // and "checks are off in dev" are failure modes with no surface at all today.
+  if (!config.updateFeedUrl) {
+    updatesDisabledReason = 'no feed URL in this build';
+    shellLog('[update] Skip checkForUpdates: no feed URL in this build');
+    updateTray();
+    return;
+  }
+  if (!app.isPackaged && !FORCE_UPDATE_CHECK) {
+    updatesDisabledReason = 'dev build — set LINES_FORCE_UPDATE_CHECK=1';
+    shellLog('[update] Skip checkForUpdates: dev build — set LINES_FORCE_UPDATE_CHECK=1');
+    updateTray();
+    return;
+  }
+
+  try {
+    // `setFeedURL` never reads `app-update.yml`, so this pair genuinely checks the
+    // real feed from a checkout.
+    autoUpdater.forceDevUpdateConfig = FORCE_UPDATE_CHECK;
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
+    autoUpdater.setFeedURL({ provider: 'generic', url: config.updateFeedUrl });
+    autoUpdater.on('update-available', (info: { version: string }) => {
+      shellLog(`[update] available version=${info.version}`);
+      setUpdateStatus({ state: 'available', version: info.version });
+      notifyUpdateAvailable(info.version);
     });
-  };
-  check();
-  setInterval(check, 6 * 60 * 60_000).unref();
+    autoUpdater.on('update-not-available', () => {
+      shellLog(`[update] not available — ${APP_VERSION} is current`);
+      setUpdateStatus({ state: 'idle' });
+    });
+    autoUpdater.on('error', (err: Error) => {
+      shellLog(`[update] error ${err.message}`);
+      setUpdateStatus({ state: 'error', message: err.message });
+    });
+    updatesEnabled = true;
+    void runCheck({});
+    setInterval(() => void runCheck({}), UPDATE_CHECK_MS).unref();
+    // The interval above does not fire while the machine sleeps, so a laptop that
+    // is closed every night would otherwise check almost never.
+    powerMonitor.on('resume', () => {
+      if (lastCheckAt !== null && Date.now() - lastCheckAt < UPDATE_RESUME_STALE_MS) return;
+      shellLog('[update] woke from sleep and the last check is stale — checking');
+      void runCheck({});
+    });
+  } catch (err) {
+    // A throw from setFeedURL used to escape start() entirely, silently skipping
+    // the pairing window below it — a second invisible failure behind the first.
+    updatesEnabled = false;
+    updatesDisabledReason = 'updater failed to start';
+    shellLog(`[update] failed to start: ${(err as Error).message}`);
+    setUpdateStatus({ state: 'error', message: (err as Error).message });
+  }
+}
+
+/**
+ * One check, automatic or asked for.
+ *
+ * `checkForUpdates()` returns the in-flight promise when one is already running,
+ * so a double-click on the menu item is safe.
+ */
+async function runCheck({ manual }: { manual?: boolean }): Promise<void> {
+  checking = true;
+  updateTray();
+  shellLog(`[update] checking manual=${Boolean(manual)}`);
+  let failure: string | null = null;
+  try {
+    await autoUpdater.checkForUpdates();
+    // A check that got an answer clears any retry armed by an earlier failure.
+    if (checkRetryTimer) {
+      clearTimeout(checkRetryTimer);
+      checkRetryTimer = null;
+    }
+  } catch (err) {
+    failure = (err as Error).message;
+    shellLog(`[update] check failed: ${failure}`);
+    // 'idle' would be a claim of currency we have no evidence for.
+    setUpdateStatus({ state: 'error', message: failure });
+    if (!manual) armRetry();
+  } finally {
+    checking = false;
+    lastCheckAt = Date.now();
+    updateTray();
+  }
+  if (manual) await answerManualCheck(failure);
+}
+
+/** A single deferred retry, so a login-time network race is not a six-hour hole. */
+function armRetry() {
+  if (checkRetryTimer) return;
+  checkRetryTimer = setTimeout(() => {
+    checkRetryTimer = null;
+    shellLog('[update] retrying after an earlier failure');
+    void runCheck({});
+  }, UPDATE_RETRY_MS);
+  checkRetryTimer.unref();
+}
+
+/**
+ * A manual check always answers with a modal, including "up to date".
+ *
+ * `focus({ steal: true })` because an LSUIElement app with no dock tile can put a
+ * modal behind every other window — and a manual check that appears to do nothing
+ * is the exact bug class this whole change exists to remove.
+ */
+async function answerManualCheck(failure: string | null) {
+  app.focus({ steal: true });
+  if (update.state === 'available' && update.version) {
+    const { response } = await dialog.showMessageBox({
+      type: 'info',
+      buttons: ['Later', 'Download'],
+      defaultId: 1,
+      cancelId: 0,
+      message: `Lines ${update.version} is available`,
+      detail: 'Sessions keep running until you install it.',
+    });
+    if (response === 1) void shell.openExternal(config.downloadUrl);
+    return;
+  }
+  if (failure || update.state === 'error') {
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['OK', 'Open logs'],
+      defaultId: 0,
+      cancelId: 0,
+      message: "Couldn't check for updates",
+      detail: failure ?? update.message ?? 'The update feed could not be reached.',
+    });
+    if (response === 1) openLogs();
+    return;
+  }
+  await dialog.showMessageBox({
+    type: 'info',
+    buttons: ['OK'],
+    message: `Lines ${APP_VERSION} is up to date`,
+  });
 }
 
 /** Serve the built web UI, plus the /__bridge discovery endpoint the client expects. */
@@ -468,24 +732,180 @@ function startUiServer(): Promise<number> {
   });
 }
 
+/**
+ * Where the app window points: our own server locally, the hosted app otherwise.
+ * One function so both modes go through the same window code.
+ */
+function appUrl(): string {
+  return LOCAL_MODE ? `http://127.0.0.1:${uiPort}/` : config.webUrl;
+}
+
+/** Origin and host of the hosted app, for the navigation allowlist. */
+const APP_ORIGIN = (() => {
+  try {
+    return new URL(config.webUrl).origin;
+  } catch {
+    return '';
+  }
+})();
+const APP_HOST = hostLabel(config.webUrl);
+
+/**
+ * Hosts the window is allowed to navigate to itself.
+ *
+ * Everything else is handed to the real browser. Kept to our own origin plus the
+ * identity providers Clerk redirects through — a sign-in that leaves the window
+ * has nowhere to come back to, since the window has no address bar.
+ */
+const IDENTITY_HOSTS = [
+  'accounts.google.com',
+  'github.com',
+  'appleid.apple.com',
+  'login.microsoftonline.com',
+  `accounts.${APP_HOST}`,
+];
+
+function isInAppUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    if (APP_ORIGIN && url.origin === APP_ORIGIN) return true;
+    if (LOCAL_MODE && url.hostname === '127.0.0.1') return true;
+    if (IDENTITY_HOSTS.includes(url.hostname)) return true;
+    // Clerk's own hosted account pages, on development instances.
+    if (url.hostname.endsWith('.clerk.accounts.dev')) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The app in a native window.
+ *
+ * Deliberately zero-privilege: no preload, no IPC, `contextIsolation` on. That is
+ * what makes loading a remote origin acceptable — the page gets nothing it would
+ * not get in Safari. The hosted bundle takes its bridge URL from
+ * `VITE_BRIDGE_WS_URL` and never probes `/__bridge`, so it needs nothing from us.
+ */
 function openWindow() {
   if (win && !win.isDestroyed()) {
     win.show();
     win.focus();
     return;
   }
-  win = new BrowserWindow({
+  const w = new BrowserWindow({
     width: 1400,
     height: 900,
     title: 'Lines',
+    // The web app's Mantine-dark background, so a slow hosted load is not a
+    // white flash.
+    backgroundColor: '#1a1b1e',
     webPreferences: { nodeIntegration: false, contextIsolation: true },
   });
-  void win.loadURL(`http://127.0.0.1:${uiPort}/`);
-  // External links open in the real browser, not inside the app shell.
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  win = w;
+  // Google refuses OAuth from anything it recognises as an embedded browser, and
+  // it keys on this token. The standard workaround, not a guarantee.
+  w.webContents.setUserAgent(w.webContents.getUserAgent().replace(/ Electron\/\S+/, ''));
+  void w.loadURL(appUrl());
+  // A real child window in the same session, so cookies are shared — what a Clerk
+  // OAuth popup needs. Anything else goes to the real browser.
+  w.webContents.setWindowOpenHandler(({ url }) => {
+    if (isInAppUrl(url)) return { action: 'allow' };
+    shellLog(`[window] external popup ${url}`);
     void shell.openExternal(url);
     return { action: 'deny' };
   });
+  // Load-bearing: without it a `target="_self"` external link replaces the app
+  // inside a chrome-less window with no way back, and with it Clerk's full-page
+  // OAuth redirect survives. Every block is logged because the allowlist above
+  // will be incomplete for some provider, and the log turns "sign-in is broken"
+  // into a one-line fix.
+  w.webContents.on('will-navigate', (event, url) => {
+    if (isInAppUrl(url)) return;
+    event.preventDefault();
+    shellLog(`[window] blocked navigation to ${url} — opening externally`);
+    void shell.openExternal(url);
+  });
+  w.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
+    // -3 is ERR_ABORTED, which every cancelled navigation reports.
+    if (!isMainFrame || code === -3) return;
+    shellLog(`[window] load failed ${code} ${description} ${url}`);
+    void w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadErrorHtml(description))}`);
+  });
+  w.on('closed', () => {
+    if (win === w) win = null;
+    syncDock();
+  });
+  syncDock();
+  w.show();
+  // The accessory -> regular dock transition leaves the window behind whatever
+  // was in front, so focusing after the tile exists is not redundant.
+  w.focus();
+}
+
+/** Offline used to be a white void. Shares the pairing window's styling. */
+function loadErrorHtml(reason: string): string {
+  return `<!doctype html><meta charset="utf-8"><title>Lines</title>
+<style>
+  body { font: 14px -apple-system, system-ui, sans-serif; background:#1a1b1e; color:#c1c2c5;
+         display:flex; align-items:center; justify-content:center; height:100vh; margin:0 }
+  .card { text-align:center; max-width:420px; padding:0 24px }
+  a { color:#4dabf7 }
+  .hint { color:#909296; font-size:12px; margin-top:18px }
+</style>
+<div class="card">
+  <h2>Can’t reach Lines</h2>
+  <p>${escapeHtml(hostLabel(appUrl()))} did not respond.</p>
+  <p class="hint">${escapeHtml(reason)}<br>
+  Sessions on this machine keep running. Check your connection, then
+  <a href="${escapeHtml(appUrl())}">try again</a>.</p>
+</div>`;
+}
+
+/**
+ * The dock tile follows the windows, in hosted mode.
+ *
+ * A visible window with no dock tile has no Cmd-Tab, no way back when it is
+ * covered, and — the real problem — no application menu, so Cmd-C and Cmd-V do
+ * not work. `LSUIElement` stays in the Info.plist; the tile is toggled at
+ * runtime instead. Local mode always has a tile, set up in `start()`.
+ */
+function syncDock() {
+  if (process.platform !== 'darwin' || LOCAL_MODE) return;
+  const anyWindow = BrowserWindow.getAllWindows().some((w) => !w.isDestroyed());
+  if (anyWindow) {
+    applyDockIcon();
+    void app.dock?.show();
+  } else {
+    app.dock?.hide();
+  }
+}
+
+/** "Open Lines", per the user's choice. Local mode has only the one route. */
+function openLinesDefault() {
+  if (RELAY_MODE && openIn === 'browser') void shell.openExternal(config.webUrl);
+  else openWindow();
+}
+
+/**
+ * The escape hatch for "I signed into the wrong account in a window with no
+ * address bar" — the window's cookie jar is not the browser's, so there is
+ * otherwise no way to sign out of it from outside.
+ */
+async function resetDesktopWindow() {
+  const { response } = await dialog.showMessageBox({
+    type: 'warning',
+    buttons: ['Cancel', 'Reset'],
+    defaultId: 0,
+    cancelId: 0,
+    message: 'Sign out of the Lines desktop window?',
+    detail:
+      'Clears the cookies and local data of the desktop window only, and closes it. Your browser, this machine’s pairing and any running sessions are not touched.',
+  });
+  if (response !== 1) return;
+  await session.defaultSession.clearStorageData({ storages: ['cookies', 'localstorage', 'indexdb'] });
+  shellLog('[window] desktop window storage cleared');
+  if (win && !win.isDestroyed()) win.close();
 }
 
 /** Interpolating into the pairing page's HTML — a code or URL must not become markup. */
@@ -538,12 +958,17 @@ function openPairingWindow(code: string) {
   pairingWindow = w;
   w.on('closed', () => {
     if (pairingWindow === w) pairingWindow = null;
+    syncDock();
   });
   void w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
   w.webContents.setWindowOpenHandler(({ url: external }) => {
     void shell.openExternal(external);
     return { action: 'deny' };
   });
+  // Gives this window a dock tile and an app menu too, so the code is selectable
+  // with Cmd-C — it never had either.
+  syncDock();
+  w.focus();
 }
 
 /**
@@ -723,75 +1148,151 @@ function applyDockIcon() {
   if (!icon.isEmpty()) app.dock?.setIcon(icon);
 }
 
+/** "3 minutes ago", roughly, for the last-checked row. */
+function agoLabel(at: number): string {
+  const mins = Math.floor((Date.now() - at) / 60_000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+/**
+ * The update row, which is always present.
+ *
+ * Taking this out of the old `state === 'available'` conditional is the single
+ * change that makes a silent update outcome impossible: "no feed", "never
+ * checked" and "the check failed" each now say so, where before all three
+ * rendered as nothing at all — indistinguishable from up to date.
+ *
+ * An error is a plain row rather than the `' ●'` title marker on purpose. That
+ * dot means "act on a new version"; one that lights up whenever you are offline
+ * teaches the user to ignore the only signal that matters.
+ */
+function updateRow(): { label: string; enabled: boolean; click?: () => void } {
+  if (checking) return { label: 'Checking for updates…', enabled: false };
+  // Ahead of the disabled case: a version we have actually been offered is
+  // actionable whatever the state of automatic checking, and this is also the
+  // only row `LINES_FAKE_UPDATE_VERSION` can exercise.
+  if (update.state === 'available') {
+    return {
+      label: `Update available: ${update.version} — download`,
+      enabled: true,
+      click: () => void shell.openExternal(config.downloadUrl),
+    };
+  }
+  if (!updatesEnabled) {
+    return { label: `Automatic updates off — ${updatesDisabledReason ?? 'unknown reason'}`, enabled: false };
+  }
+  if (update.state === 'error') {
+    // The message stays in the log: a menu item cannot wrap, and a truncated TLS
+    // error tells the user nothing.
+    return { label: 'Update check failed — open logs', enabled: true, click: openLogs };
+  }
+  if (lastCheckAt !== null) return { label: `Up to date · checked ${agoLabel(lastCheckAt)}`, enabled: false };
+  return { label: 'No update check yet', enabled: false };
+}
+
+/** Signature of the last menu we actually installed; see {@link updateTray}. */
+let trayMenuSignature: string | null = null;
+
 function updateTray() {
   if (!tray) return;
   // A persistent marker beside the icon, so a pending update is visible without
   // opening the menu. `setTitle` is macOS-only, like applyDockIcon's guard; a
-  // dock badge is not an option because hosted mode hides the dock tile. Setting
-  // '' on any other state is what clears it (including available -> idle).
-  if (process.platform === 'darwin') tray.setTitle(update.state === 'available' ? ' ●' : '');
+  // dock badge is not an option because hosted mode hides the dock tile when no
+  // window is open. Setting '' on any other state is what clears it (including
+  // available -> idle).
+  const title = update.state === 'available' ? ' ●' : '';
   const alive = (c: ChildProcess | null) => Boolean(c && c.exitCode === null && !c.killed);
-  const open = RELAY_MODE
-    ? // Hosted mode serves no local UI; the app lives at the public URL.
-      { label: 'Open Lines', click: () => void shell.openExternal(config.webUrl) }
-    : { label: 'Open Lines', click: openWindow };
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      open,
-      { label: relayLabel(), enabled: false },
-      ...(pairingCode
-        ? [
-            { label: `Pairing code: ${pairingCode}`, click: () => openPairingWindow(pairingCode!) },
-            { label: 'Get a new code', click: () => void refreshPairingCode(true) },
-          ]
-        : RELAY_MODE
-          ? [{ label: 'Unpair this machine…', click: () => void unpairThisMachine() }]
-          : []),
-      { type: 'separator' as const },
-      {
-        label: claudeLabel(),
-        enabled: cli.state !== 'ok',
-        click: () => void shell.openExternal(CLAUDE_INSTALL_URL),
-      },
-      ...(cli.state === 'ok'
-        ? []
-        : [
-            {
-              label: 'Check again',
-              click: () => {
-                cli = refreshClaudeCli();
-                updateTray();
-              },
-            },
-          ]),
-      { type: 'separator' as const },
-      {
-        label: standDown
-          ? `Bridge: paused — another bridge owns this machine${standDown.pid ? ` (pid ${standDown.pid})` : ''}`
-          : `Bridge: ${alive(bridge) ? 'running' : 'stopped'}`,
-        enabled: false,
-      },
-      { label: `Worker: ${alive(worker) ? 'running' : 'stopped'}`, enabled: false },
-      ...(update.state === 'available'
-        ? [
-            {
-              label: `Update available: ${update.version} — download`,
-              click: () => void shell.openExternal(config.downloadUrl),
-            },
-          ]
+  const template: MenuItemConstructorOptions[] = [
+    // One row, always labelled the same, dispatching per the saved preference —
+    // so the primary action never moves. The other route is the row below it.
+    { label: 'Open Lines', click: openLinesDefault },
+    ...(RELAY_MODE
+      ? [
+          openIn === 'browser'
+            ? { label: 'Open Desktop Window', click: openWindow }
+            : { label: 'Open in Browser', click: () => void shell.openExternal(config.webUrl) },
+        ]
+      : []),
+    { label: relayLabel(), enabled: false },
+    ...(pairingCode
+      ? [
+          { label: `Pairing code: ${pairingCode}`, click: () => openPairingWindow(pairingCode!) },
+          { label: 'Get a new code', click: () => void refreshPairingCode(true) },
+        ]
+      : RELAY_MODE
+        ? [{ label: 'Unpair this machine…', click: () => void unpairThisMachine() }]
         : []),
-      { type: 'separator' as const },
-      {
-        label: 'Start at login',
-        type: 'checkbox' as const,
-        checked: app.getLoginItemSettings().openAtLogin,
-        click: (item: { checked: boolean }) => app.setLoginItemSettings({ openAtLogin: item.checked }),
-      },
-      { label: 'Open logs', click: openLogs },
-      { type: 'separator' as const },
-      { label: 'Quit Lines', click: () => app.quit() },
-    ]),
-  );
+    { type: 'separator' as const },
+    {
+      label: claudeLabel(),
+      enabled: cli.state !== 'ok',
+      click: () => void shell.openExternal(CLAUDE_INSTALL_URL),
+    },
+    ...(cli.state === 'ok'
+      ? []
+      : [
+          {
+            label: 'Check again',
+            click: () => {
+              cli = refreshClaudeCli();
+              updateTray();
+            },
+          },
+        ]),
+    { type: 'separator' as const },
+    {
+      label: standDown
+        ? `Bridge: paused — another bridge owns this machine${standDown.pid ? ` (pid ${standDown.pid})` : ''}`
+        : `Bridge: ${alive(bridge) ? 'running' : 'stopped'}`,
+      enabled: false,
+    },
+    { label: `Worker: ${alive(worker) ? 'running' : 'stopped'}`, enabled: false },
+    { type: 'separator' as const },
+    // Its own group below the process rows: those answer "is it running", these
+    // answer "is it current".
+    { label: `Lines ${APP_VERSION}`, enabled: false },
+    updateRow(),
+    ...(updatesEnabled ? [{ label: 'Check for updates', click: () => void runCheck({ manual: true }) }] : []),
+    { type: 'separator' as const },
+    ...(RELAY_MODE
+      ? [
+          {
+            label: 'Open Lines in the desktop window',
+            type: 'checkbox' as const,
+            checked: openIn === 'desktop',
+            click: (item: { checked: boolean }) => {
+              openIn = item.checked ? 'desktop' : 'browser';
+              savePrefs();
+              updateTray();
+            },
+          },
+          { label: 'Reset desktop window…', click: () => void resetDesktopWindow() },
+        ]
+      : []),
+    {
+      label: 'Start at login',
+      type: 'checkbox' as const,
+      checked: app.getLoginItemSettings().openAtLogin,
+      click: (item: { checked: boolean }) => app.setLoginItemSettings({ openAtLogin: item.checked }),
+    },
+    { label: 'Open logs', click: openLogs },
+    { type: 'separator' as const },
+    { label: 'Quit Lines', click: () => app.quit() },
+  ];
+  // This runs every 2s. `JSON.stringify` drops the click closures, leaving exactly
+  // the rendered fields, so an unchanged menu is not reinstalled — which both
+  // stops ~43k pointless `setContextMenu` calls a day and, more importantly, stops
+  // swapping the NSMenu out from under a menu the user has open. Relative-time
+  // labels still refresh, because their text is part of the signature.
+  const signature = `${title}\0${JSON.stringify(template)}`;
+  if (signature === trayMenuSignature) return;
+  trayMenuSignature = signature;
+  if (process.platform === 'darwin') tray.setTitle(title);
+  tray.setContextMenu(Menu.buildFromTemplate(template));
 }
 
 /** Reveal the child log in Finder. Touched first, because `showItemInFolder` on a
@@ -814,17 +1315,26 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
+    // Relaunching from Finder or Spotlight used to do nothing at all in hosted
+    // mode, which reads as a broken app.
     if (pairingCode) openPairingWindow(pairingCode);
-    else if (LOCAL_MODE) openWindow();
+    else openLinesDefault();
+  });
+  // Clicking the dock tile with the window closed. Only reachable while a tile
+  // exists, i.e. local mode or a hosted run that has a window open.
+  app.on('activate', () => {
+    if (!BrowserWindow.getAllWindows().some((w) => !w.isDestroyed())) openLinesDefault();
   });
   void start();
 }
 
 async function start() {
   await app.whenReady();
-  // Hosted mode is a background app: no dock tile, no app switcher entry. Local
-  // mode has a real window, so it gets a tile with our own art — `show()` because
-  // the packaged Info.plist carries LSUIElement, which would otherwise suppress it
+  loadPrefs();
+  // Hosted mode starts as a background app: no dock tile, no app switcher entry.
+  // `syncDock` puts one up for as long as a window is open. Local mode has a real
+  // window throughout, so it gets a tile with our own art — `show()` because the
+  // packaged Info.plist carries LSUIElement, which would otherwise suppress it
   // even here.
   if (RELAY_MODE) {
     app.dock?.hide();

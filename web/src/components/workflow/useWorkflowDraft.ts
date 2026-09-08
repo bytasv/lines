@@ -505,8 +505,16 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
       .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0];
     if (match) {
       setSelectedId(match.id);
-      setDraft((d) => (d ? { ...d, id: match.id, updatedAt: match.updatedAt } : d));
-      setBaseline(JSON.stringify(toWire({ ...draft, id: match.id, updatedAt: match.updatedAt })));
+      // createdAt too: it is stamped by the bridge on the first save, so without
+      // this the header stays blank until the modal is reopened.
+      setDraft((d) =>
+        d ? { ...d, id: match.id, updatedAt: match.updatedAt, createdAt: match.createdAt } : d,
+      );
+      setBaseline(
+        JSON.stringify(
+          toWire({ ...draft, id: match.id, updatedAt: match.updatedAt, createdAt: match.createdAt }),
+        ),
+      );
       setSavePending(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -49,6 +49,8 @@ unbundled next to the code.
 - `shared/types.ts` — `UpdateStatus`, `installUpdate`, `updateStatus`
 - `server/src/claudeCli.ts` — finds the machine's `claude`, with a version floor
 - `desktop/assets/` — `trayTemplate.png` (+`@2x`), `icon.icns`, `icon.png`
+- `~/.lines-app/desktop.json` — the shell's own preference (window vs. browser for "Open Lines");
+  read once at boot, written on toggle, best-effort like the log
 - `desktop/scripts/ship.mjs` — orchestrates `check-unreleased.mjs`, `package`, `release` behind one
   command, local or CI
 - `desktop/scripts/check-unreleased.mjs` — compares `desktop/package.json`'s version against the
@@ -63,7 +65,9 @@ unbundled next to the code.
   packaged, `spawnChild` runs the esbuild bundles under Electron's own node, in a checkout it
   runs `tsx` against `server/src` unchanged
 - `RELAY_MODE` — `!isLocalMode()`; hosted unless `LINES_LOCAL_MODE=1`
-- `startUiServer` / `openWindow` — local-mode only; not shipped in the DMG
+- `startUiServer` — local-mode only; not shipped in the DMG
+- `openWindow` — used in both modes now; loads `appUrl()`, which is local-mode's own server or,
+  in hosted mode, `config.webUrl` directly
 - `applyRelayStatus` / `onRelayVerified` / `RELAY_SETTLE_MS` — turns the relay's raw open/close
   into "Connected" only once a link survives long enough to prove the pairing claim landed, since
   the relay accepts a socket *before* checking whether the device is claimed
@@ -73,6 +77,28 @@ unbundled next to the code.
   "Check again" refreshes it
 - `claudeCliRefusalMessage()` — the sentence a hosted user sees when the CLI is missing or old
 - `MIN_CLAUDE_VERSION` (`claudeCli.ts`) — the CLI version the pinned SDK wrapper ships
+- `APP_VERSION` — the version shown in the tray and the one `electron-updater` compares the feed
+  against; packaged it is `app.getVersion()`, unpackaged it comes from the `__LINES_VERSION__`
+  esbuild define (`build.mjs`), because `electron dist/main.cjs` never reads `desktop/package.json`
+- `appUrl()` — the window's URL: `127.0.0.1:<uiPort>` in local mode, `config.webUrl` in hosted mode;
+  one function for both, so `openWindow` is no longer local-mode-only
+- `isInAppUrl()` / `IDENTITY_HOSTS` / `APP_ORIGIN` — the window's navigation allowlist: the hosted
+  origin plus the identity hosts Clerk's OAuth redirects go through
+- `syncDock()` — shows the dock tile in hosted mode iff any `BrowserWindow` still exists, else hides
+  it; local mode keeps a permanent tile as before
+- `openLinesDefault()` — what "Open Lines" actually does, per the persisted `openIn` preference
+- `loadPrefs()` / `savePrefs()` — read/write `~/.lines-app/desktop.json`
+- `resetDesktopWindow()` — clears the window's cookies and storage and closes it; the only way to
+  sign out of a window that has no address bar
+- `shellLog()` — writes to the same log file `appendLog` writes to and echoes to stdout; everything
+  that has to be diagnosable after the fact goes through it, including `autoUpdater.logger`
+- `runCheck()` / `armRetry()` / `answerManualCheck()` — one update check, automatic or manual; a
+  failed automatic check arms a single 5-minute retry, a manual one always answers with a dialog
+- `updateRow()` — the tray's always-present update line; precedence is checking, then an offered
+  version (even with automatic checks off — the only row `LINES_FAKE_UPDATE_VERSION` can exercise),
+  then disabled-and-why, then failed, then last-checked, then never-checked
+- `updatesEnabled` / `updatesDisabledReason` — whether the updater actually started, and why it
+  didn't when it didn't
 - `CAN_SELF_INSTALL` — gates `restartForUpdate`'s real `quitAndInstall()` call behind a signed
   build existing; false until a Developer ID exists
 - `openPairingWindow` — the data-URL window showing a pairing code
@@ -106,8 +132,21 @@ unconditionally, before it ever dials the relay — see
 [hosted-machine-access](hosted-machine-access.md#one-bridge-speaks-at-a-time). A respawn racing a
 not-yet-exited previous bridge child, or a bridge started by hand alongside the packaged app, now
 exits immediately (`EXIT_BRIDGE_LOCK_HELD`, `78`) naming the pid already holding the lock, rather
-than silently becoming a second `RelayClient` claiming the same device. It serves no
-local UI — the tray menu opens the hosted web app instead of a local window. If registration
+than silently becoming a second `RelayClient` claiming the same device. "Open Lines" opens a
+native `BrowserWindow` at `config.webUrl` by default — the same zero-privilege window as local mode
+(no preload, no IPC, `contextIsolation` on), just pointed at the hosted URL instead of the local
+server (`appUrl()` picks between them). The choice persists in `~/.lines-app/desktop.json`
+(`openIn: 'desktop' | 'browser'`); the tray's second row is always the other route, labelled "Open
+in Browser" or "Open Desktop Window". Navigation inside the window is allowlisted to the hosted
+origin plus the identity hosts Clerk's OAuth redirects go through (`isInAppUrl`); anything else is
+handed to the real browser and logged, including the reason `will-navigate` blocked it — Clerk's
+own full-page OAuth redirect has to survive this or sign-in breaks with no way back, since the
+window has no address bar. **The window's cookie jar is not Safari's or Chrome's**: a browser
+sign-in does not carry into the window and vice versa, though a dev run and the packaged app share
+one jar. The dock tile (hidden by default in hosted mode) reappears for as long as any window is
+open (`syncDock`) and disappears once the last one closes, since a visible window with no tile has
+no Cmd-Tab and — the sharper problem — no application menu, so Cmd-C/Cmd-V would not work. If
+registration
 returns a pairing code, a small `BrowserWindow` shows it as a data URL, independent of `web/dist`
 even existing. The code auto-refreshes every ~14 minutes while unpaired, and "Get a new code" in
 the tray does the same on demand — both rely on `registerDevice` re-issuing a code for an
@@ -178,19 +217,46 @@ Update state flows bridge → shell → bridge: the shell pushes `updateStatus` 
 (`autoDownload: false`); an available update surfaces in the tray as a link to the download page
 rather than an in-place install, since `CAN_SELF_INSTALL` is false until the build is signed.
 
-Detecting an update was, until recently, only a tray-menu line nobody opens. Three more surfaces
-now announce it: a native macOS notification (`notifyUpdateAvailable`, deduped per version in
-memory — `notifiedUpdateVersion` — so the 6-hourly re-check doesn't re-nag for a version already
-shown; a fresh app launch with an update still pending notifies once, which is the intended
-reminder), a persistent `tray.setTitle(' ●')` marker set from `updateTray()` (macOS-only, cleared
-by any non-`'available'` state), and, for a browser, the blue `UpdateBanner` pill (see
-[turn-recovery](turn-recovery.md#multi-machine) for its place in the banner-precedence stack).
-`buildHello`'s owner branch carries `update: updates.current()` so a browser opened *after*
+Detecting an update announces it three ways: a native macOS notification (`notifyUpdateAvailable`,
+deduped per version in memory — `notifiedUpdateVersion` — so the 6-hourly re-check doesn't re-nag
+for a version already shown; a fresh app launch with an update still pending notifies once, which
+is the intended reminder), a persistent `tray.setTitle(' ●')` marker set from `updateTray()`
+(macOS-only, cleared by any non-`'available'` state), and, for a browser, the blue `UpdateBanner`
+pill (see [turn-recovery](turn-recovery.md#multi-machine) for its place in the banner-precedence
+stack). `buildHello`'s owner branch carries `update: updates.current()` so a browser opened *after*
 detection still learns about it — the guest branch omits the field, since `installUpdate` is
-owner-gated and a guest has no business updating somebody else's machine. Setting
-`LINES_FAKE_UPDATE_VERSION` short-circuits `startUpdateChecks()` straight to the `'available'`
-state (skipping the real feed check entirely) — the only practical way to exercise the whole chain
-without a packaged build and a published release.
+owner-gated and a guest has no business updating somebody else's machine.
+
+None of those three surfaces is trustworthy on its own — a native notification can be silently
+dropped by macOS for an ad-hoc signed bundle, and Electron's delivery-failure event is
+Windows-only — so a fourth, unconditional one exists: **every outcome of a check has a permanent
+tray row**, produced by `updateRow()` and no longer gated on `state === 'available'` the way it used
+to be. In order of precedence: `Checking for updates…` while one is in flight; an offered version
+(checked first, so `LINES_FAKE_UPDATE_VERSION` still renders it even with real checks disabled);
+`Automatic updates off — <reason>` when `startUpdateChecks()` never actually started one (no feed
+URL in this build, a dev build without `LINES_FORCE_UPDATE_CHECK=1`, or the updater throwing on
+start); `Update check failed — open logs` on `'error'` (the message itself stays in the log, since a
+menu item cannot wrap it); `Up to date · checked <time> ago` after a clean check; or `No update
+check yet`. A `'Check for updates'` row (when checks are running at all) calls `runCheck({ manual:
+true })`, which always answers with a dialog — including "up to date" — so a manual check never
+looks like it did nothing.
+
+`autoUpdater.logger` is assigned to the shell's own log (`shellLog`, same file `appendLog` writes
+to) before any of `startUpdateChecks()`'s guards run, so the feed URL, the parsed version, and the
+literal reason a check was skipped or failed are all in `~/.lines-app/logs/<instance>.log` — "Open
+logs" in the tray reveals it. A rejected `checkForUpdates()` now sets `'error'` rather than leaving
+`'idle'`, which used to read as "you are up to date" with no evidence behind it. `runCheck()` arms
+one 5-minute retry (`armRetry`) after an automatic failure, cleared by the next successful check —
+covering a login-time network race, where Start-at-login fires the one startup check while Wi-Fi is
+still associating. A `powerMonitor` `'resume'` listener re-checks if the last one is over an hour
+stale, since a `setInterval` does not fire while the machine sleeps and a laptop closed nightly
+could otherwise go days between checks. `LINES_FORCE_UPDATE_CHECK=1` makes an unpackaged run hit
+the real feed — `electron-updater` otherwise gates every check on `app.isPackaged` — the only way to
+exercise the network path itself without a signed build.
+
+Setting `LINES_FAKE_UPDATE_VERSION` still short-circuits `startUpdateChecks()` straight to the
+`'available'` state (skipping the real feed check entirely) — the fastest way to exercise the three
+announcement surfaces without a packaged build and a published release.
 
 ### Packaging
 
@@ -318,6 +384,21 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
   build, since that directory is electron-builder output and nothing else is meant to live there.
 - The desktop release pipeline is manual-dispatch only — no tag convention, no release on push to
   `main` — since a release starts with a deliberate version-bump commit, not a merge.
+- Every update check outcome has a permanent tray row (checking, disabled-and-why, available,
+  failed, last-checked, or never-checked) — none of the old silent failure modes (a rejected check,
+  no feed URL, a dev build, an updater that would not start) can read as up to date anymore.
+- A failed automatic check retries once after 5 minutes, and again on waking from sleep if the last
+  check is over an hour stale — covering a login-time network race and a `setInterval` a laptop's
+  sleep starved.
+- The tray states the running version from the same value (`APP_VERSION`) the updater compares the
+  feed against, so the two can never disagree.
+- A manual "Check for updates" always answers with a dialog, including "up to date" — it must never
+  look like it did nothing.
+- Hosted mode's "Open Lines" opens a native window at `config.webUrl` by default; the choice
+  between that and the browser persists in `~/.lines-app/desktop.json`, and "Open in Browser" /
+  "Open Desktop Window" is always the other row, one click away.
+- The desktop window has its own cookie jar, separate from Safari or Chrome — signing in in a
+  browser does not sign in the window and vice versa; a dev run and the packaged app share one jar.
 
 ## Architectural rules
 
@@ -383,6 +464,22 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
 - `enterStandDown` is the only path that clears `bridge`/`worker` handles and arms the recheck
   timer; both the startup check and `spawnChild`'s exit handler funnel into it rather than each
   duplicating the tray-copy and recheck logic.
+- `autoUpdater.logger` is wired to the shell's log file before every guard in `startUpdateChecks`
+  runs, so the reason a check never happened is captured too, not just the reason one failed.
+- `UpdateStatus` is deliberately not widened with a last-checked timestamp — the browser can
+  neither trigger nor act on a check, so that state stays shell-local rather than crossing the wire
+  protocol.
+- `updateTray()` only calls `setContextMenu`/`setTitle` when a signature of the rendered template
+  actually changes, since it runs every 2s and would otherwise reinstall a byte-identical `NSMenu`
+  tens of thousands of times a day and could swap the menu out from under one the user has open.
+- The desktop window gets no preload and no IPC; navigation outside its allowlist (the hosted
+  origin plus the identity hosts Clerk's OAuth redirects go through) is handed to the real browser
+  via `will-navigate`, and every blocked navigation is logged.
+- The dock tile is shown iff a `BrowserWindow` exists, in hosted mode; local mode keeps a permanent
+  tile as before.
+- Shell-owned state under `~/.lines-app` is named for the shell, never for its content —
+  `desktop.json` follows that rather than `server/src/store.ts`'s content-named convention
+  (`device.json`, `projects.json`).
 
 ## Related decisions
 
@@ -397,6 +494,12 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
 - `electron` is pinned exact in `devDependencies`: electron-builder cannot compute the version
   from a range when the module is hoisted out of the workspace.
 - arm64 only for now. Adding `x64`/universal is a one-line `mac.target` change.
+- Sign-in inside a `BrowserWindow` versus the browser is a real trade, not resolved by reading
+  code: some identity providers refuse OAuth from anything they recognise as an embedded browser,
+  and the window's separate cookie jar means the two surfaces never share a session. "Open in
+  Browser" stays permanent for exactly this reason — if a provider is ever refused and it is the
+  only sign-in method, the fix is flipping the default `openIn` preference to `'browser'`, not
+  removing the window.
 - A dev checkout and the installed app share `~/.lines-app/device.json`, so the same device
   identity can be claimed by whichever registers last — and, since the bridge lock, also share
   `~/.lines-app/bridge.lock`, so only one bridge from either can be running against it at once.

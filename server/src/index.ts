@@ -42,8 +42,8 @@ import { UserRegistry } from './userRegistry.ts';
 import type { BrowserLink, UserContext } from './userContext.ts';
 import { handleFileRequest } from './fileRoutes.ts';
 import { reportRelayStatus, UpdateManager } from './updates.ts';
-import { createMcpDispatcher } from './mcpWorkflowTools.ts';
-import { McpAuthPending } from './mcpAuth.ts';
+import { createMcpDispatcher, type McpAuthorizeOutcome } from './mcpWorkflowTools.ts';
+import { AGENT_AUTH_WAIT_MS, McpAuthPending, type McpAuthSettled } from './mcpAuth.ts';
 import * as workflowCommands from './workflowCommands.ts';
 import * as recipeCommands from './recipeCommands.ts';
 import * as worktreeCommands from './worktreeCommands.ts';
@@ -527,11 +527,16 @@ async function handleOAuthCallback(req: http.IncomingMessage, res: http.ServerRe
   }
   const ctx = registry.peek(claimed.userId);
   if (!ctx) {
+    claimed.onSettled?.({ ok: false, error: 'That Lines session is no longer loaded.' });
     oauthPage(res, 410, 'Authorization could not be completed', 'That Lines session is no longer loaded.');
     return;
   }
   if (providerError) {
     ctx.sessions.releaseAuthHold(claimed.sessionId);
+    claimed.onSettled?.({
+      ok: false,
+      error: `${claimed.serverName} refused the authorization (${providerError}).`,
+    });
     ctx.broadcast({
       type: 'mcpAuthCompleted',
       sessionId: claimed.sessionId,
@@ -549,6 +554,7 @@ async function handleOAuthCallback(req: http.IncomingMessage, res: http.ServerRe
     .completeMcpAuth(claimed.sessionId, claimed.serverName, url.toString())
     .finally(() => ctx.sessions.releaseAuthHold(claimed.sessionId));
   if ('error' in result) {
+    claimed.onSettled?.({ ok: false, error: result.error });
     ctx.broadcast({
       type: 'mcpAuthCompleted',
       sessionId: claimed.sessionId,
@@ -559,6 +565,7 @@ async function handleOAuthCallback(req: http.IncomingMessage, res: http.ServerRe
     oauthPage(res, 200, 'Authorization could not be completed', 'Lines has the details — check the Connections pane.');
     return;
   }
+  claimed.onSettled?.({ ok: true });
   ctx.broadcast({
     type: 'mcpAuthCompleted',
     sessionId: claimed.sessionId,
@@ -810,12 +817,88 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
  * waiting on this call, and a thrown bridge error would park its turn until the
  * worker's fallback fires.
  */
+/**
+ * The agent-driven half of the OAuth flow: leg 1, the sign-in card, and the wait
+ * for the browser redirect to land — so `authorize_mcp_connection` can return
+ * with the server's tools already usable in the same turn.
+ *
+ * Lives here rather than in the dispatcher because this is where the callback
+ * route and the pending-handshake table are: the tool contributes the decision
+ * to authorize, this contributes the plumbing. Same three legs the wire handler
+ * for `authorizeMcpConnection` runs, with the browser's `mcpAuthStarted` reply
+ * replaced by a card and a bounded wait.
+ */
+async function authorizeConnectionForAgent(
+  ctx: UserContext,
+  sessionId: string,
+  serverName: string,
+): Promise<McpAuthorizeOutcome> {
+  const redirectUri = `http://127.0.0.1:${boundPort}${MCP_OAUTH_CALLBACK_PATH}`;
+  const started = await ctx.sessions.startMcpAuth(sessionId, serverName, redirectUri);
+  if ('error' in started) return { error: started.error };
+  // The CLI already holds a token for this server: nothing to visit, and no
+  // handshake to register or wait for.
+  if ('alreadyAuthorized' in started) return { authorized: true, alreadyAuthorized: true };
+  if (!started.state) {
+    return {
+      error: `${serverName} did not return an OAuth state parameter, so Lines cannot verify the callback safely. The user can authorize it from Settings → Connections.`,
+    };
+  }
+
+  // Registered before the card is shown, so a fast redirect cannot beat the record.
+  let settle: (result: McpAuthSettled) => void = () => {};
+  const settled = new Promise<McpAuthSettled>((resolve) => {
+    settle = resolve;
+  });
+  mcpAuthPending.start(started.state, {
+    userId: ctx.userId,
+    sessionId,
+    serverName,
+    onSettled: settle,
+  });
+  // Leg 2 runs against this same query — it holds the PKCE verifier — so exempt
+  // it from idle recycling until the callback lands or the hold ages out.
+  ctx.sessions.holdForAuth(sessionId);
+  // The Connections pane shows the same link, for a user who is looking there.
+  ctx.broadcast({ type: 'mcpAuthStarted', sessionId, name: serverName, authUrl: started.authUrl });
+
+  const card = ctx.sessions.promptMcpAuthorization(sessionId, serverName, started.authUrl);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = await Promise.race<McpAuthSettled | 'declined' | 'timed-out'>([
+      settled,
+      // "Done — I authorized it" is not itself proof: the redirect is the
+      // authority, so an acknowledgement chains onto the handshake and only a
+      // Cancel ends the wait early.
+      card.answered.then<McpAuthSettled | 'declined'>((allow) => (allow ? settled : 'declined')),
+      new Promise<'timed-out'>((resolve) => {
+        timer = setTimeout(() => resolve('timed-out'), AGENT_AUTH_WAIT_MS);
+        timer.unref?.();
+      }),
+    ]);
+    if (outcome === 'declined') {
+      return { error: `The user cancelled the ${serverName} sign-in.` };
+    }
+    // Bounded well under PENDING_TTL_MS, so the link the user is holding is still
+    // claimable: the tool says "call me again" rather than hanging on the turn.
+    if (outcome === 'timed-out') return { pending: true };
+    return outcome.ok ? { authorized: true } : { error: outcome.error ?? 'Authorization did not complete.' };
+  } finally {
+    clearTimeout(timer);
+    // Whatever ended the wait, the card has no reason to stay on screen.
+    card.close();
+  }
+}
+
 async function handleMcpToolRpc(ctx: UserContext, rpc: WorkerRpc): Promise<void> {
   const toolName = String(rpc.payload.tool ?? '');
   const args = (rpc.payload.args ?? {}) as Record<string, unknown>;
   let result: McpToolResult;
   try {
-    result = await createMcpDispatcher(ctx)(toolName, args);
+    result = await createMcpDispatcher(ctx, {
+      sessionId: rpc.sessionId,
+      authorize: (serverName) => authorizeConnectionForAgent(ctx, rpc.sessionId, serverName),
+    })(toolName, args);
   } catch (err) {
     console.error('[mcp]', toolName, err);
     result = {

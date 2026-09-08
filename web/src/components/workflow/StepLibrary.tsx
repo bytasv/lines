@@ -18,7 +18,7 @@ import {
 } from '@mantine/core';
 import { IconCopy, IconHistory, IconPlus, IconTrash } from '@tabler/icons-react';
 import type { PermissionMode, StepContent, StepDef } from '@lines/shared';
-import { DEFAULT_MODEL } from '@lines/shared';
+import { DEFAULT_MODEL, formatTimestamp } from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../../lib/modelSelect';
@@ -36,6 +36,8 @@ type Draft = StepContent & {
   ownerName?: string;
   version?: number;
   published?: boolean;
+  createdAt?: number;
+  updatedAt?: number;
 };
 
 const BLANK: Draft = {
@@ -230,6 +232,19 @@ export function StepLibrary() {
     return [...byVersion.values()].sort((a, b) => b.version - a.version);
   };
 
+  /**
+   * The live store row behind the selection, which is where the header's
+   * timestamps come from: `save()` re-loads the draft it just sent, so a draft
+   * value would show the version and time from *before* the save until the
+   * broadcast happened to replace it.
+   */
+  const storeRow = (d: Draft): StepDef | undefined =>
+    d.id
+      ? (steps.find((s) => s.id === d.id) ??
+        sharedSteps.find((s) => s.id === d.id && s.ownerId === ownerIdOf(d)))
+      : undefined;
+  const stepRow = draft ? storeRow(draft) : undefined;
+
   /** Load an older version's content into the draft; Save republishes it as a new head version. */
   const restore = (def: StepDef) => patch(content(def));
 
@@ -334,6 +349,12 @@ export function StepLibrary() {
                   onOpen={requestVersions}
                   onRestore={restore}
                 />
+              )}
+              {stepRow?.createdAt !== undefined && (
+                <Stack gap={0} pb={8} style={{ whiteSpace: 'nowrap' }}>
+                  <Text size="xs" c="dimmed">Created {formatTimestamp(stepRow.createdAt)}</Text>
+                  <Text size="xs" c="dimmed">Updated {formatTimestamp(stepRow.updatedAt)}</Text>
+                </Stack>
               )}
               {readOnly ? (
                 <Text size="xs" c="dimmed" pb={8} style={{ whiteSpace: 'nowrap' }}>

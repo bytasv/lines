@@ -122,11 +122,31 @@ export function normalizeAuthStart(
  */
 export const PENDING_TTL_MS = 10 * 60 * 1000;
 
+/**
+ * How long the agent-facing `authorize_mcp_connection` tool waits for the user
+ * to finish signing in. Well under `PENDING_TTL_MS` on purpose: the tool holds
+ * the turn open while it waits, so it has to give up (and tell the model to ask
+ * the user to call it again) while the handshake it started is still claimable.
+ */
+export const AGENT_AUTH_WAIT_MS = 5 * 60 * 1000;
+
+/** How a started handshake ended, for whoever is waiting on it. */
+export interface McpAuthSettled {
+  ok: boolean;
+  error?: string;
+}
+
 interface PendingAuth {
   userId: string;
   sessionId: string;
   serverName: string;
   startedAt: number;
+  /**
+   * Fired once when this handshake settles — completed, refused, or abandoned
+   * (its query died, or its TTL ran out). Only the agent-driven path sets one;
+   * the browser learns the outcome from the `mcpAuthCompleted` broadcast.
+   */
+  onSettled?: (result: McpAuthSettled) => void;
 }
 
 /**
@@ -166,7 +186,14 @@ export class McpAuthPending {
   /** Drop a handshake whose query died, so a stale state cannot be replayed later. */
   forgetSession(sessionId: string): void {
     for (const [state, entry] of [...this.byState]) {
-      if (entry.sessionId === sessionId) this.byState.delete(state);
+      if (entry.sessionId !== sessionId) continue;
+      this.byState.delete(state);
+      // A waiter would otherwise sit until its own timeout for a handshake that
+      // can no longer complete — the PKCE verifier died with that CLI process.
+      entry.onSettled?.({
+        ok: false,
+        error: 'The session that started this authorization ended, so the handshake cannot complete.',
+      });
     }
   }
 
@@ -178,7 +205,9 @@ export class McpAuthPending {
   private prune(): void {
     const cutoff = Date.now() - PENDING_TTL_MS;
     for (const [state, entry] of [...this.byState]) {
-      if (entry.startedAt < cutoff) this.byState.delete(state);
+      if (entry.startedAt >= cutoff) continue;
+      this.byState.delete(state);
+      entry.onSettled?.({ ok: false, error: 'The authorization link expired before it was used.' });
     }
   }
 }

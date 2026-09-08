@@ -2093,7 +2093,22 @@
         "enterStandDown",
         "EXIT_BRIDGE_LOCK_HELD",
         "notifyUpdateAvailable",
-        "notifiedUpdateVersion"
+        "notifiedUpdateVersion",
+        "APP_VERSION",
+        "appUrl",
+        "syncDock",
+        "isInAppUrl",
+        "openLinesDefault",
+        "loadPrefs",
+        "savePrefs",
+        "resetDesktopWindow",
+        "shellLog",
+        "runCheck",
+        "armRetry",
+        "answerManualCheck",
+        "updateRow",
+        "updatesEnabled",
+        "updatesDisabledReason"
       ],
       "tests": [
         "server/src/updates.test.ts",
@@ -2119,7 +2134,13 @@
         "npm run ship -w desktop deletes desktop/release/ before every build",
         "the desktop release pipeline is manual workflow_dispatch only — no tag convention, no release on push to main",
         "an update notification fires at most once per version (in-memory dedup), not once per state transition, so the 6h re-check does not re-nag for the same version",
-        "buildHello's update field is owner-only; a guest never learns about a pending update on a machine they don't own"
+        "buildHello's update field is owner-only; a guest never learns about a pending update on a machine they don't own",
+        "every update check outcome has a permanent tray row (checking, disabled-and-why, available, failed, last-checked, or never-checked) — none of the old silent failure modes (a rejected check, no feed URL, a dev build, an updater that would not start) can read as up to date anymore",
+        "a failed automatic check retries once after 5 minutes, and again on waking from sleep if the last check is over an hour stale — covers a login-time network race and a setInterval a laptop's sleep starved",
+        "the tray states the running version from the same value (APP_VERSION) the updater compares the feed against, so the two can never disagree",
+        "a manual 'Check for updates' always answers with a dialog, including 'up to date' — it must never look like it did nothing",
+        "hosted mode's 'Open Lines' opens a native window at config.webUrl by default; the choice between that and the browser persists in ~/.lines-app/desktop.json, and 'Open in Browser'/'Open Desktop Window' is always the other row, one click away",
+        "the desktop window has its own cookie jar, separate from Safari or Chrome — signing in in a browser does not sign in the window and vice versa; dev and packaged runs share one jar"
       ],
       "architecturalRules": [
         "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
@@ -2139,7 +2160,13 @@
         "enterStandDown is the only path that clears bridge/worker handles and arms the recheck timer; both the startup check and spawnChild's exit handler funnel into it rather than each duplicating the tray-copy and recheck logic",
         "a local release and a CI release both run desktop/scripts/ship.mjs — the same code path, so they cannot drift into two procedures",
         "ship.mjs derives LINES_UPDATE_FEED_URL/LINES_DOWNLOAD_URL from R2_RELEASE_PUBLIC_BASE_URL rather than taking them as separate inputs",
-        "release-desktop.yml's guard job runs on ubuntu-latest (1x billing) so a stale version or type error is cheap; release runs on macos-latest (10x billing, arm64, a standard runner)"
+        "release-desktop.yml's guard job runs on ubuntu-latest (1x billing) so a stale version or type error is cheap; release runs on macos-latest (10x billing, arm64, a standard runner)",
+        "autoUpdater.logger is wired to the shell's log file before every guard in startUpdateChecks runs, so the reason a check never happened is captured too, not just the reason one failed",
+        "UpdateStatus is deliberately not widened with a last-checked timestamp — the browser can neither trigger nor act on a check, so that state stays shell-local rather than crossing the wire protocol",
+        "updateTray() only calls setContextMenu/setTitle when a signature of the rendered template actually changes, since it runs every 2s and would otherwise reinstall a byte-identical NSMenu tens of thousands of times a day and could swap the menu out from under one the user has open",
+        "the desktop window gets no preload and no IPC; navigation outside its allowlist (the hosted origin plus the identity hosts Clerk's OAuth redirects through) is handed to the real browser via will-navigate, and every blocked navigation is logged",
+        "the dock tile is shown iff a BrowserWindow exists, in hosted mode; local mode keeps a permanent tile as before",
+        "shell-owned state under ~/.lines-app is named for the shell, never for its content — desktop.json follows that rather than server/src/store.ts's content-named convention (device.json, projects.json)"
       ],
       "relatedDecisions": [
         "hosted-machine-access",
