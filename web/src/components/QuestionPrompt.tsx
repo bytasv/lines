@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -23,6 +23,28 @@ interface QuestionState {
   otherText: string;
 }
 
+/** The answer one question contributes, `[OTHER]` resolved to its typed text. */
+function answerOf(s: QuestionState): string {
+  const labels = s.selected.map((l) => (l === OTHER ? s.otherText.trim() : l)).filter(Boolean);
+  return labels.join(', ');
+}
+
+/** The selection after picking `label`: a toggle for multiSelect, a swap otherwise. */
+function nextSelected(s: QuestionState, label: string, multi: boolean): string[] {
+  if (!multi) return [label];
+  return s.selected.includes(label)
+    ? s.selected.filter((l) => l !== label)
+    : [...s.selected.filter((l) => l !== OTHER), label];
+}
+
+/**
+ * Requests whose card has already claimed focus, keyed by `requestId`. Module
+ * scope rather than a ref on purpose: `Transcript` windows its item list and
+ * backfills it, so this component can genuinely remount — and a ref would let a
+ * remount re-steal focus from wherever the user has moved on to.
+ */
+const autoFocused = new Set<string>();
+
 function OptionCard({
   label,
   description,
@@ -30,6 +52,10 @@ function OptionCard({
   multi,
   onToggle,
   readOnly,
+  onKeyDown,
+  onFocus,
+  tabIndex,
+  ref,
 }: {
   label: string;
   description?: string;
@@ -38,6 +64,10 @@ function OptionCard({
   onToggle?: () => void;
   /** Settled transcript view: the same card, without a click target. */
   readOnly?: boolean;
+  onKeyDown?: (e: React.KeyboardEvent) => void;
+  onFocus?: () => void;
+  tabIndex?: number;
+  ref?: React.Ref<HTMLButtonElement>;
 }) {
   const card = (
     <Paper
@@ -80,7 +110,11 @@ function OptionCard({
   if (readOnly) return card;
   return (
     <UnstyledButton
+      ref={ref}
       onClick={onToggle}
+      onKeyDown={onKeyDown}
+      onFocus={onFocus}
+      tabIndex={tabIndex}
       w="100%"
       role={multi ? 'checkbox' : 'radio'}
       aria-checked={checked}
@@ -174,33 +208,126 @@ export function QuestionPrompt({
     questions.map(() => ({ selected: [], otherText: '' })),
   );
 
-  const toggle = (qi: number, label: string, multi: boolean) => {
-    setState((prev) =>
-      prev.map((s, i) => {
-        if (i !== qi) return s;
-        if (multi) {
-          const selected = s.selected.includes(label)
-            ? s.selected.filter((l) => l !== label)
-            : [...s.selected.filter((l) => l !== OTHER), label];
-          return { ...s, selected };
-        }
-        return { ...s, selected: [label] };
-      }),
+  // Roving tabindex: one tab stop per question. The cursor *trails* real DOM
+  // focus (see `markActive`) instead of driving it.
+  const [activeIdx, setActiveIdx] = useState<number[]>(() => questions.map(() => 0));
+  // Index space per question is `options.length + 1`; the trailing slot is "Other…".
+  const cardsRef = useRef<(HTMLButtonElement | null)[][]>(questions.map(() => []));
+  const otherRef = useRef<(HTMLInputElement | null)[]>([]);
+  // The send is not idempotent and the card stays pending until the echo lands.
+  const sentRef = useRef(false);
+
+  // Tab and mouse move DOM focus without passing through the key handler, so the
+  // cursor has to follow reality or the next ArrowDown steps from a stale spot.
+  const markActive = (qi: number, oi: number) => {
+    setActiveIdx((prev) => (prev[qi] === oi ? prev : prev.map((v, i) => (i === qi ? oi : v))));
+  };
+
+  // Focus is pushed imperatively; there is deliberately no effect on `activeIdx`
+  // that focuses, because it would re-assert focus on every unrelated transcript
+  // re-render — the classic focus-stealing bug.
+  const focusOption = (qi: number, oi: number) => {
+    const el = cardsRef.current[qi]?.[oi];
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    el.scrollIntoView({ block: 'nearest' });
+  };
+
+  /** Where focus lands when a question is entered: its pick, else the first option. */
+  const entryIndex = (qi: number, snap: QuestionState[]): number => {
+    const picked = snap[qi]?.selected[0];
+    if (!picked) return 0;
+    if (picked === OTHER) return questions[qi].options.length;
+    const at = questions[qi].options.findIndex((opt) => opt.label === picked);
+    return at >= 0 ? at : 0;
+  };
+
+  const advance = (fromQi: number, snap: QuestionState[]) => {
+    if (fromQi + 1 < questions.length) {
+      const qi = fromQi + 1;
+      focusOption(qi, entryIndex(qi, snap));
+      return;
+    }
+    // Scanning from 0 includes the current question, so a blank "Other…" or a
+    // multi toggled back to empty keeps focus instead of submitting nothing.
+    const unanswered = questions.findIndex((_, i) => answerOf(snap[i]).length === 0);
+    if (unanswered >= 0) {
+      focusOption(unanswered, entryIndex(unanswered, snap));
+      return;
+    }
+    submit(snap);
+  };
+
+  /**
+   * The single write path. `setState` takes a plain value, not an updater, so
+   * `advance` can read the identical array this call just committed.
+   */
+  const pick = (qi: number, oi: number, label: string, multi: boolean, thenAdvance: boolean) => {
+    const next = state.map((s, i) =>
+      i === qi ? { ...s, selected: nextSelected(s, label, multi) } : s,
     );
+    setState(next);
+    markActive(qi, oi);
+    if (thenAdvance) advance(qi, next);
+    // Safari and Firefox do not focus a `<button>` on click; "Other…" is exempt
+    // because its `TextInput` autofocuses instead.
+    else if (label !== OTHER) focusOption(qi, oi);
   };
 
-  const answerFor = (qi: number): string => {
+  const onCardKeyDown = (
+    e: React.KeyboardEvent,
+    qi: number,
+    oi: number,
+    label: string,
+    multi: boolean,
+  ) => {
+    if (e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || e.nativeEvent.isComposing) return;
+    const lastIdx = questions[qi].options.length; // the "Other…" card
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (oi < lastIdx) focusOption(qi, oi + 1);
+      // A single-select question clamps; a multiSelect one has no "done" key of
+      // its own, so falling off the last option is how you leave it.
+      else if (multi) advance(qi, state);
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (oi > 0) focusOption(qi, oi - 1);
+      return;
+    }
+    if (e.key !== 'Enter') return;
+    // `UnstyledButton` is a real `<button>`, so Enter's keydown default action is
+    // firing the click. Cancelling it unconditionally keeps this the only
+    // activation path — otherwise select-then-advance fires twice.
+    e.preventDefault();
     const s = state[qi];
-    const labels = s.selected.map((l) => (l === OTHER ? s.otherText.trim() : l)).filter(Boolean);
-    return labels.join(', ');
+    const selected = s.selected.includes(label);
+    if (multi) {
+      pick(qi, oi, label, true, false); // toggling never advances
+      return;
+    }
+    if (label === OTHER) {
+      if (!selected) pick(qi, oi, label, false, false);
+      else if (s.otherText.trim()) advance(qi, state);
+      else otherRef.current[qi]?.focus();
+      return;
+    }
+    if (selected) advance(qi, state);
+    else pick(qi, oi, label, false, false);
   };
 
-  const allAnswered = questions.every((_, i) => answerFor(i).length > 0);
+  const allAnswered = questions.every((_, i) => answerOf(state[i]).length > 0);
 
-  const submit = () => {
+  const submit = (snap: QuestionState[] = state) => {
+    // Re-guarded here, not only on the button: the keyboard path reaches this
+    // directly, and the send cannot be taken back.
+    if (sentRef.current) return;
+    if (!questions.every((_, i) => answerOf(snap[i]).length > 0)) return;
+    sentRef.current = true;
     const answers: Record<string, string> = {};
     questions.forEach((q, i) => {
-      answers[q.question] = answerFor(i);
+      answers[q.question] = answerOf(snap[i]);
     });
     send({
       type: 'permissionResponse',
@@ -211,6 +338,29 @@ export function QuestionPrompt({
       answers,
     });
   };
+
+  // Claim focus once per request, so a keyboard answer needs no click to start.
+  useEffect(() => {
+    if (resolution || questions.length === 0) return;
+    if (autoFocused.has(data.requestId)) return;
+    const active = document.activeElement as HTMLElement | null;
+    // Mid-sentence in the composer outranks a card that just appeared.
+    if (
+      active &&
+      (active.tagName === 'INPUT' ||
+        active.tagName === 'TEXTAREA' ||
+        active.tagName === 'SELECT' ||
+        active.isContentEditable)
+    ) {
+      return;
+    }
+    autoFocused.add(data.requestId);
+    // No `scrollIntoView`: the card mounts at the bottom while the transcript's
+    // autoscroll is still running, and a focus-driven scroll can trip its
+    // `onScroll` into unpinning follow-the-stream.
+    cardsRef.current[0]?.[0]?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Resolved view: compact summary of what was chosen.
   if (resolution) {
@@ -257,34 +407,64 @@ export function QuestionPrompt({
         </Text>
       </Group>
       <Stack gap="md">
-        {questions.map((q, qi) => (
-          <div key={qi}>
-            <Group gap={6} mb={6}>
-              <Badge variant="light">{q.header}</Badge>
-              <Text size="sm" fw={500}>
-                {q.question}
-              </Text>
-            </Group>
-            <Stack gap={6}>
-              {q.options.map((opt) => (
+        {questions.map((q, qi) => {
+          const multi = Boolean(q.multiSelect);
+          const otherIdx = q.options.length;
+          return (
+            <div key={qi}>
+              <Group gap={6} mb={6}>
+                <Badge variant="light">{q.header}</Badge>
+                <Text size="sm" fw={500} id={`${data.requestId}-q${qi}`}>
+                  {q.question}
+                </Text>
+              </Group>
+              <Stack
+                gap={6}
+                // `radiogroup` is the required container for `role="radio"`
+                // children; there is no checkbox equivalent, so a multiSelect set
+                // is a plain group.
+                role={multi ? 'group' : 'radiogroup'}
+                aria-labelledby={`${data.requestId}-q${qi}`}
+                aria-orientation="vertical"
+              >
+                {q.options.map((opt, oi) => (
+                  <OptionCard
+                    key={opt.label}
+                    ref={(el) => {
+                      cardsRef.current[qi][oi] = el;
+                    }}
+                    label={opt.label}
+                    description={opt.description}
+                    checked={state[qi].selected.includes(opt.label)}
+                    multi={multi}
+                    tabIndex={activeIdx[qi] === oi ? 0 : -1}
+                    onFocus={() => markActive(qi, oi)}
+                    onKeyDown={(e) => onCardKeyDown(e, qi, oi, opt.label, multi)}
+                    onToggle={() => pick(qi, oi, opt.label, multi, !multi)}
+                  />
+                ))}
                 <OptionCard
-                  key={opt.label}
-                  label={opt.label}
-                  description={opt.description}
-                  checked={state[qi].selected.includes(opt.label)}
-                  multi={Boolean(q.multiSelect)}
-                  onToggle={() => toggle(qi, opt.label, Boolean(q.multiSelect))}
+                  ref={(el) => {
+                    cardsRef.current[qi][otherIdx] = el;
+                  }}
+                  label="Other…"
+                  description="Type your own answer"
+                  checked={state[qi].selected.includes(OTHER)}
+                  multi={multi}
+                  tabIndex={activeIdx[qi] === otherIdx ? 0 : -1}
+                  onFocus={() => markActive(qi, otherIdx)}
+                  onKeyDown={(e) => onCardKeyDown(e, qi, otherIdx, OTHER, multi)}
+                  onToggle={() => pick(qi, otherIdx, OTHER, multi, false)}
                 />
-              ))}
-              <OptionCard
-                label="Other…"
-                description="Type your own answer"
-                checked={state[qi].selected.includes(OTHER)}
-                multi={Boolean(q.multiSelect)}
-                onToggle={() => toggle(qi, OTHER, Boolean(q.multiSelect))}
-              />
+                {/* A `textbox` is not a permitted child of `radiogroup`, so the
+                    input sits outside the group. */}
+              </Stack>
               {state[qi].selected.includes(OTHER) && (
                 <TextInput
+                  ref={(el) => {
+                    otherRef.current[qi] = el;
+                  }}
+                  mt={6}
                   placeholder="Your answer"
                   value={state[qi].otherText}
                   onChange={(e) => {
@@ -293,12 +473,29 @@ export function QuestionPrompt({
                       prev.map((s, i) => (i === qi ? { ...s, otherText: value } : s)),
                     );
                   }}
+                  onKeyDown={(e) => {
+                    // Bare Enter finishes the typed answer; arrows keep their
+                    // native caret behaviour.
+                    if (
+                      e.key !== 'Enter' ||
+                      e.shiftKey ||
+                      e.metaKey ||
+                      e.ctrlKey ||
+                      e.altKey ||
+                      e.nativeEvent.isComposing
+                    ) {
+                      return;
+                    }
+                    if (!state[qi].otherText.trim()) return;
+                    e.preventDefault();
+                    advance(qi, state);
+                  }}
                   autoFocus
                 />
               )}
-            </Stack>
-          </div>
-        ))}
+            </div>
+          );
+        })}
         <Group justify="space-between">
           <Button
             variant="subtle"
@@ -310,7 +507,7 @@ export function QuestionPrompt({
           >
             Skip questions
           </Button>
-          <Button size="xs" disabled={!allAnswered} onClick={submit}>
+          <Button size="xs" disabled={!allAnswered} onClick={() => submit()}>
             Send answers
           </Button>
         </Group>

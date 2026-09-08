@@ -85,6 +85,7 @@ import {
 } from './mcpWorkflowTools.ts';
 import type { McpConnections } from './mcpConnections.ts';
 import { vetMcpUrl } from './mcpVetting.ts';
+import { mcpConnectionHint } from './mcpDirectory.ts';
 import { normalizeAuthStart, unsupportedReason, PENDING_TTL_MS } from './mcpAuth.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
@@ -2350,7 +2351,18 @@ export class SessionManager {
     }
     this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
-    const content = [...blocks, ...(text ? [{ type: 'text', text }] : [])];
+    // Appended to the pushed message only — the 'user' event above already holds
+    // the text the user actually wrote, and a hint in the transcript would read
+    // as words they typed. Null unless this prompt names a service they have no
+    // connection for, so an ordinary turn carries nothing extra (see
+    // mcpDirectory.ts for why this rides the prompt and not the system prompt).
+    const mcpHint = text ? mcpConnectionHint(text, this.mcp?.list() ?? []) : null;
+
+    const content = [
+      ...blocks,
+      ...(text ? [{ type: 'text', text }] : []),
+      ...(mcpHint ? [{ type: 'text', text: mcpHint }] : []),
+    ];
     this.pushTurnSafely(meta, { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
   }
 

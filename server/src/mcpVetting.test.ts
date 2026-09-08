@@ -11,7 +11,14 @@ import { deterministicVerdict, parseVerdict, VETTING_TIMEOUT_MS, vetMcpUrl } fro
  *    on the path that raises the approval card and must never block it.
  */
 
+/** A vendor the directory covers, so code alone can rule on it. */
 const PROPOSAL = { name: 'linear', url: 'https://mcp.linear.app/mcp', source: 'https://linear.app/docs' };
+
+/**
+ * One it does not: an obscure vendor is the case the judge exists for, and the
+ * case every judge-failure path has to answer `unknown` for.
+ */
+const UNLISTED = { name: 'acme', url: 'https://mcp.acme.example/mcp', source: 'https://acme.example/docs' };
 
 /** A judge that must never be reached. */
 const noJudge = async () => {
@@ -36,8 +43,20 @@ test('the mechanical checks are suspicious without asking a model anything', asy
   }
 });
 
-test('a clean https URL is left to the judge', () => {
-  assert.equal(deterministicVerdict(PROPOSAL), null);
+test('a vendor in the directory is ruled on in code, not by the judge', async () => {
+  // The documented host: `known` with no model call.
+  const known = await vetMcpUrl(PROPOSAL, noJudge);
+  assert.equal(known.level, 'known');
+  assert.match(known.reason, /Linear's documented MCP host/);
+
+  // The adversarial case the card exists for: our namespace, someone else's host.
+  const squat = await vetMcpUrl({ ...PROPOSAL, url: 'https://linear-app.com/mcp' }, noJudge);
+  assert.equal(squat.level, 'suspicious');
+  assert.match(squat.reason, /mcp\.linear\.app, not on linear-app\.com/);
+});
+
+test('a vendor Lines does not know is left to the judge', () => {
+  assert.equal(deterministicVerdict(UNLISTED), null);
 });
 
 test('the parser tolerates a chatty answer and rejects an unparseable one', () => {
@@ -55,17 +74,17 @@ test('the parser tolerates a chatty answer and rejects an unparseable one', () =
 });
 
 test('no judge, no answer, a thrown judge and a timeout all read unknown', async () => {
-  const unchecked = { level: 'unknown', reason: 'Could not be checked.', source: PROPOSAL.source };
+  const unchecked = { level: 'unknown', reason: 'Could not be checked.', source: UNLISTED.source };
 
   // No judge at all — the caller had no owner token to run one with.
-  assert.deepEqual(await vetMcpUrl(PROPOSAL), unchecked);
+  assert.deepEqual(await vetMcpUrl(UNLISTED), unchecked);
   // A judge that answers nothing (no result message came back).
-  assert.deepEqual(await vetMcpUrl(PROPOSAL, async () => null), unchecked);
+  assert.deepEqual(await vetMcpUrl(UNLISTED, async () => null), unchecked);
   // A judge that answers something no level can be read out of.
-  assert.deepEqual(await vetMcpUrl(PROPOSAL, async () => 'no comment'), unchecked);
+  assert.deepEqual(await vetMcpUrl(UNLISTED, async () => 'no comment'), unchecked);
   // A judge that throws: the card must still be raised.
   assert.deepEqual(
-    await vetMcpUrl(PROPOSAL, async () => {
+    await vetMcpUrl(UNLISTED, async () => {
       throw new Error('spawn failed');
     }),
     unchecked,
@@ -76,29 +95,37 @@ test('a judge that never answers is bounded, not awaited forever', async () => {
   // The real deadline is VETTING_TIMEOUT_MS; shortened here so the assertion is
   // about the bound existing rather than about waiting ten seconds for it.
   assert.equal(VETTING_TIMEOUT_MS, 10_000);
-  const verdict = await vetMcpUrl(PROPOSAL, () => new Promise<string>(() => {}), 50);
-  assert.deepEqual(verdict, { level: 'unknown', reason: 'Could not be checked.', source: PROPOSAL.source });
+  // The deadline timer is `unref`'d (a pending vetting must not hold the bridge
+  // open), and the judge here never settles — so without something ref'd the
+  // event loop drains and the runner cancels this test instead of running it.
+  const keepAlive = setTimeout(() => {}, 5_000);
+  try {
+    const verdict = await vetMcpUrl(UNLISTED, () => new Promise<string>(() => {}), 50);
+    assert.deepEqual(verdict, { level: 'unknown', reason: 'Could not be checked.', source: UNLISTED.source });
+  } finally {
+    clearTimeout(keepAlive);
+  }
 });
 
 test('a judge verdict is carried through with the cited source attached', async () => {
-  const verdict = await vetMcpUrl(PROPOSAL, async () => 'KNOWN: Linear publishes this endpoint.');
+  const verdict = await vetMcpUrl(UNLISTED, async () => 'KNOWN: Acme publishes this endpoint.');
   assert.deepEqual(verdict, {
     level: 'known',
-    reason: 'Linear publishes this endpoint.',
-    source: PROPOSAL.source,
+    reason: 'Acme publishes this endpoint.',
+    source: UNLISTED.source,
   });
 });
 
 test('the judge is asked about the domain, and given no way to fetch it', async () => {
   let seen = '';
   let system = '';
-  await vetMcpUrl({ name: 'linear', url: 'https://linear-app.com/mcp' }, async (prompt, systemPrompt) => {
+  await vetMcpUrl({ name: 'acme', url: 'https://acme-app.example/mcp' }, async (prompt, systemPrompt) => {
     seen = prompt;
     system = systemPrompt;
-    return 'suspicious: typosquat of linear.app';
+    return 'suspicious: not a host Acme publishes from';
   });
-  assert.ok(seen.includes('https://linear-app.com/mcp'), 'the URL is in the prompt');
-  assert.ok(seen.includes('linear'), 'so is the claimed name');
+  assert.ok(seen.includes('https://acme-app.example/mcp'), 'the URL is in the prompt');
+  assert.ok(seen.includes('acme'), 'so is the claimed name');
   // The tool-free instruction is the mitigation for the injected-page case; the
   // caller's `allowedTools: []` is the enforcement.
   assert.ok(system.includes('no tools'));

@@ -164,7 +164,7 @@ const READ_TOOLS: McpToolSpec[] = [
   {
     name: 'list_mcp_connections',
     description:
-      "The MCP servers this user has added, with their transport, URL, whether they are on, and this session's connection status where one is known. Call this when a task needs tools you cannot see (Linear, Sentry, a design tool) — it tells you whether the server is missing, switched off, or connected but not authorized.",
+      "The MCP servers this user has added, with their transport, URL, whether they are on, and this session's connection status where one is known. Call this whenever a task needs a third-party service you have no tools for — including when a fetch of that service's page came back as a sign-in wall or an empty JavaScript shell, which is what a missing connection looks like from the outside. It tells you whether the server is missing, switched off, or connected but not authorized.",
     readOnly: true,
     inputSchema: { type: 'object', properties: {} },
   },

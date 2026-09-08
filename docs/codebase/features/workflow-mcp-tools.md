@@ -30,6 +30,11 @@ permission-gated through the existing card, reads are not.
   (bridge-side, hot-reloadable tool names/descriptions/schemas)
 - `shared/workflowValidation.ts` — `validateWorkflow`, `validateStepContent`,
   `formatWorkflowIssues` (re-exported from `shared/types.ts`)
+- `shared/formatTime.ts` — `formatTimestamp` (also re-exported from
+  `shared/types.ts`), the one `YYYY-MM-DD HH:MM` local-time format every
+  `createdAt`/`updatedAt` in a tool result is rendered through
+- `storage/prisma/schema.prisma` — `Workflow.createdAt`, `StepVersion.createdAt`,
+  the Postgres-side half of workflow/step creation-time durability
 - `server/src/sessions.ts` — `handlePreToolUse`/`handleCanUseTool` gating on the
   `mcp__lines__*` namespace
 - `server/src/index.ts` — `handleMcpToolRpc`, and the four `saveWorkflow`/
@@ -54,6 +59,16 @@ permission-gated through the existing card, reads are not.
   `WorkflowEngine.save()` for an id it classifies as foreign (see Business rules)
 - `isLinesMcpTool` / `isReadOnlyLinesTool` — read the manifest's `readOnly` flag,
   the single source of truth for which tools skip the permission card
+- `formatTimestamp` (`shared/formatTime.ts`) — ms epoch → `YYYY-MM-DD HH:MM`
+  local time, `''` for undefined
+- `StepView` / `stepView` (`workflowCommands.ts`) — a `StepDef` with
+  `createdAt`/`updatedAt` formatted for a tool result; applied at the MCP
+  boundary (`get_step`, `list_step_versions`, `save_step`'s returned step), never
+  inside `stepVersionsView` itself
+- `createdAtOf` (`storage/src/index.ts`) — the blob's `createdAt`, else its
+  `updatedAtOf`, for `PUT /workflows`'s insert
+- `earliest` (`server/src/workflows.ts`) — the creation-time merge rule: the
+  smallest of the values given, ignoring absent ones
 
 ## Data flow
 
@@ -98,6 +113,11 @@ permission-gated through the existing card, reads are not.
 - `server/src/workflowValidation.test.ts`
 - `server/src/mcpWorkflowTools.test.ts`
 - `server/src/sessions.mcpGating.test.ts`
+- `server/src/workflows.timestamps.test.ts` — `createdAt` stamping, the
+  earliest-wins merge, and boot-time healing of rows written before it existed
+- `storage/src/workflows.createdAt.test.ts` — opt-in, needs
+  `STORAGE_TEST_DATABASE_URL` (with migrations applied): the Postgres-level
+  `LEAST` merge and the lineage-minimum read on `step_versions`
 
 ## Business rules
 
@@ -127,6 +147,23 @@ permission-gated through the existing card, reads are not.
 - A bridge that goes away mid-tool-call answers after `MCP_TOOL_FALLBACK_MS`
   (30s) with an error result, not an indefinitely parked turn — the SDK's own
   MCP tool timeout is effectively unbounded by default.
+- Every workflow/step read tool reports `createdAt`/`updatedAt` as
+  `YYYY-MM-DD HH:MM` local-time strings, not raw ms epochs — a raw epoch in a
+  tool result is a conversion the model would otherwise have to do by hand.
+  `stepVersionsView` itself is the one exception: it stays numeric, because its
+  other caller is the browser's version popover, which needs ms for `relTime`.
+- A workflow's `createdAt` is stamped once, on its first save, and never
+  restamped; a fresh (empty) id always mints a new one now, so `duplicate()` and
+  `create_workflow` can never inherit the source's birthday even though both
+  build the new workflow by spreading an existing one.
+- A step's `createdAt` is the *lineage's* creation — when the step id was first
+  created — not the mint time of whichever version is being read; every version
+  of one step reports the same `createdAt`; that version's own mint time is its
+  `updatedAt`. Identical `createdAt` values down a `list_step_versions` result
+  are correct, not a bug.
+- Creation time only ever moves earlier, never later (`earliest`/`LEAST`
+  everywhere it merges) — idempotent and order-independent across peers, and it
+  means a client or blob that omits `createdAt` can never erase a known one.
 
 ## Architectural rules
 

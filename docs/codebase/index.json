@@ -325,7 +325,8 @@
         "web/src/components/workflow/StepCard.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
         "web/src/components/workflow/WorkflowEditor.tsx",
-        "server/src/workflows.ownership.test.ts"
+        "server/src/workflows.ownership.test.ts",
+        "storage/prisma/schema.prisma"
       ],
       "symbols": [
         "VersionHistoryPopover",
@@ -346,7 +347,9 @@
         "useWorkflowDraft",
         "WorkflowEngine.isOwnRow",
         "WorkflowEngine.isForeign",
-        "WorkflowEngine.normalizeRefs"
+        "WorkflowEngine.normalizeRefs",
+        "earliest",
+        "lineageCreatedAt"
       ],
       "tests": [
         "server/src/workflows.ownership.test.ts"
@@ -361,7 +364,8 @@
         "Update all re-pins every outdated ref step directly, skipping the per-field diff review",
         "a workflows/sharedWorkflows length change while the modal is already open with a live draft must not re-trigger the pick-a-workflow fallback",
         "loadFrom collapses every step of the loaded workflow by default; a step opens only via explicit selection",
-        "own beats shared: an id/step present in both the own and shared maps is owned, editable, and never rendered under \"Shared by others\"; a StepRef.ownerId drifted from the bridge's own id is healed on re-pin/update and on WorkflowEngine.save(), plus once at boot"
+        "own beats shared: an id/step present in both the own and shared maps is owned, editable, and never rendered under \"Shared by others\"; a StepRef.ownerId drifted from the bridge's own id is healed on re-pin/update and on WorkflowEngine.save(), plus once at boot",
+        "every version of one step reports the same createdAt (the lineage's, not the version's); a content change or a publish-toggle-only save both keep it, and it only ever moves earlier, never later"
       ],
       "architecturalRules": [
         "immutable step versions are never deleted or edited, on disk or in storage — only the head list and published flag change",
@@ -1424,7 +1428,9 @@
         "server/src/sessions.ts",
         "server/src/index.ts",
         "web/src/components/PermissionPrompt.tsx",
-        "server/src/workflows.ts"
+        "server/src/workflows.ts",
+        "shared/formatTime.ts",
+        "storage/prisma/schema.prisma"
       ],
       "symbols": [
         "McpToolManifest",
@@ -1439,7 +1445,12 @@
         "isLinesMcpTool",
         "isReadOnlyLinesTool",
         "workflowToolPresentation",
-        "ForeignWorkflowError"
+        "ForeignWorkflowError",
+        "formatTimestamp",
+        "StepView",
+        "stepView",
+        "createdAtOf",
+        "earliest"
       ],
       "tests": [
         "server/src/workerMcp.test.ts",
@@ -1447,7 +1458,9 @@
         "server/src/workflowValidation.test.ts",
         "server/src/mcpWorkflowTools.test.ts",
         "server/src/sessions.mcpGating.test.ts",
-        "server/src/workflows.ownership.test.ts"
+        "server/src/workflows.ownership.test.ts",
+        "server/src/workflows.timestamps.test.ts",
+        "storage/src/workflows.createdAt.test.ts"
       ],
       "businessRules": [
         "mutations address a workflow by id, or by a name unique among owned workflows; a name match against another user's published workflow is refused as read-only, never silently forked",
@@ -1456,7 +1469,11 @@
         "resolveWorkflowRef should still run before saveWorkflow for the better, candidate-naming error message; WorkflowEngine.save() itself throws ForeignWorkflowError for an id it classifies as foreign, as the guard of last resort",
         "list/read tools cap results at 100 rows (default 50)",
         "a bridge gone mid-call answers after MCP_TOOL_FALLBACK_MS (30s) with an error result rather than parking the turn indefinitely",
-        "\"foreign\" is own-beats-shared: an id present in both the own and shared maps (a stale shared snapshot of the user's own row, or the same id republished under a second identity) is writable, not foreign"
+        "\"foreign\" is own-beats-shared: an id present in both the own and shared maps (a stale shared snapshot of the user's own row, or the same id republished under a second identity) is writable, not foreign",
+        "every workflow/step read tool reports createdAt/updatedAt as YYYY-MM-DD HH:MM local-time strings, not raw ms epochs; stepVersionsView stays numeric because the browser's version popover needs ms for relTime",
+        "a workflow's createdAt is stamped once on first save and never restamped; a fresh (empty) id always mints a new one, so duplicate()/create_workflow can never inherit the source's birthday",
+        "a step's createdAt is the lineage's creation, not the mint time of the version being read; every version of one step reports the same createdAt, and that version's own mint time is its updatedAt",
+        "creation time only ever moves earlier, never later, everywhere it merges (earliest/LEAST) — idempotent and order-independent across peers, so a client or blob that omits createdAt can never erase a known one"
       ],
       "architecturalRules": [
         "tool names/descriptions/schemas live entirely on the bridge (mcpWorkflowTools.ts) and are hot-reloadable; only the workflow-agnostic conversion (workerMcp.ts) and protocol shape (workerProtocol.ts) sit in the worker's minimal import graph",

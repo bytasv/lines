@@ -25,6 +25,7 @@
  * the tool call or blocking the card.
  */
 import type { McpVetting } from '@lines/shared';
+import { directoryEntryFor, hostMatches } from './mcpDirectory.ts';
 
 export interface McpVettingInput {
   /** The MCP namespace the agent wants to install it under. */
@@ -89,6 +90,25 @@ export function deterministicVerdict(input: McpVettingInput): McpVetting | null 
     if (CREDENTIAL_PARAMS.includes(param.toLowerCase())) {
       return suspicious(`The URL carries a credential in the query string (${param}).`);
     }
+  }
+
+  // The directory's two rulings, both cheaper and steadier than the judge for the
+  // vendors it covers (see mcpDirectory.ts for why it stores hosts, not URLs).
+  const entry = directoryEntryFor({ name: input.name, host: parsed.hostname });
+  if (entry) {
+    const onDocumentedHost = entry.endpointHosts.some((host) => hostMatches(parsed.hostname, host));
+    if (onDocumentedHost) {
+      return {
+        level: 'known',
+        reason: `${parsed.hostname} is ${entry.vendor}'s documented MCP host.`,
+        ...(input.source ? { source: input.source } : {}),
+      };
+    }
+    // Claims a vendor Lines knows, from a host that vendor does not serve MCP
+    // from — the typosquat shape, and the one case worth calling out by name.
+    return suspicious(
+      `${entry.vendor} documents its MCP endpoint on ${entry.endpointHosts.join(' or ')}, not on ${parsed.hostname}.`,
+    );
   }
   return null;
 }

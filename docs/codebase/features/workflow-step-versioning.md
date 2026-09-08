@@ -49,6 +49,8 @@ that user's own step history.
   icon next to the step's version badge)
 - `web/src/components/workflow/WorkflowEditor.tsx` (outdated-steps banner "Update all" button;
   the editor modal whose draft selection is governed here)
+- `web/src/components/workflow/StepLibrary.tsx` (the detail-header `Created`/`Updated` lines,
+  read from the live store row rather than the draft)
 
 ## Files
 
@@ -70,7 +72,10 @@ that user's own step history.
 - `server/src/index.ts` (`stepVersions` message handler)
 - `web/src/store.ts` (`stepVersions` slice, `Record<"ownerId/stepId", StepDef[]>`)
 - `server/src/workflows.ts` (`ForeignWorkflowError`, `isOwnRow`, `isForeign`, `normalizeRefs` —
-  the own-beats-shared classification and ref-healing this feature's "own vs. shared" UI reflects)
+  the own-beats-shared classification and ref-healing this feature's "own vs. shared" UI reflects;
+  also `earliest`, `lineageCreatedAt` — the creation-time merge and lookup)
+- `storage/prisma/schema.prisma` (`StepVersion.createdAt` — this row's own insert time, distinct
+  from the lineage value the blob carries)
 
 ## Symbols
 
@@ -128,6 +133,28 @@ version. Confirming:
 - Step library → `restore` loads that version's `StepContent` into the draft — draft-only,
   `saveStep` on Save bumps a **new** head version with that content; the restored version's row
   itself is untouched.
+
+### Creation time
+
+`StepDef.createdAt` is when the step *id* was first created, carried forward unchanged across
+every version bump — not the mint time of any one version, which is that immutable row's own
+`updatedAt`. `WorkflowEngine.saveStep` stamps it once (first save, or `lineageCreatedAt` recovered
+from cached versions if the head was deleted and re-created) and every later version of that id
+keeps it.
+
+In Postgres this is a lineage value, not a column: `step_versions.created_at` stays each row's own
+insert time (needed to reconstruct the lineage minimum), while the wire blob's `createdAt` is
+`min(created_at)` over `(user_id, id)`, injected on `GET /steps` via a joined subquery (not a
+window function — under `?since=` a window would only see rows inside the delta and report too
+recent a birth). `PUT /steps` therefore feeds its `created_at` column from `updatedAtOf`, not the
+blob's `createdAt`: the bridge re-pushes the whole version history on every step change, and
+writing the lineage value into every row would erase the very evidence the minimum is computed
+from.
+
+`StepLibrary`'s detail header reads `createdAt`/`updatedAt` off the live store row (`steps` /
+`sharedSteps`), not the draft — `save()` reloads the draft it just sent, so a draft read would show
+the pre-save version and time until the broadcast happened to replace it. Same wart as the
+`v{draft.version ?? 1}` badge next to it, left alone for the same reason.
 
 ### Persistence
 
@@ -195,6 +222,9 @@ The web draft/editor side (`useWorkflowDraft.ts`, `WorkflowEditor.tsx`, `StepCar
   state) does.
 - `loadFrom` collapses every step of the loaded workflow by default; a step only opens later via
   explicit selection (`selectStep`), keeping the editor compact for workflows with many steps.
+- Every version of one step reports the same `createdAt` (the lineage's, not the version's); a
+  content change or a publish-toggle-only save both keep it, and it only ever moves earlier
+  (`earliest`/`LEAST`), never later — a peer or older client that omits the field can't erase it.
 
 ## Architectural rules
 
