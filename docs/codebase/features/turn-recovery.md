@@ -121,8 +121,8 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   `workerStatus`, `authStatus` handler that opens/force-opens the login modal — unchanged)
 - `web/src/components/SessionView.tsx`, `web/src/components/SettingsModal.tsx`
 - `web/src/components/Sidebar.tsx`, `web/src/lib/format.ts` (`sessionRowMeta`)
-- `web/src/components/WorkerBanner.tsx`, `web/src/components/StorageBanner.tsx`,
-  `web/src/components/UpdateBanner.tsx` (pill precedence)
+- `web/src/components/SkewBanner.tsx`, `web/src/components/WorkerBanner.tsx`,
+  `web/src/components/StorageBanner.tsx`, `web/src/components/UpdateBanner.tsx` (pill precedence)
 - `web/src/components/Transcript.tsx` (the backward scan for `retryKey`, `WorkflowMarker`'s
   failed label, `FailedTurnActions` — Sign in + Skip step + Retry)
 - `web/src/lib/transcript.ts` (`isFailedResult`, `resultErrorText`, the compaction-span
@@ -152,6 +152,8 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   `autoContinue: false`
 - `WorkerStatus` (`shared/types.ts`) — the `hello.worker` / `workerStatus` broadcast payload
 - `WorkerBanner` — the global pill rendering `WorkerStatus`
+- `SkewBanner` — the global pill rendering `protocolSkew`; outranks `WorkerBanner` in the
+  precedence chain (see [hosted-machine-access](hosted-machine-access.md))
 - `isSelfWorkerSource` (`server/src/autoGuard.ts`) — true for
   `worker.ts`/`workerProtocol.ts`/`workerMcp.ts` under this bridge's own `server/src`
 - `SessionManager.failTurn(sessionId, error)` — the single funnel that shows a turn as failed:
@@ -652,13 +654,15 @@ message type, no new modal, no new client state, no DB migration.
   caught by the lost deadline: `everConnected` never becomes `true`, so the outage clock never
   starts. It is instead surfaced the moment the mismatched `hello` is seen, via
   `WorkerStatus.mismatch`, independent of `WORKER_LOST_MS`.
-- Exactly one of `ConnectionBanner`, `WorkerBanner`, `StorageBanner`, `UpdateBanner` renders at a
-  time — all four share the same fixed position. `ConnectionBanner` (browser↔bridge down) outranks
-  the rest; `WorkerBanner` (agent worker down) outranks `StorageBanner` (cloud sync paused), since
-  a dead agent is worse than paused sync; `UpdateBanner` (a desktop update is available) is the
-  lowest rank — it is news, not an outage, and is also hidden for a guest connection (not their
-  machine to update). See [Multi-machine](#multi-machine) below — this rule is now scoped to the
-  primary machine.
+- Exactly one of `ConnectionBanner`, `SkewBanner`, `WorkerBanner`, `StorageBanner`, `UpdateBanner`
+  renders at a time — all five share the same fixed position. `ConnectionBanner` (browser↔bridge
+  down) outranks the rest; `SkewBanner` (this client and the bridge disagree on
+  `APP_PROTOCOL_VERSION`, i.e. `protocolSkew`) outranks everything below it, since every claim those
+  make is read off messages this client may be misreading; `WorkerBanner` (agent worker down)
+  outranks `StorageBanner` (cloud sync paused), since a dead agent is worse than paused sync;
+  `UpdateBanner` (a desktop update is available) is the lowest rank — it is news, not an outage, and
+  is also hidden for a guest connection (not their machine to update). See
+  [Multi-machine](#multi-machine) below — this rule is now scoped to the primary machine.
 - Every recoverable failure (crashed query, `is_error` result, workflow pre-run failure, a push
   that never left the bridge) ends on a failure row with a working Retry button — in a plain
   session and inside a running workflow alike.
@@ -866,13 +870,14 @@ message type, no new modal, no new client state, no DB migration.
 ### Multi-machine
 
 A browser can hold live links to more than one machine at once (see
-[multi-machine-client](multi-machine-client.md)). The four banners above read only the
-**primary** machine's `connectionStatus`/`workerStatus`/`storageStatus`/`updateStatus` — a
-non-primary machine going offline, its worker dying, or it offering an update never triggers
-`ConnectionBanner`/`WorkerBanner`/`UpdateBanner` for a user looking at their own, healthy machine.
-That health surfaces on the affected session's row and header instead. The precedence rule itself
-(`ConnectionBanner` > `WorkerBanner` > `StorageBanner` > `UpdateBanner`) is unchanged — it now
-simply always describes the primary.
+[multi-machine-client](multi-machine-client.md)). The five banners above read only the
+**primary** machine's `connectionStatus`/`protocolSkew`/`workerStatus`/`storageStatus`/
+`updateStatus` — a non-primary machine going offline, speaking a different protocol version, its
+worker dying, or it offering an update never triggers `ConnectionBanner`/`SkewBanner`/
+`WorkerBanner`/`UpdateBanner` for a user looking at their own, healthy, in-sync machine. That
+health surfaces on the affected session's row and header instead. The precedence rule itself
+(`ConnectionBanner` > `SkewBanner` > `WorkerBanner` > `StorageBanner` > `UpdateBanner`) is
+unchanged — it now simply always describes the primary.
 
 ## Related decisions
 

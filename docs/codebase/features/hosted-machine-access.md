@@ -88,7 +88,9 @@ relay pipes frames between them, and the UI that gates all of it.
   `releaseBridgeLock`/`resolveRelayIdentity`, the single-instance `bridge.lock`,
   `EXIT_BRIDGE_LOCK_HELD`, `LINES_ALLOW_MULTIPLE_BRIDGES`
 - `shared/types.ts` — `APP_PROTOCOL_VERSION`, `BridgeInfo`, `hello.bridge`
-- `web/src/store.ts` — `bridge`, `protocolSkew`
+- `web/src/store.ts` — `bridge`, `protocolSkew` (both primary-machine-scoped; see
+  [multi-machine-client](multi-machine-client.md))
+- `web/src/components/SkewBanner.tsx` — the pill `protocolSkew` drives (see Data flow)
 - `relay/src/protocol.ts` — frames, shared by both ends
 - `relay/src/mux.ts` — `DeviceHub`, `HubRegistry`: pairing and routing, transport-free;
   `DeviceHub.ownerId`; `HubRegistry.drop`, whose caller is the re-verify tick
@@ -132,7 +134,9 @@ relay pipes frames between them, and the UI that gates all of it.
 - `LINK_OPEN` — `WebSocket.OPEN` inlined, so implementations need no `ws` import
 - `linkSendAction(msg, bufferedAmount)` — `'send' | 'skip' | 'close'`
 - `APP_PROTOCOL_VERSION` / `BridgeInfo` / `hello.bridge`
-- `protocolSkew` — client-side flag, set when the bridge's contract differs
+- `protocolSkew` — set when the bridge's contract differs from this client's `APP_PROTOCOL_VERSION`;
+  drives `SkewBanner`, ranked directly below `ConnectionBanner` in the pill precedence chain (see
+  [turn-recovery](turn-recovery.md))
 - `RELAY_PROTOCOL_VERSION` — frames only; the app messages inside are versioned separately by
   `APP_PROTOCOL_VERSION`
 - `DeviceHub.attachAgent` / `detachAgent` / `openChannel` / `fromClient` / `fromAgent`
@@ -208,8 +212,12 @@ carries `bridge: { version, appProtocol }` alongside the full state snapshot. Ev
 change fans out through `broadcast`, which consults `linkSendAction` per link before sending.
 
 The client compares `hello.bridge.appProtocol` against its own `APP_PROTOCOL_VERSION` and records
-`protocolSkew`. Nothing throws on a message type it does not recognise: `applyServerMessage` has
-no `default` case, so an unknown type falls through untouched.
+`protocolSkew`, which `SkewBanner` renders as a pill naming which side is older and, when it is
+this tab, a reload action. Nothing throws on a message type it does not recognise:
+`applyServerMessage` has no `default` case, so an unknown type falls through untouched — the case
+this doesn't cover is a client old enough to still *render* a field a newer bridge stopped sending
+(a removed-field change, not an added one), which is why removing or renaming a rendered field is
+a protocol bump in its own right (see `architecture.md`).
 
 ### Relaying
 

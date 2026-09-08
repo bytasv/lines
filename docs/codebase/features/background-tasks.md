@@ -41,8 +41,9 @@ while its subagent was still streaming into it. A standalone row survives only f
 - `server/src/sessions.ts` — `LiveState.backgroundTasks`, `SessionManager.setBackgroundTasks`
   (private), `SessionManager.stopBackgroundTasks` (public), `recycleIdleQueries`'s exemption, the
   `background_tasks_changed`/`init` branch in `handleWorkerEvent`, the clears in `closeQuery`,
-  `resetClaudeSession` and `handleWorkerEnded`, the hydration clear in the constructor, and the
-  `reconcileWithWorker` hydration from `LiveSessionInfo.backgroundTasks`
+  `resetClaudeSession` and `handleWorkerEnded`, the hydration clear in the constructor, the
+  `reconcileWithWorker` hydration from `LiveSessionInfo.backgroundTasks`, and
+  `BACKGROUND_TASK_SYSTEM_SUBTYPES`/`isBackgroundTaskSignal` (see Business rules)
 - `server/src/workerProtocol.ts` — the `stopTask` `BridgeToWorker` message, `PROTOCOL_VERSION` 5,
   `LiveSessionInfo.backgroundTasks`
 - `server/src/worker.ts` — `SessionState.backgroundTasks`, the `pump` tracking of
@@ -73,6 +74,11 @@ while its subagent was still streaming into it. A standalone row survives only f
   set actually changed
 - `SessionManager.stopBackgroundTasks(sessionId)` (public) — calls `WorkerClient.stopTask` once
   per live id; does not clear the set itself
+- `isBackgroundTaskSignal(msg)` / `BACKGROUND_TASK_SYSTEM_SUBTYPES` (`sessions.ts`) — true for a
+  `system` event a background task emits on its own schedule
+  (`background_tasks_changed`/`task_notification`/`task_progress`/`task_updated`); excluded from
+  `handleWorkerEvent`'s turn-liveness heal (see Business rules and
+  [turn-recovery](turn-recovery.md))
 - `recycleIdleQueries()`'s second exemption — skips closing the query of a settled session whose
   `LiveState.backgroundTasks` is non-empty
 - `LiveSessionInfo.backgroundTasks` (`workerProtocol.ts`) — worker→bridge report in `hello`;
@@ -238,6 +244,16 @@ transcript card.
   across three complete turns, clearable only by a CLI restart (`system/init`).
 - A settled session (not interruptible) that still owns a background task is never recycled —
   closing its query would kill the CLI child and the task with it, silently.
+- `handleWorkerEvent`'s staleness heal (any non-`result` event proves a turn is live; see
+  [turn-recovery](turn-recovery.md)) never fires for a background-task-only system event
+  (`background_tasks_changed`, `task_notification`, `task_progress`, `task_updated`). Those
+  outlive the turn that started them, so one arriving on a session that had already settled is not
+  proof a turn is running — treating it as one flipped the status to `'running'` permanently, since
+  no second `result` was ever coming to settle it again. That also made the session read as
+  interruptible, which is what let `recycleIdleQueries` skip a settled session over its
+  *interruptible*-status guard rather than its background-task guard, and let a `busy: false`
+  `reconcileWithWorker` pass wrongly demote, auto-continue, and (via `closeQuery`) clear the task
+  set of a session whose task was still live.
 - `stopBackgroundTasks` stops each live task, then clears the set itself, optimistically — the
   user's manual escape hatch for a task the CLI has already forgotten (where `stopTask` is a no-op
   and no level signal ever arrives to clear the set otherwise). A task that really is still alive

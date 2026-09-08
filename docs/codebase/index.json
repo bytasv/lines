@@ -554,6 +554,7 @@
         "shared/types.ts",
         "web/src/store.ts",
         "web/src/components/SessionView.tsx",
+        "web/src/components/SkewBanner.tsx",
         "web/src/components/WorkerBanner.tsx",
         "web/src/components/StorageBanner.tsx",
         "web/src/components/SettingsModal.tsx",
@@ -582,6 +583,7 @@
         "onStatusChange",
         "UserRegistry.onWorkerLost",
         "WorkerStatus",
+        "SkewBanner",
         "WorkerBanner",
         "isSelfWorkerSource",
         "SessionManager.failTurn",
@@ -652,7 +654,7 @@
         "reconcileWithWorker skips a session that has neither live state nor a local on-disk transcript (SessionManager.ranHere) — it only exists here because storage sync (adoptSynced) adopted it from another machine, and demoting/restamping/auto-continuing it would broadcast and cloud-push a turn this machine never ran; a session with an actual worker report for this pass is still fully reconciled even with no local transcript, since a live report is itself evidence",
         "a session demoted by reconcileWithWorker whose current workflow step already reads waiting-approval re-parks at waiting-approval instead of idle (the only turn that runs on an already-parked step is a manual compaction) — no interruptedAt is stamped and it is not added to flagged, so auto-continue's nudge cannot read as an approval nobody gave; see workflow-step-lifecycle",
         "a cold-start protocol mismatch never sets everConnected, so the outage clock never starts; it's surfaced by WorkerStatus.mismatch instead",
-        "exactly one of ConnectionBanner/WorkerBanner/StorageBanner/UpdateBanner renders at a time; bridge-down outranks worker-down outranks storage-down outranks update-available; scoped to the primary machine only (see multi-machine-client)",
+        "exactly one of ConnectionBanner/SkewBanner/WorkerBanner/StorageBanner/UpdateBanner renders at a time; bridge-down outranks contract skew outranks worker-down outranks storage-down outranks update-available; scoped to the primary machine only (see multi-machine-client)",
         "every recoverable failure ends on a failure row with a working Retry, in a plain session and inside a running workflow alike",
         "a failed turn never autoAdvances; it parks the step as failed instead, unless an explicit stamped force-advance is already pending",
         "Retry re-runs the right thing: a step that never got a prompt is re-rendered from WorkflowState ('pre-run'); a step whose turn failed is re-sent as a follow-up on the same conversation ('turn')",
@@ -1821,7 +1823,8 @@
         "web/vite.config.ts",
         ".env.example",
         "relay/src/protocol.ts",
-        "server/src/relayClient.ts"
+        "server/src/relayClient.ts",
+        "web/src/components/SkewBanner.tsx"
       ],
       "symbols": [
         "Device",
@@ -2401,7 +2404,8 @@
         "web/src/components/ConnectingMachine.tsx",
         "web/src/components/Sidebar.tsx",
         "web/src/components/Composer.tsx",
-        "web/src/components/SessionView.tsx"
+        "web/src/components/SessionView.tsx",
+        "web/src/components/SkewBanner.tsx"
       ],
       "symbols": [
         "MachineSlice",
@@ -2420,7 +2424,7 @@
         "server/src/machineMerge.test.ts"
       ],
       "businessRules": [
-        "the primary machine's connectionStatus/machineOffline/bootstrapped/workerStatus/storageStatus/updateStatus are the only values the global banners read",
+        "the primary machine's connectionStatus/machineOffline/bootstrapped/protocolSkew/bridge/workerStatus/storageStatus/updateStatus are the only values the global banners read",
         "a shared machine connects automatically up to LINK_CAP; an idle non-primary link disconnects after IDLE_DISCONNECT_MS",
         "sessionMachine is per-client in-memory state, never persisted or synced",
         "auto-selecting a freshly created session additionally requires the creating frame to have come from the primary machine"
@@ -2656,7 +2660,9 @@
         "WorkerClient.stopTask",
         "TaskItem",
         "BACKGROUND_WORK_META",
-        "ToolBlock.background"
+        "ToolBlock.background",
+        "isBackgroundTaskSignal",
+        "BACKGROUND_TASK_SYSTEM_SUBTYPES"
       ],
       "tests": [
         "server/src/sessions.backgroundTasks.test.ts"
@@ -2664,6 +2670,7 @@
       "businessRules": [
         "the live set is never restored from a persisted SessionMeta.backgroundTasks on load — a background task belongs to a specific CLI process, and a value surviving a restart in sessions.json describes a process nothing here has a handle on any more",
         "background_tasks_changed is the only thing that may put an id into the live set (strengthened from “is the only writer”); everything else — init, closeQuery, handleWorkerEnded, resetClaudeSession, task_notification, and stopBackgroundTasks — may only take ids out, so membership is monotone toward empty between level emissions. A missed bookend now fails as a premature empty (self-corrected by the next level emission) instead of a permanent non-empty (observed wedged for 661 events in one real session, clearable only by a CLI restart)",
+        "a background-task-only system event (background_tasks_changed, task_notification, task_progress, task_updated) never heals a stale session status back to 'running' in handleWorkerEvent — those events outlive the turn that started them, so treating one as proof a turn is live on a session that had already settled wedged the status permanently (no second result was ever coming), which also made the session wrongly read as interruptible for recycleIdleQueries and reconcileWithWorker",
         "a settled session that still owns a live background task is never recycled by recycleIdleQueries — closing its query would kill the CLI child and the task with it, silently",
         "stopBackgroundTasks stops each live task and then clears the set itself, optimistically — the user's manual escape hatch for a task the CLI has already forgotten (previously it deliberately left the set alone; a still-alive task now just flickers back on the next background_tasks_changed, which is accepted as better than an unrecoverable wedge)",
         "a result arriving while background tasks are still live still settles the turn normally (done/error) — the turn lifecycle is unaffected by background work outside it",
@@ -2879,7 +2886,8 @@
         "authorizing a server, editing/removing a connection, and reading MCP status are all owner-only, permanently",
         "OAuth's redirect URI is always http://127.0.0.1:<bridge's bound port>/mcp-oauth/callback, so authorizing only works from a browser on the same machine as the bridge",
         "the OAuth callback route's state parameter is the only credential on it: single-use, TTL-bounded, timingSafeEqual-compared; a provider response with no state is refused outright",
-        "a dead session's pending OAuth handshakes are forgotten on worker onEnded, since the PKCE verifier died with that CLI process"
+        "a dead session's pending OAuth handshakes are forgotten on worker onEnded, since the PKCE verifier died with that CLI process",
+        "review() re-sanitizes the pending list (via sanitizeConnections) on every call and recomputes the diff off that sanitized list, rather than trusting what reviewRemote staged — the pending blob round-trips through mcp-connections-sync.json, which loadMcpSync validates only on updatedAt"
       ],
       "architecturalRules": [
         "validators live in shared/types.ts so the web client runs the exact same rules before sending a connection to the bridge",

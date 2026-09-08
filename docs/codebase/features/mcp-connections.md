@@ -97,7 +97,11 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
   enabled }`. `headerKeys` is names only; values never appear on this type.
 - `normalizeConnection(raw)` — the single validation gate every writer runs through (Settings
   form, wire handler, load migration, remote ingest): canonicalizes or returns an
-  `McpConnectionError`. Mints an id when the input has none.
+  `McpConnectionError`. Mints an id when the input has none. `review()` also re-runs it (via
+  `sanitizeConnections`) on the pending blob before returning it, since that blob round-trips
+  through `mcp-connections-sync.json`, which is validated only on `updatedAt` — a hand-edited or
+  half-written file is otherwise the one path by which an unvalidated row would reach the review
+  modal.
 - `RESERVED_MCP_SERVER_NAMES` — `['lines']`; duplicated (not imported) from
   `server/src/mcpWorkflowTools.ts`'s `LINES_MCP_SERVER` because that module pulls in the whole
   bridge graph — `mcpConnections.test.ts` asserts the two agree.
@@ -132,7 +136,9 @@ On connect/reconnect, `syncNow` pulls `/mcp-connections` and calls
 `mcp.reviewRemote(pulled.mcpConnections)` **before** the push block — a fresh machine's empty list
 must not silently overwrite a populated cloud row before the user has been asked. If the remote
 list (re-validated) differs from the local one by content, a review is staged and broadcast as
-`mcpConnectionsReview`; connections are untouched until accept/reject.
+`mcpConnectionsReview`; connections are untouched until accept/reject. `review()` re-validates
+again on every read (see Business rules), so a review reported to the client is sanitized twice
+over: once when it was staged, once when it is served.
 
 ### Reaching a session
 
@@ -242,6 +248,11 @@ cannot be replayed against a query that no longer holds its verifier.
   cloud row.
 - Push to storage is suppressed while a review is pending, so the push itself cannot destroy the
   state being reviewed.
+- `review()` re-sanitizes the pending list on every call (via `sanitizeConnections`) rather than
+  trusting what `reviewRemote` staged, and recomputes the added/removed diff off that sanitized
+  list — the pending blob round-trips through `mcp-connections-sync.json`, which `loadMcpSync`
+  validates only on `updatedAt`, so this is the one path by which an unvalidated row could
+  otherwise reach the review modal.
 - A disabled connection is kept (so its configuration and secret survive) but contributes nothing
   to `serverConfigs()` — no session sees its tools while it's off.
 - `alwaysLoad` is left unset on every generated server config, so a connection's tools defer

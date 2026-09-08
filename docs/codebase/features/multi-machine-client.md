@@ -36,8 +36,8 @@ anything newly created — and are the highest-risk part of this feature for exa
 - `web/src/store.ts` — `machines: Record<string, MachineSlice>`, `primaryDeviceId`,
   `sessionMachine: Record<sessionId, deviceId>`, `setPrimaryMachine`, the per-machine
   `applyServerMessage`/`setConnectionStatus`/`setMachineOffline`/`workerStatus`/`storageStatus`/
-  `updateStatus` handling, `draftSessionIds`/`pruneDrafts`/`pruneDraftAttachments` (inverted to
-  take the ids to delete)
+  `updateStatus`/`bridge`/`protocolSkew` handling, `draftSessionIds`/`pruneDrafts`/
+  `pruneDraftAttachments` (inverted to take the ids to delete)
 - `web/src/lib/can.ts` — `useSessionMachine`, `useSessionMachineHealth` (both `useShallow`-wrapped
   — see Architectural rules)
 - `web/src/lib/machineHealth.ts` — `linkedMachineHealth`, `unlinkedMachineHealth`,
@@ -51,7 +51,7 @@ anything newly created — and are the highest-risk part of this feature for exa
 ## Symbols
 
 - `MachineSlice` — `{ deviceId, scope, connectionStatus, machineOffline, bootstrapped, worker,
-  storage, update, ownerProfile }`, one per machine in `store.machines`
+  storage, update, bridge, ownerProfile }`, one per machine in `store.machines`
 - `mergeMachineSessions({ sessions, sessionMachine, deviceId, incoming })` — folds one machine's
   `hello` into the shared session map. Drops only the sessions *stamped to this machine* that it
   no longer reports; every other machine's stamped sessions pass through untouched; an unstamped
@@ -84,8 +84,11 @@ connecting to a subset — a silent cap would read as "connected to everything" 
 ### `switchDevice` no longer tears anything down
 
 `switchDevice` sets the primary and calls `setPrimaryMachine`, which re-derives the legacy scalar
-fields (`connectionStatus`, `machineOffline`, `bootstrapped`, `workerStatus`, `storageStatus`)
-from that machine's `MachineSlice`. It neither closes the previous link nor calls
+fields (`connectionStatus`, `machineOffline`, `bootstrapped`, `workerStatus`, `storageStatus`,
+`updateStatus`, `bridge`, `protocolSkew`) from that machine's `MachineSlice`. `protocolSkew` is
+recomputed rather than copied, gated on `bootstrapped` — before a machine's first `hello`, `bridge`
+is "not asked yet", not a pre-versioning bridge, and reading that as skew would flash the pill on
+every switch. It neither closes the previous link nor calls
 `clearBootstrap()` — the previous machine's sessions and connection stay exactly as they were,
 which is the entire point of holding more than one.
 
@@ -131,8 +134,8 @@ a sleeping laptop must show offline even while the machine in front of the user 
   frames, and the device-list shape this layers `shared`/`scope`/`ownerProfile` onto.
 - [session-and-project-ui](session-and-project-ui.md) — `pendingCreate`/`seenSessionIds`, which
   `shouldClaimSelection` reuses unchanged;
-  `ConnectionBanner`/`WorkerBanner`/`StorageBanner`/`UpdateBanner`'s precedence rule, which stays
-  scoped to the primary machine (see [turn-recovery](turn-recovery.md#multi-machine)).
+  `ConnectionBanner`/`SkewBanner`/`WorkerBanner`/`StorageBanner`/`UpdateBanner`'s precedence rule,
+  which stays scoped to the primary machine (see [turn-recovery](turn-recovery.md#multi-machine)).
 - zustand v5's `useSyncExternalStore`-backed `useStore` — any selector returning a freshly built
   object per call must be wrapped in `useShallow`, or it re-renders on every store tick (see
   Architectural rules).
@@ -152,9 +155,9 @@ a sleeping laptop must show offline even while the machine in front of the user 
 
 ## Business rules
 
-- The primary machine's `connectionStatus`/`machineOffline`/`bootstrapped`/`workerStatus`/
-  `storageStatus`/`updateStatus` are the only values
-  `ConnectionBanner`/`WorkerBanner`/`StorageBanner`/`UpdateBanner` read — see
+- The primary machine's `connectionStatus`/`machineOffline`/`bootstrapped`/`protocolSkew`/`bridge`/
+  `workerStatus`/`storageStatus`/`updateStatus` are the only values
+  `ConnectionBanner`/`SkewBanner`/`WorkerBanner`/`StorageBanner`/`UpdateBanner` read — see
   [turn-recovery](turn-recovery.md#multi-machine). A non-primary machine's health never reaches
   those banners; it surfaces on the session row and header instead.
 - A shared machine connects automatically (up to `LINK_CAP`); an idle non-primary link

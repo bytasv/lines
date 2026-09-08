@@ -88,8 +88,11 @@ on the user's machine. The hosted side relays and stores; it never runs a turn.
 ## Conventions worth knowing before reading a feature doc
 
 - `shared/types.ts` holds the wire contract. Additive optional fields are routine; a new message
-  type is a protocol bump. `APP_PROTOCOL_VERSION` (browser↔bridge) and `PROTOCOL_VERSION`
-  (bridge↔worker) are separate contracts on separate numbering.
+  type is a protocol bump — and so is removing or renaming a field a client renders, even though
+  the type-level change looks additive-safe: a hosted client ships ahead of every installed bridge,
+  and an older *bundle* still renders the old field name against a payload that no longer has it.
+  `APP_PROTOCOL_VERSION` (browser↔bridge) and `PROTOCOL_VERSION` (bridge↔worker) are separate
+  contracts on separate numbering; skew is surfaced (`protocolSkew`, `SkewBanner`) but not enforced.
 - Pure, exported helpers over methods with hidden dependencies — most of `server/`'s test coverage
   is direct unit tests of functions that take plain data.
 - Server-owned broadcast state over local optimistic UI state: the client derives affordances from
