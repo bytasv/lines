@@ -75,11 +75,15 @@ describe('MESSAGE_AUTHZ', () => {
     assert.ok(ownerOnly.includes('deleteSession'));
     assert.ok(ownerOnly.includes('addGuardAllow'));
     // MCP connections run third-party code inside every session on the machine,
-    // and their status report names the host's servers.
+    // and their status report names the host's servers. Both of the last two also
+    // reach further than they read: authorizing signs the *host* in to a
+    // third-party account, and a status read may bring a session's query (and so
+    // a CLI child) up on the host's machine.
     assert.ok(ownerOnly.includes('addMcpConnection'));
     assert.ok(ownerOnly.includes('updateMcpConnection'));
     assert.ok(ownerOnly.includes('removeMcpConnection'));
     assert.ok(ownerOnly.includes('reviewMcpConnections'));
+    assert.ok(ownerOnly.includes('authorizeMcpConnection'));
     assert.ok(ownerOnly.includes('mcpServerStatus'));
     assert.ok(ownerOnly.includes('authLogout'));
     assert.ok(ownerOnly.includes('installUpdate'));

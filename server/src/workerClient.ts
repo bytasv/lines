@@ -415,4 +415,33 @@ export class WorkerClient {
   mcpAuthCallback(sessionId: string, serverName: string, callbackUrl: string): Promise<unknown> {
     return this.ask(sessionId, 'mcpAuthCallback', { serverName, callbackUrl });
   }
+
+  /**
+   * Replace this session's user MCP servers on its already-running query, so a
+   * connection added or removed in Settings reaches a live turn instead of
+   * waiting for the next brand-new session.
+   *
+   * Answers `{ result, servers }` — the `McpSetServersResult` and the settled
+   * status read after it. `no-live-session` for a session with no query, which
+   * callers treat as a benign no-op rather than an error.
+   */
+  mcpSetServers(sessionId: string, mcpServers: Record<string, unknown>): Promise<unknown> {
+    return this.ask(sessionId, 'mcpSetServers', { mcpServers });
+  }
+
+  /**
+   * Bring up a query for a session that has none, without running a turn, and
+   * answer with its MCP status. Costs no tokens: the CLI child answers control
+   * requests while it waits for input.
+   *
+   * The only ask that carries `options`/`tools`, because it is the only one that
+   * can create the query it reads.
+   */
+  mcpWarm(
+    sessionId: string,
+    options: Record<string, unknown>,
+    tools?: McpToolManifest,
+  ): Promise<unknown> {
+    return this.ask(sessionId, 'mcpWarm', { options, ...(tools ? { tools } : {}) });
+  }
 }

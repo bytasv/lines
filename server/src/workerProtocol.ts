@@ -234,6 +234,41 @@ export function mergeMcpServers<T>(
   return { ...user, [linesServerName]: linesServer };
 }
 
+/**
+ * Which live MCP servers a `setMcpServers(payload)` has left behind.
+ *
+ * `setMcpServers` adds and updates, and it destroys an in-process SDK server it
+ * omits — but it does *not* remove a process-based (http/sse/stdio) server it
+ * omits: measured, an omitted http server kept running on its old config. So a
+ * connection the user disabled or deleted has to be switched off by name, and
+ * this is the list of names to switch off.
+ *
+ * `scope: 'dynamic'` is the discriminator for "added by this SDK client". A
+ * server from a settings file or a `claudeai-proxy` entry is the user's own and
+ * must never be touched — Lines did not add it and has no business disabling it.
+ * Already-disabled servers are skipped so a repeat call is a no-op.
+ *
+ * Lives here, next to mergeMcpServers, for the same reason: it is a decision
+ * about protocol shape and needs no live Query, so a test can import it without
+ * starting a worker.
+ */
+export function staleDynamicServers(
+  statuses: unknown,
+  payload: Record<string, unknown>,
+): string[] {
+  if (!Array.isArray(statuses)) return [];
+  const stale: string[] = [];
+  for (const entry of statuses) {
+    if (!entry || typeof entry !== 'object') continue;
+    const { name, scope, status } = entry as { name?: unknown; scope?: unknown; status?: unknown };
+    if (scope !== 'dynamic' || typeof name !== 'string' || !name) continue;
+    if (status === 'disabled') continue;
+    if (Object.prototype.hasOwnProperty.call(payload, name)) continue;
+    stale.push(name);
+  }
+  return stale;
+}
+
 /** MCP `CallToolResult`, narrowed to the text content our tools return. */
 export interface McpToolResult {
   content: { type: 'text'; text: string }[];
@@ -283,14 +318,37 @@ export function mcpAuthSupport(q: unknown): McpAuthSupport {
  * live Query handle (which only the worker owns); adding one here is not a
  * protocol bump, adding a message type is.
  */
-export type AskMethod = 'contextUsage' | 'mcpStatus' | 'mcpAuthStart' | 'mcpAuthCallback';
+export type AskMethod =
+  | 'contextUsage'
+  | 'mcpStatus'
+  | 'mcpAuthStart'
+  | 'mcpAuthCallback'
+  /** Replace the session's user MCP servers on the live query (see mcpSetServers
+   *  in worker.ts for why a replace alone is not enough to remove one). */
+  | 'mcpSetServers'
+  /**
+   * Materialize a query for a session that has none, without running a turn.
+   *
+   * The odd one out: every other method reads a Query the worker already holds,
+   * this one creates it. It is an `ask` rather than its own message type so that
+   * adding it is not a protocol bump — and it is handled in `handleAsk` ahead of
+   * the liveness check, since "no live query" is the whole point of the call.
+   *
+   * Why it works at all: the CLI child spawns with `query()` and answers control
+   * requests while it waits for input, but emits nothing (not even `system:init`)
+   * until a user message arrives. So a warmed session is readable and
+   * authorizable, and costs no tokens. Verified against the installed SDK; see
+   * mcpAuth.contract.test.ts.
+   */
+  | 'mcpWarm';
 
 export type BridgeToWorker =
   /**
    * Deliver a user message. `options` is the full serializable query-options
    * object; the worker uses it only when no live query exists for the session
-   * (creation is lazy and idempotent — no separate "ensure" message, so a
-   * push can never race an ensure).
+   * (creation is lazy and idempotent, and the one other path that creates a
+   * query — the `mcpWarm` ask — funnels through the same `ensureSession`, so on
+   * a single-threaded worker the two cannot race).
    *
    * `tools` is read on that same first push: the worker builds one MCP server
    * instance per session from it and every tool call comes back as an `mcpTool`

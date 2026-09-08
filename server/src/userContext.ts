@@ -263,6 +263,12 @@ export function buildUserContext(
   mcp.onChange = (connections) => {
     broadcast({ type: 'mcpConnections', connections });
     pushMcp();
+    // The guard has no equivalent of this third line: its entries are read per
+    // decision, while `mcpServers` is frozen into a query when it is created. So
+    // without pushing the new list onto the live ones, a connection added here
+    // would not exist for any running session — and, reporting no status, could
+    // never be authorized either.
+    void sessions.applyMcpServers();
   };
   mcp.onReview = (review) => broadcast({ type: 'mcpConnectionsReview', review });
 

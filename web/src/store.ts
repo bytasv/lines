@@ -741,7 +741,10 @@ interface UiState {
    * "this SDK build no longer exposes the OAuth methods", which is why the text
    * is whatever the server sent rather than a string chosen here.
    */
-  mcpAuth: Record<string, { pending?: boolean; authUrl?: string; error?: string; ok?: boolean }>;
+  mcpAuth: Record<
+    string,
+    { pending?: boolean; authUrl?: string; alreadyAuthorized?: boolean; error?: string; ok?: boolean }
+  >;
   /** What the left sidebar shows: session list or project file tree. */
   sidebarMode: SidebarMode;
   /** Keep gitignored files out of the file tree and the Cmd+P palette. Persisted
@@ -829,8 +832,15 @@ interface UiState {
   openMcpReview: () => void;
   /** Leaves the review pending (the Settings banner stays) and remembers the dismissal. */
   closeMcpReview: () => void;
-  /** Ask one session how its MCP servers are doing; the reply lands in `mcpStatus`. */
-  requestMcpStatus: (sessionId: string) => void;
+  /**
+   * Ask one session how its MCP servers are doing; the reply lands in `mcpStatus`.
+   *
+   * `warm` lets the bridge bring the session's query up if it has none, which is
+   * the only way to get a reading for a session that has never run a turn. Pass
+   * it on an explicit Refresh, not when the pane merely opens — it spawns a CLI
+   * child.
+   */
+  requestMcpStatus: (sessionId: string, warm?: boolean) => void;
   /** Start an OAuth handshake for one server, using a session's live query. */
   authorizeMcpConnection: (sessionId: string, name: string) => void;
   /** Clear a finished/failed authorization notice for one server. */
@@ -1205,7 +1215,8 @@ export const useStore = create<UiState>((set, get) => {
       mcpReviewOpen: false,
       mcpReviewDismissedAt: state.mcpReview?.detectedAt ?? state.mcpReviewDismissedAt,
     })),
-  requestMcpStatus: (sessionId) => send({ type: 'mcpServerStatus', sessionId }),
+  requestMcpStatus: (sessionId, warm) =>
+    send({ type: 'mcpServerStatus', sessionId, ...(warm ? { warm: true } : {}) }),
   authorizeMcpConnection: (sessionId, name) => {
     set((state) => ({ mcpAuth: { ...state.mcpAuth, [name]: { pending: true } } }));
     send({ type: 'authorizeMcpConnection', sessionId, name });
@@ -1575,11 +1586,23 @@ export const useStore = create<UiState>((set, get) => {
           mcpStatus: { ...state.mcpStatus, [msg.sessionId]: msg.servers },
         }));
         break;
+      // Several sessions at once, after a connection edit reached their live
+      // queries — so the pane reflects an add or a toggle without a refresh.
+      case 'mcpStatuses':
+        set((state) => ({ mcpStatus: { ...state.mcpStatus, ...msg.statuses } }));
+        break;
       case 'mcpAuthStarted':
         set((state) => ({
           mcpAuth: {
             ...state.mcpAuth,
-            [msg.name]: msg.authUrl ? { authUrl: msg.authUrl } : { error: msg.error },
+            // Three outcomes, and already-authorized is a success: the CLI holds
+            // a token for this server, so there is no URL to offer and nothing
+            // failed.
+            [msg.name]: msg.authUrl
+              ? { authUrl: msg.authUrl }
+              : msg.alreadyAuthorized
+                ? { alreadyAuthorized: true }
+                : { error: msg.error },
           },
         }));
         break;

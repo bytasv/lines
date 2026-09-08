@@ -166,9 +166,12 @@ const worker = new WorkerClient({
     registry.forSession(sessionId).sessions.handleWorkerEvent(sessionId, message),
   onEnded: (sessionId, error) => {
     // The PKCE verifier died with that CLI process, so any handshake it started
-    // can never complete — drop the state rather than leave it claimable.
+    // can never complete — drop the state rather than leave it claimable, and
+    // drop the query hold that was protecting a query which no longer exists.
     mcpAuthPending.forgetSession(sessionId);
-    registry.forSession(sessionId).sessions.handleWorkerEnded(sessionId, error);
+    const ended = registry.forSession(sessionId);
+    ended.sessions.releaseAuthHold(sessionId);
+    ended.sessions.handleWorkerEnded(sessionId, error);
   },
   onRpc: (rpc) => {
     const ctx = registry.forSession(rpc.sessionId);
@@ -528,6 +531,7 @@ async function handleOAuthCallback(req: http.IncomingMessage, res: http.ServerRe
     return;
   }
   if (providerError) {
+    ctx.sessions.releaseAuthHold(claimed.sessionId);
     ctx.broadcast({
       type: 'mcpAuthCompleted',
       sessionId: claimed.sessionId,
@@ -538,7 +542,12 @@ async function handleOAuthCallback(req: http.IncomingMessage, res: http.ServerRe
     oauthPage(res, 200, 'Authorization was declined', 'You can close this tab and try again from Lines.');
     return;
   }
-  const result = await ctx.sessions.completeMcpAuth(claimed.sessionId, claimed.serverName, url.toString());
+  // Released only after the exchange settles, not before: the await below runs on
+  // the query holding the PKCE verifier, and a token refresh landing inside it
+  // would recycle that query out from under the handshake.
+  const result = await ctx.sessions
+    .completeMcpAuth(claimed.sessionId, claimed.serverName, url.toString())
+    .finally(() => ctx.sessions.releaseAuthHold(claimed.sessionId));
   if ('error' in result) {
     ctx.broadcast({
       type: 'mcpAuthCompleted',
@@ -1344,6 +1353,20 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
         );
         break;
       }
+      // Nothing to visit and no callback coming: the CLI already holds a token
+      // for this server. Answered as a success, and deliberately without
+      // registering a pending state — there is no handshake to claim.
+      if ('alreadyAuthorized' in started) {
+        ws.send(
+          JSON.stringify({
+            type: 'mcpAuthStarted',
+            sessionId: msg.sessionId,
+            name: msg.name,
+            alreadyAuthorized: true,
+          } satisfies ServerMessage),
+        );
+        break;
+      }
       // Register before answering, so a fast redirect cannot beat the record.
       // No state means the provider will not echo one, and without it the
       // callback route has nothing to authenticate — refuse rather than accept an
@@ -1364,6 +1387,10 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
         sessionId: msg.sessionId,
         serverName: msg.name,
       });
+      // Leg 2 must run against this same query — it holds the PKCE verifier — so
+      // exempt it from idle recycling until the callback lands or the hold ages
+      // out on the same clock the pending handshake does.
+      sessions.holdForAuth(msg.sessionId);
       ws.send(
         JSON.stringify({
           type: 'mcpAuthStarted',
@@ -1377,7 +1404,7 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
     case 'mcpServerStatus': {
       // Answered on the asking link only, not broadcast: it names the host's
       // configured servers, and a session guest has no business with those.
-      const servers = await sessions.mcpServerStatus(msg.sessionId);
+      const servers = await sessions.mcpServerStatus(msg.sessionId, { warm: msg.warm === true });
       ws.send(
         JSON.stringify({
           type: 'mcpServerStatus',

@@ -21,7 +21,8 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
 ## Entry points
 
 - Settings modal → **Connections** pane: add/edit/remove a connection, toggle it on/off, see its
-  live status, authorize it.
+  live status, authorize it. Authorizing needs no running turn and no particular status reading —
+  see Data flow → OAuth: authorize.
 - `web/src/components/McpConnectionsReviewModal.tsx`, mounted at the app root (not inside
   Settings) — a divergent connection list pulled from another machine.
 - `server/src/sessions.ts` `buildQueryOptions` — every session push includes the enabled
@@ -42,26 +43,35 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
   `describeConnection`, `diffConnections`; the `addMcpConnection`/`updateMcpConnection`/
   `removeMcpConnection`/`reviewMcpConnections`/`mcpServerStatus`/`authorizeMcpConnection` client
   messages and their `MESSAGE_AUTHZ` entries (all owner-only); the `mcpConnections`/
-  `mcpConnectionsReview`/`mcpServerStatus`/`mcpAuthStarted`/`mcpAuthCompleted` server messages;
+  `mcpConnectionsReview`/`mcpServerStatus`/`mcpAuthStarted`/`mcpAuthCompleted` server messages
+  (`mcpServerStatus` carries an optional `warm`; `mcpAuthStarted` an optional `alreadyAuthorized`),
+  plus the account-wide `mcpStatuses`;
   `McpServerStatusInfo`, `McpElicitation`, and `PermissionRequestData.elicitation`.
 - `server/src/mcpConnections.ts` — `McpConnections`, the store-backed list + review lifecycle
   class, structurally a copy of `GuardAllowlist` (`server/src/autoGuard.ts`).
 - `server/src/mcpAuth.ts` — the OAuth shim: `normalizeAuthStart`, `unsupportedReason`,
-  `McpAuthPending` (the pending-handshake map keyed by OAuth `state`), `inspectInstalledSdk`; also
+  `McpAuthPending` (the pending-handshake map keyed by OAuth `state`), `PENDING_TTL_MS` (exported,
+  because `SessionManager` bounds its query hold on the same clock), `inspectInstalledSdk`; also
   re-exports `MCP_AUTH_METHODS`/`mcpAuthSupport`/`McpAuthApi` from `workerProtocol.ts`.
-- `server/src/workerProtocol.ts` — `mergeMcpServers` (the worker-side merge helper);
+- `server/src/workerProtocol.ts` — `mergeMcpServers` (the worker-side merge helper),
+  `staleDynamicServers` (which live servers a replace left behind — see Symbols);
   `MCP_AUTH_METHODS`, `mcpAuthSupport`, `McpAuthApi`, `McpAuthSupport` (the runtime capability
   probe for the untyped SDK OAuth methods — see Architectural rules); `AskMethod` extended with
-  `'mcpStatus' | 'mcpAuthStart' | 'mcpAuthCallback'`; `BridgeToWorker`'s `ask` message extended
-  with an optional `params` field.
-- `server/src/worker.ts` — `runAsk` (dispatches the four `AskMethod` values); `ensureSession`'s
-  `mcpServers` merge.
-- `server/src/workerClient.ts` — `WorkerClient.mcpStatus`, `.mcpAuthStart`, `.mcpAuthCallback`.
-- `server/src/sessions.ts` — `buildQueryOptions`'s `mcpServers` block; `mcpServerStatus` (reads
-  live status, falling back to the last `system:init` reading); `startMcpAuth`/`completeMcpAuth`
-  (the two OAuth legs); `normalizeMcpStatuses`; the `system:init` handler stashing
-  `LiveState.mcpServers`; `findPermissionRequest`'s `toolName || elicitation` predicate;
-  `askPermission`'s `elicitation` parameter.
+  `'mcpStatus' | 'mcpAuthStart' | 'mcpAuthCallback' | 'mcpSetServers' | 'mcpWarm'`;
+  `BridgeToWorker`'s `ask` message extended with an optional `params` field.
+- `server/src/worker.ts` — `runAsk` (dispatches the `AskMethod` values, `mcpSetServers` among
+  them); `handleAsk`'s `mcpWarm` branch, ahead of the liveness check because creating the query is
+  what it does; `ensureSession`'s `mcpServers` merge and its `SessionState.linesServer` stash.
+- `server/src/workerClient.ts` — `WorkerClient.mcpStatus`, `.mcpAuthStart`, `.mcpAuthCallback`,
+  `.mcpSetServers`, `.mcpWarm`.
+- `server/src/sessions.ts` — `buildQueryOptions`'s `mcpServers` block; `applyMcpServers` (push
+  the list onto live queries); `warmQuery` (bring a query up with no turn); `mcpServerStatus`
+  (reads live status, warming only when asked, falling back to the last `system:init` reading);
+  `startMcpAuth`/`completeMcpAuth` (the two OAuth legs); `authHolds`/`holdForAuth`/
+  `releaseAuthHold`/`heldForAuth` and `recycleIdleQueries`' skip for them;
+  `normalizeMcpStatuses`; the `system:init` handler stashing `LiveState.mcpServers`;
+  `findPermissionRequest`'s `toolName || elicitation` predicate; `askPermission`'s `elicitation`
+  parameter.
 - `server/src/store.ts` — `loadMcpConnections`/`saveMcpConnections` (`mcp-connections.json`, a
   bare array), `loadMcpSync`/`saveMcpSync` (`mcp-connections-sync.json`, mirroring
   `GuardSyncState`), `loadMcpSecrets`/`saveMcpSecrets` (`mcp-secrets.json`, mode `0600`, **never**
@@ -70,19 +80,25 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
   own like `/guard-allowlist`, so an unmigrated storage server 500s only that one resource),
   `pushMcpConnections`.
 - `server/src/userContext.ts` — wires `mcp.onChange`/`mcp.onReview` to broadcast + push, and calls
-  `mcp.reviewRemote` before the push block in `syncNow`, mirroring the guard wiring exactly.
-- `server/src/index.ts` — the six MCP message cases; `boundPort`, `MCP_OAUTH_CALLBACK_PATH`,
-  `mcpAuthPending`, `handleOAuthCallback`, `oauthPage`; `onEnded`'s
-  `mcpAuthPending.forgetSession` call.
+  `mcp.reviewRemote` before the push block in `syncNow`, mirroring the guard wiring — plus one line
+  the guard has no equivalent of, `sessions.applyMcpServers()` (see Data flow → Reaching a
+  session).
+- `server/src/index.ts` — the six MCP message cases (`authorizeMcpConnection` answering
+  `alreadyAuthorized`, and taking a query hold beside `mcpAuthPending.start`); `boundPort`,
+  `MCP_OAUTH_CALLBACK_PATH`, `mcpAuthPending`, `handleOAuthCallback` (releasing the hold on every
+  settle path), `oauthPage`; `onEnded`'s `mcpAuthPending.forgetSession` and `releaseAuthHold`
+  calls.
 - `storage/prisma/schema.prisma`, `storage/src/index.ts` — the `mcp_connections` table and its
   `GET`/`PUT /mcp-connections` routes (the `PUT` handler strips any `headers` field defensively,
   independent of the bridge already never sending one).
-- `web/src/store.ts` — `mcpConnections`/`mcpReview`/`mcpStatus`/`mcpAuth` state, their actions, and
-  the matching `ServerMessage` cases; deliberately absent from `pushSettings()`.
+- `web/src/store.ts` — `mcpConnections`/`mcpReview`/`mcpStatus`/`mcpAuth` state, their actions
+  (`requestMcpStatus` takes a `warm` flag), and the matching `ServerMessage` cases; deliberately
+  absent from `pushSettings()`.
 - `web/src/lib/mcpConnections.ts` — `mcpConnectionErrorText`, `mcpStatusMeta`,
   `MCP_STATUS_UNKNOWN`.
 - `web/src/components/McpConnectionsSection.tsx` — the Settings pane: connection list, add form
-  (client-side `normalizeConnection` before send), status dot, Authorize button.
+  (client-side `normalizeConnection` before send), status dot, Authorize button (offered on status
+  alone no longer — see Business rules), Refresh (the one warming caller).
 - `web/src/components/McpConnectionsReviewModal.tsx` — accept/reject a divergent remote list.
 - `web/src/components/SettingsModal.tsx` — the `'connections'` section, registered like
   `'allowlist'`.
@@ -111,7 +127,22 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
   `acceptReview`/`rejectReview`.
 - `mergeMcpServers(fromOptions, linesServerName, linesServer)` — combines the user's connections
   with the Lines server, Lines spread **last** so it always wins a name collision. Lives in
-  `workerProtocol.ts` (not `worker.ts`) so it is testable without a live query.
+  `workerProtocol.ts` (not `worker.ts`) so it is testable without a live query. Used twice: at
+  query creation, and in every `setMcpServers` payload.
+- `staleDynamicServers(statuses, payload)` — the names a replace left running. `setMcpServers`
+  adds, updates, and destroys an omitted **in-process** server, but does *not* remove an omitted
+  **process-based** one, so a disabled or deleted connection has to be switched off by name.
+  Filters on `scope === 'dynamic'`, which is the SDK's marker for "added by this client": a
+  settings-file or `claudeai-proxy` server is the user's own and is never touched.
+- `applyMcpServers()` — pushes `serverConfigs()` onto every session that already has a live query,
+  so a Settings edit reaches running sessions. Never warms: an edit must not spawn a CLI child per
+  session, and `no-live-session` is a no-op here.
+- `warmQuery(sessionId)` — brings a session's query up without running a turn, and answers with its
+  MCP status. Goes through the same token resolution a push does and records `queryTokens`, or the
+  next real turn would recycle the query it just created.
+- `authHolds` / `holdForAuth` / `releaseAuthHold` — sessions whose query must survive
+  `recycleIdleQueries` for the length of an OAuth handshake. Timestamped and bounded by
+  `PENDING_TTL_MS`, so an abandoned handshake stops pinning a CLI child open.
 - `mcpAuthSupport(q)` — runtime probe: does this `Query` handle still expose
   `mcpAuthenticate`/`mcpSubmitOAuthCallbackUrl`? Returns `{ ok: false, missing }` instead of
   throwing when the SDK has changed shape.
@@ -147,6 +178,30 @@ values attached from the local secrets file — and includes the result as `mcpS
 serialized options sent to the worker. `ensureSession` merges that map with the Lines in-process
 server via `mergeMcpServers`, Lines last, and passes the combined map to `query()`.
 
+That covers query *creation*, and `ensureSession` is idempotent — it returns an existing session
+and discards the freshly built options. So a connection added afterwards reaches nothing that is
+already running. `McpConnections.onChange` therefore also fires `SessionManager.applyMcpServers`,
+which asks each live query to `setMcpServers` the current list. Two things make that call correct
+rather than obvious:
+
+- The payload goes through `mergeMcpServers` as well, because `setMcpServers` **destroys** an
+  in-process server omitted from it — omitting `lines` returns `removed: ['lines']` and takes the
+  workflow tools down with it.
+- A replace cannot remove a process-based server it omits (an omitted http server keeps running on
+  its old config), so the worker follows it with `toggleMcpServer(name, false)` for everything
+  `staleDynamicServers` names. Both of that call's throws are expected and neither means failure:
+  an unknown name throws `Server not found`, and a *successful* toggle throws
+  `Server status: needs-auth`. The status read after the sweep is the answer, not the throw.
+
+The resulting readings go out as one account-wide `mcpStatuses` message, not as N
+`mcpServerStatus` ones. That is a scoping requirement, not a batching preference: `mcpServerStatus`
+carries a top-level `sessionId`, so `sessionIdOf` classifies it as session-scoped and the fan-out
+would hand a session guest the names, error text and statuses of the host's third-party servers.
+Keying the sessions *inside* the payload makes it account-wide, which is owner-only.
+
+Without this, the Connections pane was a dead end: a just-added connection was in no live query,
+so it reported no status, so nothing offered to authorize it.
+
 ### Status
 
 `system:init` carries `mcp_servers: {name, status}[]` — cheap, always available, but lossy (no
@@ -155,6 +210,10 @@ detailed read (`SessionManager.mcpServerStatus`) asks the worker for a live
 `Query.mcpServerStatus()` (`AskMethod: 'mcpStatus'`) and falls back to the last-known `init`
 reading when no query is live or the read comes back empty. The Settings pane requests it for
 whichever session is currently open; there is no per-connection subscription.
+
+`warm: true` on the request additionally permits `warmQuery`, which is the only way to get a real
+reading for a session that has never run a turn. Sent by the pane's Refresh button and nothing
+else — opening Settings must not spawn a CLI child as a side effect.
 
 ### OAuth: elicitation (in-session, mid-turn)
 
@@ -175,7 +234,18 @@ through. That gap is closed by a first-class flow that does not go through `onEl
    `SessionManager.startMcpAuth`, which asks the worker (`AskMethod: 'mcpAuthStart'`) to call
    `Query.mcpAuthenticate(serverName, redirectUri)` on the session's live query, with `redirectUri`
    pointed at this bridge's own `/mcp-oauth/callback`. The bridge registers the returned `state` in
-   `mcpAuthPending` and answers `mcpAuthStarted` with the `authUrl`.
+   `mcpAuthPending`, takes a query hold, and answers `mcpAuthStarted` with the `authUrl`.
+
+   If the session has no query — the normal state of a session the user added a connection for and
+   has not run — `startMcpAuth` calls `warmQuery` and retries once, rather than making the user
+   start a turn they do not want in order to sign in. A worker too old to implement `mcpWarm`
+   answers `no-live-session` for a session it holds nothing for, which is exactly the pre-warm
+   situation, so that path degrades to the old "start a turn first" copy.
+
+   A `callbackExpected: false` answer means the CLI already holds a token for this server: there is
+   no URL to visit and no callback coming, so it is reported as `alreadyAuthorized` and **no**
+   pending state is registered. Read as an error, this announced a working setup as "the SDK
+   returned no authorization URL".
 2. The user opens that URL (a plain link, not an auto-`window.open` — a popup blocker would eat
    it) and signs in with the provider.
 3. **Leg 2** — the provider redirects the browser to the bridge's HTTP callback with `state` (and
@@ -185,8 +255,13 @@ through. That gap is closed by a first-class flow that does not go through `onEl
    `mcpServerStatus()` read), and broadcasts `mcpAuthCompleted` with the result.
 
 Both legs must run against the **same live query**: the PKCE verifier from leg 1 lives inside that
-CLI process. `worker.onEnded` calls `mcpAuthPending.forgetSession` so a state whose session died
-cannot be replayed against a query that no longer holds its verifier.
+CLI process. Two guards follow from that, in opposite directions. `worker.onEnded` calls
+`mcpAuthPending.forgetSession` so a state whose session died cannot be replayed against a query
+that no longer holds its verifier. And `holdForAuth` exempts the session from
+`recycleIdleQueries` — which closes every settled query on a token refresh — so the verifier is
+not thrown away *while* the user is still at the provider's sign-in page. The hold is released on
+every settle path (both callback outcomes, a provider refusal, and the query ending) and ages out
+on `PENDING_TTL_MS` regardless, so an abandoned sign-in cannot pin a CLI child open.
 
 ## Dependencies
 
@@ -215,18 +290,33 @@ cannot be replayed against a query that no longer holds its verifier.
   set-equal reorder not counting, accept/reject, reject-remembered-by-content, restart
   persistence, and that an accepted remote connection has no secret until one is entered locally.
 - `server/src/workerMcpMerge.test.ts` — `mergeMcpServers`: neighbours survive, Lines wins a name
-  collision, malformed/absent input still yields the Lines server alone.
+  collision, malformed/absent input still yields the Lines server alone. Plus
+  `staleDynamicServers`: an omitted dynamic server is named, a settings-file or `claudeai` server
+  never is, Lines is never swept (the merge re-includes it), an already-disabled server is not
+  toggled twice, `needs-auth` still counts as live, and a malformed status read yields no toggles.
+- `server/src/sessions.mcpLive.test.ts` — `applyMcpServers` reaches every session and broadcasts
+  the returned statuses as a single account-wide message (and nothing at all when no session had a
+  query); it sends `serverConfigs()` (header values attached), not the synced blob;
+  one session with no query does not stop the others; it never warms. And `warmQuery` through its
+  callers: a status read warms only when asked, `startMcpAuth` warms once and completes on the
+  retry, a worker too old to warm degrades to the pre-warm copy, `callbackExpected: false` is
+  `alreadyAuthorized`, and `worker-unavailable` is reported rather than retried.
+- `server/src/sessions.backgroundTasks.test.ts` — the query hold, alongside the background-task
+  skip it parallels: a held session is never recycled, is once released, and stops being held once
+  the hold ages past `PENDING_TTL_MS`; releasing a hold never taken is a no-op.
 - `server/src/mcpAuth.contract.test.ts` — the two-directional SDK canary (see Architectural
   rules); `mcpAuthSupport` degrading instead of throwing; `normalizeAuthStart` against the real
-  recorded Figma response shape, a renamed field, and a non-`http(s)` URL; `McpAuthPending`
-  single-use claim, wrong-state rejection, and per-session forgetting.
+  recorded Figma response shape, a renamed field, a non-`http(s)` URL, and a
+  `callbackExpected: false` answer (already-authorized, and winning even over a stale URL);
+  `McpAuthPending` single-use claim, wrong-state rejection, and per-session forgetting.
 - `server/src/store.test.ts` — round-trip for `mcp-connections.json`/`mcp-connections-sync.json`/
   `mcp-secrets.json`; the secrets file is `0600` and never appears in the connections file; a
   non-string secret value is dropped on load.
-- `server/src/messageAuthz.test.ts` — the five MCP messages are owner-only at both `machine` and
-  `session` scope.
-- `server/src/broadcastScope.test.ts` — `mcpConnections`/`mcpConnectionsReview` are account-wide
-  (`sessionIdOf` returns `null`), so a guest socket never receives them.
+- `server/src/messageAuthz.test.ts` — the six MCP messages are owner-only at both `machine` and
+  `session` scope. Two of them now reach further than they read: authorizing signs the *host* in to
+  a third-party account, and a warming status read brings a CLI child up on the host's machine.
+- `server/src/broadcastScope.test.ts` — `mcpConnections`/`mcpConnectionsReview`/`mcpStatuses` are
+  account-wide (`sessionIdOf` returns `null`), so a guest socket never receives them.
 - `server/src/sync.availability.test.ts` — a `P2021` on `mcp_connections` degrades that one
   resource to `null` rather than aborting the whole pull.
 - No web test runner covers `McpConnectionsSection.tsx`/`McpConnectionsReviewModal.tsx` — same
@@ -254,7 +344,21 @@ cannot be replayed against a query that no longer holds its verifier.
   validates only on `updatedAt`, so this is the one path by which an unvalidated row could
   otherwise reach the review modal.
 - A disabled connection is kept (so its configuration and secret survive) but contributes nothing
-  to `serverConfigs()` — no session sees its tools while it's off.
+  to `serverConfigs()` — no session sees its tools while it's off. On a *live* query that also
+  takes an explicit `toggleMcpServer(name, false)`: dropping it from the replace payload is not
+  enough (see Data flow → Reaching a session).
+- A connection edit reaches sessions that are already running, not only the next new one. The
+  reverse — a session picking up an edit made while it was mid-turn — is the same mechanism and is
+  equally intended.
+- Authorizing is offered for any enabled `http`/`sse` connection, whatever its status reading says,
+  and is absent for `stdio` (which takes its credentials from its own `env`). It used to appear
+  only on a `needs-auth` reading, which made it unreachable in the one case that matters: a
+  connection the user has just added is in no live query, so it reports no status at all. A wasted
+  click on an already-working server is the cheaper failure.
+- Authorizing needs a session selected, but not a running turn: leg 1 warms the query if there is
+  none.
+- "Already authorized" is a distinct outcome from an error — the CLI holds a token, nothing failed
+  and there is nothing to visit.
 - `alwaysLoad` is left unset on every generated server config, so a connection's tools defer
   behind tool search by default and cost nothing in a session with no use for them.
 - Only `mode: 'url'` elicitations render a card; `mode: 'form'` is declined without ever reaching
@@ -266,7 +370,9 @@ cannot be replayed against a query that no longer holds its verifier.
   permanently — no share preset reaches them.
 - OAuth's redirect URI is always `http://127.0.0.1:<this bridge's bound port>/mcp-oauth/callback`.
   Authorizing therefore only works from a browser on the same machine as the bridge; a relayed
-  browser elsewhere cannot reach it, and the UI states this rather than hanging.
+  browser elsewhere cannot reach it. The pane states this beside the control, always and not only
+  when something has already gone wrong — but does not block the click, since a relayed
+  deployment's browser may well be on that machine and that is the user's call.
 - The callback route's `state` parameter is the only credential on it (an OAuth redirect cannot
   carry the app's own token): single-use, TTL-bounded (`McpAuthPending`), and compared with
   `timingSafeEqual`. Unknown, expired, and already-claimed states all produce one identical
@@ -296,6 +402,30 @@ cannot be replayed against a query that no longer holds its verifier.
   worker is the only side holding a `Query` and must probe it there; `mcpAuth.ts` re-exports them
   rather than redefining them, so the canary test and the call site can never disagree about what
   is being relied on.
+- `Query.setMcpServers`/`toggleMcpServer`/`mcpServerStatus`/`reconnectMcpServer` **are** declared
+  in `sdk.d.ts`, so they are called directly and the compiler is their tripwire — a rename or
+  removal fails `npm run typecheck`. Only the two undeclared OAuth methods go behind
+  `mcpAuthSupport`. Wrapping the typed ones in a runtime probe too would trade a compile error for
+  a runtime string, which is strictly worse.
+- `staleDynamicServers` lives in `workerProtocol.ts` next to `mergeMcpServers`, for the same
+  reason: it is a decision about protocol shape, needs no live `Query`, and is the part of the
+  `mcpSetServers` handler with logic worth asserting.
+- `'mcpSetServers'` and `'mcpWarm'` are `AskMethod` values, not new `BridgeToWorker` message types,
+  and so are **not** protocol bumps — the existing rule above `AskMethod`. That is a deliberate
+  choice and not just convenience: `workerProtocol.ts` is inside the worker's tsx-watch graph, so
+  bumping `PROTOCOL_VERSION` restarts the worker and kills every live query. A feature about
+  keeping a query alive must not ship by killing them all.
+- `'mcpWarm'` is handled in `handleAsk`, ahead of its `no-live-session` check, rather than in
+  `runAsk`. It is the one ask that *creates* the query the others read, so the check it would
+  otherwise fail is the very condition it exists to fix. It funnels through the same
+  `ensureSession` a push does, so on a single-threaded worker the two creation paths cannot race.
+- A warmed query is readable but silent: the CLI answers control requests while it waits for input
+  and emits nothing — not even `system:init` — until a user message arrives. So `warmQuery` must
+  not wait for `init`, and a warmed session must not be marked `busy`. Verified empirically; the
+  lazy-init behaviour is not documented anywhere.
+- `PENDING_TTL_MS` is exported from `mcpAuth.ts` and imported by `sessions.ts` rather than
+  duplicated: a query hold that outlived the handshake it protects would pin a CLI child open for
+  a flow that can no longer complete.
 - `Query.mcpAuthenticate`/`mcpSubmitOAuthCallbackUrl` are called only behind `mcpAuthSupport(q)`,
   never directly — they exist in the SDK's runtime bundle but not in `sdk.d.ts`, so nothing
   type-checks a call to them. `mcpAuth.contract.test.ts` is the tripwire: it fails if the methods

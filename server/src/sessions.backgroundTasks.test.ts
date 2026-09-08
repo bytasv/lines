@@ -154,6 +154,49 @@ test('a settled session with no background task is still recycled', () => {
   assert.deepEqual(h.closed, ['s1']);
 });
 
+/**
+ * The second reason a settled query must sometimes survive recycling, alongside
+ * the background tasks above: an MCP OAuth handshake in flight. The PKCE verifier
+ * lives in that CLI process, so recycling it between leg 1 and the browser
+ * redirect leaves the callback with nothing to complete against.
+ */
+
+test('a session under an auth hold is never recycled, and is once released', () => {
+  const h = harness('done');
+  h.sessions.holdForAuth('s1');
+  h.sessions.recycleIdleQueries();
+  assert.deepEqual(h.closed, []);
+
+  h.sessions.releaseAuthHold('s1');
+  h.sessions.recycleIdleQueries();
+  assert.deepEqual(h.closed, ['s1']);
+});
+
+test('an abandoned handshake stops pinning the query open once its hold ages out', () => {
+  // Otherwise a user who closes the sign-in tab keeps a CLI child alive for the
+  // rest of the bridge's life, immune to every token refresh.
+  const h = harness('done');
+  h.sessions.holdForAuth('s1');
+  const realNow = Date.now;
+  try {
+    // Just past the shared handshake TTL (mcpAuth.ts PENDING_TTL_MS, 10 minutes).
+    Date.now = () => realNow() + 10 * 60 * 1000 + 1;
+    h.sessions.recycleIdleQueries();
+  } finally {
+    Date.now = realNow;
+  }
+  assert.deepEqual(h.closed, ['s1']);
+});
+
+test('releasing a hold that was never taken is a no-op', () => {
+  // handleWorkerEnded and the OAuth callback both release unconditionally.
+  const h = harness('done');
+  h.sessions.releaseAuthHold('s1');
+  h.sessions.releaseAuthHold('nosuch');
+  h.sessions.recycleIdleQueries();
+  assert.deepEqual(h.closed, ['s1']);
+});
+
 test('stopBackgroundTasks stops each live task and clears the set', () => {
   const h = harness('done');
   h.sessions.handleWorkerEvent('s1', changed(task('a'), task('b')));

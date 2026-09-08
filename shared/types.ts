@@ -1827,8 +1827,16 @@ export type ClientMessage =
     }
   | { type: 'removeMcpConnection'; id: string }
   | { type: 'reviewMcpConnections'; accept: boolean }
-  /** Read how each MCP server is doing in one session; answered by `mcpServerStatus`. */
-  | { type: 'mcpServerStatus'; sessionId: string }
+  /**
+   * Read how each MCP server is doing in one session; answered by
+   * `mcpServerStatus`.
+   *
+   * `warm: true` permits the bridge to bring the session's query up if it has
+   * none, which is the only way to get a real reading for a session that has
+   * never run a turn. Sent on an explicit Refresh, never on the pane merely
+   * opening — a status read must not spawn a CLI child as a side effect.
+   */
+  | { type: 'mcpServerStatus'; sessionId: string; warm?: boolean }
   /**
    * Start an OAuth handshake for one MCP server, using `sessionId`'s live query.
    * Answered by `mcpAuthStarted`. The session matters: the CLI process that runs
@@ -2509,8 +2517,23 @@ export type ServerMessage =
    */
   | { type: 'mcpServerStatus'; sessionId: string; servers: McpServerStatusInfo[] }
   /**
-   * Answer to `authorizeMcpConnection`. `authUrl` is where the user must go;
-   * `error` means the handshake could not start — including the case where this
+   * The same readings for several sessions at once, after a connection edit was
+   * pushed onto every live query.
+   *
+   * Deliberately keyed by session id inside the payload rather than sent as N
+   * `mcpServerStatus` messages: carrying a top-level `sessionId` would make
+   * `sessionIdOf` classify it as session-scoped, and the fan-out would hand a
+   * session guest the names, errors and statuses of the host's third-party
+   * servers. With no `sessionId` field it is account-wide, which is owner-only —
+   * the same reasoning that keeps `mcpConnections` account-wide.
+   */
+  | { type: 'mcpStatuses'; statuses: Record<string, McpServerStatusInfo[]> }
+  /**
+   * Answer to `authorizeMcpConnection`. Exactly one of the three optional fields
+   * is set. `authUrl` is where the user must go; `alreadyAuthorized` means the
+   * CLI already holds a token for this server, so there is nothing to visit —
+   * a success, not the "no authorization URL" failure it would otherwise read as;
+   * `error` means the handshake could not start, including the case where this
    * SDK build no longer exposes the (untyped) OAuth methods at all, which is why
    * the copy is server-supplied rather than a client-side string.
    */
@@ -2519,6 +2542,7 @@ export type ServerMessage =
       sessionId: string;
       name: string;
       authUrl?: string;
+      alreadyAuthorized?: boolean;
       error?: string;
     }
   /** Fired once the browser redirect has been exchanged, with the resulting state. */

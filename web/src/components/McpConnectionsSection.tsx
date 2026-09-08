@@ -56,8 +56,12 @@ export function McpConnectionsSection({ onOpenReview }: { onOpenReview: () => vo
   const statuses = useStore((s) => (selectedSessionId ? s.mcpStatus[selectedSessionId] : undefined));
 
   // Status is a per-session reading, so it needs a session to read from. The
-  // open one is the only sensible choice here, and a refresh is offered because
-  // the answer changes when a query starts.
+  // open one is the only sensible choice here.
+  //
+  // Not warmed: opening Settings must not spawn a CLI child as a side effect. So
+  // a session that has never run a turn reads as "No status yet" here — which is
+  // why the Authorize control below is no longer gated on a status at all. The
+  // Refresh button is the explicit-intent version and does warm.
   useEffect(() => {
     if (selectedSessionId) requestMcpStatus(selectedSessionId);
   }, [selectedSessionId, requestMcpStatus]);
@@ -92,12 +96,12 @@ export function McpConnectionsSection({ onOpenReview }: { onOpenReview: () => vo
             : 'Open a session to see connection status.'}
         </Text>
         {selectedSessionId && (
-          <Tooltip label="Refresh status">
+          <Tooltip label="Refresh status — starts this session's agent if it isn't running">
             <ActionIcon
               variant="subtle"
               size="sm"
               aria-label="Refresh connection status"
-              onClick={() => requestMcpStatus(selectedSessionId)}
+              onClick={() => requestMcpStatus(selectedSessionId, true)}
             >
               <IconRefresh size={14} />
             </ActionIcon>
@@ -151,6 +155,20 @@ function ConnectionRow({
       ? mcpStatusMeta(status.status)
       : MCP_STATUS_UNKNOWN;
 
+  // OAuth is an HTTP/SSE concept — a stdio server takes its credentials from its
+  // own env — and the control is offered whatever the status reading says.
+  //
+  // It used to appear only on a `needs-auth` reading, which made it unreachable:
+  // a connection the user has just added is in no live query yet, so it reports
+  // no status at all and the button never rendered. Offering it unconditionally
+  // costs a wasted click at worst; gating it cost the whole feature.
+  const canAuthorize = connection.enabled && connection.transport !== 'stdio';
+  // Hidden only while a handshake is actually in flight or waiting on the
+  // browser. A finished one leaves its note *and* the control, so re-authorizing
+  // never needs a dismissal first.
+  const showAuthorize = canAuthorize && !auth?.pending && !auth?.authUrl;
+  const unauthorized = !status || status.status === 'needs-auth' || status.status === 'failed';
+
   return (
     <Stack gap={2}>
       <Group justify="space-between" wrap="nowrap">
@@ -197,26 +215,34 @@ function ConnectionRow({
           {status.error}
         </Text>
       )}
-      {status?.status === 'needs-auth' && !auth && (
-        <Group gap="xs" wrap="nowrap">
+      {showAuthorize && (
+        <Group gap="xs" wrap="nowrap" align="flex-start">
           <Button
             size="compact-xs"
-            variant="light"
+            variant={unauthorized ? 'light' : 'subtle'}
             disabled={!sessionId}
             onClick={() => sessionId && authorizeMcpConnection(sessionId, connection.name)}
           >
-            Authorize…
+            {unauthorized ? 'Authorize…' : 'Re-authorize…'}
           </Button>
-          <Text size="xs" c="dimmed">
+          <Text size="xs" c="dimmed" style={{ flex: 1 }}>
             {sessionId
-              ? 'Opens this server’s sign-in in a new tab.'
-              : 'Open a session with a running turn to authorize.'}
+              ? // Stated up front rather than discovered as a dead redirect: the
+                // callback URL is loopback on the bridge's machine, so a browser
+                // anywhere else cannot complete the handshake.
+                'Opens this server’s sign-in in a new tab. The redirect returns to Lines on the machine running it, so authorize from a browser there.'
+              : 'Open a session to authorize.'}
           </Text>
         </Group>
       )}
       {auth?.pending && (
         <Text size="xs" c="dimmed">
           Starting authorization…
+        </Text>
+      )}
+      {auth?.alreadyAuthorized && (
+        <Text size="xs" c="teal">
+          Already authorized — this server has a token on this machine.
         </Text>
       )}
       {auth?.authUrl && (

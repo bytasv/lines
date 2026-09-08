@@ -2810,12 +2810,14 @@
       "id": "mcp-connections",
       "name": "MCP connections",
       "doc": "features/mcp-connections.md",
-      "purpose": "Add a third-party MCP server from Settings, see its live per-session connection status, and authorize it via OAuth — synced across machines like the guard allowlist, with header/credential values that never leave the machine that holds them.",
+      "purpose": "Add a third-party MCP server from Settings, see its live per-session connection status, and authorize it via OAuth without needing a running turn — synced across machines like the guard allowlist, with header/credential values that never leave the machine that holds them.",
       "entryPoints": [
         "Settings modal → Connections pane",
         "web/src/components/McpConnectionsReviewModal.tsx",
         "server/src/sessions.ts buildQueryOptions",
+        "server/src/sessions.ts applyMcpServers (a connection edit reaching live queries)",
         "server/src/worker.ts ensureSession",
+        "server/src/worker.ts handleAsk ('mcpWarm')",
         "server/src/index.ts handleOAuthCallback (/mcp-oauth/callback)",
         "web/src/components/PermissionPrompt.tsx (PermissionRequestData.elicitation, mode: 'url')"
       ],
@@ -2861,7 +2863,13 @@
         "SessionManager.mcpServerStatus",
         "normalizeMcpStatuses",
         "McpServerStatusInfo",
-        "McpElicitation"
+        "McpElicitation",
+        "staleDynamicServers",
+        "SessionManager.applyMcpServers",
+        "SessionManager.warmQuery",
+        "SessionManager.holdForAuth",
+        "SessionManager.releaseAuthHold",
+        "PENDING_TTL_MS"
       ],
       "tests": [
         "server/src/mcpConnections.test.ts",
@@ -2871,7 +2879,9 @@
         "server/src/store.test.ts",
         "server/src/messageAuthz.test.ts",
         "server/src/broadcastScope.test.ts",
-        "server/src/sync.availability.test.ts"
+        "server/src/sync.availability.test.ts",
+        "server/src/sessions.mcpLive.test.ts",
+        "server/src/sessions.backgroundTasks.test.ts"
       ],
       "businessRules": [
         "header/credential values never sync and never reach a browser; only headerKeys (names) travel on the wire, values stay in the local mcp-secrets.json (0600)",

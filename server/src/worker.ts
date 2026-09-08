@@ -31,6 +31,7 @@ import {
   mergeMcpServers,
   newRuntimeToken,
   publishRuntimeInfo,
+  staleDynamicServers,
   type BridgeToWorker,
   type McpToolManifest,
   type McpToolResult,
@@ -82,6 +83,17 @@ interface SessionState {
    *  backgrounded subagents/Bash commands. Reported in hello because the bridge's
    *  own copy dies with the bridge while these CLI children do not. */
   backgroundTasks?: { task_id: string; task_type: string; description: string }[];
+  /**
+   * The Lines in-process MCP server this query was created with, and its name.
+   *
+   * Stashed because `setMcpServers` *destroys* an in-process server omitted from
+   * its payload (measured: `removed: ['lines']`), so every later replace has to
+   * re-include this exact instance. The instance, not the manifest: its handler
+   * closes over the session id, and rebuilding one per call would tear down a
+   * live server for nothing. Absent when the session was created with no tools.
+   */
+  linesServerName?: string;
+  linesServer?: unknown;
 }
 
 interface PendingRpc {
@@ -157,6 +169,26 @@ async function runAsk(
       await q.reconnectMcpServer(String(params.serverName ?? ''));
       return q.mcpServerStatus();
     }
+    case 'mcpSetServers': {
+      const wanted = (params.mcpServers ?? {}) as Record<string, unknown>;
+      // Lines re-included on every replace, and last, for the same two reasons
+      // ensureSession merges it: an omitted in-process server is destroyed, and a
+      // same-named user connection must never win the `mcp__lines__*` namespace.
+      const payload =
+        state.linesServerName && state.linesServer !== undefined
+          ? mergeMcpServers(wanted, state.linesServerName, state.linesServer)
+          : { ...wanted };
+      const result = await q.setMcpServers(payload as never);
+      // A replace cannot remove a process-based server it omits, so the ones the
+      // user turned off have to be named — see staleDynamicServers.
+      for (const name of staleDynamicServers(await q.mcpServerStatus(), payload)) {
+        // Both throws are expected and neither means failure: an unknown name
+        // throws `Server not found`, and a *successful* toggle throws
+        // `Server status: needs-auth`. The status read below is the real answer.
+        await q.toggleMcpServer(name, false).catch(() => {});
+      }
+      return { result, servers: await q.mcpServerStatus() };
+    }
     case 'contextUsage':
     default:
       return q.getContextUsage();
@@ -172,6 +204,23 @@ async function handleAsk(msg: Extract<BridgeToWorker, { type: 'ask' }>) {
   const reply = (result: WorkerToBridge) => {
     if (bridge?.readyState === WebSocket.OPEN) bridge.send(JSON.stringify(result));
   };
+  // The one ask allowed to run without a live query, because creating one is what
+  // it does — hence handled here rather than in runAsk, ahead of the check below.
+  // No `busy` flag is set: nothing is pushed, so no turn is running.
+  if (msg.method === 'mcpWarm') {
+    const params = msg.params ?? {};
+    try {
+      const warmed = ensureSession(
+        msg.sessionId,
+        (params.options ?? {}) as Record<string, unknown>,
+        params.tools as McpToolManifest | undefined,
+      );
+      reply({ type: 'askResult', id: msg.id, ok: true, value: await warmed.query.mcpServerStatus() });
+    } catch (err) {
+      reply({ type: 'askResult', id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+    return;
+  }
   const state = sessions.get(msg.sessionId);
   if (!state) {
     reply({ type: 'askResult', id: msg.id, ok: false, error: 'no-live-session' });
@@ -287,6 +336,15 @@ function ensureSession(
   if (state) return state;
 
   const queue = new AsyncQueue<SDKUserMessage>();
+  // Built ahead of the options object so the instance can be kept on the session
+  // state — see SessionState.linesServer for why a later replace needs it.
+  const linesServer = tools
+    ? buildMcpServer(
+        tools,
+        (toolName, args, signal) =>
+          rpcCall(sessionId, 'mcpTool', { tool: toolName, args }, signal) as Promise<McpToolResult>,
+      )
+    : undefined;
   const fullOptions = {
     ...options,
     stderr: (data: string) => {
@@ -320,23 +378,18 @@ function ensureSession(
     // MERGED over whatever `options.mcpServers` carried (the user's own
     // connections, which are plain serializable config), never a replacement for
     // it — see mergeMcpServers for why the Lines entry has to win.
-    ...(tools
-      ? {
-          mcpServers: mergeMcpServers(
-            options.mcpServers,
-            tools.serverName,
-            buildMcpServer(
-              tools,
-              (toolName, args, signal) =>
-                rpcCall(sessionId, 'mcpTool', { tool: toolName, args }, signal) as Promise<McpToolResult>,
-            ),
-          ),
-        }
+    ...(tools && linesServer
+      ? { mcpServers: mergeMcpServers(options.mcpServers, tools.serverName, linesServer) }
       : {}),
   };
 
   const q = query({ prompt: queue as AsyncIterable<SDKUserMessage>, options: fullOptions as never });
-  state = { queue, query: q, busy: false };
+  state = {
+    queue,
+    query: q,
+    busy: false,
+    ...(tools && linesServer ? { linesServerName: tools.serverName, linesServer } : {}),
+  };
   sessions.set(sessionId, state);
   void pump(sessionId, state, q);
   return state;

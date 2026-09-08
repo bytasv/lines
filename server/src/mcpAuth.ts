@@ -65,13 +65,25 @@ export function unsupportedReason(missing: string[]): string {
 export interface McpAuthStart {
   authUrl: string;
   state?: string;
-  /** False means the CLI considers the server already authorized. */
+  /**
+   * Always true on this variant: a `false` from the SDK means the CLI considers
+   * the server already authorized, which `normalizeAuthStart` returns as
+   * `alreadyAuthorized` instead. Kept on the type because it is part of the
+   * recorded response shape this file is the only record of.
+   */
   callbackExpected: boolean;
 }
 
-export function normalizeAuthStart(raw: unknown): { start: McpAuthStart } | { error: string } {
+export function normalizeAuthStart(
+  raw: unknown,
+): { start: McpAuthStart } | { alreadyAuthorized: true } | { error: string } {
   if (!raw || typeof raw !== 'object') return { error: 'The SDK returned no authorization details.' };
   const src = raw as Record<string, unknown>;
+  // Checked ahead of the URL, because this answer legitimately carries none: the
+  // CLI already holds a token for this server, so there is nothing to hand the
+  // user and no callback to wait for. Reported as its own outcome rather than as
+  // "no authorization URL", which would read as a failure of a working setup.
+  if (src.callbackExpected === false) return { alreadyAuthorized: true };
   // Tolerate a renamed field rather than failing outright: this shape is
   // undocumented, and `authorizationUrl` is the likelier rename.
   const authUrl =
@@ -101,8 +113,14 @@ export function normalizeAuthStart(raw: unknown): { start: McpAuthStart } | { er
   };
 }
 
-/** How long a started handshake stays claimable before its state is forgotten. */
-const PENDING_TTL_MS = 10 * 60 * 1000;
+/**
+ * How long a started handshake stays claimable before its state is forgotten.
+ *
+ * Exported because `SessionManager` bounds its query hold on the same clock: a
+ * hold that outlived the handshake it was protecting would pin a CLI child open
+ * for a flow that can no longer complete.
+ */
+export const PENDING_TTL_MS = 10 * 60 * 1000;
 
 interface PendingAuth {
   userId: string;

@@ -100,6 +100,35 @@ test('callbackExpected defaults to true when the field is absent', () => {
   assert.ok('start' in result && result.start.callbackExpected === true);
 });
 
+test('callbackExpected: false is already-authorized, not a missing-URL failure', () => {
+  // The CLI already holds a token for this server, so it has no URL to hand back
+  // and no callback to wait for. Read as an error, this reported a working setup
+  // as "The SDK returned no authorization URL" — checked ahead of the URL for
+  // exactly that reason.
+  assert.deepEqual(normalizeAuthStart({ callbackExpected: false }), { alreadyAuthorized: true });
+  // And it wins even when a stale URL happens to ride along: no callback is
+  // coming, so registering a pending handshake for one would never be claimed.
+  assert.deepEqual(
+    normalizeAuthStart({ callbackExpected: false, authUrl: 'https://example.test/auth', state: 'x' }),
+    { alreadyAuthorized: true },
+  );
+});
+
+test('the typed MCP methods this feature calls are still typed', () => {
+  // Unlike mcpAuthenticate above, `setMcpServers` / `toggleMcpServer` /
+  // `mcpServerStatus` ARE declared in sdk.d.ts, so worker.ts calls them directly
+  // and the compiler is their tripwire — an SDK that drops or renames one fails
+  // `npm run typecheck`, not this file. Asserted here anyway so the split is
+  // recorded next to the shim it deliberately does not use: if this ever has to
+  // become a runtime probe, that is the signal the feature moved.
+  const { declaredInTypings } = inspectInstalledSdk();
+  assert.deepEqual(
+    declaredInTypings,
+    [],
+    'Only the untyped OAuth methods are probed here; see the message above.',
+  );
+});
+
 test('a pending state is single-use', () => {
   const pending = new McpAuthPending();
   pending.start('state-abc', { userId: 'u', sessionId: 's', serverName: 'figma' });

@@ -37,6 +37,10 @@ const ACCOUNT_WIDE: ServerMessage[] = [
   // socket never receives it.
   { type: 'mcpConnections', connections: [] } as unknown as ServerMessage,
   { type: 'mcpConnectionsReview', review: null } as unknown as ServerMessage,
+  // Statuses for several sessions at once. Keyed inside the payload precisely so
+  // it lands here: a top-level sessionId would make it session-scoped, and a
+  // guest would be handed the host's third-party server names and errors.
+  { type: 'mcpStatuses', statuses: {} } as unknown as ServerMessage,
   { type: 'projects', projects: [] } as unknown as ServerMessage,
 ];
 

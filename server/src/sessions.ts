@@ -78,7 +78,7 @@ import { claudeCliRefusalMessage, claudeCliStatus } from './claudeCli.ts';
 import { classifyTurnFailure, turnFailureAdvice, turnFailureRetryHint } from './turnFailure.ts';
 import { isLinesMcpTool, isReadOnlyLinesTool, LINES_TOOL_MANIFEST } from './mcpWorkflowTools.ts';
 import type { McpConnections } from './mcpConnections.ts';
-import { normalizeAuthStart, unsupportedReason } from './mcpAuth.ts';
+import { normalizeAuthStart, unsupportedReason, PENDING_TTL_MS } from './mcpAuth.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
 import type { LiveSessionInfo } from './workerProtocol.ts';
 import {
@@ -743,6 +743,16 @@ export class SessionManager {
   private rewinding = new Set<string>();
   /** Access token each live worker query was spawned with (see pushTurn). */
   private queryTokens = new Map<string, string | null>();
+  /**
+   * Sessions whose query must survive idle recycling, and when the hold started.
+   *
+   * Held for the length of an MCP OAuth handshake: the PKCE verifier lives in
+   * that CLI process, so recycling it between leg 1 and leg 2 makes the callback
+   * unable to complete. Timestamped rather than a bare set so a handshake the
+   * user abandons cannot pin a CLI child open forever — the hold ages out on the
+   * same clock the pending handshake does.
+   */
+  private authHolds = new Map<string, number>();
   private onTurnComplete: TurnCompleteListener | null = null;
   private onRewind: RewindListener | null = null;
   private worker!: WorkerClient;
@@ -1378,8 +1388,31 @@ export class SessionManager {
       // Closing the query kills the CLI child, and with it every background task
       // it owns — silently, with no notification and no transcript trace.
       if (this.live.get(meta.id)?.backgroundTasks?.length) continue;
+      // Same reasoning, different casualty: it would also kill the PKCE verifier
+      // an in-flight MCP OAuth handshake is waiting to finish with.
+      if (this.heldForAuth(meta.id)) continue;
       this.closeQuery(meta.id);
     }
+  }
+
+  /** Keep this session's query alive across an MCP OAuth handshake. */
+  holdForAuth(sessionId: string) {
+    this.authHolds.set(sessionId, Date.now());
+  }
+
+  /** Release a hold once the handshake has settled, either way. */
+  releaseAuthHold(sessionId: string) {
+    this.authHolds.delete(sessionId);
+  }
+
+  /** Is a hold in force? Expired holds are dropped on read, so a handshake the
+   *  user walked away from stops pinning a CLI child open. */
+  private heldForAuth(sessionId: string): boolean {
+    const startedAt = this.authHolds.get(sessionId);
+    if (startedAt === undefined) return false;
+    if (Date.now() - startedAt < PENDING_TTL_MS) return true;
+    this.authHolds.delete(sessionId);
+    return false;
   }
 
   /**
@@ -3291,8 +3324,115 @@ export class SessionManager {
    * Never rejects: an idle session has no query to ask, and a blank pane would be
    * indistinguishable from "everything is fine".
    */
-  async mcpServerStatus(sessionId: string): Promise<McpServerStatusInfo[]> {
+  /**
+   * Bring a session's query up without running a turn, and answer with its MCP
+   * status.
+   *
+   * The CLI child spawns with the query and answers control requests while it
+   * waits for input — it just emits nothing (not even `system:init`) until a
+   * user message arrives. So this costs a process and no tokens, and is what
+   * lets the Connections pane read status and start an OAuth handshake on a
+   * session the user has never run.
+   *
+   * Goes through the same token resolution a push does and records
+   * `queryTokens`, because `pushWithToken` recycles any query it cannot prove was
+   * spawned with the current token: a warm that skipped that would be killed by
+   * the very next turn.
+   */
+  private async warmQuery(sessionId: string): Promise<McpServerStatusInfo[] | { error: string }> {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return { error: 'That session no longer exists.' };
+    // Checked before the token for the same reason pushTurn checks it there: a
+    // missing or too-old binary cannot be fixed by retrying.
+    const cliRefusal = claudeCliRefusalMessage();
+    if (cliRefusal) return { error: cliRefusal };
+
+    let accessToken: string | null = null;
+    if (this.auth) {
+      try {
+        accessToken = await this.auth.ensureFreshToken();
+      } catch (err) {
+        return { error: authRefusalMessage(err) };
+      }
+    }
+    if (this.queryTokens.get(sessionId) !== accessToken) this.closeQuery(sessionId);
+    this.queryTokens.set(sessionId, accessToken);
+
+    try {
+      const servers = normalizeMcpStatuses(
+        await this.worker.mcpWarm(sessionId, this.buildQueryOptions(meta, accessToken), LINES_TOOL_MANIFEST),
+      );
+      if (servers.length) this.liveState(sessionId).mcpServers = servers;
+      return servers;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // A worker too old to implement `mcpWarm` answers for a session it holds no
+      // query for, which is exactly the pre-warm situation — so say what used to
+      // be said rather than reporting a broken feature.
+      if (message === 'no-live-session') {
+        return { error: 'Start a turn in this session first — authorizing needs a running query.' };
+      }
+      if (message === 'worker-unavailable') return { error: 'The Lines worker is not reachable right now.' };
+      console.warn(`[mcp-warm ${sessionId.slice(0, 8)}]`, message);
+      return { error: `Could not start a query for this session: ${message}` };
+    }
+  }
+
+  /**
+   * Push the current connection list onto every session that already has a live
+   * query, so an add/edit/remove/toggle in Settings takes effect now instead of
+   * only in the next brand-new session.
+   *
+   * Without this the pane is a dead end: `ensureSession` freezes `mcpServers` at
+   * query-creation time, so a just-added connection is absent from every running
+   * CLI, reports no status, and can never be authorized.
+   *
+   * Deliberately does not warm anything — a Settings edit must not spawn a CLI
+   * child per session. Sessions with no query answer `no-live-session`, which is
+   * a no-op here.
+   */
+  async applyMcpServers(): Promise<void> {
+    if (!this.mcp) return;
+    // Carries header values. Nothing may log this object whole.
+    const configs = this.mcp.serverConfigs();
+    const statuses: Record<string, McpServerStatusInfo[]> = {};
+    await Promise.all(
+      [...this.sessions.keys()].map(async (sessionId) => {
+        let raw: unknown;
+        try {
+          raw = await this.worker.mcpSetServers(sessionId, configs);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (message !== 'no-live-session' && message !== 'worker-unavailable') {
+            console.warn(`[mcp-apply ${sessionId.slice(0, 8)}]`, message);
+          }
+          return;
+        }
+        const answer = (raw ?? {}) as { result?: { errors?: Record<string, string> }; servers?: unknown };
+        // Named servers and their messages only — never the payload above.
+        for (const [name, error] of Object.entries(answer.result?.errors ?? {})) {
+          console.warn(`[mcp-apply ${sessionId.slice(0, 8)}] ${name}: ${error}`);
+        }
+        const servers = normalizeMcpStatuses(answer.servers);
+        if (!servers.length) return;
+        this.liveState(sessionId).mcpServers = servers;
+        statuses[sessionId] = servers;
+      }),
+    );
+    // One account-wide message rather than a per-session `mcpServerStatus` each:
+    // that message carries a top-level `sessionId`, so the fan-out would deliver
+    // the host's third-party server names and errors to session guests.
+    if (Object.keys(statuses).length) this.broadcast({ type: 'mcpStatuses', statuses });
+  }
+
+  async mcpServerStatus(sessionId: string, opts: { warm?: boolean } = {}): Promise<McpServerStatusInfo[]> {
     const last = this.live.get(sessionId)?.mcpServers ?? [];
+    // Only on explicit intent (the pane's Refresh, or an Authorize click): merely
+    // opening Settings must not spawn a CLI child for whatever is selected.
+    if (opts.warm) {
+      const warmed = await this.warmQuery(sessionId);
+      if (!('error' in warmed)) return warmed.length ? warmed : last;
+    }
     try {
       const servers = normalizeMcpStatuses(await this.worker.mcpStatus(sessionId));
       // An empty answer from a live query is not news worth overwriting a real
@@ -3321,27 +3461,48 @@ export class SessionManager {
     sessionId: string,
     serverName: string,
     redirectUri: string,
-  ): Promise<{ authUrl: string; state?: string } | { error: string }> {
+  ): Promise<
+    { authUrl: string; state?: string } | { alreadyAuthorized: true } | { error: string }
+  > {
+    const attempt = () => this.worker.mcpAuthStart(sessionId, serverName, redirectUri);
+
     let raw: unknown;
     try {
-      raw = await this.worker.mcpAuthStart(sessionId, serverName, redirectUri);
+      raw = await attempt();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // The shim's own signal, turned into copy a user can act on.
       if (message.startsWith('mcp-auth-unsupported:')) {
         return { error: unsupportedReason(message.slice('mcp-auth-unsupported:'.length).split(',')) };
       }
-      if (message === 'no-live-session') {
-        return { error: 'Start a turn in this session first — authorizing needs a running query.' };
-      }
       if (message === 'worker-unavailable') {
         return { error: 'The Lines worker is not reachable right now.' };
       }
-      console.warn(`[mcp-auth ${sessionId.slice(0, 8)}]`, message);
-      return { error: `Could not start authorization: ${message}` };
+      if (message !== 'no-live-session') {
+        console.warn(`[mcp-auth ${sessionId.slice(0, 8)}]`, message);
+        return { error: `Could not start authorization: ${message}` };
+      }
+      // No query yet — which is the normal state of a session the user added a
+      // connection for and has not run. Bring one up and try once more, rather
+      // than making them start a turn they do not want just to sign in.
+      const warmed = await this.warmQuery(sessionId);
+      if ('error' in warmed) return warmed;
+      try {
+        raw = await attempt();
+      } catch (retryErr) {
+        const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        if (retryMessage.startsWith('mcp-auth-unsupported:')) {
+          return {
+            error: unsupportedReason(retryMessage.slice('mcp-auth-unsupported:'.length).split(',')),
+          };
+        }
+        console.warn(`[mcp-auth ${sessionId.slice(0, 8)}]`, retryMessage);
+        return { error: `Could not start authorization: ${retryMessage}` };
+      }
     }
     const normalized = normalizeAuthStart(raw);
     if ('error' in normalized) return { error: normalized.error };
+    if ('alreadyAuthorized' in normalized) return { alreadyAuthorized: true };
     return {
       authUrl: normalized.start.authUrl,
       ...(normalized.start.state ? { state: normalized.start.state } : {}),
