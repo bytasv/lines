@@ -54,6 +54,8 @@ function OptionCard({
   readOnly,
   onKeyDown,
   onFocus,
+  onBlur,
+  focused,
   tabIndex,
   ref,
 }: {
@@ -66,6 +68,9 @@ function OptionCard({
   readOnly?: boolean;
   onKeyDown?: (e: React.KeyboardEvent) => void;
   onFocus?: () => void;
+  onBlur?: () => void;
+  /** Drawn from tracked focus, not `:focus-visible` — a click must show it too. */
+  focused?: boolean;
   tabIndex?: number;
   ref?: React.Ref<HTMLButtonElement>;
 }) {
@@ -80,6 +85,8 @@ function OptionCard({
         background: checked ? 'var(--mantine-color-default-hover)' : undefined,
         // Unpicked options are context, not choices, once the question is answered.
         opacity: readOnly && !checked ? 0.55 : undefined,
+        outline: focused ? '2px solid var(--mantine-primary-color-filled)' : undefined,
+        outlineOffset: 2,
       }}
     >
       <Group gap="sm" wrap="nowrap" align="flex-start">
@@ -114,6 +121,7 @@ function OptionCard({
       onClick={onToggle}
       onKeyDown={onKeyDown}
       onFocus={onFocus}
+      onBlur={onBlur}
       tabIndex={tabIndex}
       w="100%"
       role={multi ? 'checkbox' : 'radio'}
@@ -211,8 +219,13 @@ export function QuestionPrompt({
   // Roving tabindex: one tab stop per question. The cursor *trails* real DOM
   // focus (see `markActive`) instead of driving it.
   const [activeIdx, setActiveIdx] = useState<number[]>(() => questions.map(() => 0));
+  // Which card actually holds DOM focus, as `qi:oi`. Mantine's focus ring is
+  // `:focus-visible`, so a mouse-driven advance would otherwise move focus with
+  // nothing on screen to show it.
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
   // Index space per question is `options.length + 1`; the trailing slot is "Other…".
   const cardsRef = useRef<(HTMLButtonElement | null)[][]>(questions.map(() => []));
+  const questionsRef = useRef<(HTMLDivElement | null)[]>([]);
   const otherRef = useRef<(HTMLInputElement | null)[]>([]);
   // The send is not idempotent and the card stays pending until the echo lands.
   const sentRef = useRef(false);
@@ -226,11 +239,26 @@ export function QuestionPrompt({
   // Focus is pushed imperatively; there is deliberately no effect on `activeIdx`
   // that focuses, because it would re-assert focus on every unrelated transcript
   // re-render — the classic focus-stealing bug.
-  const focusOption = (qi: number, oi: number) => {
+  //
+  // `align: 'question'` is for entering a question: scrolling the focused option
+  // into view alone leaves the header and the other options off screen, so the
+  // question block goes to the top instead. Moving *within* a question keeps
+  // `'nearest'` on the option, which is the minimal, non-jerky scroll.
+  const focusOption = (qi: number, oi: number, align: 'question' | 'option' = 'option') => {
     const el = cardsRef.current[qi]?.[oi];
     if (!el) return;
     el.focus({ preventScroll: true });
-    el.scrollIntoView({ block: 'nearest' });
+    if (align === 'question' && questionsRef.current[qi]) {
+      // Smooth, so the jump to the next question reads as movement rather than a
+      // cut — unless the OS asked us not to animate.
+      const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      questionsRef.current[qi]?.scrollIntoView({
+        block: 'start',
+        behavior: reduced ? 'auto' : 'smooth',
+      });
+    } else {
+      el.scrollIntoView({ block: 'nearest' });
+    }
   };
 
   /** Where focus lands when a question is entered: its pick, else the first option. */
@@ -242,36 +270,51 @@ export function QuestionPrompt({
     return at >= 0 ? at : 0;
   };
 
-  const advance = (fromQi: number, snap: QuestionState[]) => {
+  /**
+   * Moves focus on from `fromQi`. Returns whether it did anything, so a caller
+   * that has nowhere to send focus can keep it where it is.
+   *
+   * `canSubmit` is false for the mouse path: only the Send button or Enter may
+   * submit, so a click on the last unanswered option must never fire the send.
+   */
+  const advance = (fromQi: number, snap: QuestionState[], canSubmit = true): boolean => {
     if (fromQi + 1 < questions.length) {
       const qi = fromQi + 1;
-      focusOption(qi, entryIndex(qi, snap));
-      return;
+      focusOption(qi, entryIndex(qi, snap), 'question');
+      return true;
     }
     // Scanning from 0 includes the current question, so a blank "Other…" or a
     // multi toggled back to empty keeps focus instead of submitting nothing.
     const unanswered = questions.findIndex((_, i) => answerOf(snap[i]).length === 0);
     if (unanswered >= 0) {
-      focusOption(unanswered, entryIndex(unanswered, snap));
-      return;
+      focusOption(unanswered, entryIndex(unanswered, snap), 'question');
+      return true;
     }
+    if (!canSubmit) return false;
     submit(snap);
+    return true;
   };
 
   /**
    * The single write path. `setState` takes a plain value, not an updater, so
-   * `advance` can read the identical array this call just committed.
+   * `advance` can read the identical array this call just committed. Selecting
+   * never submits — `advance` is called with `canSubmit: false`.
    */
   const pick = (qi: number, oi: number, label: string, multi: boolean, thenAdvance: boolean) => {
+    const wasAnswered = answerOf(state[qi]).length > 0;
     const next = state.map((s, i) =>
       i === qi ? { ...s, selected: nextSelected(s, label, multi) } : s,
     );
     setState(next);
     markActive(qi, oi);
-    if (thenAdvance) advance(qi, next);
+    // Revising an answer is not progress. If the question already had one and the
+    // next question is answered too, there is nothing to move on *to* — scrolling
+    // away would just take the user off the choice they came back to change.
+    const revising = wasAnswered && qi + 1 < questions.length && answerOf(next[qi + 1]).length > 0;
+    const moved = thenAdvance && !revising && advance(qi, next, false);
     // Safari and Firefox do not focus a `<button>` on click; "Other…" is exempt
     // because its `TextInput` autofocuses instead.
-    else if (label !== OTHER) focusOption(qi, oi);
+    if (!moved && label !== OTHER) focusOption(qi, oi);
   };
 
   const onCardKeyDown = (
@@ -411,7 +454,14 @@ export function QuestionPrompt({
           const multi = Boolean(q.multiSelect);
           const otherIdx = q.options.length;
           return (
-            <div key={qi}>
+            <div
+              key={qi}
+              ref={(el) => {
+                questionsRef.current[qi] = el;
+              }}
+              // Breathing room when `advance` pins this block to the top.
+              style={{ scrollMarginTop: 8 }}
+            >
               <Group gap={6} mb={6}>
                 <Badge variant="light">{q.header}</Badge>
                 <Text size="sm" fw={500} id={`${data.requestId}-q${qi}`}>
@@ -438,7 +488,12 @@ export function QuestionPrompt({
                     checked={state[qi].selected.includes(opt.label)}
                     multi={multi}
                     tabIndex={activeIdx[qi] === oi ? 0 : -1}
-                    onFocus={() => markActive(qi, oi)}
+                    focused={focusedKey === `${qi}:${oi}`}
+                    onFocus={() => {
+                      markActive(qi, oi);
+                      setFocusedKey(`${qi}:${oi}`);
+                    }}
+                    onBlur={() => setFocusedKey((k) => (k === `${qi}:${oi}` ? null : k))}
                     onKeyDown={(e) => onCardKeyDown(e, qi, oi, opt.label, multi)}
                     onToggle={() => pick(qi, oi, opt.label, multi, !multi)}
                   />
@@ -452,7 +507,12 @@ export function QuestionPrompt({
                   checked={state[qi].selected.includes(OTHER)}
                   multi={multi}
                   tabIndex={activeIdx[qi] === otherIdx ? 0 : -1}
-                  onFocus={() => markActive(qi, otherIdx)}
+                  focused={focusedKey === `${qi}:${otherIdx}`}
+                  onFocus={() => {
+                    markActive(qi, otherIdx);
+                    setFocusedKey(`${qi}:${otherIdx}`);
+                  }}
+                  onBlur={() => setFocusedKey((k) => (k === `${qi}:${otherIdx}` ? null : k))}
                   onKeyDown={(e) => onCardKeyDown(e, qi, otherIdx, OTHER, multi)}
                   onToggle={() => pick(qi, otherIdx, OTHER, multi, false)}
                 />

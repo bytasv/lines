@@ -1,5 +1,5 @@
 /**
- * Well-known vendors that publish a hosted MCP server, used for two things and
+ * Vendors that run a hosted (remote) MCP server, used for two things and
  * nothing else:
  *
  *  1. **A prompt-scoped nudge.** When the user's own prompt names a service they
@@ -15,10 +15,11 @@
  * ## Why hosts and not URLs
  *
  * Entries carry the *host* an endpoint is documented to live on, never a full
- * path. Paths move (`/mcp`, `/v1/sse`, `/mcp/`), and a wrong path in here would
- * either mislabel the real endpoint or, worse, invite the agent to call a URL
- * this file made up. The agent still has to read the vendor's own documentation
- * and cite it as `source` — this table only judges where the answer landed.
+ * path. Paths move and vary (`/mcp`, `/sse`, `/v1/sse`, `/mcp/v1/http`), and a
+ * wrong path in here would either mislabel the real endpoint or invite the agent
+ * to call a URL this file made up. The agent still has to read the vendor's own
+ * documentation and cite it as `source` — this table only judges where the
+ * answer landed.
  *
  * ## Failure direction
  *
@@ -27,6 +28,19 @@
  * attacker's URL read `known` unless the attacker controls the host named here.
  * That asymmetry is deliberate: this table is allowed to be wrong in the
  * cautious direction only, and no level of it ever skips the approval card.
+ *
+ * ## Scope, and what is deliberately absent
+ *
+ * Only vendors with a *hosted* endpoint. A service whose MCP server is a local
+ * process (MongoDB, Grafana, most databases) or is per-tenant with no stable
+ * host (Shopify's per-store Storefront server) is left out on purpose: nudging
+ * the agent toward a hosted URL that does not exist would send it hunting.
+ *
+ * Compiled 2026-09-08 from the vendor-run entries in
+ * github.com/jaw9c/awesome-remote-mcp-servers and
+ * github.com/sylviangth/awesome-remote-mcp-servers, plus vendor documentation
+ * for Figma, Datadog, Twilio, Slack, GitLab and Snowflake. Adding a row is one
+ * line; getting one wrong costs a false `suspicious`, per the note above.
  */
 
 export interface McpDirectoryEntry {
@@ -41,93 +55,135 @@ export interface McpDirectoryEntry {
   hosts: string[];
   /** Hosts the vendor documents its MCP endpoint on. Subdomains count as a match. */
   endpointHosts: string[];
+  /**
+   * False for a service whose content an ordinary fetch already reaches (public
+   * repos, docs sites, Q&A). Those rows exist for the trust check only: nudging
+   * on them would fire on half the prompts in a working session and recommend a
+   * connection nobody needs. A login wall is what makes a nudge worth its tokens.
+   */
+  nudge: boolean;
 }
 
+/** `[name, vendor, hosts, endpointHosts, nudge?]`, hosts space-separated. */
+type Row = readonly [string, string, string, string, boolean?];
+
 /**
- * Deliberately short. An entry earns its place by being a service whose hosted
- * MCP server is documented by the vendor itself; anything else is left to the
- * judge query, which is the path every unlisted vendor takes anyway.
+ * Rows, not object literals: at this length the shape is noise and the data is
+ * the point. `MCP_DIRECTORY` below is the typed form every consumer reads.
  */
-export const MCP_DIRECTORY: McpDirectoryEntry[] = [
-  {
-    name: 'linear',
-    vendor: 'Linear',
-    hosts: ['linear.app'],
-    endpointHosts: ['mcp.linear.app'],
-  },
-  {
-    name: 'sentry',
-    vendor: 'Sentry',
-    hosts: ['sentry.io'],
-    endpointHosts: ['mcp.sentry.dev'],
-  },
-  {
-    name: 'notion',
-    vendor: 'Notion',
-    hosts: ['notion.so', 'notion.com'],
-    endpointHosts: ['mcp.notion.com'],
-  },
-  {
-    name: 'figma',
-    vendor: 'Figma',
-    hosts: ['figma.com'],
-    endpointHosts: ['mcp.figma.com'],
-  },
-  {
-    name: 'atlassian',
-    vendor: 'Atlassian (Jira and Confluence)',
-    hosts: ['atlassian.net', 'atlassian.com'],
-    endpointHosts: ['mcp.atlassian.com'],
-  },
-  {
-    name: 'github',
-    vendor: 'GitHub',
-    hosts: ['github.com'],
-    endpointHosts: ['api.githubcopilot.com'],
-  },
-  {
-    name: 'stripe',
-    vendor: 'Stripe',
-    hosts: ['stripe.com'],
-    endpointHosts: ['mcp.stripe.com'],
-  },
-  {
-    name: 'vercel',
-    vendor: 'Vercel',
-    hosts: ['vercel.com'],
-    endpointHosts: ['mcp.vercel.com'],
-  },
-  {
-    name: 'supabase',
-    vendor: 'Supabase',
-    hosts: ['supabase.com', 'supabase.co'],
-    endpointHosts: ['mcp.supabase.com'],
-  },
-  {
-    name: 'cloudflare',
-    vendor: 'Cloudflare',
-    hosts: ['cloudflare.com'],
-    endpointHosts: ['mcp.cloudflare.com'],
-  },
-  {
-    name: 'asana',
-    vendor: 'Asana',
-    hosts: ['asana.com'],
-    endpointHosts: ['mcp.asana.com'],
-  },
-  {
-    name: 'canva',
-    vendor: 'Canva',
-    hosts: ['canva.com'],
-    endpointHosts: ['mcp.canva.com'],
-  },
-  {
-    name: 'huggingface',
-    vendor: 'Hugging Face',
-    hosts: ['huggingface.co'],
-    endpointHosts: ['huggingface.co'],
-  },
+const ROWS: Row[] = [
+  // ---- issue tracking, docs and project management ----
+  ['linear', 'Linear', 'linear.app', 'mcp.linear.app'],
+  ['atlassian', 'Atlassian (Jira and Confluence)', 'atlassian.net atlassian.com jira.com', 'mcp.atlassian.com'],
+  ['notion', 'Notion', 'notion.so notion.com', 'mcp.notion.com'],
+  ['asana', 'Asana', 'asana.com', 'mcp.asana.com'],
+  ['monday', 'monday.com', 'monday.com', 'mcp.monday.com'],
+  ['airtable', 'Airtable', 'airtable.com', 'mcp.airtable.com'],
+  ['box', 'Box', 'box.com', 'mcp.box.com'],
+  ['egnyte', 'Egnyte', 'egnyte.com', 'mcp-server.egnyte.com'],
+  ['jam', 'Jam', 'jam.dev', 'mcp.jam.dev'],
+  ['tally', 'Tally', 'tally.so', 'mcp.tally.so'],
+
+  // ---- code hosting, CI and code intelligence ----
+  ['github', 'GitHub', 'github.com', 'api.githubcopilot.com', false],
+  ['gitlab', 'GitLab', 'gitlab.com', 'gitlab.com'],
+  ['buildkite', 'Buildkite', 'buildkite.com', 'mcp.buildkite.com'],
+  ['semgrep', 'Semgrep', 'semgrep.dev semgrep.ai', 'mcp.semgrep.ai'],
+  ['deepwiki', 'DeepWiki', 'deepwiki.com', 'mcp.deepwiki.com', false],
+  ['stackoverflow', 'Stack Overflow', 'stackoverflow.com', 'mcp.stackoverflow.com', false],
+  ['openzeppelin', 'OpenZeppelin', 'openzeppelin.com', 'mcp.openzeppelin.com', false],
+  ['astro', 'Astro', 'astro.build', 'mcp.docs.astro.build', false],
+
+  // ---- observability, incidents and platform ----
+  ['sentry', 'Sentry', 'sentry.io', 'mcp.sentry.dev'],
+  ['datadog', 'Datadog', 'datadoghq.com datadoghq.eu', 'mcp.datadoghq.com mcp.datadoghq.eu'],
+  ['polarsignals', 'Polar Signals', 'polarsignals.com', 'api.polarsignals.com'],
+  ['port', 'Port', 'port.io', 'mcp.port.io'],
+  ['cortex', 'Cortex', 'cortex.io', 'mcp.cortex.io'],
+  ['globalping', 'Globalping', 'globalping.io globalping.dev', 'mcp.globalping.dev'],
+
+  // ---- hosting, edge and databases ----
+  ['vercel', 'Vercel', 'vercel.com', 'mcp.vercel.com'],
+  ['netlify', 'Netlify', 'netlify.com', 'netlify-mcp.netlify.app'],
+  ['cloudflare', 'Cloudflare', 'cloudflare.com', 'mcp.cloudflare.com'],
+  ['supabase', 'Supabase', 'supabase.com supabase.co', 'mcp.supabase.com'],
+  ['neon', 'Neon', 'neon.tech neon.com', 'mcp.neon.tech'],
+  ['prisma', 'Prisma', 'prisma.io', 'mcp.prisma.io'],
+  ['instantdb', 'InstantDB', 'instantdb.com', 'mcp.instantdb.com'],
+  ['grafbase', 'Grafbase', 'grafbase.com', 'api.grafbase.com'],
+  ['snowflake', 'Snowflake', 'snowflake.com snowflakecomputing.com', 'snowflakecomputing.com'],
+  ['thoughtspot', 'ThoughtSpot', 'thoughtspot.com thoughtspot.app', 'agent.thoughtspot.app'],
+  ['awsknowledge', 'AWS Knowledge', 'docs.aws.amazon.com', 'knowledge-mcp.global.api.aws', false],
+  ['bigquery', 'Google BigQuery', 'bigquery.googleapis.com', 'bigquery.googleapis.com'],
+  ['gke', 'Google Kubernetes Engine', 'container.googleapis.com', 'container.googleapis.com'],
+  ['gce', 'Google Compute Engine', 'compute.googleapis.com', 'compute.googleapis.com'],
+  ['googlemaps', 'Google Maps', 'mapstools.googleapis.com', 'mapstools.googleapis.com', false],
+
+  // ---- design and content ----
+  ['figma', 'Figma', 'figma.com', 'mcp.figma.com'],
+  ['canva', 'Canva', 'canva.com', 'mcp.canva.com'],
+  ['webflow', 'Webflow', 'webflow.com', 'mcp.webflow.com'],
+  ['wix', 'Wix', 'wix.com', 'mcp.wix.com'],
+  ['cloudinary', 'Cloudinary', 'cloudinary.com', 'mcp.cloudinary.com'],
+  ['invideo', 'invideo', 'invideo.io', 'mcp.invideo.io'],
+  ['resemble', 'Resemble AI', 'resemble.ai', 'mcp.resemble.ai'],
+
+  // ---- payments, finance and commerce ----
+  ['stripe', 'Stripe', 'stripe.com', 'mcp.stripe.com'],
+  ['square', 'Square', 'squareup.com square.com', 'mcp.squareup.com'],
+  ['paypal', 'PayPal', 'paypal.com', 'mcp.paypal.com'],
+  ['plaid', 'Plaid', 'plaid.com', 'api.dashboard.plaid.com'],
+  ['ramp', 'Ramp', 'ramp.com', 'ramp-mcp-remote.ramp.com'],
+  ['dodopayments', 'Dodo Payments', 'dodopayments.com', 'mcp.dodopayments.com'],
+  ['mercadolibre', 'Mercado Libre', 'mercadolibre.com', 'mcp.mercadolibre.com'],
+  ['mercadopago', 'Mercado Pago', 'mercadopago.com', 'mcp.mercadopago.com'],
+  ['morningstar', 'Morningstar', 'morningstar.com', 'mcp.morningstar.com'],
+  ['octagon', 'Octagon', 'octagonagents.com', 'mcp.octagonagents.com'],
+
+  // ---- CRM, support and communication ----
+  ['slack', 'Slack', 'slack.com', 'mcp.slack.com'],
+  ['intercom', 'Intercom', 'intercom.com', 'mcp.intercom.com'],
+  ['hubspot', 'HubSpot', 'hubspot.com', 'app.hubspot.com'],
+  ['attio', 'Attio', 'attio.com', 'mcp.attio.com'],
+  ['close', 'Close', 'close.com', 'mcp.close.com'],
+  ['twilio', 'Twilio', 'twilio.com', 'mcp.twilio.com'],
+  ['telnyx', 'Telnyx', 'telnyx.com', 'api.telnyx.com'],
+  ['stytch', 'Stytch', 'stytch.com stytch.dev', 'mcp.stytch.dev'],
+  ['fireflies', 'Fireflies', 'fireflies.ai', 'api.fireflies.ai'],
+  ['indeed', 'Indeed', 'indeed.com', 'mcp.indeed.com'],
+  ['peek', 'Peek', 'peek.com', 'mcp.peek.com'],
+
+  // ---- search, scraping and agent tooling ----
+  ['exa', 'Exa', 'exa.ai', 'mcp.exa.ai', false],
+  ['firecrawl', 'Firecrawl', 'firecrawl.dev', 'mcp.firecrawl.dev', false],
+  ['apify', 'Apify', 'apify.com', 'mcp.apify.com'],
+  ['simplescraper', 'Simplescraper', 'simplescraper.io', 'mcp.simplescraper.io'],
+  ['searchapi', 'SearchAPI', 'searchapi.io', 'searchapi.io', false],
+  ['dappier', 'Dappier', 'dappier.com', 'mcp.dappier.com', false],
+  ['needle', 'Needle', 'needle-ai.com', 'mcp.needle-ai.com'],
+  ['parallel', 'Parallel', 'parallel.ai', 'task-mcp.parallel.ai search-mcp.parallel.ai', false],
+  ['wolfram', 'Wolfram', 'wolfram.com wolframalpha.com', 'agenttools.wolfram.com', false],
+  ['huggingface', 'Hugging Face', 'huggingface.co hf.co', 'huggingface.co hf.co', false],
+  ['malwarepatrol', 'Malware Patrol', 'malwarepatrol.net', 'mcp.malwarepatrol.net'],
+  ['shortio', 'Short.io', 'short.io', 'ai-assistant.short.io'],
+
+  // ---- automation hubs (one connection, many downstream apps) ----
+  ['zapier', 'Zapier', 'zapier.com', 'mcp.zapier.com'],
+  ['composio', 'Composio', 'composio.dev', 'mcp.composio.dev'],
+  ['pipedream', 'Pipedream', 'pipedream.com', 'mcp.pipedream.com'],
+  ['rube', 'Rube', 'rube.app', 'rube.app'],
+  ['waystation', 'WayStation', 'waystation.ai', 'waystation.ai'],
 ];
+
+export const MCP_DIRECTORY: McpDirectoryEntry[] = ROWS.map(
+  ([name, vendor, hosts, endpointHosts, nudge]) => ({
+    name,
+    vendor,
+    hosts: hosts.split(' '),
+    endpointHosts: endpointHosts.split(' '),
+    nudge: nudge !== false,
+  }),
+);
 
 /** `sub.mcp.linear.app` counts as `mcp.linear.app`; `notmcp.linear.app` does not. */
 export function hostMatches(host: string, candidate: string): boolean {
@@ -212,7 +268,9 @@ const HINT_MAX_SERVICES = 2;
  * cite it, because that citation is what the user is shown on the approval card.
  */
 export function mcpConnectionHint(text: string, connections: CoveredConnection[]): string | null {
-  const missing = servicesNamedIn(text).filter((entry) => !connections.some((c) => covers(c, entry)));
+  const missing = servicesNamedIn(text)
+    .filter((entry) => entry.nudge)
+    .filter((entry) => !connections.some((c) => covers(c, entry)));
   if (!missing.length) return null;
   const named = missing.slice(0, HINT_MAX_SERVICES);
   const vendors = named.map((e) => e.vendor).join(' and ');

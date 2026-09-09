@@ -18,18 +18,35 @@ import {
 const NONE: { name: string; url?: string; enabled: boolean }[] = [];
 
 test('every entry is shaped so prose cannot match it', () => {
+  assert.ok(MCP_DIRECTORY.length >= 50, 'the table is worth having');
   for (const entry of MCP_DIRECTORY) {
     assert.equal(entry.name, entry.name.toLowerCase(), entry.name);
     // A valid MCP namespace, since the nudge invites the agent to propose it.
     assert.ok(!('error' in normalizeConnection({ name: entry.name, transport: 'http', url: 'https://x.example/mcp' })), entry.name);
     assert.ok(entry.hosts.length > 0 && entry.endpointHosts.length > 0, entry.name);
+    assert.ok(entry.vendor.length > 0, entry.name);
     // Every host carries a TLD: that is what stops "linear algebra" matching.
     for (const host of [...entry.hosts, ...entry.endpointHosts]) {
       assert.match(host, /^[a-z0-9-]+(\.[a-z0-9-]+)+$/, `${entry.name}: ${host}`);
     }
   }
-  // No two entries claim one namespace.
+  // No two entries claim one namespace, and no two claim one endpoint host —
+  // either would make directoryEntryFor's answer depend on row order.
   assert.equal(new Set(MCP_DIRECTORY.map((e) => e.name)).size, MCP_DIRECTORY.length);
+  const endpoints = MCP_DIRECTORY.flatMap((e) => e.endpointHosts);
+  assert.equal(new Set(endpoints).size, endpoints.length);
+});
+
+test('public-content services are in the table for vetting but never nudge', () => {
+  // A fetch already reaches these, so a nudge would fire on half the prompts in
+  // a working session and recommend a connection nobody needs.
+  for (const name of ['github', 'stackoverflow', 'huggingface']) {
+    const entry = MCP_DIRECTORY.find((e) => e.name === name);
+    assert.equal(entry?.nudge, false, name);
+  }
+  assert.equal(mcpConnectionHint('see https://github.com/foo/bar/issues/1', NONE), null);
+  // Still vetted: a proposal claiming GitHub from elsewhere is not silently fine.
+  assert.equal(directoryEntryFor({ name: 'github' })?.endpointHosts[0], 'api.githubcopilot.com');
 });
 
 test('a service is recognised from a URL, a bare domain and a subdomain', () => {
@@ -81,8 +98,10 @@ test('an unmatched prompt carries nothing, and a crowded one stays short', () =>
   assert.equal(mcpConnectionHint('refactor the store', NONE), null);
   const many = mcpConnectionHint('linear.app, sentry.io, notion.so and asana.com', NONE);
   assert.ok(many);
-  assert.match(many, /Linear and Sentry/);
-  assert.ok(!/Notion/.test(many), 'capped at two vendors');
+  // Which two depends on row order, which is not a contract; that it is two is.
+  const named = ['Linear', 'Sentry', 'Notion', 'Asana'].filter((v) => many.includes(v));
+  assert.equal(named.length, 2, `capped at two vendors, got ${named.join(', ')}`);
+  assert.match(many, / and /);
 });
 
 test('directory lookup goes both ways, and a subdomain of a documented host counts', () => {
