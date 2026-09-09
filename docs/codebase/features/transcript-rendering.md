@@ -357,6 +357,37 @@ the separate durable `context-compact` event this doc's compaction handling alre
   (`task_progress`/`task_updated`/`thinking_tokens`/`status`/`hook_started`/`hook_response`) is
   still broadcast live but is no longer written to the transcript file, except a `status` carrying
   a `compact_result`, which is the authoritative compaction verdict.
+- A pending `QuestionPrompt` card claims keyboard focus once per request (its first option), so a
+  multi-question ask can be answered without a mouse — unless focus is already in a text-entry
+  element (composer textarea, an input) elsewhere on the page, which always outranks it.
+- Within one question, arrow keys move a roving-tabindex cursor across its option cards, clamped
+  at both ends for a single-select question. A multi-select question also clamps at the top, but
+  `ArrowDown` off its last option advances to the next question — a multi-select has no other
+  "I'm done here" key.
+- `Enter` on an unselected single-select option selects it; `Enter` again (now selected) advances.
+  `Enter` on a multi-select option always toggles and never advances — advancing would end the
+  question after picking only one of several intended values. Advancing means: focus the next
+  question's already-picked option (or its first option if unanswered), or, if every question is
+  answered, submit; if some earlier question is still unanswered, focus that one instead of
+  submitting nothing.
+- A mouse click mirrors this asymmetry: a single-select click selects and advances; a multi-select
+  click only toggles, for the same reason `Enter` doesn't advance there. Neither a click nor a
+  toggled-multi-select's `Enter` ever submits by itself — only an explicit `Enter`/click on the
+  Send button, or `Enter` on a question that was already the last one unanswered, can submit.
+- Re-picking an already-answered question (mouse or keyboard toggle) does not jump the view away
+  if the next question is also already answered — there is nothing to advance *to*, and moving
+  would pull the view off the choice the user just came back to change. It still advances when the
+  revised question's successor is unanswered, since that is real forward progress.
+- Advancing to a new question scrolls that question's header to the top of the transcript
+  (smooth, `prefers-reduced-motion` respected) instead of only bringing the newly focused option
+  into view — otherwise a question below the first screenful is invisible even though it now has
+  focus. Moving between options within one question stays an instant, minimal "nearest" scroll.
+- The focused option card draws a visible outline driven by tracked focus state, not the browser's
+  default `:focus-visible` ring — a mouse click can move focus (advancing to the next question)
+  and that move must be visible even though it wasn't a keyboard interaction.
+- "Other…" never advances on selection; its text input autofocuses instead. A bare `Enter` inside
+  that input advances once its text is non-empty; arrow keys keep native caret behaviour there
+  rather than being intercepted for card navigation.
 - Code-block syntax highlighting (`rehype-highlight`) is deferred: a `Markdown` document's
   first paint renders without it, then an idle callback (2s timeout fallback) upgrades it in
   place — the highlighter only adds classes inside an already-laid-out `<pre>`, so the upgrade
@@ -460,6 +491,26 @@ the separate durable `context-compact` event this doc's compaction handling alre
 - The raw-input toggle is intentionally shown even for an empty (`{}`) input, unlike
   `PermissionPrompt`'s equivalent guard — consistency across every tool card was chosen over
   hiding a toggle that would do nothing.
+- `QuestionPrompt`'s keyboard cursor is a roving tabindex (`activeIdx`, one tab stop per question)
+  that trails real DOM focus rather than driving it — it is written from each card's `onFocus`
+  handler plus an explicit call after a programmatic pick, never read by an effect that calls
+  `.focus()`. An effect keyed on the cursor would re-assert focus on every unrelated transcript
+  re-render (the classic focus-stealing bug); pushing focus imperatively and letting state trail it
+  avoids that entirely.
+- `UnstyledButton` renders a real `<button>`, so `Enter`'s keydown default action already fires a
+  click. The `Enter` handler calls `preventDefault()` unconditionally before deciding what to do,
+  so `onClick` never also runs — the double-fire this prevents is what made select-then-advance
+  briefly advance twice. `Space` is deliberately left un-intercepted: it falls through to the
+  native keyup click, so it inherits click semantics (select **and** advance on single-select)
+  rather than `Enter` semantics (select only, needs a second press).
+- The set of requests that have already auto-focused is a module-scope `Set` keyed by
+  `data.requestId`, not a `useRef` — `Transcript` windows and backfills its item list, so this
+  component can genuinely unmount and remount for the same still-pending request, and a ref would
+  let that remount re-steal focus from wherever the user had moved on to.
+- The mouse/click path (`pick(..., thenAdvance)`) and the `Enter`/multiselect-`ArrowDown` keyboard
+  path both fold through the same `advance()` function, but the click path passes `canSubmit:
+  false` — only an explicit `Enter` or the Send button may fire the WS send, so clicking the very
+  last unanswered option can move focus onward but can never itself submit.
 - Existing transcripts already carry `parent_tool_use_id` on disk (the worker persists every SDK
   message verbatim) — subagent nesting is a pure read-side reinterpretation, no new capture and no
   migration.
