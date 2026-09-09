@@ -109,8 +109,17 @@ export const Markdown = memo(function Markdown({
                 </a>
               );
             }
+            // External links open a new tab: in the desktop window an in-place
+            // navigation has no way back, and in a browser it costs the user
+            // their live session tab. Scoped to external hrefs so `remark-gfm`'s
+            // footnote anchors (#user-content-fn-1) stay in-page.
+            const external = href ? isExternalHref(href) : false;
             return (
-              <a href={href} {...props}>
+              <a
+                href={href}
+                {...(external ? { target: '_blank', rel: 'noreferrer noopener' } : {})}
+                {...props}
+              >
                 {children}
               </a>
             );

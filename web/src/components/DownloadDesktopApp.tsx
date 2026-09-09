@@ -53,6 +53,8 @@ export function DownloadDesktopApp() {
         <Button
           component="a"
           href={DESKTOP_DOWNLOAD_URL}
+          target="_blank"
+          rel="noreferrer noopener"
           leftSection={<IconDownload size={16} />}
           style={{ alignSelf: 'flex-start' }}
         >

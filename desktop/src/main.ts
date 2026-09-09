@@ -740,42 +740,230 @@ function appUrl(): string {
   return LOCAL_MODE ? `http://127.0.0.1:${uiPort}/` : config.webUrl;
 }
 
-/** Origin and host of the hosted app, for the navigation allowlist. */
-const APP_ORIGIN = (() => {
+/**
+ * Origin of whatever `appUrl()` currently points at.
+ *
+ * A function, not a constant: `uiPort` is 0 until `startUiServer()` runs, so a
+ * value captured at module load would be the wrong origin in local mode — and
+ * trusting the hosted origin there let a link to it replace the local window.
+ */
+function appOrigin(): string {
   try {
-    return new URL(config.webUrl).origin;
+    return new URL(appUrl()).origin;
   } catch {
     return '';
   }
-})();
+}
+
+/**
+ * Host of the *hosted* app, even in local mode: the identity hosts below belong
+ * to the Clerk instance the web bundle was built against, which is the hosted
+ * one no matter where the window points.
+ */
 const APP_HOST = hostLabel(config.webUrl);
 
 /**
- * Hosts the window is allowed to navigate to itself.
+ * Hosts that are nothing but identity infrastructure, trusted host-wide.
  *
- * Everything else is handed to the real browser. Kept to our own origin plus the
- * identity providers Clerk redirects through — a sign-in that leaves the window
- * has nowhere to come back to, since the window has no address bar.
+ * Nothing on them is content an agent would link to, so path-scoping is pure
+ * downside — Microsoft's authorize path carries a tenant segment, Google has two
+ * authorize paths, and every miss is a window with no way back.
  */
 const IDENTITY_HOSTS = [
   'accounts.google.com',
-  'github.com',
   'appleid.apple.com',
   'login.microsoftonline.com',
   `accounts.${APP_HOST}`,
+  // Clerk's Frontend API host, which serves /v1/oauth_callback.
+  `clerk.${APP_HOST}`,
 ];
 
-function isInAppUrl(raw: string): boolean {
+/** Clerk's Account Portal on development instances, with or without a `clerk.` label. */
+function isIdentityHost(hostname: string): boolean {
+  return IDENTITY_HOSTS.includes(hostname) || hostname.endsWith('.accounts.dev');
+}
+
+/**
+ * OAuth entry points on hosts that are also content sites.
+ *
+ * `github.com` is the whole reason this file changed: allowing it host-wide made
+ * every GitHub link in agent output replace the app. Keeping it the only scoped
+ * host means this class of sign-in breakage has exactly one possible location.
+ */
+const OAUTH_ENTRY_PREFIXES: Record<string, string[]> = {
+  'github.com': ['/login/oauth/'],
+};
+
+/** Schemes we are willing to hand to the real browser. */
+const EXTERNAL_SCHEMES = ['http:', 'https:', 'mailto:'];
+
+type WindowRole = 'app' | 'aux';
+
+type Verdict =
+  | { action: 'in-app'; rule?: 'identity' | 'oauth-entry' | 'continuation' }
+  | { action: 'external' }
+  | { action: 'drop' };
+
+/**
+ * Whether a navigation stays in the window, goes to the browser, or is dropped.
+ *
+ * Evaluated top to bottom, and the order is load-bearing:
+ *
+ * - The app-origin check precedes any scheme gate, because attachments are
+ *   `blob:` object URLs minted by the web app — their origin is the app origin,
+ *   and `shell.openExternal('blob:…')` does nothing, so a scheme gate placed
+ *   first would silently break opening them.
+ * - "Already off-app therefore mid-sign-in" is compared against the *app*
+ *   origin, not against the identity list: mid-flow the window ends up on hosts
+ *   nobody can enumerate (`idmsa.apple.com`, `login.live.com`) and the
+ *   credential POST fires `will-navigate`. Requiring the current URL to parse as
+ *   http/https is what stops the offline page (`data:`) or a fresh window (`''`)
+ *   from counting as off-app and turning the whole policy permissive.
+ */
+function navigationVerdict(raw: string, currentUrl: string, role: WindowRole): Verdict {
+  let url: URL;
   try {
-    const url = new URL(raw);
-    if (APP_ORIGIN && url.origin === APP_ORIGIN) return true;
-    if (LOCAL_MODE && url.hostname === '127.0.0.1') return true;
-    if (IDENTITY_HOSTS.includes(url.hostname)) return true;
-    // Clerk's own hosted account pages, on development instances.
-    if (url.hostname.endsWith('.clerk.accounts.dev')) return true;
-    return false;
+    url = new URL(raw);
+  } catch {
+    return { action: 'drop' };
+  }
+  // The pairing window is a data: URL showing a code. It navigates nowhere at
+  // all, the app origin included — losing the code is the failure we are fixing.
+  if (role === 'aux') {
+    return EXTERNAL_SCHEMES.includes(url.protocol) ? { action: 'external' } : { action: 'drop' };
+  }
+  const origin = appOrigin();
+  if (origin && url.origin === origin && ['http:', 'https:', 'blob:'].includes(url.protocol)) {
+    return { action: 'in-app' };
+  }
+  if (url.protocol === 'https:') {
+    if (isIdentityHost(url.hostname)) return { action: 'in-app', rule: 'identity' };
+    const prefixes = OAUTH_ENTRY_PREFIXES[url.hostname];
+    if (prefixes?.some((prefix) => url.pathname.startsWith(prefix))) {
+      return { action: 'in-app', rule: 'oauth-entry' };
+    }
+  }
+  if (isOffApp(currentUrl)) return { action: 'in-app', rule: 'continuation' };
+  return EXTERNAL_SCHEMES.includes(url.protocol) ? { action: 'external' } : { action: 'drop' };
+}
+
+/** Whether the window is currently parked on a real page that is not ours. */
+function isOffApp(currentUrl: string): boolean {
+  try {
+    const current = new URL(currentUrl);
+    if (current.protocol !== 'http:' && current.protocol !== 'https:') return false;
+    return current.origin !== appOrigin();
   } catch {
     return false;
+  }
+}
+
+/**
+ * Every window's navigation policy, and the only place `Verdict` is acted on.
+ *
+ * `will-redirect` is deliberately not handled. Electron emits it separately for
+ * every 302, and every OAuth flow's intermediate hops arrive that way, so
+ * guarding it is the single most likely way to break sign-in for all providers
+ * at once. The residual hole — a page we already allowed can 302 the window
+ * elsewhere — is what the "Back to Lines" pill and the tray reload cover.
+ *
+ * `will-frame-navigate` is likewise not added: it fires for the main frame too
+ * and would double-handle everything, and `web/src` has no iframes. If an embed
+ * ever lands, the hook is that event filtered on `!details.isMainFrame`.
+ */
+function attachNavigationGuards(w: BrowserWindow, role: WindowRole) {
+  const contents = w.webContents;
+  // A real child window in the same session, so cookies are shared — what a Clerk
+  // OAuth popup needs. Anything else goes to the real browser.
+  contents.setWindowOpenHandler(({ url }) => {
+    const verdict = navigationVerdict(url, contents.getURL(), role);
+    if (verdict.action === 'in-app') {
+      if (verdict.rule) shellLog(`[window] in-app (${verdict.rule}) ${url}`);
+      return { action: 'allow' };
+    }
+    if (verdict.action === 'drop') {
+      shellLog(`[window] dropped ${schemeLabel(url)} navigation to ${url}`);
+      return { action: 'deny' };
+    }
+    shellLog(`[window] external popup ${url}`);
+    void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  // Popups we allowed are windows too, and until now they carried no guards at
+  // all — a link inside one could wander anywhere.
+  contents.on('did-create-window', (child) => attachNavigationGuards(child, 'app'));
+  // Load-bearing: without it a `target="_self"` external link replaces the app
+  // inside a chrome-less window with no way back, and with it Clerk's full-page
+  // OAuth redirect survives. Every block is logged because the allowlist above
+  // will be incomplete for some provider, and the log turns "sign-in is broken"
+  // into a one-line fix.
+  contents.on('will-navigate', (event, url) => {
+    const verdict = navigationVerdict(url, contents.getURL(), role);
+    if (verdict.action === 'in-app') {
+      if (verdict.rule) shellLog(`[window] in-app (${verdict.rule}) ${url}`);
+      return;
+    }
+    event.preventDefault();
+    if (verdict.action === 'drop') {
+      shellLog(`[window] dropped ${schemeLabel(url)} navigation to ${url}`);
+      return;
+    }
+    shellLog(`[window] blocked navigation to ${url} — opening externally`);
+    void shell.openExternal(url);
+  });
+  if (role === 'app') {
+    contents.on('did-navigate', (_event, url) => {
+      if (!isOffApp(url)) return;
+      void injectBackToLines(contents);
+    });
+  }
+}
+
+/** Scheme of a URL for a log line, without assuming it parses. */
+function schemeLabel(raw: string): string {
+  try {
+    return new URL(raw).protocol.replace(':', '');
+  } catch {
+    return 'unparseable';
+  }
+}
+
+/**
+ * A way home from an abandoned sign-in.
+ *
+ * The window has no address bar, so a provider page the user backs out of is a
+ * dead end. `insertCSS` rather than an inline `style` attribute because a strict
+ * CSP can strip the latter; a plain anchor to the app origin rather than IPC
+ * because that navigation is allowed by the app-origin rule, which keeps the
+ * window's no-preload/no-IPC contract intact. Idempotent on the element id, so
+ * a redirect chain does not stack pills.
+ */
+async function injectBackToLines(contents: Electron.WebContents) {
+  const href = appUrl();
+  if (!href) return;
+  try {
+    await contents.insertCSS(`
+      #lines-back-pill { position: fixed; left: 16px; bottom: 16px; z-index: 2147483647;
+        display: inline-block; padding: 8px 14px; border-radius: 999px;
+        background: #1a1b1e; color: #4dabf7; border: 1px solid #373a40;
+        font: 13px -apple-system, system-ui, sans-serif; text-decoration: none;
+        box-shadow: 0 2px 10px rgba(0,0,0,.35) }
+    `);
+    await contents.executeJavaScript(
+      `(() => {
+        if (document.getElementById('lines-back-pill')) return;
+        const a = document.createElement('a');
+        a.id = 'lines-back-pill';
+        a.textContent = '← Back to Lines';
+        a.href = ${JSON.stringify(href)};
+        document.body.appendChild(a);
+      })();`,
+      true,
+    );
+  } catch (err) {
+    // A page that refuses the injection is not worth failing over — the tray's
+    // "Open Lines" still comes home.
+    shellLog(`[window] back-to-Lines pill not injected: ${(err as Error).message}`);
   }
 }
 
@@ -789,6 +977,9 @@ function isInAppUrl(raw: string): boolean {
  */
 function openWindow() {
   if (win && !win.isDestroyed()) {
+    // "Open Lines" always comes home: a window abandoned mid-sign-in is parked
+    // off-app with no address bar, and showing it as-is leaves it stuck.
+    if (isOffApp(win.webContents.getURL())) void win.loadURL(appUrl());
     win.show();
     win.focus();
     return;
@@ -803,29 +994,8 @@ function openWindow() {
     webPreferences: { nodeIntegration: false, contextIsolation: true },
   });
   win = w;
-  // Google refuses OAuth from anything it recognises as an embedded browser, and
-  // it keys on this token. The standard workaround, not a guarantee.
-  w.webContents.setUserAgent(w.webContents.getUserAgent().replace(/ Electron\/\S+/, ''));
   void w.loadURL(appUrl());
-  // A real child window in the same session, so cookies are shared — what a Clerk
-  // OAuth popup needs. Anything else goes to the real browser.
-  w.webContents.setWindowOpenHandler(({ url }) => {
-    if (isInAppUrl(url)) return { action: 'allow' };
-    shellLog(`[window] external popup ${url}`);
-    void shell.openExternal(url);
-    return { action: 'deny' };
-  });
-  // Load-bearing: without it a `target="_self"` external link replaces the app
-  // inside a chrome-less window with no way back, and with it Clerk's full-page
-  // OAuth redirect survives. Every block is logged because the allowlist above
-  // will be incomplete for some provider, and the log turns "sign-in is broken"
-  // into a one-line fix.
-  w.webContents.on('will-navigate', (event, url) => {
-    if (isInAppUrl(url)) return;
-    event.preventDefault();
-    shellLog(`[window] blocked navigation to ${url} — opening externally`);
-    void shell.openExternal(url);
-  });
+  attachNavigationGuards(w, 'app');
   w.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     // -3 is ERR_ABORTED, which every cancelled navigation reports.
     if (!isMainFrame || code === -3) return;
@@ -937,7 +1107,7 @@ function openPairingWindow(code: string) {
 </style>
 <div class="card">
   <h2>Pair this machine</h2>
-  <p>Enter this code in <a href="${url}">${url}</a>:</p>
+  <p>Enter this code in <a href="${url}" target="_blank" rel="noreferrer noopener">${url}</a>:</p>
   <div class="code">${escapeHtml(code)}</div>
   <p class="hint">Expires in 15 minutes. Lines fetches a fresh code automatically, or
   use “Get a new code” in the menu bar.<br>
@@ -961,10 +1131,7 @@ function openPairingWindow(code: string) {
     syncDock();
   });
   void w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-  w.webContents.setWindowOpenHandler(({ url: external }) => {
-    void shell.openExternal(external);
-    return { action: 'deny' };
-  });
+  attachNavigationGuards(w, 'aux');
   // Gives this window a dock tile and an app menu too, so the code is selectable
   // with Cmd-C — it never had either.
   syncDock();
@@ -1330,6 +1497,10 @@ if (!app.requestSingleInstanceLock()) {
 
 async function start() {
   await app.whenReady();
+  // Google refuses OAuth from anything it recognises as an embedded browser, and
+  // it keys on this token. The standard workaround, not a guarantee. Set on the
+  // app rather than per-webContents so OAuth popups carry the scrubbed UA too.
+  app.userAgentFallback = app.userAgentFallback.replace(/ Electron\/\S+/, '');
   loadPrefs();
   // Hosted mode starts as a background app: no dock tile, no app switcher entry.
   // `syncDock` puts one up for as long as a window is open. Local mode has a real

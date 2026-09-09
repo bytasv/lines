@@ -54,7 +54,7 @@ export function LoginModal() {
           </Button>
         ) : (
           <>
-            <Anchor href={authorizeUrl} target="_blank" rel="noopener" size="sm">
+            <Anchor href={authorizeUrl} target="_blank" rel="noreferrer noopener" size="sm">
               <Group gap={6} wrap="nowrap" component="span">
                 <IconExternalLink size={14} />
                 <span>Approval page didn’t open? Click here.</span>

@@ -169,6 +169,7 @@ function AttachmentTile({
         component="a"
         href={url ?? undefined}
         target="_blank"
+        rel="noreferrer noopener"
         style={{ width: 72, height: 72, overflow: 'hidden', flexShrink: 0, display: 'block', cursor: 'pointer' }}
       >
         <Stack align="center" justify="center" gap={2} h="100%" px={4}>

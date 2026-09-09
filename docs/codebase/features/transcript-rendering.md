@@ -410,6 +410,11 @@ the separate durable `context-compact` event this doc's compaction handling alre
   [docs-reader](docs-reader.md) so it can route links inside its own page instead of the
   source-file preview. Every transcript call site passes nothing, so its rendering is unchanged
   (falls back to `openFilePreview`).
+- External markdown links (per `isExternalHref`) render with `target="_blank" rel="noreferrer
+  noopener"`; relative hrefs and `remark-gfm` footnote anchors (`#user-content-fn-1`) are untouched
+  so a blanket target would not open an empty tab per footnote click. In the desktop window an
+  in-place navigation to one of these has no way back (no address bar); in a browser it costs the
+  user their live session tab.
 - The user bubble `Paper` needs `minWidth: 0` alongside `maxWidth: '80%'` — without it, a flex
   child containing wide content (e.g. a code block or one long unbroken token) can grow past 80%
   regardless of the CSS wrap rules on its content: used width is

@@ -2126,7 +2126,10 @@
         "APP_VERSION",
         "appUrl",
         "syncDock",
-        "isInAppUrl",
+        "appOrigin",
+        "navigationVerdict",
+        "attachNavigationGuards",
+        "injectBackToLines",
         "openLinesDefault",
         "loadPrefs",
         "savePrefs",
@@ -2169,7 +2172,10 @@
         "the tray states the running version from the same value (APP_VERSION) the updater compares the feed against, so the two can never disagree",
         "a manual 'Check for updates' always answers with a dialog, including 'up to date' — it must never look like it did nothing",
         "hosted mode's 'Open Lines' opens a native window at config.webUrl by default; the choice between that and the browser persists in ~/.lines-app/desktop.json, and 'Open in Browser'/'Open Desktop Window' is always the other row, one click away",
-        "the desktop window has its own cookie jar, separate from Safari or Chrome — signing in in a browser does not sign in the window and vice versa; dev and packaged runs share one jar"
+        "the desktop window has its own cookie jar, separate from Safari or Chrome — signing in in a browser does not sign in the window and vice versa; dev and packaged runs share one jar",
+        "nothing but the app itself ever loads in the chrome-less window; a navigation stays in-window only as the app origin itself, a dedicated identity host, a scoped OAuth entry path (github.com's /login/oauth/ only), or the continuation of a flow already off-app — everything else, including any other github.com link, opens in the real browser",
+        "the pairing window navigates nowhere at all, not even to the app's own origin - clicking the pairing card's link opens the real browser and leaves the code on screen",
+        "an off-app window always has a way back: a 'Back to Lines' pill is injected into any page the window lands on outside the app origin, and the tray's 'Open Lines' reloads an existing window back to the app instead of just showing it as-is"
       ],
       "architecturalRules": [
         "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
@@ -2193,7 +2199,9 @@
         "autoUpdater.logger is wired to the shell's log file before every guard in startUpdateChecks runs, so the reason a check never happened is captured too, not just the reason one failed",
         "UpdateStatus is deliberately not widened with a last-checked timestamp — the browser can neither trigger nor act on a check, so that state stays shell-local rather than crossing the wire protocol",
         "updateTray() only calls setContextMenu/setTitle when a signature of the rendered template actually changes, since it runs every 2s and would otherwise reinstall a byte-identical NSMenu tens of thousands of times a day and could swap the menu out from under one the user has open",
-        "the desktop window gets no preload and no IPC; navigation outside its allowlist (the hosted origin plus the identity hosts Clerk's OAuth redirects through) is handed to the real browser via will-navigate, and every blocked navigation is logged",
+        "the desktop window gets no preload and no IPC; every BrowserWindow (main, pairing, and any popup allowed through setWindowOpenHandler) is routed through attachNavigationGuards, which evaluates one ordered decision function (navigationVerdict) against will-navigate and setWindowOpenHandler and hands anything not in-app to shell.openExternal, logging every blocked/dropped navigation and every non-trivial allow",
+        "will-redirect is deliberately unhandled — every OAuth 302 leg arrives that way, and guarding it would mean enumerating hosts no allowlist can enumerate; will-frame-navigate is likewise not added since web/src has no iframes and it would double-handle the main frame",
+        "the 'Back to Lines' pill is injected via insertCSS/executeJavaScript rather than an inline style or IPC, so a page's CSP cannot strip it and the window keeps its zero-privilege, no-preload contract",
         "the dock tile is shown iff a BrowserWindow exists, in hosted mode; local mode keeps a permanent tile as before",
         "shell-owned state under ~/.lines-app is named for the shell, never for its content — desktop.json follows that rather than server/src/store.ts's content-named convention (device.json, projects.json)"
       ],

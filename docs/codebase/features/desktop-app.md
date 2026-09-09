@@ -82,8 +82,13 @@ unbundled next to the code.
   esbuild define (`build.mjs`), because `electron dist/main.cjs` never reads `desktop/package.json`
 - `appUrl()` — the window's URL: `127.0.0.1:<uiPort>` in local mode, `config.webUrl` in hosted mode;
   one function for both, so `openWindow` is no longer local-mode-only
-- `isInAppUrl()` / `IDENTITY_HOSTS` / `APP_ORIGIN` — the window's navigation allowlist: the hosted
-  origin plus the identity hosts Clerk's OAuth redirects go through
+- `appOrigin()` / `navigationVerdict()` / `attachNavigationGuards()` — the window's navigation
+  policy: `appOrigin()` reads the origin off `appUrl()` (a function, since `uiPort` is `0` until
+  `startUiServer()` runs), `navigationVerdict()` is one ordered decision function deciding in-app
+  vs. external vs. dropped for a target URL, and `attachNavigationGuards(window, role)` wires it
+  into `will-navigate`, `setWindowOpenHandler` and `did-create-window` for every window
+- `injectBackToLines()` — injects a "Back to Lines" pill into a page the main window has navigated
+  to outside the app origin, via `insertCSS`/`executeJavaScript`, no preload or IPC involved
 - `syncDock()` — shows the dock tile in hosted mode iff any `BrowserWindow` still exists, else hides
   it; local mode keeps a permanent tile as before
 - `openLinesDefault()` — what "Open Lines" actually does, per the persisted `openIn` preference
@@ -137,18 +142,25 @@ native `BrowserWindow` at `config.webUrl` by default — the same zero-privilege
 (no preload, no IPC, `contextIsolation` on), just pointed at the hosted URL instead of the local
 server (`appUrl()` picks between them). The choice persists in `~/.lines-app/desktop.json`
 (`openIn: 'desktop' | 'browser'`); the tray's second row is always the other route, labelled "Open
-in Browser" or "Open Desktop Window". Navigation inside the window is allowlisted to the hosted
-origin plus the identity hosts Clerk's OAuth redirects go through (`isInAppUrl`); anything else is
-handed to the real browser and logged, including the reason `will-navigate` blocked it — Clerk's
-own full-page OAuth redirect has to survive this or sign-in breaks with no way back, since the
-window has no address bar. **The window's cookie jar is not Safari's or Chrome's**: a browser
+in Browser" or "Open Desktop Window". Navigation inside the window stays in-window only as the app
+origin itself (per `appUrl()`, so local mode trusts the local origin), a dedicated identity host
+Clerk's OAuth redirects go through, a scoped OAuth entry path (`github.com`'s `/login/oauth/`
+only — the one identity host that is also a content site), or the continuation of a flow already
+off-app; everything else is handed to the real browser and logged, including which rule allowed an
+in-app hop and the reason `will-navigate` blocked one — Clerk's own full-page OAuth redirect has to
+survive this or sign-in breaks with no way back, since the window has no address bar. A window that
+ends up stuck off-app (an abandoned sign-in) gets a "Back to Lines" pill injected into the page, and
+the tray's "Open Lines" reloads an existing off-app window back to the app instead of just showing
+it. **The window's cookie jar is not Safari's or Chrome's**: a browser
 sign-in does not carry into the window and vice versa, though a dev run and the packaged app share
 one jar. The dock tile (hidden by default in hosted mode) reappears for as long as any window is
 open (`syncDock`) and disappears once the last one closes, since a visible window with no tile has
 no Cmd-Tab and — the sharper problem — no application menu, so Cmd-C/Cmd-V would not work. If
 registration
 returns a pairing code, a small `BrowserWindow` shows it as a data URL, independent of `web/dist`
-even existing. The code auto-refreshes every ~14 minutes while unpaired, and "Get a new code" in
+even existing. This window navigates nowhere at all — not even to the app's own origin — so
+clicking the web URL printed on the card opens the real browser and leaves the code on screen. The
+code auto-refreshes every ~14 minutes while unpaired, and "Get a new code" in
 the tray does the same on demand — both rely on `registerDevice` re-issuing a code for an
 unclaimed device rather than 409ing, so neither needs a restart. The bridge relays its
 `RelayClient`'s raw connect/close over IPC as `relayStatus`; the shell treats a link that survives
@@ -472,9 +484,20 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
 - `updateTray()` only calls `setContextMenu`/`setTitle` when a signature of the rendered template
   actually changes, since it runs every 2s and would otherwise reinstall a byte-identical `NSMenu`
   tens of thousands of times a day and could swap the menu out from under one the user has open.
-- The desktop window gets no preload and no IPC; navigation outside its allowlist (the hosted
-  origin plus the identity hosts Clerk's OAuth redirects go through) is handed to the real browser
-  via `will-navigate`, and every blocked navigation is logged.
+- The desktop window gets no preload and no IPC; every `BrowserWindow` (main, pairing, and any
+  popup allowed through `setWindowOpenHandler`) is routed through `attachNavigationGuards`, which
+  evaluates one ordered decision function (`navigationVerdict`) against `will-navigate` and
+  `setWindowOpenHandler` and hands anything not in-app to `shell.openExternal`, logging every
+  blocked/dropped navigation and every non-trivial allow. The pairing window's `aux` role
+  navigates nowhere at all, app origin included.
+- `will-redirect` is deliberately unhandled — every OAuth 302 leg arrives that way, and guarding it
+  would mean enumerating hosts no allowlist can enumerate. `will-frame-navigate` is likewise not
+  added since `web/src` has no iframes and it would double-handle the main frame too.
+- The "Back to Lines" pill is injected via `insertCSS`/`executeJavaScript` rather than an inline
+  `style` attribute or IPC, so a page's CSP cannot strip it and the window keeps its zero-privilege,
+  no-preload contract.
+- `app.userAgentFallback` (not per-`webContents` `setUserAgent`) carries the Electron-token scrub,
+  so an OAuth popup window inherits the same scrubbed UA as the main window.
 - The dock tile is shown iff a `BrowserWindow` exists, in hosted mode; local mode keeps a permanent
   tile as before.
 - Shell-owned state under `~/.lines-app` is named for the shell, never for its content —
@@ -499,7 +522,15 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
   and the window's separate cookie jar means the two surfaces never share a session. "Open in
   Browser" stays permanent for exactly this reason — if a provider is ever refused and it is the
   only sign-in method, the fix is flipping the default `openIn` preference to `'browser'`, not
-  removing the window.
+  removing the window. A sharper version of the same trade showed up when a `github.com` link in
+  agent output silently replaced the window, because the old allowlist trusted `github.com`
+  host-wide for Clerk's OAuth redirect. The fix scopes that one host to its OAuth entry path
+  (`/login/oauth/`) rather than trusting it whole; if Clerk ever redirects through a `github.com`
+  path outside that prefix, the symptom is the window staying on the sign-in screen while the
+  browser completes the flow in its own cookie jar, diagnosed by one `blocked navigation` log line,
+  and the fix is adding that prefix — or, for a host that turns out to be pure identity
+  infrastructure with no content of its own, promoting it into the host-wide identity list instead
+  of a scoped entry.
 - A dev checkout and the installed app share `~/.lines-app/device.json`, so the same device
   identity can be claimed by whichever registers last — and, since the bridge lock, also share
   `~/.lines-app/bridge.lock`, so only one bridge from either can be running against it at once.
