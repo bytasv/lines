@@ -1,6 +1,6 @@
 {
   "name": "@lines/desktop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Runs the Lines agent on this machine and keeps it reachable from the hosted app.",
   "author": "Lines",
