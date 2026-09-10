@@ -11,6 +11,7 @@ import type {
   WorkflowMarkerData,
   WorkflowState,
 } from '@lines/shared';
+import { formatPlanComments } from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -251,6 +252,38 @@ test('a step that really failed still parks with stepFailure', () => {
   assert.equal(h.s1().workflow?.stepFailure, 'turn');
   assert.equal(h.s1().status, 'error');
   assert.equal(lastMarker(h).failed, true);
+});
+
+test('a step Retry re-sends the mid-turn refine notes, not the step template', () => {
+  const h = running(2);
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 1', source: 'workflow' });
+  h.sessions.emitEvent('s1', 'permission', {
+    requestId: 'p1',
+    toolName: 'ExitPlanMode',
+    input: {},
+  });
+  h.sessions.emitEvent('s1', 'permission', {
+    requestId: 'p1',
+    toolName: '',
+    input: {},
+    resolution: 'deny',
+    resolvedBy: 'user',
+    denyMessage: formatPlanComments([{ id: 'a', quote: 'step 3', note: 'add a rollback' }], 'refine'),
+  });
+  h.sessions.handleWorkerEvent('s1', interruptResult());
+  assert.equal(h.s1().workflow?.stepFailure, 'turn', 'the guards retryIfFailed checks');
+
+  // Stubbed on the real manager (the precedent is consolidateStepOutput above):
+  // the re-sent text is the whole point of the assertion, and prompting for real
+  // needs a live query.
+  const prompted: string[] = [];
+  h.sessions.prompt = (_id: string, text: string) => {
+    prompted.push(text);
+  };
+
+  assert.equal(h.workflows.retryIfFailed('s1'), true);
+  assert.match(prompted.at(-1)!, /On "step 3": add a rollback/);
+  assert.ok(!prompted.at(-1)!.includes('do step 1'), 'the step is not replayed');
 });
 
 test('a stopped step parks when the query ends without a result', () => {

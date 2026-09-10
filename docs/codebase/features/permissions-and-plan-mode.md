@@ -366,6 +366,15 @@ holds `prompt` and does not carry `promptNeedsApproval`.
   `KEEP_PLANNING_MESSAGE` prefix and the `"The user's message:\n"` marker means `planReplyText`
   renders the comments back on the resolved card with no client-side special case.
 
+  This stored `denyMessage`, and an `AskUserQuestion` resolution's `answers`, are also the source
+  a **Retry** re-sends if the turn fails before the answer reaches the model — neither ever
+  produces a `'user'` transcript event, so without this a Retry would re-send whatever opened the
+  turn instead (a whole workflow step's rendered prompt, on a planning step). See
+  [turn-recovery](turn-recovery.md#retry-re-sends-the-newest-human-input-not-just-the-turns-opening-prompt).
+  This is deliberately a read-side fix: writing a `'user'` event when a card is answered would open
+  a new turn boundary and corrupt turn-scoped bookkeeping (`collectTurns`, `permissionWaitMs`), so
+  that path stays exactly as described above — no wire, store, or emitted-event change.
+
 The plan body paints each comment's quote back onto the rendered text using the CSS Custom
 Highlight API (`::highlight()` in `web/src/index.css`) rather than by injecting a `<mark>`
 wrapper: a `Highlight` is a set of `Range`s held outside the DOM, so it survives the plan

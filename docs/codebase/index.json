@@ -592,6 +592,9 @@
         "isSelfWorkerSource",
         "SessionManager.failTurn",
         "SessionManager.lastPromptForRetry",
+        "lastHumanGesture",
+        "isHumanResolution",
+        "retryGestureText",
         "WorkflowEngine.retryIfFailed",
         "WorkflowState.stepFailure",
         "WorkflowMarkerData.failed",
@@ -642,7 +645,8 @@
         "server/src/auth.concurrentLogin.test.ts",
         "server/src/turnFailure.test.ts",
         "server/src/sessions.compact.test.ts",
-        "server/src/caveman.test.ts"
+        "server/src/caveman.test.ts",
+        "server/src/sessions.permission.test.ts"
       ],
       "businessRules": [
         "a turn the user stopped is not classified as a failure: no dropFailedQuery, no red banner, no Retry — the stopped result is recorded verbatim but the turn settles clean",

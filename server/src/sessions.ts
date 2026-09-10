@@ -627,6 +627,105 @@ function exitPlanRequestId(events: TranscriptEvent[], livePendingIds: string[]):
   return newestUnresolved;
 }
 
+/**
+ * Framing for a mid-turn gesture replayed by a Retry. The gesture reached the
+ * dead query, not the model, so the re-sent prompt has to say why it is arriving
+ * on its own rather than as an answer to a card.
+ */
+const RETRY_GESTURE_PREAMBLE = 'The previous turn failed before this reached you.';
+
+/**
+ * A resolution a person actually made. Server-synthesized ones ('recovery',
+ * 'workflow-advance', 'stop', …) and guard auto-allows are not the user's words,
+ * so they must never become retry text. Legacy resolutions carry no `resolvedBy`
+ * and predate every synthesized source, so they count as the user's.
+ *
+ * This predicate *is* the safety mechanism for lastHumanGesture: a new
+ * synthesized resolution source that forgets to set `resolvedBy` or `auto` would
+ * leak into a re-sent prompt.
+ */
+export function isHumanResolution(d: PermissionRequestData): boolean {
+  if (!d.resolution || d.resolution === 'expired') return false;
+  if (d.auto) return false;
+  return !d.resolvedBy || d.resolvedBy === 'user' || d.resolvedBy === 'plan-reply';
+}
+
+/**
+ * Model-directed prose for one stored human answer, or null when there is
+ * nothing of the user's to say — every allow but `AskUserQuestion` with answers,
+ * and a deny with no `denyMessage`.
+ *
+ * A plain allow is deliberately excluded: an allow that reached resolvePermission
+ * was handed to the SDK and lives in the CLI's own session file, so re-sending it
+ * would only repeat context the resumed session already has (and, for a plan
+ * approval, risk re-triggering its side effects). The answer set is the one allow
+ * whose content exists solely in our transcript.
+ */
+export function retryGestureText(toolName: string, d: PermissionRequestData): string | null {
+  if (d.resolution === 'deny') {
+    // Already model-ready: a refine carries KEEP_PLANNING_MESSAGE plus the notes.
+    const message = d.denyMessage?.trim();
+    return message ? `${RETRY_GESTURE_PREAMBLE}\n\n${message}` : null;
+  }
+  if (toolName === 'AskUserQuestion' && d.answers && Object.keys(d.answers).length) {
+    // Same rendering recoverOrphanedPermission uses for the same stored shape.
+    const lines = Object.entries(d.answers).map(([q, a]) => `- ${q}\n  Answer: ${a}`);
+    return (
+      `${RETRY_GESTURE_PREAMBLE}\n\nYou asked me these questions and I answered:\n` +
+      `${lines.join('\n')}\n\nContinue the task using these answers. Do not re-ask them.`
+    );
+  }
+  return null;
+}
+
+/**
+ * The user's newest human gesture made *after* the turn's opening prompt, framed
+ * for re-sending, or null when the turn carries none. Answering a card never
+ * writes a 'user' event (the answer rides the still-running query's canUseTool),
+ * so without this a Retry re-sends the prompt that opened the turn and the model
+ * replays the whole thing.
+ *
+ * Caller passes compact-stripped events. Newest wins, matching
+ * findPermissionResolution's convention; a resolution with nothing of the user's
+ * to say is skipped rather than treated as "no gesture", so a plain allow does
+ * not shadow the refine notes before it.
+ *
+ * "Belongs to the failed turn" is approximated by "after the last 'user' event"
+ * — permission events carry no turn correlation, the same approximation
+ * collectTurns and summarizeTurn already make.
+ */
+export function lastHumanGesture(events: TranscriptEvent[]): string | null {
+  // Resolutions store `toolName: ''`, so the tool has to come from the request.
+  const tools = new Map<string, string>();
+  for (const event of events) {
+    if (event.kind !== 'permission') continue;
+    const data = event.data as PermissionRequestData;
+    if (data.requestId && data.toolName) tools.set(data.requestId, data.toolName);
+  }
+
+  let lastUser = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'user') {
+      lastUser = i;
+      break;
+    }
+  }
+
+  for (let i = events.length - 1; i > lastUser; i--) {
+    const event = events[i];
+    if (event.kind === 'interject') {
+      const text = (event.data as InterjectData).text?.trim();
+      return text ? `${RETRY_GESTURE_PREAMBLE}\n\n${text}` : null;
+    }
+    if (event.kind !== 'permission') continue;
+    const data = event.data as PermissionRequestData;
+    if (!isHumanResolution(data)) continue;
+    const text = retryGestureText(tools.get(data.requestId) ?? '', data);
+    if (text) return text;
+  }
+  return null;
+}
+
 const MCP_STATUSES = new Set(['connected', 'failed', 'needs-auth', 'pending', 'disabled']);
 
 /**
@@ -2049,34 +2148,68 @@ export class SessionManager {
     this.prompt(sessionId, last.text, last.source, last.attachments);
   }
 
-  /** The last user prompt + attachments rehydrated from disk, for re-sending a
-   *  failed turn. Also used by WorkflowEngine, which re-sends it as a step retry —
-   *  so a hint added here reaches both retry paths, and only the re-sent prompt
-   *  (the stored transcript event keeps what the user actually wrote). */
+  /** The user's newest input for the failed turn + attachments rehydrated from
+   *  disk, for re-sending it. Also used by WorkflowEngine, which re-sends it as a
+   *  step retry — so a hint added here reaches both retry paths, and only the
+   *  re-sent prompt (the stored transcript event keeps what the user actually
+   *  wrote).
+   *
+   *  A mid-turn gesture (refine notes, question answers, a plan-approve
+   *  interjection) wins over the prompt that opened the turn: it is the newer
+   *  human input, and re-sending the opening prompt instead makes the model replay
+   *  a whole workflow step. Nothing is emitted for it — writing a 'user' event
+   *  when a card is answered would open a turn boundary and corrupt turn-scoped
+   *  bookkeeping (see permissions-and-plan-mode.md). */
   lastPromptForRetry(
     sessionId: string,
   ): { text: string; source: 'user' | 'workflow'; attachments: PromptAttachment[] } | null {
     // A compaction emits no 'user' event, so stripping changes nothing here —
     // applied anyway so the invariant is "turn scans never see compact spans".
-    const last = withoutCompactSpans(this.store.loadTranscript(sessionId))
-      .filter((e) => e.kind === 'user')
-      .at(-1);
+    const events = withoutCompactSpans(this.store.loadTranscript(sessionId));
+    const last = events.filter((e) => e.kind === 'user').at(-1);
     const data = last?.data as
       | { text?: string; source?: 'user' | 'workflow'; attachments?: Attachment[] }
       | undefined;
-    if (!data || (!data.text && !data.attachments?.length)) return null;
-
-    const attachments = this.reloadAttachments(sessionId, data.attachments);
 
     // For the failures where the phrasing is what failed, say so in the re-sent
     // prompt: an identical retry of a blocked or oversized turn just fails again.
     const hint = turnFailureRetryHint(this.sessions.get(sessionId)?.errorKind);
+
+    const gesture = lastHumanGesture(events);
+    // A gesture still sitting on the queue is *held*, not lost (a crashed query
+    // pauses the queue), so synthesizing it into the retry would double-send it
+    // once the queue is released.
+    if (gesture && !this.isQueuedText(sessionId, gesture)) {
+      return {
+        text: hint ? `${gesture}\n\n${hint}` : gesture,
+        source: data?.source ?? 'user',
+        attachments: [],
+      };
+    }
+
+    if (!data || (!data.text && !data.attachments?.length)) return null;
+
+    const attachments = this.reloadAttachments(sessionId, data.attachments);
+
     const text = data.text ?? '';
     return {
       text: hint ? `${text}\n\n${hint}` : text,
       source: data.source ?? 'user',
       attachments,
     };
+  }
+
+  /**
+   * Is this gesture's text still staged on the queue? `gesture` carries the retry
+   * framing around the stored text, so a queued item counts when its own text is
+   * contained in it.
+   */
+  private isQueuedText(sessionId: string, gesture: string): boolean {
+    const queued = this.sessions.get(sessionId)?.queued ?? [];
+    return queued.some((q) => {
+      const text = q.text?.trim();
+      return !!text && gesture.includes(text);
+    });
   }
 
   /**

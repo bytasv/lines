@@ -460,6 +460,21 @@ test('refining with comments builds the deny reason from them, not from the clie
   assert.deepEqual(h.interjections(), [], 'a refusal never interjects');
 });
 
+test('a Retry after refining re-sends the notes, off the real emit path', async () => {
+  // The reported bug: the notes never become a 'user' event, so a Retry used to
+  // re-send whatever opened the turn (a workflow step's rendered template).
+  const h = harness({ mode: 'plan', events: [ev('user', { text: 'do step 3', source: 'workflow' })] });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  h.goLive();
+  answerPlan(h, false, NOTES);
+
+  const last = h.sessions.lastPromptForRetry('s1')!;
+  assert.ok(last.text.includes(KEEP_PLANNING_MESSAGE));
+  assert.match(last.text, /On "step 3": add a rollback/);
+  assert.ok(!last.text.includes('do step 3'));
+});
+
 test('a workflow plan-step gate folds comments into its message and never interjects', async () => {
   const h = harness({
     mode: 'plan',

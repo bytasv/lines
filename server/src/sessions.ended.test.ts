@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { ServerMessage, SessionMeta, TranscriptEvent } from '@lines/shared';
+import type {
+  PermissionRequestData,
+  ServerMessage,
+  SessionMeta,
+  TranscriptEvent,
+} from '@lines/shared';
+import { formatPlanComments, KEEP_PLANNING_MESSAGE } from '@lines/shared';
 import type { AuthManager, TokenRejection } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
@@ -339,6 +345,131 @@ test('a Retry re-sends the prompt untouched where re-phrasing would not help', (
     h.sessions.handleWorkerEvent('s1', failedResult(text));
     assert.equal(h.sessions.lastPromptForRetry('s1')!.text, 'go on', text);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Retry after a mid-turn gesture. Answering a card writes no 'user' event, so
+// without the gesture scan a Retry re-sends the prompt that opened the turn —
+// on a workflow plan step, the whole rendered step template.
+// ---------------------------------------------------------------------------
+
+/** The card as it is recorded when it is asked: the only place its tool name lives. */
+const permissionRequest = (h: ReturnType<typeof harness>, requestId: string, toolName: string) =>
+  h.sessions.emitEvent('s1', 'permission', { requestId, toolName, input: {} });
+
+/** …and as it is recorded when it is answered (`toolName: ''`, by design). */
+const permissionResolution = (
+  h: ReturnType<typeof harness>,
+  requestId: string,
+  data: Partial<PermissionRequestData>,
+) =>
+  h.sessions.emitEvent('s1', 'permission', {
+    requestId,
+    toolName: '',
+    input: {},
+    resolution: 'allow',
+    resolvedBy: 'user',
+    ...data,
+  } as PermissionRequestData);
+
+/** A step prompt, a plan, then "Refine with comments" — the reported case. */
+function refinedPlan(failure = 'boom') {
+  const h = harness();
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 3', source: 'workflow' });
+  permissionRequest(h, 'p1', 'ExitPlanMode');
+  permissionResolution(h, 'p1', {
+    resolution: 'deny',
+    denyMessage: formatPlanComments([{ id: 'a', quote: 'step 3', note: 'add a rollback' }], 'refine'),
+  });
+  h.sessions.handleWorkerEvent('s1', failedResult(failure));
+  return h;
+}
+
+test('a Retry after refining a plan re-sends the notes, not the prompt that opened the turn', () => {
+  const last = refinedPlan().sessions.lastPromptForRetry('s1')!;
+
+  assert.match(last.text, /^The previous turn failed before this reached you\./);
+  assert.ok(last.text.includes(KEEP_PLANNING_MESSAGE));
+  assert.match(last.text, /On "step 3": add a rollback/);
+  assert.ok(!last.text.includes('do step 3'), 'the step template is not replayed');
+  // A gesture has no attachments of its own; the opening prompt's are not its.
+  assert.deepEqual(last.attachments, []);
+  assert.equal(last.source, 'workflow', 'inherited from the turn that failed');
+});
+
+test('a retry hint still rides the gesture text', () => {
+  const last = refinedPlan(FILTERED).sessions.lastPromptForRetry('s1')!;
+  assert.match(last.text, /On "step 3": add a rollback/);
+  assert.match(last.text, /verbatim/, 'the hint follows the gesture');
+});
+
+test('an auto-approved read is not the user speaking, so Retry re-sends the prompt', () => {
+  const h = harness();
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 3', source: 'workflow' });
+  permissionRequest(h, 'p1', 'Read');
+  permissionResolution(h, 'p1', { resolvedBy: 'auto', auto: true });
+  h.sessions.handleWorkerEvent('s1', failedResult('boom'));
+
+  assert.equal(h.sessions.lastPromptForRetry('s1')!.text, 'do step 3');
+});
+
+test('a server-synthesized resolution never becomes retry text', () => {
+  for (const resolvedBy of ['workflow-advance', 'recovery'] as const) {
+    const h = harness();
+    h.sessions.emitEvent('s1', 'user', { text: 'do step 3', source: 'workflow' });
+    permissionRequest(h, 'p1', 'ExitPlanMode');
+    permissionResolution(h, 'p1', { resolvedBy, denyMessage: 'synthesized' });
+    h.sessions.handleWorkerEvent('s1', failedResult('boom'));
+
+    assert.equal(h.sessions.lastPromptForRetry('s1')!.text, 'do step 3', resolvedBy);
+  }
+});
+
+test('answered questions are replayed as answers, with an instruction not to re-ask', () => {
+  const h = harness();
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 3', source: 'workflow' });
+  permissionRequest(h, 'p1', 'AskUserQuestion');
+  permissionResolution(h, 'p1', { answers: { 'Which store?': 'Postgres', 'Which auth?': 'Clerk' } });
+  h.sessions.handleWorkerEvent('s1', failedResult('boom'));
+
+  const last = h.sessions.lastPromptForRetry('s1')!;
+  assert.match(last.text, /- Which store\?\n  Answer: Postgres/);
+  assert.match(last.text, /- Which auth\?\n  Answer: Clerk/);
+  assert.match(last.text, /Do not re-ask them/);
+});
+
+test('a plain allow is left to the CLI: it re-sends the prompt', () => {
+  const h = harness();
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 3', source: 'workflow' });
+  permissionRequest(h, 'p1', 'Bash');
+  permissionResolution(h, 'p1', { updatedInput: { command: 'ls' } });
+  h.sessions.handleWorkerEvent('s1', failedResult('boom'));
+
+  assert.equal(h.sessions.lastPromptForRetry('s1')!.text, 'do step 3');
+});
+
+test('the newest gesture wins: an interjection outranks the resolution before it', () => {
+  const h = harness();
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 3', source: 'workflow' });
+  permissionRequest(h, 'p1', 'ExitPlanMode');
+  permissionResolution(h, 'p1', { resolution: 'deny', denyMessage: 'earlier notes' });
+  h.sessions.emitEvent('s1', 'interject', { text: 'also drop the index first' });
+  h.sessions.handleWorkerEvent('s1', failedResult('boom'));
+
+  const last = h.sessions.lastPromptForRetry('s1')!;
+  assert.match(last.text, /also drop the index first/);
+  assert.ok(!last.text.includes('earlier notes'));
+});
+
+test('a gesture still staged on the queue is held, not re-sent as a retry', () => {
+  const h = harness();
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 3', source: 'workflow' });
+  h.sessions.emitEvent('s1', 'interject', { text: 'also drop the index first' });
+  h.sessions.handleWorkerEvent('s1', failedResult('boom'));
+  const meta = h.sessions.get('s1')!;
+  meta.queued = [{ id: 'q1', ts: 1, text: 'also drop the index first' }];
+
+  assert.equal(h.sessions.lastPromptForRetry('s1')!.text, 'do step 3');
 });
 
 /** How the SDK reports a user interrupt: an error result with no `result` at all. */

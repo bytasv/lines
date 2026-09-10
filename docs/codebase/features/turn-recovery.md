@@ -178,9 +178,20 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `turnFailureRetryHint(kind): string | null` (`turnFailure.ts`) — non-null only for
   `'filtered'`/`'context'`, the two kinds where rephrasing the prompt changes the outcome;
   `null` for `'invalid'`/`'overloaded'`/`'auth'`/undefined
-- `SessionManager.lastPromptForRetry(sessionId)` — the last user prompt + attachments
-  rehydrated from disk, extracted out of `retryTurn` so `WorkflowEngine.retryIfFailed` can
-  reuse it
+- `SessionManager.lastPromptForRetry(sessionId)` — the user's newest input for the failed turn
+  + attachments rehydrated from disk, extracted out of `retryTurn` so `WorkflowEngine.retryIfFailed`
+  can reuse it. Prefers a mid-turn human gesture (`lastHumanGesture`) over the prompt that opened
+  the turn — see "Retry re-sends the newest human input" below
+- `lastHumanGesture(events): string | null` — the newest human mid-turn gesture (a plan
+  deny/refine message, `AskUserQuestion` answers, or a plan-approve interject) recorded after the
+  last `'user'` event, framed for re-sending; `null` when there is none
+- `isHumanResolution(d): boolean` — a permission resolution a person actually made
+  (`resolvedBy` absent, `'user'`, or `'plan-reply'`; never `'expired'` or `auto: true`); the
+  safety gate that keeps a server-synthesized resolution (`'recovery'`, `'workflow-advance'`, …)
+  out of retry text
+- `retryGestureText(toolName, d): string | null` — model-directed prose for one stored human
+  answer; `null` for a plain allow (its content lives in the CLI's own resumed session, not ours)
+  and for a deny with no `denyMessage`
 - `WorkflowEngine.retryIfFailed(sessionId): boolean` — consumes a Retry click for a workflow
   session whose current step failed; returns `false` for a plain session or a step that parked
   normally, so the caller falls through to `SessionManager.retryTurn`
@@ -330,6 +341,39 @@ re-sends it through `iterateStep` (same conversation, `'retried'` marker, no adv
 `stepFailure` is cleared the moment the step runs again (`runStep`, `iterateStep`) or the
 workflow moves on (`advance`), so the next park is judged on its own.
 
+### Retry re-sends the newest human input, not just the turn's opening prompt
+
+A permission card answered mid-turn (a plan approved/denied, `AskUserQuestion` answered) is
+delivered to the SDK through the still-running query's `canUseTool` answer — it never produces a
+`'user'` transcript event, only a `kind: 'permission'` resolution (or, for a plan approved with
+comments, a separate `kind: 'interject'` event). Before this, `lastPromptForRetry` took the last
+`'user'` event unconditionally, so a Retry after e.g. answering questions, getting a plan, and
+"Refine with comments" on it re-sent the *step's opening prompt* — the model replayed the whole
+planning step instead of seeing the refine notes.
+
+`lastPromptForRetry` now calls `lastHumanGesture(events)` first: it walks backward from the end
+of the transcript to the last `'user'` event, then scans everything after it for the newest
+human-authored gesture — an `interject` event's text, or a `permission` resolution that passes
+`isHumanResolution` and yields non-null prose from `retryGestureText`. A gesture wins over the
+opening prompt whenever one exists, unless its text is still staged on `meta.queued` (a
+plan-approve interject that could not interject mid-turn is held there until the queue is
+released, not lost — synthesizing it into a Retry would double-send it).
+
+This is a read-side fix only: no `'user'` event is written when a card is answered. Doing so
+would open a new turn boundary and corrupt turn-scoped bookkeeping (`collectTurns`,
+`permissionWaitMs`) — see
+[permissions-and-plan-mode](permissions-and-plan-mode.md#plan-review-and-comments). "Belongs to
+the failed turn" is approximated by "after the last `'user'` event", the same approximation
+`collectTurns` and `summarizeTurn` already make for permission events, which carry no turn
+correlation of their own.
+
+Scope is deliberately narrow: a plain tool **allow** still falls back to the opening prompt,
+because an allow that reached `resolvePermission` was handed to the SDK and lives in the CLI's
+own resumed session — re-sending it would only repeat context the CLI already has (and, for a
+plan approval, risk re-triggering its advance/permission-mode side effects). The one allow whose
+content exists solely in our transcript is `AskUserQuestion`'s answer set, which `retryGestureText`
+does render.
+
 **Client-side.** `Transcript.tsx` scans `built` backward from the end for `retryKey`, skipping
 over `'workflow'` (a park marker) and `'context-compact'` items — either can land after a
 failed result without meaning the turn moved on — and stopping at anything else (a live
@@ -462,13 +506,14 @@ changes.
 
 **Retry hint.** `SessionManager.lastPromptForRetry` — already the single source both
 `retryTurn` and `WorkflowEngine.retryIfFailed` read from — appends
-`turnFailureRetryHint(meta.errorKind)` to the re-sent prompt text when it's non-null (only for
-`'filtered'`/`'context'`; `'invalid'`/`'overloaded'`/`'auth'`/undefined add nothing). The hint
-rides only the re-sent prompt, which is what appears in the transcript as a new `'user'` event
-— the original failed turn's stored prompt is untouched. A workflow step parked with
-`stepFailure: 'pre-run'` never reaches this function (no prompt was ever sent for it), so it
-never gets a hint either — expected, since `retryIfFailed` re-enters the step via `runStep`
-instead.
+`turnFailureRetryHint(meta.errorKind)` to the re-sent text when it's non-null (only for
+`'filtered'`/`'context'`; `'invalid'`/`'overloaded'`/`'auth'`/undefined add nothing). This holds
+whether the re-sent text is the opening prompt or a mid-turn human gesture (see "Retry re-sends
+the newest human input" above) — the hint rides only whatever text is actually re-sent, which is
+what appears in the transcript as a new `'user'` event; the original failed turn's stored prompt
+(and any card it answered) is untouched. A workflow step parked with `stepFailure: 'pre-run'`
+never reaches this function (no prompt was ever sent for it), so it never gets a hint either —
+expected, since `retryIfFailed` re-enters the step via `runStep` instead.
 
 **Skip step.** A workflow session parked as failed (`stepFailure` set, current step at
 `waiting-approval`, no advance in flight) can skip the step instead of retrying it: both
@@ -556,7 +601,14 @@ message type, no new modal, no new client state, no DB migration.
   `'overloaded'`/an unrecognised failure re-sends the prompt untouched. Also: a revoked-token
   message (401 or the CLI's 403 wording) is recognised as auth, not left raw; any failed
   turn — recognised or not — closes the session's query (`dropFailedQuery`, asserted via the
-  fake `WorkerClient.close`).
+  fake `WorkerClient.close`). Also: a Retry after refining a plan with comments re-sends the
+  refine notes (with the retry preamble), not the prompt that opened the turn, and the hint
+  still rides that text; an auto-approved or otherwise server-synthesized resolution
+  (`auto: true`, `resolvedBy: 'workflow-advance'`/`'recovery'`) is never mistaken for a human
+  gesture and falls back to the opening prompt, and neither does a plain human allow; answered
+  `AskUserQuestion` questions replay as answers with an instruction not to re-ask; the newest
+  gesture wins when an interject follows a resolution; a gesture still staged on `meta.queued`
+  is held, not double-sent.
 - `server/src/turnFailure.test.ts` — each kind matches representative CLI/SDK error text; an
   unrelated failure and a filter-vs-generic-400 precedence case both resolve correctly; every
   string returned by `turnFailureAdvice`, `turnFailureRetryHint`, and (exported for this test)
@@ -567,7 +619,11 @@ message type, no new modal, no new client state, no DB migration.
   status, and does not `autoAdvance`; spend still accumulates onto the step slot; a normal park
   carries no `stepFailure`. Also: a classified (non-auth) failure's rewritten banner and
   `errorKind` survive the failed-park, proving the `persistMeta`-not-`setStatus` invariant this
-  feature leans on.
+  feature leans on; a step `Retry` after a mid-turn plan refine re-sends the refine notes through
+  `iterateStep`, not the step's rendered prompt template.
+- `server/src/sessions.permission.test.ts` — a Retry after "Refine with comments", exercised
+  through the real `resolvePermission` emit path (not a hand-built transcript), returns the
+  refine prose from `lastPromptForRetry`.
 - The claimed `server/src/workflows.retry.test.ts` from an earlier revision of this doc does
   not exist in the repo; its coverage (`retryIfFailed` re-sends the last prompt for a `'turn'`
   failure, re-runs the step for a `'pre-run'` failure, ignores a normally-parked step and a
@@ -671,6 +727,11 @@ message type, no new modal, no new client state, no DB migration.
   priority over the failure, honoring the user's own advance request.
 - Retry re-runs the right thing: a step that never got a prompt is re-rendered from
   `WorkflowState`; a step whose turn failed is re-sent as a follow-up on the same conversation.
+- Retry prefers the user's newest mid-turn gesture (a plan refine/deny message,
+  `AskUserQuestion` answers, or a plan-approve interject) over the prompt that opened the turn,
+  since answering a card never writes a `'user'` event. A plain tool allow is the one exception —
+  it falls back to the opening prompt because its content already reached the CLI's own resumed
+  session.
 - No auto-retry or backoff — a transient failure (e.g. a 529) is an ordinary failed turn with a
   manual button, not a special transient-error class.
 - `stepFailure` is persisted (part of `WorkflowState`), so a reload while parked in the failed
