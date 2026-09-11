@@ -61,7 +61,7 @@ export function ActivityRow({
     <Group align="flex-start" gap="xs" wrap="nowrap">
       <Loader size={14} style={{ marginTop: 5, flexShrink: 0 }} />
       <Box style={{ flex: 1, minWidth: 0 }}>
-        <Text size="sm" c="dimmed">
+        <Text size="sm" c="dimmed" style={{ overflowWrap: 'anywhere' }}>
           {agent && (
             <Text span size="sm" c={agent.color}>
               <agent.icon size={13} style={{ verticalAlign: '-2px' }} />

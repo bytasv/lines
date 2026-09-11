@@ -637,7 +637,15 @@ const Item = memo(function Item({
           {item.blocks.map((block, i) => {
             if (block.type === 'text') return <Markdown key={i} text={block.text} />;
             return (
-              <Text key={i} size="xs" c="dimmed" fs="italic" style={{ whiteSpace: 'pre-wrap' }}>
+              <Text
+                key={i}
+                size="xs"
+                c="dimmed"
+                fs="italic"
+                // pre-wrap keeps the author's line breaks but still cannot break an
+                // unbroken token, so it needs the wrap guard of its own.
+                style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}
+              >
                 {block.text.length > 600 ? block.text.slice(0, 600) + '…' : block.text}
               </Text>
             );
@@ -696,7 +704,14 @@ const Item = memo(function Item({
           </Group>
           {/* The durable record of why: SessionView's alert vanishes on the next prompt. */}
           {item.error && (
-            <Text size="xs" c="red" opacity={0.75} ta="center" lineClamp={3}>
+            <Text
+              size="xs"
+              c="red"
+              opacity={0.75}
+              ta="center"
+              lineClamp={3}
+              style={{ overflowWrap: 'anywhere' }}
+            >
               {item.error}
             </Text>
           )}
@@ -720,6 +735,8 @@ const Item = memo(function Item({
           c={item.outcome?.status === 'failed' ? 'red' : 'dimmed'}
           ta="center"
           lineClamp={1}
+          // lineClamp truncates lines, not a token too wide to fit on one.
+          style={{ overflowWrap: 'anywhere' }}
         >
           background task
           {item.outcome ? ` ${item.outcome.status}` : ''}

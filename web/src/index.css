@@ -213,6 +213,12 @@
   --mantine-h3-line-height: 1.35;
   --mantine-h4-line-height: 1.4;
   line-height: 1.5;
+  /* A single unbreakable token in prose — an autolinked URL, a deep file path, a git
+     hash — has no soft wrap point, so default word wrapping lets it push a horizontal
+     scrollbar onto the whole transcript column. `anywhere` (not `break-word`) is
+     deliberate: only `anywhere` also shrinks the element's min-content width, which is
+     what stops a flex child from being sized by that token. */
+  overflow-wrap: anywhere;
 }
 
 .md-body li {
@@ -283,6 +289,9 @@
 .md-body code {
   font-size: 12px;
   padding: 0 3px;
+  /* Inline code is the most common carrier of a long path; Mantine's `code` rule sets
+     no wrapping, so restate it here rather than relying on .md-body inheritance. */
+  overflow-wrap: anywhere;
 }
 
 /* Mantine's :where(pre) adds its own padding + background around the already-boxed

@@ -73,7 +73,11 @@ function ToolFields({ tool }: { tool: ToolBlock }) {
         }
         return (
           <Box key={field.key}>
-            <Text size="xs" ff={!block && field.kind === 'path' ? 'monospace' : undefined}>
+            <Text
+              size="xs"
+              ff={!block && field.kind === 'path' ? 'monospace' : undefined}
+              style={{ overflowWrap: 'anywhere' }}
+            >
               <Text span size="xs" c="dimmed" ff="var(--mantine-font-family)">
                 {field.label}
                 {block ? '' : ': '}
@@ -251,7 +255,7 @@ export const ToolCallCard = memo(function ToolCallCard({
           )}
         </Group>
         {diff && (
-          <Group gap={4} wrap="nowrap">
+          <Group gap={4} wrap="nowrap" style={{ flexShrink: 0 }}>
             {stats && (
               <Text size="xs" ff="monospace">
                 <Text span c="teal">

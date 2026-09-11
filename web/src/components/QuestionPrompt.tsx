@@ -101,12 +101,15 @@ function OptionCard({
         ) : (
           <Radio.Indicator checked={checked} size="xs" mt={2} />
         )}
-        <div>
-          <Text size="sm" fw={checked ? 600 : 500}>
+        {/* Labels and descriptions are tool-supplied free text, and the Group above is
+            `nowrap` — without minWidth: 0 an unbroken token sizes this child by its
+            min-content width and widens the transcript column. */}
+        <div style={{ minWidth: 0 }}>
+          <Text size="sm" fw={checked ? 600 : 500} style={{ overflowWrap: 'anywhere' }}>
             {label}
           </Text>
           {description && (
-            <Text size="xs" c="dimmed">
+            <Text size="xs" c="dimmed" style={{ overflowWrap: 'anywhere' }}>
               {description}
             </Text>
           )}
@@ -166,11 +169,11 @@ export function QuestionReview({
           <div key={qi}>
             <Group gap={6} mb={6} wrap="nowrap">
               {q?.header && (
-                <Badge variant="light" size="sm">
+                <Badge variant="light" size="sm" style={{ flexShrink: 0 }}>
                   {q.header}
                 </Badge>
               )}
-              <Text size="xs" fw={500}>
+              <Text size="xs" fw={500} style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
                 {q?.question}
               </Text>
             </Group>
@@ -464,7 +467,12 @@ export function QuestionPrompt({
             >
               <Group gap={6} mb={6}>
                 <Badge variant="light">{q.header}</Badge>
-                <Text size="sm" fw={500} id={`${data.requestId}-q${qi}`}>
+                <Text
+                  size="sm"
+                  fw={500}
+                  id={`${data.requestId}-q${qi}`}
+                  style={{ minWidth: 0, overflowWrap: 'anywhere' }}
+                >
                   {q.question}
                 </Text>
               </Group>

@@ -301,6 +301,13 @@ the separate durable `context-compact` event this doc's compaction handling alre
   conversation column.
 - A GFM table wider than the conversation column scrolls horizontally inside its own
   `.md-table-wrap` wrapper instead of widening the column, paralleling the code-block wrap rule.
+- No transcript surface can widen the conversation column with an unbroken token (a long URL,
+  file path, git hash, base64 blob): the whole `.md-body` scope (prose, inline `` `code` ``,
+  links, headings, list items) and every component-rendered free-form string in the transcript
+  (tool field values, question labels/descriptions, spawn `model`/`name`, activity labels,
+  thinking-block preview, turn error text, background-task summary) carry `overflow-wrap:
+  anywhere`. Boxes that legitimately scroll (fenced code blocks, raw-input/result JSON,
+  `.md-table-wrap`) keep scrolling inside themselves instead.
 - Only the user prompt renders as a bubble (right-aligned `Paper`, capped at 80% column width).
   Agent output — answers, folded turns, tool groups/calls — is unwrapped and flush-left; nesting
   is shown by vertical order and the row's expand/collapse affordance, not by a box or
@@ -415,6 +422,18 @@ the separate durable `context-compact` event this doc's compaction handling alre
   so a blanket target would not open an empty tab per footnote click. In the desktop window an
   in-place navigation to one of these has no way back (no address bar); in a browser it costs the
   user their live session tab.
+- Any `nowrap` flex row carrying free-form text needs `minWidth: 0` on the text-bearing child (or
+  `flexShrink: 0` on its fixed-size sibling — badge/icon cluster), the same reasoning as the user
+  bubble below applied transcript-wide: a flex child's default `min-width: auto` (min-content)
+  wins over any `maxWidth` above it for a single unbreakable run, since used width is
+  `max(min-width, min(max-width, width))`. Sites carrying this guard: the user bubble `Paper`
+  (below), `OptionCard`'s label/description wrapper and `QuestionReview`'s question `Text`
+  (`QuestionPrompt.tsx`), `TaskCall`'s model/name meta `Group`, `ToolGroup`'s trailing stats
+  `Group`, `ToolCallCard`'s diff-stats `Group`, and `PermissionPrompt`'s file-path `Text` and
+  comment-actions `Group`. `overflow-wrap: anywhere` (not `break-word`) is the deliberate choice
+  everywhere in this feature for the same reason: it is the only one of the two that also shrinks
+  an element's min-content width, so it doubles as a second line of defense on a site where the
+  `minWidth: 0`/`flexShrink: 0` pairing was missed.
 - The user bubble `Paper` needs `minWidth: 0` alongside `maxWidth: '80%'` — without it, a flex
   child containing wide content (e.g. a code block or one long unbroken token) can grow past 80%
   regardless of the CSS wrap rules on its content: used width is

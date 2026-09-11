@@ -73,7 +73,7 @@ export const ToolGroup = memo(function ToolGroup({
             </Text>
           )}
         </Group>
-        <Group gap={6} wrap="nowrap">
+        <Group gap={6} wrap="nowrap" style={{ flexShrink: 0 }}>
           {failed > 0 && (
             <Badge variant="light" color="red" tt="none">
               {failed} failed

@@ -396,7 +396,7 @@ function EditPreview({ data }: { data: PermissionRequestData }) {
   return (
     <>
       <Group gap="xs" justify="space-between" wrap="nowrap">
-        <Text size="sm" ff="monospace" truncate>
+        <Text size="sm" ff="monospace" truncate style={{ minWidth: 0 }}>
           {filePath}
         </Text>
         {diff && (
@@ -916,7 +916,7 @@ function CommentablePlan({
               </Text>
             </Group>
             {!peekEditing && (
-              <Group gap={2} wrap="nowrap">
+              <Group gap={2} wrap="nowrap" style={{ flexShrink: 0 }}>
                 <ActionIcon
                   size="xs"
                   variant="subtle"

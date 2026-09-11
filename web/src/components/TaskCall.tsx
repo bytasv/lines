@@ -37,13 +37,15 @@ export function TaskHeader({ tool, nested }: { tool: ToolBlock; nested: ToolBloc
           {call.description}
         </Text>
       )}
+      {/* Shrinkable, unlike the badge cluster it sits next to: `model`/`name` are
+          free-form, so a long value here would otherwise widen the whole header. */}
       {hasMeta && (
-        <Group gap={4} wrap="nowrap" c="dimmed" style={{ flexShrink: 0 }}>
+        <Group gap={4} wrap="nowrap" c="dimmed" style={{ minWidth: 0 }}>
           {flags.map((flag) => (
             <Tooltip key={flag.key} label={flag.label} withArrow>
               {/* Span wrapper: the tooltip needs a stable hover target, and an inline
                   SVG's baseline gap makes the icon jitter against the badge. */}
-              <Box component="span" style={{ display: 'flex' }}>
+              <Box component="span" style={{ display: 'flex', flexShrink: 0 }}>
                 <flag.icon
                   size={13}
                   color={flag.color ? `var(--mantine-color-${flag.color}-6)` : undefined}
@@ -52,12 +54,12 @@ export function TaskHeader({ tool, nested }: { tool: ToolBlock; nested: ToolBloc
             </Tooltip>
           ))}
           {call.model && (
-            <Text size="xs" c="dimmed">
+            <Text size="xs" c="dimmed" style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
               {call.model}
             </Text>
           )}
           {call.name && (
-            <Text size="xs" c="dimmed">
+            <Text size="xs" c="dimmed" style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
               @{call.name}
             </Text>
           )}
