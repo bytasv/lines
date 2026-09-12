@@ -445,6 +445,20 @@ export class WorkerClient {
    * The only ask that carries `options`/`tools`, because it is the only one that
    * can create the query it reads.
    */
+  /**
+   * Fork this session's codex thread at `lastTurnId`, keeping everything up to and
+   * including that turn. Answers the new thread id, or null when the worker could
+   * not do it — the caller turns that into a refusal rather than a broken session.
+   */
+  async codexFork(sessionId: string, lastTurnId: string): Promise<string | null> {
+    try {
+      const id = await this.ask(sessionId, 'codexFork', { lastTurnId });
+      return typeof id === 'string' && id ? id : null;
+    } catch {
+      return null;
+    }
+  }
+
   mcpWarm(
     sessionId: string,
     options: Record<string, unknown>,

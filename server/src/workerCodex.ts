@@ -250,6 +250,34 @@ export function interruptCodex(sessionId: string): void {
     .catch((err) => console.warn('[worker] codex interrupt', String(err)));
 }
 
+/**
+ * Fork this session's thread at `lastTurnId` and re-bind the session to the new
+ * one. Answers the new thread id, or null when there is nothing to fork.
+ *
+ * The old thread is left intact on disk: codex forks rather than truncates, so a
+ * rewind is non-destructive on its side even though the Lines transcript is
+ * truncated.
+ */
+export async function forkCodex(sessionId: string, lastTurnId: string): Promise<string | null> {
+  const state = codexSessions.get(sessionId);
+  if (!state?.threadId || !server) return null;
+  try {
+    const forked = (await server.request('thread/fork', {
+      threadId: state.threadId,
+      lastTurnId,
+    })) as { thread?: { id?: unknown } };
+    const id = forked?.thread?.id;
+    if (typeof id !== 'string' || !id) return null;
+    threadOwners.delete(state.threadId);
+    state.threadId = id;
+    threadOwners.set(id, sessionId);
+    return id;
+  } catch (err) {
+    console.warn('[worker] codex fork failed:', String(err));
+    return null;
+  }
+}
+
 /** Drop the session's binding; the next push resumes the thread. */
 export function closeCodex(sessionId: string): void {
   const state = codexSessions.get(sessionId);

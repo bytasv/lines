@@ -79,7 +79,7 @@ const OPENAI: ProviderCapabilities = {
   interject: true,
   compact: true,
   contextWindow: true,
-  rewind: false,
+  rewind: true,
   linesTools: false,
   mcpConnections: false,
   workflows: false,

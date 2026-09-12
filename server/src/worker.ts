@@ -42,6 +42,7 @@ import { buildMcpServer } from './workerMcp.ts';
 import {
   closeCodex,
   codexLiveInfo,
+  forkCodex,
   hasCodexSession,
   interruptCodex,
   pushCodex,
@@ -226,6 +227,14 @@ async function handleAsk(msg: Extract<BridgeToWorker, { type: 'ask' }>) {
     } catch (err) {
       reply({ type: 'askResult', id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
     }
+    return;
+  }
+  // Codex's own ask, handled before the Claude session lookup for the same reason
+  // the engine dispatch is first: a codex session has no Query to read.
+  if (msg.method === 'codexFork') {
+    const lastTurnId = String((msg.params ?? {}).lastTurnId ?? '');
+    const forked = await forkCodex(msg.sessionId, lastTurnId);
+    reply({ type: 'askResult', id: msg.id, ok: true, value: forked });
     return;
   }
   const state = sessions.get(msg.sessionId);

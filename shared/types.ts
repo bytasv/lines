@@ -2999,7 +2999,7 @@ export interface RewindBlockInfo {
  * (WorkflowEngine.rollbackToTranscript) and parks the session on that step.
  */
 export function rewindBlock(
-  meta: Pick<SessionMeta, 'status' | 'claudeSessionId' | 'workflow'>,
+  meta: Pick<SessionMeta, 'status' | 'claudeSessionId' | 'codexThreadId' | 'workflow'>,
 ): RewindBlockInfo | null {
   // Only a *live* turn, exactly as contextCompactBlock decides it. Deliberately
   // not isSessionActive, which also folds in 'waiting-approval': a session parked
@@ -3008,9 +3008,10 @@ export function rewindBlock(
   if (meta.status === 'running' || meta.status === 'waiting-permission') {
     return { code: 'turn-running', reason: 'Finish the current turn first.' };
   }
-  // worker.push creates the query lazily, so there is no CLI conversation to
-  // re-point at a truncated history until a turn has actually run.
-  if (!meta.claudeSessionId) {
+  // No conversation to re-point at a truncated history until a turn has actually
+  // run — on either provider. (Claude's query is created lazily; codex has no
+  // thread to fork.)
+  if (!meta.claudeSessionId && !meta.codexThreadId) {
     return { code: 'no-session', reason: "Send a message first — there's nothing to rewind yet." };
   }
   return null;

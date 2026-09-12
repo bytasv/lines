@@ -345,7 +345,13 @@ export type AskMethod =
    * authorizable, and costs no tokens. Verified against the installed SDK; see
    * mcpAuth.contract.test.ts.
    */
-  | 'mcpWarm';
+  | 'mcpWarm'
+  /**
+   * Fork a codex thread at a turn, for a rewind. An `ask` rather than its own
+   * message type for the same reason `mcpWarm` is: adding one is not a protocol
+   * bump, and an older worker simply does not implement it.
+   */
+  | 'codexFork';
 
 export type BridgeToWorker =
   /**

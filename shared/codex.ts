@@ -39,6 +39,11 @@ export interface CodexNormalizeDeps {
   /** The Lines model id this turn ran on, echoed into the message envelope. */
   model: string;
   /**
+   * Codex's id for the turn being settled, stamped onto the `result` so a later
+   * rewind can name the turn to fork at. Only read on `turn/completed`.
+   */
+  turnId?: string;
+  /**
    * The most recent `thread/tokenUsage/updated` for this thread.
    *
    * Usage arrives on its own notification *before* `turn/completed`, so the
@@ -68,6 +73,14 @@ export interface CodexNormalized {
   contextUsage?: ContextUsage;
   /** The turn ended under a Stop rather than finishing or failing. */
   interrupted?: boolean;
+  /**
+   * Codex's id for the turn this notification belongs to.
+   *
+   * Recorded because `thread/fork` anchors on a turn rather than on a message:
+   * rewinding to a prompt means forking at the turn *before* it, so the ids have
+   * to be findable in the transcript later.
+   */
+  turnId?: string;
 }
 
 /**
@@ -366,9 +379,14 @@ export function normalizeCodexNotification(
       const thread = params.thread as { id?: unknown } | undefined;
       return typeof thread?.id === 'string' ? { messages: [], threadId: thread.id } : NOTHING;
     }
-    case 'turn/started':
-      // Resets the client's streaming tail, exactly as a Claude turn's does.
-      return { messages: [streamEvent({ type: 'message_start' })] };
+    case 'turn/started': {
+      const turn = params.turn as { id?: unknown } | undefined;
+      return {
+        // Resets the client's streaming tail, exactly as a Claude turn's does.
+        messages: [streamEvent({ type: 'message_start' })],
+        ...(typeof turn?.id === 'string' ? { turnId: turn.id } : {}),
+      };
+    }
     case 'item/started': {
       const block = startingBlock(params.item as ThreadItem);
       return block
@@ -474,6 +492,9 @@ export function normalizeCodexNotification(
             // No `total_cost_usd`: codex reports tokens, never a price.
             ...(typeof turn?.durationMs === 'number' ? { duration_ms: turn.durationMs } : {}),
             _engine: 'codex',
+            // The anchor a rewind forks at. On the durable record rather than in
+            // live state, because a rewind can happen many restarts later.
+            ...(deps.turnId ? { _codexTurnId: deps.turnId } : {}),
             _codex: turn,
           },
         ],

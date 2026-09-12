@@ -925,6 +925,9 @@ interface LiveState {
    * tokens. Live-only, like everything else here.
    */
   codexUsage?: TokenUsageBreakdown;
+  /** Codex's id for the turn in flight, stamped onto its settling `result` so a
+   *  later rewind can name the turn to fork at. */
+  codexTurnId?: string;
 }
 
 /**
@@ -2830,11 +2833,46 @@ export class SessionManager {
       }
     }
 
+    // The codex anchor is a *turn*, not a message: `thread/fork` keeps everything
+    // up to and including `lastTurnId`. So the turn to fork at is the newest one
+    // that settled before this prompt — its id is on that result's durable record
+    // (see `_codexTurnId`), which is why it survives restarts.
+    let codexAnchor: string | undefined;
+    if (isCodexSession(meta)) {
+      for (let i = index - 1; i >= 0; i--) {
+        const e = events[i];
+        if (e.kind !== 'sdk') continue;
+        const d = e.data as { type?: string; _codexTurnId?: string } | null;
+        if (d?.type === 'result' && typeof d._codexTurnId === 'string' && d._codexTurnId) {
+          codexAnchor = d._codexTurnId;
+          break;
+        }
+      }
+    }
+
     this.rewinding.add(sessionId);
     // The turn being re-driven is part of what is being discarded.
     this.cancelRecovery(sessionId);
     try {
-      if (anchor) {
+      if (isCodexSession(meta)) {
+        if (codexAnchor) {
+          // Forking answers with a *new* thread; the session re-points at it, so
+          // the old one is left intact on disk rather than truncated in place.
+          const forked = await this.worker.codexFork(sessionId, codexAnchor);
+          const live = this.sessions.get(sessionId);
+          if (!live) {
+            return { ok: false, code: 'no-session', reason: 'That session is gone.' };
+          }
+          if (!forked) {
+            return { ok: false, code: 'fork-failed', reason: 'Codex could not rewind this session.' };
+          }
+          live.codexThreadId = forked;
+        } else {
+          // Nothing before this prompt to keep. Same blunt outcome the Claude path
+          // takes, and the confirm dialog has already said so.
+          this.resetClaudeSession(sessionId);
+        }
+      } else if (anchor) {
         const fork = await this.forkSession(meta.claudeSessionId!, {
           upToMessageId: anchor,
           dir: meta.cwd,
@@ -4659,15 +4697,18 @@ export class SessionManager {
   ) {
     const meta = this.sessions.get(sessionId);
     const live = this.liveState(sessionId);
-    const { messages, threadId, failure, usage, contextUsage, interrupted } = normalizeCodexNotification(
+    const { messages, threadId, failure, usage, contextUsage, interrupted, turnId } =
+      normalizeCodexNotification(
       method,
       params,
       {
         newId: () => randomUUID(),
         model: meta ? resolveModelId(meta.model) : '',
         lastUsage: live.codexUsage,
+        turnId: live.codexTurnId,
       },
     );
+    if (turnId) live.codexTurnId = turnId;
     // Usage arrives on its own notification ahead of the settling turn, so it is
     // remembered here and folded into the `result` when that lands.
     if (usage) live.codexUsage = usage;
