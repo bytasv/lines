@@ -474,6 +474,23 @@ export class WorkerClient {
     }
   }
 
+  /**
+   * The codex app-server's MCP server statuses. Null when it could not be read —
+   * no app-server up, or an older worker that does not implement the ask — which
+   * the caller renders as "not read yet" rather than as an empty list.
+   *
+   * Takes a sessionId only because `ask` is addressed that way; the answer covers
+   * the whole CODEX_HOME.
+   */
+  async codexMcpStatus(sessionId: string): Promise<unknown[] | null> {
+    try {
+      const value = await this.ask(sessionId, 'codexMcpStatus');
+      return Array.isArray(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
   mcpWarm(
     sessionId: string,
     options: Record<string, unknown>,

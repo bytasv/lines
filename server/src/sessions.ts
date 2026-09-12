@@ -852,6 +852,66 @@ const MCP_STATUSES = new Set(['connected', 'failed', 'needs-auth', 'pending', 'd
  * — narrowed to what the UI renders. Unknown statuses become 'pending' rather
  * than being dropped: the row exists, we just don't recognise its state.
  */
+/**
+ * Codex's `McpServerStatus` rows as Lines' own shape.
+ *
+ * The two enums line up but do not match: codex distinguishes `notStarted` from
+ * `starting` (both are "pending" here) and calls the auth case
+ * `authenticationRequired`. `cancelled` has no Lines equivalent and reads closest
+ * to `failed` — a server that is not going to answer.
+ *
+ * **`runtimeStatus` is null far more often than it looks.** It is *thread*-runtime
+ * state, so a server that started fine and listed all its tools still reports null
+ * whenever no thread is running — which is the normal case when Settings asks.
+ * Keying the dot off it alone showed every working connection as "pending"
+ * forever. So the catalog is the fallback evidence: codex documents `toolsError`
+ * as null whenever a catalog came back, and a server that answered a tool listing
+ * has demonstrably connected.
+ *
+ * A server whose tools failed to load is reported as `failed` even when codex
+ * calls it connected: from the user's side, a connection offering no tools has
+ * not worked, and `toolsError` is the sentence explaining why.
+ */
+export function normalizeCodexMcpStatuses(raw: unknown): McpServerStatusInfo[] {
+  if (!Array.isArray(raw)) return [];
+  const out: McpServerStatusInfo[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const src = item as {
+      name?: unknown;
+      runtimeStatus?: unknown;
+      toolsError?: unknown;
+      tools?: unknown;
+    };
+    const name = typeof src.name === 'string' ? src.name : '';
+    if (!name) continue;
+    const toolsError = typeof src.toolsError === 'string' ? src.toolsError : '';
+    const status: McpServerStatusInfo['status'] = toolsError
+      ? 'failed'
+      : src.runtimeStatus === 'connected'
+        ? 'connected'
+        : src.runtimeStatus === 'authenticationRequired'
+          ? 'needs-auth'
+          : src.runtimeStatus === 'disabled'
+            ? 'disabled'
+            : src.runtimeStatus === 'failed' || src.runtimeStatus === 'cancelled'
+              ? 'failed'
+              : // No runtime state and no tools error: the catalog came back, so
+                // the server connected even though no thread is holding it open.
+                src.runtimeStatus == null
+                ? 'connected'
+                : 'pending';
+    const entry: McpServerStatusInfo = { name, status };
+    if (toolsError) entry.error = toolsError;
+    if (src.tools && typeof src.tools === 'object') {
+      const tools = Object.keys(src.tools as Record<string, unknown>);
+      if (tools.length) entry.tools = tools;
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
 function normalizeMcpStatuses(raw: unknown): McpServerStatusInfo[] {
   if (!Array.isArray(raw)) return [];
   const out: McpServerStatusInfo[] = [];
@@ -4234,16 +4294,24 @@ export class SessionManager {
   private async warmQuery(sessionId: string): Promise<McpServerStatusInfo[] | { error: string }> {
     const meta = this.sessions.get(sessionId);
     if (!meta) return { error: 'That session no longer exists.' };
-    // Connections do reach a codex session (they are written into its CODEX_HOME),
-    // but their *status* is read off a live Claude query, and warming one for a
-    // codex session would spawn a CLI child that session never uses. So this is a
-    // missing reading, not a missing feature, and it says so.
+    // Codex answers for its whole CODEX_HOME through its own RPC, so this needs
+    // no warming at all — there is no per-session query to bring up, and the
+    // app-server can report on a session that has never run a turn.
     if (isCodexSession(meta)) {
-      return {
-        error:
-          'Connection status is not available for a session on an OpenAI model yet — the ' +
-          'connections themselves do apply.',
-      };
+      const raw = await this.worker.codexMcpStatus(sessionId);
+      if (raw === null) {
+        return {
+          error:
+            'Connection status needs the OpenAI agent running — send a message in this ' +
+            'session, then Refresh.',
+        };
+      }
+      const servers = normalizeCodexMcpStatuses(raw);
+      // Lines' own server is an implementation detail of how the tools get there,
+      // not a connection the user added, so it does not belong in their list.
+      const visible = servers.filter((s) => s.name !== LINES_MCP_SERVER);
+      if (visible.length) this.liveState(sessionId).mcpServers = visible;
+      return visible;
     }
     // Checked before the token for the same reason pushTurn checks it there: a
     // missing or too-old binary cannot be fixed by retrying.
@@ -4330,6 +4398,17 @@ export class SessionManager {
 
   async mcpServerStatus(sessionId: string, opts: { warm?: boolean } = {}): Promise<McpServerStatusInfo[]> {
     const last = this.live.get(sessionId)?.mcpServers ?? [];
+    // Codex reads without warming — its app-server answers for the whole
+    // CODEX_HOME — so the reason the Claude path waits for explicit intent does
+    // not apply, and making the user press Refresh would be a ritual with nothing
+    // behind it. Also short-circuits the `mcpStatus` call below, which asks a
+    // Claude query this session does not have.
+    const meta = this.sessions.get(sessionId);
+    if (meta && isCodexSession(meta)) {
+      const answer = await this.warmQuery(sessionId);
+      if ('error' in answer) return last;
+      return answer.length ? answer : last;
+    }
     // Only on explicit intent (the pane's Refresh, or an Authorize click): merely
     // opening Settings must not spawn a CLI child for whatever is selected.
     if (opts.warm) {

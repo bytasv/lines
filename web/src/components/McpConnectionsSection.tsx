@@ -17,6 +17,7 @@ import {
 import { IconAlertTriangle, IconPlus, IconRefresh, IconTrash } from '@tabler/icons-react';
 import {
   normalizeConnection,
+  providerForModel,
   type McpConnection,
   type McpConnectionInput,
   type McpServerStatusInfo,
@@ -55,6 +56,12 @@ export function McpConnectionsSection({ onOpenReview }: { onOpenReview: () => vo
   const selectedSessionId = useStore((s) => s.selectedSessionId);
   const requestMcpStatus = useStore((s) => s.requestMcpStatus);
   const statuses = useStore((s) => (selectedSessionId ? s.mcpStatus[selectedSessionId] : undefined));
+  // Which engine the open session runs on — the two read status by different
+  // routes, and only one of them has to start a CLI child to do it.
+  const codexSession = useStore((s) => {
+    const meta = selectedSessionId ? s.sessions[selectedSessionId] : undefined;
+    return meta ? providerForModel(meta.model) === 'openai' : false;
+  });
 
   // Status is a per-session reading, so it needs a session to read from. The
   // open one is the only sensible choice here.
@@ -92,12 +99,22 @@ export function McpConnectionsSection({ onOpenReview }: { onOpenReview: () => vo
       </Text>
       <Group justify="space-between" wrap="nowrap">
         <Text size="xs" c="dimmed">
-          {selectedSessionId
-            ? 'Status is read from the open session.'
-            : 'Open a session to see connection status.'}
+          {!selectedSessionId
+            ? 'Open a session to see connection status.'
+            : codexSession
+              ? // No warming on this path: codex reports for its whole home, so a
+                // session that has never run a turn still has a real reading.
+                'Status is read from the OpenAI agent.'
+              : 'Status is read from the open session.'}
         </Text>
         {selectedSessionId && (
-          <Tooltip label="Refresh status — starts this session's agent if it isn't running">
+          <Tooltip
+            label={
+              codexSession
+                ? 'Refresh status'
+                : "Refresh status — starts this session's agent if it isn't running"
+            }
+          >
             <ActionIcon
               variant="subtle"
               size="sm"

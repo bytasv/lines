@@ -331,6 +331,33 @@ export function interruptCodex(sessionId: string): void {
  * rewind is non-destructive on its side even though the Lines transcript is
  * truncated.
  */
+/**
+ * The app-server's own view of its MCP servers.
+ *
+ * The codex twin of the Claude path's `mcpStatus`, and it reads a different
+ * thing: not a live `Query`, but codex's `mcpServerStatus/list`. Answers for the
+ * whole `CODEX_HOME` rather than for one thread, which is why it takes no session
+ * — and why it can answer at all for a session that has never run a turn, the
+ * case Settings actually asks in.
+ *
+ * Null when no app-server is up: the bridge turns that into "not read yet"
+ * rather than into an empty list, which would render as every server missing.
+ */
+export async function codexMcpStatus(): Promise<unknown[] | null> {
+  if (!server?.running) return null;
+  try {
+    const answer = (await server.request('mcpServerStatus/list', {
+      // The catalog, not the full tool schemas: the bridge only needs names,
+      // connection state and auth state.
+      detail: 'toolsAndAuthOnly',
+    })) as { data?: unknown };
+    return Array.isArray(answer?.data) ? answer.data : [];
+  } catch (err) {
+    console.warn('[worker] codex mcp status failed:', String(err));
+    return null;
+  }
+}
+
 export async function forkCodex(sessionId: string, lastTurnId: string): Promise<string | null> {
   const state = codexSessions.get(sessionId);
   if (!state?.threadId || !server) return null;

@@ -353,6 +353,16 @@ export type AskMethod =
    */
   | 'mcpWarm'
   /**
+   * Read the codex app-server's own MCP server statuses.
+   *
+   * The codex twin of `mcpStatus`, and a separate method rather than a branch
+   * inside it because they read different things: `mcpStatus` inspects a live
+   * Claude `Query`, this one calls codex's `mcpServerStatus/list` RPC. Needs no
+   * warming — the app-server holds the servers for the whole CODEX_HOME, not per
+   * thread, so it can answer for a session that has never run a turn.
+   */
+  | 'codexMcpStatus'
+  /**
    * Fork a codex thread at a turn, for a rewind. An `ask` rather than its own
    * message type for the same reason `mcpWarm` is: adding one is not a protocol
    * bump, and an older worker simply does not implement it.

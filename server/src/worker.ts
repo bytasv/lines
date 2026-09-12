@@ -44,6 +44,7 @@ import { buildMcpServer } from './workerMcp.ts';
 import {
   closeCodex,
   codexLiveInfo,
+  codexMcpStatus,
   forkCodex,
   hasCodexSession,
   interruptCodex,
@@ -256,6 +257,13 @@ async function handleAsk(msg: Extract<BridgeToWorker, { type: 'ask' }>) {
     const lastTurnId = String((msg.params ?? {}).lastTurnId ?? '');
     const forked = await forkCodex(msg.sessionId, lastTurnId);
     reply({ type: 'askResult', id: msg.id, ok: true, value: forked });
+    return;
+  }
+  if (msg.method === 'codexMcpStatus') {
+    // Deliberately not gated on a live codex session: the app-server holds the
+    // MCP servers for the whole CODEX_HOME, so it can answer for a session that
+    // has never run a turn — which is exactly when Settings asks.
+    reply({ type: 'askResult', id: msg.id, ok: true, value: await codexMcpStatus() });
     return;
   }
   const state = sessions.get(msg.sessionId);

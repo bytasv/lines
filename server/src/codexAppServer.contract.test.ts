@@ -39,6 +39,8 @@ const CLIENT_REQUESTS = [
   // How the user's MCP connections reach a codex session. Lines never writes
   // `config.toml` itself, so losing this method loses the connections outright.
   'config/batchWrite',
+  // The status dot in Settings → Connections for a codex session.
+  'mcpServerStatus/list',
 ];
 
 /** Notifications Lines normalizes. Losing one silently drops part of a turn. */
@@ -152,4 +154,17 @@ test('the config writer still takes the edit shape the MCP table is written with
     assert.ok(edit.includes(field), `ConfigEdit no longer carries ${field}`);
   }
   assert.ok(read('v2/MergeStrategy.ts').includes('"replace"'), 'MergeStrategy lost replace');
+});
+
+test('the MCP status fields the connection dot is derived from still exist', () => {
+  // A rename here does not break a turn — it quietly turns every connection's
+  // status dot to "pending", which reads as "still connecting" forever.
+  const source = read('v2/McpServerStatus.ts');
+  for (const field of ['runtimeStatus', 'toolsError', 'tools']) {
+    assert.ok(source.includes(field), `McpServerStatus no longer carries ${field}`);
+  }
+  const states = read('v2/McpServerConnectionStatus.ts');
+  for (const state of ['connected', 'authenticationRequired', 'failed', 'disabled']) {
+    assert.ok(states.includes(`"${state}"`), `McpServerConnectionStatus lost ${state}`);
+  }
 });
