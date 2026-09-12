@@ -854,7 +854,8 @@
         "project-tab-status-dot",
         "session-status-badge",
         "session-create-auto-select",
-        "hello-duplicate-inertness"
+        "hello-duplicate-inertness",
+        "session-list-sorting"
       ],
       "entryPoints": [
         "web/src/components/Composer.tsx",
@@ -901,7 +902,12 @@
         "markSessionCreatePending",
         "actionError",
         "setActionError",
-        "send"
+        "send",
+        "SessionSort",
+        "SESSION_SORT_ORDER",
+        "SESSION_SORT_RANK",
+        "lastActivityAt",
+        "compareSessions"
       ],
       "tests": [],
       "businessRules": [
@@ -913,7 +919,10 @@
         "auto-selection always excludes archived sessions; completed needs no separate check since the server always archives alongside it",
         "a project whose sessions are all archived auto-selects nothing (empty state) rather than opening an archived one",
         "an explicit selection already in the target project, including an archived session, is never overridden by a tab switch",
-        "sort key for most recent is createdAt, matching the sidebar list order",
+        "auto-selection (latestSessionIn, which session a project switch opens) always sorts by createdAt, independent of the sidebar's own list-sort setting",
+        "the sidebar session list order is user-selectable via lines.sessionSort (persisted localStorage), applied to all three groups (Sessions, Shared-with-me, Archived): Status (default) ranks running first, then the tab-dot urgency order (plan ready > needs answer > needs approval > needs permission > interrupted > error), then background work, then done, then idle, tie-broken by lastActivityAt descending; Last active sorts by lastActivityAt descending; Created sorts by createdAt descending (the sidebar's pre-existing behavior)",
+        "a session status label missing from SESSION_SORT_RANK sorts last rather than being guessed at, same rule projectStatusMeta applies by skipping",
+        "the archived group's sort key changed from archivedAt ?? createdAt to the same compareSessions comparator the other two groups use: Status/Last-active mode still puts the most-recently-archived session first since archiving is an upsert that bumps updatedAt, but Created mode now means creation order, not archive order",
         "priority highest first: plan ready (violet) > needs answer (teal) > needs approval (sandstone) > needs permission (yellow) > interrupted (yellow) > error (red)",
         "running/done/idle sessions never show a dot",
         "archived sessions are excluded; completed sessions are always archived too, so no separate guard is needed",
@@ -946,7 +955,9 @@
         "sessionRowMeta is the single row-presentation entry point: waitingPermissionMeta first, then the interrupted-turn-recovery yellow state, then the plain per-status table (moved into format.ts from Sidebar.tsx)",
         "helloSignature is a cheap string (each session's id:updatedAt joined, plus project paths) rather than a hash of the whole hello payload, precisely so volatile fields (usage, worker/storage health) stay outside it and keep applying on every hello regardless of the short-circuit",
         "store changes here (the hello short-circuit, pendingCreate/seenSessionIds) are pure reducer logic with no web test harness backing them (web/ has no test runner) — the highest-risk, least-covered part of this feature; verified manually",
-        "SessionRow is memoized — selecting a different session or any sessions-map update (e.g. a live turn ticking status) otherwise re-rendered every row in the list regardless of the size of the session being switched to; the memo relies on `session` keeping its object identity when unchanged, which sessionUpsert already guarantees by only replacing the entry that changed"
+        "SessionRow is memoized — selecting a different session or any sessions-map update (e.g. a live turn ticking status) otherwise re-rendered every row in the list regardless of the size of the session being switched to; the memo relies on `session` keeping its object identity when unchanged, which sessionUpsert already guarantees by only replacing the entry that changed",
+        "compareSessions follows the same format.ts-never-imports-store.ts rule as projectStatusMeta: it takes plain SessionMeta and returns a comparator, so Sidebar.tsx is the only place .sort() is called",
+        "SESSION_SORT_ORDER is built from STATUS_META.running, PROJECT_STATUS_ORDER, BACKGROUND_WORK_META, STATUS_META.done/.idle rather than a second hand-written urgency table, so the sidebar list order can never drift from the tab dot it points at"
       ],
       "relatedDecisions": [
         "hosted-machine-access",

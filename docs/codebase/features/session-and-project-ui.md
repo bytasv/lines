@@ -292,8 +292,21 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   opening an archived one.
 - An explicit selection already in the target project — including an archived session opened via
   the sidebar's Archived group or a deep link — is never overridden by a tab switch.
-- Sort key for "most recent" is `createdAt`, matching the sidebar list order (`SessionMeta` has
-  no separate last-activity field).
+- Auto-selection (`latestSessionIn`, "which session does a project switch open") always sorts by
+  `createdAt`, independent of the sidebar's own list-sort setting below.
+- The sidebar session list order is user-selectable via `lines.sessionSort` (persisted
+  `localStorage`), applied to all three groups (Sessions, Shared-with-me, Archived): **Status**
+  (default) — running first, then the tab-dot urgency order (plan ready > needs answer > needs
+  approval > needs permission > interrupted > error), then background work, then done, then idle,
+  tie-broken by `lastActivityAt` descending; **Last active** — `lastActivityAt` descending;
+  **Created** — `createdAt` descending (the sidebar's pre-existing, and still default-for-archived,
+  behavior).
+- A session status label missing from `SESSION_SORT_RANK` (a future `SessionStatus`) sorts last
+  rather than being guessed at — the same rule `projectStatusMeta` applies by skipping.
+- The archived group's sort key changed from `archivedAt ?? createdAt` to the same `compareSessions`
+  comparator the other two groups use: Status/Last-active mode still puts the most-recently-archived
+  session first (archiving is an upsert, so it bumps `updatedAt`), but Created mode now means
+  creation order, not archive order.
 - Project tab dot priority, highest first: plan ready (violet) > needs answer (teal) > needs
   approval (sandstone) > needs permission (yellow) > interrupted (yellow) > error (red).
 - `running` / `done` / `idle` never show a dot (not actionable) — folder icon.
@@ -337,7 +350,11 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   `projectStatusMeta`, the sidebar list).
 - `format.ts` never imports `store.ts`; `projectStatusMeta` takes plain `SessionMeta[]` and a
   seen map so the existing one-way dependency (`store.ts` importing `lib/alerts`, `lib/format`)
-  is preserved.
+  is preserved. `compareSessions` follows the same rule: it takes plain `SessionMeta` and returns
+  a comparator, so `Sidebar.tsx` is the only place `.sort()` is actually called.
+- `SESSION_SORT_ORDER` is built from `STATUS_META.running`, `PROJECT_STATUS_ORDER`,
+  `BACKGROUND_WORK_META`, `STATUS_META.done`/`.idle` rather than a second, hand-written urgency
+  table — the sidebar list order can never drift from the tab dot it points at.
 - `seenSessionStatus` is maintained in one place (a single store subscription), not scattered
   across every mutation site that could change what counts as seen.
 - `completed` needs no separate guard in `projectStatusMeta`: the server always sets `completed`
