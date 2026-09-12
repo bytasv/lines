@@ -190,6 +190,17 @@ export function resultErrorText(msg: { result?: unknown; errors?: unknown }): st
  */
 export const isStoppedResult = (r: { stopped?: unknown }): boolean => r.stopped === true;
 
+/**
+ * Whether a `result` failed in a way the bridge is transparently re-driving (a
+ * rejected token, an overloaded API). Like `stopped`, `recovering` is a bridge
+ * stamp rather than an SDK field, and for the same reason: only the bridge knows
+ * the turn did not really end there. The row stays in the transcript as the
+ * durable diagnostic record but reads neutrally — no red text, no Retry button —
+ * because the turn is still in flight. Additive: absent on every result written
+ * before this existed, and on every one the bridge did not stamp.
+ */
+export const isRecoveringResult = (r: { recovering?: unknown }): boolean => r.recovering === true;
+
 /** How an attachment is presented to the model. */
 export type AttachmentKind = 'image' | 'document' | 'text';
 
@@ -777,8 +788,10 @@ export interface TranscriptEvent {
    *                 scan treats a 'user' event as "a turn starts here", and an
    *                 interjection starts nothing.
    * - 'sdk'       : raw SDK message (assistant / system / result / stream_event ...),
-   *                 carrying one bridge-added field: `stopped` on a result the user
-   *                 stopped (see isStoppedResult). Nothing else here is ours.
+   *                 carrying two bridge-added fields: `stopped` on a result the user
+   *                 stopped (see isStoppedResult), and `recovering` on a failed
+   *                 result whose turn is being re-driven transparently (see
+   *                 isRecoveringResult). Nothing else here is ours.
    * - 'file-snapshot': pre-edit file content captured for a tool_use (for diffs)
    * - 'permission': permission request / resolution
    * - 'workflow'  : workflow step transition marker

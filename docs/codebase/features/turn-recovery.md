@@ -41,14 +41,27 @@ filtering policy". Auth is tried first and always wins if the text matches both;
 none of these four *do* anything (no refresh, no retry) — only the banner and, for two of the
 four, the re-sent prompt change.
 
-When the app-managed OAuth token is rejected during a turn, recovery happens in the same turn:
-refresh the token if the refresh token is still good, or log out — which opens the browser's
-login modal immediately. The outcome is made **visible**: the failed turn's banner is
-rewritten to name the action the user must actually take, and when a sign-in is genuinely
-required a **Sign in** button appears next to Retry. Before this, the raw CLI text (`Failed to
-authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.`)
-was shown with only a bare Retry button, even when the token had already been silently
-refreshed (Retry would have worked) or the refresh itself had failed with no visible reason.
+When the app-managed OAuth token is rejected during a turn's `result` — the SDK surfacing the
+rejection as an ordinary error result rather than a query crash — or that `result` reports an
+overload/rate-limit, the turn is no longer settled at all: it is **transparently re-driven**. The
+failed attempt is never shown to the user as a failure — the turn stays `running`, a fresh query
+is spawned underneath it (a refreshed token, or after a short backoff), and the same prompt is
+silently re-sent. The transcript keeps the failed attempt as a dimmed one-liner (same treatment as
+a stopped turn), never a red banner. Only two things still end on a manual banner: a stored
+credential that genuinely needs re-authentication (the refresh token itself is dead), and a
+recovery that has exhausted its attempt budget (2 total for auth, 3 for overloaded) or a
+connectivity hold that outlasted 5 minutes offline — see "Transparent turn recovery" below. This
+reverses two of this feature's own former rules (no auto-retry, Retry stays manual); the reason
+those rules existed — a login completing later, or on another device, must not fire N queued
+turns across every session that failed while signed out — still holds, because a recovery is
+anchored to one in-flight turn on one session, never to a login event.
+
+A query that crashes outright (`handleWorkerEnded`'s error branch) is unaffected by any of this:
+there is no turn left in flight to re-drive into, so it still settles immediately and still ends
+on the post-hoc banner rewrite described next. Before this feature, the raw CLI text (`Failed to
+authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.`) was
+shown there with only a bare Retry button, even when the token had already been silently refreshed
+(Retry would have worked) or the refresh itself had failed with no visible reason.
 
 Underneath all of it: the app's own OAuth login (`~/.lines-app/users/<id>/auth.json`) is the
 sole credential any Claude query runs on. The ambient Claude Code CLI login (`~/.claude`) is
@@ -256,6 +269,41 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   logout/token-refresh and project-root changes; skips a session whose `LiveState.backgroundTasks`
   is non-empty (see [background-tasks](background-tasks.md)), since closing that query would kill
   the CLI child and every task it owns
+- `SessionManager.recoveryKindFor(sessionId, msg, stopped): 'auth' | 'overloaded' | null`
+  (private) — the transparent-recovery verdict, decided synchronously alongside the `stopped`
+  stamp; see "Transparent turn recovery" in Data flow
+- `LiveState.recovery?: { kind, attempts, epoch, timer? }` — live-only record of a turn being
+  re-driven; `attempts` is per kind (`TURN_ATTEMPTS`), `epoch` invalidates stale in-flight work
+- `TURN_ATTEMPTS: Record<'auth' | 'overloaded', number>` (`sessions.ts`) — total attempts allowed
+  per kind, original attempt included (`auth: 2`, `overloaded: 3`)
+- `SessionManager.beginRecovery(sessionId, kind, resultText)` (private) — closes the query and
+  starts either the auth-refresh race or the overloaded backoff
+- `SessionManager.repushTurnSilently(sessionId, ctx)` (private) — re-sends
+  `lastPromptForRetry`'s text/attachments via `promptContent`, with no `'user'` event and no
+  status transition
+- `SessionManager.promptContent(text, attachments): unknown[]` (private) — the SDK content-block
+  builder extracted out of `prompt()`; side-effect-free (no `stageAttachments`, no events), shared
+  by `prompt()` and `repushTurnSilently`
+- `SessionManager.accumulateResultSpend(meta, msg)` (private) — the cost/token/`costByModel`
+  accumulation extracted out of the `result` branch, shared by the deferred-settle and real-settle
+  paths
+- `SessionManager.settleTurnFailed(sessionId, text, kind?)` (private) — performs the failure a
+  deferred settle never did; modeled on `handleWorkerEnded`'s error branch, not `failTurn`
+- `SessionManager.cancelRecovery(sessionId)` (private) — clears a recovery's timer and record;
+  called from `interrupt`, `prompt`, `rewindSession`, session archive/delete, and `failTurn`
+- `SessionManager.recoveryStillOwns(sessionId, ctx): boolean` (private) — the ownership check a
+  recovery re-runs before every re-push: session exists, still `running`, not `interrupting`,
+  `turnStartedAt` and `epoch` unchanged
+- `isOfflineError(err)` (`auth.ts`) — `TypeError` whose `cause.code` is one of
+  `ENOTFOUND`/`EAI_AGAIN`/`ECONNREFUSED`/`ENETUNREACH`; distinguishes "no route to the network"
+  from an ordinary refresh failure for the connectivity hold
+- `AuthManager.lastRefreshAt` (private) + `RECENT_REFRESH_MS` (5s) — a rejection arriving just
+  after a refresh landed reports `{ outcome: 'refreshed' }` without a second network call,
+  collapsing concurrent sessions recovering off one rotated token into one refresh
+- `isRecoveringResult(r)` (`shared/types.ts`) — reads the bridge-added `recovering` stamp, same
+  shape as `isStoppedResult`
+- `ResultItem.recovering` (`web/src/lib/transcript.ts`) — carries the stamp into the rendered
+  item; `isFailedResult` returns `false` when it is set, same as `isStoppedResult`
 
 ## Data flow
 
@@ -422,6 +470,98 @@ before flipping the status to `error`, so `transcript.ts` builds a `ResultItem` 
 transcript keeps the raw CLI text as the durable diagnostic record — only the banner changes,
 never the transcript row.
 
+### Transparent turn recovery
+
+Scoped to exactly one place: the `msg.type === 'result'` branch of `handleWorkerEvent`. A crashed
+query (`handleWorkerEnded`) is never re-driven — there is no turn left in flight to resume.
+
+**Detection, before persist.** `SessionManager.recoveryKindFor(sessionId, msg, stopped)` is
+computed alongside the existing `stopped` stamp, for the same reason: the transcript store only
+appends, so a verdict decided after the event is written could never reach the durable record.
+It returns `'auth' | 'overloaded' | null`, requiring: `msg.type === 'result'`, not `stopped`, the
+same `is_error`/non-`success` predicate the settle path uses, not mid-compaction
+(`LiveState.compactResume` unset — a compaction reports through its own channel), the session
+still `running`/`waiting-permission`, and that kind's attempt budget (`TURN_ATTEMPTS`: `auth` 2,
+`overloaded` 3, original attempt included) not yet spent. Auth wins outright when the text matches
+both an auth pattern and `'overloaded'`, mirroring `classifyFailure`'s existing precedence. A
+non-null verdict stamps `{ ...msg, recovering: true }` at the same `emitEvent` call that stamps
+`stopped` — see `isRecoveringResult`.
+
+**Deferring the settle.** When the verdict is non-null, the `result` branch does **not** run any
+of its usual settle: no `status`/`errorMessage`/`errorKind` assignment, no clearing
+`turnSource`/`turnStartedAt`, no `classifyFailure`, no `onTurnComplete`, no `maybeFlush`, no
+`summarizeTurn`/`recordFilesChanged`/`fetchContextBreakdown` (those run once the turn really
+settles, keyed off that attempt's own `resultSeq`). It **does** still run
+`accumulateResultSpend` (the failed attempt burned real tokens) and reset
+`LiveState.permissionWaitMs` (or the same wait is subtracted twice from the next attempt's
+`duration_ms`), then calls `beginRecovery` and returns. `LiveState.turnBaselines` is left open on
+purpose — closing it would drop the first attempt's file attribution.
+
+**Re-driving.** `SessionManager.beginRecovery(sessionId, kind, resultText)` bumps a per-session
+`epoch`, increments that kind's attempt counter, closes the query (the child holds the rejected
+token, or is dead weight either way), and:
+
+- `'auth'` → `auth.handleTokenRejected()` raced against a 20s timeout. `refreshed` →
+  `repushTurnSilently`. `signed-out` → `settleTurnFailed` with the Sign-in banner — the one case
+  still surfaced to the user, since `logout()` has already broadcast `authStatus` and opened the
+  login modal. `refresh-failed` → the connectivity hold below, and this attempt is **not**
+  charged against the budget (no turn was ever re-sent).
+- `'overloaded'` → wait on a backoff (2s → 8s → 30s indexed by attempt), then
+  `repushTurnSilently`.
+
+**Connectivity hold.** A `refresh-failed` outcome is re-probed on a 5s-doubling backoff capped at
+60s, for a total budget of 5 minutes. `auth.ts`'s `isOfflineError(err)` distinguishes "no route to
+the network" (`TypeError` whose `cause.code` is `ENOTFOUND`/`EAI_AGAIN`/`ECONNREFUSED`/
+`ENETUNREACH`) from an ordinary refresh failure, but the hold's behavior is identical either way —
+a refresh that finally succeeds *is* the came-back-online signal, so there is nothing else to
+watch for. Budget exhausted → `settleTurnFailed` with the plain `authRefusalMessage` banner
+(no `errorKind`, no Sign in button — the stored credential itself is fine).
+
+**Re-sending without a second `'user'` event.** `repushTurnSilently` reads
+`lastPromptForRetry(sessionId)` — the same source a manual Retry uses, so a mid-turn plan refine
+or `AskUserQuestion` answer is re-sent instead of the stale opening prompt — builds the content via
+`promptContent` (extracted out of `prompt()`, deliberately free of `stageAttachments`: the
+original `'user'` event already owns the on-disk attachment refs) and pushes it directly. No
+`'user'` event is written and no status transition happens — `turnSource`, `turnStartedAt` and
+`status: 'running'` are already correct, because the turn was never settled. Every turn-scoped
+scan (`collectTurns`, `summarizeTurn`, `lastHumanGesture`) therefore reads a multi-attempt turn as
+one turn, the same way it already reads a mid-turn permission answer as belonging to the turn
+before it.
+
+**Ownership.** Before re-pushing (and at the top of the connectivity hold's loop),
+`recoveryStillOwns(sessionId, ctx)` re-checks that the session still exists, is still `running`,
+is not in `this.interrupting`, and that both `turnStartedAt` and the recovery's `epoch` are
+unchanged from when this attempt started. Any mismatch — a Stop, a new prompt, a rewind, session
+delete/archive — returns silently; whoever took the session over now owns it, and
+`cancelRecovery` (called from `interrupt`, `prompt`, `rewindSession`, archive/delete, and
+`failTurn`) has already cleared the timer.
+
+**Giving up.** `settleTurnFailed(sessionId, text, kind?)` performs the failure the deferred settle
+never did: pause the queue, reset `permissionWaitMs`, cancel the recovery record, capture
+`turnSource` before clearing it, emit a second (unstamped) `result` event — the first stays
+neutral forever; append-only storage cannot un-stamp it — `dropFailedQuery`, `setStatus('error',
+text, kind)`, and fire `onTurnComplete` if a source was captured. This mirrors
+`handleWorkerEnded`'s error branch rather than reusing `failTurn`, which would re-enter
+`recoverAuthFailure` and lose the already-decided `errorKind: 'auth'`. `WorkflowEngine` then parks
+the step exactly as it does for any other failed turn — same banner, same `stepFailure: 'turn'`,
+same Retry/Skip step.
+
+**Reconcile.** `reconcileWithWorker` treats "no worker report" as a dead turn (demote to `idle`,
+stamp `interruptedAt`), but a recovery deliberately holds no query for the length of its backoff —
+so the check adds `&& !this.live.get(meta.id)?.recovery`, and a `hello` landing mid-recovery
+leaves the session alone rather than demoting it and possibly firing an auto-continue nudge on top
+of a turn that is about to resume on its own.
+
+**Live-only.** `LiveState.recovery` is never persisted. A bridge restart mid-recovery drops it, so
+the surviving turn is picked up by the ordinary interrupted-turn path instead (Continue banner,
+resume on click or auto-continue) — it does not need its own crash-recovery story.
+
+**Refresh-token rotation.** `AuthManager` memoizes `lastRefreshAt`; a rejection arriving within 5s
+of a refresh that just landed reports `{ outcome: 'refreshed' }` without a second network call.
+Without this, N sessions recovering off the same rotated token would each call
+`handleTokenRejected()` and rotate the refresh token again — and a lost race there is fatal (the
+old refresh token no longer works, and the new one was just replaced out from under it).
+
 ### A stopped turn is not a failed turn
 
 The SDK reports a user-initiated interrupt as an ordinary error `result`
@@ -575,7 +715,9 @@ message type, no new modal, no new client state, no DB migration.
   alone; a session with an actual worker report is still fully reconciled even with no local
   transcript), and a bridge death mid-compaction re-parking a `waiting-approval` step instead of
   demoting it (no `interruptedAt`, not auto-continued) — see
-  [workflow-step-lifecycle](workflow-step-lifecycle.md#compacting-a-parked-step).
+  [workflow-step-lifecycle](workflow-step-lifecycle.md#compacting-a-parked-step). Also: a turn
+  being transparently re-driven (`LiveState.recovery` set) survives a worker report of no live
+  query — no demotion, no `interruptedAt`, no auto-continue nudge.
 - `server/src/workerClient.test.ts` — `onWorkerLost` fires once at the deadline and not on a
   reconnect inside it; `onStatusChange` publishes a disconnected status once per outage, a
   connected status once on recovery, nothing on an in-deadline reconnect, and a `mismatch`
@@ -608,19 +750,31 @@ message type, no new modal, no new client state, no DB migration.
   gesture and falls back to the opening prompt, and neither does a plain human allow; answered
   `AskUserQuestion` questions replay as answers with an instruction not to re-ask; the newest
   gesture wins when an interject follows a resolution; a gesture still staged on `meta.queued`
-  is held, not double-sent.
+  is held, not double-sent. Also (transparent recovery): a refreshed token re-sends the same
+  turn instead of settling it, with no second `'user'` event, a `recovering`-stamped result row,
+  and the query dropped; a second auth failure on the same turn settles for real with today's
+  banner; a `signed-out` outcome is the one failure still surfaced (`errorKind: 'auth'`, no
+  re-push); giving up fires `onTurnComplete` so a workflow step can park, while a turn still being
+  re-driven fires no completion; a failed attempt still bills its spend; an overloaded turn is
+  re-sent after its backoff and a third failure settles with the `'overloaded'` banner; Stop
+  during a recovery abandons it and leaves the session `idle`; a new prompt supersedes the
+  recovery of the turn before it; an offline refresh holds the turn (no attempt spent, no banner)
+  until a later refresh succeeds; a hold that never reconnects settles with the refusal banner.
 - `server/src/turnFailure.test.ts` — each kind matches representative CLI/SDK error text; an
   unrelated failure and a filter-vs-generic-400 precedence case both resolve correctly; every
   string returned by `turnFailureAdvice`, `turnFailureRetryHint`, and (exported for this test)
   `authRecoveryMessage` is rejected by both `classifyTurnFailure` and `isAuthFailureMessage`
-  (the anti-reclassification rule); `inWorkflow: false` omits the skip sentence; no kind's
-  advice implies an automatic retry.
+  (the anti-reclassification rule); `inWorkflow: false` omits the skip sentence; every kind names
+  an action the user can take next — by the time any of these banners renders, the app has
+  already stopped acting on its own (see "Transparent turn recovery" in Data flow).
 - `server/src/workflows.advance.test.ts` — a failed result parks the step, keeps the error
   status, and does not `autoAdvance`; spend still accumulates onto the step slot; a normal park
   carries no `stepFailure`. Also: a classified (non-auth) failure's rewritten banner and
   `errorKind` survive the failed-park, proving the `persistMeta`-not-`setStatus` invariant this
   feature leans on; a step `Retry` after a mid-turn plan refine re-sends the refine notes through
-  `iterateStep`, not the step's rendered prompt template.
+  `iterateStep`, not the step's rendered prompt template. Also (transparent recovery): a step
+  whose turn is being re-driven neither parks nor `autoAdvance`s while the recovery is in flight;
+  once it gives up, the step parks with `stepFailure: 'turn'` exactly as before this feature.
 - `server/src/sessions.permission.test.ts` — a Retry after "Refine with comments", exercised
   through the real `resolvePermission` emit path (not a hand-built transcript), returns the
   refine prose from `lastPromptForRetry`.
@@ -636,7 +790,9 @@ message type, no new modal, no new client state, no DB migration.
   "please login again", with negative cases guarding each against a false-positive tool
   output). Also: `ensureFreshToken` joins an in-flight recovery refresh and returns its result
   rather than the stale token; a failed (5xx) recovery refresh still yields the token already
-  in hand instead of blocking the turn.
+  in hand instead of blocking the turn. Also: `isOfflineError` classifies each offline `cause.code`
+  positively and an ordinary refusal/non-fetch-error negatively; a second rejection landing within
+  `RECENT_REFRESH_MS` of a refresh reuses it instead of rotating the refresh token again.
 - `server/src/sessions.spawn.test.ts` — a turn while logged out is refused instead of falling
   back to ambient credentials; a stale token is refreshed before the query spawns; a query the
   bridge cannot vouch for (no `queryTokens` entry, simulating a bridge restart) is recycled
@@ -732,8 +888,16 @@ message type, no new modal, no new client state, no DB migration.
   since answering a card never writes a `'user'` event. A plain tool allow is the one exception —
   it falls back to the opening prompt because its content already reached the CLI's own resumed
   session.
-- No auto-retry or backoff — a transient failure (e.g. a 529) is an ordinary failed turn with a
-  manual button, not a special transient-error class.
+- No bulk resume on a login event: a sign-in completing later, or from another device, must never
+  fire N queued turns across every session that failed while signed out. Transparent turn
+  recovery (see the data-flow section above) does not violate this — it is anchored to a single
+  in-flight turn on one session, decided from that turn's own `result`, never from an `authStatus`
+  broadcast or any other event that could fan out across sessions.
+- Only two failure kinds are ever transparently re-driven — a rejected auth token and an
+  overloaded/rate-limited API — and only within a fixed attempt budget (`auth`: 2 attempts total,
+  `overloaded`: 3) or, for auth, a 5-minute connectivity hold. `filtered`, `context` and `invalid`
+  are deterministic: re-sending them verbatim reproduces them, so they keep today's manual Retry
+  unconditionally.
 - `stepFailure` is persisted (part of `WorkflowState`), so a reload while parked in the failed
   state still shows Retry.
 - An auth-classified turn failure attempts exactly one token refresh, then always rewrites the
@@ -744,12 +908,22 @@ message type, no new modal, no new client state, no DB migration.
 - The login modal opens off the existing `authStatus` broadcast, not a new message type. Unlike
   the `hello` auto-open, it is not deduped — a repeat failure reopens a dismissed modal, which
   is intended.
-- Retry stays entirely manual — nothing auto-resumes a failed turn, even after a successful
-  silent refresh or a fresh sign-in. This matters most for a login completed later or from
-  another device: it must not fire N queued turns across every session that failed while signed
-  out.
+- Retry stays manual for every failure a turn's `result` can settle on directly — a query crash
+  still ends on today's post-hoc banner rewrite with no auto-resume. Only a `result`-branch
+  auth/overloaded failure is transparently re-driven (see "Transparent turn recovery" above), and
+  only up to its attempt budget; past that, it settles exactly like any other failure, banner and
+  all.
 - `errorKind` is never set when no `AuthManager` is wired (ambient-token mode has no login flow
   to offer); the raw message and plain Retry are unchanged there.
+- A failed attempt inside a transparent recovery still bills its spend (`totalCostUsd`,
+  `totalTokens`, `costByModel`) — the tokens were genuinely spent, even though the attempt is
+  invisible to the user as a failure. See [usage-and-cost](usage-and-cost.md).
+- A recovery's re-drive never appends a `'user'` transcript event — the original one already
+  represents the human's input for this turn, and a second one would split one turn's bookkeeping
+  (`collectTurns`, `summarizeTurn`, `lastHumanGesture`) into two.
+- A transparent recovery holds no query for the length of its backoff/refresh; `reconcileWithWorker`
+  must not read that absence as a dead turn (see "Transparent turn recovery" above) or it would
+  stamp a Continue banner and possibly auto-continue a turn already resuming on its own.
 - Every query crash (auth-related or not) still writes a synthetic `result` event, so the
   transcript shows "turn failed" and a Retry button, and that raw text is preserved verbatim as
   the durable record even after the banner is revised.
@@ -927,6 +1101,34 @@ message type, no new modal, no new client state, no DB migration.
   from `recycleIdleQueries()`'s existing interruptible-status gate, not a change to it: a session
   can be both "not interruptible" (turn over) and "not safe to recycle" (background work still
   running) at once, and the two checks stay separate for that reason.
+- The recovery verdict (`recoveryKindFor`) is decided and stamped (`recovering: true`) at the same
+  point and for the same reason as the `stopped` stamp: the transcript store only appends, so a
+  verdict computed after `emitEvent` persists the event could never reach the durable record. Both
+  stamps are shallow copies of `msg`, never mutations.
+- `LiveState.recovery` is live-only by design, exactly like `LiveState.compactResume` and
+  `turnBaselines` — a bridge restart mid-recovery is meant to fall through to the ordinary
+  interrupted-turn path (Continue banner), not grow its own crash-recovery mechanism.
+- `settleTurnFailed` is modeled on `handleWorkerEnded`'s error branch, not on `failTurn`:
+  `failTurn` re-enters `classifyFailure` → `recoverAuthFailure`, which would attempt a second,
+  redundant token refresh and could overwrite an already-decided `errorKind: 'auth'`.
+  `settleTurnFailed` sets `errorKind` directly, from the outcome recovery itself already knows.
+- `cancelRecovery` is called from every path that can take a session's turn away from a recovery
+  in flight (`interrupt`, `prompt`, `rewindSession`, session archive/delete, and `failTurn` as the
+  real-failure funnel) rather than relying solely on the `epoch`/`turnStartedAt` ownership check —
+  the check is the backstop for work already in flight (an awaited refresh, a sleeping backoff);
+  the explicit calls stop new timers from ever being scheduled.
+- `promptContent` (the SDK content-block builder extracted out of `prompt()`) is deliberately free
+  of `stageAttachments` and of any transcript/event write — it exists so `repushTurnSilently` can
+  build the identical content for attachments the original `'user'` event already staged, without
+  re-staging (and duplicating) the files on disk.
+- `accumulateResultSpend` is extracted so both the deferred-settle path and the real-settle path
+  call the identical cost/token/`costByModel` accumulation — a failed attempt's spend must not
+  silently differ from a settled turn's.
+- `AuthManager.lastRefreshAt` is a plain timestamp memo, not a promise cache: it exists only to
+  answer "did a refresh land in roughly the last 5 seconds", which is what lets a second
+  concurrent `handleTokenRejected()` skip a redundant refresh-token rotation without joining
+  `refreshInFlight` (that promise is already gone by the time a *second* session's turn fails on
+  the token the first one just replaced).
 
 ### Multi-machine
 

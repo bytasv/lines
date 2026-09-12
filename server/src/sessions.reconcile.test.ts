@@ -188,6 +188,28 @@ test('a session missing from the live list is still demoted', () => {
   assert.equal(h.s1().status, 'idle');
 });
 
+test('a turn being re-driven survives a worker that reports no query', () => {
+  // A transparent recovery deliberately leaves the session with no query for the
+  // length of its backoff (see beginRecovery). Demoting it there would stamp a
+  // Continue banner — and auto-continue would nudge a turn that is about to resume
+  // on its own, on top of the one already coming.
+  const h = harness('running', { turnSource: 'user', turnStartedAt: 9 }, autoContinue);
+  h.sessions.emitEvent('s1', 'user', { text: 'go on', source: 'user' });
+  h.sessions.handleWorkerEvent('s1', {
+    type: 'result',
+    subtype: 'error_during_execution',
+    is_error: true,
+    result: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}',
+  });
+  h.sessions.reconcileWithWorker([{ sessionId: 's1', busy: false }]);
+
+  const m = h.s1();
+  assert.equal(m.status, 'running');
+  assert.equal(m.turnSource, 'user');
+  assert.equal(m.interruptedAt, undefined, 'no Continue banner');
+  assert.deepEqual(h.pushed, [], 'and no auto-continue nudge');
+});
+
 test('an old worker (no busy field) demotes only, never promotes', () => {
   const running = harness('running');
   running.sessions.reconcileWithWorker([{ sessionId: 's1' }]);

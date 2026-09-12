@@ -26,6 +26,14 @@ const meta = (id: string): SessionMeta =>
     createdAt: 1,
   }) as SessionMeta;
 
+/** What the fake worker was asked to send, message included: a transparent
+ *  recovery re-pushes without writing anything to the transcript, so the pushed
+ *  message is the only place its content can be asserted. */
+interface Push {
+  sessionId: string;
+  message: Record<string, unknown>;
+}
+
 /**
  * A manager over a throwaway store, with token-rejection notifications counted.
  * `rejection` is what the fake AuthManager reports back; `withAuth: false` builds
@@ -39,12 +47,13 @@ function harness(
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([meta('s1')]));
   const store = createStore(root);
   let rejections = 0;
+  let reports = rejection;
   const auth = {
     getAccessTokenSync: () => 'tok',
     ensureFreshToken: async () => 'tok',
     handleTokenRejected: async () => {
       rejections++;
-      return rejection;
+      return reports;
     },
   } as unknown as AuthManager;
   const broadcasts: ServerMessage[] = [];
@@ -57,19 +66,40 @@ function harness(
   // index.ts wires a worker before any client can prompt; the model and permission
   // setters forward to it, so an unwired manager is not a state production has.
   const closes: string[] = [];
+  const pushes: Push[] = [];
   sessions.attachWorker({
     setModel: () => {},
     close: (sessionId: string) => closes.push(sessionId),
-    push: () => {},
+    push: (sessionId: string, message: Record<string, unknown>) => pushes.push({ sessionId, message }),
     interrupt: () => {},
   } as never);
   const transcript = () => store.loadTranscript('s1');
-  return { sessions, broadcasts, transcript, closes, rejections: () => rejections };
+  return {
+    sessions,
+    broadcasts,
+    transcript,
+    closes,
+    pushes,
+    rejections: () => rejections,
+    /** Change what the next recovery refresh reports — e.g. a machine coming back online. */
+    setRejection: (next: TokenRejection) => {
+      reports = next;
+    },
+  };
 }
+
+/** The text blocks of a pushed message, joined: what the model was actually sent. */
+const pushedText = (push: Push): string => {
+  const content = (push.message.message as { content?: { type: string; text?: string }[] }).content ?? [];
+  return content
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text ?? '')
+    .join('\n');
+};
 
 /** Let the recovery promise and its banner rewrite settle. */
 async function drain() {
-  for (let i = 0; i < 5; i++) await Promise.resolve();
+  for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
 /** The trailing transcript event, which is what the web Retry button keys off. */
@@ -82,6 +112,7 @@ const lastResult = (events: TranscriptEvent[]) => {
     subtype?: string;
     result?: string;
     stopped?: unknown;
+    recovering?: unknown;
   };
 };
 
@@ -128,6 +159,7 @@ const CLI_REVOKED = 'Failed to authenticate. API Error: 401 OAuth access token h
 
 test('a revoked token is recognised as an auth failure, not left raw', async () => {
   const h = harness({ outcome: 'refreshed' });
+  h.sessions.emitEvent('s1', 'user', { text: 'go on', source: 'user' });
   h.sessions.handleWorkerEvent('s1', {
     type: 'result',
     subtype: 'error_during_execution',
@@ -136,8 +168,10 @@ test('a revoked token is recognised as an auth failure, not left raw', async () 
   });
   await drain();
 
+  // Recognised, refreshed and re-driven: the user is never asked to do anything.
   assert.equal(h.rejections(), 1);
-  assert.match(h.sessions.get('s1')!.errorMessage!, /Retry to continue/);
+  assert.equal(h.sessions.get('s1')!.errorMessage, undefined);
+  assert.equal(h.pushes.length, 1);
 });
 
 test('an auth failure drops the query, so Retry cannot reuse the child that failed', async () => {
@@ -159,7 +193,10 @@ test('any failed turn drops its query, so one Retry is enough even unclassified'
   assert.equal(h.rejections(), 0); // still no token refresh — only auth acts
 });
 
-test('a recovered token rewrites the banner to say Retry will now work', async () => {
+test('a recovered token on a crashed query rewrites the banner to say Retry will now work', async () => {
+  // The crashed-query path still settles and still asks for a click: there is no
+  // turn left in flight to re-drive (that is handleWorkerEvent's `result` branch,
+  // covered by the transparent-recovery tests below).
   const h = harness({ outcome: 'refreshed' });
   h.sessions.handleWorkerEnded('s1', CLI_401);
   await drain();
@@ -283,9 +320,10 @@ test('a blocked request is rewritten into the choices the user actually has', ()
 });
 
 test('the other named API failures each get their own banner', () => {
+  // Deterministic failures only: an overload is re-driven transparently instead
+  // (see the transparent-recovery section), so it has no banner until it gives up.
   const cases: [string, string, RegExp][] = [
     ['context', 'API Error: 400 prompt is too long: 214331 tokens > 200000 maximum', /context window/],
-    ['overloaded', 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}', /Wait a moment/],
     ['invalid', 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error"}}', /malformed/],
   ];
   for (const [kind, text, banner] of cases) {
@@ -315,6 +353,217 @@ test('an auth failure still wins over the other classifications', async () => {
 
   assert.equal(h.rejections(), 1);
   assert.equal(h.sessions.get('s1')!.errorKind, 'auth');
+});
+
+// ---------------------------------------------------------------------------
+// Transparent turn recovery. A rejected token or a momentarily overloaded API
+// says nothing about the work, so the turn is re-driven instead of settled: the
+// session never leaves 'running', and the failed attempt stays in the transcript
+// as a neutral `recovering` row. Only a credential the user has to fix surfaces.
+// ---------------------------------------------------------------------------
+
+/** A session one prompt into a turn — what every recovery is anchored to. */
+function midTurn(rejection: TokenRejection = { outcome: 'refreshed' }) {
+  const h = harness(rejection);
+  h.sessions.emitEvent('s1', 'user', { text: 'go on', source: 'user' });
+  return h;
+}
+
+/** The API's own wording for a transient overload. */
+const OVERLOADED = 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}';
+
+test('a refreshed token re-sends the same turn instead of settling it', async () => {
+  const h = midTurn();
+  h.sessions.handleWorkerEvent('s1', failedResult(CLI_REVOKED));
+  await drain();
+  h.sessions.flushPersist();
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.status, 'running');
+  assert.equal(meta.errorMessage, undefined);
+  assert.equal(meta.errorKind, undefined);
+  assert.equal(meta.turnSource, 'user', 'the turn was never settled');
+
+  assert.equal(h.pushes.length, 1);
+  assert.equal(pushedText(h.pushes[0]!), 'go on');
+  // No second 'user' event: one turn with two attempts, so every turn-scoped scan
+  // still slices from the same prompt.
+  assert.equal(h.transcript().filter((e) => e.kind === 'user').length, 1);
+  // The failed attempt is the durable diagnostic record, stamped to read neutrally.
+  const result = lastResult(h.transcript());
+  assert.equal(result.recovering, true);
+  assert.equal(result.result, CLI_REVOKED);
+  // The child holding the rejected token is dropped, so the re-push respawns.
+  assert.deepEqual(h.closes, ['s1']);
+});
+
+test('a second auth failure on the same turn settles for real', async () => {
+  const h = midTurn();
+  h.sessions.handleWorkerEvent('s1', failedResult(CLI_REVOKED));
+  await drain();
+  h.sessions.handleWorkerEvent('s1', failedResult(CLI_REVOKED));
+  await drain();
+  h.sessions.flushPersist();
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.status, 'error');
+  assert.match(meta.errorMessage!, /Retry to continue/); // today's banner, unchanged
+  assert.equal(h.pushes.length, 1, 'the budget is spent, so nothing is re-sent');
+  assert.equal(lastResult(h.transcript()).recovering, undefined);
+});
+
+test('a dead stored credential is the one failure the user is asked to fix', async () => {
+  const h = midTurn({ outcome: 'signed-out' });
+  h.sessions.handleWorkerEvent('s1', failedResult(CLI_REVOKED));
+  await drain();
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.status, 'error');
+  assert.equal(meta.errorKind, 'auth');
+  assert.match(meta.errorMessage!, /Sign in to Claude, then Retry/);
+  assert.deepEqual(h.pushes, []);
+});
+
+test('giving up settles the turn so a workflow step can park on it', async () => {
+  const h = midTurn({ outcome: 'signed-out' });
+  const completions: [string, string, boolean, boolean][] = [];
+  h.sessions.setTurnCompleteListener((id, source, interrupted, failed) =>
+    completions.push([id, source, interrupted, failed]),
+  );
+  h.sessions.get('s1')!.turnSource = 'workflow';
+  h.sessions.handleWorkerEvent('s1', failedResult(CLI_REVOKED));
+  await drain();
+
+  assert.deepEqual(completions, [['s1', 'workflow', false, true]]);
+});
+
+test('a turn being re-driven reports no completion, so no step parks mid-recovery', async () => {
+  const h = midTurn();
+  const completions: string[] = [];
+  h.sessions.setTurnCompleteListener((id) => completions.push(id));
+  h.sessions.handleWorkerEvent('s1', failedResult(CLI_REVOKED));
+  await drain();
+
+  assert.deepEqual(completions, []);
+});
+
+test('the failed attempt still bills what it burned', async () => {
+  const h = midTurn();
+  h.sessions.handleWorkerEvent('s1', {
+    ...failedResult(CLI_REVOKED),
+    total_cost_usd: 0.2,
+    usage: { input_tokens: 900, output_tokens: 100 },
+  });
+  await drain();
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.totalCostUsd, 0.2);
+  assert.equal(meta.totalTokens, 1_000);
+});
+
+test('an overloaded turn is re-sent after a backoff, not immediately', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = midTurn();
+  h.sessions.handleWorkerEvent('s1', failedResult(OVERLOADED));
+  await drain();
+
+  assert.deepEqual(h.pushes, [], 'nothing is re-sent before the backoff elapses');
+  assert.equal(h.sessions.get('s1')!.status, 'running');
+  assert.equal(h.rejections(), 0, 'an overload is not a token problem');
+
+  t.mock.timers.tick(2_000);
+  await drain();
+  assert.equal(h.pushes.length, 1);
+  assert.equal(pushedText(h.pushes[0]!), 'go on');
+});
+
+test('a third overload settles with the banner that names the wait', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = midTurn();
+  for (const delay of [2_000, 8_000]) {
+    h.sessions.handleWorkerEvent('s1', failedResult(OVERLOADED));
+    await drain();
+    t.mock.timers.tick(delay);
+    await drain();
+  }
+  h.sessions.handleWorkerEvent('s1', failedResult(OVERLOADED));
+  await drain();
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.status, 'error');
+  assert.equal(meta.errorKind, 'overloaded');
+  assert.match(meta.errorMessage!, /Wait a moment/);
+  assert.equal(h.pushes.length, 2, 'two re-drives, then the real failure');
+});
+
+test('Stop during a recovery abandons it and leaves the session idle', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = midTurn();
+  h.sessions.handleWorkerEvent('s1', failedResult(OVERLOADED));
+  await drain();
+  h.sessions.interrupt('s1');
+
+  t.mock.timers.tick(30_000);
+  await drain();
+
+  assert.equal(h.sessions.get('s1')!.status, 'idle');
+  assert.deepEqual(h.pushes, []);
+});
+
+test('a new prompt supersedes the recovery of the turn before it', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = midTurn();
+  h.sessions.handleWorkerEvent('s1', failedResult(OVERLOADED));
+  await drain();
+  h.sessions.prompt('s1', 'do this instead');
+  await drain();
+
+  t.mock.timers.tick(30_000);
+  await drain();
+
+  assert.equal(h.pushes.length, 1, 'only the new prompt was sent');
+  assert.equal(pushedText(h.pushes[0]!), 'do this instead');
+});
+
+test('an offline refresh holds the turn rather than spending its attempt', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const offline = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } });
+  const h = midTurn({ outcome: 'refresh-failed', error: offline });
+  h.sessions.handleWorkerEvent('s1', failedResult(CLI_REVOKED));
+  await drain();
+
+  // Held, not failed: no banner, no button, nothing re-sent into a dead network.
+  assert.equal(h.sessions.get('s1')!.status, 'running');
+  assert.equal(h.sessions.get('s1')!.errorMessage, undefined);
+  assert.deepEqual(h.pushes, []);
+
+  // The probe that finally succeeds is the came-back-online signal.
+  h.setRejection({ outcome: 'refreshed' });
+  t.mock.timers.tick(5_000);
+  await drain();
+
+  assert.equal(h.pushes.length, 1);
+  assert.equal(pushedText(h.pushes[0]!), 'go on');
+});
+
+test('a hold that never reconnects fails the turn with the refusal banner', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const offline = Object.assign(new TypeError('fetch failed'), { cause: { code: 'EAI_AGAIN' } });
+  const h = midTurn({ outcome: 'refresh-failed', error: offline });
+  h.sessions.handleWorkerEvent('s1', failedResult(CLI_REVOKED));
+  await drain();
+
+  // Past the 5-minute hold budget, probing on a doubling backoff throughout.
+  for (let i = 0; i < 12; i++) {
+    t.mock.timers.tick(60_000);
+    await drain();
+  }
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.status, 'error');
+  assert.match(meta.errorMessage!, /Could not refresh the Claude login/);
+  assert.equal(meta.errorKind, undefined, 'no sign-in button: the credential is fine');
+  assert.deepEqual(h.pushes, []);
 });
 
 test('failTurn classifies the same way, so a refused push is covered too', () => {

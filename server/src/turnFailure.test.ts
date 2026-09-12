@@ -105,10 +105,12 @@ test('the skip sentence rides only on a workflow session', () => {
   }
 });
 
-test('every kind names an action, and none of them promises an automatic retry', () => {
+test('every kind names an action the user can take next', () => {
   for (const kind of KINDS) {
-    // Retry stays a manual click, so the banner has to say so rather than imply
-    // the app is already retrying (see docs turn-recovery business rules).
+    // These banners are only ever shown once the app has stopped acting on its own:
+    // 'overloaded' is re-driven transparently first and reaches a banner only after
+    // the attempt budget is spent, and the rest were never auto-retried at all. So
+    // Retry really is the next step by the time the user reads this.
     assert.match(turnFailureAdvice(kind, { inWorkflow: false }), /Retry/);
   }
 });

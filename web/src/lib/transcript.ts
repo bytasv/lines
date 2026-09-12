@@ -11,6 +11,7 @@ import type {
 } from '@lines/shared';
 import {
   isPlanFilePath,
+  isRecoveringResult,
   isStoppedResult,
   resultErrorText,
   subagentParentId,
@@ -60,6 +61,10 @@ export interface ResultItem {
   /** The user stopped this turn. Mutually exclusive with `isError`: a stop arrives in
    *  the same shape as a failure, and the row reads neutrally rather than red. */
   stopped: boolean;
+  /** This turn failed recoverably and the bridge is re-sending it. Same treatment
+   *  as `stopped` — neutral row, no error body, no Retry — because the turn is
+   *  still running; the row is only the durable record that an attempt was lost. */
+  recovering: boolean;
   /** Why the turn failed, kept only for failures so the row can say so — from the
    *  result text, or from `errors[]` when the SDK carried no `result` at all. */
   error?: string;
@@ -198,9 +203,16 @@ function withPlanFileText(
 /** A `result` that ended its turn in failure — the shape both the rendered result
  *  item and the compaction-span escape key off. A turn the user stopped is reported
  *  by the SDK in the same shape but is not a failure; the bridge's `stopped` stamp
- *  is what tells the two apart. */
-function isFailedResult(r: { is_error?: boolean; subtype?: string; stopped?: unknown }): boolean {
+ *  is what tells the two apart. A `recovering` stamp says the same thing for a
+ *  different reason: the bridge is re-driving the turn, so it did not end here. */
+function isFailedResult(r: {
+  is_error?: boolean;
+  subtype?: string;
+  stopped?: unknown;
+  recovering?: unknown;
+}): boolean {
   if (isStoppedResult(r)) return false;
+  if (isRecoveringResult(r)) return false;
   return Boolean(r.is_error) || (r.subtype != null && r.subtype !== 'success');
 }
 
@@ -606,6 +618,7 @@ export function buildTranscript(
               result?: unknown;
               errors?: unknown;
               stopped?: unknown;
+              recovering?: unknown;
             };
             const isError = isFailedResult(r);
             const errorText = resultErrorText(r);
@@ -616,6 +629,7 @@ export function buildTranscript(
               durationMs: r.duration_ms,
               isError,
               stopped: isStoppedResult(r),
+              recovering: isRecoveringResult(r),
               // Only on failures: a successful turn's `result` is the assistant's
               // own final text, already rendered above.
               ...(isError && errorText ? { error: errorText } : {}),
@@ -809,6 +823,7 @@ function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
         o.durationMs === next.durationMs &&
         o.isError === next.isError &&
         o.stopped === next.stopped &&
+        o.recovering === next.recovering &&
         o.error === next.error &&
         o.summary === next.summary
         ? o

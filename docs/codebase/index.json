@@ -283,7 +283,8 @@
         "cost rendered as $X.XX next to the step name, hidden when that step's accumulated cost is zero or unset",
         "token icon with a tooltip ('N tokens spent') shown next to the cost label, hidden when that step's accumulated tokens are zero or unset",
         "retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it, for both cost and tokens",
-        "duration shown next to the token icon via formatDuration, hidden when that step's accumulated duration is zero or unset; excludes permission-prompt approval wait within the turn"
+        "duration shown next to the token icon via formatDuration, hidden when that step's accumulated duration is zero or unset; excludes permission-prompt approval wait within the turn",
+        "a turn transparently re-driven by turn-recovery (a rejected token, an overloaded API) accumulates spend for every attempt, not just the one that finally settles"
       ],
       "architecturalRules": [
         "reuses the existing accumulate-on-result pass in server/src/sessions.ts that already owns totalCostUsd/totalTokens, instead of a new tracking mechanism",
@@ -632,7 +633,22 @@
         "COMPRESS_RESPONSES_PROMPT",
         "UserUiSettings.compressResponses",
         "SessionManager.recycleIdleQueries",
-        "UpdateBanner"
+        "UpdateBanner",
+        "SessionManager.recoveryKindFor",
+        "LiveState.recovery",
+        "TURN_ATTEMPTS",
+        "SessionManager.beginRecovery",
+        "SessionManager.repushTurnSilently",
+        "SessionManager.promptContent",
+        "SessionManager.accumulateResultSpend",
+        "SessionManager.settleTurnFailed",
+        "SessionManager.cancelRecovery",
+        "SessionManager.recoveryStillOwns",
+        "isOfflineError",
+        "AuthManager.lastRefreshAt",
+        "RECENT_REFRESH_MS",
+        "isRecoveringResult",
+        "ResultItem.recovering"
       ],
       "tests": [
         "server/src/sessions.reconcile.test.ts",
@@ -671,7 +687,7 @@
         "an auth-classified turn failure attempts exactly one token refresh, then always rewrites the banner to name the next action (Retry, Sign in, or check your connection) instead of leaving raw CLI text with only Retry",
         "errorKind: 'auth' is set only for the signed-out outcome; refreshed/refresh-failed clear it",
         "the login modal opens off the existing authStatus broadcast, not a new message type, and unlike the hello auto-open it is not deduped",
-        "retry stays entirely manual; nothing auto-resumes a failed turn, even after a silent refresh or a fresh sign-in — a login landing later or from another device must not fire N queued turns",
+        "no bulk resume on a login event: a sign-in completing later, or from another device, must never fire N queued turns across sessions; a transparent recovery is anchored to one in-flight turn's own result, never to an authStatus broadcast, so this still holds even though a rejected-token turn is now silently re-driven within its own attempt budget",
         "errorKind is never set when no AuthManager is wired (ambient-token mode)",
         "every query crash (auth-related or not) still writes a synthetic result event with the raw CLI text preserved verbatim, even after the banner is revised",
         "a clean ended (no error) writes no synthetic result",
@@ -683,12 +699,14 @@
         "accessToken: null in buildQueryOptions is reachable only when no AuthManager is wired at all (tests / embedding), never for a real signed-in user",
         "UserUiSettings.compressResponses gates COMPRESS_RESPONSES_PROMPT directly in buildQueryOptions — on means the ruleset is in systemPrompt.append, off means neither it nor a plugins key is present; one user-level setting rather than a per-session one, read from the store on every push so a Settings flip lands on each session's next query with nothing cached on the meta; on unless explicitly false",
         "logins are tracked per OAuth state, so two started at once each keep their own PKCE verifier; completing one clears the rest, unfinished ones expire after 30 minutes, and a paste with no #state falls back to the newest",
-        "a content-filter, context-overflow, invalid-request or overloaded failure never implies an automatic retry, backoff, or step advance",
+        "a content-filter, context-overflow or invalid-request failure never implies an automatic retry, backoff, or step advance; an overloaded/rate-limited failure is the one exception, transparently re-driven up to its attempt budget before it ever reaches this class of banner (see architecturalRules)",
         "auth wins outright when a failure text matches both an auth pattern and a turnFailureKind pattern",
         "the retry hint rides only the re-sent prompt text, never the stored transcript event for the original failed turn",
         "Skip step and the stepper's Approve button send the identical workflowApprove message under the identical gate",
         "a query the bridge cannot vouch for (e.g. no queryTokens entry after a bridge restart) is recycled, not reused",
-        "any failed turn drops that session's query, recognised or not, so a single Retry cannot reuse the child that just failed"
+        "any failed turn drops that session's query, recognised or not, so a single Retry cannot reuse the child that just failed",
+        "a failed attempt inside a transparent recovery still bills its spend (totalCostUsd/totalTokens/costByModel), and never appends a second 'user' transcript event",
+        "a transparent recovery holds no query for the length of its backoff/refresh; reconcileWithWorker must not read that absence as a dead turn"
       ],
       "architecturalRules": [
         "SessionManager.interrupting is the only authoritative Stop signal; the SDK's terminal_reason is unpublished and never consulted",
@@ -719,7 +737,14 @@
         "getAccessTokenSync() remains on AuthManager but has no production caller; it is kept for the sync-status shape tests rely on",
         "the no-local-history skip is narrow and scoped to reconcileWithWorker only — it does not change adoptSynced or what counts as this instance owning a session; it exists because a flapping worker or duplicate bridge (see hosted-machine-access) turned every reconcile pass into a broadcast/cloud-push storm across sessions this machine never actually ran, feeding the very kind of loop this feature exists to break rather than amplify",
         "queryTokens is bridge-memory only and never persisted, while the worker's live queries outlive a bridge restart — the same asymmetry already documented for interrupted-turn recovery, and why the recycle guard must fail closed on an unknown entry",
-        "ensureFreshToken joins an in-flight recovery refresh (refreshInFlight) rather than only checking expiresAt, since expiresAt alone cannot distinguish a merely-unexpired token from one just revoked server-side"
+        "ensureFreshToken joins an in-flight recovery refresh (refreshInFlight) rather than only checking expiresAt, since expiresAt alone cannot distinguish a merely-unexpired token from one just revoked server-side",
+        "the transparent-recovery verdict (recoveryKindFor) is decided and stamped (recovering: true) at the same point and for the same reason as the stopped stamp: the transcript store only appends, so a verdict decided after emitEvent persists the result could never reach the durable record",
+        "LiveState.recovery is live-only, like compactResume and turnBaselines — a bridge restart mid-recovery falls through to the ordinary interrupted-turn path rather than growing its own crash-recovery mechanism",
+        "settleTurnFailed mirrors handleWorkerEnded's error branch, not failTurn — failTurn re-enters classifyFailure/recoverAuthFailure, which would attempt a redundant refresh and could overwrite an already-decided errorKind: 'auth'",
+        "cancelRecovery is called from every path that can take a turn away from a recovery in flight (interrupt, prompt, rewindSession, archive/delete, failTurn) rather than relying solely on the epoch/turnStartedAt ownership check, which is the backstop for work already awaited",
+        "promptContent is extracted side-effect-free (no stageAttachments, no events) so a silent re-push can build the same content the original 'user' event already staged, without re-staging and duplicating attachment files on disk",
+        "accumulateResultSpend is extracted so the deferred-settle and real-settle paths share the identical cost/token/costByModel accumulation",
+        "AuthManager.lastRefreshAt is a plain timestamp memo (not a promise cache) so a second concurrent handleTokenRejected() within RECENT_REFRESH_MS skips a redundant refresh-token rotation instead of joining refreshInFlight, which is already resolved by then"
       ],
       "relatedDecisions": [
         "context-window",

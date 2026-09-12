@@ -695,8 +695,16 @@ const Item = memo(function Item({
           <Group gap="xs" justify="center">
             <Text size="xs" c={item.isError ? 'red' : 'dimmed'} ta="center">
               {/* A stopped turn is the user's own doing, not a failure: neutral, and
-                  Retry drops out on its own because `isError` is false. */}
-              {item.stopped ? 'turn stopped' : item.isError ? 'turn failed' : 'turn done'}
+                  Retry drops out on its own because `isError` is false. A recovering
+                  one reads neutrally for the same reason — the turn is still going,
+                  the bridge is just sending it again. */}
+              {item.recovering
+                ? 'retrying…'
+                : item.stopped
+                  ? 'turn stopped'
+                  : item.isError
+                    ? 'turn failed'
+                    : 'turn done'}
               {item.costUsd != null ? ` · $${item.costUsd.toFixed(4)}` : ''}
               {item.durationMs != null ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''}
             </Text>

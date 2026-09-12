@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AuthStatus } from '@lines/shared';
 import { resultErrorText } from '@lines/shared';
-import { AuthManager, isAuthFailureMessage } from './auth.ts';
+import { AuthManager, isAuthFailureMessage, isOfflineError } from './auth.ts';
 import type { Store, StoredAuth } from './store.ts';
 
 test('isAuthFailureMessage matches rejected-token error text', () => {
@@ -177,6 +177,31 @@ test('ensureFreshToken throws AuthRequiredError when logged out', async (t) => {
 
   await assert.rejects(() => manager.ensureFreshToken(), { name: 'AuthRequiredError' });
   assert.equal(calls.count, 0);
+});
+
+test('isOfflineError tells "no route to the network" from "the endpoint said no"', () => {
+  const offline = (code: string) => Object.assign(new TypeError('fetch failed'), { cause: { code } });
+  for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH']) {
+    assert.equal(isOfflineError(offline(code)), true, code);
+  }
+  // A refusal that did reach the endpoint, and everything that is not a fetch
+  // failure at all: the caller must not hold the turn waiting for connectivity.
+  assert.equal(isOfflineError(offline('EPERM')), false);
+  assert.equal(isOfflineError(new TypeError('fetch failed')), false);
+  assert.equal(isOfflineError(new Error('Token refresh failed (500)')), false);
+  assert.equal(isOfflineError('ENOTFOUND'), false);
+});
+
+test('a second rejection right after a refresh reuses it instead of rotating again', async (t) => {
+  // Two sessions failing on the same rotated token. Without the memo the second
+  // rejection rotates the refresh token again — and a lost race there is fatal.
+  const calls = stubFetch(t, okToken);
+  const { manager } = makeManager({ ...LIVE_AUTH });
+
+  assert.deepEqual(await manager.handleTokenRejected(), { outcome: 'refreshed' });
+  assert.deepEqual(await manager.handleTokenRejected(), { outcome: 'refreshed' });
+
+  assert.equal(calls.count, 1);
 });
 
 test('handleTokenRejected keeps the session logged in on a 5xx', async (t) => {

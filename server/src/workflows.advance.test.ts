@@ -254,6 +254,55 @@ test('a step that really failed still parks with stepFailure', () => {
   assert.equal(lastMarker(h).failed, true);
 });
 
+/** A transient overload — the failure the bridge re-drives rather than settles. */
+const overloadedResult = () => ({
+  type: 'result',
+  subtype: 'error_during_execution',
+  is_error: true,
+  result: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}',
+});
+
+/** Microtask drain: `settle` is timer-based, which mocked timers would hold. */
+const microtasks = async () => {
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+};
+
+test('a step whose turn is being re-driven neither parks nor advances', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = running(2, { autoAdvance: true });
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 1', source: 'workflow' });
+  h.sessions.handleWorkerEvent('s1', overloadedResult());
+  await microtasks();
+
+  // The turn never settled, so the engine was never told it ended: the step is
+  // still running, and autoAdvance has nothing to advance past.
+  assert.equal(h.s1().status, 'running');
+  assert.deepEqual(h.s1().workflow?.stepStatuses, ['running', 'pending']);
+  assert.equal(h.s1().workflow?.stepIndex, 0);
+  assert.equal(h.s1().workflow?.stepFailure, undefined);
+});
+
+test('a step parks exactly as before once the re-drive gives up', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = running(2);
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 1', source: 'workflow' });
+  for (const delay of [2_000, 8_000]) {
+    h.sessions.handleWorkerEvent('s1', overloadedResult());
+    await microtasks();
+    t.mock.timers.tick(delay);
+    await microtasks();
+  }
+  // Budget spent: this one is the real failure.
+  h.sessions.handleWorkerEvent('s1', overloadedResult());
+  await microtasks();
+
+  assert.equal(h.s1().status, 'error');
+  assert.equal(h.s1().errorKind, 'overloaded');
+  assert.equal(h.s1().workflow?.stepFailure, 'turn');
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval');
+  assert.equal(lastMarker(h).failed, true);
+});
+
 test('a step Retry re-sends the mid-turn refine notes, not the step template', () => {
   const h = running(2);
   h.sessions.emitEvent('s1', 'user', { text: 'do step 1', source: 'workflow' });

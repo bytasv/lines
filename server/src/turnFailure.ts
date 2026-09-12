@@ -77,8 +77,10 @@ export function classifyTurnFailure(message: string): TurnFailureKind | null {
 
 /**
  * What the banner says instead of the raw text. Every one of these names an
- * action available in this app right now, and none of them implies anything
- * happens on its own — Retry stays a click (see the turn-recovery feature doc).
+ * action available in this app right now, and by the time one is shown the app has
+ * stopped acting on its own: 'overloaded' is re-driven transparently first and
+ * only reaches a banner once its attempt budget is spent, and the other three are
+ * deterministic and never re-driven (see the turn-recovery feature doc).
  *
  * Hard constraint, same as `authRecoveryMessage`: no string here may contain a
  * word that `classifyTurnFailure` or `isAuthFailureMessage` matches, or a

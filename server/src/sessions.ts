@@ -92,6 +92,7 @@ import type { LiveSessionInfo } from './workerProtocol.ts';
 import {
   AuthRequiredError,
   isAuthFailureMessage,
+  isOfflineError,
   type AuthManager,
   type TokenRejection,
 } from './auth.ts';
@@ -155,6 +156,31 @@ export function authRecoveryMessage(rejection: TokenRejection): string {
       return authRefusalMessage(rejection.error);
   }
 }
+
+/** What a transparent recovery is recovering from (see beginRecovery). */
+type RecoveryKind = 'auth' | 'overloaded';
+
+/**
+ * How many times one turn may be attempted per failure kind, the original attempt
+ * included — so auth gets one silent re-drive and an overload two. Auth is a
+ * credential problem that a single refresh either fixes or does not; an overload is
+ * a transient the API asks us to wait out, so it earns a short ladder. Past the
+ * budget the failure is performed for real, with today's banner.
+ */
+const TURN_ATTEMPTS: Record<RecoveryKind, number> = { auth: 2, overloaded: 3 };
+
+/** Backoff before re-sending an overloaded turn, indexed by attempt. */
+const OVERLOADED_BACKOFF_MS = [2_000, 8_000, 30_000];
+
+/** A recovery refresh that has not answered by here is treated as failed: the
+ *  turn is held open meanwhile, so an unbounded wait is an unbounded hang. */
+const RECOVERY_REFRESH_TIMEOUT_MS = 20_000;
+
+/** Connectivity hold: first probe delay, its ceiling, and the total budget after
+ *  which the turn fails for real with the refusal banner. */
+const CONNECTIVITY_PROBE_MS = 5_000;
+const CONNECTIVITY_PROBE_CAP_MS = 60_000;
+const CONNECTIVITY_HOLD_MS = 5 * 60_000;
 
 /**
  * Context occupancy from a single `assistant` SDK message. Its usage covers one
@@ -798,6 +824,18 @@ interface LiveState {
    *  Per-CLI-process: cleared on `init`, on `ended`, and whenever the query closes
    *  (see setBackgroundTasks). */
   backgroundTasks?: BackgroundTaskInfo[];
+  /** A failed turn being transparently re-driven rather than settled (see
+   *  beginRecovery). Live-only on purpose: a bridge restart mid-recovery leaves the
+   *  turn to the ordinary interrupted-turn path, which already knows how to offer
+   *  Continue. `attempts` is per kind so a turn that hits both an overload and a
+   *  rejected token cannot alternate between them forever, and `epoch` invalidates
+   *  an in-flight recovery whose session has since moved on. */
+  recovery?: {
+    kind: RecoveryKind;
+    attempts: Record<RecoveryKind, number>;
+    epoch: number;
+    timer?: NodeJS.Timeout;
+  };
   /** MCP connection states, last reported. `system:init` carries `name` and
    *  `status` only, so this is the cheap always-available signal; the richer read
    *  (`error`, `scope`, `tools`) needs a live query and goes through the worker
@@ -1059,6 +1097,8 @@ export class SessionManager {
     meta.archivedAt = Date.now();
     // Putting a session away answers the Continue banner; nothing to resume.
     meta.interruptedAt = undefined;
+    // …and nothing to keep re-driving under the covers either.
+    this.cancelRecovery(id);
     this.upsert(meta);
   }
 
@@ -1207,6 +1247,7 @@ export class SessionManager {
     // Nothing here to tear down (a remote delete for a session this machine never
     // held): closing a query the worker has no record of is a pointless round trip.
     if (!this.sessions.has(id) && !this.live.has(id)) return;
+    this.cancelRecovery(id); // nothing left to re-drive the turn into
     this.closeQuery(id);
     this.flushPending(id); // the session is gone with its cards
     this.sessions.delete(id);
@@ -1694,6 +1735,8 @@ export class SessionManager {
    *  that never left the bridge, a workflow step that failed before it could run
    *  (WorkflowEngine calls this too, hence public). */
   failTurn(sessionId: string, error: string) {
+    // A turn that fails here is settling for real, so nothing is being re-driven.
+    this.cancelRecovery(sessionId);
     this.emitEvent(sessionId, 'sdk', {
       type: 'result',
       subtype: 'error_during_execution',
@@ -1776,6 +1819,281 @@ export class SessionManager {
       );
     });
     return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Transparent turn recovery.
+  //
+  // Some failures say nothing about the work: the access token rotated out from
+  // under the CLI child, or the API was momentarily overloaded. Re-sending the
+  // same turn fixes both, and the user clicking Retry is the only thing that made
+  // it their problem. So the turn is not settled at all — the query is respawned
+  // underneath a session that never leaves 'running', and the failed result stays
+  // in the transcript as a neutral one-liner (the `recovering` stamp).
+  //
+  // This is *not* the bulk-resume the turn-recovery rules forbid: recovery is
+  // anchored to one in-flight turn on one session, never to a login event, so a
+  // sign-in completing later cannot fire N queued turns across every session that
+  // failed while signed out. If recovery gives up, the real failure is performed
+  // then, with today's banner, errorKind and workflow park.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Whether this `result` is a failure worth re-driving instead of settling, and
+   * which kind. Fully synchronous by design: the verdict has to be known before the
+   * event is persisted, because the store only appends and the stamp can never be
+   * added later (same constraint as `stopped`).
+   *
+   * Deliberately narrow — a verdict returned too eagerly wedges a session at
+   * 'running' with no query. `filtered`, `context` and `invalid` are deterministic
+   * and keep their manual Retry: re-sending them reproduces them.
+   */
+  private recoveryKindFor(
+    sessionId: string,
+    msg: Record<string, unknown> & { type: string },
+    stopped: boolean,
+  ): RecoveryKind | null {
+    if (msg.type !== 'result' || stopped) return null;
+    // The same predicate the settle path uses for `failed`.
+    const failed = msg.is_error === true || (msg.subtype != null && msg.subtype !== 'success');
+    if (!failed) return null;
+    const live = this.live.get(sessionId);
+    // A compaction reports through its own channel and restores the status it
+    // covered; deferring its settle would strand the session mid-compaction.
+    if (live?.compactResume !== undefined) return null;
+    const meta = this.sessions.get(sessionId);
+    if (!meta || (meta.status !== 'running' && meta.status !== 'waiting-permission')) return null;
+    const text = resultErrorText(msg as { result?: unknown; errors?: unknown });
+    const spent = live?.recovery?.attempts;
+    // Auth wins outright, matching classifyFailure's precedence: it is the kind
+    // that also acts, and its text can carry a 400/429 incidentally.
+    if (this.auth && isAuthFailureMessage(text)) {
+      return (spent?.auth ?? 0) < TURN_ATTEMPTS.auth - 1 ? 'auth' : null;
+    }
+    if (classifyTurnFailure(text) === 'overloaded') {
+      return (spent?.overloaded ?? 0) < TURN_ATTEMPTS.overloaded - 1 ? 'overloaded' : null;
+    }
+    return null;
+  }
+
+  /**
+   * Start re-driving a turn that just failed recoverably. The turn itself was
+   * never settled (see the `result` branch of handleWorkerEvent), so there is no
+   * status to undo — this only has to get a working query back and re-push.
+   */
+  private beginRecovery(sessionId: string, kind: RecoveryKind, resultText: string) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    const live = this.liveState(sessionId);
+    const state = (live.recovery ??= { kind, attempts: { auth: 0, overloaded: 0 }, epoch: 0 });
+    state.kind = kind;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = undefined;
+    state.epoch++;
+    state.attempts[kind]++;
+    const ctx = { epoch: state.epoch, turnStartedAt: meta.turnStartedAt };
+    // The child holds the token the API rejected (auth), or is dead weight that
+    // would only be resumed into (overloaded). Either way the next push respawns.
+    this.closeQuery(sessionId);
+
+    if (kind === 'auth') {
+      void this.recoverAuthThenRepush(sessionId, ctx, resultText);
+      return;
+    }
+    const delay =
+      OVERLOADED_BACKOFF_MS[Math.min(state.attempts.overloaded - 1, OVERLOADED_BACKOFF_MS.length - 1)]!;
+    state.timer = this.recoveryTimer(delay, () => this.repushTurnSilently(sessionId, ctx));
+  }
+
+  /** Refresh the rejected token, then re-push — or give up in the one way the
+   *  user has to act on, a stored credential that is genuinely dead. */
+  private async recoverAuthThenRepush(
+    sessionId: string,
+    ctx: { epoch: number; turnStartedAt?: number },
+    resultText: string,
+  ) {
+    const auth = this.auth;
+    // recoveryKindFor only returns 'auth' with an AuthManager wired; defensive.
+    if (!auth) return this.settleTurnFailed(sessionId, resultText);
+
+    const rejection = await this.refreshWithTimeout(auth);
+    if (!this.recoveryStillOwns(sessionId, ctx)) return;
+    if (rejection.outcome === 'refreshed') {
+      this.repushTurnSilently(sessionId, ctx);
+      return;
+    }
+    if (rejection.outcome === 'signed-out') {
+      // The one case the user has to act on. logout() has already broadcast
+      // authStatus, which is what opens the login modal.
+      this.settleTurnFailed(sessionId, authRecoveryMessage(rejection), 'auth');
+      return;
+    }
+    // The refresh never landed. No turn was re-sent, so an offline machine must
+    // not burn an attempt on it — the hold below is what waits for the network.
+    if (isOfflineError(rejection.error)) {
+      const state = this.live.get(sessionId)?.recovery;
+      if (state) state.attempts.auth = Math.max(0, state.attempts.auth - 1);
+    }
+    await this.holdForConnectivity(sessionId, ctx, rejection.error);
+  }
+
+  /**
+   * Hold the turn while the token endpoint is unreachable, re-probing on a
+   * doubling backoff. A refresh that finally succeeds *is* the came-back-online
+   * signal, so there is nothing else to watch. Bounded: a machine that stays off
+   * the network fails the turn with today's refusal banner rather than holding a
+   * session at 'running' forever.
+   */
+  private async holdForConnectivity(
+    sessionId: string,
+    ctx: { epoch: number; turnStartedAt?: number },
+    firstError: unknown,
+  ) {
+    const auth = this.auth;
+    if (!auth) return;
+    const deadline = Date.now() + CONNECTIVITY_HOLD_MS;
+    let wait = CONNECTIVITY_PROBE_MS;
+    let lastError = firstError;
+    while (Date.now() < deadline) {
+      if (!this.recoveryStillOwns(sessionId, ctx)) return;
+      await this.recoverySleep(sessionId, wait);
+      if (!this.recoveryStillOwns(sessionId, ctx)) return;
+      const rejection = await this.refreshWithTimeout(auth);
+      if (!this.recoveryStillOwns(sessionId, ctx)) return;
+      if (rejection.outcome === 'refreshed') {
+        this.repushTurnSilently(sessionId, ctx);
+        return;
+      }
+      if (rejection.outcome === 'signed-out') {
+        this.settleTurnFailed(sessionId, authRecoveryMessage(rejection), 'auth');
+        return;
+      }
+      lastError = rejection.error;
+      wait = Math.min(wait * 2, CONNECTIVITY_PROBE_CAP_MS);
+    }
+    this.settleTurnFailed(sessionId, authRefusalMessage(lastError));
+  }
+
+  /** One recovery refresh, bounded. A refresh that never answers reads as a
+   *  transient failure, which is what the connectivity hold is for. */
+  private async refreshWithTimeout(auth: AuthManager): Promise<TokenRejection> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<TokenRejection>((resolve) => {
+      timer = setTimeout(
+        () => resolve({ outcome: 'refresh-failed', error: new Error('the request timed out') }),
+        RECOVERY_REFRESH_TIMEOUT_MS,
+      );
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([auth.handleTokenRejected(), timeout]);
+    } catch (err) {
+      return { outcome: 'refresh-failed', error: err };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Re-send the turn's newest human input into a fresh query, writing nothing to
+   * the transcript. No `'user'` event and no status transition: `turnSource`,
+   * `turnStartedAt` and `status: 'running'` are all still correct because the turn
+   * was never settled, and a second `'user'` event would open a turn boundary that
+   * splits one turn's bookkeeping in two.
+   */
+  private repushTurnSilently(sessionId: string, ctx: { epoch: number; turnStartedAt?: number }) {
+    if (!this.recoveryStillOwns(sessionId, ctx)) return;
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    // The same read a manual Retry does, so a mid-turn plan refine or question
+    // answer is re-sent rather than the stale prompt that opened the turn.
+    const last = this.lastPromptForRetry(sessionId);
+    if (!last) {
+      this.settleTurnFailed(
+        sessionId,
+        'The turn ended early and there was nothing to send again. Retry to continue.',
+      );
+      return;
+    }
+    this.pushTurnSafely(meta, {
+      type: 'user',
+      message: { role: 'user', content: this.promptContent(last.text, last.attachments) },
+      parent_tool_use_id: null,
+    });
+  }
+
+  /** Whether the recovery started under `ctx` is still the owner of this session's
+   *  in-flight turn. Anything else — a Stop, a new prompt, a rewind, a later
+   *  recovery — means someone else owns it now and this one returns silently. */
+  private recoveryStillOwns(
+    sessionId: string,
+    ctx: { epoch: number; turnStartedAt?: number },
+  ): boolean {
+    const meta = this.sessions.get(sessionId);
+    if (!meta || meta.status !== 'running') return false;
+    if (this.interrupting.has(sessionId)) return false;
+    if (meta.turnStartedAt !== ctx.turnStartedAt) return false;
+    return this.live.get(sessionId)?.recovery?.epoch === ctx.epoch;
+  }
+
+  /** Fail a held turn for real: the failure the deferred settle did not perform.
+   *  Modelled on handleWorkerEnded's error branch rather than routed through
+   *  failTurn, which would re-enter recoverAuthFailure and lose `errorKind`. */
+  private settleTurnFailed(sessionId: string, text: string, kind?: SessionErrorKind) {
+    const meta = this.sessions.get(sessionId);
+    // Don't auto-fire queued prompts into a session that just failed.
+    if (meta?.queued?.length) meta.queuePaused = true;
+    this.liveState(sessionId).permissionWaitMs = 0;
+    this.cancelRecovery(sessionId);
+    // Captured before it is cleared: the workflow park below keys off it.
+    const source = meta?.turnSource;
+    if (meta) {
+      meta.turnSource = undefined;
+      meta.turnStartedAt = undefined;
+    }
+    // A second result row. The first one stays neutral — the store only appends,
+    // so a `recovering` stamp can never be taken back.
+    this.emitEvent(sessionId, 'sdk', {
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      result: text,
+    });
+    this.dropFailedQuery(sessionId);
+    // Synchronous, so the banner lands before the workflow parks the step (which
+    // persists the meta rather than re-setting the status, and so preserves it).
+    this.setStatus(sessionId, 'error', text, kind);
+    const interrupted = this.interrupting.delete(sessionId);
+    if (source) this.onTurnComplete?.(sessionId, source, interrupted, true);
+  }
+
+  /** Abandon any recovery in flight for this session. Anything that takes over the
+   *  session's turn calls this; the epoch check does the rest for work already
+   *  awaiting. */
+  private cancelRecovery(sessionId: string) {
+    const live = this.live.get(sessionId);
+    if (!live?.recovery) return;
+    if (live.recovery.timer) clearTimeout(live.recovery.timer);
+    live.recovery = undefined;
+  }
+
+  /** A recovery timer that never holds the process open — a pending retry is not
+   *  a reason for the bridge to stay alive. */
+  private recoveryTimer(ms: number, fn: () => void): NodeJS.Timeout {
+    const timer = setTimeout(fn, ms);
+    timer.unref?.();
+    return timer;
+  }
+
+  /** Sleep, parked on the session's recovery record so cancelRecovery can drop it.
+   *  A cancelled sleep never resolves, which abandons the loop awaiting it. */
+  private recoverySleep(sessionId: string, ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = this.recoveryTimer(ms, resolve);
+      const state = this.live.get(sessionId)?.recovery;
+      if (state) state.timer = timer;
+      else clearTimeout(timer);
+    });
   }
 
   /** Persist attachments to disk and return the transcript/queue refs. */
@@ -2301,6 +2619,8 @@ export class SessionManager {
     }
 
     this.rewinding.add(sessionId);
+    // The turn being re-driven is part of what is being discarded.
+    this.cancelRecovery(sessionId);
     try {
       if (anchor) {
         const fork = await this.forkSession(meta.claudeSessionId!, {
@@ -2431,20 +2751,9 @@ export class SessionManager {
       meta.completed = false;
     }
 
-    // Persist attachments to disk (transcript refs) and build the SDK content blocks.
+    // Persist attachments to disk; the transcript refs go on the 'user' event below
+    // and the SDK content blocks are built from the raw attachments at push time.
     const stored = this.stageAttachments(sessionId, attachments);
-    const blocks: unknown[] = [];
-    for (const att of attachments) {
-      const kind = attachmentKind(att.mediaType);
-      if (kind === 'image') {
-        blocks.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.data } });
-      } else if (kind === 'document') {
-        blocks.push({ type: 'document', source: { type: 'base64', media_type: att.mediaType, data: att.data } });
-      } else {
-        const content = Buffer.from(att.data, 'base64').toString('utf8');
-        blocks.push({ type: 'text', text: `Attached file "${att.name}":\n\`\`\`\n${content}\n\`\`\`` });
-      }
-    }
 
     this.emitEvent(sessionId, 'user', {
       text,
@@ -2474,6 +2783,8 @@ export class SessionManager {
     void this.openTurnWindow(sessionId);
     meta.interruptedAt = undefined; // any prompt clears the crash-interrupted flag
     this.interrupting.delete(sessionId); // a new turn supersedes any in-flight interrupt
+    // …and supersedes any recovery of the turn before it, attempt budget included.
+    this.cancelRecovery(sessionId);
     // A user prompt after a force-advance (before the interrupted turn settled)
     // means they want to keep working here — don't let the stale flag advance a
     // later turn. Only for 'user': continueTurn and recoverOrphanedPermission
@@ -2484,19 +2795,43 @@ export class SessionManager {
     }
     this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
-    // Appended to the pushed message only — the 'user' event above already holds
-    // the text the user actually wrote, and a hint in the transcript would read
-    // as words they typed. Null unless this prompt names a service they have no
-    // connection for, so an ordinary turn carries nothing extra (see
-    // mcpDirectory.ts for why this rides the prompt and not the system prompt).
-    const mcpHint = text ? mcpConnectionHint(text, this.mcp?.list() ?? []) : null;
+    const content = this.promptContent(text, attachments);
+    this.pushTurnSafely(meta, { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
+  }
 
-    const content = [
+  /**
+   * The SDK content blocks for a prompt: its attachments, its text, and the MCP
+   * connection hint.
+   *
+   * Deliberately free of side effects — no staging, no events — so a transparent
+   * re-push can build the same content for a turn whose `'user'` event already owns
+   * the on-disk attachment refs; re-staging there would duplicate the files.
+   *
+   * The hint is appended to the pushed message only: the 'user' event holds the
+   * text the user actually wrote, and a hint in the transcript would read as words
+   * they typed. Null unless the prompt names a service they have no connection for,
+   * so an ordinary turn carries nothing extra (see mcpDirectory.ts for why this
+   * rides the prompt and not the system prompt).
+   */
+  private promptContent(text: string, attachments: PromptAttachment[]): unknown[] {
+    const blocks: unknown[] = [];
+    for (const att of attachments) {
+      const kind = attachmentKind(att.mediaType);
+      if (kind === 'image') {
+        blocks.push({ type: 'image', source: { type: 'base64', media_type: att.mediaType, data: att.data } });
+      } else if (kind === 'document') {
+        blocks.push({ type: 'document', source: { type: 'base64', media_type: att.mediaType, data: att.data } });
+      } else {
+        const content = Buffer.from(att.data, 'base64').toString('utf8');
+        blocks.push({ type: 'text', text: `Attached file "${att.name}":\n\`\`\`\n${content}\n\`\`\`` });
+      }
+    }
+    const mcpHint = text ? mcpConnectionHint(text, this.mcp?.list() ?? []) : null;
+    return [
       ...blocks,
       ...(text ? [{ type: 'text', text }] : []),
       ...(mcpHint ? [{ type: 'text', text: mcpHint }] : []),
     ];
-    this.pushTurnSafely(meta, { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
   }
 
   /**
@@ -2956,6 +3291,8 @@ export class SessionManager {
   interrupt(sessionId: string) {
     const meta = this.sessions.get(sessionId);
     this.interrupting.add(sessionId);
+    // Stop means stop: a turn being re-driven under the covers is still a turn.
+    this.cancelRecovery(sessionId);
     // A stopped compaction is a user decision, not a broken mechanism.
     const reparked = this.abandonCompaction(sessionId, 'interrupted');
     this.worker.interrupt(sessionId);
@@ -3406,7 +3743,16 @@ export class SessionManager {
       }
       // `busy: undefined` = a worker too old to report it; demote-only, as before.
       const noTurn = !info || info.busy === false;
-      if (noTurn && (meta.status === 'running' || meta.status === 'waiting-permission')) {
+      // A turn being re-driven transparently deliberately has no query for the
+      // length of the recovery, so a `hello` landing in that window is not evidence
+      // the turn died — demoting it here would stamp a Continue banner and possibly
+      // auto-continue a nudge on top of a turn that is about to resume.
+      const recovering = this.live.get(meta.id)?.recovery !== undefined;
+      if (
+        noTurn &&
+        !recovering &&
+        (meta.status === 'running' || meta.status === 'waiting-permission')
+      ) {
         // A step that reads 'waiting-approval' with the session 'running' can only be
         // a manual compaction over the park (see compactContext) — nothing else runs a
         // turn on a parked step. Re-park rather than demote: `compactResume` is
@@ -3783,6 +4129,11 @@ export class SessionManager {
     // branch below could never reach the durable record. A shallow copy, not a
     // mutation — everything downstream keeps reading the raw `msg`.
     const stopped = msg.type === 'result' && this.interrupting.has(sessionId);
+    // Same constraint, same place, for the same reason: whether this failure is one
+    // the bridge will re-drive rather than settle has to be stamped before the event
+    // is persisted. The verdict is fully synchronous so that it can be (see
+    // recoveryKindFor); acting on it happens in the result branch below.
+    const recoveryKind = this.recoveryKindFor(sessionId, msg, stopped);
     // Stream deltas are broadcast live but not written to disk;
     // the complete assistant message that follows is the durable record.
     // Same for the ephemeral system subtypes: nothing reads them back.
@@ -3797,7 +4148,7 @@ export class SessionManager {
     const resultSeq = this.emitEvent(
       sessionId,
       'sdk',
-      stopped ? { ...msg, stopped: true } : msg,
+      stopped ? { ...msg, stopped: true } : recoveryKind ? { ...msg, recovering: true } : msg,
       persist,
     );
 
@@ -3942,40 +4293,35 @@ export class SessionManager {
 
       const metaNow = this.sessions.get(sessionId);
       let source: 'user' | 'workflow' = 'user';
+      // A failure being re-driven transparently: the turn is not over, so nothing
+      // settles. Everything skipped below runs when it really settles, keyed off
+      // that attempt's own resultSeq.
+      if (recoveryKind && metaNow) {
+        // The attempt burned real tokens, so the spend is this turn's either way.
+        this.accumulateResultSpend(metaNow, msg);
+        // Not reset with the rest of the turn's state, or the same human wait is
+        // subtracted a second time from the successor attempt's duration_ms.
+        const live = this.liveState(sessionId);
+        live.permissionWaitMs = 0;
+        // A card left open on the query being replaced can never be answered, and
+        // recovery's ownership check reads 'running' as the invariant.
+        if (metaNow.status === 'waiting-permission') {
+          metaNow.status = 'running';
+          metaNow.pendingPermissionTool = undefined;
+        }
+        // `turnBaselines` stays open on purpose: closing it drops the first
+        // attempt's file attribution. So do contextUsage and compactedInTurn —
+        // the turn continues, and they describe it.
+        this.upsert(metaNow); // so the spend reaches the client
+        this.beginRecovery(sessionId, recoveryKind, resultText);
+        return;
+      }
+      // A turn settling for real ends any recovery budget it accrued.
+      this.cancelRecovery(sessionId);
       if (metaNow) {
-        const cost = (msg as { total_cost_usd?: number }).total_cost_usd;
-        if (typeof cost === 'number') {
-          metaNow.lastCostUsd = cost;
-          metaNow.totalCostUsd = (metaNow.totalCostUsd ?? 0) + cost;
-        }
-        const usage = (msg as {
-          usage?: {
-            input_tokens?: number;
-            output_tokens?: number;
-            cache_creation_input_tokens?: number;
-            cache_read_input_tokens?: number;
-          };
-        }).usage;
-        let turnTokens: number | undefined;
-        if (usage) {
-          turnTokens =
-            (usage.input_tokens ?? 0) +
-            (usage.output_tokens ?? 0) +
-            (usage.cache_creation_input_tokens ?? 0) +
-            (usage.cache_read_input_tokens ?? 0);
-          metaNow.lastTokens = turnTokens;
-          metaNow.totalTokens = (metaNow.totalTokens ?? 0) + turnTokens;
-        }
-        // Same accumulate-on-result pass that owns totalCostUsd — keyed by the
-        // model the turn ran on. resolveModelId keeps a retired stored id from
-        // opening a second row for what is really one model. A result carrying
-        // neither number opens no row at all.
-        if (typeof cost === 'number' || turnTokens != null) {
-          metaNow.costByModel ??= {};
-          addSpend(metaNow.costByModel, resolveModelId(metaNow.model), cost ?? 0, turnTokens ?? 0);
-        }
+        this.accumulateResultSpend(metaNow, msg);
         // Occupancy settles here, from the turn's last assistant message —
-        // never from the usage above, which is cumulative across API calls.
+        // never from the result's usage, which is cumulative across API calls.
         const live = this.liveState(sessionId);
         if (live.contextUsage) {
           metaNow.contextUsage = live.contextUsage;
@@ -4025,6 +4371,45 @@ export class SessionManager {
       // Never awaited — the queue flush and workflow advance above must not wait
       // on a CLI control request.
       void this.fetchContextBreakdown(sessionId);
+    }
+  }
+
+  /**
+   * Fold one `result`'s cost and usage into the session's running totals, and into
+   * the by-model split keyed by the model the turn ran on. resolveModelId keeps a
+   * retired stored id from opening a second row for what is really one model; a
+   * result carrying neither number opens no row at all.
+   *
+   * Its own method because a transparently re-driven turn bills every attempt —
+   * the failed one burned tokens — while settling only on the last.
+   */
+  private accumulateResultSpend(meta: SessionMeta, msg: Record<string, unknown>) {
+    const cost = (msg as { total_cost_usd?: number }).total_cost_usd;
+    if (typeof cost === 'number') {
+      meta.lastCostUsd = cost;
+      meta.totalCostUsd = (meta.totalCostUsd ?? 0) + cost;
+    }
+    const usage = (msg as {
+      usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+      };
+    }).usage;
+    let turnTokens: number | undefined;
+    if (usage) {
+      turnTokens =
+        (usage.input_tokens ?? 0) +
+        (usage.output_tokens ?? 0) +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0);
+      meta.lastTokens = turnTokens;
+      meta.totalTokens = (meta.totalTokens ?? 0) + turnTokens;
+    }
+    if (typeof cost === 'number' || turnTokens != null) {
+      meta.costByModel ??= {};
+      addSpend(meta.costByModel, resolveModelId(meta.model), cost ?? 0, turnTokens ?? 0);
     }
   }
 

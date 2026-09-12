@@ -35,6 +35,12 @@ const PROACTIVE_RETRY_CAP_MS = 15 * 60_000;
 /** How long an unfinished login stays completable. Generous: the user has to
  *  leave the app, approve in a browser, and paste the result back. */
 const PENDING_LOGIN_TTL_MS = 30 * 60_000;
+/** A refresh this recent already *is* the recovery for a rejection arriving now:
+ *  the turn that failed was started on the token this refresh replaced. Collapses
+ *  N sessions recovering off one rotated token into a single token request —
+ *  without it, each would rotate the refresh token again, and a lost race there is
+ *  fatal (see refresh()). */
+const RECENT_REFRESH_MS = 5_000;
 
 /** Thrown when a turn-starting action is attempted while logged out. */
 export class AuthRequiredError extends Error {
@@ -85,6 +91,24 @@ export function isAuthFailureMessage(message: string): boolean {
   return AUTH_FAILURE_PATTERNS.some((re) => re.test(message));
 }
 
+/** Network codes that mean the request never reached the token endpoint. */
+const OFFLINE_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH']);
+
+/**
+ * Whether a failed refresh failed because this machine has no route to the
+ * network, as opposed to the endpoint answering with something unhelpful. `fetch`
+ * reports both as a rejected promise, but only the first is worth waiting out:
+ * the caller holds the turn and re-probes instead of spending a retry attempt on
+ * a request that never left the machine (see SessionManager's connectivity hold).
+ */
+export function isOfflineError(err: unknown): boolean {
+  if (!(err instanceof TypeError)) return false;
+  const cause = (err as { cause?: unknown }).cause;
+  if (!cause || typeof cause !== 'object') return false;
+  const code = (cause as { code?: unknown }).code;
+  return typeof code === 'string' && OFFLINE_CODES.has(code);
+}
+
 function base64url(buf: Buffer): string {
   return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
@@ -110,6 +134,8 @@ export class AuthManager {
    */
   private pendingLogins = new Map<string, { verifier: string; state: string; startedAt: number }>();
   private refreshInFlight: Promise<string> | null = null;
+  /** When the stored tokens were last replaced, for the RECENT_REFRESH_MS memo. */
+  private lastRefreshAt = 0;
   private proactiveTimer: NodeJS.Timeout | null = null;
   /** Current proactive-retry backoff, null while the ladder is unclimbed. */
   private proactiveBackoffMs: number | null = null;
@@ -244,6 +270,9 @@ export class AuthManager {
   async handleTokenRejected(): Promise<TokenRejection> {
     // Already logged out: that *is* the state the user has to fix.
     if (!this.isLoggedIn()) return { outcome: 'signed-out' };
+    // A refresh that just landed is the recovery this rejection is asking for:
+    // the failing turn was spawned on the token it replaced.
+    if (Date.now() - this.lastRefreshAt < RECENT_REFRESH_MS) return { outcome: 'refreshed' };
     try {
       await this.forceRefresh();
       return { outcome: 'refreshed' };
@@ -314,6 +343,7 @@ export class AuthManager {
       account: extractAccount(body) ?? prev?.account,
     };
     this.store.saveAuth(this.auth);
+    this.lastRefreshAt = Date.now();
     // A recovery resets the backoff ladder for the next expiry window.
     this.proactiveBackoffMs = null;
     this.scheduleProactiveRefresh();
