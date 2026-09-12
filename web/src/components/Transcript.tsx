@@ -110,9 +110,12 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
 }
 
 /** Compaction marker: the conversation up to here was replaced by a summary. */
-function ContextCompactMarker({ data }: { data: ContextCompactData }) {
-  const pending = data.phase === 'requested';
-  const failed = data.ok === false;
+function ContextCompactMarker({ data, stale }: { data: ContextCompactData; stale?: boolean }) {
+  // `stale` is an unmatched 'requested' with no turn left to close it — the
+  // compaction died with its query (a worker restart, a crash). Nothing is
+  // compacting any more, so it reads as stopped rather than spinning forever.
+  const pending = data.phase === 'requested' && !stale;
+  const failed = data.ok === false || (data.phase === 'requested' && stale);
   const label = pending
     ? 'Compacting context…'
     : failed
@@ -623,6 +626,7 @@ const Item = memo(function Item({
   retryKey,
   activeGroupKey,
   activeTurnKey,
+  liveCompactKey,
 }: {
   item: TranscriptItem;
   sessionId: string;
@@ -636,6 +640,9 @@ const Item = memo(function Item({
   activeGroupKey?: string | null;
   /** Key of the agent-turn that is the current (live) turn — rendered expanded (Compact). */
   activeTurnKey?: string | null;
+  /** Key of the one compaction marker still entitled to spin. Every other open
+   *  marker belongs to a compaction whose turn is gone. */
+  liveCompactKey?: string | null;
 }) {
   const showRetry = item.key === retryKey;
   const isActiveGroup = item.key === activeGroupKey;
@@ -750,7 +757,12 @@ const Item = memo(function Item({
     case 'workflow':
       return <WorkflowMarker data={item.data} />;
     case 'context-compact':
-      return <ContextCompactMarker data={item.data} />;
+      return (
+        <ContextCompactMarker
+          data={item.data}
+          stale={item.data.phase === 'requested' && item.key !== liveCompactKey}
+        />
+      );
     case 'task':
       // One dimmed row in the same register as session-init, and only for an orphan —
       // a task whose launching tool card is known renders as state on that card
@@ -979,6 +991,18 @@ export function Transcript({
     if (status !== 'running' && status !== 'waiting-permission') return null;
     for (let i = items.length - 1; i >= 0; i--) {
       if (items[i].kind === 'agent-turn') return items[i].key;
+    }
+    return null;
+  }, [items, status]);
+  // The one compaction that may still be in flight: the last unmatched marker,
+  // and only while the session actually has a turn. A span is closed by its 'done'
+  // or by the next user prompt (see buildTranscript), so an earlier unmatched one
+  // is always the debris of a compaction that died with its query.
+  const liveCompactKey = useMemo(() => {
+    if (status !== 'running' && status !== 'waiting-permission') return null;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (item.kind === 'context-compact' && item.data.phase === 'requested') return item.key;
     }
     return null;
   }, [items, status]);
@@ -1371,6 +1395,7 @@ export function Transcript({
               retryKey={retryKey}
               activeGroupKey={activeGroupKey}
               activeTurnKey={activeTurnKey}
+              liveCompactKey={liveCompactKey}
             />
           ))}
           {showActivity && (
