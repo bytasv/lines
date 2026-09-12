@@ -1624,6 +1624,7 @@ export class SessionManager {
     // `codex exec` had none, which is why the toggle used to be a silent no-op on
     // an OpenAI session while claiming to apply to every session.
     const compress = this.store.loadSettings()?.compressResponses !== false;
+    const codexMcp = this.mcp?.codexServerConfigs();
     return {
       model: resolveModelId(meta.model),
       workingDirectory: meta.cwd,
@@ -1639,6 +1640,10 @@ export class SessionManager {
       // Required, not optional: `pushCodexTurn` refuses the turn when discovery
       // found nothing, so this is always set by the time a push is built.
       codexPath: cli.path ?? '',
+      // Translated here, not in the worker, for the same reason `mcpServers` is
+      // on the Claude path: this is where the secrets file is readable.
+      ...(codexMcp && Object.keys(codexMcp.servers).length ? { mcpServers: codexMcp.servers } : {}),
+      ...(codexMcp && Object.keys(codexMcp.env).length ? { mcpEnv: codexMcp.env } : {}),
       ...(meta.codexThreadId ? { threadId: meta.codexThreadId } : {}),
     };
   }

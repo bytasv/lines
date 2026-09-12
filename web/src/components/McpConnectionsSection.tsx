@@ -26,6 +26,7 @@ import {
   MCP_STATUS_UNKNOWN,
   mcpConnectionErrorText,
   mcpStatusMeta,
+  codexUnsupportedReason,
 } from '../lib/mcpConnections';
 
 const TRANSPORTS = [
@@ -168,6 +169,11 @@ function ConnectionRow({
   // never needs a dismissal first.
   const showAuthorize = canAuthorize && !auth?.pending && !auth?.authUrl;
   const unauthorized = !status || status.status === 'needs-auth' || status.status === 'failed';
+  // Codex expresses a narrower set of connections than the Claude SDK does. A
+  // row it cannot express still works everywhere else, so this is a note on the
+  // row rather than an error or a disabled control.
+  const codexNote = connection.enabled ? codexUnsupportedReason(connection) : null;
+  const openaiConnected = useStore((s) => s.openaiAuth?.loggedIn === true);
 
   return (
     <Stack gap={2}>
@@ -210,6 +216,13 @@ function ConnectionRow({
           Headers: {connection.headerKeys.join(', ')}
         </Text>
       ) : null}
+      {openaiConnected && codexNote && (
+        // Only once an OpenAI account exists: until then there is no session this
+        // could apply to, and the note would be noise on a working connection.
+        <Text size="xs" c="dimmed">
+          {codexNote}
+        </Text>
+      )}
       {status?.error && (
         <Text size="xs" c="red">
           {status.error}

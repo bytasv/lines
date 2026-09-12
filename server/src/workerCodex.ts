@@ -41,6 +41,12 @@ const CodexPushOptions = z.object({
   codexPath: z.string(),
   /** Resume pointer; absent starts a fresh thread. */
   threadId: z.string().optional(),
+  /** The user's enabled MCP connections, already in codex's `config.toml`
+   *  shape — the bridge translates, because that is where the secrets live. */
+  mcpServers: z.record(z.string(), z.unknown()).optional(),
+  /** Bearer tokens keyed by the env var name `mcpServers` points at. The
+   *  app-server child is spawned with these; they never reach `config.toml`. */
+  mcpEnv: z.record(z.string(), z.string()).optional(),
 });
 
 export type CodexPushOptions = z.infer<typeof CodexPushOptions>;
@@ -70,6 +76,11 @@ const threadOwners = new Map<string, string>();
 /** One app-server per `$CODEX_HOME`. Threads multiplex over it. */
 let server: CodexAppServer | null = null;
 let serverHome: string | null = null;
+/** Bearer-token env the live child was spawned with; see `ensureServer`. */
+let serverEnv: string | null = null;
+/** The `mcp_servers` table the live child has already been given, so a push
+ *  that changes nothing does not rewrite its config. Cleared with the child. */
+let appliedMcpServers: string | null = null;
 
 export interface CodexSink {
   event: (sessionId: string, message: Record<string, unknown>) => void;
@@ -111,27 +122,85 @@ function ownerOf(params: Record<string, unknown>): string | null {
   return typeof threadId === 'string' ? (threadOwners.get(threadId) ?? null) : null;
 }
 
+/** Stable identity of a set of MCP bearer tokens — a child's env is fixed at
+ *  spawn, so a change to these is the one thing that forces a respawn. */
+function envFingerprint(env: Record<string, string> | undefined): string {
+  return JSON.stringify(Object.entries(env ?? {}).sort());
+}
+
 /**
  * Bring up the app-server if it is not running. One child serves every codex
  * session, so this is idempotent and cheap after the first call.
  */
 function ensureServer(options: CodexPushOptions): CodexAppServer {
   // A different CODEX_HOME means a different app user; drop the old child rather
-  // than serve two accounts from one process.
-  if (server && (!server.running || serverHome !== options.codexHome)) {
-    server.close();
+  // than serve two accounts from one process. A changed bearer-token set is the
+  // same story for a different reason: the child read those at spawn, so the
+  // running one is holding credentials the user has since changed.
+  const fingerprint = envFingerprint(options.mcpEnv);
+  // One child serves every codex session, so closing it is never free: a turn
+  // running for some *other* session dies with it. A changed account is worth
+  // that (the old child holds the wrong credentials outright); a changed bearer
+  // token is not, so it waits for the first push that finds the child idle.
+  const busy = [...codexSessions.values()].some((state) => state.busy);
+  const stale =
+    server &&
+    (!server.running ||
+      serverHome !== options.codexHome ||
+      (serverEnv !== fingerprint && !busy));
+  if (stale) {
+    server!.close();
     server = null;
+    // The config the dead child was given died with it.
+    appliedMcpServers = null;
   }
   if (server) return server;
   serverHome = options.codexHome;
+  serverEnv = fingerprint;
   server = new CodexAppServer({
     codexPath: options.codexPath,
     codexHome: options.codexHome,
+    ...(options.mcpEnv && Object.keys(options.mcpEnv).length ? { extraEnv: options.mcpEnv } : {}),
     onNotification: handleNotification,
     onServerRequest: handleServerRequest,
     onExit: handleServerExit,
   });
   return server;
+}
+
+/**
+ * Hand codex the user's MCP servers, through codex's own config writer.
+ *
+ * Lines never writes `config.toml` itself. `config/batchWrite` keeps codex the
+ * single writer of its own file — the same single-writer rule `auth.json`
+ * follows, and for the same reason: two processes editing one file is how a
+ * half-written config or a clobbered credential happens.
+ *
+ * The whole `mcp_servers` table is replaced rather than upserted, so a removed
+ * or disabled connection actually goes away. That is safe because this
+ * `CODEX_HOME` is Lines' own, not the user's `~/.codex` — nothing else has put
+ * a server in it.
+ *
+ * Applied at most once per distinct table per child: it is a file write plus a
+ * reload, and every turn push carries the connection list.
+ */
+async function applyMcpServers(app: CodexAppServer, options: CodexPushOptions): Promise<void> {
+  const servers = options.mcpServers ?? {};
+  const desired = JSON.stringify(Object.entries(servers).sort());
+  if (appliedMcpServers === desired) return;
+  try {
+    await app.request('config/batchWrite', {
+      edits: [{ keyPath: 'mcp_servers', value: servers, mergeStrategy: 'replace' }],
+      // Reach the threads already loaded in this child, not just the next one.
+      reloadUserConfig: true,
+    });
+    appliedMcpServers = desired;
+  } catch (err) {
+    // A turn with no MCP servers is worth far more than no turn at all, so this
+    // never fails the push — the tools are simply absent, and the reason is in
+    // the log rather than swallowed.
+    console.warn('[worker] codex mcp config write failed:', String(err));
+  }
 }
 
 /**
@@ -231,6 +300,10 @@ function handleServerRequest(id: unknown, method: string, params: Record<string,
 function handleServerExit(reason: string) {
   server = null;
   serverHome = null;
+  serverEnv = null;
+  // The next child starts with codex's config as it found it, so the table has
+  // to be written again rather than assumed still applied.
+  appliedMcpServers = null;
   const owned = [...codexSessions];
   codexSessions.clear();
   threadOwners.clear();
@@ -330,6 +403,7 @@ export function pushCodex(
 async function runCompaction(sessionId: string, options: CodexPushOptions, turnSink: CodexSink) {
   try {
     const app = ensureServer(options);
+    await applyMcpServers(app, options);
     const state = codexSessions.get(sessionId) ?? { busy: false };
     codexSessions.set(sessionId, state);
     const threadId = state.threadId ?? options.threadId;
@@ -358,6 +432,7 @@ async function runTurn(
 ) {
   try {
     const app = ensureServer(options);
+    await applyMcpServers(app, options);
     const state = codexSessions.get(sessionId) ?? { busy: false };
     codexSessions.set(sessionId, state);
 

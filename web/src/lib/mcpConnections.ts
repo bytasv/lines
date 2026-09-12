@@ -1,4 +1,4 @@
-import type { McpConnectionError, McpServerStatusInfo } from '@lines/shared';
+import type { McpConnection, McpConnectionError, McpServerStatusInfo } from '@lines/shared';
 
 /** Plain-language form copy for each refusal the shared validator can return. */
 const MCP_CONNECTION_ERROR_TEXT: Record<McpConnectionError, string> = {
@@ -42,3 +42,31 @@ export const MCP_STATUS_UNKNOWN = {
   color: 'var(--mantine-color-gray-5)',
   label: 'No status yet',
 };
+
+/**
+ * Why a connection cannot be offered to a session on an OpenAI model, or null
+ * when it can.
+ *
+ * Computed on the client because it is a property of the connection itself, not
+ * a reading from any session: codex expresses a stdio server fully, and an HTTP
+ * server whose only credential is a bearer token. Keeping the rule here rather
+ * than shipping a per-connection verdict over the wire means the pane can say
+ * so while the user is still typing the row.
+ *
+ * The bridge decides the same question independently in
+ * `McpConnections.codexServerConfigs` — this text explains that decision, it
+ * does not make it.
+ */
+export function codexUnsupportedReason(connection: McpConnection): string | null {
+  if (connection.transport === 'stdio') return null;
+  if (connection.transport === 'sse') {
+    return 'OpenAI sessions cannot use SSE connections — codex speaks streamable HTTP only.';
+  }
+  const extra = (connection.headerKeys ?? []).filter(
+    (name) => name.toLowerCase() !== 'authorization',
+  );
+  if (extra.length) {
+    return `OpenAI sessions cannot send the ${extra.join(', ')} header — codex supports a bearer token only.`;
+  }
+  return null;
+}

@@ -32,6 +32,15 @@ export interface CodexAppServerOptions {
   codexPath: string;
   /** `$CODEX_HOME` for this app user — where auth.json and the thread store live. */
   codexHome: string;
+  /**
+   * Extra environment for the child, on top of the bridge's own.
+   *
+   * Carries MCP bearer tokens, which is why they are env and not config: codex
+   * reads an HTTP server's credential from a variable named by `config.toml`,
+   * so the token stays out of the file. Fixed at spawn — a change means a new
+   * child, which `ensureServer` handles.
+   */
+  extraEnv?: Record<string, string>;
   /** A notification from the server (no reply expected). */
   onNotification: (method: string, params: Record<string, unknown>) => void;
   /**
@@ -67,7 +76,7 @@ export class CodexAppServer {
       // Spreading process.env is required, not cosmetic: without PATH and HOME the
       // child cannot find git or a shell, and CODEX_HOME is what points it at this
       // app user's credentials rather than the user's own ~/.codex.
-      env: { ...process.env, CODEX_HOME: options.codexHome },
+      env: { ...process.env, ...options.extraEnv, CODEX_HOME: options.codexHome },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

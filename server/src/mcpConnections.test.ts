@@ -222,3 +222,85 @@ test('a pending review read back from disk is sanitized before it reaches the wi
   assert.deepEqual(review?.added.map((c) => c.name), ['figma']);
   assert.equal(review?.detectedAt, 3);
 });
+
+/**
+ * The codex translation.
+ *
+ * Same principle as the tests above: assert on `codexServerConfigs()`, the
+ * artifact actually written into codex's `config.toml`, because its shape is
+ * what codex parses. The expected shapes here were taken from `codex mcp add`
+ * on 0.154.0, not from documentation.
+ */
+
+test('a stdio connection becomes a codex command server', () => {
+  const h = harness();
+  h.mcp.add({
+    name: 'local',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', 'some-server'],
+    env: { FOO: 'bar' },
+  });
+  const { servers, env, skipped } = h.mcp.codexServerConfigs();
+  assert.deepEqual(servers, {
+    local: { command: 'npx', args: ['-y', 'some-server'], env: { FOO: 'bar' } },
+  });
+  assert.deepEqual(env, {});
+  assert.deepEqual(skipped, []);
+});
+
+test('the codex shape carries no `type` or `timeout` key', () => {
+  // Codex infers the transport from which keys are present; a stray key makes it
+  // reject the whole table, so the Claude-shaped extras must not leak through.
+  const h = harness();
+  h.mcp.add({ name: 'local', transport: 'stdio', command: 'npx', timeout: 5000 });
+  const { servers } = h.mcp.codexServerConfigs();
+  assert.deepEqual(Object.keys(servers.local as object), ['command']);
+});
+
+test('an http bearer token is passed by env-var name, never by value', () => {
+  const h = harness();
+  const added = h.mcp.add({ ...HTTP, headerKeys: ['Authorization'] }, { Authorization: 'Bearer sk-secret' });
+  assert.ok(added.ok);
+  const { servers, env } = h.mcp.codexServerConfigs();
+  const config = servers.figma as Record<string, string>;
+  assert.equal(config.url, 'https://mcp.figma.com/mcp');
+  // The config is what lands on disk: it may name the variable and nothing more.
+  assert.ok(!JSON.stringify(servers).includes('sk-secret'));
+  assert.equal(env[config.bearer_token_env_var], 'Bearer sk-secret');
+});
+
+test('an http connection with a non-bearer header is skipped, with a reason', () => {
+  // Codex models an HTTP credential as a bearer token only. Shipping this one
+  // without its header would connect as the wrong principal.
+  const h = harness();
+  h.mcp.add({ ...HTTP, name: 'tenant', headerKeys: ['X-Api-Key'] }, { 'X-Api-Key': 'k' });
+  const { servers, skipped } = h.mcp.codexServerConfigs();
+  assert.deepEqual(servers, {});
+  assert.deepEqual(skipped, [{ name: 'tenant', reason: 'headers-unsupported' }]);
+});
+
+test('an sse connection is skipped rather than handed over as streamable http', () => {
+  const h = harness();
+  h.mcp.add({ name: 'legacy', transport: 'sse', url: 'https://example.com/sse' });
+  const { servers, skipped } = h.mcp.codexServerConfigs();
+  assert.deepEqual(servers, {});
+  assert.deepEqual(skipped, [{ name: 'legacy', reason: 'sse-unsupported' }]);
+});
+
+test('a disabled connection reaches codex no more than it reaches the SDK', () => {
+  const h = harness();
+  const added = h.mcp.add({ name: 'local', transport: 'stdio', command: 'npx' });
+  assert.ok(added.ok);
+  h.mcp.update(added.connection.id, { ...added.connection, enabled: false });
+  assert.deepEqual(h.mcp.codexServerConfigs().servers, {});
+});
+
+test('the bearer env var is derived from the id, so a rename cannot orphan it', () => {
+  const h = harness();
+  const added = h.mcp.add({ ...HTTP, headerKeys: ['Authorization'] }, { Authorization: 'tok' });
+  assert.ok(added.ok);
+  const before = Object.keys(h.mcp.codexServerConfigs().env)[0];
+  h.mcp.update(added.connection.id, { ...added.connection, name: 'figma-renamed' });
+  assert.deepEqual(Object.keys(h.mcp.codexServerConfigs().env), [before]);
+});

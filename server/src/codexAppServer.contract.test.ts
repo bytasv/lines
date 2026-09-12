@@ -36,6 +36,9 @@ const CLIENT_REQUESTS = [
   'thread/resume',
   'turn/start',
   'turn/interrupt',
+  // How the user's MCP connections reach a codex session. Lines never writes
+  // `config.toml` itself, so losing this method loses the connections outright.
+  'config/batchWrite',
 ];
 
 /** Notifications Lines normalizes. Losing one silently drops part of a turn. */
@@ -135,4 +138,18 @@ test('the sandbox modes the permission mapping targets still exist', () => {
   for (const mode of ['read-only', 'workspace-write', 'danger-full-access']) {
     assert.ok(source.includes(`"${mode}"`), `SandboxMode no longer has ${mode}`);
   }
+});
+
+test('the config writer still takes the edit shape the MCP table is written with', () => {
+  // `mcp_servers` is written as one whole-table `replace`, which is what makes a
+  // removed connection actually go away. A lost `mergeStrategy` would silently
+  // turn that into an append, leaving deleted servers configured.
+  const params = read('v2/ConfigBatchWriteParams.ts');
+  assert.ok(params.includes('edits'), 'ConfigBatchWriteParams no longer takes edits');
+  assert.ok(params.includes('reloadUserConfig'), 'batchWrite no longer hot-reloads');
+  const edit = read('v2/ConfigEdit.ts');
+  for (const field of ['keyPath', 'value', 'mergeStrategy']) {
+    assert.ok(edit.includes(field), `ConfigEdit no longer carries ${field}`);
+  }
+  assert.ok(read('v2/MergeStrategy.ts').includes('"replace"'), 'MergeStrategy lost replace');
 });

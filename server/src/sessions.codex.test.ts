@@ -7,6 +7,7 @@ import { CODEX_NOTIFICATION } from '@lines/shared';
 import type { ServerMessage, SessionMeta } from '@lines/shared';
 import type { AuthManager } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
+import { McpConnections } from './mcpConnections.ts';
 import type { OpenaiAuthManager } from './openaiAuth.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -40,6 +41,8 @@ const meta = (id: string, model: string): SessionMeta =>
 interface HarnessOptions {
   model?: string;
   openaiConnected?: boolean;
+  /** Seed the user's MCP connection list, to assert what rides a codex push. */
+  connections?: unknown[];
 }
 
 function harness(opts: HarnessOptions = {}) {
@@ -48,6 +51,9 @@ function harness(opts: HarnessOptions = {}) {
     path.join(root, 'sessions.json'),
     JSON.stringify([meta('s1', opts.model ?? 'gpt-5.6-terra')]),
   );
+  if (opts.connections?.length) {
+    fs.writeFileSync(path.join(root, 'mcp-connections.json'), JSON.stringify(opts.connections));
+  }
   const store = createStore(root);
 
   // Every call here is a failure: a codex push must never reach the Claude token.
@@ -75,7 +81,7 @@ function harness(opts: HarnessOptions = {}) {
     new GuardAllowlist(store),
     (msg) => broadcasts.push(msg),
     auth,
-    undefined,
+    new McpConnections(store),
     openaiAuth,
   );
   const pushes: {
@@ -358,4 +364,35 @@ test('a cross-provider setModel is refused once the session has run', async () =
   );
   // Refused means unchanged, not partially applied.
   assert.equal(h.sessions.get('s1')?.model, 'gpt-5.6-terra');
+});
+
+test("the user's MCP connections ride a codex push, in codex's own shape", async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness({
+    connections: [
+      { id: 'c1', name: 'local', transport: 'stdio', command: 'npx', args: ['-y', 's'], enabled: true },
+    ],
+  });
+
+  h.sessions.prompt('s1', 'list the files');
+  await settle();
+
+  const push = h.pushes[0]!;
+  // codex's `config.toml` shape, not the SDK's: no `type` discriminator.
+  assert.deepEqual(push.options.mcpServers, { local: { command: 'npx', args: ['-y', 's'] } });
+});
+
+test('a codex push with no connections carries no MCP keys at all', async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+
+  h.sessions.prompt('s1', 'list the files');
+  await settle();
+
+  const push = h.pushes[0]!;
+  // An empty table would still be a config write plus a reload on every push.
+  assert.ok(!('mcpServers' in push.options));
+  assert.ok(!('mcpEnv' in push.options));
 });

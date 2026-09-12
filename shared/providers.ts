@@ -71,6 +71,12 @@ const ANTHROPIC: ProviderCapabilities = {
  *
  * `cost` is the exception — false because codex genuinely reports tokens and
  * never a price, so it stays false on a subscription login.
+ *
+ * `mcpConnections` is on, but covers a narrower set of connections than the
+ * Claude path: codex expresses a stdio server fully, an HTTP server whose only
+ * credential is a bearer token, and nothing else. A connection it cannot
+ * express is reported to the user rather than dropped — see
+ * `McpConnections.codexServerConfigs`.
  */
 const OPENAI: ProviderCapabilities = {
   streaming: true,
@@ -81,7 +87,7 @@ const OPENAI: ProviderCapabilities = {
   contextWindow: true,
   rewind: true,
   linesTools: false,
-  mcpConnections: false,
+  mcpConnections: true,
   workflows: false,
   cost: false,
 };

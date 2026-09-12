@@ -77,6 +77,75 @@ function serverConfig(
 }
 
 /**
+ * The environment variable a codex-hosted connection reads its bearer token from.
+ *
+ * Codex takes an HTTP server's credential as the *name* of an environment
+ * variable (`bearer_token_env_var`), never as a literal in `config.toml` — which
+ * is a better trust boundary than the Claude path's inline `headers`, and the
+ * reason the token still never lands on disk. The name is derived from the
+ * connection id, not its display name, so renaming a connection cannot orphan a
+ * variable the app-server was spawned with.
+ */
+export function codexBearerEnvVar(id: string): string {
+  return `LINES_MCP_BEARER_${id.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()}`;
+}
+
+/** Why a connection the user enabled cannot be handed to codex. */
+export type CodexMcpSkip = 'headers-unsupported' | 'sse-unsupported';
+
+export interface CodexMcpConfig {
+  /** `mcp_servers` in codex's `config.toml` shape — the whole table, verbatim. */
+  servers: Record<string, unknown>;
+  /** Bearer tokens, keyed by the env var name codex was told to read. */
+  env: Record<string, string>;
+  /** Enabled connections deliberately left out, so the UI can say why. */
+  skipped: { name: string; reason: CodexMcpSkip }[];
+}
+
+/**
+ * One connection in codex's `config.toml` shape.
+ *
+ * The shape is the CLI's own, confirmed against `codex mcp add` on 0.154.0
+ * rather than taken from docs: stdio servers carry `command`/`args`/`env`, and
+ * streamable-HTTP servers carry `url`/`bearer_token_env_var`. There is no
+ * `type` discriminator and no `timeout` — codex infers the transport from which
+ * keys are present, so emitting a stray key makes it reject the whole table.
+ */
+function codexServerConfig(
+  connection: McpConnection,
+  headers: Record<string, string> | undefined,
+): { config: Record<string, unknown> } | { skip: CodexMcpSkip } {
+  if (connection.transport === 'stdio') {
+    return {
+      config: {
+        command: connection.command,
+        ...(connection.args?.length ? { args: connection.args } : {}),
+        ...(connection.env && Object.keys(connection.env).length ? { env: connection.env } : {}),
+      },
+    };
+  }
+  // Legacy SSE is not streamable HTTP. Codex 0.154's `url` server speaks the
+  // latter only, so pointing it at an SSE endpoint fails at handshake with a
+  // message about the initialize response — worse than declining it here.
+  if (connection.transport === 'sse') return { skip: 'sse-unsupported' };
+  const names = Object.keys(headers ?? {});
+  const bearer = names.find((name) => name.toLowerCase() === 'authorization');
+  // Codex models an HTTP server's credential as a bearer token and nothing else.
+  // A connection carrying any other header (an `X-Api-Key`, a tenant id) cannot
+  // be expressed, and shipping it without them would connect as the wrong
+  // principal or not at all.
+  if (names.some((name) => name.toLowerCase() !== 'authorization')) {
+    return { skip: 'headers-unsupported' };
+  }
+  return {
+    config: {
+      url: connection.url,
+      ...(bearer ? { bearer_token_env_var: codexBearerEnvVar(connection.id) } : {}),
+    },
+  };
+}
+
+/**
  * Per-store list of MCP servers the user added, plus the cross-machine review
  * lifecycle: a remote list is *never* applied silently. `reviewRemote` only
  * stages a diff; connections change solely through `add`, `update`, `remove`
@@ -135,6 +204,38 @@ export class McpConnections {
       if (config) out[connection.name] = config;
     }
     return out;
+  }
+
+
+  /**
+   * Every enabled connection in codex's `config.toml` shape, plus the bearer
+   * tokens the app-server child must be spawned with.
+   *
+   * The codex twin of `serverConfigs()`, and the only other method whose output
+   * holds a credential. Two things make it a translation rather than a rename:
+   * codex takes a token by env-var *name*, and it supports a narrower set of
+   * connections than the Claude path does — see `codexServerConfig`. Anything it
+   * cannot express is reported in `skipped` rather than dropped silently.
+   */
+  codexServerConfigs(): CodexMcpConfig {
+    const servers: Record<string, unknown> = {};
+    const env: Record<string, string> = {};
+    const skipped: { name: string; reason: CodexMcpSkip }[] = [];
+    for (const connection of this.connections) {
+      if (!connection.enabled) continue;
+      const headers = this.secrets[connection.id];
+      const result = codexServerConfig(connection, headers);
+      if ('skip' in result) {
+        skipped.push({ name: connection.name, reason: result.skip });
+        continue;
+      }
+      servers[connection.name] = result.config;
+      const bearer = Object.entries(headers ?? {}).find(
+        ([name]) => name.toLowerCase() === 'authorization',
+      );
+      if (bearer) env[codexBearerEnvVar(connection.id)] = bearer[1];
+    }
+    return { servers, env, skipped };
   }
 
   /** Header names this machine actually holds a value for, so the UI can say what is missing. */
