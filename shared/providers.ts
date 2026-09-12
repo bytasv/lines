@@ -12,9 +12,9 @@
  * keeps working when a third provider arrives, or when codex gains steering;
  * a site that reads `=== 'openai'` does not.
  *
- * The table describes the engine as currently wired, not the vendor's ceiling.
- * Codex can stream and can be steered — Lines has not wired those yet — so the
- * flags move as the integration does, and flipping one is how a capability ships.
+ * The table describes the engine as currently wired, not the vendor's ceiling:
+ * the flags move as the integration does, and flipping one is how a capability
+ * ships.
  */
 import type { ModelProvider } from './types.ts';
 
@@ -62,9 +62,9 @@ const ANTHROPIC: ProviderCapabilities = {
  * through. `planMode` rides with it — plan mode is a read-only sandbox *plus* a
  * gate, and the gate is what was missing.
  *
- * Everything still false is a transport capability Lines has not wired rather
- * than one codex lacks. The app-server can be steered, fork a thread, compact and
- * report occupancy; each flag flips as its plumbing lands.
+ * `linesTools` is the one still false, and it is a capability Lines has not wired
+ * rather than one codex lacks: the workflow tools are hosted in-process for the
+ * Claude SDK, and codex can only reach them through a real MCP server.
  *
  * `cost` is the exception — false because codex genuinely reports tokens and
  * never a price, so it stays false on a subscription login.

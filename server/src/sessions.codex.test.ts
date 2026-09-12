@@ -140,10 +140,11 @@ test('an OpenAI model pushes with engine codex and never reads the Claude token'
   assert.equal(push.engine, 'codex');
   // Thread options, not SDK query options.
   assert.equal(push.options.model, 'gpt-5.6-terra');
-  // Lines is the gate: codex checks before it acts, and the request lands in the
-  // bridge's own permission path.
-  assert.equal(push.options.approvalPolicy, 'untrusted');
-  assert.equal(push.options.sandboxMode, 'workspace-write');
+  // Codex escalates rather than asking about everything, and in 'default' the
+  // sandbox is read-only — so a write is what raises a card, and an observation
+  // is not. Same set of things Claude prompts about.
+  assert.equal(push.options.approvalPolicy, 'on-request');
+  assert.equal(push.options.sandboxMode, 'read-only');
   assert.equal(push.options.codexPath, FAKE_CODEX);
   assert.match(String(push.options.codexHome), /codex$/);
   // The prompt is flattened: `codex exec` takes text, not content blocks.
@@ -181,10 +182,12 @@ test('bypassPermissions reaches danger-full-access, now that Lines is the gate',
   assert.equal(h.pushes[0]!.options.approvalPolicy, 'never');
 });
 
-test('every gated mode asks codex to check before it acts', async () => {
-  // `untrusted` is what makes Lines the gate: the request lands in
-  // handleCanUseTool, where the auto-guard silently approves the safe calls. Any
-  // other policy would let codex decide for itself when to ask.
+test('every gated mode has codex escalate rather than ask about everything', async () => {
+  // `untrusted` used to be set here on the theory that the auto-guard would
+  // silently approve the safe calls. It cannot: `isSafeReadOnly` gates on
+  // Read/Glob/Grep and every codex command arrives as `Bash`, so the result was a
+  // permission card for every `cat`. What reaches the card now is what the
+  // sandbox refuses.
   process.env.LINES_CODEX_PATH = FAKE_CODEX;
   await refreshCodex();
   for (const mode of ['default', 'auto', 'acceptEdits', 'plan'] as const) {
@@ -192,8 +195,27 @@ test('every gated mode asks codex to check before it acts', async () => {
     h.sessions.setPermissionMode('s1', mode);
     h.sessions.prompt('s1', 'go');
     await settle();
-    assert.equal(h.pushes[0]!.options.approvalPolicy, 'untrusted', mode);
+    assert.equal(h.pushes[0]!.options.approvalPolicy, 'on-request', mode);
   }
+});
+
+test('only acceptEdits hands codex the workspace up front', async () => {
+  // The sandbox is what makes an edit ask in 'default': codex has to escalate to
+  // write, and that escalation is the permission card. Granting workspace-write
+  // in 'default' would let it edit files without one.
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const sandboxFor = async (mode: 'default' | 'auto' | 'acceptEdits' | 'plan') => {
+    const h = harness();
+    h.sessions.setPermissionMode('s1', mode);
+    h.sessions.prompt('s1', 'go');
+    await settle();
+    return h.pushes[0]!.options.sandboxMode;
+  };
+  assert.equal(await sandboxFor('default'), 'read-only');
+  assert.equal(await sandboxFor('auto'), 'read-only');
+  assert.equal(await sandboxFor('plan'), 'read-only');
+  assert.equal(await sandboxFor('acceptEdits'), 'workspace-write');
 });
 
 test('no OpenAI account is refused with the Connect message, and no Claude authStatus', async () => {

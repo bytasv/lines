@@ -32,7 +32,7 @@ const CodexPushOptions = z.object({
   workingDirectory: z.string(),
   additionalDirectories: z.array(z.string()).optional(),
   sandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']),
-  approvalPolicy: z.enum(['never', 'on-request', 'on-failure', 'untrusted']),
+  approvalPolicy: z.enum(['never', 'on-request', 'untrusted']),
   /** Appended to the thread's instructions — how the global "compress responses"
    *  setting reaches a codex session. */
   developerInstructions: z.string().optional(),

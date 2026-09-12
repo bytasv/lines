@@ -125,23 +125,39 @@ function sdkPermissionMode(mode: PermissionMode): string {
 function codexSandboxMode(mode: PermissionMode): 'read-only' | 'workspace-write' | 'danger-full-access' {
   if (mode === 'plan') return 'read-only';
   if (mode === 'bypassPermissions') return 'danger-full-access';
-  return 'workspace-write';
+  // 'default' is read-only *by sandbox*, which is what makes an edit need an
+  // approval rather than a card after the fact: codex must escalate to write, and
+  // the escalation is the permission card. 'acceptEdits' is the mode that granted
+  // the workspace up front, so it is the one that gets workspace-write.
+  if (mode === 'acceptEdits') return 'workspace-write';
+  return 'read-only';
 }
 
 /**
  * How eagerly codex should ask before acting.
  *
- * `untrusted` — ask about everything — is the right setting for every mode where
- * Lines wants to decide, which is all of them except bypass. It is not as noisy
- * as it sounds: the request lands in `handleCanUseTool`, where the auto-guard
- * silently approves the safe calls and the allowlist covers the ones the user has
- * already blessed. Only what would have prompted on Claude prompts here.
+ * `on-request` — codex asks when it needs to escalate — rather than `untrusted`,
+ * which asks about every command. `untrusted` was chosen on the theory that the
+ * auto-guard would silently approve the safe calls, and that theory was wrong:
+ * `isSafeReadOnly` recognises `Read`/`Glob`/`Grep`, and every codex command
+ * arrives as `Bash`, so nothing was ever auto-approved. A codex session raised a
+ * card for every `cat`, `rg` and `sed`.
+ *
+ * Measured, not assumed: the same "cat package.json" prompt run through the Claude
+ * SDK calls `canUseTool` zero times — the Claude CLI classifies a read-only Bash
+ * command itself and never routes it to us. `on-request` is codex's equivalent of
+ * that, so the two providers now ask about the same things.
+ *
+ * What still reaches the permission card is what the sandbox cannot satisfy: in
+ * 'default' the sandbox is read-only, so every write escalates. The guard, the
+ * allowlist and the always-ask tools are unchanged — they simply stop seeing
+ * observations that were never going to prompt on Claude either.
  *
  * `never` under bypass matches what bypass means on the Claude side: the bridge's
  * own handlers still see the call, and the always-ask tools still stop.
  */
-function codexApprovalPolicy(mode: PermissionMode): 'untrusted' | 'never' {
-  return mode === 'bypassPermissions' ? 'never' : 'untrusted';
+function codexApprovalPolicy(mode: PermissionMode): 'on-request' | 'never' {
+  return mode === 'bypassPermissions' ? 'never' : 'on-request';
 }
 
 /** Which engine a session's model runs on. Derived from the model, never stored:
@@ -4201,12 +4217,16 @@ export class SessionManager {
   private async warmQuery(sessionId: string): Promise<McpServerStatusInfo[] | { error: string }> {
     const meta = this.sessions.get(sessionId);
     if (!meta) return { error: 'That session no longer exists.' };
-    // The user's MCP connections are handed to the Claude CLI through its query
-    // options; codex is configured through its own `CODEX_HOME`, which Lines does
-    // not seed in this cut. Warming a Claude query for a codex session would spawn
-    // a CLI child that session never uses.
+    // Connections do reach a codex session (they are written into its CODEX_HOME),
+    // but their *status* is read off a live Claude query, and warming one for a
+    // codex session would spawn a CLI child that session never uses. So this is a
+    // missing reading, not a missing feature, and it says so.
     if (isCodexSession(meta)) {
-      return { error: 'MCP connections do not apply to sessions on an OpenAI model yet.' };
+      return {
+        error:
+          'Connection status is not available for a session on an OpenAI model yet — the ' +
+          'connections themselves do apply.',
+      };
     }
     // Checked before the token for the same reason pushTurn checks it there: a
     // missing or too-old binary cannot be fixed by retrying.
