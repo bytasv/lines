@@ -240,6 +240,7 @@ export function WorkflowEditor({
                                 <StepCard
                                   step={step}
                                   index={i}
+                                  previousModel={i > 0 ? draft.steps[i - 1]?.model : undefined}
                                   availableOutputs={draft.steps
                                     .slice(0, i)
                                     .map((s) => s.outputName?.trim())

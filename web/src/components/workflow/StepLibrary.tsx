@@ -388,9 +388,10 @@ export function StepLibrary() {
                 <Select
                   w={168}
                   comboboxProps={modelComboboxProps}
-                  // Claude only, for the reason StepCard's picker is — a step model
-                  // reaches a live session through setModel.
-                  data={modelSelectData(models, draft.model, { providers: ['anthropic'] })}
+                  // Any provider. A library step has no predecessor to cross, so
+                  // the fresh-start rule is applied where it is knowable: on the
+                  // step's position in a workflow, in StepCard.
+                  data={modelSelectData(models, draft.model)}
                   renderOption={renderModelOption}
                   value={draft.model}
                   disabled={readOnly}

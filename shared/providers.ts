@@ -37,8 +37,6 @@ export interface ProviderCapabilities {
   linesTools: boolean;
   /** The user's MCP connections apply to the session. */
   mcpConnections: boolean;
-  /** Workflow steps may run on this provider. */
-  workflows: boolean;
   /** Turns report a USD cost, not just tokens. */
   cost: boolean;
 }
@@ -53,7 +51,6 @@ const ANTHROPIC: ProviderCapabilities = {
   rewind: true,
   linesTools: true,
   mcpConnections: true,
-  workflows: true,
   cost: true,
 };
 
@@ -72,6 +69,11 @@ const ANTHROPIC: ProviderCapabilities = {
  * `cost` is the exception — false because codex genuinely reports tokens and
  * never a price, so it stays false on a subscription login.
  *
+ * Workflow steps run on either provider, with one rule the Claude-only era never
+ * needed: a step that changes provider cannot inherit the previous step's
+ * conversation — see `providerSwitchNeedsFreshStart`. That is a property of the
+ * *pair* of steps, not of a provider, so it is a function rather than a flag here.
+ *
  * `mcpConnections` is on, but covers a narrower set of connections than the
  * Claude path: codex expresses a stdio server fully, an HTTP server whose only
  * credential is a bearer token, and nothing else. A connection it cannot
@@ -88,7 +90,6 @@ const OPENAI: ProviderCapabilities = {
   rewind: true,
   linesTools: false,
   mcpConnections: true,
-  workflows: false,
   cost: false,
 };
 
@@ -110,4 +111,21 @@ export function capabilitiesForModel(
   providerOf: (id: string) => ModelProvider,
 ): ProviderCapabilities {
   return capabilitiesFor(providerOf(modelId));
+}
+
+/**
+ * Does moving from one provider to another have to start a fresh conversation?
+ *
+ * Always, and it is not a policy choice: nothing carries context between a
+ * `claudeSessionId` and a `codexThreadId`. A step that changed provider while
+ * inheriting the previous step's conversation would hand the new model a
+ * transcript it has never seen and cannot read — so the conversation is dropped
+ * and the step starts from the hand-off text instead.
+ *
+ * One function rather than an `a !== b` at each site, because the workflow
+ * editor, the workflow runner and the step validator all have to agree on the
+ * answer, and a rule spelt out three times is a rule that drifts.
+ */
+export function providerSwitchNeedsFreshStart(from: ModelProvider, to: ModelProvider): boolean {
+  return from !== to;
 }

@@ -32,6 +32,7 @@ import {
 } from '@tabler/icons-react';
 import type { DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import type { PermissionMode, ModelOption, StepContent, StepDef } from '@lines/shared';
+import { providerForModel, providerSwitchNeedsFreshStart } from '@lines/shared';
 import type { DraftStep, StepErrors } from './useWorkflowDraft';
 import {
   PERMISSION_MODES,
@@ -205,6 +206,7 @@ function VersionHistoryPopover({
 export function StepCard({
   step,
   index,
+  previousModel,
   collapsed,
   errors,
   readOnly,
@@ -227,6 +229,9 @@ export function StepCard({
 }: {
   step: DraftStep;
   index: number;
+  /** The model the step before this one runs on; undefined for step 0, whose
+   *  predecessor is the session itself and is not known until the run. */
+  previousModel?: string;
   /** Output names published by earlier steps — offered as {outputs.<name>} tokens. */
   availableOutputs: string[];
   collapsed: boolean;
@@ -251,6 +256,13 @@ export function StepCard({
 }) {
   const isRef = !!step.ref;
   const contentReadOnly = readOnly || isRef;
+  // Changing provider between steps drops the conversation — nothing carries
+  // context from a Claude session to a codex thread. So a crossing step is a
+  // fresh start whether or not the user asked for one, and saying so here is
+  // what stops that being a surprise at run time.
+  const crossesProvider =
+    previousModel !== undefined &&
+    providerSwitchNeedsFreshStart(providerForModel(previousModel), providerForModel(step.model));
   const modeLabel = permissionModeLabel(step.permissionMode);
   const modelLabel = models.find((m) => m.id === step.model)?.label ?? step.model;
   const modelKnown = models.some((m) => m.id === step.model);
@@ -401,16 +413,28 @@ export function StepCard({
               <Select
                 w={168}
                 comboboxProps={modelComboboxProps}
-                // Claude only: a step's stored model is applied with setModel on the
-                // live session, which would flip a running workflow onto a provider
-                // that holds none of its conversation. The server refuses it too.
-                data={modelSelectData(models, step.model, { providers: ['anthropic'] })}
+                data={modelSelectData(models, step.model)}
                 renderOption={renderModelOption}
                 value={step.model}
                 disabled={contentReadOnly}
                 allowDeselect={false}
                 classNames={{ input: styles.fieldInput }}
-                onChange={(v) => v && onPatch({ model: v })}
+                // Picking a model that changes provider turns Fresh start on in the
+                // same patch. The alternative — letting it save and refusing at run
+                // time — is the same outcome discovered several minutes later.
+                onChange={(v) =>
+                  v &&
+                  onPatch({
+                    model: v,
+                    ...(previousModel !== undefined &&
+                    providerSwitchNeedsFreshStart(
+                      providerForModel(previousModel),
+                      providerForModel(v),
+                    )
+                      ? { freshStart: true }
+                      : {}),
+                  })
+                }
               />
             </div>
             <div className={styles.control}>
@@ -436,9 +460,15 @@ export function StepCard({
             />
             <Switch
               label="Fresh start"
-              description="Run in a clean session; seed with prior step's output + diff, not the full conversation"
-              checked={step.freshStart}
-              disabled={contentReadOnly}
+              description={
+                crossesProvider
+                  ? 'Required: this step changes provider, and a conversation cannot move between providers'
+                  : "Run in a clean session; seed with prior step's output + diff, not the full conversation"
+              }
+              checked={step.freshStart || crossesProvider}
+              // Locked rather than merely defaulted: switching it back off would
+              // save a step the runner then refuses to start.
+              disabled={contentReadOnly || crossesProvider}
               onChange={(e) => onPatch({ freshStart: e.currentTarget.checked })}
             />
             <div className={styles.control}>

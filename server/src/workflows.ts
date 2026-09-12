@@ -13,11 +13,11 @@ import type {
   WorkflowState,
 } from '@lines/shared';
 import {
-  capabilitiesFor,
   isSessionActive,
   isSessionInterruptible,
   isStepRef,
   providerForModel,
+  providerSwitchNeedsFreshStart,
   rootsForCwd,
 } from '@lines/shared';
 import type { Store } from './store.ts';
@@ -901,21 +901,46 @@ export class WorkflowEngine {
       return;
     }
 
-    // Workflows do not run on an OpenAI model in this cut. Caught here rather
-    // than at setModel below because a step is the *stored* model's caller: a
-    // refusal there would leave the step running on whatever the session happened
-    // to be on, which is worse than not starting it. Parked as a pre-run failure —
-    // the existing mechanism — so Approve can still skip past it.
-    if (!capabilitiesFor(providerForModel(content.model)).workflows) {
+    // A step may run on any provider, but it cannot *carry* a conversation across
+    // one: nothing links a claudeSessionId to a codexThreadId, so the new model
+    // would inherit a transcript it cannot read. A crossing step therefore has to
+    // be a fresh start.
+    //
+    // Checked here rather than at setModel below because a step is the *stored*
+    // model's caller: a refusal there would leave the step running on whatever the
+    // session happened to be on, which is worse than not starting it. The editor
+    // forces freshStart on a crossing step, so reaching this is an older workflow
+    // or a hand-edited one — parked as a pre-run failure, the existing mechanism,
+    // so Approve can still skip past it.
+    const stepProvider = providerForModel(content.model);
+    // Keyed on the conversation the session actually holds, not on `meta.model`:
+    // attaching a workflow writes step 0's model onto the session up front, so by
+    // the time the step runs `meta.model` already agrees with it and would report
+    // no crossing at all. The resume pointers are the thing that cannot move.
+    const strandedConversation =
+      stepProvider === 'openai' ? meta.claudeSessionId : meta.codexThreadId;
+    const crossesProvider =
+      Boolean(strandedConversation) &&
+      providerSwitchNeedsFreshStart(
+        stepProvider === 'openai' ? 'anthropic' : 'openai',
+        stepProvider,
+      );
+    if (crossesProvider && !content.freshStart) {
       meta.workflow.stepStatuses[i] = 'waiting-approval';
       meta.workflow.stepFailure = 'pre-run';
       this.sessions.failTurn(
         sessionId,
-        `Step ${i + 1} is set to run on ${content.model}, an OpenAI model. Workflow steps run ` +
-          'on Claude models only — edit the step to pick one, then Retry.',
+        `Step ${i + 1} runs on ${content.model}, a different provider from the step before it, ` +
+          'but is set to continue that step’s conversation. A conversation cannot move between ' +
+          'providers — turn on “Fresh start” for this step, then Retry.',
       );
       return;
     }
+    // Drop the old provider's conversation *before* setModel, which refuses a
+    // cross-provider switch on a session that still has one. The hand-off text
+    // below is read from the transcript and the step's stored output, so it
+    // survives this.
+    if (crossesProvider) this.sessions.resetClaudeSession(sessionId);
 
     meta.workflow.stepStatuses[i] = 'running';
     meta.workflow.stepPermissionMode = content.permissionMode;

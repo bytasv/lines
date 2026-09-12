@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { StepContent, StepDef, WorkflowDef, WorkflowStep } from '@lines/shared';
-import { DEFAULT_MODEL, isStepRef } from '@lines/shared';
+import {
+  DEFAULT_MODEL,
+  isStepRef,
+  providerForModel,
+  providerSwitchNeedsFreshStart,
+} from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { send } from '../../ws';
@@ -603,9 +608,29 @@ function stepsKey(steps: WorkflowStep[]): string {
   );
 }
 
+/**
+ * Does the step at `i` run on a different provider from the one before it?
+ *
+ * Only meaningful from step 1 on: step 0's predecessor is the session it is
+ * attached to, which the editor cannot know. The runner checks that case
+ * against the session's actual conversation.
+ *
+ * A `ref` step's model lives in the shared definition, not the draft, so a
+ * crossing into or out of one is left to the runner rather than guessed at here.
+ */
+function crossesProviderAt(steps: DraftStep[], i: number): boolean {
+  const previous = steps[i - 1];
+  const step = steps[i];
+  if (!previous || !step || previous.ref || step.ref) return false;
+  return providerSwitchNeedsFreshStart(
+    providerForModel(previous.model),
+    providerForModel(step.model),
+  );
+}
+
 /** Serialize a draft to the wire shape: refs → StepRef, inline → StepContent. */
 function toWire(d: DraftWorkflow): WorkflowDef {
-  const steps: WorkflowStep[] = d.steps.map((s) =>
+  const steps: WorkflowStep[] = d.steps.map((s, i) =>
     s.ref
       ? { kind: 'ref', stepId: s.ref.stepId, ownerId: s.ref.ownerId, ownerName: s.ref.ownerName, version: s.ref.version }
       : {
@@ -614,7 +639,11 @@ function toWire(d: DraftWorkflow): WorkflowDef {
           model: s.model,
           permissionMode: s.permissionMode,
           autoAdvance: s.autoAdvance,
-          freshStart: s.freshStart,
+          // Forced on for a step that changes provider, matching what the card
+          // shows. The card locks the switch, but a workflow saved before this
+          // rule existed can still hold `false` here, and saving it back
+          // unchanged would store a step the runner refuses to start.
+          freshStart: s.freshStart || crossesProviderAt(d.steps, i),
           outputName: s.outputName ?? '',
         },
   );
