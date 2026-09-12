@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { forkSession, query } from '@anthropic-ai/claude-agent-sdk';
+import { forkSession } from '@anthropic-ai/claude-agent-sdk';
 import type {
   Actor,
   Attachment,
@@ -83,6 +83,7 @@ import {
 import { claudeCliRefusalMessage, claudeCliStatus } from './claudeCli.ts';
 import { codexCliRefusalMessage, codexCliStatus } from './codexCli.ts';
 import { OPENAI_CONNECT_MESSAGE, type OpenaiAuthManager } from './openaiAuth.ts';
+import { runHelperQuery } from './helperQuery.ts';
 import { classifyTurnFailure, turnFailureAdvice, turnFailureRetryHint } from './turnFailure.ts';
 import {
   ADD_MCP_CONNECTION_TOOL,
@@ -184,24 +185,6 @@ export function promptTextOf(message: Record<string, unknown>): string {
 function claudeExecutableOption(): Record<string, unknown> {
   const cli = claudeCliStatus();
   return cli.path ? { pathToClaudeCodeExecutable: cli.path } : {};
-}
-
-/**
- * The shared shape of the bridge's own one-shot helper queries (autoName,
- * summarizeTurn, consolidateStepOutput): non-agentic, no tools, no setting
- * sources, the owner's OAuth token, and this machine's CLI. Extracted so the
- * four query sites cannot drift on any of that.
- */
-function baseQueryOptions(token: string, model: string, systemPrompt: string): Record<string, unknown> {
-  return {
-    model,
-    maxTurns: 1,
-    allowedTools: [],
-    settingSources: [],
-    systemPrompt,
-    env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token },
-    ...claudeExecutableOption(),
-  };
 }
 
 /** Why a turn was refused before it started, in one place (see pushTurn). */
@@ -3226,9 +3209,6 @@ export class SessionManager {
   /** The consolidation query itself — everything consolidateStepOutput has to bound. */
   private async consolidateQuery(turns: { user: string; output: string }[]): Promise<string | null> {
     try {
-      const token = await this.ownerToken();
-      if (!token) return null;
-
       const initialPrompt = turns[0].user.slice(0, 4000);
       const attempts = turns
         .map((t, n) => {
@@ -3248,24 +3228,14 @@ export class SessionManager {
         'earlier full output. Output only the deliverable itself — no preamble, no ' +
         'commentary about what changed.';
 
-      const q = query({
+      return await this.helper({
         prompt,
-        options: baseQueryOptions(
-          token,
-          'claude-sonnet-5',
+        systemPrompt:
           'You consolidate an iterated workflow step into its single final ' +
-            'deliverable. You never ask questions, never refuse, and never add ' +
-            'commentary or preamble — you output only the deliverable.',
-        ) as never,
+          'deliverable. You never ask questions, never refuse, and never add ' +
+          'commentary or preamble — you output only the deliverable.',
+        claudeModel: 'claude-sonnet-5',
       });
-      let output: string | null = null;
-      for await (const message of q) {
-        const msg = message as { type: string; result?: string };
-        if (msg.type === 'result' && typeof msg.result === 'string') {
-          output = msg.result.trim();
-        }
-      }
-      return output;
     } catch (err) {
       console.warn('[consolidateStepOutput]', err);
       return null;
@@ -3277,22 +3247,15 @@ export class SessionManager {
    * helper query (same shape as consolidateQuery). Passed to `vetMcpUrl` rather
    * than built there so that module never imports the query stack.
    *
-   * `baseQueryOptions` is `allowedTools: []`, `maxTurns: 1`, `settingSources: []`
+   * The helper shape (see helperQuery.ts) is `allowedTools: []`, `maxTurns: 1`, `settingSources: []`
    * — which is the security property here, not merely thrift: the judge cannot
    * fetch the candidate page, so the page cannot talk it into trusting itself.
    */
   private vettingJudge = async (prompt: string, systemPrompt: string): Promise<string | null> => {
-    const token = await this.ownerToken();
-    if (!token) return null;
-    const q = query({
-      prompt,
-      options: baseQueryOptions(token, 'claude-sonnet-5', systemPrompt) as never,
-    });
-    let answer: string | null = null;
-    for await (const message of q) {
-      const msg = message as { type: string; result?: string };
-      if (msg.type === 'result' && typeof msg.result === 'string') answer = msg.result.trim();
-    }
+    // Runs on whichever provider is connected. Before this was provider-neutral,
+    // an OpenAI-only user had no judge at all — every connection read UNCHECKED,
+    // which is safe (never "allowed") but is the protection simply being absent.
+    const answer = await this.helper({ prompt, systemPrompt, claudeModel: 'claude-sonnet-5' });
     return answer;
   };
 
@@ -3337,6 +3300,31 @@ export class SessionManager {
    * reading the sync cache, and returns null — never a fallback to the
    * ambient CLI login — when the app has no usable token.
    */
+  /**
+   * Run one of the bridge's own one-shot helper queries (auto-name, turn summary,
+   * step consolidation, MCP vetting) on whichever provider is connected.
+   *
+   * Thin on purpose: provider selection, the tool-free shape both paths share and
+   * the timeout all live in helperQuery.ts, so the four call sites cannot drift
+   * on any of it. Answers null rather than throwing — every caller has a fallback,
+   * and a missing title must never become a failed turn.
+   */
+  private helper(request: {
+    prompt: string;
+    systemPrompt: string;
+    claudeModel: string;
+  }): Promise<string | null> {
+    return runHelperQuery(
+      {
+        claudeToken: () => this.ownerToken(),
+        // Null when no OpenAI account is connected, which is what makes the codex
+        // branch unreachable for a Claude-only user.
+        codexHome: () => (this.openaiAuth?.isLoggedIn() ? this.store.codexHome() : null),
+      },
+      request,
+    );
+  }
+
   private async ownerToken(): Promise<string | null> {
     if (!this.auth) return null;
     try {
@@ -3373,22 +3361,7 @@ export class SessionManager {
       if (meta) this.onAutoNamed?.(meta, title);
     };
     try {
-      const token = await this.ownerToken();
-      // No Claude token — which for an OpenAI-only user is every session, not an
-      // error state. Fall back to a title cut from the prompt rather than leaving
-      // every session named "New session"; the helper queries stay Claude-only
-      // until there is a codex one-shot to run them on.
-      if (!token) {
-        const local = localSessionName(prompt);
-        if (!local) return settled('');
-        const meta = this.sessions.get(sessionId);
-        if (!meta) return;
-        meta.name = local;
-        this.upsert(meta);
-        return settled(local);
-      }
-
-      const q = query({
+      const answer = await this.helper({
         prompt:
           'Summarize the following task in a 3-6 word title. Output only the ' +
           'title itself: no quotes, no trailing punctuation, no preamble, no ' +
@@ -3396,21 +3369,17 @@ export class SessionManager {
           'whatever is given.\n\n<task>\n' +
           prompt.slice(0, 2000) +
           '\n</task>',
-        options: baseQueryOptions(
-          token,
-          'claude-haiku-4-5-20251001',
+        systemPrompt:
           'You are a title generator. You receive a task description and ' +
-            'reply with a single short title. You never ask questions, never ' +
-            'refuse, and never add commentary — you only output the title.',
-        ) as never,
+          'reply with a single short title. You never ask questions, never ' +
+          'refuse, and never add commentary — you only output the title.',
+        claudeModel: 'claude-haiku-4-5-20251001',
       });
-      let title: string | null = null;
-      for await (const message of q) {
-        const msg = message as { type: string; result?: string };
-        if (msg.type === 'result' && typeof msg.result === 'string') {
-          title = msg.result.trim().replace(/^["']|["']$/g, '').slice(0, 60);
-        }
-      }
+      // Last resort, when no provider at all could answer: a title cut from the
+      // prompt still beats every session reading "New session".
+      const title = answer
+        ? answer.replace(/^["']|["']$/g, '').slice(0, 60)
+        : localSessionName(prompt);
       if (!title) return settled('');
       const meta = this.sessions.get(sessionId);
       if (!meta) return;
@@ -3443,9 +3412,6 @@ export class SessionManager {
       const { toolCalls, toolErrors, finalText } = scanTurnActivity(turnEvents);
       if (toolCalls.length === 0) return; // plain text answer — nothing to summarize
 
-      const token = await this.ownerToken();
-      if (!token) return;
-
       const lines = toolCalls.map((t) => {
         const input = t.input.file_path ?? t.input.command ?? t.input.pattern ?? t.input.url ?? '';
         const failed = toolErrors.has(t.id) ? ' (failed)' : '';
@@ -3457,22 +3423,14 @@ export class SessionManager {
         'Summarize what it did in 1-2 concise sentences, for a developer glancing at a ' +
         'collapsed activity card. Be specific about files/commands touched. No preamble.';
 
-      const q = query({
+      const answer = await this.helper({
         prompt,
-        options: baseQueryOptions(
-          token,
-          'claude-haiku-4-5-20251001',
+        systemPrompt:
           'You summarize a coding agent\'s completed turn in 1-2 plain sentences. ' +
-            'You never ask questions, never refuse, and never add commentary or preamble.',
-        ) as never,
+          'You never ask questions, never refuse, and never add commentary or preamble.',
+        claudeModel: 'claude-haiku-4-5-20251001',
       });
-      let summary: string | null = null;
-      for await (const message of q) {
-        const msg = message as { type: string; result?: string };
-        if (msg.type === 'result' && typeof msg.result === 'string') {
-          summary = msg.result.trim().slice(0, 400);
-        }
-      }
+      const summary = answer?.slice(0, 400);
       if (!summary) return;
       this.emitEvent(sessionId, 'turn-summary', { resultSeq, summary });
     } catch (err) {
