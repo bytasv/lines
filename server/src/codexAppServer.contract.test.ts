@@ -64,6 +64,10 @@ const SERVER_REQUESTS = [
   'item/permissions/requestApproval',
   'mcpServer/elicitation/request',
   'item/tool/call',
+  // Codex asking the user a question mid-turn, routed into the AskUserQuestion
+  // card. Marked EXPERIMENTAL in the generated types, so it is the likeliest of
+  // these to be renamed.
+  'item/tool/requestUserInput',
 ];
 
 test('every method Lines calls still exists in the generated protocol', () => {
@@ -167,4 +171,17 @@ test('the MCP status fields the connection dot is derived from still exist', () 
   for (const state of ['connected', 'authenticationRequired', 'failed', 'disabled']) {
     assert.ok(states.includes(`"${state}"`), `McpServerConnectionStatus lost ${state}`);
   }
+});
+
+test('the question shape the AskUserQuestion card is built from still holds', () => {
+  // A rename here does not fail a turn: the question is refused, the model
+  // continues on its own assumptions, and the user never learns it was asked.
+  const question = read('v2/ToolRequestUserInputQuestion.ts');
+  for (const field of ['id', 'header', 'question', 'options']) {
+    assert.ok(question.includes(field), `ToolRequestUserInputQuestion lost ${field}`);
+  }
+  assert.ok(read('v2/ToolRequestUserInputOption.ts').includes('label'), 'an option lost its label');
+  // The reply is keyed by question id, each carrying a list of chosen labels.
+  assert.ok(read('v2/ToolRequestUserInputAnswer.ts').includes('answers'), 'the answer lost its list');
+  assert.ok(read('v2/ToolRequestUserInputResponse.ts').includes('answers'), 'the response lost its map');
 });

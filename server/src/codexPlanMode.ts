@@ -34,6 +34,17 @@ const MODE_TAG = 'collaboration_mode';
  * with it": Lines takes the final assistant message as the plan (codex emits no
  * dedicated plan item — verified), so anything that splits the plan across
  * several messages would lose all but the last.
+ *
+ * Ambiguity is surfaced *in the plan* rather than through a question tool, and
+ * that is a constraint rather than a preference. Codex has a `request_user_input`
+ * tool and it is not served to the model on 0.154 — asked directly, in both modes,
+ * with `default_mode_request_user_input` enabled, it answers "I'm unable to access
+ * the input prompt tool in the current mode". An earlier draft of this prompt told
+ * it to use that tool, which produced exactly that dead end instead of a plan.
+ *
+ * Lines maps the tool anyway (see `askUserQuestionInput` in workerCodex.ts), so
+ * the moment codex serves it the card works. Until then the plan states the
+ * question and the assumption it made, which is strictly better than stalling.
  */
 export const CODEX_PLAN_MODE_PROMPT = `<${MODE_TAG}>Plan</${MODE_TAG}>
 
@@ -45,7 +56,7 @@ In Plan mode you investigate and propose; you do not change anything. Read files
 
 End your turn with the plan itself, as your final message: a short statement of the approach followed by concrete ordered steps, naming the files each step touches. Do not begin implementing it, and do not ask whether to proceed — the user is shown the plan and approves or rejects it outside this conversation.
 
-If the request is too vague to plan, say what you would need to know instead of guessing.`;
+If something genuinely blocks a good plan — an ambiguity where two readings lead to different work — say so in the plan: state the question, state which reading you planned for, and keep going. Do not stall waiting for an answer, and do not go looking for a tool to ask with. Raise only what you cannot settle by reading the code, and never ask whether to proceed.`;
 
 /**
  * Sent once the user approves a plan, to leave plan mode.

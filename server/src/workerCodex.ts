@@ -98,7 +98,13 @@ export interface CodexSink {
     sessionId: string,
     toolName: string,
     input: Record<string, unknown>,
-  ) => Promise<{ behavior?: string; message?: string; updatedInput?: Record<string, unknown> }>;
+  ) => Promise<{
+    behavior?: string;
+    message?: string;
+    updatedInput?: Record<string, unknown>;
+    /** Question text -> chosen label(s), for `AskUserQuestion` only. */
+    answers?: Record<string, string>;
+  }>;
 }
 
 let sink: CodexSink | null = null;
@@ -258,9 +264,73 @@ function approvalRequest(
           ...(params.grantRoot ? { grantRoot: params.grantRoot } : {}),
         },
       };
+    // Codex asking the user a question mid-turn — its `request_user_input` tool.
+    // Mapped onto `AskUserQuestion` because that is the *same question*, and the
+    // card, the multi-select UI, the "Other" free-text option and the recovery
+    // path for an unanswered one are all already built around that name.
+    case 'item/tool/requestUserInput':
+      return { toolName: 'AskUserQuestion', input: askUserQuestionInput(params) };
     default:
       return null;
   }
+}
+
+/** One codex question as the card's shape. Codex's `options` may be null, which
+ *  means a free-text answer and no choices to render. Exported for its test:
+ *  the mapping is the feature, and it is pure. */
+export function askUserQuestionInput(params: Record<string, unknown>): Record<string, unknown> {
+  const questions = Array.isArray(params.questions) ? params.questions : [];
+  return {
+    questions: questions.map((raw) => {
+      const q = raw as {
+        header?: unknown;
+        question?: unknown;
+        options?: unknown;
+      };
+      const options = Array.isArray(q.options) ? q.options : [];
+      return {
+        header: String(q.header ?? ''),
+        question: String(q.question ?? ''),
+        options: options.map((opt) => {
+          const o = opt as { label?: unknown; description?: unknown };
+          return {
+            label: String(o.label ?? ''),
+            ...(o.description ? { description: String(o.description) } : {}),
+          };
+        }),
+      };
+    }),
+  };
+}
+
+/**
+ * The user's answers in the shape codex expects: keyed by *question id*, each a
+ * list of chosen labels.
+ *
+ * Lines keys its answers by question **text**, because that is what the Claude
+ * tool returns and what the transcript records. The ids never leave this module,
+ * so the match is made here against the questions codex just sent.
+ *
+ * An unmatched or unanswered question is simply absent rather than sent empty:
+ * codex's own guidance is "If `request_user_input` returns no answers, continue
+ * with best judgment", so silence is a defined outcome and a fabricated empty
+ * answer is not.
+ */
+export function userInputResponse(
+  params: Record<string, unknown>,
+  answers: Record<string, string> | undefined,
+): { answers: Record<string, { answers: string[] }> } {
+  const out: Record<string, { answers: string[] }> = {};
+  const questions = Array.isArray(params.questions) ? params.questions : [];
+  for (const raw of questions) {
+    const q = raw as { id?: unknown; question?: unknown };
+    const id = typeof q.id === 'string' ? q.id : '';
+    const answer = answers?.[String(q.question ?? '')];
+    if (!id || !answer) continue;
+    // The card joins a multi-select with ', '; codex wants them apart again.
+    out[id] = { answers: answer.split(', ').map((a) => a.trim()).filter(Boolean) };
+  }
+  return { answers: out };
 }
 
 /**
@@ -279,9 +349,19 @@ function handleServerRequest(id: unknown, method: string, params: Record<string,
     server?.respondError(id, `Lines does not support '${method}' yet.`);
     return;
   }
+  // A question is not an approval: codex wants the answers back, not a verdict,
+  // so this one request answers in its own shape.
+  const asking = method === 'item/tool/requestUserInput';
   void sink
     ?.approve(sessionId, request.toolName, request.input)
     .then((answer) => {
+      if (asking) {
+        // Dismissing the card answers nothing, which is a defined outcome —
+        // codex's own guidance is to continue with best judgment when
+        // `request_user_input` returns no answers.
+        server?.respond(id, userInputResponse(params, answer?.behavior === 'allow' ? answer.answers : undefined));
+        return;
+      }
       // `acceptForSession` is deliberately never sent. Lines keeps its own
       // allowlist — the user's "always allow" is recorded there, and asking codex
       // to remember a second copy would split one decision across two stores that
@@ -291,8 +371,11 @@ function handleServerRequest(id: unknown, method: string, params: Record<string,
     })
     .catch((err) => {
       console.warn('[worker] codex approval failed:', String(err));
+      // Answering nothing lets the turn continue; declining a *question* would be
+      // answering one it did not ask.
+      if (asking) server?.respond(id, { answers: {} });
       // Decline, never accept: a bridge that could not answer has not approved.
-      server?.respond(id, { decision: 'decline' });
+      else server?.respond(id, { decision: 'decline' });
     });
 }
 

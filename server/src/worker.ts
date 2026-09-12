@@ -490,6 +490,8 @@ function handleBridgeMessage(msg: BridgeToWorker) {
         rpcCall(sessionId, 'canUseTool', { toolName, input }) as Promise<{
           behavior?: string;
           message?: string;
+          /** Question text -> chosen label(s); set only for `AskUserQuestion`. */
+          answers?: Record<string, string>;
         }>,
     });
     return;

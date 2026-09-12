@@ -43,6 +43,15 @@ test('the plan prompt demands the plan as the final message', () => {
   assert.match(CODEX_PLAN_MODE_PROMPT, /final message/);
 });
 
+test('the plan prompt does not send the model after a tool it cannot reach', () => {
+  // Measured on 0.154, both modes, with default_mode_request_user_input enabled:
+  // "I'm unable to access the input prompt tool in the current mode." An earlier
+  // draft named the tool and got that dead end instead of a plan.
+  assert.doesNotMatch(CODEX_PLAN_MODE_PROMPT, /request_user_input/);
+  // Ambiguity still has to surface — in the plan, with the assumption named.
+  assert.match(CODEX_PLAN_MODE_PROMPT, /state which reading you planned for/);
+});
+
 test('the plan prompt does not ask the user whether to proceed', () => {
   // The approve/deny card is the question. A model that also asks in prose gets a
   // card and a question that contradict each other.

@@ -416,6 +416,9 @@ interface PermissionAnswer {
   allow: boolean;
   updatedInput?: Record<string, unknown>;
   denyMessage?: string;
+  /** `AskUserQuestion` only: question text -> chosen label(s), as the user picked
+   *  them. Needed by the codex path, which has to key them back to question ids. */
+  answers?: Record<string, string>;
 }
 
 /** Tools whose write to a plan file can carry a plan-mode deliverable. */
@@ -963,7 +966,14 @@ function normalizeMcpStatuses(raw: unknown): McpServerStatusInfo[] {
 
 /** SDK PermissionResult shape returned to the worker's canUseTool rpc. */
 type PermissionResult =
-  | { behavior: 'allow'; updatedInput?: Record<string, unknown> }
+  | {
+      behavior: 'allow';
+      updatedInput?: Record<string, unknown>;
+      /** `AskUserQuestion` only: question text -> chosen label(s). The Claude SDK
+       *  reads the answers off `updatedInput`; codex wants them separately, keyed
+       *  by its own question ids, so they travel beside it rather than inside. */
+      answers?: Record<string, string>;
+    }
   | { behavior: 'deny'; message: string };
 
 interface LiveState {
@@ -4033,7 +4043,7 @@ export class SessionManager {
       return;
     }
 
-    resolve({ allow, updatedInput, denyMessage });
+    resolve({ allow, updatedInput, denyMessage, answers });
 
     // Approving a plan exits plan mode inside the CLI — mirror that in our
     // session meta so the composer's mode control stays truthful.
@@ -5384,7 +5394,14 @@ export class SessionManager {
         !resolved?.resolvedBy || resolved.resolvedBy === 'user' || resolved.resolvedBy === 'plan-reply';
       if (resolved && (humanAnswered || !ALWAYS_ASK_TOOLS.has(toolName))) {
         return resolved.resolution === 'allow'
-          ? { behavior: 'allow', updatedInput: resolved.updatedInput ?? input }
+          ? {
+              behavior: 'allow',
+              updatedInput: resolved.updatedInput ?? input,
+              // Without this a codex question re-delivered after a bridge restart
+              // would be answered 'allow' with no answers in it, which reads to the
+              // model as the user declining to answer.
+              ...(resolved.answers ? { answers: resolved.answers } : {}),
+            }
           : {
               behavior: 'deny',
               message: resolved.denyMessage || 'User denied this tool call in the UI.',
@@ -5471,7 +5488,7 @@ export class SessionManager {
     );
     const finalInput = answer.updatedInput ?? input;
     return answer.allow
-      ? { behavior: 'allow', updatedInput: finalInput }
+      ? { behavior: 'allow', updatedInput: finalInput, ...(answer.answers ? { answers: answer.answers } : {}) }
       : { behavior: 'deny', message: answer.denyMessage || 'User denied this tool call in the UI.' };
   }
 
