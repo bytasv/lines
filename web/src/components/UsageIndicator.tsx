@@ -89,9 +89,6 @@ interface PlanUsageChipProps {
   globalRows: [string, ModelSpend][];
   sessionRows: [string, ModelSpend][];
   models: ModelOption[];
-  /** Show the brand mark. Only when a second provider is connected: with one chip
-   *  on screen there is nothing to disambiguate it from. */
-  withMark: boolean;
 }
 
 /**
@@ -111,7 +108,6 @@ function PlanUsageChip({
   globalRows,
   sessionRows,
   models,
-  withMark,
 }: PlanUsageChipProps) {
   const worst = usage.windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), usage.windows[0]);
   // Anthropic's session window by name where it exists, else simply the first —
@@ -135,7 +131,11 @@ function PlanUsageChip({
                 </Text>
               }
             />
-            {withMark && <ProviderBadge provider={provider} />}
+            {/* Always, not only when a second provider is connected: which vendor a
+                number belongs to is part of reading it, and a mark that comes and
+                goes teaches nothing. It also keeps the chip's appearance stable
+                when the other provider is connected or disconnected. */}
+            <ProviderBadge provider={provider} />
           </Box>
         </UnstyledButton>
       </HoverCard.Target>
@@ -242,8 +242,6 @@ export function UsageIndicator() {
   const globalSpend = mergeSpend(Object.values(sessions).map((s) => s.costByModel));
   const selected = selectedSessionId ? sessions[selectedSessionId] : undefined;
   const sessionSpend = selected?.costByModel ?? {};
-  // Marks are for telling two chips apart, so one chip wears none.
-  const withMark = showClaude && showOpenai;
 
   return (
     <Group gap={2} wrap="nowrap">
@@ -257,7 +255,6 @@ export function UsageIndicator() {
           globalRows={rowsFor(globalSpend, 'anthropic')}
           sessionRows={rowsFor(sessionSpend, 'anthropic')}
           models={models}
-          withMark={withMark}
         />
       )}
       {showOpenai && openaiUsage && (
@@ -270,7 +267,6 @@ export function UsageIndicator() {
           globalRows={rowsFor(globalSpend, 'openai')}
           sessionRows={rowsFor(sessionSpend, 'openai')}
           models={models}
-          withMark={withMark}
         />
       )}
     </Group>

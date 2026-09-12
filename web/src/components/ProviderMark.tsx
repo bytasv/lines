@@ -18,8 +18,10 @@ const ANTHROPIC_CLAY = 'var(--cds-clay, #d97757)';
  * with the theme. Rendering either one in the other's treatment would be wrong
  * rather than merely inconsistent.
  *
- * Used only to disambiguate: a chip shows its mark when more than one provider is
- * connected, and nothing at all when there is only one to be confused with.
+ * Every plan-usage chip wears one, always. Which vendor a number belongs to is
+ * part of reading it, and a mark that appeared only when a second provider was
+ * connected taught nothing and moved the chip's appearance around underneath the
+ * user.
  */
 export function ProviderMark({ provider, size = 10 }: { provider: ModelProvider; size?: number }) {
   if (provider === 'openai') {
