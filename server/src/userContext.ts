@@ -327,6 +327,9 @@ export function buildUserContext(
   sessions.attachWorker(worker);
 
   const workflows = new WorkflowEngine(store, sessions, broadcast, userId);
+  // Codex only: a plan step's turn is already settled when its card is answered,
+  // so the advance has to be asked for rather than fall out of the settle.
+  sessions.onPlanApproved = (sessionId, stepIndex) => workflows.approve(sessionId, stepIndex);
   const recipes = new RecipeEngine(store, broadcast, userId);
 
   // Backfill: sessions that predate project keys (and any checkout opened while

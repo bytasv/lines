@@ -71,6 +71,7 @@ import {
   type RepoBaseline,
 } from './git.ts';
 import { COMPRESS_RESPONSES_PROMPT } from './caveman.ts';
+import { codexModePrompt } from './codexPlanMode.ts';
 import {
   ALWAYS_ASK_TOOLS,
   allowEntryFor,
@@ -848,11 +849,6 @@ export function lastHumanGesture(events: TranscriptEvent[]): string | null {
 const MCP_STATUSES = new Set(['connected', 'failed', 'needs-auth', 'pending', 'disabled']);
 
 /**
- * SDK `McpServerStatus[]` — from `system:init` or from `Query.mcpServerStatus()`
- * — narrowed to what the UI renders. Unknown statuses become 'pending' rather
- * than being dropped: the row exists, we just don't recognise its state.
- */
-/**
  * Codex's `McpServerStatus` rows as Lines' own shape.
  *
  * The two enums line up but do not match: codex distinguishes `notStarted` from
@@ -872,6 +868,22 @@ const MCP_STATUSES = new Set(['connected', 'failed', 'needs-auth', 'pending', 'd
  * calls it connected: from the user's side, a connection offering no tools has
  * not worked, and `toolsError` is the sentence explaining why.
  */
+export /** The plain text of an assistant message, or '' for anything else. Used to keep
+ *  the last thing a codex turn said, which in plan mode is the plan. */
+function assistantTextOf(message: { type?: string; message?: unknown }): string {
+  if (message.type !== 'assistant') return '';
+  const content = (message.message as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((b): b is { type: 'text'; text: string } => {
+      const block = b as { type?: unknown; text?: unknown };
+      return block.type === 'text' && typeof block.text === 'string';
+    })
+    .map((b) => b.text)
+    .join('\n\n')
+    .trim();
+}
+
 export function normalizeCodexMcpStatuses(raw: unknown): McpServerStatusInfo[] {
   if (!Array.isArray(raw)) return [];
   const out: McpServerStatusInfo[] = [];
@@ -912,6 +924,11 @@ export function normalizeCodexMcpStatuses(raw: unknown): McpServerStatusInfo[] {
   return out;
 }
 
+/**
+ * SDK `McpServerStatus[]` — from `system:init` or from `Query.mcpServerStatus()`
+ * — narrowed to what the UI renders. Unknown statuses become 'pending' rather
+ * than being dropped: the row exists, we just don't recognise its state.
+ */
 function normalizeMcpStatuses(raw: unknown): McpServerStatusInfo[] {
   if (!Array.isArray(raw)) return [];
   const out: McpServerStatusInfo[] = [];
@@ -1007,6 +1024,14 @@ interface LiveState {
   /** Codex's id for the turn in flight, stamped onto its settling `result` so a
    *  later rewind can name the turn to fork at. */
   codexTurnId?: string;
+  /**
+   * Assistant text seen so far in the codex turn in flight.
+   *
+   * Plan mode reads this at the settle: codex emits no dedicated plan item
+   * (verified against the live app-server), so the plan *is* the turn's final
+   * assistant message, and the card has to be built from it.
+   */
+  codexLastText?: string;
 }
 
 /**
@@ -1088,6 +1113,16 @@ export class SessionManager {
    * userContext.ts, exactly as `GuardAllowlist.onChange` is.
    */
   onAutoNamed?: (session: SessionMeta, title: string) => void;
+
+  /**
+   * A codex plan step's plan was approved, so its workflow should advance.
+   *
+   * A callback for the same reason `onAutoNamed` is one: the advance belongs to
+   * `WorkflowEngine`, which this manager is only a part of. Needed only on the
+   * codex path — a Claude plan step advances off its turn settling, and a codex
+   * turn has already settled by the time the card is answered.
+   */
+  onPlanApproved?: (sessionId: string, stepIndex: number) => void;
 
   constructor(
     private store: Store,
@@ -1708,6 +1743,12 @@ export class SessionManager {
     // an OpenAI session while claiming to apply to every session.
     const compress = this.store.loadSettings()?.compressResponses !== false;
     const codexMcp = this.mcp?.codexServerConfigs();
+    // Plan mode is carried by developer instructions on codex, not by a request
+    // parameter: there is no `ExitPlanMode` tool to force, and codex's own product
+    // switches mode exactly this way. The read-only sandbox above is the
+    // enforcement; this is the intent.
+    const modePrompt = codexModePrompt(meta.permissionMode === 'plan');
+    const instructions = [modePrompt, ...(compress ? [COMPRESS_RESPONSES_PROMPT] : [])].join('\n\n');
     // Codex spawns MCP servers as child processes, so Lines' own tools reach it
     // as a real stdio server rather than the in-process one the Claude SDK hosts.
     const codexServers = mergeMcpServers(
@@ -1723,7 +1764,7 @@ export class SessionManager {
       additionalDirectories: this.rootsFor(meta).filter((root) => root !== meta.cwd),
       sandboxMode: codexSandboxMode(meta.permissionMode),
       approvalPolicy: codexApprovalPolicy(meta.permissionMode),
-      ...(compress ? { developerInstructions: COMPRESS_RESPONSES_PROMPT } : {}),
+      developerInstructions: instructions,
       // The one place OpenAI credentials enter a turn: as a directory, not a
       // token. See openaiAuth.ts for why Lines holds no copy of the tokens.
       codexHome: this.store.codexHome(),
@@ -4858,11 +4899,97 @@ export class SessionManager {
     // stopped instead of as a completed turn nobody asked to end.
     if (interrupted) this.interrupting.add(sessionId);
     for (const message of messages) {
+      // Remembered before the event is handled, so a settle in the same batch
+      // still sees the text that arrived with it.
+      const text = assistantTextOf(message);
+      if (text) live.codexLastText = text;
       this.handleWorkerEvent(sessionId, message as SdkShapedMessage);
     }
-    // One turn's usage belongs to that turn: clearing at the settle stops a turn
-    // that reports nothing from re-billing its predecessor's tokens.
-    if (messages.some((m) => m.type === 'result')) live.codexUsage = undefined;
+    if (messages.some((m) => m.type === 'result')) {
+      // One turn's usage belongs to that turn: clearing at the settle stops a turn
+      // that reports nothing from re-billing its predecessor's tokens.
+      live.codexUsage = undefined;
+      const plan = live.codexLastText;
+      live.codexLastText = undefined;
+      // A plan-mode turn ends by presenting a plan, and on codex the turn is over
+      // by the time it lands — there is no blocked tool call to hang a card on, so
+      // the card is raised here and its answer drives the *next* turn.
+      if (meta?.permissionMode === 'plan' && plan?.trim() && !this.interrupting.has(sessionId)) {
+        void this.reviewCodexPlan(sessionId, plan);
+      }
+    }
+  }
+
+  /**
+   * Put a codex plan in front of the user, and act on their answer.
+   *
+   * The card itself is the ordinary `ExitPlanMode` permission card, deliberately:
+   * everything downstream of it — the plan renderer, per-passage comments, "Refine
+   * with comments", the composer's typed reply meaning "keep planning" — keys off
+   * that tool name and none of it was ever Claude-specific.
+   *
+   * What differs is only what an answer *does*. On Claude the answer unblocks a
+   * waiting tool call; here the turn has already settled, so approve and deny both
+   * become the next prompt. That is the same shape `recoverOrphanedPermission`
+   * uses for a Claude session whose CLI died mid-approval — the difference is that
+   * for codex it is the normal path rather than a recovery.
+   */
+  private async reviewCodexPlan(sessionId: string, plan: string): Promise<void> {
+    const requestId = randomUUID();
+    const answer = await this.askPermission(sessionId, requestId, 'ExitPlanMode', { plan });
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    const wf = meta.workflow;
+    const stepRunning = !!wf && wf.stepStatuses[wf.stepIndex] === 'running';
+    if (answer.allow) {
+      // A configured plan step is finished by its plan, not continued past it —
+      // the workflow's next step is what implements. On the Claude path the CLI's
+      // own turn-end drives this; codex's turn is already over, so the advance is
+      // asked for directly.
+      if (stepRunning && (wf!.stepPermissionMode ?? 'plan') === 'plan') {
+        this.onPlanApproved?.(sessionId, wf!.stepIndex);
+        return;
+      }
+      // Leaving plan mode is done here rather than left to `resolvePermission`,
+      // which does it only when it can match the request back to an ExitPlanMode
+      // card in the transcript. On this path the consequence of that lookup
+      // missing is not a stale mode pill — it is an infinite loop, because the
+      // next turn would plan again and raise another card. Idempotent: if
+      // `resolvePermission` already switched it, this is a no-op.
+      if (meta.permissionMode === 'plan') {
+        meta.permissionMode = stepRunning ? (wf!.stepPermissionMode ?? 'default') : 'default';
+        this.upsert(meta);
+      }
+      this.prompt(sessionId, 'I approved your plan. Proceed with the implementation now.', 'user');
+      return;
+    }
+    // A bare reject — Escape, or the card's Deny with nothing typed — starts no
+    // turn at all. This is where the first cut looped: every deny sent a prompt,
+    // every plan-mode turn ends by presenting a plan, and every plan raises a
+    // card, so dismissing one produced the next one forever. On Claude a deny
+    // answers a tool call that is *already blocked* and the same turn carries on;
+    // there is no equivalent here, and manufacturing a turn is not it.
+    const feedback = answer.denyMessage?.trim();
+    if (!feedback) {
+      // The turn is long settled, so nothing else will take the session out of
+      // the state the card put it in.
+      this.setStatus(sessionId, 'idle');
+      return;
+    }
+    // Refining is the user asking for another plan, so a card at the end of it is
+    // correct — that is the same loop Claude's "Refine with comments" runs, and it
+    // ends when they approve or walk away.
+    if (meta.permissionMode !== 'plan') {
+      // They left plan mode while the card was open. Their comments are still
+      // worth sending, but not an instruction to keep planning.
+      this.prompt(sessionId, feedback, stepRunning ? 'workflow' : 'user');
+      return;
+    }
+    this.prompt(
+      sessionId,
+      `I have not approved that plan. ${feedback}\n\nStay in Plan mode and revise the plan.`,
+      stepRunning ? 'workflow' : 'user',
+    );
   }
 
   /**

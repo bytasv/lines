@@ -456,3 +456,144 @@ test('a user connection cannot take over the lines namespace on a codex push', a
   assert.notEqual(servers.lines.command, 'imposter');
   assert.equal(servers.lines.command, process.execPath);
 });
+
+test('a plan-mode codex push carries the Plan collaboration-mode block', async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.setPermissionMode('s1', 'plan');
+  h.sessions.prompt('s1', 'add a flag');
+  await settle();
+
+  const instructions = String(h.pushes[0]!.options.developerInstructions ?? '');
+  // Codex has no ExitPlanMode tool; the mode tag is the whole mechanism.
+  assert.match(instructions, /<collaboration_mode>Plan<\/collaboration_mode>/);
+  assert.equal(h.pushes[0]!.options.sandboxMode, 'read-only');
+});
+
+test('an ordinary codex push stands plan mode down again', async () => {
+  // Not merely "omits the plan block": a mode stays active until different
+  // instructions replace it, so a session that planned once would otherwise
+  // refuse to edit for the rest of its life.
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.prompt('s1', 'go');
+  await settle();
+
+  assert.match(
+    String(h.pushes[0]!.options.developerInstructions ?? ''),
+    /<collaboration_mode>Default<\/collaboration_mode>/,
+  );
+});
+
+test("a plan-mode turn's final message is raised as a plan to approve", async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.setPermissionMode('s1', 'plan');
+  h.sessions.prompt('s1', 'add a flag');
+  await settle();
+
+  h.sessions.handleWorkerEvent('s1', notify('item/completed', {
+      item: { type: 'agentMessage', id: 'i1', text: '1. Read the parser\n2. Add the flag' },
+    }));
+  h.sessions.handleWorkerEvent('s1', notify('turn/completed', { turn: { id: 't1', status: 'completed' } }));
+  await settle();
+
+  // The ordinary ExitPlanMode card, because everything downstream of it — the
+  // plan renderer, comments, "keep planning" — keys off that tool name.
+  const card = h.broadcasts
+    .filter((m) => m.type === 'event' && m.event.kind === 'permission')
+    .map((m) => (m as { event: { data: { toolName?: string; input?: { plan?: string } } } }).event.data)
+    .find((d) => d.toolName === 'ExitPlanMode');
+  assert.ok(card, 'a plan card was raised');
+  assert.match(String(card!.input?.plan), /Add the flag/);
+});
+
+test('an ordinary codex turn raises no plan card', async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.prompt('s1', 'go');
+  await settle();
+
+  h.sessions.handleWorkerEvent('s1', notify('item/completed', { item: { type: 'agentMessage', id: 'i1', text: 'done' } }));
+  h.sessions.handleWorkerEvent('s1', notify('turn/completed', { turn: { id: 't1', status: 'completed' } }));
+  await settle();
+
+  const cards = h.broadcasts.filter(
+    (m) => m.type === 'event' && m.event.kind === 'permission',
+  );
+  assert.deepEqual(cards, [], 'no card outside plan mode');
+});
+
+/** Run a plan-mode turn to its settle and return the raised plan card's requestId. */
+async function planCard(h: ReturnType<typeof harness>) {
+  h.sessions.setPermissionMode('s1', 'plan');
+  h.sessions.prompt('s1', 'add a flag');
+  await settle();
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('item/completed', { item: { type: 'agentMessage', id: 'i1', text: '1. Do the thing' } }),
+  );
+  h.sessions.handleWorkerEvent('s1', notify('turn/completed', { turn: { id: 't1', status: 'completed' } }));
+  await settle();
+  const card = h.broadcasts
+    .filter((m) => m.type === 'event' && m.event.kind === 'permission')
+    .map((m) => (m as { event: { data: { toolName?: string; requestId?: string } } }).event.data)
+    .find((d) => d.toolName === 'ExitPlanMode');
+  return card!.requestId!;
+}
+
+test('dismissing a plan card starts no turn — the loop that made plan mode unusable', async () => {
+  // Escape denies with no feedback. The first cut prompted anyway, and since every
+  // plan-mode turn ends by presenting a plan, and every plan raises a card,
+  // dismissing one produced the next one forever.
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  const requestId = await planCard(h);
+  const before = h.pushes.length;
+
+  h.sessions.resolvePermission('s1', requestId, false);
+  await settle();
+
+  assert.equal(h.pushes.length, before, 'no turn was started');
+  assert.equal(h.sessions.get('s1')!.status, 'idle', 'and the session is not left parked');
+});
+
+test('rejecting with feedback does send it, and keeps planning', async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  const requestId = await planCard(h);
+  const before = h.pushes.length;
+
+  h.sessions.resolvePermission('s1', requestId, false, undefined, undefined, 'Too vague.');
+  await settle();
+
+  assert.equal(h.pushes.length, before + 1, 'the feedback is a turn');
+  assert.match(String((h.pushes[before]!.message as { text: string }).text), /Too vague\./);
+  assert.equal(h.sessions.get('s1')!.permissionMode, 'plan', 'still planning');
+});
+
+test('approving a plan actually leaves plan mode', async () => {
+  // The other half of the loop: if the mode does not flip, the turn started by the
+  // approval plans again and raises another card.
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  const requestId = await planCard(h);
+
+  h.sessions.resolvePermission('s1', requestId, true);
+  await settle();
+
+  assert.notEqual(h.sessions.get('s1')!.permissionMode, 'plan');
+  const last = h.pushes[h.pushes.length - 1]!;
+  assert.match(
+    String(last.options.developerInstructions ?? ''),
+    /<collaboration_mode>Default<\/collaboration_mode>/,
+    'and the next turn is told the mode changed',
+  );
+});
