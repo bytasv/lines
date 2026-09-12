@@ -50,7 +50,8 @@ import type {
   TranscriptEvent,
   WorkflowMarkerData,
 } from '@lines/shared';
-import { providerForModel, rewindBlock } from '@lines/shared';
+import { rewindBlock } from '@lines/shared';
+import { sessionCaps } from '../lib/capabilities';
 import { useStore } from '../store';
 import { send } from '../ws';
 import {
@@ -327,12 +328,13 @@ function UserBubble({
   // A boolean, for the same reason the block reason is a string: a stable
   // selector result keeps this bubble out of unrelated re-renders.
   const inWorkflow = useStore((s) => s.sessions[sessionId]?.workflow?.started === true);
-  // Rewind forks the Claude CLI conversation; a codex thread has no equivalent
-  // here. Hidden rather than disabled: rewindBlock would report it as "send a
-  // message first", which is both wrong and unfixable by the user.
-  const codex = useStore((s) => {
+  // Hidden rather than disabled where the engine cannot rewind: rewindBlock
+  // would report it as "send a message first", which is both wrong and unfixable
+  // by the user. Asked as a capability, so this comes back on its own when the
+  // engine gains thread forking.
+  const canRewind = useStore((s) => {
     const meta = s.sessions[sessionId];
-    return meta ? providerForModel(meta.model) === 'openai' : false;
+    return meta ? sessionCaps(meta).rewind : true;
   });
   const seq = Number(item.key.slice(1));
 
@@ -469,7 +471,7 @@ function UserBubble({
             {clipboard.copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
           </ActionIcon>
         </Tooltip>
-        {!codex && (
+        {canRewind && (
           <>
             {action(
               'edit',

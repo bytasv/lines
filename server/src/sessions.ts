@@ -35,6 +35,7 @@ import type {
   SessionErrorKind,
   SessionMeta,
   SessionStatus,
+  TokenUsageBreakdown,
   TranscriptEvent,
 } from '@lines/shared';
 import {
@@ -43,10 +44,10 @@ import {
   formatPlanComments,
   isPlanFilePath,
   isSessionActive,
-  isCodexEvent,
+  isCodexNotification,
   isSessionInterruptible,
   KEEP_PLANNING_MESSAGE,
-  normalizeCodexEvent,
+  normalizeCodexNotification,
   providerForModel,
   resolveModelId,
   resultErrorText,
@@ -896,6 +897,15 @@ interface LiveState {
    *  `ask`. Kept as last-known so an idle session shows something rather than
    *  blank. */
   mcpServers?: McpServerStatusInfo[];
+  /**
+   * Last `thread/tokenUsage/updated` for a codex turn.
+   *
+   * Codex reports usage on its own notification, ahead of the turn settling, so
+   * it is held here and folded into the synthesized `result`. Cleared at each
+   * settle so a turn that reports nothing cannot re-bill its predecessor's
+   * tokens. Live-only, like everything else here.
+   */
+  codexUsage?: TokenUsageBreakdown;
 }
 
 /**
@@ -1586,23 +1596,30 @@ export class SessionManager {
    */
   private buildCodexOptions(meta: SessionMeta): Record<string, unknown> {
     const cli = codexCliStatus();
+    // Same global toggle the Claude path reads, and read the same way — fresh on
+    // every push, so a Settings change takes effect on the next turn with nothing
+    // cached on the meta. `developerInstructions` is the app-server's hook for it;
+    // `codex exec` had none, which is why the toggle used to be a silent no-op on
+    // an OpenAI session while claiming to apply to every session.
+    const compress = this.store.loadSettings()?.compressResponses !== false;
     return {
       model: resolveModelId(meta.model),
       workingDirectory: meta.cwd,
       // Without these a multi-root project's other roots are outside the sandbox
       // and every write to them fails.
       additionalDirectories: this.rootsFor(meta).filter((root) => root !== meta.cwd),
-      // Lines allows a non-git root; `codex exec` otherwise refuses to start.
-      skipGitRepoCheck: true,
       sandboxMode: codexSandboxMode(meta.permissionMode),
-      // No per-tool approval callback exists in the Codex SDK, so the only honest
-      // setting is "do not ask" plus a sandbox. See codexSandboxMode.
+      // Lines is not the gate for a codex turn yet: the app-server can ask for
+      // approval, but nothing here answers it. Until that is wired, the only
+      // honest setting is "do not ask" plus a sandbox. See codexSandboxMode.
       approvalPolicy: 'never',
-      networkAccessEnabled: true,
+      ...(compress ? { developerInstructions: COMPRESS_RESPONSES_PROMPT } : {}),
       // The one place OpenAI credentials enter a turn: as a directory, not a
       // token. See openaiAuth.ts for why Lines holds no copy of the tokens.
       codexHome: this.store.codexHome(),
-      ...(cli.path ? { codexPath: cli.path } : {}),
+      // Required, not optional: `pushCodexTurn` refuses the turn when discovery
+      // found nothing, so this is always set by the time a push is built.
+      codexPath: cli.path ?? '',
       ...(meta.codexThreadId ? { threadId: meta.codexThreadId } : {}),
     };
   }
@@ -4308,8 +4325,8 @@ export class SessionManager {
     // the `result` settle pass, `markTurnLive`, the transcript format on disk and
     // the renderer — is keyed to SDK message shapes, and a codex-shaped event
     // would silently no-op all of it. See shared/codex.ts.
-    if (isCodexEvent(msg)) {
-      this.handleCodexEvent(sessionId, msg);
+    if (isCodexNotification(msg)) {
+      this.handleCodexNotification(sessionId, msg.method, msg.params);
       return;
     }
     // Capture the CLI session id for resume-after-restart.
@@ -4598,12 +4615,25 @@ export class SessionManager {
    * synthetic error result, so they get the same classification, banner and Retry
    * as every other failure the SDK never reported itself.
    */
-  private handleCodexEvent(sessionId: string, event: Parameters<typeof normalizeCodexEvent>[0]) {
+  private handleCodexNotification(
+    sessionId: string,
+    method: string,
+    params: Record<string, unknown>,
+  ) {
     const meta = this.sessions.get(sessionId);
-    const { messages, threadId, failure } = normalizeCodexEvent(event, {
-      newId: () => randomUUID(),
-      model: meta ? resolveModelId(meta.model) : '',
-    });
+    const live = this.liveState(sessionId);
+    const { messages, threadId, failure, usage, interrupted } = normalizeCodexNotification(
+      method,
+      params,
+      {
+        newId: () => randomUUID(),
+        model: meta ? resolveModelId(meta.model) : '',
+        lastUsage: live.codexUsage,
+      },
+    );
+    // Usage arrives on its own notification ahead of the settling turn, so it is
+    // remembered here and folded into the `result` when that lands.
+    if (usage) live.codexUsage = usage;
     // The resume pointer, persisted exactly as `claudeSessionId` is.
     if (threadId && meta && meta.codexThreadId !== threadId) {
       meta.codexThreadId = threadId;
@@ -4613,9 +4643,16 @@ export class SessionManager {
       this.failTurn(sessionId, failure);
       return;
     }
+    // A turn the user stopped reports `interrupted` rather than failing. Stamping
+    // the interrupt set here is what makes the settling result below render as
+    // stopped instead of as a completed turn nobody asked to end.
+    if (interrupted) this.interrupting.add(sessionId);
     for (const message of messages) {
       this.handleWorkerEvent(sessionId, message as SdkShapedMessage);
     }
+    // One turn's usage belongs to that turn: clearing at the settle stops a turn
+    // that reports nothing from re-billing its predecessor's tokens.
+    if (messages.some((m) => m.type === 'result')) live.codexUsage = undefined;
   }
 
   /**

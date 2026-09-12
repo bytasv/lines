@@ -18,7 +18,8 @@ import type {
   QueuedPrompt,
   SessionMeta,
 } from '@lines/shared';
-import { providerForModel, rootsForCwd } from '@lines/shared';
+import { rootsForCwd } from '@lines/shared';
+import { sessionCaps } from '../lib/capabilities';
 import { buildExpandedPrompt, mentionKindMeta, uniqueMentions } from '../lib/mentions';
 import { useCan } from '../lib/can';
 import { useIdentityResolver } from '../lib/identity';
@@ -258,9 +259,7 @@ export function QueuedMessages({ session }: { session: SessionMeta }) {
   const queued = session.queued;
   const identify = useIdentityResolver();
   const canPrompt = useCan('prompt');
-  // Derived from the model, like every other provider check — there is no
-  // provider field on the meta.
-  const isCodex = providerForModel(session.model) === 'openai';
+  const caps = sessionCaps(session);
   // Our own machine — the owner may rewrite anything in the queue, which is the
   // whole point of reviewing a guest's prompt before releasing it.
   const isOwnerView = useStore((s) => s.access === null);
@@ -320,11 +319,10 @@ export function QueuedMessages({ session }: { session: SessionMeta }) {
         // a button that silently degraded into an ordinary send would be worse
         // than no button. The two near-miss cases are disabled rather than
         // hidden, so the rule is learnable from the tooltip.
-        // Never for a codex session: `codex exec` is a one-shot, non-interactive
-        // transport with no way to steer a turn that is already running, so the
-        // server has nothing to deliver this into. Hidden, not disabled — there
-        // is no state the user could reach that would enable it.
-        const showSendNow = canPrompt && session.status === 'running' && !isCodex;
+        // Only where the engine can be steered mid-turn. Hidden, not disabled:
+        // with no steering there is no state the user could reach that would
+        // enable it.
+        const showSendNow = canPrompt && session.status === 'running' && caps.interject;
         const sendNowBlocked = item.attachments?.length
           ? // Refused server-side in v1: the staged files would have to be
             // re-read into a multi-block content array mid-turn.

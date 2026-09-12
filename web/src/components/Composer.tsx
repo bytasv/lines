@@ -23,6 +23,7 @@ import {
 } from '@tabler/icons-react';
 import type { ModelProvider, PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
 import { isSessionInterruptible, providerForModel, rootsForCwd } from '@lines/shared';
+import { sessionCaps } from '../lib/capabilities';
 import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
@@ -140,6 +141,9 @@ export function Composer({ session }: { session: SessionMeta }) {
   const openaiConnected = useStore((s) => s.openaiAuth?.loggedIn === true);
   /** This session's provider, derived from its model — there is no stored field. */
   const provider: ModelProvider = providerForModel(session.model);
+  /** What this session's engine can do. Asked as capabilities rather than as
+   *  "is it codex", so a control comes back on its own when the engine gains it. */
+  const caps = sessionCaps(session);
   /**
    * The session has a conversation that a provider switch would leave behind.
    * Nothing carries context between a Claude session and a codex thread, so the
@@ -395,9 +399,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         placeholder={
           session.workflow && !session.workflow.started
             ? 'Describe the task — this kicks off the workflow…'
-            : provider === 'openai'
-              ? 'Message Codex… (↵ to send, ⇧↵ for newline)'
-              : 'Message Claude… (↵ to send, ⇧↵ for newline)'
+            : `Message ${provider === 'openai' ? 'Codex' : 'Claude'}… (↵ to send, ⇧↵ for newline)`
         }
         textareaRef={textareaRef}
         onFocusChange={setComposerFocused}
@@ -415,10 +417,10 @@ export function Composer({ session }: { session: SessionMeta }) {
               gets explained. A span so the tooltip fires over a disabled control. */}
           <Tooltip
             label={
-              provider === 'openai'
-                ? 'Codex sessions run sandboxed and approve their own tool calls. ' +
-                  'Plan mode is read-only, and your MCP connections do not apply here.'
-                : 'How tool calls are approved in this session'
+              caps.approvals
+                ? 'How tool calls are approved in this session'
+                : 'This session runs sandboxed and approves its own tool calls. ' +
+                  'Plan mode is read-only here, and your MCP connections do not apply.'
             }
             withArrow
             openDelay={400}
@@ -426,7 +428,7 @@ export function Composer({ session }: { session: SessionMeta }) {
             <span style={{ display: 'inline-flex' }}>
               <SegmentedControl
                 size="xs"
-                disabled={!canSetMode || provider === 'openai'}
+                disabled={!canSetMode || !caps.approvals}
                 data={PERMISSION_MODE_SEGMENTS}
                 value={session.permissionMode}
                 onChange={(v) =>

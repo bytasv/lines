@@ -3009,6 +3009,13 @@ export { addSpend, mergeSpend, sortedSpend } from './usageByModel.ts';
 export { formatTimestamp } from './formatTime.ts';
 
 /**
+ * Per-provider capability table, re-exported alongside `ModelProvider` so a call
+ * site gets the question and the answer from one import. Safe above the
+ * cycle-sensitive block below: `./providers.ts` imports only a type from here.
+ */
+export * from './providers.ts';
+
+/**
  * Codex event shapes and their normalization into Claude SDK messages,
  * re-exported so callers reach them the same way they reach everything else in
  * this package. Safe above the cycle-sensitive block below: `./codex.ts` imports

@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  CODEX_NOTIFICATION,
   codexToolUseId,
-  isCodexEvent,
-  normalizeCodexEvent,
-  type CodexEvent,
+  isCodexNotification,
+  normalizeCodexNotification,
 } from '@lines/shared';
 
 /** Deterministic ids, so a mapping assertion is about the mapping. */
-function deps() {
+function deps(extra: Record<string, unknown> = {}) {
   let n = 0;
-  return { newId: () => `id${++n}`, model: 'gpt-5.6-terra' };
+  return { newId: () => `id${++n}`, model: 'gpt-5.6-terra', ...extra };
 }
 
 /** The `content` blocks of a normalized assistant message. */
@@ -18,83 +18,145 @@ function blocks(msg: Record<string, unknown>): Record<string, unknown>[] {
   return (msg as unknown as { message: { content: Record<string, unknown>[] } }).message.content;
 }
 
-test('thread.started captures the resume pointer and emits nothing', () => {
-  const out = normalizeCodexEvent({ type: 'thread.started', thread_id: 'th_1' }, deps());
+/** The `event` payload of a normalized stream message. */
+function streamOf(msg: Record<string, unknown>): Record<string, unknown> {
+  return (msg as unknown as { event: Record<string, unknown> }).event;
+}
+
+const run = (method: string, params: Record<string, unknown> = {}, extra = {}) =>
+  normalizeCodexNotification(method, params, deps(extra));
+
+test('thread/started captures the resume pointer and emits nothing', () => {
+  const out = run('thread/started', { thread: { id: 'th_1' } });
   assert.equal(out.threadId, 'th_1');
   assert.deepEqual(out.messages, []);
 });
 
+test('an unknown notification is inert, not an error', () => {
+  // The protocol is experimental and grows; a method we do not read must not
+  // break a turn.
+  assert.deepEqual(run('thread/goal/updated', { threadId: 't' }), { messages: [] });
+});
+
+// --- streaming ------------------------------------------------------------
+// The envelope is what matters: `isDroppable` on the bridge and the supersede
+// rule in the client store both key off kind:'sdk' + type:'stream_event'. A
+// delta in any other shape would be undroppable and pile up client-side.
+
+test('every streamed message wears the droppable stream_event envelope', () => {
+  const cases: [string, Record<string, unknown>][] = [
+    ['turn/started', {}],
+    ['item/started', { item: { type: 'agentMessage', id: 'i1', text: '' } }],
+    ['item/agentMessage/delta', { delta: 'hi' }],
+    ['item/reasoning/textDelta', { delta: 'mm' }],
+  ];
+  for (const [method, params] of cases) {
+    const [msg] = run(method, params).messages;
+    assert.equal(msg?.type, 'stream_event', method);
+  }
+});
+
+test('an agent message delta streams as text, reasoning as thinking', () => {
+  const text = streamOf(run('item/agentMessage/delta', { delta: 'hello' }).messages[0]);
+  assert.equal(text.type, 'content_block_delta');
+  assert.deepEqual(text.delta, { type: 'text_delta', text: 'hello' });
+
+  const thinking = streamOf(run('item/reasoning/textDelta', { delta: 'hmm' }).messages[0]);
+  assert.deepEqual(thinking.delta, { type: 'thinking_delta', thinking: 'hmm' });
+  // The summary variant is the same phase to the user.
+  const summary = streamOf(run('item/reasoning/summaryTextDelta', { delta: 'hmm' }).messages[0]);
+  assert.deepEqual(summary.delta, { type: 'thinking_delta', thinking: 'hmm' });
+});
+
+test('an empty delta produces nothing rather than an empty block', () => {
+  assert.deepEqual(run('item/agentMessage/delta', { delta: '' }).messages, []);
+});
+
+test('a starting item opens the block its live row needs', () => {
+  const started = (item: Record<string, unknown>) =>
+    streamOf(run('item/started', { item }).messages[0]).content_block;
+  assert.deepEqual(started({ type: 'agentMessage', id: 'i', text: '' }), { type: 'text' });
+  assert.deepEqual(started({ type: 'reasoning', id: 'i', summary: [], content: [] }), {
+    type: 'thinking',
+  });
+  assert.deepEqual(started({ type: 'commandExecution', id: 'i', command: 'ls' }), {
+    type: 'tool_use',
+    name: 'Bash',
+  });
+});
+
+// --- durable items --------------------------------------------------------
+
 test('an agent message becomes an assistant text message with a uuid', () => {
-  const out = normalizeCodexEvent(
-    { type: 'item.completed', item: { id: 'i1', type: 'agent_message', text: 'hello' } },
-    deps(),
-  );
-  assert.equal(out.messages.length, 1);
+  const out = run('item/completed', {
+    item: { type: 'agentMessage', id: 'i1', text: 'hello' },
+  });
   const msg = out.messages[0];
   assert.equal(msg.type, 'assistant');
   // The rewind anchor scan keys off this; a message without one is invisible to it.
   assert.equal(typeof msg.uuid, 'string');
   assert.deepEqual(blocks(msg), [{ type: 'text', text: 'hello' }]);
-  // Provenance: nothing from the JSONL is lost by the Claude-shaped envelope.
   assert.equal(msg._engine, 'codex');
-  assert.equal((msg._codex as { id: string }).id, 'i1');
 });
 
-test('reasoning becomes a thinking block, not visible text', () => {
-  const out = normalizeCodexEvent(
-    { type: 'item.completed', item: { id: 'i1', type: 'reasoning', text: 'thinking…' } },
-    deps(),
+test("codex's echo of the user's own prompt is dropped", () => {
+  // Lines already wrote its own 'user' event when the prompt was sent; keeping
+  // this one would double every prompt in the transcript.
+  assert.deepEqual(
+    run('item/completed', { item: { type: 'userMessage', id: 'i', content: [] } }).messages,
+    [],
   );
-  assert.deepEqual(blocks(out.messages[0])[0].type, 'thinking');
+});
+
+test('reasoning prefers the readable summary over the raw trace', () => {
+  const out = run('item/completed', {
+    item: { type: 'reasoning', id: 'i', summary: ['short'], content: ['long raw trace'] },
+  });
+  assert.deepEqual(blocks(out.messages[0]), [
+    { type: 'thinking', thinking: 'short', signature: '' },
+  ]);
+  // With no summary the raw content is better than nothing.
+  const raw = run('item/completed', {
+    item: { type: 'reasoning', id: 'i', summary: [], content: ['long raw trace'] },
+  });
+  assert.match(String(blocks(raw.messages[0])[0].thinking), /long raw trace/);
 });
 
 test('a command execution maps to a paired tool_use and tool_result', () => {
-  const out = normalizeCodexEvent(
-    {
-      type: 'item.completed',
-      item: {
-        id: 'i7',
-        type: 'command_execution',
-        command: 'ls -la',
-        aggregated_output: 'a\nb',
-        exit_code: 0,
-        status: 'completed',
-      },
+  const out = run('item/completed', {
+    item: {
+      type: 'commandExecution',
+      id: 'i7',
+      command: 'ls -la',
+      aggregatedOutput: 'a\nb',
+      exitCode: 0,
+      status: 'completed',
     },
-    deps(),
-  );
-  assert.equal(out.messages.length, 2);
+  });
   const [call, result] = out.messages;
   const use = blocks(call)[0];
-  assert.equal(use.type, 'tool_use');
   assert.equal(use.name, 'Bash');
   assert.deepEqual(use.input, { command: 'ls -la' });
-  // Derived from the codex item id, not minted: this is what pairs the two
-  // messages in the renderer with no shared state.
+  // Derived from the item id, not minted: this is what pairs the two messages in
+  // the renderer with no shared state.
   assert.equal(use.id, codexToolUseId('i7'));
   const block = (result as unknown as { message: { content: Record<string, unknown>[] } }).message
     .content[0];
-  assert.equal(block.type, 'tool_result');
   assert.equal(block.tool_use_id, codexToolUseId('i7'));
-  assert.match(String(block.content), /a\nb/);
   assert.equal(block.is_error, undefined);
 });
 
 test('a non-zero exit code makes the tool result an error', () => {
-  const out = normalizeCodexEvent(
-    {
-      type: 'item.completed',
-      item: {
-        id: 'i8',
-        type: 'command_execution',
-        command: 'false',
-        aggregated_output: '',
-        exit_code: 1,
-        status: 'completed',
-      },
+  const out = run('item/completed', {
+    item: {
+      type: 'commandExecution',
+      id: 'i8',
+      command: 'false',
+      aggregatedOutput: '',
+      exitCode: 1,
+      status: 'completed',
     },
-    deps(),
-  );
+  });
   const block = (out.messages[1] as unknown as { message: { content: Record<string, unknown>[] } })
     .message.content[0];
   assert.equal(block.is_error, true);
@@ -102,102 +164,93 @@ test('a non-zero exit code makes the tool result an error', () => {
 
 test('a file change renders plain, never as an edit tool', () => {
   // Codex reports no before/after, so pairing it into a diff card would promise a
-  // diff that does not exist — and the file-write tool names are what the server's
-  // change attribution scans for.
-  const out = normalizeCodexEvent(
-    {
-      type: 'item.completed',
-      item: {
-        id: 'i9',
-        type: 'file_change',
-        changes: [{ path: '/repo/a.ts', kind: 'update' }],
-        status: 'completed',
-      },
+  // diff that does not exist — and the file-write tool names are what the
+  // server's change attribution scans for.
+  const out = run('item/completed', {
+    item: {
+      type: 'fileChange',
+      id: 'i9',
+      changes: [{ path: '/repo/a.ts', kind: 'update' }],
+      status: 'completed',
     },
-    deps(),
-  );
+  });
   const use = blocks(out.messages[0])[0];
   assert.equal(use.name, 'ApplyPatch');
   assert.ok(!['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(String(use.name)));
 });
 
-test('an mcp tool call keeps its server and tool in the name', () => {
-  const out = normalizeCodexEvent(
-    {
-      type: 'item.completed',
-      item: {
-        id: 'i10',
-        type: 'mcp_tool_call',
-        server: 'linear',
-        tool: 'list_issues',
-        arguments: { team: 'x' },
-        result: 'ok',
-        status: 'completed',
-      },
-    },
-    deps(),
+test('an item with no Claude-shaped home is dropped, not invented', () => {
+  // A made-up tool row would read as work the agent did not do.
+  assert.deepEqual(
+    run('item/completed', { item: { type: 'enteredReviewMode', id: 'i', review: 'x' } }).messages,
+    [],
   );
-  assert.equal(blocks(out.messages[0])[0].name, 'mcp__linear__list_issues');
 });
 
-test('turn.completed settles as a success result whose tokens include reasoning', () => {
-  const out = normalizeCodexEvent(
-    {
-      type: 'turn.completed',
-      usage: {
-        input_tokens: 100,
-        cached_input_tokens: 20,
-        cache_write_input_tokens: 5,
-        output_tokens: 30,
-        reasoning_output_tokens: 7,
-      },
-    },
-    deps(),
+// --- settling -------------------------------------------------------------
+
+test('usage is carried forward and folded into the settling result', () => {
+  const usage = {
+    totalTokens: 137,
+    inputTokens: 100,
+    cachedInputTokens: 20,
+    cacheWriteInputTokens: 5,
+    outputTokens: 30,
+    reasoningOutputTokens: 7,
+  };
+  // Usage arrives on its own notification ahead of the turn settling.
+  const seen = run('thread/tokenUsage/updated', { tokenUsage: { last: usage } });
+  assert.deepEqual(seen.usage, usage);
+  assert.deepEqual(seen.messages, []);
+
+  const out = normalizeCodexNotification(
+    'turn/completed',
+    { turn: { id: 't', status: 'completed', durationMs: 1234 } },
+    deps({ lastUsage: usage }),
   );
   const result = out.messages[0] as unknown as Record<string, unknown> & {
     usage: Record<string, number>;
   };
   assert.equal(result.type, 'result');
-  assert.equal(result.subtype, 'success');
   assert.equal(result.is_error, false);
   assert.equal(result.usage.input_tokens, 100);
-  // Reasoning tokens are billed output; folding them in is what keeps the
-  // session's spend from under-reporting.
+  // Reasoning tokens are billed output; folding them in is what keeps spend from
+  // under-reporting.
   assert.equal(result.usage.output_tokens, 37);
   assert.equal(result.usage.cache_read_input_tokens, 20);
   assert.equal(result.usage.cache_creation_input_tokens, 5);
-  // Codex reports neither, and both are optional downstream.
+  assert.equal(result.duration_ms, 1234);
+  // Codex reports tokens, never a price.
   assert.equal(result.total_cost_usd, undefined);
-  assert.equal(result.duration_ms, undefined);
 });
 
-test('turn.failed and a bare error both carry their message verbatim', () => {
+test('a failed turn carries its message verbatim, not a result', () => {
+  // Failure is a status on turn/completed, not a notification of its own.
+  const out = run('turn/completed', {
+    turn: { id: 't', status: 'failed', error: { message: 'insufficient_quota' } },
+  });
+  assert.equal(out.failure, 'insufficient_quota');
+  assert.deepEqual(out.messages, []);
+});
+
+test('an interrupted turn settles, and is flagged as stopped rather than failed', () => {
+  const out = run('turn/completed', { turn: { id: 't', status: 'interrupted' } });
+  assert.equal(out.interrupted, true);
+  assert.equal(out.messages[0].type, 'result');
+  assert.equal(out.failure, undefined);
+});
+
+test('only the codex envelope routes to the normalizer', () => {
   assert.equal(
-    normalizeCodexEvent({ type: 'turn.failed', error: { message: 'boom' } }, deps()).failure,
-    'boom',
+    isCodexNotification({ type: CODEX_NOTIFICATION, method: 'item/started', params: {} }),
+    true,
   );
-  assert.equal(
-    normalizeCodexEvent({ type: 'error', message: 'stream died' }, deps()).failure,
-    'stream died',
-  );
-});
-
-test('partials produce nothing at all', () => {
-  // Streaming them would need them to be droppable, and only `kind:'sdk'`
-  // stream_event is — undroppable partials would pile up client-side.
-  const item = { id: 'i1', type: 'agent_message', text: 'partial' } as const;
-  for (const type of ['item.started', 'item.updated', 'turn.started'] as const) {
-    const event = (type === 'turn.started' ? { type } : { type, item }) as CodexEvent;
-    assert.deepEqual(normalizeCodexEvent(event, deps()), { messages: [] });
-  }
-});
-
-test('only codex event types route to the normalizer', () => {
-  assert.equal(isCodexEvent({ type: 'item.completed' }), true);
-  assert.equal(isCodexEvent({ type: 'turn.completed' }), true);
-  // SDK message types must never be mistaken for codex events.
+  // SDK message types must never be mistaken for codex notifications — that is
+  // what lets one handleWorkerEvent accept both engines.
   for (const type of ['assistant', 'user', 'result', 'system', 'stream_event']) {
-    assert.equal(isCodexEvent({ type }), false, type);
+    assert.equal(isCodexNotification({ type }), false, type);
   }
-  assert.equal(isCodexEvent(null), false);
+  // A half-built envelope is not one: params is read without a guard downstream.
+  assert.equal(isCodexNotification({ type: CODEX_NOTIFICATION, method: 'x' }), false);
+  assert.equal(isCodexNotification(null), false);
 });

@@ -13,6 +13,7 @@ import type {
   WorkflowState,
 } from '@lines/shared';
 import {
+  capabilitiesFor,
   isSessionActive,
   isSessionInterruptible,
   isStepRef,
@@ -905,7 +906,7 @@ export class WorkflowEngine {
     // refusal there would leave the step running on whatever the session happened
     // to be on, which is worse than not starting it. Parked as a pre-run failure —
     // the existing mechanism — so Approve can still skip past it.
-    if (providerForModel(content.model) === 'openai') {
+    if (!capabilitiesFor(providerForModel(content.model)).workflows) {
       meta.workflow.stepStatuses[i] = 'waiting-approval';
       meta.workflow.stepFailure = 'pre-run';
       this.sessions.failTurn(

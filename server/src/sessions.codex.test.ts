@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { CODEX_NOTIFICATION } from '@lines/shared';
 import type { ServerMessage, SessionMeta } from '@lines/shared';
 import type { AuthManager } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
@@ -100,6 +101,13 @@ function harness(opts: HarnessOptions = {}) {
   return { sessions, store, pushes, broadcasts, claudeTokenReads: () => claudeTokenReads };
 }
 
+/** One app-server notification, in the envelope the worker forwards. */
+const notify = (method: string, params: Record<string, unknown> = {}) => ({
+  type: CODEX_NOTIFICATION,
+  method,
+  params,
+});
+
 /** Let the fire-and-forget pushTurn chain settle (no timers involved). */
 async function settle() {
   for (let i = 0; i < 5; i++) await Promise.resolve();
@@ -125,7 +133,6 @@ test('an OpenAI model pushes with engine codex and never reads the Claude token'
   assert.equal(push.options.model, 'gpt-5.6-terra');
   assert.equal(push.options.approvalPolicy, 'never');
   assert.equal(push.options.sandboxMode, 'workspace-write');
-  assert.equal(push.options.skipGitRepoCheck, true);
   assert.equal(push.options.codexPath, FAKE_CODEX);
   assert.match(String(push.options.codexHome), /codex$/);
   // The prompt is flattened: `codex exec` takes text, not content blocks.
@@ -199,21 +206,31 @@ test('a codex turn settles to done with its tokens accumulated', async () => {
   h.sessions.prompt('s1', 'hello');
   await settle();
 
-  h.sessions.handleWorkerEvent('s1', { type: 'thread.started', thread_id: 'th_1' });
-  h.sessions.handleWorkerEvent('s1', {
-    type: 'item.completed',
-    item: { id: 'i1', type: 'agent_message', text: 'done' },
-  });
-  h.sessions.handleWorkerEvent('s1', {
-    type: 'turn.completed',
-    usage: {
-      input_tokens: 100,
-      cached_input_tokens: 0,
-      cache_write_input_tokens: 0,
-      output_tokens: 30,
-      reasoning_output_tokens: 7,
-    },
-  });
+  h.sessions.handleWorkerEvent('s1', notify('thread/started', { thread: { id: 'th_1' } }));
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('item/completed', { item: { type: 'agentMessage', id: 'i1', text: 'done' } }),
+  );
+  // Usage arrives on its own notification, ahead of the turn settling.
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('thread/tokenUsage/updated', {
+      tokenUsage: {
+        last: {
+          totalTokens: 137,
+          inputTokens: 100,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 30,
+          reasoningOutputTokens: 7,
+        },
+      },
+    }),
+  );
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('turn/completed', { turn: { id: 't1', status: 'completed' } }),
+  );
   await settle();
 
   const settled = h.sessions.get('s1')!;
@@ -250,17 +267,24 @@ test('a stopped codex turn settles as stopped, not as a failure', async () => {
   assert.equal((last?.data as { stopped?: boolean }).stopped, true);
 });
 
-test('turn.failed carries its message into a failed turn', async () => {
+test('a failed turn carries its message into a failed turn', async () => {
   process.env.LINES_CODEX_PATH = FAKE_CODEX;
   await refreshCodex();
   const h = harness();
   h.sessions.prompt('s1', 'hello');
   await settle();
 
-  h.sessions.handleWorkerEvent('s1', {
-    type: 'turn.failed',
-    error: { message: 'insufficient_quota: you exceeded your current quota' },
-  });
+  // Failure is a status on turn/completed, not a notification of its own.
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('turn/completed', {
+      turn: {
+        id: 't1',
+        status: 'failed',
+        error: { message: 'insufficient_quota: you exceeded your current quota' },
+      },
+    }),
+  );
   await settle();
 
   const settled = h.sessions.get('s1')!;

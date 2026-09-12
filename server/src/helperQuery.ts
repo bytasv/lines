@@ -91,9 +91,18 @@ async function runClaudeHelper(
 }
 
 /**
- * The codex equivalent. `codex exec` takes no system prompt, so the instruction
- * is folded into the message — acceptable for a single-turn helper, where there
- * is no later turn for the model to drift across.
+ * The codex equivalent, over `codex exec` rather than the app-server the worker
+ * now uses for sessions.
+ *
+ * Deliberate: a helper is genuinely one-shot and non-interactive, which is
+ * exactly what `exec` is for. Routing it through the app-server would mean
+ * standing up a long-lived child on the *bridge* just to title a session, and
+ * would buy nothing — no streaming to show, no approvals to answer, no turn to
+ * steer.
+ *
+ * `codex exec` takes no system prompt, so the instruction is folded into the
+ * message — acceptable for a single-turn helper, where there is no later turn
+ * for the model to drift across.
  *
  * `read-only` and `approvalPolicy: 'never'` together are what keep this as
  * tool-free as the Claude path: the model may look, never act, and nothing can

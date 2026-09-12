@@ -1,59 +1,74 @@
 /**
- * The worker's Codex half: every `codex exec` child, and nothing else.
+ * The worker's Codex half: the `codex app-server` child, and the threads running
+ * on it.
  *
- * Lives in the worker for the reason the worker exists — a bridge hot-reload
- * must not kill a live turn — and in its own module for the reason workerMcp.ts
- * has one: it holds no domain knowledge. Thread options, the sandbox mapping and
- * the normalization of codex events into SDK shapes are all bridge-side; this
- * file spawns, streams and aborts.
+ * Lives in the worker for the reason the worker exists — a bridge hot-reload must
+ * not kill a live turn — and in its own module for the reason workerMcp.ts has
+ * one: it holds no domain knowledge. Thread options, the sandbox mapping and the
+ * normalization of notifications into SDK shapes are all bridge-side; this file
+ * spawns, routes and aborts.
  *
- * A separate session map from the Claude one, deliberately. worker.ts reaches
- * into that map as `sessions.get(id)?.query.foo(...)`, where the `?.` guards only
- * the lookup — a codex entry there would throw a synchronous TypeError past the
- * attached `.catch()`, inside the one process whose job is to survive.
+ * It forwards notifications **verbatim**, wrapped in `CodexNotificationEnvelope`.
+ * That is deliberate: normalizing here would put the mapping inside the worker's
+ * restart trigger, so changing how a codex tool call renders would kill every
+ * live turn on save.
+ *
+ * A separate session map from the Claude one. worker.ts reaches into that map as
+ * `sessions.get(id)?.query.foo(...)`, where the `?.` guards only the lookup — a
+ * codex session reaching one of those would throw a synchronous TypeError past
+ * the attached `.catch()`, in the one process whose job is to survive.
  */
-import { Codex, type Thread, type ThreadOptions } from '@openai/codex-sdk';
 import { z } from 'zod';
+import { CodexAppServer } from './codexAppServer.ts';
+import { CODEX_NOTIFICATION } from '@lines/shared';
 
 /**
- * What a `push` carries when `engine: 'codex'`. Validated rather than trusted:
- * a mis-shaped push has to fail here, with a message, instead of deep inside the
+ * What a `push` carries when `engine: 'codex'`. Validated rather than trusted: a
+ * mis-shaped push has to fail here, with a message, instead of deep inside the
  * child process.
  */
 const CodexPushOptions = z.object({
   model: z.string().optional(),
   workingDirectory: z.string(),
   additionalDirectories: z.array(z.string()).optional(),
-  skipGitRepoCheck: z.boolean().optional(),
   sandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']),
   approvalPolicy: z.enum(['never', 'on-request', 'on-failure', 'untrusted']),
-  networkAccessEnabled: z.boolean().optional(),
-  /** `$CODEX_HOME` for this app user — where codex reads auth.json and keeps threads. */
+  /** Appended to the thread's instructions — how the global "compress responses"
+   *  setting reaches a codex session. */
+  developerInstructions: z.string().optional(),
+  /** `$CODEX_HOME` for this app user. */
   codexHome: z.string(),
-  /** Discovered `codex` binary. Absent lets the SDK resolve its own, which the
-   *  bridge's refusal check makes unreachable in the real app. */
-  codexPath: z.string().optional(),
-  /** Resume pointer (`codex exec resume <id>`); absent starts a fresh thread. */
+  codexPath: z.string(),
+  /** Resume pointer; absent starts a fresh thread. */
   threadId: z.string().optional(),
 });
 
 export type CodexPushOptions = z.infer<typeof CodexPushOptions>;
 
-/** The prompt shape a codex push carries. No content blocks: `codex exec` takes
- *  text (plus image *paths*, which Lines stages as base64 and so cannot pass). */
 const CodexPushMessage = z.object({ text: z.string() });
 
 interface CodexSessionState {
-  codex: Codex;
-  thread: Thread;
-  abort: AbortController;
-  /** A turn is in flight. Reported in `hello` exactly as the Claude side's is. */
-  busy: boolean;
-  /** Last id seen on `thread.started`, so a bridge restart can repair its pointer. */
+  /** Codex thread this Lines session is bound to; set once `thread/started` lands. */
   threadId?: string;
+  /** Turn currently in flight, for `turn/interrupt`. */
+  turnId?: string;
+  busy: boolean;
 }
 
 const codexSessions = new Map<string, CodexSessionState>();
+/** threadId -> Lines sessionId, so an inbound notification can be routed. */
+const threadOwners = new Map<string, string>();
+
+/** One app-server per `$CODEX_HOME`. Threads multiplex over it. */
+let server: CodexAppServer | null = null;
+let serverHome: string | null = null;
+
+export interface CodexSink {
+  event: (sessionId: string, message: Record<string, unknown>) => void;
+  ended: (sessionId: string, error?: string) => void;
+}
+
+let sink: CodexSink | null = null;
 
 export function hasCodexSession(sessionId: string): boolean {
   return codexSessions.has(sessionId);
@@ -68,128 +83,197 @@ export function codexLiveInfo(): { sessionId: string; codexThreadId?: string; bu
   }));
 }
 
-/**
- * Abort the session's in-flight turn. A `codex exec` child produces no `result`
- * of its own when it is killed, so the bridge synthesizes the settling result
- * from the `ended` this eventually causes.
- */
-export function interruptCodex(sessionId: string): void {
-  codexSessions.get(sessionId)?.abort.abort();
+/** Which Lines session a notification belongs to, or null when we do not own it. */
+function ownerOf(params: Record<string, unknown>): string | null {
+  const threadId = params.threadId ?? (params.thread as { id?: unknown } | undefined)?.id;
+  return typeof threadId === 'string' ? (threadOwners.get(threadId) ?? null) : null;
 }
 
-/** Drop the session's state; the next push rebuilds it (resume keeps the thread). */
+/**
+ * Bring up the app-server if it is not running. One child serves every codex
+ * session, so this is idempotent and cheap after the first call.
+ */
+function ensureServer(options: CodexPushOptions): CodexAppServer {
+  // A different CODEX_HOME means a different app user; drop the old child rather
+  // than serve two accounts from one process.
+  if (server && (!server.running || serverHome !== options.codexHome)) {
+    server.close();
+    server = null;
+  }
+  if (server) return server;
+  serverHome = options.codexHome;
+  server = new CodexAppServer({
+    codexPath: options.codexPath,
+    codexHome: options.codexHome,
+    onNotification: handleNotification,
+    onServerRequest: handleServerRequest,
+    onExit: handleServerExit,
+  });
+  return server;
+}
+
+/**
+ * Route one notification to its session and forward it verbatim.
+ *
+ * `thread/started` is the one that establishes ownership: it is answered by the
+ * `thread/start` call that is still awaiting, so the mapping is installed there
+ * rather than here.
+ */
+function handleNotification(method: string, params: Record<string, unknown>) {
+  const sessionId = ownerOf(params);
+  if (!sessionId) return; // a thread we do not own, or one already closed
+  const state = codexSessions.get(sessionId);
+  if (state) {
+    if (method === 'turn/started') {
+      const turn = params.turn as { id?: unknown } | undefined;
+      if (typeof turn?.id === 'string') state.turnId = turn.id;
+    } else if (method === 'turn/completed') {
+      state.turnId = undefined;
+      state.busy = false;
+    }
+  }
+  sink?.event(sessionId, { type: CODEX_NOTIFICATION, method, params });
+  // A settled turn ends the stream for this push, exactly as the exec transport's
+  // child exit did — the bridge's settle pass keys off the normalized `result`.
+  if (method === 'turn/completed') sink?.ended(sessionId);
+}
+
+/**
+ * A request *from* codex. Approvals, tool calls and elicitations arrive here.
+ *
+ * Every one is refused for now, explicitly rather than by silence: an unanswered
+ * request parks the turn forever, which is strictly worse than a refusal the
+ * model can route around. Threads run with `approvalPolicy: 'never'`, so in
+ * practice only a tool call we never registered can reach this.
+ *
+ * Wiring these into the bridge's permission card path is the next phase; this is
+ * the seam it plugs into.
+ */
+function handleServerRequest(id: unknown, method: string, _params: Record<string, unknown>) {
+  console.warn(`[worker] codex asked for '${method}', which Lines cannot answer yet — refusing`);
+  server?.respondError(id, `Lines does not support '${method}' yet.`);
+}
+
+/** The child died: every in-flight turn died with it. */
+function handleServerExit(reason: string) {
+  server = null;
+  serverHome = null;
+  const owned = [...codexSessions];
+  codexSessions.clear();
+  threadOwners.clear();
+  for (const [sessionId, state] of owned) {
+    // Only a session mid-turn has a turn to fail; an idle one simply loses its
+    // thread binding and re-resumes on its next push.
+    if (state.busy) sink?.ended(sessionId, `codex app-server ${reason}`);
+  }
+}
+
+/** Abort the session's in-flight turn. */
+export function interruptCodex(sessionId: string): void {
+  const state = codexSessions.get(sessionId);
+  if (!state?.threadId || !state.turnId || !server) return;
+  void server
+    .request('turn/interrupt', { threadId: state.threadId, turnId: state.turnId })
+    .catch((err) => console.warn('[worker] codex interrupt', String(err)));
+}
+
+/** Drop the session's binding; the next push resumes the thread. */
 export function closeCodex(sessionId: string): void {
   const state = codexSessions.get(sessionId);
   if (!state) return;
   codexSessions.delete(sessionId);
-  state.abort.abort();
-}
-
-export interface CodexSink {
-  event: (sessionId: string, message: Record<string, unknown>) => void;
-  ended: (sessionId: string, error?: string) => void;
+  if (state.threadId) threadOwners.delete(state.threadId);
 }
 
 /**
- * Run one turn. Each turn is its own `codex exec` child — continuity is
- * `codex exec resume <threadId>`, the same delegation `resume: claudeSessionId`
- * already relies on — so a session's state here is rebuilt per push, and the
- * `threadId` carried on the push is what makes the second turn a continuation.
+ * Run one turn: bind the session to a thread (starting or resuming one), then
+ * start the turn on it. Unlike the `codex exec` transport this replaces, the
+ * thread outlives the turn — which is what makes steering and approvals
+ * reachable at all.
  */
 export function pushCodex(
   sessionId: string,
   rawOptions: unknown,
   rawMessage: unknown,
-  sink: CodexSink,
+  turnSink: CodexSink,
 ): void {
+  sink = turnSink;
   let options: CodexPushOptions;
   let input: string;
   try {
     options = CodexPushOptions.parse(rawOptions);
     input = CodexPushMessage.parse(rawMessage).text;
   } catch (err) {
-    // Never silently: the bridge is holding a session at 'running' waiting for
+    // Never silently: the bridge is holding the session at 'running' waiting for
     // this stream, and `ended` with an error is what settles it as failed.
-    sink.ended(sessionId, `Malformed codex push: ${err instanceof Error ? err.message : String(err)}`);
+    turnSink.ended(sessionId, `Malformed codex push: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
-
-  // A previous turn's child must not outlive the push that supersedes it.
-  closeCodex(sessionId);
-
-  const threadOptions: ThreadOptions = {
-    ...(options.model ? { model: options.model } : {}),
-    sandboxMode: options.sandboxMode,
-    approvalPolicy: options.approvalPolicy,
-    workingDirectory: options.workingDirectory,
-    ...(options.additionalDirectories?.length
-      ? { additionalDirectories: options.additionalDirectories }
-      : {}),
-    ...(options.skipGitRepoCheck ? { skipGitRepoCheck: true } : {}),
-    ...(options.networkAccessEnabled !== undefined
-      ? { networkAccessEnabled: options.networkAccessEnabled }
-      : {}),
-  };
-
-  const codex = new Codex({
-    ...(options.codexPath ? { codexPathOverride: options.codexPath } : {}),
-    // Passing `env` means the SDK does NOT inherit process.env, so it is spread
-    // here — the same trap buildQueryOptions already works around for the Claude
-    // side. Without PATH and HOME the child cannot find git, node or a shell.
-    env: {
-      ...(Object.fromEntries(
-        Object.entries(process.env).filter(([, v]) => v !== undefined),
-      ) as Record<string, string>),
-      CODEX_HOME: options.codexHome,
-    },
-  });
-
-  const thread = options.threadId
-    ? codex.resumeThread(options.threadId, threadOptions)
-    : codex.startThread(threadOptions);
-
-  const state: CodexSessionState = {
-    codex,
-    thread,
-    abort: new AbortController(),
-    busy: true,
-    ...(options.threadId ? { threadId: options.threadId } : {}),
-  };
-  codexSessions.set(sessionId, state);
-  void pumpCodex(sessionId, state, input, sink);
+  void runTurn(sessionId, options, input, turnSink);
 }
 
-async function pumpCodex(
+async function runTurn(
   sessionId: string,
-  state: CodexSessionState,
+  options: CodexPushOptions,
   input: string,
-  sink: CodexSink,
+  turnSink: CodexSink,
 ) {
   try {
-    const { events } = await state.thread.runStreamed(input, { signal: state.abort.signal });
-    for await (const event of events) {
-      const msg = event as unknown as Record<string, unknown> & { type?: unknown };
-      // Recorded here as well as forwarded: the bridge repairs its persisted
-      // pointer from `hello`, which is read off this state, not off the stream.
-      if (msg.type === 'thread.started' && typeof msg.thread_id === 'string') {
-        state.threadId = msg.thread_id;
-      }
-      sink.event(sessionId, msg);
+    const app = ensureServer(options);
+    const state = codexSessions.get(sessionId) ?? { busy: false };
+    codexSessions.set(sessionId, state);
+    state.busy = true;
+
+    if (!state.threadId) {
+      const threadId = await bindThread(app, options);
+      state.threadId = threadId;
+      threadOwners.set(threadId, sessionId);
     }
-    sink.ended(sessionId);
+
+    await app.request('turn/start', {
+      threadId: state.threadId,
+      input: [{ type: 'text', text: input, text_elements: [] }],
+    });
+    // The turn's own events arrive as notifications; `ended` is sent when
+    // `turn/completed` lands (see handleNotification).
   } catch (err) {
-    // An abort is a Stop, not a failure: the child is killed with a signal, which
-    // the SDK reports as a throw. Reporting it as an error would put a red banner
-    // and a Retry on a turn the user deliberately stopped.
-    if (state.abort.signal.aborted || (err as { name?: string })?.name === 'AbortError') {
-      sink.ended(sessionId);
-    } else {
-      console.error(`[worker] codex session ${sessionId} failed:`, err);
-      sink.ended(sessionId, err instanceof Error ? err.message : String(err));
-    }
-  } finally {
-    state.busy = false;
-    // One child per turn: the state stays only to answer `hello` with the thread
-    // id, and the next push replaces it wholesale.
+    const state = codexSessions.get(sessionId);
+    if (state) state.busy = false;
+    turnSink.ended(sessionId, err instanceof Error ? err.message : String(err));
   }
+}
+
+/**
+ * Start or resume this session's thread and return its id.
+ *
+ * A resume that fails falls back to a fresh thread rather than failing the turn:
+ * storage sync carries session meta but not codex's thread store, so a session
+ * opened on a second machine legitimately holds a pointer that machine has never
+ * seen. The bridge rewrites that into a sentence for the user.
+ */
+async function bindThread(app: CodexAppServer, options: CodexPushOptions): Promise<string> {
+  const common = {
+    cwd: options.workingDirectory,
+    sandbox: options.sandboxMode,
+    approvalPolicy: options.approvalPolicy,
+    ...(options.model ? { model: options.model } : {}),
+    ...(options.developerInstructions
+      ? { developerInstructions: options.developerInstructions }
+      : {}),
+  };
+  if (options.threadId) {
+    try {
+      const resumed = (await app.request('thread/resume', {
+        threadId: options.threadId,
+        ...common,
+      })) as { thread?: { id?: unknown } };
+      if (typeof resumed?.thread?.id === 'string') return resumed.thread.id;
+    } catch (err) {
+      console.warn('[worker] codex resume failed, starting a fresh thread:', String(err));
+    }
+  }
+  const started = (await app.request('thread/start', common)) as { thread?: { id?: unknown } };
+  const id = started?.thread?.id;
+  if (typeof id !== 'string') throw new Error('codex thread/start returned no thread id');
+  return id;
 }
