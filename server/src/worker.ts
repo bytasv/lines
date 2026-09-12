@@ -446,6 +446,13 @@ function handleBridgeMessage(msg: BridgeToWorker) {
     pushCodex(msg.sessionId, msg.options, msg.message, {
       event: (sessionId, message) => send({ type: 'event', sessionId, message }),
       ended: (sessionId, error) => send({ type: 'ended', sessionId, error }),
+      // The same rpc the Claude side's canUseTool uses, so a codex approval lands
+      // in the same card, under the same guard, with the same provenance.
+      approve: (sessionId, toolName, input) =>
+        rpcCall(sessionId, 'canUseTool', { toolName, input }) as Promise<{
+          behavior?: string;
+          message?: string;
+        }>,
     });
     return;
   }

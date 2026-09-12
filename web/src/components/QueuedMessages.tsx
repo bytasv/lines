@@ -19,7 +19,7 @@ import type {
   SessionMeta,
 } from '@lines/shared';
 import { rootsForCwd } from '@lines/shared';
-import { sessionCaps } from '../lib/capabilities';
+import { agentLabel, sessionCaps } from '../lib/capabilities';
 import { buildExpandedPrompt, mentionKindMeta, uniqueMentions } from '../lib/mentions';
 import { useCan } from '../lib/can';
 import { useIdentityResolver } from '../lib/identity';
@@ -260,6 +260,7 @@ export function QueuedMessages({ session }: { session: SessionMeta }) {
   const identify = useIdentityResolver();
   const canPrompt = useCan('prompt');
   const caps = sessionCaps(session);
+  const agent = agentLabel(session);
   // Our own machine — the owner may rewrite anything in the queue, which is the
   // whole point of reviewing a guest's prompt before releasing it.
   const isOwnerView = useStore((s) => s.access === null);
@@ -392,7 +393,7 @@ export function QueuedMessages({ session }: { session: SessionMeta }) {
                         // model picks it up on its next inference, once the step
                         // that is already running finishes.
                         sendNowBlocked ??
-                        'Send now — Claude reads it once the current step finishes'
+                        `Send now — ${agent} reads it once the current step finishes`
                       }
                       withArrow
                       openDelay={300}

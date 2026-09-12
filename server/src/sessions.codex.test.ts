@@ -131,7 +131,9 @@ test('an OpenAI model pushes with engine codex and never reads the Claude token'
   assert.equal(push.engine, 'codex');
   // Thread options, not SDK query options.
   assert.equal(push.options.model, 'gpt-5.6-terra');
-  assert.equal(push.options.approvalPolicy, 'never');
+  // Lines is the gate: codex checks before it acts, and the request lands in the
+  // bridge's own permission path.
+  assert.equal(push.options.approvalPolicy, 'untrusted');
   assert.equal(push.options.sandboxMode, 'workspace-write');
   assert.equal(push.options.codexPath, FAKE_CODEX);
   assert.match(String(push.options.codexHome), /codex$/);
@@ -152,9 +154,10 @@ test('plan mode maps to a read-only sandbox', async () => {
   assert.equal(h.pushes[0]!.options.sandboxMode, 'read-only');
 });
 
-test('bypassPermissions does not reach danger-full-access', async () => {
-  // Codex has no gate of its own in this cut, so full access would be genuinely
-  // unrestricted — which is not what the user picked.
+test('bypassPermissions reaches danger-full-access, now that Lines is the gate', async () => {
+  // Safe only because every codex tool call is routed back through the bridge's
+  // permission path: the sandbox is a second line, not the only one. While codex
+  // answered its own approvals this mapping was deliberately withheld.
   process.env.LINES_CODEX_PATH = FAKE_CODEX;
   await refreshCodex();
   const h = harness();
@@ -163,7 +166,25 @@ test('bypassPermissions does not reach danger-full-access', async () => {
   h.sessions.prompt('s1', 'go');
   await settle();
 
-  assert.equal(h.pushes[0]!.options.sandboxMode, 'workspace-write');
+  assert.equal(h.pushes[0]!.options.sandboxMode, 'danger-full-access');
+  // Bypass means the bridge's own handlers decide without codex asking first —
+  // the always-ask tools still stop there.
+  assert.equal(h.pushes[0]!.options.approvalPolicy, 'never');
+});
+
+test('every gated mode asks codex to check before it acts', async () => {
+  // `untrusted` is what makes Lines the gate: the request lands in
+  // handleCanUseTool, where the auto-guard silently approves the safe calls. Any
+  // other policy would let codex decide for itself when to ask.
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  for (const mode of ['default', 'auto', 'acceptEdits', 'plan'] as const) {
+    const h = harness();
+    h.sessions.setPermissionMode('s1', mode);
+    h.sessions.prompt('s1', 'go');
+    await settle();
+    assert.equal(h.pushes[0]!.options.approvalPolicy, 'untrusted', mode);
+  }
 });
 
 test('no OpenAI account is refused with the Connect message, and no Claude authStatus', async () => {

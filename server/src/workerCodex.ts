@@ -66,6 +66,20 @@ let serverHome: string | null = null;
 export interface CodexSink {
   event: (sessionId: string, message: Record<string, unknown>) => void;
   ended: (sessionId: string, error?: string) => void;
+  /**
+   * Ask the bridge to decide one tool call, exactly as a Claude `canUseTool`
+   * callback does.
+   *
+   * Codex approvals ride the RPC channel the worker already has rather than a
+   * channel of their own, which is what lets them land in the existing permission
+   * card with the existing auto-guard, allowlist and provenance — none of which
+   * was ever Claude-specific. Only the transport differed.
+   */
+  approve: (
+    sessionId: string,
+    toolName: string,
+    input: Record<string, unknown>,
+  ) => Promise<{ behavior?: string; message?: string; updatedInput?: Record<string, unknown> }>;
 }
 
 let sink: CodexSink | null = null;
@@ -139,19 +153,70 @@ function handleNotification(method: string, params: Record<string, unknown>) {
 }
 
 /**
- * A request *from* codex. Approvals, tool calls and elicitations arrive here.
+ * How one approval request is described to the bridge's permission machinery.
  *
- * Every one is refused for now, explicitly rather than by silence: an unanswered
- * request parks the turn forever, which is strictly worse than a refusal the
- * model can route around. Threads run with `approvalPolicy: 'never'`, so in
- * practice only a tool call we never registered can reach this.
- *
- * Wiring these into the bridge's permission card path is the next phase; this is
- * the seam it plugs into.
+ * The tool names are the same ones the normalizer gives completed items, so a
+ * card and the transcript row it gates name the same thing — and an allowlist
+ * entry the user creates from the card matches the call that produced it.
  */
-function handleServerRequest(id: unknown, method: string, _params: Record<string, unknown>) {
-  console.warn(`[worker] codex asked for '${method}', which Lines cannot answer yet — refusing`);
-  server?.respondError(id, `Lines does not support '${method}' yet.`);
+function approvalRequest(
+  method: string,
+  params: Record<string, unknown>,
+): { toolName: string; input: Record<string, unknown> } | null {
+  switch (method) {
+    case 'item/commandExecution/requestApproval':
+      return {
+        toolName: 'Bash',
+        input: {
+          command: String(params.command ?? ''),
+          ...(params.cwd ? { cwd: params.cwd } : {}),
+          ...(params.reason ? { reason: params.reason } : {}),
+        },
+      };
+    case 'item/fileChange/requestApproval':
+      return {
+        toolName: 'ApplyPatch',
+        input: {
+          ...(params.reason ? { reason: params.reason } : {}),
+          ...(params.grantRoot ? { grantRoot: params.grantRoot } : {}),
+        },
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * A request *from* codex: an approval, an elicitation, or a tool call.
+ *
+ * Approvals are routed into the bridge's existing permission path. Anything else
+ * is refused explicitly rather than by silence — an unanswered request parks the
+ * turn forever, which is strictly worse than a refusal the model can route
+ * around.
+ */
+function handleServerRequest(id: unknown, method: string, params: Record<string, unknown>) {
+  const sessionId = ownerOf(params);
+  const request = sessionId ? approvalRequest(method, params) : null;
+  if (!sessionId || !request) {
+    console.warn(`[worker] codex asked for '${method}', which Lines cannot answer yet — refusing`);
+    server?.respondError(id, `Lines does not support '${method}' yet.`);
+    return;
+  }
+  void sink
+    ?.approve(sessionId, request.toolName, request.input)
+    .then((answer) => {
+      // `acceptForSession` is deliberately never sent. Lines keeps its own
+      // allowlist — the user's "always allow" is recorded there, and asking codex
+      // to remember a second copy would split one decision across two stores that
+      // cannot be kept in step (and that the user can only see one of).
+      const decision = answer?.behavior === 'allow' ? 'accept' : 'decline';
+      server?.respond(id, { decision });
+    })
+    .catch((err) => {
+      console.warn('[worker] codex approval failed:', String(err));
+      // Decline, never accept: a bridge that could not answer has not approved.
+      server?.respond(id, { decision: 'decline' });
+    });
 }
 
 /** The child died: every in-flight turn died with it. */

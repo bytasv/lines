@@ -14,3 +14,15 @@ import type { ProviderCapabilities, SessionMeta } from '@lines/shared';
 export function sessionCaps(session: Pick<SessionMeta, 'model'>): ProviderCapabilities {
   return capabilitiesFor(providerForModel(session.model));
 }
+
+/**
+ * What to call the agent in copy about *this session*, e.g. "Codex wants to run
+ * a command".
+ *
+ * Session-scoped strings only. Copy about the *account* — the Claude login modal,
+ * the Claude plan chip — stays Claude-specific, because it really is about
+ * Claude and nothing else.
+ */
+export function agentLabel(session: Pick<SessionMeta, 'model'>): string {
+  return providerForModel(session.model) === 'openai' ? 'Codex' : 'Claude';
+}

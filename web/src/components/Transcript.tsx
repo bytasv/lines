@@ -51,7 +51,7 @@ import type {
   WorkflowMarkerData,
 } from '@lines/shared';
 import { rewindBlock } from '@lines/shared';
-import { sessionCaps } from '../lib/capabilities';
+import { agentLabel, sessionCaps } from '../lib/capabilities';
 import { useStore } from '../store';
 import { send } from '../ws';
 import {
@@ -336,6 +336,12 @@ function UserBubble({
     const meta = s.sessions[sessionId];
     return meta ? sessionCaps(meta).rewind : true;
   });
+  // What to call the agent in this session's copy. A primitive, for the same
+  // re-render reason as the block reason above.
+  const agent = useStore((s) => {
+    const meta = s.sessions[sessionId];
+    return meta ? agentLabel(meta) : 'the agent';
+  });
   const seq = Number(item.key.slice(1));
 
   const openConfirm = (intent: RewindIntent) => {
@@ -356,13 +362,13 @@ function UserBubble({
    *  this message's own text differs. Both sentences say "deleted" rather than
    *  "rewound to" — the ambiguity being avoided is whether the message survives. */
   const lostCopy =
-    'Every reply and prompt after it is deleted too, and Claude forgets those turns. ' +
+    `Every reply and prompt after it is deleted too, and ${agent} forgets those turns. ` +
     'This cannot be undone, and what the deleted turns already cost is not refunded.' +
     (inWorkflow
       ? ' The workflow goes back to the step this message belongs to and waits there; later steps and anything they published are discarded.'
       : '') +
     (fullReset
-      ? " There is no earlier reply to go back to, so Claude's memory of this session is cleared completely."
+      ? ` There is no earlier reply to go back to, so ${agent}'s memory of this session is cleared completely.`
       : '');
 
   /** Icon-only, so the tooltip carries the whole explanation — and it has to say
@@ -540,7 +546,7 @@ function InterjectionRow({ item }: { item: Extract<TranscriptItem, { kind: 'inte
             model reads it on its next inference, after the tool call that was
             already running returns. Promising anything faster would have someone
             watch a 3-minute Bash and think it was lost. */}
-        <Tooltip label="Sent into this turn — Claude reads it after the current step">
+        <Tooltip label="Sent into this turn — the agent reads it after the current step">
           <IconBolt size={14} style={{ flexShrink: 0, marginBottom: 5, opacity: 0.6 }} />
         </Tooltip>
         <Paper

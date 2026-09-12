@@ -60,21 +60,22 @@ const ANTHROPIC: ProviderCapabilities = {
 /**
  * Codex over the app-server transport.
  *
- * `streaming` is on: the app-server emits `item/agentMessage/delta` and the
- * reasoning deltas, which normalize into `stream_event` shapes and so are
- * droppable under backpressure exactly as Claude's are.
+ * `approvals` is on: codex asks before it acts, and the request is routed back
+ * into the same permission card, auto-guard and allowlist a Claude call goes
+ * through. `planMode` rides with it — plan mode is a read-only sandbox *plus* a
+ * gate, and the gate is what was missing.
  *
  * Everything still false is a transport capability Lines has not wired rather
- * than one codex lacks. The app-server *can* ask for approval, be steered, fork a
- * thread and report rate limits; each flag flips as its plumbing lands.
+ * than one codex lacks. The app-server can be steered, fork a thread, compact and
+ * report occupancy; each flag flips as its plumbing lands.
  *
- * `cost` is the exception — it is false because codex genuinely reports tokens
- * and never a price, so it will stay false on a subscription login.
+ * `cost` is the exception — false because codex genuinely reports tokens and
+ * never a price, so it stays false on a subscription login.
  */
 const OPENAI: ProviderCapabilities = {
   streaming: true,
-  approvals: false,
-  planMode: false,
+  approvals: true,
+  planMode: true,
   interject: false,
   compact: false,
   contextWindow: false,

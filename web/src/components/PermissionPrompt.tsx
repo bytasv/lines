@@ -43,6 +43,7 @@ import type {
 import { KEEP_PLANNING_MESSAGE, normalizePlanComments } from '@lines/shared';
 import { send } from '../ws';
 import { readPlanComments, useStore, writePlanComments } from '../store';
+import { agentLabel } from '../lib/capabilities';
 import { useCan } from '../lib/can';
 import { useIdentityResolver } from '../lib/identity';
 import { QuestionPrompt } from './QuestionPrompt';
@@ -71,7 +72,7 @@ const SOURCE_NOTE: Partial<Record<PermissionResolutionSource, string>> = {
   'workflow-advance': 'you approved this; the workflow advanced instead of implementing here',
   'interrupt-expire': 'closed when the interrupted session was resumed',
   stop: 'closed when the turn was stopped',
-  cancel: 'cancelled by Claude Code',
+  cancel: 'cancelled by the agent',
 };
 
 /** The resolution badge, with a provenance tooltip when a human did not click it. */
@@ -137,7 +138,7 @@ function respond(
 }
 
 /** Per-tool presentation: title, icon, body, and button labels. */
-function toolPresentation(data: PermissionRequestData): {
+function toolPresentation(data: PermissionRequestData, agent: string): {
   icon: React.ReactNode;
   title: string;
   allowLabel: string;
@@ -174,7 +175,7 @@ function toolPresentation(data: PermissionRequestData): {
     case 'Bash':
       return {
         icon: <IconTerminal2 size={16} color="var(--mantine-color-yellow-6)" />,
-        title: 'Claude wants to run a command',
+        title: `${agent} wants to run a command`,
         allowLabel: 'Run command',
         denyLabel: 'Deny',
         body: (
@@ -195,7 +196,10 @@ function toolPresentation(data: PermissionRequestData): {
     case 'WebSearch':
       return {
         icon: <IconWorld size={16} color="var(--mantine-color-blue-5)" />,
-        title: data.toolName === 'WebFetch' ? 'Claude wants to fetch a URL' : 'Claude wants to search the web',
+        title:
+          data.toolName === 'WebFetch'
+            ? `${agent} wants to fetch a URL`
+            : `${agent} wants to search the web`,
         allowLabel: 'Allow',
         denyLabel: 'Deny',
         body: (
@@ -206,17 +210,17 @@ function toolPresentation(data: PermissionRequestData): {
       };
 
     default: {
-      const connection = mcpConnectionPresentation(data);
+      const connection = mcpConnectionPresentation(data, agent);
       if (connection) return connection;
-      const workflowEdit = workflowToolPresentation(data.toolName, input);
+      const workflowEdit = workflowToolPresentation(data.toolName, input, agent);
       if (workflowEdit) return workflowEdit;
       if (isEditTool(data.toolName)) {
         return {
           icon: <IconFilePencil size={16} color="var(--mantine-color-teal-5)" />,
           title:
             data.toolName === 'Write'
-              ? 'Claude wants to write a file'
-              : 'Claude wants to edit a file',
+              ? `${agent} wants to write a file`
+              : `${agent} wants to edit a file`,
           allowLabel: data.toolName === 'Write' ? 'Write file' : 'Apply edit',
           denyLabel: 'Deny',
           body: <EditPreview data={data} />,
@@ -225,7 +229,7 @@ function toolPresentation(data: PermissionRequestData): {
       const json = JSON.stringify(input, null, 2);
       return {
         icon: <IconShieldQuestion size={16} color="var(--mantine-color-yellow-6)" />,
-        title: `Claude wants to use ${data.toolName || 'a tool'}`,
+        title: `${agent} wants to use ${data.toolName || 'a tool'}`,
         allowLabel: 'Allow',
         denyLabel: 'Deny',
         body:
@@ -265,6 +269,7 @@ const VETTING_LABEL: Record<McpVetting['level'], string> = {
  */
 function mcpConnectionPresentation(
   data: PermissionRequestData,
+  agent: string,
 ): ReturnType<typeof toolPresentation> | null {
   if (data.toolName !== `${WORKFLOW_TOOL_PREFIX}add_mcp_connection`) return null;
   const input = data.input;
@@ -276,7 +281,7 @@ function mcpConnectionPresentation(
 
   return {
     icon: <IconPlugConnected size={16} color="var(--mantine-color-yellow-6)" />,
-    title: `Claude wants to connect an MCP server (${name || 'unnamed'})`,
+    title: `${agent} wants to connect an MCP server (${name || 'unnamed'})`,
     allowLabel: 'Add connection',
     denyLabel: 'Deny',
     body: (
@@ -300,7 +305,7 @@ function mcpConnectionPresentation(
         )}
         {source && (
           <Text size="xs" c="dimmed" style={{ wordBreak: 'break-all' }}>
-            Claude says it found this at {source}
+            {agent} says it found this at {source}
           </Text>
         )}
         <Text size="xs" c="dimmed">
@@ -313,13 +318,15 @@ function mcpConnectionPresentation(
   };
 }
 
-const WORKFLOW_TOOL_TITLES: Record<string, { title: string; allowLabel: string }> = {
-  create_workflow: { title: 'Claude wants to create a workflow', allowLabel: 'Create workflow' },
-  update_workflow: { title: 'Claude wants to change a workflow', allowLabel: 'Save workflow' },
-  delete_workflow: { title: 'Claude wants to delete a workflow', allowLabel: 'Delete workflow' },
-  save_step: { title: 'Claude wants to save a reusable step', allowLabel: 'Save step' },
-  delete_step: { title: 'Claude wants to delete a reusable step', allowLabel: 'Delete step' },
-};
+const workflowToolTitles = (
+  agent: string,
+): Record<string, { title: string; allowLabel: string }> => ({
+  create_workflow: { title: `${agent} wants to create a workflow`, allowLabel: 'Create workflow' },
+  update_workflow: { title: `${agent} wants to change a workflow`, allowLabel: 'Save workflow' },
+  delete_workflow: { title: `${agent} wants to delete a workflow`, allowLabel: 'Delete workflow' },
+  save_step: { title: `${agent} wants to save a reusable step`, allowLabel: 'Save step' },
+  delete_step: { title: `${agent} wants to delete a reusable step`, allowLabel: 'Delete step' },
+});
 
 /**
  * A readable summary for a workflow write instead of the default JSON dump. A
@@ -330,9 +337,10 @@ const WORKFLOW_TOOL_TITLES: Record<string, { title: string; allowLabel: string }
 function workflowToolPresentation(
   toolName: string,
   input: Record<string, unknown>,
+  agent: string,
 ): ReturnType<typeof toolPresentation> | null {
   if (!toolName.startsWith(WORKFLOW_TOOL_PREFIX)) return null;
-  const labels = WORKFLOW_TOOL_TITLES[toolName.slice(WORKFLOW_TOOL_PREFIX.length)];
+  const labels = workflowToolTitles(agent)[toolName.slice(WORKFLOW_TOOL_PREFIX.length)];
   if (!labels) return null; // a read tool, or one added since — fall through to the default card
 
   const target = String(input.workflow ?? input.name ?? input.stepId ?? '');
@@ -1075,6 +1083,10 @@ function PlanApproval({
   data: PermissionRequestData;
   resolution?: Resolution;
 }) {
+  const agent = useStore((s) => {
+    const meta = s.sessions[sessionId];
+    return meta ? agentLabel(meta) : 'The agent';
+  });
   // Auto-open fullscreen only if this tab is focused now; a background tab must not steal focus
   // when the user later switches to it (precedent: alerts.ts document.hasFocus() guard).
   const [focus, setFocus] = useState(() => document.hasFocus());
@@ -1361,7 +1373,7 @@ function PlanApproval({
             )}
             <IconMap size={16} color="var(--mantine-color-sandstone-5)" />
             <Text size="sm" fw={600}>
-              Claude finished planning
+              {agent} finished planning
             </Text>
             {resolution && (
               <ResolutionBadge
@@ -1491,6 +1503,13 @@ export function PermissionPrompt({
   data: PermissionRequestData;
   resolution?: Resolution;
 }) {
+  // What to call the agent in this card's copy. A primitive from the selector, so
+  // a card does not re-render on unrelated session changes.
+  const agent = useStore((s) => {
+    const meta = s.sessions[sessionId];
+    return meta ? agentLabel(meta) : 'The agent';
+  });
+
   // Clarifying questions get a dedicated interactive card instead of raw JSON.
   if (data.toolName === 'AskUserQuestion') {
     return <QuestionPrompt sessionId={sessionId} data={data} resolution={resolution} />;
@@ -1500,7 +1519,7 @@ export function PermissionPrompt({
     return <PlanApproval sessionId={sessionId} data={data} resolution={resolution} />;
   }
 
-  const p = toolPresentation(data);
+  const p = toolPresentation(data, agent);
 
   return (
     <PermissionCard sessionId={sessionId} data={data} resolution={resolution} p={p} />

@@ -114,15 +114,33 @@ function sdkPermissionMode(mode: PermissionMode): string {
 /**
  * The codex sandbox a Lines permission mode maps to.
  *
- * `bypassPermissions` deliberately does NOT reach `danger-full-access`. Claude's
- * bypass still routes every call through the bridge's own gates (see
- * buildQueryOptions), while codex in this cut runs with `approvalPolicy: 'never'`
- * and no gate at all — so `danger-full-access` there would be genuinely
- * unrestricted, which is not what the user picked. It ships with the permissions
- * parity work, when Lines is the gate again.
+ * `bypassPermissions` reaches `danger-full-access` now that Lines is the gate:
+ * every codex tool call is routed back through the bridge's own permission path
+ * (see workerCodex's handleServerRequest), exactly as a Claude call is, so the
+ * sandbox is a second line rather than the only one. While codex answered its
+ * own approvals this mapping was deliberately withheld — full access plus no
+ * gate is genuinely unrestricted, which is not what the user picked.
  */
-function codexSandboxMode(mode: PermissionMode): 'read-only' | 'workspace-write' {
-  return mode === 'plan' ? 'read-only' : 'workspace-write';
+function codexSandboxMode(mode: PermissionMode): 'read-only' | 'workspace-write' | 'danger-full-access' {
+  if (mode === 'plan') return 'read-only';
+  if (mode === 'bypassPermissions') return 'danger-full-access';
+  return 'workspace-write';
+}
+
+/**
+ * How eagerly codex should ask before acting.
+ *
+ * `untrusted` — ask about everything — is the right setting for every mode where
+ * Lines wants to decide, which is all of them except bypass. It is not as noisy
+ * as it sounds: the request lands in `handleCanUseTool`, where the auto-guard
+ * silently approves the safe calls and the allowlist covers the ones the user has
+ * already blessed. Only what would have prompted on Claude prompts here.
+ *
+ * `never` under bypass matches what bypass means on the Claude side: the bridge's
+ * own handlers still see the call, and the always-ask tools still stop.
+ */
+function codexApprovalPolicy(mode: PermissionMode): 'untrusted' | 'never' {
+  return mode === 'bypassPermissions' ? 'never' : 'untrusted';
 }
 
 /** Which engine a session's model runs on. Derived from the model, never stored:
@@ -1609,10 +1627,7 @@ export class SessionManager {
       // and every write to them fails.
       additionalDirectories: this.rootsFor(meta).filter((root) => root !== meta.cwd),
       sandboxMode: codexSandboxMode(meta.permissionMode),
-      // Lines is not the gate for a codex turn yet: the app-server can ask for
-      // approval, but nothing here answers it. Until that is wired, the only
-      // honest setting is "do not ask" plus a sandbox. See codexSandboxMode.
-      approvalPolicy: 'never',
+      approvalPolicy: codexApprovalPolicy(meta.permissionMode),
       ...(compress ? { developerInstructions: COMPRESS_RESPONSES_PROMPT } : {}),
       // The one place OpenAI credentials enter a turn: as a directory, not a
       // token. See openaiAuth.ts for why Lines holds no copy of the tokens.

@@ -15,6 +15,8 @@ import { IconHelpCircle } from '@tabler/icons-react';
 import type { AskUserQuestionInput, PermissionRequestData } from '@lines/shared';
 import { matchAnswerToOptions, parseQuestionAnswers } from '../lib/toolFields';
 import { send } from '../ws';
+import { useStore } from '../store';
+import { agentLabel } from '../lib/capabilities';
 
 const OTHER = '__other__';
 
@@ -213,6 +215,10 @@ export function QuestionPrompt({
   data: PermissionRequestData;
   resolution?: 'allow' | 'deny' | 'expired';
 }) {
+  const agent = useStore((s) => {
+    const meta = s.sessions[sessionId];
+    return meta ? agentLabel(meta) : 'The agent';
+  });
   const input = data.input as unknown as AskUserQuestionInput;
   const questions = Array.isArray(input.questions) ? input.questions : [];
   const [state, setState] = useState<QuestionState[]>(
@@ -415,7 +421,7 @@ export function QuestionPrompt({
         <Group gap="xs" mb={data.answers ? 6 : 0}>
           <IconHelpCircle size={16} opacity={0.6} />
           <Text size="sm" fw={600}>
-            Claude asked
+            {agent} asked
           </Text>
           <Badge
             color={resolution === 'allow' ? 'teal' : resolution === 'expired' ? 'gray' : 'red'}
@@ -426,7 +432,7 @@ export function QuestionPrompt({
         </Group>
         {resolution === 'expired' && (
           <Text size="xs" c="dimmed" mt={4}>
-            Question no longer active — re-send your prompt and Claude will ask again.
+            Question no longer active — re-send your prompt and {agent} will ask again.
           </Text>
         )}
         {data.answers &&
@@ -449,7 +455,7 @@ export function QuestionPrompt({
       <Group gap="xs" mb="xs">
         <IconHelpCircle size={16} color="var(--mantine-primary-color-filled)" />
         <Text size="sm" fw={600}>
-          Claude has {questions.length === 1 ? 'a question' : `${questions.length} questions`}
+          {agent} has {questions.length === 1 ? 'a question' : `${questions.length} questions`}
         </Text>
       </Group>
       <Stack gap="md">
