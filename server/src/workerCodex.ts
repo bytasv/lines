@@ -45,7 +45,12 @@ const CodexPushOptions = z.object({
 
 export type CodexPushOptions = z.infer<typeof CodexPushOptions>;
 
-const CodexPushMessage = z.object({ text: z.string() });
+const CodexPushMessage = z.object({
+  text: z.string(),
+  /** Deliver into the turn already running (`turn/steer`) instead of starting a
+   *  new one. The bridge sets it for an interjection. */
+  steer: z.boolean().optional(),
+});
 
 interface CodexSessionState {
   /** Codex thread this Lines session is bound to; set once `thread/started` lands. */
@@ -264,17 +269,17 @@ export function pushCodex(
 ): void {
   sink = turnSink;
   let options: CodexPushOptions;
-  let input: string;
+  let message: z.infer<typeof CodexPushMessage>;
   try {
     options = CodexPushOptions.parse(rawOptions);
-    input = CodexPushMessage.parse(rawMessage).text;
+    message = CodexPushMessage.parse(rawMessage);
   } catch (err) {
     // Never silently: the bridge is holding the session at 'running' waiting for
     // this stream, and `ended` with an error is what settles it as failed.
     turnSink.ended(sessionId, `Malformed codex push: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
-  void runTurn(sessionId, options, input, turnSink);
+  void runTurn(sessionId, options, message.text, turnSink, message.steer === true);
 }
 
 async function runTurn(
@@ -282,13 +287,33 @@ async function runTurn(
   options: CodexPushOptions,
   input: string,
   turnSink: CodexSink,
+  steer: boolean,
 ) {
   try {
     const app = ensureServer(options);
     const state = codexSessions.get(sessionId) ?? { busy: false };
     codexSessions.set(sessionId, state);
-    state.busy = true;
 
+    // An interjection joins the turn that is already running: it must not clear
+    // `busy`, must not start a second turn, and has nothing to settle of its own.
+    if (steer) {
+      if (!state.threadId || !state.turnId) {
+        // The turn ended between the click and here. Nothing to steer into, and
+        // starting a turn instead would silently turn Send now into an ordinary
+        // send — the bridge's own gate already refuses that case, so this is only
+        // the race.
+        console.warn('[worker] codex steer with no live turn — dropped');
+        return;
+      }
+      await app.request('turn/steer', {
+        threadId: state.threadId,
+        expectedTurnId: state.turnId,
+        input: [{ type: 'text', text: input, text_elements: [] }],
+      });
+      return;
+    }
+
+    state.busy = true;
     if (!state.threadId) {
       const threadId = await bindThread(app, options);
       state.threadId = threadId;
@@ -302,6 +327,12 @@ async function runTurn(
     // The turn's own events arrive as notifications; `ended` is sent when
     // `turn/completed` lands (see handleNotification).
   } catch (err) {
+    // An interjection has no turn of its own to fail — the turn it was joining is
+    // still healthy, and settling it here would put a Retry on a live session.
+    if (steer) {
+      console.warn('[worker] codex steer failed:', String(err));
+      return;
+    }
     const state = codexSessions.get(sessionId);
     if (state) state.busy = false;
     turnSink.ended(sessionId, err instanceof Error ? err.message : String(err));

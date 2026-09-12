@@ -76,7 +76,7 @@ const OPENAI: ProviderCapabilities = {
   streaming: true,
   approvals: true,
   planMode: true,
-  interject: false,
+  interject: true,
   compact: false,
   contextWindow: false,
   rewind: false,

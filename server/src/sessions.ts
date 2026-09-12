@@ -44,6 +44,7 @@ import {
   formatPlanComments,
   isPlanFilePath,
   isSessionActive,
+  capabilitiesFor,
   isCodexNotification,
   isSessionInterruptible,
   KEEP_PLANNING_MESSAGE,
@@ -1786,7 +1787,7 @@ export class SessionManager {
     // re-broadcast `authStatus { loggedIn: false }`, which force-opens the Claude
     // login modal at a user who never asked for one.
     if (isCodexSession(meta)) {
-      this.pushCodexTurn(meta, message);
+      this.pushCodexTurn(meta, message, opts.intoLiveTurn === true);
       return;
     }
 
@@ -1844,7 +1845,11 @@ export class SessionManager {
    * blocks. Image attachments are dropped: codex takes image *paths* and Lines
    * stages attachments as base64.
    */
-  private pushCodexTurn(meta: SessionMeta, message: Record<string, unknown>) {
+  private pushCodexTurn(
+    meta: SessionMeta,
+    message: Record<string, unknown>,
+    intoLiveTurn = false,
+  ) {
     const cliRefusal = codexCliRefusalMessage();
     if (cliRefusal) {
       this.failTurn(meta.id, cliRefusal);
@@ -1858,7 +1863,10 @@ export class SessionManager {
     }
     this.worker.push(
       meta.id,
-      { text: promptTextOf(message) },
+      // `steer: true` delivers into the turn already running rather than starting
+      // one — the codex equivalent of joining a live query, and what makes Send
+      // now work here.
+      { text: promptTextOf(message), ...(intoLiveTurn ? { steer: true } : {}) },
       this.buildCodexOptions(meta),
       undefined,
       'codex',
@@ -2468,8 +2476,14 @@ export class SessionManager {
     if (this.interrupting.has(sessionId)) return false; // a Stop is in flight
     if (this.rewinding.has(sessionId)) return false; // the transcript is moving under us
     if (meta.workflow?.advancing) return false; // mid-consolidateStepOutput; the turn is over
-    // Only interject into a query this bridge knows it spawned.
-    if (!this.queryTokens.has(sessionId)) return false;
+    // The engine has to be able to take a message mid-turn at all.
+    if (!capabilitiesFor(providerForModel(meta.model)).interject) return false;
+    // Only interject into a query this bridge knows it spawned. Claude-only:
+    // `queryTokens` is the Claude token map, which a codex session never fills.
+    // Its equivalent guarantee is stronger and lives in the protocol — `turn/steer`
+    // carries an `expectedTurnId` precondition, so steering a turn that has moved
+    // on fails in the worker rather than landing in the wrong one.
+    if (!isCodexSession(meta) && !this.queryTokens.has(sessionId)) return false;
     // `linkOpen`, not `status.connected`: WorkerClient buffers a send made while
     // the socket is down and replays it on the next `hello`, where ensureSession
     // builds a *fresh* query — the interjection would open an unattributed turn
@@ -4691,6 +4705,9 @@ export class SessionManager {
         output_tokens?: number;
         cache_creation_input_tokens?: number;
         cache_read_input_tokens?: number;
+        /** Reported separately by providers that bill it as output but count it
+         *  apart (codex). Absent on Claude, which folds it in at the source. */
+        reasoning_output_tokens?: number;
       };
     }).usage;
     let turnTokens: number | undefined;
@@ -4699,7 +4716,10 @@ export class SessionManager {
         (usage.input_tokens ?? 0) +
         (usage.output_tokens ?? 0) +
         (usage.cache_creation_input_tokens ?? 0) +
-        (usage.cache_read_input_tokens ?? 0);
+        (usage.cache_read_input_tokens ?? 0) +
+        // Added here rather than folded into output_tokens upstream, so the
+        // canonical field keeps meaning what it says while the total stays right.
+        (usage.reasoning_output_tokens ?? 0);
       meta.lastTokens = turnTokens;
       meta.totalTokens = (meta.totalTokens ?? 0) + turnTokens;
     }

@@ -93,6 +93,9 @@ function harness(opts: HarnessOptions = {}) {
     ) => pushes.push({ options, message, engine }),
     close: () => {},
     interrupt: () => {},
+    // canInterject reads this rather than `status.connected`: a send made while
+    // the socket is down would be replayed into a *fresh* turn.
+    linkOpen: true,
     setModel: () => {},
     setPermissionMode: () => {},
     contextUsage: () => Promise.reject(new Error('no-live-session')),
@@ -312,6 +315,30 @@ test('a failed turn carries its message into a failed turn', async () => {
   assert.equal(settled.status, 'error');
   // Classified, so the banner names an action instead of echoing the API.
   assert.equal(settled.errorKind, 'quota');
+});
+
+test('an interjection steers the live turn instead of starting a new one', async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.prompt('s1', 'count to twenty');
+  await settle();
+
+  // Queue a prompt, then Send now. `queryTokens` is the Claude token map and is
+  // never filled for codex — canInterject has to let that pass, or Send now is
+  // refused on every codex session.
+  const meta = h.sessions.get('s1')!;
+  meta.queued = [{ id: 'q1', text: 'stop counting', at: Date.now() } as never];
+  const verdict = h.sessions.interjectQueued('s1', 'q1', { needsApproval: false });
+  assert.equal(verdict.ok, true, `refused: ${verdict.ok === false ? verdict.reason : ''}`);
+  await settle();
+
+  assert.equal(h.pushes.length, 2);
+  // The second push joins the running turn rather than opening one.
+  assert.deepEqual(h.pushes[1]!.message, { text: 'stop counting', steer: true });
+  assert.equal(h.pushes[1]!.engine, 'codex');
+  // And the turn it joined is still the live one — an interjection settles nothing.
+  assert.equal(h.sessions.get('s1')?.status, 'running');
 });
 
 test('a cross-provider setModel is refused once the session has run', async () => {

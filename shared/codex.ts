@@ -110,6 +110,14 @@ function toolNameFor(item: ThreadItem): string {
       return 'WebSearch';
     case 'dynamicToolCall':
       return item.tool;
+    case 'functionCallOutput':
+      return item.name;
+    // Claude's own name for "the agent spawned a helper", so a codex sub-agent
+    // lands in the Task card the renderer already has.
+    case 'subAgentActivity':
+      return 'Task';
+    case 'imageView':
+      return 'ViewImage';
     default:
       return item.type;
   }
@@ -127,6 +135,12 @@ function toolInputFor(item: ThreadItem): Record<string, unknown> {
       return { query: (item as { query?: string }).query ?? '' };
     case 'dynamicToolCall':
       return { arguments: item.arguments };
+    case 'functionCallOutput':
+      return { ...(item.namespace ? { namespace: item.namespace } : {}) };
+    case 'subAgentActivity':
+      return { subagent_type: item.agentPath, agentThreadId: item.agentThreadId };
+    case 'imageView':
+      return { file_path: item.path };
     default:
       return {};
   }
@@ -154,6 +168,15 @@ function toolResultFor(item: ThreadItem): { text: string; isError: boolean } {
         text: JSON.stringify(item.contentItems ?? null),
         isError: item.success === false,
       };
+    case 'functionCallOutput':
+      return {
+        text: typeof item.output === 'string' ? item.output : JSON.stringify(item.output),
+        isError: false,
+      };
+    case 'subAgentActivity':
+      return { text: item.kind, isError: item.kind === 'interrupted' };
+    case 'imageView':
+      return { text: String(item.path), isError: false };
     default:
       return { text: '', isError: false };
   }
@@ -226,6 +249,9 @@ function startingBlock(item: ThreadItem): Record<string, unknown> | null {
     case 'mcpToolCall':
     case 'webSearch':
     case 'dynamicToolCall':
+    case 'functionCallOutput':
+    case 'subAgentActivity':
+    case 'imageView':
       return { type: 'tool_use', name: toolNameFor(item) };
     default:
       return null;
@@ -253,11 +279,28 @@ function completedItem(item: ThreadItem, deps: CodexNormalizeDeps): SdkShapedMes
         ? [assistantMessage(deps, [{ type: 'thinking', thinking: text, signature: '' }], item)]
         : [];
     }
+    // The compaction marker has a real Claude-shaped home: the bridge already
+    // reads `system`/`compact_boundary` to self-correct its occupancy reading and
+    // record that a compaction happened. Codex names no token counts, so the
+    // record is the event itself.
+    case 'contextCompaction':
+      return [
+        {
+          type: 'system',
+          subtype: 'compact_boundary',
+          compact_metadata: { trigger: 'auto' },
+          _engine: 'codex',
+          _codex: item,
+        },
+      ];
     case 'commandExecution':
     case 'fileChange':
     case 'mcpToolCall':
     case 'webSearch':
-    case 'dynamicToolCall': {
+    case 'dynamicToolCall':
+    case 'functionCallOutput':
+    case 'subAgentActivity':
+    case 'imageView': {
       const toolUseId = codexToolUseId(item.id);
       return [
         assistantMessage(
@@ -281,11 +324,19 @@ function completedItem(item: ThreadItem, deps: CodexNormalizeDeps): SdkShapedMes
 function resultUsage(usage: TokenUsageBreakdown | null | undefined) {
   return {
     input_tokens: usage?.inputTokens ?? 0,
-    // Reasoning tokens are billed output; folding them in is what keeps the
-    // session's spend from under-reporting.
-    output_tokens: (usage?.outputTokens ?? 0) + (usage?.reasoningOutputTokens ?? 0),
+    // Exactly what the provider called output, and nothing else.
+    //
+    // Reasoning tokens used to be folded in here so the session total came out
+    // right. It did — at the cost of the canonical field meaning something other
+    // than its name, which is the kind of small lie that later reads as a bug in
+    // whatever consumes it. They are carried beside it instead, and
+    // `accumulateResultSpend` adds them to the total explicitly.
+    output_tokens: usage?.outputTokens ?? 0,
     cache_read_input_tokens: usage?.cachedInputTokens ?? 0,
     cache_creation_input_tokens: usage?.cacheWriteInputTokens ?? 0,
+    // Billed as output, reported separately. Absent on Claude, which folds its
+    // own reasoning into `output_tokens` at the source.
+    ...(usage?.reasoningOutputTokens ? { reasoning_output_tokens: usage.reasoningOutputTokens } : {}),
   };
 }
 

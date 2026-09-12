@@ -179,6 +179,29 @@ test('a file change renders plain, never as an edit tool', () => {
   assert.ok(!['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(String(use.name)));
 });
 
+test('items with a real Claude-shaped home use it rather than being dropped', () => {
+  // Each of these has an existing home the renderer already knows how to draw, so
+  // dropping them lost information for no reason.
+  const toolName = (item: Record<string, unknown>) =>
+    blocks(run('item/completed', { item }).messages[0])[0].name;
+
+  // Codex sub-agents land in the Task card Claude subagents already use.
+  assert.equal(
+    toolName({ type: 'subAgentActivity', id: 'i', kind: 'started', agentThreadId: 't', agentPath: 'explore' }),
+    'Task',
+  );
+  assert.equal(toolName({ type: 'functionCallOutput', id: 'i', name: 'lookup', output: 'ok' }), 'lookup');
+  assert.equal(toolName({ type: 'imageView', id: 'i', path: '/tmp/a.png' }), 'ViewImage');
+});
+
+test('a compaction marker becomes the boundary the bridge already reads', () => {
+  // system/compact_boundary is what self-corrects the occupancy reading and
+  // records that a compaction happened — a tool card would do neither.
+  const [msg] = run('item/completed', { item: { type: 'contextCompaction', id: 'i' } }).messages;
+  assert.equal(msg.type, 'system');
+  assert.equal(msg.subtype, 'compact_boundary');
+});
+
 test('an item with no Claude-shaped home is dropped, not invented', () => {
   // A made-up tool row would read as work the agent did not do.
   assert.deepEqual(
@@ -214,9 +237,10 @@ test('usage is carried forward and folded into the settling result', () => {
   assert.equal(result.type, 'result');
   assert.equal(result.is_error, false);
   assert.equal(result.usage.input_tokens, 100);
-  // Reasoning tokens are billed output; folding them in is what keeps spend from
-  // under-reporting.
-  assert.equal(result.usage.output_tokens, 37);
+  // Exactly what the provider called output — reasoning is carried beside it, not
+  // folded in, so the canonical field means what its name says.
+  assert.equal(result.usage.output_tokens, 30);
+  assert.equal(result.usage.reasoning_output_tokens, 7);
   assert.equal(result.usage.cache_read_input_tokens, 20);
   assert.equal(result.usage.cache_creation_input_tokens, 5);
   assert.equal(result.duration_ms, 1234);
