@@ -322,6 +322,7 @@ export function buildUserContext(
     auth,
     mcp,
     openaiAuth,
+    userId,
   );
   sessions.attachWorker(worker);
 

@@ -5,8 +5,12 @@
 Lets a Lines session discuss and edit its own workflows and reusable steps in
 plain conversation — "what workflows do we have?", "add a review step to the
 MVP flow" — instead of requiring the browser's `WorkflowEditor` modal. Backed by
-an in-process MCP server (`mcp__lines__*`) exposed to every session; writes are
+an MCP server (`mcp__lines__*`) exposed to every session; writes are
 permission-gated through the existing card, reads are not.
+
+The server is hosted **two different ways**, one per engine, because the engines
+offer different hooks — see "Two front doors" below. The tool manifest and every
+handler are shared; only the hosting differs.
 
 ## Entry points
 
@@ -192,6 +196,53 @@ permission-gated through the existing card, reads are not.
   separately-encoded `validate()` — it was **not** migrated onto
   `shared/workflowValidation.ts` in this change. Drift between the two is a
   known, currently-accepted risk.
+
+## Two front doors
+
+The Claude SDK lets a client host an MCP server **in process** (`createSdkMcpServer`),
+so `workerMcp.ts` builds one inside the worker and points every handler back at the
+bridge. Codex has no such hook: it spawns every MCP server as a child process named
+in its `config.toml`. The same tool surface therefore needs a second front door.
+
+`server/src/linesMcpStdio.ts` is that door — a real stdio MCP server, spawned by
+codex, that is a **proxy and not a second implementation**. It asks the bridge for
+the manifest and forwards each call to it over `POST /lines-mcp`. That is what keeps
+the two doors from drifting: one description of the surface
+(`LINES_TOOL_MANIFEST`), one implementation behind it (`createMcpDispatcher`), and
+rewording a tool still restarts nothing.
+
+| | Claude | codex |
+| --- | --- | --- |
+| hosting | in-process, built in the worker | child process, spawned by codex |
+| built by | `workerMcp.ts` (`buildMcpServer`) | `linesMcpStdio.ts` |
+| schema form | manifest → Zod (`tool()` wants Zod) | manifest → JSON Schema (MCP wants JSON Schema) |
+| call path | worker → `rpcCall('mcpTool')` → bridge | child → `POST /lines-mcp` → bridge |
+| merged in | `mergeMcpServers` in the worker | `mergeMcpServers` in `buildCodexOptions` |
+
+Both merges put the Lines entry **last**, which is load-bearing in both: a user
+connection named `lines` would otherwise take over the `mcp__lines__*` namespace
+with no error anywhere.
+
+### How the child authenticates
+
+`POST /lines-mcp` takes the per-boot runtime token as a bearer, compared in constant
+time. That token already gates the worker's control channel, lives in a 0600 file
+and changes on every restart — so a child left behind by an old bridge fails closed
+rather than acting on a new one. The child re-reads the run file on **every** call
+rather than caching it: codex keeps the process for the life of the thread, and the
+bridge rebinds its port on every hot reload.
+
+The request names a user, because one bridge can serve several and each has its own
+`CODEX_HOME`. It is resolved with `registry.peek`, never `get` — `get` would build a
+context, and a store directory, for any string handed to it.
+
+### What the codex door cannot do
+
+Codex names one MCP server for the whole `CODEX_HOME`, so a tool call arriving at
+the bridge cannot say which *thread* made it. The two session-scoped tools therefore
+decline rather than guess: `authorize_mcp_connection` refuses and names Settings →
+Connections instead, and `list_mcp_connections` omits per-session status. The other
+eleven are unaffected — they are about stored data, not about the calling session.
 
 ## Related decisions
 

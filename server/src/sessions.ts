@@ -56,6 +56,9 @@ import {
   rootsForCwd,
   subagentParentId,
 } from '@lines/shared';
+import { LINES_MCP_SERVER } from './mcpWorkflowTools.ts';
+import { linesMcpServerConfig } from './linesMcpStdio.ts';
+import { mergeMcpServers } from './workerProtocol.ts';
 import type { Store } from './store.ts';
 import {
   captureBaseline,
@@ -1038,6 +1041,10 @@ export class SessionManager {
      *  the same reason `auth` is: absent means no codex turn can start, and the
      *  refusal names the Connect button rather than crashing. */
     private openaiAuth?: OpenaiAuthManager,
+    /** Whose sessions these are. Needed only so a codex session's MCP server can
+     *  be spawned pointing back at the right context; defaults to the local user,
+     *  which is what single-tenant mode and every test run as. */
+    private userId: string = 'local',
   ) {
     for (const meta of this.store.loadSessions()) {
       // An advance in flight belonged to the previous process — nothing is
@@ -1641,6 +1648,13 @@ export class SessionManager {
     // an OpenAI session while claiming to apply to every session.
     const compress = this.store.loadSettings()?.compressResponses !== false;
     const codexMcp = this.mcp?.codexServerConfigs();
+    // Codex spawns MCP servers as child processes, so Lines' own tools reach it
+    // as a real stdio server rather than the in-process one the Claude SDK hosts.
+    const codexServers = mergeMcpServers(
+      codexMcp?.servers ?? {},
+      LINES_MCP_SERVER,
+      linesMcpServerConfig(this.userId),
+    );
     return {
       model: resolveModelId(meta.model),
       workingDirectory: meta.cwd,
@@ -1657,8 +1671,11 @@ export class SessionManager {
       // found nothing, so this is always set by the time a push is built.
       codexPath: cli.path ?? '',
       // Translated here, not in the worker, for the same reason `mcpServers` is
-      // on the Claude path: this is where the secrets file is readable.
-      ...(codexMcp && Object.keys(codexMcp.servers).length ? { mcpServers: codexMcp.servers } : {}),
+      // on the Claude path: this is where the secrets file is readable. Lines'
+      // own server is merged in last, which is the same load-bearing ordering
+      // `mergeMcpServers` enforces for Claude — a user connection sharing the
+      // name must not take over the `mcp__lines__*` namespace.
+      ...(Object.keys(codexServers).length ? { mcpServers: codexServers } : {}),
       ...(codexMcp && Object.keys(codexMcp.env).length ? { mcpEnv: codexMcp.env } : {}),
       ...(meta.codexThreadId ? { threadId: meta.codexThreadId } : {}),
     };

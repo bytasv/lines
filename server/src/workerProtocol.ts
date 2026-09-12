@@ -74,6 +74,12 @@ export interface RuntimeInfo {
   token: string;
 }
 
+/** Absolute path of a runtime file, for handing to a child that must read it —
+ *  see `linesMcpStdio.ts`, which codex spawns with no knowledge of this layout. */
+export function runtimeFilePath(name: RuntimeName): string {
+  return runtimeFile(name);
+}
+
 const runtimeFile = (name: RuntimeName, instance: string = INSTANCE) =>
   path.join(APP_ROOT, 'run', instance, `${name}.json`);
 

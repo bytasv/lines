@@ -539,10 +539,12 @@ test('a bad URL is refused with the model told what to pass instead', async () =
 
 test('authorize_mcp_connection needs a session, a known name and an authorizable transport', async () => {
   const h = harness();
-  // No session context at all (a caller with no live session).
+  // No session context at all. Reached in earnest by a codex session, where the
+  // call genuinely cannot be traced back to a thread — so the message has to name
+  // the route that does work rather than describe the obstacle.
   const noSession = await h.call('authorize_mcp_connection', { name: 'linear' });
   assert.equal(noSession.isError, true);
-  assert.match(text(noSession), /running session/);
+  assert.match(text(noSession), /Settings → Connections/);
 
   const unknown = await h.callInSession('authorize_mcp_connection', { name: 'linear' });
   assert.equal(unknown.isError, true);

@@ -623,7 +623,16 @@ export function createMcpDispatcher(ctx: UserContext, session?: McpToolSession):
       }
 
       case 'authorize_mcp_connection': {
-        if (!session) return fail('Authorization needs a running session.');
+        // Reachable from a codex session, where it is not that no session is
+        // running but that codex names one MCP server for the whole CODEX_HOME,
+        // so the call cannot say which thread made it. Either way the user has a
+        // working route, and the message names it.
+        if (!session) {
+          return fail(
+            'This call did not arrive with a session to authorize from — ask the user to ' +
+              'authorize it in Settings → Connections.',
+          );
+        }
         const name = str(args.name).trim().toLowerCase();
         const connection = ctx.mcp.list().find((c) => c.name === name);
         if (!connection) {

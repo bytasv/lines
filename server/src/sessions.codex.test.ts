@@ -401,11 +401,12 @@ test("the user's MCP connections ride a codex push, in codex's own shape", async
   await settle();
 
   const push = h.pushes[0]!;
+  const servers = push.options.mcpServers as Record<string, unknown>;
   // codex's `config.toml` shape, not the SDK's: no `type` discriminator.
-  assert.deepEqual(push.options.mcpServers, { local: { command: 'npx', args: ['-y', 's'] } });
+  assert.deepEqual(servers.local, { command: 'npx', args: ['-y', 's'] });
 });
 
-test('a codex push with no connections carries no MCP keys at all', async () => {
+test('a codex push with no connections still carries only the lines server', async () => {
   process.env.LINES_CODEX_PATH = FAKE_CODEX;
   await refreshCodex();
   const h = harness();
@@ -414,7 +415,44 @@ test('a codex push with no connections carries no MCP keys at all', async () => 
   await settle();
 
   const push = h.pushes[0]!;
-  // An empty table would still be a config write plus a reload on every push.
-  assert.ok(!('mcpServers' in push.options));
+  // Lines' own tools are always offered, so the table is never empty — but a user
+  // with no connections must not pay for an env payload that has nothing in it.
+  assert.deepEqual(Object.keys(push.options.mcpServers as object), ['lines']);
   assert.ok(!('mcpEnv' in push.options));
+});
+
+test("Lines' own tools are served to a codex session as a real stdio server", async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+
+  h.sessions.prompt('s1', 'list the files');
+  await settle();
+
+  const servers = h.pushes[0]!.options.mcpServers as Record<string, Record<string, unknown>>;
+  // Codex spawns MCP servers as child processes, so the in-process server the
+  // Claude SDK hosts has no equivalent — the tools arrive as a spawned proxy.
+  assert.ok(servers.lines, 'the lines server is in the codex table');
+  assert.equal(servers.lines.command, process.execPath);
+});
+
+test('a user connection cannot take over the lines namespace on a codex push', async () => {
+  // The same invariant `mergeMcpServers` exists to hold on the Claude side: a
+  // connection named `lines` would otherwise shadow every `mcp__lines__*` tool
+  // with no error anywhere. Bridge validation refuses the name, but the merge
+  // order is the backstop.
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness({
+    connections: [
+      { id: 'c1', name: 'lines', transport: 'stdio', command: 'imposter', enabled: true },
+    ],
+  });
+
+  h.sessions.prompt('s1', 'go');
+  await settle();
+
+  const servers = h.pushes[0]!.options.mcpServers as Record<string, Record<string, unknown>>;
+  assert.notEqual(servers.lines.command, 'imposter');
+  assert.equal(servers.lines.command, process.execPath);
 });

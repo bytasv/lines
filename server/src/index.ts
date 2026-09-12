@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import dotenv from 'dotenv';
 
@@ -42,7 +42,11 @@ import { UserRegistry } from './userRegistry.ts';
 import type { BrowserLink, UserContext } from './userContext.ts';
 import { handleFileRequest } from './fileRoutes.ts';
 import { reportRelayStatus, UpdateManager } from './updates.ts';
-import { createMcpDispatcher, type McpAuthorizeOutcome } from './mcpWorkflowTools.ts';
+import {
+  LINES_TOOL_MANIFEST,
+  createMcpDispatcher,
+  type McpAuthorizeOutcome,
+} from './mcpWorkflowTools.ts';
 import { AGENT_AUTH_WAIT_MS, McpAuthPending, type McpAuthSettled } from './mcpAuth.ts';
 import * as workflowCommands from './workflowCommands.ts';
 import * as recipeCommands from './recipeCommands.ts';
@@ -583,7 +587,88 @@ async function handleOAuthCallback(req: http.IncomingMessage, res: http.ServerRe
  * removed the Clerk token from query strings and left nothing else here needing
  * CORS or an auth gate.
  */
+/**
+ * The route `linesMcpStdio.ts` calls — how Lines' own tools reach a codex
+ * session.
+ *
+ * Codex spawns every MCP server as a child process, so the in-process server the
+ * Claude path uses has no equivalent there. The child is a thin proxy: it asks
+ * here for the manifest and forwards each call here, which keeps one description
+ * of the tool surface and one implementation of it.
+ *
+ * Authenticated with the per-boot runtime token, matched in constant time. That
+ * token already gates the worker's control channel, lives in a 0600 file, and
+ * changes on every restart — a stale child therefore fails closed rather than
+ * acting on someone else's bridge.
+ */
+const LINES_MCP_PATH = '/lines-mcp';
+
+function tokenMatches(presented: string): boolean {
+  const a = Buffer.from(presented);
+  const b = Buffer.from(bridgeToken);
+  // timingSafeEqual throws on a length mismatch, which is itself an answer.
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+async function handleLinesMcp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const deny = (code: number, error: string) => {
+    res.writeHead(code, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error }));
+  };
+  const presented = /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
+  if (!presented || !tokenMatches(presented)) return deny(401, 'unauthorized');
+  if (req.method !== 'POST') return deny(405, 'method not allowed');
+
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    // A tool call is small. The cap is what stops a wedged child streaming the
+    // bridge out of memory.
+    if (size > 1_000_000) return deny(413, 'payload too large');
+    chunks.push(chunk as Buffer);
+  }
+  let body: { op?: string; userId?: string; tool?: string; args?: Record<string, unknown> };
+  try {
+    body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as typeof body;
+  } catch {
+    return deny(400, 'bad json');
+  }
+
+  // The caller names the user because one bridge can serve several, and each has
+  // its own CODEX_HOME — so the config that spawned this child already knew which
+  // one it belongs to. Resolved through the registry, never trusted as a path.
+  // `peek`, not `get`: the id arrives from outside this process, and `get` would
+  // build a context (and a store directory) for any string handed to it.
+  const ctx = registry.peek(body.userId ?? LOCAL_USER);
+  if (!ctx) return deny(404, 'no such user');
+
+  if (body.op === 'manifest') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(LINES_TOOL_MANIFEST));
+    return;
+  }
+  if (body.op !== 'call' || !body.tool) return deny(400, 'unknown op');
+
+  // No session: codex names one MCP server for the whole CODEX_HOME, so a call
+  // arriving here cannot say which thread made it. The two session-scoped tools
+  // decline rather than guess — see McpToolSession.
+  const result = await createMcpDispatcher(ctx)(body.tool, body.args ?? {});
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(result));
+}
+
 const server = http.createServer((req, res) => {
+  if ((req.url ?? '').startsWith(LINES_MCP_PATH)) {
+    void handleLinesMcp(req, res).catch((err) => {
+      console.warn('[lines-mcp] request failed:', err);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal error' }));
+      }
+    });
+    return;
+  }
   if ((req.url ?? '').startsWith(MCP_OAUTH_CALLBACK_PATH)) {
     void handleOAuthCallback(req, res).catch((err) => {
       console.warn('[mcp-auth] callback failed:', err);

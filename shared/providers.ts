@@ -62,9 +62,12 @@ const ANTHROPIC: ProviderCapabilities = {
  * through. `planMode` rides with it — plan mode is a read-only sandbox *plus* a
  * gate, and the gate is what was missing.
  *
- * `linesTools` is the one still false, and it is a capability Lines has not wired
- * rather than one codex lacks: the workflow tools are hosted in-process for the
- * Claude SDK, and codex can only reach them through a real MCP server.
+ * `linesTools` is on, by a different route than Claude's: codex spawns every MCP
+ * server as a child process, so the tools it hosts in-process for the SDK are
+ * served to codex by a real stdio server (`linesMcpStdio.ts`) that proxies back
+ * to the bridge. Two of the thirteen are session-scoped and decline there, since
+ * codex names one server for the whole CODEX_HOME and a call cannot say which
+ * thread made it.
  *
  * `cost` is the exception — false because codex genuinely reports tokens and
  * never a price, so it stays false on a subscription login.
@@ -88,7 +91,7 @@ const OPENAI: ProviderCapabilities = {
   compact: true,
   contextWindow: true,
   rewind: true,
-  linesTools: false,
+  linesTools: true,
   mcpConnections: true,
   cost: false,
 };
