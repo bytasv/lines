@@ -460,15 +460,39 @@ on `PENDING_TTL_MS` regardless, so an abandoned sign-in cannot pin a CLI child o
 - [workflow-mcp-tools](workflow-mcp-tools.md) — the Lines in-process server the worker's merge
   must never let a same-named connection shadow.
 
-## Not yet on a codex session
+## On a codex session
 
-The connections in this pane **do not apply to a session on an OpenAI model**. Codex takes its
-MCP servers from its own `config.toml` rather than from per-session options, and Lines does not
-seed one yet, so a codex session sees none of them. The capability is `mcpConnections` in
-`shared/providers.ts` and is currently false for OpenAI; warming is refused with a message
-saying so rather than spawning a Claude query the session would never use.
+Connections **do** apply to a session on an OpenAI model, by a different route. Codex takes its
+MCP servers from its own `config.toml` rather than from per-session options, so the bridge
+translates the enabled connections into codex's shape (`McpConnections.codexServerConfigs`) and
+the worker hands them over with codex's own `config/batchWrite` RPC.
 
-`$CODEX_HOME` is Lines-owned (`~/.lines-app/users/<id>/codex/`), which also means it **shadows
-the user's own `~/.codex/config.toml`** — so servers they configured for their terminal codex do
-not apply inside Lines either. Seeding that file deliberately is what closes both gaps. See
-[openai-codex-sessions](openai-codex-sessions.md).
+Lines never writes that file itself. Keeping codex the single writer of its own config is the
+same rule `auth.json` follows, and for the same reason. The whole `mcp_servers` table is written
+as one `replace`, so a removed or disabled connection actually goes away — safe because this
+`$CODEX_HOME` is Lines-owned (`~/.lines-app/users/<id>/codex/`) and nothing else puts a server
+in it.
+
+Three things are narrower than on the Claude path, and all three are visible to the user rather
+than silent:
+
+- **Only stdio and bearer-token HTTP.** Codex models an HTTP server's credential as a bearer
+  token and nothing else, so a connection carrying an `X-Api-Key` (or any non-`Authorization`
+  header) cannot be expressed. An SSE endpoint cannot either — codex's `url` server speaks
+  streamable HTTP only. Both are reported on the connection row by
+  `codexUnsupportedReason` (`web/src/lib/mcpConnections.ts`) rather than dropped.
+- **The token is passed by env-var name.** Codex reads it from a variable named in
+  `config.toml` (`bearer_token_env_var`), so the value never lands on disk — a better boundary
+  than the Claude path's inline `headers`. The name is derived from the connection *id*, so a
+  rename cannot orphan the variable the app-server was spawned with.
+- **A changed token waits for an idle moment.** A child's environment is fixed at spawn and one
+  child serves every codex session, so respawning to pick up a new token would kill another
+  session's in-flight turn. It happens at the first push that finds the child idle.
+
+Still missing is the **status reading**: `mcpServerStatus` is read off a live Claude query, and
+warming one for a codex session would spawn a CLI child it never uses, so the pane reports no
+status there. Codex has its own `mcpServerStatus/list` RPC, which is what would close it.
+
+`$CODEX_HOME` being Lines-owned also means it **shadows the user's own `~/.codex/config.toml`**
+— servers they configured for their terminal codex do not apply inside Lines. Adding them to
+this pane is how they get in. See [openai-codex-sessions](openai-codex-sessions.md).

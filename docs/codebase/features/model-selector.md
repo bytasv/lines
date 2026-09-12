@@ -89,10 +89,13 @@ it did: a model has to be *listed* as OpenAI to be treated as one.
 `modelSelectData()` stays the single entry point, and gained two options rather than letting
 call sites filter their own lists:
 
-- `providers` — which vendors this picker may offer. The workflow step pickers and the recipe
-  run modal pass `['anthropic']`, because a step's stored model is applied with `setModel` on a
-  live session and would otherwise flip a running workflow onto a provider that holds none of
-  its conversation. The server refuses the same thing independently.
+- `providers` — which vendors this picker may offer. No caller narrows it today: the workflow
+  step pickers and the recipe run modal used to pass `['anthropic']`, on the grounds that a
+  step's model is applied with `setModel` and would flip a running workflow onto a provider
+  holding none of its conversation. That was the right worry attached to the wrong control —
+  the fix is to drop the conversation, not to hide the models, so a provider-changing step is
+  now forced to be a fresh start. See
+  [workflow-step-lifecycle](workflow-step-lifecycle.md).
 - `unavailable` — render a provider's options disabled with a reason. Used for "connect an
   OpenAI account" and for "this session has already run on the other provider", so a blocked
   option still says why instead of vanishing.

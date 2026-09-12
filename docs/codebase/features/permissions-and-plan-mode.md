@@ -680,11 +680,28 @@ allowlist and this provenance. None of the decision logic was ever Claude-specif
 transport — so the approvals ride the RPC channel the worker already had rather than one of
 their own.
 
-Threads run `untrusted` rather than `never` in every gated mode: the request reaches
-`handleCanUseTool`, where the guard silently approves the safe calls, so only what would have
-prompted on Claude prompts here. `bypassPermissions` maps to codex's `danger-full-access`, which
-is safe *because* Lines is the gate — the sandbox is a second line, not the only one, and the
-always-ask tools still stop.
+Threads run `on-request` in every gated mode, and **what stops for approval is set by the
+sandbox, not by the policy**. That split matters, and it was originally got wrong.
+
+The first cut used `untrusted` — ask about everything — on the theory that the auto-guard would
+silently approve the safe calls. It cannot: `isSafeReadOnly` gates on `READ_ONLY_TOOLS`
+(`Read`/`Glob`/`Grep`/…) and every codex command arrives as `Bash`, so nothing was auto-approved
+and a codex session raised a card for every `cat` and `rg`. Claude does not rely on the guard for
+this either — measured, the same "cat package.json" prompt through the Claude SDK calls
+`canUseTool` **zero** times, because the CLI classifies a read-only Bash command itself.
+
+So the sandbox carries the gate instead:
+
+| mode | sandbox | policy | effect |
+| --- | --- | --- | --- |
+| `default`, `auto`, `plan` | `read-only` | `on-request` | reads run; any write must escalate, and the escalation *is* the card |
+| `acceptEdits` | `workspace-write` | `on-request` | the workspace was granted up front, so edits do not ask |
+| `bypassPermissions` | `danger-full-access` | `never` | Lines' own handlers still see the call |
+
+Measured against the live app-server on `gpt-5.6-luna`: `untrusted` + workspace-write produced 5
+approval requests for 5 commands; `on-request` + read-only produced 0 for a read and 2 for a
+write. `bypassPermissions` is safe *because* Lines is the gate — the sandbox is a second line,
+not the only one, and the always-ask tools still stop.
 
 `acceptForSession` is deliberately never sent. Lines keeps its own allowlist, and asking codex
 to remember a second copy would split one decision across two stores that cannot be kept in step

@@ -559,6 +559,36 @@ installed icon, no new package). No other new dependencies.
   follow-the-stream and scrolls straight to it, otherwise it drops the tail window and scrolls
   once the marker mounts.
 
+### Steps across providers
+
+A step may run on **either** provider, but it cannot *carry* a conversation across one: nothing
+links a `claudeSessionId` to a `codexThreadId`, so a model on the far side would inherit a
+transcript it cannot read. That makes the constraint a property of a **pair of adjacent steps**
+rather than of a provider — which is why it is a function,
+`providerSwitchNeedsFreshStart(from, to)` in `shared/providers.ts`, and not a capability flag.
+(The `workflows` flag it replaced had become `true` for both providers and had no reader.)
+
+A step that changes provider is therefore a fresh start, enforced in three places because each
+catches a case the others cannot:
+
+- **The editor** (`StepCard.tsx`) turns `freshStart` on in the same patch as the model change and
+  locks the switch, so the rule is visible while the workflow is being assembled rather than
+  discovered minutes into a run.
+- **The draft serializer** (`useWorkflowDraft.ts`, `crossesProviderAt`) forces it again on save,
+  because a workflow stored before this rule existed still holds `freshStart: false` and saving
+  it back unchanged would persist a step the runner rejects.
+- **The runner** (`workflows.ts`) refuses a crossing step that is not a fresh start, naming the
+  fix; and for one that is, drops the stranded conversation with `resetClaudeSession` **before**
+  `setModel`, which would otherwise refuse the cross-provider switch outright.
+
+The runner keys that check on the **resume pointers the session actually holds**, not on
+`meta.model`. Attaching a workflow writes step 0's model onto the session up front, so by the
+time the step runs `meta.model` already agrees with it and a comparison against it would report
+no crossing at all.
+
+Step 0 is the one case the editor cannot judge: its predecessor is whatever session the workflow
+is attached to, which is not known until the run. The runner handles it with the same rule.
+
 ## Architectural rules
 
 - `interrupt()` stays intent-free — no caller may infer "advance" from "stop". Only

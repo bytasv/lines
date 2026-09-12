@@ -9,10 +9,11 @@ A second agent provider. A session whose model is an OpenAI one runs its turns t
 Settings → Account is how the account gets there.
 
 Everything that makes a session a session is at parity: token streaming, permission cards,
-plan mode, Send now, compaction, the context ring, and rewind all work on a codex session and
-go through the *same* bridge machinery a Claude session does. What is not at parity is tools —
-Lines' own workflow tools and the user's MCP connections do not reach a codex session yet, and
-workflows are refused on both the client and the server because of it.
+plan mode, Send now, compaction, the context ring, rewind, the user's MCP connections and
+workflow steps all work on a codex session and go through the *same* bridge machinery a Claude
+session does. One capability is still false — `linesTools`: Lines' own workflow tools are hosted
+in-process for the Claude SDK, and codex can only reach them through a real MCP server. `cost` is
+false for a different and permanent reason: codex reports tokens and never a price.
 
 Two decisions shape the whole feature.
 
@@ -119,6 +120,9 @@ the transport was.
 - `server/src/codexAppServer.contract.test.ts` — the protocol canary.
 - `server/src/openaiUsage.test.ts` — the `/wham/usage` parser.
 - `server/src/helperQuery.test.ts` — provider selection for the bridge's own queries.
+- `server/src/mcpConnections.test.ts` — the codex translation of a connection, including the
+  bearer-token boundary and the two connection kinds codex cannot express.
+- `server/src/workflows.providers.test.ts` — a step that changes provider.
 
 ## Related decisions
 
@@ -138,3 +142,15 @@ the transport was.
   the user can only see one of.
 - **Helper queries stay on `codex exec`.** They are genuinely one-shot, so the app-server would
   mean a long-lived child on the bridge for no gain.
+- **Codex is the only writer of its own `config.toml`.** MCP connections reach a codex session
+  through codex's `config/batchWrite` RPC rather than Lines editing the file. Same single-writer
+  rule `auth.json` follows, and for the same reason.
+- **The sandbox carries the permission gate, not the approval policy.** The first cut ran
+  `untrusted` believing the auto-guard would approve safe calls; it cannot, because every codex
+  command arrives as `Bash` and `isSafeReadOnly` only knows `Read`/`Glob`/`Grep`. Measured, the
+  Claude CLI calls `canUseTool` zero times for a read-only Bash command — so codex runs
+  `on-request`, and `default` uses a read-only sandbox to make writes escalate. See
+  [permissions-and-plan-mode](permissions-and-plan-mode.md).
+- **A provider change inside a workflow forces a fresh start.** Nothing links a
+  `claudeSessionId` to a `codexThreadId`, so the conversation is dropped rather than handed to a
+  model that cannot read it. See [workflow-step-lifecycle](workflow-step-lifecycle.md).
