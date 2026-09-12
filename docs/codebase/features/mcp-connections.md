@@ -489,9 +489,21 @@ than silent:
   child serves every codex session, so respawning to pick up a new token would kill another
   session's in-flight turn. It happens at the first push that finds the child idle.
 
-Still missing is the **status reading**: `mcpServerStatus` is read off a live Claude query, and
-warming one for a codex session would spawn a CLI child it never uses, so the pane reports no
-status there. Codex has its own `mcpServerStatus/list` RPC, which is what would close it.
+**Status** comes from codex's own `mcpServerStatus/list`, which answers for the whole
+`CODEX_HOME` rather than per thread. That makes it cheaper than the Claude reading, not dearer:
+there is nothing to warm, so it needs no Refresh click and works for a session that has never
+run a turn. `SessionManager.mcpServerStatus` short-circuits to it before the `warm` check.
+
+The mapping has one trap worth knowing about. `runtimeStatus` is *thread*-runtime state: a
+server that started fine and listed every one of its tools still reports it as `null` whenever
+no thread is running, which is exactly the case when Settings asks. Reading the dot off it alone
+showed every working connection as "pending" forever. The catalog is the fallback evidence —
+codex documents `toolsError` as null whenever a catalog came back, so a server that answered a
+tool listing has demonstrably connected. `normalizeCodexMcpStatuses` encodes that, and
+`sessions.codexMcpStatus.test.ts` pins each state.
+
+Lines' own `lines` server is filtered out of the list: it is how the tools get there, not a
+connection the user added, and showing it would invite them to remove it.
 
 `$CODEX_HOME` being Lines-owned also means it **shadows the user's own `~/.codex/config.toml`**
 — servers they configured for their terminal codex do not apply inside Lines. Adding them to

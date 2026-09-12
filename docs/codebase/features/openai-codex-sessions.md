@@ -11,9 +11,9 @@ Settings → Account is how the account gets there.
 Everything that makes a session a session is at parity: token streaming, permission cards,
 plan mode, Send now, compaction, the context ring, rewind, the user's MCP connections and
 workflow steps all work on a codex session and go through the *same* bridge machinery a Claude
-session does. One capability is still false — `linesTools`: Lines' own workflow tools are hosted
-in-process for the Claude SDK, and codex can only reach them through a real MCP server. `cost` is
-false for a different and permanent reason: codex reports tokens and never a price.
+session does — including Lines' own workflow tools, served to codex by a real stdio MCP server
+(see [workflow-mcp-tools](workflow-mcp-tools.md)) since codex cannot host one in-process. `cost`
+is the only capability still false, and permanently: codex reports tokens and never a price.
 
 Two decisions shape the whole feature.
 
@@ -123,6 +123,9 @@ the transport was.
 - `server/src/mcpConnections.test.ts` — the codex translation of a connection, including the
   bearer-token boundary and the two connection kinds codex cannot express.
 - `server/src/workflows.providers.test.ts` — a step that changes provider.
+- `server/src/linesMcpStdio.test.ts` — the spawn recipe codex is given for Lines' own tools.
+- `server/src/sessions.codexMcpStatus.test.ts` — the connection-status mapping, including the
+  null `runtimeStatus` a working server reports.
 
 ## Related decisions
 
