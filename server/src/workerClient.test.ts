@@ -39,8 +39,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** A fake worker: binds an ephemeral port, publishes it, and says hello to
  *  anyone presenting the right token — enough for WorkerClient to connect.
- *  `version` overrides the hello's protocol version, to play a stale worker. */
-function startFakeWorker({ version }: { version?: number } = {}): Promise<{ close: () => void }> {
+ *  `version` overrides the hello's protocol version, to play a stale worker;
+ *  `appVersion` plays a worker built at a given package version. */
+function startFakeWorker({
+  version,
+  appVersion,
+}: { version?: number; appVersion?: string } = {}): Promise<{ close: () => void }> {
   return new Promise((resolve) => {
     const token = randomUUID();
     const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -72,7 +76,16 @@ function startFakeWorker({ version }: { version?: number } = {}): Promise<{ clos
       }
       clients.add(ws);
       ws.on('close', () => clients.delete(ws));
-      ws.send(JSON.stringify({ type: 'hello', version: version ?? PROTOCOL_VERSION, live: [] }));
+      ws.send(
+        JSON.stringify({
+          type: 'hello',
+          version: version ?? PROTOCOL_VERSION,
+          // Omitted entirely when unset, which is also how a worker too old to
+          // report one behaves.
+          ...(appVersion ? { appVersion } : {}),
+          live: [],
+        }),
+      );
     });
   });
 }
@@ -231,4 +244,42 @@ test('a never-compatible worker publishes a mismatch without ever connecting', a
   await sleep(LOST_MS);
   assert.equal(statuses.length, 1, 'one mismatch message, not one per retry');
   assert.equal(lostCount, 0, 'the outage clock never started, so onWorkerLost cannot fire');
+});
+
+test('a worker restarted on a new build publishes a status update', async (t) => {
+  const worker = await startFakeWorker({ appVersion: '0.2.0' });
+  const statuses: WorkerStatus[] = [];
+  const client = startClient(
+    () => {},
+    (s) => statuses.push(s),
+  );
+  t.after(() => client.dispose());
+
+  // The first hello is itself a change: the seeded status carries no version, so
+  // the browsers are told which build answered rather than waiting for an outage.
+  await until(() => statuses.length === 1, 'first-hello status');
+  assert.deepEqual(statuses[0], { connected: true, version: '0.2.0' });
+
+  // A dogfooding restart: the worker comes back on a new build well inside the
+  // outage deadline, so `connected` and `since` never move. Without `version` in
+  // the comparison this transition would publish nothing and the Updates pane
+  // would keep naming the old build.
+  worker.close();
+  const restarted = await startFakeWorker({ appVersion: '0.2.1' });
+  t.after(() => restarted.close());
+
+  await until(() => statuses.length === 2, 'version-change status');
+  assert.deepEqual(statuses[1], { connected: true, version: '0.2.1' });
+  assert.equal(client.status.version, '0.2.1');
+});
+
+test('a worker too old to report its build is connected with no version', async (t) => {
+  const worker = await startFakeWorker();
+  t.after(() => worker.close());
+  const client = startClient(() => {});
+  t.after(() => client.dispose());
+
+  await until(() => client.everConnected, 'fake worker hello');
+  // Absent, not undefined-valued: the field is optional on the wire too.
+  assert.deepEqual(client.status, { connected: true });
 });

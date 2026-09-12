@@ -55,6 +55,7 @@ import {
   readRuntimeInfo,
   type McpToolResult,
 } from './workerProtocol.ts';
+import { publicClaudeCliStatus } from './claudeCli.ts';
 
 /** Explicit pin for local dev (Tilt sets it so its readiness probe has a fixed
  *  target); unset means bind :0 and publish the result to bridge.json. */
@@ -807,6 +808,11 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
     // Same reason as `worker`, and owner-only: `installUpdate` is owner-gated,
     // and a guest has no business being told to update this machine.
     update: updates.current(),
+    // Which CLI this machine's turns actually run on, for the Updates pane.
+    // Owner-only like `update` above and narrowed the same way it is worded:
+    // `publicClaudeCliStatus` drops `path`, which would leak the host's home
+    // directory and username. Never spread `claudeCliStatus()` here.
+    claudeCli: publicClaudeCliStatus(),
     settings: ctx.store.loadSettings(),
     guardAllowlist: ctx.guard.list(),
     // Read from persisted state, so a pending review is on screen before the

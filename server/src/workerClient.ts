@@ -100,6 +100,10 @@ export class WorkerClient {
   private mismatch: { worker: number; bridge: number } | null = null;
   /** When that mismatch was first seen — `since` for a link that never came up at all. */
   private mismatchAt: number | null = null;
+  /** Package version of the connected worker, from its hello; null on a worker
+   *  too old to send one. Kept across an outage on purpose — the same worker is
+   *  what the retry loop is dialling — and re-stamped by the next hello. */
+  private appVersion: string | null = null;
   /** Last published health, so `onStatusChange` only fires on a real transition. */
   private published: WorkerStatus = { connected: true };
   private retryTimer: NodeJS.Timeout | null = null;
@@ -155,11 +159,14 @@ export class WorkerClient {
    * outage deadline passes or it answers on the wrong protocol version.
    */
   get status(): WorkerStatus {
+    // The version rides along on every branch: a mismatched or lost worker is
+    // exactly when knowing which build answered is worth most.
+    const version = this.appVersion ? { version: this.appVersion } : {};
     if (this.mismatch) {
-      return { connected: false, since: this.mismatchAt ?? undefined, mismatch: this.mismatch };
+      return { connected: false, since: this.mismatchAt ?? undefined, mismatch: this.mismatch, ...version };
     }
-    if (this.lostFired) return { connected: false, since: this.disconnectedAt ?? undefined };
-    return { connected: true };
+    if (this.lostFired) return { connected: false, since: this.disconnectedAt ?? undefined, ...version };
+    return { connected: true, ...version };
   }
 
   /**
@@ -181,7 +188,11 @@ export class WorkerClient {
       prev.connected === next.connected &&
       prev.since === next.since &&
       prev.mismatch?.worker === next.mismatch?.worker &&
-      prev.mismatch?.bridge === next.mismatch?.bridge;
+      prev.mismatch?.bridge === next.mismatch?.bridge &&
+      // A worker that restarted on a new build while the link stayed up moves
+      // nothing else in this comparison, and the Updates pane would keep
+      // showing the old one.
+      prev.version === next.version;
     if (same) return;
     this.published = next;
     this.callbacks.onStatusChange(next);
@@ -253,6 +264,9 @@ export class WorkerClient {
           // never sets the outage clock, so this is the only signal the UI gets.
           this.mismatch = { worker: msg.version, bridge: PROTOCOL_VERSION };
           this.mismatchAt ??= Date.now();
+          // Recorded even here: `appVersion` is outside the protocol contract,
+          // and naming the stale build is the whole point of the mismatch row.
+          this.appVersion = msg.appVersion ?? null;
           if (this.warnedVersion !== msg.version) {
             this.warnedVersion = msg.version;
             console.error(
@@ -272,6 +286,7 @@ export class WorkerClient {
         this.lostFired = false;
         this.mismatch = null;
         this.mismatchAt = null;
+        this.appVersion = msg.appVersion ?? null;
         this.publishStatus();
         // Reconcile first so command handlers see fresh session statuses, and
         // count queued pushes as live — otherwise reconcile idles a session

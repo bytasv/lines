@@ -16,6 +16,12 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { ClaudeCliState, ClaudeCliStatus } from '@lines/shared';
+
+// The shapes live in shared/types.ts because the browser renders them in
+// Settings -> Updates and must not import server code. Re-exported here so every
+// existing importer keeps reading them off the module that produces them.
+export type { ClaudeCliState, ClaudeCliStatus };
 
 /**
  * The CLI version the pinned SDK wrapper ships with
@@ -33,18 +39,6 @@ export const MIN_CLAUDE_VERSION = '2.1.211';
 
 /** Where to send someone who has no CLI at all. */
 export const CLAUDE_INSTALL_URL = 'https://docs.claude.com/en/docs/claude-code/setup';
-
-export type ClaudeCliState = 'ok' | 'missing' | 'outdated';
-
-export interface ClaudeCliStatus {
-  state: ClaudeCliState;
-  /** Absolute path to the binary; absent only when `state === 'missing'`. */
-  path?: string;
-  /** Parsed `x.y.z`; absent when the binary exists but would not report one. */
-  version?: string;
-  /** Echoed so callers can word their own message without importing the constant. */
-  minVersion: string;
-}
 
 /** Injection seams, so discovery order is testable without a real filesystem. */
 export interface DiscoveryDeps {
@@ -198,6 +192,23 @@ export function claudeCliStatus(): ClaudeCliStatus {
 export function refreshClaudeCli(): ClaudeCliStatus {
   cached = resolveClaudeCliStatus();
   return cached;
+}
+
+/**
+ * The copy a client may see, for `hello`.
+ *
+ * Built field by field rather than by spreading, because `path` is an absolute
+ * path to the binary: it names the host's home directory and therefore their
+ * username, to anyone holding a socket. A spread with a `delete` would put that
+ * one line's correctness between every future field and the wire; this cannot
+ * leak a field nobody listed.
+ */
+export function publicClaudeCliStatus(status: ClaudeCliStatus = claudeCliStatus()): ClaudeCliStatus {
+  return {
+    state: status.state,
+    ...(status.version ? { version: status.version } : {}),
+    minVersion: status.minVersion,
+  };
 }
 
 /**

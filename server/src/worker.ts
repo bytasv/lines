@@ -19,6 +19,8 @@
  * shapes) are authored on the bridge and arrive as data on `push`.
  */
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -110,6 +112,25 @@ interface PendingRpc {
   payload: Record<string, unknown>;
   settle: (result: unknown) => void;
 }
+
+/**
+ * Injected by the desktop bundler (esbuild `--define`); undefined under tsx,
+ * Tilt and every test — hence the `typeof` guard. Same idiom as the bridge's
+ * BRIDGE_VERSION, which this is the worker-side twin of.
+ */
+declare const __LINES_VERSION__: string | undefined;
+
+/** Reported on `hello` so the Updates pane can show a worker that outlived a
+ *  bridge upgrade. Read from disk rather than imported, like the bridge does it;
+ *  a missing manifest is cosmetic. */
+const WORKER_VERSION: string = (() => {
+  try {
+    const pkg = fs.readFileSync(path.resolve(import.meta.dirname, '../package.json'), 'utf8');
+    return (JSON.parse(pkg) as { version?: string }).version ?? '0.0.0';
+  } catch {
+    return typeof __LINES_VERSION__ === 'string' ? __LINES_VERSION__ : '0.0.0';
+  }
+})();
 
 const startedAt = Date.now();
 /** Minted per boot and published (0600) in worker.json. The bridge must echo it
@@ -558,6 +579,7 @@ function handleConnection(ws: WebSocket, req: IncomingMessage) {
     JSON.stringify({
       type: 'hello',
       version: PROTOCOL_VERSION,
+      appVersion: WORKER_VERSION,
       startedAt,
       live: [
         ...[...sessions].map(([sessionId, s]) => ({

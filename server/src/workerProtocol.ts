@@ -426,8 +426,13 @@ export interface LiveSessionInfo {
 }
 
 export type WorkerToBridge =
-  /** Sent on every (re)connect, before buffered events and rpc re-sends. */
-  | { type: 'hello'; version: number; startedAt: number; live: LiveSessionInfo[] }
+  /** Sent on every (re)connect, before buffered events and rpc re-sends.
+   *  `appVersion` is the worker's *package* version, distinct from `version`'s
+   *  protocol number — the worker survives bridge restarts, so the two halves
+   *  can legitimately be different builds and the Updates pane says so.
+   *  `undefined` = a worker too old to report it; adding this field is not a
+   *  protocol bump (see the note above AskMethod). */
+  | { type: 'hello'; version: number; appVersion?: string; startedAt: number; live: LiveSessionInfo[] }
   /** One SDK message from a session's query stream. */
   | { type: 'event'; sessionId: string; message: Record<string, unknown> }
   /** The session's query stream finished (error = it threw). */

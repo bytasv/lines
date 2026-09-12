@@ -3095,6 +3095,61 @@
         "agent-memory-sync",
         "workflow-mcp-tools"
       ]
+    },
+    {
+      "id": "settings-updates-pane",
+      "name": "Settings → Updates pane",
+      "doc": "features/settings-updates-pane.md",
+      "purpose": "Show the version of every moving part (web, bridge, worker, desktop app, Claude Code CLI) in one place in Settings, with a permanent desktop download link.",
+      "entryPoints": [
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/UpdatesSection.tsx"
+      ],
+      "files": [
+        "web/src/components/UpdatesSection.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/vite.config.ts",
+        "web/src/vite-env.d.ts",
+        "web/src/store.ts",
+        "web/src/lib/machines.ts",
+        "shared/types.ts",
+        "server/src/claudeCli.ts",
+        "server/src/index.ts",
+        "server/src/workerProtocol.ts",
+        "server/src/worker.ts",
+        "server/src/workerClient.ts"
+      ],
+      "symbols": [
+        "publicClaudeCliStatus",
+        "ClaudeCliState",
+        "ClaudeCliStatus",
+        "UpdatesSection",
+        "VersionRow",
+        "WorkerClient.status",
+        "WorkerStatus.version"
+      ],
+      "tests": [
+        "server/src/claudeCli.test.ts",
+        "server/src/workerClient.test.ts"
+      ],
+      "businessRules": [
+        "versions shown are web, bridge, worker, desktop app, and Claude CLI only",
+        "the desktop row's badge and button variant come solely from updateStatus.state === 'available' (the desktop shell's own feed verdict) — no client-side version-string comparison exists anywhere in the pane",
+        "the download button always renders whenever a desktop build has been published, regardless of update state — being current does not hide it, only DESKTOP_DOWNLOAD_ENABLED being false hides the whole row",
+        "the download action is a plain link to DESKTOP_DOWNLOAD_URL, never the owner-gated installUpdate message, which would silently no-op for a remote browser",
+        "an unknown version renders as a dimmed em dash rather than an omitted row, so the pane's shape never changes",
+        "hello.claudeCli never carries the CLI binary's absolute path — publicClaudeCliStatus builds the wire object field by field rather than spreading the bridge-local status",
+        "hello.claudeCli and the worker's hello.appVersion are both optional, so neither bumps a protocol version"
+      ],
+      "architecturalRules": [
+        "ClaudeCliState/ClaudeCliStatus are declared in shared/types.ts and re-exported from server/src/claudeCli.ts, so the browser can read the shape without importing server code",
+        "the worker's appVersion is a package version, distinct from the protocol version already on its hello — the worker outlives bridge restarts, so the two can legitimately differ",
+        "__LINES_VERSION__ for the web bundle mirrors the existing bridge/worker/desktop-shell define idiom rather than introducing a VITE_ env var"
+      ],
+      "relatedDecisions": [
+        "desktop-app",
+        "hosted-machine-access"
+      ]
     }
   ]
 }

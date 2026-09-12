@@ -9,6 +9,7 @@ import {
   compareVersions,
   findClaudeCli,
   MIN_CLAUDE_VERSION,
+  publicClaudeCliStatus,
   readVersion,
   resolveClaudeCliStatus,
   type DiscoveryDeps,
@@ -125,4 +126,26 @@ test('this machine resolves a usable CLI', () => {
   if (status.state === 'missing') return;
   assert.equal(status.state, 'ok', `found ${status.path} at ${status.version}`);
   assert.ok(path.isAbsolute(status.path!));
+});
+
+test('the wire copy carries the version and never the binary path', () => {
+  // `path` names the host's home directory and therefore their username, and
+  // `hello` goes to anyone holding a socket. Field-by-field construction is what
+  // keeps it off the wire, so this asserts the key is absent, not merely falsy.
+  const status = resolveClaudeCliStatus({
+    ...base,
+    isExecutable: () => true,
+    readVersion: () => '2.2.0',
+  });
+  assert.ok(status.path, 'the bridge-side status does keep the path');
+
+  const wire = publicClaudeCliStatus(status);
+  assert.deepEqual(Object.keys(wire).sort(), ['minVersion', 'state', 'version']);
+  assert.equal('path' in wire, false);
+  assert.deepEqual(wire, { state: 'ok', version: '2.2.0', minVersion: MIN_CLAUDE_VERSION });
+});
+
+test('the wire copy of a missing CLI omits the version rather than sending undefined', () => {
+  const wire = publicClaudeCliStatus(resolveClaudeCliStatus({ ...base, isExecutable: () => false }));
+  assert.deepEqual(wire, { state: 'missing', minVersion: MIN_CLAUDE_VERSION });
 });

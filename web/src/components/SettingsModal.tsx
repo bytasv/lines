@@ -27,6 +27,7 @@ import { GuardAllowlistSection } from './GuardAllowlistSection';
 import { McpConnectionsSection } from './McpConnectionsSection';
 import { DevicesSection } from './DevicesSection';
 import { CollaboratorsSection } from './CollaboratorsSection';
+import { UpdatesSection } from './UpdatesSection';
 import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
 import { SHARING_ENABLED } from '../lib/shares';
 import { modelSelectData, renderModelOption } from '../lib/modelSelect';
@@ -44,7 +45,8 @@ export type SettingsSection =
   | 'allowlist'
   | 'connections'
   | 'diagnostics'
-  | 'docs';
+  | 'docs'
+  | 'updates';
 
 const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   { value: 'account', label: 'Account' },
@@ -65,6 +67,7 @@ const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   { value: 'connections', label: 'Connections' },
   { value: 'diagnostics', label: 'Sync' },
   { value: 'docs', label: 'Documentation' },
+  { value: 'updates', label: 'Updates' },
 ];
 
 /**
@@ -165,6 +168,7 @@ export function SettingsModal({
             {section === 'notifications' && <NotificationsSection />}
             {section === 'diagnostics' && <SyncLogSection />}
             {section === 'docs' && <DocsSection onClose={onClose} />}
+            {section === 'updates' && <UpdatesSection />}
             {section === 'allowlist' && (
               <GuardAllowlistSection
                 onOpenReview={() => {

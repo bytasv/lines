@@ -146,6 +146,30 @@ export interface BridgeInfo {
   appProtocol: number;
 }
 
+export type ClaudeCliState = 'ok' | 'missing' | 'outdated';
+
+/**
+ * The Claude Code CLI the host machine runs turns with, as discovered by the
+ * bridge (server/src/claudeCli.ts, which re-exports these two types).
+ *
+ * Declared here rather than in the server workspace for the same reason
+ * `PLAN_DIR_MARKER` is: the browser renders this in Settings -> Updates and must
+ * not import server code to do it.
+ *
+ * `path` is filled in on the bridge side only. It is an absolute path to the
+ * binary — i.e. the host's home directory and username — so the wire copy in
+ * `hello` is built field by field and deliberately leaves it out.
+ */
+export interface ClaudeCliStatus {
+  state: ClaudeCliState;
+  /** Absolute path to the binary; absent only when `state === 'missing'`, and never sent to a client. */
+  path?: string;
+  /** Parsed `x.y.z`; absent when the binary exists but would not report one. */
+  version?: string;
+  /** Echoed so callers can word their own message without importing the constant. */
+  minVersion: string;
+}
+
 /**
  * 'auto' is UI-level: the SDK runs in acceptEdits underneath while the bridge
  * server auto-approves tool calls its guard considers safe and prompts only
@@ -2028,6 +2052,13 @@ export interface WorkerStatus {
    * copy differs.
    */
   mismatch?: { worker: number; bridge: number };
+  /**
+   * Package version of the connected worker. Absent on a worker too old to
+   * report it, and while no worker has said hello. Worth carrying separately
+   * from the bridge's own: the worker outlives bridge restarts, so a frozen
+   * worker beside a hot bridge is a real (and confusing) state to be able to see.
+   */
+  version?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -2610,6 +2641,13 @@ export type ServerMessage =
        * only: a guest must not be nagged to update somebody else's machine.
        */
       update?: UpdateStatus;
+      /**
+       * The Claude Code CLI this machine runs turns with. Absent on a bridge
+       * older than this field, and on a guest connection (like `update`, it
+       * describes somebody else's machine). Never carries `path` — see
+       * ClaudeCliStatus.
+       */
+      claudeCli?: ClaudeCliStatus;
       settings?: UserUiSettings | null;
       guardAllowlist?: GuardAllowEntry[];
       guardAllowlistReview?: GuardAllowlistReview | null;

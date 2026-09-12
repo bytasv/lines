@@ -39,8 +39,25 @@ function bridgeDiscovery(): Plugin {
   };
 }
 
+/**
+ * Version of this bundle, read at config time.
+ *
+ * Mirrors the bridge's `__LINES_VERSION__` (server/src/index.ts) rather than
+ * introducing a `VITE_` var: this is the app's own identity, not deployment
+ * configuration, and a browser has no package.json to read it from at runtime.
+ */
+const WEB_VERSION: string = (() => {
+  try {
+    const pkg = fs.readFileSync(path.resolve(import.meta.dirname, 'package.json'), 'utf8');
+    return (JSON.parse(pkg) as { version?: string }).version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
+
 export default defineConfig({
   plugins: [react(), bridgeDiscovery()],
+  define: { __LINES_VERSION__: JSON.stringify(WEB_VERSION) },
   // VITE_* vars load from the repo-root .env (shared with the bridge).
   envDir: '..',
   server: {

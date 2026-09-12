@@ -2,7 +2,7 @@
 
 Covers: `composer-draft-persistence`, `composer-focus-new-session`,
 `project-switch-session-selection`, `project-tab-status-dot`, `session-status-badge`,
-`session-create-auto-select`, `hello-duplicate-inertness`.
+`session-create-auto-select`, `hello-duplicate-inertness`, `session-list-sorting`.
 
 ## Purpose
 
@@ -39,6 +39,10 @@ and how status is surfaced in the sidebar row and the project tab.
   transcript/context-breakdown caches. The relay replays a channel's `open` (and with it, a fresh
   `hello`) on every bridge attach or takeover, so a browser that never itself reconnected can still
   receive one.
+- **Session list sorting** — a per-browser choice of sidebar session order: Status (default,
+  urgency-ranked), Last active, or Created. Applies to all three sidebar groups (Sessions,
+  Shared-with-me, Archived). Distinct from auto-selection (`latestSessionIn`), which still always
+  picks by `createdAt` regardless of this setting.
 
 ## Entry points
 
@@ -63,7 +67,8 @@ and how status is surfaced in the sidebar row and the project tab.
 - `web/src/lib/format.ts` — `projectStatusMeta`,
   `PROJECT_STATUS_ORDER`/`PROJECT_STATUS_RANK`, `waitingPermissionMeta`, `sessionRowMeta` (the
   sidebar row's single presentation entry point; wraps `waitingPermissionMeta` and the plain
-  per-status `STATUS_META` table, which lives here instead of in `Sidebar.tsx`)
+  per-status `STATUS_META` table, which lives here instead of in `Sidebar.tsx`); `SessionSort`,
+  `SESSION_SORT_ORDER`/`SESSION_SORT_RANK`, `lastActivityAt`, `compareSessions`
 - `web/src/components/ProjectTabs.tsx` — `ProjectTab` folder/dot swap and tooltip
 - `server/src/sessions.ts` — `askPermission`, `setStatus`, `reconcileWithWorker`, `adoptSynced`
 - `web/src/components/Sidebar.tsx` — badge label/color lookup
@@ -98,6 +103,15 @@ and how status is surfaced in the sidebar row and the project tab.
   `waiting-permission` pause (e.g. `ExitPlanMode`, `AskUserQuestion`); undefined for any other
   status
 - `waitingPermissionMeta(tool)` — maps a pending tool name to `{ label, color }`
+- `SessionSort` — `'status' | 'activity' | 'created'`; the sidebar's persisted sort choice
+- `lastActivityAt(session)` — `session.updatedAt ?? session.createdAt`; the closest thing to a
+  last-activity clock, since there is no dedicated last-turn field
+- `compareSessions(mode)` — comparator for a sidebar session list: `status` ranks by
+  `SESSION_SORT_RANK` (urgency), tie-broken by `lastActivityAt` descending; `activity` sorts by
+  `lastActivityAt` descending; `created` sorts by `createdAt` descending (today's pre-existing
+  order)
+- `SESSION_SORT_ORDER`/`SESSION_SORT_RANK` — the `status`-mode urgency table: running, then
+  `PROJECT_STATUS_ORDER` (the same table the tab dot uses), then background work, done, idle
 - `sessionRowMeta(session)` — maps a full session to `{ color, label, actionable }` for the
   sidebar row: `waitingPermissionMeta` first, then the [turn-recovery](turn-recovery.md) yellow
   interrupted state, then a settled session's own live

@@ -27,6 +27,7 @@ import type {
   StepDef,
   StorageStatus,
   TranscriptEvent,
+  ClaudeCliStatus,
   UpdateStatus,
   UsageSnapshot,
   UserUiSettings,
@@ -699,6 +700,10 @@ interface UiState {
   /** Which bridge we're talking to; null until the first hello, and on a bridge
    *  too old to send it. */
   bridge: BridgeInfo | null;
+  /** The Claude Code CLI the primary machine runs turns with; null until the
+   *  first hello, on a bridge too old to send it, and on a guest connection.
+   *  Shown in Settings -> Updates. Never carries the binary's path. */
+  claudeCli: ClaudeCliStatus | null;
   /** The bridge speaks a contract this client doesn't. Hosted builds ship ahead
    *  of installed bridges, so this is the expected steady state after a deploy,
    *  not an error — the UI degrades rather than throwing. Shows SkewBanner, which
@@ -1068,6 +1073,7 @@ export const useStore = create<UiState>((set, get) => {
   workerStatus: null,
   updateStatus: null,
   bridge: null,
+  claudeCli: null,
   protocolSkew: false,
   authorizeUrl: null,
   authError: null,
@@ -1121,6 +1127,7 @@ export const useStore = create<UiState>((set, get) => {
         storageStatus: slice.storage,
         updateStatus: slice.update,
         bridge: slice.bridge,
+        claudeCli: slice.claudeCli,
         // Only meaningful once that machine has said `hello`: before it, a null
         // `bridge` is "not asked yet", not a pre-versioning bridge, and reading it
         // as skew would flash the pill on every machine switch.
@@ -1479,6 +1486,7 @@ export const useStore = create<UiState>((set, get) => {
             storage: msg.storage ?? null,
             update: msg.update ?? null,
             bridge: msg.bridge ?? null,
+            claudeCli: msg.claudeCli ?? null,
             scope: msg.access?.scope ?? 'owner',
             ownerProfile: msg.access?.ownerProfile ?? null,
           };
@@ -1526,6 +1534,10 @@ export const useStore = create<UiState>((set, get) => {
           // machine's hello must not retag them (and SkewBanner reads both, which
           // only reads straight if they move together).
           bridge: fromPrimary ? msg.bridge ?? null : state.bridge,
+          // Gated on `fromPrimary` like `update` and `bridge` above: a guest
+          // `hello` never carries it, so an ungated read would blank the pane
+          // the moment a second machine says hello.
+          claudeCli: fromPrimary ? msg.claudeCli ?? null : state.claudeCli,
           // Present only from somebody else's machine. Absent means our own, so
           // it must reset rather than persist from a previous connection.
           access: msg.access ?? null,

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import type {
+  ContextCompactData,
   PermissionRequestData,
   SessionMeta,
   SessionStatus,
@@ -86,6 +87,11 @@ function managerOver(
         .loadTranscript(id)
         .filter((e) => e.kind === 'permission')
         .map((e) => e.data as PermissionRequestData),
+    compactions: (id: string) =>
+      store
+        .loadTranscript(id)
+        .filter((e) => e.kind === 'context-compact')
+        .map((e) => e.data as ContextCompactData),
   };
 }
 
@@ -471,4 +477,47 @@ test('a rewound session reconciles cleanly', async () => {
   assert.equal(m.interruptedAt, undefined, 'nothing was interrupted — the turns were discarded');
   assert.equal(m.claudeSessionId, 'cli-2');
   assert.deepEqual(h.cards('s1'), [], 'the discarded query leaves no orphaned permission cards');
+});
+
+/**
+ * A manual compaction is a turn like any other, so it dies with the worker. The
+ * reconcile that follows has to close its span: the marker renders from the span
+ * (an unmatched 'requested' reads as still compacting), and `compacting` refuses a
+ * second compaction for as long as the entry stands — which outlives the worker,
+ * because the set lives on the bridge.
+ */
+test('a compaction that died with the worker is closed by the reconcile', () => {
+  const workflow = {
+    workflowId: 'wf1',
+    started: true,
+    stepIndex: 1,
+    stepStatuses: ['done', 'waiting-approval'],
+  };
+  const contextUsage = {
+    inputTokens: 120_000,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    outputTokens: 0,
+    model: 'claude-opus-5',
+  };
+  const h = harness(
+    'waiting-approval',
+    { claudeSessionId: 'cli-1', contextUsage, workflow } as never,
+    noAutoContinue,
+  );
+  assert.equal(h.sessions.compactContext('s1').ok, true);
+  assert.equal(h.s1().status, 'running', 'the compaction covers the park with its own turn');
+
+  h.sessions.reconcileWithWorker([]);
+
+  const m = h.s1();
+  assert.equal(m.status, 'waiting-approval', 'the park is put back');
+  assert.equal(m.interruptedAt, undefined, 'a parked step gets no Continue banner');
+  const spans = h.compactions('s1');
+  assert.equal(spans.length, 2);
+  assert.deepEqual(
+    { phase: spans[1].phase, ok: spans[1].ok, error: spans[1].error },
+    { phase: 'done', ok: false, error: 'worker-lost' },
+  );
+  assert.equal(h.sessions.compactContext('s1').ok, true, 'and a retry is allowed');
 });

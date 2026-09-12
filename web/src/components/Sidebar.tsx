@@ -21,6 +21,7 @@ import {
 import {
   IconArchive,
   IconArchiveOff,
+  IconArrowsSort,
   IconBook,
   IconCircleCheck,
   IconCircleCheckFilled,
@@ -44,7 +45,8 @@ import {
   projectPaths,
   projectRoots,
 } from '@lines/shared';
-import { formatDuration, isWorkflowFinished, sessionRowMeta } from '../lib/format';
+import type { SessionSort } from '../lib/format';
+import { compareSessions, formatDuration, isWorkflowFinished, sessionRowMeta } from '../lib/format';
 import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode } from '../store';
@@ -58,6 +60,13 @@ import { FileTree } from './FileTree';
  * on every re-render — and `showArchived` defaults to on.
  */
 const ARCHIVED_PAGE = 20;
+
+/** Sidebar sort menu, in menu order. `status` is the default — see `compareSessions`. */
+const SORT_OPTIONS: { value: SessionSort; label: string }[] = [
+  { value: 'status', label: 'Status' },
+  { value: 'activity', label: 'Last active' },
+  { value: 'created', label: 'Created' },
+];
 
 /** One formatter for the whole list: `toLocaleDateString` builds a new one per call. */
 const rowDate = new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -523,6 +532,13 @@ export function Sidebar({
     key: 'lines.newSessionWorktree',
     defaultValue: false,
   });
+  // Persisted like the toggles above. Defaults to urgency order: the session that
+  // needs the user must not sit below newer idle ones in a busy project.
+  const [sessionSort, setSessionSort] = useLocalStorage<SessionSort>({
+    key: 'lines.sessionSort',
+    defaultValue: 'status',
+  });
+  const compare = useMemo(() => compareSessions(sessionSort), [sessionSort]);
 
   // A project switch starts the archived list over: the point of the cap is that
   // the first paint of a tab is cheap.
@@ -548,14 +564,13 @@ export function Sidebar({
   const shared = access
     ? Object.values(sessions)
         .filter((s) => !s.archived && !projectSessions.some((p) => p.id === s.id))
-        .sort((a, b) => b.createdAt - a.createdAt)
+        .sort(compare)
     : [];
-  const list = projectSessions
-    .filter((s) => !s.archived)
-    .sort((a, b) => b.createdAt - a.createdAt);
-  const archived = projectSessions
-    .filter((s) => s.archived)
-    .sort((a, b) => (b.archivedAt ?? b.createdAt) - (a.archivedAt ?? a.createdAt));
+  const list = projectSessions.filter((s) => !s.archived).sort(compare);
+  // Same comparator as the live list rather than an `archivedAt` key of its own:
+  // archiving is an upsert, so `status` and `activity` still put the most recently
+  // archived first, and `created` means creation order — which is what it says.
+  const archived = projectSessions.filter((s) => s.archived).sort(compare);
 
   // Model/mode come from the settings modal (header gear); compression still
   // inherits from the project's latest session.
@@ -615,9 +630,37 @@ export function Sidebar({
   return (
     <Stack gap={0} h="100%">
       <Group px="sm" py="xs" justify="space-between">
-        <Text size="xs" fw={600} c="dimmed" tt="uppercase">
-          {sidebarMode === 'files' ? 'Files' : 'Sessions'}
-        </Text>
+        <Group gap={4}>
+          <Text size="xs" fw={600} c="dimmed" tt="uppercase">
+            {sidebarMode === 'files' ? 'Files' : 'Sessions'}
+          </Text>
+          {/* Next to the label rather than with the Recipes/Workflows icons on the
+              right: this one governs the list below it, the others open dialogs. */}
+          {sidebarMode === 'sessions' && (
+            <Menu position="bottom-start" width={180}>
+              <Menu.Target>
+                <Tooltip label="Sort sessions">
+                  <ActionIcon variant="subtle" color="gray" size="sm">
+                    <IconArrowsSort size={15} />
+                  </ActionIcon>
+                </Tooltip>
+              </Menu.Target>
+              <Menu.Dropdown>
+                {SORT_OPTIONS.map((opt) => (
+                  <Menu.Item
+                    key={opt.value}
+                    onClick={() => setSessionSort(opt.value)}
+                    rightSection={
+                      sessionSort === opt.value ? <IconCircleCheck size={14} /> : undefined
+                    }
+                  >
+                    {opt.label}
+                  </Menu.Item>
+                ))}
+              </Menu.Dropdown>
+            </Menu>
+          )}
+        </Group>
         {sidebarMode === 'files' && (
           <Switch
             size="xs"

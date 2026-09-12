@@ -106,6 +106,52 @@ const PROJECT_STATUS_ORDER = [
 /** Keyed on label — all six are distinct, so a rename propagates for free. */
 const PROJECT_STATUS_RANK = new Map(PROJECT_STATUS_ORDER.map((m, i) => [m.label, i]));
 
+/** How the sidebar orders a session list — persisted per browser. */
+export type SessionSort = 'status' | 'activity' | 'created';
+
+/**
+ * Sidebar row order for `status` mode, most urgent first: the running turn, then
+ * the states that need the user in the tab-dot order above, then everything
+ * settled. Built from the same tables `sessionRowMeta` and `projectStatusMeta`
+ * read, so the list order can never drift from the dot that points at it.
+ */
+const SESSION_SORT_ORDER = [
+  STATUS_META.running,
+  ...PROJECT_STATUS_ORDER,
+  BACKGROUND_WORK_META,
+  STATUS_META.done,
+  STATUS_META.idle,
+];
+
+/** Keyed on label, exactly as `PROJECT_STATUS_RANK` is — all labels are distinct. */
+const SESSION_SORT_RANK = new Map(SESSION_SORT_ORDER.map((m, i) => [m.label, i]));
+
+/**
+ * The closest thing to a last-activity clock: `updatedAt` is stamped by every
+ * `SessionManager.upsert`, and `adoptSynced` deliberately does not restamp, so it
+ * already means "last change made here or synced from elsewhere". Falls back to
+ * `createdAt` for a session that has not been upserted since it was made.
+ */
+function lastActivityAt(session: SessionMeta): number {
+  return session.updatedAt ?? session.createdAt;
+}
+
+/**
+ * Comparator for a sidebar session list. `status` ranks by urgency and tie-breaks
+ * on activity; a label missing from the rank table (a future `SessionStatus`)
+ * sorts last rather than being guessed at — the same rule `projectStatusMeta`
+ * applies by skipping.
+ */
+export function compareSessions(mode: SessionSort): (a: SessionMeta, b: SessionMeta) => number {
+  if (mode === 'created') return (a, b) => b.createdAt - a.createdAt;
+  if (mode === 'activity') return (a, b) => lastActivityAt(b) - lastActivityAt(a);
+  return (a, b) => {
+    const rank = (s: SessionMeta) =>
+      SESSION_SORT_RANK.get(sessionRowMeta(s).label) ?? SESSION_SORT_ORDER.length;
+    return rank(a) - rank(b) || lastActivityAt(b) - lastActivityAt(a);
+  };
+}
+
 /**
  * The single most urgent *unseen* actionable state across a project's sessions,
  * or `null` when nothing needs the user (caller keeps the plain folder icon).

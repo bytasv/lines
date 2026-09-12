@@ -4047,6 +4047,12 @@ export class SessionManager {
         // there") would read as an approval nobody gave.
         const reparked =
           meta.workflow?.stepStatuses[meta.workflow.stepIndex] === 'waiting-approval';
+        // A manual compaction in flight when the turn died leaves its span open:
+        // the marker reads as still compacting and `compacting` keeps refusing a
+        // retry, both for as long as this bridge process lives. Close it here —
+        // the status this restores is overwritten immediately below, which is
+        // fine: the repark is derived from the step, not from `compactResume`.
+        this.abandonCompaction(meta.id, 'worker-lost');
         meta.status = reparked ? 'waiting-approval' : 'idle';
         meta.turnSource = undefined;
         meta.turnStartedAt = undefined;
