@@ -672,3 +672,20 @@ note in a small bubble with the same edit/delete actions the list row has.
 - [mcp-connections](mcp-connections.md) — a second producer of `PermissionRequestData`
   (`elicitation` instead of a tool call), reusing this page's resolution machinery rather than
   building its own.
+
+## On a codex session
+
+Codex asks before it acts, and the request lands in **this** card, under this auto-guard, this
+allowlist and this provenance. None of the decision logic was ever Claude-specific — only the
+transport — so the approvals ride the RPC channel the worker already had rather than one of
+their own.
+
+Threads run `untrusted` rather than `never` in every gated mode: the request reaches
+`handleCanUseTool`, where the guard silently approves the safe calls, so only what would have
+prompted on Claude prompts here. `bypassPermissions` maps to codex's `danger-full-access`, which
+is safe *because* Lines is the gate — the sandbox is a second line, not the only one, and the
+always-ask tools still stop.
+
+`acceptForSession` is deliberately never sent. Lines keeps its own allowlist, and asking codex
+to remember a second copy would split one decision across two stores that cannot be kept in step
+and that the user can only see one of. See [openai-codex-sessions](openai-codex-sessions.md).

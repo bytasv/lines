@@ -459,3 +459,16 @@ on `PENDING_TTL_MS` regardless, so an abandoned sign-in cannot pin a CLI child o
 - [agent-memory-sync](agent-memory-sync.md) — the one-blob-per-user storage precedent.
 - [workflow-mcp-tools](workflow-mcp-tools.md) — the Lines in-process server the worker's merge
   must never let a same-named connection shadow.
+
+## Not yet on a codex session
+
+The connections in this pane **do not apply to a session on an OpenAI model**. Codex takes its
+MCP servers from its own `config.toml` rather than from per-session options, and Lines does not
+seed one yet, so a codex session sees none of them. The capability is `mcpConnections` in
+`shared/providers.ts` and is currently false for OpenAI; warming is refused with a message
+saying so rather than spawning a Claude query the session would never use.
+
+`$CODEX_HOME` is Lines-owned (`~/.lines-app/users/<id>/codex/`), which also means it **shadows
+the user's own `~/.codex/config.toml`** — so servers they configured for their terminal codex do
+not apply inside Lines either. Seeding that file deliberately is what closes both gaps. See
+[openai-codex-sessions](openai-codex-sessions.md).

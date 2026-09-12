@@ -271,3 +271,18 @@ ring/warning from `effectiveContextTokens` on every `SessionMeta` update.
   the client, so a turn that failed mid-compaction still gets a Retry-able failure row.
 - [transcript-rendering](transcript-rendering.md) — why a subagent's `assistant` message never
   updates the fallback occupancy reading.
+
+## On a codex session
+
+The chip works the same way, from a different channel. Codex reports occupancy on
+`thread/tokenUsage/updated` rather than on each assistant message, so `extractContextUsage`
+never sees it; the normalizer emits a `ContextUsage` and both providers meet at the same
+`live.contextUsage`. The reading carries `maxTokens`, the window codex names for the thread,
+and `contextDenominator` prefers it over `ModelOption.contextWindow` — it came from the engine
+that produced the numerator.
+
+Compaction is a real RPC (`thread/compact/start`) rather than the Claude path's `/compact`
+prompt. It runs a **full turn** — `turn/started`, its own items, `turn/completed` — so it
+settles through the ordinary notification path, and the boundary arrives as a
+`contextCompaction` item that maps onto the same `system`/`compact_boundary` this feature
+already reads. See [openai-codex-sessions](openai-codex-sessions.md).

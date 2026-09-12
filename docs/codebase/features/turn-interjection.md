@@ -210,3 +210,15 @@ auto-approved the tool before `settingSources: []` was added to the spike), so
   prompt, never an interjection that was delivered into it.
 - [permissions-and-plan-mode](permissions-and-plan-mode.md) — the sibling "never opens a turn
   boundary" rule; `waiting-permission` excluded here for the same reason it is unresolved there.
+
+## On a codex session
+
+Send now maps to `turn/steer`, which delivers into the turn already running. The protocol
+carries an `expectedTurnId` precondition, so steering a turn that has already moved on fails in
+the worker rather than landing in the wrong one — which is also why `canInterject` does not
+demand a `queryTokens` entry for codex. That map is the Claude token store and a codex session
+never fills it, so the check would have refused every Send now here.
+
+The capability is `interject` in `shared/providers.ts`; a provider that cannot be steered hides
+the button rather than disabling it, because there is no state the user could reach that would
+enable it. See [openai-codex-sessions](openai-codex-sessions.md).

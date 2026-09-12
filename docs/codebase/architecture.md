@@ -13,9 +13,13 @@ The agent side of Lines is two Node processes, not one.
 - **bridge** (`server/src/index.ts`) owns everything else: sessions, workflows, permissions,
   transcripts, storage sync, the relay client, and the browser-facing WebSocket.
 
+The worker owns **both** engines' children: the Claude CLI processes, and the long-lived
+`codex app-server` a session on an OpenAI model runs its turns through.
+
 They exist as separate processes because a bridge restart must not take a turn with it. During
 development the bridge hot-reloads on every edit; the worker does not, so an in-flight query
-survives. The worker is never auto-restarted on crash either — its queries are already gone, and
+survives. That is also why the worker forwards codex notifications verbatim and normalizes
+nothing — the mapping belongs on the hot-reloadable side. The worker is never auto-restarted on crash either — its queries are already gone, and
 a silent respawn would look like a healthy session that lost its turn.
 
 The two speak `server/src/workerProtocol.ts` over a loopback WebSocket, versioned by
@@ -46,7 +50,10 @@ A relayed connection is presented to the bridge as an ordinary `BrowserLink`, so
 
 - **On the user's machine, under `~/.lines-app/`** — session metadata and transcripts, workflows
   and step versions, the guard allowlist, recent projects, the app's Claude OAuth tokens, the
-  device identity, and the runtime port-discovery files. This is the working copy: the bridge
+  device identity, and the runtime port-discovery files. Also per app user:
+  `users/<id>/codex/` — the `CODEX_HOME` every codex child runs with, holding the OpenAI
+  credentials codex itself owns, and `users/<id>/openai-account.json`, non-secret account
+  metadata Lines keeps so the account row can name the account without a network call. This is the working copy: the bridge
   reads and writes it directly and broadcasts changes to every connected browser.
 - **In Postgres, via `storage/`** — a per-user mirror pushed by the bridge (sessions, workflows,
   steps and their version history, recipes, settings, agent memory, the guard allowlist) plus the
@@ -84,6 +91,11 @@ on the user's machine. The hosted side relays and stores; it never runs a turn.
 - **Claude credentials** are the app's own OAuth tokens under `~/.lines-app/users/<id>/`. A turn
   that cannot resolve one is refused rather than falling back to the unrefreshable ambient CLI
   login.
+- **OpenAI credentials** are codex's, not ours. Lines writes `$CODEX_HOME/auth.json` exactly
+  once at login and never again — OpenAI rotates the refresh token on every refresh, so a second
+  writer would clobber tokens fresher than its own. A codex turn therefore carries no credential
+  at all; it carries a `CODEX_HOME`. See
+  [features/openai-codex-sessions.md](features/openai-codex-sessions.md).
 
 ## Conventions worth knowing before reading a feature doc
 

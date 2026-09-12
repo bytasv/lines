@@ -215,3 +215,17 @@ via `formatDuration`, all in a metrics row below the step name.
   started): using the spend-by-model table's numbers to justify subagent-only cheaper-model
   routing.
 - [turn-recovery](turn-recovery.md) — the auth path that also discovers a dead OAuth session.
+
+## Two providers
+
+There are two plan-usage chips, one per connected account, rendered from one component so they
+cannot drift. Each shows only its own provider's spend rows. The ChatGPT numbers come from
+`GET https://chatgpt.com/backend-api/wham/usage` — the same endpoint the Codex CLI's own status
+card reads — polled on the same cadence as the Claude one.
+
+The `$` half of a spend row is dropped when a row has no cost: codex reports tokens but never a
+price, and a column of `$0.00` reads as "these turns were free" rather than "we are not told".
+
+Each chip wears its provider's mark, **always** — which vendor a number belongs to is part of
+reading it, not a tiebreaker for when two are on screen. See
+[openai-codex-sessions](openai-codex-sessions.md).

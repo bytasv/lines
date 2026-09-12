@@ -76,3 +76,28 @@ can't misfire on a valid dated snapshot id.
 ## Related decisions
 
 None recorded.
+
+## Two providers
+
+`ModelOption.provider` (`'anthropic' | 'openai'`) says which vendor's engine a model runs on.
+It is **optional, and absent means `'anthropic'`** — the same convention `resolvedBy` uses — so
+every pre-existing entry, every stored step model and every older client's copy of the list
+means exactly what it meant before. `providerForModel(id)` resolves an id and answers
+`'anthropic'` for anything unlisted, so a dated snapshot or a hand-typed id keeps behaving as
+it did: a model has to be *listed* as OpenAI to be treated as one.
+
+`modelSelectData()` stays the single entry point, and gained two options rather than letting
+call sites filter their own lists:
+
+- `providers` — which vendors this picker may offer. The workflow step pickers and the recipe
+  run modal pass `['anthropic']`, because a step's stored model is applied with `setModel` on a
+  live session and would otherwise flip a running workflow onto a provider that holds none of
+  its conversation. The server refuses the same thing independently.
+- `unavailable` — render a provider's options disabled with a reason. Used for "connect an
+  OpenAI account" and for "this session has already run on the other provider", so a blocked
+  option still says why instead of vanishing.
+
+**OpenAI models carry no `contextWindow`.** The number is not unknown — codex reports one per
+thread on `thread/tokenUsage/updated`, and that reading wins over the table via
+`ContextUsage.maxTokens`. A static value here would be a second, staler answer to a question
+the engine already answers. See [openai-codex-sessions](openai-codex-sessions.md).

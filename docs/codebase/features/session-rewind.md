@@ -220,3 +220,15 @@ transcript's newest `'started'`/`'retried'` workflow marker:
 - [workflow-step-lifecycle](workflow-step-lifecycle.md) — `rollbackToTranscript`'s park uses the
   same `waiting-approval` step-lifecycle state and `iterateIfWaiting`/Approve controls as an
   ordinary step park.
+
+## On a codex session
+
+`thread/fork` anchors on a **turn**, not a message: it keeps everything up to and including
+`lastTurnId`. So rewinding to a prompt means forking at the turn that settled before it, and
+the turn ids have to survive — each settling `result` carries `_codexTurnId` on its durable
+record, because a rewind can happen many restarts after the turn did.
+
+Forking answers a *new* thread and the session re-points at it, so codex's own history stays
+intact on disk even though the Lines transcript is truncated. The gate is provider-neutral: it
+asks for a conversation on either provider, not for a `claudeSessionId`. See
+[openai-codex-sessions](openai-codex-sessions.md).

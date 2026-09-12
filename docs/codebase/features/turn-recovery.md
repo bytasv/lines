@@ -56,6 +56,19 @@ those rules existed — a login completing later, or on another device, must not
 turns across every session that failed while signed out — still holds, because a recovery is
 anchored to one in-flight turn on one session, never to a login event.
 
+**Two providers, one recovery path — except for auth.** Everything above applies to a session on
+an OpenAI model too: the same banners, the same Retry, the same transparent re-drive for an
+overload. The exception is auth recovery, which is Claude-only *by design*. The action it takes
+is a Claude token refresh, so it cannot be the recovery for a codex turn, and running it would
+light up the Claude Sign in button over a session that does not use that account. A codex turn
+that cannot start is refused with its own message naming the Connect button instead. See
+[openai-codex-sessions](openai-codex-sessions.md).
+
+`app-managed-login-only` now spans both providers, but means something different on each: for
+Claude it is "the app holds and refreshes its own OAuth token, and a turn that cannot resolve
+one is refused"; for OpenAI it is "codex holds the credential and Lines never carries one into a
+turn at all".
+
 A query that crashes outright (`handleWorkerEnded`'s error branch) is unaffected by any of this:
 there is no turn left in flight to re-drive into, so it still settles immediately and still ends
 on the post-hoc banner rewrite described next. Before this feature, the raw CLI text (`Failed to
