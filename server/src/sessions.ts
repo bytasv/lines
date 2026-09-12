@@ -19,6 +19,7 @@ import type {
   McpServerStatusInfo,
   McpVetting,
   MentionValue,
+  ModelProvider,
   PermissionMode,
   PermissionRequestData,
   PermissionResolutionSource,
@@ -27,6 +28,7 @@ import type {
   PromptMention,
   RewindBlockInfo,
   RewindPrompt,
+  SdkShapedMessage,
   ServerMessage,
   SessionDiffRepo,
   SessionDiffResponse,
@@ -41,8 +43,11 @@ import {
   formatPlanComments,
   isPlanFilePath,
   isSessionActive,
+  isCodexEvent,
   isSessionInterruptible,
   KEEP_PLANNING_MESSAGE,
+  normalizeCodexEvent,
+  providerForModel,
   resolveModelId,
   resultErrorText,
   rewindBlock,
@@ -76,6 +81,8 @@ import {
   summarizeContextBreakdown,
 } from './contextBreakdown.ts';
 import { claudeCliRefusalMessage, claudeCliStatus } from './claudeCli.ts';
+import { codexCliRefusalMessage, codexCliStatus } from './codexCli.ts';
+import { OPENAI_CONNECT_MESSAGE, type OpenaiAuthManager } from './openaiAuth.ts';
 import { classifyTurnFailure, turnFailureAdvice, turnFailureRetryHint } from './turnFailure.ts';
 import {
   ADD_MCP_CONNECTION_TOOL,
@@ -100,6 +107,70 @@ import {
 /** 'auto' is our guard layer on top of the SDK's acceptEdits mode. */
 function sdkPermissionMode(mode: PermissionMode): string {
   return mode === 'auto' ? 'acceptEdits' : mode;
+}
+
+/**
+ * The codex sandbox a Lines permission mode maps to.
+ *
+ * `bypassPermissions` deliberately does NOT reach `danger-full-access`. Claude's
+ * bypass still routes every call through the bridge's own gates (see
+ * buildQueryOptions), while codex in this cut runs with `approvalPolicy: 'never'`
+ * and no gate at all — so `danger-full-access` there would be genuinely
+ * unrestricted, which is not what the user picked. It ships with the permissions
+ * parity work, when Lines is the gate again.
+ */
+function codexSandboxMode(mode: PermissionMode): 'read-only' | 'workspace-write' {
+  return mode === 'plan' ? 'read-only' : 'workspace-write';
+}
+
+/** Which engine a session's model runs on. Derived from the model, never stored:
+ *  a `provider` field on the meta could disagree with it after a model change. */
+function engineFor(meta: Pick<SessionMeta, 'model'>): ModelProvider {
+  return providerForModel(meta.model);
+}
+
+/** True when this session's turns run through `codex exec`. */
+export function isCodexSession(meta: Pick<SessionMeta, 'model'>): boolean {
+  return engineFor(meta) === 'openai';
+}
+
+/**
+ * Error text that means "the thread we asked codex to resume is not here". Narrow
+ * and wording-based, like every other classifier in this codebase: a miss
+ * degrades to today's behaviour (codex's own text plus a Retry), never to worse.
+ */
+const CODEX_RESUME_FAILURE =
+  /(thread|session|conversation)[^\n]*not found|no such (thread|session)|failed to resume/i;
+
+/**
+ * A session title cut from its first prompt, for when no helper query can run.
+ * First non-empty line, trimmed of list/heading punctuation, capped at the same
+ * 60 characters the model-generated title is.
+ */
+export function localSessionName(prompt: string): string {
+  const line = prompt
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (!line) return '';
+  const cleaned = line.replace(/^[#>\-*\d.\s]+/, '').trim() || line;
+  return cleaned.length > 60 ? `${cleaned.slice(0, 57).trimEnd()}…` : cleaned;
+}
+
+/**
+ * The prompt text out of an SDK-shaped user message, for the codex push — which
+ * takes a string rather than content blocks. Non-text blocks (staged image
+ * attachments) are dropped: `codex exec --image` takes a path on disk, and Lines
+ * stages attachments as base64.
+ */
+export function promptTextOf(message: Record<string, unknown>): string {
+  const content = (message as { message?: { content?: unknown } }).message?.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return (content as { type?: unknown; text?: unknown }[])
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text as string)
+    .join('\n\n');
 }
 
 /**
@@ -932,6 +1003,10 @@ export class SessionManager {
     /** User-added MCP servers. Optional so tests and embeddings can omit it —
      *  absent simply means a session gets the Lines workflow tools and nothing else. */
     private mcp?: McpConnections,
+    /** The connected OpenAI account, for sessions on a Codex model. Optional for
+     *  the same reason `auth` is: absent means no codex turn can start, and the
+     *  refusal names the Connect button rather than crashing. */
+    private openaiAuth?: OpenaiAuthManager,
   ) {
     for (const meta of this.store.loadSessions()) {
       // An advance in flight belonged to the previous process — nothing is
@@ -1515,6 +1590,41 @@ export class SessionManager {
   }
 
   /**
+   * The serializable options one codex turn runs with — the `codex exec` mirror
+   * of {@link buildQueryOptions}.
+   *
+   * Everything here binds at `startThread`/`resumeThread`, i.e. at the start of
+   * the turn, so a mid-turn model or mode change cannot affect a running one; the
+   * bridge applies it to the next push instead.
+   *
+   * `networkAccessEnabled: true` is for parity: a Claude session can reach the
+   * network, and with no approval prompt to explain it, a silent `npm install` or
+   * `git fetch` failure is worse than the access.
+   */
+  private buildCodexOptions(meta: SessionMeta): Record<string, unknown> {
+    const cli = codexCliStatus();
+    return {
+      model: resolveModelId(meta.model),
+      workingDirectory: meta.cwd,
+      // Without these a multi-root project's other roots are outside the sandbox
+      // and every write to them fails.
+      additionalDirectories: this.rootsFor(meta).filter((root) => root !== meta.cwd),
+      // Lines allows a non-git root; `codex exec` otherwise refuses to start.
+      skipGitRepoCheck: true,
+      sandboxMode: codexSandboxMode(meta.permissionMode),
+      // No per-tool approval callback exists in the Codex SDK, so the only honest
+      // setting is "do not ask" plus a sandbox. See codexSandboxMode.
+      approvalPolicy: 'never',
+      networkAccessEnabled: true,
+      // The one place OpenAI credentials enter a turn: as a directory, not a
+      // token. See openaiAuth.ts for why Lines holds no copy of the tokens.
+      codexHome: this.store.codexHome(),
+      ...(cli.path ? { codexPath: cli.path } : {}),
+      ...(meta.codexThreadId ? { threadId: meta.codexThreadId } : {}),
+    };
+  }
+
+  /**
    * Restart queries that aren't mid-turn so their next prompt rebuilds options
    * with the current token (resume keeps context). Called on login/logout and
    * after token refresh; busy sessions finish their turn on the old token, and
@@ -1655,6 +1765,16 @@ export class SessionManager {
     message: Record<string, unknown>,
     opts: { intoLiveTurn?: boolean } = {},
   ) {
+    // Engine first, before anything reads the Claude token. A codex session has no
+    // Claude credential, no CLI and no in-process tools — running it through the
+    // checks below would refuse every turn on `claudeCliRefusalMessage()` and then
+    // re-broadcast `authStatus { loggedIn: false }`, which force-opens the Claude
+    // login modal at a user who never asked for one.
+    if (isCodexSession(meta)) {
+      this.pushCodexTurn(meta, message);
+      return;
+    }
+
     if (opts.intoLiveTurn) {
       this.worker.push(
         meta.id,
@@ -1697,6 +1817,39 @@ export class SessionManager {
     this.pushWithToken(meta, message, accessToken);
   }
 
+  /**
+   * Start one codex turn: check the binary, check the account, push.
+   *
+   * The two refusals are in this order for the same reason the Claude path's are —
+   * a missing binary cannot be fixed by retrying, and it is the one thing a
+   * hosted user can be told to install.
+   *
+   * `message` arrives SDK-shaped (that is what every caller builds); the text is
+   * flattened out of it here because `codex exec` takes a prompt, not content
+   * blocks. Image attachments are dropped: codex takes image *paths* and Lines
+   * stages attachments as base64.
+   */
+  private pushCodexTurn(meta: SessionMeta, message: Record<string, unknown>) {
+    const cliRefusal = codexCliRefusalMessage();
+    if (cliRefusal) {
+      this.failTurn(meta.id, cliRefusal);
+      return;
+    }
+    if (!this.openaiAuth?.isLoggedIn()) {
+      // Deliberately not routed through any `authStatus` broadcast: that message
+      // drives the Claude login modal, and this is a different account entirely.
+      this.failTurn(meta.id, OPENAI_CONNECT_MESSAGE);
+      return;
+    }
+    this.worker.push(
+      meta.id,
+      { text: promptTextOf(message) },
+      this.buildCodexOptions(meta),
+      undefined,
+      'codex',
+    );
+  }
+
   /** pushTurn is fire-and-forget, so a throw past its own handling must not
    *  become an unhandled rejection. */
   private pushTurnSafely(
@@ -1737,6 +1890,7 @@ export class SessionManager {
   failTurn(sessionId: string, error: string) {
     // A turn that fails here is settling for real, so nothing is being re-driven.
     this.cancelRecovery(sessionId);
+    error = this.repairCodexResume(sessionId, error);
     this.emitEvent(sessionId, 'sdk', {
       type: 'result',
       subtype: 'error_during_execution',
@@ -1745,6 +1899,28 @@ export class SessionManager {
     });
     this.setStatus(sessionId, 'error', error);
     this.classifyFailure(sessionId, error);
+  }
+
+  /**
+   * A codex resume that named a thread this machine does not have.
+   *
+   * The usual cause is storage sync: it carries session meta but not codex's own
+   * thread store, so machine B inherits a `codexThreadId` pointing into machine
+   * A's `CODEX_HOME`. Drop the pointer and say so — the next Retry then starts a
+   * fresh thread and works, which codex's raw error does not hint at.
+   *
+   * Returns the message to show, unchanged when this is not that failure.
+   */
+  private repairCodexResume(sessionId: string, error: string): string {
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.codexThreadId || !isCodexSession(meta)) return error;
+    if (!CODEX_RESUME_FAILURE.test(error)) return error;
+    meta.codexThreadId = undefined;
+    this.upsert(meta);
+    return (
+      "This session's Codex conversation is not on this machine, so it could not be picked up " +
+      'again — Retry starts a fresh one here, without the earlier turns as context.'
+    );
   }
 
   /**
@@ -1806,6 +1982,11 @@ export class SessionManager {
    */
   private recoverAuthFailure(sessionId: string, error: string): boolean {
     if (!this.auth || !isAuthFailureMessage(error)) return false;
+    // Claude-only by design. A codex failure that happens to carry a 401 says
+    // nothing about the Claude token, and refreshing it would light up the Claude
+    // Sign in buttons over a session that does not use it.
+    const meta = this.sessions.get(sessionId);
+    if (meta && isCodexSession(meta)) return false;
     void this.auth.handleTokenRejected().then((rejection) => {
       const meta = this.sessions.get(sessionId);
       // The session moved on while we refreshed (new turn, flushed queue, retry,
@@ -1866,8 +2047,10 @@ export class SessionManager {
     const text = resultErrorText(msg as { result?: unknown; errors?: unknown });
     const spent = live?.recovery?.attempts;
     // Auth wins outright, matching classifyFailure's precedence: it is the kind
-    // that also acts, and its text can carry a 400/429 incidentally.
-    if (this.auth && isAuthFailureMessage(text)) {
+    // that also acts, and its text can carry a 400/429 incidentally. Claude-only,
+    // for the reason recoverAuthFailure gives: the action it takes is a Claude
+    // token refresh, which cannot be the recovery for a codex turn.
+    if (this.auth && !isCodexSession(meta) && isAuthFailureMessage(text)) {
       return (spent?.auth ?? 0) < TURN_ATTEMPTS.auth - 1 ? 'auth' : null;
     }
     if (classifyTurnFailure(text) === 'overloaded') {
@@ -2949,6 +3132,9 @@ export class SessionManager {
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
     meta.claudeSessionId = undefined;
+    // The codex resume pointer is the same fact for the other provider: a session
+    // whose conversation is deliberately discarded must not resume either one.
+    meta.codexThreadId = undefined;
     // The occupancy readings now describe a conversation that is gone; they stay
     // (a fresh step's overhead is close to the old floor) but render as stale.
     meta.contextResetAt = Date.now();
@@ -3188,7 +3374,19 @@ export class SessionManager {
     };
     try {
       const token = await this.ownerToken();
-      if (!token) return settled('');
+      // No Claude token — which for an OpenAI-only user is every session, not an
+      // error state. Fall back to a title cut from the prompt rather than leaving
+      // every session named "New session"; the helper queries stay Claude-only
+      // until there is a codex one-shot to run them on.
+      if (!token) {
+        const local = localSessionName(prompt);
+        if (!local) return settled('');
+        const meta = this.sessions.get(sessionId);
+        if (!meta) return;
+        meta.name = local;
+        this.upsert(meta);
+        return settled(local);
+      }
 
       const q = query({
         prompt:
@@ -3481,16 +3679,44 @@ export class SessionManager {
     this.prompt(sessionId, text, wfRunning ? 'workflow' : 'user');
   }
 
-  setModel(sessionId: string, model: string) {
+  /**
+   * Switch the session's model.
+   *
+   * A cross-provider switch on a session that has already run is **refused**, not
+   * handled: nothing carries context between a `claudeSessionId` and a
+   * `codexThreadId`, so the alternative is a continuous transcript in front of a
+   * model that knows none of it. Same shape as the other server-side gates
+   * (`canInterject`, `rewindBlock`) — a reason the caller can show.
+   */
+  setModel(sessionId: string, model: string): { ok: true } | { ok: false; reason: string } {
     const meta = this.sessions.get(sessionId);
-    if (!meta) return;
+    if (!meta) return { ok: false, reason: 'That session no longer exists.' };
     const resolved = resolveModelId(model);
     if (resolved !== model) {
       console.warn(`legacy model "${model}" resolved to "${resolved}"`);
     }
+    const from = providerForModel(meta.model);
+    const to = providerForModel(resolved);
+    // Only once the session has a conversation to lose. A model change before the
+    // first turn is free, which is what makes the composer's picker useful.
+    if (from !== to && (meta.claudeSessionId || meta.codexThreadId)) {
+      return {
+        ok: false,
+        reason:
+          'This session has already run on ' +
+          (from === 'openai' ? 'an OpenAI' : 'a Claude') +
+          ' model, and its conversation cannot move between providers. Start a new session ' +
+          'to use ' +
+          (to === 'openai' ? 'an OpenAI' : 'a Claude') +
+          ' model.',
+      };
+    }
     meta.model = resolved;
     this.upsert(meta);
-    this.worker.setModel(sessionId, resolved);
+    // Codex binds its model at thread creation, so there is nothing live to tell:
+    // the next push carries the new model in its thread options.
+    if (to !== 'openai') this.worker.setModel(sessionId, resolved);
+    return { ok: true };
   }
 
   setPermissionMode(sessionId: string, mode: PermissionMode) {
@@ -3498,6 +3724,10 @@ export class SessionManager {
     if (!meta) return;
     meta.permissionMode = mode;
     this.upsert(meta);
+    // Codex binds its sandbox at thread creation, so there is nothing live to
+    // tell — the next push carries the new mode in its thread options. Same
+    // reasoning as setModel, and the worker drops the message either way.
+    if (isCodexSession(meta)) return;
     this.worker.setPermissionMode(sessionId, sdkPermissionMode(mode));
   }
 
@@ -3723,6 +3953,12 @@ export class SessionManager {
         meta.claudeSessionId = info.claudeSessionId;
         changed = true;
       }
+      // Same repair for the codex resume pointer: the worker outlives the bridge,
+      // so a thread started during a bridge restart is only knowable from here.
+      if (info?.codexThreadId && meta.codexThreadId !== info.codexThreadId) {
+        meta.codexThreadId = info.codexThreadId;
+        changed = true;
+      }
       if (info?.busy === true && !isSessionActive(meta.status)) {
         this.markTurnLive(meta);
         changed = true;
@@ -3839,6 +4075,12 @@ export class SessionManager {
    * refreshes off the broadcast and storage-sync path.
    */
   fetchContextBreakdown(sessionId: string): Promise<ContextBreakdown | null> {
+    // No codex equivalent: the breakdown is a Claude CLI control request, and a
+    // codex session holds no query to make it against. Answered as "no reading"
+    // rather than as a failed ask, which is what it is.
+    const current = this.sessions.get(sessionId);
+    if (current && isCodexSession(current)) return Promise.resolve(null);
+
     const inFlight = this.contextFetches.get(sessionId);
     if (inFlight) return inFlight;
 
@@ -3898,6 +4140,13 @@ export class SessionManager {
   private async warmQuery(sessionId: string): Promise<McpServerStatusInfo[] | { error: string }> {
     const meta = this.sessions.get(sessionId);
     if (!meta) return { error: 'That session no longer exists.' };
+    // The user's MCP connections are handed to the Claude CLI through its query
+    // options; codex is configured through its own `CODEX_HOME`, which Lines does
+    // not seed in this cut. Warming a Claude query for a codex session would spawn
+    // a CLI child that session never uses.
+    if (isCodexSession(meta)) {
+      return { error: 'MCP connections do not apply to sessions on an OpenAI model yet.' };
+    }
     // Checked before the token for the same reason pushTurn checks it there: a
     // missing or too-old binary cannot be fixed by retrying.
     const cliRefusal = claudeCliRefusalMessage();
@@ -4096,6 +4345,15 @@ export class SessionManager {
   }
 
   handleWorkerEvent(sessionId: string, msg: Record<string, unknown> & { type: string }) {
+    // Codex events are translated into SDK shape and then fall straight through
+    // this same function. That boundary is the whole design: everything below —
+    // the `result` settle pass, `markTurnLive`, the transcript format on disk and
+    // the renderer — is keyed to SDK message shapes, and a codex-shaped event
+    // would silently no-op all of it. See shared/codex.ts.
+    if (isCodexEvent(msg)) {
+      this.handleCodexEvent(sessionId, msg);
+      return;
+    }
     // Capture the CLI session id for resume-after-restart.
     const claudeSessionId = msg.session_id as string | undefined;
     const meta = this.sessions.get(sessionId);
@@ -4375,6 +4633,34 @@ export class SessionManager {
   }
 
   /**
+   * One codex event: capture the thread id, then hand whatever it normalizes to
+   * back through `handleWorkerEvent` as ordinary SDK messages.
+   *
+   * `turn.failed` and a bare `error` are routed to `failTurn` rather than to a
+   * synthetic error result, so they get the same classification, banner and Retry
+   * as every other failure the SDK never reported itself.
+   */
+  private handleCodexEvent(sessionId: string, event: Parameters<typeof normalizeCodexEvent>[0]) {
+    const meta = this.sessions.get(sessionId);
+    const { messages, threadId, failure } = normalizeCodexEvent(event, {
+      newId: () => randomUUID(),
+      model: meta ? resolveModelId(meta.model) : '',
+    });
+    // The resume pointer, persisted exactly as `claudeSessionId` is.
+    if (threadId && meta && meta.codexThreadId !== threadId) {
+      meta.codexThreadId = threadId;
+      this.upsert(meta);
+    }
+    if (failure !== undefined) {
+      this.failTurn(sessionId, failure);
+      return;
+    }
+    for (const message of messages) {
+      this.handleWorkerEvent(sessionId, message as SdkShapedMessage);
+    }
+  }
+
+  /**
    * Fold one `result`'s cost and usage into the session's running totals, and into
    * the by-model split keyed by the model the turn ran on. resolveModelId keeps a
    * retired stored id from opening a second row for what is really one model; a
@@ -4445,6 +4731,34 @@ export class SessionManager {
       if (source) this.onTurnComplete?.(sessionId, source, interrupted, true);
       // A dead token surfacing as a query crash is recovered by failTurn above,
       // which is now the single classification point for every synthetic failure.
+      return;
+    }
+    // A codex turn never emits a `result` of its own except through
+    // `turn.completed` — an aborted one (Stop) emits nothing at all, and the child
+    // simply exits. Synthesize the settling result and feed it through the
+    // ordinary event path, which is what stamps `stopped: true` from the
+    // `interrupting` set: a stopped codex turn must not render as a failure with
+    // a Retry button.
+    //
+    // Only when the turn is still open: a `turn.completed` or a `turn.failed` has
+    // already settled the session, and the `ended` that follows them is routine.
+    const codexMeta = this.sessions.get(sessionId);
+    if (
+      codexMeta &&
+      isCodexSession(codexMeta) &&
+      // `interrupting` is checked as well as the status because Stop has already
+      // set the session to 'idle' by the time the child dies — without it, a
+      // stopped turn would end with no trailing row in the transcript at all.
+      (this.interrupting.has(sessionId) ||
+        codexMeta.status === 'running' ||
+        codexMeta.status === 'waiting-permission')
+    ) {
+      this.handleWorkerEvent(sessionId, {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        _engine: 'codex',
+      });
       return;
     }
     // An interrupted query sometimes dies without emitting a final `result`;

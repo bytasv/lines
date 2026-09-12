@@ -419,6 +419,11 @@ async function openSocket(link: MachineLink) {
       if (msg.type === 'authLoginStarted') {
         window.open(msg.authorizeUrl, '_blank', 'noopener');
       }
+      // Same treatment for the OpenAI device-code page. The code itself stays in
+      // the modal — this only saves the user navigating there by hand.
+      if (msg.type === 'openaiLoginStarted') {
+        window.open(msg.verificationUrl, '_blank', 'noopener');
+      }
       // The native folder picker either opens a project or widens one, depending on
       // where the pick was started from. Adding a root leaves the active tab alone —
       // the tab the root lands in need not be the one in front.

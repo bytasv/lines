@@ -2,6 +2,8 @@ import type { ServerMessage, SocketAccess, UserUiSettings } from '@lines/shared'
 import { findWorktree, projectRoots } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
 import { AuthManager } from './auth.ts';
+import { OpenaiAuthManager } from './openaiAuth.ts';
+import { OpenaiUsagePoller } from './openaiUsage.ts';
 import { GuardAllowlist } from './autoGuard.ts';
 import { McpConnections } from './mcpConnections.ts';
 import { SessionManager } from './sessions.ts';
@@ -137,6 +139,12 @@ export interface UserContext {
   userId: string;
   store: Store;
   auth: AuthManager;
+  /** The connected OpenAI (ChatGPT) account, for sessions on a Codex model.
+   *  Its own manager, not a mode of `auth`: the two share no tokens, no refresh
+   *  model and no wire messages. */
+  openaiAuth: OpenaiAuthManager;
+  /** ChatGPT plan usage, the OpenAI mirror of `usage`. */
+  openaiUsage: OpenaiUsagePoller;
   guard: GuardAllowlist;
   /** User-managed MCP servers, spliced into every session's query options. */
   mcp: McpConnections;
@@ -282,7 +290,11 @@ export function buildUserContext(
   const memory = new MemorySyncer(store, projectKeys);
 
   const auth = new AuthManager(store);
+  const openaiAuth = new OpenaiAuthManager(store);
   const usage = new UsagePoller(broadcast, auth);
+  // Reads codex's own credential per request; see openaiUsage.ts for why that is
+  // safe when writing it a second time would not be.
+  const openaiUsage = new OpenaiUsagePoller(broadcast, store);
 
   const sessions = new SessionManager(
     store,
@@ -296,6 +308,11 @@ export function buildUserContext(
         (msg.event.data as { type?: string } | null)?.type === 'result'
       ) {
         usage.refreshSoon();
+        // Both pollers are nudged rather than the one matching the turn's provider:
+        // this hook sees a settled `result` with no provider on it, and both are
+        // debounced and rate-limited, so the wrong one is a no-op rather than a
+        // request.
+        openaiUsage.refreshSoon();
         // Turn end is when the agent may have written memory; the mtime-diff also
         // catches hand-edits made outside a turn for free.
         const changed = memory.collectChanged();
@@ -304,6 +321,7 @@ export function buildUserContext(
     },
     auth,
     mcp,
+    openaiAuth,
   );
   sessions.attachWorker(worker);
 
@@ -326,6 +344,20 @@ export function buildUserContext(
   };
   // Token refresh: idle queries hold the old token in their spawn env.
   auth.onRefresh = () => sessions.recycleIdleQueries();
+
+  // Connect/disconnect of the OpenAI account. No `recycleIdleQueries` and no
+  // `usage.refreshSoon` counterpart: a codex turn carries no cached credential
+  // (it reads `$CODEX_HOME/auth.json` per child), and the plan-usage poller is
+  // Claude's.
+  openaiAuth.onChange = (status) => {
+    broadcast({ type: 'openaiAuthStatus', auth: status });
+    // A connect makes a reading possible for the first time; a disconnect has to
+    // clear the one on screen.
+    openaiUsage.refreshSoon();
+  };
+  // A device-code login fails long after the click that started it, so the
+  // failure needs a channel of its own.
+  openaiAuth.onError = (message) => broadcast({ type: 'openaiAuthError', message });
 
   const refreshShared = async () => {
     const list = await sync.pullShared();
@@ -440,6 +472,8 @@ export function buildUserContext(
     userId,
     store,
     auth,
+    openaiAuth,
+    openaiUsage,
     guard,
     mcp,
     sessions,
@@ -468,7 +502,8 @@ export function buildUserContext(
       console.warn('[worktrees] branch naming failed:', err);
     });
   };
-  // After ctx exists — its async broadcasts reference ctx-bound state (sync token).
+  // After ctx exists — their async broadcasts reference ctx-bound state (sync token).
   usage.start();
+  openaiUsage.start();
   return ctx;
 }

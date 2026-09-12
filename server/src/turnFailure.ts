@@ -20,7 +20,7 @@
  * `SessionErrorKind`) so the patterns and the advice can only be written for a
  * kind this module actually recognises.
  */
-export type TurnFailureKind = 'filtered' | 'context' | 'invalid' | 'overloaded';
+export type TurnFailureKind = 'filtered' | 'context' | 'invalid' | 'overloaded' | 'quota';
 
 /**
  * Error text per kind, matched in order — first kind whose patterns hit wins, so
@@ -54,11 +54,18 @@ const TURN_FAILURE_PATTERNS: ReadonlyArray<readonly [TurnFailureKind, readonly R
     ],
   ],
   ['invalid', [/invalid_request_error/i, /\b400\b[^\n]*bad request/i]],
+  // Before 'overloaded' on purpose: OpenAI reports an exhausted quota as a 429
+  // carrying `insufficient_quota`, so a later position would classify the one
+  // failure waiting cannot fix as the one waiting does fix.
+  ['quota', [/insufficient_quota/i, /exceeded your current quota/i, /billing_hard_limit_reached/i]],
   [
     'overloaded',
     [
       /overloaded_error/i,
       /rate_limit_error/i,
+      // OpenAI's spellings of the same thing.
+      /rate_limit_exceeded/i,
+      /rate limit reached/i,
       // Anchored to the status text, so a tool output that merely contains the
       // digits ("exit code 429 lines written") is not a rate limit.
       /\b529\b[^\n]*\b(overloaded|service unavailable)\b/i,
@@ -98,6 +105,9 @@ const ADVICE: Record<TurnFailureKind, string> = {
     'The API rejected the request as malformed. Retry; if it repeats, change the prompt ' +
     'or the model.',
   overloaded: 'The API is busy or rate-limited right now. Wait a moment, then Retry.',
+  quota:
+    'This account has no usage left to spend right now. Check the plan or billing for ' +
+    'the account this session runs on, or pick a different model in the composer, then Retry.',
 };
 
 /** Only offered while a workflow step is parked — Approve is what skips it. */

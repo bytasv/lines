@@ -11,12 +11,14 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/*.test.ts",
     "migrate": "tsx scripts/migrate-user.ts",
-    "pair": "tsx scripts/pair-device.ts"
+    "pair": "tsx scripts/pair-device.ts",
+    "gen:codex-protocol": "codex app-server generate-ts --out ../shared/codexProtocol && node scripts/normalize-codex-protocol.mjs ../shared/codexProtocol"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.211",
     "@clerk/backend": "^3.12.0",
     "@lines/shared": "*",
+    "@openai/codex-sdk": "^0.154.0",
     "dotenv": "^17.4.2",
     "ws": "^8.18.0",
     "zod": "^4.4.3"

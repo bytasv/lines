@@ -11,7 +11,7 @@
  * — only inside function bodies, by which time both modules are initialized.
  */
 import type { PermissionMode, StepContent } from './types.ts';
-import { isKnownModel, LEGACY_MODEL_MAP } from './types.ts';
+import { isKnownModel, LEGACY_MODEL_MAP, providerForModel } from './types.ts';
 
 /** The runtime reads `{outputs.<name>}` with `[\w-]+`, so anything else is unreferenceable. */
 export const OUTPUT_NAME_RE = /^[A-Za-z0-9_-]+$/;
@@ -84,6 +84,18 @@ export function validateStepContent(c: StepContent, opts: ValidateOptions = {}):
     } else if (!isKnownModel(model) && !LEGACY_MODEL_MAP[model]) {
       issues.push({ field: 'model', message: `Unknown model "${model}"` });
     }
+  }
+
+  // Unconditional, unlike the strict check above: a workflow step's stored model
+  // is applied with setModel on the live session, and a step carrying an OpenAI
+  // model would flip a running workflow onto a provider that holds none of its
+  // conversation. The editor's model picker already offers Claude models only —
+  // this is what stops an agent-authored step from going around it.
+  if (c.model && providerForModel(String(c.model)) === 'openai') {
+    issues.push({
+      field: 'model',
+      message: `"${c.model}" is an OpenAI model — workflow steps run on Claude models only`,
+    });
   }
 
   return issues;

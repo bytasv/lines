@@ -189,6 +189,53 @@ export function SettingsModal({
 }
 
 function AccountSection({ onClose }: { onClose: () => void }) {
+  return (
+    <Stack gap="xs">
+      <ClaudeAccountRow onClose={onClose} />
+      <OpenaiAccountRow onClose={onClose} />
+    </Stack>
+  );
+}
+
+/**
+ * The OpenAI (ChatGPT) account, for sessions on a Codex model. A second row
+ * rather than a mode of the Claude one: the two are independent connections, and
+ * either alone is enough to run turns.
+ */
+function OpenaiAccountRow({ onClose }: { onClose: () => void }) {
+  const auth = useStore((s) => s.openaiAuth);
+  const openModal = useStore((s) => s.openOpenaiLoginModal);
+
+  return auth?.loggedIn ? (
+    <Group justify="space-between" wrap="nowrap">
+      <Text size="sm" truncate>
+        {auth.account?.email ?? 'Connected to OpenAI'}
+        {auth.account?.organization ? ` · ${auth.account.organization}` : ''}
+      </Text>
+      <Button size="xs" variant="default" onClick={() => send({ type: 'openaiLogout' })}>
+        Disconnect
+      </Button>
+    </Group>
+  ) : (
+    <Group justify="space-between" wrap="nowrap">
+      <Text size="sm" c="dimmed">
+        No OpenAI account connected
+      </Text>
+      <Button
+        size="xs"
+        variant="default"
+        onClick={() => {
+          onClose();
+          openModal();
+        }}
+      >
+        Connect…
+      </Button>
+    </Group>
+  );
+}
+
+function ClaudeAccountRow({ onClose }: { onClose: () => void }) {
   const auth = useStore((s) => s.auth);
   const openLoginModal = useStore((s) => s.openLoginModal);
 
@@ -260,6 +307,7 @@ function DocsSection({ onClose }: { onClose: () => void }) {
 
 function SessionsSection() {
   const models = useStore((s) => s.models);
+  const openaiConnected = useStore((s) => s.openaiAuth?.loggedIn === true);
   const defaults = useStore((s) => s.newSessionDefaults);
   const setDefaults = useStore((s) => s.setNewSessionDefaults);
   const autoContinueInterrupted = useStore((s) => s.autoContinueInterrupted);
@@ -274,7 +322,14 @@ function SessionsSection() {
       </Text>
       <Select
         label="Model"
-        data={modelSelectData(models, defaults.model)}
+        // Both providers. An OpenAI model with no account connected is shown
+        // disabled rather than hidden: hiding it leaves no clue the option exists,
+        // and this is the pane the Connect button lives in.
+        data={modelSelectData(models, defaults.model, {
+          ...(openaiConnected
+            ? {}
+            : { unavailable: { openai: 'Connect an OpenAI account in Account above' } }),
+        })}
         renderOption={renderModelOption}
         value={defaults.model}
         onChange={(v) => v && setDefaults({ ...defaults, model: v })}

@@ -225,7 +225,9 @@ export function RecipeRunModal({
             <Select
               label="Model"
               comboboxProps={modelComboboxProps}
-              data={modelSelectData(models, model)}
+              // Claude only: a recipe run creates workflow sessions, and workflows do
+              // not run on an OpenAI model in this cut.
+              data={modelSelectData(models, model, { providers: ['anthropic'] })}
               renderOption={renderModelOption}
               value={model}
               allowDeselect={false}

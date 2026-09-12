@@ -318,14 +318,22 @@ export class WorkerClient {
     }
   }
 
-  /** `tools` is only read when the worker has to create the query (see `push` in workerProtocol.ts). */
+  /**
+   * `tools` is only read when the worker has to create the query (see `push` in
+   * workerProtocol.ts).
+   *
+   * `engine: 'codex'` routes the push to the worker's Codex half instead, where
+   * `options` is a `CodexPushOptions` and `tools` is ignored — the Codex SDK can
+   * host no in-process MCP server.
+   */
   push(
     sessionId: string,
     message: unknown,
     options: Record<string, unknown>,
     tools?: McpToolManifest,
+    engine?: 'codex',
   ) {
-    this.send({ type: 'push', sessionId, message, options, tools });
+    this.send({ type: 'push', sessionId, message, options, tools, ...(engine ? { engine } : {}) });
   }
 
   interrupt(sessionId: string) {

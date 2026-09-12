@@ -39,6 +39,13 @@ import {
   type WorkerToBridge,
 } from './workerProtocol.ts';
 import { buildMcpServer } from './workerMcp.ts';
+import {
+  closeCodex,
+  codexLiveInfo,
+  hasCodexSession,
+  interruptCodex,
+  pushCodex,
+} from './workerCodex.ts';
 
 /** Push-based async iterable used as the streaming-input prompt for the SDK. */
 class AsyncQueue<T> implements AsyncIterable<T> {
@@ -429,6 +436,38 @@ async function pump(sessionId: string, state: SessionState, q: Query) {
 }
 
 function handleBridgeMessage(msg: BridgeToWorker) {
+  // Engine dispatch first, before anything reaches the Claude session map.
+  //
+  // Not optional: the control cases below are `sessions.get(id)?.query.foo(...)`,
+  // where the `?.` guards only the map lookup — a codex session reaching one of
+  // them would throw a synchronous TypeError past the attached `.catch()`, in the
+  // one process whose job is to survive.
+  if (msg.type === 'push' && msg.engine === 'codex') {
+    pushCodex(msg.sessionId, msg.options, msg.message, {
+      event: (sessionId, message) => send({ type: 'event', sessionId, message }),
+      ended: (sessionId, error) => send({ type: 'ended', sessionId, error }),
+    });
+    return;
+  }
+  if ('sessionId' in msg && hasCodexSession(msg.sessionId)) {
+    switch (msg.type) {
+      case 'interrupt':
+        interruptCodex(msg.sessionId);
+        return;
+      case 'close':
+        closeCodex(msg.sessionId);
+        return;
+      // stopTask / setModel / setPermissionMode have no codex equivalent: thread
+      // options bind at startThread, so the bridge applies them to the next turn
+      // rather than to this one. Dropped rather than forwarded.
+      case 'stopTask':
+      case 'setModel':
+      case 'setPermissionMode':
+        return;
+      default:
+        break;
+    }
+  }
   switch (msg.type) {
     case 'push': {
       const state = ensureSession(msg.sessionId, msg.options, msg.tools);
@@ -504,12 +543,17 @@ function handleConnection(ws: WebSocket, req: IncomingMessage) {
       type: 'hello',
       version: PROTOCOL_VERSION,
       startedAt,
-      live: [...sessions].map(([sessionId, s]) => ({
-        sessionId,
-        claudeSessionId: s.claudeSessionId,
-        busy: s.busy,
-        backgroundTasks: s.backgroundTasks,
-      })),
+      live: [
+        ...[...sessions].map(([sessionId, s]) => ({
+          sessionId,
+          claudeSessionId: s.claudeSessionId,
+          busy: s.busy,
+          backgroundTasks: s.backgroundTasks,
+        })),
+        // Codex sessions are live too — a bridge that restarted mid-codex-turn
+        // must not reconcile one as dead, and repairs its `codexThreadId` here.
+        ...codexLiveInfo(),
+      ],
     } satisfies WorkerToBridge),
   );
   for (const msg of outbox.splice(0)) ws.send(JSON.stringify(msg));

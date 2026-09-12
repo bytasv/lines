@@ -388,7 +388,9 @@ export function StepLibrary() {
                 <Select
                   w={168}
                   comboboxProps={modelComboboxProps}
-                  data={modelSelectData(models, draft.model)}
+                  // Claude only, for the reason StepCard's picker is — a step model
+                  // reaches a live session through setModel.
+                  data={modelSelectData(models, draft.model, { providers: ['anthropic'] })}
                   renderOption={renderModelOption}
                   value={draft.model}
                   disabled={readOnly}

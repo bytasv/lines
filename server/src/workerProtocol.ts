@@ -19,7 +19,12 @@ import { randomBytes } from 'node:crypto';
 // a v4 worker cannot find each other at all, which the version check in
 // workerClient.ts reports as the protocol mismatch it is.
 // v5 = the `stopTask` message (background tasks).
-export const PROTOCOL_VERSION = 5;
+// v6 = `push.engine`. A bump rather than a free additive field, because a v5
+// worker ignores what it does not read: it would run a codex push as a Claude
+// query with codex thread options as query options, which workerClient.ts only
+// warns about. Failing the handshake is the only way that reads as the mismatch
+// it is.
+export const PROTOCOL_VERSION = 6;
 
 /** Explicit pin for local dev; unset means "bind :0 and let the OS pick", which
  *  is the default so two Lines instances can never fight over a port. */
@@ -360,6 +365,16 @@ export type BridgeToWorker =
       message: unknown;
       options: Record<string, unknown>;
       tools?: McpToolManifest;
+      /**
+       * Which engine runs this turn. Absent = the Claude SDK, so every existing
+       * push means exactly what it meant before.
+       *
+       * `'codex'` routes to workerCodex.ts instead, where `options` is a
+       * `CodexPushOptions` (thread options + CODEX_HOME + the binary path) rather
+       * than SDK query options, and `tools` is ignored — the Codex SDK can host no
+       * in-process MCP server.
+       */
+      engine?: 'codex';
     }
   | { type: 'interrupt'; sessionId: string }
   /** Stop one background task (a backgrounded subagent or Bash command). The CLI
@@ -386,6 +401,9 @@ export interface LiveSessionInfo {
   sessionId: string;
   /** CLI session id, so the bridge can repair its persisted resume pointer. */
   claudeSessionId?: string;
+  /** Codex thread id, the OpenAI-provider mirror of `claudeSessionId`: a bridge
+   *  restart repairs its persisted resume pointer from this the same way. */
+  codexThreadId?: string;
   /**
    * A turn is in flight (pushed, no `result` yet). `undefined` = a worker too
    * old to report it; the bridge then only demotes, as it always did. Adding

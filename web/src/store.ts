@@ -683,6 +683,9 @@ interface UiState {
   filePreview: { path: string; display: string; line?: number; col?: number } | null;
   /** Claude-plan usage snapshot from the bridge; null when unavailable (API-key users). */
   usage: UsageSnapshot | null;
+  /** ChatGPT-plan usage snapshot; null when no OpenAI account is connected, or
+   *  when codex's access token is stale and the reading could not be taken. */
+  openaiUsage: UsageSnapshot | null;
   /** App login state from the bridge; null until the first `hello`. */
   auth: AuthStatus | null;
   /** Bridge->storage/Supabase link health; null until first `hello`. `available: false` shows the sync-degraded banner. */
@@ -707,6 +710,19 @@ interface UiState {
   /** Last login failure, shown inline in the login modal. */
   authError: string | null;
   loginModalOpen: boolean;
+  /** OpenAI (ChatGPT) account state from the bridge; null until the first `hello`,
+   *  and on a bridge too old to send it. */
+  openaiAuth: AuthStatus | null;
+  /** Device code of the in-progress OpenAI login, set once the server answers
+   *  openaiStartLogin. Null means "not started yet", which is what the modal's
+   *  first screen keys off. */
+  openaiUserCode: string | null;
+  openaiVerificationUrl: string | null;
+  /** Last OpenAI login failure, shown inline in its modal. */
+  openaiAuthError: string | null;
+  /** Only ever opened by an explicit Connect click — never auto-opened the way the
+   *  Claude modal is. A user with a Claude account is not missing anything. */
+  openaiLoginModalOpen: boolean;
   /**
    * Auto-mode guard allowlist. Server-authoritative and never cached in
    * localStorage: it arrives in every `hello`, and a cached copy would be a stale
@@ -811,6 +827,9 @@ interface UiState {
   closeFilePreview: () => void;
   openLoginModal: () => void;
   closeLoginModal: () => void;
+  openOpenaiLoginModal: () => void;
+  /** Also cancels the bridge's poll loop — see the implementation. */
+  closeOpenaiLoginModal: () => void;
   /** Allowlist an entry (validated client-side first, with the same shared rules). */
   addGuardAllow: (entry: GuardAllowEntry) => void;
   removeGuardAllow: (entry: GuardAllowEntry) => void;
@@ -1043,6 +1062,7 @@ export const useStore = create<UiState>((set, get) => {
   notifyPermission: 'Notification' in window ? Notification.permission : 'denied',
   filePreview: null,
   usage: null,
+  openaiUsage: null,
   auth: null,
   storageStatus: null,
   workerStatus: null,
@@ -1052,6 +1072,11 @@ export const useStore = create<UiState>((set, get) => {
   authorizeUrl: null,
   authError: null,
   loginModalOpen: false,
+  openaiAuth: null,
+  openaiUserCode: null,
+  openaiVerificationUrl: null,
+  openaiAuthError: null,
+  openaiLoginModalOpen: false,
   guardAllowlist: [],
   guardReview: null,
   guardReviewOpen: false,
@@ -1179,6 +1204,19 @@ export const useStore = create<UiState>((set, get) => {
 
   openLoginModal: () => set({ loginModalOpen: true, authError: null }),
   closeLoginModal: () => set({ loginModalOpen: false, authorizeUrl: null, authError: null }),
+
+  openOpenaiLoginModal: () => set({ openaiLoginModalOpen: true, openaiAuthError: null }),
+  closeOpenaiLoginModal: () => {
+    // Tell the bridge to stop polling OpenAI: a device-code flow nobody is
+    // watching would otherwise poll until the code expired.
+    if (get().openaiUserCode) send({ type: 'openaiCancelLogin' });
+    set({
+      openaiLoginModalOpen: false,
+      openaiUserCode: null,
+      openaiVerificationUrl: null,
+      openaiAuthError: null,
+    });
+  },
 
   // Intent messages, not a list save: the bridge is the only writer of the list
   // and echoes the whole thing back on `guardAllowlist`.
@@ -1468,7 +1506,14 @@ export const useStore = create<UiState>((set, get) => {
           // Server restarts send hello before the first usage fetch completes;
           // keep the last good snapshot rather than flickering the chip away.
           usage: msg.usage ?? (msg.auth.loggedIn ? state.usage : null),
+          // Same rule as `usage` above: a bridge restart sends hello before the
+          // first fetch lands, so keep the last good snapshot rather than
+          // flickering the chip away — but drop it once the account is gone.
+          openaiUsage: msg.openaiUsage ?? (msg.openaiAuth?.loggedIn ? state.openaiUsage : null),
           auth: msg.auth,
+          // Absent on a bridge older than this field — degrades to "no OpenAI
+          // account", which is exactly what such a bridge can offer.
+          openaiAuth: msg.openaiAuth ?? { loggedIn: false },
           storageStatus: msg.storage ?? null,
           // Absent on a bridge older than this field — degrades to "no strip".
           workerStatus: msg.worker ?? null,
@@ -1499,9 +1544,15 @@ export const useStore = create<UiState>((set, get) => {
           // and turns there run on the host's token either way. Prompting a guest
           // to connect an account would be asking them to fix something they
           // cannot see and do not own.
+          // Gated on "no provider connected", not on Claude alone: an OpenAI-only
+          // user is signed in to something and must not be nagged to sign in to
+          // Claude on every launch.
           loginModalOpen: msg.access
             ? false
-            : state.loginModalOpen || (!msg.auth.loggedIn && state.auth?.loggedIn !== false),
+            : state.loginModalOpen ||
+              (!msg.auth.loggedIn &&
+                !msg.openaiAuth?.loggedIn &&
+                state.auth?.loggedIn !== false),
           guardAllowlist: msg.guardAllowlist ?? [],
           guardReview: msg.guardAllowlistReview ?? null,
           // Same "auto-open on genuinely new news" rule as the login modal: a
@@ -1799,6 +1850,9 @@ export const useStore = create<UiState>((set, get) => {
       case 'usage':
         set({ usage: msg.usage });
         break;
+      case 'openaiUsage':
+        set({ openaiUsage: msg.usage });
+        break;
       case 'authStatus':
         // Success closes the modal; a logout (or dead refresh token) reopens it.
         set(
@@ -1854,6 +1908,34 @@ export const useStore = create<UiState>((set, get) => {
         break;
       case 'authError':
         set({ authError: msg.message });
+        break;
+      case 'openaiAuthStatus':
+        // Success closes the modal. A disconnect deliberately does NOT open it —
+        // unlike the Claude case, there is no turn this app cannot run without it
+        // unless the user picked an OpenAI model, and that refusal says so itself.
+        set(
+          msg.auth.loggedIn
+            ? {
+                openaiAuth: msg.auth,
+                openaiLoginModalOpen: false,
+                openaiUserCode: null,
+                openaiVerificationUrl: null,
+                openaiAuthError: null,
+              }
+            : { openaiAuth: msg.auth },
+        );
+        break;
+      case 'openaiLoginStarted':
+        set({
+          openaiUserCode: msg.userCode,
+          openaiVerificationUrl: msg.verificationUrl,
+          openaiAuthError: null,
+        });
+        break;
+      case 'openaiAuthError':
+        // The code is spent either way: a failure ends the flow server-side, so
+        // clearing it puts the modal back on its "Connect" screen.
+        set({ openaiAuthError: msg.message, openaiUserCode: null });
         break;
       case 'folderPicked':
         // Cleared even when the pick was cancelled (no `path`), so a stale target

@@ -50,7 +50,7 @@ import type {
   TranscriptEvent,
   WorkflowMarkerData,
 } from '@lines/shared';
-import { rewindBlock } from '@lines/shared';
+import { providerForModel, rewindBlock } from '@lines/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
 import {
@@ -327,6 +327,13 @@ function UserBubble({
   // A boolean, for the same reason the block reason is a string: a stable
   // selector result keeps this bubble out of unrelated re-renders.
   const inWorkflow = useStore((s) => s.sessions[sessionId]?.workflow?.started === true);
+  // Rewind forks the Claude CLI conversation; a codex thread has no equivalent
+  // here. Hidden rather than disabled: rewindBlock would report it as "send a
+  // message first", which is both wrong and unfixable by the user.
+  const codex = useStore((s) => {
+    const meta = s.sessions[sessionId];
+    return meta ? providerForModel(meta.model) === 'openai' : false;
+  });
   const seq = Number(item.key.slice(1));
 
   const openConfirm = (intent: RewindIntent) => {
@@ -462,17 +469,21 @@ function UserBubble({
             {clipboard.copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
           </ActionIcon>
         </Tooltip>
-        {action(
-          'edit',
-          IconPencil,
-          'Edit',
-          'Edit and resend — deletes this message and everything after it, and puts its text back in the composer',
-        )}
-        {action(
-          'rewind',
-          IconArrowBackUp,
-          'Delete from here',
-          'Delete this message and everything after it — the text is not kept',
+        {!codex && (
+          <>
+            {action(
+              'edit',
+              IconPencil,
+              'Edit',
+              'Edit and resend — deletes this message and everything after it, and puts its text back in the composer',
+            )}
+            {action(
+              'rewind',
+              IconArrowBackUp,
+              'Delete from here',
+              'Delete this message and everything after it — the text is not kept',
+            )}
+          </>
         )}
       </Group>
       <ConfirmModal

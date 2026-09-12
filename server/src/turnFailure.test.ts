@@ -9,7 +9,7 @@ import {
   type TurnFailureKind,
 } from './turnFailure.ts';
 
-const KINDS: TurnFailureKind[] = ['filtered', 'context', 'invalid', 'overloaded'];
+const KINDS: TurnFailureKind[] = ['filtered', 'context', 'invalid', 'overloaded', 'quota'];
 
 /** Wording seen from the CLI/SDK for each kind, as close to verbatim as we have. */
 const SAMPLES: Record<TurnFailureKind, string[]> = {
@@ -31,6 +31,12 @@ const SAMPLES: Record<TurnFailureKind, string[]> = {
     'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
     'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit"}}',
     'API Error: 429 Too Many Requests',
+    // OpenAI's spelling, which the Anthropic patterns do not cover.
+    'stream error: 429 {"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for gpt-5.6-terra"}}',
+  ],
+  quota: [
+    'stream error: 429 {"error":{"type":"insufficient_quota","message":"You exceeded your current quota"}}',
+    'billing_hard_limit_reached',
   ],
 };
 

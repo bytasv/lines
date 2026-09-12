@@ -401,7 +401,10 @@ export function StepCard({
               <Select
                 w={168}
                 comboboxProps={modelComboboxProps}
-                data={modelSelectData(models, step.model)}
+                // Claude only: a step's stored model is applied with setModel on the
+                // live session, which would flip a running workflow onto a provider
+                // that holds none of its conversation. The server refuses it too.
+                data={modelSelectData(models, step.model, { providers: ['anthropic'] })}
                 renderOption={renderModelOption}
                 value={step.model}
                 disabled={contentReadOnly}

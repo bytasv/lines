@@ -21,8 +21,8 @@ import {
   IconX,
   IconZoomIn,
 } from '@tabler/icons-react';
-import type { PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
-import { isSessionInterruptible, rootsForCwd } from '@lines/shared';
+import type { ModelProvider, PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
+import { isSessionInterruptible, providerForModel, rootsForCwd } from '@lines/shared';
 import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
@@ -137,6 +137,23 @@ export function Composer({ session }: { session: SessionMeta }) {
   const canInterrupt = useCan('interrupt');
   const canSetModel = useCan('setModel');
   const canSetMode = useCan('setPermissionMode');
+  const openaiConnected = useStore((s) => s.openaiAuth?.loggedIn === true);
+  /** This session's provider, derived from its model — there is no stored field. */
+  const provider: ModelProvider = providerForModel(session.model);
+  /**
+   * The session has a conversation that a provider switch would leave behind.
+   * Nothing carries context between a Claude session and a codex thread, so the
+   * server refuses the switch; the picker says so before the click rather than
+   * after (see modelSelectData's `unavailable`).
+   */
+  const hasRun = Boolean(session.claudeSessionId || session.codexThreadId);
+  const otherProvider: ModelProvider = provider === 'openai' ? 'anthropic' : 'openai';
+  const modelUnavailable: Partial<Record<ModelProvider, string>> = {
+    ...(hasRun ? { [otherProvider]: 'This session has already run on the other provider' } : {}),
+    ...(openaiConnected || provider === 'openai'
+      ? {}
+      : { openai: 'Connect an OpenAI account in Settings' }),
+  };
   const needsApproval = useStore((s) => s.access?.caps.promptNeedsApproval === true);
   // Prompt text plus the inline @mention pill ranges painted over it. Seeded from
   // the persisted draft — SessionView is keyed by session id, so this component
@@ -378,7 +395,9 @@ export function Composer({ session }: { session: SessionMeta }) {
         placeholder={
           session.workflow && !session.workflow.started
             ? 'Describe the task — this kicks off the workflow…'
-            : 'Message Claude… (↵ to send, ⇧↵ for newline)'
+            : provider === 'openai'
+              ? 'Message Codex… (↵ to send, ⇧↵ for newline)'
+              : 'Message Claude… (↵ to send, ⇧↵ for newline)'
         }
         textareaRef={textareaRef}
         onFocusChange={setComposerFocused}
@@ -391,20 +410,38 @@ export function Composer({ session }: { session: SessionMeta }) {
               <IconPaperclip size={16} />
             </ActionIcon>
           </Tooltip>
-          <SegmentedControl
-            size="xs"
-            disabled={!canSetMode}
-            data={PERMISSION_MODE_SEGMENTS}
-            value={session.permissionMode}
-            onChange={(v) =>
-              send({ type: 'setPermissionMode', sessionId: session.id, mode: v as PermissionMode })
+          {/* Visible but disabled for a codex session, deliberately: its absence
+              would read as a bug, and the tooltip is where the reduced surface
+              gets explained. A span so the tooltip fires over a disabled control. */}
+          <Tooltip
+            label={
+              provider === 'openai'
+                ? 'Codex sessions run sandboxed and approve their own tool calls. ' +
+                  'Plan mode is read-only, and your MCP connections do not apply here.'
+                : 'How tool calls are approved in this session'
             }
-          />
+            withArrow
+            openDelay={400}
+          >
+            <span style={{ display: 'inline-flex' }}>
+              <SegmentedControl
+                size="xs"
+                disabled={!canSetMode || provider === 'openai'}
+                data={PERMISSION_MODE_SEGMENTS}
+                value={session.permissionMode}
+                onChange={(v) =>
+                  send({ type: 'setPermissionMode', sessionId: session.id, mode: v as PermissionMode })
+                }
+              />
+            </span>
+          </Tooltip>
           <Select
             w={130}
             disabled={!canSetModel}
             comboboxProps={modelComboboxProps}
-            data={modelSelectData(models, session.model)}
+            // Both providers, with the ones this session cannot move to rendered
+            // disabled and saying why.
+            data={modelSelectData(models, session.model, { unavailable: modelUnavailable })}
             renderOption={renderModelOption}
             value={session.model}
             onChange={(v) => v && send({ type: 'setModel', sessionId: session.id, model: v })}

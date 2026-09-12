@@ -17,6 +17,7 @@ import { WorkflowEditor } from './components/workflow/WorkflowEditor';
 import type { WorkflowEditorView } from './components/workflow/WorkflowEditor';
 import { MonacoPreviewModal } from './components/MonacoPreviewModal';
 import { LoginModal } from './components/LoginModal';
+import { OpenaiLoginModal } from './components/OpenaiLoginModal';
 import { GuardAllowlistReviewModal } from './components/GuardAllowlistReviewModal';
 import { McpConnectionsReviewModal } from './components/McpConnectionsReviewModal';
 import { FilePalette } from './components/FilePalette';
@@ -49,6 +50,7 @@ export function App() {
       <FilePalette />
       <MonacoPreviewModal />
       <LoginModal />
+      <OpenaiLoginModal />
       <GuardAllowlistReviewModal />
       <McpConnectionsReviewModal />
     </>

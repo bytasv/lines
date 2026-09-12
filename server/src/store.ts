@@ -195,6 +195,25 @@ export interface StoredAuth {
 }
 
 /**
+ * Non-secret facts about the connected OpenAI (ChatGPT) account, parsed out of the
+ * `id_token` claims at login.
+ *
+ * Deliberately separate from the tokens, which live *only* in
+ * `$CODEX_HOME/auth.json` and are codex's to rotate: OpenAI rotates the refresh
+ * token on every refresh, so a second Lines-held copy would be invalidated by the
+ * first codex-side refresh. This file is what lets `AuthStatus` name the account
+ * the way the Claude row does, with no network call and nothing codex can drop.
+ */
+export interface StoredOpenaiAccount {
+  version: 1;
+  email?: string;
+  /** ChatGPT plan (`chatgpt_plan_type` claim), e.g. `plus`, `pro`, `team`. */
+  plan?: string;
+  accountId?: string;
+  connectedAt: number;
+}
+
+/**
  * Flat-JSON persistence rooted at a single directory. One store per user
  * (`createStore(userStoreRoot(userId))`); the local disk is a cache/offline
  * fallback for the cloud storage server. Whole-file overwrites, no locking.
@@ -216,6 +235,17 @@ export function createStore(root: string) {
   const PROJECTS_FILE = path.join(root, 'projects.json');
   const PROJECT_KEYS_FILE = path.join(root, 'project-keys.json');
   const AUTH_FILE = path.join(root, 'auth.json');
+  // `$CODEX_HOME` for every codex child this user runs: its `auth.json` (the only
+  // store of OpenAI secrets) and codex's own session/thread files.
+  //
+  // Per-app-user and Lines-owned, which has one consequence worth stating: it
+  // SHADOWS the user's own `~/.codex/config.toml`, so their terminal codex
+  // configuration (model providers, MCP servers, trust) does not apply inside
+  // Lines. Seeding a config here deliberately is followup work.
+  const CODEX_HOME = path.join(root, 'codex');
+  const CODEX_AUTH_FILE = path.join(CODEX_HOME, 'auth.json');
+  // Non-secret metadata only — see StoredOpenaiAccount.
+  const OPENAI_ACCOUNT_FILE = path.join(root, 'openai-account.json');
   const GUARD_FILE = path.join(root, 'guard-allowlist.json');
   // Separate file from GUARD_FILE, which stays a bare GuardAllowEntry[]: wrapping
   // the entries in an envelope would make an older build's loader call .some() on
@@ -549,6 +579,63 @@ export function createStore(root: string) {
 
     deleteAuth() {
       fs.rmSync(AUTH_FILE, { force: true });
+    },
+
+    /** `$CODEX_HOME` for this user's codex children, created on first ask. */
+    codexHome(): string {
+      fs.mkdirSync(CODEX_HOME, { recursive: true, mode: 0o700 });
+      return CODEX_HOME;
+    },
+
+    /**
+     * Write `$CODEX_HOME/auth.json` — the one time Lines ever does. Temp file plus
+     * rename so a codex child reading it concurrently never sees a partial file,
+     * and 0600 because it holds an OAuth refresh token.
+     *
+     * After this, codex owns the file: it refreshes and rewrites it, and a second
+     * Lines write would clobber tokens fresher than ours.
+     */
+    saveCodexAuth(payload: unknown) {
+      fs.mkdirSync(CODEX_HOME, { recursive: true, mode: 0o700 });
+      const tmp = `${CODEX_AUTH_FILE}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
+      fs.renameSync(tmp, CODEX_AUTH_FILE);
+      try {
+        fs.chmodSync(CODEX_AUTH_FILE, 0o600);
+      } catch {
+        // best-effort on platforms without POSIX perms
+      }
+    },
+
+    /** Presence only — the contents are codex's business, never read back here. */
+    hasCodexAuth(): boolean {
+      return fs.existsSync(CODEX_AUTH_FILE);
+    },
+
+    /**
+     * The raw file, for the single reader that needs a secret out of it: logout's
+     * best-effort revoke, immediately before deleting it. Nothing else may read
+     * this — a Lines-held copy of a rotating refresh token is exactly what this
+     * design avoids (see openaiAuth.ts).
+     */
+    readCodexAuthRaw(): unknown {
+      return readJson<unknown>(CODEX_AUTH_FILE, null);
+    },
+
+    deleteCodexAuth() {
+      fs.rmSync(CODEX_AUTH_FILE, { force: true });
+    },
+
+    loadOpenaiAccount(): StoredOpenaiAccount | null {
+      return readJson<StoredOpenaiAccount | null>(OPENAI_ACCOUNT_FILE, null);
+    },
+
+    saveOpenaiAccount(account: StoredOpenaiAccount) {
+      writeJson(OPENAI_ACCOUNT_FILE, account);
+    },
+
+    deleteOpenaiAccount() {
+      fs.rmSync(OPENAI_ACCOUNT_FILE, { force: true });
     },
 
     loadGuardAllowlist<T>(fallback: T): T {

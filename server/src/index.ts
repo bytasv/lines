@@ -754,9 +754,14 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
       // names no path the guest may reach.
       projectKeys: ctx.projectKeys.all(),
       usage: null,
+      // Both plan-usage chips are the host's business, not a guest's.
+      openaiUsage: null,
       // The host's Claude account is theirs alone: a guest is told nothing about
       // it, not even the email. Turns run on the host's token regardless.
       auth: { loggedIn: false },
+      // Same reasoning as the Claude row above: the host's OpenAI account is
+      // theirs alone, and turns run on it regardless.
+      openaiAuth: { loggedIn: false },
       storage: ctx.sync.status,
       worker: worker.status,
       access: {
@@ -792,7 +797,9 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
     projects: ctx.store.loadProjects(),
     projectKeys: ctx.projectKeys.all(),
     usage: ctx.usage.snapshot,
+    openaiUsage: ctx.openaiUsage.snapshot,
     auth: ctx.auth.getStatus(),
+    openaiAuth: ctx.openaiAuth.getStatus(),
     storage: ctx.sync.status,
     // So a browser connecting mid-outage learns about it without waiting for
     // the next transition (which may never come).
@@ -1123,9 +1130,21 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
     case 'completeSession':
       sessions.completeSession(msg.sessionId);
       break;
-    case 'setModel':
-      sessions.setModel(msg.sessionId, msg.model);
+    case 'setModel': {
+      // A cross-provider switch on a session that has already run is refused —
+      // nothing carries the conversation across, so the user has to hear why.
+      const verdict = sessions.setModel(msg.sessionId, msg.model);
+      if (!verdict.ok) {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            sessionId: msg.sessionId,
+            message: verdict.reason,
+          } satisfies ServerMessage),
+        );
+      }
       break;
+    }
     case 'setPermissionMode':
       sessions.setPermissionMode(msg.sessionId, msg.mode);
       break;
@@ -1364,6 +1383,37 @@ async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessa
       break;
     case 'authLogout':
       auth.logout();
+      break;
+    case 'openaiStartLogin':
+      try {
+        const { verificationUrl, userCode } = await ctx.openaiAuth.startLogin();
+        // To the requesting socket only, exactly as `authLoginStarted` is: the
+        // code is a one-time secret and belongs to the browser that asked.
+        ws.send(
+          JSON.stringify({
+            type: 'openaiLoginStarted',
+            verificationUrl,
+            userCode,
+          } satisfies ServerMessage),
+        );
+      } catch (err) {
+        ws.send(
+          JSON.stringify({
+            type: 'openaiAuthError',
+            message: err instanceof Error ? err.message : String(err),
+          } satisfies ServerMessage),
+        );
+      }
+      break;
+    case 'openaiCancelLogin':
+      // Stops the poll loop. Without it an abandoned login keeps polling OpenAI
+      // until the device code expires.
+      ctx.openaiAuth.cancelLogin();
+      break;
+    case 'openaiLogout':
+      // Awaited: the best-effort revoke runs before the local credential is gone,
+      // and the broadcast that follows is what updates every tab.
+      await ctx.openaiAuth.logout();
       break;
     case 'saveSettings': {
       // LWW: an out-of-order save from a stale tab must not clobber newer state.

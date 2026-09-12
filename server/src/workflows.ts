@@ -12,7 +12,13 @@ import type {
   WorkflowMarkerData,
   WorkflowState,
 } from '@lines/shared';
-import { isSessionActive, isSessionInterruptible, isStepRef, rootsForCwd } from '@lines/shared';
+import {
+  isSessionActive,
+  isSessionInterruptible,
+  isStepRef,
+  providerForModel,
+  rootsForCwd,
+} from '@lines/shared';
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
 import {
@@ -891,6 +897,22 @@ export class WorkflowEngine {
         // reach the client.
         this.sessions.persistMeta(sessionId);
       }
+      return;
+    }
+
+    // Workflows do not run on an OpenAI model in this cut. Caught here rather
+    // than at setModel below because a step is the *stored* model's caller: a
+    // refusal there would leave the step running on whatever the session happened
+    // to be on, which is worse than not starting it. Parked as a pre-run failure —
+    // the existing mechanism — so Approve can still skip past it.
+    if (providerForModel(content.model) === 'openai') {
+      meta.workflow.stepStatuses[i] = 'waiting-approval';
+      meta.workflow.stepFailure = 'pre-run';
+      this.sessions.failTurn(
+        sessionId,
+        `Step ${i + 1} is set to run on ${content.model}, an OpenAI model. Workflow steps run ` +
+          'on Claude models only — edit the step to pick one, then Retry.',
+      );
       return;
     }
 

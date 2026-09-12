@@ -26,8 +26,13 @@
  *
  * 3: `SessionMeta.caveman` is gone (a client older than this renders it and
  * throws), along with the rest of the removals since 2.
+ *
+ * 4: OpenAI (Codex) as a second agent provider — the `openai*` login messages,
+ * `hello.openaiAuth`, and `ModelOption.provider`. A client older than this would
+ * offer no way to connect an OpenAI account while the bridge happily runs codex
+ * sessions, and would auto-open the Claude login modal at a user who has one.
  */
-export const APP_PROTOCOL_VERSION = 3;
+export const APP_PROTOCOL_VERSION = 4;
 
 /**
  * Workspace reads the browser makes over the WebSocket rather than plain HTTP.
@@ -651,7 +656,16 @@ export type ModelSpendMap = Record<string, ModelSpend>;
  * the turn itself (see `server/src/turnFailure.ts`). Additive — a client that only
  * understands `'auth'` still behaves correctly for the others.
  */
-export type SessionErrorKind = 'auth' | 'filtered' | 'context' | 'invalid' | 'overloaded';
+export type SessionErrorKind =
+  | 'auth'
+  | 'filtered'
+  | 'context'
+  | 'invalid'
+  | 'overloaded'
+  /** The account has no usage left to spend (OpenAI's `insufficient_quota`, and
+   *  the equivalent wherever else it appears). Distinct from `'overloaded'`
+   *  because waiting does not fix it. */
+  | 'quota';
 
 /**
  * One live background task (a backgrounded subagent or Bash command), taken from
@@ -677,6 +691,17 @@ export interface SessionMeta {
   /** True until the name is either auto-generated from the first prompt or renamed by the user. */
   nameAuto?: boolean;
   claudeSessionId?: string;
+  /**
+   * Codex thread id, the OpenAI-provider mirror of `claudeSessionId`: `codex exec
+   * resume <id>` is what carries the conversation from one turn to the next.
+   *
+   * Deliberately a second field rather than a renamed shared one — the two name
+   * conversations in different stores that cannot be exchanged, and the code that
+   * reads `claudeSessionId` (compaction, rewind, fork) is Claude-only by design.
+   *
+   * There is no `provider` field beside it: provider is derived from `model`.
+   */
+  codexThreadId?: string;
   /**
    * Who sent the prompt driving the current turn. One field on the already-synced
    * blob, changing once per turn — enough for the sidebar to say "your colleague
@@ -766,13 +791,26 @@ export interface SessionMeta {
   diffBaselineAt?: number;
 }
 
+/** Which vendor's agent runs a model. Absent on a `ModelOption` means 'anthropic'. */
+export type ModelProvider = 'anthropic' | 'openai';
+
 export interface ModelOption {
   id: string;
   label: string;
   /** One-line summary shown under the label in model dropdowns. */
   description?: string;
-  /** Max context window in tokens; omitted when unknown (chip hides its ring). */
+  /** Max context window in tokens; omitted when unknown (chip hides its ring).
+   *  Never set for an OpenAI model: the occupancy reading comes from
+   *  per-assistant-message usage, which codex does not report, so a denominator
+   *  here would show a ring that could never fill. */
   contextWindow?: number;
+  /**
+   * Optional, and absent means `'anthropic'` — the same convention `resolvedBy`
+   * uses. Keeping it optional is what makes every existing entry, every stored
+   * step model and every older client's copy of this list mean exactly what it
+   * meant before.
+   */
+  provider?: ModelProvider;
 }
 
 /** A single entry in a session transcript, persisted as JSONL and streamed live. */
@@ -1587,6 +1625,10 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   authStartLogin: { needs: 'owner' },
   authCompleteLogin: { needs: 'owner' },
   authLogout: { needs: 'owner' },
+  // The host's OpenAI account, exactly as owner-only as their Claude one.
+  openaiStartLogin: { needs: 'owner' },
+  openaiCancelLogin: { needs: 'owner' },
+  openaiLogout: { needs: 'owner' },
   saveSettings: { needs: 'owner' },
   addGuardAllow: { needs: 'owner' },
   removeGuardAllow: { needs: 'owner' },
@@ -1829,6 +1871,17 @@ export type ClientMessage =
   | { type: 'authStartLogin' }
   | { type: 'authCompleteLogin'; code: string }
   | { type: 'authLogout' }
+  /**
+   * OpenAI (ChatGPT) account connection, for running sessions on a Codex model.
+   *
+   * A device-code flow, so there is no completion message to match
+   * `authCompleteLogin`: the bridge polls OpenAI itself and announces the result
+   * with `openaiAuthStatus`. `openaiCancelLogin` stops that polling — without it
+   * an abandoned login would keep a poll loop alive until the device code expired.
+   */
+  | { type: 'openaiStartLogin' }
+  | { type: 'openaiCancelLogin' }
+  | { type: 'openaiLogout' }
   /** Fresh Clerk token relay (~50s cadence) so the bridge's per-connection token never expires. */
   | { type: 'auth'; token: string }
   | { type: 'saveSettings'; settings: UserUiSettings }
@@ -1888,6 +1941,13 @@ export interface UsageWindow {
   utilization: number;
   /** ISO timestamp when the window resets, or null if the API omitted it. */
   resetsAt: string | null;
+  /**
+   * Display label, when the provider names its windows by duration rather than by
+   * a stable key. Anthropic's ids are stable, so the client maps them itself and
+   * this stays unset; OpenAI reports only `primary`/`secondary` plus a window
+   * length, so the label is derived server-side and carried here.
+   */
+  label?: string;
 }
 
 /** Snapshot of Claude-plan usage, polled by the bridge and mirrored to browsers. */
@@ -2526,7 +2586,13 @@ export type ServerMessage =
       projects: Project[];
       projectKeys: ProjectKeyMap;
       usage: UsageSnapshot | null;
+      /** ChatGPT plan usage. Absent on a bridge older than this field. */
+      openaiUsage?: UsageSnapshot | null;
       auth: AuthStatus;
+      /** The OpenAI (ChatGPT) account, for Codex sessions. Absent on a bridge
+       *  older than this field; a guest is told `{ loggedIn: false }`, exactly as
+       *  they are told nothing about the host's Claude account. */
+      openaiAuth?: AuthStatus;
       storage: StorageStatus;
       worker?: WorkerStatus;
       /**
@@ -2602,6 +2668,10 @@ export type ServerMessage =
       servers?: McpServerStatusInfo[];
     }
   | { type: 'usage'; usage: UsageSnapshot | null }
+  /** ChatGPT plan usage, the OpenAI mirror of `usage`. A separate message rather
+   *  than a provider field, so a client that does not know about it simply never
+   *  renders a second chip. */
+  | { type: 'openaiUsage'; usage: UsageSnapshot | null }
   | { type: 'authStatus'; auth: AuthStatus }
   | { type: 'storageStatus'; storage: StorageStatus }
   /**
@@ -2613,6 +2683,16 @@ export type ServerMessage =
   | { type: 'workerStatus'; worker: WorkerStatus }
   | { type: 'authLoginStarted'; authorizeUrl: string }
   | { type: 'authError'; message: string }
+  /**
+   * OpenAI account state. Deliberately NOT folded into `authStatus`, which is
+   * wired to the Claude login modal — reusing it would force-open that modal
+   * whenever the OpenAI account was disconnected.
+   */
+  | { type: 'openaiAuthStatus'; auth: AuthStatus }
+  /** Device-code login: where to go and what to type. Sent to the requesting
+   *  socket only, like `authLoginStarted`. */
+  | { type: 'openaiLoginStarted'; verificationUrl: string; userCode: string }
+  | { type: 'openaiAuthError'; message: string }
   | { type: 'projects'; projects: Project[] }
   | { type: 'sessionUpsert'; session: SessionMeta }
   | { type: 'sessionDeleted'; sessionId: string }
@@ -2683,6 +2763,17 @@ export const DEFAULT_MODELS: ModelOption[] = [
   { id: 'claude-fable-5-1', label: 'Fable 5.1', description: 'For demanding reasoning and long-horizon agentic work', contextWindow: 1_000_000 },
   { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability', contextWindow: 1_000_000 },
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, for lightweight tasks', contextWindow: 200_000 },
+  // OpenAI models run through the `codex` CLI, not the Claude SDK. No
+  // contextWindow on any of them — see ModelOption.contextWindow.
+  //
+  // All four need a ChatGPT sign-in, which is the only OpenAI credential Lines
+  // holds. Deliberately omitted: `gpt-5.3-codex-spark` (a research preview gated
+  // to ChatGPT Pro, so it would 404 for most accounts) and `gpt-5.5` (previous
+  // generation) — this list mirrors the Claude one in showing current models only.
+  { id: 'gpt-6-astra', label: 'GPT-6 Astra', description: 'OpenAI — most capable, for complex reasoning and long agentic work', provider: 'openai' },
+  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', description: 'OpenAI — for complex work', provider: 'openai' },
+  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', description: 'OpenAI — balanced for everyday work', provider: 'openai' },
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', description: 'OpenAI — fastest, for lightweight tasks', provider: 'openai' },
 ];
 
 export const DEFAULT_MODEL = 'claude-opus-5';
@@ -2706,6 +2797,17 @@ export function isKnownModel(id: string): boolean {
 export function resolveModelId(id: string): string {
   if (isKnownModel(id)) return id;
   return LEGACY_MODEL_MAP[id] ?? id;
+}
+
+/**
+ * Which vendor's agent a model id runs on. Unknown ids answer `'anthropic'`
+ * deliberately: that is what every id meant before OpenAI existed here, so a
+ * dated snapshot, a legacy alias or a hand-typed id keeps behaving exactly as it
+ * did. An OpenAI model has to be *listed* to be treated as one.
+ */
+export function providerForModel(id: string): ModelProvider {
+  const resolved = resolveModelId(id);
+  return DEFAULT_MODELS.find((m) => m.id === resolved)?.provider ?? 'anthropic';
 }
 
 /**
@@ -2905,6 +3007,14 @@ export { addSpend, mergeSpend, sortedSpend } from './usageByModel.ts';
  * block below — `formatTime.ts` imports nothing at all.
  */
 export { formatTimestamp } from './formatTime.ts';
+
+/**
+ * Codex event shapes and their normalization into Claude SDK messages,
+ * re-exported so callers reach them the same way they reach everything else in
+ * this package. Safe above the cycle-sensitive block below: `./codex.ts` imports
+ * nothing at all, so nothing of ours is read at its top level.
+ */
+export * from './codex.ts';
 
 /**
  * Workflow/step validation, re-exported so a caller gets the rules from the same

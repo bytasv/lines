@@ -24,6 +24,7 @@ import {
   contextDenominator,
   effectiveContextTokens,
   preferContextSummary,
+  providerForModel,
 } from '@lines/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
@@ -471,6 +472,12 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
       if (!next.delete(key)) next.add(key);
       return next;
     });
+
+  // Hidden outright for an OpenAI session, and deliberately rather than
+  // incidentally: codex reports no per-message usage and no context breakdown, so
+  // there is no reading to show and no compaction to offer from this card. A chip
+  // that could never fill reads as broken.
+  if (providerForModel(session.model) === 'openai') return null;
 
   const summary = session.contextSummary;
   const usage = session.contextUsage;
