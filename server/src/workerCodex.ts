@@ -50,6 +50,9 @@ const CodexPushMessage = z.object({
   /** Deliver into the turn already running (`turn/steer`) instead of starting a
    *  new one. The bridge sets it for an interjection. */
   steer: z.boolean().optional(),
+  /** Compact the thread instead of prompting it. Codex has a real RPC for this,
+   *  unlike the Claude path's `/compact` prompt. */
+  compact: z.boolean().optional(),
 });
 
 interface CodexSessionState {
@@ -279,7 +282,43 @@ export function pushCodex(
     turnSink.ended(sessionId, `Malformed codex push: ${err instanceof Error ? err.message : String(err)}`);
     return;
   }
+  if (message.compact === true) {
+    void runCompaction(sessionId, options, turnSink);
+    return;
+  }
   void runTurn(sessionId, options, message.text, turnSink, message.steer === true);
+}
+
+/**
+ * Compact the session's thread.
+ *
+ * `thread/compact/start` runs a *real turn* — measured: it emits `turn/started`,
+ * its own items, and finally `turn/completed`. So this must not settle anything
+ * itself; the ordinary notification path ends the turn, exactly as it does for a
+ * prompt. Settling here instead released the session before the compaction had
+ * happened, and the compaction's own events then landed on a session that had
+ * already moved on.
+ */
+async function runCompaction(sessionId: string, options: CodexPushOptions, turnSink: CodexSink) {
+  try {
+    const app = ensureServer(options);
+    const state = codexSessions.get(sessionId) ?? { busy: false };
+    codexSessions.set(sessionId, state);
+    const threadId = state.threadId ?? options.threadId;
+    if (!threadId) {
+      turnSink.ended(sessionId, 'This session has no codex conversation to compact yet.');
+      return;
+    }
+    state.threadId = threadId;
+    threadOwners.set(threadId, sessionId);
+    state.busy = true;
+    await app.request('thread/compact/start', { threadId });
+    // No `ended` here: `turn/completed` sends it.
+  } catch (err) {
+    const state = codexSessions.get(sessionId);
+    if (state) state.busy = false;
+    turnSink.ended(sessionId, err instanceof Error ? err.message : String(err));
+  }
 }
 
 async function runTurn(

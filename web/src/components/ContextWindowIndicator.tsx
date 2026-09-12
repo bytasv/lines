@@ -496,7 +496,9 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
   const readingAt = view?.at ?? usage?.at ?? 0;
   const stale = session.contextResetAt != null && readingAt < session.contextResetAt;
   const model = view?.model ?? usage?.model ?? session.model;
-  const denominator = contextDenominator(sdkMode ? summary : undefined, model, models);
+  // `usage` is passed so a window the provider reported wins over our table —
+  // codex names its own per thread, and it is the one the numerator came from.
+  const denominator = contextDenominator(sdkMode ? summary : undefined, model, models, usage);
   const fallbackUsed = usage
     ? usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens + usage.outputTokens
     : 0;
@@ -506,7 +508,7 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
   const compacted = effective?.fromCompaction ? effective.used : null;
   // The CLI's real window when we have ever seen one, even in fallback mode —
   // a compaction reports raw tokens, so it needs a denominator of its own.
-  const windowTokens = contextDenominator(summary, model, models);
+  const windowTokens = contextDenominator(summary, model, models, usage);
   const pct =
     compacted != null
       ? windowTokens

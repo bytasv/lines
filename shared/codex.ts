@@ -26,6 +26,7 @@
  */
 import type { ThreadItem } from './codexProtocol/v2/ThreadItem.ts';
 import type { TokenUsageBreakdown } from './codexProtocol/v2/TokenUsageBreakdown.ts';
+import type { ContextUsage } from './types.ts';
 
 export type { ThreadItem, TokenUsageBreakdown };
 
@@ -56,6 +57,15 @@ export interface CodexNormalized {
   failure?: string;
   /** Token usage seen on this notification, for the caller to remember. */
   usage?: TokenUsageBreakdown;
+  /**
+   * Context occupancy seen on this notification.
+   *
+   * Codex reports it on its own channel rather than on each assistant message, so
+   * `extractContextUsage` — which reads per-message usage — finds nothing here.
+   * The bridge stores this instead, and the two paths meet at the same
+   * `live.contextUsage`.
+   */
+  contextUsage?: ContextUsage;
   /** The turn ended under a Stop rather than finishing or failing. */
   interrupted?: boolean;
 }
@@ -395,9 +405,52 @@ export function normalizeCodexNotification(
     case 'item/completed':
       return { messages: completedItem(params.item as ThreadItem, deps) };
     case 'thread/tokenUsage/updated': {
-      const usage = (params.tokenUsage as { last?: TokenUsageBreakdown } | undefined)?.last;
-      return usage ? { messages: [], usage } : NOTHING;
+      const reported = params.tokenUsage as
+        | { last?: TokenUsageBreakdown; total?: TokenUsageBreakdown; modelContextWindow?: number | null }
+        | undefined;
+      if (!reported?.last && !reported?.total) return NOTHING;
+      // `last` is this turn's spend; `total` is what is sitting in the context
+      // window. They answer different questions and both are carried.
+      const total = reported.total;
+      return {
+        messages: [],
+        ...(reported.last ? { usage: reported.last } : {}),
+        ...(total
+          ? {
+              contextUsage: {
+                inputTokens: total.inputTokens ?? 0,
+                cacheReadTokens: total.cachedInputTokens ?? 0,
+                cacheCreationTokens: total.cacheWriteInputTokens ?? 0,
+                outputTokens: total.outputTokens ?? 0,
+                model: deps.model,
+                // The window the engine itself reported, which beats our table.
+                ...(typeof reported.modelContextWindow === 'number'
+                  ? { maxTokens: reported.modelContextWindow }
+                  : {}),
+                at: Date.now(),
+              },
+            }
+          : {}),
+      };
     }
+    // Codex's own compaction, whoever asked for it.
+    //
+    // Belt and braces: measured against 0.154.0, a compaction actually reports
+    // through a `contextCompaction` *item* inside its own turn, and this
+    // notification never fired. Both map to the same boundary, so whichever the
+    // server sends, the bridge records it once.
+    case 'thread/compacted':
+      return {
+        messages: [
+          {
+            type: 'system',
+            subtype: 'compact_boundary',
+            compact_metadata: { trigger: 'manual' },
+            _engine: 'codex',
+            _codex: params,
+          },
+        ],
+      };
     case 'turn/completed': {
       const turn = params.turn as
         | { status?: string; error?: { message?: unknown } | null; durationMs?: number | null }

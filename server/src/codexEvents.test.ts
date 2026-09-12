@@ -194,6 +194,13 @@ test('items with a real Claude-shaped home use it rather than being dropped', ()
   assert.equal(toolName({ type: 'imageView', id: 'i', path: '/tmp/a.png' }), 'ViewImage');
 });
 
+test('the compaction notification maps to the same boundary as the item', () => {
+  // Two routes, one record: measured, 0.154.0 sends the item — but whichever
+  // arrives, the bridge reads one boundary.
+  const [msg] = run('thread/compacted', { threadId: 't' }).messages;
+  assert.equal(msg.subtype, 'compact_boundary');
+});
+
 test('a compaction marker becomes the boundary the bridge already reads', () => {
   // system/compact_boundary is what self-corrects the occupancy reading and
   // records that a compaction happened — a tool card would do neither.

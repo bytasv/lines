@@ -546,6 +546,15 @@ export interface ContextUsage {
   reportedTotal?: number;
   /** Model that produced this reading; the window limit is keyed off it. */
   model: string;
+  /**
+   * Window the provider itself reported for this reading.
+   *
+   * Preferred over the static `ModelOption.contextWindow` when present, because
+   * it came from the engine that produced the number rather than from a table we
+   * maintain. Codex reports one per thread; Claude does not, and falls back to
+   * the table as it always did.
+   */
+  maxTokens?: number;
   at: number;
 }
 
@@ -2839,8 +2848,12 @@ export function contextDenominator(
   summary: ContextSummary | undefined,
   modelId: string,
   models: ModelOption[],
+  /** The last measured reading, which may carry a provider-reported window. */
+  usage?: ContextUsage,
 ): number | undefined {
-  return summary?.maxTokens ?? contextWindowFor(modelId, models);
+  // A window the provider reported beats one from our own table: it came from the
+  // engine that produced the numerator.
+  return summary?.maxTokens ?? usage?.maxTokens ?? contextWindowFor(modelId, models);
 }
 
 /** Percent of the window at which the UI starts warning about the context filling up. */
@@ -2901,7 +2914,13 @@ const NOTHING_TO_COMPACT = "Send a message first — there's nothing to compact 
 export function contextCompactBlock(
   meta: Pick<
     SessionMeta,
-    'status' | 'claudeSessionId' | 'contextSummary' | 'contextUsage' | 'contextCompact' | 'workflow'
+    | 'status'
+    | 'claudeSessionId'
+    | 'codexThreadId'
+    | 'contextSummary'
+    | 'contextUsage'
+    | 'contextCompact'
+    | 'workflow'
   >,
 ): ContextCompactBlockInfo | null {
   if (meta.status === 'running' || meta.status === 'waiting-permission') {
@@ -2918,9 +2937,12 @@ export function contextCompactBlock(
       reason: "This step's output is being wrapped up — try again in a moment.",
     };
   }
-  // worker.push creates the query lazily, so '/compact' on a session that never
-  // ran would spawn a fresh query with `resume: undefined` and compact nothing.
-  if (!meta.claudeSessionId) return { code: 'no-session', reason: NOTHING_TO_COMPACT };
+  // A session that never ran has no conversation to compact — on either provider.
+  // (Claude's query is created lazily, so '/compact' would spawn a fresh one with
+  // `resume: undefined` and compact nothing; codex has no thread to name.)
+  if (!meta.claudeSessionId && !meta.codexThreadId) {
+    return { code: 'no-session', reason: NOTHING_TO_COMPACT };
+  }
   if (!effectiveContextTokens(meta)) return { code: 'no-reading', reason: NOTHING_TO_COMPACT };
   if (meta.contextCompact?.ok === false) {
     const why = meta.contextCompact.error;

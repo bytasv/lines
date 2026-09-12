@@ -3093,6 +3093,14 @@ export class SessionManager {
 
     // Synchronous { ok: true } stands: an auth refusal after this point surfaces
     // through failTurn, not through the { ok: false, code, reason } union.
+    if (isCodexSession(meta)) {
+      // A real RPC rather than the Claude path's `/compact` prompt: codex exposes
+      // `thread/compact/start`, so the compaction is a request instead of a
+      // message the model has to recognise. Routed through the same push so the
+      // status, the span and the settle all behave identically.
+      this.worker.push(meta.id, { text: '', compact: true }, this.buildCodexOptions(meta), undefined, 'codex');
+      return { ok: true };
+    }
     this.pushTurnSafely(meta, {
       type: 'user',
       message: { role: 'user', content: [{ type: 'text', text: '/compact' }] },
@@ -4651,7 +4659,7 @@ export class SessionManager {
   ) {
     const meta = this.sessions.get(sessionId);
     const live = this.liveState(sessionId);
-    const { messages, threadId, failure, usage, interrupted } = normalizeCodexNotification(
+    const { messages, threadId, failure, usage, contextUsage, interrupted } = normalizeCodexNotification(
       method,
       params,
       {
@@ -4663,6 +4671,11 @@ export class SessionManager {
     // Usage arrives on its own notification ahead of the settling turn, so it is
     // remembered here and folded into the `result` when that lands.
     if (usage) live.codexUsage = usage;
+    // Occupancy arrives on its own channel here rather than on each assistant
+    // message, so this is the codex entry to the same `live.contextUsage` the
+    // Claude path fills from `extractContextUsage`. Both settle onto the meta at
+    // the result, unchanged.
+    if (contextUsage && !live.compactedInTurn) live.contextUsage = contextUsage;
     // The resume pointer, persisted exactly as `claudeSessionId` is.
     if (threadId && meta && meta.codexThreadId !== threadId) {
       meta.codexThreadId = threadId;
