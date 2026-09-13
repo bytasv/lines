@@ -214,7 +214,11 @@
         "useFileContent",
         "PlanComment",
         "normalizePlanComments",
+        "planCommentsBody",
         "formatPlanComments",
+        "PLAN_REPLY_MARKER",
+        "keepPlanningReason",
+        "takeQueuedPlanReply",
         "pushIntoLiveTurn",
         "readPlanComments",
         "writePlanComments",
@@ -230,7 +234,8 @@
         "server/src/autoGuard.allowlist.test.ts",
         "server/src/autoGuard.sync.test.ts",
         "server/src/sessions.alwaysAllow.test.ts",
-        "server/src/index.planFile.test.ts"
+        "server/src/index.planFile.test.ts",
+        "server/src/sessions.queue.test.ts"
       ],
       "businessRules": [
         "all five PermissionMode values stay selectable, including acceptEdits, because preset workflows ship steps with permissionMode: 'acceptEdits'",
@@ -260,7 +265,8 @@
         "opening a plan card re-reads its plan file from disk, so the card (pending or resolved) always shows the plan's current text, not a frozen snapshot",
         "a resolved card whose live text differs from what was captured shows an 'updated since approval' hint",
         "a typed composer reply while an ExitPlanMode card is pending is treated as \"keep planning\": it denies that one request with the user's text as the reason, unblocking the query instead of queueing behind a promise nothing can resolve; it only fires for a pending ExitPlanMode, never another tool",
-        "no attachments: the deny reason is KEEP_PLANNING_MESSAGE plus the user's raw text and nothing else is queued; with attachments: the reason is a note only and the real text/attachments are queued as the next turn once the deny settles the busy query",
+        "no attachments: the deny reason is KEEP_PLANNING_MESSAGE plus the user's raw text and nothing else is queued; with attachments: the reason is a note only and the real text/attachments are queued, but not delivered until the turn genuinely settles (idle/done/error) since a keep-planning deny is a tool_result inside the live turn and never emits an SDK result",
+        "Keep planning (button) folds the leading run of queued messages authored by the clicker into the same deny reason via takeQueuedPlanReply, since that deny never settles the turn either and the row would otherwise strand until final approval; a paused queue and a foreign-authored row are never folded; an attachments row keeps its place with its text/mentions/draft cleared",
         "the plan card's badge shows 'kept planning' (not 'denied') for a denied ExitPlanMode request",
         "the card's two actions only relabel and only send planComments when at least one comment is attached; with zero comments the wire message and labels are unchanged",
         "a plan comment is a {quote, note} pair, never a character offset",
@@ -296,6 +302,7 @@
         "the wording of a commented plan decision lives solely in formatPlanComments",
         "on a deny, the server always rebuilds denyMessage from the comments and discards the client's",
         "pushIntoLiveTurn is the pushTurnSafely(..., {intoLiveTurn:true}) call extracted out of interjectQueued so the plan-comments approval path can reuse it",
+        "the keep-planning wording has exactly one builder, keepPlanningReason (paired with PLAN_REPLY_MARKER) in shared/types.ts, shared by the build side (server) and the parse side (web's planReplyText) so the two can never drift",
         "plan-comment drafts follow the composer-draft localStorage pattern, keyed by session id and requestId",
         "the highlight paint uses the CSS Custom Highlight API rather than DOM mutation, since the plan markdown re-renders on mount and on every live re-read of the plan file"
       ],
