@@ -1,3 +1,4 @@
+import { devRuntime } from './devRuntime.ts';
 import type { ServerMessage, SocketAccess, UserUiSettings } from '@lines/shared';
 import { findWorktree, projectRoots } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
@@ -502,7 +503,7 @@ export function buildUserContext(
   // failing to name a branch must never disturb the turn that is already running.
   sessions.onAutoNamed = (session, title) => {
     if (!findWorktree(store.loadProjects(), session.cwd)) return;
-    void worktreeCommands.nameWorktreeBranch(ctx, session.cwd, title).catch((err) => {
+    void devRuntime.run(() => worktreeCommands.nameWorktreeBranch(ctx, session.cwd, title)).catch((err) => {
       console.warn('[worktrees] branch naming failed:', err);
     });
   };

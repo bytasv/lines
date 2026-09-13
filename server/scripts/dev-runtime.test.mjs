@@ -3,6 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { buildGeneration, Supervisor, policyCommand } from './dev-runtime.mjs';
 
 const actualRoot = path.resolve(import.meta.dirname, '../..');
@@ -12,7 +13,7 @@ async function until(check, label) {
   while (Date.now() < deadline) { if (await check()) return; await delay(30); }
   throw new Error(`Timed out: ${label}`);
 }
-function fixture(t) {
+function fixture(t, cleanup = true) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-dev-runtime-'));
   for (const dir of ['server/src', 'shared']) fs.mkdirSync(path.join(root, dir), { recursive: true });
   fs.symlinkSync(path.join(actualRoot, 'node_modules'), path.join(root, 'node_modules'), 'dir');
@@ -20,13 +21,14 @@ function fixture(t) {
     fs.writeFileSync(path.join(root, file), JSON.stringify({ type: 'module', main: './types.ts' }));
   }
   fs.writeFileSync(path.join(root, 'shared/types.ts'), 'export const version = 1;');
-  fs.writeFileSync(path.join(root, 'server/src/index.ts'), "import { version } from '@lines/shared'; console.log(version);");
+  fs.writeFileSync(path.join(root, 'server/src/index.ts'), "import { version } from '@lines/shared'; process.stdout.write(String(version));");
   fs.writeFileSync(path.join(root, 'server/src/worker.ts'), 'export const worker = 1;');
   fs.writeFileSync(path.join(root, 'server/src/linesMcpStdio.ts'), 'export const helper = 1;');
   const childFile = path.join(root, 'child.mjs');
   fs.writeFileSync(childFile, `
     import fs from 'node:fs';
     import path from 'node:path';
+import { execFileSync } from 'node:child_process';
     const [directory, name] = process.argv.slice(2);
     if (fs.readFileSync(path.join(directory, 'server/src', name === 'worker' ? 'worker.ts' : 'index.ts'), 'utf8').includes('FAIL')) process.exit(9);
     let held = true;
@@ -45,15 +47,19 @@ function fixture(t) {
     });
     setInterval(() => process.send({type:'devActivity', ...activity(), held, activated}), 40);
   `);
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  if (cleanup) t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return { root, childFile, flags: (flags) => fs.writeFileSync(path.join(root, 'flags.json'), JSON.stringify(flags)) };
 }
 async function running(t) {
-  const f = fixture(t);
+  const f = fixture(t, false);
   const supervisor = new Supervisor(f.root, { quietMs: 100, startupMs: 1200,
     command: (name, generation) => [f.childFile, generation.directory, name] });
   // Stop processes before removing the fixture, regardless of assertion failures.
-  t.after(async () => { await supervisor.stop(); });
+  t.after(async () => {
+    await supervisor.stop();
+    await until(() => !supervisor.ticking, 'supervisor stopped');
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
   await supervisor.start();
   return { ...f, supervisor };
 }
@@ -67,6 +73,8 @@ test('generations isolate local sources, shared imports, and MCP helper paths', 
   assert.equal(fs.readFileSync(path.join(first.directory, 'node_modules/@lines/shared/types.ts'), 'utf8'), 'export const version = 1;');
   assert.ok(fs.existsSync(path.join(first.directory, 'server/src/linesMcpStdio.ts')));
   assert.equal((await buildGeneration(root)).id, second.id);
+  const output = execFileSync(process.execPath, ['--import', path.join(actualRoot, 'node_modules/tsx/dist/loader.mjs'), path.join(first.directory, 'server/src/index.ts')], { encoding: 'utf8' });
+  assert.equal(output.trim(), '1', 'the runtime must resolve the snapshotted shared package');
 });
 
 test('active work blocks edits; freeze and resume keep PIDs; idle reloads the pair', async (t) => {

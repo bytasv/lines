@@ -52,6 +52,8 @@ scattered `=== 'openai'` checks.
 - `server/src/codexCli.ts` — `codex` binary discovery and the version floor.
 - `server/src/codexAppServer.ts` — spawn, handshake, request/notification demux.
 - `server/src/workerCodex.ts` — thread binding, turns, steering, compaction, forking.
+- `server/src/codexPlanMode.ts` — the `collaborationMode` a turn runs with, and
+  `applyModePreset`'s fill of its reasoning effort from codex's own preset.
 - `server/src/helperQuery.ts` — the bridge's own one-shot queries, on either provider.
 - `shared/codex.ts` — the normalizer.
 - `shared/providers.ts` — `ProviderCapabilities` and the per-provider table.
@@ -125,6 +127,9 @@ the transport was.
   bearer-token boundary and the two connection kinds codex cannot express.
 - `server/src/workflows.providers.test.ts` — a step that changes provider.
 - `server/src/linesMcpStdio.test.ts` — the spawn recipe codex is given for Lines' own tools.
+- `server/src/codexExperimental.contract.test.ts` — asks the installed binary for a Plan
+  collaboration mode, covering what `generate-ts` cannot: the experimental surface is absent
+  from its output with or without `--enable collaboration_modes`.
 - `server/src/sessions.codexMcpStatus.test.ts` — the connection-status mapping, including the
   null `runtimeStatus` a working server reports.
 

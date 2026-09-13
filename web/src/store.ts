@@ -655,7 +655,7 @@ interface UiState {
   lastEventAt: Record<string, number>;
   /** Prompt a rewind handed back, waiting for that session's composer to pick it
    *  up (see takeComposerPrefill). Only ever set on the tab that asked. */
-  composerPrefill: Record<string, RewindPrompt & { preserveDraft?: boolean }>;
+  composerPrefill: Record<string, RewindPrompt>;
   /** Live `/context` breakdown per session from the last hover fetch. Ephemeral:
    *  the detail is only meaningful while the session has a live query. */
   contextBreakdowns: Record<string, { breakdown: ContextBreakdown | null; at: number; loading: boolean }>;
@@ -1960,11 +1960,12 @@ export const useStore = create<UiState>((set, get) => {
           const current = readDraft(rejected.sessionId);
           const text = [rejected.text, current.text].filter(Boolean).join('\n\n');
           writeDraft(rejected.sessionId, { text, ranges: [] });
-          void readDraftAttachments(rejected.sessionId).then((existing) =>
-            writeDraftAttachments(rejected.sessionId, [...(rejected.attachments ?? []), ...existing]));
-          set((state) => ({ composerPrefill: { ...state.composerPrefill,
-            [rejected.sessionId]: { text: rejected.text, attachments: rejected.attachments ?? [], preserveDraft: true },
-          } }));
+          const restored = new CustomEvent('lines:prompt-restored', { detail: rejected, cancelable: true });
+          window.dispatchEvent(restored);
+          if (!restored.defaultPrevented) {
+            void readDraftAttachments(rejected.sessionId).then((existing) =>
+              writeDraftAttachments(rejected.sessionId, [...(rejected.attachments ?? []), ...existing]));
+          }
         }
         console.error('[server]', msg.message);
         // Surfaced, not just logged: a server refusal is the only description of

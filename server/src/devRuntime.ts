@@ -31,12 +31,15 @@ export class DevRuntime {
       } else if (message.action === 'status') {
         this.status = message.status;
       } else return;
-      process.send?.({ type: 'devAck', id: message.id, ok, ...this.snapshot() });
+      if (process.connected) process.send?.({ type: 'devAck', id: message.id, ok, ...this.snapshot() }, () => {});
     });
     const timer = setInterval(() => this.report(), 250);
     timer.unref();
     // A lost supervisor must never kill an agent. Fail closed for future reloads.
-    process.on('disconnect', () => { this.held = false; });
+    process.on('disconnect', () => {
+      this.held = false;
+      for (const callback of this.activated.splice(0)) callback();
+    });
   }
 
   configure(activity: () => DevActivity) { this.activity = activity; }
@@ -45,7 +48,7 @@ export class DevRuntime {
     return { ...state, blockers: [...state.blockers, ...(this.operations ? ['requests in flight'] : [])] };
   }
   report() {
-    if (this.enabled && process.connected) process.send?.({ type: 'devActivity', ...this.snapshot() });
+    if (this.enabled && process.connected) process.send?.({ type: 'devActivity', ...this.snapshot() }, () => {});
   }
   whenActive(callback: () => void) {
     if (this.held) this.activated.push(callback);

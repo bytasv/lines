@@ -1,3 +1,4 @@
+import { devRuntime } from './devRuntime.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -1189,6 +1190,7 @@ export class SessionManager {
     for (const [id, state] of this.live) {
       if (state.pendingPermissions.size || state.backgroundTasks?.length || state.recovery) blockers.push(`live session ${id}`);
     }
+    for (const id of this.authHolds.keys()) this.heldForAuth(id);
     if (this.authHolds.size || this.interrupting.size || this.compacting.size || this.rewinding.size ||
         this.contextFetches.size) blockers.push('session operations');
     return blockers;
@@ -3577,7 +3579,7 @@ export class SessionManager {
     systemPrompt: string;
     claudeModel: string;
   }): Promise<string | null> {
-    return runHelperQuery(
+    return devRuntime.run(() => runHelperQuery(
       {
         claudeToken: () => this.ownerToken(),
         // Null when no OpenAI account is connected, which is what makes the codex
@@ -3585,7 +3587,7 @@ export class SessionManager {
         codexHome: () => (this.openaiAuth?.isLoggedIn() ? this.store.codexHome() : null),
       },
       request,
-    );
+    ));
   }
 
   private async ownerToken(): Promise<string | null> {

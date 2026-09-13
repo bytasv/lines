@@ -21,7 +21,7 @@ import {
   IconX,
   IconZoomIn,
 } from '@tabler/icons-react';
-import type { ModelProvider, PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
+import type { ClientMessage, ModelProvider, PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
 import { isSessionInterruptible, providerForModel, rootsForCwd } from '@lines/shared';
 import { sessionCaps } from '../lib/capabilities';
 import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
@@ -243,17 +243,23 @@ export function Composer({ session }: { session: SessionMeta }) {
   useEffect(() => {
     if (!prefill) return;
     takeComposerPrefill(session.id);
-    if (prefill.preserveDraft) {
-      // A refused send must not overwrite text typed while the reply was in flight.
-      setPrompt((current) => ({ text: [prefill.text, current.text].filter(Boolean).join('\n\n'), ranges: [] }));
-      setAttachments((current) => [...prefill.attachments, ...current]);
-    } else {
-      // A rewind deliberately replaces the draft with the selected prompt.
-      setPrompt({ text: prefill.text, ranges: [] });
-      setAttachments(prefill.attachments);
-    }
+    // A rewind deliberately replaces the draft with the selected prompt.
+    setPrompt({ text: prefill.text, ranges: [] });
+    setAttachments(prefill.attachments);
     textareaRef.current?.focus();
   }, [prefill, session.id, takeComposerPrefill]);
+
+  useEffect(() => {
+    const restore = (event: Event) => {
+      const rejected = (event as CustomEvent<Extract<ClientMessage, { type: 'prompt' }>>).detail;
+      if (rejected.sessionId !== session.id) return;
+      event.preventDefault(); // This mounted composer owns attachment persistence.
+      setPrompt((current) => ({ text: [rejected.text, current.text].filter(Boolean).join('\n\n'), ranges: [] }));
+      setAttachments((current) => [...(rejected.attachments ?? []), ...current]);
+    };
+    window.addEventListener('lines:prompt-restored', restore);
+    return () => window.removeEventListener('lines:prompt-restored', restore);
+  }, [session.id]);
 
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files);

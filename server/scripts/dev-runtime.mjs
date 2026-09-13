@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import os from 'node:os';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -84,6 +85,12 @@ export async function buildGeneration(root) {
   });
   writeJson(path.join(directory, 'complete.json'), { id });
   return { id, directory };
+}
+
+export function legacyRuntimeRunning(root) {
+  const commands = execFileSync('ps', ['-axo', 'command'], { encoding: 'utf8' });
+  const executable = path.join(root, 'node_modules/.bin/tsx');
+  return commands.split('\n').some((line) => line.includes(executable) && /(?:watch )?src\/worker\.ts(?:$|\s)/.test(line));
 }
 
 export class Supervisor {
@@ -306,6 +313,12 @@ export class Supervisor {
     writeJson(this.paths.control, { pid: process.pid, port: this.http.address().port, token: this.token });
   }
   async start() {
+    if (!this.options.command) {
+      const runtime = readJson(path.join(os.homedir(), '.lines-app/run', process.env.LINES_INSTANCE ?? 'default', 'worker.json'));
+      if (legacyRuntimeRunning(this.root) || (runtime?.pid && alive(runtime.pid))) {
+        throw new Error('A worker is already running. Stop its stack once sessions are idle before starting the safe runtime.');
+      }
+    }
     await this.startControl();
     const previous = readJson(this.paths.healthy);
     try { this.current = await buildGeneration(this.root); }
@@ -373,9 +386,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   } else if (action === 'legacy-running') {
     // Keep an already running tsx-owned Tilt stack intact during migration.
     // This process inspection happens only when Tilt evaluates its file.
-    const commands = execFileSync('ps', ['-axo', 'command'], { encoding: 'utf8' });
-    const executable = path.join(checkout, 'node_modules/.bin/tsx');
-    console.log(commands.split('\n').some((line) => line.includes(executable) && /(?:watch )?src\/worker\.ts(?:$|\s)/.test(line)) ? 'yes' : 'no');
+    console.log(legacyRuntimeRunning(checkout) ? 'yes' : 'no');
   } else if (['freeze', 'resume', 'set', 'status'].includes(action)) {
     policyCommand(checkout, action, process.argv.slice(3)).then((state) => log(JSON.stringify(state))).catch((error) => { console.error(error.message); process.exitCode = 1; });
   } else { console.error('Usage: dev-runtime.mjs [start|status|freeze|resume|set] [worker|bridge|all]'); process.exitCode = 1; }

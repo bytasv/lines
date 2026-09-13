@@ -1400,9 +1400,11 @@
       "id": "local-dev-orchestration",
       "name": "Local dev orchestration (Tilt)",
       "doc": "features/local-dev-orchestration.md",
-      "purpose": "Run the four local dev processes (worker, bridge, storage, web) via Tilt with readiness probes, a loud preflight, automatic Prisma generation, and a live-togglable freeze on worker/bridge hot reload.",
+      "purpose": "Run local development with a stable worker/bridge supervisor, automatic idle-boundary source reload, startup rollback, and non-restarting Freeze/Resume controls.",
       "entryPoints": [
-        "Tiltfile"
+        "Tiltfile",
+        "package.json",
+        "server/scripts/dev-runtime.mjs"
       ],
       "files": [
         "Tiltfile",
@@ -1411,43 +1413,49 @@
         "package.json",
         "server/package.json",
         "web/package.json",
-        "storage/package.json"
+        "storage/package.json",
+        "server/scripts/dev-runtime.mjs",
+        "server/src/devRuntime.ts"
       ],
       "symbols": [
         "frozen",
         "FROZEN",
-        "WORKER_CMD",
-        "BRIDGE_CMD",
-        "tilt_args_argv",
         "dotenv_keys",
         "have",
         "dotenv_value",
         "RELAY_TARGET",
         "LOOPBACK_RELAY",
-        "LOCK_PROBE"
+        "LOCK_PROBE",
+        "Supervisor",
+        "buildGeneration",
+        "DevRuntime"
       ],
-      "tests": [],
+      "tests": [
+        "server/scripts/dev-runtime.test.mjs",
+        "server/src/devRuntime.test.ts"
+      ],
       "businessRules": [
         "tilt up gates only storage on .env completeness (DATABASE_URL/DIRECT_URL/CLERK_SECRET_KEY); bridge/worker/web stay reachable even when storage config is missing",
-        "freezing worker or bridge reload swaps which npm script the resource runs, it does not change Tilt's own watch behavior",
-        "toggling freeze restarts that resource once, at the moment it's toggled, dropping any in-flight agent turn on the worker",
-        "freezing worker while bridge stays hot and editing workerProtocol.ts produces a visible protocol-version mismatch in the bridge log until the worker is restarted by hand",
         "web is excluded from the freeze options since Vite HMR never restarts the dev server",
         "a pull that changes only package-lock.json triggers nothing; run tilt trigger install by hand",
         "pair-device (npm run pair -w server) is always declared but never auto_init - triggered by hand when a code expires or a machine is revoked, not part of bringing the stack up; idempotent, prints 'already paired' and exits 0 on a claimed device",
         "desktop-package (npm run package -w desktop) is the same shape as pair-device - manual, never part of tilt up - and exists so the DMG build is discoverable from Tilt at all",
         "RELAY_URL set without STORAGE_URL warns rather than failing preflight - the bridge would dial a hosted relay while syncing to the local storage default, splitting one machine's data across two databases",
         "when RELAY_URL in .env points at a non-loopback host and ~/.lines-app/bridge.lock names a live process, preflight warns (naming the tray app if instance:'desktop', or naming any other holder as one that will refuse with exit 78) rather than failing; a stale/absent/unparseable lock is silent",
-        "LINES_INSTANCE is not set anywhere in this Tiltfile despite older comments claiming Tilt sets it to 'dev' — web/vite.config.ts resolves /__bridge from the same variable, so pinning it for the bridge alone would break dev-server discovery"
+        "LINES_INSTANCE is not set anywhere in this Tiltfile despite older comments claiming Tilt sets it to 'dev' — web/vite.config.ts resolves /__bridge from the same variable, so pinning it for the bridge alone would break dev-server discovery",
+        "source changes build an immutable local code generation; both backend processes reload only after confirmed idle",
+        "Freeze and Resume change supervisor policy without restarting a process",
+        "failed candidate startup restores the last healthy generation",
+        "a running legacy Tilt stack is preserved until its next normal restart"
       ],
       "architecturalRules": [
-        "no deps= on the four service resources — tsx watch/Vite own file-watching, not Tilt",
         "PORT is injected per resource via serve_env, never a shared env block",
         "preflight reads .env key names only, never values, into any Tilt spec/log/UI button",
-        "the Freeze/Resume UI buttons and the --no-reload CLI flag are two entry points into one FROZEN state, reconciled by re-invoking tilt args with the full current flag set rather than mutating Tilt state directly",
         "no resource watches a file its own cmd writes — install's deps list the five workspace manifests but omit package-lock.json, which npm install itself rewrites and would retrigger the resource forever",
         "resource_deps gates only the first build after tilt up; a later re-run of install does not cascade to prisma-generate or the four service resources",
-        "whether the bridge talks to a hosted install is not a Tilt flag - it follows RELAY_URL in .env, read by the bridge's own dotenv; STORAGE_URL is injected into serve_env only as a default, so an explicit .env value is never overridden"
+        "whether the bridge talks to a hosted install is not a Tilt flag - it follows RELAY_URL in .env, read by the bridge's own dotenv; STORAGE_URL is injected into serve_env only as a default, so an explicit .env value is never overridden",
+        "the backend supervisor owns source watching and private IPC admission; Tilt owns only the stable parent",
+        "external installed dependencies are shared and are not covered by source rollback"
       ],
       "relatedDecisions": [
         "session-collaboration"
