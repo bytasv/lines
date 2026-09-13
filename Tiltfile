@@ -12,8 +12,8 @@
 # silently skips, a preflight that fails loudly instead of letting the storage
 # server exit(0), and one-click typecheck/test/migrate.
 #
-# Tilt does NOT watch source files — `tsx watch` and Vite HMR own that. Do not
-# add `deps=` to the service resources; see the note on `worker` below.
+# The backend supervisor owns source watching and reloads only between turns.
+# Vite owns web HMR. Do not add source deps to serving resources.
 
 version_settings(constraint='>=0.33.0')
 update_settings(max_parallel_updates=8)
@@ -42,10 +42,9 @@ config.define_bool(
 )
 config.define_string_list(
     'no-reload',
-    usage='Freeze hot reload: worker | bridge | all. Runs the no-watch npm script ' +
-          'so tsx never restarts the process mid-turn. Restart by hand from the Tilt ' +
-          'UI (or `tilt trigger worker`). Live-togglable: `tilt args -- --no-reload worker`, ' +
-          'or the Freeze/Resume reload buttons on the worker and bridge resources.',
+    usage='Hold automatic backend reload: worker | bridge | all. Either hold pauses ' +
+          'the coordinated pair. Freeze/Resume never restarts a process. By default ' +
+          'pending edits apply automatically once every session is idle.',
 )
 cfg = config.parse()
 WITH_STORAGE = not cfg.get('no-storage', False)
@@ -89,15 +88,18 @@ def frozen(name):
 WORKER_CMD = 'npm run start:worker -w server' if frozen('worker') else 'npm run dev:worker -w server'
 BRIDGE_CMD = 'npm run start -w server' if frozen('bridge') else 'npm run dev -w server'
 
-if frozen('worker'):
-    warn('worker reload FROZEN — edits to server/src/worker.ts or workerProtocol.ts ' +
-         'will NOT take effect until you restart the `worker` resource by hand. ' +
-         'If you edit workerProtocol.ts while the bridge stays hot, the bridge will ' +
-         'log a protocol-version mismatch (server/src/workerClient.ts:92-100) and keep ' +
-         'retrying until you do.')
-if frozen('bridge'):
-    warn('bridge reload FROZEN — restart the `bridge` resource by hand to pick up ' +
-         'edits to server/src/*.ts.')
+# Installing this Tiltfile into a running legacy stack must not kill its turns.
+# Keep its exact resources until Tilt is stopped normally. The next `tilt up`
+# uses the safe supervisor. The probe does not watch discovery files or source.
+LEGACY_RUNTIME = str(local('node server/scripts/dev-runtime.mjs legacy-running',
+                           quiet=True, echo_off=True)).strip() == 'yes'
+if LEGACY_RUNTIME:
+    warn('Safe backend reload is installed. Existing tsx processes are retained ' +
+         'to protect active sessions; restart Tilt once idle to activate it.')
+
+
+if FROZEN:
+    warn('Automatic backend reload held. Resume applies pending edits only when all sessions are idle.')
 
 # Ports: single source of truth, injected per-process via serve_env. NOT read
 # from .env, because server/src/index.ts:21 and storage/src/index.ts:43 both
@@ -312,26 +314,27 @@ if WITH_STORAGE:
 # ---- services --------------------------------------------------------------
 # NO `deps=` here on purpose. tsx watch / vite own file watching.
 
-local_resource(
-    'worker',
-    cmd='',  # serve-only; `cmd` is a required param, so pass it empty
-    # `tsx watch` unless --no-reload worker; see WORKER_CMD above. Restarting this
-    # resource ALWAYS kills in-flight agent turns — that is what --no-reload buys.
-    serve_cmd=WORKER_CMD,
-    # worker.ts loads no dotenv — this must be a real env var
-    # (server/src/workerProtocol.ts). The bridge finds the worker through
-    # run/<instance>/worker.json and does not need this; the pin exists so the
-    # readiness probe below has a known port to dial. Unset, the worker binds an
-    # ephemeral one and stays perfectly reachable — only the probe would break.
-    serve_env={'LINES_WORKER_PORT': str(WORKER_PORT)},
-    resource_deps=['install'],
-    # WS-only, binds 127.0.0.1 (server/src/worker.ts:321) — TCP is the only
-    # honest check.
-    readiness_probe=probe(initial_delay_secs=2, period_secs=5,
-                          tcp_socket=tcp_socket_action(port=WORKER_PORT, host='127.0.0.1')),
-    labels=['services'],
-    allow_parallel=True,
-)
+if LEGACY_RUNTIME:
+    local_resource(
+        'worker',
+        cmd='',  # serve-only; `cmd` is a required param, so pass it empty
+        # `tsx watch` unless --no-reload worker; see WORKER_CMD above. Restarting this
+        # resource ALWAYS kills in-flight agent turns — that is what --no-reload buys.
+        serve_cmd=WORKER_CMD,
+        # worker.ts loads no dotenv — this must be a real env var
+        # (server/src/workerProtocol.ts). The bridge finds the worker through
+        # run/<instance>/worker.json and does not need this; the pin exists so the
+        # readiness probe below has a known port to dial. Unset, the worker binds an
+        # ephemeral one and stays perfectly reachable — only the probe would break.
+        serve_env={'LINES_WORKER_PORT': str(WORKER_PORT)},
+        resource_deps=['install'],
+        # WS-only, binds 127.0.0.1 (server/src/worker.ts:321) — TCP is the only
+        # honest check.
+        readiness_probe=probe(initial_delay_secs=2, period_secs=5,
+                              tcp_socket=tcp_socket_action(port=WORKER_PORT, host='127.0.0.1')),
+        labels=['services'],
+        allow_parallel=True,
+    )
 
 # Built up before the resource: Starlark allows only one ** per call, and this
 # needs three conditional groups.
@@ -351,30 +354,49 @@ if WITH_RELAY:
         BRIDGE_ENV['LINES_DEVICE_ID'] = 'tilt-dev'
         BRIDGE_ENV['LINES_DEVICE_SECRET'] = 'tilt-dev'
 
+if LEGACY_RUNTIME:
+    local_resource(
+        'bridge',
+        cmd='',
+        serve_cmd=BRIDGE_CMD,
+        # LINES_BRIDGE_PORT is pinned here for the same reason the worker's is: the
+        # readiness probe and the status link below need a fixed target. The packaged
+        # app sets neither and binds :0, publishing the result to bridge.json.
+        # STORAGE_URL is injected only as a DEFAULT: an explicit value in .env means
+        # this bridge syncs to a deployment, and overriding it here would silently
+        # point it back at localhost. RELAY_URL is never injected unless --with-relay
+        # wires up the loopback one — otherwise .env decides, and the device
+        # credential comes from ~/.lines-app/device.json, so no secret reaches a spec.
+        serve_env=BRIDGE_ENV,
+        # Deliberately NOT depending on worker/storage: the bridge reconnects to the
+        # worker every 1s (workerClient.ts:74-79) and treats storage as best-effort
+        # (sync.ts:295-308). A broken worker/storage still leaves a reachable UI.
+        resource_deps=['install'],
+        # GET / returns 200 {"ok":true,...}. It is the bridge's only HTTP surface now
+        # that workspace reads moved onto the WebSocket (see fileRoutes.ts).
+        readiness_probe=probe(initial_delay_secs=2, period_secs=15,
+                              http_get=http_get_action(port=BRIDGE_PORT, host='localhost', path='/')),
+        links=[link('http://localhost:%d/' % BRIDGE_PORT, 'bridge status')],
+        labels=['services'],
+        allow_parallel=True,
+    )
+else:
+    BACKEND_ENV = dict(BRIDGE_ENV)
+    BACKEND_ENV['LINES_WORKER_PORT'] = str(WORKER_PORT)
+    local_resource(
+        'backend', cmd='', serve_cmd='npm run dev:backend',
+        serve_env=BACKEND_ENV, resource_deps=['install'],
+        readiness_probe=probe(initial_delay_secs=2, period_secs=5,
+                              http_get=http_get_action(port=BRIDGE_PORT, host='localhost', path='/')),
+        links=[link('http://localhost:%d/' % BRIDGE_PORT, 'backend status')],
+        labels=['services'], allow_parallel=True,
+    )
+
+# Policy changes run a control command, never change the backend's serve spec.
 local_resource(
-    'bridge',
-    cmd='',
-    serve_cmd=BRIDGE_CMD,
-    # LINES_BRIDGE_PORT is pinned here for the same reason the worker's is: the
-    # readiness probe and the status link below need a fixed target. The packaged
-    # app sets neither and binds :0, publishing the result to bridge.json.
-    # STORAGE_URL is injected only as a DEFAULT: an explicit value in .env means
-    # this bridge syncs to a deployment, and overriding it here would silently
-    # point it back at localhost. RELAY_URL is never injected unless --with-relay
-    # wires up the loopback one — otherwise .env decides, and the device
-    # credential comes from ~/.lines-app/device.json, so no secret reaches a spec.
-    serve_env=BRIDGE_ENV,
-    # Deliberately NOT depending on worker/storage: the bridge reconnects to the
-    # worker every 1s (workerClient.ts:74-79) and treats storage as best-effort
-    # (sync.ts:295-308). A broken worker/storage still leaves a reachable UI.
-    resource_deps=['install'],
-    # GET / returns 200 {"ok":true,...}. It is the bridge's only HTTP surface now
-    # that workspace reads moved onto the WebSocket (see fileRoutes.ts).
-    readiness_probe=probe(initial_delay_secs=2, period_secs=15,
-                          http_get=http_get_action(port=BRIDGE_PORT, host='localhost', path='/')),
-    links=[link('http://localhost:%d/' % BRIDGE_PORT, 'bridge status')],
-    labels=['services'],
-    allow_parallel=True,
+    'reload-policy',
+    cmd='node server/scripts/dev-runtime.mjs set ' + ' '.join(FROZEN),
+    labels=['setup'], allow_parallel=True,
 )
 
 # The relay is opt-in (`tilt up -- --with-relay`): the bridge only dials it when
@@ -435,67 +457,23 @@ local_resource(
     allow_parallel=True,
 )
 
-# ---- freeze / resume buttons ----------------------------------------------
-# One button on `worker` and one on `bridge`, so the freeze is reachable without
-# leaving the dashboard. `tilt args` REPLACES the whole arg list, so each button
-# re-emits every flag currently in effect plus/minus its own resource; clearing
-# the last one needs `--clear`, because `tilt args --` with nothing after it opens
-# $EDITOR instead of clearing.
-#
-# Changing args re-evaluates this Tiltfile, which regenerates these buttons for
-# the new state — the button on a frozen resource is always the Resume one.
-
-def tilt_args_argv(frozen_names):
-    flags = []
-    if not WITH_STORAGE:
-        flags.append('--no-storage')
-    if WITH_RELAY:
-        flags.append('--with-relay')
-    if WITH_STUDIO:
-        flags.append('--with-studio')
-    if not WITH_BUTTONS:
-        flags.append('--no-ui-buttons')
-    for name in frozen_names:
-        flags.extend(['--no-reload', name])
-    if not flags:
-        return ['tilt', 'args', '--clear']
-    return ['tilt', 'args', '--'] + flags
-
+# ---- reload controls -------------------------------------------------------
+# Buttons change the supervisor's policy directly. They never invoke tilt args
+# or replace a serving command. A resume still waits for an idle boundary.
 if WITH_BUTTONS:
-    # load_dynamic, not load: `load` is a top-level-only statement, so it cannot
-    # sit behind --no-ui-buttons.
     cmd_button = load_dynamic('ext://uibutton')['cmd_button']
-    for name in FREEZABLE:
-        if frozen(name):
+    if not LEGACY_RUNTIME:
+        for action in ['freeze', 'resume']:
             cmd_button(
-                '%s-resume-reload' % name,
-                resource=name,
-                argv=tilt_args_argv([n for n in FROZEN if n != name]),
-                text='Resume hot reload',
-                icon_name='local_fire_department',
+                'backend-%s-reload' % action, resource='backend',
+                argv=['node', 'server/scripts/dev-runtime.mjs', action, 'all'],
+                text='Freeze reload' if action == 'freeze' else 'Resume reload',
+                icon_name='ac_unit' if action == 'freeze' else 'play_arrow',
             )
-        else:
-            cmd_button(
-                '%s-freeze-reload' % name,
-                resource=name,
-                argv=tilt_args_argv(FROZEN + [name]),
-                text='Freeze reload',
-                icon_name='ac_unit',
-                # Both directions swap serve_cmd, so the process restarts once the
-                # moment you click — which kills any in-flight agent turn on the
-                # worker. Confirm rather than one-click it.
-                requires_confirmation=True,
-            )
-
-    # Pairing is reachable from the bridge too: it is the resource whose relay
-    # link the code exists to establish, so that is where you look when a machine
-    # will not connect.
     cmd_button(
         'bridge-pair-device',
-        resource='bridge',
-        argv=['tilt', 'trigger', 'pair-device'],
-        text='Pair this machine',
-        icon_name='link',
+        resource='bridge' if LEGACY_RUNTIME else 'backend',
+        argv=['tilt', 'trigger', 'pair-device'], text='Pair this machine', icon_name='link',
     )
 
 # ---- manual tasks ----------------------------------------------------------

@@ -19,6 +19,7 @@
  * shapes) are authored on the bridge and arrive as data on `push`.
  */
 import { randomUUID } from 'node:crypto';
+import { devRuntime } from './devRuntime.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { IncomingMessage } from 'node:http';
@@ -43,6 +44,7 @@ import {
 import { buildMcpServer } from './workerMcp.ts';
 import {
   closeCodex,
+  shutdownCodex,
   codexLiveInfo,
   codexMcpStatus,
   forkCodex,
@@ -552,7 +554,9 @@ function handleBridgeMessage(msg: BridgeToWorker) {
       pendingRpcs.get(msg.id)?.settle(msg.result);
       break;
     case 'ask':
-      void handleAsk(msg);
+      void devRuntime.run(() => handleAsk(msg)).catch((error) => {
+        send({ type: 'askResult', id: msg.id, ok: false, error: String(error) });
+      });
       break;
   }
 }
@@ -621,6 +625,7 @@ function handleConnection(ws: WebSocket, req: IncomingMessage) {
 
 // Port bind with retry: a dying predecessor (worker self-restart under tsx
 // watch) may still hold the port for a moment.
+let readinessPort = 0;
 let listenAttempts = 0;
 function listen() {
   const wss = new WebSocketServer({ host: '127.0.0.1', port: WORKER_PORT });
@@ -630,6 +635,7 @@ function listen() {
     // other way to learn the port, and handleConnection rejects anyone who
     // cannot echo the token in this file.
     const { port } = wss.address() as { port: number };
+    readinessPort = port;
     publishRuntimeInfo('worker', {
       port,
       pid: process.pid,
@@ -658,9 +664,22 @@ function listen() {
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     clearRuntimeInfo('worker');
+    for (const session of sessions.values()) {
+      try { session.query.close(); } catch { /* already closed */ }
+    }
+    shutdownCodex();
     process.exit(0);
   });
 }
 process.on('exit', () => clearRuntimeInfo('worker'));
 
+devRuntime.configure(() => ({
+  ready: !!readinessPort,
+  blockers: [
+    ...[...sessions].filter(([, s]) => s.busy || s.backgroundTasks?.length).map(([id]) => `Claude ${id}`),
+    ...codexLiveInfo().filter((s) => s.busy).map((s) => `Codex ${s.sessionId}`),
+    ...(pendingRpcs.size ? ['pending RPCs'] : []),
+    ...(outbox.length ? ['undelivered events'] : []),
+  ],
+}));
 listen();

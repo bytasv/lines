@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { devRuntime, DEV_UPDATING } from './devRuntime.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,7 +18,7 @@ import dotenv from 'dotenv';
 // key, so reading it before the repo file is what makes it an override.
 for (const envFile of [
   path.join(os.homedir(), '.lines-app', '.env'),
-  path.resolve(import.meta.dirname, '../../.env'),
+  path.resolve(process.env.LINES_DEV_CHECKOUT ?? path.resolve(import.meta.dirname, '../..'), '.env'),
 ]) {
   if (fs.existsSync(envFile)) dotenv.config({ path: envFile });
 }
@@ -165,8 +166,9 @@ const LOCAL_USER = 'local';
 // (tsx watch, dogfooding edits) without killing in-flight agent turns.
 // Callbacks close over `registry` (created right after) and only fire once the
 // worker socket connects.
+let devRelayConnected = false;
 const worker = new WorkerClient({
-  onHello: (live) => registry.onWorkerLive(live),
+  onHello: (live) => devRuntime.whenActive(() => registry.onWorkerLive(live)),
   onEvent: (sessionId, message) =>
     registry.forSession(sessionId).sessions.handleWorkerEvent(sessionId, message),
   onEnded: (sessionId, error) => {
@@ -468,7 +470,7 @@ if (RELAY_URL) {
     },
     // Straight through to the desktop shell: it is the only consumer, and the
     // tray is the only place a user can see that this machine is reachable.
-    onStatus: reportRelayStatus,
+    onStatus: (status) => { devRelayConnected = status.connected; reportRelayStatus(status); },
   });
   console.log(`[relay] dialling ${RELAY_URL} as device ${relayIdentity!.id}`);
 }
@@ -477,7 +479,7 @@ if (RELAY_URL) {
 // Unless it did show up and we hung up on it over a protocol mismatch: that
 // worker is alive and still running turns, so clearing would falsely idle them.
 setTimeout(() => {
-  if (worker.everConnected) return;
+  if (devRuntime.held || worker.everConnected) return;
   if (worker.sawIncompatibleWorker) {
     console.warn('[worker] alive but incompatible — leaving in-flight session statuses alone');
     return;
@@ -659,8 +661,13 @@ async function handleLinesMcp(req: http.IncomingMessage, res: http.ServerRespons
 }
 
 const server = http.createServer((req, res) => {
+  if ((req.url ?? '').startsWith(LINES_MCP_PATH) && devRuntime.held) {
+    res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '1' });
+    res.end(JSON.stringify({ error: DEV_UPDATING }));
+    return;
+  }
   if ((req.url ?? '').startsWith(LINES_MCP_PATH)) {
-    void handleLinesMcp(req, res).catch((err) => {
+    void devRuntime.run(() => handleLinesMcp(req, res)).catch((err) => {
       console.warn('[lines-mcp] request failed:', err);
       if (!res.headersSent) {
         res.writeHead(500, { 'content-type': 'application/json' });
@@ -670,14 +677,14 @@ const server = http.createServer((req, res) => {
     return;
   }
   if ((req.url ?? '').startsWith(MCP_OAUTH_CALLBACK_PATH)) {
-    void handleOAuthCallback(req, res).catch((err) => {
+    void devRuntime.run(() => handleOAuthCallback(req, res)).catch((err) => {
       console.warn('[mcp-auth] callback failed:', err);
       if (!res.headersSent) oauthPage(res, 500, 'Something went wrong', 'Check the Lines bridge log.');
     });
     return;
   }
   res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ ok: true, sessions: registry.get(LOCAL_USER).sessions.list().length }));
+  res.end(JSON.stringify({ ok: true, sessions: registry.get(LOCAL_USER).sessions.list().length, devRuntime: devRuntime.publicStatus }));
 });
 
 const wss = new WebSocketServer({ server });
@@ -795,6 +802,7 @@ async function handleConnection(
           type: 'error',
           sessionId,
           message: err instanceof Error ? err.message : String(err),
+          ...(err instanceof Error && err.message === DEV_UPDATING && msg.type === 'prompt' ? { rejectedPrompt: msg } : {}),
         } satisfies ServerMessage),
       );
     });
@@ -989,6 +997,10 @@ async function authorizeConnectionForAgent(
 }
 
 async function handleMcpToolRpc(ctx: UserContext, rpc: WorkerRpc): Promise<void> {
+  return devRuntime.run(() => handleMcpToolRpcImpl(ctx, rpc));
+}
+
+async function handleMcpToolRpcImpl(ctx: UserContext, rpc: WorkerRpc): Promise<void> {
   const toolName = String(rpc.payload.tool ?? '');
   const args = (rpc.payload.args ?? {}) as Record<string, unknown>;
   let result: McpToolResult;
@@ -1018,6 +1030,12 @@ function sendMcpError(ws: BrowserLink, reason: string): void {
 }
 
 async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessage): Promise<void> {
+  // Heartbeats and presence cannot start work and must not prevent an idle window.
+  if (msg.type === 'ping' || msg.type === 'presence') return handleMessageImpl(ctx, ws, msg);
+  return devRuntime.run(() => handleMessageImpl(ctx, ws, msg));
+}
+
+async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientMessage): Promise<void> {
   const { sessions, workflows, recipes, store, auth, broadcast } = ctx;
 
   /**
@@ -1793,4 +1811,16 @@ function shutdown() {
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
+devRuntime.configure(() => ({
+  ready: server.listening && worker.linkOpen,
+  relayConnected: devRelayConnected,
+  blockers: [
+    ...(!worker.linkOpen ? ['worker disconnected'] : []),
+    ...worker.devReloadBlockers(),
+    ...[...registry.all()].flatMap((ctx) => [
+      ...ctx.sessions.devReloadBlockers(),
+      ...ctx.workflows.devReloadBlockers(),
+    ]),
+  ],
+}));
 listen();

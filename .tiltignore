@@ -2,3 +2,5 @@
 .git/
 web/dist/
 **/.tilt/
+
+.cache/

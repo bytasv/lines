@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { devRuntime, DEV_UPDATING } from './devRuntime.ts';
 import type { WorkerStatus } from '@lines/shared';
 import { WebSocket } from 'ws';
 import {
@@ -325,7 +326,15 @@ export class WorkerClient {
     }
   }
 
+  devReloadBlockers(): string[] {
+    return [
+      ...(this.pending.length ? ['worker commands queued'] : []),
+      ...(this.pendingAsks.size ? ['worker requests in flight'] : []),
+    ];
+  }
+
   private send(msg: BridgeToWorker) {
+    if (msg.type === 'push' && devRuntime.held) throw new Error(DEV_UPDATING);
     if (this.ready && this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
     } else {

@@ -457,7 +457,7 @@ test('a user connection cannot take over the lines namespace on a codex push', a
   assert.equal(servers.lines.command, process.execPath);
 });
 
-test('a plan-mode codex push carries the Plan collaboration-mode block', async () => {
+test("a plan-mode codex push selects codex's own Plan collaboration mode", async () => {
   process.env.LINES_CODEX_PATH = FAKE_CODEX;
   await refreshCodex();
   const h = harness();
@@ -465,25 +465,36 @@ test('a plan-mode codex push carries the Plan collaboration-mode block', async (
   h.sessions.prompt('s1', 'add a flag');
   await settle();
 
-  const instructions = String(h.pushes[0]!.options.developerInstructions ?? '');
-  // Codex has no ExitPlanMode tool; the mode tag is the whole mechanism.
-  assert.match(instructions, /<collaboration_mode>Plan<\/collaboration_mode>/);
+  // A real preset, not instructions Lines wrote: the question tool and the plan
+  // contract live inside codex's managed Plan instructions, and only the real
+  // mode gets them. Measured — the hand-written tag produced 0 questions and no
+  // plan item; this produced 2 and 1.
+  assert.deepEqual(h.pushes[0]!.options.collaborationMode, {
+    mode: 'plan',
+    settings: {
+      model: 'gpt-5.6-terra',
+      // Left null so codex applies its own preset, which carries
+      // reasoning_effort 'medium' for Plan.
+      reasoning_effort: null,
+      developer_instructions: null,
+    },
+  });
   assert.equal(h.pushes[0]!.options.sandboxMode, 'read-only');
 });
 
 test('an ordinary codex push stands plan mode down again', async () => {
-  // Not merely "omits the plan block": a mode stays active until different
-  // instructions replace it, so a session that planned once would otherwise
-  // refuse to edit for the rest of its life.
+  // Not merely "omits the mode": codex's mode persists until a different one
+  // replaces it, and a resumed thread carries its history — so a session that
+  // planned once would otherwise refuse to edit for the rest of its life.
   process.env.LINES_CODEX_PATH = FAKE_CODEX;
   await refreshCodex();
   const h = harness();
   h.sessions.prompt('s1', 'go');
   await settle();
 
-  assert.match(
-    String(h.pushes[0]!.options.developerInstructions ?? ''),
-    /<collaboration_mode>Default<\/collaboration_mode>/,
+  assert.equal(
+    (h.pushes[0]!.options.collaborationMode as { mode?: string }).mode,
+    'default',
   );
 });
 
@@ -591,9 +602,40 @@ test('approving a plan actually leaves plan mode', async () => {
 
   assert.notEqual(h.sessions.get('s1')!.permissionMode, 'plan');
   const last = h.pushes[h.pushes.length - 1]!;
-  assert.match(
-    String(last.options.developerInstructions ?? ''),
-    /<collaboration_mode>Default<\/collaboration_mode>/,
-    'and the next turn is told the mode changed',
+  assert.equal(
+    (last.options.collaborationMode as { mode?: string }).mode,
+    'default',
+    'and the next turn runs in codex\'s Default mode',
   );
+});
+
+test("codex's own plan item is what the card shows, not a closing remark", async () => {
+  // Real plan mode emits a dedicated `plan` item. Preferring it matters because a
+  // turn can end with a pleasantry after the plan, and the card would otherwise
+  // put that in front of the user as the thing to approve.
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.setPermissionMode('s1', 'plan');
+  h.sessions.prompt('s1', 'add a flag');
+  await settle();
+
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('item/completed', { item: { type: 'plan', id: 'p1', text: '1. Read parser\n2. Add flag' } }),
+  );
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('item/completed', { item: { type: 'agentMessage', id: 'a1', text: 'Let me know if that works.' } }),
+  );
+  h.sessions.handleWorkerEvent('s1', notify('turn/completed', { turn: { id: 't1', status: 'completed' } }));
+  await settle();
+
+  const card = h.broadcasts
+    .filter((m) => m.type === 'event' && m.event.kind === 'permission')
+    .map((m) => (m as { event: { data: { toolName?: string; input?: { plan?: string } } } }).event.data)
+    .find((d) => d.toolName === 'ExitPlanMode');
+  assert.ok(card, 'a plan card was raised');
+  assert.match(String(card!.input?.plan), /Add flag/);
+  assert.doesNotMatch(String(card!.input?.plan), /Let me know/);
 });

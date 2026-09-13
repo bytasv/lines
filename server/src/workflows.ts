@@ -294,6 +294,11 @@ export class WorkflowEngine {
   /** Armed watchdogs, keyed by session (see armSettleWatchdog). */
   private settleWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
 
+  devReloadBlockers(): string[] {
+    return this.settleWatchdogs.size ? ['workflow continuation scheduled'] : [];
+  }
+
+
   constructor(
     private store: Store,
     private sessions: SessionManager,

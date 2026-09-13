@@ -108,7 +108,20 @@ export class CodexAppServer {
   private async handshake(): Promise<void> {
     await this.send('initialize', {
       clientInfo: { name: 'lines', title: 'Lines', version: '0.1.0' },
-      capabilities: null,
+      capabilities: {
+        // Opts into codex's experimental methods *and fields*, and it is not
+        // optional for us: plan mode lives there. `collaborationMode/list` and
+        // `turn/start`'s `collaborationMode` field are both invisible without it
+        // — including to `codex app-server generate-ts`, which is why neither
+        // appears in `shared/codexProtocol`. Sending `null` here cost us real
+        // plan mode, the question tool, and (measured) a 222-character stub of a
+        // plan where opting in produced 3240 characters.
+        experimentalApi: true,
+        // Left off deliberately: it opts into `attestation/generate`, a
+        // server→client request Lines does not implement, and an unanswered
+        // request parks the turn.
+        requestAttestation: false,
+      },
     });
     this.notify('initialized', {});
   }

@@ -2776,7 +2776,7 @@ export type ServerMessage =
   /** Everything at or after `seq` is gone from this session's transcript. */
   | { type: 'transcriptTruncated'; sessionId: string; seq: number }
   | { type: 'folderPicked'; path: string | null }
-  | { type: 'error'; sessionId?: string; message: string }
+  | { type: 'error'; sessionId?: string; message: string; rejectedPrompt?: Extract<ClientMessage, { type: 'prompt' }> }
   /** Reply to one fileRequest. `status` mirrors the HTTP codes the client already
    *  maps to messages (403/404/413/415); `body` is absent on failure. */
   | { type: 'fileResponse'; reqId: string; status: number; body?: unknown }

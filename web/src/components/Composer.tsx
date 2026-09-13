@@ -243,9 +243,15 @@ export function Composer({ session }: { session: SessionMeta }) {
   useEffect(() => {
     if (!prefill) return;
     takeComposerPrefill(session.id);
-    // Overwrites whatever was typed, deliberately: the user asked for this text back.
-    setPrompt({ text: prefill.text, ranges: [] });
-    setAttachments(prefill.attachments);
+    if (prefill.preserveDraft) {
+      // A refused send must not overwrite text typed while the reply was in flight.
+      setPrompt((current) => ({ text: [prefill.text, current.text].filter(Boolean).join('\n\n'), ranges: [] }));
+      setAttachments((current) => [...prefill.attachments, ...current]);
+    } else {
+      // A rewind deliberately replaces the draft with the selected prompt.
+      setPrompt({ text: prefill.text, ranges: [] });
+      setAttachments(prefill.attachments);
+    }
     textareaRef.current?.focus();
   }, [prefill, session.id, takeComposerPrefill]);
 

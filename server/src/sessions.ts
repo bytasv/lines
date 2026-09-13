@@ -71,7 +71,7 @@ import {
   type RepoBaseline,
 } from './git.ts';
 import { COMPRESS_RESPONSES_PROMPT } from './caveman.ts';
-import { codexModePrompt } from './codexPlanMode.ts';
+import { codexCollaborationMode } from './codexPlanMode.ts';
 import {
   ALWAYS_ASK_TOOLS,
   allowEntryFor,
@@ -1035,13 +1035,19 @@ interface LiveState {
    *  later rewind can name the turn to fork at. */
   codexTurnId?: string;
   /**
-   * Assistant text seen so far in the codex turn in flight.
-   *
-   * Plan mode reads this at the settle: codex emits no dedicated plan item
-   * (verified against the live app-server), so the plan *is* the turn's final
-   * assistant message, and the card has to be built from it.
+   * Assistant text seen so far in the codex turn in flight. The fallback the
+   * plan card is built from when no `plan` item arrived.
    */
   codexLastText?: string;
+  /**
+   * The `plan` item's text, when codex emitted one.
+   *
+   * Real plan mode emits a dedicated `plan` item — measured, one per plan turn.
+   * Preferred over `codexLastText` because it is the plan codex itself
+   * delimited, where the last assistant message may be a closing remark that
+   * happens to follow it.
+   */
+  codexPlanText?: string;
 }
 
 /**
@@ -1171,6 +1177,21 @@ export class SessionManager {
       // wrote it back) must not come back to life on this restart.
       this.sessions.delete(id);
     }
+  }
+
+  /** All state whose loss could strand work during a coordinated dev reload. */
+  devReloadBlockers(): string[] {
+    const blockers: string[] = [];
+    for (const meta of this.sessions.values()) {
+      if (isSessionActive(meta.status) || meta.queued?.length || meta.workflow?.advancing ||
+          meta.workflow?.advanceOnComplete || meta.backgroundTasks?.length) blockers.push(`session ${meta.id}`);
+    }
+    for (const [id, state] of this.live) {
+      if (state.pendingPermissions.size || state.backgroundTasks?.length || state.recovery) blockers.push(`live session ${id}`);
+    }
+    if (this.authHolds.size || this.interrupting.size || this.compacting.size || this.rewinding.size ||
+        this.contextFetches.size) blockers.push('session operations');
+    return blockers;
   }
 
   /** Wired by index.ts right after construction, before any client can prompt. */
@@ -1753,12 +1774,7 @@ export class SessionManager {
     // an OpenAI session while claiming to apply to every session.
     const compress = this.store.loadSettings()?.compressResponses !== false;
     const codexMcp = this.mcp?.codexServerConfigs();
-    // Plan mode is carried by developer instructions on codex, not by a request
-    // parameter: there is no `ExitPlanMode` tool to force, and codex's own product
-    // switches mode exactly this way. The read-only sandbox above is the
-    // enforcement; this is the intent.
-    const modePrompt = codexModePrompt(meta.permissionMode === 'plan');
-    const instructions = [modePrompt, ...(compress ? [COMPRESS_RESPONSES_PROMPT] : [])].join('\n\n');
+    const instructions = compress ? COMPRESS_RESPONSES_PROMPT : '';
     // Codex spawns MCP servers as child processes, so Lines' own tools reach it
     // as a real stdio server rather than the in-process one the Claude SDK hosts.
     const codexServers = mergeMcpServers(
@@ -1766,15 +1782,21 @@ export class SessionManager {
       LINES_MCP_SERVER,
       linesMcpServerConfig(this.userId),
     );
+    const model = resolveModelId(meta.model);
     return {
-      model: resolveModelId(meta.model),
+      model,
       workingDirectory: meta.cwd,
       // Without these a multi-root project's other roots are outside the sandbox
       // and every write to them fails.
       additionalDirectories: this.rootsFor(meta).filter((root) => root !== meta.cwd),
       sandboxMode: codexSandboxMode(meta.permissionMode),
       approvalPolicy: codexApprovalPolicy(meta.permissionMode),
-      developerInstructions: instructions,
+      ...(instructions ? { developerInstructions: instructions } : {}),
+      // Plan mode on codex is a real collaboration mode, not a prompt: the tool
+      // grant and the plan contract live inside codex's managed Plan
+      // instructions, and only the real mode gets them. Sent on every turn so a
+      // session that planned once is released again — see codexPlanMode.ts.
+      collaborationMode: codexCollaborationMode(meta.permissionMode === 'plan', model),
       // The one place OpenAI credentials enter a turn: as a directory, not a
       // token. See openaiAuth.ts for why Lines holds no copy of the tokens.
       codexHome: this.store.codexHome(),
@@ -4908,6 +4930,15 @@ export class SessionManager {
     // the interrupt set here is what makes the settling result below render as
     // stopped instead of as a completed turn nobody asked to end.
     if (interrupted) this.interrupting.add(sessionId);
+    // Codex's own plan item, read off the raw notification: the normalizer maps it
+    // to an assistant message so it renders, which loses the fact that codex
+    // marked this text as *the plan*.
+    if (method === 'item/completed') {
+      const item = params.item as { type?: unknown; text?: unknown } | undefined;
+      if (item?.type === 'plan' && typeof item.text === 'string' && item.text.trim()) {
+        live.codexPlanText = item.text;
+      }
+    }
     for (const message of messages) {
       // Remembered before the event is handled, so a settle in the same batch
       // still sees the text that arrived with it.
@@ -4919,8 +4950,9 @@ export class SessionManager {
       // One turn's usage belongs to that turn: clearing at the settle stops a turn
       // that reports nothing from re-billing its predecessor's tokens.
       live.codexUsage = undefined;
-      const plan = live.codexLastText;
+      const plan = live.codexPlanText ?? live.codexLastText;
       live.codexLastText = undefined;
+      live.codexPlanText = undefined;
       // A plan-mode turn ends by presenting a plan, and on codex the turn is over
       // by the time it lands — there is no blocked tool call to hang a card on, so
       // the card is raised here and its answer drives the *next* turn.

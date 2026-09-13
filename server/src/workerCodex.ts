@@ -20,6 +20,7 @@
  */
 import { z } from 'zod';
 import { CodexAppServer } from './codexAppServer.ts';
+import { CODEX_PLAN_FALLBACK_EFFORT, type CodexCollaborationMode } from './codexPlanMode.ts';
 import { CODEX_NOTIFICATION } from '@lines/shared';
 
 /**
@@ -36,6 +37,19 @@ const CodexPushOptions = z.object({
   /** Appended to the thread's instructions — how the global "compress responses"
    *  setting reaches a codex session. */
   developerInstructions: z.string().optional(),
+  /** Codex's own Plan/Default preset for this turn, built by the bridge. An
+   *  experimental-API field, so it is absent from the generated protocol types;
+   *  passed through as-is. */
+  collaborationMode: z
+    .object({
+      mode: z.enum(['plan', 'default']),
+      settings: z.object({
+        model: z.string(),
+        reasoning_effort: z.string().nullable(),
+        developer_instructions: z.string().nullable(),
+      }),
+    })
+    .optional(),
   /** `$CODEX_HOME` for this app user. */
   codexHome: z.string(),
   codexPath: z.string(),
@@ -128,6 +142,59 @@ function ownerOf(params: Record<string, unknown>): string | null {
   return typeof threadId === 'string' ? (threadOwners.get(threadId) ?? null) : null;
 }
 
+/**
+ * Codex's own collaboration-mode presets, cached per app-server child.
+ *
+ * `collaborationMode/list` answers e.g.
+ *   [{name:'Plan', mode:'plan', model:null, reasoning_effort:'medium'},
+ *    {name:'Default', mode:'default', model:null, reasoning_effort:null}]
+ *
+ * Asked for rather than hardcoded so the reasoning effort a plan runs at stays
+ * OpenAI's choice. Experimental-API-only, which is why it is absent from the
+ * generated protocol types.
+ */
+let modePresets: Map<string, string | null> | null = null;
+
+async function loadModePresets(app: CodexAppServer): Promise<Map<string, string | null>> {
+  if (modePresets) return modePresets;
+  const presets = new Map<string, string | null>();
+  try {
+    const answer = (await app.request('collaborationMode/list', {})) as {
+      data?: { mode?: unknown; reasoning_effort?: unknown }[];
+    };
+    for (const row of answer?.data ?? []) {
+      if (typeof row.mode === 'string') {
+        presets.set(row.mode, typeof row.reasoning_effort === 'string' ? row.reasoning_effort : null);
+      }
+    }
+  } catch (err) {
+    console.warn('[worker] collaborationMode/list failed:', String(err));
+  }
+  modePresets = presets;
+  return presets;
+}
+
+/**
+ * Fill the mode's reasoning effort from codex's preset.
+ *
+ * Not cosmetic: `reasoning_effort: null` is taken literally, not as "use the
+ * preset". Measured, a plan turn sent with null asked no questions and emitted no
+ * plan item — plan mode in name only — while the preset's value produced both.
+ */
+async function applyModePreset(
+  app: CodexAppServer,
+  mode: CodexCollaborationMode,
+): Promise<CodexCollaborationMode> {
+  if (mode.settings.reasoning_effort !== null) return mode;
+  const presets = await loadModePresets(app);
+  const effort = presets.has(mode.mode)
+    ? presets.get(mode.mode)!
+    : mode.mode === 'plan'
+      ? CODEX_PLAN_FALLBACK_EFFORT
+      : null;
+  return { ...mode, settings: { ...mode.settings, reasoning_effort: effort } };
+}
+
 /** Stable identity of a set of MCP bearer tokens — a child's env is fixed at
  *  spawn, so a change to these is the one thing that forces a respawn. */
 function envFingerprint(env: Record<string, string> | undefined): string {
@@ -159,6 +226,7 @@ function ensureServer(options: CodexPushOptions): CodexAppServer {
     server = null;
     // The config the dead child was given died with it.
     appliedMcpServers = null;
+    modePresets = null;
   }
   if (server) return server;
   serverHome = options.codexHome;
@@ -461,6 +529,12 @@ export async function forkCodex(sessionId: string, lastTurnId: string): Promise<
   }
 }
 
+/** Release the app-server when its owning worker shuts down. */
+export function shutdownCodex(): void {
+  server?.close();
+  server = null;
+}
+
 /** Drop the session's binding; the next push resumes the thread. */
 export function closeCodex(sessionId: string): void {
   const state = codexSessions.get(sessionId);
@@ -575,6 +649,16 @@ async function runTurn(
     await app.request('turn/start', {
       threadId: state.threadId,
       input: [{ type: 'text', text: input, text_elements: [] }],
+      // Per turn, not per thread: a resumed thread carries whatever mode it last
+      // ran in, so leaving this off would strand a session in Plan mode.
+      ...(options.collaborationMode
+        ? {
+            collaborationMode: await applyModePreset(
+              app,
+              options.collaborationMode as CodexCollaborationMode,
+            ),
+          }
+        : {}),
     });
     // The turn's own events arrive as notifications; `ended` is sent when
     // `turn/completed` lands (see handleNotification).

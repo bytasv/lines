@@ -60,7 +60,7 @@ export class UpdateManager {
 
   /** True when the shell is supervising us; false under Tilt / npm run dev. */
   get supervised(): boolean {
-    return typeof process.send === 'function';
+    return typeof process.send === 'function' && process.env.LINES_DEV_SUPERVISED !== '1';
   }
 
   /** A turn dies on restart, so an active session blocks it. */
