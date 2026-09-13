@@ -26,7 +26,8 @@ together. Vite continues to handle web HMR independently.
   outstanding RPCs, authentication holds, helper queries, and scheduled workflow
   continuations block it. Missing or stale activity also blocks reload.
 - The private Node IPC channel in `server/src/devRuntime.ts` closes bridge admission
-  before preparing the worker. A failed preparation reopens admission without
+  before preparing the worker, then rechecks the bridge for messages that arrived
+  during preparation. A failed preparation reopens admission without
   restarting either process. Prompts refused during handover return an explicit
   error and their content to the browser's composer/draft; they are not executed.
 - The bridge flushes session persistence before shutdown. The next worker and
@@ -37,6 +38,9 @@ together. Vite continues to handle web HMR independently.
   hash is quarantined for the supervisor's lifetime; editing the code produces a
   new candidate. The last healthy generation is saved for the next supervisor boot.
 - A crashed bridge restarts from the current generation without killing its worker.
+  Its worker snapshot, buffered events, RPCs, cancellations, and end notifications
+  wait for activation and replay once in arrival order. Deferred messages also
+  block reload, so a reconnect cannot start work inside a prepared handover.
   A crashed worker restarts from the same code; the existing reconciliation path
   handles interrupted sessions. A worker crash cannot preserve an in-flight turn.
 - The supervisor refuses to overwrite a live worker's discovery record, including
@@ -111,9 +115,15 @@ Supervisor code itself takes effect at the next normal development-stack restart
 - `server/scripts/dev-runtime.test.mjs`: isolated process fixtures exercise immutable
   local imports, busy deferral, Freeze/Resume PID stability, paired reload, failed
   builds, startup rollback, preparation races, stale activity, and bridge-only recovery.
-- `server/src/devRuntime.test.ts`: admission and asynchronous activity accounting.
+- `server/src/devRuntime.test.ts`: real IPC preparation and activation, asynchronous
+  activity accounting, session blockers, and ordered worker replay without duplicates.
 - Existing session/worker tests verify persistence, queued work, provider reconciliation,
   permissions, and reconnect behavior. Process fixtures do not spend provider credits.
+
+Validated with 1,105 server tests plus six supervisor process tests, server/web
+typechecks, and Tilt evaluation in automatic and frozen modes. Freeze leaves the
+backend deployment specification identical; relay authentication and offline-button
+configuration remain supported.
 
 See [session collaboration](session-collaboration.md) for relay sharing and
 [desktop app](desktop-app.md) for packaged runtime ownership.

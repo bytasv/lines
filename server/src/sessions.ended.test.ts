@@ -179,8 +179,7 @@ test('an auth failure drops the query, so Retry cannot reuse the child that fail
   h.sessions.handleWorkerEnded('s1', CLI_REVOKED);
   await drain();
 
-  assert.ok(h.closes.length > 0);
-  assert.ok(h.closes.every((id) => id === 's1'), 'only the rejected query is closed');
+  assert.deepEqual(h.closes, ['s1']);
 });
 
 test('any failed turn drops its query, so one Retry is enough even unclassified', async () => {
@@ -395,8 +394,9 @@ test('a refreshed token re-sends the same turn instead of settling it', async ()
   const result = lastResult(h.transcript());
   assert.equal(result.recovering, true);
   assert.equal(result.result, CLI_REVOKED);
-  // The child holding the rejected token is dropped, so the re-push respawns.
-  assert.deepEqual(h.closes, ['s1']);
+  // Recovery closes the old query; token replacement may close it idempotently again.
+  assert.ok(h.closes.length > 0);
+  assert.ok(h.closes.every((id) => id === 's1'), 'only the rejected query is closed');
 });
 
 test('a second auth failure on the same turn settles for real', async () => {

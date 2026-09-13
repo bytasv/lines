@@ -216,7 +216,7 @@ export class Supervisor {
     if (!next) return;
     // Bridge closes admission first. Worker then checks commands already in transit.
     try {
-      if (!(await this.control('bridge', 'prepare')).ok || !(await this.control('worker', 'prepare')).ok || !this.idle() || this.frozen.length || this.candidate !== next) {
+      if (!(await this.control('bridge', 'prepare')).ok || !(await this.control('worker', 'prepare')).ok || !(await this.control('bridge', 'prepare')).ok || !this.idle() || this.frozen.length || this.candidate !== next) {
         await this.control('worker', 'activate'); await this.control('bridge', 'activate');
         this.idleSince = null; return;
       }

@@ -26,8 +26,7 @@ export class DevRuntime {
         ok = state.ready && state.blockers.length === 0;
         if (ok) this.held = true;
       } else if (message.action === 'activate') {
-        this.held = false;
-        for (const callback of this.activated.splice(0)) callback();
+        this.activate();
       } else if (message.action === 'status') {
         this.status = message.status;
       } else return;
@@ -36,22 +35,24 @@ export class DevRuntime {
     const timer = setInterval(() => this.report(), 250);
     timer.unref();
     // A lost supervisor must never kill an agent. Fail closed for future reloads.
-    process.on('disconnect', () => {
-      this.held = false;
-      for (const callback of this.activated.splice(0)) callback();
-    });
+    process.on('disconnect', () => this.activate());
+  }
+
+  activate() {
+    this.held = false;
+    for (const callback of this.activated.splice(0)) callback();
   }
 
   configure(activity: () => DevActivity) { this.activity = activity; }
   snapshot(): DevActivity {
     const state = this.activity();
-    return { ...state, blockers: [...state.blockers, ...(this.operations ? ['requests in flight'] : [])] };
+    return { ...state, blockers: [...state.blockers, ...(this.operations ? ['requests in flight'] : []), ...(this.activated.length ? ['deferred worker messages'] : [])] };
   }
   report() {
     if (this.enabled && process.connected) process.send?.({ type: 'devActivity', ...this.snapshot() }, () => {});
   }
   whenActive(callback: () => void) {
-    if (this.held) this.activated.push(callback);
+    if (this.held) { this.activated.push(callback); this.report(); }
     else callback();
   }
   async run<T>(operation: () => Promise<T>): Promise<T> {

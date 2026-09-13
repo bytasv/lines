@@ -170,8 +170,8 @@ let devRelayConnected = false;
 const worker = new WorkerClient({
   onHello: (live) => devRuntime.whenActive(() => registry.onWorkerLive(live)),
   onEvent: (sessionId, message) =>
-    registry.forSession(sessionId).sessions.handleWorkerEvent(sessionId, message),
-  onEnded: (sessionId, error) => {
+    devRuntime.whenActive(() => registry.forSession(sessionId).sessions.handleWorkerEvent(sessionId, message)),
+  onEnded: (sessionId, error) => devRuntime.whenActive(() => {
     // The PKCE verifier died with that CLI process, so any handshake it started
     // can never complete — drop the state rather than leave it claimable, and
     // drop the query hold that was protecting a query which no longer exists.
@@ -179,22 +179,22 @@ const worker = new WorkerClient({
     const ended = registry.forSession(sessionId);
     ended.sessions.releaseAuthHold(sessionId);
     ended.sessions.handleWorkerEnded(sessionId, error);
-  },
-  onRpc: (rpc) => {
+  }),
+  onRpc: (rpc) => devRuntime.whenActive(() => {
     const ctx = registry.forSession(rpc.sessionId);
     // Workflow tool calls are the bridge's own business, not the session's —
     // they read and write this user's context rather than gating a tool call.
     if (rpc.kind === 'mcpTool') void handleMcpToolRpc(ctx, rpc);
     else void ctx.sessions.handleWorkerRpc(rpc);
-  },
+  }),
   // No sessionId on a cancel — only the owner's live map has the pending rpc, the rest no-op.
-  onRpcCancel: (id) => {
+  onRpcCancel: (id) => devRuntime.whenActive(() => {
     for (const ctx of registry.all()) ctx.sessions.handleRpcCancel(id);
-  },
-  onWorkerLost: () => {
+  }),
+  onWorkerLost: () => devRuntime.whenActive(() => {
     console.warn(`[worker] lost — no reconnect within ${WORKER_LOST_MS}ms, flagging in-flight sessions`);
     registry.onWorkerLost();
-  },
+  }),
   // Link health carries no session, so it fans out to every context rather than
   // going through the registry's session ownership.
   onStatusChange: (worker) => {
