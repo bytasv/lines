@@ -1146,6 +1146,7 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
         cwd: worktree?.path ?? msg.cwd,
         model: msg.model,
         permissionMode: msg.permissionMode,
+        reasoningEffort: msg.reasoningEffort,
       });
       // Only nameable once the session exists; nothing depends on it beyond the
       // UI's "orphaned" label.
@@ -1254,6 +1255,11 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       }
       break;
     }
+    case 'setReasoningEffort':
+      // No verdict to report: unlike a model change, effort never strands a
+      // conversation, so there is nothing to refuse.
+      sessions.setReasoningEffort(msg.sessionId, msg.effort);
+      break;
     case 'setPermissionMode':
       sessions.setPermissionMode(msg.sessionId, msg.mode);
       break;

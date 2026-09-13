@@ -104,3 +104,11 @@ call sites filter their own lists:
 thread on `thread/tokenUsage/updated`, and that reading wins over the table via
 `ContextUsage.maxTokens`. A static value here would be a second, staler answer to a question
 the engine already answers. See [openai-codex-sessions](openai-codex-sessions.md).
+
+## Reasoning effort
+
+A second, related control sits beside the model `Select` in every one of these entry points:
+how hard the chosen model thinks, not just which model it is. It is its own feature — see
+[reasoning-effort-selection](reasoning-effort-selection.md) — but reuses this file's
+`modelComboboxProps` and `renderOptionWithDescription`, and its own `effortSelectData()` is
+`web/src/lib/modelSelect.tsx`'s second entry point.

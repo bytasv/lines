@@ -84,8 +84,9 @@ deliverable is written and reviewed.
   guard entry/blob/review types, `normalizeAllowEntry` and the other validators, the
   `addGuardAllow`/`removeGuardAllow`/`reviewGuardAllowlist` and
   `guardAllowlist`/`guardAllowlistReview` wire messages; `PLAN_DIR_MARKER`, `isPlanFilePath`;
-  `PermissionRequestData.denyMessage`, `KEEP_PLANNING_MESSAGE`; `PlanComment`,
-  `normalizePlanComments`, `formatPlanComments`; `ClientMessage.permissionResponse.planComments`
+  `PermissionRequestData.denyMessage`, `KEEP_PLANNING_MESSAGE`, `PLAN_REPLY_MARKER`,
+  `keepPlanningReason`; `PlanComment`, `normalizePlanComments`, `planCommentsBody`,
+  `formatPlanComments`; `ClientMessage.permissionResponse.planComments`
 - `web/src/lib/permissionModes.tsx` — shared mode list, segmented-control data, dropdown render
   helper
 - `web/src/lib/modelSelect.tsx` — `renderOptionWithDescription` (label + dimmed description
@@ -99,7 +100,8 @@ deliverable is written and reviewed.
   `collectTurns`; `resolvePermission`'s "Always allow" branch; `planReplyDecision`, `userPrompt`,
   `recoverOrphanedPermission`; `pushIntoLiveTurn` (extracted from `interjectQueued`, see
   [turn-interjection](turn-interjection.md)); `resolvePermission`'s `planComments` handling
-  (gate branch, allow+interject, deny wording, queue fallback)
+  (gate branch, allow+interject, deny wording, queue fallback); `takeQueuedPlanReply` (beside
+  `takeQueuedText`) — the button's queue fold into a keep-planning deny
 - `server/src/autoGuard.ts` — `GuardAllowlist` (CRUD, load-time migration, the review
   lifecycle); re-exports `ALWAYS_ASK_TOOLS`/`GuardAllowEntry` from `shared/types.ts` for
   existing importers; `isPlanPath` (exported), `isSafeReadOnly`, `isSafePlanWrite`,
@@ -190,6 +192,17 @@ deliverable is written and reviewed.
 - `planReplyDecision(input)` — pure helper; decides whether a typed prompt should be treated as
   a plan-mode deny, which pending request to answer, and the wrapped reason text
 - `KEEP_PLANNING_MESSAGE` — shared reason prefix used by both the button and the typed-reply path
+- `PLAN_REPLY_MARKER` — the `"The user's message:\n"` marker separating that prefix from the
+  user's own words; exported so `planReplyText` slices on it instead of re-declaring the literal
+- `keepPlanningReason(body)` — `KEEP_PLANNING_MESSAGE` + `PLAN_REPLY_MARKER` + `body`; the single
+  builder of a keep-planning deny reason, called by `planReplyDecision`, `formatPlanComments`'s
+  `'refine'` arm, and `resolvePermission`'s queue fold
+- `planCommentsBody(comments)` — the numbered `1. On "quote": note` list, with no surrounding
+  wording; `formatPlanComments` and `resolvePermission`'s queue fold both build on it
+- `takeQueuedPlanReply(meta, actor?)` — pulls the leading run of queue items authored by `actor`
+  into a keep-planning deny (see [Data flow](#keep-planning-button-folds-the-queue)); leaves a
+  paused queue or a foreign-authored row untouched, and keeps an attachments row in place with
+  its text stripped
 - `PermissionRequestData.denyMessage` — the deny reason, persisted on the resolution transcript
   event so it survives reload/restart and can be replayed or displayed later
 - `PermissionRequestData.elicitation` — set instead of a tool call when an MCP server (not the
@@ -204,8 +217,8 @@ deliverable is written and reviewed.
   the wire payload and by the web client before it ever sends one, the same role
   `normalizeAllowEntry` plays for guard entries
 - `formatPlanComments(comments, mode)` — the only place the wording of a commented plan decision
-  lives; `'refine'` wraps `KEEP_PLANNING_MESSAGE` and the `"The user's message:\n"` marker
-  `planReplyText` already parses, `'approve'` states the count and applies-not-replaces framing
+  lives; `'refine'` is `keepPlanningReason(planCommentsBody(comments))`, `'approve'` states the
+  count and applies-not-replaces framing over the same `planCommentsBody`
 - `pushIntoLiveTurn(meta, text)` — the `pushTurnSafely(..., { intoLiveTurn: true })` call
   extracted out of `interjectQueued` so a second caller (an approved plan carrying comments) can
   reuse it without duplicating the `priority: 'next'` reasoning; see
@@ -323,12 +336,53 @@ badge.
 `userPrompt` calls `planReplyDecision` with the session's status, `pendingPermissionTool`, the
 live pending permission ids, and the transcript. A match resolves the identified `ExitPlanMode`
 request through the same `resolvePermission` path the button uses (not a bulk deny), with the
-reason wrapping `KEEP_PLANNING_MESSAGE` around the user's text. `resolvePermission` (and
-`recoverOrphanedPermission`, for the case where the original query already died) persist
-`denyMessage` on the `permission` resolution event. A restart-resend of the same request replays
-that persisted `denyMessage` instead of a generic denial string. The web transcript merge copies
-`denyMessage` from the resolution event onto the existing card, and `PlanApproval` shows it as a
-quoted reply under a `kept planning` badge.
+reason built by `keepPlanningReason(text)` — `KEEP_PLANNING_MESSAGE` plus the `PLAN_REPLY_MARKER`
+prefix around the user's text. `resolvePermission` (and `recoverOrphanedPermission`, for the case
+where the original query already died) persist `denyMessage` on the `permission` resolution
+event. A restart-resend of the same request replays that persisted `denyMessage` instead of a
+generic denial string. The web transcript merge copies `denyMessage` from the resolution event
+onto the existing card, and `PlanApproval` shows it as a quoted reply under a `kept planning`
+badge (`planReplyText` slices the message on the exported `PLAN_REPLY_MARKER` constant, rather
+than a re-declared copy of the literal).
+
+`keepPlanningReason` and `planCommentsBody` (both in `shared/types.ts`) are the single builder and
+single body-formatter every keep-planning deny goes through — the typed-composer path above, the
+"Refine with comments" path (`formatPlanComments(..., 'refine')`, now `keepPlanningReason(planCommentsBody(comments))`),
+and the button's queue fold (`takeQueuedPlanReply`, next section) all call them rather than each
+assembling the wording inline.
+
+### Keep planning (button) folds the queue
+
+The button's deny (`source: 'user'`) reaches the *same* stranding the typed-reply's attachments
+branch does: a keep-planning deny is a `tool_result` answered inside the live turn, never a turn
+boundary, so `maybeFlush` — which only fires once the session settles to `idle`/`done`/`error` —
+never opens on it. A message queued before the card appeared (typed while the turn was merely
+`running`) would otherwise sit stranded until the plan is finally approved and the whole turn
+completes.
+
+`resolvePermission` closes that gap by calling `takeQueuedPlanReply(meta, actor)` before building
+the deny reason, whenever the resolved request is `ExitPlanMode`, the answer is a deny, and
+`source === 'user'` (a button click or any other user-sourced deny — not `'plan-reply'`, which
+already carries its own text, and not the workflow plan-step gate, which only denies on an
+*allow*). `takeQueuedPlanReply`:
+
+- Returns `[]` immediately for an empty or `queuePaused` queue — a paused queue is a guest's
+  prompt held for the owner and is never auto-released by someone else's click.
+- Walks the queue from the head, folding text from the leading run whose `item.actor?.userId`
+  matches the clicker's (`undefined` on both sides means the machine owner) — the same comparison
+  `editQueued` already uses. The first foreign-authored item stops the walk, so a collaborator's
+  queued words are never re-attributed to whoever clicked, and a guest's row is never released by
+  the owner's click.
+- An item with attachments has its `text` folded but its row kept (with `mentions`/`draft`
+  cleared) rather than removed, since attachments can't ride a `tool_result` either; that row
+  still delivers in its place once the turn does settle. The walk stops there.
+- Calls `upsert` before returning whenever it changed anything, so no client ever renders a queue
+  row the model has already been handed.
+
+`resolvePermission` joins `planCommentsBody(comments)` and the folded text (in that order) into
+one `keepPlanningReason(...)` body. An empty queue and no comments leaves `denyMessage` exactly as
+the caller passed it — the identity path every existing deny assertion (including the codex bare-
+deny branch in `reviewCodexPlan`) depends on.
 
 ### Plan comments
 
@@ -435,7 +489,19 @@ note in a small bubble with the same edit/delete actions the list row has.
   refine-with-comments produces a `deny` whose `denyMessage` is server-built from the comments,
   never the client's; a workflow plan-step gate with comments still resolves
   `resolvedBy: 'workflow-advance'` with no `'interject'` event, the comments folded into the gate's
-  deny message instead; an empty comment list resolves exactly as before this feature existed.
+  deny message instead; an empty comment list resolves exactly as before this feature existed; a
+  button Keep planning with one queued message produces a `denyMessage` byte-identical to the
+  same text typed at the card; several queued messages fold in order; comments and a queued
+  message compose into one `keepPlanningReason` body; an empty queue leaves `denyMessage`
+  byte-identical to before this fold existed; a `'plan-reply'` deny does not also eat the queue;
+  a paused queue is never released by the button; the folded text is persisted on the resolution
+  event so Retry re-sends it.
+- `server/src/sessions.queue.test.ts` — `takeQueuedPlanReply` mechanics: a single text-only item
+  folded and its row removed; several items folded in order; a paused queue yields `[]` and is
+  left untouched; a foreign-authored item stops the walk and the FIFO order past it is preserved;
+  an unattributed item is treated as the machine owner's; an attachments-bearing item keeps its
+  row with `text`/`mentions`/`draft` cleared and stops the walk there; an attachment-only row (no
+  text) is left completely alone; an empty queue folds to nothing.
 - `server/src/sessions.reconcile.test.ts` — an unresolved `ExitPlanMode` card blocks
   auto-continue and survives `continueTurn`'s expiry; an ordinary tool's card still expires.
 - `server/src/autoGuard.allowlist.test.ts` — validator rules (through `assessToolCall`, not just
@@ -526,8 +592,26 @@ note in a small bubble with the same edit/delete actions the list row has.
 - No attachments: the reason is `KEEP_PLANNING_MESSAGE` plus the user's raw text, and nothing
   else is queued — the deny reason is the whole turn.
 - With attachments: the reason is `KEEP_PLANNING_MESSAGE` plus a note only (no raw text, since
-  attachments can't ride a `tool_result`); the real text and attachments are queued separately
-  and delivered as the next turn once the deny settles the busy query.
+  attachments can't ride a `tool_result`); the real text and attachments are queued separately.
+  A keep-planning deny is answered as a `tool_result` inside the *live* turn — it does not end
+  the turn or emit an SDK `result` — so `maybeFlush` does not open on it; the queued item is
+  only delivered once the turn genuinely settles (`idle`/`done`/`error`), which on a plan can be
+  several "keep planning" rounds and the eventual approval later, not "as soon as the deny is
+  sent".
+- **Keep planning (button) folds the queue into the same deny reason** (`takeQueuedPlanReply`):
+  because that deny never settles the turn either, a message queued before the card appeared
+  would otherwise be stranded until final approval, with removing and retyping it as the only
+  workaround. The click walks the queue from the head and folds the leading run authored by the
+  clicker (`item.actor?.userId === actor?.userId`, matching `editQueued`'s author check) into
+  `keepPlanningReason(...)`, stopping at the first foreign-authored row so a collaborator's words
+  are never re-attributed to the clicker. A paused queue (a guest's prompt held for the owner) is
+  never folded. A folded item with attachments keeps its row — attachments can't ride the deny
+  either — with its `text`/`mentions`/`draft` cleared, so it still delivers in order once the
+  plan is approved; the walk stops there. `resolvePermission` composes one `keepPlanningReason`
+  body from `planCommentsBody(comments)` plus the folded text, in that order, before emitting the
+  resolution event, so `PlanReply` and Retry read the same combined text. Only a `source: 'user'`
+  deny on `ExitPlanMode` folds the queue — `'plan-reply'` already carries its own text, and the
+  workflow plan-step gate only fires on an allow.
 - The plan card's badge shows `kept planning` (not `denied`) for a denied `ExitPlanMode` request.
 - A shared session's resolution badge additionally names *who* answered, when it was not the
   viewer: `resolvedActor` (see [session-collaboration](session-collaboration.md)) rides alongside
@@ -636,6 +720,10 @@ note in a small bubble with the same edit/delete actions the list row has.
 - The wording of a commented plan decision lives solely in `formatPlanComments` — the two button
   labels, the interjected text, and the deny reason all derive from it, so the model-facing wording
   can never drift between the approve and refine paths.
+- The keep-planning wording itself has exactly one builder: `keepPlanningReason` (paired with
+  `PLAN_REPLY_MARKER`), in `shared/types.ts` so it is the same function `server/` calls to build a
+  deny and `web/` (`planReplyText`) parses to render one back — build and parse can never drift
+  across the three packages the way two independently-written string templates eventually would.
 - On a deny, the server always rebuilds `denyMessage` from the comments via `formatPlanComments`
   and discards whatever the client sent in that field — the wording is server-owned, never
   client-supplied, the same posture `resolvePermission` already took before comments existed.
@@ -749,3 +837,7 @@ this gap — the experimental surface is absent from the output with and without
 `acceptForSession` is deliberately never sent. Lines keeps its own allowlist, and asking codex
 to remember a second copy would split one decision across two stores that cannot be kept in step
 and that the user can only see one of. See [openai-codex-sessions](openai-codex-sessions.md).
+
+A user can now choose plan mode's effort directly, as a global setting distinct from a session's
+own — mirroring codex's own `plan_mode_reasoning_effort` config key, and applying to a Claude
+session's plan turns the same way. See [reasoning-effort-selection](reasoning-effort-selection.md).

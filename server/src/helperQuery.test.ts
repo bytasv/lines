@@ -25,8 +25,9 @@ test('neither provider connected answers null rather than throwing', async () =>
   assert.equal(answer, null);
 });
 
-test('a Claude token wins when both are connected', async () => {
-  // Unchanged behaviour for the common case, and the cheaper path.
+test('with no preference, Claude still wins when both are connected', async () => {
+  // The unprefixed order is unchanged — the MCP judge has no session to take a
+  // provider from, and Claude is the cheaper path.
   let codexAsked = false;
   await runHelperQuery(
     {
@@ -41,6 +42,42 @@ test('a Claude token wins when both are connected', async () => {
     request,
   ).catch(() => {});
   assert.equal(codexAsked, false, 'codex must not be consulted while Claude is available');
+});
+
+test('prefer openai consults codex first even with a Claude token', async () => {
+  // A codex session's title is written by codex: the point of `prefer`.
+  let claudeAsked = false;
+  await runHelperQuery(
+    {
+      claudeToken: async () => {
+        claudeAsked = true;
+        return 'tok';
+      },
+      codexHome: () => {
+        throw new Error('codex-path-reached');
+      },
+    },
+    { ...request, prefer: 'openai' },
+  ).catch(() => {});
+  assert.equal(claudeAsked, false, 'Claude must not be consulted before the preferred provider');
+});
+
+test('a preferred provider that answers null falls back to the other', async () => {
+  // What keeps a stale codex CLI probe or an unreachable helper model degrading
+  // to a Claude-written title rather than to no title at all.
+  let claudeAsked = false;
+  await runHelperQuery(
+    {
+      claudeToken: async () => {
+        claudeAsked = true;
+        throw new Error('claude-path-reached');
+      },
+      // Not connected, so the preferred provider has no answer.
+      codexHome: () => null,
+    },
+    { ...request, prefer: 'openai' },
+  ).catch(() => {});
+  assert.equal(claudeAsked, true, 'the other provider must be tried when the preferred one is absent');
 });
 
 test('a thrown provider lookup is swallowed, not propagated', async () => {

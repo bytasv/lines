@@ -41,6 +41,9 @@ function sameContent(a: StepContent, b: StepContent): boolean {
     a.promptTemplate === b.promptTemplate &&
     a.model === b.model &&
     a.permissionMode === b.permissionMode &&
+    // Optional-field idiom, as `outputName` below: without this line a step whose
+    // only edit is its reasoning effort never mints a new version.
+    (a.reasoningEffort ?? '') === (b.reasoningEffort ?? '') &&
     a.autoAdvance === b.autoAdvance &&
     a.freshStart === b.freshStart &&
     (a.outputName ?? '') === (b.outputName ?? '')
@@ -768,6 +771,7 @@ export class WorkflowEngine {
     if (step0) {
       meta.permissionMode = step0.permissionMode;
       meta.model = step0.model;
+      meta.reasoningEffort = step0.reasoningEffort;
       meta.workflow.stepPermissionMode = step0.permissionMode;
     }
     this.sessions.setStatus(sessionId, meta.status); // persist + broadcast the attached workflow
@@ -961,6 +965,9 @@ export class WorkflowEngine {
 
     // Per-step model + permission mode take effect before the prompt is queued.
     await this.sessions.setModel(sessionId, content.model);
+    // Called even when the step sets none, which is what *clears* it: skipping the
+    // call would leak a high-effort step's setting into every later step of the run.
+    await this.sessions.setReasoningEffort(sessionId, content.reasoningEffort ?? null);
     await this.sessions.setPermissionMode(sessionId, content.permissionMode);
 
     const feedbackText = feedback

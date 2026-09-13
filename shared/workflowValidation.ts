@@ -12,6 +12,9 @@
  */
 import type { PermissionMode, StepContent } from './types.ts';
 import { isKnownModel, LEGACY_MODEL_MAP, providerForModel } from './types.ts';
+// Safe despite the cycle note below: providers.ts imports only *types* from
+// './types.ts', so it holds no runtime binding that could still be uninitialized.
+import { capabilitiesFor } from './providers.ts';
 
 /** The runtime reads `{outputs.<name>}` with `[\w-]+`, so anything else is unreferenceable. */
 export const OUTPUT_NAME_RE = /^[A-Za-z0-9_-]+$/;
@@ -38,7 +41,8 @@ export type WorkflowIssueField =
   | 'ref'
   | 'outputName'
   | 'model'
-  | 'permissionMode';
+  | 'permissionMode'
+  | 'reasoningEffort';
 
 export interface WorkflowIssue {
   /** Absent for workflow-level issues (name, no steps). */
@@ -91,6 +95,20 @@ export function validateStepContent(c: StepContent, opts: ValidateOptions = {}):
   // model would flip a running workflow onto a provider that holds none of its
   // conversation. The editor's model picker already offers Claude models only —
   // this is what stops an agent-authored step from going around it.
+  // Anthropic's vocabulary only, unconditionally: the check below rejects an
+  // OpenAI model on a step outright, so a step never runs on codex and `minimal`
+  // is not a level it could use.
+  const effort = c.reasoningEffort;
+  if (effort !== undefined) {
+    const allowed = capabilitiesFor('anthropic').reasoningEfforts;
+    if (!allowed.includes(effort)) {
+      issues.push({
+        field: 'reasoningEffort',
+        message: `Unknown reasoning effort "${effort}" — expected one of ${allowed.join(', ')}`,
+      });
+    }
+  }
+
   if (c.model && providerForModel(String(c.model)) === 'openai') {
     issues.push({
       field: 'model',

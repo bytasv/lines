@@ -13,11 +13,19 @@
  * MCP connection went un-vetted (`UNCHECKED`, never "allowed", so the failure was
  * safe but the protection was absent).
  *
- * So provider selection lives here, once, rather than at four call sites:
+ * So provider selection lives here, once, rather than at four call sites. It is a
+ * preference with a fallback, never a hard route:
  *
- *  - Claude when the app holds a Claude token. Unchanged behaviour, and the
- *    cheaper path — the CLI is already warm and the models are small.
- *  - Codex when it is not, via a one-shot `codex exec` on a fast model.
+ *  - `prefer` is tried first when that provider is connected. A session-scoped
+ *    helper passes the session's own provider, so a codex session's title is
+ *    written by codex rather than by Claude — the title is about that session's
+ *    work, and a user holding both logins should not see one provider quietly
+ *    doing the other's chores.
+ *  - The other provider is tried when the preferred one is absent or answers
+ *    null (a stale CLI probe, a helper model the account cannot reach). A
+ *    degraded title beats no title.
+ *  - With no preference, Claude first and codex second — the older order, and
+ *    the cheaper path, since the CLI is already warm and the models are small.
  *  - Null when neither is connected, which every caller already handles.
  *
  * Both paths are tool-free and single-turn, and that is a security property, not
@@ -26,6 +34,7 @@
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { Codex } from '@openai/codex-sdk';
+import type { ModelProvider } from '@lines/shared';
 import { claudeCliStatus } from './claudeCli.ts';
 import { codexCliStatus } from './codexCli.ts';
 
@@ -54,6 +63,12 @@ export interface HelperQueryRequest {
   /** Working directory for the codex child. Only used to give it somewhere to
    *  start; helpers read no files. */
   cwd?: string;
+  /**
+   * Which provider to consult first. A session-scoped helper passes the
+   * session's own provider; the other one is still tried when this one is
+   * absent or answers null. Omitted means "no preference" — Claude first.
+   */
+  prefer?: ModelProvider;
 }
 
 /**
@@ -138,7 +153,8 @@ async function runCodexHelper(
 }
 
 /**
- * Run one helper query on whichever provider is available, or answer null.
+ * Run one helper query on the preferred provider, falling back to the other, or
+ * answer null.
  *
  * Never throws: every caller treats null as "no answer" and has a fallback
  * (a default session name, no summary, an `UNCHECKED` verdict), so a helper
@@ -148,12 +164,22 @@ export async function runHelperQuery(
   deps: HelperQueryDeps,
   request: HelperQueryRequest,
 ): Promise<string | null> {
-  const attempt = async (): Promise<string | null> => {
+  /** Null means "not this one" — either not connected, or it had no answer. */
+  const viaClaude = async (): Promise<string | null> => {
     const token = await deps.claudeToken();
-    if (token) return runClaudeHelper(token, request);
+    return token ? runClaudeHelper(token, request) : null;
+  };
+  const viaCodex = async (): Promise<string | null> => {
     const home = deps.codexHome();
-    if (home) return runCodexHelper(home, request);
-    return null;
+    return home ? runCodexHelper(home, request) : null;
+  };
+  const attempt = async (): Promise<string | null> => {
+    const [first, second] =
+      request.prefer === 'openai' ? [viaCodex, viaClaude] : [viaClaude, viaCodex];
+    // The fallback is the whole point: a codex session whose CLI probe is stale
+    // or whose helper model the account cannot reach still gets a title, rather
+    // than being stranded because its own provider was picked.
+    return (await first()) ?? (await second());
   };
   try {
     // A helper that hangs must not hold up the thing that asked for it — a

@@ -17,11 +17,19 @@ import {
   UnstyledButton,
 } from '@mantine/core';
 import { IconCopy, IconHistory, IconPlus, IconTrash } from '@tabler/icons-react';
-import type { PermissionMode, StepContent, StepDef } from '@lines/shared';
+import type { PermissionMode, ReasoningEffort, StepContent, StepDef } from '@lines/shared';
 import { DEFAULT_MODEL, formatTimestamp } from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
-import { modelComboboxProps, modelSelectData, renderModelOption } from '../../lib/modelSelect';
+import {
+  AUTO_EFFORT,
+  effortSelectData,
+  modelComboboxProps,
+  modelSelectData,
+  renderModelOption,
+  renderOptionWithDescription,
+  STEP_EFFORTS,
+} from '../../lib/modelSelect';
 import { send } from '../../ws';
 import { ConfirmModal } from '../ConfirmModal';
 import { OUTPUT_NAME_HINT, OUTPUT_NAME_RE } from './useWorkflowDraft';
@@ -398,6 +406,25 @@ export function StepLibrary() {
                   allowDeselect={false}
                   classNames={{ input: styles.fieldInput }}
                   onChange={(v) => v && patch({ model: v })}
+                />
+              </div>
+              <div className={styles.control}>
+                <span className={styles.controlLabel}>Reasoning effort</span>
+                <Select
+                  w={140}
+                  comboboxProps={modelComboboxProps}
+                  data={effortSelectData(STEP_EFFORTS, draft.reasoningEffort)}
+                  renderOption={renderOptionWithDescription}
+                  value={draft.reasoningEffort ?? AUTO_EFFORT}
+                  disabled={readOnly}
+                  allowDeselect={false}
+                  classNames={{ input: styles.fieldInput }}
+                  onChange={(v) =>
+                    v &&
+                    patch({
+                      reasoningEffort: v === AUTO_EFFORT ? undefined : (v as ReasoningEffort),
+                    })
+                  }
                 />
               </div>
               <div className={styles.control}>

@@ -498,6 +498,59 @@ test('an ordinary codex push stands plan mode down again', async () => {
   );
 });
 
+test('a chosen reasoning effort rides the collaboration mode', async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.setReasoningEffort('s1', 'high');
+  h.sessions.prompt('s1', 'go');
+  await settle();
+
+  // Not `turn/start.effort`: the collaboration mode is built on every turn, plan
+  // or not, so one channel covers both and there are never two dials to rank.
+  assert.equal(
+    (h.pushes[0]!.options.collaborationMode as { settings: { reasoning_effort: string | null } })
+      .settings.reasoning_effort,
+    'high',
+  );
+});
+
+test('plan mode runs at the global plan effort, ahead of the session’s own', async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.store.saveSettings({ planReasoningEffort: 'xhigh' });
+  h.sessions.setReasoningEffort('s1', 'low');
+  h.sessions.setPermissionMode('s1', 'plan');
+  h.sessions.prompt('s1', 'add a flag');
+  await settle();
+
+  const mode = h.pushes[0]!.options.collaborationMode as {
+    mode: string;
+    settings: { reasoning_effort: string | null };
+  };
+  assert.equal(mode.mode, 'plan');
+  assert.equal(mode.settings.reasoning_effort, 'xhigh');
+});
+
+test('an unset effort still leaves codex’s own preset to the worker', async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.setReasoningEffort('s1', 'high');
+  h.sessions.setReasoningEffort('s1', null);
+  h.sessions.prompt('s1', 'go');
+  await settle();
+
+  // Null, not an empty string and not a dropped key: `applyModePreset` in the
+  // worker keys off exactly this, and codex reads a surviving null literally.
+  assert.equal(
+    (h.pushes[0]!.options.collaborationMode as { settings: { reasoning_effort: string | null } })
+      .settings.reasoning_effort,
+    null,
+  );
+});
+
 test("a plan-mode turn's final message is raised as a plan to approve", async () => {
   process.env.LINES_CODEX_PATH = FAKE_CODEX;
   await refreshCodex();

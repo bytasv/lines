@@ -177,6 +177,38 @@ export interface ClaudeCliStatus {
  */
 export type PermissionMode = 'default' | 'auto' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 
+/**
+ * How hard the engine thinks on a turn. One union covering both vendors, whose
+ * vocabularies turn out to be identical: Claude's `EffortLevel` and the set
+ * codex's own API reports as supported are both `low..max`. Which values a given
+ * session may use is still a *capability* (`ProviderCapabilities
+ * .reasoningEfforts`) rather than a property of this type, because that is where
+ * a future divergence belongs.
+ *
+ * Deliberately no `minimal`: OpenAI's config reference lists it, and a codex turn
+ * sent with it fails with "Unsupported value: 'minimal' is not supported with the
+ * 'gpt-5.6-terra' model" — measured, not assumed.
+ *
+ * "Unset" is always the field being absent, never a value here and never `null`
+ * on the wire: absent means the engine's own default, which is what every
+ * session ran at before this existed.
+ */
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/** Every level any provider accepts, weakest first. For a control that is not
+ *  scoped to one session (the global plan-mode effort), and for validation. */
+export const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+];
+
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === 'string' && (REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
 export type SessionStatus =
   | 'idle'
   | 'running'
@@ -331,6 +363,14 @@ export interface StepContent {
   promptTemplate: string;
   model: string;
   permissionMode: PermissionMode;
+  /**
+   * How hard the step's turns think. Absent = the provider's own default, which
+   * is how every step ran before this existed.
+   *
+   * Applied on every step start, absent included — a step that leaves it unset
+   * *clears* the session's effort rather than inheriting the previous step's.
+   */
+  reasoningEffort?: ReasoningEffort;
   autoAdvance: boolean;
   /**
    * When true, the step runs in a fresh Claude CLI session instead of inheriting
@@ -718,6 +758,16 @@ export interface SessionMeta {
   name: string;
   cwd: string;
   model: string;
+  /**
+   * How hard this session's ordinary turns think. Absent = the provider's own
+   * default. Plan-mode turns read the global `planReasoningEffort` first — see
+   * `resolveReasoningEffort`.
+   *
+   * A change takes effect on the *next* turn, never the running one: codex binds
+   * it at `turn/start`, and the Claude path drops the idle query so the next push
+   * rebuilds it with the new value.
+   */
+  reasoningEffort?: ReasoningEffort;
   permissionMode: PermissionMode;
   status: SessionStatus;
   createdAt: number;
@@ -1062,21 +1112,41 @@ export function normalizePlanComments(raw: unknown): PlanComment[] {
 }
 
 /**
+ * Separates the "stay in plan mode" prefix from the user's own words. Shared by
+ * every writer of a keep-planning reason and by `planReplyText`, which slices on
+ * it to render those words back on the resolved card.
+ */
+export const PLAN_REPLY_MARKER = "The user's message:\n";
+
+/**
+ * The single builder of a keep-planning deny reason — typed composer reply,
+ * "Refine with comments", and queued messages folded in at the button all go
+ * through here, so the model reads one wording and the client parses one shape.
+ */
+export function keepPlanningReason(body: string): string {
+  return `${KEEP_PLANNING_MESSAGE}\n\n${PLAN_REPLY_MARKER}${body}`;
+}
+
+/** The numbered list of plan comments, without any surrounding wording. */
+export function planCommentsBody(comments: PlanComment[]): string {
+  return comments
+    .map((c, i) => (c.quote ? `${i + 1}. On "${c.quote}": ${c.note}` : `${i + 1}. ${c.note}`))
+    .join('\n');
+}
+
+/**
  * The one place the wording of a commented plan decision lives, so the two
  * buttons on the card and the server that answers them cannot drift.
  *
- * 'refine' reuses the `KEEP_PLANNING_MESSAGE` prefix and the
- * `"The user's message:\n"` marker the typed-composer reply already uses, which
- * is what lets `planReplyText` render the comments back on the resolved card
- * with no client-side special case.
+ * 'refine' reuses `keepPlanningReason`, the same wrapper the typed-composer
+ * reply uses, which is what lets `planReplyText` render the comments back on the
+ * resolved card with no client-side special case.
  */
 export function formatPlanComments(comments: PlanComment[], mode: 'approve' | 'refine'): string {
   if (comments.length === 0) return '';
-  const body = comments
-    .map((c, i) => (c.quote ? `${i + 1}. On "${c.quote}": ${c.note}` : `${i + 1}. ${c.note}`))
-    .join('\n');
+  const body = planCommentsBody(comments);
   if (mode === 'refine') {
-    return `${KEEP_PLANNING_MESSAGE}\n\nThe user's message:\n${body}`;
+    return keepPlanningReason(body);
   }
   const n = comments.length;
   return (
@@ -1604,6 +1674,11 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   rewindSession: { needs: 'session', cap: 'interrupt' },
   permissionResponse: { needs: 'session', cap: 'approvePermissions' },
   setModel: { needs: 'session', cap: 'setModel' },
+  // Deliberately the `setModel` cap rather than one of its own: effort is a
+  // strictly weaker choice than model, so anyone who may switch the model may say
+  // how hard it thinks. A cap here would have to be re-granted across every preset
+  // and carry denial copy nobody would reason about.
+  setReasoningEffort: { needs: 'session', cap: 'setModel' },
   // No preset grants this: permission mode is the guard around everything else.
   setPermissionMode: { needs: 'session', cap: 'setPermissionMode' },
 
@@ -1750,6 +1825,8 @@ export type ClientMessage =
       cwd: string;
       model: string;
       permissionMode: PermissionMode;
+      /** Seeded from the user's new-session default; absent = provider default. */
+      reasoningEffort?: ReasoningEffort;
       workflowId?: string;
       /**
        * Opt-in: cut a fresh worktree+branch off `cwd`'s repo and run the session
@@ -1799,6 +1876,11 @@ export type ClientMessage =
   | { type: 'unarchiveSession'; sessionId: string }
   | { type: 'completeSession'; sessionId: string }
   | { type: 'setModel'; sessionId: string; model: string }
+  /** `null` clears back to the provider's own default. A separate message from
+   *  `setModel` because that one carries a cross-provider refusal effort has no
+   *  analogue for; it reuses the `setModel` *capability*, since choosing how hard
+   *  a session thinks is strictly weaker than choosing what it runs on. */
+  | { type: 'setReasoningEffort'; sessionId: string; effort: ReasoningEffort | null }
   | { type: 'setPermissionMode'; sessionId: string; mode: PermissionMode }
   | {
       type: 'permissionResponse';
@@ -2067,7 +2149,12 @@ export interface WorkerStatus {
 
 /** Per-user UI settings mirrored to the storage server; localStorage stays the offline cache. */
 export interface UserUiSettings {
-  newSessionDefaults?: { model: string; permissionMode: PermissionMode };
+  newSessionDefaults?: {
+    model: string;
+    permissionMode: PermissionMode;
+    /** Seed for a new session's `reasoningEffort`. Absent = provider default. */
+    reasoningEffort?: ReasoningEffort;
+  };
   sidebarMode?: 'sessions' | 'files';
   compactionLevel?: 'full' | 'grouped' | 'compact';
   turnSummariesEnabled?: boolean;
@@ -2085,6 +2172,16 @@ export interface UserUiSettings {
    *  longer carry their own toggle, so changing it applies the next time each
    *  session's worker starts a fresh query (not to one already running). */
   compressResponses?: boolean;
+  /**
+   * Effort plan-mode turns run at, whichever session they belong to. Global for
+   * the same reason codex's own equivalent (`plan_mode_reasoning_effort`) is a
+   * `config.toml` key rather than a per-thread one, and read fresh on every push
+   * exactly like `compressResponses` — nothing is cached on the session.
+   *
+   * Absent = plan mode runs at the session's own effort, or the provider's
+   * default. A value the session's provider does not offer is ignored.
+   */
+  planReasoningEffort?: ReasoningEffort;
   alertsEnabled?: boolean;
   alertSound?: string;
   /**

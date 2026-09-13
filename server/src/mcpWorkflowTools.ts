@@ -68,6 +68,12 @@ const STEP: JsonSchemaNode = {
       enum: ['default', 'auto', 'plan', 'acceptEdits', 'bypassPermissions'],
       description: "Defaults to 'default'. 'plan' makes the step read-only until its plan is approved.",
     },
+    reasoningEffort: {
+      type: 'string',
+      enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+      description:
+        "How hard the model thinks on this step. Omit to run at the model's own default. Cleared for the next step unless that step sets one too.",
+    },
     autoAdvance: {
       type: 'boolean',
       description: 'Advance to the next step without waiting for approval. Defaults to false.',
@@ -217,6 +223,7 @@ const WRITE_TOOLS: McpToolSpec[] = [
         promptTemplate: STEP.properties!.promptTemplate!,
         model: STEP.properties!.model!,
         permissionMode: STEP.properties!.permissionMode!,
+        reasoningEffort: STEP.properties!.reasoningEffort!,
         autoAdvance: STEP.properties!.autoAdvance!,
         freshStart: STEP.properties!.freshStart!,
         outputName: STEP.properties!.outputName!,
@@ -364,11 +371,15 @@ function toWorkflowSteps(raw: unknown): { ok: true; steps: WorkflowStep[] } | { 
 /** Inline step content with the editor's own defaults applied for anything omitted. */
 function toStepContent(s: Record<string, unknown>): StepContent {
   const outputName = str(s.outputName).trim();
+  // Kept absent rather than defaulted: absent is what "the model's own effort"
+  // means, and an unknown value is left in place for validation to reject by name.
+  const effort = str(s.reasoningEffort).trim();
   return {
     name: str(s.name).trim(),
     promptTemplate: str(s.promptTemplate),
     model: str(s.model).trim() || DEFAULT_MODEL,
     permissionMode: (str(s.permissionMode).trim() || 'default') as StepContent['permissionMode'],
+    ...(effort ? { reasoningEffort: effort as StepContent['reasoningEffort'] } : {}),
     autoAdvance: bool(s.autoAdvance, false),
     freshStart: bool(s.freshStart, false),
     ...(outputName ? { outputName } : {}),

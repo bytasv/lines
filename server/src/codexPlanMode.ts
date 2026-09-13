@@ -60,17 +60,27 @@ export interface CodexCollaborationMode {
  * refusing to edit — a symptom nearly impossible to trace back to a mode set
  * several turns earlier.
  *
- * `reasoning_effort` is left null *here* and filled in the worker, which is the
- * side that can ask codex what the preset actually is. A turn must not reach
- * `turn/start` still carrying null — see the note above.
+ * `reasoning_effort` is left null *here* when the user has chosen nothing, and
+ * filled in the worker, which is the side that can ask codex what the preset
+ * actually is. A turn must not reach `turn/start` still carrying null — see the
+ * note above.
+ *
+ * `effort` is the user's own choice for this turn, and this is the *only* way it
+ * reaches codex: not `turn/start.effort`, because this object is built on every
+ * turn, plan or not, so one code path covers both — and a collaboration mode
+ * carrying its own effort beside `turn/start.effort` would be two dials with no
+ * documented precedence. Unset must stay null rather than a user-chosen null:
+ * null here means "the worker fills it from codex's preset", and codex itself
+ * reads a null that survives that far literally.
  */
 export function codexCollaborationMode(
   planMode: boolean,
   model: string,
+  effort?: string,
 ): CodexCollaborationMode {
   return {
     mode: planMode ? 'plan' : 'default',
-    settings: { model, reasoning_effort: null, developer_instructions: null },
+    settings: { model, reasoning_effort: effort ?? null, developer_instructions: null },
   };
 }
 

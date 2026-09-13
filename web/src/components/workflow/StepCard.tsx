@@ -31,7 +31,13 @@ import {
   IconWorld,
 } from '@tabler/icons-react';
 import type { DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
-import type { PermissionMode, ModelOption, StepContent, StepDef } from '@lines/shared';
+import type {
+  PermissionMode,
+  ModelOption,
+  ReasoningEffort,
+  StepContent,
+  StepDef,
+} from '@lines/shared';
 import { providerForModel, providerSwitchNeedsFreshStart } from '@lines/shared';
 import type { DraftStep, StepErrors } from './useWorkflowDraft';
 import {
@@ -40,7 +46,15 @@ import {
   renderPermissionModeOption,
 } from '../../lib/permissionModes';
 import { PromptEditor } from './PromptEditor';
-import { modelComboboxProps, modelSelectData, renderModelOption } from '../../lib/modelSelect';
+import {
+  AUTO_EFFORT,
+  effortSelectData,
+  modelComboboxProps,
+  modelSelectData,
+  renderModelOption,
+  renderOptionWithDescription,
+  STEP_EFFORTS,
+} from '../../lib/modelSelect';
 import styles from './workflow.module.css';
 
 const cn = (...xs: (string | false | undefined)[]) => xs.filter(Boolean).join(' ');
@@ -49,6 +63,7 @@ const FIELD_LABELS: Record<keyof StepContent, string> = {
   name: 'Name',
   promptTemplate: 'Prompt',
   model: 'Model',
+  reasoningEffort: 'Reasoning effort',
   permissionMode: 'Permission',
   autoAdvance: 'Auto-advance',
   freshStart: 'Fresh start',
@@ -433,6 +448,28 @@ export function StepCard({
                     )
                       ? { freshStart: true }
                       : {}),
+                  })
+                }
+              />
+            </div>
+            <div className={styles.control}>
+              <span className={styles.controlLabel}>Reasoning effort</span>
+              <Select
+                w={140}
+                comboboxProps={modelComboboxProps}
+                // Claude's list, whichever model the step names: a step carrying an
+                // OpenAI model is rejected by validation, so codex's `minimal` is
+                // not a level a step can ever run at.
+                data={effortSelectData(STEP_EFFORTS, step.reasoningEffort)}
+                renderOption={renderOptionWithDescription}
+                value={step.reasoningEffort ?? AUTO_EFFORT}
+                disabled={contentReadOnly}
+                allowDeselect={false}
+                classNames={{ input: styles.fieldInput }}
+                onChange={(v) =>
+                  v &&
+                  onPatch({
+                    reasoningEffort: v === AUTO_EFFORT ? undefined : (v as ReasoningEffort),
                   })
                 }
               />

@@ -40,7 +40,7 @@ import type {
   PermissionResolutionSource,
   PlanComment,
 } from '@lines/shared';
-import { KEEP_PLANNING_MESSAGE, normalizePlanComments } from '@lines/shared';
+import { KEEP_PLANNING_MESSAGE, PLAN_REPLY_MARKER, normalizePlanComments } from '@lines/shared';
 import { send } from '../ws';
 import { readPlanComments, useStore, writePlanComments } from '../store';
 import { agentLabel } from '../lib/capabilities';
@@ -442,9 +442,8 @@ function EditPreview({ data }: { data: PermissionRequestData }) {
 function planReplyText(data: PermissionRequestData): string | undefined {
   const msg = data.denyMessage;
   if (!msg || !msg.startsWith(KEEP_PLANNING_MESSAGE)) return undefined;
-  const marker = "The user's message:\n";
-  const at = msg.indexOf(marker);
-  return at === -1 ? undefined : msg.slice(at + marker.length).trim() || undefined;
+  const at = msg.indexOf(PLAN_REPLY_MARKER);
+  return at === -1 ? undefined : msg.slice(at + PLAN_REPLY_MARKER.length).trim() || undefined;
 }
 
 /**

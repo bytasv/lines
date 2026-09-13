@@ -59,7 +59,8 @@
         "server/src/sessions.codex.test.ts",
         "server/src/codexAppServer.contract.test.ts",
         "server/src/openaiUsage.test.ts",
-        "server/src/helperQuery.test.ts"
+        "server/src/helperQuery.test.ts",
+        "server/src/sessions.autoName.test.ts"
       ],
       "businessRules": [
         "$CODEX_HOME/auth.json is the only store of OpenAI secrets; Lines writes it exactly once at login and never again, because OpenAI rotates the refresh token on every refresh",
@@ -69,7 +70,9 @@
         "workflow steps run on Claude models only, refused on both the client pickers and the server validator",
         "output_tokens means exactly what the provider called output; reasoning tokens ride beside it and the spend accumulator adds them explicitly",
         "codex reports tokens and never a price, so a codex spend row shows tokens with no $",
-        "a stopped codex turn settles as stopped, never as a failure with a Retry"
+        "a stopped codex turn settles as stopped, never as a failure with a Retry",
+        "a session-scoped helper query (autoName, summarizeTurn, consolidateStepOutput) prefers that session's own provider and falls back to the other when the preferred one is absent or answers null; a helper with no session (the MCP judge) stays Claude-first",
+        "auto-naming never strands a session on 'New session': a null or thrown helper answer still writes a localSessionName(prompt) fallback title, and the session retries on its next prompt until a real summary lands"
       ],
       "architecturalRules": [
         "codex notifications are normalized into Claude SDK message shapes on the bridge, not given a transcript kind of their own — the settle pass and every turn scan are keyed to those shapes",
@@ -84,7 +87,9 @@
         "Claude's message shape is the internal model deliberately; a neutral event model is deferred until a third provider is real",
         "device code rather than a redirect, because the browser finishing a login is frequently not on the bridge's machine",
         "acceptForSession is never sent to codex — Lines keeps the one allowlist the user can actually see",
-        "helper queries stay on codex exec: they are one-shot, so the app-server would mean a long-lived child on the bridge for no gain"
+        "helper queries stay on codex exec: they are one-shot, so the app-server would mean a long-lived child on the bridge for no gain",
+        "provider selection for a helper query is a preference, not a hard route: a session-scoped call passes its own provider, and the other one is still tried when the preferred provider is disconnected or answers null",
+        "reasoning-effort-selection"
       ]
     },
     {
@@ -127,7 +132,9 @@
         "modelSelectData() takes the current stored id as ensureId so a stale/unknown id renders disabled instead of leaving the Select blank",
         "legacy-model resolution is a static explicit map (LEGACY_MODEL_MAP), not a tier-prefix heuristic or live Models-API lookup"
       ],
-      "relatedDecisions": []
+      "relatedDecisions": [
+        "reasoning-effort-selection"
+      ]
     },
     {
       "id": "permissions-and-plan-mode",
@@ -295,7 +302,8 @@
       "relatedDecisions": [
         "session-collaboration",
         "turn-recovery",
-        "turn-interjection"
+        "turn-interjection",
+        "reasoning-effort-selection"
       ]
     },
     {
@@ -607,7 +615,8 @@
         "session-and-project-ui",
         "transcript-performance",
         "context-window",
-        "session-rewind"
+        "session-rewind",
+        "reasoning-effort-selection"
       ]
     },
     {
@@ -3168,6 +3177,78 @@
       "relatedDecisions": [
         "desktop-app",
         "hosted-machine-access"
+      ]
+    },
+    {
+      "id": "reasoning-effort-selection",
+      "name": "Manual reasoning-effort selection",
+      "doc": "features/reasoning-effort-selection.md",
+      "purpose": "Let a user or workflow step pick how hard a model thinks, not just which model runs: a control beside the model picker in the composer, on a workflow step, as a new-session default, and as a global effort for plan-mode turns specifically.",
+      "entryPoints": [
+        "web/src/components/Composer.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/workflow/StepLibrary.tsx",
+        "server/src/mcpWorkflowTools.ts"
+      ],
+      "files": [
+        "shared/types.ts",
+        "shared/providers.ts",
+        "shared/workflowValidation.ts",
+        "server/src/sessions.ts",
+        "server/src/codexPlanMode.ts",
+        "server/src/workerCodex.ts",
+        "server/src/workflows.ts",
+        "server/src/mcpWorkflowTools.ts",
+        "server/src/index.ts",
+        "web/src/lib/modelSelect.tsx",
+        "web/src/store.ts"
+      ],
+      "symbols": [
+        "ReasoningEffort",
+        "REASONING_EFFORTS",
+        "isReasoningEffort",
+        "ProviderCapabilities.reasoningEfforts",
+        "SessionMeta.reasoningEffort",
+        "StepContent.reasoningEffort",
+        "UserUiSettings.newSessionDefaults.reasoningEffort",
+        "UserUiSettings.planReasoningEffort",
+        "resolveReasoningEffort",
+        "SessionManager.setReasoningEffort",
+        "codexCollaborationMode",
+        "applyModePreset",
+        "effortSelectData",
+        "AUTO_EFFORT",
+        "STEP_EFFORTS"
+      ],
+      "tests": [
+        "server/src/sessions.effort.test.ts",
+        "server/src/codexPlanMode.test.ts",
+        "server/src/sessions.codex.test.ts",
+        "server/src/workflows.providers.test.ts",
+        "server/src/messageAuthz.test.ts"
+      ],
+      "businessRules": [
+        "absent means the provider's own default everywhere; never a sentinel and never null on the wire for Claude — codex alone still receives an explicit null when nothing is chosen, meaning 'ask codex for its own preset', not 'the user chose nothing', and a user-chosen value must never itself be sent as null",
+        "no 'minimal': measured directly against a live codex app-server, a turn sent with it fails outright even though OpenAI's own config reference lists it, so both providers' offered lists are low..max",
+        "plan mode has its own global effort (UserUiSettings.planReasoningEffort), mirroring codex's own plan_mode_reasoning_effort config key, overriding the session's own effort only while that session is in plan mode",
+        "a workflow step's effort is absolute, not additive: a step with none clears the session back to the provider default rather than inheriting the previous step's",
+        "no cross-provider refusal: unlike setModel, changing effort never strands a conversation",
+        "a stored effort the session's current provider does not offer is dropped at push time rather than sent, reachable via a pre-first-turn provider switch",
+        "effect lands on the next turn, never the running one"
+      ],
+      "architecturalRules": [
+        "the worker's ensureSession returns an already-live query early and discards the options of every later push, so an effort change on a live Claude session marks the query stale (SessionManager.staleQueries) rather than editing options in place; pushWithToken drops it there on the next push, reusing recycleIdleQueries' three exemptions (busy, background tasks, MCP OAuth hold) for free",
+        "codex's effort rides collaborationMode.settings.reasoning_effort, which is already built and sent on every turn for plan mode, rather than the typed turn/start.effort field — one code path instead of two dials with no documented precedence",
+        "setReasoningEffort reuses the setModel ShareCaps capability rather than minting a new one (effort is strictly weaker than model choice), but stays a distinct ClientMessage since setModel carries a cross-provider refusal verdict effort has no analogue for",
+        "effortSelectData is the single entry point every effort Select goes through, mirroring modelSelectData/renderModelOption, and always leads with an explicit 'Auto' row rather than an empty value",
+        "workflow steps validate a chosen effort against Anthropic's list only, since a step naming an OpenAI model is already refused outright"
+      ],
+      "relatedDecisions": [
+        "model-selector",
+        "openai-codex-sessions",
+        "permissions-and-plan-mode",
+        "workflow-step-lifecycle"
       ]
     }
   ]

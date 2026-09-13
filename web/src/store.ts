@@ -17,6 +17,7 @@ import type {
   PromptAttachment,
   PresenceViewer,
   PromptMention,
+  ReasoningEffort,
   RecipeDef,
   RewindPrompt,
   ServerMessage,
@@ -37,6 +38,7 @@ import type {
 import {
   APP_PROTOCOL_VERSION,
   DEFAULT_MODEL,
+  isReasoningEffort,
   normalizePlanComments,
   projectPaths,
   resolveModelId,
@@ -90,6 +92,7 @@ const COMPACTION_LEVEL_KEY = 'lines.compactionLevel';
 const TURN_SUMMARIES_ENABLED_KEY = 'lines.turnSummariesEnabled';
 const AUTO_CONTINUE_KEY = 'lines.autoContinueInterrupted';
 const COMPRESS_RESPONSES_KEY = 'lines.compressResponses';
+const PLAN_REASONING_EFFORT_KEY = 'lines.planReasoningEffort';
 const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
 const DRAFTS_KEY = 'lines.drafts';
 const PLAN_COMMENTS_KEY = 'lines.planComments';
@@ -351,6 +354,8 @@ async function pruneDraftAttachments(doomedSessionIds: Set<string>): Promise<voi
 export interface NewSessionDefaults {
   model: string;
   permissionMode: PermissionMode;
+  /** Absent = new sessions run at the provider's own effort. */
+  reasoningEffort?: ReasoningEffort;
 }
 
 function loadNewSessionDefaults(): NewSessionDefaults {
@@ -363,10 +368,19 @@ function loadNewSessionDefaults(): NewSessionDefaults {
       model: typeof parsed.model === 'string' ? resolveModelId(parsed.model) : fallback.model,
       permissionMode:
         typeof parsed.permissionMode === 'string' ? parsed.permissionMode : fallback.permissionMode,
+      ...(isReasoningEffort(parsed.reasoningEffort)
+        ? { reasoningEffort: parsed.reasoningEffort }
+        : {}),
     };
   } catch {
     return fallback;
   }
+}
+
+/** Global plan-mode effort. Absent = plan turns run at the session's own effort. */
+function loadPlanReasoningEffort(): ReasoningEffort | undefined {
+  const raw = localStorage.getItem(PLAN_REASONING_EFFORT_KEY);
+  return isReasoningEffort(raw) ? raw : undefined;
 }
 
 /** Selected session from the current URL, so a reload keeps its route. */
@@ -779,6 +793,9 @@ interface UiState {
   autoContinueInterrupted: boolean;
   /** Append the response-compression ruleset to every session's system prompt. Global. */
   compressResponses: boolean;
+  /** Effort every session's plan-mode turns run at. Global, like codex's own
+   *  `plan_mode_reasoning_effort`. Undefined = the session's own effort. */
+  planReasoningEffort?: ReasoningEffort;
   /** Open editor tabs per project path; persisted in localStorage. */
   openFiles: Record<string, OpenFilesState>;
 
@@ -874,6 +891,8 @@ interface UiState {
   setTurnSummariesEnabled: (on: boolean) => void;
   setAutoContinueInterrupted: (on: boolean) => void;
   setCompressResponses: (on: boolean) => void;
+  /** `null` clears it back to per-session effort. */
+  setPlanReasoningEffort: (effort: ReasoningEffort | null) => void;
   setHideIgnored: (on: boolean) => void;
   openFileTab: (path: string) => void;
   closeFileTab: (path: string) => void;
@@ -897,6 +916,7 @@ export const useStore = create<UiState>((set, get) => {
         turnSummariesEnabled: s.turnSummariesEnabled,
         autoContinueInterrupted: s.autoContinueInterrupted,
         compressResponses: s.compressResponses,
+        planReasoningEffort: s.planReasoningEffort,
         alertsEnabled: s.alertsEnabled,
         alertSound: s.alertSound,
         dismissedCheckouts: s.dismissedCheckouts,
@@ -1000,6 +1020,7 @@ export const useStore = create<UiState>((set, get) => {
       turnSummariesEnabled: s.turnSummariesEnabled ?? state.turnSummariesEnabled,
       autoContinueInterrupted: s.autoContinueInterrupted ?? state.autoContinueInterrupted,
       compressResponses: s.compressResponses ?? state.compressResponses,
+      planReasoningEffort: s.planReasoningEffort ?? state.planReasoningEffort,
       alertsEnabled: s.alertsEnabled ?? state.alertsEnabled,
       alertSound: (s.alertSound as AlertSound | undefined) ?? state.alertSound,
       dismissedCheckouts: s.dismissedCheckouts ?? state.dismissedCheckouts,
@@ -1011,6 +1032,7 @@ export const useStore = create<UiState>((set, get) => {
     if (s.turnSummariesEnabled != null) localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(s.turnSummariesEnabled));
     if (s.autoContinueInterrupted != null) localStorage.setItem(AUTO_CONTINUE_KEY, String(s.autoContinueInterrupted));
     if (s.compressResponses != null) localStorage.setItem(COMPRESS_RESPONSES_KEY, String(s.compressResponses));
+    if (s.planReasoningEffort) localStorage.setItem(PLAN_REASONING_EFFORT_KEY, s.planReasoningEffort);
     if (s.alertsEnabled != null) persistAlertsEnabled(s.alertsEnabled);
     if (s.alertSound) persistAlertSound(s.alertSound as AlertSound);
     if (s.dismissedCheckouts) {
@@ -1099,6 +1121,7 @@ export const useStore = create<UiState>((set, get) => {
   turnSummariesEnabled: loadTurnSummariesEnabled(),
   autoContinueInterrupted: loadAutoContinueInterrupted(),
   compressResponses: loadCompressResponses(),
+  planReasoningEffort: loadPlanReasoningEffort(),
   openFiles: loadOpenFiles(),
 
   setConnectionStatus: (status, deviceId) =>
@@ -1305,6 +1328,13 @@ export const useStore = create<UiState>((set, get) => {
   setCompressResponses: (on) => {
     localStorage.setItem(COMPRESS_RESPONSES_KEY, String(on));
     set({ compressResponses: on });
+    pushSettings();
+  },
+
+  setPlanReasoningEffort: (effort) => {
+    if (effort) localStorage.setItem(PLAN_REASONING_EFFORT_KEY, effort);
+    else localStorage.removeItem(PLAN_REASONING_EFFORT_KEY);
+    set({ planReasoningEffort: effort ?? undefined });
     pushSettings();
   },
 

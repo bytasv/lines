@@ -4,8 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import type {
+  Actor,
   PermissionMode,
   PermissionRequestData,
+  QueuedPrompt,
   SessionMeta,
   SessionStatus,
   TranscriptEvent,
@@ -13,7 +15,9 @@ import type {
 } from '@lines/shared';
 import {
   KEEP_PLANNING_MESSAGE,
+  PLAN_REPLY_MARKER,
   formatPlanComments,
+  keepPlanningReason,
   normalizePlanComments,
   type PlanComment,
 } from '@lines/shared';
@@ -394,6 +398,8 @@ test('a legacy resolution with no resolvedBy still counts as the user', async ()
 
 const NOTES: PlanComment[] = [{ id: 'a', quote: 'step 3', note: 'add a rollback' }];
 
+const ALICE: Actor = { userId: 'u-alice', name: 'Alice', imageUrl: null };
+
 /** resolvePermission's trailing params are positional; this names the two that matter. */
 const answerPlan = (
   h: ReturnType<typeof harness>,
@@ -510,6 +516,133 @@ test('an empty comment list resolves exactly as it did before the feature', asyn
   assert.deepEqual(h.interjections(), []);
   assert.deepEqual(h.s1().queued ?? [], []);
   assert.equal(h.s1().permissionMode, 'default', 'plan mode still mirrored off on approval');
+});
+
+// ---------------------------------------------------------------------------
+// Queued messages folded into a "Keep planning" deny
+// ---------------------------------------------------------------------------
+
+/** Stage items straight on the queue — get() hands back the live meta object. */
+const seedQueue = (h: ReturnType<typeof harness>, items: Partial<QueuedPrompt>[]) => {
+  h.s1().queued = items.map((over, i) => ({
+    id: `q${i}`,
+    ts: 1000 + i,
+    text: '',
+    ...over,
+  })) as QueuedPrompt[];
+};
+
+/** The button: a bare keep-planning deny, no comments. */
+const keepPlanning = (h: ReturnType<typeof harness>, actor?: Actor) =>
+  h.sessions.resolvePermission(
+    's1',
+    'p1',
+    false,
+    undefined,
+    undefined,
+    KEEP_PLANNING_MESSAGE,
+    undefined,
+    'user',
+    actor,
+  );
+
+test('Keep planning folds a queued message in, exactly as typing it at the card would', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  seedQueue(h, [{ text: 'add a rollback step' }]);
+  keepPlanning(h);
+  await settle();
+
+  const last = h.cards().at(-1)!;
+  assert.equal(last.resolution, 'deny');
+  // Byte-identical to the typed-reply path: the same words must read the same way.
+  assert.equal(last.denyMessage, decide({ text: 'add a rollback step' })!.denyMessage);
+  assert.deepEqual(h.s1().queued, [], 'the row is gone, not left to strand');
+});
+
+test('several queued messages fold in order, into one reason', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  seedQueue(h, [{ text: 'first' }, { text: 'second' }]);
+  keepPlanning(h);
+  await settle();
+
+  assert.equal(h.cards().at(-1)?.denyMessage, keepPlanningReason('first\n\nsecond'));
+  assert.deepEqual(h.s1().queued, []);
+});
+
+test('comments and a queued message compose into one marker', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  seedQueue(h, [{ text: 'and rename the flag' }]);
+  answerPlan(h, false, NOTES, 'whatever the client sent');
+  await settle();
+
+  const msg = h.cards().at(-1)!.denyMessage!;
+  assert.equal(msg, keepPlanningReason('1. On "step 3": add a rollback\n\nand rename the flag'));
+  assert.equal(msg.split(PLAN_REPLY_MARKER).length, 2, 'one marker, not one per body');
+});
+
+test('an empty queue leaves the deny reason exactly as the client sent it', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  keepPlanning(h);
+  await settle();
+
+  assert.equal(h.cards().at(-1)?.denyMessage, KEEP_PLANNING_MESSAGE);
+  assert.deepEqual(h.answered.at(-1), {
+    behavior: 'deny',
+    message: KEEP_PLANNING_MESSAGE,
+  });
+});
+
+test('a typed reply does not also eat the queue', async () => {
+  // 'plan-reply' already carries the user's words; folding there would jump the
+  // queue ahead of the row that was waiting first.
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  seedQueue(h, [{ text: 'queued earlier' }]);
+  h.sessions.userPrompt('s1', 'typed now');
+  await settle();
+
+  const last = h.cards().at(-1)!;
+  assert.equal(last.resolvedBy, 'plan-reply');
+  assert.ok(!last.denyMessage!.includes('queued earlier'));
+  assert.equal(h.s1().queued?.length, 1, 'still queued, untouched');
+});
+
+test('a paused queue is never released by a Keep planning click', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  seedQueue(h, [{ text: 'held for the owner', actor: ALICE }]);
+  h.s1().queuePaused = true;
+  keepPlanning(h);
+  await settle();
+
+  assert.equal(h.cards().at(-1)?.denyMessage, KEEP_PLANNING_MESSAGE);
+  assert.equal(h.s1().queued?.length, 1);
+  assert.equal(h.s1().queuePaused, true);
+});
+
+test('the folded text is persisted on the resolution, so Retry can re-send it', async () => {
+  const h = harness({
+    mode: 'plan',
+    events: [ev('user', { text: 'do step 3', source: 'workflow' })],
+  });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  seedQueue(h, [{ text: 'add a rollback step' }]);
+  keepPlanning(h);
+  await settle();
+
+  const last = h.sessions.lastPromptForRetry('s1')!;
+  assert.match(last.text, /add a rollback step/);
 });
 
 test('a model-initiated EnterPlanMode is mirrored into the session mode', async () => {

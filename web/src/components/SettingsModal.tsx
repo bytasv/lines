@@ -20,7 +20,8 @@ import {
 } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import { IconAlertCircle, IconCopy, IconPlayerPlay } from '@tabler/icons-react';
-import type { PermissionMode, SyncLogEntry } from '@lines/shared';
+import type { PermissionMode, ReasoningEffort, SyncLogEntry } from '@lines/shared';
+import { capabilitiesForModel, providerForModel, REASONING_EFFORTS } from '@lines/shared';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { GuardAllowlistSection } from './GuardAllowlistSection';
@@ -30,7 +31,13 @@ import { CollaboratorsSection } from './CollaboratorsSection';
 import { UpdatesSection } from './UpdatesSection';
 import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
 import { SHARING_ENABLED } from '../lib/shares';
-import { modelSelectData, renderModelOption } from '../lib/modelSelect';
+import {
+  AUTO_EFFORT,
+  effortSelectData,
+  modelSelectData,
+  renderModelOption,
+  renderOptionWithDescription,
+} from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { fileRequest, send } from '../ws';
 import { useIsGuest } from '../lib/can';
@@ -318,6 +325,8 @@ function SessionsSection() {
   const setAutoContinueInterrupted = useStore((s) => s.setAutoContinueInterrupted);
   const compressResponses = useStore((s) => s.compressResponses);
   const setCompressResponses = useStore((s) => s.setCompressResponses);
+  const planReasoningEffort = useStore((s) => s.planReasoningEffort);
+  const setPlanReasoningEffort = useStore((s) => s.setPlanReasoningEffort);
 
   return (
     <>
@@ -339,6 +348,26 @@ function SessionsSection() {
         onChange={(v) => v && setDefaults({ ...defaults, model: v })}
         allowDeselect={false}
       />
+      <Select
+        label="Reasoning effort"
+        description="How hard a new session thinks. Auto leaves it to the model."
+        // The chosen default model's own engine decides the vocabulary. The two
+        // agree today; the capability is still what is asked, so they may not.
+        data={effortSelectData(
+          capabilitiesForModel(defaults.model, providerForModel).reasoningEfforts,
+          defaults.reasoningEffort,
+        )}
+        renderOption={renderOptionWithDescription}
+        value={defaults.reasoningEffort ?? AUTO_EFFORT}
+        onChange={(v) =>
+          v &&
+          setDefaults({
+            ...defaults,
+            reasoningEffort: v === AUTO_EFFORT ? undefined : (v as ReasoningEffort),
+          })
+        }
+        allowDeselect={false}
+      />
       <Stack gap={4}>
         <Text size="sm" fw={500}>
           Permission mode
@@ -350,6 +379,24 @@ function SessionsSection() {
           onChange={(v) => setDefaults({ ...defaults, permissionMode: v as PermissionMode })}
         />
       </Stack>
+      {/* Global, not a newSessionDefaults member — hence its own subgroup. Plan
+          mode gets its own effort for the same reason codex keeps
+          `plan_mode_reasoning_effort` in config rather than per thread: planning
+          is the one turn worth paying more for regardless of the session. */}
+      <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
+        Plan mode
+      </Text>
+      <Select
+        label="Reasoning effort"
+        description="Applies to plan-mode turns in every session, overriding the session's own effort. A level the session's engine does not offer is ignored. Takes effect on the next turn."
+        data={effortSelectData(REASONING_EFFORTS, planReasoningEffort)}
+        renderOption={renderOptionWithDescription}
+        value={planReasoningEffort ?? AUTO_EFFORT}
+        onChange={(v) =>
+          v && setPlanReasoningEffort(v === AUTO_EFFORT ? null : (v as ReasoningEffort))
+        }
+        allowDeselect={false}
+      />
       {/* Global, not a newSessionDefaults member — hence its own subgroup. */}
       <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
         Recovery

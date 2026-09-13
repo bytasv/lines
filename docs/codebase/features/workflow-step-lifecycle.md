@@ -675,3 +675,6 @@ is attached to, which is not known until the run. The runner handles it with the
 - [session-rewind](session-rewind.md) — a rewind mid-workflow parks the current step at
   `waiting-approval` the same way as here, but re-derives `stepIndex`/`stepStatuses` from the
   surviving transcript's markers rather than from a live turn settling.
+- [reasoning-effort-selection](reasoning-effort-selection.md) — a step's `reasoningEffort` is
+  applied by `runStep` beside `setModel`/`setPermissionMode`, including when it is unset: an
+  absent effort clears the session's, it never inherits the previous step's.

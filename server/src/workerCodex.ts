@@ -155,6 +155,12 @@ function ownerOf(params: Record<string, unknown>): string | null {
  */
 let modePresets: Map<string, string | null> | null = null;
 
+/** Drop the cache. The presets belong to one app-server child, so a test that
+ *  serves a different `collaborationMode/list` has to start from nothing. */
+export function resetModePresets() {
+  modePresets = null;
+}
+
 async function loadModePresets(app: CodexAppServer): Promise<Map<string, string | null>> {
   if (modePresets) return modePresets;
   const presets = new Map<string, string | null>();
@@ -180,8 +186,12 @@ async function loadModePresets(app: CodexAppServer): Promise<Map<string, string 
  * Not cosmetic: `reasoning_effort: null` is taken literally, not as "use the
  * preset". Measured, a plan turn sent with null asked no questions and emitted no
  * plan item — plan mode in name only — while the preset's value produced both.
+ *
+ * A non-null value is the user's own choice and passes through untouched, which
+ * is what lets the bridge carry a chosen effort through this seam without a
+ * second channel. Exported for its tests.
  */
-async function applyModePreset(
+export async function applyModePreset(
   app: CodexAppServer,
   mode: CodexCollaborationMode,
 ): Promise<CodexCollaborationMode> {

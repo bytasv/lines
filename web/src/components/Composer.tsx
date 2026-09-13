@@ -21,11 +21,25 @@ import {
   IconX,
   IconZoomIn,
 } from '@tabler/icons-react';
-import type { ClientMessage, ModelProvider, PermissionMode, PromptAttachment, SessionMeta } from '@lines/shared';
+import type {
+  ClientMessage,
+  ModelProvider,
+  PermissionMode,
+  PromptAttachment,
+  ReasoningEffort,
+  SessionMeta,
+} from '@lines/shared';
 import { isSessionInterruptible, providerForModel, rootsForCwd } from '@lines/shared';
 import { sessionCaps } from '../lib/capabilities';
 import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
-import { modelComboboxProps, modelSelectData, renderModelOption } from '../lib/modelSelect';
+import {
+  AUTO_EFFORT,
+  effortSelectData,
+  modelComboboxProps,
+  modelSelectData,
+  renderModelOption,
+  renderOptionWithDescription,
+} from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
 import { buildExpandedPrompt, uniqueMentions } from '../lib/mentions';
 import { linkedMachineHealth } from '../lib/machineHealth';
@@ -461,6 +475,38 @@ export function Composer({ session }: { session: SessionMeta }) {
             onChange={(v) => v && send({ type: 'setModel', sessionId: session.id, model: v })}
             allowDeselect={false}
           />
+          {/* Disabled rather than hidden on an engine with no effort control, for
+              the same reason the permission segments above are, and inside a span
+              so the tooltip fires over it. */}
+          <Tooltip
+            label={
+              caps.reasoningEfforts.length
+                ? 'How hard the model thinks. Takes effect on the next turn.'
+                : 'This engine does not expose a reasoning-effort control.'
+            }
+            withArrow
+            openDelay={400}
+          >
+            <span style={{ display: 'inline-flex' }}>
+              <Select
+                w={120}
+                disabled={!canSetModel || caps.reasoningEfforts.length === 0}
+                comboboxProps={modelComboboxProps}
+                data={effortSelectData(caps.reasoningEfforts, session.reasoningEffort)}
+                renderOption={renderOptionWithDescription}
+                value={session.reasoningEffort ?? AUTO_EFFORT}
+                onChange={(v) =>
+                  v &&
+                  send({
+                    type: 'setReasoningEffort',
+                    sessionId: session.id,
+                    effort: v === AUTO_EFFORT ? null : (v as ReasoningEffort),
+                  })
+                }
+                allowDeselect={false}
+              />
+            </span>
+          </Tooltip>
         </Group>
         <Group gap="xs">
           <ContextWindowIndicator session={session} />

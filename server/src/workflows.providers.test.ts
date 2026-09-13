@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { ServerMessage, SessionMeta, WorkflowDef, WorkflowState } from '@lines/shared';
+import type {
+  ReasoningEffort,
+  ServerMessage,
+  SessionMeta,
+  WorkflowDef,
+  WorkflowState,
+} from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -20,7 +26,17 @@ import { WorkflowEngine } from './workflows.ts';
  * new model a transcript it cannot read.
  */
 
-const twoStep = (secondModel: string, secondFreshStart: boolean): WorkflowDef => ({
+/** Per-step reasoning effort, absent on both steps unless a test sets one. */
+interface StepEfforts {
+  first?: ReasoningEffort;
+  second?: ReasoningEffort;
+}
+
+const twoStep = (
+  secondModel: string,
+  secondFreshStart: boolean,
+  efforts: StepEfforts = {},
+): WorkflowDef => ({
   id: 'wf1',
   name: 'cross-provider flow',
   steps: [
@@ -31,6 +47,7 @@ const twoStep = (secondModel: string, secondFreshStart: boolean): WorkflowDef =>
       permissionMode: 'default',
       autoAdvance: false,
       freshStart: false,
+      ...(efforts.first ? { reasoningEffort: efforts.first } : {}),
     },
     {
       name: 'Step 2',
@@ -39,11 +56,12 @@ const twoStep = (secondModel: string, secondFreshStart: boolean): WorkflowDef =>
       permissionMode: 'default',
       autoAdvance: false,
       freshStart: secondFreshStart,
+      ...(efforts.second ? { reasoningEffort: efforts.second } : {}),
     },
   ],
 });
 
-function harness(secondModel: string, secondFreshStart: boolean) {
+function harness(secondModel: string, secondFreshStart: boolean, efforts: StepEfforts = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-wf-provider-'));
   const state: WorkflowState = {
     workflowId: 'wf1',
@@ -60,13 +78,16 @@ function harness(secondModel: string, secondFreshStart: boolean) {
     status: 'waiting-approval',
     createdAt: 1,
     workflow: state,
+    // What step 1 left behind, so a step that sets no effort of its own can be
+    // seen clearing it rather than inheriting.
+    ...(efforts.first ? { reasoningEffort: efforts.first } : {}),
     // The conversation the second step would have to strand.
     claudeSessionId: 'claude-abc',
   } as SessionMeta;
   fs.writeFileSync(path.join(root, 'sessions.json'), JSON.stringify([session]));
   fs.writeFileSync(
     path.join(root, 'workflows.json'),
-    JSON.stringify([twoStep(secondModel, secondFreshStart)]),
+    JSON.stringify([twoStep(secondModel, secondFreshStart, efforts)]),
   );
 
   const broadcast = (_msg: ServerMessage) => {};
@@ -123,6 +144,38 @@ test('a fresh-start step may change provider, and the old conversation is droppe
   assert.equal(m.claudeSessionId, undefined);
   await settleUntil(() => h.prompts.length > 0);
   assert.equal(h.prompts.length, 1);
+});
+
+test('a step applies its own reasoning effort to the session', async () => {
+  const h = harness('claude-opus-5', false, { first: 'high', second: 'xhigh' });
+  h.workflows.approve('s1', 0);
+  await settle();
+
+  assert.equal(h.s1().reasoningEffort, 'xhigh');
+});
+
+test('a step with no effort clears the previous step’s', async () => {
+  // The leak: apply it only when the step names one and a single high-effort step
+  // silently sets the price of every step after it.
+  const h = harness('claude-opus-5', false, { first: 'high' });
+  assert.equal(h.s1().reasoningEffort, 'high');
+
+  h.workflows.approve('s1', 0);
+  await settle();
+
+  assert.equal(h.s1().reasoningEffort, undefined);
+});
+
+test('changing only the effort does not strand the conversation', async () => {
+  // Unlike a model change, effort never crosses a provider — so there is nothing
+  // to refuse and nothing to reset.
+  const h = harness('claude-opus-5', false, { second: 'max' });
+  h.workflows.approve('s1', 0);
+  await settle();
+
+  const m = h.s1();
+  assert.equal(m.workflow!.stepStatuses[1], 'running');
+  assert.equal(m.claudeSessionId, 'claude-abc');
 });
 
 test('a same-provider step still inherits the conversation', async () => {

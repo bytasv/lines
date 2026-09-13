@@ -52,8 +52,9 @@ scattered `=== 'openai'` checks.
 - `server/src/codexCli.ts` — `codex` binary discovery and the version floor.
 - `server/src/codexAppServer.ts` — spawn, handshake, request/notification demux.
 - `server/src/workerCodex.ts` — thread binding, turns, steering, compaction, forking.
-- `server/src/codexPlanMode.ts` — the `collaborationMode` a turn runs with, and
-  `applyModePreset`'s fill of its reasoning effort from codex's own preset.
+- `server/src/codexPlanMode.ts` — the `collaborationMode` a turn runs with; a chosen
+  effort rides it verbatim, and `applyModePreset` fills it from codex's own preset only
+  when the user chose none. See [reasoning-effort-selection](reasoning-effort-selection.md).
 - `server/src/helperQuery.ts` — the bridge's own one-shot queries, on either provider.
 - `shared/codex.ts` — the normalizer.
 - `shared/providers.ts` — `ProviderCapabilities` and the per-provider table.
@@ -93,6 +94,13 @@ the transport was.
   it in `reasoning_output_tokens` and the spend accumulator adds them explicitly.
 - Codex reports tokens and never a price, so a codex row shows tokens with no `$`.
 - A stopped codex turn settles as stopped, never as a failure with a Retry.
+- A session-scoped helper query (auto-name, turn summary, step consolidation) prefers that
+  session's own provider — a codex session is titled by codex, a Claude session by Claude — and
+  falls back to the other provider when the preferred one is absent or answers null. A helper
+  with no session (the MCP judge) has no provider to prefer and stays Claude-first.
+- Auto-naming never strands a session on "New session". A helper that answers null or throws
+  still writes a title cut from the prompt (`localSessionName`), and the session is retried on
+  its next prompt until a real summary lands.
 
 ## Architectural rules
 
@@ -122,7 +130,10 @@ the transport was.
   interjection.
 - `server/src/codexAppServer.contract.test.ts` — the protocol canary.
 - `server/src/openaiUsage.test.ts` — the `/wham/usage` parser.
-- `server/src/helperQuery.test.ts` — provider selection for the bridge's own queries.
+- `server/src/helperQuery.test.ts` — provider selection for the bridge's own queries, including
+  the preferred-provider fallback.
+- `server/src/sessions.autoName.test.ts` — a dead helper still names a session from its prompt,
+  a failed attempt is retried on the next one, and `nameAuto` still spends on the first try.
 - `server/src/mcpConnections.test.ts` — the codex translation of a connection, including the
   bearer-token boundary and the two connection kinds codex cannot express.
 - `server/src/workflows.providers.test.ts` — a step that changes provider.
@@ -151,6 +162,9 @@ the transport was.
   the user can only see one of.
 - **Helper queries stay on `codex exec`.** They are genuinely one-shot, so the app-server would
   mean a long-lived child on the bridge for no gain.
+- **Provider selection for a helper query is a preference, not a hard route.** A session-scoped
+  call passes its own provider; the other one is still tried when the preferred provider is
+  disconnected or comes back null, because a degraded title beats no title.
 - **Codex is the only writer of its own `config.toml`.** MCP connections reach a codex session
   through codex's `config/batchWrite` RPC rather than Lines editing the file. Same single-writer
   rule `auth.json` follows, and for the same reason.
@@ -172,3 +186,8 @@ the transport was.
   several iterations; `codexExperimental.contract.test.ts` covers the part they cannot describe by
   asking the installed binary. `requestAttestation` stays false deliberately — it opts into a
   server→client request Lines does not implement, and an unanswered request parks the turn.
+- **A manually chosen reasoning effort rides `collaborationMode`, not `turn/start.effort`** — the
+  typed field exists, but the collaboration mode is already sent on every turn for plan mode, so
+  this is one code path instead of two dials with no documented precedence. See
+  [reasoning-effort-selection](reasoning-effort-selection.md), including the measured fact that
+  drove its vocabulary: codex rejects `minimal` outright, despite OpenAI's own docs listing it.

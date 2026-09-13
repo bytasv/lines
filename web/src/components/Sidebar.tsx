@@ -598,6 +598,7 @@ export function Sidebar({
       cwd: activeProject,
       model: newSessionDefaults.model,
       permissionMode: newSessionDefaults.permissionMode,
+      reasoningEffort: newSessionDefaults.reasoningEffort,
       workflowId,
       // Empty object = let the server name the branch and the path.
       ...(worktreeMode ? { worktree: {} } : {}),

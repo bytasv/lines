@@ -27,6 +27,7 @@ import type {
   PlanComment,
   PromptAttachment,
   PromptMention,
+  ReasoningEffort,
   RewindBlockInfo,
   RewindPrompt,
   SdkShapedMessage,
@@ -38,6 +39,7 @@ import type {
   SessionStatus,
   TokenUsageBreakdown,
   TranscriptEvent,
+  UserUiSettings,
 } from '@lines/shared';
 import {
   addSpend,
@@ -49,7 +51,9 @@ import {
   isCodexNotification,
   isSessionInterruptible,
   KEEP_PLANNING_MESSAGE,
+  keepPlanningReason,
   normalizeCodexNotification,
+  planCommentsBody,
   providerForModel,
   resolveModelId,
   resultErrorText,
@@ -174,6 +178,33 @@ function engineFor(meta: Pick<SessionMeta, 'model'>): ModelProvider {
 /** True when this session's turns run through `codex exec`. */
 export function isCodexSession(meta: Pick<SessionMeta, 'model'>): boolean {
   return engineFor(meta) === 'openai';
+}
+
+/**
+ * How hard this turn should think.
+ *
+ *   plan mode + a global plan effort → that
+ *   the session's own effort          → that
+ *   otherwise                         → undefined, i.e. the provider's default
+ *
+ * One helper for both option builders, because "unset" has to mean exactly the
+ * same thing on both: the key absent from the Claude options, and `null` left
+ * for the worker to fill on the codex ones.
+ *
+ * A value the provider does not offer is dropped rather than sent. Effort is
+ * carried across a pre-first-turn model change (the composer allows one), so a
+ * session set to codex's `minimal` and then moved to Claude would otherwise fail
+ * every turn on a level Claude has never heard of.
+ */
+export function resolveReasoningEffort(
+  meta: Pick<SessionMeta, 'permissionMode' | 'reasoningEffort'>,
+  settings: Pick<UserUiSettings, 'planReasoningEffort'> | null | undefined,
+  allowed: readonly ReasoningEffort[],
+): ReasoningEffort | undefined {
+  const chosen =
+    (meta.permissionMode === 'plan' ? settings?.planReasoningEffort : undefined) ??
+    meta.reasoningEffort;
+  return chosen && allowed.includes(chosen) ? chosen : undefined;
 }
 
 /**
@@ -721,7 +752,7 @@ export function planReplyDecision(input: {
         requestId,
         // Raw user text alone reads to the model as a rejection reason, not as
         // "stay in plan mode" — hence the wrapper.
-        denyMessage: `${KEEP_PLANNING_MESSAGE}\n\nThe user's message:\n${text}`,
+        denyMessage: keepPlanningReason(text),
         alsoQueue: false,
       };
 }
@@ -1093,8 +1124,24 @@ export class SessionManager {
   /** Sessions with a rewind in flight. Claimed before the fork's await, so two
    *  rapid requests cannot both pass the gate (see rewindSession). */
   private rewinding = new Set<string>();
+  /**
+   * Sessions whose auto-name got nothing out of the helper and are owed another
+   * attempt on their next prompt (see maybeAutoName).
+   *
+   * Deliberately separate from `meta.nameAuto`, which stays a one-shot flip: the
+   * Sidebar reads `nameAuto === true` as "never prompted, safe to delete outright
+   * instead of archiving", so un-flipping it to retry a title would quietly turn a
+   * session holding real work into a delete-outright one. Live-only, like
+   * LiveState.recovery — a restart in between simply keeps the fallback title.
+   */
+  private nameRetry = new Set<string>();
   /** Access token each live worker query was spawned with (see pushTurn). */
   private queryTokens = new Map<string, string | null>();
+  /**
+   * Claude sessions whose live query was built with options that are now out of
+   * date, so the next push has to rebuild it (see markQueryStale).
+   */
+  private staleQueries = new Set<string>();
   /**
    * Sessions whose query must survive idle recycling, and when the hold started.
    *
@@ -1419,12 +1466,16 @@ export class SessionManager {
     cwd: string;
     model: string;
     permissionMode: PermissionMode;
+    reasoningEffort?: ReasoningEffort;
   }): SessionMeta {
     const meta: SessionMeta = {
       id: randomUUID(),
       name: params.name,
       cwd: params.cwd,
       model: params.model,
+      // Absent unless the user has a new-session default, so a session created
+      // without one keeps running at the provider's own effort.
+      ...(params.reasoningEffort ? { reasoningEffort: params.reasoningEffort } : {}),
       permissionMode: params.permissionMode,
       status: 'idle',
       createdAt: Date.now(),
@@ -1704,8 +1755,17 @@ export class SessionManager {
     // Global, not per-session: read fresh on every push, so a Settings toggle
     // takes effect the next time this session's worker starts a query, with
     // nothing cached on the meta itself. On unless explicitly `false`.
+    const settings = this.store.loadSettings();
     const appendParts: string[] = [];
-    if (this.store.loadSettings()?.compressResponses !== false) appendParts.push(COMPRESS_RESPONSES_PROMPT);
+    if (settings?.compressResponses !== false) appendParts.push(COMPRESS_RESPONSES_PROMPT);
+
+    // Same "read fresh, cache nothing" rule as the toggle above, for the same
+    // reason: the plan-mode effort is a global setting, not session state.
+    const effort = resolveReasoningEffort(
+      meta,
+      settings,
+      capabilitiesFor('anthropic').reasoningEfforts,
+    );
 
     // cwd stays this session's own root so settingSources and CLAUDE.md
     // resolution keep pointing at it; the project's other roots ride along as
@@ -1727,6 +1787,9 @@ export class SessionManager {
       ...(Object.keys(mcpServers).length ? { mcpServers } : {}),
       ...(extraRoots.length ? { additionalDirectories: extraRoots } : {}),
       model: resolveModelId(meta.model),
+      // Absent, not null, when unset: an untouched session's serialized options
+      // stay byte-identical to what they were before effort existed.
+      ...(effort ? { effort } : {}),
       permissionMode: sdkPermissionMode(meta.permissionMode),
       // Only *permits* bypassPermissions to be selected — the bridge's own
       // permission handlers are the real gate, and they keep the always-ask
@@ -1774,7 +1837,9 @@ export class SessionManager {
     // cached on the meta. `developerInstructions` is the app-server's hook for it;
     // `codex exec` had none, which is why the toggle used to be a silent no-op on
     // an OpenAI session while claiming to apply to every session.
-    const compress = this.store.loadSettings()?.compressResponses !== false;
+    const settings = this.store.loadSettings();
+    const compress = settings?.compressResponses !== false;
+    const effort = resolveReasoningEffort(meta, settings, capabilitiesFor('openai').reasoningEfforts);
     const codexMcp = this.mcp?.codexServerConfigs();
     const instructions = compress ? COMPRESS_RESPONSES_PROMPT : '';
     // Codex spawns MCP servers as child processes, so Lines' own tools reach it
@@ -1798,7 +1863,9 @@ export class SessionManager {
       // grant and the plan contract live inside codex's managed Plan
       // instructions, and only the real mode gets them. Sent on every turn so a
       // session that planned once is released again — see codexPlanMode.ts.
-      collaborationMode: codexCollaborationMode(meta.permissionMode === 'plan', model),
+      // The effort rides here too, on every turn: unset leaves `reasoning_effort`
+      // null for the worker to fill from codex's own preset, exactly as before.
+      collaborationMode: codexCollaborationMode(meta.permissionMode === 'plan', model, effort),
       // The one place OpenAI credentials enter a turn: as a directory, not a
       // token. See openaiAuth.ts for why Lines holds no copy of the tokens.
       codexHome: this.store.codexHome(),
@@ -1919,10 +1986,34 @@ export class SessionManager {
     this.setBackgroundTasks(sessionId, []);
   }
 
+  /**
+   * Mark this session's live query as built on stale options, so the next push
+   * drops it and builds a fresh one (`resume` keeps the conversation).
+   *
+   * Needed because the worker reuses a live query for a session and **discards
+   * the options of every later push** (`ensureSession` returns early when it
+   * already holds one). Anything that only lives in those options — the `effort`
+   * key — would otherwise look applied in the UI, change nothing in the model's
+   * behaviour, and then land at an unpredictable later moment when something else
+   * happened to recycle the query.
+   *
+   * Deferred to the next push rather than closed here on purpose: it is the one
+   * point every Claude turn goes through, so a busy session finishes its turn
+   * untouched, a session holding background tasks keeps them until it is prompted
+   * again, and an in-flight MCP OAuth handshake keeps its verifier — the same
+   * three cases `recycleIdleQueries` exempts, without a second copy of the guard.
+   * "Takes effect on the next turn" is exactly what the UI promises.
+   */
+  private markQueryStale(sessionId: string) {
+    this.staleQueries.add(sessionId);
+  }
+
   /** Close a session's worker query and forget the token it was spawned with. */
   private closeQuery(sessionId: string) {
     this.worker.close(sessionId);
     this.queryTokens.delete(sessionId);
+    // The next push builds a fresh query anyway.
+    this.staleQueries.delete(sessionId);
     // The CLI child that owned them is gone.
     this.setBackgroundTasks(sessionId, []);
   }
@@ -2074,7 +2165,10 @@ export class SessionManager {
    *  can be pinned to a token that has since rotated — reusing it 401s that one
    *  session forever while every other session runs fine on the current token. */
   private pushWithToken(meta: SessionMeta, message: Record<string, unknown>, accessToken: string | null) {
-    if (this.queryTokens.get(meta.id) !== accessToken) this.closeQuery(meta.id);
+    // One close, not two: closeQuery forgets the token as well, so testing the
+    // token *after* a stale close would always see a mismatch and close again.
+    const stale = this.staleQueries.delete(meta.id);
+    if (stale || this.queryTokens.get(meta.id) !== accessToken) this.closeQuery(meta.id);
     this.queryTokens.set(meta.id, accessToken);
     // Every session gets the workflow tool surface; the manifest is static, and
     // the calls it produces are routed back to this user's context by the bridge.
@@ -2615,6 +2709,48 @@ export class SessionManager {
       })
       .filter((a): a is PromptAttachment => a !== null);
     return { text: item.text, attachments };
+  }
+
+  /**
+   * Take the queued messages that a "Keep planning" click should carry into its
+   * deny reason. Mirrors `takeQueuedText`, but folds a whole leading run instead
+   * of one item, because none of them has any other way out: a keep-planning deny
+   * is answered as a tool_result inside the live turn, so no `result` ever lands
+   * and `maybeFlush` never opens.
+   *
+   * Only the leading run authored by the clicker is taken. A foreign-authored
+   * item stops the walk: its words would otherwise be re-attributed to the
+   * clicker on the resolved card, and a guest's click would release the owner's
+   * prompt past the `mayPrompt` gate.
+   */
+  private takeQueuedPlanReply(meta: SessionMeta, actor?: Actor): string[] {
+    // A paused queue is a guest's prompt held for the owner — never auto-released.
+    if (!meta.queued?.length || meta.queuePaused) return [];
+    const out: string[] = [];
+    let changed = false;
+    while (meta.queued.length) {
+      const item = meta.queued[0];
+      // Both undefined = the machine owner, the same comparison editQueued makes.
+      if (item.actor?.userId !== actor?.userId) break;
+      const text = item.text.trim();
+      if (text) out.push(text);
+      if (item.attachments?.length) {
+        if (!text) break;
+        changed = true;
+        // Attachments can't ride a tool_result, so the row keeps its place in the
+        // queue and delivers them after approval. `mentions`/`draft` describe the
+        // text that just left, so they go with it.
+        item.text = '';
+        item.mentions = undefined;
+        item.draft = undefined;
+        break;
+      }
+      meta.queued.shift();
+      changed = true;
+    }
+    // Before the caller resolves, so no client renders a row the model already has.
+    if (changed) this.upsert(meta);
+    return out;
   }
 
   /** Drop a queued prompt before it is sent. */
@@ -3453,7 +3589,7 @@ export class SessionManager {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timedOut = Symbol('consolidate-timeout');
       const output = await Promise.race([
-        this.consolidateQuery(turns),
+        this.consolidateQuery(sessionId, turns),
         new Promise<typeof timedOut>((resolve) => {
           timer = setTimeout(() => resolve(timedOut), this.consolidateTimeoutMs);
           timer.unref?.();
@@ -3472,7 +3608,10 @@ export class SessionManager {
   }
 
   /** The consolidation query itself — everything consolidateStepOutput has to bound. */
-  private async consolidateQuery(turns: { user: string; output: string }[]): Promise<string | null> {
+  private async consolidateQuery(
+    sessionId: string,
+    turns: { user: string; output: string }[],
+  ): Promise<string | null> {
     try {
       const initialPrompt = turns[0].user.slice(0, 4000);
       const attempts = turns
@@ -3494,6 +3633,7 @@ export class SessionManager {
         'commentary about what changed.';
 
       return await this.helper({
+        sessionId,
         prompt,
         systemPrompt:
           'You consolidate an iterated workflow step into its single final ' +
@@ -3573,20 +3713,31 @@ export class SessionManager {
    * the timeout all live in helperQuery.ts, so the four call sites cannot drift
    * on any of it. Answers null rather than throwing — every caller has a fallback,
    * and a missing title must never become a failed turn.
+   *
+   * `sessionId` makes the query session-scoped: it runs on that session's own
+   * provider first (helperQuery still falls back to the other), and in that
+   * session's directory. A helper with no session — the MCP judge — passes none
+   * and keeps the unprefixed Claude-first order.
    */
   private helper(request: {
     prompt: string;
     systemPrompt: string;
     claudeModel: string;
+    sessionId?: string;
   }): Promise<string | null> {
+    const { sessionId, ...rest } = request;
+    const meta = sessionId ? this.sessions.get(sessionId) : undefined;
     return devRuntime.run(() => runHelperQuery(
       {
         claudeToken: () => this.ownerToken(),
-        // Null when no OpenAI account is connected, which is what makes the codex
-        // branch unreachable for a Claude-only user.
+        // Null when no OpenAI account is connected, which is what leaves a
+        // Claude-only user on the Claude path whatever the session's provider is.
         codexHome: () => (this.openaiAuth?.isLoggedIn() ? this.store.codexHome() : null),
       },
-      request,
+      {
+        ...rest,
+        ...(meta ? { prefer: providerForModel(meta.model), cwd: meta.cwd } : {}),
+      },
     ));
   }
 
@@ -3604,10 +3755,14 @@ export class SessionManager {
    * immediately so a slow title query can't fire twice or clobber a manual rename.
    * Workflow sessions call this with the task description (their prompts arrive
    * with source 'workflow', which skips the auto-name path in prompt()).
+   *
+   * A session in `nameRetry` — its last attempt got nothing out of the helper —
+   * is tried again on the next prompt, even though `nameAuto` is already spent.
    */
   maybeAutoName(sessionId: string, text: string) {
     const meta = this.sessions.get(sessionId);
-    if (!meta?.nameAuto) return;
+    if (!meta) return;
+    if (!meta.nameAuto && !this.nameRetry.has(sessionId)) return;
     meta.nameAuto = false;
     void this.autoName(sessionId, text);
   }
@@ -3625,8 +3780,23 @@ export class SessionManager {
       const meta = this.sessions.get(sessionId);
       if (meta) this.onAutoNamed?.(meta, title);
     };
+    /**
+     * Write whatever title we ended up with. Shared by the answered path, the
+     * no-answer path and the catch, because every one of them has to leave the
+     * session named: a helper that failed once used to strand it on "New
+     * session" forever, since nothing retried and the catch wrote nothing.
+     */
+    const apply = (title: string) => {
+      if (!title) return settled('');
+      const meta = this.sessions.get(sessionId);
+      if (!meta) return;
+      meta.name = title;
+      this.upsert(meta);
+      settled(title);
+    };
     try {
       const answer = await this.helper({
+        sessionId,
         prompt:
           'Summarize the following task in a 3-6 word title. Output only the ' +
           'title itself: no quotes, no trailing punctuation, no preamble, no ' +
@@ -3640,20 +3810,25 @@ export class SessionManager {
           'refuse, and never add commentary — you only output the title.',
         claudeModel: 'claude-haiku-4-5-20251001',
       });
-      // Last resort, when no provider at all could answer: a title cut from the
-      // prompt still beats every session reading "New session".
-      const title = answer
-        ? answer.replace(/^["']|["']$/g, '').slice(0, 60)
-        : localSessionName(prompt);
-      if (!title) return settled('');
-      const meta = this.sessions.get(sessionId);
-      if (!meta) return;
-      meta.name = title;
-      this.upsert(meta);
-      settled(title);
+      if (answer) {
+        this.nameRetry.delete(sessionId);
+        return apply(answer.replace(/^["']|["']$/g, '').slice(0, 60));
+      }
+      // No provider could answer: a title cut from the prompt still beats the
+      // session reading "New session", and the next prompt gets another go at a
+      // real summary.
+      this.nameRetry.add(sessionId);
+      apply(localSessionName(prompt));
     } catch (err) {
       console.warn('[autoName]', err);
-      settled('');
+      this.nameRetry.add(sessionId);
+      // autoName is fire-and-forget (`void`), so a throw from the fallback write
+      // itself would surface as an unhandled rejection rather than a lost title.
+      try {
+        apply(localSessionName(prompt));
+      } catch (writeErr) {
+        console.warn('[autoName]', writeErr);
+      }
     }
   }
 
@@ -3689,6 +3864,7 @@ export class SessionManager {
         'collapsed activity card. Be specific about files/commands touched. No preamble.';
 
       const answer = await this.helper({
+        sessionId,
         prompt,
         systemPrompt:
           'You summarize a coding agent\'s completed turn in 1-2 plain sentences. ' +
@@ -3942,11 +4118,38 @@ export class SessionManager {
     return { ok: true };
   }
 
+  /**
+   * Set how hard the session thinks, or clear it back to the provider's default.
+   *
+   * No cross-provider refusal and no fresh start: unlike a model change, this
+   * never strands a conversation. A value the session's provider does not offer
+   * is stored but ignored at push time (see `resolveReasoningEffort`), so moving a
+   * session between providers before its first turn cannot wedge it.
+   *
+   * Takes effect on the next turn either way — codex binds it at `turn/start`,
+   * and the Claude query is marked stale so the next push rebuilds it.
+   */
+  setReasoningEffort(sessionId: string, effort: ReasoningEffort | null) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    if (meta.reasoningEffort === (effort ?? undefined)) return;
+    meta.reasoningEffort = effort ?? undefined;
+    this.upsert(meta);
+    if (!isCodexSession(meta)) this.markQueryStale(sessionId);
+  }
+
   setPermissionMode(sessionId: string, mode: PermissionMode) {
     const meta = this.sessions.get(sessionId);
     if (!meta) return;
+    // Entering or leaving plan mode changes which effort the next turn resolves
+    // to, and effort only exists in the query's spawn options — so the Claude
+    // query has to be rebuilt for it, the same way an effort change does it.
+    const planEffortMoves =
+      this.store.loadSettings()?.planReasoningEffort !== undefined &&
+      (mode === 'plan') !== (meta.permissionMode === 'plan');
     meta.permissionMode = mode;
     this.upsert(meta);
+    if (planEffortMoves && !isCodexSession(meta)) this.markQueryStale(sessionId);
     // Codex binds its sandbox at thread creation, so there is nothing live to
     // tell — the next push carries the new mode in its thread options. Same
     // reasoning as setModel, and the worker drops the message either way.
@@ -4025,10 +4228,23 @@ export class SessionManager {
     // Comments belong to a plan review and nowhere else; anything attached to
     // another tool's card is dropped rather than smuggled into its reason.
     const comments = original?.toolName === 'ExitPlanMode' ? (planComments ?? []) : [];
-    // The server owns the wording on a deny, so "Refine with comments" and the
-    // typed composer reply read identically to the model — whatever the client
-    // sent as `denyMessage` is discarded.
-    if (!allow && comments.length) denyMessage = formatPlanComments(comments, 'refine');
+    // The server owns the wording on a deny, so "Refine with comments", the typed
+    // composer reply, and messages waiting in the queue read identically to the
+    // model — whatever the client sent as `denyMessage` is discarded.
+    //
+    // The queue is folded in here because a keep-planning deny is answered as a
+    // tool_result inside the live turn: no `result` is emitted, so `maybeFlush`
+    // never opens and a message typed before the card went up would be stranded
+    // until the plan is finally approved. 'plan-reply' is excluded — it already
+    // carries the user's words — and `planStepGate` requires `allow`, so it is
+    // excluded on its own. With an empty queue and no comments this leaves
+    // `denyMessage` exactly as the caller sent it.
+    if (!allow && original?.toolName === 'ExitPlanMode') {
+      const folded =
+        source === 'user' && meta0 ? this.takeQueuedPlanReply(meta0, actor) : ([] as string[]);
+      const body = [planCommentsBody(comments), ...folded].filter(Boolean).join('\n\n');
+      if (body) denyMessage = keepPlanningReason(body);
+    }
     // updatedInput is recorded so a worker rpc re-send after a bridge restart
     // can be answered from the transcript with the exact approved input.
     this.emitEvent(sessionId, 'permission', {

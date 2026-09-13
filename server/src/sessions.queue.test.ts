@@ -562,3 +562,126 @@ describe('interjectQueued', () => {
     assert.equal(h.pushes.length, 0);
   });
 });
+
+/**
+ * The fold a "Keep planning" click performs. Its whole reason for existing is
+ * that a keep-planning deny never settles the turn, so these rows have no other
+ * way out — see resolvePermission and sessions.permission.test.ts for the deny
+ * end of it.
+ */
+describe('takeQueuedPlanReply', () => {
+  const take = (h: ReturnType<typeof harness>, actor?: Actor) =>
+    (
+      h.sessions as unknown as {
+        takeQueuedPlanReply(meta: SessionMeta, actor?: Actor): string[];
+      }
+    ).takeQueuedPlanReply(h.sessions.get(SID)!, actor);
+
+  test('folds a text-only item and removes its row', () => {
+    const h = harness();
+    seed(h.sessions, [item({ text: '  add a rollback step  ' })]);
+
+    const before = h.broadcasts.length;
+    assert.deepEqual(take(h), ['add a rollback step']);
+    assert.deepEqual(h.queue(), []);
+    // Broadcast before the caller resolves: no client may render a row the model
+    // has already been handed.
+    assert.ok(h.broadcasts.length > before);
+  });
+
+  test('folds the whole leading run, in order', () => {
+    const h = harness();
+    seed(h.sessions, [
+      item({ id: 'q0', text: 'first' }),
+      item({ id: 'q1', text: 'second' }),
+      item({ id: 'q2', text: 'third' }),
+    ]);
+
+    assert.deepEqual(take(h), ['first', 'second', 'third']);
+    assert.deepEqual(h.queue(), []);
+  });
+
+  test('a paused queue is left intact', () => {
+    // A guest's held prompt waits for the owner's release, never for a button
+    // that was aimed at the plan card.
+    const h = harness({ queuePaused: true });
+    seed(h.sessions, [item({ text: 'held' })]);
+
+    const before = h.broadcasts.length;
+    assert.deepEqual(take(h), []);
+    assert.equal(h.queue().length, 1);
+    assert.equal(h.broadcasts.length, before);
+  });
+
+  test('a foreign-authored item stops the walk and keeps FIFO', () => {
+    const h = harness();
+    seed(h.sessions, [
+      item({ id: 'q0', text: 'mine', actor: ALICE }),
+      item({ id: 'q1', text: 'theirs', actor: BOB }),
+      item({ id: 'q2', text: 'mine again', actor: ALICE }),
+    ]);
+
+    assert.deepEqual(take(h, ALICE), ['mine']);
+    assert.deepEqual(
+      h.queue().map((q) => q.id),
+      ['q1', 'q2'],
+    );
+  });
+
+  test('an unattributed item belongs to the machine owner', () => {
+    const h = harness();
+    seed(h.sessions, [
+      item({ id: 'q0', text: 'owner wrote this' }),
+      item({ id: 'q1', text: 'guest', actor: ALICE }),
+    ]);
+
+    assert.deepEqual(take(h), ['owner wrote this']);
+    assert.deepEqual(
+      h.queue().map((q) => q.id),
+      ['q1'],
+    );
+  });
+
+  test('an attachments item keeps its row with the text stripped, and stops the walk', () => {
+    const h = harness();
+    const att = h.stage('shot.png');
+    seed(h.sessions, [
+      item({
+        id: 'q0',
+        text: 'look at this',
+        attachments: [att],
+        mentions: [{ kind: 'feature', id: 'f1', label: 'Auth' }],
+        draft: { text: '@Auth look at this', ranges: [range('Auth')] },
+      }),
+      item({ id: 'q1', text: 'after' }),
+    ]);
+
+    assert.deepEqual(take(h), ['look at this']);
+    const [row] = h.queue();
+    assert.equal(row.id, 'q0', 'the row holds its place so the file still arrives in order');
+    assert.equal(row.text, '');
+    assert.equal(row.mentions, undefined);
+    assert.equal(row.draft, undefined);
+    assert.deepEqual(row.attachments, [att]);
+    assert.equal(h.onDisk(att), true);
+    assert.equal(h.queue().length, 2, 'the walk stopped at the attachments row');
+  });
+
+  test('an attachment-only row is left completely alone', () => {
+    const h = harness();
+    const att = h.stage('shot.png');
+    seed(h.sessions, [item({ text: '', attachments: [att] })]);
+
+    const before = h.broadcasts.length;
+    assert.deepEqual(take(h), []);
+    assert.equal(h.queue().length, 1);
+    assert.equal(h.broadcasts.length, before, 'nothing changed, so nothing to broadcast');
+  });
+
+  test('an empty queue folds to nothing', () => {
+    const h = harness();
+    const before = h.broadcasts.length;
+    assert.deepEqual(take(h), []);
+    assert.equal(h.broadcasts.length, before);
+  });
+});

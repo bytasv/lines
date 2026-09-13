@@ -1,6 +1,7 @@
 import { Text } from '@mantine/core';
 import type { ComboboxItem, SelectProps } from '@mantine/core';
-import type { ModelOption, ModelProvider } from '@lines/shared';
+import type { ModelOption, ModelProvider, ReasoningEffort } from '@lines/shared';
+import { capabilitiesFor } from '@lines/shared';
 
 /** Any Select item that renders a dimmed second line under its label. */
 export interface DescribedItem extends ComboboxItem {
@@ -56,6 +57,49 @@ export function modelSelectData(
   }
   return data;
 }
+
+/**
+ * The "no choice made" row of an effort Select. A real option rather than an
+ * empty value, because Mantine renders an unmatched value as a blank input — and
+ * "unset" is the default every session starts in, so it has to read as a choice.
+ */
+export const AUTO_EFFORT = 'auto';
+
+const EFFORT_LABELS: Record<ReasoningEffort, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+};
+
+/**
+ * Effort options for one engine, weakest first, led by Auto.
+ *
+ * Takes the provider's own list (`ProviderCapabilities.reasoningEfforts`) rather
+ * than a vendor's vocabulary spelt out at the call site — same reason
+ * {@link modelSelectData} takes the model list: this module is the single entry
+ * point every described Select goes through.
+ */
+export function effortSelectData(
+  efforts: readonly ReasoningEffort[],
+  ensureValue?: string,
+): DescribedItem[] {
+  const data: DescribedItem[] = [
+    { value: AUTO_EFFORT, label: 'Auto', description: 'The model’s own default' },
+    ...efforts.map((e) => ({ value: e, label: EFFORT_LABELS[e] })),
+  ];
+  // Same trick modelSelectData uses: a stored level this provider no longer
+  // offers renders as a disabled row instead of blanking the Select.
+  if (ensureValue && !data.some((e) => e.value === ensureValue)) {
+    data.push({ value: ensureValue, label: ensureValue, description: 'Not available here', disabled: true });
+  }
+  return data;
+}
+
+/** What a workflow step may be set to: a step runs on Claude only (an OpenAI
+ *  model on a step is a validation error), so codex's `minimal` is unreachable. */
+export const STEP_EFFORTS = capabilitiesFor('anthropic').reasoningEfforts;
 
 export const renderOptionWithDescription: SelectProps['renderOption'] = ({ option }) => (
   <div>

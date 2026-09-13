@@ -16,7 +16,7 @@
  * the flags move as the integration does, and flipping one is how a capability
  * ships.
  */
-import type { ModelProvider } from './types.ts';
+import type { ModelProvider, ReasoningEffort } from './types.ts';
 
 export interface ProviderCapabilities {
   /** Token-level deltas reach the transcript while the turn runs. */
@@ -39,6 +39,16 @@ export interface ProviderCapabilities {
   mcpConnections: boolean;
   /** Turns report a USD cost, not just tokens. */
   cost: boolean;
+  /**
+   * Reasoning-effort levels this engine accepts, weakest first. Empty = no
+   * control, and the picker hides itself the way `linesTools` and `rewind`
+   * already gate UI.
+   *
+   * A list rather than a boolean plus a table elsewhere: the picker needs the
+   * values anyway, and a flag would put the vocabulary somewhere this file could
+   * not keep honest.
+   */
+  reasoningEfforts: readonly ReasoningEffort[];
 }
 
 const ANTHROPIC: ProviderCapabilities = {
@@ -52,6 +62,8 @@ const ANTHROPIC: ProviderCapabilities = {
   linesTools: true,
   mcpConnections: true,
   cost: true,
+  // The Agent SDK's top-level `effort` option (`EffortLevel` in sdk.d.ts).
+  reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 /**
@@ -94,6 +106,14 @@ const OPENAI: ProviderCapabilities = {
   linesTools: true,
   mcpConnections: true,
   cost: false,
+  // Measured against a real `codex app-server`, not taken from OpenAI's config
+  // reference: that reference lists `minimal`, and a turn sent with it fails
+  // outright — "Unsupported value: 'minimal' is not supported with the
+  // 'gpt-5.6-terra' model. Supported values are: 'none', 'low', 'medium',
+  // 'high', 'xhigh', and 'max'." `none` is left out because "no choice" is
+  // already expressed by the field being absent, which hands the turn to codex's
+  // own preset rather than turning reasoning off.
+  reasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 const TABLE: Record<ModelProvider, ProviderCapabilities> = {
