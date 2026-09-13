@@ -703,6 +703,49 @@ approval requests for 5 commands; `on-request` + read-only produced 0 for a read
 write. `bypassPermissions` is safe *because* Lines is the gate — the sandbox is a second line,
 not the only one, and the always-ask tools still stop.
 
+### Plan mode is codex's own, not a prompt
+
+The sandbox above is what stops a plan-mode turn writing. What makes it *plan* is separate:
+codex's **collaboration mode**, a first-class preset selected per turn with `turn/start`'s
+`collaborationMode: { mode: 'plan' | 'default', settings: {...} }`.
+
+That field, and `collaborationMode/list` which discovers the presets, exist only for a client
+that declares `experimentalApi` at `initialize`. Lines sent `capabilities: null` for the whole
+first cut of this integration, so neither existed for it — and because
+`codex app-server generate-ts` runs under the same handshake, neither appears in
+`shared/codexProtocol` either. **The vendored types are a filtered view of the API, not the whole
+of it**, which is the trap that cost this feature a working plan mode: the types looked like
+proof that plan mode was not exposed.
+
+An earlier cut therefore hand-wrote a `<collaboration_mode>Plan</collaboration_mode>` block and
+passed it as `developerInstructions`, on the theory that codex's rule — a mode changes when
+developer instructions carrying a different tag arrive — applied to any client text. It does not;
+that governs codex's own *managed* instructions. Measured on one prompt:
+
+| | questions | plan items |
+| --- | --- | --- |
+| hand-written tag | 0 | 0 |
+| `collaborationMode: {mode:'plan'}` | 2 | 1 |
+
+Real plan mode asks clarifying questions through `request_user_input`, stays read-only, and emits
+a dedicated `plan` item. The tool grant and the plan contract live inside codex's managed Plan
+instructions, and only the real mode gets them.
+
+Two consequences worth knowing:
+
+- **`reasoning_effort` must be a real value.** A `null` is taken literally rather than as "use the
+  preset", and a plan turn sent with null asks nothing and emits no plan item — plan mode in name
+  only. The worker fills it from `collaborationMode/list` (Plan reports `medium`) so the value
+  stays OpenAI's; `applyModePreset` in `workerCodex.ts`.
+- **The mode is sent on every turn, including ordinary ones.** Codex's mode persists until a
+  different one replaces it and a resumed thread carries its history, so a session that planned
+  once would otherwise refuse to edit for the rest of its life.
+
+`codexExperimental.contract.test.ts` guards the part `generate-ts` cannot describe: it spawns the
+installed binary and asserts a Plan mode is still listed. Verified that regeneration cannot close
+this gap — the experimental surface is absent from the output with and without
+`--enable collaboration_modes`.
+
 `acceptForSession` is deliberately never sent. Lines keeps its own allowlist, and asking codex
 to remember a second copy would split one decision across two stores that cannot be kept in step
 and that the user can only see one of. See [openai-codex-sessions](openai-codex-sessions.md).

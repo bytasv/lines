@@ -9,7 +9,8 @@ A second agent provider. A session whose model is an OpenAI one runs its turns t
 Settings → Account is how the account gets there.
 
 Everything that makes a session a session is at parity: token streaming, permission cards,
-plan mode, Send now, compaction, the context ring, rewind, the user's MCP connections and
+plan mode (codex's own collaboration mode, with its clarifying questions routed into the
+`AskUserQuestion` card), Send now, compaction, the context ring, rewind, the user's MCP connections and
 workflow steps all work on a codex session and go through the *same* bridge machinery a Claude
 session does — including Lines' own workflow tools, served to codex by a real stdio MCP server
 (see [workflow-mcp-tools](workflow-mcp-tools.md)) since codex cannot host one in-process. `cost`
@@ -157,3 +158,12 @@ the transport was.
 - **A provider change inside a workflow forces a fresh start.** Nothing links a
   `claudeSessionId` to a `codexThreadId`, so the conversation is dropped rather than handed to a
   model that cannot read it. See [workflow-step-lifecycle](workflow-step-lifecycle.md).
+- **The handshake declares `experimentalApi`, and the vendored types do not describe everything.**
+  `initialize` sends `capabilities: { experimentalApi: true, requestAttestation: false }`. Plan
+  mode lives behind that flag: `collaborationMode/list` and `turn/start`'s `collaborationMode`
+  field exist only for a client that declares it, and `generate-ts` runs *without* it — so
+  `shared/codexProtocol` omits them, with or without `--enable collaboration_modes` (verified).
+  Treating those types as the complete API is what cost this integration a working plan mode for
+  several iterations; `codexExperimental.contract.test.ts` covers the part they cannot describe by
+  asking the installed binary. `requestAttestation` stays false deliberately — it opts into a
+  server→client request Lines does not implement, and an unanswered request parks the turn.
