@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/*.test.ts && node --test scripts/dev-runtime.test.mjs",
     "migrate": "tsx scripts/migrate-user.ts",
+    "repair:spend": "tsx scripts/repair-spend.ts",
     "pair": "tsx scripts/pair-device.ts",
     "gen:codex-protocol": "codex app-server generate-ts --out ../shared/codexProtocol && node scripts/normalize-codex-protocol.mjs ../shared/codexProtocol"
   },

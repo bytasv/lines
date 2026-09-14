@@ -335,7 +335,9 @@
         "web/src/store.ts",
         "web/src/components/UsageIndicator.tsx",
         "shared/usageByModel.ts",
+        "shared/resultSpend.ts",
         "server/src/sessions.ts",
+        "server/scripts/repair-spend.ts",
         "web/src/components/Sidebar.tsx",
         "web/src/lib/format.ts",
         "server/src/workflows.ts",
@@ -351,6 +353,10 @@
         "addSpend",
         "mergeSpend",
         "sortedSpend",
+        "resultSpend",
+        "startsQueryLifetime",
+        "foldResultSpend",
+        "LiveState.lastCostCumulativeUsd",
         "SessionMeta.totalCostUsd",
         "SessionMeta.totalTokens",
         "SessionMeta.totalDurationMs",
@@ -364,9 +370,13 @@
       ],
       "tests": [
         "server/src/usageByModel.test.ts",
+        "server/src/resultSpend.test.ts",
         "server/src/sessions.ended.test.ts"
       ],
       "businessRules": [
+        "result.total_cost_usd is cumulative across the query-process lifetime, not per-turn; a turn's billed cost is the delta against the last reading billed for that lifetime (resultSpend), with the first reading of a new lifetime billed whole",
+        "a lifetime boundary the runtime did not observe closing is still caught: a cumulative reading below the last one stored, or startsQueryLifetime detecting the cumulative modelUsage tokens equal this turn's own usage, forces the whole reading to be billed instead of a delta",
+        "historical totalCostUsd/lastCostUsd accumulated before the delta fix are inflated and additive-only, so they never self-correct; server/scripts/repair-spend.ts is a one-time, per-machine, dry-run-by-default backfill from surviving transcript result events",
         "no login, no chip - enforced server-side (poller never fetches, logout nulls snapshot) and client-side (auth.loggedIn gate)",
         "{type: 'usage', usage: null} means auth is gone (logout or revoked/expired OAuth session), nothing else",
         "a stale snapshot survives transient fetch failures; staleness is shown via 'Updated Xm ago', never by hiding the chip",
@@ -395,7 +405,9 @@
         "permission-wait time is deducted via LiveState.permissionWaitMs (measured from askPermission call to resolution) rather than switching to the SDK's duration_api_ms, which would also strip genuine tool-execution time",
         "reuses the existing per-turn SessionMeta.lastCostUsd accumulation instead of adding a new cost-tracking path",
         "tokens mirror the same pattern via a new SessionMeta.lastTokens field rather than a separate tracking mechanism",
-        "permission-wait time is deducted via LiveState.permissionWaitMs rather than the SDK's duration_api_ms, which would also strip genuine tool-execution time"
+        "permission-wait time is deducted via LiveState.permissionWaitMs rather than the SDK's duration_api_ms, which would also strip genuine tool-execution time",
+        "the query-lifetime-boundary rule for cost lives in shared/resultSpend.ts rather than inline in server/src/sessions.ts, so the live accumulator and the standalone repair-spend.ts script share one definition of a lifetime boundary and cannot diverge",
+        "repair-spend.ts is a throwaway script, not startup migration code, following the bridge-running guard / dry-run-default / JSON-backup pattern established by server/scripts/migrate-user.ts"
       ],
       "relatedDecisions": []
     },

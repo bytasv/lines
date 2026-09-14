@@ -40,6 +40,13 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 - `server/src/sessions.ts` — accumulates cost/tokens/duration from each turn's SDK `result`
   message; tags each settled turn's spend onto `costByModel`; sets `SessionMeta.lastTokens` /
   `SessionMeta.lastDurationMs` per turn
+- `shared/resultSpend.ts` — `resultSpend`, `startsQueryLifetime`, `foldResultSpend`: turns a
+  `result`'s cumulative `total_cost_usd` into that turn's own delta. Used by both the live
+  accumulator in `server/src/sessions.ts` and the one-time repair script, so they cannot disagree
+  about where a query lifetime starts.
+- `server/scripts/repair-spend.ts` — one-time local backfill (`npm run repair:spend -w server`)
+  that recomputes `totalCostUsd`/`lastCostUsd`/`costByModel` from transcript `result` events for
+  sessions whose totals predate the delta fix
 - `server/src/workflows.ts` — `WorkflowEngine.onWorkflowTurnComplete` (accumulates all three
   per-step numbers)
 - `web/src/components/Sidebar.tsx` — renders date (EU format), cost, token icon + tooltip,
@@ -60,6 +67,17 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   incrementing `turns` once per call
 - `mergeSpend(maps)` — sums an array of (possibly `undefined`) maps into one rollup
 - `sortedSpend(map)` — rows ordered by `costUsd` descending
+- `resultSpend(msg, previousCumulativeUsd)` — this turn's own cost: the delta against the last
+  cumulative reading billed for the same query lifetime, or the reading whole at a lifetime
+  boundary
+- `startsQueryLifetime(msg)` — true when a `result`'s cumulative `modelUsage` token total equals
+  its own per-turn `usage`, meaning the running total consists of just this turn (a fresh query
+  process)
+- `foldResultSpend(results)` — folds a transcript's `result` events into `{ totalUsd, lastUsd }`,
+  the recomputation the repair script and its test both drive
+- `LiveState.lastCostCumulativeUsd` — the last `total_cost_usd` reading billed for the
+  session's currently-open query lifetime; cleared in `closeQuery` so the next lifetime's first
+  turn is billed whole
 - `SessionMeta.totalCostUsd` — cumulative USD cost across the session
 - `SessionMeta.totalTokens` — cumulative tokens across the session (input + output + cache
   creation + cache read), summed from `result.usage` per turn
@@ -93,20 +111,34 @@ from it.
 ### Spend by model
 
 SDK `result` message → the same accumulate-on-`result` pass in `server/src/sessions.ts` that
-already owns `totalCostUsd`/`totalTokens` also calls
-`addSpend(metaNow.costByModel, resolveModelId(metaNow.model), cost, turnTokens)` → persisted via
-the `SessionMeta` upsert → `UsageIndicator` reads
-`mergeSpend(sessions.map(s => s.costByModel))` for the global rollup and `session.costByModel`
-for the current session, both rendered via `sortedSpend`.
+already owns `totalCostUsd`/`totalTokens` resolves the turn's own cost via `resultSpend` (see
+Per-session totals below) and calls
+`addSpend(metaNow.costByModel, resolveModelId(metaNow.model), billed, turnTokens)` with that
+resolved delta, never the raw `total_cost_usd` reading → persisted via the `SessionMeta` upsert →
+`UsageIndicator` reads `mergeSpend(sessions.map(s => s.costByModel))` for the global rollup and
+`session.costByModel` for the current session, both rendered via `sortedSpend`.
 
 ### Per-session totals
 
-SDK `result` message (`total_cost_usd`, `usage`, `duration_ms`) → `SessionMeta.totalCostUsd` /
-`totalTokens` accumulated per turn; `duration_ms` minus the turn's accumulated
-`LiveState.permissionWaitMs` (tracked from `askPermission` start to resolution, across every
-permission prompt in the turn) → `SessionMeta.totalDurationMs` → persisted via `SessionMeta`
-upsert → sidebar reads from the session store and renders `totalDurationMs` via
-`formatDuration`.
+`usage` and `duration_ms` are genuinely per-turn: `SessionMeta.totalTokens` accumulates `usage`
+directly, and `duration_ms` minus the turn's accumulated `LiveState.permissionWaitMs` (tracked
+from `askPermission` start to resolution, across every permission prompt in the turn) accumulates
+into `SessionMeta.totalDurationMs`.
+
+`total_cost_usd` is not per-turn — it is cumulative across the lifetime of the underlying query
+process (the CLI child), resetting only when that process is replaced. `accumulateResultSpend`
+calls `resultSpend(msg, live.lastCostCumulativeUsd)` (`shared/resultSpend.ts`) to recover the
+turn's own cost as the delta against the last reading billed for the same lifetime, then adds
+*that* onto `SessionMeta.totalCostUsd`/`lastCostUsd` and stores the raw reading as the new
+`LiveState.lastCostCumulativeUsd`. `closeQuery` — the one function every path that ends a query
+lifetime goes through — clears `lastCostCumulativeUsd`, so the next lifetime's first `result` is
+recognised as having no prior reading and is billed whole. As a safety net for a lifetime the
+runtime failed to observe closing (e.g. a bridge restart that leaves the worker's query alive),
+`resultSpend` also bills a reading whole whenever it is below the stored cumulative value, or
+whenever `startsQueryLifetime` detects the cumulative `modelUsage` token total equals this
+result's own `usage` (the running total consists of just this turn). All three accumulated numbers
+persist via `SessionMeta` upsert → sidebar reads from the session store and renders
+`totalDurationMs` via `formatDuration`.
 
 ### Per-step totals
 
@@ -128,15 +160,37 @@ via `formatDuration`, all in a metrics row below the step name.
 
 - `server/src/usageByModel.test.ts` — `addSpend`/`mergeSpend`/`sortedSpend` pure-function
   behavior.
+- `server/src/resultSpend.test.ts` — `resultSpend`/`startsQueryLifetime`/`foldResultSpend`: a
+  second turn in a lifetime bills the delta, a lifetime that opens above the previous one's final
+  reading still bills whole, a cumulative reading that drops bills whole, and a run of results
+  folds to the sum of its lifetimes rather than the sum of its raw readings.
 - `server/src/sessions.ended.test.ts` — a settled `result` splits spend under the session's
-  model, a `setModel()` between turns opens a second row instead of moving the first, and a
-  result with neither cost nor usage opens no row.
+  model; a second turn in the same query lifetime bills the delta, not the raw reading; a turn
+  after `recycleIdleQueries()` closes the query bills its reading whole; a cumulative reading that
+  drops, or that trips the `startsQueryLifetime` detector, bills whole even when the raw reading
+  rose; `setModel()` between turns opens a second row instead of moving the first; a codex-shaped
+  result (no cost) still opens a token-only row; a result with neither cost nor usage opens no
+  row.
 - No test infrastructure covers `UsagePoller`, the Sidebar/`SessionMeta` display, or
   `WorkflowStepper` rendering at time of writing; natural first targets are `UsagePoller`
   (mocked `fetch`/`AuthManager`) and `parseSnapshot`.
 
 ## Business rules
 
+- `result.total_cost_usd` is cumulative across the lifetime of the query process that produced
+  it, not this turn's own cost. A turn's billed cost is the delta against the last reading billed
+  for the same lifetime (`resultSpend`, `shared/resultSpend.ts`); the first reading of a new
+  lifetime is billed whole. Getting this wrong compounds quadratically within a long-lived query
+  — every earlier turn gets re-billed on every later one.
+- A lifetime boundary the runtime itself did not observe closing (e.g. a bridge restart that
+  leaves a worker's query alive, so `LiveState.lastCostCumulativeUsd` is lost) is still caught: a
+  reading below the stored cumulative value, or a `startsQueryLifetime` detection (cumulative
+  `modelUsage` tokens equal this turn's own `usage`), forces the whole reading to be billed
+  instead of subtracted.
+- Historical sessions accumulated before this delta fix have inflated `totalCostUsd`/`lastCostUsd`
+  that will not self-correct — the field is additive and never rewound. `server/scripts/repair-spend.ts`
+  is a one-time, per-machine, dry-run-by-default backfill that recomputes them from each session's
+  surviving transcript `result` events; a session with none left is skipped, not zeroed.
 - No login → no usage chip. Enforced both server-side (poller never fetches without a session,
   logout nulls the snapshot) and client-side (`UsageIndicator` gates on `auth.loggedIn`).
 - `{type: 'usage', usage: null}` means auth is gone (logout or a revoked/expired OAuth session) —
@@ -194,6 +248,14 @@ via `formatDuration`, all in a metrics row below the step name.
   instead of adding a new tracking mechanism: `totalTokens`/`totalDurationMs`, `costByModel`,
   and the per-step `lastCostUsd`/`lastTokens`/`lastDurationMs` all follow the same
   accumulate-on-`result` pass.
+- The query-lifetime-boundary rule for cost lives in `shared/resultSpend.ts`, not inline in
+  `server/src/sessions.ts`, specifically so the live accumulator and `repair-spend.ts` (a
+  standalone script with no access to `LiveState`) share one definition of "where does a
+  lifetime start" and cannot silently diverge.
+- `repair-spend.ts` is a throwaway script, not startup migration code — the fix in
+  `server/src/sessions.ts` only corrects turns going forward, so historical totals need running
+  once per machine rather than a permanent code path. See `server/scripts/migrate-user.ts` for
+  the established pattern this follows (bridge-running guard, dry-run default, JSON backup).
 - No new persistence and no new ws message for spend-by-model: `costByModel` travels inside the
   existing `SessionMeta` blob, and the rollup is computed in the browser from data already
   pushed via `sessionUpsert`/`hello`.

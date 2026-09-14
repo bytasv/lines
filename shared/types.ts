@@ -3160,6 +3160,19 @@ export function rewindBlock(
 export { addSpend, mergeSpend, sortedSpend } from './usageByModel.ts';
 
 /**
+ * How a `result` message's cumulative cost becomes one turn's spend, re-exported
+ * beside the totals it feeds. Safe above the cycle-sensitive block below:
+ * `resultSpend.ts` imports nothing at all.
+ */
+export {
+  foldResultSpend,
+  resultSpend,
+  startsQueryLifetime,
+  type ResultSpend,
+  type ResultSpendPayload,
+} from './resultSpend.ts';
+
+/**
  * Timestamp display, re-exported for the same reason: it formats the
  * `createdAt`/`updatedAt` fields declared here. Safe above the cycle-sensitive
  * block below — `formatTime.ts` imports nothing at all.

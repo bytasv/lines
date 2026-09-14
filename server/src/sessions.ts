@@ -28,6 +28,7 @@ import type {
   PromptAttachment,
   PromptMention,
   ReasoningEffort,
+  ResultSpendPayload,
   RewindBlockInfo,
   RewindPrompt,
   SdkShapedMessage,
@@ -57,6 +58,7 @@ import {
   providerForModel,
   resolveModelId,
   resultErrorText,
+  resultSpend,
   rewindBlock,
   rootsForCwd,
   subagentParentId,
@@ -1015,6 +1017,11 @@ interface LiveState {
    *  prompts so far — subtracted from the SDK's duration_ms, which otherwise
    *  counts human approval wait as "active" time. Reset once read. */
   permissionWaitMs: number;
+  /** Last `result.total_cost_usd` billed for the query lifetime currently open.
+   *  That field is cumulative over the lifetime, not per-turn, so a turn's own
+   *  cost is its delta against this. Cleared by closeQuery — the one funnel every
+   *  path that ends a lifetime goes through. See shared/resultSpend.ts. */
+  lastCostCumulativeUsd?: number;
   /** Reading from the latest `assistant` message of the in-flight turn; committed
    *  to the meta when the turn settles, so the sidebar isn't re-rendered per message. */
   contextUsage?: ContextUsage;
@@ -2016,6 +2023,10 @@ export class SessionManager {
     this.staleQueries.delete(sessionId);
     // The CLI child that owned them is gone.
     this.setBackgroundTasks(sessionId, []);
+    // The next query starts its cumulative cost counter from zero, so the reading
+    // this one left behind must not be subtracted from the next one's first turn.
+    const live = this.live.get(sessionId);
+    if (live) live.lastCostCumulativeUsd = undefined;
   }
 
   /**
@@ -5258,14 +5269,21 @@ export class SessionManager {
    * retired stored id from opening a second row for what is really one model; a
    * result carrying neither number opens no row at all.
    *
+   * Cost is billed as a delta, because `total_cost_usd` is cumulative over the
+   * query lifetime rather than this turn's spend — see shared/resultSpend.ts for
+   * the rule and how a lifetime boundary is recognised. Tokens are genuinely
+   * per-turn and are summed as they read.
+   *
    * Its own method because a transparently re-driven turn bills every attempt —
    * the failed one burned tokens — while settling only on the last.
    */
   private accumulateResultSpend(meta: SessionMeta, msg: Record<string, unknown>) {
-    const cost = (msg as { total_cost_usd?: number }).total_cost_usd;
-    if (typeof cost === 'number') {
-      meta.lastCostUsd = cost;
-      meta.totalCostUsd = (meta.totalCostUsd ?? 0) + cost;
+    const live = this.liveState(meta.id);
+    const spend = resultSpend(msg as ResultSpendPayload, live.lastCostCumulativeUsd);
+    if (spend) {
+      live.lastCostCumulativeUsd = spend.cumulative;
+      meta.lastCostUsd = spend.billed;
+      meta.totalCostUsd = (meta.totalCostUsd ?? 0) + spend.billed;
     }
     const usage = (msg as {
       usage?: {
@@ -5291,9 +5309,9 @@ export class SessionManager {
       meta.lastTokens = turnTokens;
       meta.totalTokens = (meta.totalTokens ?? 0) + turnTokens;
     }
-    if (typeof cost === 'number' || turnTokens != null) {
+    if (spend || turnTokens != null) {
       meta.costByModel ??= {};
-      addSpend(meta.costByModel, resolveModelId(meta.model), cost ?? 0, turnTokens ?? 0);
+      addSpend(meta.costByModel, resolveModelId(meta.model), spend?.billed ?? 0, turnTokens ?? 0);
     }
   }
 

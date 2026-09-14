@@ -810,38 +810,103 @@ test('a successful result message does not notify auth', () => {
   assert.equal(h.rejections(), 0);
 });
 
-/** A settled turn's cost/usage payload, the shape the by-model split reads. */
-const settled = (costUsd: number, inputTokens: number) => ({
+/**
+ * A settled turn's cost/usage payload, the shape the by-model split reads.
+ * `cumulativeCostUsd` is what `total_cost_usd` really carries: the running total
+ * for the query lifetime so far, not this turn's own spend.
+ */
+const settled = (cumulativeCostUsd: number, inputTokens: number) => ({
   type: 'result',
   subtype: 'success',
   result: 'done',
-  total_cost_usd: costUsd,
+  total_cost_usd: cumulativeCostUsd,
   usage: { input_tokens: inputTokens, output_tokens: 0 },
 });
 
 test('a settled turn splits its spend under the session model', () => {
   const h = harness();
-  h.sessions.handleWorkerEvent('s1', settled(0.4, 1_000));
-  h.sessions.handleWorkerEvent('s1', settled(0.6, 500));
+  h.sessions.handleWorkerEvent('s1', settled(0.25, 1_000));
+  h.sessions.handleWorkerEvent('s1', settled(0.75, 500));
 
   const meta = h.sessions.get('s1')!;
   assert.deepEqual(meta.costByModel, {
-    'claude-opus-5': { costUsd: 1, tokens: 1_500, turns: 2 },
+    'claude-opus-5': { costUsd: 0.75, tokens: 1_500, turns: 2 },
   });
   const summed = Object.values(meta.costByModel!).reduce((n, s) => n + s.costUsd, 0);
   assert.equal(summed, meta.totalCostUsd);
 });
 
+test('a second turn in one query lifetime bills the delta, not the reading', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', settled(0.25, 1_000));
+  h.sessions.handleWorkerEvent('s1', settled(0.75, 500));
+
+  const meta = h.sessions.get('s1')!;
+  // Not 1.0: the second reading already contains the first turn's $0.25.
+  assert.equal(meta.totalCostUsd, 0.75);
+  assert.equal(meta.lastCostUsd, 0.5);
+});
+
+test('a turn after the query is recycled bills its reading whole', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', settled(0.25, 1_000));
+  // The settled result left the session idle, so this closes its query — and the
+  // next one starts its cumulative counter over.
+  h.sessions.recycleIdleQueries();
+  h.sessions.handleWorkerEvent('s1', settled(0.5, 500));
+
+  assert.equal(h.sessions.get('s1')!.totalCostUsd, 0.75);
+});
+
+test('a cumulative reading that went backwards bills whole', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', settled(0.5, 1_000));
+  h.sessions.handleWorkerEvent('s1', settled(0.125, 500));
+
+  assert.equal(h.sessions.get('s1')!.totalCostUsd, 0.625);
+});
+
+test('a new lifetime is billed whole even when it opens above the last one', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', settled(0.25, 1_000));
+  // modelUsage is cumulative like the cost, so a per-model total that equals this
+  // turn's own usage says the counters just reset — which "the cost went down"
+  // would miss here, since $2 is more than $0.25.
+  h.sessions.handleWorkerEvent('s1', {
+    ...settled(2, 500),
+    modelUsage: { 'claude-opus-5': { inputTokens: 500 } },
+  });
+
+  assert.equal(h.sessions.get('s1')!.totalCostUsd, 2.25);
+});
+
 test('switching model mid-session opens a second row instead of moving the first', () => {
   const h = harness();
-  h.sessions.handleWorkerEvent('s1', settled(0.4, 1_000));
+  h.sessions.handleWorkerEvent('s1', settled(0.5, 1_000));
   h.sessions.setModel('s1', 'claude-haiku-4-5');
-  h.sessions.handleWorkerEvent('s1', settled(0.01, 200));
+  // A reading below the last one is a restarted lifetime, so it bills whole.
+  h.sessions.handleWorkerEvent('s1', settled(0.25, 200));
 
   const meta = h.sessions.get('s1')!;
   assert.deepEqual(meta.costByModel, {
-    'claude-opus-5': { costUsd: 0.4, tokens: 1_000, turns: 1 },
-    'claude-haiku-4-5': { costUsd: 0.01, tokens: 200, turns: 1 },
+    'claude-opus-5': { costUsd: 0.5, tokens: 1_000, turns: 1 },
+    'claude-haiku-4-5': { costUsd: 0.25, tokens: 200, turns: 1 },
+  });
+});
+
+test('a codex-shaped result reports tokens with no cost', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', {
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    usage: { input_tokens: 900, output_tokens: 100 },
+  });
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.totalCostUsd, undefined);
+  assert.deepEqual(meta.costByModel, {
+    'claude-opus-5': { costUsd: 0, tokens: 1_000, turns: 1 },
   });
 });
 
