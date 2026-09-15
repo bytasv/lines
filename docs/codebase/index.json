@@ -238,8 +238,9 @@
         "server/src/sessions.queue.test.ts"
       ],
       "businessRules": [
-        "all five PermissionMode values stay selectable, including acceptEdits, because preset workflows ship steps with permissionMode: 'acceptEdits'",
-        "'default' displays as Manual; the stored value is unchanged",
+        "all five PermissionMode values stay in PERMISSION_MODES and selectable in the workflow step Selects, including acceptEdits, because preset workflows ship steps with permissionMode: 'acceptEdits'; the composer/settings segmented controls only show three (Plan, Assist, Full Auto) and default/acceptEdits have no pill",
+        "'default' displays as Manual; the stored value is unchanged (used for the workflow step badge and any session outside the three pill values)",
+        "the shipped new-session default is 'auto' (Assist), and a session lands on 'auto' rather than 'default' after a plan is approved on every path that used to reset it, all routed through setPermissionMode so the worker is told rather than only the stored meta changing",
         "ExitPlanMode and AskUserQuestion always resolve to an explicit 'ask' from the hook, in every permission mode, never a bare continue: true a mode or settings entry could pre-empt",
         "a second answer to an already-resolved permission request is dropped; it never re-emits a resolution event or re-triggers recoverOrphanedPermission's injected prompt",
         "a resend after a bridge restart replays a stored ALWAYS_ASK_TOOLS resolution only when it was produced by a human (resolvedBy is 'user', 'plan-reply', or absent/legacy); any server-synthesized resolution is re-asked instead",
@@ -276,8 +277,8 @@
         "a quote that no longer matches the live plan text silently drops its highlight; the comment itself is unaffected"
       ],
       "architecturalRules": [
-        "single shared PERMISSION_MODES list — no component defines its own label/description array",
-        "SegmentedControl has no per-segment tooltip prop, so per-item tooltips wrap each segment's label in a Tooltip-wrapped full-width span",
+        "single shared PERMISSION_MODES list — no component defines its own label/description array; PERMISSION_MODE_SEGMENTS is a three-item, independently-ordered subset (plan, auto, bypassPermissions) built by mapping over that subset, not by filtering PERMISSION_MODES",
+        "SegmentedControl has no per-segment tooltip prop, so per-item tooltips wrap each segment's label in a Tooltip-wrapped full-width span; the composer's control-level Tooltip only renders when the session is disabled (a Codex session), not generically, so it never fights the per-pill tooltips",
         "resolvedBy is optional and every reader treats a missing value as 'user'",
         "findPermissionResolution scans backwards (newest wins), matching the existing convention in exitPlanRequestId",
         "the workflow plan-step gate's recorded resolution: 'allow' was already not a record of the SDK's tool result; resolvedBy: 'workflow-advance' makes that legible rather than changing it",

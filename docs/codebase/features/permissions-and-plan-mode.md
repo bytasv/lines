@@ -9,8 +9,9 @@ Everything that decides whether a tool call runs, who decided it, and how plan m
 deliverable is written and reviewed.
 
 - **Mode selector** — pick how much a session or workflow step's tool calls are gated by the
-  permission guard. Every picker (composer toolbar, settings defaults, workflow step
-  editor/library) shows the same five modes with the same labels and descriptions.
+  permission guard. The shared list holds five modes and their descriptions; the composer/settings
+  segmented controls show three of them (Plan, Assist, Full Auto) as an escalating scale, while the
+  workflow step editor/library `Select`s still offer all five.
 - **Resolution provenance** — close every path by which an `ALWAYS_ASK_TOOLS` request
   (`ExitPlanMode`, `AskUserQuestion`) could be resolved without a human clicking a card, and
   record *how* every permission resolution happened so a report like "I never approved that
@@ -133,10 +134,11 @@ deliverable is written and reviewed.
 
 ## Symbols
 
-- `PERMISSION_MODES` — `{ value, label, description }[]`, single source of truth for all four
-  pickers
-- `PERMISSION_MODE_SEGMENTS` — `PERMISSION_MODES` mapped to Mantine `SegmentedControl` data,
-  each label wrapped in a `Tooltip` showing the description
+- `PERMISSION_MODES` — `{ value, label, description }[]`, single source of truth for all five
+  pickers; all five entries stay in it even though only three appear as pills
+- `PERMISSION_MODE_SEGMENTS` — a subset of `PERMISSION_MODES` (`plan`, `auto`, `bypassPermissions`,
+  in that order — an escalating scale, not `PERMISSION_MODES`' own order) mapped to Mantine
+  `SegmentedControl` data, each label wrapped in a `Tooltip` showing the description
 - `permissionModeLabel()` — label lookup by value, raw value fallback (used by the collapsed
   step card)
 - `renderPermissionModeOption` — alias of `renderOptionWithDescription`, used as the workflow
@@ -238,7 +240,8 @@ deliverable is written and reviewed.
 
 `PERMISSION_MODES` (`web/src/lib/permissionModes.tsx`) feeds every picker directly — there is no
 server round-trip for the mode list, unlike the model selector. The composer/settings segmented
-controls use `PERMISSION_MODE_SEGMENTS`; the workflow Selects use `PERMISSION_MODES` +
+controls use `PERMISSION_MODE_SEGMENTS`, a three-item subset (Plan, Assist, Full Auto) in its own
+order; the workflow Selects use the full `PERMISSION_MODES` (all five, its own order) +
 `renderPermissionModeOption`.
 
 The chosen value is UI/storage-level only. `'auto'` is a client-and-guard concept: the SDK
@@ -251,10 +254,11 @@ a `canUseTool` callback, so the SDK's own bypass fast-path never runs and *our* 
 every call. Both `handlePreToolUse` and `handleCanUseTool` carry a `bypassPermissions` branch that
 auto-allows outright — placed after the `ALWAYS_ASK_TOOLS` and Lines-MCP-write returns, so those
 two carve-outs still prompt, and before the guard, so bypass never pays for `assessToolCall`.
-Without those branches Bypass behaved exactly like Manual. `buildQueryOptions` also passes
-`allowDangerouslySkipPermissions: true` unconditionally — the SDK requires it before it will
-accept the mode at all, and setting it at spawn is what lets a *mid-session* switch to Bypass
-take effect on the running query instead of being rejected into a `worker.ts` `console.warn`.
+Without those branches `bypassPermissions` ("Full Auto") behaved exactly like `default` ("Manual").
+`buildQueryOptions` also passes `allowDangerouslySkipPermissions: true` unconditionally — the SDK
+requires it before it will accept the mode at all, and setting it at spawn is what lets a
+*mid-session* switch to `bypassPermissions` take effect on the running query instead of being
+rejected into a `worker.ts` `console.warn`.
 
 ### Resolution provenance
 
@@ -263,7 +267,7 @@ call, in every permission mode, instead of merely skipping its own auto-allow br
 `continue: true` would let `bypassPermissions` (whose own branch sits right below it) or a
 `settings.json` `permissions.allow` entry resolve the tool before `canUseTool` runs at all. That
 explicit `'ask'` is the only thing keeping plan approval and clarifying questions in front of a
-human under Bypass. The same hook mirrors a model-initiated
+human under `bypassPermissions` ("Full Auto"). The same hook mirrors a model-initiated
 `EnterPlanMode` into `meta.permissionMode = 'plan'`, the inverse of the mirroring
 `resolvePermission` already does on approval, so a query restart respawns still gated.
 
@@ -519,10 +523,18 @@ note in a small bubble with the same edit/delete actions the list row has.
 
 ## Business rules
 
-- All five `PermissionMode` values stay selectable everywhere, including `acceptEdits` — preset
-  workflows (`web/src/lib/workflowPresets.ts`, `server/src/workflows.ts`) ship steps with
-  `permissionMode: 'acceptEdits'`, so dropping it from the option list would blank those Selects.
-- `default` displays as **Manual** — the stored value is unchanged, only the label differs.
+- All five `PermissionMode` values stay in `PERMISSION_MODES` and selectable in the workflow step
+  `Select`s, including `acceptEdits` — preset workflows (`web/src/lib/workflowPresets.ts`,
+  `server/src/workflows.ts`) ship steps with `permissionMode: 'acceptEdits'`, so dropping it from
+  the option list would blank those Selects. `default` and `acceptEdits` have no pill in the
+  composer/settings segmented controls, which only show Plan, Assist, and Full Auto.
+- `default` displays as **Manual** — the stored value is unchanged, only the label differs — for
+  the workflow step badge (`permissionModeLabel`) and any session outside the three pill values.
+- The shipped new-session default is `'auto'` ("Assist"), and a session lands on `'auto'` (not
+  `'default'`) after a plan is approved, on every path that used to reset it to `'default'`: the
+  normal `ExitPlanMode` approval, the interrupted-approval workflow-step resume, and the
+  loop-guard exit path. All three go through `setPermissionMode` rather than a bare meta write, so
+  the worker is told (`worker.setPermissionMode`) instead of only the stored meta changing.
 - `ExitPlanMode` and `AskUserQuestion` always resolve to an explicit `'ask'` from the hook, in
   every permission mode — never a bare `continue: true` that a mode or settings entry could
   pre-empt. This holds regardless of the target path.
@@ -640,10 +652,16 @@ note in a small bubble with the same edit/delete actions the list row has.
 ## Architectural rules
 
 - Single shared `PERMISSION_MODES` list — no component defines its own label/description array.
-  Editing a label or description here changes every picker at once.
+  Editing a label or description here changes every picker at once, though `PERMISSION_MODE_SEGMENTS`
+  only exposes a three-item, independently-ordered subset (`plan`, `auto`, `bypassPermissions`) of
+  it — built by mapping over that subset list, not by filtering `PERMISSION_MODES`, so the pill
+  order can differ from the Selects' order.
 - Mantine `SegmentedControl` has no per-segment tooltip prop, so per-item tooltips are attached
   by wrapping each segment's `label` in a `Tooltip`-wrapped `span` (`display:block; width:100%`
-  so the hover target fills the segment instead of shrinking to the text).
+  so the hover target fills the segment instead of shrinking to the text). The composer's
+  control-level `Tooltip` (wrapping the whole `SegmentedControl`) only renders when the session is
+  disabled (a Codex session, explaining the reduced surface) — a generic "how calls are approved"
+  tooltip on top of it would fight the per-pill ones.
 - `resolvedBy` is optional and every reader treats a missing value as `'user'` — the only source
   that existed for any card a user could have seen before this field was added.
 - `resolvedActor` sits **alongside** `resolvedBy`, never folded into it: `resolvedBy` is

@@ -29,7 +29,13 @@ import type {
   ReasoningEffort,
   SessionMeta,
 } from '@lines/shared';
-import { isSessionInterruptible, providerForModel, rootsForCwd } from '@lines/shared';
+import {
+  hasEstimatedSpend,
+  isSessionInterruptible,
+  providerForModel,
+  rootsForCwd,
+} from '@lines/shared';
+import { formatSpendUsd } from '../lib/format';
 import { sessionCaps } from '../lib/capabilities';
 import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
 import {
@@ -309,6 +315,18 @@ export function Composer({ session }: { session: SessionMeta }) {
     setAttachments([]);
   };
 
+  const permissionModeControl = (
+    <SegmentedControl
+      size="xs"
+      disabled={!canSetMode || !caps.approvals}
+      data={PERMISSION_MODE_SEGMENTS}
+      value={session.permissionMode}
+      onChange={(v) =>
+        send({ type: 'setPermissionMode', sessionId: session.id, mode: v as PermissionMode })
+      }
+    />
+  );
+
   return (
     <Paper
       withBorder
@@ -440,29 +458,23 @@ export function Composer({ session }: { session: SessionMeta }) {
           </Tooltip>
           {/* Visible but disabled for a codex session, deliberately: its absence
               would read as a bug, and the tooltip is where the reduced surface
-              gets explained. A span so the tooltip fires over a disabled control. */}
-          <Tooltip
-            label={
-              caps.approvals
-                ? 'How tool calls are approved in this session'
-                : 'This session runs sandboxed and approves its own tool calls. ' +
-                  'Plan mode is read-only here, and your MCP connections do not apply.'
-            }
-            withArrow
-            openDelay={400}
-          >
-            <span style={{ display: 'inline-flex' }}>
-              <SegmentedControl
-                size="xs"
-                disabled={!canSetMode || !caps.approvals}
-                data={PERMISSION_MODE_SEGMENTS}
-                value={session.permissionMode}
-                onChange={(v) =>
-                  send({ type: 'setPermissionMode', sessionId: session.id, mode: v as PermissionMode })
-                }
-              />
-            </span>
-          </Tooltip>
+              gets explained. A span so the tooltip fires over a disabled control.
+              Only wrapped in that disabled state — each segment carries its own
+              description tooltip, and a second one on the control fights them. */}
+          {caps.approvals ? (
+            permissionModeControl
+          ) : (
+            <Tooltip
+              label={
+                'This session runs sandboxed and approves its own tool calls. ' +
+                'Plan mode is read-only here, and your MCP connections do not apply.'
+              }
+              withArrow
+              openDelay={400}
+            >
+              <span style={{ display: 'inline-flex' }}>{permissionModeControl}</span>
+            </Tooltip>
+          )}
           <Select
             w={130}
             disabled={!canSetModel}
@@ -512,7 +524,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           <ContextWindowIndicator session={session} />
           {session.totalCostUsd != null && (
             <Text size="xs" c="dimmed">
-              ${session.totalCostUsd.toFixed(3)}
+              {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
             </Text>
           )}
           {interruptible || bgTasks > 0 ? (

@@ -78,7 +78,7 @@ const FEATURES: Feature[] = [
     icon: IconAdjustmentsHorizontal,
     title: 'Model & mode control',
     description:
-      'Switch models and Agent / Accept-edits / Plan / Bypass mid-session, per session or per workflow step, without losing context.',
+      'Switch models and Assist / Plan / Full Auto mid-session, per session or per workflow step, without losing context.',
   },
   {
     icon: IconCoin,

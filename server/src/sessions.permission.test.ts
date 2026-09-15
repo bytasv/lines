@@ -200,11 +200,13 @@ function harness(
   const answered: unknown[] = [];
   const pushes: string[] = [];
   const pushed: Record<string, unknown>[] = [];
+  const modePushes: string[] = [];
   sessions.attachWorker({
     push: (id: string, message: Record<string, unknown>) => {
       pushes.push(id);
       pushed.push(message);
     },
+    setPermissionMode: (_id: string, mode: string) => modePushes.push(mode),
     close: () => {},
     interrupt: () => {},
     rpcResult: (_id: string, result: unknown) => answered.push(result),
@@ -217,6 +219,7 @@ function harness(
     answered,
     pushes,
     pushed,
+    modePushes,
     s1: () => sessions.get('s1')!,
     /**
      * Pretend this bridge spawned the running query. `canInterject` only steers a
@@ -515,7 +518,20 @@ test('an empty comment list resolves exactly as it did before the feature', asyn
   assert.equal(h.cards().at(-1)?.resolution, 'allow');
   assert.deepEqual(h.interjections(), []);
   assert.deepEqual(h.s1().queued ?? [], []);
-  assert.equal(h.s1().permissionMode, 'default', 'plan mode still mirrored off on approval');
+  assert.equal(h.s1().permissionMode, 'auto', 'approval leaves plan mode and lands in Assist');
+});
+
+test('leaving plan mode on approval is pushed to the worker, not only written to meta', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  h.goLive();
+  answerPlan(h, true, []);
+  await settle();
+
+  // 'auto' is not an SDK mode — the worker has to be told, or the CLI keeps
+  // enforcing plan mode while the pill says otherwise.
+  assert.deepEqual(h.modePushes, ['acceptEdits']);
 });
 
 // ---------------------------------------------------------------------------

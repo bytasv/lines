@@ -45,6 +45,7 @@ import type {
 import {
   addSpend,
   contextCompactBlock,
+  estimateSpendUsd,
   formatPlanComments,
   isPlanFilePath,
   isSessionActive,
@@ -4058,11 +4059,12 @@ export class SessionManager {
       } else {
         // Resume outside plan mode so the approved plan gets implemented in place.
         if (meta.permissionMode === 'plan') {
-          meta.permissionMode =
+          this.setPermissionMode(
+            sessionId,
             stepRunning && wf!.stepPermissionMode && wf!.stepPermissionMode !== 'plan'
               ? wf!.stepPermissionMode // manual override: resume in the step's configured mode
-              : 'default';
-          this.upsert(meta);
+              : 'auto',
+          );
         }
         text =
           'I approved your plan (the session was interrupted before the approval reached you). ' +
@@ -4314,8 +4316,11 @@ export class SessionManager {
           // approval, so push the step's configured mode back to the worker too.
           this.setPermissionMode(sessionId, stepMode);
         } else {
-          meta.permissionMode = 'default';
-          this.upsert(meta);
+          // 'auto' is a Lines-level mode the CLI knows nothing about — it maps to
+          // SDK acceptEdits underneath — so this goes through setPermissionMode to
+          // push it to the worker. A bare meta write was only ever right for
+          // 'default', which is where the CLI had already put itself.
+          this.setPermissionMode(sessionId, 'auto');
         }
       }
     }
@@ -5233,8 +5238,10 @@ export class SessionManager {
       // next turn would plan again and raise another card. Idempotent: if
       // `resolvePermission` already switched it, this is a no-op.
       if (meta.permissionMode === 'plan') {
-        meta.permissionMode = stepRunning ? (wf!.stepPermissionMode ?? 'default') : 'default';
-        this.upsert(meta);
+        this.setPermissionMode(
+          sessionId,
+          stepRunning ? (wf!.stepPermissionMode ?? 'auto') : 'auto',
+        );
       }
       this.prompt(sessionId, 'I approved your plan. Proceed with the implementation now.', 'user');
       return;
@@ -5279,11 +5286,16 @@ export class SessionManager {
    * the rule and how a lifetime boundary is recognised. Tokens are genuinely
    * per-turn and are summed as they read.
    *
+   * A provider that reports no cost at all gets an estimate instead, computed
+   * here so the one figure feeds the session totals, the by-model split and the
+   * ledger alike — see shared/estimateSpend.ts for what that number means.
+   *
    * Its own method because a transparently re-driven turn bills every attempt —
    * the failed one burned tokens — while settling only on the last.
    */
   private accumulateResultSpend(meta: SessionMeta, msg: Record<string, unknown>) {
     const live = this.liveState(meta.id);
+    const modelId = resolveModelId(meta.model);
     const spend = resultSpend(msg as ResultSpendPayload, live.lastCostCumulativeUsd);
     if (spend) {
       live.lastCostCumulativeUsd = spend.cumulative;
@@ -5314,14 +5326,30 @@ export class SessionManager {
       meta.lastTokens = turnTokens;
       meta.totalTokens = (meta.totalTokens ?? 0) + turnTokens;
     }
+    // The estimate stands in only where the provider reports nothing, and the
+    // gate is the capability rather than "the cost is missing": a Claude turn
+    // that happens to carry no cost must stay uncosted, or one Anthropic row
+    // would silently be part-reported and part-estimated.
+    //
+    // `live.lastCostCumulativeUsd` is deliberately left alone — an estimate is
+    // per-turn and has no cumulative reading to carry forward. Setting
+    // `meta.lastCostUsd` is what makes workflow step costs follow for free.
+    let billedUsd = spend?.billed ?? 0;
+    if (!spend && usage && !capabilitiesFor(providerForModel(modelId)).cost) {
+      const estimated = estimateSpendUsd(modelId, usage);
+      if (estimated != null) {
+        billedUsd = estimated;
+        meta.lastCostUsd = estimated;
+        meta.totalCostUsd = (meta.totalCostUsd ?? 0) + estimated;
+      }
+    }
     if (spend || turnTokens != null) {
       meta.costByModel ??= {};
-      const modelId = resolveModelId(meta.model);
-      addSpend(meta.costByModel, modelId, spend?.billed ?? 0, turnTokens ?? 0);
+      addSpend(meta.costByModel, modelId, billedUsd, turnTokens ?? 0);
       // Same arguments, same guard, one line apart: the ledger records what the
       // session's own split records, so the two can never disagree about what
       // counted. Stamped now rather than from the result, which carries no time.
-      this.spendHistory?.record(modelId, spend?.billed ?? 0, turnTokens ?? 0, Date.now());
+      this.spendHistory?.record(modelId, billedUsd, turnTokens ?? 0, Date.now());
     }
   }
 

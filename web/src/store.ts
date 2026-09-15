@@ -360,15 +360,22 @@ export interface NewSessionDefaults {
 }
 
 function loadNewSessionDefaults(): NewSessionDefaults {
-  const fallback: NewSessionDefaults = { model: DEFAULT_MODEL, permissionMode: 'default' };
+  const fallback: NewSessionDefaults = { model: DEFAULT_MODEL, permissionMode: 'auto' };
   try {
     const raw = localStorage.getItem(NEW_SESSION_DEFAULTS_KEY);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw);
     return {
       model: typeof parsed.model === 'string' ? resolveModelId(parsed.model) : fallback.model,
+      // 'default' and 'acceptEdits' no longer have a segment, so a profile that
+      // saved one would open Settings to an unselected row. Folded in here rather
+      // than run as a migration: this is the only reader of the stored value.
       permissionMode:
-        typeof parsed.permissionMode === 'string' ? parsed.permissionMode : fallback.permissionMode,
+        typeof parsed.permissionMode === 'string' &&
+        parsed.permissionMode !== 'default' &&
+        parsed.permissionMode !== 'acceptEdits'
+          ? parsed.permissionMode
+          : fallback.permissionMode,
       ...(isReasoningEffort(parsed.reasoningEffort)
         ? { reasoningEffort: parsed.reasoningEffort }
         : {}),
