@@ -724,6 +724,27 @@ export interface ModelSpend {
 export type ModelSpendMap = Record<string, ModelSpend>;
 
 /**
+ * Day-resolution spend ledger, one file per user on the bridge that wrote it.
+ *
+ * Deliberately NOT a field on `SessionMeta`: that blob is synced last-write-wins
+ * under a hard push cap, and a growing per-day record is exactly the per-turn
+ * data it is documented as having to stay free of. The consequence is that this
+ * is machine-local while the all-time rollup (derived from synced sessions) is
+ * not, so a period total can read lower than the all-time one — which is why the
+ * UI defaults to All time and labels the periods as this machine's.
+ *
+ * `days` is keyed `YYYY-MM-DD` in `tz`, the bridge's timezone at write time.
+ * Keys are frozen once written: a laptop that moves timezone gets a noted
+ * mismatch, never a re-bucketing.
+ */
+export interface SpendHistoryBlob {
+  v: 1;
+  /** IANA zone the day keys were stamped in, e.g. `Europe/Vilnius`. */
+  tz: string;
+  days: Record<string, ModelSpendMap>;
+}
+
+/**
  * Which named failure a red banner is describing, so the UI can offer more than a
  * bare Retry. `'auth'` is the app being signed out; the rest are the API refusing
  * the turn itself (see `server/src/turnFailure.ts`). Additive — a client that only
@@ -2725,6 +2746,10 @@ export type ServerMessage =
       usage: UsageSnapshot | null;
       /** ChatGPT plan usage. Absent on a bridge older than this field. */
       openaiUsage?: UsageSnapshot | null;
+      /** This machine's day-resolution spend ledger. Absent on a bridge older
+       *  than this field; `null` for a guest, whose host's spend is none of
+       *  their business. */
+      spendHistory?: SpendHistoryBlob | null;
       auth: AuthStatus;
       /** The OpenAI (ChatGPT) account, for Codex sessions. Absent on a bridge
        *  older than this field; a guest is told `{ loggedIn: false }`, exactly as
@@ -2812,6 +2837,14 @@ export type ServerMessage =
       servers?: McpServerStatusInfo[];
     }
   | { type: 'usage'; usage: UsageSnapshot | null }
+  /**
+   * One day row of the spend ledger, whole, after a turn added to it. Its own
+   * message rather than a field on `usage`: that one is nullable and means "auth
+   * is gone", and spend history has nothing to do with plan auth. Sending the
+   * whole row rather than the delta makes it an idempotent replace, so a dropped
+   * message self-heals on the next turn instead of leaving a permanent gap.
+   */
+  | { type: 'spendDay'; day: string; spend: ModelSpendMap }
   /** ChatGPT plan usage, the OpenAI mirror of `usage`. A separate message rather
    *  than a provider field, so a client that does not know about it simply never
    *  renders a second chip. */
@@ -3157,7 +3190,18 @@ export function rewindBlock(
  * `ModelSpendMap`. Safe above the cycle-sensitive block below: `usageByModel.ts`
  * imports only types from here, so nothing of ours is read at its top level.
  */
-export { addSpend, mergeSpend, sortedSpend } from './usageByModel.ts';
+export {
+  addSpend,
+  dayKey,
+  foldDays,
+  mergeSpend,
+  periodBounds,
+  periodLabel,
+  shiftPeriod,
+  sortedSpend,
+  type Granularity,
+  type PeriodBounds,
+} from './usageByModel.ts';
 
 /**
  * How a `result` message's cumulative cost becomes one turn's spend, re-exported
@@ -3165,6 +3209,7 @@ export { addSpend, mergeSpend, sortedSpend } from './usageByModel.ts';
  * `resultSpend.ts` imports nothing at all.
  */
 export {
+  billRun,
   foldResultSpend,
   resultSpend,
   startsQueryLifetime,

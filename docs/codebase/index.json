@@ -321,6 +321,7 @@
       "covers": [
         "usage-indicator",
         "usage-by-model",
+        "usage-history",
         "session-sidebar-usage",
         "workflow-step-cost"
       ],
@@ -337,7 +338,10 @@
         "shared/usageByModel.ts",
         "shared/resultSpend.ts",
         "server/src/sessions.ts",
+        "server/src/spendHistory.ts",
+        "server/src/store.ts",
         "server/scripts/repair-spend.ts",
+        "server/scripts/backfill-spend-history.ts",
         "web/src/components/Sidebar.tsx",
         "web/src/lib/format.ts",
         "server/src/workflows.ts",
@@ -366,7 +370,16 @@
         "WorkflowEngine.onWorkflowTurnComplete",
         "WorkflowState.stepDurationsMs",
         "SessionMeta.lastDurationMs",
-        "formatDuration"
+        "formatDuration",
+        "SpendHistoryBlob",
+        "SpendHistory",
+        "dayKey",
+        "periodBounds",
+        "foldDays",
+        "shiftPeriod",
+        "periodLabel",
+        "Granularity",
+        "billRun"
       ],
       "tests": [
         "server/src/usageByModel.test.ts",
@@ -395,7 +408,13 @@
         "token icon with a tooltip ('N tokens spent') shown next to the cost label, hidden when that step's accumulated tokens are zero or unset",
         "retries and auto-advance turns on the same step add onto the same array slot rather than overwriting it, for both cost and tokens",
         "duration shown next to the token icon via formatDuration, hidden when that step's accumulated duration is zero or unset; excludes permission-prompt approval wait within the turn",
-        "a turn transparently re-driven by turn-recovery (a rejected token, an overloaded API) accumulates spend for every attempt, not just the one that finally settles"
+        "a turn transparently re-driven by turn-recovery (a rejected token, an overloaded API) accumulates spend for every attempt, not just the one that finally settles",
+        "usage-history period totals (day/week/month/year) are computed from this bridge's own spend-history.json and are not synced, covering only turns run on this machine; the all-time rollup is derived from synced sessions and spans every machine, so a period figure can read lower than all-time for the same window",
+        "All time is the default and first entry in the period picker, since it is the only figure that is not machine-scoped and the number the card already showed before period browsing existed",
+        "day keys (YYYY-MM-DD) are stamped in the bridge's local timezone at write time and frozen; the blob's tz field records the zone in effect, and a mismatch against the browser's zone is surfaced as a note rather than corrected",
+        "the ledger is additive only; nothing rewrites an existing day row except the one-time backfill script, which replaces the whole file",
+        "server/scripts/backfill-spend-history.ts is best-effort: a session whose transcript was deleted or rewind-truncated contributes nothing and cannot be recovered, so a later run can produce a smaller history than an earlier one; it attributes cost by SDK-reported per-model modelUsage delta (falling back to the session's current model) rather than the session's historical model, and refuses to run while the bridge is up",
+        "the period picker's menu re-anchors on today whenever granularity changes, so switching grains never leaves the user viewing an unrelated period"
       ],
       "architecturalRules": [
         "reuses the existing accumulate-on-result pass in server/src/sessions.ts that already owns totalCostUsd/totalTokens, instead of a new tracking mechanism",
@@ -407,7 +426,15 @@
         "tokens mirror the same pattern via a new SessionMeta.lastTokens field rather than a separate tracking mechanism",
         "permission-wait time is deducted via LiveState.permissionWaitMs rather than the SDK's duration_api_ms, which would also strip genuine tool-execution time",
         "the query-lifetime-boundary rule for cost lives in shared/resultSpend.ts rather than inline in server/src/sessions.ts, so the live accumulator and the standalone repair-spend.ts script share one definition of a lifetime boundary and cannot diverge",
-        "repair-spend.ts is a throwaway script, not startup migration code, following the bridge-running guard / dry-run-default / JSON-backup pattern established by server/scripts/migrate-user.ts"
+        "repair-spend.ts is a throwaway script, not startup migration code, following the bridge-running guard / dry-run-default / JSON-backup pattern established by server/scripts/migrate-user.ts",
+        "the spend-history ledger lives in its own store file (spend-history.json), not on SessionMeta, because that blob is synced last-write-wins under a hard push cap and a day-by-day record is exactly the per-turn data it must stay free of",
+        "spend history is deliberately not cloud-synced in v1 (no Prisma migration, no new sync route); a synced ledger table is the stated follow-up",
+        "a day's spend rides its own {type: 'spendDay'} message rather than the nullable {type: 'usage'} broadcast, since usage: null has one fixed meaning (auth is gone) unrelated to spend history",
+        "the ledger write sits inside accumulateResultSpend's existing addSpend guard, using the identical resolved model id and billed delta, so the ledger and costByModel can never disagree about what counted",
+        "spendDay broadcasts and the hello snapshot carry the whole day row, not a delta, so a dropped message self-heals on the next turn instead of leaving a permanent gap",
+        "the web store's hello merge and spendDay handler are both gated on fromPrimary, mirroring updateStatus/bridge/claudeCli, so a second machine's hello cannot overwrite or blend into the primary's ledger",
+        "the period picker is plain useState lifted only as far as UsageIndicator, not zustand state, since it is ephemeral view state shared only between the two provider chips",
+        "the period-picker menu renders with withinPortal={false} because a portaled dropdown would render outside the HoverCard's DOM subtree and dismiss it on pointer move"
       ],
       "relatedDecisions": []
     },

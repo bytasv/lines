@@ -34,8 +34,9 @@ export class DevRuntime {
     });
     const timer = setInterval(() => this.report(), 250);
     timer.unref();
-    // A lost supervisor must never kill an agent. Fail closed for future reloads.
-    process.on('disconnect', () => this.activate());
+    // Development ownership ends with the parent. Reuse the service's normal
+    // signal shutdown (persistence, discovery files, provider cleanup).
+    process.on('disconnect', () => process.kill(process.pid, 'SIGTERM'));
   }
 
   activate() {

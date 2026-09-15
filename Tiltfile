@@ -80,22 +80,6 @@ for name in NO_RELOAD:
 # off the expanded list so there is one representation of the frozen state.
 FROZEN = [n for n in FREEZABLE if 'all' in NO_RELOAD or n in NO_RELOAD]
 
-def frozen(name):
-    return name in FROZEN
-
-# tsx watch owns reload; the ONLY lever is which npm script runs. `start`/
-# `start:worker` (server/package.json:9-10) are the existing no-watch entries.
-WORKER_CMD = 'npm run start:worker -w server' if frozen('worker') else 'npm run dev:worker -w server'
-BRIDGE_CMD = 'npm run start -w server' if frozen('bridge') else 'npm run dev -w server'
-
-# Installing this Tiltfile into a running legacy stack must not kill its turns.
-# Keep its exact resources until Tilt is stopped normally. The next `tilt up`
-# uses the safe supervisor. The probe does not watch discovery files or source.
-LEGACY_RUNTIME = str(local('node server/scripts/dev-runtime.mjs legacy-running',
-                           quiet=True, echo_off=True)).strip() == 'yes'
-if LEGACY_RUNTIME:
-    warn('Safe backend reload is installed. Existing tsx processes are retained ' +
-         'to protect active sessions; restart Tilt once idle to activate it.')
 
 
 if FROZEN:
@@ -312,29 +296,17 @@ if WITH_STORAGE:
     )
 
 # ---- services --------------------------------------------------------------
-# NO `deps=` here on purpose. tsx watch / vite own file watching.
+# NO source deps: the worker runner coordinates safe reloads; Vite owns HMR.
 
-if LEGACY_RUNTIME:
-    local_resource(
-        'worker',
-        cmd='',  # serve-only; `cmd` is a required param, so pass it empty
-        # `tsx watch` unless --no-reload worker; see WORKER_CMD above. Restarting this
-        # resource ALWAYS kills in-flight agent turns — that is what --no-reload buys.
-        serve_cmd=WORKER_CMD,
-        # worker.ts loads no dotenv — this must be a real env var
-        # (server/src/workerProtocol.ts). The bridge finds the worker through
-        # run/<instance>/worker.json and does not need this; the pin exists so the
-        # readiness probe below has a known port to dial. Unset, the worker binds an
-        # ephemeral one and stays perfectly reachable — only the probe would break.
-        serve_env={'LINES_WORKER_PORT': str(WORKER_PORT)},
-        resource_deps=['install'],
-        # WS-only, binds 127.0.0.1 (server/src/worker.ts:321) — TCP is the only
-        # honest check.
-        readiness_probe=probe(initial_delay_secs=2, period_secs=5,
-                              tcp_socket=tcp_socket_action(port=WORKER_PORT, host='127.0.0.1')),
-        labels=['services'],
-        allow_parallel=True,
-    )
+local_resource(
+    'worker', cmd='',
+    serve_cmd=['node', 'server/scripts/dev-runtime.mjs', 'worker'],
+    serve_env={'LINES_WORKER_PORT': str(WORKER_PORT)},
+    resource_deps=['install'],
+    readiness_probe=probe(initial_delay_secs=2, period_secs=5,
+                          tcp_socket=tcp_socket_action(port=WORKER_PORT, host='127.0.0.1')),
+    labels=['services'], allow_parallel=True,
+)
 
 # Built up before the resource: Starlark allows only one ** per call, and this
 # needs three conditional groups.
@@ -354,43 +326,15 @@ if WITH_RELAY:
         BRIDGE_ENV['LINES_DEVICE_ID'] = 'tilt-dev'
         BRIDGE_ENV['LINES_DEVICE_SECRET'] = 'tilt-dev'
 
-if LEGACY_RUNTIME:
-    local_resource(
-        'bridge',
-        cmd='',
-        serve_cmd=BRIDGE_CMD,
-        # LINES_BRIDGE_PORT is pinned here for the same reason the worker's is: the
-        # readiness probe and the status link below need a fixed target. The packaged
-        # app sets neither and binds :0, publishing the result to bridge.json.
-        # STORAGE_URL is injected only as a DEFAULT: an explicit value in .env means
-        # this bridge syncs to a deployment, and overriding it here would silently
-        # point it back at localhost. RELAY_URL is never injected unless --with-relay
-        # wires up the loopback one — otherwise .env decides, and the device
-        # credential comes from ~/.lines-app/device.json, so no secret reaches a spec.
-        serve_env=BRIDGE_ENV,
-        # Deliberately NOT depending on worker/storage: the bridge reconnects to the
-        # worker every 1s (workerClient.ts:74-79) and treats storage as best-effort
-        # (sync.ts:295-308). A broken worker/storage still leaves a reachable UI.
-        resource_deps=['install'],
-        # GET / returns 200 {"ok":true,...}. It is the bridge's only HTTP surface now
-        # that workspace reads moved onto the WebSocket (see fileRoutes.ts).
-        readiness_probe=probe(initial_delay_secs=2, period_secs=15,
-                              http_get=http_get_action(port=BRIDGE_PORT, host='localhost', path='/')),
-        links=[link('http://localhost:%d/' % BRIDGE_PORT, 'bridge status')],
-        labels=['services'],
-        allow_parallel=True,
-    )
-else:
-    BACKEND_ENV = dict(BRIDGE_ENV)
-    BACKEND_ENV['LINES_WORKER_PORT'] = str(WORKER_PORT)
-    local_resource(
-        'backend', cmd='', serve_cmd='npm run dev:backend',
-        serve_env=BACKEND_ENV, resource_deps=['install'],
-        readiness_probe=probe(initial_delay_secs=2, period_secs=5,
-                              http_get=http_get_action(port=BRIDGE_PORT, host='localhost', path='/')),
-        links=[link('http://localhost:%d/' % BRIDGE_PORT, 'backend status')],
-        labels=['services'], allow_parallel=True,
-    )
+local_resource(
+    'bridge', cmd='',
+    serve_cmd=['node', 'server/scripts/dev-runtime.mjs', 'bridge'],
+    serve_env=BRIDGE_ENV, resource_deps=['install'],
+    readiness_probe=probe(initial_delay_secs=2, period_secs=5,
+                          http_get=http_get_action(port=BRIDGE_PORT, host='localhost', path='/')),
+    links=[link('http://localhost:%d/' % BRIDGE_PORT, 'bridge status')],
+    labels=['services'], allow_parallel=True,
+)
 
 # Policy changes run a control command, never change the backend's serve spec.
 local_resource(
@@ -462,17 +406,16 @@ local_resource(
 # or replace a serving command. A resume still waits for an idle boundary.
 if WITH_BUTTONS:
     cmd_button = load_dynamic('ext://uibutton')['cmd_button']
-    if not LEGACY_RUNTIME:
+    for resource in FREEZABLE:
         for action in ['freeze', 'resume']:
             cmd_button(
-                'backend-%s-reload' % action, resource='backend',
+                '%s-%s-reload' % (resource, action), resource=resource,
                 argv=['node', 'server/scripts/dev-runtime.mjs', action, 'all'],
                 text='Freeze reload' if action == 'freeze' else 'Resume reload',
                 icon_name='ac_unit' if action == 'freeze' else 'play_arrow',
             )
     cmd_button(
-        'bridge-pair-device',
-        resource='bridge' if LEGACY_RUNTIME else 'backend',
+        'bridge-pair-device', resource='bridge',
         argv=['tilt', 'trigger', 'pair-device'], text='Pair this machine', icon_name='link',
     )
 

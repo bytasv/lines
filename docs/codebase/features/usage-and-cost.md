@@ -1,6 +1,7 @@
 # Usage and cost
 
-Covers: `usage-indicator`, `usage-by-model`, `session-sidebar-usage`, `workflow-step-cost`.
+Covers: `usage-indicator`, `usage-by-model`, `usage-history`, `session-sidebar-usage`,
+`workflow-step-cost`.
 
 ## Purpose
 
@@ -16,12 +17,14 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   list, so users can see at a glance which sessions are expensive or slow without opening them.
 - **Per-workflow-step** — the same three numbers in the workflow stepper, so users can see which
   step of a running workflow is expensive or slow without opening the transcript.
+- **Usage history** — a day-resolution spend ledger, browsable by day/week/month/year from the
+  same hover card, so "what did I spend this month?" has an answer beyond the all-time rollup.
 
 ## Entry points
 
 - Top-bar `UsageIndicator` chip
-- `UsageIndicator` hover card — "Spend by model" section, plus a "This session" sub-section when
-  the selected session used more than one model
+- `UsageIndicator` hover card — "Spend by model" section (with a period picker menu and pager),
+  plus a "This session" sub-section when the selected session used more than one model
 - Sidebar session row meta line (date, cost, token icon, duration, status badge)
 - `web/src/components/WorkflowStepper.tsx` (cost label, token icon, and duration label in a
   metrics row below each step name)
@@ -29,24 +32,32 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 ## Files
 
 - `server/src/usage.ts` — `UsagePoller`
-- `web/src/store.ts` — `hello` and `usage` message handling
-- `web/src/components/UsageIndicator.tsx` — the chip, the global rollup, and the current
-  session's rows
+- `web/src/store.ts` — `hello`, `usage`, and `spendDay` message handling
+- `web/src/components/UsageIndicator.tsx` — the chip, the global rollup, the period picker/pager,
+  and the current session's rows
 - `shared/types.ts` — `UsageSnapshot`, `UsageWindow`, `ModelSpend`, `ModelSpendMap`,
-  `SessionMeta.costByModel`, `SessionMeta.totalCostUsd`, `SessionMeta.totalTokens`,
-  `SessionMeta.totalDurationMs`, `WorkflowState.stepCostsUsd`, `WorkflowState.stepTokens`,
-  `WorkflowState.stepDurationsMs`
-- `shared/usageByModel.ts` — `addSpend`, `mergeSpend`, `sortedSpend`
+  `SpendHistoryBlob`, `SessionMeta.costByModel`, `SessionMeta.totalCostUsd`,
+  `SessionMeta.totalTokens`, `SessionMeta.totalDurationMs`, `WorkflowState.stepCostsUsd`,
+  `WorkflowState.stepTokens`, `WorkflowState.stepDurationsMs`
+- `shared/usageByModel.ts` — `addSpend`, `mergeSpend`, `sortedSpend`, `dayKey`, `periodBounds`,
+  `foldDays`, `shiftPeriod`, `periodLabel`, `Granularity`
 - `server/src/sessions.ts` — accumulates cost/tokens/duration from each turn's SDK `result`
   message; tags each settled turn's spend onto `costByModel`; sets `SessionMeta.lastTokens` /
-  `SessionMeta.lastDurationMs` per turn
-- `shared/resultSpend.ts` — `resultSpend`, `startsQueryLifetime`, `foldResultSpend`: turns a
-  `result`'s cumulative `total_cost_usd` into that turn's own delta. Used by both the live
-  accumulator in `server/src/sessions.ts` and the one-time repair script, so they cannot disagree
-  about where a query lifetime starts.
+  `SessionMeta.lastDurationMs` per turn; feeds the same billed delta into `SpendHistory`
+- `shared/resultSpend.ts` — `resultSpend`, `startsQueryLifetime`, `foldResultSpend`, `billRun`:
+  turns a `result`'s cumulative `total_cost_usd` into that turn's own delta. Used by the live
+  accumulator in `server/src/sessions.ts`, the one-time repair script, and the spend-history
+  backfill script, so they cannot disagree about where a query lifetime starts.
 - `server/scripts/repair-spend.ts` — one-time local backfill (`npm run repair:spend -w server`)
   that recomputes `totalCostUsd`/`lastCostUsd`/`costByModel` from transcript `result` events for
   sessions whose totals predate the delta fix
+- `server/src/spendHistory.ts` — `SpendHistory`: the day-resolution ledger, fed from
+  `accumulateResultSpend`, debounce-persisted, broadcasting one day row per turn
+- `server/src/store.ts` — `loadSpendHistory`/`saveSpendHistory` (flat-JSON, per-user, same
+  pattern as every other store file)
+- `server/scripts/backfill-spend-history.ts` — one-time local reconstruction
+  (`npm run backfill:spend-history -w server`) of the ledger from transcript `result` events, for
+  history predating the ledger's existence
 - `server/src/workflows.ts` — `WorkflowEngine.onWorkflowTurnComplete` (accumulates all three
   per-step numbers)
 - `web/src/components/Sidebar.tsx` — renders date (EU format), cost, token icon + tooltip,
@@ -98,6 +109,24 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   `stepCostsUsd[stepIndex]`, `meta.lastTokens` onto `stepTokens[stepIndex]`, and
   `meta.lastDurationMs` onto `stepDurationsMs[stepIndex]` each time a workflow turn completes
 - `formatDuration` — renders ms as `Xs` / `Xm Ys` / `Xh Ym`
+- `SpendHistoryBlob` — `{ v: 1, tz, days: Record<dayKey, ModelSpendMap> }`, one per user, held by
+  `SpendHistory` and carried on `hello`
+- `SpendHistory` — in-memory ledger over `SpendHistoryBlob`; `record(modelId, costUsd, tokens, ts)`
+  folds one turn into `days[dayKey(ts)]`, debounce-persists, and broadcasts the mutated day whole;
+  caps to the newest ~730 days on load
+- `dayKey(ts)` — `YYYY-MM-DD` in local time, never `toISOString()` (which is UTC and can name the
+  wrong day)
+- `Granularity` — `'day' | 'week' | 'month' | 'year' | 'all'`
+- `periodBounds(anchor, g)` — the inclusive day-key range a granularity/anchor pair covers; weeks
+  are hardcoded Monday-start
+- `foldDays(days, from, to)` — `mergeSpend` over the day rows inside an inclusive range
+- `shiftPeriod(anchor, g, delta)` — the anchor one period earlier/later; `'all'` cannot page
+- `periodLabel(anchor, g, now?)` — the heading text, e.g. `Today` / `Current month` for a period
+  containing `now`, else `4 Oct 2026` / `September 2026` / `2026` / a week's date range
+- `billRun(results)` — bills a transcript's `result` events index-aligned with the input
+  (`undefined` where a result carried no usable cost), so a caller can attribute each turn to
+  something of its own (the day it happened on) without restating the lifetime-boundary rule;
+  `foldResultSpend` is now implemented over it
 
 ## Data flow
 
@@ -117,6 +146,26 @@ Per-session totals below) and calls
 resolved delta, never the raw `total_cost_usd` reading → persisted via the `SessionMeta` upsert →
 `UsageIndicator` reads `mergeSpend(sessions.map(s => s.costByModel))` for the global rollup and
 `session.costByModel` for the current session, both rendered via `sortedSpend`.
+
+### Usage history
+
+Same accumulate-on-`result` pass, one line further: inside `accumulateResultSpend`'s existing
+`if (spend || turnTokens != null)` guard, right after the `addSpend` call that maintains
+`costByModel`, with the identical resolved model id and billed delta →
+`SpendHistory.record(modelId, billed, tokens, Date.now())` folds the turn into
+`days[dayKey(now)]` → debounce-persisted to `spend-history.json` and broadcast as
+`{ type: 'spendDay', day, spend: days[day] }` (the whole row, not a delta, so a dropped message
+self-heals on the next turn) → the store applies it as a whole-row replace, gated on
+`fromPrimary` → `hello` also carries the full `SpendHistoryBlob` for newly connecting clients,
+same `fromPrimary` gate.
+
+`UsageIndicator` keeps one `{ g: Granularity, anchor }` period, defaulting to `all`, lifted above
+both provider chips so they page in lockstep. For `all` the section renders the existing
+cross-machine `mergeSpend` rollup unchanged; for every other granularity it instead computes
+`periodBounds(anchor, g)` and folds `spendHistory.days` over that range via `foldDays`. A menu on
+the "Spend by model" heading (word + chevron) switches granularity, re-anchoring on today; a
+prev/next pager (hidden on `all`) steps the anchor via `shiftPeriod`. Both read from one place,
+so the picker, the pager and the totals can never disagree about which period is on screen.
 
 ### Per-session totals
 
@@ -159,18 +208,25 @@ via `formatDuration`, all in a metrics row below the step name.
 ## Tests
 
 - `server/src/usageByModel.test.ts` — `addSpend`/`mergeSpend`/`sortedSpend` pure-function
-  behavior.
+  behavior; `dayKey` is local-time (not UTC-shifted); `periodBounds` for a Monday-start week, a
+  month, a year, a day, and across month/year boundaries; `shiftPeriod` wrapping December →
+  January and stepping a day across a month/year boundary; `foldDays` range-inclusive, a single
+  day, and empty-range cases; `periodLabel`'s "current period" branch (and that a neighbouring
+  period does not falsely match it).
 - `server/src/resultSpend.test.ts` — `resultSpend`/`startsQueryLifetime`/`foldResultSpend`: a
   second turn in a lifetime bills the delta, a lifetime that opens above the previous one's final
   reading still bills whole, a cumulative reading that drops bills whole, and a run of results
-  folds to the sum of its lifetimes rather than the sum of its raw readings.
+  folds to the sum of its lifetimes rather than the sum of its raw readings; `billRun` is
+  index-aligned with its input and yields `undefined` for an uncosted result without breaking
+  alignment for the results around it.
 - `server/src/sessions.ended.test.ts` — a settled `result` splits spend under the session's
   model; a second turn in the same query lifetime bills the delta, not the raw reading; a turn
   after `recycleIdleQueries()` closes the query bills its reading whole; a cumulative reading that
   drops, or that trips the `startsQueryLifetime` detector, bills whole even when the raw reading
   rose; `setModel()` between turns opens a second row instead of moving the first; a codex-shaped
   result (no cost) still opens a token-only row; a result with neither cost nor usage opens no
-  row.
+  row; the same settled/recovered/no-op cases open (or don't open) a matching `SpendHistory` day
+  row and broadcast its whole content as `spendDay`.
 - No test infrastructure covers `UsagePoller`, the Sidebar/`SessionMeta` display, or
   `WorkflowStepper` rendering at time of writing; natural first targets are `UsagePoller`
   (mocked `fetch`/`AuthManager`) and `parseSnapshot`.
@@ -239,6 +295,32 @@ via `formatDuration`, all in a metrics row below the step name.
   step blocked on a slow approval doesn't read as an expensive step.
 - Retries and auto-advance turns on the same step add onto the same array slot rather than
   overwriting it, for cost, tokens, and duration.
+- Usage-history period totals (day/week/month/year) are computed from this bridge's own
+  `spend-history.json` and are **not synced** — they cover only turns run on this machine. The
+  all-time rollup, by contrast, is derived from synced sessions and spans every machine the
+  account has used. For a multi-machine user, a period figure can therefore read lower than the
+  all-time one for the same window; the hover card labels every period other than `All time` as
+  "This machine only" (plus the ledger's timezone when it disagrees with the browser's).
+- `All time` is the default and first entry in the period picker — it is the only figure in the
+  section that is not machine-scoped, and it is the number the card already showed before period
+  browsing existed, so upgrading a bridge must not silently change what the user is reading.
+- Day keys (`YYYY-MM-DD`) are stamped in the bridge's local timezone at write time and frozen —
+  they are never re-bucketed if the machine's timezone later changes; the blob's `tz` field
+  records what zone was in effect, and a mismatch against the browser's own zone is surfaced as
+  a note rather than corrected.
+- The ledger is additive only: nothing ever rewrites an existing day row except the one-time
+  backfill script, which replaces the whole file. Live turns can only add to it.
+- `server/scripts/backfill-spend-history.ts` is best-effort, not authoritative: a session whose
+  transcript was deleted (session delete, or a rewind that truncated it) contributes nothing and
+  cannot be recovered, so a later run can produce a *smaller* history than an earlier one. It
+  attributes cost by the SDK-reported per-model `modelUsage` delta (falling back to the session's
+  current model when absent) rather than the session's model at that historical moment, which the
+  transcript does not record — a provenance difference from the live path, not a bug, and can
+  cause a turn split across two models to count a `turns` against each. It refuses to run while
+  the bridge is up, mirroring `repair-spend.ts` and `migrate-user.ts`.
+- The period picker's menu re-anchors on today whenever the granularity changes, so switching
+  from "Month" to "Week" (say) never leaves the user looking at a week that has nothing to do
+  with the month they were just viewing.
 
 ## Architectural rules
 
@@ -270,6 +352,38 @@ via `formatDuration`, all in a metrics row below the step name.
   whenever a turn dies without a `result` (worker crash/error, interrupt, or
   reconcile-on-reconnect), so stale wait time from a dead turn never leaks into the next turn's
   deduction.
+- The spend-history ledger deliberately lives in its own store file (`spend-history.json`), not on
+  `SessionMeta`: that blob is synced last-write-wins under a hard 1.5 MB push cap, and a
+  day-by-day record is exactly the kind of per-turn data it is documented as having to stay free
+  of (`shared/types.ts`). A separate file follows the same per-user flat-JSON pattern every other
+  store file already uses.
+- Spend history is deliberately **not cloud-synced in v1** — no Prisma migration, no new sync
+  route. That is a real limitation (see the business rule above), accepted rather than solved
+  here; a synced ledger table is the stated follow-up.
+- A day's spend rides its own `{ type: 'spendDay' }` message rather than piggybacking on the
+  nullable `{ type: 'usage' }` broadcast: `usage: null` has one fixed meaning ("auth is gone") and
+  spend history has nothing to do with plan auth, so overloading it would make that message mean
+  two unrelated things depending on which field is set.
+- The ledger write sits *inside* `accumulateResultSpend`'s existing `if (spend || turnTokens !=
+  null)` guard, immediately after the `addSpend` call for `costByModel`, using the identical
+  resolved model id and billed delta — not a second, independently-derived call. This is what
+  guarantees the ledger and the per-session split can never disagree about what counted; a
+  discrepancy between the two would otherwise be a permanent, hard-to-notice reconciliation bug.
+- `SpendDay` broadcasts (and the `hello` snapshot) carry the *whole* day row, not a delta, for the
+  same reason `sessionUpsert` sends whole objects: a message dropped mid-flight (a flaky relay
+  link) self-heals on the next turn instead of leaving a permanent gap that nothing ever re-sends.
+- The web store's `hello` merge and its `spendDay` handler are both gated on `fromPrimary`,
+  mirroring `updateStatus`/`bridge`/`claudeCli`: the ledger describes one specific machine, so a
+  second machine's `hello` (a guest connection, or another of the user's own bridges) must never
+  overwrite or blend into the primary's history.
+- The period picker is a plain `useState` lifted only as far as `UsageIndicator`, not zustand
+  state: it is ephemeral view state with no reason to survive a remount or be read anywhere else,
+  and lifting it exactly one component higher than where it's needed (so both provider chips share
+  it) is enough.
+- The period-picker menu is rendered with `withinPortal={false}`: a portaled Mantine dropdown
+  renders outside the `HoverCard`'s DOM subtree, so moving the pointer onto it would read as
+  leaving the hover card and dismiss both at once. Keeping it inline makes the menu part of what
+  the hover card considers itself.
 
 ## Related decisions
 

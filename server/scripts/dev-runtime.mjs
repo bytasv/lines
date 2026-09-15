@@ -17,6 +17,7 @@ export const pathsFor = (root) => ({
   cache: path.join(root, '.cache/dev-runtime'),
   policy: path.join(root, '.cache/dev-runtime/policy.json'),
   control: path.join(root, '.cache/dev-runtime/control.json'),
+  bridgeControl: path.join(root, '.cache/dev-runtime/bridge-control.json'),
   healthy: path.join(root, '.cache/dev-runtime/healthy.json'),
 });
 const readJson = (file, fallback = null) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
@@ -139,7 +140,7 @@ export class Supervisor {
       '--import', path.join(this.root, 'node_modules/tsx/dist/loader.mjs'),
       path.join(generation.directory, 'server/src', entry),
     ];
-    const child = { process: spawn(process.execPath, command, {
+    const child = { process: spawn(process.execPath, [fileURLToPath(new URL('./dev-process.mjs', import.meta.url)), ...command], {
       cwd: path.join(this.root, 'server'), detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: { ...process.env, LINES_DEV_SUPERVISED: '1', LINES_DEV_CHECKOUT: this.root,
@@ -175,6 +176,7 @@ export class Supervisor {
   async ready(name, requireRelay = false) {
     const deadline = Date.now() + this.options.startupMs;
     while (!this.stopping && Date.now() < deadline) {
+      await this.refreshChild(name);
       const child = this.children.get(name);
       if (!child || child.process.exitCode !== null || child.process.signalCode) throw new Error(`${name} exited during startup`);
       if (this.fresh(child) && child.activity.ready && (!requireRelay || child.activity.relayConnected)) return;
@@ -206,9 +208,9 @@ export class Supervisor {
       } catch (error) { if (error.code !== 'ESRCH') throw error; }
     };
     signal('SIGTERM');
-    const deadline = Date.now() + 2000;
+    const deadline = Date.now() + 2500;
     while (child.process.exitCode === null && !child.process.signalCode && Date.now() < deadline) await sleep(25);
-    signal('SIGKILL'); // Reap remaining children in our private process group too.
+    signal('SIGKILL');
   }
   async stopPair() { await this.stopChild('bridge'); await this.stopChild('worker'); }
   async reload() {
@@ -236,6 +238,7 @@ export class Supervisor {
       writeJson(this.paths.healthy, next);
       this.error = null;
     } catch (error) {
+      if (this.stopping) return;
       this.rejected.add(next.id);
       this.error = `Rejected ${next.id}: ${error.message}; restoring ${previous.id}`;
       this.phase = 'restoring'; this.publish();
@@ -271,6 +274,7 @@ export class Supervisor {
     if (this.ticking || this.stopping || !this.current) return;
     this.ticking = true;
     try {
+      await this.refreshChild('bridge');
       for (const name of names) {
         const child = this.children.get(name);
         if (!child || child.process.exitCode !== null || child.process.signalCode) {
@@ -310,6 +314,7 @@ export class Supervisor {
       this.publish();
     });
     await new Promise((resolve, reject) => { this.http.once('error', reject); this.http.listen(0, '127.0.0.1', resolve); });
+    if (this.stopping) { this.http.close(); return; }
     writeJson(this.paths.control, { pid: process.pid, port: this.http.address().port, token: this.token });
   }
   async start() {
@@ -320,6 +325,7 @@ export class Supervisor {
       }
     }
     await this.startControl();
+    if (this.stopping) throw new Error('Supervisor is stopping');
     const previous = readJson(this.paths.healthy);
     try { this.current = await buildGeneration(this.root); }
     catch (error) {
@@ -334,6 +340,7 @@ export class Supervisor {
       this.error = `Startup failed; restored ${previous.id}: ${error.message}`;
       await this.startPair(previous);
     }
+    if (this.stopping) throw new Error('Supervisor is stopping');
     writeJson(this.paths.healthy, this.current);
     this.phase = 'running';
     for (const relative of ['server/src', 'shared']) {
@@ -345,14 +352,211 @@ export class Supervisor {
     this.timer = setInterval(() => { void this.tick(); }, 250);
     this.publish();
   }
-  async stop() {
+  stop() {
+    return this.stopPromise ??= this.finishStop();
+  }
+  async finishStop() {
     this.stopping = true;
     clearInterval(this.timer); clearTimeout(this.buildTimer);
     for (const watcher of this.watchers) watcher.close();
-    await this.stopPair();
+    await this.stopOwned();
     this.http?.close();
     if (readJson(this.paths.control)?.pid === process.pid) fs.rmSync(this.paths.control, { force: true });
   }
+  async stopOwned() { await this.stopPair(); }
+  async refreshChild() {}
+}
+
+/** Requests never print the checkout-local bearer token. */
+async function bridgeRequest(root, action, payload = {}) {
+  const endpoint = readJson(pathsFor(root).bridgeControl);
+  if (!endpoint || !alive(endpoint.pid)) throw new Error('Bridge runner is unavailable');
+  return new Promise((resolve, reject) => {
+    const request = http.request({ host: '127.0.0.1', port: endpoint.port, path: '/', method: 'POST',
+      headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, timeout: 5000 }, (response) => {
+      let body = '';
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => {
+        try {
+          const value = JSON.parse(body);
+          if (response.statusCode !== 200) throw new Error(value.error ?? 'Bridge control failed');
+          resolve(value);
+        } catch (error) { reject(error); }
+      });
+    });
+    request.on('error', reject);
+    request.on('timeout', () => request.destroy(new Error('Bridge control timed out')));
+    request.end(JSON.stringify({ action, ...payload }));
+  });
+}
+
+export class WorkerRunner extends Supervisor {
+  async refreshChild(name) {
+    if (name !== 'bridge') return;
+    try {
+      const state = await bridgeRequest(this.root, 'state');
+      this.peerGeneration = state.generation;
+      if (!state.child) { this.children.delete('bridge'); return; }
+      this.children.set('bridge', {
+        process: { ...state.child.process, connected: false },
+        activity: state.child.activity, at: state.child.at,
+      });
+    } catch {
+      this.children.delete('bridge');
+      this.peerGeneration = null;
+    }
+  }
+  async startPair(generation, requireRelay = false) {
+    // A coordinator restart adopts the bridge's generation. Starting the worker
+    // must not replace a still-running bridge with newly edited source.
+    if (this.phase === 'starting') {
+      const deadline = Date.now() + this.options.startupMs;
+      while (!this.stopping) {
+        try {
+          const state = await bridgeRequest(this.root, 'state');
+          if (state.generation && state.child?.process.exitCode === null && !state.child.process.signalCode) {
+            generation = state.generation;
+            this.current = generation;
+          }
+          break;
+        } catch (error) {
+          if (Date.now() >= deadline) throw error;
+          await sleep(100);
+        }
+      }
+    }
+    return super.startPair(generation, requireRelay);
+  }
+  async startChild(name, generation) {
+    if (name !== 'bridge') return super.startChild(name, generation);
+    if (this.stopping) throw new Error('Worker runner is stopping');
+    await bridgeRequest(this.root, 'start', { generation });
+    await this.refreshChild(name);
+    return this.children.get(name);
+  }
+  async stopChild(name) {
+    if (name !== 'bridge') return super.stopChild(name);
+    await bridgeRequest(this.root, 'stop');
+    this.children.delete(name);
+  }
+  async control(name, action) {
+    if (name !== 'bridge') return super.control(name, action);
+    return bridgeRequest(this.root, 'control', { command: action });
+  }
+  publish() {
+    super.publish();
+    if (!this.stopping) void bridgeRequest(this.root, 'status', { status: this.state() }).catch(() => {});
+  }
+  // Tilt owns the two lifetimes independently. Coordinated *reload* still uses
+  // stopPair, but stopping this resource must never stop the bridge resource.
+  async stopOwned() { await super.stopChild('worker'); }
+}
+
+export class BridgeRunner extends Supervisor {
+  constructor(root, options = {}) {
+    super(root, options);
+    this.paths.control = this.paths.bridgeControl;
+  }
+  async start() {
+    const prior = readJson(this.paths.bridgeControl);
+    if (prior?.pid && alive(prior.pid)) throw new Error('Another bridge runner is running for this checkout.');
+    this.token = randomBytes(32).toString('hex');
+    this.http = http.createServer(async (request, response) => {
+      const provided = Buffer.from(String(request.headers.authorization ?? ''));
+      const expected = Buffer.from(`Bearer ${this.token}`);
+      if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+        response.writeHead(403); response.end(); return;
+      }
+      try {
+        let body = '';
+        for await (const chunk of request) {
+          body += chunk;
+          if (body.length > 1024 * 1024) throw new Error('Request too large');
+        }
+        const message = JSON.parse(body);
+        if (this.stopping) throw new Error('Bridge runner is stopping');
+        let result = {};
+        if (message.action === 'start' || message.action === 'stop') {
+          // Serialize lifecycle mutations, including requests whose client timed
+          // out. Recheck stopping after the preceding mutation finishes.
+          const operation = (this.operation ?? Promise.resolve()).catch(() => {}).then(async () => {
+            if (this.stopping) throw new Error('Bridge runner is stopping');
+            if (message.action === 'stop') return super.stopChild('bridge');
+            const child = this.children.get('bridge');
+            if (child?.process.exitCode === null && !child.process.signalCode) {
+              if (this.current?.id !== message.generation.id) throw new Error('Bridge is running a different generation');
+              return;
+            }
+            // Only accept complete immutable generations inside this checkout.
+            const generation = message.generation;
+            const directory = path.join(this.paths.cache, 'generations', generation.id);
+            if (!/^[a-f0-9]{20}$/.test(generation.id) || directory !== generation.directory || !fs.existsSync(path.join(directory, 'complete.json'))) {
+              throw new Error('Invalid generation');
+            }
+            await super.stopChild('bridge');
+            await super.startChild('bridge', generation);
+            this.current = generation;
+          });
+          this.operation = operation;
+          await operation;
+        } else if (message.action === 'control') {
+          if (!['prepare', 'activate'].includes(message.command)) throw new Error('Invalid command');
+          result = await super.control('bridge', message.command);
+        } else if (message.action === 'status') {
+          const child = this.children.get('bridge');
+          if (child?.process.connected) child.process.send({ type: 'devControl', action: 'status', status: message.status }, () => {});
+        } else if (message.action !== 'state') throw new Error('Invalid action');
+        if (message.action === 'state') {
+          const child = this.children.get('bridge');
+          result = { generation: this.current, child: child ? {
+            process: { pid: child.process.pid, exitCode: child.process.exitCode, signalCode: child.process.signalCode },
+            activity: child.activity, at: child.at,
+          } : null };
+        }
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify(result));
+      } catch (error) { response.writeHead(503); response.end(JSON.stringify({ error: error.message })); }
+    });
+    await new Promise((resolve, reject) => { this.http.once('error', reject); this.http.listen(0, '127.0.0.1', resolve); });
+    if (this.stopping) { this.http.close(); return; }
+    writeJson(this.paths.bridgeControl, { pid: process.pid, port: this.http.address().port, token: this.token });
+    log('bridge runner ready; waiting for worker coordinator');
+  }
+  async stopOwned() {
+    await this.operation?.catch(() => {});
+    await super.stopChild('bridge');
+    if (readJson(this.paths.bridgeControl)?.pid === process.pid) fs.rmSync(this.paths.bridgeControl, { force: true });
+  }
+}
+
+/** The runner itself stays in Tilt's group. Its guard survives a hard owner
+ * kill just long enough to reap the private service group through IPC loss. */
+export function watchOwner(stop) {
+  const owner = process.ppid;
+  const timer = setInterval(() => {
+    if (process.ppid !== owner || !alive(owner)) stop();
+  }, 250);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+async function runRoles() {
+  const children = names.map((name) => spawn(process.execPath, [fileURLToPath(import.meta.url), name], {
+    stdio: 'inherit', env: process.env,
+  }));
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    for (const child of children) child.kill('SIGTERM');
+  };
+  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, stop);
+  const unwatch = watchOwner(stop);
+  await Promise.all(children.map((child) => new Promise((resolve) => {
+    child.once('exit', (code) => { if (!stopping) { process.exitCode = code || 1; stop(); } resolve(); });
+    child.once('error', (error) => { console.error(error.message); process.exitCode = 1; stop(); resolve(); });
+  })));
+  unwatch();
 }
 
 export async function policyCommand(root, action, targets = []) {
@@ -380,14 +584,21 @@ export async function policyCommand(root, action, targets = []) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const action = process.argv[2] ?? 'start';
   if (action === 'start') {
-    const supervisor = new Supervisor(checkout);
-    for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => { void supervisor.stop().then(() => process.exit(0)); });
-    supervisor.start().catch(async (error) => { console.error(`[dev-runtime] ${error.message}`); await supervisor.stop(); process.exitCode = 1; });
+    await runRoles();
+  } else if (names.includes(action)) {
+    const supervisor = action === 'worker' ? new WorkerRunner(checkout) : new BridgeRunner(checkout);
+    const stop = () => { void supervisor.stop().then(() => process.exit(0)); };
+    for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, stop);
+    const unwatch = watchOwner(stop);
+    supervisor.start().catch(async (error) => {
+      if (!supervisor.stopping) console.error(`[dev-runtime] ${error.message}`);
+      await supervisor.stop(); unwatch(); process.exitCode = 1;
+    });
   } else if (action === 'legacy-running') {
     // Keep an already running tsx-owned Tilt stack intact during migration.
     // This process inspection happens only when Tilt evaluates its file.
     console.log(legacyRuntimeRunning(checkout) ? 'yes' : 'no');
   } else if (['freeze', 'resume', 'set', 'status'].includes(action)) {
     policyCommand(checkout, action, process.argv.slice(3)).then((state) => log(JSON.stringify(state))).catch((error) => { console.error(error.message); process.exitCode = 1; });
-  } else { console.error('Usage: dev-runtime.mjs [start|status|freeze|resume|set] [worker|bridge|all]'); process.exitCode = 1; }
+  } else { console.error('Usage: dev-runtime.mjs [start|worker|bridge|status|freeze|resume|set] [worker|bridge|all]'); process.exitCode = 1; }
 }

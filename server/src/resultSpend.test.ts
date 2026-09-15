@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { foldResultSpend, resultSpend, startsQueryLifetime } from '@lines/shared';
+import { billRun, foldResultSpend, resultSpend, startsQueryLifetime } from '@lines/shared';
 import type { ResultSpendPayload } from '@lines/shared';
 
 /**
@@ -82,4 +82,28 @@ test('a run with no cost anywhere folds to nothing', () => {
     totalUsd: 0,
     lastUsd: undefined,
   });
+});
+
+test('billRun is index-aligned with the results it was given', () => {
+  const billed = billRun([result(1, 100, 100), result(3, 250, 150), result(10, 400, 400)]);
+  assert.equal(billed.length, 3);
+  // First of a lifetime, then a delta, then a lifetime that opens above the last.
+  assert.deepEqual(
+    billed.map((b) => b?.billed),
+    [1, 2, 10],
+  );
+  // And the fold over the same run agrees with the sum of the parts.
+  assert.equal(
+    foldResultSpend([result(1, 100, 100), result(3, 250, 150), result(10, 400, 400)]).totalUsd,
+    13,
+  );
+});
+
+test('billRun yields undefined for a result carrying no cost, keeping alignment', () => {
+  const codex: ResultSpendPayload = { usage: { input_tokens: 500 } };
+  const billed = billRun([result(1, 100, 100), codex, result(3, 250, 150)]);
+  assert.equal(billed.length, 3);
+  assert.equal(billed[1], undefined);
+  // The uncosted result does not disturb the lifetime the two around it share.
+  assert.deepEqual(billed[2], { billed: 2, cumulative: 3 });
 });

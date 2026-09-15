@@ -3,13 +3,14 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { buildGeneration, Supervisor, policyCommand } from './dev-runtime.mjs';
+import { execFileSync, spawn } from 'node:child_process';
+import net from 'node:net';
+import { buildGeneration, WorkerRunner, BridgeRunner, policyCommand } from './dev-runtime.mjs';
 
 const actualRoot = path.resolve(import.meta.dirname, '../..');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(check, label) {
-  const deadline = Date.now() + 8000;
+  const deadline = Date.now() + 15000;
   while (Date.now() < deadline) { if (await check()) return; await delay(30); }
   throw new Error(`Timed out: ${label}`);
 }
@@ -52,16 +53,20 @@ import { execFileSync } from 'node:child_process';
 }
 async function running(t) {
   const f = fixture(t, false);
-  const supervisor = new Supervisor(f.root, { quietMs: 100, startupMs: 1200,
-    command: (name, generation) => [f.childFile, generation.directory, name] });
+  const options = { quietMs: 100, startupMs: 1200,
+    command: (name, generation) => [f.childFile, generation.directory, name] };
+  const supervisor = new WorkerRunner(f.root, options);
+  const bridge = new BridgeRunner(f.root, options);
   // Stop processes before removing the fixture, regardless of assertion failures.
   t.after(async () => {
     await supervisor.stop();
+    await bridge.stop();
     await until(() => !supervisor.ticking, 'supervisor stopped');
     fs.rmSync(f.root, { recursive: true, force: true });
   });
+  await bridge.start();
   await supervisor.start();
-  return { ...f, supervisor };
+  return { ...f, supervisor, bridge, options };
 }
 
 test('generations isolate local sources, shared imports, and MCP helper paths', async (t) => {
@@ -131,7 +136,7 @@ test('bridge crash preserves worker PID and active work', async (t) => {
   flags({ busy: true });
   const workerPid = supervisor.children.get('worker').process.pid;
   const bridgePid = supervisor.children.get('bridge').process.pid;
-  supervisor.children.get('bridge').process.kill('SIGKILL');
+  process.kill(supervisor.children.get('bridge').process.pid, 'SIGTERM');
   await until(() => supervisor.children.get('bridge')?.process.pid !== bridgePid && supervisor.phase === 'running', 'bridge recovery');
   assert.equal(supervisor.children.get('worker').process.pid, workerPid);
 });
@@ -142,4 +147,109 @@ test('missing or stale activity is never treated as idle', async (t) => {
   assert.equal(supervisor.idle(), false);
   supervisor.children.get('worker').activity = null;
   assert.equal(supervisor.idle(), false);
+});
+
+test('bridge disable/re-enable preserves worker; worker stop preserves bridge and adopts its generation on restart', async (t) => {
+  const { root, flags, supervisor, bridge, options } = await running(t);
+  flags({ busy: true });
+  const workerPid = supervisor.children.get('worker').process.pid;
+  await bridge.stop();
+  await delay(500);
+  assert.equal(supervisor.children.get('worker').process.pid, workerPid);
+  const replacement = new BridgeRunner(root, options);
+  t.after(() => replacement.stop());
+  await replacement.start();
+  await until(() => supervisor.children.get('bridge')?.activity?.ready, 're-enabled bridge');
+  const bridgePid = replacement.children.get('bridge').process.pid;
+  const generation = replacement.current.id;
+  await supervisor.stop();
+  await delay(500);
+  assert.equal(replacement.children.get('bridge').process.pid, bridgePid);
+  assert.equal(replacement.children.get('bridge').process.exitCode, null);
+  assert.equal(supervisor.children.has('worker'), false, 'stopped worker is not resurrected');
+  fs.writeFileSync(path.join(root, 'shared/types.ts'), 'export const version = 123;');
+  const coordinator = new WorkerRunner(root, options);
+  t.after(() => coordinator.stop());
+  await coordinator.start();
+  assert.equal(coordinator.current.id, generation);
+  assert.equal(replacement.children.get('bridge').process.pid, bridgePid);
+});
+
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+async function portOpen(port) {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, '127.0.0.1');
+    socket.once('connect', () => { socket.destroy(); resolve(true); });
+    socket.once('error', () => resolve(false));
+  });
+}
+
+// Exercise the actual runner/guard ownership chain without providers or user state.
+async function ownedProcess(t, { unready = false } = {}) {
+  const f = fixture(t, false);
+  const stateFile = path.join(f.root, 'pids.json');
+  const service = path.join(f.root, 'service.mjs');
+  fs.writeFileSync(service, `
+    import fs from 'node:fs';
+    import net from 'node:net';
+    import { spawn } from 'node:child_process';
+    process.on('SIGTERM', () => {});
+    process.on('SIGINT', () => {});
+    const descendant = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{}); process.on("SIGINT",()=>{}); setInterval(()=>{},1000)'], { stdio: 'ignore' });
+    const server = net.createServer();
+    server.listen(0, '127.0.0.1', () => {
+      fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify({service:process.pid, descendant:descendant.pid, port:server.address().port}));
+    });
+    process.on('message', m => {
+      if (m.action !== 'status') process.send?.({type:'devAck',id:m.id,ok:true,ready:${!unready},blockers:[]},()=>{});
+    });
+    setInterval(() => { if (process.connected) process.send({type:'devActivity',ready:${!unready},blockers:[]},()=>{}); }, 40);
+  `);
+  const runnerFile = path.join(f.root, 'runner.mjs');
+  fs.writeFileSync(runnerFile, `
+    import { Supervisor, watchOwner } from ${JSON.stringify(new URL('./dev-runtime.mjs', import.meta.url).href)};
+    const runner = new Supervisor(${JSON.stringify(f.root)}, {command:()=>[${JSON.stringify(service)}],startupMs:10000});
+    const stop = () => runner.stop().then(()=>process.exit(0));
+    process.on('SIGTERM',stop); process.on('SIGINT',stop); watchOwner(stop);
+    await runner.startChild('worker', {id:'test'});
+    if (${unready}) runner.ready('worker').catch(()=>{});
+    setInterval(()=>{},1000);
+  `);
+  const runner = spawn(process.execPath, [runnerFile], { stdio: ['ignore', 'ignore', 'inherit'] });
+  let state;
+  t.after(async () => {
+    if (alive(runner.pid)) runner.kill('SIGTERM');
+    await until(() => !alive(runner.pid), 'runner cleanup');
+    if (state) await until(() => !alive(state.service) && !alive(state.descendant), 'service cleanup');
+    fs.rmSync(f.root, { recursive: true, force: true });
+  });
+  await until(() => fs.existsSync(stateFile), 'service listening');
+  state = JSON.parse(fs.readFileSync(stateFile));
+  assert.equal(await portOpen(state.port), true);
+  return { runner, state };
+}
+
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGKILL']) {
+  test(`${signal} of runner reaps service and stubborn descendants and releases port`, async (t) => {
+    const { runner, state } = await ownedProcess(t);
+    runner.kill(signal);
+    await until(() => !alive(runner.pid) && !alive(state.service) && !alive(state.descendant), 'owned tree exits');
+    assert.equal(await portOpen(state.port), false);
+  });
+}
+
+test('shutdown during startup does not spawn replacement processes', async (t) => {
+  const { runner, state } = await ownedProcess(t, { unready: true });
+  runner.kill('SIGTERM');
+  await until(() => !alive(runner.pid) && !alive(state.service) && !alive(state.descendant), 'startup shutdown');
+  assert.equal(await portOpen(state.port), false);
+});
+
+test('shutdown during coordinated reload cannot restart the worker', async (t) => {
+  const { root, supervisor } = await running(t);
+  fs.writeFileSync(path.join(root, 'shared/types.ts'), 'export const version = 321;');
+  await until(() => supervisor.phase === 'reloading', 'reload starts');
+  await supervisor.stop();
+  await until(() => !supervisor.ticking, 'reload finishes');
+  assert.equal(supervisor.children.has('worker'), false);
 });

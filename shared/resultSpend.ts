@@ -120,10 +120,28 @@ export function resultSpend(
 }
 
 /**
- * Real spend over a run of results in transcript order, folding lifetimes as they
- * are detected. This is what the repair script recomputes a historical session's
- * `totalCostUsd` and `lastCostUsd` from, and what the boundary rule is tested
- * through. `lastUsd` is `undefined` when no result in the run carried a cost.
+ * Bill a run of results in transcript order, folding lifetimes as they are
+ * detected. The output is index-aligned with the input — `undefined` where a
+ * result carried no usable cost — so a caller that needs to attribute each turn
+ * to something of its own (the day it happened on, say) can zip the two together
+ * without restating the lifetime-boundary rule.
+ */
+export function billRun(results: ResultSpendPayload[]): (ResultSpend | undefined)[] {
+  const billed: (ResultSpend | undefined)[] = [];
+  let cumulative: number | undefined;
+  for (const msg of results) {
+    const spend = resultSpend(msg, cumulative);
+    billed.push(spend);
+    if (spend) cumulative = spend.cumulative;
+  }
+  return billed;
+}
+
+/**
+ * Real spend over a run of results in transcript order. This is what the repair
+ * script recomputes a historical session's `totalCostUsd` and `lastCostUsd`
+ * from, and what the boundary rule is tested through. `lastUsd` is `undefined`
+ * when no result in the run carried a cost.
  */
 export function foldResultSpend(results: ResultSpendPayload[]): {
   totalUsd: number;
@@ -131,13 +149,10 @@ export function foldResultSpend(results: ResultSpendPayload[]): {
 } {
   let totalUsd = 0;
   let lastUsd: number | undefined;
-  let cumulative: number | undefined;
-  for (const msg of results) {
-    const spend = resultSpend(msg, cumulative);
+  for (const spend of billRun(results)) {
     if (!spend) continue;
     totalUsd += spend.billed;
     lastUsd = spend.billed;
-    cumulative = spend.cumulative;
   }
   return { totalUsd, lastUsd };
 }

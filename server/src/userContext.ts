@@ -8,6 +8,7 @@ import { OpenaiUsagePoller } from './openaiUsage.ts';
 import { GuardAllowlist } from './autoGuard.ts';
 import { McpConnections } from './mcpConnections.ts';
 import { SessionManager } from './sessions.ts';
+import { SpendHistory } from './spendHistory.ts';
 import { UsagePoller } from './usage.ts';
 import { WorkflowEngine } from './workflows.ts';
 import { RecipeEngine } from './recipes.ts';
@@ -153,6 +154,8 @@ export interface UserContext {
   workflows: WorkflowEngine;
   recipes: RecipeEngine;
   usage: UsagePoller;
+  /** This machine's day-resolution spend ledger, for the hello snapshot. */
+  spendHistory: SpendHistory;
   /** cwd -> machine-independent project identity; groups sessions across installs. */
   projectKeys: ProjectKeyRegistry;
   /**
@@ -297,6 +300,9 @@ export function buildUserContext(
   // safe when writing it a second time would not be.
   const openaiUsage = new OpenaiUsagePoller(broadcast, store);
 
+  // Before the SessionManager, which is its only writer.
+  const spendHistory = new SpendHistory(store, broadcast);
+
   const sessions = new SessionManager(
     store,
     guard,
@@ -324,6 +330,7 @@ export function buildUserContext(
     mcp,
     openaiAuth,
     userId,
+    spendHistory,
   );
   sessions.attachWorker(worker);
 
@@ -485,6 +492,7 @@ export function buildUserContext(
     workflows,
     recipes,
     usage,
+    spendHistory,
     projectKeys,
     sockets,
     presence,

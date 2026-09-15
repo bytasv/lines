@@ -10,6 +10,7 @@ import type {
   ProjectKeyMap,
   RecipeDef,
   SessionMeta,
+  SpendHistoryBlob,
   StepDef,
   SyncLogEntry,
   TranscriptEvent,
@@ -260,6 +261,11 @@ export function createStore(root: string) {
   // travels to another machine arrives without its credential.
   const MCP_SECRETS_FILE = path.join(root, 'mcp-secrets.json');
   const SETTINGS_FILE = path.join(root, 'settings.json');
+  // Day-resolution spend ledger. Its own file rather than a field on
+  // SESSIONS_FILE's rows: it is not synced, and it is written on a different
+  // cadence. New file, so the bare-array/envelope hazard noted above cannot
+  // apply — no older build ever reads it.
+  const SPEND_HISTORY_FILE = path.join(root, 'spend-history.json');
   const MEMORY_MANIFEST_FILE = path.join(root, 'memory-manifest.json');
   const WATERMARKS_FILE = path.join(root, 'sync-watermarks.json');
   const SYNC_LOG_FILE = path.join(root, 'sync-log.jsonl');
@@ -648,6 +654,21 @@ export function createStore(root: string) {
 
     saveSettings(settings: UserUiSettings) {
       writeJson(SETTINGS_FILE, settings);
+    },
+
+    /** Missing, empty or corrupt reads as "no history yet" — the ledger is
+     *  additive and only ever rebuilt by the explicit backfill script. */
+    loadSpendHistory(): SpendHistoryBlob {
+      const raw = readJson<Partial<SpendHistoryBlob> | null>(SPEND_HISTORY_FILE, null);
+      return {
+        v: 1,
+        tz: typeof raw?.tz === 'string' ? raw.tz : '',
+        days: raw?.days && typeof raw.days === 'object' ? raw.days : {},
+      };
+    },
+
+    saveSpendHistory(blob: SpendHistoryBlob) {
+      writeJson(SPEND_HISTORY_FILE, blob);
     },
 
     saveGuardAllowlist(entries: unknown) {

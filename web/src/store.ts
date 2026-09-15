@@ -30,6 +30,7 @@ import type {
   TranscriptEvent,
   ClaudeCliStatus,
   UpdateStatus,
+  SpendHistoryBlob,
   UsageSnapshot,
   UserUiSettings,
   WorkerStatus,
@@ -701,6 +702,10 @@ interface UiState {
   /** ChatGPT-plan usage snapshot; null when no OpenAI account is connected, or
    *  when codex's access token is stale and the reading could not be taken. */
   openaiUsage: UsageSnapshot | null;
+  /** The primary machine's day-resolution spend ledger; null until the first
+   *  `hello` from it, and on a bridge too old to send one. Machine-local by
+   *  construction — see `SpendHistoryBlob`. */
+  spendHistory: SpendHistoryBlob | null;
   /** App login state from the bridge; null until the first `hello`. */
   auth: AuthStatus | null;
   /** Bridge->storage/Supabase link health; null until first `hello`. `available: false` shows the sync-degraded banner. */
@@ -1090,6 +1095,7 @@ export const useStore = create<UiState>((set, get) => {
   filePreview: null,
   usage: null,
   openaiUsage: null,
+  spendHistory: null,
   auth: null,
   storageStatus: null,
   workerStatus: null,
@@ -1548,6 +1554,11 @@ export const useStore = create<UiState>((set, get) => {
           // first fetch lands, so keep the last good snapshot rather than
           // flickering the chip away — but drop it once the account is gone.
           openaiUsage: msg.openaiUsage ?? (msg.openaiAuth?.loggedIn ? state.openaiUsage : null),
+          // Gated on `fromPrimary`, like `update`/`bridge`/`claudeCli` below and
+          // for the same reason: the ledger is machine-local and a guest `hello`
+          // never carries one, so an ungated read would let a second machine wipe
+          // the primary's history the moment it says hello.
+          spendHistory: fromPrimary ? msg.spendHistory ?? state.spendHistory : state.spendHistory,
           auth: msg.auth,
           // Absent on a bridge older than this field — degrades to "no OpenAI
           // account", which is exactly what such a bridge can offer.
@@ -1894,6 +1905,21 @@ export const useStore = create<UiState>((set, get) => {
         break;
       case 'openaiUsage':
         set({ openaiUsage: msg.usage });
+        break;
+      case 'spendDay':
+        // Whole-row replace, never a merge: the bridge sends the day as it now
+        // stands, so a message dropped while the tab was asleep self-heals on
+        // the next turn. Ignored from anything but the primary — the ledger
+        // describes one machine and must not be crossed with another's.
+        if (fromPrimary) {
+          set((state) => ({
+            spendHistory: {
+              v: 1,
+              tz: state.spendHistory?.tz ?? '',
+              days: { ...state.spendHistory?.days, [msg.day]: msg.spend },
+            },
+          }));
+        }
         break;
       case 'authStatus':
         // Success closes the modal; a logout (or dead refresh token) reopens it.

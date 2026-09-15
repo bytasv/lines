@@ -67,6 +67,7 @@ import { LINES_MCP_SERVER } from './mcpWorkflowTools.ts';
 import { linesMcpServerConfig } from './linesMcpStdio.ts';
 import { mergeMcpServers } from './workerProtocol.ts';
 import type { Store } from './store.ts';
+import type { SpendHistory } from './spendHistory.ts';
 import {
   captureBaseline,
   captureBaselines,
@@ -1211,6 +1212,10 @@ export class SessionManager {
      *  be spawned pointing back at the right context; defaults to the local user,
      *  which is what single-tenant mode and every test run as. */
     private userId: string = 'local',
+    /** The day-resolution spend ledger, fed from `accumulateResultSpend`.
+     *  Optional so tests and embeddings can omit it — absent simply means no
+     *  history is kept, never a different number anywhere else. */
+    private spendHistory?: SpendHistory,
   ) {
     for (const meta of this.store.loadSessions()) {
       // An advance in flight belonged to the previous process — nothing is
@@ -5311,7 +5316,12 @@ export class SessionManager {
     }
     if (spend || turnTokens != null) {
       meta.costByModel ??= {};
-      addSpend(meta.costByModel, resolveModelId(meta.model), spend?.billed ?? 0, turnTokens ?? 0);
+      const modelId = resolveModelId(meta.model);
+      addSpend(meta.costByModel, modelId, spend?.billed ?? 0, turnTokens ?? 0);
+      // Same arguments, same guard, one line apart: the ledger records what the
+      // session's own split records, so the two can never disagree about what
+      // counted. Stamped now rather than from the result, which carries no time.
+      this.spendHistory?.record(modelId, spend?.billed ?? 0, turnTokens ?? 0, Date.now());
     }
   }
 

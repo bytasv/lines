@@ -1,17 +1,37 @@
+import { useState } from 'react';
 import {
+  ActionIcon,
   Anchor,
   Box,
   Divider,
   Group,
   HoverCard,
+  Menu,
   Progress,
   RingProgress,
   Stack,
   Text,
   UnstyledButton,
 } from '@mantine/core';
-import { mergeSpend, providerForModel, sortedSpend } from '@lines/shared';
-import type { ClientMessage, ModelOption, ModelProvider, ModelSpend, UsageSnapshot } from '@lines/shared';
+import { IconChevronDown, IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
+import {
+  dayKey,
+  foldDays,
+  mergeSpend,
+  periodBounds,
+  periodLabel,
+  providerForModel,
+  shiftPeriod,
+  sortedSpend,
+} from '@lines/shared';
+import type {
+  ClientMessage,
+  Granularity,
+  ModelOption,
+  ModelProvider,
+  ModelSpend,
+  UsageSnapshot,
+} from '@lines/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { formatTokens, usageColor } from '../lib/format';
@@ -76,6 +96,157 @@ function SpendRows({ rows, models }: { rows: [string, ModelSpend][]; models: Mod
   );
 }
 
+/**
+ * Which period the spend table is showing. `anchor` is any day key inside it —
+ * the bounds are derived, so paging is one date shift rather than a range.
+ *
+ * Ephemeral UI state, deliberately not in zustand: it is lifted only as far as
+ * `UsageIndicator` so the two provider chips page in lockstep, and nothing
+ * outside the dropdown has any business reading it.
+ */
+interface Period {
+  g: Granularity;
+  anchor: string;
+}
+
+const GRANULARITIES: { value: Granularity; label: string }[] = [
+  // All first and default: it is the only figure that spans machines, and it is
+  // the number this card already showed — upgrading must not silently change
+  // what the user is reading.
+  { value: 'all', label: 'All time' },
+  { value: 'day', label: 'Day' },
+  { value: 'week', label: 'Week' },
+  { value: 'month', label: 'Month' },
+  { value: 'year', label: 'Year' },
+];
+
+function totalOf(rows: [string, ModelSpend][]): ModelSpend {
+  return rows.reduce(
+    (acc, [, spend]) => ({
+      costUsd: acc.costUsd + spend.costUsd,
+      tokens: acc.tokens + spend.tokens,
+      turns: acc.turns + spend.turns,
+    }),
+    { costUsd: 0, tokens: 0, turns: 0 },
+  );
+}
+
+/**
+ * Segment picker, period pager and the rows for whichever period is selected.
+ *
+ * Rendered per provider (so each chip accounts for its own models) but driven by
+ * one `Period` owned above, so the two never disagree about which week is on
+ * screen.
+ */
+function SpendSection({
+  rows,
+  period,
+  onPeriod,
+  models,
+  tzNote,
+}: {
+  rows: [string, ModelSpend][];
+  period: Period;
+  onPeriod: (next: Period) => void;
+  models: ModelOption[];
+  /** The bridge's timezone when it disagrees with this browser's; null when it
+   *  matches or is unknown. Day keys are frozen at write time, so a mismatch is
+   *  reported rather than re-bucketed. */
+  tzNote: string | null;
+}) {
+  const { g, anchor } = period;
+  const total = totalOf(rows);
+  // Nothing to page forward into: this period already contains today.
+  const atLatest = periodBounds(anchor, g).to >= dayKey(Date.now());
+
+  return (
+    <>
+      <Divider />
+      <Group justify="space-between" gap="xs" wrap="nowrap">
+        <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+          Spend by model
+        </Text>
+        {/* `withinPortal={false}` is load-bearing, not a preference: a portaled
+            dropdown renders outside the hover card, so moving the pointer onto it
+            counts as leaving the card and dismisses both. Kept inside, the menu
+            is part of what the card considers itself. */}
+        <Menu position="bottom-end" width={120} withinPortal={false}>
+          <Menu.Target>
+            <UnstyledButton aria-label="Change period" c="dimmed">
+              <Group gap={2} wrap="nowrap">
+                <Text size="xs" c="inherit">
+                  {GRANULARITIES.find((s) => s.value === g)?.label}
+                </Text>
+                <IconChevronDown size={12} />
+              </Group>
+            </UnstyledButton>
+          </Menu.Target>
+          <Menu.Dropdown>
+            {GRANULARITIES.map((segment) => (
+              <Menu.Item
+                key={segment.value}
+                fz="xs"
+                fw={segment.value === g ? 600 : undefined}
+                // Re-anchored on today, so switching granularity never lands the
+                // user in a period they did not navigate to.
+                onClick={() => onPeriod({ g: segment.value, anchor: dayKey(Date.now()) })}
+              >
+                {segment.label}
+              </Menu.Item>
+            ))}
+          </Menu.Dropdown>
+        </Menu>
+      </Group>
+      {g !== 'all' && (
+        <Group justify="space-between" gap={4} wrap="nowrap">
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            aria-label="Previous period"
+            onClick={() => onPeriod({ g, anchor: shiftPeriod(anchor, g, -1) })}
+          >
+            <IconChevronLeft size={14} />
+          </ActionIcon>
+          <Text size="xs" fw={600}>
+            {periodLabel(anchor, g)}
+          </Text>
+          <ActionIcon
+            size="sm"
+            variant="subtle"
+            aria-label="Next period"
+            disabled={atLatest}
+            onClick={() => onPeriod({ g, anchor: shiftPeriod(anchor, g, 1) })}
+          >
+            <IconChevronRight size={14} />
+          </ActionIcon>
+        </Group>
+      )}
+      {/* No reserved height: the card is anchored at its top and the pager sits
+          above this block, so a period with fewer rows shortens the card without
+          moving anything the pointer is aimed at. */}
+      {rows.length > 0 ? (
+        <SpendRows rows={rows} models={models} />
+      ) : (
+        <Text size="xs" c="dimmed">
+          No spend in this period.
+        </Text>
+      )}
+      {/* A rule and a right-aligned figure, no "Total" label: it lands in the same
+          column as every row's amount above it, which is what says what it is. */}
+      <Divider />
+      <Text size="xs" fw={600} ta="right">
+        {total.costUsd > 0 ? `$${total.costUsd.toFixed(2)} · ` : ''}
+        {formatTokens(total.tokens)}
+      </Text>
+      {g !== 'all' && (
+        <Text size="xs" c="dimmed">
+          This machine only{tzNote ? ` · days counted in ${tzNote}` : ''}
+        </Text>
+      )}
+    </>
+  );
+}
+
 interface PlanUsageChipProps {
   provider: ModelProvider;
   usage: UsageSnapshot;
@@ -85,9 +256,15 @@ interface PlanUsageChipProps {
   accountLabel?: string;
   /** Copy and message for the footer's disconnect action. */
   signOut: { label: string; message: ClientMessage };
-  /** Rows for this provider's models only — each chip accounts for its own. */
-  globalRows: [string, ModelSpend][];
+  /** All-time rollup for this provider's models only — each chip accounts for
+   *  its own. Derived from the synced sessions, so it spans machines. */
+  allTimeRows: [string, ModelSpend][];
+  /** The same, folded out of this machine's day ledger for the selected period. */
+  periodRows: [string, ModelSpend][];
   sessionRows: [string, ModelSpend][];
+  period: Period;
+  onPeriod: (next: Period) => void;
+  tzNote: string | null;
   models: ModelOption[];
 }
 
@@ -105,17 +282,28 @@ function PlanUsageChip({
   title,
   accountLabel,
   signOut,
-  globalRows,
+  allTimeRows,
+  periodRows,
   sessionRows,
+  period,
+  onPeriod,
+  tzNote,
   models,
 }: PlanUsageChipProps) {
+  const spendRows = period.g === 'all' ? allTimeRows : periodRows;
+  // A deleted session leaves the rollup but not the ledger, so either side alone
+  // is reason enough to show the section.
+  const hasSpend = allTimeRows.length > 0 || periodRows.length > 0;
   const worst = usage.windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), usage.windows[0]);
   // Anthropic's session window by name where it exists, else simply the first —
   // OpenAI's primary window is already first (see parseOpenaiUsage).
   const primary = usage.windows.find((w) => w.id === 'five_hour') ?? usage.windows[0];
 
   return (
-    <HoverCard width={280} position="bottom-end" withArrow shadow="md" openDelay={100} closeDelay={100}>
+    // Wider than the plan-usage windows alone need: the spend heading now shares
+    // its line with the period picker, and the pager's label has to fit between
+    // its two arrows, both without wrapping.
+    <HoverCard width={340} position="bottom-end" withArrow shadow="md" openDelay={100} closeDelay={100}>
       <HoverCard.Target>
         <UnstyledButton aria-label={title} style={{ display: 'flex', alignItems: 'center' }}>
           {/* Relative, so the badge can sit on the ring's corner without widening
@@ -163,13 +351,15 @@ function PlanUsageChip({
               </div>
             );
           })}
-          {globalRows.length > 0 && (
+          {hasSpend && (
             <>
-              <Divider />
-              <Text size="xs" fw={700} tt="uppercase" c="dimmed">
-                Spend by model
-              </Text>
-              <SpendRows rows={globalRows} models={models} />
+              <SpendSection
+                rows={spendRows}
+                period={period}
+                onPeriod={onPeriod}
+                models={models}
+                tzNote={tzNote}
+              />
               {/* A single-model session adds nothing over the sidebar's own total. */}
               {sessionRows.length > 1 && (
                 <>
@@ -230,6 +420,10 @@ export function UsageIndicator() {
   const sessions = useStore((s) => s.sessions);
   const models = useStore((s) => s.models);
   const selectedSessionId = useStore((s) => s.selectedSessionId);
+  const spendHistory = useStore((s) => s.spendHistory);
+  // One period for both chips, so they page together. Above the early return on
+  // purpose: a hook placed after it would break hook order.
+  const [period, setPeriod] = useState<Period>({ g: 'all', anchor: dayKey(Date.now()) });
 
   // No login → no chip, independent of usage-message timing (also covers API-key users).
   const showClaude = Boolean(auth?.loggedIn && usage && usage.windows.length > 0);
@@ -243,6 +437,14 @@ export function UsageIndicator() {
   const selected = selectedSessionId ? sessions[selectedSessionId] : undefined;
   const sessionSpend = selected?.costByModel ?? {};
 
+  // The period total comes from this machine's ledger instead, folded over the
+  // day keys the selected period spans. `all` never reads it: the rollup above
+  // is the only cross-machine figure and stays the default for that reason.
+  const bounds = periodBounds(period.anchor, period.g);
+  const periodSpend = foldDays(spendHistory?.days ?? {}, bounds.from, bounds.to);
+  const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const tzNote = spendHistory?.tz && spendHistory.tz !== browserTz ? spendHistory.tz : null;
+
   return (
     <Group gap={2} wrap="nowrap">
       {showClaude && usage && (
@@ -252,8 +454,12 @@ export function UsageIndicator() {
           title="Claude plan usage"
           accountLabel={auth?.account?.email ?? 'Signed in'}
           signOut={{ label: 'Log out', message: { type: 'authLogout' } }}
-          globalRows={rowsFor(globalSpend, 'anthropic')}
+          allTimeRows={rowsFor(globalSpend, 'anthropic')}
+          periodRows={rowsFor(periodSpend, 'anthropic')}
           sessionRows={rowsFor(sessionSpend, 'anthropic')}
+          period={period}
+          onPeriod={setPeriod}
+          tzNote={tzNote}
           models={models}
         />
       )}
@@ -264,8 +470,12 @@ export function UsageIndicator() {
           title="ChatGPT plan usage"
           accountLabel={openaiAuth?.account?.email ?? 'Connected to OpenAI'}
           signOut={{ label: 'Disconnect', message: { type: 'openaiLogout' } }}
-          globalRows={rowsFor(globalSpend, 'openai')}
+          allTimeRows={rowsFor(globalSpend, 'openai')}
+          periodRows={rowsFor(periodSpend, 'openai')}
           sessionRows={rowsFor(sessionSpend, 'openai')}
+          period={period}
+          onPeriod={setPeriod}
+          tzNote={tzNote}
           models={models}
         />
       )}

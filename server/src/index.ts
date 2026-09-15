@@ -850,6 +850,8 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
       usage: null,
       // Both plan-usage chips are the host's business, not a guest's.
       openaiUsage: null,
+      // As is what the host has spent, on any day.
+      spendHistory: null,
       // The host's Claude account is theirs alone: a guest is told nothing about
       // it, not even the email. Turns run on the host's token regardless.
       auth: { loggedIn: false },
@@ -892,6 +894,9 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
     projectKeys: ctx.projectKeys.all(),
     usage: ctx.usage.snapshot,
     openaiUsage: ctx.openaiUsage.snapshot,
+    // This machine's ledger only — it is not synced, so a second machine's
+    // browser merges rather than replaces (see the client's `fromPrimary` gate).
+    spendHistory: ctx.spendHistory.snapshot,
     auth: ctx.auth.getStatus(),
     openaiAuth: ctx.openaiAuth.getStatus(),
     storage: ctx.sync.status,
@@ -1808,6 +1813,8 @@ function shutdown() {
   for (const ctx of registry.all()) {
     // persist() is debounced — land any pending session state before we exit.
     ctx.sessions.flushPersist();
+    // Debounced for the same reason, and lost the same way if we don't.
+    ctx.spendHistory.flush();
     for (const ws of ctx.sockets.keys()) ws.terminate();
   }
   wss.close();

@@ -13,6 +13,7 @@ import { formatPlanComments, KEEP_PLANNING_MESSAGE } from '@lines/shared';
 import type { AuthManager, TokenRejection } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
+import { SpendHistory } from './spendHistory.ts';
 import { createStore } from './store.ts';
 
 const meta = (id: string): SessionMeta =>
@@ -57,11 +58,16 @@ function harness(
     },
   } as unknown as AuthManager;
   const broadcasts: ServerMessage[] = [];
+  const spendHistory = new SpendHistory(store, (msg) => broadcasts.push(msg));
   const sessions = new SessionManager(
     store,
     new GuardAllowlist(store),
     (msg) => broadcasts.push(msg),
     withAuth ? auth : undefined,
+    undefined,
+    undefined,
+    undefined,
+    spendHistory,
   );
   // index.ts wires a worker before any client can prompt; the model and permission
   // setters forward to it, so an unwired manager is not a state production has.
@@ -76,6 +82,7 @@ function harness(
   const transcript = () => store.loadTranscript('s1');
   return {
     sessions,
+    spendHistory,
     broadcasts,
     transcript,
     closes,
@@ -914,4 +921,69 @@ test('a result carrying neither cost nor usage opens no row', () => {
   const h = harness();
   h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success', result: 'done' });
   assert.equal(h.sessions.get('s1')!.costByModel, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// The day-resolution ledger. It is fed from the same guard as `costByModel`,
+// with the same arguments, so these assert that the two agree — not that a
+// second accumulator works.
+// ---------------------------------------------------------------------------
+
+/** The one day row a single-day test produces. */
+function onlyDay(h: { spendHistory: SpendHistory }) {
+  const days = Object.entries(h.spendHistory.snapshot.days);
+  assert.equal(days.length, 1, 'one turn, one day');
+  return days[0]![1];
+}
+
+test('a settled turn opens a day row carrying its billed delta', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', settled(0.25, 1_000));
+  h.sessions.handleWorkerEvent('s1', settled(0.75, 500));
+
+  // The same numbers as costByModel, under the same resolved model id: $0.75, not
+  // the $1.00 the two raw readings sum to.
+  assert.deepEqual(onlyDay(h), {
+    'claude-opus-5': { costUsd: 0.75, tokens: 1_500, turns: 2 },
+  });
+  assert.deepEqual(onlyDay(h), h.sessions.get('s1')!.costByModel);
+});
+
+test('a transparently re-driven attempt bills into the day too', async () => {
+  const h = midTurn();
+  // The failed attempt burned tokens, so it counts — and it is not a settle.
+  h.sessions.handleWorkerEvent('s1', {
+    ...failedResult(OVERLOADED),
+    total_cost_usd: 0.1,
+    usage: { input_tokens: 400, output_tokens: 0 },
+  });
+  await drain();
+
+  assert.deepEqual(onlyDay(h), {
+    'claude-opus-5': { costUsd: 0.1, tokens: 400, turns: 1 },
+  });
+  // The attempt did not settle the turn, so the ledger and the session agree
+  // about spend while the turn is still open.
+  assert.deepEqual(onlyDay(h), h.sessions.get('s1')!.costByModel);
+});
+
+test('a result with neither cost nor usage writes no day row at all', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success', result: 'done' });
+  assert.deepEqual(h.spendHistory.snapshot.days, {});
+});
+
+test('a settled turn broadcasts the whole day row, so a dropped one self-heals', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', settled(0.25, 1_000));
+  h.sessions.handleWorkerEvent('s1', settled(0.75, 500));
+
+  const rows = h.broadcasts.filter((m) => m.type === 'spendDay');
+  assert.equal(rows.length, 2);
+  // Not the delta: the second message carries the day as it now stands.
+  assert.deepEqual(rows.at(-1), {
+    type: 'spendDay',
+    day: Object.keys(h.spendHistory.snapshot.days)[0],
+    spend: { 'claude-opus-5': { costUsd: 0.75, tokens: 1_500, turns: 2 } },
+  });
 });
