@@ -47,6 +47,8 @@ config.define_string_list(
           'pending edits apply automatically once every session is idle.',
 )
 cfg = config.parse()
+if config.tilt_subcommand == 'down':
+    local(['node', 'server/scripts/dev-runtime.mjs', 'shutdown'], quiet=True)
 WITH_STORAGE = not cfg.get('no-storage', False)
 WITH_STUDIO = cfg.get('with-studio', False)
 WITH_RELAY = cfg.get('with-relay', False)

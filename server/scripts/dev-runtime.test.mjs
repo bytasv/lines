@@ -3,9 +3,10 @@ import test from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import net from 'node:net';
-import { buildGeneration, WorkerRunner, BridgeRunner, policyCommand } from './dev-runtime.mjs';
+import { buildGeneration, WorkerRunner, BridgeRunner, policyCommand, shutdownRunners } from './dev-runtime.mjs';
 
 const actualRoot = path.resolve(import.meta.dirname, '../..');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -173,6 +174,8 @@ test('bridge disable/re-enable preserves worker; worker stop preserves bridge an
   await coordinator.start();
   assert.equal(coordinator.current.id, generation);
   assert.equal(replacement.children.get('bridge').process.pid, bridgePid);
+  await coordinator.stop();
+  await replacement.stop();
 });
 
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -252,4 +255,102 @@ test('shutdown during coordinated reload cannot restart the worker', async (t) =
   await supervisor.stop();
   await until(() => !supervisor.ticking, 'reload finishes');
   assert.equal(supervisor.children.has('worker'), false);
+});
+
+test('authenticated shutdown stops both runners and is safe to repeat', async (t) => {
+  const { root, supervisor, bridge } = await running(t);
+  await shutdownRunners(root);
+  await Promise.all([supervisor.stop(), bridge.stop()]);
+  assert.equal(supervisor.children.has('worker'), false);
+  assert.equal(bridge.children.has('bridge'), false);
+  await shutdownRunners(root);
+});
+
+// Opt-in: exercises real Tilt without installing dependencies, touching the
+// user's runtime, or requiring a database/provider connection.
+test('Tilt lifecycle smoke tests', { skip: process.env.LINES_TEST_TILT !== '1' }, async (t) => {
+  const exec = promisify(execFile);
+  for (const ending of ['SIGINT', 'SIGKILL', 'down']) {
+    await t.test(ending, async (t) => {
+      const f = fixture(t, false);
+      const service = path.join(f.root, 'tilt-service.mjs');
+      fs.writeFileSync(service, `
+        import fs from 'node:fs';
+        import net from 'node:net';
+        const name = process.argv[2];
+        const server = net.createServer();
+        server.listen(0, '127.0.0.1', () => fs.writeFileSync(${JSON.stringify(f.root)}+'/'+name+'.json',JSON.stringify({pid:process.pid,port:server.address().port})));
+        process.on('message', m => {
+          if(m.action !== 'status') process.send({type:'devAck',id:m.id,ok:true,ready:true,blockers:[]},()=>{});
+        });
+        setInterval(()=>{if(process.connected)process.send({type:'devActivity',ready:true,blockers:[]},()=>{});},40);
+      `);
+      const entry = path.join(f.root, 'tilt-runner.mjs');
+      fs.writeFileSync(entry, `
+        import {WorkerRunner,BridgeRunner,watchOwner,shutdownRunners} from ${JSON.stringify(new URL('./dev-runtime.mjs', import.meta.url).href)};
+        const root=${JSON.stringify(f.root)};
+        const role=process.argv[2];
+        if(role==='shutdown') { await shutdownRunners(root); }
+        else {
+          const runner=new (role==='worker'?WorkerRunner:BridgeRunner)(root,{command:(name)=>[${JSON.stringify(service)},name]});
+          const stop=()=>runner.stop().then(()=>process.exit(0));
+          process.on('SIGTERM',stop);process.on('SIGINT',stop);watchOwner(stop);
+          runner.start().catch(async e=>{console.error(e);await runner.stop();process.exitCode=1;});
+        }
+      `);
+      const tiltfile = path.join(f.root, 'Tiltfile');
+      fs.writeFileSync(tiltfile, `
+analytics_settings(enable=False)
+if config.tilt_subcommand == 'down':
+    local(${JSON.stringify([process.execPath, entry, 'shutdown'])}, quiet=True)
+local_resource('worker', cmd='', serve_cmd=${JSON.stringify([process.execPath, entry, 'worker'])}, allow_parallel=True)
+local_resource('bridge', cmd='', serve_cmd=${JSON.stringify([process.execPath, entry, 'bridge'])}, allow_parallel=True)
+      `);
+      fs.writeFileSync(path.join(f.root, '.tiltignore'), 'node_modules/\n.cache/\n');
+      const reservation = net.createServer();
+      await new Promise((resolve) => reservation.listen(0, '127.0.0.1', resolve));
+      const port = String(reservation.address().port);
+      await new Promise((resolve) => reservation.close(resolve));
+      const logFile = fs.openSync(path.join(f.root, 'tilt.log'), 'w');
+      const tilt = spawn('tilt', ['up', '--stream', '--port', port, '-f', tiltfile], { cwd: f.root, stdio: ['ignore', logFile, logFile] });
+      fs.closeSync(logFile);
+      const states = [];
+      const state = (name) => {
+        try { return JSON.parse(fs.readFileSync(path.join(f.root, name + '.json'))); } catch { return null; }
+      };
+      const capture = async () => {
+        await until(() => state('worker') && state('bridge'), 'Tilt services start');
+        const pair = { worker: state('worker'), bridge: state('bridge') };
+        states.push(...Object.values(pair));
+        return pair;
+      };
+      t.after(async () => {
+        tilt.kill('SIGTERM');
+        await shutdownRunners(f.root).catch(() => {});
+        await until(() => !alive(tilt.pid) && states.every((s) => !alive(s.pid)), 'Tilt cleanup');
+        fs.rmSync(f.root, { recursive: true, force: true });
+      });
+      let pair;
+      try { pair = await capture(); }
+      catch (error) { throw new Error(`${error.message}\n${fs.readFileSync(path.join(f.root, 'tilt.log'), 'utf8')}`); }
+      if (ending === 'SIGINT') {
+        await exec('tilt', ['disable', 'bridge', '--port', port]);
+        await until(() => !alive(pair.bridge.pid), 'Tilt disables bridge');
+        assert.ok(alive(pair.worker.pid));
+        await exec('tilt', ['enable', 'bridge', '--port', port]);
+        await until(() => state('bridge')?.pid !== pair.bridge.pid, 'Tilt enables bridge');
+        pair = await capture();
+        await exec('tilt', ['disable', 'worker', '--port', port]);
+        await until(() => !alive(pair.worker.pid), 'Tilt disables worker');
+        assert.ok(alive(pair.bridge.pid));
+        await exec('tilt', ['enable', 'worker', '--port', port]);
+        await until(() => state('worker')?.pid !== pair.worker.pid, 'Tilt enables worker');
+        pair = await capture();
+      }
+      if (ending === 'down') await exec('tilt', ['down', '-f', tiltfile], { cwd: f.root });
+      else tilt.kill(ending);
+      await until(() => states.every((s) => !alive(s.pid)), `Tilt ${ending} stops all services`);
+      for (const s of states) assert.equal(await portOpen(s.port), false);
+    });
+  }
 });

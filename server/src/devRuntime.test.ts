@@ -81,7 +81,7 @@ test('real IPC preparation refuses live work and activation releases startup hol
   const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
     cwd: process.cwd(), env: { ...process.env, LINES_DEV_SUPERVISED: '1' }, stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
   });
-  t.after(async () => { if (child.exitCode === null) { const exited = new Promise<void>((resolve) => child.once('exit', () => resolve())); child.kill(); await exited; } });
+  t.after(async () => { if (child.exitCode === null && child.signalCode === null) { const exited = new Promise<void>((resolve) => child.once('exit', () => resolve())); child.kill(); await exited; } });
   const messages: any[] = [];
   child.on('message', (message) => messages.push(message));
   async function receive(type: string, id?: string) {
@@ -103,6 +103,13 @@ test('real IPC preparation refuses live work and activation releases startup hol
   await receive('releasedOperation');
   child.send({ type: 'devControl', action: 'prepare', id: 'idle' });
   assert.equal((await receive('devAck', 'idle')).ok, true);
+  const exited = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Supervised service survived IPC loss')), 2000);
+    child.once('exit', () => { clearTimeout(timer); resolve(); });
+  });
+  child.disconnect();
+  await exited;
+  assert.equal(child.signalCode, 'SIGTERM', 'IPC loss uses the normal service shutdown signal');
 });
 
 test('worker replay waits for activation, retains FIFO order, and blocks a handover', () => {

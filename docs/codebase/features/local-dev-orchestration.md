@@ -2,10 +2,10 @@
 
 ## Purpose
 
-`tilt up` runs the backend, web, and optional storage/relay services with readiness
-probes, environment preflight, and Prisma generation. The backend supervisor owns
-both worker and bridge. `npm run dev` uses the same supervisor; `npm run dev:backend`
-starts only the backend.
+`tilt up` runs separate worker and bridge resources, web, and optional storage/relay
+services with readiness probes, environment preflight, and Prisma generation. Each
+backend resource has its own stable runner and process ownership. `npm run dev`
+uses the same runners; `npm run dev:backend` starts just the pair.
 
 Backend source edits no longer restart a live agent. The supervisor builds a saved
 code generation, waits until every session is idle, and reloads worker and bridge
@@ -13,8 +13,8 @@ together. Vite continues to handle web HMR independently.
 
 ## Safe reload behavior
 
-- `server/scripts/dev-runtime.mjs` is a stable parent process, outside source watching.
-  It copies `server/src`, shared code, and package metadata into
+- `server/scripts/dev-runtime.mjs worker` coordinates reloads; the `bridge` runner
+  owns only the bridge. Both remain outside source watching. The worker copies `server/src`, shared code, and package metadata into
   `.cache/dev-runtime/generations/<hash>`. Each generation resolves `@lines/shared`
   to its own copy. The MCP stdio helper also runs from that generation. Third-party
   packages remain shared with the installed `node_modules`.
@@ -43,11 +43,20 @@ together. Vite continues to handle web HMR independently.
   block reload, so a reconnect cannot start work inside a prepared handover.
   A crashed worker restarts from the same code; the existing reconciliation path
   handles interrupted sessions. A worker crash cannot preserve an in-flight turn.
-- The supervisor refuses to overwrite a live worker's discovery record, including
-  orphaned children left by a lost supervisor. Closing the supervisor's IPC channel
-  does not kill a running agent.
+- The worker runner refuses to overwrite a live worker's discovery record.
+- Each runner starts a small `dev-process.mjs` guard in a private process group.
+  The guard forwards IPC and owns the service and its ordinary descendants. On
+  graceful termination or runner IPC loss, it sends SIGTERM and performs a final
+  SIGKILL group sweep after two seconds. Runners also detect parent loss. Supervised
+  services reuse normal shutdown on IPC disconnect, including persistence and
+  discovery cleanup. Explicit shutdown ends active work; idle protection applies
+  only to automatic reloads. `tilt down` sends authenticated shutdown requests to
+  the checkout-local runners, stopping coordination before the bridge.
+- Stopping the worker resource does not stop the bridge resource, and vice versa.
+  A returning worker coordinator adopts the live bridge's generation before
+  considering pending edits. An unavailable peer blocks automatic reloads.
 
-## Controls and migration
+## Controls and shutdown
 
 The default is automatic protection. No per-turn freeze step is needed.
 
@@ -58,7 +67,7 @@ node server/scripts/dev-runtime.mjs freeze all
 node server/scripts/dev-runtime.mjs resume all
 ```
 
-Tilt's backend resource has Freeze and Resume buttons. Both send control commands;
+Tilt's worker and bridge resources both have Freeze and Resume buttons. Both send control commands;
 neither changes `serve_cmd` or restarts a process. Resume still waits for idle.
 `--no-reload worker`, `--no-reload bridge`, and `--no-reload all` remain accepted.
 Either backend hold pauses the coordinated pair. CLI policy changes run through
@@ -66,14 +75,13 @@ Tilt's `reload-policy` resource, separately from the backend serve specification
 Buttons do not rewrite Tilt arguments, so flags such as `--relay-auth` are preserved.
 `--no-ui-buttons` works offline without fetching the UI-button extension.
 
-Installing this change into an already running legacy Tilt stack preserves its
-existing worker and bridge resources. Once current work is idle, stop Tilt and
-start it again to activate the supervisor. This is a one-time migration; hot-swapping
-ownership of the old worker would itself kill the session being protected.
+Restart Tilt once idle to replace the old combined `backend` resource. There is
+no legacy-resource switching. Old orphaned processes are not adopted or killed
+by discovery-file PID alone; stop their owning stack before starting the new one.
 The standalone `server` workspace's old `dev` and `dev:worker` scripts remain
 unsupervised watch commands for compatibility, not the protected entrypoints.
 
-`node server/scripts/dev-runtime.mjs status`, the backend log, and the bridge status
+`node server/scripts/dev-runtime.mjs status`, the worker log, and the bridge status
 response expose the running generation, pending generation, freeze state, blockers,
 and build/recovery errors. The controller binds loopback and requires a random token
 stored in a mode-0600 control file. That token is not included in status output.
@@ -81,8 +89,8 @@ stored in a mode-0600 control file. That token is not included in status output.
 ## Other Tilt behavior
 
 - Ports remain worker 8788, bridge 8787, storage 8790, relay 8791, web 5173,
-  and optional Prisma Studio 5555. The supervisor passes backend environment values
-  to both children; `LINES_DEV_CHECKOUT` keeps dotenv resolution at the original
+  and optional Prisma Studio 5555. Each runner passes its resource environment
+  to its own service; `LINES_DEV_CHECKOUT` keeps dotenv resolution at the original
   checkout. No environment files are copied into generations.
 - Preflight checks `.env` key names, not secret values. Missing storage settings
   can be bypassed with `--no-storage`; the backend and web remain independently useful.
@@ -100,7 +108,7 @@ stored in a mode-0600 control file. That token is not included in status output.
   initial startup; later installs do not cascade into service restarts.
 - Typecheck, tests, database migration, pairing, desktop packaging, and optional
   Prisma Studio remain manual resources. Prisma generation is automatic when storage
-  is enabled. Pairing stays available on the backend resource.
+  is enabled. Pairing stays available on the bridge resource.
 
 ## Limits
 
@@ -120,10 +128,12 @@ Supervisor code itself takes effect at the next normal development-stack restart
 - Existing session/worker tests verify persistence, queued work, provider reconciliation,
   permissions, and reconnect behavior. Process fixtures do not spend provider credits.
 
-Validated with 1,105 server tests plus six supervisor process tests, server/web
-typechecks, and Tilt evaluation in automatic and frozen modes. Freeze leaves the
-backend deployment specification identical; relay authentication and offline-button
-configuration remain supported.
+The process suite also checks independent resource stop/re-enable, coordinator
+restart, SIGINT/SIGTERM/SIGKILL ownership loss, stubborn descendants, released
+listening ports, and shutdown during startup/reload. Fixtures use temporary state
+and never connect to providers. Set `LINES_TEST_TILT=1` when running the process
+suite to include real Tilt startup, resource disable/re-enable, Ctrl-C, abrupt
+termination, and `tilt down` smoke tests.
 
 See [session collaboration](session-collaboration.md) for relay sharing and
 [desktop app](desktop-app.md) for packaged runtime ownership.

@@ -231,8 +231,8 @@ export class Supervisor {
     const requireRelay = !!this.children.get('bridge')?.activity?.relayConnected;
     this.candidate = null;
     this.phase = 'reloading'; this.publish();
-    await this.stopPair();
     try {
+      await this.stopPair();
       await this.startPair(next, requireRelay);
       this.current = next;
       writeJson(this.paths.healthy, next);
@@ -242,7 +242,8 @@ export class Supervisor {
       this.rejected.add(next.id);
       this.error = `Rejected ${next.id}: ${error.message}; restoring ${previous.id}`;
       this.phase = 'restoring'; this.publish();
-      await this.stopPair();
+      await this.stopChild('bridge').catch(() => {});
+      await this.stopChild('worker');
       // A relay outage must not prevent local recovery of the known working build.
       await this.startPair(previous);
     }
@@ -274,6 +275,7 @@ export class Supervisor {
     if (this.ticking || this.stopping || !this.current) return;
     this.ticking = true;
     try {
+      let recovered = false;
       await this.refreshChild('bridge');
       for (const name of names) {
         const child = this.children.get(name);
@@ -286,7 +288,14 @@ export class Supervisor {
           await this.control(name, 'activate');
           this.failureCount = 0;
           this.phase = 'running';
+          this.error = null;
+          recovered = true;
         }
+      }
+      if (recovered && names.every((name) => this.fresh(this.children.get(name)) && this.children.get(name).activity.ready)) {
+        await this.control('worker', 'activate');
+        await this.control('bridge', 'activate');
+        writeJson(this.paths.healthy, this.current);
       }
       if (this.candidate && !this.frozen.length && this.idle()) {
         this.idleSince ??= Date.now();
@@ -306,6 +315,12 @@ export class Supervisor {
       const provided = Buffer.from(String(req.headers.authorization ?? ''));
       const expected = Buffer.from(`Bearer ${this.token}`);
       if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) { res.writeHead(403); res.end(); return; }
+      if (req.method === 'POST' && req.url === '/shutdown') {
+        void this.stop().then(() => res.end('{}'), (error) => {
+          res.writeHead(503); res.end(JSON.stringify({ error: error.message }));
+        });
+        return;
+      }
       if (req.method === 'POST' && req.url === '/policy') {
         this.frozen = readJson(this.paths.policy, { frozen: [] }).frozen;
         this.idleSince = null;
@@ -341,7 +356,9 @@ export class Supervisor {
       await this.startPair(previous);
     }
     if (this.stopping) throw new Error('Supervisor is stopping');
-    writeJson(this.paths.healthy, this.current);
+    if (names.every((name) => this.fresh(this.children.get(name)) && this.children.get(name).activity.ready)) {
+      writeJson(this.paths.healthy, this.current);
+    }
     this.phase = 'running';
     for (const relative of ['server/src', 'shared']) {
       this.watchers.push(fs.watch(path.join(this.root, relative), { recursive: true }, (_, file) => {
@@ -368,11 +385,11 @@ export class Supervisor {
 }
 
 /** Requests never print the checkout-local bearer token. */
-async function bridgeRequest(root, action, payload = {}) {
-  const endpoint = readJson(pathsFor(root).bridgeControl);
-  if (!endpoint || !alive(endpoint.pid)) throw new Error('Bridge runner is unavailable');
+async function runnerRequest(root, role, action, payload = {}) {
+  const endpoint = readJson(role === 'bridge' ? pathsFor(root).bridgeControl : pathsFor(root).control);
+  if (!endpoint || !alive(endpoint.pid)) throw new Error(`${role} runner is unavailable`);
   return new Promise((resolve, reject) => {
-    const request = http.request({ host: '127.0.0.1', port: endpoint.port, path: '/', method: 'POST',
+    const request = http.request({ host: '127.0.0.1', port: endpoint.port, path: role === 'worker' ? '/shutdown' : '/', method: 'POST',
       headers: { authorization: `Bearer ${endpoint.token}`, 'content-type': 'application/json' }, timeout: 5000 }, (response) => {
       let body = '';
       response.on('data', (chunk) => { body += chunk; });
@@ -389,12 +406,25 @@ async function bridgeRequest(root, action, payload = {}) {
     request.end(JSON.stringify({ action, ...payload }));
   });
 }
+const bridgeRequest = (root, action, payload) => runnerRequest(root, 'bridge', action, payload);
+
+export async function shutdownRunners(root) {
+  // Stop coordination first so it cannot restart the bridge during tilt down.
+  for (const role of names) {
+    const file = role === 'worker' ? pathsFor(root).control : pathsFor(root).bridgeControl;
+    const endpoint = readJson(file);
+    if (!endpoint || !alive(endpoint.pid)) continue;
+    await runnerRequest(root, role, 'shutdown');
+  }
+}
 
 export class WorkerRunner extends Supervisor {
   async refreshChild(name) {
     if (name !== 'bridge') return;
     try {
       const state = await bridgeRequest(this.root, 'state');
+      if (!this.peerAvailable) { this.retryAt = 0; this.failureCount = 0; }
+      this.peerAvailable = true;
       this.peerGeneration = state.generation;
       if (!state.child) { this.children.delete('bridge'); return; }
       this.children.set('bridge', {
@@ -402,6 +432,7 @@ export class WorkerRunner extends Supervisor {
         activity: state.child.activity, at: state.child.at,
       });
     } catch {
+      this.peerAvailable = false;
       this.children.delete('bridge');
       this.peerGeneration = null;
     }
@@ -410,22 +441,27 @@ export class WorkerRunner extends Supervisor {
     // A coordinator restart adopts the bridge's generation. Starting the worker
     // must not replace a still-running bridge with newly edited source.
     if (this.phase === 'starting') {
-      const deadline = Date.now() + this.options.startupMs;
-      while (!this.stopping) {
-        try {
-          const state = await bridgeRequest(this.root, 'state');
-          if (state.generation && state.child?.process.exitCode === null && !state.child.process.signalCode) {
-            generation = state.generation;
-            this.current = generation;
-          }
-          break;
-        } catch (error) {
-          if (Date.now() >= deadline) throw error;
-          await sleep(100);
+      try {
+        const state = await bridgeRequest(this.root, 'state');
+        if (state.generation && state.child?.process.exitCode === null && !state.child.process.signalCode) {
+          generation = state.generation;
+          this.current = generation;
         }
-      }
+      } catch { /* Bridge may be disabled or still starting in Tilt. */ }
     }
-    return super.startPair(generation, requireRelay);
+    try {
+      return await super.startPair(generation, requireRelay);
+    } catch (error) {
+      if (this.stopping || this.phase !== 'starting') throw error;
+      // A missing peer is not a worker startup failure. Keep its resource alive
+      // and let tick reconnect when the independently owned bridge returns.
+      let available = false;
+      try { await bridgeRequest(this.root, 'state'); available = true; } catch {}
+      const worker = this.children.get('worker');
+      if (available || !this.fresh(worker) || !worker.activity.ready) throw error;
+      await this.control('worker', 'activate');
+      this.error = 'Waiting for bridge runner';
+    }
   }
   async startChild(name, generation) {
     if (name !== 'bridge') return super.startChild(name, generation);
@@ -476,7 +512,9 @@ export class BridgeRunner extends Supervisor {
         const message = JSON.parse(body);
         if (this.stopping) throw new Error('Bridge runner is stopping');
         let result = {};
-        if (message.action === 'start' || message.action === 'stop') {
+        if (message.action === 'shutdown') {
+          await this.stop();
+        } else if (message.action === 'start' || message.action === 'stop') {
           // Serialize lifecycle mutations, including requests whose client timed
           // out. Recheck stopping after the preceding mutation finishes.
           const operation = (this.operation ?? Promise.resolve()).catch(() => {}).then(async () => {
@@ -594,11 +632,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       if (!supervisor.stopping) console.error(`[dev-runtime] ${error.message}`);
       await supervisor.stop(); unwatch(); process.exitCode = 1;
     });
+  } else if (action === 'shutdown') {
+    await shutdownRunners(checkout);
   } else if (action === 'legacy-running') {
     // Keep an already running tsx-owned Tilt stack intact during migration.
     // This process inspection happens only when Tilt evaluates its file.
     console.log(legacyRuntimeRunning(checkout) ? 'yes' : 'no');
   } else if (['freeze', 'resume', 'set', 'status'].includes(action)) {
     policyCommand(checkout, action, process.argv.slice(3)).then((state) => log(JSON.stringify(state))).catch((error) => { console.error(error.message); process.exitCode = 1; });
-  } else { console.error('Usage: dev-runtime.mjs [start|worker|bridge|status|freeze|resume|set] [worker|bridge|all]'); process.exitCode = 1; }
+  } else { console.error('Usage: dev-runtime.mjs [start|worker|bridge|shutdown|status|freeze|resume|set] [worker|bridge|all]'); process.exitCode = 1; }
 }

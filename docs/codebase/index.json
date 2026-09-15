@@ -1455,7 +1455,7 @@
       "id": "local-dev-orchestration",
       "name": "Local dev orchestration (Tilt)",
       "doc": "features/local-dev-orchestration.md",
-      "purpose": "Run local development with a stable worker/bridge supervisor, automatic idle-boundary source reload, startup rollback, and non-restarting Freeze/Resume controls.",
+      "purpose": "Run local development with independently owned worker and bridge runners, coordinated idle-boundary reload, startup rollback, and bounded process-tree shutdown.",
       "entryPoints": [
         "Tiltfile",
         "package.json",
@@ -1470,10 +1470,12 @@
         "web/package.json",
         "storage/package.json",
         "server/scripts/dev-runtime.mjs",
+        "server/scripts/dev-process.mjs",
         "server/src/devRuntime.ts"
       ],
       "symbols": [
-        "frozen",
+        "WorkerRunner",
+        "BridgeRunner",
         "FROZEN",
         "dotenv_keys",
         "have",
@@ -1501,7 +1503,7 @@
         "source changes build an immutable local code generation; both backend processes reload only after confirmed idle",
         "Freeze and Resume change supervisor policy without restarting a process",
         "failed candidate startup restores the last healthy generation",
-        "a running legacy Tilt stack is preserved until its next normal restart"
+        "explicit shutdown ends active work and reaps only the resource-owned process tree"
       ],
       "architecturalRules": [
         "PORT is injected per resource via serve_env, never a shared env block",
@@ -1509,7 +1511,7 @@
         "no resource watches a file its own cmd writes — install's deps list the five workspace manifests but omit package-lock.json, which npm install itself rewrites and would retrigger the resource forever",
         "resource_deps gates only the first build after tilt up; a later re-run of install does not cascade to prisma-generate or the four service resources",
         "whether the bridge talks to a hosted install is not a Tilt flag - it follows RELAY_URL in .env, read by the bridge's own dotenv; STORAGE_URL is injected into serve_env only as a default, so an explicit .env value is never overridden",
-        "the backend supervisor owns source watching and private IPC admission; Tilt owns only the stable parent",
+        "the worker runner coordinates source watching and IPC admission; Tilt independently owns the worker and bridge runners",
         "external installed dependencies are shared and are not covered by source rollback"
       ],
       "relatedDecisions": [

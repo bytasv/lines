@@ -86,8 +86,9 @@ npm run dev
 ```
 
 Open http://localhost:5173. The bridge listens on `:8787`, the worker on `:8788`.
-(`tilt up` runs the same four processes with readiness probes and hot-reload
-freezing during a live turn — see `Tiltfile`.)
+(`tilt up` shows separate worker and bridge resources with readiness probes.
+Source reloads wait for active turns to finish; stopping Tilt shuts both down
+and cleans up their child processes — see `Tiltfile`.)
 
 ## Layout
 
