@@ -14,7 +14,11 @@ plan mode (codex's own collaboration mode, with its clarifying questions routed 
 workflow steps all work on a codex session and go through the *same* bridge machinery a Claude
 session does — including Lines' own workflow tools, served to codex by a real stdio MCP server
 (see [workflow-mcp-tools](workflow-mcp-tools.md)) since codex cannot host one in-process. `cost`
-is the only capability still false, and permanently: codex reports tokens and never a price.
+is the only capability still false, and permanently: codex reports tokens and never a price. That
+no longer means a codex session shows no dollar figure — one is computed from a static per-model
+price table and shown marked with a `~`, since `cost: false` is exactly the signal that decides
+"this turn's money is estimated, not provider-reported" (see
+[usage-and-cost](usage-and-cost.md)).
 
 Two decisions shape the whole feature.
 
@@ -92,7 +96,11 @@ the transport was.
   OpenAI models) and the server (`validateStepContent`, and a pre-run park).
 - `output_tokens` means exactly what the provider called output. Reasoning tokens ride beside
   it in `reasoning_output_tokens` and the spend accumulator adds them explicitly.
-- Codex reports tokens and never a price, so a codex row shows tokens with no `$`.
+- Codex reports tokens and never a price. A codex row shows tokens with an *estimated* `$` instead
+  — computed from `ModelOption.price` and always marked with a `~` — never a bare `$`, which is
+  reserved for a provider-reported figure. See [usage-and-cost](usage-and-cost.md) for the
+  estimator, the marker, and why the estimation gate reads `capabilitiesFor(provider).cost`
+  rather than "did this particular result carry a cost".
 - A stopped codex turn settles as stopped, never as a failure with a Retry.
 - A session-scoped helper query (auto-name, turn summary, step consolidation) prefers that
   session's own provider — a codex session is titled by codex, a Claude session by Claude — and
@@ -186,6 +194,10 @@ the transport was.
   several iterations; `codexExperimental.contract.test.ts` covers the part they cannot describe by
   asking the installed binary. `requestAttestation` stays false deliberately — it opts into a
   server→client request Lines does not implement, and an unanswered request parks the turn.
+- **An estimated cost must never look identical to a provider-reported one.** Codex's usage
+  numbers are real; its price is not. Rather than leave a codex spend row blank of `$`, or worse
+  render it exactly like a Claude row, every figure computed from the price table wears a `~` —
+  the single rule the whole estimation design turns on. See [usage-and-cost](usage-and-cost.md).
 - **A manually chosen reasoning effort rides `collaborationMode`, not `turn/start.effort`** — the
   typed field exists, but the collaboration mode is already sent on every turn for plan mode, so
   this is one code path instead of two dials with no documented precedence. See

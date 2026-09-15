@@ -2,8 +2,15 @@ import { useState } from 'react';
 import { Box, Button, Center, Group, Loader, Paper, Stack, Text, ThemeIcon, Tooltip } from '@mantine/core';
 import { IconCheck, IconCoins, IconPlayerPlay } from '@tabler/icons-react';
 import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@lines/shared';
-import { isSessionActive, isSessionInterruptible, isStepRef } from '@lines/shared';
-import { formatDuration } from '../lib/format';
+import {
+  capabilitiesFor,
+  hasEstimatedSpend,
+  isSessionActive,
+  isSessionInterruptible,
+  isStepRef,
+  providerForModel,
+} from '@lines/shared';
+import { formatDuration, formatSpendUsd } from '../lib/format';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { revealWorkflowStep } from '../lib/workflowReveal';
@@ -144,6 +151,13 @@ export function WorkflowStepper({
           const cost = state.stepCostsUsd?.[i] ?? 0;
           const tokens = state.stepTokens?.[i] ?? 0;
           const durationMs = state.stepDurationsMs?.[i] ?? 0;
+          // The step's own model where the server stamped one — a workflow may
+          // cross providers, so only that answers per step. Steps run before
+          // `stepModels` existed fall back to the session-wide reading.
+          const stepModel = state.stepModels?.[i];
+          const estimated = stepModel
+            ? !capabilitiesFor(providerForModel(stepModel)).cost
+            : hasEstimatedSpend(session.costByModel);
           return (
             <Group
               key={i}
@@ -226,7 +240,7 @@ export function WorkflowStepper({
                   )}
                   {cost > 0 && (
                     <Text fz={11} c="dimmed" style={{ flexShrink: 0 }}>
-                      ${cost.toFixed(2)}
+                      {formatSpendUsd(cost, estimated)}
                     </Text>
                   )}
                   {tokens > 0 && (

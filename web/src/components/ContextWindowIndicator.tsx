@@ -23,12 +23,13 @@ import {
   contextCompactBlock,
   contextDenominator,
   effectiveContextTokens,
+  hasEstimatedSpend,
   preferContextSummary,
 } from '@lines/shared';
 import { sessionCaps } from '../lib/capabilities';
 import { useStore } from '../store';
 import { send } from '../ws';
-import { formatDuration, formatTokens, usageColor } from '../lib/format';
+import { formatDuration, formatSpendUsd, formatTokens, usageColor } from '../lib/format';
 
 /** Category name as a lookup key: lowercased, with a trailing ` (deferred)`
  *  stripped, so a deferred row shares its category's colour and detail. */
@@ -609,7 +610,12 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
             {session.totalTokens != null && (
               <TotalRow label="Tokens" dim="(cumulative spend, not context)" value={formatTokens(session.totalTokens)} />
             )}
-            {session.totalCostUsd != null && <TotalRow label="Cost" value={`$${session.totalCostUsd.toFixed(3)}`} />}
+            {session.totalCostUsd != null && (
+              <TotalRow
+                label="Cost"
+                value={formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
+              />
+            )}
             {session.totalDurationMs != null && (
               <TotalRow label="Active time" value={formatDuration(session.totalDurationMs)} />
             )}

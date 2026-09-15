@@ -69,7 +69,7 @@
         "a cross-provider setModel is refused once a session has run: nothing carries a conversation between a claudeSessionId and a codexThreadId",
         "workflow steps run on Claude models only, refused on both the client pickers and the server validator",
         "output_tokens means exactly what the provider called output; reasoning tokens ride beside it and the spend accumulator adds them explicitly",
-        "codex reports tokens and never a price, so a codex spend row shows tokens with no $",
+        "codex reports tokens and never a price; a codex spend row now shows an estimated $ instead, computed from a static price table and always marked with a ~ so it can never look like a provider-reported figure (see usage-and-cost)",
         "a stopped codex turn settles as stopped, never as a failure with a Retry",
         "a session-scoped helper query (autoName, summarizeTurn, consolidateStepOutput) prefers that session's own provider and falls back to the other when the preferred one is absent or answers null; a helper with no session (the MCP judge) stays Claude-first",
         "auto-naming never strands a session on 'New session': a null or thrown helper answer still writes a localSessionName(prompt) fallback title, and the session retries on its next prompt until a real summary lands"
@@ -346,7 +346,12 @@
         "web/src/components/Sidebar.tsx",
         "web/src/lib/format.ts",
         "server/src/workflows.ts",
-        "web/src/components/WorkflowStepper.tsx"
+        "web/src/components/WorkflowStepper.tsx",
+        "shared/estimateSpend.ts",
+        "shared/providers.ts",
+        "web/src/components/SessionView.tsx",
+        "web/src/components/ContextWindowIndicator.tsx",
+        "web/src/components/Composer.tsx"
       ],
       "symbols": [
         "UsagePoller",
@@ -380,12 +385,19 @@
         "shiftPeriod",
         "periodLabel",
         "Granularity",
-        "billRun"
+        "billRun",
+        "ModelPrice",
+        "priceFor",
+        "estimateSpendUsd",
+        "hasEstimatedSpend",
+        "formatSpendUsd",
+        "WorkflowState.stepModels"
       ],
       "tests": [
         "server/src/usageByModel.test.ts",
         "server/src/resultSpend.test.ts",
-        "server/src/sessions.ended.test.ts"
+        "server/src/sessions.ended.test.ts",
+        "server/src/estimateSpend.test.ts"
       ],
       "businessRules": [
         "result.total_cost_usd is cumulative across the query-process lifetime, not per-turn; a turn's billed cost is the delta against the last reading billed for that lifetime (resultSpend), with the first reading of a new lifetime billed whole",
@@ -415,7 +427,12 @@
         "day keys (YYYY-MM-DD) are stamped in the bridge's local timezone at write time and frozen; the blob's tz field records the zone in effect, and a mismatch against the browser's zone is surfaced as a note rather than corrected",
         "the ledger is additive only; nothing rewrites an existing day row except the one-time backfill script, which replaces the whole file",
         "server/scripts/backfill-spend-history.ts is best-effort: a session whose transcript was deleted or rewind-truncated contributes nothing and cannot be recovered, so a later run can produce a smaller history than an earlier one; it attributes cost by SDK-reported per-model modelUsage delta (falling back to the session's current model) rather than the session's historical model, and refuses to run while the bridge is up",
-        "the period picker's menu re-anchors on today whenever granularity changes, so switching grains never leaves the user viewing an unrelated period"
+        "the period picker's menu re-anchors on today whenever granularity changes, so switching grains never leaves the user viewing an unrelated period",
+        "a turn on a provider whose capability table says cost: false is priced from ModelOption.price via estimateSpendUsd instead of left uncosted; the gate is the provider's capability, not whether a particular result happens to be missing a cost, so a Claude turn with no cost stays uncosted",
+        "estimateSpendUsd returns undefined (never 0) for a model with no price entry, since a zero would render as \"this turn was free\" rather than \"we cannot say\"",
+        "every figure derived from an estimate is marked with a ~ prefix (formatSpendUsd) rather than a dimmed style or a tooltip, decided once per spend surface (section/session/step) rather than per row, since each surface is already narrowed to one provider",
+        "WorkflowState.stepModels[i] records the model id a step's turns actually ran on, because a provider-crossing workflow stays inside one SessionMeta and the session's current model cannot answer for an earlier step; absent on a step run before this field existed, which falls back to the session-level hasEstimatedSpend reading",
+        "server/scripts/repair-spend.ts and server/scripts/backfill-spend-history.ts both call the same estimateSpendUsd behind the same capability gate as the live accumulator, so a repaired or rebuilt historical figure agrees with what a live turn would have recorded"
       ],
       "architecturalRules": [
         "reuses the existing accumulate-on-result pass in server/src/sessions.ts that already owns totalCostUsd/totalTokens, instead of a new tracking mechanism",
@@ -435,7 +452,9 @@
         "spendDay broadcasts and the hello snapshot carry the whole day row, not a delta, so a dropped message self-heals on the next turn instead of leaving a permanent gap",
         "the web store's hello merge and spendDay handler are both gated on fromPrimary, mirroring updateStatus/bridge/claudeCli, so a second machine's hello cannot overwrite or blend into the primary's ledger",
         "the period picker is plain useState lifted only as far as UsageIndicator, not zustand state, since it is ephemeral view state shared only between the two provider chips",
-        "the period-picker menu renders with withinPortal={false} because a portaled dropdown would render outside the HoverCard's DOM subtree and dismiss it on pointer move"
+        "the period-picker menu renders with withinPortal={false} because a portaled dropdown would render outside the HoverCard's DOM subtree and dismiss it on pointer move",
+        "estimation is kept out of shared/resultSpend.ts, which does cumulative-delta arithmetic for a genuinely cumulative total_cost_usd; an estimate is per-turn, so shared/estimateSpend.ts is its own module called from accumulateResultSpend only after resultSpend comes back empty",
+        "shared/estimateSpend.ts and shared/types.ts form a deliberate import cycle (the estimator reads priceFor/DEFAULT_MODELS; types.ts re-exports the estimator) safe only because the estimator reads those bindings inside function bodies, never at its own top level"
       ],
       "relatedDecisions": []
     },

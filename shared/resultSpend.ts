@@ -23,6 +23,12 @@ export interface ResultSpendPayload {
     output_tokens?: number;
     cache_creation_input_tokens?: number;
     cache_read_input_tokens?: number;
+    /** Reported apart by a provider that bills it as output (codex). Declared so
+     *  a reader of a stored payload — the spend-history backfill, via
+     *  `estimateSpendUsd` — can see it. Nothing in this module counts it: the
+     *  sums here exist to date a query lifetime, and adding a field only one
+     *  provider sends would move that boundary for no gain. */
+    reasoning_output_tokens?: number;
   };
   /** Per-model breakdown, cumulative over the query lifetime exactly like
    *  `total_cost_usd` — which is why it can date the lifetime. */

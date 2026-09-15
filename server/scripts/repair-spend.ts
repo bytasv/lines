@@ -18,13 +18,23 @@
  * live accumulator uses (`shared/resultSpend.ts`), so the two cannot disagree
  * about where a query lifetime starts.
  *
+ * It also fills in the sessions that never had a cost to inflate. A provider that
+ * reports none (codex) left `totalCostUsd` unset and its `costByModel` rows at
+ * zero; those turns are now priced from the static table the live path uses
+ * (`shared/estimateSpend.ts`), from the same transcripts. Without this the usage
+ * card's All-time rollup — which reads these metas, not the day ledger — stays
+ * blank for codex however many times `backfill-spend-history.ts` is run.
+ *
  * What it touches, per session:
- *   - totalCostUsd, lastCostUsd  — recomputed
+ *   - totalCostUsd, lastCostUsd  — recomputed, estimate included
  *   - costByModel[*].costUsd     — rescaled to the corrected total, keeping the
  *                                  existing split. Historical per-turn model
  *                                  attribution is not recoverable from the meta,
  *                                  and the split was already keyed on whatever
- *                                  `meta.model` was at the time.
+ *                                  `meta.model` was at the time. An estimated
+ *                                  share lands on the unpriced rows only, split
+ *                                  by tokens — the one weight that survives on a
+ *                                  row whose costs are all zero.
  *   - updatedAt                  — bumped, so the correction wins last-writer-wins
  *                                  sync and reaches the user's other machines
  * Tokens and durations are verified correct and left alone. A session with no
@@ -43,7 +53,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { foldResultSpend } from '@lines/shared';
+import {
+  capabilitiesFor,
+  estimateSpendUsd,
+  foldResultSpend,
+  providerForModel,
+  resolveModelId,
+} from '@lines/shared';
 import type { ModelSpendMap, ResultSpendPayload, SessionMeta } from '@lines/shared';
 
 const args = process.argv.slice(2);
@@ -100,6 +116,24 @@ function rescale(map: ModelSpendMap | undefined, total: number): void {
   for (const row of rows) row.costUsd = (row.costUsd / current) * total;
 }
 
+/**
+ * Put an estimated total onto the rows it belongs to — the ones whose provider
+ * reports no cost, since those are the only ones an estimate was computed for.
+ *
+ * Split by tokens rather than by cost, which is what `rescale` above cannot do
+ * here: every one of these rows holds a zero, so there is no existing proportion
+ * to preserve. Tokens are the only recorded weight that survived.
+ */
+function fillEstimated(map: ModelSpendMap | undefined, total: number): void {
+  if (!map) return;
+  const rows = Object.entries(map)
+    .filter(([id]) => !capabilitiesFor(providerForModel(id)).cost)
+    .map(([, row]) => row);
+  const tokens = rows.reduce((n, row) => n + row.tokens, 0);
+  if (tokens <= 0) return;
+  for (const row of rows) row.costUsd = (row.tokens / tokens) * total;
+}
+
 interface Repair {
   id: string;
   name: string;
@@ -123,13 +157,37 @@ function repairUser(userId: string): { repairs: Repair[]; skipped: number } {
       continue;
     }
     const { totalUsd, lastUsd } = foldResultSpend(results);
+
+    // What the provider never priced, priced from the table — the same gate the
+    // live accumulator uses, so a Claude turn that merely happens to be missing a
+    // cost is still left alone. Attributed to the session's model, which is what
+    // the live path attributes to and what the stored split was already keyed on.
+    const modelId = resolveModelId(meta.model);
+    let estimatedUsd = 0;
+    let lastEstimateUsd: number | undefined;
+    if (!capabilitiesFor(providerForModel(modelId)).cost) {
+      for (const payload of results) {
+        // A result that did report a cost is already inside `totalUsd`.
+        if (payload.total_cost_usd != null) continue;
+        const estimate = estimateSpendUsd(modelId, payload.usage);
+        if (estimate == null) continue;
+        estimatedUsd += estimate;
+        lastEstimateUsd = estimate;
+      }
+    }
+
+    const after = totalUsd + estimatedUsd;
     const before = meta.totalCostUsd ?? 0;
-    if (before === totalUsd) continue;
-    meta.totalCostUsd = totalUsd;
-    if (lastUsd != null) meta.lastCostUsd = lastUsd;
+    if (before === after) continue;
+    meta.totalCostUsd = after;
+    // The last result wins. On a session the estimator ran over, every result is
+    // uncosted, so the last estimate is the last turn.
+    const last = lastEstimateUsd ?? lastUsd;
+    if (last != null) meta.lastCostUsd = last;
     rescale(meta.costByModel, totalUsd);
+    if (estimatedUsd > 0) fillEstimated(meta.costByModel, estimatedUsd);
     meta.updatedAt = Date.now();
-    repairs.push({ id: meta.id, name: meta.name ?? meta.id, before, after: totalUsd });
+    repairs.push({ id: meta.id, name: meta.name ?? meta.id, before, after });
   }
 
   if (write && repairs.length > 0) {
@@ -183,6 +241,9 @@ for (const userId of users) {
 
 console.log(`\nStored    ${usd(storedTotal)}`);
 console.log(`Corrected ${usd(correctedTotal)}`);
-console.log(`Removed   ${usd(storedTotal - correctedTotal)}`);
+// Signed, because this no longer only ever removes: a codex session had no cost
+// stored at all and gains one.
+const delta = correctedTotal - storedTotal;
+console.log(`${delta < 0 ? 'Removed  ' : 'Added    '} ${usd(Math.abs(delta))}`);
 if (skippedTotal) console.log(`Unrecoverable (left as-is): ${skippedTotal} sessions`);
 if (!write) console.log('\nRe-run with --write to apply.');

@@ -221,6 +221,22 @@ export function formatTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(2)}M`;
 }
 
+/**
+ * A spend figure, marked when it is an estimate rather than money the provider
+ * reported: `~$1.23` against `$1.23`.
+ *
+ * A visible prefix rather than a dimmed style or a tooltip. Dimmed is already
+ * the ambient colour at every one of these sites, so dimming would say nothing;
+ * a tooltip does not exist on touch. The tilde is what carries the distinction
+ * everywhere, and the usage card spells out once what it means.
+ *
+ * `digits` because the sites disagree on purpose — a last-turn cost is worth
+ * four decimals where a lifetime total is worth two.
+ */
+export function formatSpendUsd(usd: number, estimated: boolean, digits = 2): string {
+  return `${estimated ? '~' : ''}$${usd.toFixed(digits)}`;
+}
+
 /** Human-friendly duration for step/session scale: `Xs` under a minute,
  *  `Xm Ys` under an hour, else `Xh Ym`. */
 export function formatDuration(ms: number): string {

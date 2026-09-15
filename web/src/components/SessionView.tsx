@@ -13,9 +13,9 @@ import {
   IconPlayerSkipForward,
   IconRefresh,
 } from '@tabler/icons-react';
-import { findWorktree, isSessionActive } from '@lines/shared';
+import { findWorktree, hasEstimatedSpend, isSessionActive } from '@lines/shared';
 import { useStore } from '../store';
-import { skippableFailedStep } from '../lib/format';
+import { formatSpendUsd, skippableFailedStep } from '../lib/format';
 import { send } from '../ws';
 import { Transcript } from './Transcript';
 import { Composer } from './Composer';
@@ -117,7 +117,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
           <PresenceStack sessionId={sessionId} />
           {session.lastCostUsd != null && (
             <Text size="xs" c="dimmed">
-              last turn ${session.lastCostUsd.toFixed(4)}
+              last turn {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel), 4)}
             </Text>
           )}
           {/* Opens on click rather than prefetching a count: the diff is a `git

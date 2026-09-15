@@ -15,6 +15,7 @@ import {
 } from '@mantine/core';
 import { IconChevronDown, IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
 import {
+  capabilitiesFor,
   dayKey,
   foldDays,
   mergeSpend,
@@ -34,7 +35,7 @@ import type {
 } from '@lines/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
-import { formatTokens, usageColor } from '../lib/format';
+import { formatSpendUsd, formatTokens, usageColor } from '../lib/format';
 import { ProviderBadge } from './ProviderMark';
 
 /** Anthropic names its windows with stable keys, so the label is a lookup. OpenAI
@@ -75,10 +76,23 @@ function modelLabel(id: string, models: ModelOption[]): string {
 
 /**
  * Spend rows. The cost half is dropped when a row has none rather than printed as
- * `$0.00`: codex reports tokens but no USD, so a column of zeroes would read as
+ * `$0.00`: a turn can report tokens and no USD at all (an unpriced model, or a
+ * row recorded before estimates existed), so a column of zeroes would read as
  * "these turns were free" instead of "we are not told".
+ *
+ * `estimated` is a property of the whole block rather than of a row: every spend
+ * surface here is already narrowed to one provider by `rowsFor`, so either all
+ * of these figures are computed or none are.
  */
-function SpendRows({ rows, models }: { rows: [string, ModelSpend][]; models: ModelOption[] }) {
+function SpendRows({
+  rows,
+  models,
+  estimated,
+}: {
+  rows: [string, ModelSpend][];
+  models: ModelOption[];
+  estimated: boolean;
+}) {
   return (
     <>
       {rows.map(([id, spend]) => (
@@ -87,7 +101,7 @@ function SpendRows({ rows, models }: { rows: [string, ModelSpend][]; models: Mod
             {modelLabel(id, models)}
           </Text>
           <Text size="xs" c="dimmed">
-            {spend.costUsd > 0 ? `$${spend.costUsd.toFixed(2)} · ` : ''}
+            {spend.costUsd > 0 ? `${formatSpendUsd(spend.costUsd, estimated)} · ` : ''}
             {formatTokens(spend.tokens)}
           </Text>
         </Group>
@@ -143,12 +157,16 @@ function SpendSection({
   period,
   onPeriod,
   models,
+  estimated,
   tzNote,
 }: {
   rows: [string, ModelSpend][];
   period: Period;
   onPeriod: (next: Period) => void;
   models: ModelOption[];
+  /** This provider reports no cost, so every figure here is computed from a
+   *  price table rather than billed — see shared/estimateSpend.ts. */
+  estimated: boolean;
   /** The bridge's timezone when it disagrees with this browser's; null when it
    *  matches or is unknown. Day keys are frozen at write time, so a mismatch is
    *  reported rather than re-bucketed. */
@@ -225,7 +243,7 @@ function SpendSection({
           above this block, so a period with fewer rows shortens the card without
           moving anything the pointer is aimed at. */}
       {rows.length > 0 ? (
-        <SpendRows rows={rows} models={models} />
+        <SpendRows rows={rows} models={models} estimated={estimated} />
       ) : (
         <Text size="xs" c="dimmed">
           No spend in this period.
@@ -235,9 +253,18 @@ function SpendSection({
           column as every row's amount above it, which is what says what it is. */}
       <Divider />
       <Text size="xs" fw={600} ta="right">
-        {total.costUsd > 0 ? `$${total.costUsd.toFixed(2)} · ` : ''}
+        {total.costUsd > 0 ? `${formatSpendUsd(total.costUsd, estimated)} · ` : ''}
         {formatTokens(total.tokens)}
       </Text>
+      {/* Said once, here, for every `~` on this chip — the tilde alone marks the
+          figure as computed but cannot say what it is computed against. Not
+          gated on the period: the caveat holds for all of them. */}
+      {estimated && (
+        <Text size="xs" c="dimmed">
+          ~ estimated from token counts at API list prices. This plan is flat-rate, so it is not
+          what you were billed.
+        </Text>
+      )}
       {g !== 'all' && (
         <Text size="xs" c="dimmed">
           This machine only{tzNote ? ` · days counted in ${tzNote}` : ''}
@@ -294,6 +321,10 @@ function PlanUsageChip({
   // A deleted session leaves the rollup but not the ledger, so either side alone
   // is reason enough to show the section.
   const hasSpend = allTimeRows.length > 0 || periodRows.length > 0;
+  // The chip's whole spend block, marked once at this level rather than per row:
+  // every row under it belongs to this one provider, and `cost` asks exactly the
+  // right question — "is a dollar figure here reported, or computed by us".
+  const estimated = !capabilitiesFor(provider).cost;
   const worst = usage.windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), usage.windows[0]);
   // Anthropic's session window by name where it exists, else simply the first —
   // OpenAI's primary window is already first (see parseOpenaiUsage).
@@ -358,6 +389,7 @@ function PlanUsageChip({
                 period={period}
                 onPeriod={onPeriod}
                 models={models}
+                estimated={estimated}
                 tzNote={tzNote}
               />
               {/* A single-model session adds nothing over the sidebar's own total. */}
@@ -366,7 +398,7 @@ function PlanUsageChip({
                   <Text size="xs" fw={700} tt="uppercase" c="dimmed">
                     This session
                   </Text>
-                  <SpendRows rows={sessionRows} models={models} />
+                  <SpendRows rows={sessionRows} models={models} estimated={estimated} />
                 </>
               )}
             </>

@@ -99,6 +99,18 @@ test('billRun is index-aligned with the results it was given', () => {
   );
 });
 
+test('a codex payload still yields no cost here, whatever the estimator does', () => {
+  // The estimator (shared/estimateSpend.ts) prices a turn this module refuses to
+  // bill. It must never reach the delta path: this arithmetic is cumulative, and
+  // a genuinely per-turn number run through it would be over- and under-counted
+  // by turns against the whole-reading guard.
+  const codex: ResultSpendPayload = {
+    usage: { input_tokens: 100, output_tokens: 30, reasoning_output_tokens: 7 },
+  };
+  assert.equal(resultSpend(codex), undefined);
+  assert.equal(resultSpend(codex, 5), undefined);
+});
+
 test('billRun yields undefined for a result carrying no cost, keeping alignment', () => {
   const codex: ResultSpendPayload = { usage: { input_tokens: 500 } };
   const billed = billRun([result(1, 100, 100), codex, result(3, 250, 150)]);

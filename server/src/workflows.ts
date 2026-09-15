@@ -18,6 +18,7 @@ import {
   isStepRef,
   providerForModel,
   providerSwitchNeedsFreshStart,
+  resolveModelId,
   rootsForCwd,
 } from '@lines/shared';
 import type { Store } from './store.ts';
@@ -1141,6 +1142,16 @@ export class WorkflowEngine {
       if (typeof cost === 'number') {
         const costs = (meta.workflow.stepCostsUsd ??= []);
         costs[i] = (costs[i] ?? 0) + cost;
+      }
+
+      // Which model that cost was spent on, so the stepper can tell a reported
+      // figure from an estimated one per step — a provider-crossing workflow
+      // stays in one SessionMeta, so meta.model only answers for the step
+      // running now. Last writer wins: a retried step is marked by the model it
+      // last ran on, which is the one the accumulated cost mostly came from.
+      if (typeof cost === 'number') {
+        const models = (meta.workflow.stepModels ??= []);
+        models[i] = resolveModelId(meta.model);
       }
 
       // Same accumulation for tokens (retries add to the same slot).

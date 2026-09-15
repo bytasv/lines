@@ -37,7 +37,16 @@ export interface ProviderCapabilities {
   linesTools: boolean;
   /** The user's MCP connections apply to the session. */
   mcpConnections: boolean;
-  /** Turns report a USD cost, not just tokens. */
+  /**
+   * Turns report a USD cost, not just tokens.
+   *
+   * Reads as "cost is provider-reported truth", and that is the whole of it: it
+   * is false for OpenAI even though Lines does show an OpenAI session a dollar
+   * figure, because that figure is computed from a static price table
+   * (`shared/estimateSpend.ts`) rather than reported. Flipping it to true would
+   * both stop the estimator running and erase the only signal that tells a
+   * rendered figure apart from a real one.
+   */
   cost: boolean;
   /**
    * Reasoning-effort levels this engine accepts, weakest first. Empty = no

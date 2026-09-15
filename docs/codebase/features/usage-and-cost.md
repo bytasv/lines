@@ -19,6 +19,10 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   step of a running workflow is expensive or slow without opening the transcript.
 - **Usage history** — a day-resolution spend ledger, browsable by day/week/month/year from the
   same hover card, so "what did I spend this month?" has an answer beyond the all-time rollup.
+- **Estimated spend** — a provider whose capability table says `cost: false` (OpenAI/codex) never
+  reports a price, so its turns are priced from a static per-model rate table instead
+  (`shared/estimateSpend.ts`) and every figure derived from that estimate is marked with a `~`
+  prefix, everywhere a real cost would otherwise render bare.
 
 ## Entry points
 
@@ -38,33 +42,47 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 - `shared/types.ts` — `UsageSnapshot`, `UsageWindow`, `ModelSpend`, `ModelSpendMap`,
   `SpendHistoryBlob`, `SessionMeta.costByModel`, `SessionMeta.totalCostUsd`,
   `SessionMeta.totalTokens`, `SessionMeta.totalDurationMs`, `WorkflowState.stepCostsUsd`,
-  `WorkflowState.stepTokens`, `WorkflowState.stepDurationsMs`
+  `WorkflowState.stepTokens`, `WorkflowState.stepDurationsMs`, `WorkflowState.stepModels`,
+  `ModelOption.price`, `ModelPrice`, `priceFor`
 - `shared/usageByModel.ts` — `addSpend`, `mergeSpend`, `sortedSpend`, `dayKey`, `periodBounds`,
   `foldDays`, `shiftPeriod`, `periodLabel`, `Granularity`
+- `shared/estimateSpend.ts` — `estimateSpendUsd`, `hasEstimatedSpend`: prices a turn from
+  `ModelOption.price` for a provider that reports no cost, and answers whether a per-model spend
+  map contains any such estimated money
+- `shared/providers.ts` — `capabilitiesFor(provider).cost`: the gate that decides whether a
+  turn's cost is provider-reported truth or has to be estimated; see
+  [openai-codex-sessions](openai-codex-sessions.md)
 - `server/src/sessions.ts` — accumulates cost/tokens/duration from each turn's SDK `result`
   message; tags each settled turn's spend onto `costByModel`; sets `SessionMeta.lastTokens` /
-  `SessionMeta.lastDurationMs` per turn; feeds the same billed delta into `SpendHistory`
+  `SessionMeta.lastDurationMs` per turn; feeds the same billed-or-estimated figure into
+  `SpendHistory`; calls `estimateSpendUsd` when the turn's provider reports no cost at all
 - `shared/resultSpend.ts` — `resultSpend`, `startsQueryLifetime`, `foldResultSpend`, `billRun`:
   turns a `result`'s cumulative `total_cost_usd` into that turn's own delta. Used by the live
   accumulator in `server/src/sessions.ts`, the one-time repair script, and the spend-history
   backfill script, so they cannot disagree about where a query lifetime starts.
 - `server/scripts/repair-spend.ts` — one-time local backfill (`npm run repair:spend -w server`)
   that recomputes `totalCostUsd`/`lastCostUsd`/`costByModel` from transcript `result` events for
-  sessions whose totals predate the delta fix
+  sessions whose totals predate the delta fix, and also fills in `estimateSpendUsd` for turns on
+  a no-cost provider whose stored rows are still at zero
 - `server/src/spendHistory.ts` — `SpendHistory`: the day-resolution ledger, fed from
   `accumulateResultSpend`, debounce-persisted, broadcasting one day row per turn
 - `server/src/store.ts` — `loadSpendHistory`/`saveSpendHistory` (flat-JSON, per-user, same
   pattern as every other store file)
 - `server/scripts/backfill-spend-history.ts` — one-time local reconstruction
   (`npm run backfill:spend-history -w server`) of the ledger from transcript `result` events, for
-  history predating the ledger's existence
+  history predating the ledger's existence; also estimates cost for a no-cost provider's turns via
+  `estimateSpendUsd`
 - `server/src/workflows.ts` — `WorkflowEngine.onWorkflowTurnComplete` (accumulates all three
-  per-step numbers)
+  per-step numbers, and stamps `WorkflowState.stepModels[stepIndex]`)
 - `web/src/components/Sidebar.tsx` — renders date (EU format), cost, token icon + tooltip,
   duration
 - `web/src/components/WorkflowStepper.tsx` — renders the amount, the token tooltip, and the
-  duration
-- `web/src/lib/format.ts` — `formatDuration`
+  duration, marked `~` when the step's model is on a no-cost provider
+- `web/src/components/SessionView.tsx`, `web/src/components/ContextWindowIndicator.tsx`,
+  `web/src/components/Composer.tsx` — the other per-session cost readouts (last-turn cost, the
+  context-ring hover card's session total, the composer's running total), all routed through
+  `formatSpendUsd`
+- `web/src/lib/format.ts` — `formatDuration`, `formatSpendUsd`
 
 ## Symbols
 
@@ -127,6 +145,20 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   (`undefined` where a result carried no usable cost), so a caller can attribute each turn to
   something of its own (the day it happened on) without restating the lifetime-boundary rule;
   `foldResultSpend` is now implemented over it
+- `ModelOption.price` / `ModelPrice` — vendor list price in USD per 1M tokens (`input`,
+  `cachedInput`, `output`), a static constant on the model list exactly like `contextWindow`
+- `priceFor(modelId)` — resolves a (possibly retired) model id to its `ModelPrice`, or `undefined`
+  when the model carries none
+- `estimateSpendUsd(modelId, usage)` — this turn's cost computed from `priceFor`, or `undefined`
+  when the model has no price (never `0`, which would read as "this turn was free"). Bills
+  `input − cacheRead` at `input`, `cacheRead` at `cachedInput`, `cacheCreation` at `input` (no
+  separate rate), and `output + reasoning` at `output` — codex's `input_tokens` already contains
+  its cached reads, so billing it whole would double-charge them
+- `hasEstimatedSpend(spend)` — true when any row in a `ModelSpendMap` holds estimated money
+  (`costUsd > 0` on a model whose `capabilitiesFor(provider).cost` is false); drives the `~`
+  marker at the section/session/step level rather than per row
+- `formatSpendUsd(usd, estimated, digits?)` — `$1.23` or `~$1.23`; the one place every cost
+  readout renders its dollar sign
 
 ## Data flow
 
@@ -146,6 +178,26 @@ Per-session totals below) and calls
 resolved delta, never the raw `total_cost_usd` reading → persisted via the `SessionMeta` upsert →
 `UsageIndicator` reads `mergeSpend(sessions.map(s => s.costByModel))` for the global rollup and
 `session.costByModel` for the current session, both rendered via `sortedSpend`.
+
+### Estimated spend
+
+A turn on a provider whose `capabilitiesFor(provider).cost` is `false` never carries a
+`total_cost_usd`, so `resultSpend` returns `undefined` and the ordinary delta path bills nothing.
+`accumulateResultSpend` then calls `estimateSpendUsd(resolveModelId(meta.model), usage)`; if that
+returns a number it becomes `billedUsd` and flows into the same three places a real cost would —
+`SessionMeta.lastCostUsd`/`totalCostUsd`, the `costByModel` row via `addSpend`, and
+`SpendHistory.record` — so nothing downstream needs to know the number was computed rather than
+reported. The gate is the capability, not "is the cost missing": a Claude turn that happens to
+carry no cost stays uncosted rather than silently getting an estimate, which would leave one
+Anthropic row part-real and part-computed. `live.lastCostCumulativeUsd` is left untouched, since an
+estimate is genuinely per-turn and has no cumulative reading to carry forward.
+
+Every render site asks `hasEstimatedSpend(costByModel)` (or, in the workflow stepper,
+`WorkflowState.stepModels[i]` when present) and passes the answer to `formatSpendUsd`, which
+prefixes a `~` rather than dimming or using a tooltip — dimmed is already the ambient color at
+every one of these sites, and a tooltip is invisible on touch. The usage card's hover text spells
+out once, at the section level, what the `~` means: estimated from token counts at API list
+prices, not what a flat-rate plan actually billed.
 
 ### Usage history
 
@@ -192,11 +244,16 @@ persist via `SessionMeta` upsert → sidebar reads from the session store and re
 ### Per-step totals
 
 SDK `result` message → `SessionMeta.lastCostUsd` / `lastTokens` / `lastDurationMs` (the same
-accumulation) → read by `onWorkflowTurnComplete` and added onto
-`WorkflowState.stepCostsUsd[stepIndex]` / `stepTokens[stepIndex]` / `stepDurationsMs[stepIndex]`
-→ persisted on `SessionMeta` upsert → `WorkflowStepper` renders `stepCostsUsd[i]` as a `$X.XX`
-label, `stepTokens[i]` as a coin icon with a "N tokens spent" tooltip, and `stepDurationsMs[i]`
-via `formatDuration`, all in a metrics row below the step name.
+accumulation, estimate included) → read by `onWorkflowTurnComplete` and added onto
+`WorkflowState.stepCostsUsd[stepIndex]` / `stepTokens[stepIndex]` / `stepDurationsMs[stepIndex]`;
+the same block stamps `stepModels[stepIndex] = resolveModelId(meta.model)` (last writer wins
+across retries) → persisted on `SessionMeta` upsert → `WorkflowStepper` renders `stepCostsUsd[i]`
+via `formatSpendUsd`, `stepTokens[i]` as a coin icon with a "N tokens spent" tooltip, and
+`stepDurationsMs[i]` via `formatDuration`, all in a metrics row below the step name.
+`stepModels[i]` exists only because a provider-crossing workflow keeps one `SessionMeta`: the
+session's *current* model cannot say what an earlier step actually ran on, so per-step estimation
+marking needs its own stamp. A step run before this field existed falls back to the
+session-level `hasEstimatedSpend` reading.
 
 ## Dependencies
 
@@ -218,15 +275,23 @@ via `formatDuration`, all in a metrics row below the step name.
   reading still bills whole, a cumulative reading that drops bills whole, and a run of results
   folds to the sum of its lifetimes rather than the sum of its raw readings; `billRun` is
   index-aligned with its input and yields `undefined` for an uncosted result without breaking
-  alignment for the results around it.
+  alignment for the results around it; a codex-shaped payload yields `undefined` regardless of
+  `estimateSpendUsd`, so the estimator can never reach the cumulative-delta path.
 - `server/src/sessions.ended.test.ts` — a settled `result` splits spend under the session's
   model; a second turn in the same query lifetime bills the delta, not the raw reading; a turn
   after `recycleIdleQueries()` closes the query bills its reading whole; a cumulative reading that
   drops, or that trips the `startsQueryLifetime` detector, bills whole even when the raw reading
-  rose; `setModel()` between turns opens a second row instead of moving the first; a codex-shaped
-  result (no cost) still opens a token-only row; a result with neither cost nor usage opens no
-  row; the same settled/recovered/no-op cases open (or don't open) a matching `SpendHistory` day
-  row and broadcast its whole content as `spendDay`.
+  rose; `setModel()` between turns opens a second row instead of moving the first; a costless
+  result on a cost-reporting provider (Anthropic) stays uncosted; a codex-shaped result is priced
+  from the table instead, matching the codex fixture's usage composition by hand; a result with
+  neither cost nor usage opens no row; the same settled/recovered/no-op cases open (or don't open)
+  a matching `SpendHistory` day row and broadcast its whole content as `spendDay`.
+- `server/src/estimateSpend.test.ts` — `estimateSpendUsd`: an unpriced model returns `undefined`,
+  a priced model with no usage returns `0`, a cached read is billed once at the cached rate (not
+  the naive double-charge of billing `input_tokens` whole), a cache write bills as input,
+  reasoning bills as output, a retired model id prices as its replacement; `hasEstimatedSpend`:
+  a Claude row never marks, an OpenAI row with `costUsd > 0` does, a mixed session marks, and a
+  zero-cost OpenAI row (recorded before estimation existed) does not.
 - No test infrastructure covers `UsagePoller`, the Sidebar/`SessionMeta` display, or
   `WorkflowStepper` rendering at time of writing; natural first targets are `UsagePoller`
   (mocked `fetch`/`AuthManager`) and `parseSnapshot`.
@@ -268,6 +333,29 @@ via `formatDuration`, all in a metrics row below the step name.
   whatever those helpers cost.
 - `costByModel` is additive and never backfilled: a session shows nothing until its next turn
   settles, same convention as `totalTokens`/`totalDurationMs`.
+- A turn on a provider whose capability table says `cost: false` is priced from
+  `ModelOption.price` via `estimateSpendUsd` instead of left uncosted; `estimateSpendUsd` returns
+  `undefined` (never `0`) for a model with no price entry, since a zero would render as "this turn
+  was free" rather than "we cannot say". The gate is the provider's capability, not whether a
+  particular result happens to be missing a cost — a Claude turn with no cost stays uncosted.
+- Every figure derived from an estimate — the usage-chip section total, a sidebar row, the
+  composer total, the context-ring hover card, a workflow step's cost — renders with a `~` prefix
+  (`formatSpendUsd`) rather than a dimmed style or a tooltip-only cue, and the usage card spells
+  out the caveat once at the section level: estimated from token counts at API list prices, not
+  what a flat-rate plan was actually billed.
+- The `~` marker is decided per spend surface, not per row: every one of these surfaces is already
+  narrowed to a single provider (`rowsFor`, a session's own `costByModel`, a workflow step's
+  stamped model), so within one surface every dollar figure is either all reported or all
+  estimated.
+- `WorkflowState.stepModels[i]` records the model id a step's turns actually ran on, because a
+  provider-crossing workflow stays inside one `SessionMeta` and the session's *current* model
+  cannot answer for an earlier step. Absent on a step run before this field existed, which falls
+  back to the session-level `hasEstimatedSpend` reading.
+- `server/scripts/repair-spend.ts` and `server/scripts/backfill-spend-history.ts` both call the
+  same `estimateSpendUsd`, behind the same capability gate, as the live accumulator — so a
+  rebuilt or repaired figure for historical codex spend agrees with what a live turn would have
+  recorded. `repair-spend.ts` splits an estimated total across a session's already-zero rows by
+  token share, since cost cannot be the weight when every row starts at zero.
 - The global rollup is derived client-side from the sessions the store already holds — deleting
   a session removes its spend from the rollup; there is no separate persisted total.
 - The "Spend by model" section (and its "This session" sub-section) render nothing at all when
@@ -334,6 +422,16 @@ via `formatDuration`, all in a metrics row below the step name.
   `server/src/sessions.ts`, specifically so the live accumulator and `repair-spend.ts` (a
   standalone script with no access to `LiveState`) share one definition of "where does a
   lifetime start" and cannot silently diverge.
+- Estimation is deliberately kept out of `shared/resultSpend.ts`: that module does
+  cumulative-delta arithmetic because `total_cost_usd` is cumulative over a query lifetime, while
+  an estimate is genuinely per-turn — running it through the delta path would over- and
+  under-count against the whole-reading guard. `shared/estimateSpend.ts` is its own file for that
+  reason, called once from `accumulateResultSpend` after `resultSpend` comes back empty.
+- `shared/estimateSpend.ts` and `shared/types.ts` form an import cycle (the estimator reads
+  `priceFor`/`DEFAULT_MODELS`; `types.ts` re-exports the estimator alongside them) — safe only
+  because the estimator reads those bindings inside function bodies, never at its own top level,
+  and the re-export statement in `types.ts` runs after `priceFor` is initialized. Same pattern as
+  the pre-existing `workflowValidation.ts` cycle in the same file.
 - `repair-spend.ts` is a throwaway script, not startup migration code — the fix in
   `server/src/sessions.ts` only corrects turns going forward, so historical totals need running
   once per machine rather than a permanent code path. See `server/scripts/migrate-user.ts` for
@@ -399,8 +497,11 @@ cannot drift. Each shows only its own provider's spend rows. The ChatGPT numbers
 `GET https://chatgpt.com/backend-api/wham/usage` — the same endpoint the Codex CLI's own status
 card reads — polled on the same cadence as the Claude one.
 
-The `$` half of a spend row is dropped when a row has no cost: codex reports tokens but never a
-price, and a column of `$0.00` reads as "these turns were free" rather than "we are not told".
+A codex turn does carry a `$` figure now — estimated from `ModelOption.price` and marked with a
+`~` (see Estimated spend above) — but the `$` half of a spend row is still dropped outright when a
+row has genuinely no cost information at all (an unpriced model, or a row recorded before
+estimation existed): a column of `$0.00` would read as "these turns were free" rather than "we are
+not told".
 
 Each chip wears its provider's mark, **always** — which vendor a number belongs to is part of
 reading it, not a tiebreaker for when two are on screen. See

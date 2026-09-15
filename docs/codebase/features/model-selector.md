@@ -25,7 +25,7 @@ shows the model name plus a one-line description to help users pick between mode
 
 ## Important symbols
 
-- `ModelOption` — `{ id, label, description?, contextWindow? }`
+- `ModelOption` — `{ id, label, description?, contextWindow?, price?, provider? }`
 - `modelSelectData()` — maps `ModelOption[]` to Mantine `Select` data with descriptions; given `ensureId`, appends a disabled "No longer available" entry if that id isn't in `models`
 - `renderModelOption` — alias of `renderOptionWithDescription` (Mantine `renderOption` renderer: label + dimmed description), shared with the [permissions-and-plan-mode](permissions-and-plan-mode.md) dropdowns
 - `modelComboboxProps` — widens the dropdown popover for narrow inputs without widening the input itself; also reused by the permission-mode workflow Selects
@@ -104,6 +104,13 @@ call sites filter their own lists:
 thread on `thread/tokenUsage/updated`, and that reading wins over the table via
 `ContextUsage.maxTokens`. A static value here would be a second, staler answer to a question
 the engine already answers. See [openai-codex-sessions](openai-codex-sessions.md).
+
+**`ModelOption.price` is filled for every model, both providers.** Unlike `contextWindow`, it is
+never read for display here — the selector has no cost column — and it is never a substitute for
+a reported cost: it exists purely so a provider whose capability table says `cost: false` can have
+its turns priced from something. See [usage-and-cost](usage-and-cost.md) for `priceFor` /
+`estimateSpendUsd` and the `~` marking that keeps an estimated figure from looking like a
+provider-reported one.
 
 ## Reasoning effort
 

@@ -574,6 +574,13 @@ export interface WorkflowState {
   /** Per-step accumulated tokens (input + output + cache), indexed by step
    *  position. Summed across every turn a step runs (retries included). */
   stepTokens?: number[];
+  /** Model id the step's last turn ran on, indexed by step position. Read only to
+   *  decide whether that step's cost is a provider-reported figure or an estimate
+   *  — a provider-crossing workflow stays in one SessionMeta, so the session's
+   *  current model cannot answer it per step. A model id rather than a boolean:
+   *  it survives a price-table change and reads as a label. Absent on metas
+   *  written by an older build, which fall back to the session-level derivation. */
+  stepModels?: string[];
   /** Per-step accumulated active-turn duration in ms, indexed by step position.
    *  Summed across every turn a step runs (retries included); excludes idle wait. */
   stepDurationsMs?: number[];
@@ -898,6 +905,15 @@ export interface SessionMeta {
 /** Which vendor's agent runs a model. Absent on a `ModelOption` means 'anthropic'. */
 export type ModelProvider = 'anthropic' | 'openai';
 
+/** Vendor list price in USD per 1,000,000 tokens. `cachedInput` is the rate a
+ *  cache *read* bills at; a cache write has no separate rate here and bills at
+ *  `input`. */
+export interface ModelPrice {
+  input: number;
+  cachedInput: number;
+  output: number;
+}
+
 export interface ModelOption {
   id: string;
   label: string;
@@ -908,6 +924,20 @@ export interface ModelOption {
    *  per-assistant-message usage, which codex does not report, so a denominator
    *  here would show a ring that could never fill. */
   contextWindow?: number;
+  /**
+   * List price in USD per 1M tokens — a static per-model constant, exactly like
+   * `contextWindow`, read through `priceFor`.
+   *
+   * Only ever used to *estimate* the cost of a turn whose provider reports none
+   * (see `shared/estimateSpend.ts`). A provider that reports real money is always
+   * billed from what it reported; this number never overrides it.
+   *
+   * Rates as published on 2026-09-15. A stale context window shows a slightly
+   * wrong ring; a stale price shows wrong money — re-check these against each
+   * vendor's pricing page when this date ages, and keep the `~` marker on every
+   * figure derived from them.
+   */
+  price?: ModelPrice;
   /**
    * Optional, and absent means `'anthropic'` — the same convention `resolvedBy`
    * uses. Keeping it optional is what makes every existing entry, every stored
@@ -2936,10 +2966,12 @@ export function subagentParentId(msg: unknown): string | null {
 }
 
 export const DEFAULT_MODELS: ModelOption[] = [
-  { id: 'claude-opus-5', label: 'Opus 5', description: 'Powerful model for complex work', contextWindow: 1_000_000 },
-  { id: 'claude-fable-5-1', label: 'Fable 5.1', description: 'For demanding reasoning and long-horizon agentic work', contextWindow: 1_000_000 },
-  { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability', contextWindow: 1_000_000 },
-  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, for lightweight tasks', contextWindow: 200_000 },
+  // `price` is the vendor list rate per 1M tokens — see ModelOption.price for what
+  // it is (and is not) used for, and for when to re-check these numbers.
+  { id: 'claude-opus-5', label: 'Opus 5', description: 'Powerful model for complex work', contextWindow: 1_000_000, price: { input: 5, cachedInput: 0.5, output: 25 } },
+  { id: 'claude-fable-5-1', label: 'Fable 5.1', description: 'For demanding reasoning and long-horizon agentic work', contextWindow: 1_000_000, price: { input: 10, cachedInput: 0.25, output: 50 } },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability', contextWindow: 1_000_000, price: { input: 2, cachedInput: 0.2, output: 10 } },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, for lightweight tasks', contextWindow: 200_000, price: { input: 1, cachedInput: 0.1, output: 5 } },
   // OpenAI models run through the `codex` CLI, not the Claude SDK. No
   // contextWindow on any of them — see ModelOption.contextWindow.
   //
@@ -2947,10 +2979,15 @@ export const DEFAULT_MODELS: ModelOption[] = [
   // holds. Deliberately omitted: `gpt-5.3-codex-spark` (a research preview gated
   // to ChatGPT Pro, so it would 404 for most accounts) and `gpt-5.5` (previous
   // generation) — this list mirrors the Claude one in showing current models only.
-  { id: 'gpt-6-astra', label: 'GPT-6 Astra', description: 'OpenAI — most capable, for complex reasoning and long agentic work', provider: 'openai' },
-  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', description: 'OpenAI — for complex work', provider: 'openai' },
-  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', description: 'OpenAI — balanced for everyday work', provider: 'openai' },
-  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', description: 'OpenAI — fastest, for lightweight tasks', provider: 'openai' },
+  //
+  // These four are the only prices that are actually read today: OpenAI reports
+  // no cost, so their spend is estimated from these (shared/estimateSpend.ts).
+  // Sol's rate is promotional through at least 2026-11-21 and reverts higher
+  // after it — the first of these to re-check.
+  { id: 'gpt-6-astra', label: 'GPT-6 Astra', description: 'OpenAI — most capable, for complex reasoning and long agentic work', provider: 'openai', price: { input: 10, cachedInput: 1, output: 50 } },
+  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', description: 'OpenAI — for complex work', provider: 'openai', price: { input: 4, cachedInput: 0.4, output: 20 } },
+  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', description: 'OpenAI — balanced for everyday work', provider: 'openai', price: { input: 2, cachedInput: 0.2, output: 12 } },
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', description: 'OpenAI — fastest, for lightweight tasks', provider: 'openai', price: { input: 0.2, cachedInput: 0.02, output: 1.2 } },
 ];
 
 export const DEFAULT_MODEL = 'claude-opus-5';
@@ -2995,6 +3032,19 @@ export function providerForModel(id: string): ModelProvider {
 export function contextWindowFor(modelId: string, models: ModelOption[]): number | undefined {
   const resolved = resolveModelId(modelId);
   return models.find((m) => m.id === resolved)?.contextWindow;
+}
+
+/**
+ * List price of `modelId`, or undefined when the model isn't listed or carries
+ * no price. Resolves a retired id first, exactly as `contextWindowFor` does.
+ *
+ * Reads `DEFAULT_MODELS` directly rather than taking a list, unlike its sibling:
+ * a price is never rendered from a client's copy of the model list — it is only
+ * ever applied on the bridge, where this list is the one in force.
+ */
+export function priceFor(modelId: string): ModelPrice | undefined {
+  const resolved = resolveModelId(modelId);
+  return DEFAULT_MODELS.find((m) => m.id === resolved)?.price;
 }
 
 /**
@@ -3238,6 +3288,19 @@ export * from './providers.ts';
  * nothing at all, so nothing of ours is read at its top level.
  */
 export * from './codex.ts';
+
+/**
+ * The estimator that stands in for a provider-reported cost, re-exported beside
+ * the price table it reads. `./estimateSpend.ts` imports back from here, so the
+ * two form a cycle — safe for the same reason `./workflowValidation.ts` below is:
+ * it reads our bindings inside function bodies only, never at its own top level,
+ * and this statement runs after `priceFor` and `DEFAULT_MODELS` are initialized.
+ */
+export {
+  estimateSpendUsd,
+  hasEstimatedSpend,
+  type EstimateUsage,
+} from './estimateSpend.ts';
 
 /**
  * Workflow/step validation, re-exported so a caller gets the rules from the same

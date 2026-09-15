@@ -901,7 +901,11 @@ test('switching model mid-session opens a second row instead of moving the first
   });
 });
 
-test('a codex-shaped result reports tokens with no cost', () => {
+test('a costless result on a provider that reports cost stays uncosted', () => {
+  // The session is on the harness default, an Anthropic model, and Anthropic
+  // reports cost — so a result that carries none is a gap, not something to
+  // estimate. Filling it in would make one model's row part-reported and
+  // part-computed, which is the thing the capability gate exists to prevent.
   const h = harness();
   h.sessions.handleWorkerEvent('s1', {
     type: 'result',
@@ -915,6 +919,36 @@ test('a codex-shaped result reports tokens with no cost', () => {
   assert.deepEqual(meta.costByModel, {
     'claude-opus-5': { costUsd: 0, tokens: 1_000, turns: 1 },
   });
+});
+
+test('a codex-shaped result is costed from the price table instead', () => {
+  const h = harness();
+  h.sessions.setModel('s1', 'gpt-5.6-terra');
+  // The codexEvents fixture's usage, verbatim: cached reads are already inside
+  // input_tokens, and reasoning is billed as output.
+  h.sessions.handleWorkerEvent('s1', {
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    usage: {
+      input_tokens: 100,
+      output_tokens: 30,
+      cache_read_input_tokens: 20,
+      cache_creation_input_tokens: 5,
+      reasoning_output_tokens: 7,
+    },
+  });
+
+  // (80 × $2 + 20 × $0.20 + 5 × $2 + 37 × $12) / 1M.
+  const expected = 618 / 1_000_000;
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.lastCostUsd, expected);
+  assert.equal(meta.totalCostUsd, expected);
+  assert.deepEqual(meta.costByModel, {
+    'gpt-5.6-terra': { costUsd: expected, tokens: 162, turns: 1 },
+  });
+  // The ledger is fed the same number from the same guard.
+  assert.deepEqual(onlyDay(h), meta.costByModel);
 });
 
 test('a result carrying neither cost nor usage opens no row', () => {

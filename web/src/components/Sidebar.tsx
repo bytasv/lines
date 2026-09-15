@@ -42,11 +42,18 @@ import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
 import {
   findWorktree,
+  hasEstimatedSpend,
   projectPaths,
   projectRoots,
 } from '@lines/shared';
 import type { SessionSort } from '../lib/format';
-import { compareSessions, formatDuration, isWorkflowFinished, sessionRowMeta } from '../lib/format';
+import {
+  compareSessions,
+  formatDuration,
+  formatSpendUsd,
+  isWorkflowFinished,
+  sessionRowMeta,
+} from '../lib/format';
 import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode } from '../store';
@@ -270,7 +277,10 @@ const SessionRow = memo(function SessionRow({
                 </Text>
                 {session.totalCostUsd != null && (
                   <Text size="xs" c="dimmed">
-                    ${session.totalCostUsd.toFixed(2)}
+                    {/* Derived from the session's own rows rather than its current
+                        model: a provider-crossing workflow keeps one session, so
+                        the model it is on now need not be the one it spent on. */}
+                    {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel))}
                   </Text>
                 )}
                 {session.totalTokens != null && (

@@ -29,7 +29,9 @@
  *
  * Cost is always `billRun`'s billed delta, never a raw `total_cost_usd` reading
  * — that field is cumulative over a query lifetime (see shared/resultSpend.ts),
- * and the same shared rule is used here as live so the two cannot diverge.
+ * and the same shared rule is used here as live so the two cannot diverge. Where
+ * the provider reports no cost at all, the same shared estimator the live path
+ * uses fills in (see shared/estimateSpend.ts), for exactly that reason.
  *
  * Run with the bridge STOPPED: it holds the ledger in memory and whole-file
  * persists, so a live bridge would write its own copy straight back over this.
@@ -39,7 +41,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { addSpend, billRun, dayKey, resolveModelId, sortedSpend } from '@lines/shared';
+import {
+  addSpend,
+  billRun,
+  capabilitiesFor,
+  dayKey,
+  estimateSpendUsd,
+  providerForModel,
+  resolveModelId,
+  sortedSpend,
+} from '@lines/shared';
 import type {
   ModelSpendMap,
   ResultSpendPayload,
@@ -182,7 +193,15 @@ function rebuildUser(userId: string): UserResult {
       const tokens = turnTokens(payload.usage);
       // The live guard, restated: a result carrying neither number opens no row.
       if (!spend && tokens === 0) return;
-      const cost = spend?.billed ?? 0;
+      let cost = spend?.billed ?? 0;
+      // And the live estimator, restated for the same reason: a codex result
+      // carries no cost, so without this the rebuilt ledger would disagree with
+      // the one the bridge wrote for the very same turns. Same gate as live, and
+      // the estimate is attributed to the session's model — codex reports no
+      // `modelUsage`, so there is no split to spread it over anyway.
+      if (!spend && !capabilitiesFor(providerForModel(fallbackModel)).cost) {
+        cost = estimateSpendUsd(fallbackModel, payload.usage) ?? 0;
+      }
       total += cost;
 
       // `billRun` bills the whole reading exactly when it decides the lifetime
