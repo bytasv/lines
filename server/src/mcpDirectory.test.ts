@@ -51,7 +51,7 @@ test('public-content services are in the table for vetting but never nudge', () 
 
 test('a service is recognised from a URL, a bare domain and a subdomain', () => {
   for (const text of [
-    'can you see this https://linear.app/acme/issue/NUR-4868/x',
+    'can you see this https://linear.app/acme/issue/ACME-123/x',
     'check linear.app for the ticket',
     'the issue is on acme.linear.app',
     'mail from noreply@linear.app',
@@ -74,7 +74,7 @@ test('prose and lookalike domains match nothing', () => {
 });
 
 test('no hint when a connection already covers the service — by name or by host', () => {
-  const text = 'read https://linear.app/x/issue/NUR-1';
+  const text = 'read https://linear.app/x/issue/ACME-1';
   assert.equal(mcpConnectionHint(text, [{ name: 'linear', url: 'https://mcp.linear.app/mcp', enabled: true }]), null);
   // Named something else, but pointed at the vendor's host: still covered.
   assert.equal(mcpConnectionHint(text, [{ name: 'issues', url: 'https://mcp.linear.app/mcp', enabled: true }]), null);
@@ -83,7 +83,7 @@ test('no hint when a connection already covers the service — by name or by hos
 });
 
 test('the hint names the vendor and the two tools, and never invents a URL', () => {
-  const hint = mcpConnectionHint('see https://linear.app/x/issue/NUR-1', NONE);
+  const hint = mcpConnectionHint('see https://linear.app/x/issue/ACME-1', NONE);
   assert.ok(hint);
   assert.match(hint, /Linear/);
   assert.match(hint, /mcp__lines__add_mcp_connection/);

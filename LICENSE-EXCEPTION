@@ -1,0 +1,109 @@
+                        LINES LICENSE EXCEPTION
+              Additional permission for Agent Provider Software
+                             Version 1.0
+
+Copyright (C) 2026 Vytautas Butkus
+
+This file states an additional permission granted under section 7 of the GNU
+General Public License version 3, as incorporated into and applicable to the
+GNU Affero General Public License version 3 ("the License"), under which the
+Lines program ("the Program") is licensed.
+
+0. DEFINITIONS
+
+   "Agent Provider Software" means any software development kit, client
+   library, command-line program, executable, daemon, or network service whose
+   purpose is to operate, host, authenticate to, or relay requests for an
+   artificial-intelligence coding agent or large language model, together with
+   any platform-specific binary, sidecar, or supporting package distributed by
+   its publisher for that purpose, and any documentation, model weights, or
+   data files it requires.
+
+   Agent Provider Software includes, without limitation and by way of example
+   only:
+
+     (a) the Claude Agent SDK, published as the npm package
+         `@anthropic-ai/claude-agent-sdk` and its platform-specific companion
+         packages, and any successor, predecessor, or renamed edition of it;
+
+     (b) the Claude Code command-line interface (the `claude` executable) and
+         any binary it installs, extracts, or spawns;
+
+     (c) the OpenAI Codex SDK, published as the npm package
+         `@openai/codex-sdk`, and the Codex command-line interface (the `codex`
+         executable);
+
+   and any comparable software from any other publisher, whether or not that
+   software is distributed under terms compatible with the License.
+
+   "Combine" means to link with, dynamically load, import, embed, bundle,
+   install alongside, package into the same distribution artifact, execute as a
+   child process or subprocess, or communicate with over any inter-process,
+   local, or network transport.
+
+1. GRANT OF ADDITIONAL PERMISSION
+
+   You have permission to Combine the Program, or a work based on the Program,
+   with Agent Provider Software, and to convey the resulting work, under terms
+   of your choice with respect to that Agent Provider Software, notwithstanding
+   any requirement of section 5, section 6, or section 13 of the License that
+   would otherwise extend to that Agent Provider Software.
+
+   In particular, and without limiting the foregoing:
+
+     (a) Agent Provider Software is not required to be, and need not be,
+         licensed under the License, and is not "Corresponding Source" of the
+         Program for the purposes of sections 1, 6, or 13 of the License;
+
+     (b) you may convey an executable, installer, container image, or other
+         distribution artifact that contains both the Program and Agent
+         Provider Software, without conveying the source of that Agent Provider
+         Software, and without that Agent Provider Software causing the
+         artifact to fall outside the permissions of the License;
+
+     (c) you may make the Program available to users over a network in a form
+         that invokes, depends upon, or transmits to Agent Provider Software,
+         and section 13 of the License is satisfied by offering the
+         Corresponding Source of the Program itself.
+
+2. SCOPE AND LIMITS
+
+   This permission applies only to Agent Provider Software as defined above. It
+   grants no permission with respect to any other work, and it does not relieve
+   you of any obligation of the License as to the Program itself or as to any
+   modified version of the Program you convey. The Corresponding Source of the
+   Program, including every modification you make to it, must still be conveyed
+   or offered under the License in full.
+
+   This permission grants no right in any trademark, service mark, or trade
+   name of any publisher of Agent Provider Software, and no representation is
+   made here about that publisher's own terms. You remain responsible for
+   complying with the license or terms of service governing any Agent Provider
+   Software you Combine with the Program — including, where applicable,
+   Anthropic's Commercial Terms of Service, under which the Claude Agent SDK
+   and the Claude Code command-line interface are made available.
+
+3. APPLICATION TO THE ENTIRE PROGRAM AND TO DERIVED WORKS
+
+   This additional permission applies to the entire Program and to every work
+   based on the Program, and, as provided by section 7 of the License, is to be
+   treated as though it were included in the License.
+
+   When you convey a copy or a modified version of the Program, this permission
+   travels with that copy by default. You are encouraged to retain this file
+   and its reference in any fork, so that your recipients inherit the same
+   permission.
+
+4. REMOVAL
+
+   Section 7 of the License permits any recipient to remove this additional
+   permission from their own copy of the Program. Removing it withdraws the
+   permission only from that copy and from works based on it; it does not
+   withdraw it from any other copy, and it does not revoke it upstream.
+
+5. CONTRIBUTIONS
+
+   Unless a contributor states otherwise in writing, a contribution offered for
+   inclusion in the Program is offered under the License together with this
+   additional permission, and the maintainers may issue later versions of this
+   exception applying to the Program as a whole.

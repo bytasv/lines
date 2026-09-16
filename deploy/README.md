@@ -11,12 +11,17 @@ That split is the security story. The server holds no agent, no workspaces, and
 no `~/.lines-app` — that directory is the source of truth and lives on the
 user's machine, so **server backups are not the backup that matters**.
 
-Everything here is containers behind the Traefik instance that Hostinger's
-image already ships at `/docker/traefik`.
+Everything here is containers behind the Traefik instance the host image
+already ships at `${TRAEFIK_ROOT}`.
+
+Two placeholders run through this document: `${TRAEFIK_ROOT}` is wherever the
+host image put its Traefik stack, and `${DEPLOY_ROOT}` is wherever you check
+this repo out on the VPS. Substitute your own paths, or `export DEPLOY_ROOT=...`
+in the shell you run the commands from.
 
 ## Status: working end to end
 
-A signed-in user reaches `linesapp.cloud`, downloads the macOS app, pairs it with
+A signed-in user reaches `<domain>`, downloads the macOS app, pairs it with
 the code it shows, and runs turns on their own machine. The four client-side
 blockers this section used to list — no device id on the socket, the wrong
 `/client` path, no way to discover a device, no pairing flow — are all
@@ -24,31 +29,25 @@ implemented. `web/src/ws.ts` names the device, `web/src/lib/storage.ts` lists
 them, storage is exposed through Traefik at `api.<domain>`, and
 `desktop/src/main.ts` registers this machine and shows the pairing code.
 
-Two things are still rough, and neither is a deployment problem:
-
-1. **The desktop build is ad-hoc signed, not notarized.** Gatekeeper blocks a
-   browser download until the user allows it in Privacy & Security. See
-   `docs/codebase/features/desktop-app.md`; only a Developer ID fixes it.
-2. **Auto-update notifies, it does not self-install.** Squirrel.Mac needs a valid
-   signature, so `CAN_SELF_INSTALL` in `desktop/src/main.ts` is false and the tray
-   links the download page instead.
+The desktop build's signing and auto-update status is a packaging matter, not a
+deployment one — see `docs/codebase/features/desktop-app.md`.
 
 ## Prerequisites
 
-- A VPS with Docker and the stock Traefik stack in `/docker/traefik`
+- A VPS with Docker and a stock Traefik stack in `${TRAEFIK_ROOT}`
   (`--providers.docker.exposedbydefault=false`, ACME via HTTP challenge,
   HTTP→HTTPS redirect — all default in that image).
 - `A <domain> → <VPS IP>` resolving **before** the first `up`; Traefik issues
   the certificate on demand via the HTTP challenge.
 - Ports 80 and 443 open, nothing else. The relay and storage never publish a
   port; Traefik reaches the relay on the internal network.
-- Set `ACME_EMAIL` in `/docker/traefik/.env` to a real address — the stock value
-  is `admin@<hostname>.hstgr.cloud`, so expiry warnings go nowhere.
+- Set `ACME_EMAIL` in `${TRAEFIK_ROOT}/.env` to a real address — a stock image
+  usually defaults it to an unrouted address, so expiry warnings go nowhere.
 
 ## Deploy
 
 ```bash
-git clone git@github.com:bytasv/lines.git ~/app && cd ~/app/deploy/docker
+git clone git@github.com:<org>/lines.git ~/app && cd ~/app/deploy/docker
 cp env.example lines.env && chmod 600 lines.env
 $EDITOR lines.env                       # every field is annotated
 
@@ -78,29 +77,24 @@ Every push to `main` that passes tests deploys automatically —
    flagged migration needs a human to review and merge by hand; the pipeline
    will not auto-deploy it.
 3. **build** — builds `relay`/`storage`/`web` from `deploy/docker/Dockerfile`
-   and pushes each to `ghcr.io/bytasv/lines-<service>` tagged `latest` and the
+   and pushes each to `ghcr.io/<org>/lines-<service>` tagged `latest` and the
    commit SHA. The `web` build args come from the `VITE_*` GitHub secrets — keep
    those in sync with `lines.env` by hand if either changes.
 4. **deploy** — SSHes into the VPS with a key scoped to that one purpose (see
-   below) and runs `/root/deploy-lines.sh`: `git pull --ff-only`, `docker
-   compose pull`, `run --rm migrate`, `up -d`, then prunes old images.
+   below) and runs the VPS-side copy of `deploy-lines.sh`: `git pull --ff-only`,
+   `docker compose pull`, `run --rm migrate`, `up -d`, then prunes old images.
 
-**The deploy key is forced-command, not a general login.** Its
-`authorized_keys` entry on the VPS is:
-
-```
-command="/root/deploy-lines.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA...
-```
-
-Whatever command the workflow requests, sshd runs `/root/deploy-lines.sh`
-instead — a leaked key can only trigger that one script, not arbitrary root
-commands. The script reads the GHCR login token off stdin (the workflow's own
-short-lived `GITHUB_TOKEN`, piped in each run) rather than storing a
-long-lived registry credential on the box.
+**The deploy key is forced-command, not a general login.** Its `authorized_keys`
+entry on the VPS pins the key to a `command="…"` naming that one script, and
+disables port, X11 and agent forwarding as well as pty allocation. Whatever
+command the workflow requests, sshd runs the script instead — a leaked key can
+only trigger that one script, not arbitrary root commands. The script reads the
+GHCR login token off stdin (the workflow's own short-lived `GITHUB_TOKEN`, piped
+in each run) rather than storing a long-lived registry credential on the box.
 
 GitHub secrets involved: `DEPLOY_SSH_KEY` (the private half), `DEPLOY_HOST`,
 `DEPLOY_USER`, and the four `VITE_*` build args. `lines.env` on the VPS carries
-one addition, `REGISTRY=ghcr.io/bytasv/`, which is what makes `compose.yml`
+one addition, `REGISTRY=ghcr.io/<org>/`, which is what makes `compose.yml`
 pull the CI-built images instead of building locally — unset it and `build`
 still works exactly as before for a manual/local deploy.
 
@@ -178,10 +172,10 @@ pipeline does this for you. Manual steps below are for a rollback, a schema
 change flagged by the migration-safety check, or the pipeline itself being
 down.
 
-The checkout lives at `/docker/lines` on the VPS (alongside `/docker/traefik`).
+The checkout lives at `${DEPLOY_ROOT}` on the VPS (alongside `${TRAEFIK_ROOT}`).
 
 ```bash
-cd /docker/lines && git pull --ff-only origin main && cd deploy/docker
+cd "$DEPLOY_ROOT" && git pull --ff-only origin main && cd deploy/docker
 docker compose --env-file lines.env build
 docker compose --env-file lines.env run --rm migrate   # if storage/prisma changed
 docker compose --env-file lines.env up -d
@@ -191,7 +185,7 @@ The server holds **no GitHub credential** — only an inbound `authorized_keys`.
 `git pull` there needs your own key forwarded for the one command:
 
 ```bash
-ssh -A <host> 'cd /docker/lines && git pull --ff-only'
+ssh -A <host> "cd $DEPLOY_ROOT && git pull --ff-only"
 ```
 
 Add a read-only deploy key if that ever needs to run unattended. Note `-A` lets

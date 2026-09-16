@@ -131,3 +131,17 @@ boundary; `docs/codebase/feature-index.md` is the per-feature index.
   transcripts/*.jsonl}`; the hosted deployment additionally mirrors sessions,
   workflows, recipes, guard allowlists, and agent memory to Postgres for
   cross-machine sync, with disk as the SDK-facing source of truth.
+
+## License
+
+Lines is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+It also carries an [additional permission](LICENSE-EXCEPTION) under section 7 of
+the GPL, which lets Lines be combined with, and distributed alongside, the
+proprietary agent SDKs and CLIs it drives — the Claude Agent SDK and `claude`,
+the Codex SDK and `codex`, and comparable software from any other vendor —
+without that software falling under the AGPL. Those vendors' own terms still
+apply to their software; see [NOTICE](NOTICE).
+
+Contributions are accepted under the same terms, with a DCO sign-off — see
+[CONTRIBUTING.md](CONTRIBUTING.md).

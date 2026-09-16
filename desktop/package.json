@@ -2,8 +2,14 @@
   "name": "@lines/desktop",
   "version": "0.2.3",
   "private": true,
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bytasv/lines.git",
+    "directory": "desktop"
+  },
   "description": "Runs the Lines agent on this machine and keeps it reachable from the hosted app.",
-  "author": "Lines",
+  "author": "Vytautas Butkus",
   "main": "dist/main.cjs",
   "scripts": {
     "build": "node scripts/build.mjs",

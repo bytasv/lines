@@ -1,0 +1,90 @@
+name: Bug report
+description: Something in Lines behaves incorrectly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here — see
+        [SECURITY.md](../blob/main/SECURITY.md) and use GitHub Security Advisories.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        1. Started a session in ...
+        2. Ran ...
+        3. Expected ..., got ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: How are you running Lines?
+      options:
+        - Local dev (npm run dev / tilt up)
+        - Desktop app
+        - Hosted (relay + storage + web)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part is involved?
+      description: Best guess is fine.
+      options:
+        - bridge (server)
+        - worker (agent turns)
+        - web UI
+        - desktop app
+        - relay
+        - storage / sync
+        - not sure
+    validations:
+      required: false
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Agent provider
+      options:
+        - Claude (Claude Code CLI / Agent SDK)
+        - Codex
+        - Both
+        - Not applicable
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Desktop app version, or the commit SHA you are running.
+      placeholder: "0.2.3 / 8551422"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: OS and Node version
+      placeholder: "macOS 15.1 (arm64), Node 22.11"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: >
+        Bridge/worker output, the browser console, or the desktop app log.
+        Redact tokens, device secrets, and file paths you would rather not publish —
+        this issue is public.
+      render: text
+    validations:
+      required: false

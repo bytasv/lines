@@ -78,14 +78,21 @@ intentionally public (Clerk-authenticated) on that one subdomain.
 
 ## Tests
 
-None as a test suite — the `.github/workflows/deploy.yml` pipeline itself is
-the verification path: `test` runs the `server`/`relay`/`storage` unit suites
-and `npm run typecheck` (all five workspaces, including `relay`), then
-`check-migrations`, `build`, and `deploy` gate on each other in sequence. Manual
-verification is still `deploy/README.md`'s checklist (health endpoints, CORS
-preflight, the `/v1/devices/verify` 404 at the edge, cert issuance for both the
-apex and `www`, and — after a deploy — confirming the running images are
-tagged with the pushed commit SHA).
+`server/src/oss-safety.test.ts` — not a deployment test as such, but it reads
+this feature's own files (`deploy/README.md`, `deploy/scripts/deploy-lines.sh`,
+`deploy/docker/env.example`) as part of a repo-wide denylist that fails CI if a
+string scrubbed before the repository went public (the author's Linear
+workspace slug, the literal forced-command `authorized_keys` line, the
+author's GHCR namespace) comes back.
+
+Otherwise none as a test suite — the `.github/workflows/deploy.yml` pipeline
+itself is the verification path: `test` runs the `server`/`relay`/`storage`
+unit suites and `npm run typecheck` (all five workspaces, including `relay`),
+then `check-migrations`, `build`, and `deploy` gate on each other in sequence.
+Manual verification is still `deploy/README.md`'s checklist (health endpoints,
+CORS preflight, the `/v1/devices/verify` 404 at the edge, cert issuance for
+both the apex and `www`, and — after a deploy — confirming the running images
+are tagged with the pushed commit SHA).
 
 ## Business rules
 

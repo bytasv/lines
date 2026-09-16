@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Additional permission under GNU AGPL v3 section 7 — see LICENSE-EXCEPTION.
+
 /**
  * The Claude Code CLI this machine has installed.
  *

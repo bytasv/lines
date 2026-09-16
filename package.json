@@ -2,6 +2,17 @@
   "name": "lines",
   "private": true,
   "version": "0.1.0",
+  "description": "A web GUI for coding agents: run, watch and steer multiple Claude Code or Codex sessions in parallel, while the agent runs on your own machine.",
+  "license": "AGPL-3.0-only",
+  "author": "Vytautas Butkus",
+  "homepage": "https://github.com/bytasv/lines#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bytasv/lines.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bytasv/lines/issues"
+  },
   "workspaces": [
     "shared",
     "server",

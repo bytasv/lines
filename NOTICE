@@ -1,0 +1,59 @@
+Lines
+Copyright (C) 2026 Vytautas Butkus
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License, version 3, as published by
+the Free Software Foundation. The full text is in `LICENSE`.
+
+ADDITIONAL PERMISSION
+---------------------
+
+Lines is licensed with an additional permission under section 7 of the GNU
+General Public License version 3, as incorporated into the GNU Affero General
+Public License version 3. That permission allows Lines to be combined with, and
+distributed alongside, agent provider software — SDKs, command-line programs
+and binaries published by an AI agent or model vendor — without that software
+becoming subject to the License.
+
+The grant itself is in `LICENSE-EXCEPTION`. This file only describes it; the
+text in `LICENSE-EXCEPTION` controls, and section 7 of the License permits any
+recipient to remove that permission from their own copy.
+
+PROPRIETARY COMPONENT: THE CLAUDE AGENT SDK
+-------------------------------------------
+
+`server/package.json` depends on `@anthropic-ai/claude-agent-sdk`, published by
+Anthropic. It is **not** free software: the package declares
+`"license": "SEE LICENSE IN README.md"`, which points at Anthropic's Commercial
+Terms of Service. The packaged macOS desktop app built by
+`desktop/scripts/build.mjs` installs that package into the shipped bundle, so a
+release artifact contains it.
+
+The additional permission in `LICENSE-EXCEPTION` resolves the AGPL side of this
+combination. It grants no rights in the SDK itself. If you redistribute a build
+of Lines that bundles the SDK, or run Lines against Anthropic's services, you
+remain bound by Anthropic's own terms.
+
+The `claude` command-line interface that the SDK drives is subject to those same
+terms. It is not bundled by this repository; Lines locates whichever copy the
+user has installed (`server/src/claudeCli.ts`).
+
+THIRD-PARTY COMPONENTS
+----------------------
+
+Every other direct dependency of this repository is distributed under the MIT
+or Apache-2.0 license. Their copyright notices and license texts are in each
+package's own directory under `node_modules` after installation. Notable ones:
+
+  - Mantine, React, Vite, Express, ws, tsx, esbuild, electron,
+    electron-builder, electron-updater, concurrently — MIT
+  - Prisma and `@prisma/client` — Apache-2.0
+  - `@clerk/*` — MIT
+  - `@openai/codex-sdk` — Apache-2.0
+  - `@aws-sdk/client-s3` — Apache-2.0
+  - `@modelcontextprotocol/sdk` — MIT
+  - `@monaco-editor/react` — MIT
+  - `@tabler/icons-react` — MIT
+
+This list is a convenience, not a substitute for the license files shipped with
+each package.

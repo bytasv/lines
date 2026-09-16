@@ -5,7 +5,7 @@ read -r GHCR_ACTOR
 read -r IMAGE_TAG || true
 export TAG="${IMAGE_TAG:-latest}"
 echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_ACTOR" --password-stdin
-cd /docker/lines
+cd "${LINES_DEPLOY_ROOT:-/docker/lines}"
 git fetch origin main
 git merge --ff-only origin/main
 cd deploy/docker

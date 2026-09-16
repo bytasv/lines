@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/bytasv/lines/security/advisories/new
+    about: Private disclosure through GitHub Security Advisories. Never open a public issue for a vulnerability.
+  - name: Questions and ideas
+    url: https://github.com/bytasv/lines/discussions
+    about: Usage questions, setup help, and open-ended ideas belong in Discussions.
+  - name: Contributing guide
+    url: https://github.com/bytasv/lines/blob/main/CONTRIBUTING.md
+    about: Dev setup, conventions, DCO sign-off, and licensing of contributions.

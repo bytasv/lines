@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Additional permission under GNU AGPL v3 section 7 — see LICENSE-EXCEPTION.
+
 /**
  * The worker's Codex half: the `codex app-server` child, and the threads running
  * on it.

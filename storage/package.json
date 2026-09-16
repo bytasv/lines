@@ -2,6 +2,12 @@
   "name": "@lines/storage-server",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bytasv/lines.git",
+    "directory": "storage"
+  },
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",

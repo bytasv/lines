@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Additional permission under GNU AGPL v3 section 7 — see LICENSE-EXCEPTION.
+
 /**
  * Worker process: owns every Claude SDK query (and therefore every Claude CLI
  * child process), so the bridge can restart freely — tsx watch, crashes,

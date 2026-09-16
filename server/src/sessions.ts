@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Additional permission under GNU AGPL v3 section 7 — see LICENSE-EXCEPTION.
+
 import { devRuntime } from './devRuntime.ts';
 import fs from 'node:fs';
 import path from 'node:path';
