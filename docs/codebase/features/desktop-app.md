@@ -300,9 +300,20 @@ with `--dry-run`). Both `LINES_UPDATE_FEED_URL` and `LINES_DOWNLOAD_URL` are der
 also breaking the derivation everywhere else.
 
 `check-unreleased.mjs` fetches the published `latest-mac.yml`, compares its `version:` line against
-`desktop/package.json`, and exits 1 on a match — the version bump is still a manual edit
-(`desktop/package.json` + a `chore(desktop): release X` commit); this only catches forgetting it. A
-missing feed (first release, or an unreachable base URL) is treated as "proceed".
+`desktop/package.json`, and distinguishes two failures by exit code: `2` means this version is
+already published, `1` means the check itself could not run (e.g. no
+`R2_RELEASE_PUBLIC_BASE_URL`). A missing feed (first release, or an unreachable base URL) is treated
+as "proceed" (exit 0).
+
+`ship.mjs` reads that exit code. On `2`, at an interactive terminal (`stdin`/`stdout` both a TTY) and
+not `--dry-run`, it offers to bump the patch version, commit, and push — `Bump to 0.2.7 and continue?
+[Y/n]`. Declining, a non-matching version (a prerelease `check-unreleased.mjs` won't guess how to
+bump), CI, or any piped/non-interactive invocation all fall through to the original behaviour:
+print the "already published" message and fail. The bump — a targeted string replace, not
+`JSON.parse`/`stringify`, so formatting is untouched — is written before `package` runs (so
+`build.mjs` and electron-builder both pick it up) but only committed and pushed after `release`
+succeeds, so a failed build never leaves a pushed bump for a release that didn't ship. A push
+rejection (remote ahead) is reported, not fatal — the release already succeeded.
 
 `release.mjs` uploads the versioned artifacts, then re-uploads the DMG a second time under a fixed
 key (`desktop/Lines-latest.dmg`, `Cache-Control: no-cache`) — the alias `VITE_DESKTOP_DOWNLOAD_URL`
@@ -398,7 +409,15 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
 - `npm run ship -w desktop` is destructive on purpose: it deletes `desktop/release/` before every
   build, since that directory is electron-builder output and nothing else is meant to live there.
 - The desktop release pipeline is manual-dispatch only — no tag convention, no release on push to
-  `main` — since a release starts with a deliberate version-bump commit, not a merge.
+  `main` — since a release starts with a deliberate version-bump commit, not a merge. That commit no
+  longer has to be written by hand first: `npm run ship -w desktop`, run interactively, can author
+  and push it itself after a successful release (see Releasing above). CI keeps failing outright —
+  the prompt is gated on a TTY.
+- A push to `main` that only touches `desktop/package.json` (the bump commit `ship.mjs` can now
+  make) does not trigger `deploy.yml` — see `paths-ignore` in that workflow. Scoped to that one file
+  rather than all of `desktop/**`, because `deploy.yml`'s `typecheck` step chains
+  `npm run typecheck -w desktop` and `release-desktop.yml` is dispatch-only, so ignoring the whole
+  directory would remove the only push-time typecheck desktop code gets.
 - Every update check outcome has a permanent tray row (checking, disabled-and-why, available,
   failed, last-checked, or never-checked) — none of the old silent failure modes (a rejected check,
   no feed URL, a dev build, an updater that would not start) can read as up to date anymore.

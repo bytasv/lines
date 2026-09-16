@@ -17,7 +17,10 @@ host, and the images ship without `server/`'s Claude Agent SDK dependency.
 - `deploy/README.md` — the runbook this doc summarizes
 - `.github/workflows/deploy.yml` — CI: on push to `main`, runs `test` →
   `check-migrations` → `build` (push images to GHCR) → `deploy` (SSH into the
-  VPS)
+  VPS). Skipped when every changed file matches `paths-ignore`
+  (`desktop/package.json` only — the lone bump commit `ship.mjs` can push, see
+  desktop-app's Releasing section); a push touching that file alongside
+  anything else still runs normally.
 - `deploy/scripts/deploy-lines.sh` — the VPS-side script the forced-command SSH
   key runs; pulls, migrates, and restarts the stack
 - `deploy/scripts/check-migration-safety.sh` — the `check-migrations` job's gate

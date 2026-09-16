@@ -15,6 +15,16 @@
  *   node desktop/scripts/check-unreleased.mjs
  *   node desktop/scripts/check-unreleased.mjs --force   # skip the check on purpose
  *
+ * Exit codes are deliberately the inverse of the grep/diff convention, because
+ * `ship.mjs` dispatches on them and the two outcomes are not interchangeable:
+ *
+ *   0  this version is publishable (or the check was skipped)
+ *   2  this version is already published — the bump is the fix
+ *   1  the check could not run (no R2_RELEASE_PUBLIC_BASE_URL)
+ *
+ * Do not "tidy" the 2 back to 1: `ship.mjs` reads it to decide whether it can
+ * offer the bump, and the workflow only cares that either is non-zero.
+ *
  * Needs only `R2_RELEASE_PUBLIC_BASE_URL` — it reads the public feed, so no
  * credentials are involved.
  */
@@ -83,7 +93,7 @@ if (published === version) {
       'Artifacts are immutable at the edge, so re-uploading one does not replace it. ' +
       'Pass --force (or the workflow `force` input) if you mean to republish anyway.',
   );
-  process.exit(1);
+  process.exit(2);
 }
 
 console.log(`Publishing ${version} (currently published: ${published}).`);

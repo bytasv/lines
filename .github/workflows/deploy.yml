@@ -3,6 +3,15 @@ name: Deploy
 on:
   push:
     branches: [main]
+    # `ship.mjs` can author a lone `chore(desktop): bump version to X` commit,
+    # and a version string the images never read is not worth a deploy. Scoped
+    # to the one file, not `desktop/**`: the `typecheck` step below chains
+    # `npm run typecheck -w desktop`, and `release-desktop` is dispatch-only, so
+    # ignoring the whole directory would leave desktop code with no push-time
+    # typecheck at all. A run is skipped only when *every* changed file matches,
+    # so a bump pushed alongside real work still runs the full pipeline.
+    paths-ignore:
+      - 'desktop/package.json'
   workflow_dispatch: {}
 
 concurrency:

@@ -2,7 +2,7 @@
 /**
  * The whole desktop release, in one command.
  *
- *   npm run ship -w desktop               # bump the version first, then this
+ *   npm run ship -w desktop               # offers to bump the version if needed
  *   npm run ship -w desktop -- --dry-run  # build and sign, publish nothing
  *   npm run ship -w desktop -- --force    # re-publish a version on purpose
  *
@@ -23,6 +23,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import readline from 'node:readline/promises';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
@@ -30,6 +31,8 @@ const require = createRequire(import.meta.url);
 const DESKTOP = path.resolve(import.meta.dirname, '..');
 const REPO = path.resolve(DESKTOP, '..');
 const RELEASE_DIR = path.join(DESKTOP, 'release');
+/** Relative so the commit below is path-scoped from the repo root. */
+const MANIFEST = 'desktop/package.json';
 /** Must match `PREFIX` and `ALIAS` in `release.mjs` — that script writes the key this URL reads. */
 const PREFIX = 'desktop';
 const ALIAS = 'Lines-latest.dmg';
@@ -73,10 +76,101 @@ function run(command, args, options = {}) {
   }
 }
 
+/**
+ * Like `run`, but hands the status back instead of exiting on it, and captures
+ * the child's stderr rather than inheriting it. Both matter only for the
+ * already-published check: its failure message has to be held back until we
+ * know whether a prompt is coming, or the user reads an error and *then* a
+ * question about that error.
+ */
+function runStatus(command, args, options = {}) {
+  console.log(`\n$ ${command} ${args.join(' ')}`);
+  try {
+    execFileSync(command, args, { cwd: REPO, stdio: ['inherit', 'inherit', 'pipe'], ...options });
+    return { status: 0, stderr: '' };
+  } catch (error) {
+    return {
+      status: typeof error.status === 'number' ? error.status : 1,
+      stderr: error.stderr?.toString() ?? '',
+    };
+  }
+}
+
+/**
+ * Every release used to start the same way: hit the already-published check,
+ * hand-edit one line of `desktop/package.json`, commit, re-run. So offer it.
+ *
+ * Only at a terminal, and never on a `--dry-run` — a dry run publishes nothing
+ * and must leave the repo untouched. CI and any piped invocation fall through to
+ * the original failure, unchanged.
+ *
+ * Returns the new version, having already written it; `build.mjs` and
+ * electron-builder both re-read the file in a fresh process, so the write only
+ * has to land before `npm run package`.
+ */
+async function promptForBump(message) {
+  const text = fs.readFileSync(path.join(REPO, MANIFEST), 'utf8');
+  const current = JSON.parse(text).version;
+  const parts = /^(\d+)\.(\d+)\.(\d+)$/.exec(current);
+  if (!parts) {
+    // A prerelease or anything else unusual: what "the next one" means is a
+    // judgement call, so make it by hand.
+    process.stderr.write(message);
+    console.error(`\nCannot bump ${current} automatically — edit ${MANIFEST} yourself.`);
+    process.exit(1);
+  }
+  const next = `${parts[1]}.${parts[2]}.${Number(parts[3]) + 1}`;
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await rl.question(
+    `\n${current} is already published. Bump to ${next} and continue?\n` +
+      'The bump is committed and pushed after the release succeeds. [Y/n] ',
+  );
+  rl.close();
+  if (!/^(y(es)?)?$/i.test(answer.trim())) {
+    // The original message and the original exit code: a scripted caller that
+    // only checks for failure sees exactly what it saw before.
+    process.stderr.write(message);
+    process.exit(1);
+  }
+
+  // A targeted replace on the first `"version"` — line 3 of this file — keeps
+  // the formatting that `JSON.parse` + `stringify` would quietly rewrite.
+  // package-lock.json is deliberately left stale: every historical bump commit
+  // did the same, and it resyncs on the next install.
+  fs.writeFileSync(path.join(REPO, MANIFEST), text.replace(/"version": "[^"]+"/, `"version": "${next}"`));
+  console.log(`Bumped ${MANIFEST} to ${next}.`);
+  return next;
+}
+
+/** The version this run wrote, if it wrote one. Null on every other path. */
+let bumped = null;
+
 if (force) {
   console.log('--force: skipping the already-published check.');
 } else {
-  run(process.execPath, [path.join(DESKTOP, 'scripts', 'check-unreleased.mjs')], { env });
+  const check = runStatus(process.execPath, [path.join(DESKTOP, 'scripts', 'check-unreleased.mjs')], { env });
+  if (check.status !== 0) {
+    // 2 is specifically "already published" (see `check-unreleased.mjs`); any
+    // other non-zero status is a check that could not run, which no bump fixes.
+    const offerBump = check.status === 2 && !dryRun && process.stdin.isTTY && process.stdout.isTTY;
+    if (!offerBump) {
+      process.stderr.write(check.stderr);
+      process.exit(check.status);
+    }
+    bumped = await promptForBump(check.stderr);
+  }
+}
+
+/**
+ * A build that fails after the bump leaves a version that is neither published
+ * nor committed — and the next ship would see it differ from the published one,
+ * pass the check silently, and publish a bump nobody recorded. Say so instead.
+ */
+if (bumped) {
+  process.on('exit', (code) => {
+    if (code !== 0) console.error(`\nleft ${MANIFEST} at ${bumped}, uncommitted.`);
+  });
 }
 
 /**
@@ -98,3 +192,25 @@ if (dryRun) {
 }
 
 run('npm', ['run', 'release', '-w', 'desktop'], { env });
+
+/**
+ * Record the bump only now: a failed build must never leave a pushed bump for a
+ * release that did not ship. Deliberately not via `run` — that exits on a
+ * non-zero status, which would report an already-published release as a
+ * failure. The release is done; the worst case here is a commit you push later.
+ */
+if (bumped) {
+  const git = (args) => execFileSync('git', args, { cwd: REPO, stdio: 'inherit' });
+  try {
+    git(['commit', MANIFEST, '-m', `chore(desktop): bump version to ${bumped}`]);
+  } catch {
+    console.error(`\npublished ${bumped}; ${MANIFEST} is written but uncommitted — commit and push it.`);
+    process.exit(0);
+  }
+  try {
+    git(['push']);
+  } catch {
+    console.error(`\npublished ${bumped}; the bump commit is local — run \`git push\`.`);
+    process.exit(0);
+  }
+}
