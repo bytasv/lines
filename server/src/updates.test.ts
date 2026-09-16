@@ -20,18 +20,25 @@ function manager(sessions: SessionMeta[]) {
   return { mgr, sent };
 }
 
-/** Pretend the tray app spawned us. */
+/**
+ * Pretend the tray app spawned us — and that the channel is open, since every
+ * send is guarded on `process.connected` and a test run has no real IPC channel.
+ */
 function withSend<T>(fn: (calls: unknown[]) => T): T {
   const original = process.send;
+  const connected = Object.getOwnPropertyDescriptor(process, 'connected');
   const calls: unknown[] = [];
   (process as { send?: unknown }).send = (msg: unknown) => {
     calls.push(msg);
     return true;
   };
+  Object.defineProperty(process, 'connected', { value: true, configurable: true });
   try {
     return fn(calls);
   } finally {
     (process as { send?: unknown }).send = original;
+    if (connected) Object.defineProperty(process, 'connected', connected);
+    else delete (process as { connected?: unknown }).connected;
   }
 }
 
@@ -132,11 +139,35 @@ test('relay transitions reach the shell over the same channel', () => {
 
 test('relay reporting is inert without the desktop shell', () => {
   const original = process.send;
+  const connected = Object.getOwnPropertyDescriptor(process, 'connected');
   (process as { send?: unknown }).send = undefined;
+  // `connected` is forced on so the missing `send` is what is under test here,
+  // rather than the closed-channel guard short-circuiting ahead of it.
+  Object.defineProperty(process, 'connected', { value: true, configurable: true });
   try {
     // Under Tilt and `npm run dev` there is no parent listening; this must not throw.
     reportRelayStatus({ connected: true });
   } finally {
     (process as { send?: unknown }).send = original;
+    if (connected) Object.defineProperty(process, 'connected', connected);
+    else delete (process as { connected?: unknown }).connected;
+  }
+});
+
+test('relay reporting is inert once the shell channel closes', () => {
+  const original = process.send;
+  const connected = Object.getOwnPropertyDescriptor(process, 'connected');
+  // A send into a closed channel throws synchronously, which is what killed the
+  // shell on the other side of this contract.
+  (process as { send?: unknown }).send = () => {
+    throw new Error('Channel closed');
+  };
+  Object.defineProperty(process, 'connected', { value: false, configurable: true });
+  try {
+    reportRelayStatus({ connected: true });
+  } finally {
+    (process as { send?: unknown }).send = original;
+    if (connected) Object.defineProperty(process, 'connected', connected);
+    else delete (process as { connected?: unknown }).connected;
   }
 });

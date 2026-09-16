@@ -460,9 +460,17 @@ function wireBridgeIpc() {
   if (update.state !== 'idle') sendUpdateStatus();
 }
 
-/** Push the current update state to the bridge, which broadcasts it to browsers. */
+/**
+ * Push the current update state to the bridge, which broadcasts it to browsers.
+ *
+ * Guarded on `connected`, not on the handle: the bridge is respawned after a
+ * crash and killed on quit, and neither path nulls `bridge`, so a non-null child
+ * is no proof of a live channel. `send` throws synchronously into a closed one,
+ * and an uncaught throw here kills the whole shell. The no-op callback covers the
+ * same race landing between the check and the write.
+ */
 function sendUpdateStatus() {
-  bridge?.send?.({ type: 'updateStatus', status: update });
+  if (bridge?.connected) bridge.send({ type: 'updateStatus', status: update }, () => {});
 }
 
 function setUpdateStatus(status: UpdateStatus) {

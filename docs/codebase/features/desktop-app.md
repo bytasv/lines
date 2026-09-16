@@ -225,7 +225,10 @@ starts) is verified manually.
 Update state flows bridge → shell → bridge: the shell pushes `updateStatus` over `process.send`;
 `UpdateManager` folds in the live `busy` flag and broadcasts it to the browser. A client's
 `installUpdate` calls `UpdateManager.requestRestart()`, which asks the shell over the same channel
-— or refuses outright if any session is active. `electron-updater` only *checks*
+— or refuses outright if any session is active. Every send in both directions is guarded on
+`connected` with a no-op error callback rather than sent bare: a respawned-after-crash or
+killed-on-quit child leaves a non-null handle whose channel is already closed, and `send` into a
+closed channel throws synchronously — uncaught, that took the whole shell down. `electron-updater` only *checks*
 (`autoDownload: false`); an available update surfaces in the tray as a link to the download page
 rather than an in-place install, since `CAN_SELF_INSTALL` is false until the build is signed.
 

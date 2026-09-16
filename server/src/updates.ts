@@ -5,8 +5,10 @@
  * shell cannot know — whether a session is mid-turn. A restart always kills
  * in-flight turns, so "Restart now" is refused until the app is idle.
  *
- * Entirely inert when the bridge was not spawned by the shell (`process.send`
- * absent), which is every Tilt and `npm run dev` run.
+ * Entirely inert when the channel to the shell is absent (`process.send`
+ * missing, which is every Tilt and `npm run dev` run) or already closed — a send
+ * into a closed channel throws synchronously and would take the bridge down with
+ * a shell that went away first.
  */
 import { isSessionActive, type ServerMessage, type SessionMeta, type UpdateStatus } from '@lines/shared';
 
@@ -37,7 +39,7 @@ export interface RelayLinkStatus {
  * where nothing is listening — same inertness as the rest of this module.
  */
 export function reportRelayStatus(status: RelayLinkStatus): void {
-  process.send?.({ type: 'relayStatus', status } satisfies ToShell);
+  if (process.connected) process.send?.({ type: 'relayStatus', status } satisfies ToShell, () => {});
 }
 
 export class UpdateManager {
@@ -79,7 +81,7 @@ export class UpdateManager {
    */
   requestRestart(): boolean {
     if (!this.supervised || this.busy) return false;
-    process.send?.({ type: 'updateRestartRequest' } satisfies ToShell);
+    if (process.connected) process.send?.({ type: 'updateRestartRequest' } satisfies ToShell, () => {});
     return true;
   }
 }
