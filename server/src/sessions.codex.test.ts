@@ -389,6 +389,21 @@ test('a cross-provider setModel is refused once the session has run', async () =
   assert.equal(h.sessions.get('s1')?.model, 'gpt-5.6-terra');
 });
 
+test('switchProvider is the way past that refusal', async () => {
+  const h = harness();
+  h.sessions.get('s1')!.codexThreadId = 'th_1';
+  // The summary query would spawn a CLI; the switch only cares that it answers.
+  (h.sessions as unknown as { handoffQuery: () => Promise<string | null> }).handoffQuery = () =>
+    Promise.resolve('what the codex session established');
+
+  const verdict = await h.sessions.switchProvider('s1', 'claude-opus-5');
+  assert.equal(verdict.ok, true, verdict.ok === false ? verdict.reason : '');
+  const m = h.sessions.get('s1')!;
+  assert.equal(m.model, 'claude-opus-5');
+  // The stranded thread is dropped rather than carried — that is the whole price.
+  assert.equal(m.codexThreadId, undefined);
+});
+
 test("the user's MCP connections ride a codex push, in codex's own shape", async () => {
   process.env.LINES_CODEX_PATH = FAKE_CODEX;
   await refreshCodex();

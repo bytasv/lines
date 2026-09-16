@@ -50,7 +50,8 @@
         "agentLabel",
         "pushCodex",
         "forkCodex",
-        "runHelperQuery"
+        "runHelperQuery",
+        "helperCwd"
       ],
       "tests": [
         "server/src/openaiAuth.test.ts",
@@ -60,19 +61,21 @@
         "server/src/codexAppServer.contract.test.ts",
         "server/src/openaiUsage.test.ts",
         "server/src/helperQuery.test.ts",
-        "server/src/sessions.autoName.test.ts"
+        "server/src/sessions.autoName.test.ts",
+        "server/src/sessions.switchProvider.test.ts"
       ],
       "businessRules": [
         "$CODEX_HOME/auth.json is the only store of OpenAI secrets; Lines writes it exactly once at login and never again, because OpenAI rotates the refresh token on every refresh",
         "reading that file is allowed and writing it twice is not — the usage poller reads the access token per request, never caches it, and a stale token hides the chip rather than being refreshed here",
         "CODEX_HOME shadows the user's own ~/.codex/config.toml, so their terminal codex configuration does not apply inside Lines",
-        "a cross-provider setModel is refused once a session has run: nothing carries a conversation between a claudeSessionId and a codexThreadId",
+        "a cross-provider setModel is refused once a session has run: nothing carries a conversation between a claudeSessionId and a codexThreadId; SessionManager.switchProvider is the deliberate way past that refusal (see cross-provider-model-switching)",
         "workflow steps run on Claude models only, refused on both the client pickers and the server validator",
         "output_tokens means exactly what the provider called output; reasoning tokens ride beside it and the spend accumulator adds them explicitly",
         "codex reports tokens and never a price; a codex spend row now shows an estimated $ instead, computed from a static price table and always marked with a ~ so it can never look like a provider-reported figure (see usage-and-cost)",
         "a stopped codex turn settles as stopped, never as a failure with a Retry",
         "a session-scoped helper query (autoName, summarizeTurn, consolidateStepOutput) prefers that session's own provider and falls back to the other when the preferred one is absent or answers null; a helper with no session (the MCP judge) stays Claude-first",
-        "auto-naming never strands a session on 'New session': a null or thrown helper answer still writes a localSessionName(prompt) fallback title, and the session retries on its next prompt until a real summary lands"
+        "auto-naming never strands a session on 'New session': a null or thrown helper answer still writes a localSessionName(prompt) fallback title, and the session retries on its next prompt until a real summary lands",
+        "every helper query (auto-name, turn summary, step consolidation, provider-switch hand-off) runs in an empty scratch directory (helperCwd()), never the session's own cwd, so a project's auto-memory or AGENTS.md cannot leak into an answer meant to describe one narrow thing"
       ],
       "architecturalRules": [
         "codex notifications are normalized into Claude SDK message shapes on the bridge, not given a transcript kind of their own — the settle pass and every turn scan are keyed to those shapes",
@@ -89,7 +92,8 @@
         "acceptForSession is never sent to codex — Lines keeps the one allowlist the user can actually see",
         "helper queries stay on codex exec: they are one-shot, so the app-server would mean a long-lived child on the bridge for no gain",
         "provider selection for a helper query is a preference, not a hard route: a session-scoped call passes its own provider, and the other one is still tried when the preferred provider is disconnected or answers null",
-        "reasoning-effort-selection"
+        "reasoning-effort-selection",
+        "a manual provider switch is a second, deliberate entry point past setModel's refusal, not a loophole in it (cross-provider-model-switching)"
       ]
     },
     {
@@ -119,21 +123,26 @@
         "modelComboboxProps",
         "LEGACY_MODEL_MAP",
         "resolveModelId",
-        "isKnownModel"
+        "isKnownModel",
+        "describedOptionRenderer",
+        "describedOptionStyles"
       ],
       "tests": [],
       "businessRules": [
         "description is optional on ModelOption; missing description renders label-only",
         "a step/session keeps a retired model id in storage (no migration); resolveModelId() substitutes the mapped replacement at query time so it still runs, and a warning badge on the step card flags it for the user to update",
-        "an unmapped unknown model id passes through resolveModelId() unchanged rather than being forced to a default"
+        "an unmapped unknown model id passes through resolveModelId() unchanged rather than being forced to a default",
+        "picking the other provider's model on a session that has already run opens a confirm dialog (switchProvider) rather than disabling the option; only providerSwitchBlock's own reasons (a workflow step consolidating, a pending advance, queued messages) and a missing CLI/account still disable it"
       ],
       "architecturalRules": [
         "all model Selects must use modelSelectData()/renderModelOption instead of inlining data mapping",
         "modelSelectData() takes the current stored id as ensureId so a stale/unknown id renders disabled instead of leaving the Select blank",
-        "legacy-model resolution is a static explicit map (LEGACY_MODEL_MAP), not a tier-prefix heuristic or live Models-API lookup"
+        "legacy-model resolution is a static explicit map (LEGACY_MODEL_MAP), not a tier-prefix heuristic or live Models-API lookup",
+        "modelSelectData()'s unavailable and warn options both disable an option, but only warn marks it warningActionable — describedOptionRenderer overrides Mantine's disabled-option opacity (describedOptionStyles) so a warning icon still stands out on a dimmed row, and only an actionable one is a click-through to Settings -> Updates"
       ],
       "relatedDecisions": [
-        "reasoning-effort-selection"
+        "cross-provider-model-switching",
+        "settings-updates-pane"
       ]
     },
     {
@@ -1511,7 +1520,9 @@
         "LOCK_PROBE",
         "Supervisor",
         "buildGeneration",
-        "DevRuntime"
+        "DevRuntime",
+        "Supervisor.forceReload",
+        "restartCommand"
       ],
       "tests": [
         "server/scripts/dev-runtime.test.mjs",
@@ -1529,7 +1540,9 @@
         "source changes build an immutable local code generation; both backend processes reload only after confirmed idle",
         "Freeze and Resume change supervisor policy without restarting a process",
         "failed candidate startup restores the last healthy generation",
-        "explicit shutdown ends active work and reaps only the resource-owned process tree"
+        "explicit shutdown ends active work and reaps only the resource-owned process tree",
+        "restart-backend (a manual Tilt resource plus a button on worker/bridge) rebuilds and cycles the pair without waiting for idle, for the case the automatic path can be blocked on indefinitely (a workflow step parked at waiting-approval anywhere on the machine); the control route answers with a 'restarted: true' handshake so a supervisor predating the route cannot report false success on its plain 200",
+        "enable-all (tilt enable --all, plus a button living on preflight specifically because that resource is never disabled) is the way back from a disabled Tilt resource, whose own buttons disappear along with it"
       ],
       "architecturalRules": [
         "PORT is injected per resource via serve_env, never a shared env block",
@@ -1541,7 +1554,8 @@
         "external installed dependencies are shared and are not covered by source rollback"
       ],
       "relatedDecisions": [
-        "session-collaboration"
+        "session-collaboration",
+        "cross-provider-model-switching"
       ]
     },
     {
@@ -2641,7 +2655,8 @@
         "presence and attribution identity always come from the connection's attested identity, never a client-supplied field",
         "a historical row or the owner's own prompt with no recorded actor is attributed to the session's host",
         "the collaborator address book (ShareContact) is decoupled from grant state on purpose — revoking a share or letting an invite expire never removes the remembered address; removing a contact is a hard delete, not a tombstone, and only clears the suggestion, never a grant",
-        "a queued prompt may be edited in place by its author or the machine owner (prompt cap, not interrupt); editing never clears queuePaused, and an edit by someone other than the author is recorded (editedAt/editedBy) but still flushes attributed to the author"
+        "a queued prompt may be edited in place by its author or the machine owner (prompt cap, not interrupt); editing never clears queuePaused, and an edit by someone other than the author is recorded (editedAt/editedBy) but still flushes attributed to the author",
+        "switchProvider sits at MESSAGE_AUTHZ cap 'interrupt' (the most destructive cap the table has), and also requires the setModel cap and refuses an actor with promptNeedsApproval -- both checked inside SessionManager.switchProvider itself, since one MESSAGE_AUTHZ row can only express one cap"
       ],
       "architecturalRules": [
         "MESSAGE_AUTHZ is an exhaustive Record keyed on ClientMessage['type'] so an unclassified message is a compile error, not a review gap",
@@ -2661,7 +2676,8 @@
         "permissions-and-plan-mode",
         "cloud-sync-sessions",
         "session-rewind",
-        "turn-interjection"
+        "turn-interjection",
+        "cross-provider-model-switching"
       ]
     },
     {
@@ -2859,7 +2875,8 @@
         "server/src/index.ts",
         "web/src/store.ts",
         "web/src/components/Transcript.tsx",
-        "web/src/components/Composer.tsx"
+        "web/src/components/Composer.tsx",
+        "server/src/workerCodex.ts"
       ],
       "symbols": [
         "rewindBlock",
@@ -2873,7 +2890,8 @@
         "Store.truncateTranscript",
         "WorkflowEngine.rollbackToTranscript",
         "composerPrefill",
-        "takeComposerPrefill"
+        "takeComposerPrefill",
+        "SessionManager.restoreEra"
       ],
       "tests": [
         "server/src/sessions.rewind.test.ts",
@@ -2888,7 +2906,8 @@
         "cumulative session spend and per-step spend are deliberately not rewound — that money was really spent",
         "Edit reloads attachments from disk only when edit: true was requested; a plain Delete never pays that read",
         "the confirm dialog states plainly what is lost: the message is deleted either way (only Edit keeps its text, in the composer, not the transcript), everything after it is deleted too, and it is irreversible with no refund; a first-prompt rewind with no anchor also says Claude's memory of the session is cleared completely; a started workflow names the step it parks back on",
-        "Copy of the message's own text is never gated by rewindBlock"
+        "Copy of the message's own text is never gated by rewindBlock",
+        "rewinding above a provider switch restores the model and, when the switch recorded its abandoned resume pointer (ProviderSwitchData.fromSessionId), forks and resumes that conversation for real; a switch recorded before that field existed degrades to the right model with a fresh conversation, never the wrong model with a stale pointer"
       ],
       "architecturalRules": [
         "fork-then-truncate ordering: forkSession is awaited eagerly inside rewindSession, before any local mutation, so a fork failure leaves Lines' own transcript untouched",
@@ -2897,13 +2916,15 @@
         "store.truncateTranscript invalidates the transcript cache rather than trimming the cached entry in place, since entry.lines/entry.parsed are handed to live readers by reference",
         "the dropped tail is archived to a transcripts/<sessionId>.rewind-<ts>.jsonl sidecar before the live file is rewritten (archive-then-truncate); no read path or cleanup job consumes these files, and they accumulate with repeated rewinds",
         "the rewinding in-flight claim is taken synchronously before rewindSession's first await, mirroring the compacting guard",
-        "RewindPrompt's attachment rehydration reuses SessionManager.reloadAttachments, extracted out of lastPromptForRetry so both paths reload identically"
+        "RewindPrompt's attachment rehydration reuses SessionManager.reloadAttachments, extracted out of lastPromptForRetry so both paths reload identically",
+        "the rewind target's era (model + resume pointer) is resolved from the transcript's provider-switch markers before any anchor scan runs; both the Claude-uuid and codex-turn-id scans are bounded below by the era's floor so an anchor is never borrowed from a conversation the fork target has never seen"
       ],
       "relatedDecisions": [
         "turn-recovery",
         "context-window",
         "session-collaboration",
-        "workflow-step-lifecycle"
+        "workflow-step-lifecycle",
+        "cross-provider-model-switching"
       ]
     },
     {
@@ -3222,7 +3243,8 @@
         "server/src/index.ts",
         "server/src/workerProtocol.ts",
         "server/src/worker.ts",
-        "server/src/workerClient.ts"
+        "server/src/workerClient.ts",
+        "server/src/codexCli.ts"
       ],
       "symbols": [
         "publicClaudeCliStatus",
@@ -3231,11 +3253,15 @@
         "UpdatesSection",
         "VersionRow",
         "WorkerClient.status",
-        "WorkerStatus.version"
+        "WorkerStatus.version",
+        "publicCodexCliStatus",
+        "CodexCliState",
+        "CodexCliStatus"
       ],
       "tests": [
         "server/src/claudeCli.test.ts",
-        "server/src/workerClient.test.ts"
+        "server/src/workerClient.test.ts",
+        "server/src/codexCli.test.ts"
       ],
       "businessRules": [
         "versions shown are web, bridge, worker, desktop app, and Claude CLI only",
@@ -3244,16 +3270,20 @@
         "the download action is a plain link to DESKTOP_DOWNLOAD_URL, never the owner-gated installUpdate message, which would silently no-op for a remote browser",
         "an unknown version renders as a dimmed em dash rather than an omitted row, so the pane's shape never changes",
         "hello.claudeCli never carries the CLI binary's absolute path — publicClaudeCliStatus builds the wire object field by field rather than spreading the bridge-local status",
-        "hello.claudeCli and the worker's hello.appVersion are both optional, so neither bumps a protocol version"
+        "hello.claudeCli and the worker's hello.appVersion are both optional, so neither bumps a protocol version",
+        "both CLI probes are self-healing: a working answer is cached for the process lifetime, but a missing/outdated verdict is only trusted for RETRY_FAILED_AFTER_MS (10s); the bridge re-probes on a 15s interval and broadcasts a 'cliStatus' message to every context only when the combined answer actually changes, so installing a CLI clears the pane and the model picker without a restart"
       ],
       "architecturalRules": [
         "ClaudeCliState/ClaudeCliStatus are declared in shared/types.ts and re-exported from server/src/claudeCli.ts, so the browser can read the shape without importing server code",
         "the worker's appVersion is a package version, distinct from the protocol version already on its hello — the worker outlives bridge restarts, so the two can legitimately differ",
-        "__LINES_VERSION__ for the web bundle mirrors the existing bridge/worker/desktop-shell define idiom rather than introducing a VITE_ env var"
+        "__LINES_VERSION__ for the web bundle mirrors the existing bridge/worker/desktop-shell define idiom rather than introducing a VITE_ env var",
+        "CodexCliState/CodexCliStatus follow ClaudeCliStatus's precedent exactly: declared in shared/types.ts, re-exported from server/src/codexCli.ts, path stripped before hello/cliStatus"
       ],
       "relatedDecisions": [
         "desktop-app",
-        "hosted-machine-access"
+        "hosted-machine-access",
+        "cross-provider-model-switching",
+        "model-selector"
       ]
     },
     {
@@ -3326,6 +3356,73 @@
         "openai-codex-sessions",
         "permissions-and-plan-mode",
         "workflow-step-lifecycle"
+      ]
+    },
+    {
+      "id": "cross-provider-model-switching",
+      "name": "Cross-provider model switching",
+      "doc": "features/cross-provider-model-switching.md",
+      "purpose": "The deliberate, lossy way past setModel's cross-provider refusal: drop a session's stranded conversation, summarize it with a one-shot helper query, and seed the other provider with the hand-off.",
+      "covers": [
+        "provider-switch"
+      ],
+      "entryPoints": [
+        "web/src/components/Composer.tsx",
+        "web/src/components/ConfirmModal.tsx"
+      ],
+      "files": [
+        "shared/types.ts",
+        "server/src/sessions.ts",
+        "server/src/workflows.ts",
+        "server/src/index.ts",
+        "server/src/helperQuery.ts",
+        "web/src/components/Composer.tsx",
+        "web/src/lib/format.ts",
+        "web/src/lib/transcript.ts",
+        "web/src/components/Transcript.tsx"
+      ],
+      "symbols": [
+        "SessionManager.switchProvider",
+        "providerSwitchBlock",
+        "ProviderSwitchBlockCode",
+        "ProviderSwitchBlockInfo",
+        "ProviderSwitchData",
+        "WorkflowState.providerSwitched",
+        "withoutProviderSwitchSpans",
+        "handoffSummary",
+        "handoffQuery",
+        "handoffPrompt",
+        "awaitInterruptSettled",
+        "stepAfterProviderSwitch",
+        "ProviderSwitchMarker",
+        "ProviderSwitchItem"
+      ],
+      "tests": [
+        "server/src/sessions.switchProvider.test.ts",
+        "server/src/workflows.providers.test.ts",
+        "server/src/sessions.codex.test.ts",
+        "server/src/sessions.rewind.test.ts"
+      ],
+      "businessRules": [
+        "the switch is lossy by design: the summary is capped to roughly six bullets under 120 words, and the transcript's provider-switch marker is the only durable signal that everything above it is invisible to the model below, rendering even when the summary failed",
+        "providerSwitchBlock does not refuse on a live turn or on a workflow session in any state, unlike rewindBlock -- a live turn is stopped first, and a workflow session's own advancing/advanceOnComplete state is what actually blocks",
+        "the switch is one-shot on a workflow session: the next step still runs on the model that step names; providerSwitched only stops that step from parking as an authoring mistake, it does not make the switch sticky for the run",
+        "CLI availability on the target provider is checked before anything destructive -- the single highest-severity ordering property in the feature; any later refusal must go above resetClaudeSession, never below it",
+        "a guest whose prompts need approval is refused outright, since the seed prompt bypasses that staging entirely"
+      ],
+      "architecturalRules": [
+        "setModel's refusal stays strict and untouched; switchProvider is a second, more deliberate entry point rather than a flag that loosens the first one",
+        "helper queries run in an empty scratch directory, never the session's cwd, so a project's auto-memory or AGENTS.md cannot leak into a narrow summary",
+        "switchingProvider is claimed before the stop, not merely before the summary, and folded into isBusy/canInterject/maybeFlush alongside the existing rewinding/compacting guards",
+        "forkCodex takes an optional explicit threadId, used only when a rewind crosses back into a codex era the worker holds no live binding for"
+      ],
+      "relatedDecisions": [
+        "openai-codex-sessions",
+        "model-selector",
+        "session-rewind",
+        "settings-updates-pane",
+        "local-dev-orchestration",
+        "session-collaboration"
       ]
     }
   ]

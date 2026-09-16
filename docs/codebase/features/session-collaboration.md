@@ -341,6 +341,15 @@ resolves a person through — so they can never disagree about who somebody is.
   from a client-supplied message field.
 - A historical row (or the owner's own prompt) with no recorded actor is attributed to the
   session's host — a pure read-side reinterpretation, not a migration.
+- `switchProvider` sits at `cap: 'interrupt'` in `MESSAGE_AUTHZ`, the most destructive cap the
+  table has, beside `compactContext`/`rewindSession` — it is strictly more destructive than
+  either, dropping the conversation, changing the model, and injecting a turn. What the table
+  cannot express (one row, one cap) is that it also needs the `setModel` cap, and that a guest
+  whose prompts are held for review (`promptNeedsApproval`) must be refused outright, since the
+  seed prompt it injects bypasses `userPrompt`'s approval staging. Both are the first lines of
+  `SessionManager.switchProvider` — the same documented pattern `interjectQueued` already uses
+  for the check this table cannot carry. See
+  [cross-provider-model-switching](cross-provider-model-switching.md).
 - The collaborator address book (`ShareContact`) is decoupled from grant state on purpose:
   revoking a share, letting an invite expire unclaimed, or the invite being claimed-then-revoked
   never removes the remembered address — that is exactly the case the book exists to survive.
@@ -386,3 +395,5 @@ resolves a person through — so they can never disagree about who somebody is.
 - [cloud-sync-sessions](cloud-sync-sessions.md) — why a guest connection must never sync.
 - [turn-interjection](turn-interjection.md) — releasing a queued item into the turn already
   running, built on this feature's queue, `MESSAGE_AUTHZ`, and attribution.
+- [cross-provider-model-switching](cross-provider-model-switching.md) — `switchProvider`'s
+  `MESSAGE_AUTHZ` row and the second authz check the table cannot express.

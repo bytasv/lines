@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
-import { Badge, Button, Group, Stack, Text } from '@mantine/core';
-import { IconDownload } from '@tabler/icons-react';
+import { Badge, Button, CopyButton, Group, Stack, Text, Tooltip } from '@mantine/core';
+import { IconCheck, IconCopy, IconDownload, IconExternalLink } from '@tabler/icons-react';
+import { CLAUDE_INSTALL_URL, CODEX_INSTALL_COMMAND } from '@lines/shared';
 import { useStore } from '../store';
 import {
   DESKTOP_DOWNLOAD_ENABLED,
@@ -31,6 +32,7 @@ export function UpdatesSection() {
   const worker = useStore((s) => s.workerStatus);
   const update = useStore((s) => s.updateStatus);
   const claudeCli = useStore((s) => s.claudeCli);
+  const codexCli = useStore((s) => s.codexCli);
 
   const updateAvailable = update?.state === 'available';
 
@@ -104,17 +106,72 @@ export function UpdatesSection() {
         name="Claude Code CLI"
         version={claudeCli?.version}
         detail={claudeCli ? `minimum ${claudeCli.minVersion}` : undefined}
-        badge={
+        badge={<CliBadge status={claudeCli} />}
+        action={
           claudeCli && claudeCli.state !== 'ok' ? (
-            <Badge size="xs" color={claudeCli.state === 'missing' ? 'red' : 'yellow'} variant="light">
-              {claudeCli.state === 'missing'
-                ? 'not found on this machine'
-                : `older than ${claudeCli.minVersion}`}
-            </Badge>
+            <Button
+              size="xs"
+              variant="light"
+              component="a"
+              href={CLAUDE_INSTALL_URL}
+              target="_blank"
+              rel="noreferrer"
+              leftSection={<IconExternalLink size={14} />}
+            >
+              {claudeCli.state === 'missing' ? 'Install' : 'Update'}
+            </Button>
+          ) : undefined
+        }
+      />
+
+      {/* The other engine's CLI, on the same terms. Shown even when it is fine,
+          like the Claude row: "installed, and this is the version" is what makes
+          the missing case legible when it happens. */}
+      <VersionRow
+        name="Codex CLI"
+        version={codexCli?.version}
+        detail={codexCli ? `minimum ${codexCli.minVersion}` : undefined}
+        badge={<CliBadge status={codexCli} />}
+        action={
+          codexCli && codexCli.state !== 'ok' ? (
+            <CopyButton value={CODEX_INSTALL_COMMAND}>
+              {({ copied, copy }) => (
+                <Tooltip label={copied ? 'Copied' : CODEX_INSTALL_COMMAND} withArrow>
+                  <Button
+                    size="xs"
+                    variant="light"
+                    onClick={copy}
+                    leftSection={copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                  >
+                    {copied ? 'Copied' : 'Copy install command'}
+                  </Button>
+                </Tooltip>
+              )}
+            </CopyButton>
           ) : undefined
         }
       />
     </>
+  );
+}
+
+/** "not found" / "older than x.y.z" for either CLI, or nothing when it is fine. */
+function CliBadge({ status }: { status: { state: string; minVersion: string } | null }) {
+  // Null is not "fine", it is "nobody said" — a bridge older than the field, or
+  // one that has not said hello yet. Saying so is what stops a blank row reading
+  // as a verdict, which is exactly how a stale bridge hides a missing CLI.
+  if (!status) {
+    return (
+      <Badge size="xs" color="gray" variant="light">
+        not reported by this bridge
+      </Badge>
+    );
+  }
+  if (status.state === 'ok') return null;
+  return (
+    <Badge size="xs" color={status.state === 'missing' ? 'red' : 'yellow'} variant="light">
+      {status.state === 'missing' ? 'not found on this machine' : `older than ${status.minVersion}`}
+    </Badge>
   );
 }
 
@@ -152,9 +209,14 @@ function VersionRow({
         )}
       </Stack>
       <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
-        <Text size="sm" c={version ? undefined : 'dimmed'} ff="monospace">
-          {version ?? '—'}
-        </Text>
+        {/* The dash is the "we don't know" answer, and it only reads as one when
+            there is nothing beside it. With an action present the row already
+            says what is wrong and what to do, and a dash in front of it is noise. */}
+        {(version || !action) && (
+          <Text size="sm" c={version ? undefined : 'dimmed'} ff="monospace">
+            {version ?? '—'}
+          </Text>
+        )}
         {action}
       </Group>
     </Group>

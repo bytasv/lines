@@ -1,6 +1,7 @@
 import type {
   BridgeInfo,
   ClaudeCliStatus,
+  CodexCliStatus,
   SessionMeta,
   ShareProfile,
   ShareScope,
@@ -44,6 +45,8 @@ export interface MachineSlice {
    *  and on a bridge too old to send the field. Per-machine like `bridge`: it
    *  describes the machine, and two links can be held at once. */
   claudeCli: ClaudeCliStatus | null;
+  /** The Codex CLI on this machine, on the same terms as `claudeCli`. */
+  codexCli: CodexCliStatus | null;
   /** Whose machine it is, when it is not ours. */
   ownerProfile: ShareProfile | null;
 }
@@ -59,6 +62,7 @@ export const emptyMachine = (deviceId: string): MachineSlice => ({
   update: null,
   bridge: null,
   claudeCli: null,
+  codexCli: null,
   ownerProfile: null,
 });
 

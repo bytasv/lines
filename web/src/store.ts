@@ -29,6 +29,7 @@ import type {
   StorageStatus,
   TranscriptEvent,
   ClaudeCliStatus,
+  CodexCliStatus,
   UpdateStatus,
   SpendHistoryBlob,
   UsageSnapshot,
@@ -730,6 +731,10 @@ interface UiState {
    *  first hello, on a bridge too old to send it, and on a guest connection.
    *  Shown in Settings -> Updates. Never carries the binary's path. */
   claudeCli: ClaudeCliStatus | null;
+  /** The Codex CLI on that same machine, on the same terms as `claudeCli`: an
+   *  OpenAI model cannot run a turn without it, so the picker and the Updates
+   *  pane both read this rather than waiting for a turn to fail. */
+  codexCli: CodexCliStatus | null;
   /** The bridge speaks a contract this client doesn't. Hosted builds ship ahead
    *  of installed bridges, so this is the expected steady state after a deploy,
    *  not an error — the UI degrades rather than throwing. Shows SkewBanner, which
@@ -1109,6 +1114,7 @@ export const useStore = create<UiState>((set, get) => {
   updateStatus: null,
   bridge: null,
   claudeCli: null,
+  codexCli: null,
   protocolSkew: false,
   authorizeUrl: null,
   authError: null,
@@ -1164,6 +1170,7 @@ export const useStore = create<UiState>((set, get) => {
         updateStatus: slice.update,
         bridge: slice.bridge,
         claudeCli: slice.claudeCli,
+        codexCli: slice.codexCli,
         // Only meaningful once that machine has said `hello`: before it, a null
         // `bridge` is "not asked yet", not a pre-versioning bridge, and reading it
         // as skew would flash the pill on every machine switch.
@@ -1530,6 +1537,7 @@ export const useStore = create<UiState>((set, get) => {
             update: msg.update ?? null,
             bridge: msg.bridge ?? null,
             claudeCli: msg.claudeCli ?? null,
+            codexCli: msg.codexCli ?? null,
             scope: msg.access?.scope ?? 'owner',
             ownerProfile: msg.access?.ownerProfile ?? null,
           };
@@ -1586,6 +1594,7 @@ export const useStore = create<UiState>((set, get) => {
           // `hello` never carries it, so an ungated read would blank the pane
           // the moment a second machine says hello.
           claudeCli: fromPrimary ? msg.claudeCli ?? null : state.claudeCli,
+          codexCli: fromPrimary ? msg.codexCli ?? null : state.codexCli,
           // Present only from somebody else's machine. Absent means our own, so
           // it must reset rather than persist from a previous connection.
           access: msg.access ?? null,
@@ -1967,6 +1976,22 @@ export const useStore = create<UiState>((set, get) => {
             [from]: { ...(state.machines[from] ?? emptyMachine(from)), worker: msg.worker },
           },
           ...(fromPrimary ? { workerStatus: msg.worker } : {}),
+        }));
+        break;
+      case 'cliStatus':
+        // Same per-machine shape `workerStatus` uses: the slice for the machine
+        // it came from, and the top-level copy only when that machine is the one
+        // the UI is pointed at.
+        set((state) => ({
+          machines: {
+            ...state.machines,
+            [from]: {
+              ...(state.machines[from] ?? emptyMachine(from)),
+              claudeCli: msg.claudeCli,
+              codexCli: msg.codexCli,
+            },
+          },
+          ...(fromPrimary ? { claudeCli: msg.claudeCli, codexCli: msg.codexCli } : {}),
         }));
         break;
       case 'updateStatus':

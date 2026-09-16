@@ -35,6 +35,9 @@
  * thrift: the MCP judge must not be able to fetch the page it is judging, or the
  * page could talk it into trusting itself.
  */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { Codex } from '@openai/codex-sdk';
 import type { ModelProvider } from '@lines/shared';
@@ -63,9 +66,6 @@ export interface HelperQueryRequest {
   systemPrompt: string;
   /** Which Claude model to use when that is the provider chosen. */
   claudeModel: string;
-  /** Working directory for the codex child. Only used to give it somewhere to
-   *  start; helpers read no files. */
-  cwd?: string;
   /**
    * Which provider to consult first. A session-scoped helper passes the
    * session's own provider; the other one is still tried when this one is
@@ -75,9 +75,28 @@ export interface HelperQueryRequest {
 }
 
 /**
+ * A directory with nothing in it, which is the point.
+ *
+ * Both CLIs pull ambient context from wherever they are started — Claude's
+ * auto-memory defaults to `~/.claude/projects/<sanitized-cwd>/memory/`, and codex
+ * reads `AGENTS.md` from its cwd. A helper is asked to summarize the text it was
+ * handed and nothing else, so it is started somewhere that has no text of its
+ * own. Measured, not theoretical: a provider-switch summary of a two-line
+ * conversation came back reciting this repo's MEMORY.md entries.
+ *
+ * One directory per process, created lazily and left behind — it is empty, and
+ * cleaning it up would mean owning a lifecycle for nothing.
+ */
+let neutralDir: string | null = null;
+function helperCwd(): string {
+  neutralDir ??= fs.mkdtempSync(path.join(os.tmpdir(), 'lines-helper-'));
+  return neutralDir;
+}
+
+/**
  * The serializable shape of a Claude helper query: non-agentic, no tools, no
- * setting sources, the owner's OAuth token, and this machine's CLI. One place, so
- * the call sites cannot drift on any of it.
+ * setting sources, no ambient memory, the owner's OAuth token, and this
+ * machine's CLI. One place, so the call sites cannot drift on any of it.
  */
 function claudeOptions(token: string, model: string, systemPrompt: string): Record<string, unknown> {
   const cli = claudeCliStatus();
@@ -86,6 +105,9 @@ function claudeOptions(token: string, model: string, systemPrompt: string): Reco
     maxTurns: 1,
     allowedTools: [],
     settingSources: [],
+    // Not merely tidiness: this is what keeps the project's auto-memory out of
+    // an answer that is supposed to describe one conversation. See helperCwd.
+    cwd: helperCwd(),
     systemPrompt,
     env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: token },
     ...(cli.path ? { pathToClaudeCodeExecutable: cli.path } : {}),
@@ -148,7 +170,9 @@ async function runCodexHelper(
     sandboxMode: 'read-only',
     approvalPolicy: 'never',
     skipGitRepoCheck: true,
-    ...(request.cwd ? { workingDirectory: request.cwd } : {}),
+    // Same reason as the Claude path's `cwd`: away from the project, so no
+    // AGENTS.md joins the summary it was asked for.
+    workingDirectory: helperCwd(),
   });
   const turn = await thread.run(`${request.systemPrompt}\n\n${request.prompt}`);
   const text = turn.finalResponse?.trim();

@@ -62,6 +62,13 @@ WITH_BUTTONS = not cfg.get('no-ui-buttons', False)
 # resource list took `pair-device` away with it every time it was switched off.
 # To run agent-only against a deployment, disable `web` and `storage` from the
 # Tilt UI — per-resource enable/disable is built in.
+#
+# Getting them BACK is the part that is not obvious: a disabled resource drops
+# out of its label group, and its own buttons go with it, so the affordance that
+# would re-enable it is inside the thing that vanished. The `enable-all` resource
+# and the Enable-all button below are the way back — they live on `preflight`,
+# which nothing has a reason to disable. From a shell it is `tilt enable --all`
+# (add `--port` when this project's Tilt is not on the default 10350).
 
 # Accept both `--no-reload worker --no-reload bridge` and `--no-reload worker,bridge`.
 NO_RELOAD = []
@@ -261,6 +268,17 @@ if RELAYED and not LOOPBACK_RELAY and not WITH_RELAY and os.path.exists(BRIDGE_L
 
 local_resource('preflight', cmd=preflight_cmd, labels=['setup'], allow_parallel=True)
 
+# The way back from a disabled resource. `tilt enable --all` is a one-liner, but
+# it is only reachable from a terminal — and with several Tilt instances on this
+# machine, a bare `tilt` in the wrong shell targets whichever project is on the
+# default port. Run from here it is always this project's.
+#
+# Its own resource as well as a button (below): with `--no-ui-buttons` there is no
+# button at all, and this still gives the UI something to trigger.
+local_resource('enable-all', cmd='tilt enable --all',
+               auto_init=False, trigger_mode=TRIGGER_MODE_MANUAL,
+               labels=['setup'], allow_parallel=True)
+
 # ---- install ---------------------------------------------------------------
 # `package-lock.json` is deliberately NOT in `deps`. `npm install` REWRITES the
 # lockfile, and Tilt keeps file changes that land after a build started as
@@ -345,6 +363,27 @@ local_resource(
     labels=['setup'], allow_parallel=True,
 )
 
+# Rebuild and restart worker+bridge together, now, whatever sessions are doing.
+#
+# The automatic path only swaps generations once every session reports idle, and
+# `isSessionActive` counts a workflow step parked for approval — so a long-lived
+# machine can sit on a build from days ago while every edit queues behind it.
+# Restarting the Tilt resources by hand does not fix it either: the worker
+# supervisor adopts the running bridge's generation on startup (a deliberate
+# guard, so that starting the worker does not replace a live bridge with newly
+# edited source), which is why restarting either one alone changes nothing.
+#
+# This goes through the supervisor's own control port, so both children are
+# stopped and started as a pair on a generation built at the moment you press it.
+# In-flight turns die — that is the trade, and it is why this is manual.
+local_resource(
+    'restart-backend',
+    cmd='node server/scripts/dev-runtime.mjs restart',
+    auto_init=False, trigger_mode=TRIGGER_MODE_MANUAL,
+    resource_deps=['install'],
+    labels=['services'], allow_parallel=True,
+)
+
 # The relay is opt-in (`tilt up -- --with-relay`): the bridge only dials it when
 # RELAY_URL is set, so the default local stack is unchanged. Useful for exercising
 # the hosted path — a browser reaching the bridge through the tunnel — locally.
@@ -416,9 +455,26 @@ if WITH_BUTTONS:
                 text='Freeze reload' if action == 'freeze' else 'Resume reload',
                 icon_name='ac_unit' if action == 'freeze' else 'play_arrow',
             )
+    # On both halves of the pair, because either one is where you notice the
+    # staleness — the bridge serving old code, or the worker holding the build.
+    for resource in FREEZABLE:
+        cmd_button(
+            '%s-restart-backend' % resource, resource=resource,
+            argv=['node', 'server/scripts/dev-runtime.mjs', 'restart'],
+            text='Rebuild + restart backend', icon_name='restart_alt',
+        )
     cmd_button(
         'bridge-pair-device', resource='bridge',
         argv=['tilt', 'trigger', 'pair-device'], text='Pair this machine', icon_name='link',
+    )
+    # On `preflight` deliberately: a button attached to a resource disappears with
+    # that resource, so the one that undoes a disable has to live somewhere a
+    # disable never reaches. preflight is that place — it is `setup`, it holds no
+    # process, and disabling it accomplishes nothing.
+    cmd_button(
+        'enable-all-resources', resource='preflight',
+        argv=['tilt', 'enable', '--all'],
+        text='Enable all resources', icon_name='restart_alt',
     )
 
 # ---- manual tasks ----------------------------------------------------------

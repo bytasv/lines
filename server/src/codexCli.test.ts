@@ -6,9 +6,11 @@ import { test } from 'node:test';
 import {
   codexCandidatePaths,
   codexCliRefusalMessage,
+  codexCliStatus,
   findCodexCli,
   MIN_CODEX_VERSION,
   readCodexVersion,
+  refreshCodexCli,
   resolveCodexCliStatus,
   type CodexDiscoveryDeps,
 } from './codexCli.ts';
@@ -88,6 +90,38 @@ test('--version output is parsed down to x.y.z', () => {
   try {
     assert.equal(readCodexVersion(binary), '0.62.1');
   } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a missing CLI is re-probed, so installing one lands without a restart', (t) => {
+  // The bug this closes: the verdict was cached for the life of the bridge, so
+  // the obvious response to "not installed" — installing it — changed nothing.
+  // Every turn kept refusing and the UI kept saying it was missing.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-codex-cache-'));
+  const binary = path.join(dir, 'codex');
+  const previous = process.env.LINES_CODEX_PATH;
+  process.env.LINES_CODEX_PATH = binary;
+  // Date only: a fake setTimeout would hang the probe's own execFileSync timeout.
+  t.mock.timers.enable({ apis: ['Date'] });
+  try {
+    assert.equal(refreshCodexCli().state, 'missing');
+
+    fs.writeFileSync(binary, '#!/bin/sh\necho "codex-cli 99.0.0"\n', { mode: 0o755 });
+    assert.equal(codexCliStatus().state, 'missing', 'inside the window, no probe per call');
+
+    t.mock.timers.tick(10_001);
+    assert.equal(codexCliStatus().state, 'ok', 'past the window, the machine is asked again');
+
+    // And a working answer stays cached — that is the path every turn push is on.
+    fs.rmSync(binary);
+    t.mock.timers.tick(60_000);
+    assert.equal(codexCliStatus().state, 'ok');
+  } finally {
+    t.mock.timers.reset();
+    if (previous === undefined) delete process.env.LINES_CODEX_PATH;
+    else process.env.LINES_CODEX_PATH = previous;
+    refreshCodexCli();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

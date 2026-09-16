@@ -19,6 +19,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { CLAUDE_INSTALL_URL } from '@lines/shared';
 import type { ClaudeCliState, ClaudeCliStatus } from '@lines/shared';
 
 // The shapes live in shared/types.ts because the browser renders them in
@@ -40,8 +41,10 @@ export type { ClaudeCliState, ClaudeCliStatus };
  */
 export const MIN_CLAUDE_VERSION = '2.1.211';
 
-/** Where to send someone who has no CLI at all. */
-export const CLAUDE_INSTALL_URL = 'https://docs.claude.com/en/docs/claude-code/setup';
+// Where to send someone who has no CLI at all. Declared in shared/types.ts
+// beside the status shape, so the browser's install button and this module's
+// refusal text name the same place; re-exported for existing importers.
+export { CLAUDE_INSTALL_URL };
 
 /** Injection seams, so discovery order is testable without a real filesystem. */
 export interface DiscoveryDeps {
@@ -181,19 +184,34 @@ export function resolveClaudeCliStatus(deps: DiscoveryDeps = {}): ClaudeCliStatu
 }
 
 let cached: ClaudeCliStatus | null = null;
+/** When {@link cached} was resolved, for the failed-answer retry below. */
+let probedAt = 0;
+
+/** How long a "missing" or "outdated" verdict is trusted before the machine is
+ *  asked again. Short enough that installing the CLI takes effect on the next
+ *  turn, long enough that a busy session is not spawning a probe per push. */
+const RETRY_FAILED_AFTER_MS = 10_000;
 
 /**
- * Cached per process: discovery spawns `--version` and a login shell, and the
- * answer is asked for on every turn push and every tray render. The tray's
- * "Check again" calls {@link refreshClaudeCli} after the user installs one.
+ * Cached, because discovery spawns `--version` through a login shell and this is
+ * asked on every turn push and every tray render.
+ *
+ * A *failed* answer is only cached for {@link RETRY_FAILED_AFTER_MS}, so an
+ * install taken in response to "not found on this machine" is picked up on its
+ * own rather than at the next restart. A working answer stays cached — that is
+ * the path the per-turn cost is on. The tray's "Check again" still forces it
+ * through {@link refreshClaudeCli}.
  */
 export function claudeCliStatus(): ClaudeCliStatus {
-  cached ??= resolveClaudeCliStatus();
-  return cached;
+  if (cached && (cached.state === 'ok' || Date.now() - probedAt < RETRY_FAILED_AFTER_MS)) {
+    return cached;
+  }
+  return refreshClaudeCli();
 }
 
 export function refreshClaudeCli(): ClaudeCliStatus {
   cached = resolveClaudeCliStatus();
+  probedAt = Date.now();
   return cached;
 }
 

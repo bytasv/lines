@@ -33,17 +33,19 @@ import {
   hasEstimatedSpend,
   isSessionInterruptible,
   providerForModel,
+  providerSwitchBlock,
   rootsForCwd,
 } from '@lines/shared';
-import { formatSpendUsd } from '../lib/format';
-import { sessionCaps } from '../lib/capabilities';
+import { formatSpendUsd, stepAfterProviderSwitch } from '../lib/format';
+import { agentLabel, sessionCaps } from '../lib/capabilities';
 import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
 import {
   AUTO_EFFORT,
+  describedOptionRenderer,
+  describedOptionStyles,
   effortSelectData,
   modelComboboxProps,
   modelSelectData,
-  renderModelOption,
   renderOptionWithDescription,
 } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
@@ -51,7 +53,9 @@ import { buildExpandedPrompt, uniqueMentions } from '../lib/mentions';
 import { linkedMachineHealth } from '../lib/machineHealth';
 import { useCan, useSessionMachine, useSessionMachineHealth } from '../lib/can';
 import { usePresence } from '../lib/presence';
+import { ConfirmModal } from './ConfirmModal';
 import { ContextWindowIndicator } from './ContextWindowIndicator';
+import { SettingsModal } from './SettingsModal';
 import { MentionInput } from './MentionInput';
 import { send } from '../ws';
 
@@ -159,6 +163,8 @@ export function Composer({ session }: { session: SessionMeta }) {
   const canSetModel = useCan('setModel');
   const canSetMode = useCan('setPermissionMode');
   const openaiConnected = useStore((s) => s.openaiAuth?.loggedIn === true);
+  const claudeCli = useStore((s) => s.claudeCli);
+  const codexCli = useStore((s) => s.codexCli);
   /** This session's provider, derived from its model — there is no stored field. */
   const provider: ModelProvider = providerForModel(session.model);
   /** What this session's engine can do. Asked as capabilities rather than as
@@ -167,17 +173,100 @@ export function Composer({ session }: { session: SessionMeta }) {
   /**
    * The session has a conversation that a provider switch would leave behind.
    * Nothing carries context between a Claude session and a codex thread, so the
-   * server refuses the switch; the picker says so before the click rather than
-   * after (see modelSelectData's `unavailable`).
+   * other provider is not a plain `setModel` any more — it is the confirmed,
+   * conversation-dropping `switchProvider` below.
    */
   const hasRun = Boolean(session.claudeSessionId || session.codexThreadId);
   const otherProvider: ModelProvider = provider === 'openai' ? 'anthropic' : 'openai';
+  /**
+   * Why that switch can't run right now, if it can't — the same predicate the
+   * server guards with, so a blocked option explains itself in the dropdown
+   * instead of failing silently on click (see modelSelectData's `unavailable`).
+   * Only once the session has run: before that a model change is free.
+   */
+  const switchBlock = hasRun ? providerSwitchBlock(session) : null;
   const modelUnavailable: Partial<Record<ModelProvider, string>> = {
-    ...(hasRun ? { [otherProvider]: 'This session has already run on the other provider' } : {}),
+    ...(switchBlock ? { [otherProvider]: switchBlock.reason } : {}),
     ...(openaiConnected || provider === 'openai'
       ? {}
       : { openai: 'Connect an OpenAI account in Settings' }),
   };
+  /**
+   * A missing engine blocks the model like any other reason, but says so with a
+   * warning icon that is a link: it is the one prerequisite the app cannot fix
+   * for you, so the row leads to the pane that can. Null on a bridge too old to
+   * report it — absent is not "broken".
+   *
+   * Kept to a few words on purpose: the version, the floor and the install
+   * command all live in Settings → Updates, which the icon opens.
+   */
+  const cliWarning = (status: { state: string } | null, name: string): string | undefined =>
+    !status || status.state === 'ok'
+      ? undefined
+      : status.state === 'missing'
+        ? `${name} CLI is not installed on this machine`
+        : `${name} CLI on this machine is out of date`;
+  const modelWarn: Partial<Record<ModelProvider, string>> = {
+    ...(cliWarning(claudeCli, 'Claude Code') ? { anthropic: cliWarning(claudeCli, 'Claude Code')! } : {}),
+    ...(cliWarning(codexCli, 'Codex') ? { openai: cliWarning(codexCli, 'Codex')! } : {}),
+  };
+  /** Opened from a model's warning icon — see describedOptionRenderer. */
+  const [updatesOpen, setUpdatesOpen] = useState(false);
+  /**
+   * The picker's dropdown, controlled only so the warning icon can close it on
+   * the way to Settings — otherwise the option list stays open around a modal
+   * nobody opened from it.
+   *
+   * Through `dropdownOpened` + the two callbacks, NOT by handing `Select` a
+   * `store` via comboboxProps: Select builds its own store from this prop and
+   * drives every interaction through that one, so an injected store only
+   * replaces what the dropdown renders with and the picker stops opening.
+   */
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+  /** A model's display label, falling back to its id for one no longer offered. */
+  const modelLabel = (id: string): string => models.find((m) => m.id === id)?.label ?? id;
+  /**
+   * The step the workflow would take its own model back at, if this session is
+   * mid-workflow. Resolved here rather than server-side because the dialog has to
+   * say it *before* the switch is sent. Step refs resolve through the same three
+   * libraries WorkflowStepper's `nameOf` reads.
+   */
+  const workflows = useStore((s) => s.workflows);
+  const pinnedSteps = useStore((s) => s.pinnedSteps);
+  const sharedSteps = useStore((s) => s.sharedSteps);
+  const libSteps = useStore((s) => s.steps);
+  const workflowDef = session.workflow
+    ? workflows.find((w) => w.id === session.workflow!.workflowId)
+    : undefined;
+  const nextStep = workflowDef
+    ? stepAfterProviderSwitch(session, workflowDef, (ownerId, stepId, version) => {
+        const all = [...pinnedSteps, ...libSteps, ...sharedSteps];
+        return (
+          all.find((d) => d.ownerId === ownerId && d.id === stepId && d.version === version) ??
+          all.find((d) => d.ownerId === ownerId && d.id === stepId)
+        );
+      })
+    : null;
+  /** The model a provider switch is being confirmed for, or null. */
+  const [switchTo, setSwitchTo] = useState<string | null>(null);
+  /** …and whether that switch has been sent and is still in flight. */
+  const [switching, setSwitching] = useState(false);
+  const actionError = useStore((s) => s.actionError);
+  // The switch is fire-and-forget over the socket and blocks on a summary query
+  // for up to a minute with no turn visible, so the dialog holds its loader until
+  // the session comes back on the new model — or the server refuses.
+  useEffect(() => {
+    setSwitching(false);
+    setSwitchTo(null);
+  }, [session.model, actionError]);
+  // Safety net for the one case that clears nothing: the same refusal twice in a
+  // row is the same string in the store, so there is no change to react to. The
+  // server's own summary bound is a minute; this sits past it.
+  useEffect(() => {
+    if (!switching) return;
+    const timer = setTimeout(() => setSwitching(false), 90_000);
+    return () => clearTimeout(timer);
+  }, [switching]);
   const needsApproval = useStore((s) => s.access?.caps.promptNeedsApproval === true);
   // Prompt text plus the inline @mention pill ranges painted over it. Seeded from
   // the persisted draft — SessionView is keyed by session id, so this component
@@ -479,12 +568,33 @@ export function Composer({ session }: { session: SessionMeta }) {
             w={130}
             disabled={!canSetModel}
             comboboxProps={modelComboboxProps}
-            // Both providers, with the ones this session cannot move to rendered
-            // disabled and saying why.
-            data={modelSelectData(models, session.model, { unavailable: modelUnavailable })}
-            renderOption={renderModelOption}
+            dropdownOpened={modelDropdownOpen}
+            onDropdownOpen={() => setModelDropdownOpen(true)}
+            onDropdownClose={() => setModelDropdownOpen(false)}
+            // Both providers, with every model this machine or this session cannot
+            // take rendered disabled. The reason sits on the models it applies to
+            // rather than beside the control, and where the fix is a CLI install
+            // the icon opens the pane that carries it.
+            data={modelSelectData(models, session.model, {
+              unavailable: modelUnavailable,
+              warn: modelWarn,
+            })}
+            renderOption={describedOptionRenderer(() => {
+              setModelDropdownOpen(false);
+              setUpdatesOpen(true);
+            })}
+            styles={describedOptionStyles}
             value={session.model}
-            onChange={(v) => v && send({ type: 'setModel', sessionId: session.id, model: v })}
+            onChange={(v) => {
+              if (!v || v === session.model) return;
+              // Crossing providers on a session that has run drops its
+              // conversation, so it is confirmed rather than dispatched.
+              if (hasRun && providerForModel(v) !== provider) {
+                setSwitchTo(v);
+                return;
+              }
+              send({ type: 'setModel', sessionId: session.id, model: v });
+            }}
             allowDeselect={false}
           />
           {/* Disabled rather than hidden on an engine with no effort control, for
@@ -595,6 +705,50 @@ export function Composer({ session }: { session: SessionMeta }) {
           )}
         </Group>
       </Group>
+      {/* Opened only from a model's warning icon — the pane that carries the
+          version, the floor and the install command. Rendered here, exactly as
+          StorageBanner opens its own copy at Diagnostics. */}
+      <SettingsModal
+        opened={updatesOpen}
+        onClose={() => setUpdatesOpen(false)}
+        initialSection="updates"
+      />
+      <ConfirmModal
+        opened={switchTo !== null}
+        title="Switch provider?"
+        message={
+          [
+            `This session has been running on ${agentLabel(session)}. ` +
+              `Moving it to ${modelLabel(switchTo ?? '')} starts a brand-new conversation: ` +
+              'everything said so far is dropped, and a summary of it is sent as the first ' +
+              'message instead. The transcript here is kept — but the summary is lossy, so ' +
+              'anything it misses is gone from the new model’s view.',
+            // Named before the click, because it is not undone afterwards.
+            interruptible ? 'The turn running now is stopped first.' : '',
+            nextStep
+              ? `Step ${nextStep.index + 1} takes the workflow’s own model back` +
+                (nextStep.model ? ` (${modelLabel(nextStep.model)})` : '') +
+                '.' +
+                // Only when the switch actually changes what that step does: a step
+                // already set to start fresh would have done this anyway.
+                (nextStep.inherits
+                  ? ' It continues this conversation, so it will start fresh from the ' +
+                    'previous step’s output instead.'
+                  : '')
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' ')
+        }
+        confirmLabel="Switch and summarize"
+        confirmLoading={switching}
+        onConfirm={() => {
+          if (!switchTo) return;
+          setSwitching(true);
+          send({ type: 'switchProvider', sessionId: session.id, model: switchTo });
+        }}
+        onCancel={() => setSwitchTo(null)}
+      />
       <Modal
         opened={lightbox !== null}
         onClose={() => setLightbox(null)}

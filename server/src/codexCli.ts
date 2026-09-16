@@ -19,7 +19,16 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { CODEX_INSTALL_COMMAND, CODEX_INSTALL_URL } from '@lines/shared';
+import type { CodexCliState, CodexCliStatus } from '@lines/shared';
 import { compareVersions } from './claudeCli.ts';
+
+// The shapes and the install copy live in shared/types.ts because the browser
+// renders them (Settings -> Updates, and the model picker's disabled options)
+// and must not import server code. Re-exported here so every existing importer
+// keeps reading them off the module that produces them.
+export type { CodexCliState, CodexCliStatus };
+export { CODEX_INSTALL_COMMAND, CODEX_INSTALL_URL };
 
 /**
  * The oldest `codex` we are willing to drive: the version the pinned
@@ -37,21 +46,6 @@ import { compareVersions } from './claudeCli.ts';
  * Bump this with the SDK dependency, not independently.
  */
 export const MIN_CODEX_VERSION = '0.154.0';
-
-/** Where to send someone who has no CLI at all. */
-export const CODEX_INSTALL_URL = 'https://developers.openai.com/codex/cli';
-
-export type CodexCliState = 'ok' | 'missing' | 'outdated';
-
-export interface CodexCliStatus {
-  state: CodexCliState;
-  /** Absolute path to the binary; absent only when `state === 'missing'`. */
-  path?: string;
-  /** Parsed `x.y.z`; absent when the binary exists but would not report one. */
-  version?: string;
-  /** Echoed so callers can word their own message without importing the constant. */
-  minVersion: string;
-}
 
 /** Injection seams, so discovery order is testable without a real filesystem.
  *  Same shape as `claudeCli.ts`'s `DiscoveryDeps`, deliberately. */
@@ -183,17 +177,51 @@ export function resolveCodexCliStatus(deps: CodexDiscoveryDeps = {}): CodexCliSt
 }
 
 let cached: CodexCliStatus | null = null;
+/** When {@link cached} was resolved, for the failed-answer retry below. */
+let probedAt = 0;
 
-/** Cached per process: discovery spawns `--version` and a login shell, and the
- *  answer is asked for on every codex turn push. */
+/** How long a "missing" or "outdated" verdict is trusted before the machine is
+ *  asked again. Short enough that installing the CLI takes effect on the next
+ *  turn, long enough that a busy session is not spawning a probe per push. */
+const RETRY_FAILED_AFTER_MS = 10_000;
+
+/**
+ * Cached, because discovery spawns `--version` through a login shell and this is
+ * asked on every codex turn push.
+ *
+ * A *failed* answer is only cached for {@link RETRY_FAILED_AFTER_MS}. Installing
+ * the CLI is the obvious thing to do when told it is missing, and caching that
+ * verdict for the life of the bridge meant the install changed nothing until a
+ * restart — every turn kept refusing, and the UI kept saying "not installed",
+ * with nothing on screen admitting it had stopped looking. A working answer stays
+ * cached: a CLI that exists does not usually disappear, and that is the path the
+ * per-turn cost is on.
+ */
 export function codexCliStatus(): CodexCliStatus {
-  cached ??= resolveCodexCliStatus();
-  return cached;
+  if (cached && (cached.state === 'ok' || Date.now() - probedAt < RETRY_FAILED_AFTER_MS)) {
+    return cached;
+  }
+  return refreshCodexCli();
 }
 
 export function refreshCodexCli(): CodexCliStatus {
   cached = resolveCodexCliStatus();
+  probedAt = Date.now();
   return cached;
+}
+
+/**
+ * The copy a client may see, for `hello`. Field by field for the same reason
+ * `publicClaudeCliStatus` is: `path` is an absolute path to the binary, which
+ * names the host's home directory and therefore their username, to anyone
+ * holding a socket. This cannot leak a field nobody listed.
+ */
+export function publicCodexCliStatus(status: CodexCliStatus = codexCliStatus()): CodexCliStatus {
+  return {
+    state: status.state,
+    ...(status.version ? { version: status.version } : {}),
+    minVersion: status.minVersion,
+  };
 }
 
 /**
@@ -205,11 +233,11 @@ export function codexCliRefusalMessage(status: CodexCliStatus = codexCliStatus()
   if (status.state === 'missing') {
     return (
       'The Codex CLI is not installed on this machine — install it with ' +
-      `\`npm i -g @openai/codex\` (see ${CODEX_INSTALL_URL}), then Retry.`
+      `\`${CODEX_INSTALL_COMMAND}\` (see ${CODEX_INSTALL_URL}), then Retry.`
     );
   }
   return (
     `Codex ${status.version} on this machine is older than the ${status.minVersion} Lines ` +
-    'needs — run `npm i -g @openai/codex`, then Retry.'
+    `needs — run \`${CODEX_INSTALL_COMMAND}\`, then Retry.`
   );
 }

@@ -89,9 +89,12 @@ the transport was.
 - A codex turn carries no credential. It carries a `CODEX_HOME`.
 - `CODEX_HOME` is `~/.lines-app/users/<id>/codex/`, which **shadows the user's own
   `~/.codex/config.toml`**: their terminal codex configuration does not apply inside Lines.
-- A cross-provider `setModel` is refused once a session has run. Nothing carries a conversation
-  between a `claudeSessionId` and a `codexThreadId`, and the alternative is a continuous
-  transcript in front of a model that knows none of it.
+- A cross-provider `setModel` is refused once a session has run, and that refusal stays strict.
+  Nothing carries a conversation between a `claudeSessionId` and a `codexThreadId`, and the
+  alternative is a continuous transcript in front of a model that knows none of it.
+  `SessionManager.switchProvider` is the deliberate way past it — it drops the stranded
+  conversation, summarizes it, and seeds the new provider with the summary. See
+  [cross-provider-model-switching](cross-provider-model-switching.md).
 - Workflow steps run on Claude models only, refused on both the client (the pickers offer no
   OpenAI models) and the server (`validateStepContent`, and a pre-run park).
 - `output_tokens` means exactly what the provider called output. Reasoning tokens ride beside
@@ -102,10 +105,15 @@ the transport was.
   estimator, the marker, and why the estimation gate reads `capabilitiesFor(provider).cost`
   rather than "did this particular result carry a cost".
 - A stopped codex turn settles as stopped, never as a failure with a Retry.
-- A session-scoped helper query (auto-name, turn summary, step consolidation) prefers that
-  session's own provider — a codex session is titled by codex, a Claude session by Claude — and
-  falls back to the other provider when the preferred one is absent or answers null. A helper
-  with no session (the MCP judge) has no provider to prefer and stays Claude-first.
+- A session-scoped helper query (auto-name, turn summary, step consolidation, provider-switch
+  hand-off) prefers that session's own provider — a codex session is titled by codex, a Claude
+  session by Claude — and falls back to the other provider when the preferred one is absent or
+  answers null. A helper with no session (the MCP judge) has no provider to prefer and stays
+  Claude-first.
+- Every helper query runs in an empty scratch directory (`helperQuery.ts`'s `helperCwd()`), never
+  the session's own `cwd`. Both CLIs pull ambient context from their working directory — Claude's
+  auto-memory, codex's `AGENTS.md` — and a helper answering a narrow question (a title, a
+  summary) must not fold in a project's memory or agent instructions.
 - Auto-naming never strands a session on "New session". A helper that answers null or throws
   still writes a title cut from the prompt (`localSessionName`), and the session is retried on
   its next prompt until a real summary lands.
@@ -127,6 +135,10 @@ the transport was.
   parking a turn.
 - Nothing in `shared/` may import a server dependency. The protocol types are `export type`
   only, so the browser bundle pays nothing for them.
+- `forkCodex(sessionId, lastTurnId, threadId?)` normally forks the session's own live thread
+  binding; `threadId` is only supplied when a rewind crosses back into an earlier codex era the
+  current worker holds no binding for (see [session-rewind](session-rewind.md)) — the caller
+  names the thread explicitly rather than the worker guessing at one.
 
 ## Tests
 
@@ -151,6 +163,8 @@ the transport was.
   from its output with or without `--enable collaboration_modes`.
 - `server/src/sessions.codexMcpStatus.test.ts` — the connection-status mapping, including the
   null `runtimeStatus` a working server reports.
+- `server/src/sessions.switchProvider.test.ts` — `switchProvider` as the deliberate way past
+  `setModel`'s refusal; see [cross-provider-model-switching](cross-provider-model-switching.md).
 
 ## Related decisions
 
@@ -185,6 +199,11 @@ the transport was.
 - **A provider change inside a workflow forces a fresh start.** Nothing links a
   `claudeSessionId` to a `codexThreadId`, so the conversation is dropped rather than handed to a
   model that cannot read it. See [workflow-step-lifecycle](workflow-step-lifecycle.md).
+- **A manual provider switch is a distinct, deliberate operation from the workflow-step
+  refusal above**, not a loophole in it. `setModel`'s cross-provider refusal is unconditional;
+  `SessionManager.switchProvider` is a second entry point that summarizes and drops the
+  conversation on purpose, gated on its own capability and CLI/account checks. See
+  [cross-provider-model-switching](cross-provider-model-switching.md).
 - **The handshake declares `experimentalApi`, and the vendored types do not describe everything.**
   `initialize` sends `capabilities: { experimentalApi: true, requestAttestation: false }`. Plan
   mode lives behind that flag: `collaborationMode/list` and `turn/start`'s `collaborationMode`

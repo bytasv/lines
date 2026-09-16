@@ -33,9 +33,10 @@ import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
 import { SHARING_ENABLED } from '../lib/shares';
 import {
   AUTO_EFFORT,
+  describedOptionRenderer,
+  describedOptionStyles,
   effortSelectData,
   modelSelectData,
-  renderModelOption,
   renderOptionWithDescription,
 } from '../lib/modelSelect';
 import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
@@ -170,7 +171,7 @@ export function SettingsModal({
             {section === 'account' && <AccountSection onClose={onClose} />}
             {section === 'devices' && <DevicesSection />}
             {section === 'collaborators' && <CollaboratorsSection />}
-            {section === 'sessions' && <SessionsSection />}
+            {section === 'sessions' && <SessionsSection onOpenUpdates={() => setSection('updates')} />}
             {section === 'transcript' && <TranscriptSection />}
             {section === 'notifications' && <NotificationsSection />}
             {section === 'diagnostics' && <SyncLogSection />}
@@ -316,9 +317,16 @@ function DocsSection({ onClose }: { onClose: () => void }) {
   );
 }
 
-function SessionsSection() {
+/** `onOpenUpdates` follows GuardAllowlistSection's `onOpenReview`: the pane that
+ *  fixes a missing CLI is a sibling of this one, and only the parent can switch. */
+function SessionsSection({ onOpenUpdates }: { onOpenUpdates: () => void }) {
+  // Controlled only so the warning icon can close it before the pane switches —
+  // see the composer for why this is the prop and not an injected store.
+  const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const models = useStore((s) => s.models);
   const openaiConnected = useStore((s) => s.openaiAuth?.loggedIn === true);
+  const claudeCli = useStore((s) => s.claudeCli);
+  const codexCli = useStore((s) => s.codexCli);
   const defaults = useStore((s) => s.newSessionDefaults);
   const setDefaults = useStore((s) => s.setNewSessionDefaults);
   const autoContinueInterrupted = useStore((s) => s.autoContinueInterrupted);
@@ -342,8 +350,26 @@ function SessionsSection() {
           ...(openaiConnected
             ? {}
             : { unavailable: { openai: 'Connect an OpenAI account in Account above' } }),
+          // A CLI this machine doesn't have warns rather than blocks, exactly as
+          // the composer's picker does: it is the prerequisite the app cannot fix,
+          // and the icon leads to the Updates pane that can.
+          warn: {
+            ...(claudeCli && claudeCli.state !== 'ok'
+              ? { anthropic: `Claude Code CLI is ${claudeCli.state === 'missing' ? 'not installed' : 'out of date'}` }
+              : {}),
+            ...(codexCli && codexCli.state !== 'ok'
+              ? { openai: `Codex CLI is ${codexCli.state === 'missing' ? 'not installed' : 'out of date'}` }
+              : {}),
+          },
         })}
-        renderOption={renderModelOption}
+        dropdownOpened={modelDropdownOpen}
+        onDropdownOpen={() => setModelDropdownOpen(true)}
+        onDropdownClose={() => setModelDropdownOpen(false)}
+        renderOption={describedOptionRenderer(() => {
+          setModelDropdownOpen(false);
+          onOpenUpdates();
+        })}
+        styles={describedOptionStyles}
         value={defaults.model}
         onChange={(v) => v && setDefaults({ ...defaults, model: v })}
         allowDeselect={false}

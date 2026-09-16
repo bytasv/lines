@@ -56,6 +56,30 @@ together. Vite continues to handle web HMR independently.
   A returning worker coordinator adopts the live bridge's generation before
   considering pending edits. An unavailable peer blocks automatic reloads.
 
+## Forced restart
+
+The automatic idle-boundary reload can starve indefinitely on a real machine: a workflow step
+parked at `waiting-approval` counts as active session state, and one such session anywhere on
+the machine holds every pending edit behind it — potentially for days. `restart-backend`
+(`Supervisor.forceReload`, wired to a manual Tilt resource and a **Rebuild + restart backend**
+button on both the `worker` and `bridge` resources) is the deliberate way through: it rebuilds
+from current source and cycles worker and bridge as a pair *without* waiting for idle. In-flight
+turns die — that is the whole trade, and it is why this is a manual action, never automatic.
+
+It still adopts the pairing rule everything else in this file relies on: it runs with
+`phase: 'reloading'`, never `'starting'`, which is what stops `WorkerRunner.startPair` from
+adopting the bridge's already-running (and, here, deliberately stale) generation — the same trap
+that otherwise makes "restart the worker resource, then the bridge resource" independently do
+nothing. A failed candidate restores the previously running generation, the same rollback
+`reload()` performs.
+
+**The command only trusts a real restart, not a 200.** The control route answers with a
+`restarted: true` handshake field; a supervisor from before this route existed answers an
+unknown URL with its plain state and a 200 anyway, which is otherwise indistinguishable from
+success. `restartCommand` treats a missing handshake as a hard failure with a message telling
+the user to cycle the supervisor by hand once (`tilt down` / `tilt up`, or restart the dev
+terminal) — after that, the command works from a warm start every time.
+
 ## Controls and shutdown
 
 The default is automatic protection. No per-turn freeze step is needed.
@@ -74,6 +98,15 @@ Either backend hold pauses the coordinated pair. CLI policy changes run through
 Tilt's `reload-policy` resource, separately from the backend serve specification.
 Buttons do not rewrite Tilt arguments, so flags such as `--relay-auth` are preserved.
 `--no-ui-buttons` works offline without fetching the UI-button extension.
+
+**Re-enabling a disabled resource.** Tilt's per-resource disable is genuinely useful (running
+agent-only against a deployment means disabling `web`/`storage`), but a disabled resource takes
+its own buttons with it — including, for anything else disabled the same way, any affordance
+that would turn it back on. `enable-all` (`tilt enable --all`, manual, plus an **Enable all
+resources** button) lives on `preflight` specifically because that resource holds no process and
+nothing has a reason to disable it — it is the one place a way back survives whatever else was
+switched off. It is all-or-nothing; narrowing it to specific resources or labels is a possible
+follow-up, not built.
 
 Restart Tilt once idle to replace the old combined `backend` resource. There is
 no legacy-resource switching. Old orphaned processes are not adopted or killed
@@ -122,7 +155,10 @@ Supervisor code itself takes effect at the next normal development-stack restart
 
 - `server/scripts/dev-runtime.test.mjs`: isolated process fixtures exercise immutable
   local imports, busy deferral, Freeze/Resume PID stability, paired reload, failed
-  builds, startup rollback, preparation races, stale activity, and bridge-only recovery.
+  builds, startup rollback, preparation races, stale activity, bridge-only recovery, a
+  forced restart cycling the pair while work is live, a forced restart whose new build
+  will not start restoring the working one, and a restart request against a supervisor
+  too old to answer the handshake failing loudly rather than reporting false success.
 - `server/src/devRuntime.test.ts`: real IPC preparation and activation, asynchronous
   activity accounting, session blockers, and ordered worker replay without duplicates.
 - Existing session/worker tests verify persistence, queued work, provider reconciliation,
@@ -137,3 +173,8 @@ termination, and `tilt down` smoke tests.
 
 See [session collaboration](session-collaboration.md) for relay sharing and
 [desktop app](desktop-app.md) for packaged runtime ownership.
+
+[Cross-provider model switching](cross-provider-model-switching.md) is unrelated to this
+file's mechanism but is why the forced-restart resource exists: it and the CLI-status
+self-heal both needed a way to get a running dev stack onto new server code without
+waiting for the automatic idle boundary.

@@ -61,6 +61,7 @@ import {
   type McpToolResult,
 } from './workerProtocol.ts';
 import { publicClaudeCliStatus } from './claudeCli.ts';
+import { publicCodexCliStatus } from './codexCli.ts';
 
 /** Explicit pin for local dev (Tilt sets it so its readiness probe has a fixed
  *  target); unset means bind :0 and publish the result to bridge.json. */
@@ -911,6 +912,10 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
     // `publicClaudeCliStatus` drops `path`, which would leak the host's home
     // directory and username. Never spread `claudeCliStatus()` here.
     claudeCli: publicClaudeCliStatus(),
+    // The other engine's, on the same terms: an OpenAI model is unusable without
+    // it, and until this was on the wire the browser could only find that out by
+    // running a turn and watching it fail.
+    codexCli: publicCodexCliStatus(),
     settings: ctx.store.loadSettings(),
     guardAllowlist: ctx.guard.list(),
     // Read from persisted state, so a pending review is on screen before the
@@ -1249,6 +1254,29 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       // A cross-provider switch on a session that has already run is refused —
       // nothing carries the conversation across, so the user has to hear why.
       const verdict = sessions.setModel(msg.sessionId, msg.model);
+      if (!verdict.ok) {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            sessionId: msg.sessionId,
+            message: verdict.reason,
+          } satisfies ServerMessage),
+        );
+      }
+      break;
+    }
+    case 'switchProvider': {
+      // The deliberate way past that refusal: the conversation is dropped and the
+      // new model is seeded with a summary of it. The cap gate already ran for
+      // `interrupt`; the `setModel` half and the held-guest case are decided
+      // inside, since the table carries only one cap.
+      const verdict = await sessions.switchProvider(msg.sessionId, msg.model, {
+        actor,
+        canSetModel: access.caps.setModel,
+        needsApproval: access.caps.promptNeedsApproval,
+      });
+      // The block reason is written for a human — surfaced verbatim, on the same
+      // channel setModel's refusal uses.
       if (!verdict.ok) {
         ws.send(
           JSON.stringify({
@@ -1738,6 +1766,27 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       }
       break;
     }
+    default: {
+      // Unreachable while the switch above is exhaustive — but a client *newer*
+      // than this bridge is not unreachable at all: in dev the two reload
+      // independently (the supervisor holds a generation back while a session is
+      // busy), and a browser tab outlives a bridge update in production. Dropping
+      // the frame in silence is what makes that read as "the app hung" — a
+      // confirmed action that never lands and never explains itself. Answering
+      // says which message went unanswered, and the UI surfaces it.
+      const unhandled = msg as { type?: string; sessionId?: string };
+      console.warn(`[bridge] unhandled client message: ${unhandled.type}`);
+      ws.send(
+        JSON.stringify({
+          type: 'error',
+          ...(unhandled.sessionId ? { sessionId: unhandled.sessionId } : {}),
+          message:
+            `This machine's bridge doesn't understand "${unhandled.type}" — it is running an ` +
+            'older version than this page. Restart the bridge, then reload.',
+        } satisfies ServerMessage),
+      );
+      break;
+    }
   }
 }
 
@@ -1823,6 +1872,34 @@ function shutdown() {
 }
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+/**
+ * Re-publish the machine's CLI status when it changes.
+ *
+ * The probes cache a working answer for the life of the process and a failed one
+ * for ten seconds (see claudeCli.ts / codexCli.ts), so this only spawns anything
+ * while something is actually missing — and stops the moment both report `ok`.
+ *
+ * It exists because the obvious response to "Codex CLI is not installed" is to
+ * install it, and until now nothing noticed: `hello` carries the status once per
+ * connection, so the pane kept saying "not installed" and the picker kept the
+ * model disabled until the page was reloaded.
+ */
+let lastCliSignature = '';
+setInterval(() => {
+  const claude = publicClaudeCliStatus();
+  const codex = publicCodexCliStatus();
+  const signature = JSON.stringify([claude, codex]);
+  if (signature === lastCliSignature) return;
+  // Not on the first pass: `hello` already carried it, and a broadcast before any
+  // client has connected reaches nobody.
+  const first = lastCliSignature === '';
+  lastCliSignature = signature;
+  if (first) return;
+  for (const ctx of registry.all()) {
+    ctx.broadcast({ type: 'cliStatus', claudeCli: claude, codexCli: codex });
+  }
+}, 15_000).unref();
 
 devRuntime.configure(() => ({
   ready: server.listening && worker.linkOpen,

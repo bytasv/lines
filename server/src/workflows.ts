@@ -935,7 +935,16 @@ export class WorkflowEngine {
         stepProvider === 'openai' ? 'anthropic' : 'openai',
         stepProvider,
       );
-    if (crossesProvider && !content.freshStart) {
+    // One crossing is not an authoring mistake: the user switched this session's
+    // provider by hand (SessionManager.switchProvider), so the conversation this
+    // step would inherit is one the switch already replaced — there is nothing
+    // left to protect. Start fresh for this entry instead of parking, which is
+    // what keeps the run moving; the user was told this would happen before they
+    // confirmed the switch. One-shot, and consumed whether or not it was needed.
+    const switched = meta.workflow.providerSwitched === true;
+    meta.workflow.providerSwitched = undefined;
+    const freshStart = content.freshStart || (crossesProvider && switched);
+    if (crossesProvider && !freshStart) {
       meta.workflow.stepStatuses[i] = 'waiting-approval';
       meta.workflow.stepFailure = 'pre-run';
       this.sessions.failTurn(
@@ -986,7 +995,7 @@ export class WorkflowEngine {
     // that actually has predecessors (i > 0); step 0 has no prior output and its
     // "diff" would just be the repo's pre-existing dirty state. Retries stay in
     // the fresh session already established for this step.
-    const handoff = content.freshStart && entry && i > 0;
+    const handoff = freshStart && entry && i > 0;
     const previous = handoff
       ? (meta.workflow.lastStepOutput ?? this.sessions.lastAssistantText(sessionId))
       : '';
@@ -1054,7 +1063,7 @@ export class WorkflowEngine {
         if (parts.length) prompt = `${parts.join('\n\n')}\n\n---\n\n${prompt}`;
       }
       this.sessions.resetClaudeSession(sessionId);
-    } else if (content.freshStart && entry) {
+    } else if (freshStart && entry) {
       // Nothing to hand off (a fresh first step) — still start from a clean session.
       this.sessions.resetClaudeSession(sessionId);
     }

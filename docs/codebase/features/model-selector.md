@@ -26,8 +26,11 @@ shows the model name plus a one-line description to help users pick between mode
 ## Important symbols
 
 - `ModelOption` — `{ id, label, description?, contextWindow?, price?, provider? }`
-- `modelSelectData()` — maps `ModelOption[]` to Mantine `Select` data with descriptions; given `ensureId`, appends a disabled "No longer available" entry if that id isn't in `models`
-- `renderModelOption` — alias of `renderOptionWithDescription` (Mantine `renderOption` renderer: label + dimmed description), shared with the [permissions-and-plan-mode](permissions-and-plan-mode.md) dropdowns
+- `modelSelectData()` — maps `ModelOption[]` to Mantine `Select` data with descriptions; given `ensureId`, appends a disabled "No longer available" entry if that id isn't in `models`. Takes `providers`/`unavailable`/`warn` — see Two providers.
+- `renderModelOption` — alias of `describedOptionRenderer()` with no click handler (Mantine `renderOption` renderer: label + dimmed description + optional warning icon), shared with the [permissions-and-plan-mode](permissions-and-plan-mode.md) dropdowns
+- `describedOptionRenderer(onWarningClick?)` — the renderer factory; a handler makes an
+  actionable warning's icon a link. `describedOptionStyles` pairs with it, overriding
+  Mantine's disabled-option opacity so the icon does not dim with the row.
 - `modelComboboxProps` — widens the dropdown popover for narrow inputs without widening the input itself; also reused by the permission-mode workflow Selects
 - `LEGACY_MODEL_MAP` — explicit map of retired model ids to their replacement
 - `resolveModelId()` — known ids pass through; otherwise applies `LEGACY_MODEL_MAP`; unmapped unknown ids pass through unchanged
@@ -75,7 +78,10 @@ can't misfire on a valid dated snapshot id.
 
 ## Related decisions
 
-None recorded.
+- [cross-provider-model-switching](cross-provider-model-switching.md) — the confirm-dialog
+  path a cross-provider pick takes on a session that has run.
+- [settings-updates-pane](settings-updates-pane.md) — the CLI-availability status the `warn`
+  option and its Updates-pane link read.
 
 ## Two providers
 
@@ -86,7 +92,7 @@ means exactly what it meant before. `providerForModel(id)` resolves an id and an
 `'anthropic'` for anything unlisted, so a dated snapshot or a hand-typed id keeps behaving as
 it did: a model has to be *listed* as OpenAI to be treated as one.
 
-`modelSelectData()` stays the single entry point, and gained two options rather than letting
+`modelSelectData()` stays the single entry point, and has three options rather than letting
 call sites filter their own lists:
 
 - `providers` — which vendors this picker may offer. No caller narrows it today: the workflow
@@ -96,9 +102,40 @@ call sites filter their own lists:
   the fix is to drop the conversation, not to hide the models, so a provider-changing step is
   now forced to be a fresh start. See
   [workflow-step-lifecycle](workflow-step-lifecycle.md).
-- `unavailable` — render a provider's options disabled with a reason. Used for "connect an
-  OpenAI account" and for "this session has already run on the other provider", so a blocked
-  option still says why instead of vanishing.
+- `unavailable` — render a provider's options **disabled** with a reason, shown as a warning
+  icon beside the label (`describedOptionRenderer`) rather than as the option's description.
+  Used for "connect an OpenAI account" and for whatever
+  [`providerSwitchBlock`](cross-provider-model-switching.md) currently refuses on a session
+  that has run (a workflow step consolidating, a queued message written against the old
+  conversation) — **not** "this session has already run on the other provider": picking the
+  other provider on a session that has run no longer disables the option, it opens a confirm
+  dialog (see below).
+- `warn` — render a provider's options disabled for a reason the *app* cannot fix, with the
+  warning icon rendered as a link rather than a plain tooltip: clicking it opens Settings →
+  Updates instead of doing nothing. Used for a provider whose CLI is not installed or is too
+  old on this machine (`ClaudeCliStatus`/`CodexCliStatus`, see
+  [settings-updates-pane](settings-updates-pane.md)) — an account can be connected but the
+  turn still cannot run without the binary.
+
+`describedOptionRenderer(onWarningClick?)` is the renderer both `unavailable` and `warn`
+options go through: the row itself stays at full opacity (Mantine's default disabled-option
+`opacity: 0.35` is overridden via `describedOptionStyles`, since it would otherwise dim the
+warning icon along with everything else) and only the label text dims, so the icon is what
+stands out. The icon is a click target — `pointerEvents: 'auto'` against the disabled row's
+`cursor: not-allowed` — only when `onWarningClick` is supplied and the option's
+`warningActionable` flag is set (true for `warn` entries, never for `unavailable` ones: an
+account to connect is not fixed in the Updates pane). `renderModelOption` remains
+`describedOptionRenderer()` with no handler, for the callers with nowhere to send anyone
+(the workflow step editor, the recipe run modal).
+
+**Picking the other provider on a session that has already run opens a confirm dialog
+instead of dispatching `setModel`.** The composer's `onChange` checks
+`providerForModel(v) !== provider` on a session with `hasRun`; if so it stages the target
+model and shows `ConfirmModal` naming what is dropped, what is kept (the visible transcript),
+and — on a workflow session — what the next step will do, before sending
+`{ type: 'switchProvider', ... }`. See
+[cross-provider-model-switching](cross-provider-model-switching.md) for the whole mechanism;
+this file only owns the picker's own presentation of it.
 
 **OpenAI models carry no `contextWindow`.** The number is not unknown — codex reports one per
 thread on `thread/tokenUsage/updated`, and that reading wins over the table via

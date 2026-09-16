@@ -1,5 +1,5 @@
-import { isSessionActive } from '@lines/shared';
-import type { SessionMeta, SessionStatus } from '@lines/shared';
+import { isSessionActive, resolveStepContent } from '@lines/shared';
+import type { SessionMeta, SessionStatus, StepContent, WorkflowDef } from '@lines/shared';
 
 const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
   idle: { color: 'gray', label: 'idle' },
@@ -70,6 +70,38 @@ export function skippableFailedStep(session: SessionMeta): number | null {
   if (!wf?.stepFailure || wf.advancing) return null;
   const i = wf.stepIndex;
   return wf.stepStatuses[i] === 'waiting-approval' ? i : null;
+}
+
+/**
+ * The step a manual provider switch would hand the workflow back to, or null when
+ * there is none (no workflow, not started, or already finished).
+ *
+ * A switch is one-shot: the model is the user's for now, and the next step entry
+ * re-applies the model that step names (WorkflowEngine.runStep). That is what the
+ * confirm dialog has to say out loud — and `inherits` is what decides whether it
+ * also has to say the step will restart from the previous step's output, since a
+ * step already marked `freshStart` would have done exactly that anyway.
+ *
+ * Which step is next follows the stepper's own reading: a step parked for
+ * approval or already done hands over to the one after it; anything else (pending,
+ * running) is still the current step's turn to come.
+ *
+ * A `StepRef` whose content this client cannot resolve reads as inheriting — the
+ * cautious answer, since the caveat is a warning and omitting it is the lie.
+ */
+export function stepAfterProviderSwitch(
+  session: SessionMeta,
+  workflow: WorkflowDef,
+  lookup: (ownerId: string, stepId: string, version: number) => StepContent | undefined,
+): { index: number; model: string; inherits: boolean } | null {
+  const wf = session.workflow;
+  if (!wf?.started || isWorkflowFinished(session)) return null;
+  const current = wf.stepStatuses[wf.stepIndex];
+  const index = current === 'done' || current === 'waiting-approval' ? wf.stepIndex + 1 : wf.stepIndex;
+  const step = workflow.steps[index];
+  if (!step) return null;
+  const content = resolveStepContent(step, lookup);
+  return { index, model: content?.model ?? '', inherits: !content?.freshStart };
 }
 
 /**

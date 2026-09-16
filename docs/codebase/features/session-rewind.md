@@ -39,6 +39,8 @@ shows, and parks there for review.
 - `web/src/store.ts` — `composerPrefill`, `takeComposerPrefill`, `case 'rewound'`,
   `case 'transcriptTruncated'`
 - `web/src/components/Transcript.tsx` — `UserBubble`, `RewindIntent`
+- `server/src/workerCodex.ts` — `forkCodex(sessionId, lastTurnId, threadId?)` — the
+  explicit `threadId` is the cross-era rewind path (see Crossing a provider switch)
 - `web/src/components/Composer.tsx` — the prefill effect
 
 ## Symbols
@@ -58,6 +60,11 @@ shows, and parks there for review.
   to a sidecar first, invalidates the transcript cache.
 - `RewindPrompt` — `{ text, mentions?, attachments }`, the shape handed back to the composer on
   an Edit; rehydrated from disk the same way a retry rehydrates its prompt.
+- `restoreEra(sessionId, model, pointers)` — puts the session's model and resume pointer
+  back together after a rewind resolves them to something other than what is running now
+  (see Crossing a provider switch). Model and pointer always move as one; never reused by
+  `switchProvider`, which has the opposite direction (dropping a conversation, not
+  restoring one).
 
 ## Data flow
 
@@ -66,17 +73,26 @@ shows, and parks there for review.
 2. `SessionManager.rewindSession` gates on `rewindBlock` and a `rewinding` in-flight claim (taken
    synchronously, before the first `await`, so a double-click cannot race two rewinds past the
    gate), then confirms `seq` really is a `'user'` event.
-3. Scans backwards from `seq` for the nearest `kind: 'sdk'` event with
-   `data.type === 'assistant'` and a `uuid` — the CLI anchor the SDK's `forkSession`/
-   `resumeSessionAt` documents `upToMessageId` against. Every non-`stream_event` SDK message is
-   already persisted verbatim by `handleWorkerEvent`, so the anchor is already on disk; no new
-   capture needed.
-4. **Fork before touching Lines' own transcript.** With an anchor: `forkSession(claudeSessionId,
-   { upToMessageId, dir: cwd })`, then `meta.claudeSessionId = fork.sessionId` and
-   `closeQuery(sessionId)` — the next ordinary `prompt()` resumes the fork through the existing
-   `resume:` line in `buildQueryOptions`, no new query option. With no anchor (rewinding to the
-   session's very first prompt — no prior turn to keep): degrades to the existing
-   `resetClaudeSession(sessionId)`. A fork failure aborts here; nothing below has run yet.
+3. Resolves the **era** the target belongs to — see Crossing a provider switch. For a
+   target that never crosses a `provider-switch` marker this is just `meta`'s own model
+   and pointer, exactly as before.
+4. Scans backwards from `seq`, bounded below by the era's **floor** (the newest switch
+   marker at or before the target, `-1` when none), for the nearest `kind: 'sdk'` event
+   with `data.type === 'assistant'` and a `uuid` — the CLI anchor the SDK's
+   `forkSession`/`resumeSessionAt` documents `upToMessageId` against. Every
+   non-`stream_event` SDK message is already persisted verbatim by `handleWorkerEvent`, so
+   the anchor is already on disk; no new capture needed. The floor stops an anchor being
+   borrowed from a conversation the fork target has never seen.
+5. **Fork before touching Lines' own transcript.** With an anchor and a conversation to
+   fork (the era's own pointer, `meta`'s own pointer when the era matches it):
+   `forkSession(pointer, { upToMessageId, dir: cwd })` (or `codexFork` with an explicit
+   thread id for a codex era), then `restoreEra` sets the model and the fork's new pointer
+   together and `closeQuery(sessionId)` — the next ordinary `prompt()` resumes the fork
+   through the existing `resume:` line in `buildQueryOptions`, no new query option. With no
+   anchor, or an era whose pointer was never recorded: degrades to
+   `resetClaudeSession(sessionId)` followed by `restoreEra` on the era's model alone — the
+   right model, a fresh conversation. A fork failure aborts here; nothing below has run
+   yet.
 5. `store.truncateTranscript(sessionId, seq)`, then `liveState(sessionId).seq = seq` so the next
    `emitEvent` resumes the numbering where the discarded tail began.
 6. **Broadcasts `transcriptTruncated` itself**, from inside `rewindSession` — not from the
@@ -115,6 +131,34 @@ transcript's newest `'started'`/`'retried'` workflow marker:
 - Per-step spend (`stepCostsUsd`/`stepTokens`/`stepDurationsMs`) is **not** rewound — same rule
   as cumulative session spend (see Business rules): the turns really ran.
 
+### Crossing a provider switch
+
+A [cross-provider switch](cross-provider-model-switching.md) replaces the session's live
+conversation and pointer, so a rewind target from before the switch belongs to a
+conversation the session's *current* pointer cannot name. Rewind resolves an **era** for
+the target rather than assuming `meta`'s own model and pointer are always the right ones:
+
+- Scan every `'provider-switch'` marker in the transcript. The first one **after** the
+  target names the era it belongs to: `{ model: marker.from, sessionId: marker.fromSessionId }`.
+  The newest one **at or before** the target only sets the **floor** — it does not change
+  the era, because a target with no switch after it is still inside the conversation
+  running *now*, and the session's own model is authoritative there (reading it off an
+  older marker would undo a plain `setModel` made since).
+- With an era resolved and its `fromSessionId` present: fork that conversation at an
+  anchor bounded by the floor, then `restoreEra` puts the session back on that era's model
+  and the new fork.
+- With an era resolved but no `fromSessionId` (a switch recorded before that field
+  existed): `resetClaudeSession` plus `restoreEra` on the era's model alone — the
+  conversation is unrecoverable, but the session still lands on the *right* model rather
+  than continuing on the wrong one.
+- Crossing eras also clears the context-occupancy readings, the last compaction verdict,
+  and (if the era's provider differs from the session's own) the workflow's
+  `providerSwitched` one-shot flag — all of them describe a conversation being left.
+
+The confirm dialog names this before the click: which model the rewind falls back to, and
+whether that conversation is still forkable or the session will start fresh there — the
+same “still on this machine?” uncertainty the switch itself carries.
+
 ## Dependencies
 
 - `@anthropic-ai/claude-agent-sdk`'s `forkSession(sessionId, { upToMessageId, dir })` — copies a
@@ -135,7 +179,10 @@ transcript's newest `'started'`/`'retried'` workflow marker:
   Delete prompt shape (`RewindPrompt` populated vs. `null`); attachment rehydration with a
   missing file dropped; the rewind sidecar's contents; a rewind listener settling the session
   instead of it being idled; the `transcriptTruncated` broadcast ordered before a listener's
-  emitted events.
+  emitted events; rewinding above a switch restores the abandoned conversation and model at
+  a floor-bounded anchor; a rewind fully inside a later era forks that era's own thread,
+  naming it explicitly; an anchor is never borrowed from across the switch; a switch marker
+  recorded without `fromSessionId` degrades to a fresh conversation on the right model.
 - `server/src/workflows.rewind.test.ts` — `rollbackToTranscript`: park lands on the right step;
   rolling into an earlier step demotes later ones to `pending`; output pruning for rolled-back
   steps; full un-start past every step marker; `advanceOnComplete`/`advancing`/`stepFailure`/
@@ -173,6 +220,11 @@ transcript's newest `'started'`/`'retried'` workflow marker:
   discarded.
 - Copy (of the message's own text) is never gated by `rewindBlock` — reading your own text back
   is not a session-mutating action.
+- Rewinding above a provider switch restores the model and, when the switch recorded its
+  abandoned pointer (`ProviderSwitchData.fromSessionId`), forks and resumes that
+  conversation for real — model and pointer always move together. A switch made before
+  that field existed degrades to the right model with a fresh conversation, never the
+  wrong model with a stale pointer.
 
 ## Architectural rules
 
@@ -206,6 +258,14 @@ transcript's newest `'started'`/`'retried'` workflow marker:
 - `RewindPrompt`'s attachment rehydration reuses `SessionManager.reloadAttachments`, extracted
   out of `lastPromptForRetry` so both paths reload identically rather than duplicating the
   base64-from-disk logic.
+- The era's floor bounds both the Claude-uuid and the codex-turn-id anchor scans
+  identically — an anchor is never resolved by asking "is this the current session's
+  provider" and scanning the whole transcript, because the current provider is not
+  necessarily the era's provider.
+- `restoreEra` is the only place model and resume pointer are set together outside
+  `switchProvider`/`resetClaudeSession`; it exists specifically so a rewind can never
+  leave a session on one provider's model holding the other's pointer — the exact state
+  `setModel` refuses to create in the first place.
 
 ## Related decisions
 
@@ -220,6 +280,8 @@ transcript's newest `'started'`/`'retried'` workflow marker:
 - [workflow-step-lifecycle](workflow-step-lifecycle.md) — `rollbackToTranscript`'s park uses the
   same `waiting-approval` step-lifecycle state and `iterateIfWaiting`/Approve controls as an
   ordinary step park.
+- [cross-provider-model-switching](cross-provider-model-switching.md) — the source of the
+  `'provider-switch'` markers and `fromSessionId` pointer this doc's era resolution reads.
 
 ## On a codex session
 
@@ -232,3 +294,9 @@ Forking answers a *new* thread and the session re-points at it, so codex's own h
 intact on disk even though the Lines transcript is truncated. The gate is provider-neutral: it
 asks for a conversation on either provider, not for a `claudeSessionId`. See
 [openai-codex-sessions](openai-codex-sessions.md).
+
+`forkCodex`'s `threadId` parameter is optional and normally omitted — the worker forks its own
+live binding. It is only supplied for a rewind that crosses back into a codex era the current
+worker holds no binding for (see Crossing a provider switch above); the bridge reads the id off
+the abandoned `provider-switch` marker and writes the fork's result onto the session so the
+next push binds to it exactly as a cold worker would.
