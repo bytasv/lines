@@ -38,6 +38,18 @@ interface BridgeRunFile {
 }
 
 /**
+ * Marks an argv as "codex spawned this file to actually serve MCP", as opposed
+ * to some other process merely importing `linesMcpServerConfig` from it. Path
+ * identity (`argv[1] === this file`) used to be the guard, and broke the moment
+ * a packaged build's bundler folded this file into `bridge.mjs` as a dependency:
+ * `import.meta.url` then resolved to the bridge's own entrypoint, so the bridge
+ * matched its own guard, tried to serve MCP on its own stdio with no run file,
+ * and crash-looped. A sentinel survives any future bundling arrangement because
+ * it says nothing about where this code physically lives.
+ */
+const LINES_MCP_STDIO_FLAG = '--lines-mcp-stdio';
+
+/**
  * `--run-file` and `--user` are passed by whoever wrote the codex config, rather
  * than discovered here: this process must not have to know how Lines lays out its
  * state directory, and a wrong guess would be a silent connection to nothing.
@@ -162,18 +174,30 @@ async function main() {
  *
  * Lives here rather than beside the config writer because the answer depends on
  * how *this* module is being run, which only this module can see: under `tsx`
- * the path is a `.ts` file that node cannot execute alone, and in a packaged
- * build it is already plain JavaScript.
+ * `import.meta.url` is this `.ts` file, which node cannot execute alone. In a
+ * packaged build it is bundled into `bridge.mjs` as a dependency — `import.meta.url`
+ * there resolves to the bridge's own entrypoint, not a standalone script, so the
+ * packaged branch below points instead at `linesMcpStdio.mjs`, built alongside
+ * `bridge.mjs`/`worker.mjs` for exactly this purpose (see desktop/scripts/build.mjs).
  *
  * `process.execPath` rather than `"node"`: the desktop app's node is the Electron
  * binary, and a bare `node` may not be on the PATH codex inherits at all.
  */
 export function linesMcpServerConfig(userId: string): Record<string, unknown> {
-  const script = fileURLToPath(import.meta.url);
-  const args = script.endsWith('.ts') ? ['--import', 'tsx', script] : [script];
+  const here = fileURLToPath(import.meta.url);
+  const args = here.endsWith('.ts')
+    ? ['--import', 'tsx', here]
+    : [path.join(path.dirname(here), 'linesMcpStdio.mjs')];
   return {
     command: process.execPath,
-    args: [...args, '--run-file', runtimeFilePath('bridge'), '--user', userId],
+    args: [
+      ...args,
+      LINES_MCP_STDIO_FLAG,
+      '--run-file',
+      runtimeFilePath('bridge'),
+      '--user',
+      userId,
+    ],
     // ELECTRON_RUN_AS_NODE is how the desktop build's Electron binary agrees to
     // behave as plain node; harmless everywhere else.
     env: { ELECTRON_RUN_AS_NODE: '1' },
@@ -181,11 +205,15 @@ export function linesMcpServerConfig(userId: string): Record<string, unknown> {
 }
 
 /**
- * Only when codex ran this file as a process. `index.ts` imports it for
- * `linesMcpServerConfig` alone, and starting an MCP server on the bridge's own
- * stdio would write protocol frames into its log.
+ * Only when codex spawned this file with the sentinel flag `linesMcpServerConfig`
+ * always passes. `index.ts` imports this module for `linesMcpServerConfig` alone,
+ * and a bundler is free to fold it into the bridge's own entrypoint — deciding by
+ * path identity (`argv[1] === this file`) broke exactly that way once already
+ * (see `LINES_MCP_STDIO_FLAG`), so the flag, not the path, is what starts an MCP
+ * server on stdio. Starting one on the bridge's own stdio would write protocol
+ * frames into its log.
  */
-if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+if (process.argv.includes(LINES_MCP_STDIO_FLAG)) {
   main().catch((err) => {
     console.error('[lines-mcp] failed to start:', err instanceof Error ? err.message : String(err));
     process.exit(1);

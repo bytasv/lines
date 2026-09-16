@@ -2,10 +2,15 @@
 /**
  * Builds everything that goes inside the app bundle.
  *
- * Three artifacts, because the shipped app is three processes:
- *   dist/main.cjs         — the Electron shell (CJS; Electron's main process)
- *   dist/server/bridge.mjs — the bridge, as a single ESM file
- *   dist/server/worker.mjs — the worker, ditto
+ * Four artifacts, because the shipped app is three processes plus one thing a
+ * process spawns:
+ *   dist/main.cjs              — the Electron shell (CJS; Electron's main process)
+ *   dist/server/bridge.mjs      — the bridge, as a single ESM file
+ *   dist/server/worker.mjs      — the worker, ditto
+ *   dist/server/linesMcpStdio.mjs — codex's Lines MCP server, spawned BY the
+ *     bridge (not the shell) as its own process; see linesMcpServerConfig in
+ *     server/src/linesMcpStdio.ts for why this can't just be a codepath inside
+ *     bridge.mjs.
  *
  * ESM for the two server bundles is not a preference: `server` and `shared` are
  * both `"type": "module"` and use `import.meta.dirname`, which is `undefined` in
@@ -165,6 +170,7 @@ await buildShell();
 if (!shellOnly) {
   await buildServer('bridge', 'index.ts');
   await buildServer('worker', 'worker.ts');
+  await buildServer('linesMcpStdio', 'linesMcpStdio.ts');
   writeRuntimeModules();
   writeConfig();
 }
