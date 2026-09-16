@@ -167,7 +167,8 @@ test('periodLabel reads en-GB and names the span, not the anchor', () => {
   assert.equal(periodLabel('2026-09-14', 'month', NOW), 'September 2026');
   // Any day of the week labels the same Monday-to-Sunday span.
   assert.equal(periodLabel('2026-09-17', 'week', NOW), periodLabel('2026-09-14', 'week', NOW));
-  assert.match(periodLabel('2026-09-14', 'week', NOW), /14 Sep.*20 Sep 2026/);
+  // ICU's abbreviated en-GB month varies by Node/runner ('Sep' vs 'Sept').
+  assert.match(periodLabel('2026-09-14', 'week', NOW), /14 Sept?.*20 Sept? 2026/);
 });
 
 test('the period in progress is labelled by its relation to today', () => {

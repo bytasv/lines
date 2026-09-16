@@ -290,8 +290,9 @@ test('a codex turn settles to done with its tokens accumulated', async () => {
   // The resume pointer, persisted the way claudeSessionId is.
   assert.equal(settled.codexThreadId, 'th_1');
   assert.equal(settled.lastTokens, 137);
-  // Codex reports no USD cost; the row exists on tokens alone.
-  assert.equal(settled.totalCostUsd, undefined);
+  // Codex reports no USD cost; estimateSpendUsd fills it from gpt-5.6-terra's
+  // price table instead — (100 input * $2 + (30 + 7 reasoning) output * $12) / 1e6.
+  assert.equal(settled.totalCostUsd, 0.000644);
 });
 
 test('a stopped codex turn settles as stopped, not as a failure', async () => {
