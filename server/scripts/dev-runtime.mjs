@@ -249,6 +249,54 @@ export class Supervisor {
     }
     this.phase = 'running'; this.idleSince = null;
   }
+  /**
+   * Restart both processes on freshly built source, without waiting for idle.
+   *
+   * `reload()` is the automatic path and is right to refuse while a session is
+   * live — a reload kills in-flight turns. But a parked workflow step counts as
+   * active and never settles, so on a real machine the automatic path can be
+   * blocked for days while every edit piles up behind it. This is the deliberate
+   * way through, and it is honest about the cost: turns die.
+   *
+   * Builds first rather than promoting whatever candidate is pending, so "restart"
+   * means "run what is on disk now". Phase is `reloading`, never `starting`, which
+   * is what keeps WorkerRunner.startPair from adopting the bridge's *old*
+   * generation — the trap that makes restarting either process alone a no-op.
+   */
+  async forceReload() {
+    if (this.stopping) throw new Error('Supervisor is stopping');
+    await this.rebuild();
+    const next = this.candidate ?? this.current;
+    if (!next) throw new Error('No generation to start');
+    const previous = this.current;
+    const requireRelay = !!this.children.get('bridge')?.activity?.relayConnected;
+    this.candidate = null;
+    this.phase = 'reloading';
+    this.publish();
+    try {
+      await this.stopPair();
+      await this.startPair(next, requireRelay);
+      this.current = next;
+      writeJson(this.paths.healthy, next);
+      this.error = null;
+    } catch (error) {
+      if (this.stopping) throw error;
+      // Same recovery reload() performs: a candidate that will not start must not
+      // leave the machine with nothing running.
+      this.rejected.add(next.id);
+      this.error = `Rejected ${next.id}: ${error.message}; restoring ${previous.id}`;
+      this.phase = 'restoring';
+      this.publish();
+      await this.stopChild('bridge').catch(() => {});
+      await this.stopChild('worker');
+      await this.startPair(previous);
+      this.current = previous;
+    }
+    this.phase = 'running';
+    this.idleSince = null;
+    this.publish();
+    return this.state();
+  }
   async rebuild() {
     const revision = this.revision;
     try {
@@ -319,6 +367,23 @@ export class Supervisor {
         void this.stop().then(() => res.end('{}'), (error) => {
           res.writeHead(503); res.end(JSON.stringify({ error: error.message }));
         });
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/restart') {
+        // Serialized against itself: two restarts in flight would race stopPair
+        // against startPair and leave the pair half-built.
+        this.restarting = (this.restarting ?? Promise.resolve()).catch(() => {}).then(() => this.forceReload());
+        void this.restarting.then(
+          (state) => {
+            res.setHeader('content-type', 'application/json');
+            // `restarted` is the handshake, not decoration. A supervisor older than
+            // this route answers an unknown URL with its plain state and a 200 —
+            // indistinguishable from success, which is how a restart that never
+            // happened reported as one. The client requires this field.
+            res.end(JSON.stringify({ ...state, restarted: true }));
+          },
+          (error) => { res.writeHead(503); res.end(JSON.stringify({ error: error.message })); },
+        );
         return;
       }
       if (req.method === 'POST' && req.url === '/policy') {
@@ -597,6 +662,44 @@ async function runRoles() {
   unwatch();
 }
 
+/**
+ * Ask the worker supervisor to rebuild and restart both processes now.
+ *
+ * Goes to the supervisor rather than restarting anything itself: it owns both
+ * children (the bridge through its runner's control port), and a restart issued
+ * from outside is what leaves the two on different generations.
+ */
+export async function restartCommand(root) {
+  const control = readJson(pathsFor(root).control);
+  if (!control || !alive(control.pid)) {
+    throw new Error('The backend supervisor is not running — start the worker resource first.');
+  }
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: control.port, path: '/restart', method: 'POST',
+      // Generous: a restart builds a generation, then waits for both processes to
+      // report ready. The supervisor's own startup budget is the real bound.
+      headers: { authorization: `Bearer ${control.token}` }, timeout: 120_000 }, (res) => {
+      let body = ''; res.on('data', (chunk) => { body += chunk; }); res.on('end', () => {
+        try {
+          const value = JSON.parse(body);
+          if (res.statusCode !== 200) throw new Error(value.error ?? `Control HTTP ${res.statusCode}`);
+          if (!value.restarted) {
+            throw new Error(
+              'The running supervisor predates this command and ignored it — nothing was restarted. ' +
+              'Cycle it once by hand (`tilt down` then `tilt up`, or stop and restart the dev terminal); ' +
+              'this command works from then on.',
+            );
+          }
+          resolve(value);
+        } catch (error) { reject(error); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('Restart timed out')));
+    req.end();
+  });
+}
+
 export async function policyCommand(root, action, targets = []) {
   const paths = pathsFor(root);
   const current = readJson(paths.policy, { frozen: [] });
@@ -638,7 +741,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     // Keep an already running tsx-owned Tilt stack intact during migration.
     // This process inspection happens only when Tilt evaluates its file.
     console.log(legacyRuntimeRunning(checkout) ? 'yes' : 'no');
+  } else if (action === 'restart') {
+    restartCommand(checkout).then((state) => log(JSON.stringify(state))).catch((error) => { console.error(error.message); process.exitCode = 1; });
   } else if (['freeze', 'resume', 'set', 'status'].includes(action)) {
     policyCommand(checkout, action, process.argv.slice(3)).then((state) => log(JSON.stringify(state))).catch((error) => { console.error(error.message); process.exitCode = 1; });
-  } else { console.error('Usage: dev-runtime.mjs [start|worker|bridge|shutdown|status|freeze|resume|set] [worker|bridge|all]'); process.exitCode = 1; }
+  } else { console.error('Usage: dev-runtime.mjs [start|worker|bridge|restart|shutdown|status|freeze|resume|set] [worker|bridge|all]'); process.exitCode = 1; }
 }

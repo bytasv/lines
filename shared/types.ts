@@ -170,6 +170,39 @@ export interface ClaudeCliStatus {
   minVersion: string;
 }
 
+export type CodexCliState = 'ok' | 'missing' | 'outdated';
+
+/**
+ * The Codex CLI the host machine runs OpenAI turns with, the mirror of
+ * {@link ClaudeCliStatus} and here for the same reason: the browser has to be
+ * able to say "not installed, here is how" without importing server code.
+ *
+ * `path` carries the same caveat — it names the host's home directory, so the
+ * wire copy in `hello` is built field by field and leaves it out.
+ */
+export interface CodexCliStatus {
+  state: CodexCliState;
+  /** Absolute path to the binary; absent only when `state === 'missing'`, and never sent to a client. */
+  path?: string;
+  /** Parsed `x.y.z`; absent when the binary exists but would not report one. */
+  version?: string;
+  /** Echoed so callers can word their own message without importing the constant. */
+  minVersion: string;
+}
+
+/**
+ * Where to send someone who has no CLI at all, and the one-line install for the
+ * CLI that has one.
+ *
+ * Declared beside the status shapes rather than in the bridge modules that probe
+ * for them: the refusal text the server writes and the install button the
+ * browser renders have to name the same place, and a second copy in `web/` is
+ * how they drift.
+ */
+export const CLAUDE_INSTALL_URL = 'https://docs.claude.com/en/docs/claude-code/setup';
+export const CODEX_INSTALL_URL = 'https://developers.openai.com/codex/cli';
+export const CODEX_INSTALL_COMMAND = 'npm i -g @openai/codex';
+
 /**
  * 'auto' is UI-level: the SDK runs in acceptEdits underneath while the bridge
  * server auto-approves tool calls its guard considers safe and prompts only
@@ -595,6 +628,18 @@ export interface WorkflowState {
   /** Consolidated final output of the last-completed step; consumed as {previous}
    *  by the next fresh-start step. Falls back to lastAssistantText when absent. */
   lastStepOutput?: string;
+  /**
+   * A manual provider switch (see SessionManager.switchProvider) moved this
+   * session's conversation to the other provider mid-run.
+   *
+   * Run-level and one-shot: the next step entry that would cross back starts
+   * fresh instead of parking as a pre-run failure. Without it that step reads as
+   * "changes provider while inheriting the previous step's conversation" — the
+   * contradiction runStep refuses — and the run wedges on an error the user
+   * cannot clear without editing the workflow. Cleared by the next step entry,
+   * whether it crossed or not.
+   */
+  providerSwitched?: true;
   /** Set when the current step parked because it *failed* rather than finishing, so
    *  a one-click Retry knows what to re-run. 'turn' = its turn failed, so Retry
    *  re-sends that prompt as a follow-up; 'pre-run' = the step never got a prompt
@@ -718,6 +763,39 @@ export interface ContextCompactData {
   postTokens?: number;
   ok?: boolean;
   error?: string;
+}
+
+/**
+ * Transcript-event payload for a deliberate provider switch (kind:
+ * 'provider-switch') — the conversation above this marker was dropped and the
+ * model below it was seeded with a summary of it instead.
+ *
+ * `summarized` is false when the summary query produced nothing and the seed
+ * fell back to the last assistant text (or to a bare note). The marker is
+ * written either way: it is the only durable record that the transcript above
+ * the line is invisible to the model below it.
+ */
+export interface ProviderSwitchData {
+  /** Model the session ran on, and the one it moved to. */
+  from: string;
+  to: string;
+  summarized: boolean;
+  /**
+   * The resume pointer the switch abandoned — a `claudeSessionId` or a
+   * `codexThreadId`, whichever `from`'s provider uses.
+   *
+   * Recorded because it is the only thing that cannot be recovered later: the
+   * switch clears both pointers from `SessionMeta`, and without this the
+   * conversation that was live before it becomes unnameable the moment the
+   * switch happens. A rewind to a turn above this marker restores it (see
+   * SessionManager.rewindSession).
+   *
+   * Lives here on the transcript rather than on `SessionMeta` deliberately: it
+   * names a file in *this* machine's CLI store, and `SessionMeta` is synced
+   * last-write-wins between machines. Absent on markers written before this
+   * field existed, and on a switch from a session that had never run.
+   */
+  fromSessionId?: string;
 }
 
 /** Chat-turn spend for one model id. Internal helper queries are not counted. */
@@ -969,6 +1047,8 @@ export interface TranscriptEvent {
    * - 'workflow'  : workflow step transition marker
    * - 'turn-summary': one-line summary of a completed turn's tool activity
    * - 'context-compact': context compaction requested / finished
+   * - 'provider-switch': the conversation was dropped to move the session to the
+   *                 other provider, and the new one seeded with a summary
    * - 'files-changed': paths a completed turn changed on disk
    */
   kind:
@@ -980,6 +1060,7 @@ export interface TranscriptEvent {
     | 'workflow'
     | 'turn-summary'
     | 'context-compact'
+    | 'provider-switch'
     | 'files-changed';
   data: unknown;
 }
@@ -1725,6 +1806,14 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   rewindSession: { needs: 'session', cap: 'interrupt' },
   permissionResponse: { needs: 'session', cap: 'approvePermissions' },
   setModel: { needs: 'session', cap: 'setModel' },
+  // `interrupt`, not `setModel`, for the reason compactContext and rewindSession
+  // sit there: this is destructive to the session's context. It is strictly more
+  // destructive than either — it drops the conversation, changes the model *and*
+  // injects a turn. What this table cannot express is the second half, that the
+  // `setModel` cap is required too (and that a guest whose prompts need approval
+  // must not inject the seed turn); both are the first lines of
+  // SessionManager.switchProvider.
+  switchProvider: { needs: 'session', cap: 'interrupt' },
   // Deliberately the `setModel` cap rather than one of its own: effort is a
   // strictly weaker choice than model, so anyone who may switch the model may say
   // how hard it thinks. A cap here would have to be re-granted across every preset
@@ -1927,6 +2016,16 @@ export type ClientMessage =
   | { type: 'unarchiveSession'; sessionId: string }
   | { type: 'completeSession'; sessionId: string }
   | { type: 'setModel'; sessionId: string; model: string }
+  /**
+   * The deliberate way past `setModel`'s cross-provider refusal: drop the
+   * conversation this session cannot carry across, then run the new model seeded
+   * with a summary of it. Lossy by design — see SessionManager.switchProvider.
+   *
+   * A message of its own rather than a flag on `setModel`, so the two-step
+   * decision stays something only a deliberate caller makes: every other
+   * `setModel` call site (notably WorkflowEngine.runStep) relies on that refusal.
+   */
+  | { type: 'switchProvider'; sessionId: string; model: string }
   /** `null` clears back to the provider's own default. A separate message from
    *  `setModel` because that one carries a cross-provider refusal effort has no
    *  analogue for; it reuses the `setModel` *capability*, since choosing how hard
@@ -2800,6 +2899,9 @@ export type ServerMessage =
        * ClaudeCliStatus.
        */
       claudeCli?: ClaudeCliStatus;
+      /** The other engine's CLI, on the same terms as `claudeCli` above: owner
+       *  only, `path` stripped. Absent from a bridge older than this field. */
+      codexCli?: CodexCliStatus;
       settings?: UserUiSettings | null;
       guardAllowlist?: GuardAllowEntry[];
       guardAllowlistReview?: GuardAllowlistReview | null;
@@ -2941,6 +3043,10 @@ export type ServerMessage =
    *  maps to messages (403/404/413/415); `body` is absent on failure. */
   | { type: 'fileResponse'; reqId: string; status: number; body?: unknown }
   | { type: 'updateStatus'; status: UpdateStatus }
+  /** The machine's CLIs, re-sent when the answer changes — an install taken in
+   *  response to "not found" has to reach the UI without a reconnect. Same
+   *  `path`-stripped copies `hello` carries. */
+  | { type: 'cliStatus'; claudeCli: ClaudeCliStatus; codexCli: CodexCliStatus }
   | { type: 'pong' };
 
 /** Path fragment shared by both plan directories. Cheap hint only — the server's
@@ -3231,6 +3337,81 @@ export function rewindBlock(
   // thread to fork.)
   if (!meta.claudeSessionId && !meta.codexThreadId) {
     return { code: 'no-session', reason: "Send a message first — there's nothing to rewind yet." };
+  }
+  return null;
+}
+
+export type ProviderSwitchBlockCode =
+  | 'step-advancing'
+  | 'advance-pending'
+  | 'queued'
+  /** Raised by the server only — see {@link providerSwitchBlock}. */
+  | 'no-session'
+  /** The target provider's CLI is missing or too old on this machine. */
+  | 'cli-missing'
+  | 'not-connected'
+  | 'denied'
+  | 'switching'
+  /** The live turn was stopped but never settled, so nothing was switched. */
+  | 'turn-running';
+
+/** Why a provider switch can't run — `reason` goes into a tooltip or an error toast. */
+export interface ProviderSwitchBlockInfo {
+  code: ProviderSwitchBlockCode;
+  reason: string;
+}
+
+/**
+ * The single predicate behind the provider-switch gate, in the same shape as
+ * {@link rewindBlock}: the server guard, the composer's disabled model options
+ * and their tooltips all read this. Returns null when the switch is allowed.
+ *
+ * Deliberately says nothing about a *live turn*, unlike rewindBlock: a running
+ * turn is stopped and then switched (see SessionManager.switchProvider), so
+ * refusing here would hide the affordance from the state people most often ask
+ * from. `turn-running` survives as a code, raised by the server alone, for the
+ * one case it cannot handle — a stop the worker never acknowledges.
+ *
+ * Nor does it refuse a workflow session outright any more. What it cannot decide
+ * and the server raises instead: whether the target provider's CLI is installed
+ * on the machine (`cli-missing`), whether that provider has a connected account
+ * (that needs OpenaiAuthManager, which `shared/` may not import —
+ * `not-connected`), whether the caller holds the `setModel` capability
+ * (`denied`), whether a switch is already running (`switching`), and whether the
+ * stop settled (`turn-running`).
+ *
+ * Note this says nothing about *whether* the session has run: a switch before
+ * the first turn is an ordinary `setModel` and never comes through here.
+ */
+export function providerSwitchBlock(
+  meta: Pick<SessionMeta, 'workflow' | 'queued'>,
+): ProviderSwitchBlockInfo | null {
+  // The one workflow state with nothing to interrupt and no way to wait: the
+  // step's output is being consolidated on the bridge and the next step is about
+  // to be prompted. Same refusal contextCompactBlock makes, for the same reason.
+  if (meta.workflow?.advancing) {
+    return {
+      code: 'step-advancing',
+      reason: "This step's output is being wrapped up — try again in a moment.",
+    };
+  }
+  // A force-advance or an approved plan is already waiting on this turn to
+  // settle. Stopping it ourselves would consume that pending advance in a way
+  // nobody asked for, so the switch waits for it instead.
+  if (meta.workflow?.advanceOnComplete) {
+    return {
+      code: 'advance-pending',
+      reason: 'This step is finishing and the workflow is about to move on — try again in a moment.',
+    };
+  }
+  // Those prompts were written against the conversation that is about to be
+  // dropped; replaying them at the new provider with no acknowledgement is worse
+  // than asking for them to be sent or cancelled first.
+  if (meta.queued?.length) {
+    return {
+      code: 'queued',
+      reason: 'Send or cancel the queued messages first — they were written for this conversation.',
+    };
   }
   return null;
 }

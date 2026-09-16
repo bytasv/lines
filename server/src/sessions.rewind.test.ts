@@ -64,6 +64,9 @@ function harness(over: Partial<SessionMeta> = {}, events: TranscriptEvent[] = TR
     push: () => {},
     close: (id: string) => closed.push(id),
     interrupt: () => {},
+    // Reached only when a rewind moves the model — i.e. one that crosses a
+    // provider switch (see restoreEra).
+    setModel: () => {},
   } as unknown as WorkerClient);
   const forks: { sessionId: string; upToMessageId?: string; dir?: string }[] = [];
   sessions.forkSession = async (sessionId, opts) => {
@@ -346,4 +349,125 @@ test('the discarded turns are recoverable from the sidecar', async () => {
     .filter(Boolean)
     .map((l) => (JSON.parse(l) as TranscriptEvent).seq);
   assert.deepEqual(archived, [2, 3, 4]);
+});
+
+// ---------------------------------------------------------------------------
+// Across a provider switch
+// ---------------------------------------------------------------------------
+
+/**
+ * A session that ran on Claude, switched to codex, and ran there. Seq 0 is the
+ * rewind target: a turn from the Claude era, above the switch.
+ */
+const SWITCHED: TranscriptEvent[] = [
+  ev(0, 'user', { text: 'claude era' }),
+  assistant(1, 'uuid-claude', 'answered on claude'),
+  ev(2, 'user', { text: 'claude era, second turn' }),
+  assistant(3, 'uuid-claude-2', 'answered again'),
+  ev(4, 'provider-switch', {
+    from: 'claude-opus-5',
+    to: 'gpt-5.6-terra',
+    summarized: true,
+    fromSessionId: 'cli-claude',
+  }),
+  ev(5, 'user', { text: '## Context from the previous model…' }),
+  assistant(6, 'uuid-codex', 'understood'),
+  ev(7, 'sdk', { type: 'result', subtype: 'success', _codexTurnId: 'turn-codex-1' }),
+  ev(8, 'user', { text: 'codex era' }),
+  assistant(9, 'uuid-codex-2', 'answered on codex'),
+];
+
+test('a rewind above a switch restores the conversation and the model it left', async () => {
+  const h = harness(
+    { model: 'gpt-5.6-terra', claudeSessionId: undefined, codexThreadId: 'th-codex' },
+    SWITCHED,
+  );
+
+  const verdict = await h.sessions.rewindSession('s', 2);
+  assert.equal(verdict.ok, true, verdict.ok === false ? verdict.reason : '');
+
+  // Forked the conversation the switch abandoned, at an anchor from that era —
+  // not the one running now, which has never seen `uuid-claude`.
+  assert.deepEqual(h.forks, [
+    { sessionId: 'cli-claude', upToMessageId: 'uuid-claude', dir: '/tmp/project' },
+  ]);
+  const m = h.sessions.get('s')!;
+  assert.equal(m.model, 'claude-opus-5', 'back on the model that era ran on');
+  assert.equal(m.claudeSessionId, 'cli-2', 'and on the fork of its conversation');
+  assert.equal(m.codexThreadId, undefined, 'off the codex thread entirely');
+});
+
+test('a rewind inside the codex era forks that era, naming its thread', async () => {
+  const h = harness(
+    { model: 'gpt-5.6-terra', claudeSessionId: undefined, codexThreadId: 'th-codex' },
+    SWITCHED,
+  );
+  let forkedAt: { lastTurnId: string; threadId?: string } | null = null;
+  h.sessions.attachWorker({
+    push: () => {},
+    close: () => {},
+    interrupt: () => {},
+    setModel: () => {},
+    codexFork: async (_id: string, lastTurnId: string, threadId?: string) => {
+      forkedAt = { lastTurnId, threadId };
+      return 'th-forked';
+    },
+  } as unknown as WorkerClient);
+
+  const verdict = await h.sessions.rewindSession('s', 8);
+  assert.equal(verdict.ok, true, verdict.ok === false ? verdict.reason : '');
+  assert.deepEqual(forkedAt, { lastTurnId: 'turn-codex-1', threadId: 'th-codex' });
+  assert.equal(h.forks.length, 0, 'the Claude conversation is not touched');
+  const m = h.sessions.get('s')!;
+  assert.equal(m.model, 'gpt-5.6-terra', 'still the era it rewound inside');
+  assert.equal(m.codexThreadId, 'th-forked');
+});
+
+test('an anchor is never borrowed from across the switch', async () => {
+  // Target seq 5 — the hand-off turn, with no codex result settled below it. The
+  // Claude era's `uuid-claude-2` sits right there in the transcript and belongs to
+  // a conversation this fork would not contain.
+  const h = harness(
+    { model: 'gpt-5.6-terra', claudeSessionId: undefined, codexThreadId: 'th-codex' },
+    SWITCHED,
+  );
+  let forked = false;
+  h.sessions.attachWorker({
+    push: () => {},
+    close: () => {},
+    interrupt: () => {},
+    setModel: () => {},
+    codexFork: async () => {
+      forked = true;
+      return 'th-forked';
+    },
+  } as unknown as WorkerClient);
+
+  const verdict = await h.sessions.rewindSession('s', 5);
+  assert.equal(verdict.ok, true, verdict.ok === false ? verdict.reason : '');
+  assert.equal(forked, false, 'nothing in this era to anchor on, so nothing is forked');
+  assert.equal(h.forks.length, 0);
+});
+
+test('a switch recorded without its pointer degrades to a fresh start on the old model', async () => {
+  // Markers written before `fromSessionId` existed: the era is known, the
+  // conversation is not. Starting fresh on the right model beats continuing on
+  // the wrong one.
+  const older = SWITCHED.map((e) =>
+    e.kind === 'provider-switch'
+      ? ev(e.seq, 'provider-switch', { from: 'claude-opus-5', to: 'gpt-5.6-terra', summarized: true })
+      : e,
+  );
+  const h = harness(
+    { model: 'gpt-5.6-terra', claudeSessionId: undefined, codexThreadId: 'th-codex' },
+    older,
+  );
+
+  const verdict = await h.sessions.rewindSession('s', 2);
+  assert.equal(verdict.ok, true, verdict.ok === false ? verdict.reason : '');
+  assert.equal(h.forks.length, 0, 'nothing to fork');
+  const m = h.sessions.get('s')!;
+  assert.equal(m.model, 'claude-opus-5');
+  assert.equal(m.claudeSessionId, undefined);
+  assert.equal(m.codexThreadId, undefined);
 });

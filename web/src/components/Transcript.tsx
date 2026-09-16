@@ -24,12 +24,14 @@ import {
   Stack,
   Text,
   Tooltip,
+  UnstyledButton,
 } from '@mantine/core';
 import { useClipboard, useHover } from '@mantine/hooks';
 import {
   IconArchive,
   IconArrowBackUp,
   IconArrowDown,
+  IconArrowsExchange,
   IconBolt,
   IconCheck,
   IconChevronDown,
@@ -47,10 +49,11 @@ import type {
   Attachment,
   ContextCompactData,
   PermissionRequestData,
+  ProviderSwitchData,
   TranscriptEvent,
   WorkflowMarkerData,
 } from '@lines/shared';
-import { rewindBlock } from '@lines/shared';
+import { hasEstimatedSpend, rewindBlock } from '@lines/shared';
 import { agentLabel, sessionCaps } from '../lib/capabilities';
 import { useStore } from '../store';
 import { send } from '../ws';
@@ -60,12 +63,13 @@ import {
   reconcileItems,
   turnToolStats,
   type AgentTurnItem,
+  type ResultItem,
   type TranscriptItem,
 } from '../lib/transcript';
 import { REVEAL_STEP_EVENT } from '../lib/workflowReveal';
 import { useAttachmentUrl } from '../lib/files';
 import { mentionKindMeta } from '../lib/mentions';
-import { formatTokens, skippableFailedStep } from '../lib/format';
+import { formatDuration, formatSpendUsd, formatTokens, skippableFailedStep } from '../lib/format';
 import { useClaudeLoginNeeded } from '../lib/can';
 import { PromptAuthor } from './PromptAuthor';
 import { Markdown } from './Markdown';
@@ -74,25 +78,22 @@ import { PermissionPrompt } from './PermissionPrompt';
 import { ActivityRow } from './ActivityRow';
 import { ConfirmModal } from './ConfirmModal';
 
+/**
+ * A workflow marker the transcript renders. Only the load-bearing ones do — see
+ * {@link isNoisyWorkflowMarker}, which drops the rest before they reach here, so
+ * this has no branch for `approved` / `retried` / `interrupted` / a clean park.
+ */
 function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
   const label =
     data.event === 'started'
       ? `Step ${data.stepIndex + 1}: ${data.stepName}`
-      : data.event === 'retried'
-        ? `Step ${data.stepIndex + 1}: ${data.stepName} — retry`
-        : data.event === 'waiting-approval'
-          ? data.missingOutputs?.length
-            ? `${data.stepName} — not run: nothing published for ${data.missingOutputs
-                .map((n) => `{outputs.${n}}`)
-                .join(', ')}`
-            : data.failed
-              ? `${data.stepName} — failed, retry or approve to skip`
-              : `${data.stepName} — waiting for your approval`
-          : data.event === 'approved'
-            ? `${data.stepName} — approved`
-            : data.event === 'interrupted'
-              ? `${data.stepName} — stopped and marked completed`
-              : 'Workflow complete';
+      : data.event === 'waiting-approval'
+        ? data.missingOutputs?.length
+          ? `${data.stepName} — not run: nothing published for ${data.missingOutputs
+              .map((n) => `{outputs.${n}}`)
+              .join(', ')}`
+          : `${data.stepName} — failed, retry or approve to skip`
+        : 'Workflow complete';
   return (
     <Divider
       // Anchor for the stepper's click-to-scroll; first 'started' marker is the step's start.
@@ -138,6 +139,57 @@ function ContextCompactMarker({ data, stale }: { data: ContextCompactData; stale
       labelPosition="center"
       color={failed ? 'orange' : 'slate'}
     />
+  );
+}
+
+/**
+ * Provider-switch marker: the conversation above this line was dropped, and the
+ * model below it was seeded with a summary of it.
+ *
+ * The only durable signal that the transcript above is invisible to the model
+ * below, so it renders whether or not the summary worked — a fallback seed says
+ * so rather than disappearing.
+ */
+function ProviderSwitchMarker({ data, handoff }: { data: ProviderSwitchData; handoff?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Stack gap={4}>
+      <Divider
+        label={
+          <Group gap={6}>
+            <IconArrowsExchange size={12} />
+            <Text size="xs">
+              Switched to {data.to} — earlier turns are not in its context
+              {data.summarized ? '' : ' (no summary could be made)'}
+            </Text>
+            {/* The seed prompt is real and was really sent; this is the way to read
+                it without a wall of generated summary sitting in the transcript
+                as though somebody had typed it. */}
+            {handoff && (
+              <UnstyledButton onClick={() => setOpen((v) => !v)}>
+                <Group gap={2}>
+                  {open ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />}
+                  <Text size="xs" c="dimmed">
+                    {open ? 'hide context' : 'context sent'}
+                  </Text>
+                </Group>
+              </UnstyledButton>
+            )}
+          </Group>
+        }
+        labelPosition="center"
+        color={data.summarized ? 'slate' : 'orange'}
+      />
+      {handoff && (
+        <Collapse expanded={open} transitionDuration={150}>
+          {open && (
+            <Paper withBorder radius="sm" p="xs" bg="var(--mantine-color-default-hover)">
+              <Markdown text={handoff} />
+            </Paper>
+          )}
+        </Collapse>
+      )}
+    </Stack>
   );
 }
 
@@ -319,6 +371,9 @@ function UserBubble({
    *  clears Claude's memory of the session outright. Said in the dialog rather
    *  than done silently. */
   const [fullReset, setFullReset] = useState(false);
+  /** The model the session was on before a switch this rewind would undo, or null
+   *  when the rewind stays inside the conversation that is running now. */
+  const [switchedFrom, setSwitchedFrom] = useState<string | null>(null);
   // A primitive (the reason string, or null) rather than the meta object: this
   // selector runs on every store change and every user bubble holds one, so
   // returning anything with a fresh identity would re-render the whole transcript.
@@ -349,15 +404,29 @@ function UserBubble({
 
   const openConfirm = (intent: RewindIntent) => {
     // Read at click time, not subscribed: the transcript changes on every event
-    // and this is needed once, for one line of dialog copy.
+    // and this is needed once, for two lines of dialog copy.
     const events = useStore.getState().transcripts[sessionId] ?? [];
-    setFullReset(
-      !events.some((e) => {
-        if (e.seq >= seq || e.kind !== 'sdk') return false;
-        const d = e.data as { type?: string; uuid?: string } | null;
-        return d?.type === 'assistant' && !!d.uuid;
-      }),
-    );
+    // The first provider switch *after* this message, if any: rewinding above it
+    // undoes the switch, so the session goes back to the model it was on then.
+    // Mirrors the era the server resolves in rewindSession.
+    const crossed = events.find((e) => e.seq > seq && e.kind === 'provider-switch');
+    setSwitchedFrom(crossed ? (crossed.data as ProviderSwitchData).from : null);
+    // Anchor search, bounded below by the switch that opened this message's era —
+    // an anchor from an older conversation is one the fork would not contain.
+    // Same floor the server applies.
+    let anchored = false;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.seq >= seq) continue;
+      if (e.kind === 'provider-switch') break;
+      if (e.kind !== 'sdk') continue;
+      const d = e.data as { type?: string; uuid?: string } | null;
+      if (d?.type === 'assistant' && d.uuid) {
+        anchored = true;
+        break;
+      }
+    }
+    setFullReset(!anchored);
     setConfirming(intent);
   };
 
@@ -372,6 +441,10 @@ function UserBubble({
       : '') +
     (fullReset
       ? ` There is no earlier reply to go back to, so ${agent}'s memory of this session is cleared completely.`
+      : '') +
+    (switchedFrom
+      ? ` This is before a provider switch, so the session goes back to ${switchedFrom} and picks up the ` +
+        'conversation it had then — or starts fresh there, if that conversation is no longer on this machine.'
       : '');
 
   /** Icon-only, so the tooltip carries the whole explanation — and it has to say
@@ -398,7 +471,10 @@ function UserBubble({
   );
 
   return (
-    <Stack ref={ref} gap={6} align="flex-end">
+    // mt on top of the list's own gap: a prompt reads as the start of the next
+    // exchange, so it needs more air above it than the rows inside one do. Only
+    // above — the hover action row below the bubble already supplies the space there.
+    <Stack ref={ref} gap={6} align="flex-end" mt="sm">
       {/* width: 100% is load-bearing: the outer Stack's align="flex-end" would
           otherwise shrink this row to fit, and the bubble's maxWidth: 80% below
           would resolve against the text's own width instead of the column. */}
@@ -614,6 +690,27 @@ function InterjectionRow({ item }: { item: Extract<TranscriptItem, { kind: 'inte
 }
 
 /**
+ * What a successful turn cost, where no turn card carries it: a text-only turn at
+ * Compact level, and every turn at Grouped/Full. Trailing and dimmed rather than a
+ * centered row of its own — the figure is worth having, not worth announcing.
+ */
+function ResultMeta({ item, sessionId }: { item: ResultItem; sessionId: string }) {
+  // A boolean selector, so this row stays out of unrelated store updates and only
+  // re-renders when the estimate flag itself flips.
+  const estimated = useStore((s) => hasEstimatedSpend(s.sessions[sessionId]?.costByModel));
+  const parts = [
+    item.costUsd != null ? formatSpendUsd(item.costUsd, estimated, 3) : null,
+    item.durationMs != null ? formatDuration(item.durationMs) : null,
+  ].filter(Boolean);
+  if (parts.length === 0) return null;
+  return (
+    <Text size="xs" c="dimmed" ta="right">
+      {parts.join(' · ')}
+    </Text>
+  );
+}
+
+/**
  * One transcript row. Memoized: {@link reconcileItems} hands unchanged items back
  * across rebuilds, so with stable props an untouched row skips reconciliation
  * entirely — which is the whole point of the structural sharing upstream.
@@ -627,6 +724,7 @@ const Item = memo(function Item({
   activeGroupKey,
   activeTurnKey,
   liveCompactKey,
+  inTurn,
 }: {
   item: TranscriptItem;
   sessionId: string;
@@ -643,6 +741,9 @@ const Item = memo(function Item({
   /** Key of the one compaction marker still entitled to spin. Every other open
    *  marker belongs to a compaction whose turn is gone. */
   liveCompactKey?: string | null;
+  /** This row is a child of an `agent-turn` card (Compact level). A successful
+   *  result renders nothing there — the turn header already carries its figures. */
+  inTurn?: boolean;
 }) {
   const showRetry = item.key === retryKey;
   const isActiveGroup = item.key === activeGroupKey;
@@ -710,12 +811,21 @@ const Item = memo(function Item({
         </Box>
       );
     case 'system-init':
+      // A later init only reaches here when the model actually moved, and "session
+      // started" would be a lie about it.
       return (
         <Text size="xs" c="dimmed" ta="center">
-          session started · {item.model}
+          {item.changed ? `model set to ${item.model}` : `session started · ${item.model}`}
         </Text>
       );
-    case 'result':
+    case 'result': {
+      // A turn that ended badly (or is being re-sent) is news and keeps its row —
+      // it is also the only mount point for the Retry actions. A successful one is
+      // not: inside a turn card the header chips already say what it cost, and at
+      // top level it reduces to a quiet trailing figure.
+      if (!item.isError && !item.stopped && !item.recovering) {
+        return inTurn ? null : <ResultMeta item={item} sessionId={sessionId} />;
+      }
       return (
         <Stack gap={2} align="center">
           <Group gap="xs" justify="center">
@@ -724,13 +834,7 @@ const Item = memo(function Item({
                   Retry drops out on its own because `isError` is false. A recovering
                   one reads neutrally for the same reason — the turn is still going,
                   the bridge is just sending it again. */}
-              {item.recovering
-                ? 'retrying…'
-                : item.stopped
-                  ? 'turn stopped'
-                  : item.isError
-                    ? 'turn failed'
-                    : 'turn done'}
+              {item.recovering ? 'retrying…' : item.stopped ? 'turn stopped' : 'turn failed'}
               {item.costUsd != null ? ` · $${item.costUsd.toFixed(4)}` : ''}
               {item.durationMs != null ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''}
             </Text>
@@ -751,6 +855,7 @@ const Item = memo(function Item({
           )}
         </Stack>
       );
+    }
     case 'permission':
       // Auto-allowed calls are filtered out upstream; only real prompts reach here.
       return <PermissionPrompt sessionId={sessionId} data={item.data} resolution={item.resolution} />;
@@ -763,6 +868,8 @@ const Item = memo(function Item({
           stale={item.data.phase === 'requested' && item.key !== liveCompactKey}
         />
       );
+    case 'provider-switch':
+      return <ProviderSwitchMarker data={item.data} handoff={item.handoff} />;
     case 'task':
       // One dimmed row in the same register as session-init, and only for an orphan —
       // a task whose launching tool card is known renders as state on that card
@@ -800,6 +907,25 @@ function isRedundant(item: { data: PermissionRequestData; resolution?: string })
   return item.data.toolName === 'AskUserQuestion' && item.resolution === 'allow';
 }
 
+/**
+ * A workflow marker that says nothing the live surfaces don't: the stepper above
+ * the transcript and the approve card already carry a clean park, an approval, a
+ * retry and a force-advance, and one step used to cost up to three dividers.
+ *
+ * What survives is what scrollback can't reconstruct: where a step began
+ * (`started`), a park the user has to act on because the step *failed* or
+ * published nothing, and the end of the workflow.
+ *
+ * Filtered out here rather than rendered as null so the tail window budget and
+ * the "Show earlier messages" count stay honest, and after buildTranscript so the
+ * group/text/plan resets a 'workflow' event performs during the build survive.
+ */
+function isNoisyWorkflowMarker(data: WorkflowMarkerData): boolean {
+  if (data.event === 'started' || data.event === 'workflow-done') return false;
+  if (data.event !== 'waiting-approval') return true;
+  return !data.failed && !data.missingOutputs?.length;
+}
+
 // Sticky per-turn override (Compact level), keyed `${sessionId}:${turn.key}`. Module scope
 // so it survives Transcript remount and rebuilds; `t*` keys never collide with `g*` groups.
 const turnOverrides = new Map<string, boolean>();
@@ -830,6 +956,8 @@ const AgentTurn = memo(function AgentTurn({
   };
 
   const turnSummariesEnabled = useStore((s) => s.turnSummariesEnabled);
+  // A boolean selector, so a memoized turn card only re-renders when the flag flips.
+  const estimated = useStore((s) => hasEstimatedSpend(s.sessions[sessionId]?.costByModel));
   // Walks every tool call in the turn (and diffs the edits) — recomputing it on
   // an unrelated re-render is pure waste; `turn.items` is rebuilt only when the
   // transcript itself changes.
@@ -882,9 +1010,16 @@ const AgentTurn = memo(function AgentTurn({
               </Text>
             </Text>
           )}
+          {/* What the turn cost, where the result row used to say it — the success
+              row renders nothing inside the card now. */}
+          {result?.costUsd != null && (
+            <Text size="xs" c="dimmed">
+              {formatSpendUsd(result.costUsd, estimated, 3)}
+            </Text>
+          )}
           {result?.durationMs != null && (
             <Text size="xs" c="dimmed">
-              {(result.durationMs / 1000).toFixed(1)}s
+              {formatDuration(result.durationMs)}
             </Text>
           )}
           {active && <Loader size={12} />}
@@ -905,6 +1040,7 @@ const AgentTurn = memo(function AgentTurn({
                 renderNested={renderNested}
                 retryKey={retryKey}
                 activeGroupKey={activeGroupKey}
+                inTurn
               />
             ))}
           </Stack>
@@ -957,9 +1093,15 @@ export function Transcript({
   // Flat item list. Full level ('full') leaves tools ungrouped (1-tool groups render bare);
   // otherwise consecutive tools fold into tool-groups. Auto-allowed permission one-liners
   // are redundant (their tool shows in the group card) so drop them; real prompts stay.
+  // Workflow markers the stepper and the approve card already carry are dropped the
+  // same way — see isNoisyWorkflowMarker.
   const { built, live } = useMemo(() => {
     const { items, live } = buildTranscript(events, compactionLevel !== 'full');
-    const kept = items.filter((it) => !(it.kind === 'permission' && isRedundant(it)));
+    const kept = items.filter(
+      (it) =>
+        !(it.kind === 'permission' && isRedundant(it)) &&
+        !(it.kind === 'workflow' && isNoisyWorkflowMarker(it.data)),
+    );
     builtRef.current = reconcileItems(builtRef.current, kept);
     return { built: builtRef.current, live };
   }, [events, compactionLevel]);

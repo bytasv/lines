@@ -5,6 +5,7 @@ import type {
   FileSnapshotData,
   PermissionRequestData,
   PromptMention,
+  ProviderSwitchData,
   TranscriptEvent,
   TurnSummaryData,
   WorkflowMarkerData,
@@ -115,12 +116,33 @@ export type TranscriptItem =
   | ToolGroupItem
   | AgentTurnItem
   | { kind: 'streaming'; key: string; text: string }
-  | { kind: 'system-init'; key: string; model: string }
+  /** Only pushed when the model differs from the previous init (see buildTranscript):
+   *  the CLI restarts per turn, so an undeduped row would repeat every turn.
+   *  `changed` marks a later one — a mid-session model switch, not a session start. */
+  | { kind: 'system-init'; key: string; model: string; changed?: boolean }
   | ResultItem
   | { kind: 'permission'; key: string; data: PermissionRequestData; resolution?: 'allow' | 'deny' | 'expired' }
   | { kind: 'workflow'; key: string; data: WorkflowMarkerData }
   | ContextCompactItem
+  | ProviderSwitchItem
   | TaskItem;
+
+/**
+ * One provider switch, with the hand-off prompt it seeded folded in.
+ *
+ * The seed really is a user turn on the wire — it is what the new model was
+ * asked — but rendering it as one put a wall of generated summary in the middle
+ * of the transcript, above the reply, as if the person had typed it. So the row
+ * is the marker, and the text is behind a disclosure on it.
+ */
+export interface ProviderSwitchItem {
+  kind: 'provider-switch';
+  key: string;
+  data: ProviderSwitchData;
+  /** The seed prompt, when it has arrived. Absent for the moment between the
+   *  marker and the prompt, and on a switch whose seed never landed. */
+  handoff?: string;
+}
 
 /**
  * One background task (a backgrounded subagent or Bash command). `task_started`
@@ -282,6 +304,12 @@ export function buildTranscript(
   let sessionPlanWrite: ToolBlock | null = null;
   /** Compaction whose 'done' hasn't landed yet, so it can be upgraded in place. */
   let openCompact: ContextCompactItem | null = null;
+  /** A provider switch whose seed prompt has not arrived yet (see the case below). */
+  let openSwitch: ProviderSwitchItem | null = null;
+  /** The model the last `system`/`init` reported. The CLI process restarts for every
+   *  turn (resumed by session id) and emits a fresh init each time, so an undeduped
+   *  row says "session started" once per turn. Only a model change is news. */
+  let lastInitModel: string | null = null;
   /** Unresolved background tasks by task_id — a map, not a single slot like
    *  openCompact, because tasks can overlap. The value is the launching tool card
    *  whenever the task named one (the common case), and a standalone `TaskItem`
@@ -331,6 +359,12 @@ export function buildTranscript(
     }
     switch (event.kind) {
       case 'user': {
+        if (openSwitch) {
+          // Folded into the marker above instead of becoming a bubble of its own.
+          openSwitch.handoff = (event.data as { text?: string }).text ?? '';
+          openSwitch = null;
+          break;
+        }
         main.openGroup = null;
         main.lastText = '';
         sinks.clear();
@@ -436,17 +470,45 @@ export function buildTranscript(
         items.push(item);
         break;
       }
+      case 'provider-switch': {
+        // The same four resets a 'workflow' marker does: everything above this
+        // line belongs to a conversation the model below it cannot see, so no
+        // group, text or plan write may stitch across it.
+        main.openGroup = null;
+        main.lastText = '';
+        sinks.clear();
+        lastPlanWrite = null;
+        const item: ProviderSwitchItem = {
+          kind: 'provider-switch',
+          key: `ps${event.seq}`,
+          data: event.data as ProviderSwitchData,
+        };
+        // The next 'user' event is this switch's seed, and belongs to the marker
+        // rather than to the conversation — the same span the server strips from
+        // its turn scans (withoutProviderSwitchSpans).
+        openSwitch = item;
+        items.push(item);
+        break;
+      }
       case 'sdk': {
         const msg = event.data as Record<string, unknown> & { type: string };
         switch (msg.type) {
           case 'system': {
             const subtype = (msg as { subtype?: string }).subtype;
             if (subtype === 'init') {
-              items.push({
-                kind: 'system-init',
-                key: `s${event.seq}`,
-                model: String((msg as { model?: string }).model ?? ''),
-              });
+              const model = String((msg as { model?: string }).model ?? '');
+              // The first init opens the session; a later one is only worth a row
+              // when the model actually moved (a same-provider setModel — a
+              // cross-provider switch has its own marker).
+              if (model !== lastInitModel) {
+                items.push({
+                  kind: 'system-init',
+                  key: `s${event.seq}`,
+                  model,
+                  ...(lastInitModel !== null ? { changed: true } : {}),
+                });
+              }
+              lastInitModel = model;
               break;
             }
             // Ambient/housekeeping tasks are hidden from the inline transcript on
@@ -815,8 +877,10 @@ function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
     }
     case 'streaming':
       return (old as typeof next).text === next.text ? old : next;
-    case 'system-init':
-      return (old as typeof next).model === next.model ? old : next;
+    case 'system-init': {
+      const o = old as typeof next;
+      return o.model === next.model && o.changed === next.changed ? o : next;
+    }
     case 'result': {
       const o = old as ResultItem;
       return o.costUsd === next.costUsd &&
@@ -837,6 +901,10 @@ function reuseItem(old: TranscriptItem, next: TranscriptItem): TranscriptItem {
       return (old as typeof next).data === next.data ? old : next;
     case 'context-compact':
       return (old as ContextCompactItem).data === next.data ? old : next;
+    case 'provider-switch': {
+      const o = old as ProviderSwitchItem;
+      return o.data === next.data && o.handoff === next.handoff ? o : next;
+    }
     case 'task': {
       const o = old as TaskItem;
       return o.description === next.description &&
@@ -946,6 +1014,7 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
       it.kind === 'system-init' ||
       it.kind === 'workflow' ||
       it.kind === 'context-compact' ||
+      it.kind === 'provider-switch' ||
       (it.kind === 'permission' && it.data.toolName === 'ExitPlanMode') ||
       // An MCP authorization request is the same kind of thing: the turn cannot
       // continue until the user acts on it, so it must not fold away.

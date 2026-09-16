@@ -474,9 +474,9 @@ export class WorkerClient {
    * including that turn. Answers the new thread id, or null when the worker could
    * not do it — the caller turns that into a refusal rather than a broken session.
    */
-  async codexFork(sessionId: string, lastTurnId: string): Promise<string | null> {
+  async codexFork(sessionId: string, lastTurnId: string, threadId?: string): Promise<string | null> {
     try {
-      const id = await this.ask(sessionId, 'codexFork', { lastTurnId });
+      const id = await this.ask(sessionId, 'codexFork', { lastTurnId, ...(threadId ? { threadId } : {}) });
       return typeof id === 'string' && id ? id : null;
     } catch {
       return null;

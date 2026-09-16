@@ -522,18 +522,35 @@ export async function codexMcpStatus(): Promise<unknown[] | null> {
   }
 }
 
-export async function forkCodex(sessionId: string, lastTurnId: string): Promise<string | null> {
+/**
+ * Fork a codex thread at `lastTurnId`, keeping everything up to and including it.
+ *
+ * `threadId` names the thread to fork when it is not the session's live one — a
+ * rewind to a turn above a provider switch forks the thread that switch
+ * abandoned, which this worker has no binding for. The bridge holds that id (on
+ * the `provider-switch` transcript event) and writes the fork back onto the
+ * session, so the next push binds to it through `options.threadId` exactly as a
+ * cold worker does.
+ */
+export async function forkCodex(
+  sessionId: string,
+  lastTurnId: string,
+  threadId?: string,
+): Promise<string | null> {
   const state = codexSessions.get(sessionId);
-  if (!state?.threadId || !server) return null;
+  const source = threadId || state?.threadId;
+  if (!source || !server) return null;
   try {
     const forked = (await server.request('thread/fork', {
-      threadId: state.threadId,
+      threadId: source,
       lastTurnId,
     })) as { thread?: { id?: unknown } };
     const id = forked?.thread?.id;
     if (typeof id !== 'string' || !id) return null;
-    threadOwners.delete(state.threadId);
-    state.threadId = id;
+    // Drop the routing entry for whichever thread this replaces — the live one
+    // when there is a binding, otherwise the one we were handed.
+    threadOwners.delete(state?.threadId ?? source);
+    if (state) state.threadId = id;
     threadOwners.set(id, sessionId);
     return id;
   } catch (err) {

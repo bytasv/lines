@@ -1,7 +1,7 @@
 # Usage and cost
 
 Covers: `usage-indicator`, `usage-by-model`, `usage-history`, `session-sidebar-usage`,
-`workflow-step-cost`.
+`workflow-step-cost`, `transcript-turn-cost`.
 
 ## Purpose
 
@@ -17,6 +17,10 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   list, so users can see at a glance which sessions are expensive or slow without opening them.
 - **Per-workflow-step** — the same three numbers in the workflow stepper, so users can see which
   step of a running workflow is expensive or slow without opening the transcript.
+- **Per-turn (transcript)** — cost + duration for one agent turn, rendered as a chip pair on
+  the turn's Compact-level header card, or a small right-aligned meta line when there is no
+  card (a text-only turn, or Full/Grouped level) — see
+  [transcript-rendering](transcript-rendering.md#noise-reduction).
 - **Usage history** — a day-resolution spend ledger, browsable by day/week/month/year from the
   same hover card, so "what did I spend this month?" has an answer beyond the all-time rollup.
 - **Estimated spend** — a provider whose capability table says `cost: false` (OpenAI/codex) never
@@ -82,6 +86,10 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   `web/src/components/Composer.tsx` — the other per-session cost readouts (last-turn cost, the
   context-ring hover card's session total, the composer's running total), all routed through
   `formatSpendUsd`
+- `web/src/components/Transcript.tsx` — `AgentTurn`'s cost/duration chip pair
+  (`turnToolStats(turn.items).result`), and `ResultMeta`'s right-aligned meta line for a turn
+  with no header card, both via `formatSpendUsd`/`formatDuration` and a boolean
+  `hasEstimatedSpend(session.costByModel)` store selector
 - `web/src/lib/format.ts` — `formatDuration`, `formatSpendUsd`
 
 ## Symbols
@@ -339,7 +347,8 @@ session-level `hasEstimatedSpend` reading.
   was free" rather than "we cannot say". The gate is the provider's capability, not whether a
   particular result happens to be missing a cost — a Claude turn with no cost stays uncosted.
 - Every figure derived from an estimate — the usage-chip section total, a sidebar row, the
-  composer total, the context-ring hover card, a workflow step's cost — renders with a `~` prefix
+  composer total, the context-ring hover card, a workflow step's cost, a transcript turn's
+  chip/meta line — renders with a `~` prefix
   (`formatSpendUsd`) rather than a dimmed style or a tooltip-only cue, and the usage card spells
   out the caveat once at the section level: estimated from token counts at API list prices, not
   what a flat-rate plan was actually billed.
@@ -489,6 +498,10 @@ session-level `hasEstimatedSpend` reading.
   started): using the spend-by-model table's numbers to justify subagent-only cheaper-model
   routing.
 - [turn-recovery](turn-recovery.md) — the auth path that also discovers a dead OAuth session.
+- [transcript-rendering](transcript-rendering.md) — the turn-header chip / result meta line,
+  the newest consumer of `formatSpendUsd`/`formatDuration`/`hasEstimatedSpend`; it also uses
+  3-digit precision (matching the composer's running total), which reads calmer than the
+  4-digit "last turn" figure `SessionView` shows for the same number.
 
 ## Two providers
 

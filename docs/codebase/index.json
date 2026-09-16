@@ -1073,7 +1073,8 @@
         "web/src/lib/agents.ts",
         "web/src/components/TaskCall.tsx",
         "web/src/components/ActivityRow.tsx",
-        "web/src/lib/workflowReveal.ts"
+        "web/src/lib/workflowReveal.ts",
+        "web/src/lib/format.ts"
       ],
       "symbols": [
         "Markdown",
@@ -1135,7 +1136,10 @@
         "re-picking an already-answered question does not move the view if the next question is also already answered (nothing to advance to); it still advances when the revised question's successor is unanswered",
         "advancing to a new question smooth-scrolls that question's header to the top of the transcript (prefers-reduced-motion respected) rather than only revealing the newly focused option; moving within one question stays an instant nearest-scroll",
         "the focused option card draws a visible outline from tracked focus state, not the browser's default :focus-visible ring, since a mouse click can also move focus (advancing) and that move must be visible",
-        "\"Other…\" never advances on selection (its text input autofocuses instead); a bare Enter inside that input advances once non-empty, and arrow keys keep native caret behaviour there"
+        "\"Other…\" never advances on selection (its text input autofocuses instead); a bare Enter inside that input advances once non-empty, and arrow keys keep native caret behaviour there",
+        "a system/init row only renders when the model actually differs from the previous init the transcript saw, not once per turn (the CLI process restarts every turn); the first init in a transcript always renders (\"session started · model\"), a later one only on a genuine model change and reads \"model set to model\" instead — a cross-provider switch is a separate ProviderSwitchItem marker and is unaffected",
+        "a successful turn's cost and duration render as chips on the turn's header (Compact level) rather than their own centered row; a turn with no header card (text-only, or Full/Grouped level) shows them as a small right-aligned dimmed meta line instead — a failed, stopped, or recovering turn keeps its centered row, error text, and Retry affordance unchanged",
+        "only three workflow-marker events render in the transcript: started, a failure park (waiting-approval with failed or missingOutputs), and workflow-done; a clean park, an approve, a retry, and an interrupt leave no transcript trace since the stepper and the approve card already show that state live, and the emitted/stored event set is unchanged"
       ],
       "architecturalRules": [
         "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
@@ -1166,7 +1170,9 @@
         "transcript-performance",
         "workflow-step-lifecycle",
         "background-tasks",
-        "turn-interjection"
+        "turn-interjection",
+        "turn-recovery",
+        "usage-and-cost"
       ]
     },
     {

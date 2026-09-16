@@ -30,6 +30,8 @@ import type {
   PlanComment,
   PromptAttachment,
   PromptMention,
+  ProviderSwitchBlockInfo,
+  ProviderSwitchData,
   ReasoningEffort,
   ResultSpendPayload,
   RewindBlockInfo,
@@ -60,6 +62,8 @@ import {
   normalizeCodexNotification,
   planCommentsBody,
   providerForModel,
+  providerSwitchBlock,
+  providerSwitchNeedsFreshStart,
   resolveModelId,
   resultErrorText,
   resultSpend,
@@ -368,6 +372,51 @@ export function withoutCompactSpans(events: TranscriptEvent[]): TranscriptEvent[
     }
     if (dropping && event.kind === 'user') dropping = false; // the next turn closes an orphan span
     if (!dropping) out.push(event);
+  }
+  return out;
+}
+
+/**
+ * A provider switch's hand-off turn, removed from a transcript slice.
+ *
+ * The same problem `withoutCompactSpans` solves, one layer up: the seed prompt is
+ * bookkeeping, not conversation, and its answer is the new model acknowledging a
+ * summary. Left in, a switch made during a workflow step registers as one more
+ * "attempt" at that step, and the acknowledgement — rather than the step's real
+ * deliverable — becomes its consolidated output and the `{previous}` hand-off to
+ * the next step.
+ *
+ * A span runs from the `provider-switch` marker through the end of the turn its
+ * seed opened: the marker, the `user` event immediately after it, and everything
+ * up to the next `user` or `workflow` event. Bounded that way rather than by the
+ * end of the array so that a crash between the marker and the seed cannot swallow
+ * the rest of the transcript.
+ *
+ * Deliberately NOT applied to the switch's own summary scan: that one wants
+ * everything the current model can actually see, hand-off turns included.
+ */
+export function withoutProviderSwitchSpans(events: TranscriptEvent[]): TranscriptEvent[] {
+  const out: TranscriptEvent[] = [];
+  /** null = not in a span; 'seed' = the span's own user event is still to come. */
+  let span: 'seed' | 'turn' | null = null;
+  for (const event of events) {
+    if (event.kind === 'provider-switch') {
+      // The marker itself is display-only; scans never want it either.
+      span = 'seed';
+      continue;
+    }
+    if (span === 'seed') {
+      // Only a `user` event opens the seed turn. Anything else means the seed
+      // never happened (a crash between the two), so the span closes unused.
+      if (event.kind === 'user') {
+        span = 'turn';
+        continue;
+      }
+      span = null;
+    } else if (span === 'turn' && (event.kind === 'user' || event.kind === 'workflow')) {
+      span = null; // the next real turn — or the next step — ends the hand-off
+    }
+    if (!span) out.push(event);
   }
   return out;
 }
@@ -1117,6 +1166,45 @@ export type TurnCompleteListener = (
   failed: boolean,
 ) => void;
 
+/**
+ * Caps on the transcript fed to a provider switch's hand-off summary.
+ *
+ * consolidateQuery caps the same way, but it summarizes a single step and can
+ * afford to be loose. A switch summarizes a whole long-lived session, which is
+ * exactly the shape that would blow the helper's own context — and exactly the
+ * case where the summary matters most. So the total is bounded too, and the
+ * turns kept are the most recent ones, with the elision said out loud.
+ */
+const HANDOFF_USER_MAX = 2_000;
+const HANDOFF_OUTPUT_MAX = 4_000;
+const HANDOFF_TOTAL_MAX = 60_000;
+/** Ceiling on the summary itself. The prompt asks for well under this; the cap is
+ *  what stops an ignored instruction being sent as a turn. */
+const HANDOFF_SUMMARY_MAX = 4_000;
+
+/** Seed text when neither the summary nor the last assistant text produced one.
+ *  The switch still goes through — a missing summary is never a failed switch. */
+const NO_HANDOFF_SUMMARY =
+  'No summary of the previous conversation could be produced. Ask the user for whatever ' +
+  'context you need before continuing.';
+
+/**
+ * The seed prompt a switched session starts from. Mirrors the auto-prepend a
+ * crossing workflow step uses (`## Context from the previous step` + a `---`
+ * separator), with headings that name a provider switch instead of a step.
+ */
+function handoffPrompt(fromModel: string, toModel: string, summary: string): string {
+  return (
+    `## Context from the previous model\n\n` +
+    `This session was running on \`${fromModel}\` and has been switched to \`${toModel}\`. ` +
+    'The earlier turns are still in the transcript, but they are **not** in your context — ' +
+    'this summary is all you have of them, and it is lossy. Ask rather than guess when ' +
+    `something it does not cover matters.\n\n${summary}\n\n---\n\n` +
+    'Acknowledge briefly what you understand the state of this work to be, then wait for ' +
+    'the next instruction.'
+  );
+}
+
 export class SessionManager {
   private sessions = new Map<string, SessionMeta>();
   /**
@@ -1136,6 +1224,13 @@ export class SessionManager {
   /** Sessions with a rewind in flight. Claimed before the fork's await, so two
    *  rapid requests cannot both pass the gate (see rewindSession). */
   private rewinding = new Set<string>();
+  /**
+   * Sessions with a cross-provider switch in flight. Claimed before the summary
+   * query's await for the same reason `rewinding` is, and with one more: the
+   * session's status stays idle for the length of that query, so without this a
+   * prompt sent in the meantime would race the conversation being dropped.
+   */
+  private switchingProvider = new Set<string>();
   /**
    * Sessions whose auto-name got nothing out of the helper and are owed another
    * attempt on their next prompt (see maybeAutoName).
@@ -1175,6 +1270,12 @@ export class SessionManager {
   /** How long consolidateStepOutput waits on its query before falling back to the
    *  last assistant text. A field so tests can shrink it. */
   consolidateTimeoutMs = 60_000;
+  /** The same bound for a provider switch's hand-off summary (see switchProvider).
+   *  A field for the same reason: so a test can shrink it. */
+  switchSummaryTimeoutMs = 60_000;
+  /** How long a provider switch waits for the turn it stopped to settle before
+   *  refusing. A field so a test can shrink it (see awaitInterruptSettled). */
+  interruptSettleMs = 10_000;
   /** The SDK's session fork, used by rewindSession. A field so a test can stand in
    *  for it without a real CLI session on disk. */
   forkSession: typeof forkSession = forkSession;
@@ -1255,7 +1356,7 @@ export class SessionManager {
     }
     for (const id of this.authHolds.keys()) this.heldForAuth(id);
     if (this.authHolds.size || this.interrupting.size || this.compacting.size || this.rewinding.size ||
-        this.contextFetches.size) blockers.push('session operations');
+        this.switchingProvider.size || this.contextFetches.size) blockers.push('session operations');
     return blockers;
   }
 
@@ -2602,6 +2703,11 @@ export class SessionManager {
   }
 
   private isBusy(meta: SessionMeta) {
+    // A provider switch holds the session between the summary query and the seed
+    // prompt with the status still idle, so it has to be named here: a prompt
+    // sent in that window would open a turn on the conversation about to be
+    // dropped, and would then be queued behind the seed with no author.
+    if (this.switchingProvider.has(meta.id)) return true;
     return isSessionActive(meta.status);
   }
 
@@ -2693,6 +2799,10 @@ export class SessionManager {
   private maybeFlush(sessionId: string) {
     const meta = this.sessions.get(sessionId);
     if (!meta?.queued?.length || meta.queuePaused) return;
+    // The one busy state the status does not show: a provider switch is mid-flight
+    // and the conversation under this prompt is about to be dropped. The seed
+    // turn's own settle calls back here, so the item only waits.
+    if (this.switchingProvider.has(sessionId)) return;
     if (meta.status !== 'idle' && meta.status !== 'done' && meta.status !== 'error') return;
 
     const item = meta.queued.shift()!;
@@ -2807,6 +2917,7 @@ export class SessionManager {
     if (this.compacting.has(sessionId)) return false;
     if (this.interrupting.has(sessionId)) return false; // a Stop is in flight
     if (this.rewinding.has(sessionId)) return false; // the transcript is moving under us
+    if (this.switchingProvider.has(sessionId)) return false; // the conversation is being dropped
     if (meta.workflow?.advancing) return false; // mid-consolidateStepOutput; the turn is over
     // The engine has to be able to take a message mid-turn at all.
     if (!capabilitiesFor(providerForModel(meta.model)).interject) return false;
@@ -3148,11 +3259,44 @@ export class SessionManager {
         }
       : null;
 
+    // Which conversation was live at the rewind target.
+    //
+    // Not necessarily the session's current one: a provider switch replaces it,
+    // so a target above a `provider-switch` marker belongs to the conversation
+    // that marker abandoned. `era` is that conversation — its model, its provider
+    // and its resume pointer — and everything below resolves against it rather
+    // than against `meta`.
+    //
+    // `floor` is the marker that *opened* the era (the newest switch before the
+    // target), so an anchor scan cannot walk back into a conversation older
+    // still. Without it, two switches would let a fork anchor on a message the
+    // forked session has never seen.
+    let era: { model: string; sessionId?: string } | null = null;
+    let floor = -1;
+    for (let i = 0; i < events.length; i++) {
+      if (events[i].kind !== 'provider-switch') continue;
+      const d = events[i].data as ProviderSwitchData;
+      if (i > index) {
+        // The first switch *after* the target: it names what was live at it.
+        era = { model: d.from, ...(d.fromSessionId ? { sessionId: d.fromSessionId } : {}) };
+        break;
+      }
+      // A switch before the target only sets the floor. Deliberately not the era:
+      // with no switch *after* the target, the target sits in the conversation
+      // that is still running, and the session's own model is the authority —
+      // reading it off the marker would undo any plain setModel made since.
+      floor = i;
+    }
+    const eraModel = era?.model ?? meta.model;
+    const eraIsCodex = providerForModel(resolveModelId(eraModel)) === 'openai';
+    const eraSessionId = era?.sessionId ?? (eraIsCodex ? meta.codexThreadId : meta.claudeSessionId);
+
     // The CLI anchor: the nearest preceding assistant message, whose uuid is what
     // the SDK documents upToMessageId against. Already on disk — handleWorkerEvent
-    // writes every non-stream SDK message verbatim.
+    // writes every non-stream SDK message verbatim. Bounded below by `floor`, so
+    // it can only name a message the conversation being forked actually contains.
     let anchor: string | undefined;
-    for (let i = index - 1; i >= 0; i--) {
+    for (let i = index - 1; i > floor; i--) {
       const e = events[i];
       if (e.kind !== 'sdk') continue;
       const d = e.data as { type?: string; uuid?: string } | null;
@@ -3167,8 +3311,8 @@ export class SessionManager {
     // that settled before this prompt — its id is on that result's durable record
     // (see `_codexTurnId`), which is why it survives restarts.
     let codexAnchor: string | undefined;
-    if (isCodexSession(meta)) {
-      for (let i = index - 1; i >= 0; i--) {
+    if (eraIsCodex) {
+      for (let i = index - 1; i > floor; i--) {
         const e = events[i];
         if (e.kind !== 'sdk') continue;
         const d = e.data as { type?: string; _codexTurnId?: string } | null;
@@ -3183,11 +3327,11 @@ export class SessionManager {
     // The turn being re-driven is part of what is being discarded.
     this.cancelRecovery(sessionId);
     try {
-      if (isCodexSession(meta)) {
-        if (codexAnchor) {
+      if (eraIsCodex) {
+        if (codexAnchor && eraSessionId) {
           // Forking answers with a *new* thread; the session re-points at it, so
           // the old one is left intact on disk rather than truncated in place.
-          const forked = await this.worker.codexFork(sessionId, codexAnchor);
+          const forked = await this.worker.codexFork(sessionId, codexAnchor, eraSessionId);
           const live = this.sessions.get(sessionId);
           if (!live) {
             return { ok: false, code: 'no-session', reason: 'That session is gone.' };
@@ -3195,14 +3339,15 @@ export class SessionManager {
           if (!forked) {
             return { ok: false, code: 'fork-failed', reason: 'Codex could not rewind this session.' };
           }
-          live.codexThreadId = forked;
+          this.restoreEra(sessionId, eraModel, { codexThreadId: forked });
         } else {
           // Nothing before this prompt to keep. Same blunt outcome the Claude path
           // takes, and the confirm dialog has already said so.
           this.resetClaudeSession(sessionId);
+          this.restoreEra(sessionId, eraModel, {});
         }
-      } else if (anchor) {
-        const fork = await this.forkSession(meta.claudeSessionId!, {
+      } else if (anchor && eraSessionId) {
+        const fork = await this.forkSession(eraSessionId, {
           upToMessageId: anchor,
           dir: meta.cwd,
         });
@@ -3211,12 +3356,16 @@ export class SessionManager {
         if (!live) {
           return { ok: false, code: 'no-session', reason: 'That session is gone.' };
         }
-        live.claudeSessionId = fork.sessionId;
+        this.restoreEra(sessionId, eraModel, { claudeSessionId: fork.sessionId });
         this.closeQuery(sessionId);
       } else {
         // Nothing before this prompt to keep — the blunter reset is the honest
-        // outcome, and the confirm dialog says so before we get here.
+        // outcome, and the confirm dialog says so before we get here. Reached for
+        // a rewind across a switch recorded before `fromSessionId` existed, too:
+        // the era is known but its conversation is not, so it starts fresh on the
+        // right model rather than continuing on the wrong one.
         this.resetClaudeSession(sessionId);
+        this.restoreEra(sessionId, eraModel, {});
       }
     } catch (err) {
       console.warn('[rewind]', err);
@@ -3551,12 +3700,64 @@ export class SessionManager {
   }
 
   /**
+   * Put the session back on the conversation and model that were live at a rewind
+   * target, when that is not the one it is on now.
+   *
+   * Model and pointer move together, deliberately: a session left on one
+   * provider's model holding the other provider's resume pointer is precisely the
+   * state `setModel` refuses to create, and every turn after it would either
+   * strand the conversation or fail.
+   *
+   * `setModel` is not reused here — it refuses a cross-provider change while a
+   * pointer exists, which is exactly the move being made. The refusal guards a
+   * *user* changing model with a conversation to lose; here the conversation is
+   * being restored to match, which is the opposite.
+   */
+  private restoreEra(
+    sessionId: string,
+    model: string,
+    pointers: { claudeSessionId?: string; codexThreadId?: string },
+  ) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    const resolved = resolveModelId(model);
+    const movedProvider = providerForModel(meta.model) !== providerForModel(resolved);
+    const movedModel = meta.model !== resolved;
+    meta.model = resolved;
+    // Exactly one of the two, always: the other names a conversation this session
+    // is no longer on.
+    meta.claudeSessionId = pointers.claudeSessionId;
+    meta.codexThreadId = pointers.codexThreadId;
+    if (movedProvider) {
+      // Readings and compaction verdicts describe the conversation being left.
+      meta.contextUsage = undefined;
+      meta.contextSummary = undefined;
+      meta.contextCompact = undefined;
+      // The hand-off allowance belongs to the switch that is being rewound away.
+      if (meta.workflow) meta.workflow.providerSwitched = undefined;
+    }
+    this.upsert(meta);
+    // Only when it actually moved. Codex binds its model at thread creation, so
+    // there is nothing live to tell there either — the same split setModel makes.
+    if (movedModel && providerForModel(resolved) !== 'openai') {
+      this.worker.setModel(sessionId, resolved);
+    }
+  }
+
+  /**
    * The deliverable of the most recent turn ('' if none) — its plan when it ended
    * in plan mode, else its final assistant text block. Reused as the `{previous}`
    * hand-off when a fresh step needs the prior step's output (e.g. a plan).
+   *
+   * A provider switch's hand-off turn is stripped along with compactions: its
+   * answer is an acknowledgement of a summary, and handing that to the next step
+   * as the previous one's deliverable is exactly the corruption both strips exist
+   * to prevent.
    */
   lastAssistantText(sessionId: string): string {
-    const events = withoutCompactSpans(this.store.loadTranscript(sessionId));
+    const events = withoutProviderSwitchSpans(
+      withoutCompactSpans(this.store.loadTranscript(sessionId)),
+    );
     let lastUserIdx = -1;
     for (let i = events.length - 1; i >= 0; i--) {
       if (events[i].kind === 'user') {
@@ -3591,8 +3792,12 @@ export class SessionManager {
   async consolidateStepOutput(sessionId: string, stepIndex?: number): Promise<string> {
     try {
       // Stripped before findStepStart, so the index it returns and the slice
-      // collectTurns takes are cut from the same array.
-      const events = withoutCompactSpans(this.store.loadTranscript(sessionId));
+      // collectTurns takes are cut from the same array. A provider switch's
+      // hand-off turn goes with the compactions: it is bookkeeping that happened
+      // to land inside this step, not an attempt at it.
+      const events = withoutProviderSwitchSpans(
+        withoutCompactSpans(this.store.loadTranscript(sessionId)),
+      );
       // Slice from the marker that opened *this* step, not merely the newest
       // 'started' one: with a step queued while the previous one consolidates,
       // the newest marker can already belong to the next step.
@@ -3756,7 +3961,10 @@ export class SessionManager {
       },
       {
         ...rest,
-        ...(meta ? { prefer: providerForModel(meta.model), cwd: meta.cwd } : {}),
+        // `prefer` only: a helper deliberately runs *outside* the session's
+        // directory, so the project's memory and AGENTS.md stay out of an answer
+        // about one conversation (see helperQuery's helperCwd).
+        ...(meta ? { prefer: providerForModel(meta.model) } : {}),
       },
     ));
   }
@@ -4137,6 +4345,296 @@ export class SessionManager {
     // the next push carries the new model in its thread options.
     if (to !== 'openai') this.worker.setModel(sessionId, resolved);
     return { ok: true };
+  }
+
+  /**
+   * Move a session that has already run to the other provider, deliberately.
+   *
+   * `setModel` above refuses this, and stays refusing it — that refusal is a
+   * data-integrity invariant every other call site relies on (WorkflowEngine.runStep
+   * most of all). This is the one caller that may get past it, and it does so the
+   * way a crossing workflow step already does: drop the stranded conversation
+   * first, then set the model, then seed the fresh one with a hand-off.
+   *
+   * The hand-off is a summary of the old conversation, produced by a helper query.
+   * It is **lossy** and nothing here pretends otherwise: the transcript keeps a
+   * 'provider-switch' marker saying everything above it is invisible to the model
+   * below it, and the confirm dialog says the same before the click.
+   *
+   * Ordering is the whole safety property — **every refusal happens before
+   * anything destructive**. In particular the OpenAI account check: without it a
+   * disconnected account would surface as a failed *first turn* (harmless today)
+   * only after the conversation had already been destroyed. Any refusal added
+   * later goes above `resetClaudeSession`, never below it.
+   */
+  async switchProvider(
+    sessionId: string,
+    model: string,
+    by: { actor?: Actor; canSetModel?: boolean; needsApproval?: boolean } = {},
+  ): Promise<{ ok: true } | ({ ok: false } & ProviderSwitchBlockInfo)> {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return { ok: false, code: 'no-session', reason: 'That session no longer exists.' };
+    const resolved = resolveModelId(model);
+    const fromModel = meta.model;
+    const from = providerForModel(fromModel);
+    const to = providerForModel(resolved);
+    // Not a provider switch at all: the ordinary path, with its own refusals.
+    if (!providerSwitchNeedsFreshStart(from, to)) {
+      const verdict = this.setModel(sessionId, resolved);
+      return verdict.ok ? { ok: true } : { ok: false, code: 'denied', reason: verdict.reason };
+    }
+
+    // The half of the authz decision MESSAGE_AUTHZ cannot express (it carries one
+    // cap, and this message needs `interrupt` *and* `setModel`), and the guest
+    // whose prompts are held for review — the seed prompt below goes through
+    // prompt(), which bypasses userPrompt's approval staging entirely.
+    if (by.canSetModel === false) {
+      return { ok: false, code: 'denied', reason: 'Only a collaborator can change the model.' };
+    }
+    if (by.needsApproval) {
+      return { ok: false, code: 'denied', reason: 'Your prompts need the owner’s approval.' };
+    }
+    const block = providerSwitchBlock(meta);
+    if (block) return { ok: false, ...block };
+    // Everything `pushCodexTurn` / `pushTurn` would refuse the *first turn* on,
+    // asked here instead — before anything is dropped. A failed first turn is
+    // harmless on a session that still has its conversation; after the reset it
+    // means the conversation is gone and nothing ran in its place. The CLI probe
+    // is as load-bearing as the account check: an account with no `codex` on the
+    // machine fails exactly the same way.
+    const cliRefusal = to === 'openai' ? codexCliRefusalMessage() : claudeCliRefusalMessage();
+    if (cliRefusal) {
+      return {
+        ok: false,
+        code: 'cli-missing',
+        reason: `${cliRefusal} This session’s conversation is left untouched.`,
+      };
+    }
+    // The Claude direction has no account check to match: that path falls back to
+    // the CLI's own ambient login, so there is no state here that says it cannot run.
+    if (to === 'openai' && !this.openaiAuth?.isLoggedIn()) {
+      return {
+        ok: false,
+        code: 'not-connected',
+        reason:
+          'No OpenAI account is connected. Connect one in Settings → Account, then switch — ' +
+          'this session’s conversation is left untouched.',
+      };
+    }
+    // Claimed before the first await, exactly as `rewinding` is, and for one more
+    // reason: `meta.status` stays idle for the length of the summary query below,
+    // so without this a second click — or a prompt sent in that window — would
+    // race the conversation being dropped.
+    if (this.switchingProvider.has(sessionId)) {
+      return { ok: false, code: 'switching', reason: 'A provider switch is already running.' };
+    }
+    // Claimed before the stop, not merely before the summary: `interrupt` settles
+    // the session to idle, and a prompt landing in that window would open a turn
+    // on the conversation this is about to drop.
+    this.switchingProvider.add(sessionId);
+    try {
+      // A live turn is stopped rather than refused. The wait is on the turn
+      // actually settling, never on the status — `interrupt` sets 'idle'
+      // synchronously, long before the CLI has stopped.
+      if (isSessionInterruptible(meta.status)) {
+        this.interrupt(sessionId);
+        if (!(await this.awaitInterruptSettled(sessionId))) {
+          return {
+            ok: false,
+            code: 'turn-running',
+            reason: 'The turn running here did not stop — nothing was switched. Try again.',
+          };
+        }
+      }
+      // The settle is what parks a running workflow step (onTurnComplete →
+      // WorkflowEngine.onWorkflowTurnComplete), and a parked step is what makes
+      // the seed prompt below safe: onWorkflowTurnComplete early-returns for any
+      // step that is not 'running', so it cannot mistake the hand-off turn for
+      // the step's own. A step still marked running is the one shape where it
+      // could, so it is refused rather than guessed at.
+      const settled = this.sessions.get(sessionId);
+      if (!settled) return { ok: false, code: 'no-session', reason: 'That session is gone.' };
+      const wf = settled.workflow;
+      if (wf && wf.stepStatuses[wf.stepIndex] === 'running') {
+        return {
+          ok: false,
+          code: 'turn-running',
+          reason: 'This workflow step is still running — nothing was switched. Try again.',
+        };
+      }
+
+      // Read (and summarized) before anything is dropped: the transcript on disk
+      // survives the reset, but the last assistant text fallback is cheaper to
+      // take while the session still describes the old conversation.
+      const summary = await this.handoffSummary(sessionId);
+      // The session can have been deleted while the summary ran.
+      if (!this.sessions.get(sessionId)) {
+        return { ok: false, code: 'no-session', reason: 'That session is gone.' };
+      }
+
+      // Read before the reset drops it. A rewind to a turn above the marker below
+      // resumes this conversation rather than starting another fresh one.
+      const abandoned =
+        from === 'openai'
+          ? this.sessions.get(sessionId)?.codexThreadId
+          : this.sessions.get(sessionId)?.claudeSessionId;
+
+      this.resetClaudeSession(sessionId);
+      // Passes now, and only now: the two resume pointers it refuses on are both
+      // cleared. The same two-step WorkflowEngine.runStep performs for a crossing
+      // step.
+      const verdict = this.setModel(sessionId, resolved);
+      if (!verdict.ok) return { ok: false, code: 'denied', reason: verdict.reason };
+
+      this.emitEvent(sessionId, 'provider-switch', {
+        from: fromModel,
+        to: resolved,
+        summarized: summary.ok,
+        // Captured above, before resetClaudeSession cleared it: this is the only
+        // record of the conversation being left behind.
+        ...(abandoned ? { fromSessionId: abandoned } : {}),
+      } satisfies ProviderSwitchData);
+
+      // The workflow keeps its own per-step models — this switch is one-shot, and
+      // the next step takes its model back. What that step must not do is park as
+      // "changes provider while inheriting the previous step's conversation": it
+      // is inheriting a conversation this switch just replaced. The flag is how
+      // runStep tells that apart from the authoring mistake the refusal is for.
+      const live = this.sessions.get(sessionId);
+      if (live?.workflow) live.workflow.providerSwitched = true;
+
+      // `source: 'workflow'`, not a third source value: its only two behaviours —
+      // skipping maybeAutoName and skipping the interrupted-advance clear — are
+      // both no-ops here. On a workflow session the step is parked (guaranteed
+      // above), so onWorkflowTurnComplete ignores this turn entirely. It renders
+      // as an ordinary user bubble, exactly as a workflow hand-off does today.
+      this.prompt(sessionId, handoffPrompt(fromModel, resolved, summary.text), 'workflow', [], [], by.actor);
+      return { ok: true };
+    } finally {
+      this.switchingProvider.delete(sessionId);
+    }
+  }
+
+  /**
+   * Wait for a stop to actually land: `this.interrupting` holds the session from
+   * `interrupt()` until the worker's `ended`/`result` settles the turn, and that
+   * same edge is what fires `onTurnComplete` (so a running workflow step parks).
+   *
+   * Polled rather than hooked on `onTurnComplete`, which is a single listener
+   * owned by WorkflowEngine — a second subscriber would mean rewiring that
+   * ownership for one bounded wait. Answers false on timeout; the caller refuses
+   * with nothing destroyed.
+   */
+  private async awaitInterruptSettled(sessionId: string): Promise<boolean> {
+    const deadline = Date.now() + this.interruptSettleMs;
+    while (this.interrupting.has(sessionId)) {
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 25);
+        timer.unref?.();
+      });
+      // A session deleted under us is not a stop that failed.
+      if (!this.sessions.has(sessionId)) return true;
+    }
+    return true;
+  }
+
+  /**
+   * Summarize the whole conversation for a provider switch's hand-off.
+   *
+   * Has a fallback on every exit path, like consolidateStepOutput: the helper
+   * answers null rather than throwing, and a switch must never fail because its
+   * summary did. `ok: false` is what the transcript marker reports as a fallback.
+   */
+  private async handoffSummary(sessionId: string): Promise<{ text: string; ok: boolean }> {
+    const fallback = (): { text: string; ok: boolean } => {
+      const last = this.lastAssistantText(sessionId).slice(0, HANDOFF_OUTPUT_MAX);
+      return { text: last || NO_HANDOFF_SUMMARY, ok: false };
+    };
+    try {
+      // withoutCompactSpans as every other consumer does it: raw loadTranscript
+      // double-counts a session that was manually compacted earlier.
+      const events = withoutCompactSpans(this.store.loadTranscript(sessionId));
+      const turns = collectTurns(events, 0, this.planRoots(sessionId));
+      if (!turns.length) return { text: NO_HANDOFF_SUMMARY, ok: false };
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = Symbol('handoff-timeout');
+      const answer = await Promise.race([
+        this.handoffQuery(sessionId, turns),
+        new Promise<typeof timedOut>((resolve) => {
+          timer = setTimeout(() => resolve(timedOut), this.switchSummaryTimeoutMs);
+          timer.unref?.();
+        }),
+      ]).finally(() => clearTimeout(timer));
+      if (answer === timedOut) {
+        console.warn(`[switchProvider] summary timed out after ${this.switchSummaryTimeoutMs}ms`);
+        return fallback();
+      }
+      return answer ? { text: answer, ok: true } : fallback();
+    } catch (err) {
+      console.warn('[switchProvider]', err);
+      return fallback();
+    }
+  }
+
+  /** The hand-off summary query itself — everything handoffSummary has to bound. */
+  private async handoffQuery(
+    sessionId: string,
+    turns: { user: string; output: string }[],
+  ): Promise<string | null> {
+    try {
+      // Newest turns first, so the ones that survive the total cap are the ones
+      // the user is most likely still working on. Rendered back in order.
+      const kept: string[] = [];
+      let total = 0;
+      let dropped = 0;
+      for (let i = turns.length - 1; i >= 0; i--) {
+        const turn = turns[i];
+        const block =
+          `### Turn ${i + 1}\n\n**User:** ${turn.user.slice(0, HANDOFF_USER_MAX)}\n\n` +
+          `**Assistant:** ${turn.output.slice(0, HANDOFF_OUTPUT_MAX)}`;
+        if (total + block.length > HANDOFF_TOTAL_MAX && kept.length) {
+          dropped = i + 1;
+          break;
+        }
+        total += block.length;
+        kept.unshift(block);
+      }
+      const elision = dropped
+        ? `[${dropped} earlier turn${dropped === 1 ? '' : 's'} omitted — they are not in this summary]\n\n`
+        : '';
+      const prompt =
+        'Below is one conversation between a user and a coding agent. Summarize it ' +
+        'for a different model that is about to continue the work and can see none ' +
+        `of it.\n\n${elision}${kept.join('\n\n')}\n\n` +
+        'Rules: use only what is in the conversation above — you may have project ' +
+        'files, memories or other context available, and none of it belongs in this ' +
+        'summary. Be brief: at most six short bullets, under 120 words. Cover only ' +
+        'what is needed to carry on — the task, decisions made, files and commands ' +
+        'touched, what is still open. Name specifics (paths, identifiers, numbers) ' +
+        'rather than describing them. Say nothing about a topic the conversation did ' +
+        'not raise, and add no preamble, caveats or closing advice. A short ' +
+        'conversation gets a short summary; one exchange may need one line.';
+
+      const answer = await this.helper({
+        sessionId,
+        prompt,
+        systemPrompt:
+          'You brief one model on another model’s conversation so the work can ' +
+          'continue. You summarize only the conversation you are given, never your ' +
+          'own context. You are terse: no preamble, no commentary, no advice — the ' +
+          'briefing and nothing else.',
+        claudeModel: 'claude-sonnet-5',
+      });
+      // A cap in case the instruction is ignored: this text is about to be sent
+      // as a turn, and a runaway summary would cost more than the conversation it
+      // replaces.
+      return answer ? answer.slice(0, HANDOFF_SUMMARY_MAX) : null;
+    } catch (err) {
+      console.warn('[switchProvider]', err);
+      return null;
+    }
   }
 
   /**

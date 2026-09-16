@@ -40,7 +40,9 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   summary below it, which still appears for a denied/expired question
 - A prompt that causes the agent to spawn a subagent (e.g. "use the Explore agent to map
   server/src")
-- `web/src/lib/transcript.ts` (`buildTranscript`) — nests rendering
+- `web/src/lib/transcript.ts` (`buildTranscript`) — nests rendering; also dedupes the
+  per-turn `system`/`init` row and drops noisy workflow markers before render (see
+  "Noise reduction" below)
 - `server/src/sessions.ts` (`handleWorkerEvent`, `collectTurns`, `scanTurnActivity`) — excludes
   subagent messages from main-agent state
 
@@ -68,7 +70,9 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   (turn-output scan), `scanTurnActivity` (turn-summary scan, extracted from `summarizeTurn`)
 - `web/src/lib/transcript.ts` — `ToolBlock.children`, `ToolBlock.background`,
   `LiveActivity.subagent` / `subagentType`, `Sink`, `sinkFor`, `buildTranscript`, `isQuestionTool`,
-  `reuseTool`'s `background` compare
+  `reuseTool`'s `background` compare, the `system-init` model-dedup tracker, `ResultItem`
+- `web/src/lib/format.ts` — `formatDuration`, `formatSpendUsd` (shared by the turn-header
+  cost/duration chips and the top-level result meta line; see [usage-and-cost](usage-and-cost.md))
 - `web/src/lib/agents.ts` — `isAgentTool`, `parseTaskInput`, `agentMeta`, `MAIN_AGENT_META`,
   `taskFlags`
 - `web/src/components/TaskCall.tsx` — `TaskHeader` (badge + description + flags), `TaskBody`
@@ -239,6 +243,53 @@ letting them through made the row flip between concurrent background agents and 
 (correctly labeled) background card. Full detail, plus the server-side tracking and the
 composer/sidebar/alert surfaces, live in [background-tasks](background-tasks.md).
 
+### Noise reduction
+
+Three read-side reinterpretations — no server change, no change to what is emitted or
+persisted, so every existing transcript on disk cleans up on reload too.
+
+**Session-init dedup.** The Claude CLI process restarts for every turn (resumed by
+session id) and emits a fresh `system`/`init` message each time. `buildTranscript`
+tracks the last init's model in a local variable and only pushes a `system-init` item
+when the model differs from the previous one (the first init always pushes, since the
+tracker starts unset). A later push — a genuine same-provider model switch mid-session
+(`setModel`, opus → sonnet) — carries `changed: true` so `Transcript.tsx` renders
+`model set to …` instead of `session started · …`. A cross-provider switch is unrelated:
+that already has its own `ProviderSwitchItem`/`ProviderSwitchMarker`. Side effect: since
+`system-init` is a `foldAgentTurns` boundary, dropping the per-turn repeats also drops a
+per-turn fold boundary — normal turns are unaffected (`user` is already a boundary and
+every turn opens with one), but an interstitial CLI restart with no new prompt now folds
+into the turn around it, which is the intended reading.
+
+**Result row becomes a chip, not a row.** A successful (`!isError && !stopped &&
+!recovering`) `result` item renders nothing when it is a child of an `agent-turn` card
+(Compact level) — the turn header already carries its cost/duration as chips, via
+`turnToolStats(turn.items).result` and the shared `formatSpendUsd`/`formatDuration`
+(`web/src/lib/format.ts`). At top level (a text-only turn, or Full/Grouped level, where
+nothing folds) it renders a small right-aligned dimmed meta line (`$0.42 · 29s`) instead
+of a centered "turn done" row. `Item` learns whether it's inside a card from a new
+`inTurn` prop, passed by `AgentTurn`'s children map — the same prop-threading pattern
+already used for `retryKey`/`activeGroupKey`. A failed/stopped/recovering result is
+unchanged: it keeps its centered row, its error body, and is still the only mount point
+for `FailedTurnActions` (Sign in / Skip step / Retry). `estimated` is read per site via
+`hasEstimatedSpend(session.costByModel)` with a boolean store selector, matching
+`SessionView`'s "last turn" figure — see [usage-and-cost](usage-and-cost.md).
+
+**Workflow-marker allowlist.** `isNoisyWorkflowMarker(data)` (next to `isRedundant`,
+same `built` filter in `Transcript.tsx`) drops every workflow marker except `started`,
+a failure park (`waiting-approval` with `failed === true` or a non-empty
+`missingOutputs`), and `workflow-done`. Plain `waiting-approval`, `approved`,
+`retried`, and `interrupted` are filtered out — the `WorkflowStepper` above the
+transcript and the approve card already carry that state live, and a step used to cost
+up to three divider rows. Filtered post-`buildTranscript`, not rendered as `null` and
+not suppressed at emission: the tail-window budget and the "Show earlier messages (N)"
+count stay honest, and the group/text/plan resets a `'workflow'` event performs during
+the build (see the `case 'workflow'` reset block) are unaffected. `WorkflowMarker`'s
+label branches for the dropped events were removed along with them. See
+[workflow-step-lifecycle](workflow-step-lifecycle.md) for what still reads `started`
+(the stepper's scroll anchor) and what the server still stores regardless of what
+renders.
+
 ### Persisted-event filter
 
 Not every SDK message the bridge forwards live is written to the transcript file. Stream deltas
@@ -403,6 +454,22 @@ the separate durable `context-compact` event this doc's compaction handling alre
   for a second pass to add. See [transcript-performance](transcript-performance.md) for the
   measured cost this addresses.
 
+- A `system`/`init` row only renders when the model actually differs from the previous
+  init the transcript saw — not once per turn (the CLI restarts every turn). The first
+  init in a transcript always renders (`session started · model`); a later one only
+  renders on a genuine model change and reads `model set to model` instead. A
+  cross-provider switch is a separate marker (`ProviderSwitchItem`) and is unaffected.
+- A successful turn's cost and duration render as chips on the turn's header (Compact
+  level) rather than as their own centered row; a turn with no header card (text-only,
+  or Full/Grouped level) shows them as a small right-aligned dimmed line instead. A
+  failed, stopped, or recovering turn keeps its centered row, error text, and Retry
+  affordance unchanged — only the success case moved.
+- Only three workflow-marker events render in the transcript: `started`, a failure park
+  (`waiting-approval` with `failed` or `missingOutputs`), and `workflow-done`. A clean
+  park, an approve, a retry, and an interrupt leave no transcript trace — the stepper and
+  the approve card already show that state live. A park marker that does render always
+  means the step failed or published nothing; the emitted/stored event set is unchanged.
+
 ## Architectural rules
 
 - User and agent transcript text share one markdown renderer (`Markdown`) rather than each having
@@ -480,7 +547,8 @@ the separate durable `context-compact` event this doc's compaction handling alre
 - `reconcileItems` (`transcript.ts`) hands a rebuilt item back its previous object identity
   when every field `buildTranscript` can later mutate in place is unchanged —
   `ToolBlock.result`/`isError`/`snapshot`/`children`, permission `.resolution`/`.data`,
-  `ResultItem.summary`/`stopped`, and streaming/assistant text. This is what makes `memo` on
+  `ResultItem.summary`/`stopped`, `system-init`'s `changed` flag, and streaming/assistant
+  text. This is what makes `memo` on
   `Item`/`AgentTurn`/`ToolGroup`/`ToolCallCard` actually skip work (a rebuild recreates every
   item from scratch otherwise) and what lets the `toolDiffCache` `WeakMap` (keyed on the
   `ToolBlock` object) survive a rebuild instead of recomputing every whole-file diff on every
@@ -586,3 +654,8 @@ the separate durable `context-compact` event this doc's compaction handling alre
   doc's `system` switch grew, and the resolve-in-place idiom borrowed from `openCompact`.
 - [turn-interjection](turn-interjection.md) — `InterjectionRow`, and why it must not clear the
   subagent sinks or `foldAgentTurns`'s buffer the way `'user'` does.
+- [turn-recovery](turn-recovery.md) — the failed/stopped/recovering `result` row this
+  feature's success-row change deliberately leaves untouched, including the `Retry`
+  mount point.
+- [usage-and-cost](usage-and-cost.md) — `formatSpendUsd`/`formatDuration`/`hasEstimatedSpend`,
+  shared by the turn-header chips and the result meta line.

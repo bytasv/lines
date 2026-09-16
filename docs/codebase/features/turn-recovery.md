@@ -225,7 +225,11 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   parked-as-failed; `'pre-run'` means it never got a prompt (re-render via `runStep`),
   `'turn'` means its turn failed (re-send the prompt via `iterateStep`)
 - `WorkflowMarkerData.failed` — set on a `'waiting-approval'` marker whose park was a failure,
-  so the divider reads "failed, retry or approve to skip"
+  so the divider reads "failed, retry or approve to skip". Since the transcript's
+  workflow-marker allowlist (see [transcript-rendering](transcript-rendering.md#noise-reduction))
+  only renders `started`/failure/`workflow-done`, a rendered `waiting-approval` marker
+  now *always* means this — a clean park is invisible in the transcript, discoverable
+  only via the stepper and the approve card
 - `isAuthFailureMessage(message)` — narrow regex match over SDK/CLI error text
   (`invalid_grant`, `authentication_error`, `authentication_failed`, `invalid bearer token`,
   `401 Unauthorized`, `403 Forbidden`, `oauth … token … expired`, `oauth … token … revoked`,

@@ -550,6 +550,14 @@ installed icon, no new package). No other new dependencies.
      user is never masked as "done"
   4. `isWorkflowFinished(session)` → green **filled** `IconCircleCheckFilled`, 14px
   5. otherwise → plain `.status-dot`
+- The transcript renders only three workflow-marker events: `started`, a failure park
+  (`waiting-approval` with `failed` or `missingOutputs`), and `workflow-done`. Every
+  other event this engine emits (`waiting-approval` with neither flag, `approved`,
+  `retried`, `interrupted`) is still written to the transcript event log exactly as
+  before — `findStepStart`, `rollbackToTranscript`, and every server-side reader are
+  unaffected — but `Transcript.tsx`'s `isNoisyWorkflowMarker` filters it out of the
+  rendered list, since the `WorkflowStepper` and the approve card already show that
+  state live. See [transcript-rendering](transcript-rendering.md#noise-reduction).
 - Clicking a step in the stepper still jumps the transcript to that step's start marker, but
   the marker may not be mounted — `Transcript.tsx` windows a long transcript to its tail (see
   [transcript-performance](transcript-performance.md)). The click always dispatches

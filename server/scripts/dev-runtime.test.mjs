@@ -6,7 +6,8 @@ import path from 'node:path';
 import { execFileSync, execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import net from 'node:net';
-import { buildGeneration, WorkerRunner, BridgeRunner, policyCommand, shutdownRunners } from './dev-runtime.mjs';
+import http from 'node:http';
+import { buildGeneration, WorkerRunner, BridgeRunner, policyCommand, restartCommand, shutdownRunners } from './dev-runtime.mjs';
 
 const actualRoot = path.resolve(import.meta.dirname, '../..');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -103,6 +104,69 @@ test('active work blocks edits; freeze and resume keep PIDs; idle reloads the pa
   assert.ok([...supervisor.children.values()].every((c) => !pids.includes(c.process.pid)));
 });
 
+test('a forced restart rebuilds and cycles the pair while work is live', async (t) => {
+  // The gap this closes: `isSessionActive` counts a workflow step parked for
+  // approval, so a machine with one parked step never reaches idle and the
+  // automatic reload waits forever, however long the edits pile up.
+  const { root, flags, supervisor } = await running(t);
+  flags({ busy: true });
+  await until(() => !supervisor.idle(), 'activity arrives');
+  const pids = [...supervisor.children.values()].map((c) => c.process.pid);
+  const original = supervisor.current.id;
+
+  fs.writeFileSync(path.join(root, 'shared/types.ts'), 'export const version = 3;');
+  await delay(350);
+  assert.equal(supervisor.current.id, original, 'the automatic path is still blocked');
+
+  await restartCommand(root);
+
+  assert.notEqual(supervisor.current.id, original, 'restarted on the new generation');
+  assert.equal(supervisor.phase, 'running');
+  assert.ok(
+    [...supervisor.children.values()].every((c) => !pids.includes(c.process.pid)),
+    'both children are new processes',
+  );
+  const healthy = JSON.parse(fs.readFileSync(path.join(root, '.cache/dev-runtime/healthy.json'), 'utf8'));
+  assert.equal(healthy.id, supervisor.current.id);
+});
+
+test('a restart a supervisor is too old to understand fails loudly', async (t) => {
+  // The failure this closes: an older supervisor answers an unknown control URL
+  // with its plain state and a 200, which is indistinguishable from a successful
+  // restart — so a restart that never happened reported as one, in the CLI and in
+  // Tilt. The handshake field is what tells them apart.
+  const { root, supervisor } = await running(t);
+  const control = JSON.parse(fs.readFileSync(path.join(root, '.cache/dev-runtime/control.json'), 'utf8'));
+  const original = supervisor.current.id;
+  // Stand in for the old route: 200, valid JSON state, no `restarted`.
+  const legacy = http.createServer((_req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ phase: 'running', generation: original }));
+  });
+  await new Promise((resolve) => legacy.listen(0, '127.0.0.1', resolve));
+  t.after(() => legacy.close());
+  fs.writeFileSync(
+    path.join(root, '.cache/dev-runtime/control.json'),
+    JSON.stringify({ ...control, port: legacy.address().port }),
+  );
+
+  await assert.rejects(() => restartCommand(root), /nothing was restarted/);
+  assert.equal(supervisor.current.id, original, 'and it really did not restart');
+});
+
+test('a forced restart that will not start puts the working build back', async (t) => {
+  const { root, supervisor } = await running(t);
+  const original = supervisor.current.id;
+  fs.writeFileSync(path.join(root, 'server/src/index.ts'), 'FAIL');
+  await delay(350);
+
+  await assert.rejects(() => restartCommand(root));
+
+  assert.equal(supervisor.current.id, original, 'restored the generation that runs');
+  assert.equal(supervisor.phase, 'running');
+  assert.ok(supervisor.children.get('worker'), 'and left something running');
+});
+
 test('syntax failure retains running code; failed startup rolls back without retry loop', async (t) => {
   const { root, supervisor } = await running(t);
   const original = supervisor.current.id;
@@ -195,6 +259,7 @@ async function ownedProcess(t, { unready = false } = {}) {
   fs.writeFileSync(service, `
     import fs from 'node:fs';
     import net from 'node:net';
+import http from 'node:http';
     import { spawn } from 'node:child_process';
     process.on('SIGTERM', () => {});
     process.on('SIGINT', () => {});
@@ -277,6 +342,7 @@ test('Tilt lifecycle smoke tests', { skip: process.env.LINES_TEST_TILT !== '1' }
       fs.writeFileSync(service, `
         import fs from 'node:fs';
         import net from 'node:net';
+import http from 'node:http';
         const name = process.argv[2];
         const server = net.createServer();
         server.listen(0, '127.0.0.1', () => fs.writeFileSync(${JSON.stringify(f.root)}+'/'+name+'.json',JSON.stringify({pid:process.pid,port:server.address().port})));

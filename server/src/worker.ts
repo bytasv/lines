@@ -260,7 +260,10 @@ async function handleAsk(msg: Extract<BridgeToWorker, { type: 'ask' }>) {
   // the engine dispatch is first: a codex session has no Query to read.
   if (msg.method === 'codexFork') {
     const lastTurnId = String((msg.params ?? {}).lastTurnId ?? '');
-    const forked = await forkCodex(msg.sessionId, lastTurnId);
+    // Optional: a rewind across a provider switch names the abandoned thread,
+    // which this worker holds no binding for.
+    const threadId = String((msg.params ?? {}).threadId ?? '') || undefined;
+    const forked = await forkCodex(msg.sessionId, lastTurnId, threadId);
     reply({ type: 'askResult', id: msg.id, ok: true, value: forked });
     return;
   }
