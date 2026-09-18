@@ -753,6 +753,23 @@ app.put('/settings', async (req, res) => {
   res.json({ ok: true });
 });
 
+/**
+ * The bridge's blob signature, carried through verbatim.
+ *
+ * This server rebuilds each blob from validated fields rather than storing what
+ * it was sent, which is right — but it means a signature computed over the blob
+ * has to be carried across that rebuild explicitly, or the bridge on the other
+ * side would see every row as unsigned. Never inspected here: this server is
+ * deliberately not a party to that verification. It holds the bytes; the two
+ * bridges decide whether to believe them.
+ */
+const SIGNATURE_KEY = '_linesSig';
+
+function carriedSignature(body: unknown): Record<string, unknown> {
+  const sig = (body as Record<string, unknown> | null)?.[SIGNATURE_KEY];
+  return sig && typeof sig === 'object' ? { [SIGNATURE_KEY]: sig as Record<string, unknown> } : {};
+}
+
 // --- auto-mode guard allowlist -----------------------------------------------
 
 /** Hard cap on a stored list. Authoritative validation is the bridge's (normalizeAllowEntry). */
@@ -779,7 +796,11 @@ app.put('/guard-allowlist', async (req, res) => {
     if (e.prefix !== undefined && typeof e.prefix !== 'string') continue;
     entries.push(typeof e.prefix === 'string' ? { tool: e.tool, prefix: e.prefix } : { tool: e.tool });
   }
-  const data = { entries, updatedAt: typeof body.updatedAt === 'number' ? body.updatedAt : Date.now() };
+  const data = {
+    entries,
+    updatedAt: typeof body.updatedAt === 'number' ? body.updatedAt : Date.now(),
+    ...carriedSignature(body),
+  };
   await prisma.guardAllowlist.upsert({
     where: { userId },
     create: { userId, data, updatedAt: updatedAtOf(data) },
@@ -851,7 +872,11 @@ app.put('/mcp-connections', async (req, res) => {
     if (typeof c.timeout === 'number') row.timeout = c.timeout;
     connections.push(row);
   }
-  const data = { connections, updatedAt: typeof body.updatedAt === 'number' ? body.updatedAt : Date.now() };
+  const data = {
+    connections,
+    updatedAt: typeof body.updatedAt === 'number' ? body.updatedAt : Date.now(),
+    ...carriedSignature(body),
+  };
   await prisma.mcpConnections.upsert({
     where: { userId },
     create: { userId, data, updatedAt: updatedAtOf(data) },

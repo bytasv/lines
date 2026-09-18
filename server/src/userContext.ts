@@ -59,8 +59,18 @@ export const LINK_OPEN = 1;
  * bridge memory climb without bound. Deliberately generous — normal use must
  * never reach them.
  */
-const SEND_HIGH_WATER = 4 * 1024 * 1024;
-const SEND_HARD_LIMIT = 32 * 1024 * 1024;
+/*
+ * Raised by a third when end-to-end encryption landed. The thresholds are read
+ * off the *socket's* queue, and an encrypted frame is base64 — the relay's own
+ * envelope is JSON, so the payload has to survive JSON — which inflates every
+ * byte by ~33%. Left unchanged, an encrypted link would start shedding stream
+ * deltas at three quarters of the traffic an unencrypted one tolerated, purely
+ * because of the encoding.
+ *
+ * Still deliberately generous: normal use must never reach them.
+ */
+const SEND_HIGH_WATER = 5.5 * 1024 * 1024;
+const SEND_HARD_LIMIT = 43 * 1024 * 1024;
 
 /**
  * Stream deltas are the only droppable traffic: they are never persisted, and
@@ -150,6 +160,8 @@ export interface UserContext {
   guard: GuardAllowlist;
   /** User-managed MCP servers, spliced into every session's query options. */
   mcp: McpConnections;
+  /** Cross-machine agent memory, and the review gate in front of its writes. */
+  memory: MemorySyncer;
   sessions: SessionManager;
   workflows: WorkflowEngine;
   recipes: RecipeEngine;
@@ -292,6 +304,10 @@ export function buildUserContext(
   // Cross-machine agent memory: disk is the SDK-facing cache, storage is the
   // shared source of truth. Pushed on turn end (below) and on connect (syncNow).
   const memory = new MemorySyncer(store, projectKeys);
+  // Same shape as the guard's and the MCP list's: a pulled change is staged and
+  // announced, never applied. Agent memory is read into every session's prompt
+  // on this machine, so an unreviewed write is prompt injection that persists.
+  memory.onReview = (review) => broadcast({ type: 'memoryReview', review });
 
   const auth = new AuthManager(store);
   const openaiAuth = new OpenaiAuthManager(store);
@@ -452,7 +468,9 @@ export function buildUserContext(
         // Adopted sessions may name checkouts this machine has but has never opened.
         projectKeys.learnAll(sessions.list().map((s) => s.cwd));
         // Apply after key merge/learn so slug->key resolution is as complete as possible.
-        if (pulled.memory) memory.applyRemote(pulled.memory);
+        // Stage, never write. `reviewRemote` touches no file, so it is safe
+        // inside this applying window for the same reason the two above are.
+        memory.reviewRemote(pulled.memory ?? {});
       } finally {
         sync.applying = false;
       }
@@ -488,6 +506,7 @@ export function buildUserContext(
     openaiUsage,
     guard,
     mcp,
+    memory,
     sessions,
     workflows,
     recipes,

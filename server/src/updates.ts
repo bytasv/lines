@@ -13,7 +13,10 @@
 import { isSessionActive, type ServerMessage, type SessionMeta, type UpdateStatus } from '@lines/shared';
 
 /** Messages exchanged with the desktop shell over the Node IPC channel. */
-type ToShell = { type: 'updateRestartRequest' } | { type: 'relayStatus'; status: RelayLinkStatus };
+type ToShell =
+  | { type: 'updateRestartRequest' }
+  | { type: 'relayStatus'; status: RelayLinkStatus }
+  | { type: 'activity'; busy: boolean };
 type FromShell = { type: 'updateStatus'; status: UpdateStatus };
 
 /**
@@ -40,6 +43,35 @@ export interface RelayLinkStatus {
  */
 export function reportRelayStatus(status: RelayLinkStatus): void {
   if (process.connected) process.send?.({ type: 'relayStatus', status } satisfies ToShell, () => {});
+}
+
+/**
+ * Last value {@link reportActivity} sent, so a per-status-broadcast call and the
+ * safety tick both collapse into one IPC message per real transition.
+ */
+let lastActivity: boolean | null = null;
+
+/**
+ * Tell the shell whether any session is mid-turn, so it can hold a power-save
+ * blocker for exactly as long as work is running.
+ *
+ * Deliberately a free function rather than an `UpdateManager` method: this fires
+ * on every session-status broadcast, and the manager's own IPC log is asserted
+ * on wholesale by its tests. Deduped on the last value for the same reason —
+ * the caller is a hot path plus a 30s re-sync, and the shell only cares about
+ * the edges.
+ *
+ * Inert without the shell, exactly like {@link reportRelayStatus}.
+ */
+export function reportActivity(busy: boolean): void {
+  if (busy === lastActivity) return;
+  lastActivity = busy;
+  if (process.connected) process.send?.({ type: 'activity', busy } satisfies ToShell, () => {});
+}
+
+/** Test seam: forget the deduped value so each case starts from no opinion. */
+export function resetActivityForTests(): void {
+  lastActivity = null;
 }
 
 export class UpdateManager {

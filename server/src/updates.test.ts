@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ServerMessage, SessionMeta, SessionStatus } from '@lines/shared';
-import { reportRelayStatus, UpdateManager } from './updates.ts';
+import {
+  reportActivity,
+  reportRelayStatus,
+  resetActivityForTests,
+  UpdateManager,
+} from './updates.ts';
 
 /**
  * A restart always kills in-flight turns — bridge and worker go down together
@@ -169,5 +174,37 @@ test('relay reporting is inert once the shell channel closes', () => {
     (process as { send?: unknown }).send = original;
     if (connected) Object.defineProperty(process, 'connected', connected);
     else delete (process as { connected?: unknown }).connected;
+  }
+});
+
+test('activity reaches the shell once per transition, not once per broadcast', () => {
+  withSend((calls) => {
+    resetActivityForTests();
+    // The bridge calls this on every session upsert and again on a 30s tick, so
+    // the dedupe is what keeps a busy machine from flooding the IPC channel.
+    reportActivity(true);
+    reportActivity(true);
+    reportActivity(false);
+    reportActivity(false);
+    reportActivity(true);
+    assert.deepEqual(calls, [
+      { type: 'activity', busy: true },
+      { type: 'activity', busy: false },
+      { type: 'activity', busy: true },
+    ]);
+  });
+  resetActivityForTests();
+});
+
+test('activity reporting is inert without the desktop shell', () => {
+  const original = process.send;
+  (process as { send?: unknown }).send = undefined;
+  try {
+    resetActivityForTests();
+    // Tilt and `npm run dev` have no parent listening; this must not throw.
+    reportActivity(true);
+  } finally {
+    (process as { send?: unknown }).send = original;
+    resetActivityForTests();
   }
 });

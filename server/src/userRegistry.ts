@@ -26,10 +26,17 @@ export class UserRegistry {
   /** Worker's live sessions from its last hello, kept so a context built later can reconcile its slice. */
   private lastWorkerLive: LiveSessionInfo[] | null = null;
 
+  /**
+   * @param onSessionChange fired after any context's session list or status
+   *   changed. The bridge uses it to keep the shell's power-save blocker matched
+   *   to whether a turn is running — that has to consider *every* user's
+   *   sessions, which only the registry can see.
+   */
   constructor(
     private worker: WorkerClient,
     private storeRootFor: (userId: string) => string,
     private defaultUserId: string,
+    private onSessionChange?: () => void,
   ) {}
 
   get(userId: string): UserContext {
@@ -104,8 +111,13 @@ export class UserRegistry {
 
   /** Keep the ownership index current from each context's own broadcasts. */
   private observe(userId: string, msg: ServerMessage) {
-    if (msg.type === 'sessionUpsert') this.sessionOwner.set(msg.session.id, userId);
-    else if (msg.type === 'sessionDeleted') this.sessionOwner.delete(msg.sessionId);
+    if (msg.type === 'sessionUpsert') {
+      this.sessionOwner.set(msg.session.id, userId);
+      this.onSessionChange?.();
+    } else if (msg.type === 'sessionDeleted') {
+      this.sessionOwner.delete(msg.sessionId);
+      this.onSessionChange?.();
+    }
     // A user saved/published/deleted a workflow or step: their published set may
     // have changed, so every other live context re-pulls its shared view.
     //

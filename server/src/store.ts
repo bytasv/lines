@@ -6,6 +6,7 @@ import type {
   GuardAllowEntry,
   McpConnection,
   McpConnectionSecrets,
+  MemoryReviewEntry,
   Project,
   ProjectKeyMap,
   RecipeDef,
@@ -40,6 +41,19 @@ export interface McpSyncState {
 }
 
 const EMPTY_MCP_SYNC: McpSyncState = { updatedAt: 0, pending: null, rejected: null };
+
+/**
+ * Agent-memory review bookkeeping. No `updatedAt`: memory is merged per file on
+ * the storage server, so there is no whole-blob row for a timestamp to order.
+ * `rejectedHash` remembers the exact remote content a "keep mine" answer already
+ * covered, so the same staged write is not re-asked on every pull.
+ */
+export interface MemorySyncState {
+  pending: { entries: MemoryReviewEntry[]; detectedAt: number } | null;
+  rejectedHash: string | null;
+}
+
+const EMPTY_MEMORY_SYNC: MemorySyncState = { pending: null, rejectedHash: null };
 
 /** Machine-global app root. Per-user stores live under `${APP_ROOT}/users/{userId}`;
  * machine-wide assets (vendored plugins) and the `run/<instance>/` port-discovery
@@ -267,6 +281,10 @@ export function createStore(root: string) {
   // apply — no older build ever reads it.
   const SPEND_HISTORY_FILE = path.join(root, 'spend-history.json');
   const MEMORY_MANIFEST_FILE = path.join(root, 'memory-manifest.json');
+  // Staged remote memory writes plus the last rejection, kept out of the
+  // manifest for the same reason the guard's two files are split: the manifest
+  // is a bare map an older build reads directly.
+  const MEMORY_SYNC_FILE = path.join(root, 'memory-sync.json');
   const WATERMARKS_FILE = path.join(root, 'sync-watermarks.json');
   const SYNC_LOG_FILE = path.join(root, 'sync-log.jsonl');
 
@@ -743,6 +761,18 @@ export function createStore(root: string) {
 
     saveMemoryManifest(manifest: MemoryManifest) {
       writeJson(MEMORY_MANIFEST_FILE, manifest);
+    },
+
+    loadMemorySync(): MemorySyncState {
+      const raw = readJson<Partial<MemorySyncState>>(MEMORY_SYNC_FILE, EMPTY_MEMORY_SYNC);
+      return {
+        pending: raw.pending ?? null,
+        rejectedHash: typeof raw.rejectedHash === 'string' ? raw.rejectedHash : null,
+      };
+    },
+
+    saveMemorySync(state: MemorySyncState) {
+      writeJson(MEMORY_SYNC_FILE, state);
     },
 
     // Per-resource delta-sync cursors. Persisted so a bridge restart resumes

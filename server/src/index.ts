@@ -29,6 +29,7 @@ import {
   DEFAULT_MODELS,
   OWNER_ACCESS,
   authorizeMessage,
+  isSessionActive,
   normalizePlanComments,
   normalizeRootPath,
   parseShareCaps,
@@ -38,11 +39,14 @@ import { verifyToken } from '@clerk/backend';
 import { WORKER_LOST_MS, WorkerClient, type WorkerRpc } from './workerClient.ts';
 import { RelayClient, type AttestedGrant, type AttestedIdentity } from './relayClient.ts';
 import { deviceIdentity } from './device.ts';
+import { bridgeIdentity } from './e2eeIdentity.ts';
+import { e2eeRequired, guardRelayChannel } from './e2eeChannel.ts';
+import { isLoopbackAddress } from './locality.ts';
 import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
 import type { BrowserLink, UserContext } from './userContext.ts';
 import { handleFileRequest } from './fileRoutes.ts';
-import { reportRelayStatus, UpdateManager } from './updates.ts';
+import { reportActivity, reportRelayStatus, UpdateManager } from './updates.ts';
 import {
   LINES_TOOL_MANIFEST,
   createMcpDispatcher,
@@ -149,6 +153,11 @@ interface ConnState {
    * the file-read clamp.
    */
   access: SocketAccess;
+  /**
+   * Whether this link reaches us from this machine (loopback, not relayed). The
+   * only connection that may open a native dialog on the host's screen.
+   */
+  local: boolean;
 }
 // Keyed on the link object; relayClient will hold a strong ref per channel,
 // so a WeakMap entry lives exactly as long as its connection.
@@ -207,7 +216,37 @@ const registry = new UserRegistry(
   worker,
   (userId) => (userId === LOCAL_USER ? APP_ROOT : userStoreRoot(userId)),
   LOCAL_USER,
+  () => syncActivity(),
 );
+
+/**
+ * Is any session on this machine mid-turn, for any user?
+ *
+ * The same predicate `UpdateManager.busy` uses, widened past the local user:
+ * the shell holds the Mac awake for a turn whoever started it.
+ */
+function anyTurnActive(): boolean {
+  for (const ctx of registry.all()) {
+    if (ctx.sessions.list().some((s) => isSessionActive(s.status))) return true;
+  }
+  return false;
+}
+
+/**
+ * Keep the shell's power-save blocker matched to the machine's real state.
+ * Deduped inside `reportActivity`, so calling it on every session upsert costs
+ * one comparison.
+ */
+function syncActivity(): void {
+  reportActivity(anyTurnActive());
+}
+
+/**
+ * Safety tick. A missed transition would otherwise either leave the Mac awake
+ * for good or let it sleep mid-turn — both silent, and both only noticed hours
+ * later. 30s is far below any sleep timer and costs nothing when nothing moved.
+ */
+setInterval(syncActivity, 30_000).unref();
 // Eager local context in single-tenant mode: workflows keep advancing and
 // worker events keep landing even before (or without) any browser connecting.
 // With auth on, contexts build lazily per verified user instead — but seed the
@@ -454,7 +493,23 @@ claimBridgeLock(relayIdentity?.id ?? null);
 if (RELAY_URL) {
   new RelayClient(RELAY_URL, relayIdentity!.id, relayIdentity!.secret, {
     onChannel: (link, identity) => {
-      void handleConnection(link, {}, identity);
+      // Never straight to handleConnection any more. A relay channel passes
+      // through the e2ee gate first: on a machine with an enrolled device it
+      // only reaches the bridge once it has authenticated with a key this
+      // machine pinned itself, rather than on the relay's say-so.
+      void bridgeIdentity()
+        .then((self) => {
+          const isGuest = !!identity.grant && identity.grant.scope !== 'owner';
+          guardRelayChannel(link, self, isGuest, (secured, peerKey) => {
+            void handleConnection(secured, {}, identity, peerKey);
+          });
+        })
+        .catch((err) => {
+          // No key, no channel: failing open here would restore exactly the
+          // trust this removes.
+          console.error('[e2ee] could not load this machine key:', err);
+          link.close(1011, 'e2ee unavailable');
+        });
     },
     onToken: (userId, token) => {
       // Only a user who owns a context here. A guest's token must never reach
@@ -697,15 +752,21 @@ wss.on('connection', (ws, req) => {
 });
 
 /**
- * `attested` is supplied for relay channels, where the relay is the auth edge and
- * has already verified the token. The bridge does not re-verify: a second
- * verifier means two failure modes, and would make every relayed connection
- * depend on this machine reaching Clerk's JWKS. Direct sockets are unaffected.
+ * `attested` is supplied for relay channels. It used to be the authorization
+ * decision — the relay said who this was and the bridge granted owner access on
+ * that word alone, so whoever ran the relay could drive any machine it brokered.
+ * It is now a *routing hint*: which user's context to open, nothing more.
+ *
+ * What actually grants owner authority on a relay channel is `peerKey`: the
+ * static key the channel authenticated against this machine's own enrolled list
+ * (see e2eeChannel.ts). Direct sockets are unaffected — there is no relay in the
+ * middle of one, and a loopback socket is the machine's own browser.
  */
 async function handleConnection(
   ws: BrowserLink,
-  req: { url?: string },
+  req: { url?: string; socket?: { remoteAddress?: string } },
   attested?: AttestedIdentity,
+  peerKey?: string | null,
 ) {
   let userId = LOCAL_USER;
   let clerkToken: string | null = null;
@@ -753,8 +814,23 @@ async function handleConnection(
       }
     : OWNER_ACCESS;
 
+  // The E3 gate, stated once. The channel guard already refuses an
+  // unauthenticated owner channel on a machine with an enrolled device, so this
+  // is the second lock on the same door: an owner grant over a relay needs a key
+  // this machine pinned, never the relay's assertion about who is calling.
+  if (attested && !isGuest && !peerKey && e2eeRequired()) {
+    console.warn('[e2ee] refused an unauthenticated owner channel');
+    ws.close(1008, 'unauthorized');
+    return;
+  }
+
   const connId = randomUUID();
-  conns.set(ws, { userId, connId, clerkToken, access });
+  // Only a loopback socket is this machine's own browser. `!attested` alone is
+  // not enough — the listener binds every interface, so a direct socket may be
+  // a laptop on the same LAN, which is as remote as the relay for anything that
+  // opens a window here.
+  const local = !attested && isLoopbackAddress(req.socket?.remoteAddress);
+  conns.set(ws, { userId, connId, clerkToken, access, local });
   // A guest's token is never installed on the host's context, and a guest never
   // triggers a sync: either would push this machine's sessions up under the
   // guest's Clerk identity, which is the worst outcome in this whole feature.
@@ -764,7 +840,7 @@ async function handleConnection(
     void ctx.syncNow();
   }
   ctx.sockets.set(ws, access);
-  ws.send(JSON.stringify(buildHello(ctx, access, attested?.grant)));
+  ws.send(JSON.stringify(buildHello(ctx, access, { local, encrypted: !!peerKey }, attested?.grant)));
 
   if (isGuest) {
     console.log(
@@ -820,7 +896,13 @@ async function handleConnection(
  * machine's `hello` contributes only sessions, so a client holding two machines
  * at once never has to merge two sets of owner state.
  */
-function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGrant): ServerMessage {
+function buildHello(
+  ctx: UserContext,
+  access: SocketAccess,
+  link: { local: boolean; encrypted: boolean },
+  grant?: AttestedGrant,
+): ServerMessage {
+  const { local, encrypted } = link;
   const sessions =
     access.scope === 'session'
       ? ctx.sessions.list().filter((s) => access.sessionIds?.includes(s.id))
@@ -861,6 +943,10 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
       openaiAuth: { loggedIn: false },
       storage: ctx.sync.status,
       worker: worker.status,
+      // Always false in practice — a guest arrives over the relay — but sent
+      // rather than omitted so the client reads one rule for every link.
+      local,
+      encrypted,
       access: {
         scope: access.scope,
         caps: access.caps,
@@ -917,10 +1003,18 @@ function buildHello(ctx: UserContext, access: SocketAccess, grant?: AttestedGran
     // running a turn and watching it fail.
     codexCli: publicCodexCliStatus(),
     settings: ctx.store.loadSettings(),
+    // Whether this link may drive a dialog that opens on this machine's screen.
+    local,
+    // Whether this link is end-to-end encrypted against a key this machine
+    // pinned. False on a direct socket, where there is no relay to distrust.
+    encrypted,
     guardAllowlist: ctx.guard.list(),
     // Read from persisted state, so a pending review is on screen before the
     // first pull lands (and survives the 30s pull spacing after a restart).
     guardAllowlistReview: ctx.guard.review(),
+    // Same reasoning, and the same persisted source: a staged memory write is a
+    // decision the user still owes, not a transient notification.
+    memoryReview: ctx.memory.review(),
     // Header names only — `blob()`'s list is what the client ever sees, never a value.
     mcpConnections: ctx.mcp.list(),
     mcpConnectionsReview: ctx.mcp.review(),
@@ -1507,6 +1601,13 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       break;
     }
     case 'pickFolder': {
+      // The dialog opens on *this* machine's screen. Asked for from anywhere
+      // else it would hang a remote user for the full 120s timeout while a
+      // Finder window nobody can see waits on an empty desk.
+      if (!conns.get(ws)?.local) {
+        ws.send(JSON.stringify({ type: 'folderPicked', path: null } satisfies ServerMessage));
+        break;
+      }
       const path = await pickFolderNative();
       ws.send(JSON.stringify({ type: 'folderPicked', path } satisfies ServerMessage));
       break;
@@ -1595,6 +1696,11 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
     case 'reviewGuardAllowlist':
       if (msg.accept) ctx.guard.acceptReview();
       else ctx.guard.rejectReview();
+      break;
+    case 'reviewMemory':
+      // Accept is the only path that writes a pulled memory file to this disk.
+      if (msg.accept) ctx.memory.acceptReview();
+      else ctx.memory.rejectReview();
       break;
     case 'addMcpConnection': {
       // Broadcasts and pushes through mcp.onChange. The client runs the same

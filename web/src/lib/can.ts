@@ -46,6 +46,22 @@ export function useClaudeLoginNeeded(): boolean {
 }
 
 /**
+ * Whether the machine this UI is pointed at is the one the browser runs on.
+ *
+ * The only thing this gates is a control that opens a native dialog on the host
+ * — "Browse…", which shells out to Finder. From a phone or a second laptop that
+ * dialog appears on a screen nobody is looking at, so the control is hidden
+ * rather than disabled: recents and the typed path already cover the remote
+ * case, and a greyed-out button with no remote equivalent just reads as broken.
+ */
+export function useIsLocalMachine(): boolean {
+  return useStore((s) => {
+    const deviceId = s.primaryDeviceId ?? '';
+    return s.machines[deviceId]?.local ?? false;
+  });
+}
+
+/**
  * The machine hosting a session, and whether it is the one the user is on.
  *
  * `projectKeys` groups sessions across installs by design, so a colleague's

@@ -9,6 +9,7 @@ import type {
   McpConnectionInput,
   McpConnectionsReview,
   McpServerStatusInfo,
+  MemoryReview,
   ModelOption,
   PermissionMode,
   PlanComment,
@@ -773,6 +774,25 @@ interface UiState {
   /** `detectedAt` of a review the user dismissed with Escape, so a reconnect doesn't re-pop it. */
   guardReviewDismissedAt: number | null;
   /**
+   * Agent-memory writes a pull wants to make to the host's disk, awaiting
+   * accept/reject. Server-authoritative like the allowlist review beside it, and
+   * for a sharper reason: these files are read into every session's prompt on
+   * that machine, so nothing may be applied without the user seeing it.
+   */
+  memoryReview: MemoryReview | null;
+  memoryReviewOpen: boolean;
+  /** `detectedAt` of a memory review dismissed with Escape. Same rule as the guard's. */
+  memoryReviewDismissedAt: number | null;
+  /**
+   * Why the machine refused this browser's channel, when it did.
+   *
+   * Load-bearing rather than cosmetic: a machine with an enrolled device refuses
+   * any browser that cannot present a pinned key, and the only place to enrol one
+   * used to be inside the app shell — which never loads, because the channel was
+   * refused. Without this the second computer spins forever with no way forward.
+   */
+  e2eeRefusal: string | null;
+  /**
    * User-managed MCP servers. Server-authoritative and never cached in
    * localStorage, for the same two reasons as the guard allowlist — and one more:
    * the bridge holds header values this client has never seen, so it is also
@@ -877,6 +897,12 @@ interface UiState {
   openGuardReview: () => void;
   /** Leaves the review pending (the Settings banner stays) and remembers the dismissal. */
   closeGuardReview: () => void;
+  /** Resolve the staged memory pull: accept writes those files on the host. */
+  resolveMemoryReview: (accept: boolean) => void;
+  /** Leaves the memory review pending and remembers the dismissal. */
+  closeMemoryReview: () => void;
+  /** Set when a machine refuses this browser for want of an enrolled key; cleared by a `hello`. */
+  setE2eeRefusal: (reason: string | null) => void;
   /** Add a connection. `headers` are secret values; they go up and never come back. */
   addMcpConnection: (connection: McpConnectionInput, headers?: Record<string, string>) => void;
   updateMcpConnection: (
@@ -1128,6 +1154,10 @@ export const useStore = create<UiState>((set, get) => {
   guardReview: null,
   guardReviewOpen: false,
   guardReviewDismissedAt: null,
+  memoryReview: null,
+  memoryReviewOpen: false,
+  memoryReviewDismissedAt: null,
+  e2eeRefusal: null,
   mcpConnections: [],
   mcpReview: null,
   mcpReviewOpen: false,
@@ -1284,6 +1314,18 @@ export const useStore = create<UiState>((set, get) => {
       guardReviewOpen: false,
       guardReviewDismissedAt: state.guardReview?.detectedAt ?? state.guardReviewDismissedAt,
     })),
+  resolveMemoryReview: (accept) => {
+    // Closed optimistically, exactly like the allowlist review; the server's
+    // `memoryReview: null` confirms it and closes the modal in other tabs.
+    set({ memoryReviewOpen: false });
+    send({ type: 'reviewMemory', accept });
+  },
+  closeMemoryReview: () =>
+    set((state) => ({
+      memoryReviewOpen: false,
+      memoryReviewDismissedAt: state.memoryReview?.detectedAt ?? state.memoryReviewDismissedAt,
+    })),
+  setE2eeRefusal: (reason) => set({ e2eeRefusal: reason }),
 
   // Intent messages, not a list save, for the same reason the guard's are — and
   // one more: the bridge holds header values this client cannot round-trip.
@@ -1540,6 +1582,13 @@ export const useStore = create<UiState>((set, get) => {
             codexCli: msg.codexCli ?? null,
             scope: msg.access?.scope ?? 'owner',
             ownerProfile: msg.access?.ownerProfile ?? null,
+            // Absent on a bridge older than the field, which reads as "not
+            // local" — the fail-closed direction for a control that opens a
+            // dialog on the host's screen.
+            local: msg.local ?? false,
+            // Same fail-closed reading as `local`: absent means "no evidence of
+            // encryption", which is what an older bridge honestly offers.
+            encrypted: msg.encrypted ?? false,
           };
           return {
           machines: { ...state.machines, [from]: slice },
@@ -1631,6 +1680,12 @@ export const useStore = create<UiState>((set, get) => {
             state.guardReviewOpen ||
             (msg.guardAllowlistReview != null &&
               msg.guardAllowlistReview.detectedAt !== state.guardReviewDismissedAt),
+          memoryReview: msg.memoryReview ?? null,
+          // Same auto-open-on-genuinely-new-news rule as the allowlist review.
+          memoryReviewOpen:
+            state.memoryReviewOpen ||
+            (msg.memoryReview != null &&
+              msg.memoryReview.detectedAt !== state.memoryReviewDismissedAt),
           mcpConnections: msg.mcpConnections ?? [],
           mcpReview: msg.mcpConnectionsReview ?? null,
           // Same auto-open-on-new-news rule as the allowlist review above.
@@ -1686,6 +1741,13 @@ export const useStore = create<UiState>((set, get) => {
           guardReview: msg.review,
           guardReviewOpen:
             msg.review != null && msg.review.detectedAt !== state.guardReviewDismissedAt,
+        }));
+        break;
+      case 'memoryReview':
+        set((state) => ({
+          memoryReview: msg.review,
+          memoryReviewOpen:
+            msg.review != null && msg.review.detectedAt !== state.memoryReviewDismissedAt,
         }));
         break;
       case 'mcpConnections':

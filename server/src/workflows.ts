@@ -52,6 +52,15 @@ function sameContent(a: StepContent, b: StepContent): boolean {
 }
 
 /**
+ * Whether two workflow revisions would run the same thing. Compares the step
+ * list only — a rename or a description edit is not an instruction change, and
+ * holding those back while a run is in flight would be noise.
+ */
+function sameSteps(a: WorkflowDef, b: WorkflowDef): boolean {
+  return JSON.stringify(a.steps) === JSON.stringify(b.steps);
+}
+
+/**
  * Merge rule for `createdAt` at every layer: earliest wins. Idempotent and
  * order-independent, so two peers converge whichever way round their pushes
  * land — and a blob that dropped the field can never erase a known birthday.
@@ -449,6 +458,22 @@ export class WorkflowEngine {
   }
 
   /**
+   * Any session part-way through this workflow: started, with at least one step
+   * still to run. A finished run keeps its state on the meta (every step 'done'),
+   * and that is not in flight — nothing more will be resolved from the def.
+   */
+  private isRunning(workflowId: string): boolean {
+    return this.sessions.list().some((s) => {
+      const state = s.workflow;
+      return (
+        state?.workflowId === workflowId &&
+        state.started &&
+        state.stepStatuses.some((status) => status !== 'done')
+      );
+    });
+  }
+
+  /**
    * True when a pulled row is this user's own workflow wearing a stranger's
    * clothes: either it says so (`ownerId`), or the own map already holds that id.
    *
@@ -615,7 +640,15 @@ export class WorkflowEngine {
         const createdAt = earliest(cur?.createdAt, s.createdAt, this.lineageCreatedAt(s.id));
         const merged = createdAt === undefined ? s : { ...s, createdAt };
         this.steps.set(s.id, merged);
-        this.stepVersions.set(stepKey(merged.ownerId, merged.id, merged.version), merged);
+        const versionKey = stepKey(merged.ownerId, merged.id, merged.version);
+        const pinned = this.stepVersions.get(versionKey);
+        // A version row is immutable by contract — that is the whole basis on
+        // which a workflow pins one. A pulled row claiming an existing version
+        // with *different* content is either a bug or an edit to a body a
+        // running workflow already resolved, so the head moves and the pin does
+        // not. The head is what the next save builds on, so nothing is stuck.
+        if (!pinned || sameContent(pinned, merged)) this.stepVersions.set(versionKey, merged);
+        else console.warn(`[step ${merged.id}] pulled v${merged.version} differs from the pinned copy — kept ours`);
         changed = true;
       }
     }
@@ -732,6 +765,18 @@ export class WorkflowEngine {
     for (const workflow of list) {
       const cur = this.workflows.get(workflow.id);
       if (cur && (workflow.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) continue;
+      // A workflow a session is part-way through resolves its steps live, so
+      // adopting a pulled body here rewrites the instructions of a run already
+      // under way — including the step the user is about to approve. Whoever can
+      // write that storage row would be editing work in flight, invisibly.
+      // Keep ours until the run ends; the row is still newer, so the next pull
+      // after it settles adopts it the normal way.
+      if (cur && this.isRunning(workflow.id) && !sameSteps(cur, workflow)) {
+        console.warn(
+          `[workflow ${workflow.id}] pulled step changes held back: a session is mid-run`,
+        );
+        continue;
+      }
       // The content is adopted wholesale (LWW), but creation time only ever moves
       // earlier — a newer remote row missing `createdAt` must not erase ours.
       this.workflows.set(

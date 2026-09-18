@@ -49,6 +49,20 @@ export interface MachineSlice {
   codexCli: CodexCliStatus | null;
   /** Whose machine it is, when it is not ours. */
   ownerProfile: ShareProfile | null;
+  /**
+   * Whether this link reaches the bridge from the machine the bridge runs on.
+   * Locality is a property of a *link* — the client holds several at once — so
+   * it lives here rather than in a global flag. False until a `hello` says
+   * otherwise, and on a bridge too old to send the field: a control that would
+   * open a window on somebody else's desk fails closed.
+   */
+  local: boolean;
+  /**
+   * Whether this link is end-to-end encrypted against a key this browser pinned,
+   * rather than merely TLS-protected as far as a relay the machine has to trust.
+   * False until a `hello` says otherwise, and on a bridge too old to say.
+   */
+  encrypted: boolean;
 }
 
 export const emptyMachine = (deviceId: string): MachineSlice => ({
@@ -64,6 +78,8 @@ export const emptyMachine = (deviceId: string): MachineSlice => ({
   claudeCli: null,
   codexCli: null,
   ownerProfile: null,
+  local: false,
+  encrypted: false,
 });
 
 /**

@@ -31,8 +31,20 @@
  * `hello.openaiAuth`, and `ModelOption.provider`. A client older than this would
  * offer no way to connect an OpenAI account while the bridge happily runs codex
  * sessions, and would auto-open the Claude login modal at a user who has one.
+ *
+ * 5: end-to-end encryption (`e2ee*`), the `hello.local` locality flag, and the
+ * agent-memory review gate. A client older than this cannot enroll a device key,
+ * so a bridge in strict mode refuses it — which is the intended behaviour, and
+ * the reason strict mode is off until every client has been updated.
  */
-export const APP_PROTOCOL_VERSION = 4;
+export const APP_PROTOCOL_VERSION = 5;
+
+/**
+ * The handshake shapes the `e2ee*` messages below carry. Imported rather than
+ * redeclared so the wire contract and the crypto that produces it cannot drift;
+ * `./e2ee.ts` imports nothing, so this cannot cycle.
+ */
+import type { HandshakeAccept, HandshakeConfirm, HandshakeOffer } from './e2ee.ts';
 
 /**
  * Workspace reads the browser makes over the WebSocket rather than plain HTTP.
@@ -1776,6 +1788,16 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // --- the socket itself
   ping: { needs: 'connection' },
   auth: { needs: 'connection' },
+  // --- bringing the channel up. `connection` is not a weakening: these four are
+  // handled before the authz gate anyway (they are what *establishes* who this
+  // is), and each carries its own proof — a pinned key, a key confirmation, or
+  // an enrollment code. Whatever rides inside `e2eeData` is re-checked against
+  // this same table once decrypted, so nothing escapes classification by hiding
+  // in ciphertext.
+  e2eeHello: { needs: 'connection' },
+  e2eeConfirm: { needs: 'connection' },
+  e2eeEnroll: { needs: 'connection' },
+  e2eeData: { needs: 'connection' },
 
   // --- running a session
   prompt: { needs: 'session', cap: 'prompt' },
@@ -1881,6 +1903,9 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   addGuardAllow: { needs: 'owner' },
   removeGuardAllow: { needs: 'owner' },
   reviewGuardAllowlist: { needs: 'owner' },
+  // Pulled agent memory is read into every session's prompt on this machine, so
+  // deciding to write it is the owner's alone.
+  reviewMemory: { needs: 'owner' },
   // MCP connections run third-party code (or ship the host's credentials to a
   // third party) inside every session on this machine — owner only, permanently.
   addMcpConnection: { needs: 'owner' },
@@ -2157,6 +2182,23 @@ export type ClientMessage =
   | { type: 'removeGuardAllow'; entry: GuardAllowEntry }
   /** Resolve a pending remote-divergence review: accept installs it, reject keeps local. */
   | { type: 'reviewGuardAllowlist'; accept: boolean }
+  /** Resolve a staged agent-memory pull: accept writes the files, reject keeps
+   *  disk as it is and remembers the answer for that exact remote content. */
+  | { type: 'reviewMemory'; accept: boolean }
+  /**
+   * End-to-end encryption, client half. These four are the only client messages
+   * the bridge handles *before* it decides what this connection may do, so they
+   * are deliberately tiny and carry no authority of their own.
+   *
+   * `e2eeHello` opens a handshake against the client's pinned key; `e2eeConfirm`
+   * completes it. `e2eeEnroll` binds a new device, proving possession of a code
+   * the host displayed. `e2eeData` is every other message once the channel is
+   * up — its plaintext is an ordinary `ClientMessage`.
+   */
+  | { type: 'e2eeHello'; offer: HandshakeOffer }
+  | { type: 'e2eeConfirm'; confirm: HandshakeConfirm }
+  | { type: 'e2eeEnroll'; clientKey: string; proof: string }
+  | { type: 'e2eeData'; n: number; d: string }
   /**
    * MCP connection edits. Intent messages for the same reason the guard's are:
    * the bridge holds header values the client has never seen, so a whole-list
@@ -2479,6 +2521,35 @@ export interface MemoryFileEntry {
  *   "slug/<slug>/memory/<rel>"              — fallback for a dir with no resolvable key
  */
 export type MemoryFileMap = Record<string, MemoryFileEntry>;
+
+/**
+ * One pending write a pulled memory blob wants to make to this machine's disk.
+ *
+ * Agent memory is read into the prompt of every session on the machine, so an
+ * unreviewed remote write is prompt injection with a persistence guarantee —
+ * `user/CLAUDE.md` in particular. Nothing is written until the user accepts, on
+ * the same accept/reject shape the guard allowlist and MCP connections use.
+ */
+export interface MemoryReviewEntry {
+  /** The sync key — see {@link MemoryFileMap} for the three forms. */
+  key: string;
+  /** Absolute path(s) on this machine the entry would land on. */
+  targets: string[];
+  change: 'add' | 'update' | 'delete';
+  /** Remote content; empty string for a delete. */
+  content: string;
+  /** What is on disk now, so the modal can show a diff. Absent for an add. */
+  local?: string;
+  /** Remote mtime, as pulled. Clamped to now on accept — see the syncer. */
+  updatedAt: number;
+}
+
+/** A pulled memory blob awaiting explicit accept/reject. */
+export interface MemoryReview {
+  entries: MemoryReviewEntry[];
+  /** ms epoch the divergence was first staged; a stable client dedupe key. */
+  detectedAt: number;
+}
 
 // ---------------------------------------------------------------------------
 // Auto-mode guard allowlist
@@ -2905,8 +2976,30 @@ export type ServerMessage =
       settings?: UserUiSettings | null;
       guardAllowlist?: GuardAllowEntry[];
       guardAllowlistReview?: GuardAllowlistReview | null;
+      /** Staged agent-memory writes, read from persisted state like the guard's
+       *  review so a pending decision is on screen before the next pull. */
+      memoryReview?: MemoryReview | null;
       mcpConnections?: McpConnection[];
       mcpConnectionsReview?: McpConnectionsReview | null;
+      /**
+       * Whether this particular link reaches the bridge from the machine the
+       * bridge runs on. Only such a link may drive a host-side native dialog
+       * (the Finder folder picker): from anywhere else the dialog opens on a
+       * screen nobody is looking at.
+       *
+       * A property of the *link*, not of the app — a client holds several at
+       * once — so it lives beside the machine, not in a global flag. Absent
+       * means not local: a bridge older than this field cannot be asked, and
+       * a control that opens a window on someone else's desk fails closed.
+       */
+      local?: boolean;
+      /**
+       * Whether this link is end-to-end encrypted against a key the machine
+       * pinned itself, rather than merely TLS-protected between the browser and
+       * a relay the machine has to trust. False on a direct socket (nothing in
+       * the middle to distrust) and absent from a bridge older than the field.
+       */
+      encrypted?: boolean;
       /**
        * Present only on a guest connection, and the client's cue that this is
        * somebody else's machine: what it may do, and whose it is. Absent means
@@ -2920,6 +3013,21 @@ export type ServerMessage =
   | { type: 'guardAllowlist'; entries: GuardAllowEntry[] }
   /** A remote allowlist awaiting the user's accept/reject; null once resolved. */
   | { type: 'guardAllowlistReview'; review: GuardAllowlistReview | null }
+  /** Pulled agent-memory writes awaiting the user's accept/reject; null once resolved. */
+  | { type: 'memoryReview'; review: MemoryReview | null }
+  /**
+   * End-to-end encryption, bridge half. `e2eeAccept` answers a handshake,
+   * `e2eeReady` says the channel is up (and carries the key the client should
+   * now have pinned, for a mismatch check), `e2eeEnrolled` completes an
+   * enrollment, and `e2eeError` explains a refusal — an unknown device key, a
+   * bad proof, a replayed frame.
+   */
+  | { type: 'e2eeAccept'; accept: HandshakeAccept }
+  | { type: 'e2eeReady'; bridgeKey: string }
+  | { type: 'e2eeEnrolled'; bridgeKey: string; proof: string }
+  | { type: 'e2eeError'; reason: string }
+  /** An encrypted `ServerMessage`. Same envelope as the client's `e2eeData`. */
+  | { type: 'e2eeData'; n: number; d: string }
   /** The whole MCP connection list after any change. Header *values* are never in it. */
   | { type: 'mcpConnections'; connections: McpConnection[] }
   /** A remote connection list awaiting the user's accept/reject; null once resolved. */
@@ -3469,6 +3577,14 @@ export * from './providers.ts';
  * nothing at all, so nothing of ours is read at its top level.
  */
 export * from './codex.ts';
+
+/**
+ * The end-to-end encryption layer, re-exported beside the wire messages that
+ * carry it. Safe above the cycle-sensitive block below: `./e2ee.ts` imports
+ * nothing at all — it is WebCrypto and this file's own message shapes only by
+ * convention, never by import.
+ */
+export * from './e2ee.ts';
 
 /**
  * The estimator that stands in for a provider-reported cost, re-exported beside

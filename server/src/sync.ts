@@ -1,5 +1,14 @@
 import type { GuardAllowlistBlob, McpConnectionsBlob, MemoryFileMap, ProjectKeyMap, RecipeDef, SessionMeta, StepDef, StepRef, StorageErrorKind, StorageStatus, SyncLogEntry, WorkflowDef } from '@lines/shared';
 import type { SyncWatermarks } from './store.ts';
+import {
+  fileSignerStore,
+  signBlob,
+  signingIdentity,
+  stripSignature,
+  strictSync,
+  verifyBlob,
+  type SignerStore,
+} from './syncSignature.ts';
 
 const PUSH_DEBOUNCE_MS = 2_000;
 const PULL_MIN_SPACING_MS = 30_000;
@@ -24,6 +33,21 @@ const SESSIONS_PUSH_MAX_BYTES = 1.5 * 1024 * 1024;
 export const THROTTLED = Symbol('throttled');
 /** The server answered 304 — the caller's cached view is still current. */
 const NOT_MODIFIED = Symbol('not-modified');
+
+/**
+ * Resources whose blob travels as an envelope the storage server keeps intact,
+ * so a signature can ride inside it (see syncSignature.ts).
+ *
+ * The rest are deliberately absent rather than forgotten. `/memory` and
+ * `/project-keys` are *maps*, merged per key in SQL — a reserved signature key
+ * would be filtered out on the way in, and there is nowhere else to put one
+ * without a storage column. `/sessions`, `/workflows`, `/steps` and `/recipes`
+ * are arrays, for the same reason. Those resources are covered today by the
+ * review gate in front of pulled memory and by the field stripping in
+ * `adoptSynced`; carrying signatures for them needs a per-row column, which is a
+ * migration on a running deployment and is the next step here, not this one.
+ */
+const SIGNED_PATHS = new Set(['/settings', '/guard-allowlist', '/mcp-connections']);
 
 /** Endpoints that return an `x-sync-cursor`, mapped to the watermark they advance. */
 const CURSOR_KEYS: Record<string, keyof SyncWatermarks> = {
@@ -150,14 +174,21 @@ export class StorageSyncClient {
   private readonly authGraceMs: number;
   private readonly probeMs: number;
 
+  /**
+   * Where signer pins and counters live. Injected so a test can drive the
+   * signature policy without a home directory, exactly as `appendLog` is.
+   */
+  private signers: SignerStore;
+
   constructor(
     private base: string,
     private tokenFn: () => string | null,
     private persistMarks: (marks: SyncWatermarks) => void = () => {},
     marks: SyncWatermarks = {},
     appendLog: (entry: SyncLogEntry) => void = () => {},
-    opts?: { authGraceMs?: number; probeMs?: number },
+    opts?: { authGraceMs?: number; probeMs?: number; signers?: SignerStore },
   ) {
+    this.signers = opts?.signers ?? fileSignerStore;
     this.marks = { ...marks };
     this.appendLog = appendLog;
     this.authGraceMs = opts?.authGraceMs ?? AUTH_GRACE_MS;
@@ -597,6 +628,14 @@ export class StorageSyncClient {
     const basePath = path.split('?')[0];
     const knownEtag = this.etags.get(basePath);
     const started = Date.now();
+    // Signed on the way out, so a peer can tell this machine's writes from
+    // anything the database grew on its own. Objects only: the list endpoints
+    // (`PUT /workflows`) take arrays, which have nowhere to carry a signature —
+    // those are covered per-row by the modules that build them.
+    const outgoing =
+      SIGNED_PATHS.has(basePath) && body !== undefined && body !== null && typeof body === 'object'
+        ? await signBlob(body as object, await signingIdentity(), this.signers)
+        : body;
     let res: Response;
     try {
       res = await fetch(`${this.base}${path}`, {
@@ -606,7 +645,7 @@ export class StorageSyncClient {
           ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
           ...(knownEtag ? { 'if-none-match': knownEtag } : {}),
         },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        ...(body !== undefined ? { body: JSON.stringify(outgoing) } : {}),
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       });
     } catch (err) {
@@ -654,7 +693,44 @@ export class StorageSyncClient {
       this.marks[cursorKey] = cursor;
       this.marksDirty = true;
     }
-    return res.json();
+    const payload = await res.json();
+    return SIGNED_PATHS.has(basePath) ? this.checkSignature(basePath, payload) : payload;
+  }
+
+  /**
+   * Verify a pulled blob, and decide what to do about a failure.
+   *
+   * The two halves, and why they differ: a *forged* or *rolled back* blob is
+   * always refused — those are things only an attacker produces, and accepting
+   * one is the whole risk this closes. An *unsigned* blob is accepted with a
+   * warning while the fleet is still mixed, because refusing it before every
+   * machine writes signatures is just a way to stop syncing. Strict mode is what
+   * turns the second into the first, once that is true.
+   */
+  private async checkSignature(resource: string, body: unknown): Promise<unknown> {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+    const verdict = await verifyBlob(resource, body, this.signers);
+    if (verdict.ok) return stripSignature(body);
+
+    const refuse = verdict.reason !== 'unsigned' || strictSync();
+    // `fail` with a client kind: the request itself succeeded, the *content*
+    // did not, and this log is the only place a user can see why a resource
+    // stopped applying.
+    this.appendLog({
+      at: Date.now(),
+      event: 'fail',
+      kind: 'client',
+      method: 'GET',
+      path: resource,
+      reason: `signature ${verdict.reason}${refuse ? ' — refused' : ' — accepted (rollout)'}`,
+    });
+    if (refuse) {
+      console.warn(`[sync] refusing ${resource}: signature ${verdict.reason}`);
+      // Null, not a throw: one unverifiable resource must not abort a pull that
+      // also carries five verifiable ones.
+      return null;
+    }
+    return stripSignature(body);
   }
 
   /** Current bridge->storage link health for a fresh client's hello (null before first contact). */

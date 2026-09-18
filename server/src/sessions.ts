@@ -1450,6 +1450,26 @@ export class SessionManager {
     const cur = this.sessions.get(meta.id);
     if (cur && (meta.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) return;
     if (isSessionActive(meta.status)) meta.status = 'idle';
+    /*
+     * A synced session is a display artifact plus resumable history. It is not a
+     * work order, and the two fields below are the ones that would make it one.
+     *
+     * `queued` is a list of prompts to run; adopting it hands this machine work
+     * from a row it did not write. `permissionMode` decides how much of that
+     * work runs without being asked — a remote row that says
+     * `bypassPermissions` would silently widen what an existing local session
+     * may do. Both are kept at whatever this machine already believed: the local
+     * queue survives a pull (it would otherwise be dropped by any peer's write),
+     * and the mode can still be raised the only way it should be, by someone
+     * clicking it here.
+     */
+    meta.queued = cur?.queued;
+    meta.queuePaused = cur?.queuePaused;
+    // With no local copy there is no baseline to hold, so only the unbounded
+    // mode is clamped: a session first seen here must not arrive pre-authorized
+    // to skip every permission prompt. The user can still set it, here, once.
+    if (cur) meta.permissionMode = cur.permissionMode;
+    else if (meta.permissionMode === 'bypassPermissions') meta.permissionMode = 'default';
     // In-flight statuses were just reset, so no pause is owned by this instance.
     meta.pendingPermissionTool = undefined;
     // Same reasoning: only the instance actually consolidating is advancing.
@@ -4997,7 +5017,17 @@ export class SessionManager {
     }
     // A bridge that died between a turn's result and its flush leaves queued
     // prompts on a settled session; release them now.
-    for (const meta of this.sessions.values()) this.maybeFlush(meta.id);
+    //
+    // Scoped by the same `ranHere` rule as the demotion loop above, and for a
+    // sharper reason: a session adopted from storage arrives with whatever the
+    // remote row said, `queued` included. Flushing that starts a turn on this
+    // machine from a row nobody here wrote — unattended execution driven by
+    // whoever can write that table. A queue this machine never took a prompt
+    // into is not this machine's work to release.
+    for (const meta of this.sessions.values()) {
+      if (!this.ranHere(meta.id)) continue;
+      this.maybeFlush(meta.id);
+    }
     // Resume what this pass just flagged, without waiting for a click. On unless
     // explicitly disabled, so a fresh install recovers with no configuration.
     // Scoped to `flagged` on purpose — a stale flag from an older crash keeps its

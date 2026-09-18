@@ -2,11 +2,15 @@ import type {
   ClientMessage,
   FileRequestKind,
   FileRequestParams,
+  HandshakeAccept,
+  HandshakeConfirm,
+  SecureSession,
   ServerMessage,
 } from '@lines/shared';
-import { APP_PROTOCOL_VERSION } from '@lines/shared';
+import { APP_PROTOCOL_VERSION, enrollProof, startHandshake } from '@lines/shared';
 import { useStore } from './store';
 import { refreshDevices } from './lib/devices';
+import { cryptoUnavailable, deviceIdentity, pinKey, pinnedKey } from './lib/e2ee';
 
 /**
  * One link per machine.
@@ -97,10 +101,56 @@ interface MachineLink {
   reqCounter: number;
   /** Set while an intentional close is in flight, so it does not schedule a retry. */
   closing: boolean;
+  /**
+   * The established encrypted session with this machine, once the handshake has
+   * completed. Null on a direct bridge socket, and on a machine this browser has
+   * not enrolled with — both of which fall back to plaintext over TLS.
+   */
+  secure: SecureSession | null;
+  /**
+   * This link owes the bridge a handshake and has not finished one yet.
+   *
+   * Set synchronously when the socket opens, because `beginHandshake` is async —
+   * it awaits the IndexedDB identity before it can set `finishHandshake`, and a
+   * frame written inside that window would otherwise find neither a session nor
+   * a handshake in flight and go out in the clear.
+   */
+  expectsSecure: boolean;
+  /** Second half of the handshake, held between our offer and the bridge's accept. */
+  finishHandshake:
+    | ((accept: HandshakeAccept) => Promise<{ session: SecureSession; confirm: HandshakeConfirm }>)
+    | null;
+  /**
+   * Messages written while the handshake was still in flight. Sending them in
+   * the clear would be the downgrade the handshake exists to prevent, and
+   * dropping them would lose a prompt, so they wait.
+   */
+  outbox: string[];
+  /**
+   * Orders outbound frames. `seal` takes its counter synchronously and encrypts
+   * asynchronously; the bridge refuses a counter it has already passed, so two
+   * sends resolving out of order would look like a replay rather than a race.
+   */
+  sending: Promise<void>;
+  /** Resolver for an enrollment in flight on this link, if any. */
+  enrollWaiter:
+    | ((msg: { type: 'e2eeEnrolled'; bridgeKey: string; proof: string } | { type: 'e2eeError'; reason: string }) => void)
+    | null;
 }
 
 const links = new Map<string, MachineLink>();
 let connectivityWired = false;
+
+/**
+ * Machines that have refused this browser for want of an enrolled key.
+ *
+ * Remembered because the recovery needs a *quiet* socket: the bridge refuses the
+ * first plaintext app frame it sees, and the heartbeat is a plaintext app frame
+ * one second in. So for a machine known to require a key, the link opens and
+ * says nothing at all, leaving the channel alive long enough for the user to
+ * type the code from that machine's screen.
+ */
+const needsEnrollment = new Set<string>();
 
 /**
  * The machine the UI is "on": the one whose account-wide state (settings,
@@ -132,6 +182,12 @@ function linkFor(deviceId: string): MachineLink {
       pending: new Map(),
       reqCounter: 0,
       closing: false,
+      secure: null,
+      expectsSecure: false,
+      finishHandshake: null,
+      outbox: [],
+      sending: Promise.resolve(),
+      enrollWaiter: null,
     };
     links.set(deviceId, link);
   }
@@ -223,7 +279,20 @@ function cancelIdleDisconnect(link: MachineLink) {
  */
 export function reconnectNow() {
   if (primaryDeviceId === null) return;
-  const link = linkFor(primaryDeviceId);
+  reconnectMachine(primaryDeviceId);
+}
+
+/**
+ * Re-dial one named machine, whoever the UI is currently pointed at.
+ *
+ * Enrollment needs this rather than {@link reconnectNow}: it happens on the
+ * connect-time gate, where the link being enrolled is named explicitly and
+ * `primaryDeviceId` may be a different machine entirely (or unset, before any
+ * `hello` has landed). Re-dialling the primary there leaves the enrolled link
+ * sitting on its old, keyless socket — which the machine refuses, forever.
+ */
+export function reconnectMachine(deviceId: string) {
+  const link = linkFor(deviceId);
   if (link.retryTimer) clearTimeout(link.retryTimer);
   link.retryTimer = null;
   if (link.socket && link.socket.readyState !== WebSocket.CLOSED) link.socket.close();
@@ -255,7 +324,7 @@ export function fileRequest(
   const reqId = `f${++link.reqCounter}`;
   return new Promise((resolve, reject) => {
     link.pending.set(reqId, { resolve, reject });
-    link.socket!.send(JSON.stringify({ type: 'fileRequest', reqId, kind, params } satisfies ClientMessage));
+    writeToLink(link, JSON.stringify({ type: 'fileRequest', reqId, kind, params } satisfies ClientMessage));
   });
 }
 
@@ -290,7 +359,7 @@ function startAuthRelay(link: MachineLink) {
   link.authRelayTimer = setInterval(async () => {
     if (link.socket?.readyState !== WebSocket.OPEN) return;
     const token = await tokenProvider?.().catch(() => null);
-    if (token) link.socket.send(JSON.stringify({ type: 'auth', token } satisfies ClientMessage));
+    if (token) writeToLink(link, JSON.stringify({ type: 'auth', token } satisfies ClientMessage));
   }, AUTH_RELAY_INTERVAL_MS);
 }
 
@@ -306,7 +375,7 @@ function startHeartbeat(link: MachineLink) {
     const stalledMs = now - expectedTick;
     expectedTick = now + PING_INTERVAL_MS;
     if (link.socket?.readyState !== WebSocket.OPEN) return;
-    link.socket.send(JSON.stringify({ type: 'ping' } satisfies ClientMessage));
+    writeToLink(link, JSON.stringify({ type: 'ping' } satisfies ClientMessage));
     if (stalledMs > PING_INTERVAL_MS) {
       link.lastPongAt = now;
       return;
@@ -326,6 +395,135 @@ function flushQueue() {
       console.warn('dropped queued prompt, session gone', p.sessionId);
     }
   }
+}
+
+/**
+ * Write one already-serialised message to a machine.
+ *
+ * Three states, and the middle one is the security-relevant one: with a session
+ * established everything is sealed; while a handshake is in flight nothing goes
+ * out at all (sending in the clear would be exactly the downgrade the handshake
+ * prevents); with no enrollment at all it is plaintext over TLS, which is where
+ * every install starts and what enrolling a device upgrades.
+ *
+ * Every client frame but the handshake's own goes through here. That includes
+ * the ones written by a timer rather than by the user — the heartbeat ping and
+ * the auth relay — which is not a detail: they used to call `socket.send`
+ * directly, so the first ping after a successful handshake arrived at the bridge
+ * as plaintext, the bridge read it as a downgrade and closed the channel, and the
+ * link reconnected into the same loop a second later.
+ */
+function writeToLink(link: MachineLink, payload: string): boolean {
+  if (link.socket?.readyState !== WebSocket.OPEN) return false;
+  if (link.secure) {
+    const session = link.secure;
+    const socket = link.socket;
+    link.sending = link.sending
+      .then(async () => {
+        const sealed = await session.seal(payload);
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: 'e2eeData', ...sealed } satisfies ClientMessage));
+        }
+      })
+      .catch((err) => console.warn('[e2ee] send failed', err));
+    return true;
+  }
+  if (link.expectsSecure) {
+    link.outbox.push(payload);
+    return true;
+  }
+  link.socket.send(payload);
+  return true;
+}
+
+/** Everything held back during the handshake, in the order it was written. */
+function flushOutbox(link: MachineLink) {
+  const held = link.outbox;
+  link.outbox = [];
+  for (const payload of held) writeToLink(link, payload);
+}
+
+/**
+ * Open an encrypted channel to a machine this browser has enrolled with.
+ *
+ * The pinned key is passed *in* rather than read off the wire: believing the
+ * key the connection offers would authenticate the connection against itself,
+ * which is no authentication at all. If the peer cannot produce a matching key
+ * confirmation the handshake throws, and the link is closed rather than
+ * downgraded.
+ */
+async function beginHandshake(link: MachineLink, bridgeKey: string): Promise<void> {
+  const identity = await deviceIdentity();
+  const { offer, finish } = await startHandshake(identity, bridgeKey);
+  link.finishHandshake = finish as MachineLink['finishHandshake'];
+  link.socket?.send(JSON.stringify({ type: 'e2eeHello', offer } satisfies ClientMessage));
+}
+
+/**
+ * Bind this browser to a machine, using a code read off the host's own screen.
+ *
+ * The code never travels — only MACs computed under it do — and the bridge's
+ * answer is itself MAC'd over both public keys, so the key this pins cannot be
+ * substituted by anything in the middle. That is the whole reason enrollment is
+ * out-of-band: it is the one moment the two ends can agree on a key without a
+ * server they would otherwise have to trust.
+ */
+export async function enrollWithCode(deviceId: string, code: string): Promise<{ error?: string }> {
+  // Checked before anything else, and answered rather than thrown: on an
+  // insecure origin every call below rejects, and an unhandled rejection at the
+  // call site is a button that spins for ever with no explanation.
+  const blocked = cryptoUnavailable();
+  if (blocked) return { error: blocked };
+  try {
+    return await runEnrollment(deviceId, code);
+  } catch (err) {
+    // Nothing in here is worth crashing a screen over: IndexedDB can be blocked
+    // in a private window, and the socket can die mid-exchange.
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function runEnrollment(deviceId: string, code: string): Promise<{ error?: string }> {
+  const link = linkFor(deviceId);
+  // A refused link is closed and on a 5s retry, so the socket is usually down at
+  // the moment the user presses Enrol. Nudge it and wait, rather than answering
+  // "not connected" to somebody looking straight at the machine they mean.
+  if (link.socket?.readyState !== WebSocket.OPEN) {
+    if (link.retryTimer) clearTimeout(link.retryTimer);
+    link.retryTimer = null;
+    void openSocket(link);
+    const deadline = Date.now() + 10_000;
+    while (link.socket?.readyState !== WebSocket.OPEN && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  if (link.socket?.readyState !== WebSocket.OPEN) return { error: 'Not connected to that machine.' };
+  const identity = await deviceIdentity();
+  const proof = await enrollProof(code, 'enroll', identity.publicKey);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      link.enrollWaiter = null;
+      resolve({ error: 'That machine did not answer. Try again.' });
+    }, 15_000);
+    link.enrollWaiter = async (msg) => {
+      clearTimeout(timer);
+      link.enrollWaiter = null;
+      if (msg.type === 'e2eeError') return resolve({ error: msg.reason });
+      const expected = await enrollProof(code, 'enrolled', identity.publicKey, msg.bridgeKey);
+      if (expected !== msg.proof) {
+        // Either the code was wrong on the far side or something rewrote the key
+        // in flight. Pinning anyway would pin the attacker's key, permanently.
+        return resolve({ error: 'That machine answered with a key the code does not vouch for.' });
+      }
+      pinKey(deviceId, msg.bridgeKey);
+      needsEnrollment.delete(deviceId);
+      useStore.getState().setE2eeRefusal(null);
+      resolve({});
+      // This link, by name — not the primary. See reconnectMachine.
+      reconnectMachine(deviceId);
+    };
+    link.socket!.send(JSON.stringify({ type: 'e2eeEnroll', clientKey: identity.publicKey, proof } satisfies ClientMessage));
+  });
 }
 
 /**
@@ -370,6 +568,34 @@ async function openSocket(link: MachineLink) {
 
   socket.onopen = () => {
     useStore.getState().setConnectionStatus('connected', link.deviceId);
+    link.secure = null;
+    link.finishHandshake = null;
+    // Whatever the previous socket could not deliver describes a state this one
+    // has already left, so it is dropped rather than replayed.
+    link.outbox = [];
+    link.sending = Promise.resolve();
+    const bridgeKey = pinnedKey(link.deviceId);
+    link.expectsSecure = !!bridgeKey;
+    if (!bridgeKey && needsEnrollment.has(link.deviceId)) {
+      // Deliberately silent: no heartbeat, no auth relay, no app traffic. This
+      // machine refuses the first plaintext frame it sees, and the heartbeat is
+      // one a second in — so the socket is held open saying nothing, which is
+      // what leaves a window for the enrollment frame the gate screen sends.
+      console.warn(
+        `[e2ee] ${link.deviceId || 'bridge'} requires an enrolled browser — holding the socket for enrollment`,
+      );
+      return;
+    }
+    if (bridgeKey) {
+      // Heartbeat and auth relay start only once the channel is authenticated:
+      // both write, and a write before the handshake would either be refused by
+      // a strict bridge or travel in the clear past the relay.
+      void beginHandshake(link, bridgeKey).catch((err) => {
+        console.warn('[e2ee] handshake could not start', err);
+        socket.close();
+      });
+      return;
+    }
     startHeartbeat(link);
     startAuthRelay(link);
   };
@@ -379,62 +605,20 @@ async function openSocket(link: MachineLink) {
     if (generation !== link.generation) return;
     try {
       const msg = JSON.parse(e.data as string) as ServerMessage | RelayControlMessage;
-      // Relay control frames, not app messages: the socket is healthy, the machine
-      // behind it is not. Handled here with the other non-app frames because the
-      // reducer has no case for them and would drop them silently.
-      if (msg.type === 'deviceOffline' || msg.type === 'deviceOnline') {
-        useStore.getState().setMachineOffline(msg.type === 'deviceOffline', link.deviceId);
+      // The encrypted channel's own frames, handled before anything reads them
+      // as app state: they are what establishes whether this connection may
+      // carry app state at all.
+      if (
+        msg.type === 'e2eeAccept' ||
+        msg.type === 'e2eeReady' ||
+        msg.type === 'e2eeEnrolled' ||
+        msg.type === 'e2eeError' ||
+        msg.type === 'e2eeData'
+      ) {
+        void handleE2eeFrame(link, generation, msg);
         return;
       }
-      if (msg.type === 'pong') {
-        link.lastPongAt = Date.now();
-        return;
-      }
-      if (msg.type === 'fileResponse') {
-        // Point-to-point reply, not app state — settled here, never in the store,
-        // and only against this link's own in-flight requests.
-        const pending = link.pending.get(msg.reqId);
-        link.pending.delete(msg.reqId);
-        pending?.resolve({ status: msg.status, body: msg.body });
-        return;
-      }
-      // Which project (if any) this pick adds a root to — read before the reducer
-      // clears it below.
-      const folderPickTarget =
-        msg.type === 'folderPicked' ? useStore.getState().folderPickTarget : null;
-      // Tagged with the link: this is what lets the reducer keep two machines'
-      // sessions apart instead of letting the newest `hello` win.
-      useStore.getState().applyServerMessage(msg, link.deviceId);
-      // Flush only after the hello reducer ran: sessions are fresh and transcripts reset.
-      if (msg.type === 'hello') {
-        if (useStore.getState().protocolSkew) {
-          console.warn(
-            `[ws] protocol skew: bridge speaks v${msg.bridge?.appProtocol ?? '<pre-versioning>'}, ` +
-              `this client speaks v${APP_PROTOCOL_VERSION}. Unknown messages are ignored.`,
-          );
-        }
-        flushQueue();
-      }
-      // Pop the Claude approval page; the login modal keeps a link as the popup-blocked fallback.
-      if (msg.type === 'authLoginStarted') {
-        window.open(msg.authorizeUrl, '_blank', 'noopener');
-      }
-      // Same treatment for the OpenAI device-code page. The code itself stays in
-      // the modal — this only saves the user navigating there by hand.
-      if (msg.type === 'openaiLoginStarted') {
-        window.open(msg.verificationUrl, '_blank', 'noopener');
-      }
-      // The native folder picker either opens a project or widens one, depending on
-      // where the pick was started from. Adding a root leaves the active tab alone —
-      // the tab the root lands in need not be the one in front.
-      if (msg.type === 'folderPicked' && msg.path) {
-        if (folderPickTarget) {
-          send({ type: 'addProjectRoot', project: folderPickTarget, path: msg.path });
-        } else {
-          send({ type: 'openProject', path: msg.path });
-          useStore.getState().setActiveProject(msg.path);
-        }
-      }
+      handleServerMessage(link, msg);
     } catch (err) {
       console.error('bad server message', err);
     }
@@ -474,6 +658,139 @@ async function openSocket(link: MachineLink) {
 
   socket.onerror = () => socket.close();
 }
+
+/**
+ * Apply one decrypted (or plaintext) server message to this link.
+ *
+ * Split out of `socket.onmessage` when encryption landed: a message now arrives
+ * either straight off the socket or out of an `e2eeData` envelope, and both have
+ * to run exactly the same path — a second copy is how the two would drift.
+ */
+function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayControlMessage) {
+  // Relay control frames, not app messages: the socket is healthy, the machine
+  // behind it is not. Handled here with the other non-app frames because the
+  // reducer has no case for them and would drop them silently.
+  if (msg.type === 'deviceOffline' || msg.type === 'deviceOnline') {
+    useStore.getState().setMachineOffline(msg.type === 'deviceOffline', link.deviceId);
+    return;
+  }
+  if (msg.type === 'pong') {
+    link.lastPongAt = Date.now();
+    return;
+  }
+  if (msg.type === 'fileResponse') {
+    // Point-to-point reply, not app state — settled here, never in the store,
+    // and only against this link's own in-flight requests.
+    const pending = link.pending.get(msg.reqId);
+    link.pending.delete(msg.reqId);
+    pending?.resolve({ status: msg.status, body: msg.body });
+    return;
+  }
+  // Which project (if any) this pick adds a root to — read before the reducer
+  // clears it below.
+  const folderPickTarget =
+    msg.type === 'folderPicked' ? useStore.getState().folderPickTarget : null;
+  // Tagged with the link: this is what lets the reducer keep two machines'
+  // sessions apart instead of letting the newest `hello` win.
+  useStore.getState().applyServerMessage(msg, link.deviceId);
+  // Flush only after the hello reducer ran: sessions are fresh and transcripts reset.
+  if (msg.type === 'hello') {
+    if (useStore.getState().protocolSkew) {
+      console.warn(
+        `[ws] protocol skew: bridge speaks v${msg.bridge?.appProtocol ?? '<pre-versioning>'}, ` +
+          `this client speaks v${APP_PROTOCOL_VERSION}. Unknown messages are ignored.`,
+      );
+    }
+    flushQueue();
+  }
+  // Pop the Claude approval page; the login modal keeps a link as the popup-blocked fallback.
+  if (msg.type === 'authLoginStarted') {
+    window.open(msg.authorizeUrl, '_blank', 'noopener');
+  }
+  // Same treatment for the OpenAI device-code page. The code itself stays in
+  // the modal — this only saves the user navigating there by hand.
+  if (msg.type === 'openaiLoginStarted') {
+    window.open(msg.verificationUrl, '_blank', 'noopener');
+  }
+  // The native folder picker either opens a project or widens one, depending on
+  // where the pick was started from. Adding a root leaves the active tab alone —
+  // the tab the root lands in need not be the one in front.
+  if (msg.type === 'folderPicked' && msg.path) {
+    if (folderPickTarget) {
+      send({ type: 'addProjectRoot', project: folderPickTarget, path: msg.path });
+    } else {
+      send({ type: 'openProject', path: msg.path });
+      useStore.getState().setActiveProject(msg.path);
+    }
+  }
+}
+
+/**
+ * The handshake, enrollment answer, and encrypted traffic.
+ *
+ * A failure anywhere here closes the socket rather than falling back to
+ * plaintext. That is deliberate: every failure mode this can see — a peer that
+ * cannot confirm the pinned key, a replayed frame, a refusal — is either an
+ * attack or a state a reconnect fixes, and a silent downgrade would turn the
+ * first into the second.
+ */
+async function handleE2eeFrame(
+  link: MachineLink,
+  generation: number,
+  msg: Extract<ServerMessage, { type: `e2ee${string}` }>,
+): Promise<void> {
+  try {
+    if (msg.type === 'e2eeAccept') {
+      const finish = link.finishHandshake;
+      if (!finish) return;
+      const { session, confirm } = await finish(msg.accept);
+      if (generation !== link.generation) return; // the socket was replaced mid-handshake
+      link.finishHandshake = null;
+      link.secure = session;
+      link.socket?.send(JSON.stringify({ type: 'e2eeConfirm', confirm } satisfies ClientMessage));
+      return;
+    }
+    if (msg.type === 'e2eeReady') {
+      // Belt and braces: the handshake already failed if the peer held a
+      // different key, so a mismatch here means something rewrote this frame.
+      if (msg.bridgeKey !== pinnedKey(link.deviceId)) {
+        console.warn('[e2ee] the machine answered with an unpinned key — closing');
+        link.socket?.close();
+        return;
+      }
+      link.expectsSecure = false;
+      startHeartbeat(link);
+      startAuthRelay(link);
+      flushOutbox(link);
+      return;
+    }
+    if (msg.type === 'e2eeEnrolled' || msg.type === 'e2eeError') {
+      const waiter = link.enrollWaiter;
+      if (waiter) {
+        waiter(msg);
+        return;
+      }
+      if (msg.type === 'e2eeError') {
+        console.warn(`[e2ee] ${link.deviceId || 'bridge'} refused the channel: ${msg.reason}`);
+        // A refusal for want of a key is recoverable *here*, from the connecting
+        // gate — every other refusal is not, so only this one arms the quiet
+        // reconnect that makes enrollment possible.
+        if (/end-to-end encrypted channel/.test(msg.reason)) needsEnrollment.add(link.deviceId);
+        useStore.getState().setE2eeRefusal(msg.reason);
+      }
+      return;
+    }
+    // e2eeData: an ordinary server message, sealed.
+    if (!link.secure) return;
+    const plaintext = await link.secure.open({ n: msg.n, d: msg.d });
+    if (generation !== link.generation) return;
+    handleServerMessage(link, JSON.parse(plaintext) as ServerMessage | RelayControlMessage);
+  } catch (err) {
+    console.warn('[e2ee] frame rejected', err);
+    link.socket?.close();
+  }
+}
+
 
 /** Register once: react to the OS network toggling so we don't wait out the heartbeat. */
 function wireConnectivity() {
@@ -519,10 +836,16 @@ function linkForMessage(msg: ClientMessage): MachineLink | undefined {
  *  leaving the user with a button that appears to do nothing. */
 export function send(msg: ClientMessage): boolean {
   const link = linkForMessage(msg);
-  if (link?.socket?.readyState === WebSocket.OPEN) {
-    link.socket.send(JSON.stringify(msg));
-    return true;
-  }
+  // Through `writeToLink`, never straight at the socket: this is the path every
+  // prompt and control message takes, so writing it raw put the app's entire
+  // payload past the relay in the clear on an enrolled machine — and the bridge,
+  // correctly, closed the channel over it.
+  // One exception to that routing: a prompt written while the handshake is still
+  // in flight goes to the durable queue below instead of the link's outbox. The
+  // outbox is dropped if that socket dies before the handshake finishes, and a
+  // lost prompt is the single failure the queue exists to prevent.
+  const buffersOnly = !!link?.expectsSecure && !link.secure;
+  if (link && !(msg.type === 'prompt' && buffersOnly) && writeToLink(link, JSON.stringify(msg))) return true;
   if (msg.type === 'prompt') {
     // Only prompts are safe to replay blind; other control messages depend on live state.
     useStore.getState().enqueuePrompt({

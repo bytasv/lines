@@ -20,6 +20,7 @@
     "repair:spend": "tsx scripts/repair-spend.ts",
     "backfill:spend-history": "tsx scripts/backfill-spend-history.ts",
     "pair": "tsx scripts/pair-device.ts",
+    "enroll": "tsx scripts/enroll-code.ts",
     "gen:codex-protocol": "codex app-server generate-ts --out ../shared/codexProtocol && node scripts/normalize-codex-protocol.mjs ../shared/codexProtocol"
   },
   "dependencies": {
