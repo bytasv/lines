@@ -62,8 +62,9 @@ was a versioned filename hand-pasted after every release, forcing a `web` rebuil
 `desktop-app`'s release step; that ordering no longer exists.
 
 At runtime, Traefik routes by `Host()`/`PathPrefix()` label rules on the
-existing Docker socket provider: `web` takes the apex host, `relay` takes
-`/agent` and `/client` on the same host (with a `www` redirect router), and
+existing Docker socket provider: `web` takes **its own host** (`app.<domain>`),
+`relay` takes `/agent` and `/client` on the apex (which otherwise redirects to
+`app.`, as does `www`), and
 `storage` gets its own subdomain (`api.<domain>`) with `/v1/devices/verify`,
 `/v1/devices/presence`, and `/v1/devices/authorize` excluded from that router —
 see Architectural rules. `storage` carries no
@@ -99,6 +100,52 @@ are tagged with the pushed commit SHA).
 
 ## Business rules
 
+### Origin separation
+
+- The web bundle and the relay **must not share a hostname**. They were always separate
+  containers; sharing an origin was purely a Traefik routing accident, and it meant that code
+  execution inside the relay — the most exposed process here — could serve JavaScript to the page
+  holding the end-to-end encryption keys and defeat all of it in one line. The bundle lives on
+  `app.<domain>`; the apex keeps `/agent` and `/client` (priority 100) and redirects everything
+  else.
+- The apex redirects rather than serving a second copy. Two origins serving one app are two
+  origins whose compromise is equivalent, which is exactly what the split removes.
+- This narrows the exposure from "any server-side compromise" to "host or reverse-proxy
+  compromise". It is a reduction, not a solution: whoever controls Traefik or the host can still
+  serve arbitrary JavaScript from the bundle's origin. See
+  [end-to-end-encryption](end-to-end-encryption.md#residual-risks).
+- Deploying the split needs two things in place **first**: an A record for `app.<domain>`, and
+  that origin in the production Clerk instance's allowed origins and redirect URLs. Without the
+  DNS record the apex redirects to a name that resolves nowhere; without Clerk, sign-in breaks at
+  the cutover.
+
+### Content security
+
+- Monaco is bundled from `node_modules`, not loaded from `cdn.jsdelivr.net`. A CDN script in the
+  page that holds the encryption keys is a second, independent supply chain into it — and it was
+  the stated reason a CSP was impossible.
+- The CSP ships **Report-Only** until it has been exercised against live Clerk and a real diff
+  modal. Its `connect-src` is interpolated at image build time from `VITE_BRIDGE_WS_URL` and
+  `VITE_STORAGE_URL` via nginx's envsubst; if either is empty, an *enforcing* policy would leave
+  an app that loads and then cannot reach the relay — indistinguishable from a broken deploy.
+  Drop the `-Report-Only` suffix once the console is clean.
+- `script-src` needs `blob:`: Monaco's editor worker is instantiated from a blob URL by Vite's
+  `?worker` import, and without it every editor silently fails to load. `style-src` allows
+  `'unsafe-inline'` because Mantine sets inline styles throughout — style injection is not script
+  execution.
+- SRI is added to the emitted chunks by a post-build step, and its limit is worth stating: it
+  protects the chunks `index.html` references, not `index.html` itself. Against an attacker who
+  can rewrite the served HTML it buys nothing; its value is against a compromised asset host and
+  against accidental drift.
+
+### Deploy mechanics
+
+- The VPS checkout is a **deploy target, not a working copy**. It drifted onto an orphaned
+  history once (a different root commit from `origin/main`), and every deploy then failed at
+  `git merge --ff-only` with `refusing to merge unrelated histories` — for days, with the error
+  pointing at git rather than at the cause. If it recurs, re-point it:
+  `git fetch origin main && git checkout -B main origin/main`. `lines.env` is gitignored, so a
+  reset cannot touch it; check `git status --porcelain` for tracked modifications first.
 - `storage` never gets a published port or exposure beyond its one Traefik
   router; the browser reaches it directly (cross-origin) only for the device
   routes, everything else is called by the relay over the internal Docker

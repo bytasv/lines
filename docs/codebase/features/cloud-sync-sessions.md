@@ -81,6 +81,8 @@ A row with no `deletedAt` goes through `adoptSynced` as before, except it now ch
 - The bridge keeps its own tombstone map (`id -> deletedAt` ms), persisted alongside `sessions.json` and pruned past ~30 days on load.
 - `adoptSynced` now has the tombstone branch the plain LWW check never reached: a pulled session that doesn't beat an existing local tombstone is dropped, even with no local copy of the session itself.
 - `applyRemoteDelete` records a tombstone even for a session this machine never held, so a slower third machine's later push can't resurrect it here either.
+- **A synced session is a display artifact plus resumable history — not a work order.** `adoptSynced` never takes `queued` from a pulled row, and never lets one raise `permissionMode`; a session first seen here arrives with `bypassPermissions` clamped to `default`. The local queue survives a pull rather than being replaced by whatever the row carried.
+- The queue flush that follows `reconcileWithWorker` is scoped by the same `ranHere` rule as the demotion loop above it. Without that scope it ran over *every* session, adopted ones included — and a synced row supplies everything `maybeFlush` asks for (non-empty `queued`, unpaused queue, idle status), so a row written into Postgres started a turn on this machine, unattended, at the next worker hello. That was a live path, not a theoretical one; `sessions.reconcile.test.ts` covers it and the test was written before the fix.
 - A delete issued while pulled state is being applied, or before there's a token to send it with, is queued (`pendingDeletes`) rather than dropped, and rides the next flush/sync instead of being lost.
 - A bulk push (reconnect) filters out any session whose delete is still unconfirmed, so the whole-list push can't undo a delete that raced it.
 - A guest connection (see [session-collaboration](session-collaboration.md)) never sets
@@ -100,6 +102,10 @@ A row with no `deletedAt` goes through `adoptSynced` as before, except it now ch
 - `flushSessions` re-checks `pendingDeletes` per chunk rather than once before the loop, because the batch was captured before the first `await` and a delete can land in the gap between chunks.
 
 ## Related decisions
+
+- [end-to-end-encryption](end-to-end-encryption.md) — why session rows cannot yet carry a
+  signature (they travel as an array, with nowhere to put one short of a per-row column), and why
+  the field stripping above is what stands in for it
 
 - [agent-memory-sync](agent-memory-sync.md)
 - [hosted-machine-access](hosted-machine-access.md) — the relay/bridge-supersede half of the same

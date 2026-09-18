@@ -649,10 +649,29 @@ instead of retrying a device the relay will now refuse.
   keeps dead links forever and `broadcast` serialises JSON into them on every state change.
 - `RelayChannel` is a plain object, not an EventEmitter — an unhandled `'error'` on an
   EventEmitter throws and takes the process down.
-- The relay is the auth edge; the bridge trusts the attested `userId` on relay channels and does
-  not re-verify. A second verifier means two failure modes, and would make every relayed
-  connection depend on the user's machine reaching Clerk's JWKS. Direct sockets still verify
-  locally.
+- **The relay is not the auth edge.** It used to be, and this document used to say so: the
+  bridge took the attested `userId` and granted owner access on the relay's word. That made a
+  compromised relay able to forge an `open` frame as any user and drive their machine. The
+  attested identity is now a *routing hint* — which user's context to open — and owner authority
+  on a relay channel comes from a static key the machine pinned itself, out of band, at
+  enrollment. See [end-to-end-encryption](end-to-end-encryption.md); `guardRelayChannel` refuses
+  an unauthenticated owner channel before `handleConnection` ever sees it.
+  - Rollout shape, which is why the old behaviour is still reachable: a machine with **no**
+    enrolled device behaves exactly as it did, because requiring a key before any exists would
+    have locked every install out of its own bridge. Enrolling one browser turns the requirement
+    on, machine-wide.
+  - The bridge still does not re-verify the Clerk token on a relay channel, and that part of the
+    original reasoning stands: a second verifier means two failure modes and would make every
+    relayed connection depend on the user's machine reaching Clerk's JWKS. The token is
+    authorization for *storage sync*, not for driving the machine. Direct sockets still verify
+    locally.
+- A link's *locality* is a property of the link, not of the app: `hello.local` is true only for a
+  socket that is both unrelayed and on loopback. `!attested` alone is not enough — the bridge
+  binds every interface, so a direct socket may be a laptop on the same LAN, which is as remote
+  as the relay for anything that opens a window on the host's screen. It fails closed: absent
+  means not local, so an older bridge simply hides the affordance. Today that gates exactly one
+  thing, the Finder folder picker (`pickFolder`), which is also refused server-side rather than
+  merely hidden.
 - `relay/` shares no types with the app and the bridge does not import the relay package: the
   frame shapes are duplicated in `relayClient.ts` on purpose, since the bridge ships to users'
   machines.

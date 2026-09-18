@@ -77,10 +77,23 @@ complete snapshot, which is why dropping a stream delta or closing a wedged link
 Execution is local. The agent, the filesystem it edits, `git`, and the Claude OAuth token are all
 on the user's machine. The hosted side relays and stores; it never runs a turn.
 
-- **Clerk** authenticates the browser. On a direct socket the bridge verifies the token itself; on
-  a relayed one the relay is the auth edge and the bridge trusts the attested `userId` rather than
-  re-verifying (a second verifier would make every relayed connection depend on the user's machine
-  reaching Clerk's JWKS).
+- **Clerk** authenticates the browser to the *hosted side*. On a direct socket the bridge verifies
+  the token itself; on a relayed one the relay verifies it and the bridge does not re-verify (a
+  second verifier would make every relayed connection depend on the user's machine reaching
+  Clerk's JWKS).
+- **What grants owner authority on a relayed channel is a pinned key, not the relay's word.** The
+  relay used to be the auth edge: it named the user and the bridge believed it, so controlling the
+  relay meant being able to drive any machine it brokered. The attested identity is now a routing
+  hint; authority comes from a static key exchanged out of band at enrollment and held only on the
+  two ends. Once a machine has an enrolled device it refuses any owner channel that cannot present
+  one. A machine with none behaves as before, which is what let this ship without locking existing
+  installs out. See [features/end-to-end-encryption.md](features/end-to-end-encryption.md).
+- **Storage is a blob store that cannot author content, within limits.** Blobs this fleet pushes
+  are signed and verified against a pinned signer with a monotonic counter, so a compromised
+  database can delete, withhold or replay — not forge. Where a resource cannot carry a signature
+  yet (maps merged in SQL, arrays), the defence is instead that nothing pulled is *applied*
+  unreviewed: agent memory stages a diff, and an adopted session contributes no queued work and
+  cannot raise its own permission mode.
 - **Device pairing** binds a machine to a user. Only a hash of the machine's pairing secret
   reaches Postgres; the plaintext is generated on the machine and never leaves it. The relay holds
   no database credentials — it asks `storage/` to verify, and refuses the connection if storage is

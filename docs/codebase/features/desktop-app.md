@@ -49,8 +49,11 @@ unbundled next to the code.
 - `shared/types.ts` — `UpdateStatus`, `installUpdate`, `updateStatus`
 - `server/src/claudeCli.ts` — finds the machine's `claude`, with a version floor
 - `desktop/assets/` — `trayTemplate.png` (+`@2x`), `icon.icns`, `icon.png`
-- `~/.lines-app/desktop.json` — the shell's own preference (window vs. browser for "Open Lines");
-  read once at boot, written on toggle, best-effort like the log
+- `~/.lines-app/desktop.json` — the shell's own preferences (window vs. browser for "Open Lines",
+  keep-awake, whether the login item has been defaulted once); read at boot, written on toggle,
+  best-effort like the log
+- `server/scripts/enroll-code.ts` — the tray's encryption actions without Electron, for a bridge
+  under Tilt or on a headless box
 - `desktop/scripts/ship.mjs` — orchestrates `check-unreleased.mjs`, `package`, `release` behind one
   command, local or CI
 - `desktop/scripts/check-unreleased.mjs` — compares `desktop/package.json`'s version against the
@@ -348,6 +351,40 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
   real dispatch (dry run, then a real one) rather than a test.
 
 ## Business rules
+
+### Staying awake
+
+- The shell holds a `powerSaveBlocker('prevent-app-suspension')` for exactly as long as a turn is
+  running, driven by a new `{ type: 'activity'; busy }` message on the same bridge→shell IPC
+  channel as `relayStatus`. `UpdateManager.busy` already knew when a turn was live; the bridge
+  reports the *edge*, deduped, from every session upsert plus a 30-second safety tick so a missed
+  transition self-heals.
+- Keyed on a live turn, never on "a session exists". A blocker held whenever the app is paired is
+  a permanent one, and a laptop that never sleeps is a battery complaint rather than a feature.
+- Released on the `busy: false` edge, on the bridge child's `exit`, and on `before-quit`. A leaked
+  id outlives its turn, and the respawned bridge re-reports within its first tick anyway.
+- `reportActivity` is a free function, deliberately not an `UpdateManager` method:
+  `updates.test.ts` asserts `deepEqual` on that class's whole IPC log, and a hot-path message
+  would break every one of those assertions for no reason.
+- `prevent-app-suspension` stops an idle sleep and does **not** survive the lid closing on
+  battery. Nothing in-process can. The tray tooltip says so rather than letting the user find out
+  by losing a turn.
+- Start-at-login is defaulted **once**, recorded by a `loginItemDefaulted` pref. Without that
+  record a user who deliberately turned it off would have it turned back on at every boot — the
+  same bug as a setting that does not persist.
+
+### Encryption
+
+- The tray mints the one-time enrollment code ("Show encryption code…"), shows it as text and as
+  a QR, and lists enrolled browsers by fingerprint; clicking a row revokes it after a confirm.
+- The QR encodes `<webUrl>?enroll=<code>`, so a phone's own camera opens the app with the code
+  filled in — no scanner in the web bundle, nothing to install. The web app strips the parameter
+  from the URL immediately, since a one-time code has no business surviving in history.
+- Revocation from the tray is the lockout escape hatch: key pinning plus a lost device would
+  otherwise be unrecoverable, and the same actions exist as `npm run enroll -w server` for a
+  bridge with no Electron around it.
+
+### Updates and lifecycle
 
 - A restart is refused while any session is `running`, `waiting-permission`, or
   `waiting-approval` — a restart always kills bridge and worker together, and an atomic update

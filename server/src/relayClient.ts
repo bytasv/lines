@@ -41,7 +41,12 @@ type RelayToAgent =
   | { t: 'token'; userId: string; token: string }
   | { t: 'ping' };
 
-/** Identity the relay vouched for, in place of a Clerk verification here. */
+/**
+ * Identity the relay vouched for — a *routing hint*, not an authorization
+ * decision. Which user's context to open, and the token storage sync runs on.
+ * Owner authority is established separately, by the pinned-key handshake in
+ * e2eeChannel.ts.
+ */
 export interface AttestedIdentity {
   userId: string;
   clerkToken: string | null;
@@ -392,10 +397,15 @@ export class RelayClient {
           () => this.ws?.bufferedAmount ?? 0,
         );
         this.channels.set(frame.ch, ch);
-        // The relay is the auth edge and already verified this token, so the
-        // bridge does not re-verify: a second verifier would mean two failure
-        // modes, and would make every relayed connection depend on this machine
-        // being able to reach Clerk's JWKS.
+        // The relay verified this Clerk token and the bridge does not re-verify
+        // it: a second verifier would mean two failure modes, and would make
+        // every relayed connection depend on this machine reaching Clerk's JWKS.
+        //
+        // What that token is NOT is permission to drive this machine. It says
+        // which user's context to open and it authorizes storage sync; owner
+        // authority comes from the key exchange in e2eeChannel.ts, which this
+        // channel passes through before the bridge ever sees it. The relay used
+        // to be the auth edge here — that is precisely the hole that closed.
         this.callbacks.onChannel(ch, {
           userId: frame.userId,
           clerkToken: frame.token,
