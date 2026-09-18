@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -40,6 +41,58 @@ function bridgeDiscovery(): Plugin {
 }
 
 /**
+ * Subresource integrity for the scripts and stylesheets `index.html` references.
+ *
+ * Be precise about what this buys, because it is easy to overstate: it protects
+ * the *chunks*, not the HTML that names them. Against an attacker who can
+ * rewrite the served `index.html` it buys nothing — they simply write new hashes.
+ * Its value is against a compromised asset host and against accidental drift
+ * between a cached chunk and the HTML that expects it.
+ *
+ * The real mitigation for a compromised web origin is not being able to serve
+ * JavaScript from it at all, which is why the relay now lives on a different
+ * hostname (see deploy/docker/compose.yml).
+ */
+function subresourceIntegrity(): Plugin {
+  return {
+    name: 'lines-sri',
+    enforce: 'post',
+    writeBundle(options, bundle) {
+      const outDir = options.dir ?? 'dist';
+      const indexPath = path.join(outDir, 'index.html');
+      let html: string;
+      try {
+        html = fs.readFileSync(indexPath, 'utf8');
+      } catch {
+        return; // no HTML entry (library build): nothing to pin
+      }
+      const digests = new Map<string, string>();
+      for (const [fileName, chunk] of Object.entries(bundle)) {
+        // Hashed from what was written, not from what was read back: an asset
+        // copied from `public/` is not in the bundle at all, so it simply has no
+        // digest here and is left unpinned rather than pinned wrongly.
+        const source = chunk.type === 'chunk' ? chunk.code : chunk.source;
+        digests.set(`/${fileName}`, `sha384-${createHash('sha384').update(source).digest('base64')}`);
+      }
+      const withIntegrity = html.replace(
+        /<(script|link)\b([^>]*?)(src|href)="([^"]+)"([^>]*)>/g,
+        (tag, name: string, before: string, attr: string, url: string, after: string) => {
+          const digest = digests.get(url);
+          // Only same-origin emitted assets: an external URL has no hash here,
+          // and adding a wrong one would block the resource outright.
+          if (!digest || tag.includes('integrity=')) return tag;
+          // Vite already emits `crossorigin` on these tags; a second copy is
+          // invalid markup even though browsers tolerate it.
+          const cors = tag.includes('crossorigin') ? '' : ' crossorigin="anonymous"';
+          return `<${name}${before}${attr}="${url}"${after} integrity="${digest}"${cors}>`;
+        },
+      );
+      fs.writeFileSync(indexPath, withIntegrity);
+    },
+  };
+}
+
+/**
  * Version of this bundle, read at config time.
  *
  * Mirrors the bridge's `__LINES_VERSION__` (server/src/index.ts) rather than
@@ -55,13 +108,76 @@ const WEB_VERSION: string = (() => {
   }
 })();
 
+/**
+ * Optional TLS + a same-origin proxy for the dev server.
+ *
+ * Why it exists: WebCrypto only runs in a secure context. `localhost` counts,
+ * but `http://192.168.x.x` does not — so a second laptop or a phone on the LAN
+ * cannot hold an encryption key, and enrollment is impossible there. Serving
+ * dev over https fixes that for every device at once.
+ *
+ * The proxy is the other half, and it is not optional once TLS is on: an https
+ * page may not open a `ws://` socket or fetch `http://` (mixed content), so the
+ * relay and the storage server have to arrive through this same origin. `/client`
+ * is the relay's WebSocket endpoint and `/v1` is storage's whole API, neither of
+ * which collides with an app route.
+ *
+ * Opt-in via `LINES_DEV_TLS=1`, because the plain-http path is what Tilt and
+ * every existing checkout use, and a dev server that suddenly needs a
+ * certificate is a worse default than one that cannot enrol a phone.
+ */
+function devTls(): { https?: { cert: Buffer; key: Buffer }; proxy?: Record<string, unknown> } {
+  if (process.env.LINES_DEV_TLS !== '1') return {};
+  const certDir = process.env.LINES_DEV_CERT_DIR ?? path.resolve(import.meta.dirname, 'certs');
+  const cert = path.join(certDir, 'dev-cert.pem');
+  const key = path.join(certDir, 'dev-key.pem');
+  if (!fs.existsSync(cert) || !fs.existsSync(key)) {
+    // Loud, not silent: falling back to http here would leave the user staring
+    // at the same "not a secure origin" banner with no idea why.
+    throw new Error(
+      `LINES_DEV_TLS=1 but no certificate at ${certDir}. Generate one with:\n` +
+        `  mkcert -cert-file ${cert} -key-file ${key} localhost 127.0.0.1 ::1 <your-lan-ip>`,
+    );
+  }
+  const relayPort = process.env.LINES_DEV_RELAY_PORT ?? '8791';
+  const storagePort = process.env.LINES_DEV_STORAGE_PORT ?? '8790';
+  return {
+    https: { cert: fs.readFileSync(cert), key: fs.readFileSync(key) },
+    proxy: {
+      // `ws: true` matters — without it the upgrade request is proxied as a
+      // plain GET and the socket closes immediately.
+      '/client': { target: `ws://127.0.0.1:${relayPort}`, ws: true, changeOrigin: true },
+      '/v1': { target: `http://127.0.0.1:${storagePort}`, changeOrigin: true },
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), bridgeDiscovery()],
+  plugins: [react(), bridgeDiscovery(), subresourceIntegrity()],
   define: { __LINES_VERSION__: JSON.stringify(WEB_VERSION) },
   // VITE_* vars load from the repo-root .env (shared with the bridge).
   envDir: '..',
   server: {
     port: 5173,
+    ...devTls(),
+    // Every interface, not just loopback: the point of the dev server now is to
+    // be opened from a phone on the same Wi-Fi. The bridge already binds this
+    // way, and `/__bridge` hands the browser its port, so a phone reaches both
+    // halves with no further configuration.
+    //
+    // Worth knowing what that exposes: anyone on the same network can open this
+    // dev server, and the bridge behind it runs agent turns. A LAN socket is not
+    // loopback, so `hello.local` is false there and the host-side folder picker
+    // is hidden — but everything else a session can do is reachable. Fine on a
+    // home or phone-hotspot network; not something to leave running on a café's.
+    host: true,
+    // Vite refuses a request whose Host header is a name it does not know, which
+    // is what a tunnel (cloudflared, ngrok) sends. IPs are always allowed, so
+    // this is only needed for the https-tunnel path — and it is opt-in rather
+    // than a blanket `true`, since that would accept DNS-rebinding hosts too.
+    ...(process.env.LINES_DEV_HOSTS
+      ? { allowedHosts: process.env.LINES_DEV_HOSTS.split(',').map((h) => h.trim()) }
+      : {}),
     fs: { allow: ['..'] },
   },
 });

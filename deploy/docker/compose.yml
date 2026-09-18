@@ -30,7 +30,10 @@ services:
       PORT: 8790
       # Origins allowed to call this server from a browser. The web app is on a
       # different host to storage, so without this every device call fails CORS.
-      WEB_ORIGINS: https://${LINES_DOMAIN}
+      # Both, during the move: the bundle now lives on app.<domain>, and the
+      # apex only redirects there — but a browser tab opened before the change
+      # still calls from the old origin until it is reloaded.
+      WEB_ORIGINS: https://app.${LINES_DOMAIN},https://${LINES_DOMAIN}
     networks: [lines]
     security_opt: [no-new-privileges:true]
     healthcheck:
@@ -136,25 +139,41 @@ services:
     labels:
       traefik.enable: "true"
       traefik.docker.network: lines
-      traefik.http.routers.lines-web.rule: "Host(`${LINES_DOMAIN}`)"
+      # The bundle has its own hostname, and this is a security boundary rather
+      # than tidiness. `web` and `relay` were always separate containers; they
+      # shared an origin only because Traefik routed them by path prefix on one
+      # host. Sharing it meant that code execution inside the *relay* container —
+      # the most exposed process here — could serve JavaScript to the browser
+      # holding the end-to-end encryption keys, defeating all of it in one line.
+      # On its own host it cannot: it no longer answers on the bundle's origin.
+      #
+      # This narrows the exposure from "any server-side compromise" to "host or
+      # Traefik compromise". It does not remove it — whoever controls the reverse
+      # proxy can still serve anything from any of these names.
+      traefik.http.routers.lines-web.rule: "Host(`app.${LINES_DOMAIN}`)"
       traefik.http.routers.lines-web.priority: "1"
       traefik.http.routers.lines-web.entrypoints: websecure
       traefik.http.routers.lines-web.tls: "true"
       traefik.http.routers.lines-web.tls.certresolver: letsencrypt
       traefik.http.services.lines-web.loadbalancer.server.port: "80"
-      # www exists in DNS, so it needs its own router or Traefik answers it with
-      # the self-signed TRAEFIK DEFAULT CERT and the browser shows a warning.
-      # It only redirects: the bundle's baked socket URL and the Clerk origin
-      # are both the apex, so the app itself is never served from www.
+      # The apex and www both only *redirect* to the bundle's own host now. The
+      # apex still answers /agent and /client (the relay's router, priority 100,
+      # wins those), so this catches everything else that lands there — an old
+      # bookmark, a link in a message — and sends it to app.<domain>.
+      #
+      # Deliberately a redirect rather than a second place the bundle is served
+      # from: two origins serving the same app means two origins whose
+      # compromise is equivalent, which is precisely what the split removes.
       # $$ escapes compose interpolation — $${1} must reach Traefik intact.
-      traefik.http.routers.lines-www.rule: "Host(`www.${LINES_DOMAIN}`)"
-      traefik.http.routers.lines-www.entrypoints: websecure
-      traefik.http.routers.lines-www.tls: "true"
-      traefik.http.routers.lines-www.tls.certresolver: letsencrypt
-      traefik.http.routers.lines-www.middlewares: lines-www-redirect
-      traefik.http.middlewares.lines-www-redirect.redirectregex.regex: "^https://www\\.(.*)"
-      traefik.http.middlewares.lines-www-redirect.redirectregex.replacement: "https://$${1}"
-      traefik.http.middlewares.lines-www-redirect.redirectregex.permanent: "true"
+      traefik.http.routers.lines-apex.rule: "Host(`${LINES_DOMAIN}`) || Host(`www.${LINES_DOMAIN}`)"
+      traefik.http.routers.lines-apex.priority: "1"
+      traefik.http.routers.lines-apex.entrypoints: websecure
+      traefik.http.routers.lines-apex.tls: "true"
+      traefik.http.routers.lines-apex.tls.certresolver: letsencrypt
+      traefik.http.routers.lines-apex.middlewares: lines-app-redirect
+      traefik.http.middlewares.lines-app-redirect.redirectregex.regex: "^https://(?:www\\.)?${LINES_DOMAIN}/(.*)"
+      traefik.http.middlewares.lines-app-redirect.redirectregex.replacement: "https://app.${LINES_DOMAIN}/$${1}"
+      traefik.http.middlewares.lines-app-redirect.redirectregex.permanent: "true"
 
   # One-shot, not part of `up`. `prisma migrate deploy` is forward-only and uses
   # DIRECT_URL (:5432), not the pooled :6543 string. Run it BEFORE starting

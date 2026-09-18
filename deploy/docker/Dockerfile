@@ -110,6 +110,17 @@ RUN test -z "$VITE_DESKTOP_DOWNLOAD_URL" \
 # ---------- web (runtime) ----------
 # Traefik cannot serve files, so the bundle ships with its own nginx.
 FROM nginx:alpine AS web
-COPY deploy/docker/web-nginx.conf /etc/nginx/conf.d/default.conf
+# Origins the page is allowed to *talk to*, substituted into the CSP below. They
+# are deployment facts (the relay's WebSocket host, the storage API), so they
+# cannot be hardcoded in the conf — and a policy naming the wrong ones fails in a
+# way that looks like an app bug rather than like a policy.
+ARG VITE_BRIDGE_WS_URL
+ARG VITE_STORAGE_URL
+COPY deploy/docker/web-nginx.conf /etc/nginx/templates/default.conf.template
+# nginx's own envsubst entrypoint renders /etc/nginx/templates/*.template into
+# /etc/nginx/conf.d at container start. Restricted to this one variable, because
+# the conf is full of `$uri` and `$host` that nginx must receive intact.
+ENV NGINX_ENVSUBST_FILTER=CSP_CONNECT_SRC
+ENV CSP_CONNECT_SRC="${VITE_BRIDGE_WS_URL} ${VITE_STORAGE_URL} https://*.clerk.accounts.dev https://*.clerk.com"
 COPY --from=web-build /app/web/dist /usr/share/nginx/html
 EXPOSE 80

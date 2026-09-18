@@ -27,3 +27,4 @@ deploy/docker/lines.env
 # Cache
 .cache/
 *.tsbuildinfo
+web/certs/
