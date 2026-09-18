@@ -1,9 +1,22 @@
 import { useEffect, useState } from 'react';
-import { ActionIcon, Alert, Badge, Button, Divider, Group, Loader, Stack, Text, Tooltip } from '@mantine/core';
+import {
+  ActionIcon,
+  Alert,
+  Badge,
+  Button,
+  Divider,
+  Group,
+  Loader,
+  Menu,
+  Stack,
+  Text,
+  Tooltip,
+} from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import {
   IconAlertTriangle,
   IconCheck,
+  IconDots,
   IconFileDiff,
   IconFolder,
   IconGitBranch,
@@ -16,6 +29,7 @@ import {
 import { findWorktree, hasEstimatedSpend, isSessionActive } from '@lines/shared';
 import { useStore } from '../store';
 import { formatSpendUsd, skippableFailedStep } from '../lib/format';
+import { useIsPhone } from '../lib/layout';
 import { send } from '../ws';
 import { Transcript } from './Transcript';
 import { Composer } from './Composer';
@@ -58,6 +72,10 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     if (!loaded) send({ type: 'loadTranscript', sessionId });
   }, [sessionId, loaded]);
+
+  // Layout only: what the header can hold at 390px. Never a second decision
+  // path — both branches call the same handlers.
+  const isPhone = useIsPhone();
 
   if (!session) return null;
   // Both halves matter: the server says a sign-in is required, and the client
@@ -115,6 +133,36 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         </Group>
         <Group gap="xs" wrap="nowrap">
           <PresenceStack sessionId={sessionId} />
+          {/* Phone: the two icon buttons and the cost read-out do not fit beside
+              a session name at 390px, so they fold into one menu. Same actions,
+              same handlers — a second decision path here is how the two would
+              drift. */}
+          {isPhone ? (
+            <Menu position="bottom-end" width={220} withinPortal>
+              <Menu.Target>
+                <ActionIcon variant="subtle" color="gray" size="sm" aria-label="Session actions">
+                  <IconDots size={16} />
+                </ActionIcon>
+              </Menu.Target>
+              <Menu.Dropdown>
+                {session.lastCostUsd != null && (
+                  <Menu.Label>
+                    last turn{' '}
+                    {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel), 4)}
+                  </Menu.Label>
+                )}
+                <Menu.Item leftSection={<IconFileDiff size={14} />} onClick={() => setReviewing(true)}>
+                  Review changes
+                </Menu.Item>
+                {!access && SHARING_ENABLED && (
+                  <Menu.Item leftSection={<IconShare size={14} />} onClick={() => setSharing(true)}>
+                    Share session
+                  </Menu.Item>
+                )}
+              </Menu.Dropdown>
+            </Menu>
+          ) : (
+            <>
           {session.lastCostUsd != null && (
             <Text size="xs" c="dimmed">
               last turn {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel), 4)}
@@ -148,6 +196,8 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                 <IconShare size={14} />
               </ActionIcon>
             </Tooltip>
+          )}
+            </>
           )}
         </Group>
       </Group>

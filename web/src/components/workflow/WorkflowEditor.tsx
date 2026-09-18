@@ -23,6 +23,8 @@ import type { DropResult } from '@hello-pangea/dnd';
 import type { StepDef } from '@lines/shared';
 import { formatTimestamp } from '@lines/shared';
 import { useStore } from '../../store';
+import { useIsPhone } from '../../lib/layout';
+import { BestOnDesktop } from '../BestOnDesktop';
 import { ConfirmModal } from '../ConfirmModal';
 import { WORKFLOW_PRESETS } from '../../lib/workflowPresets';
 import { useWorkflowDraft } from './useWorkflowDraft';
@@ -103,6 +105,7 @@ export function WorkflowEditor({
   initialView?: WorkflowEditorView;
 }) {
   const models = useStore((s) => s.models);
+  const isPhone = useIsPhone();
   const [view, setView] = useState<WorkflowEditorView>(initialView);
   const wf = useWorkflowDraft(opened, onClose);
   const { draft, readOnly, validation, submitAttempted, collapsed } = wf;
@@ -126,6 +129,17 @@ export function WorkflowEditor({
   };
 
   const updatesAvailable = draft?.steps.filter((s) => wf.updateFor(s)).length ?? 0;
+
+  if (isPhone) {
+    // A two-pane editor with a Monaco prompt field. Nothing here is reachable at
+    // 390px, and a phone-shaped rewrite would be a second editor to keep in step
+    // with this one.
+    return (
+      <Modal opened={opened} onClose={onClose} title="Workflows, steps & recipes" fullScreen>
+        <BestOnDesktop what="Editing workflows" onClose={onClose} />
+      </Modal>
+    );
+  }
 
   return (
     <>

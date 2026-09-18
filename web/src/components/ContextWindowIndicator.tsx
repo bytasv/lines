@@ -28,6 +28,7 @@ import {
 } from '@lines/shared';
 import { sessionCaps } from '../lib/capabilities';
 import { useStore } from '../store';
+import { useReveal } from '../lib/layout';
 import { send } from '../ws';
 import { formatDuration, formatSpendUsd, formatTokens, usageColor } from '../lib/format';
 
@@ -253,7 +254,10 @@ function CategoryRow({
   onToggle: () => void;
 }) {
   const { hovered, ref } = useHover<HTMLDivElement>();
-  const showChevron = detail != null && (hovered || expanded);
+  // On touch the chevron is the only sign a row can be expanded at all, so it is
+  // shown outright there rather than waiting for a hover that never arrives.
+  const show = useReveal(hovered);
+  const showChevron = detail != null && (show || expanded);
 
   const row = (
     <Group justify="space-between" gap={ROW_GAP} wrap="nowrap">
@@ -525,7 +529,7 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
 
   return (
     <HoverCard
-      width={340}
+      width="min(340px, calc(100vw - 2rem))"
       position="top-end"
       withArrow
       shadow="md"

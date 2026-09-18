@@ -3,6 +3,8 @@ import { DiffEditor } from '@monaco-editor/react';
 import { useComputedColorScheme } from '@mantine/core';
 import { diffStats } from '../lib/transcript';
 import { languageFor } from '../lib/language';
+import { useIsPhone } from '../lib/layout';
+import { BestOnDesktop } from './BestOnDesktop';
 
 export function MonacoDiffModal({
   opened,
@@ -19,6 +21,15 @@ export function MonacoDiffModal({
 }) {
   const colorScheme = useComputedColorScheme('dark');
   const stats = diffStats(before, after);
+  const isPhone = useIsPhone();
+
+  if (isPhone) {
+    return (
+      <Modal opened={opened} onClose={onClose} fullScreen>
+        <BestOnDesktop what="Reviewing a diff" onClose={onClose} />
+      </Modal>
+    );
+  }
 
   return (
     <Modal

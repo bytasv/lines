@@ -334,7 +334,14 @@ function PlanUsageChip({
     // Wider than the plan-usage windows alone need: the spend heading now shares
     // its line with the period picker, and the pager's label has to fit between
     // its two arrows, both without wrapping.
-    <HoverCard width={340} position="bottom-end" withArrow shadow="md" openDelay={100} closeDelay={100}>
+    <HoverCard
+      width="min(340px, calc(100vw - 2rem))"
+      position="bottom-end"
+      withArrow
+      shadow="md"
+      openDelay={100}
+      closeDelay={100}
+    >
       <HoverCard.Target>
         <UnstyledButton aria-label={title} style={{ display: 'flex', alignItems: 'center' }}>
           {/* Relative, so the badge can sit on the ring's corner without widening

@@ -34,7 +34,11 @@ export function ConnectionBanner({ headerHeight }: { headerHeight: number }) {
         borderRadius: 'var(--mantine-radius-xl)',
         padding: '4px 14px',
         boxShadow: 'var(--mantine-shadow-sm)',
-        whiteSpace: 'nowrap',
+        // Was `nowrap`, which at 390px pushed the pill off both edges of the
+        // screen. Capped and allowed to wrap instead: the text is a sentence,
+        // and two lines of it are readable where a clipped line is not.
+        maxWidth: 'calc(100vw - 2rem)',
+        textAlign: 'center',
       }}
     >
       <Text size="sm" fw={500}>

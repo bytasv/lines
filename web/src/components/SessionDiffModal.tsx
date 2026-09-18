@@ -32,6 +32,8 @@ import type { FileChange, SessionDiffFileResponse, SessionDiffRepo, SessionDiffR
 import { fetchSessionDiff, fetchSessionDiffFile } from '../lib/sessionDiff';
 import { languageFor } from '../lib/language';
 import { MonacoDiffModal } from './MonacoDiffModal';
+import { useIsPhone } from '../lib/layout';
+import { BestOnDesktop } from './BestOnDesktop';
 
 /** Why a repo's diff isn't floored at the session's own snapshot. */
 const BASELINE_NOTE: Record<SessionDiffRepo['baseline'], string | null> = {
@@ -640,6 +642,15 @@ export function SessionDiffModal({
     });
 
   const total = data?.repos.reduce((n, r) => n + r.attributed.length, 0) ?? 0;
+  const isPhone = useIsPhone();
+
+  if (isPhone) {
+    return (
+      <Modal opened={opened} onClose={onClose} title="Session changes" fullScreen>
+        <BestOnDesktop what="Reviewing this session’s changes" onClose={onClose} />
+      </Modal>
+    );
+  }
 
   return (
     <>

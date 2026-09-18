@@ -26,7 +26,7 @@ import {
   IconSettings,
   IconSun,
 } from '@tabler/icons-react';
-import { useState, type CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { Project, WorktreeInfo } from '@lines/shared';
 import { projectRoots } from '@lines/shared';
@@ -34,7 +34,7 @@ import { ConfirmModal } from './ConfirmModal';
 import { WorktreeModal } from './WorktreeModal';
 import { projectStatusMeta } from '../lib/format';
 import { sessionsInProject, useStore } from '../store';
-import { useIsGuest } from '../lib/can';
+import { useIsGuest, useIsLocalMachine } from '../lib/can';
 import { send } from '../ws';
 import { BrandMark } from './BrandMark';
 import { SettingsModal } from './SettingsModal';
@@ -54,6 +54,9 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
   const sessions = useStore((s) => s.sessions);
   const projectKeys = useStore((s) => s.projectKeys);
   const seen = useStore((s) => s.seenSessionStatus);
+  // "Add folder…" shells out to Finder on the host, so it exists only for a
+  // browser on the host. A remote device widens a project from the typed path.
+  const isLocal = useIsLocalMachine();
   // The active project's sessions are already spelled out in the sidebar, so a
   // dot here would only be noise. Leaving keeps it quiet: opening the project
   // marked those states seen, and only a state the user hasn't seen re-lights it.
@@ -159,7 +162,7 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
           {/* Roots menu. Clicks are stopped on both the trigger and the dropdown —
               a portalled dropdown still bubbles through the React tree, so without
               it managing folders would double as "switch to this tab". */}
-          <Menu position="bottom-start" width={320} withinPortal>
+          <Menu position="bottom-start" width="min(320px, calc(100vw - 2rem))" withinPortal>
             <Menu.Target>
               <ActionIcon
                 variant="subtle"
@@ -172,9 +175,11 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
               </ActionIcon>
             </Menu.Target>
             <Menu.Dropdown onClick={(e) => e.stopPropagation()}>
-              <Menu.Item leftSection={<IconFolderPlus size={14} />} onClick={addFolder}>
-                Add folder…
-              </Menu.Item>
+              {isLocal && (
+                <Menu.Item leftSection={<IconFolderPlus size={14} />} onClick={addFolder}>
+                  Add folder…
+                </Menu.Item>
+              )}
               {/* Only the extra roots are listed: the primary is the project's
                   identity and can't be removed, only closed. */}
               {extraRoots.length > 0 && <Menu.Label>Extra folders</Menu.Label>}
@@ -270,6 +275,9 @@ export function ProjectTabs() {
   const folderPickPending = useStore((s) => s.folderPickPending);
   const setFolderPickPending = useStore((s) => s.setFolderPickPending);
   const setFolderPickTarget = useStore((s) => s.setFolderPickTarget);
+  // Finder opens on the host, so Browse… is hidden off-machine. The recents
+  // below stay: they are exactly the projects a remote device can reach.
+  const isLocal = useIsLocalMachine();
 
   const browse = () => {
     setFolderPickTarget(null); // a plain browse opens a project rather than widening one
@@ -295,7 +303,7 @@ export function ProjectTabs() {
           {projects.map((p) => (
             <ProjectTab key={p.path} project={p} active={p.path === activeProject} />
           ))}
-          <Menu position="bottom-start" width={320}>
+          <Menu position="bottom-start" width="min(320px, calc(100vw - 2rem))">
             <Menu.Target>
               <Tooltip label="Open project">
                 <ActionIcon variant="subtle" color="gray" size="sm" disabled={folderPickPending}>
@@ -304,9 +312,11 @@ export function ProjectTabs() {
               </Tooltip>
             </Menu.Target>
             <Menu.Dropdown>
-              <Menu.Item leftSection={<IconFolderOpen size={14} />} onClick={browse}>
-                Browse…
-              </Menu.Item>
+              {isLocal && (
+                <Menu.Item leftSection={<IconFolderOpen size={14} />} onClick={browse}>
+                  Browse…
+                </Menu.Item>
+              )}
               {recents.length > 0 && <Menu.Label>Recent</Menu.Label>}
               {recents.map((d) => (
                 <Menu.Item key={d} onClick={() => openRecent(d)}>
@@ -354,6 +364,13 @@ function SettingsButton() {
   // A dismissed allowlist review still needs a way back in; the gear is it.
   const guardReview = useStore((s) => s.guardReview);
   const guest = useIsGuest();
+  // A phone that scanned the machine's QR arrives at `/?enroll=…`. Opening the
+  // pane for them is the whole point of the QR — a code they have to go hunting
+  // for a settings pane to use is a code they will type by hand instead.
+  const enrolling = new URLSearchParams(window.location.search).has('enroll');
+  useEffect(() => {
+    if (enrolling) setOpened(true);
+  }, [enrolling]);
   return (
     <>
       <Tooltip label={guardReview ? 'Settings — allowlist needs review' : 'Settings'}>
@@ -375,7 +392,9 @@ function SettingsButton() {
         // A guest lands on Machines, the one pane that is theirs rather than the
         // host's — and their only way back to their own machine. Hiding the gear
         // outright would strand them on somebody else's computer.
-        initialSection={guest ? 'devices' : guardReview ? 'allowlist' : 'account'}
+        initialSection={
+          enrolling ? 'encryption' : guest ? 'devices' : guardReview ? 'allowlist' : 'account'
+        }
       />
     </>
   );

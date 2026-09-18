@@ -29,11 +29,13 @@ import {
   dialog,
   nativeImage,
   powerMonitor,
+  powerSaveBlocker,
   session,
   shell,
   type MenuItemConstructorOptions,
 } from 'electron';
 import { autoUpdater } from 'electron-updater';
+import QRCode from 'qrcode';
 import type { UpdateStatus } from '@lines/shared';
 
 /**
@@ -48,6 +50,13 @@ import {
   unpairDevice,
   type DeviceIdentity,
 } from '../../server/src/device.ts';
+import {
+  ENROLL_TTL_MS,
+  listPeers,
+  mintEnrollmentCode,
+  revokePeer,
+  type EnrolledPeer,
+} from '../../server/src/e2eeIdentity.ts';
 import {
   CLAUDE_INSTALL_URL,
   claudeCliStatus,
@@ -159,6 +168,9 @@ let bridge: ChildProcess | null = null;
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
 let pairingWindow: BrowserWindow | null = null;
+/** The encryption-enrollment window, when one is open. Its own, not the pairing
+ *  window's: the two answer different questions and can both be up at once. */
+let enrollWindow: BrowserWindow | null = null;
 let uiPort = 0;
 let quitting = false;
 let device: DeviceIdentity | null = null;
@@ -202,6 +214,26 @@ let checkRetryTimer: NodeJS.Timeout | null = null;
 const FORCE_UPDATE_CHECK = process.env.LINES_FORCE_UPDATE_CHECK === '1';
 /** Where "Open Lines" goes. Read once at boot from {@link PREFS_FILE}. */
 let openIn: 'desktop' | 'browser' = 'desktop';
+/**
+ * Whether to hold the Mac awake while a turn is running. On by default: the
+ * whole point of leaving this app running is that a session driven from a phone
+ * finishes, and a machine that sleeps mid-turn kills it silently.
+ */
+let keepAwake = true;
+/**
+ * Whether we have ever set the login item ourselves. Without it a user who
+ * deliberately turned start-at-login *off* would have it turned back on at every
+ * boot, which is the same bug as a setting that does not persist.
+ */
+let loginItemDefaulted = false;
+/**
+ * The live `powerSaveBlocker` id, or null when nothing is held. A leaked id
+ * outlives its turn and keeps the Mac awake forever, so every path that can end
+ * a turn — the busy=false message, the bridge's exit, quit — releases it.
+ */
+let powerBlockerId: number | null = null;
+/** Last `activity` the bridge reported, so the tray can say what it is doing. */
+let turnActive = false;
 
 /**
  * The relay accepts our socket *before* asking storage whether this device is
@@ -304,8 +336,14 @@ function shellLog(line: string) {
 /** Shell preferences, best-effort: a read-only home must not break the tray. */
 function loadPrefs() {
   try {
-    const raw = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')) as { openIn?: unknown };
+    const raw = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')) as {
+      openIn?: unknown;
+      keepAwake?: unknown;
+      loginItemDefaulted?: unknown;
+    };
     if (raw.openIn === 'browser' || raw.openIn === 'desktop') openIn = raw.openIn;
+    if (typeof raw.keepAwake === 'boolean') keepAwake = raw.keepAwake;
+    if (raw.loginItemDefaulted === true) loginItemDefaulted = true;
   } catch {
     /* absent or corrupt: the default stands */
   }
@@ -314,7 +352,10 @@ function loadPrefs() {
 function savePrefs() {
   try {
     fs.mkdirSync(APP_ROOT, { recursive: true });
-    fs.writeFileSync(PREFS_FILE, `${JSON.stringify({ openIn }, null, 2)}\n`);
+    fs.writeFileSync(
+      PREFS_FILE,
+      `${JSON.stringify({ openIn, keepAwake, loginItemDefaulted }, null, 2)}\n`,
+    );
   } catch (err) {
     shellLog(`[prefs] could not save: ${(err as Error).message}`);
   }
@@ -422,6 +463,10 @@ function spawnChild(name: 'worker' | 'bridge', ipc: boolean): ChildProcess {
     if (name === 'bridge') {
       // The relay link died with it; don't leave the tray claiming otherwise.
       applyRelayStatus({ connected: false });
+      // Same reasoning for the blocker: the process that knew whether a turn was
+      // running is gone, so a held id would outlive every turn it was taken for.
+      // The respawned bridge re-reports within its first 30s tick.
+      applyActivity(false);
       // Two ways another bridge takes this machine: ours refused to start (78), or
       // ours was preempted — SIGTERMed by the newcomer, so `code` is null and the
       // lock is the only tell. Either way, respawning on a 1s timer would be a
@@ -453,11 +498,47 @@ function wireBridgeIpc() {
       restartForUpdate();
     } else if (msg?.type === 'relayStatus') {
       applyRelayStatus(msg.status as RelayLinkStatus);
+    } else if (msg?.type === 'activity') {
+      applyActivity(msg.busy === true);
     }
   });
   // The bridge's UpdateManager is created fresh on every (re)spawn, so re-send
   // whatever we already know instead of leaving the browser at 'idle'.
   if (update.state !== 'idle') sendUpdateStatus();
+}
+
+/**
+ * Hold the Mac awake for exactly as long as a turn is running.
+ *
+ * Keyed on a live turn, never on "a session exists": a blocker held whenever the
+ * app is paired is a permanent one, and a laptop that never sleeps is a battery
+ * complaint rather than a feature. `prevent-app-suspension` keeps the process and
+ * the network alive while allowing the display to sleep, which is what an
+ * unattended machine driven from a phone needs.
+ *
+ * Honest limit, repeated in the tray tooltip: this does not defeat closing the
+ * lid on battery. Nothing in-process can.
+ */
+function applyActivity(busy: boolean) {
+  turnActive = busy;
+  const wanted = busy && keepAwake;
+  if (wanted && powerBlockerId === null) {
+    powerBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+    shellLog('[power] holding the machine awake for a running turn');
+  } else if (!wanted && powerBlockerId !== null) {
+    releasePowerBlocker();
+  }
+  updateTray();
+}
+
+/** Drop the blocker if we hold one. Safe to call when we do not. */
+function releasePowerBlocker() {
+  if (powerBlockerId === null) return;
+  // An id from a previous run of the app is not ours to stop; `isStarted` is the
+  // only honest check, and stopping an unknown id throws.
+  if (powerSaveBlocker.isStarted(powerBlockerId)) powerSaveBlocker.stop(powerBlockerId);
+  powerBlockerId = null;
+  shellLog('[power] released');
 }
 
 /**
@@ -1147,6 +1228,92 @@ function openPairingWindow(code: string) {
 }
 
 /**
+ * Mint a one-time encryption code and put it on screen, as text and as a QR.
+ *
+ * This is the out-of-band step the whole threat model rests on: the code travels
+ * through the *user*, from this machine's own screen to the browser, so the
+ * server in the middle never sees it and cannot substitute a key. The QR is a
+ * plain link into the web app with the code in the query, so a phone's own
+ * camera opens it — no scanner in the bundle, and nothing to install.
+ *
+ * Deliberately one code, one device, fifteen minutes: a code left on a screen
+ * would otherwise be a standing invitation to enrol.
+ */
+async function openEncryptionWindow(): Promise<void> {
+  const { code, expiresAt } = mintEnrollmentCode();
+  const link = `${config.webUrl}?enroll=${encodeURIComponent(code)}`;
+  // Data URL, generated here: rendering it in the page would mean shipping a QR
+  // library into a window that is otherwise inert HTML.
+  const qr = await QRCode.toDataURL(link, { margin: 1, width: 240 }).catch(() => '');
+  const minutes = Math.round(ENROLL_TTL_MS / 60_000);
+  const grouped = code.replace(/(.{5})(?=.)/g, '$1 ');
+  const html = `<!doctype html><meta charset="utf-8"><title>Encryption code</title>
+<style>
+  body { font: 14px -apple-system, system-ui, sans-serif; background:#1a1b1e; color:#c1c2c5;
+         display:flex; align-items:center; justify-content:center; height:100vh; margin:0 }
+  .card { text-align:center; max-width:440px; padding:0 24px }
+  .code { font:600 22px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing:3px;
+          color:#fff; margin:16px 0; user-select:all }
+  img { background:#fff; padding:8px; border-radius:8px }
+  .hint { color:#909296; font-size:12px; margin-top:16px }
+</style>
+<div class="card">
+  <h2>Encrypt this machine's connection</h2>
+  <p>In Lines, open Settings → Encryption and enter this code:</p>
+  <div class="code">${escapeHtml(grouped)}</div>
+  ${qr ? `<img src="${qr}" alt="Enrollment QR code" width="240" height="240">` : ''}
+  <p class="hint">Scan with a phone to open Lines with the code filled in.<br>
+  Works once, and expires in ${minutes} minutes. Anyone who reads this code before you use it
+  could enrol their own browser, so treat it like a password.<br>
+  Expires ${new Date(expiresAt).toLocaleTimeString()}.</p>
+</div>`;
+  if (enrollWindow && !enrollWindow.isDestroyed()) {
+    void enrollWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    enrollWindow.show();
+    enrollWindow.focus();
+    return;
+  }
+  const w = new BrowserWindow({
+    width: 520,
+    height: 640,
+    title: 'Encryption code',
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  });
+  enrollWindow = w;
+  w.on('closed', () => {
+    if (enrollWindow === w) enrollWindow = null;
+    syncDock();
+  });
+  void w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  attachNavigationGuards(w, 'aux');
+  syncDock();
+  w.focus();
+}
+
+/**
+ * Forget an enrolled browser, after confirming.
+ *
+ * The tray is deliberately a route to this that needs no browser: key pinning
+ * plus a lost device is otherwise an unrecoverable state, and "revoke and
+ * re-enrol from the machine itself" is the way back in.
+ */
+function revokeEnrolledPeer(peer: EnrolledPeer): void {
+  const choice = dialog.showMessageBoxSync({
+    type: 'warning',
+    buttons: ['Cancel', 'Revoke'],
+    defaultId: 0,
+    cancelId: 0,
+    message: `Revoke ${peer.label}?`,
+    detail:
+      `That browser (${peer.fingerprint}) will be refused the next time it connects. ` +
+      'It can be enrolled again with a new code.',
+  });
+  if (choice !== 1) return;
+  revokePeer(peer.publicKey);
+  updateTray();
+}
+
+/**
  * Register (or re-register) this machine and show the code it gets back.
  *
  * `registerDevice` re-upserts an *unclaimed* device and answers with a fresh
@@ -1381,6 +1548,9 @@ function updateTray() {
   // available -> idle).
   const title = update.state === 'available' ? ' ●' : '';
   const alive = (c: ChildProcess | null) => Boolean(c && c.exitCode === null && !c.killed);
+  // Read once per rebuild rather than per row: this runs every 2s, and the menu
+  // is only reinstalled when its rendered text changes (see the signature below).
+  const enrolledPeers = RELAY_MODE ? listPeers() : [];
   const template: MenuItemConstructorOptions[] = [
     // One row, always labelled the same, dispatching per the saved preference —
     // so the primary action never moves. The other route is the row below it.
@@ -1452,7 +1622,27 @@ function updateTray() {
       label: 'Start at login',
       type: 'checkbox' as const,
       checked: app.getLoginItemSettings().openAtLogin,
-      click: (item: { checked: boolean }) => app.setLoginItemSettings({ openAtLogin: item.checked }),
+      click: (item: { checked: boolean }) => {
+        app.setLoginItemSettings({ openAtLogin: item.checked });
+        // Recorded so the boot-time default never overrides a deliberate off.
+        loginItemDefaulted = true;
+        savePrefs();
+        updateTray();
+      },
+    },
+    {
+      // Read from `keepAwake`, not from the blocker id: the signature this menu
+      // dedupes on is rebuilt every 2s, and a row that flickered with each turn
+      // would reinstall the NSMenu under an open menu.
+      label: 'Keep Mac awake during turns',
+      type: 'checkbox' as const,
+      checked: keepAwake,
+      click: (item: { checked: boolean }) => {
+        keepAwake = item.checked;
+        savePrefs();
+        // Apply to whatever is running right now rather than at the next turn.
+        applyActivity(turnActive);
+      },
     },
     { label: 'Open logs', click: openLogs },
     { type: 'separator' as const },
@@ -1510,6 +1700,14 @@ async function start() {
   // app rather than per-webContents so OAuth popups carry the scrubbed UA too.
   app.userAgentFallback = app.userAgentFallback.replace(/ Electron\/\S+/, '');
   loadPrefs();
+  // "Leave it running" only holds if it comes back after a reboot, so the login
+  // item is defaulted on — once. After that the checkbox is the user's, and a
+  // deliberate off stays off.
+  if (!loginItemDefaulted) {
+    loginItemDefaulted = true;
+    app.setLoginItemSettings({ openAtLogin: true });
+    savePrefs();
+  }
   // Hosted mode starts as a background app: no dock tile, no app switcher entry.
   // `syncDock` puts one up for as long as a window is open. Local mode has a real
   // window throughout, so it gets a tile with our own art — `show()` because the
@@ -1550,7 +1748,9 @@ async function start() {
   }
 
   tray = new Tray(trayImage());
-  tray.setToolTip('Lines');
+  // The caveat belongs where the promise is made: a power-save blocker stops an
+  // idle sleep, and does not survive the lid closing on battery.
+  tray.setToolTip('Lines — stays awake while a turn runs (except with the lid closed on battery)');
   updateTray();
   setInterval(updateTray, 2_000).unref();
 
@@ -1568,6 +1768,7 @@ app.on('window-all-closed', () => {});
 
 app.on('before-quit', () => {
   quitting = true;
+  releasePowerBlocker();
   bridge?.kill('SIGTERM');
   worker?.kill('SIGTERM');
 });

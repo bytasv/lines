@@ -5,6 +5,10 @@ import { MantineProvider } from '@mantine/core';
 import { ClerkProvider, SignedIn, SignedOut, useAuth, useUser } from '@clerk/clerk-react';
 import '@mantine/core/styles.css';
 import './index.css';
+// Side-effect import, and it has to run before the first editor mounts: it
+// points Monaco at this bundle instead of at a CDN. See the module for why that
+// is a security property and not only a preference.
+import './lib/monacoSetup';
 import { theme } from './theme';
 import { App } from './App';
 import { connect, connectMachine, reconnectNow, setTokenProvider, switchDevice } from './ws';
@@ -106,6 +110,7 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
     return (
       <ConnectingMachine
         name={chosen.name}
+        deviceId={chosen.id}
         others={devices.filter((d) => d.id !== chosen.id)}
         onSwitch={setPickedId}
         onPairNew={() => setPairingNew(true)}

@@ -538,8 +538,12 @@ export function Composer({ session }: { session: SessionMeta }) {
         onFocusChange={setComposerFocused}
         onPasteFiles={(files) => void addFiles(files)}
       />
-      <Group justify="space-between" px={4} pt={4}>
-        <Group gap="xs">
+      {/* `wrap` rather than `nowrap`: at 390px the model and effort selects do
+          not fit beside the mode pills, and a horizontally clipped row hides the
+          send button. Wrapping costs a line of height on a phone and nothing on
+          a desktop, where the row has always fitted. */}
+      <Group justify="space-between" px={4} pt={4} wrap="wrap" gap={6} className="lines-safe-bottom">
+        <Group gap="xs" wrap="wrap">
           <Tooltip label="Attach files">
             <ActionIcon variant="subtle" size="lg" onClick={() => fileInputRef.current?.click()}>
               <IconPaperclip size={16} />
@@ -566,6 +570,7 @@ export function Composer({ session }: { session: SessionMeta }) {
           )}
           <Select
             w={130}
+            maw="calc(100vw - 8rem)"
             disabled={!canSetModel}
             comboboxProps={modelComboboxProps}
             dropdownOpened={modelDropdownOpen}
@@ -612,6 +617,7 @@ export function Composer({ session }: { session: SessionMeta }) {
             <span style={{ display: 'inline-flex' }}>
               <Select
                 w={120}
+                maw="calc(100vw - 8rem)"
                 disabled={!canSetModel || caps.reasoningEfforts.length === 0}
                 comboboxProps={modelComboboxProps}
                 data={effortSelectData(caps.reasoningEfforts, session.reasoningEffort)}

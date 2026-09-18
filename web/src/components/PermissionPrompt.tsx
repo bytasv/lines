@@ -9,6 +9,7 @@ import {
   Center,
   Code,
   Collapse,
+  Drawer,
   Group,
   Modal,
   Paper,
@@ -45,6 +46,7 @@ import { send } from '../ws';
 import { readPlanComments, useStore, writePlanComments } from '../store';
 import { agentLabel } from '../lib/capabilities';
 import { useCan } from '../lib/can';
+import { useIsPhone } from '../lib/layout';
 import { useIdentityResolver } from '../lib/identity';
 import { QuestionPrompt } from './QuestionPrompt';
 import { Markdown } from './Markdown';
@@ -1236,7 +1238,12 @@ function PlanApproval({
             gap="xs"
             wrap="nowrap"
             align="flex-start"
+            // Touch has no hover precursor, so the comment↔passage pairing was
+            // unreachable with a finger: a pointer press (and a keyboard focus)
+            // does what a mouse-over does.
             onMouseEnter={() => setActiveId(c.id)}
+            onPointerDown={() => setActiveId(c.id)}
+            onFocusCapture={() => setActiveId(c.id)}
             onMouseLeave={() => setActiveId((id) => (id === c.id ? null : id))}
           >
             <Box
@@ -1545,14 +1552,13 @@ function PermissionCard({
   // Collaborator reaches it — and a button that always errors is worse than none.
   const canApprove = useCan('approvePermissions');
   const owner = useStore((s) => s.access?.ownerProfile ?? null);
-
-  return (
-    <Paper
-      withBorder
-      radius="md"
-      p="sm"
-      style={{ borderColor: resolution ? undefined : 'var(--mantine-color-yellow-6)' }}
-    >
+  const isPhone = useIsPhone();
+  // Exactly one decision path: the same body, in a different container. A
+  // phone-shaped approval card with its own logic is how two answers to "may
+  // this run?" would drift apart, and this is the one place where that would be
+  // a security bug rather than a layout bug.
+  const body = (
+    <>
       <Group gap="xs" mb={resolution ? 0 : 8}>
         {p.icon}
         <Text size="sm" fw={600}>
@@ -1620,6 +1626,50 @@ function PermissionCard({
           </Group>
         </>
       )}
+    </>
+  );
+
+  // Pending and answerable, on a phone: the buttons belong at the bottom of the
+  // screen where a thumb is, not wherever the transcript happens to have
+  // scrolled to. The transcript keeps a marker so the conversation does not jump
+  // when the sheet closes.
+  if (isPhone && !resolution && canApprove) {
+    return (
+      <>
+        <Paper withBorder radius="md" p="sm" style={{ borderColor: 'var(--mantine-color-yellow-6)' }}>
+          <Group gap="xs">
+            {p.icon}
+            <Text size="sm" fw={600}>
+              {p.title}
+            </Text>
+          </Group>
+        </Paper>
+        <Drawer
+          opened
+          position="bottom"
+          onClose={() => respond(sessionId, data.requestId, false, p.denyMessage)}
+          // Closing a permission request by swiping it away is a *decision*, and
+          // the safe reading of it is "no". Said in the title so it is not a
+          // surprise.
+          title="Needs your approval"
+          size="auto"
+          padding="md"
+          className="lines-safe-bottom"
+        >
+          {body}
+        </Drawer>
+      </>
+    );
+  }
+
+  return (
+    <Paper
+      withBorder
+      radius="md"
+      p="sm"
+      style={{ borderColor: resolution ? undefined : 'var(--mantine-color-yellow-6)' }}
+    >
+      {body}
     </Paper>
   );
 }

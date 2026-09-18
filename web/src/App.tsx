@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Route, Routes, useNavigate, useParams } from 'react-router-dom';
-import { AppShell, Box, Center, Stack, Text, Title } from '@mantine/core';
+import { AppShell, Box, Burger, Center, Stack, Text, Title } from '@mantine/core';
+import { useDisclosure } from '@mantine/hooks';
 import { IconMessageChatbot } from '@tabler/icons-react';
 import { useStore } from './store';
 import { Sidebar } from './components/Sidebar';
@@ -20,9 +21,11 @@ import { LoginModal } from './components/LoginModal';
 import { OpenaiLoginModal } from './components/OpenaiLoginModal';
 import { GuardAllowlistReviewModal } from './components/GuardAllowlistReviewModal';
 import { McpConnectionsReviewModal } from './components/McpConnectionsReviewModal';
+import { MemoryReviewModal } from './components/MemoryReviewModal';
 import { FilePalette } from './components/FilePalette';
 import { FilesView } from './components/FilesView';
 import { DocsPage } from './components/docs/DocsPage';
+import { useIsPhone } from './lib/layout';
 import { send } from './ws';
 
 const HEADER_HEIGHT = 56;
@@ -31,7 +34,10 @@ const SIDEBAR_MAX = 560;
 const SIDEBAR_STORAGE_KEY = 'sidebarWidth';
 
 function clampSidebar(w: number) {
-  return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, w));
+  // The viewport is the real upper bound. `window.innerWidth` is read per call
+  // rather than captured: a phone rotates, and a desktop window is resized.
+  const max = Math.min(SIDEBAR_MAX, Math.max(240, window.innerWidth - 48));
+  return Math.min(max, Math.max(Math.min(SIDEBAR_MIN, max), w));
 }
 
 export function App() {
@@ -53,6 +59,7 @@ export function App() {
       <OpenaiLoginModal />
       <GuardAllowlistReviewModal />
       <McpConnectionsReviewModal />
+      <MemoryReviewModal />
     </>
   );
 }
@@ -72,9 +79,16 @@ function Shell() {
   const [workflowEditorOpen, setWorkflowEditorOpen] = useState(false);
   // Which library the modal lands on — the sidebar has an entry point per library.
   const [workflowEditorView, setWorkflowEditorView] = useState<WorkflowEditorView>('workflows');
+  const isPhone = useIsPhone();
+  // Real drawer state, rather than the desktop rule reused. On a phone the
+  // navbar is the only way to reach another session, so "collapsed" has to mean
+  // "closed until asked for" and not "there is no workspace".
+  const [navOpen, { toggle: toggleNav, close: closeNav }] = useDisclosure(false);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = Number(localStorage.getItem(SIDEBAR_STORAGE_KEY));
-    return saved ? clampSidebar(saved) : SIDEBAR_MIN;
+    // Clamped against the viewport too: a width saved on a 27" display would
+    // otherwise open a 560px drawer over a 390px screen.
+    return clampSidebar(saved || SIDEBAR_MIN);
   });
   const [resizing, setResizing] = useState(false);
 
@@ -148,13 +162,30 @@ function Shell() {
       header={{ height: HEADER_HEIGHT }}
       navbar={{
         width: sidebarWidth,
-        breakpoint: 'xs',
-        collapsed: { desktop: !hasWorkspace, mobile: !hasWorkspace },
+        breakpoint: 'sm',
+        // The two halves mean different things now: on a desktop the navbar is
+        // permanent unless there is nothing to show, and on a phone it is a
+        // drawer the burger opens.
+        collapsed: { desktop: !hasWorkspace, mobile: !hasWorkspace || !navOpen },
       }}
       padding={0}
     >
       <AppShell.Header>
-        <ProjectTabs />
+        <Box style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
+          {hasWorkspace && (
+            <Burger
+              opened={navOpen}
+              onClick={toggleNav}
+              size="sm"
+              ml="xs"
+              hiddenFrom="sm"
+              aria-label="Sessions"
+            />
+          )}
+          <Box style={{ flex: 1, minWidth: 0, height: '100%' }}>
+            <ProjectTabs />
+          </Box>
+        </Box>
       </AppShell.Header>
       <ConnectionBanner headerHeight={HEADER_HEIGHT} />
       <SkewBanner headerHeight={HEADER_HEIGHT} />
@@ -162,11 +193,14 @@ function Shell() {
       <WorkerBanner headerHeight={HEADER_HEIGHT} />
       <UpdateBanner headerHeight={HEADER_HEIGHT} />
       <AppShell.Navbar>
+        {/* Picking a session on a phone has to close the drawer, or the thing
+            just picked is behind it. */}
         <Sidebar
           onEditWorkflows={() => openWorkflowEditor('workflows')}
           onBrowseRecipes={() => openWorkflowEditor('recipes')}
+          onNavigate={isPhone ? closeNav : undefined}
         />
-        {hasWorkspace && (
+        {hasWorkspace && !isPhone && (
           <Box
             onMouseDown={startResize}
             className="sidebar-resize-handle"

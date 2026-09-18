@@ -408,3 +408,23 @@
   background: var(--mantine-color-yellow-light);
   color: inherit;
 }
+
+/* Phone. The app's first @media block, and deliberately small: the layout is
+   adapted in the components with Mantine breakpoints, and only what CSS alone
+   can express lives here.
+
+   `viewport-fit=cover` in index.html lets the page reach under the iOS home
+   indicator; this pays that back where it matters. Without it the send button
+   sits beneath the indicator and every tap is a swipe-up instead. */
+@media (max-width: 48em) {
+  .lines-safe-bottom {
+    padding-bottom: max(env(safe-area-inset-bottom), 0.25rem);
+  }
+
+  /* Touch targets. Mantine's xs controls are tuned for a mouse; 32px is the
+     floor below which a finger starts missing them. */
+  .lines-touch-target {
+    min-height: 32px;
+    min-width: 32px;
+  }
+}

@@ -500,6 +500,15 @@ local_resource('pair-device', cmd='npm run pair -w server',
                auto_init=False, trigger_mode=TRIGGER_MODE_MANUAL,
                resource_deps=['install'], labels=['setup'], allow_parallel=True)
 
+# Mints the one-time code that binds a browser to this machine's encryption key,
+# and prints what is already enrolled. The desktop tray has the same action; this
+# is how it is reachable under Tilt, where there is no Electron shell. Manual for
+# the same reason pairing is: a code is something you ask for, and minting one
+# invalidates whatever was outstanding.
+local_resource('enroll-browser', cmd='npm run enroll -w server',
+               auto_init=False, trigger_mode=TRIGGER_MODE_MANUAL,
+               resource_deps=['install'], labels=['setup'], allow_parallel=True)
+
 # Builds the installable DMG into desktop/release. Never automatic: it is a
 # minutes-long electron-builder run producing a release artifact, and nothing in
 # the dev stack consumes it. Here so the packaging step is discoverable at all —

@@ -55,6 +55,8 @@ import {
   sessionRowMeta,
 } from '../lib/format';
 import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
+import { useReveal } from '../lib/layout';
+import { ConfirmModal } from './ConfirmModal';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode } from '../store';
 import { projectAt, sessionsInProject, useStore } from '../store';
@@ -102,9 +104,12 @@ function useOverflow() {
 const SessionRow = memo(function SessionRow({
   session,
   selected,
+  onSelect,
 }: {
   session: SessionMeta;
   selected: boolean;
+  /** Phone only: the sidebar is a drawer there, and it covers what was picked. */
+  onSelect?: () => void;
 }) {
   const status = sessionRowMeta(session);
   // deleteSession/archiveSession are permanently owner-only: a guest never gets
@@ -123,6 +128,8 @@ const SessionRow = memo(function SessionRow({
     : null;
   const { overflowing, check } = useOverflow();
   const [hovered, setHovered] = useState(false);
+  // Touch has no hover, so the row's actions would never appear on a phone.
+  const show = useReveal(hovered);
   // A delete that has been sent but not echoed back. No optimistic removal: the
   // `sessionDeleted` echo stays the only thing that takes a row off the list, so a
   // delete that never lands leaves the row visible rather than silently "working".
@@ -133,10 +140,17 @@ const SessionRow = memo(function SessionRow({
   const projects = useStore((s) => s.projects);
   const worktree = findWorktree(projects, session.cwd)?.worktree;
   const deleteSession = (opts: { confirmFirst: boolean }) => {
-    if (opts.confirmFirst && !confirm(`Delete session "${session.name}"?`)) return;
+    if (opts.confirmFirst) {
+      // The app's own modal, not the native `confirm()`: a blocking dialog is
+      // hostile on a phone, and this one already exists for every other
+      // destructive action.
+      setConfirmingDelete(true);
+      return;
+    }
     setActionError(null);
     if (send({ type: 'deleteSession', sessionId: session.id })) setDeleting(true);
   };
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   // A session with no real prompt yet is safe to delete outright; others archive first.
   const isNew = session.nameAuto === true;
   // Ran its workflow to the end but not manually completed — and never allowed to
@@ -148,6 +162,7 @@ const SessionRow = memo(function SessionRow({
     <UnstyledButton
       component={Link}
       to={`/session/${session.id}`}
+      onClick={() => onSelect?.()}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       px="sm"
@@ -260,7 +275,7 @@ const SessionRow = memo(function SessionRow({
             </Tooltip>
           </Group>
           <Group gap={6} wrap="nowrap" align="center" mih={17} mt={3}>
-            {!hovered && status.actionable ? (
+            {!show && status.actionable ? (
               <Badge
                 variant="light"
                 color={status.color}
@@ -382,6 +397,18 @@ const SessionRow = memo(function SessionRow({
           )}
         </Group>
       </Group>
+      <ConfirmModal
+        opened={confirmingDelete}
+        title="Delete session"
+        message={`Delete session “${session.name}”? Its transcript goes with it.`}
+        confirmLabel="Delete"
+        confirmColor="red"
+        onCancel={() => setConfirmingDelete(false)}
+        onConfirm={() => {
+          setConfirmingDelete(false);
+          deleteSession({ confirmFirst: false });
+        }}
+      />
     </UnstyledButton>
   );
 });
@@ -427,7 +454,7 @@ function UnlinkedCheckouts({ activeKey }: { activeKey: string }) {
   // Collapsed to a single dimmed line: this is an occasional one-time fixup,
   // not something worth standing between the user and their session list.
   return (
-    <Popover width={320} position="top" withArrow shadow="md">
+    <Popover width="min(320px, calc(100vw - 2rem))" position="top" withArrow shadow="md">
       <Popover.Target>
         <UnstyledButton px="sm" py={6} mt={4} style={{ opacity: 0.55 }}>
           <Group gap={5} wrap="nowrap">
@@ -511,9 +538,13 @@ function UnlinkedCheckouts({ activeKey }: { activeKey: string }) {
 export function Sidebar({
   onEditWorkflows,
   onBrowseRecipes,
+  onNavigate,
 }: {
   onEditWorkflows: () => void;
   onBrowseRecipes: () => void;
+  /** Called when the user picks something. Supplied only on a phone, where this
+   *  list is a drawer sitting on top of the thing they just picked. */
+  onNavigate?: () => void;
 }) {
   const sessions = useStore((s) => s.sessions);
   const workflows = useStore((s) => s.workflows);
@@ -819,12 +850,22 @@ export function Sidebar({
                   Shared with me
                 </Text>
                 {shared.map((s) => (
-                  <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
+                  <SessionRow
+                    key={s.id}
+                    session={s}
+                    selected={s.id === selectedSessionId}
+                    onSelect={onNavigate}
+                  />
                 ))}
               </>
             )}
             {list.map((s) => (
-              <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
+              <SessionRow
+                key={s.id}
+                session={s}
+                selected={s.id === selectedSessionId}
+                onSelect={onNavigate}
+              />
             ))}
             {list.length === 0 && archived.length === 0 && shared.length === 0 && (
               <Text size="xs" c="dimmed" ta="center" pt="lg">
@@ -860,7 +901,12 @@ export function Sidebar({
                 {showArchived && (
                   <>
                     {archived.slice(0, archivedShown).map((s) => (
-                      <SessionRow key={s.id} session={s} selected={s.id === selectedSessionId} />
+                      <SessionRow
+                        key={s.id}
+                        session={s}
+                        selected={s.id === selectedSessionId}
+                        onSelect={onNavigate}
+                      />
                     ))}
                     {archived.length > archivedShown && (
                       <Button

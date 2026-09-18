@@ -20,7 +20,12 @@ export interface DesktopConfig {
    */
   relayUrl: string;
   storageUrl: string;
-  /** The hosted app, for "Open Lines" and the pairing window's link. */
+  /**
+   * The hosted app, for "Open Lines", the pairing window's link and the
+   * enrollment QR. Its own hostname, separate from the relay's: the bundle and
+   * the relay must not share an origin, or a compromise of the relay container
+   * can serve JavaScript to the page holding the encryption keys.
+   */
   webUrl: string;
   /**
    * Directory holding `latest-mac.yml` for electron-updater's `generic`
@@ -36,7 +41,7 @@ export interface DesktopConfig {
 export const DEFAULT_CONFIG: DesktopConfig = {
   relayUrl: 'wss://linesapp.cloud',
   storageUrl: 'https://api.linesapp.cloud',
-  webUrl: 'https://linesapp.cloud',
+  webUrl: 'https://app.linesapp.cloud',
   updateFeedUrl: '',
   downloadUrl: 'https://linesapp.cloud',
 };

@@ -4,6 +4,7 @@ import { useHotkeys } from '@mantine/hooks';
 import { IconFile, IconSearch } from '@tabler/icons-react';
 import { rootsForCwd } from '@lines/shared';
 import { useStore } from '../store';
+import { useIsPhone } from '../lib/layout';
 import { searchFiles } from '../lib/files';
 
 const DEBOUNCE_MS = 120;
@@ -45,8 +46,12 @@ export function FilePalette() {
 
   // A guest, or the folder picker before any project is open, has nothing to
   // search: leave Cmd+P to the browser instead of opening an empty palette.
+  // Desktop only, and not a deferral panel: its one entry point is a keyboard
+  // shortcut, so on a phone there is nothing to defer — the palette simply does
+  // not exist rather than announcing itself.
+  const isPhone = useIsPhone();
   useHotkeys(
-    [['mod+P', () => rootsKey && setOpened(true), { preventDefault: Boolean(rootsKey) }]],
+    [['mod+P', () => !isPhone && rootsKey && setOpened(true), { preventDefault: Boolean(rootsKey) }]],
     [], // no tag is ignored — the shortcut has to work from the composer textarea too
     true,
   );

@@ -11,6 +11,7 @@ import {
   providerForModel,
 } from '@lines/shared';
 import { formatDuration, formatSpendUsd } from '../lib/format';
+import { useReveal } from '../lib/layout';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { revealWorkflowStep } from '../lib/workflowReveal';
@@ -32,10 +33,13 @@ function StepIcon({
   onAdvance?: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
+  // Touch has no hover, so on a phone the force-advance affordance would not
+  // exist — and it is the only way past a step that will not settle.
+  const show = useReveal(hovered);
   // Hovering an advanceable step swaps its number/loader for the action's glyph — the
   // affordance lives on the icon only, so the rest of the row keeps its
   // scroll-to-marker click.
-  const showAdvance = !!advanceLabel && hovered;
+  const showAdvance = !!advanceLabel && show;
   // Fixed width so the title (and the metrics row indented under it) never shifts
   // when a step flips between the 20px loader and the 22px icon.
   const icon = (

@@ -26,7 +26,9 @@ import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { GuardAllowlistSection } from './GuardAllowlistSection';
 import { McpConnectionsSection } from './McpConnectionsSection';
+import { useIsPhone } from '../lib/layout';
 import { DevicesSection } from './DevicesSection';
+import { EncryptionSection } from './EncryptionSection';
 import { CollaboratorsSection } from './CollaboratorsSection';
 import { UpdatesSection } from './UpdatesSection';
 import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
@@ -46,6 +48,7 @@ import { useIsGuest } from '../lib/can';
 export type SettingsSection =
   | 'account'
   | 'devices'
+  | 'encryption'
   | 'collaborators'
   | 'sessions'
   | 'transcript'
@@ -61,7 +64,13 @@ const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   // Only in a hosted build. A local install talks to the bridge on this machine,
   // which is the one and only device — a list of one it cannot revoke is noise.
   ...(DEVICE_PAIRING_ENABLED
-    ? [{ value: 'devices' as SettingsSection, label: 'Machines' }]
+    ? [
+        { value: 'devices' as SettingsSection, label: 'Machines' },
+        // Beside Machines, because enrolling a key is a property of the machine
+        // this browser is pointed at — and only a hosted build has a relay in
+        // the middle worth removing from the trust chain.
+        { value: 'encryption' as SettingsSection, label: 'Encryption' },
+      ]
     : []),
   // Same reasoning: with no storage server there is nothing to share and nobody
   // to have shared with.
@@ -103,6 +112,7 @@ export function SettingsModal({
   const guest = useIsGuest();
   const sections = guest ? GUEST_SECTIONS : SETTINGS_SECTIONS;
   const [section, setSection] = useState<SettingsSection>(initialSection);
+  const isPhone = useIsPhone();
 
   // Snapshot in a ref so a guardReview that clears mid-edit cannot yank the
   // user off the allowlist pane; only an open transition picks the section.
@@ -118,6 +128,9 @@ export function SettingsModal({
       opened={opened}
       onClose={onClose}
       title="Settings"
+      // Full-screen on a phone: a 90%-wide modal over a 390px viewport leaves a
+      // sliver of backdrop that swallows taps meant for the pane.
+      fullScreen={isPhone}
       size="90%"
       centered
       padding={0}
@@ -129,7 +142,9 @@ export function SettingsModal({
       }}
     >
       <Group align="stretch" gap={0} wrap="nowrap" style={{ flex: 1, minHeight: 0 }}>
-        <Stack gap="xs" w={200} p="md" style={{ flexShrink: 0 }}>
+        {/* The rail is the navigation, so it narrows rather than disappearing —
+            a phone-only section picker would be a second way to do one thing. */}
+        <Stack gap="xs" w={isPhone ? 132 : 200} p={isPhone ? 'xs' : 'md'} style={{ flexShrink: 0 }}>
           {sections.map((s) => {
             const button = (
               <Button
@@ -170,6 +185,7 @@ export function SettingsModal({
           <Stack gap="xs" p="md" maw={620}>
             {section === 'account' && <AccountSection onClose={onClose} />}
             {section === 'devices' && <DevicesSection />}
+            {section === 'encryption' && <EncryptionSection />}
             {section === 'collaborators' && <CollaboratorsSection />}
             {section === 'sessions' && <SessionsSection onOpenUpdates={() => setSection('updates')} />}
             {section === 'transcript' && <TranscriptSection />}

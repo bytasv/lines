@@ -229,7 +229,14 @@ function RestoreHistoryPopover({
   const preview = versions?.find((v) => v.version === selected);
 
   return (
-    <Popover width={340} position="bottom-end" withArrow shadow="md" opened={opened} onChange={setOpened}>
+    <Popover
+      width="min(340px, calc(100vw - 2rem))"
+      position="bottom-end"
+      withArrow
+      shadow="md"
+      opened={opened}
+      onChange={setOpened}
+    >
       <Popover.Target>
         <Tooltip label="Version history">
           <ActionIcon

@@ -3,6 +3,8 @@ import { useComputedColorScheme } from '@mantine/core';
 import { IconFiles, IconX } from '@tabler/icons-react';
 import { Editor } from '@monaco-editor/react';
 import { useStore } from '../store';
+import { useIsPhone } from '../lib/layout';
+import { BestOnDesktop } from './BestOnDesktop';
 import { useFileContent } from '../lib/files';
 import { languageFor } from '../lib/language';
 
@@ -84,6 +86,7 @@ function FileEditor({ path }: { path: string }) {
 export function FilesView() {
   const activeProject = useStore((s) => s.activeProject);
   const openFiles = useStore((s) => activeProject ? s.openFiles[activeProject] : undefined);
+  const isPhone = useIsPhone();
 
   const empty = (
     <Center h="100%">
@@ -95,6 +98,11 @@ export function FilesView() {
       </Stack>
     </Center>
   );
+
+  // Monaco on a 390px screen is a text field you cannot navigate: no gutter
+  // room, no keyboard shortcuts, and a virtual keyboard over half the viewport.
+  // Said plainly rather than shipped shrunk.
+  if (isPhone) return <BestOnDesktop what="Browsing files" />;
 
   if (!activeProject || !openFiles || openFiles.tabs.length === 0) return empty;
 

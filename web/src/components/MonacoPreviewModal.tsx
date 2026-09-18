@@ -3,6 +3,8 @@ import { useComputedColorScheme } from '@mantine/core';
 import { Editor } from '@monaco-editor/react';
 import { projectRoots } from '@lines/shared';
 import { useStore } from '../store';
+import { useIsPhone } from '../lib/layout';
+import { BestOnDesktop } from './BestOnDesktop';
 import { useFileContent } from '../lib/files';
 import { languageFor } from '../lib/language';
 import { FileTree } from './FileTree';
@@ -18,12 +20,21 @@ export function MonacoPreviewModal() {
   const path = filePreview?.path;
   const line = filePreview?.line;
   const { content, error } = useFileContent(path);
+  const isPhone = useIsPhone();
 
   // Root the tree at the root that contains the previewed file — any root of any
   // open project, since a project spans several — else the active project.
   const treeRoot =
     (path && projects.flatMap(projectRoots).find((r) => path === r || path.startsWith(r + '/'))) ??
     activeProject;
+
+  if (isPhone) {
+    return (
+      <Modal opened={filePreview !== null} onClose={closeFilePreview} fullScreen>
+        <BestOnDesktop what="Reading source" onClose={closeFilePreview} />
+      </Modal>
+    );
+  }
 
   return (
     <Modal

@@ -56,6 +56,7 @@ import type {
 import { hasEstimatedSpend, rewindBlock } from '@lines/shared';
 import { agentLabel, sessionCaps } from '../lib/capabilities';
 import { useStore } from '../store';
+import { useReveal } from '../lib/layout';
 import { send } from '../ws';
 import {
   buildTranscript,
@@ -364,6 +365,7 @@ function UserBubble({
   onImage: (src: string) => void;
 }) {
   const { hovered, ref } = useHover<HTMLDivElement>();
+  const show = useReveal(hovered);
   const clipboard = useClipboard({ timeout: 1500 });
   /** The action awaiting confirmation, or null when the dialog is closed. */
   const [confirming, setConfirming] = useState<RewindIntent | null>(null);
@@ -539,9 +541,11 @@ function UserBubble({
         pr={30}
         justify="flex-end"
         style={{
-          opacity: hovered || confirming ? 1 : 0,
+          // `show`, not `hovered`: a finger never hovers, and these were the
+          // only way to copy, edit or rewind a message. See lib/pointer.ts.
+          opacity: show || confirming ? 1 : 0,
           transition: 'opacity 120ms',
-          pointerEvents: hovered || confirming ? 'auto' : 'none',
+          pointerEvents: show || confirming ? 'auto' : 'none',
         }}
       >
         <Tooltip label={clipboard.copied ? 'Copied' : 'Copy message'}>
@@ -606,6 +610,7 @@ function UserBubble({
  */
 function InterjectionRow({ item }: { item: Extract<TranscriptItem, { kind: 'interject' }> }) {
   const { hovered, ref } = useHover<HTMLDivElement>();
+  const show = useReveal(hovered);
   const clipboard = useClipboard({ timeout: 1500 });
   return (
     <Stack ref={ref} gap={2} align="flex-end">
@@ -668,9 +673,9 @@ function InterjectionRow({ item }: { item: Extract<TranscriptItem, { kind: 'inte
         pr={30}
         justify="flex-end"
         style={{
-          opacity: hovered ? 1 : 0,
+          opacity: show ? 1 : 0,
           transition: 'opacity 120ms',
-          pointerEvents: hovered ? 'auto' : 'none',
+          pointerEvents: show ? 'auto' : 'none',
         }}
       >
         <Tooltip label={clipboard.copied ? 'Copied' : 'Copy message'}>
