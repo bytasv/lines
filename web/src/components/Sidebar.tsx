@@ -27,6 +27,7 @@ import {
   IconCircleCheckFilled,
   IconChevronDown,
   IconCoins,
+  IconDots,
   IconEye,
   IconEyeOff,
   IconGitBranch,
@@ -40,12 +41,7 @@ import type { CSSProperties } from 'react';
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
-import {
-  findWorktree,
-  hasEstimatedSpend,
-  projectPaths,
-  projectRoots,
-} from '@lines/shared';
+import { findWorktree, hasEstimatedSpend, projectPaths, projectRoots } from '@lines/shared';
 import type { SessionSort } from '../lib/format';
 import {
   compareSessions,
@@ -55,7 +51,7 @@ import {
   sessionRowMeta,
 } from '../lib/format';
 import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
-import { useReveal } from '../lib/layout';
+import { useIsPhone, useReveal } from '../lib/layout';
 import { ConfirmModal } from './ConfirmModal';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode } from '../store';
@@ -78,7 +74,11 @@ const SORT_OPTIONS: { value: SessionSort; label: string }[] = [
 ];
 
 /** One formatter for the whole list: `toLocaleDateString` builds a new one per call. */
-const rowDate = new Intl.DateTimeFormat('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+const rowDate = new Intl.DateTimeFormat('en-GB', {
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+});
 
 function stop(e: { preventDefault: () => void; stopPropagation: () => void }) {
   e.preventDefault(); // don't follow the row link
@@ -153,6 +153,7 @@ const SessionRow = memo(function SessionRow({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   // A session with no real prompt yet is safe to delete outright; others archive first.
   const isNew = session.nameAuto === true;
+  const isPhone = useIsPhone();
   // Ran its workflow to the end but not manually completed — and never allowed to
   // mask a session that still needs the user.
   const finished = !session.completed && !status.actionable && isWorkflowFinished(session);
@@ -275,13 +276,10 @@ const SessionRow = memo(function SessionRow({
             </Tooltip>
           </Group>
           <Group gap={6} wrap="nowrap" align="center" mih={17} mt={3}>
-            {!show && status.actionable ? (
+            {isPhone || (!show && status.actionable) ? (
               <Badge
-                variant="light"
-                color={status.color}
-                px={4}
-                h={12}
-                style={{ fontSize: 8 }}
+                variant="light" color={status.color} px={4}
+                h={isPhone ? 20 : 12} style={{ fontSize: isPhone ? 12 : 8 }}
               >
                 {status.label}
               </Badge>
@@ -319,7 +317,69 @@ const SessionRow = memo(function SessionRow({
           </Group>
         </Box>
         <Group gap={2} wrap="nowrap">
-          {guest ? null : session.archived ? (
+          {guest ? null : isPhone ? (
+            <Menu withinPortal position="bottom-end">
+              <Menu.Target>
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  aria-label={`Actions for ${session.name}`}
+                  onClick={stop}
+                >
+                  <IconDots size={18} />
+                </ActionIcon>
+              </Menu.Target>
+              <Menu.Dropdown onClick={stop}>
+                {session.archived ? (
+                  <>
+                    <Menu.Item
+                      leftSection={<IconArchiveOff size={16} />}
+                      onClick={() =>
+                        send({
+                          type: 'unarchiveSession',
+                          sessionId: session.id,
+                        })
+                      }
+                    >
+                      Unarchive session
+                    </Menu.Item>
+                    <Menu.Item
+                      color="red"
+                      disabled={deleting}
+                      leftSection={<IconTrash size={16} />}
+                      onClick={() => deleteSession({ confirmFirst: true })}
+                    >
+                      Delete session
+                    </Menu.Item>
+                  </>
+                ) : isNew ? (
+                  <Menu.Item
+                    color="red"
+                    disabled={deleting}
+                    leftSection={<IconTrash size={16} />}
+                    onClick={() => deleteSession({ confirmFirst: false })}
+                  >
+                    Delete session
+                  </Menu.Item>
+                ) : (
+                  <>
+                    <Menu.Item
+                      leftSection={<IconCircleCheck size={16} />}
+                      onClick={() => send({ type: 'completeSession', sessionId: session.id })}
+                    >
+                      Mark completed
+                    </Menu.Item>
+                    <Menu.Item
+                      leftSection={<IconArchive size={16} />}
+                      onClick={() => send({ type: 'archiveSession', sessionId: session.id })}
+                    >
+                      Archive session
+                    </Menu.Item>
+                  </>
+                )}
+              </Menu.Dropdown>
+            </Menu>
+          ) : session.archived ? (
             <>
               <Tooltip label="Unarchive session">
                 <ActionIcon
@@ -591,7 +651,7 @@ export function Sidebar({
   const projects = useStore((s) => s.projects);
   const project = projectAt(projects, activeProject);
   const roots = project ? projectRoots(project) : [];
-  const activeProjectKey = activeProject ? projectKeys[activeProject] ?? null : null;
+  const activeProjectKey = activeProject ? (projectKeys[activeProject] ?? null) : null;
   const projectSessions = sessionsInProject(sessions, projectKeys, project);
   /**
    * Sessions shared with this user that no project tab covers.
@@ -666,7 +726,7 @@ export function Sidebar({
   const hideIgnored = useStore((s) => s.hideIgnored);
   const setHideIgnored = useStore((s) => s.setHideIgnored);
   const activeFile = useStore((s) =>
-    activeProject ? s.openFiles[activeProject]?.active ?? null : null,
+    activeProject ? (s.openFiles[activeProject]?.active ?? null) : null,
   );
 
   return (
@@ -769,8 +829,14 @@ export function Sidebar({
                     checked={worktreeMode}
                     onChange={(e) => setWorktreeMode(e.currentTarget.checked)}
                     styles={{
-                      body: { width: '100%', alignItems: 'center', justifyContent: 'space-between' },
-                      labelWrapper: { marginInlineEnd: 'var(--mantine-spacing-sm)' },
+                      body: {
+                        width: '100%',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      },
+                      labelWrapper: {
+                        marginInlineEnd: 'var(--mantine-spacing-sm)',
+                      },
                     }}
                   />
                 </Box>

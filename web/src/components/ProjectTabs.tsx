@@ -1,6 +1,11 @@
 import {
   ActionIcon,
   Box,
+  Button,
+  Drawer,
+  Stack,
+  TextInput,
+  UnstyledButton,
   Center,
   CloseButton,
   Group,
@@ -14,6 +19,7 @@ import {
 } from '@mantine/core';
 import {
   IconBooks,
+  IconChevronDown,
   IconDots,
   IconFolder,
   IconFolderMinus,
@@ -46,7 +52,21 @@ function baseName(path: string) {
   return path.split('/').filter(Boolean).pop() ?? path;
 }
 
-function ProjectTab({ project, active }: { project: Project; active: boolean }) {
+function ProjectTab({
+  project,
+  active,
+  mobile = false,
+  onSelect,
+  onRemoveRoot,
+  onWorktree,
+}: {
+  project: Project;
+  active: boolean;
+  mobile?: boolean;
+  onSelect?: () => void;
+  onRemoveRoot: (project: Project, root: string) => void;
+  onWorktree: (project: Project, target: string | null) => void;
+}) {
   const path = project.path;
   const extraRoots = project.extraRoots ?? [];
   const setActiveProject = useStore((s) => s.setActiveProject);
@@ -88,12 +108,6 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
     send({ type: 'pickFolder' });
   };
 
-  // The root awaiting confirmation. Removal widens/narrows what every session in
-  // this tab may write to, so it goes through the same gate as deleting a step.
-  const [pendingRemove, setPendingRemove] = useState<string | null>(null);
-  // null = closed; `{ target: null }` = the create form; a path = manage that record.
-  const [worktreeModal, setWorktreeModal] = useState<{ target: string | null } | null>(null);
-
   /** A record whose session is gone still holds files, so it is labelled, not hidden. */
   const orphaned = (w: WorktreeInfo) => w.sessionId != null && !sessions[w.sessionId];
 
@@ -122,7 +136,7 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
         styles={{ tooltip: { whiteSpace: 'pre-line' } }}
       >
         <Box
-          onClick={() => setActiveProject(path)}
+          onClick={mobile ? undefined : () => setActiveProject(path)}
           px={8}
           py={3}
           style={{
@@ -157,9 +171,33 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
               <IconFolder size={13} opacity={0.6} />
             )}
           </Center>
-          <Text size="xs" fw={active ? 600 : 400}>
-            {baseName(path)}
-          </Text>
+          {mobile ? (
+            <UnstyledButton
+              style={{ flex: 1, minWidth: 0 }}
+              py={6}
+              aria-current={active ? 'true' : undefined}
+              onClick={() => {
+                setActiveProject(path);
+                onSelect?.();
+              }}
+            >
+              <Text size="sm" fw={active ? 600 : 400} truncate>
+                {baseName(path)}
+              </Text>
+              <Text size="xs" c="dimmed" truncate>
+                {path}
+              </Text>
+              {status && (
+                <Text size="xs" c={status.color}>
+                  {status.label}
+                </Text>
+              )}
+            </UnstyledButton>
+          ) : (
+            <Text size="xs" fw={active ? 600 : 400}>
+              {baseName(path)}
+            </Text>
+          )}
           {/* Roots menu. Clicks are stopped on both the trigger and the dropdown —
               a portalled dropdown still bubbles through the React tree, so without
               it managing folders would double as "switch to this tab". */}
@@ -176,6 +214,11 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
               </ActionIcon>
             </Menu.Target>
             <Menu.Dropdown onClick={(e) => e.stopPropagation()}>
+              {mobile && (
+                <Menu.Item onClick={() => send({ type: 'closeProject', path })}>
+                  Close project
+                </Menu.Item>
+              )}
               {isLocal && (
                 <Menu.Item leftSection={<IconFolderPlus size={14} />} onClick={addFolder}>
                   Add folder…
@@ -193,11 +236,10 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
                   key={root}
                   color="red"
                   leftSection={<IconFolderMinus size={14} />}
-                  onClick={() => setPendingRemove(root)}
+                  onClick={() => onRemoveRoot(project, root)}
                 >
                   <Text size="xs">
-                    Remove{' '}
-                    {/* truncate="start" keeps the tail: the distinctive part of a path. */}
+                    Remove {/* truncate="start" keeps the tail: the distinctive part of a path. */}
                     <Text span ff="monospace" truncate="start">
                       {root}
                     </Text>
@@ -210,7 +252,7 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
                   may write to. */}
               <Menu.Item
                 leftSection={<IconGitBranch size={14} />}
-                onClick={() => setWorktreeModal({ target: null })}
+                onClick={() => onWorktree(project, null)}
               >
                 New worktree…
               </Menu.Item>
@@ -219,7 +261,7 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
                 <Menu.Item
                   key={w.path}
                   leftSection={<IconGitBranch size={14} />}
-                  onClick={() => setWorktreeModal({ target: w.path })}
+                  onClick={() => onWorktree(project, w.path)}
                 >
                   <Text size="xs" truncate>
                     {worktreeLabel(w).title}
@@ -234,37 +276,18 @@ function ProjectTab({ project, active }: { project: Project; active: boolean }) 
               ))}
             </Menu.Dropdown>
           </Menu>
-          <CloseButton
-            size={14}
-            onClick={(e) => {
-              e.stopPropagation();
-              send({ type: 'closeProject', path });
-            }}
-          />
+          {!mobile && (
+            <CloseButton
+              aria-label={`Close ${baseName(path)}`}
+              size={14}
+              onClick={(e) => {
+                e.stopPropagation();
+                send({ type: 'closeProject', path });
+              }}
+            />
+          )}
         </Box>
       </Tooltip>
-      {/* Outside the tab's Box on purpose: a click inside the modal would otherwise
-          bubble up to the Box's onClick and switch projects behind the dialog. */}
-      <ConfirmModal
-        opened={pendingRemove !== null}
-        title="Remove folder"
-        message={`Remove ${pendingRemove ?? ''} from this project? Sessions in this tab lose access to it — nothing on disk is deleted.`}
-        confirmLabel="Remove"
-        confirmColor="red"
-        onConfirm={() => {
-          send({ type: 'removeProjectRoot', project: path, path: pendingRemove! });
-          setPendingRemove(null);
-        }}
-        onCancel={() => setPendingRemove(null)}
-      />
-      {/* Outside the tab's Box for the same reason as the ConfirmModal above. */}
-      {worktreeModal && (
-        <WorktreeModal
-          project={project}
-          target={worktreeModal.target}
-          onClose={() => setWorktreeModal(null)}
-        />
-      )}
     </>
   );
 }
@@ -280,6 +303,25 @@ export function ProjectTabs() {
   // below stay: they are exactly the projects a remote device can reach.
   const isLocal = useIsLocalMachine();
   const isPhone = useIsPhone();
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [projectSearch, setProjectSearch] = useState('');
+  const [pendingRemove, setPendingRemove] = useState<{ project: Project; root: string } | null>(
+    null,
+  );
+  const [worktreeModal, setWorktreeModal] = useState<{
+    project: Project;
+    target: string | null;
+  } | null>(null);
+  const projectActions = {
+    onRemoveRoot: (project: Project, root: string) => {
+      setPickerOpen(false);
+      setPendingRemove({ project, root });
+    },
+    onWorktree: (project: Project, target: string | null) => {
+      setPickerOpen(false);
+      setWorktreeModal({ project, target });
+    },
+  };
 
   const browse = () => {
     setFolderPickTarget(null); // a plain browse opens a project rather than widening one
@@ -309,40 +351,169 @@ export function ProjectTabs() {
           <Box className="brand-separator" mx={8} />
         </>
       )}
-      <ScrollArea type="never" style={{ flex: 1 }}>
-        <Group gap={4} wrap="nowrap">
-          {projects.map((p) => (
-            <ProjectTab key={p.path} project={p} active={p.path === activeProject} />
-          ))}
-          <Menu position="bottom-start" width="min(320px, calc(100vw - 2rem))">
-            <Menu.Target>
-              <Tooltip label="Open project">
-                <ActionIcon variant="subtle" color="gray" size="sm" disabled={folderPickPending}>
-                  {folderPickPending ? <Loader size={12} /> : <IconPlus size={14} />}
-                </ActionIcon>
-              </Tooltip>
-            </Menu.Target>
-            <Menu.Dropdown>
-              {isLocal && (
-                <Menu.Item leftSection={<IconFolderOpen size={14} />} onClick={browse}>
-                  Browse…
-                </Menu.Item>
-              )}
-              {recents.length > 0 && <Menu.Label>Recent</Menu.Label>}
-              {recents.map((d) => (
-                <Menu.Item key={d} onClick={() => openRecent(d)}>
-                  <Text size="xs" truncate ff="monospace">
-                    {d}
-                  </Text>
-                </Menu.Item>
+      {isPhone ? (
+        <>
+          <Button
+            variant="subtle"
+            color="gray"
+            px={6}
+            rightSection={<IconChevronDown size={16} />}
+            style={{ flex: 1, minWidth: 0 }}
+            styles={{
+              label: {
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              },
+            }}
+            aria-label="Switch project"
+            onClick={() => {
+              setProjectSearch('');
+              setPickerOpen(true);
+            }}
+          >
+            <Text component="span" size="sm" truncate>
+              {activeProject ? baseName(activeProject) : 'Projects'}
+            </Text>
+          </Button>
+          <Drawer
+            opened={pickerOpen}
+            onClose={() => setPickerOpen(false)}
+            position="bottom"
+            size="min(80dvh, var(--lines-viewport))"
+            title="Projects"
+            keepMounted
+            classNames={{ content: 'lines-mobile-sheet', inner: 'lines-mobile-sheet-inner' }}
+          >
+            <Stack gap="sm" className="lines-safe-bottom">
+              <TextInput
+                label="Search projects"
+                placeholder="Name or path"
+                value={projectSearch}
+                onChange={(event) => setProjectSearch(event.currentTarget.value)}
+              />
+              {projects.map((project) => (
+                <Box
+                  key={project.path}
+                  display={
+                    project.path.toLowerCase().includes(projectSearch.toLowerCase())
+                      ? undefined
+                      : 'none'
+                  }
+                >
+                  <ProjectTab
+                    {...projectActions}
+                    project={project}
+                    active={project.path === activeProject}
+                    mobile
+                    onSelect={() => setPickerOpen(false)}
+                  />
+                </Box>
               ))}
-            </Menu.Dropdown>
-          </Menu>
-        </Group>
-      </ScrollArea>
+              {!projects.some((project) =>
+                project.path.toLowerCase().includes(projectSearch.toLowerCase()),
+              ) && (
+                <Text size="sm" c="dimmed">
+                  {projects.length ? 'No matching projects.' : 'No open projects.'}
+                </Text>
+              )}
+              {isLocal && (
+                <Button variant="light" disabled={folderPickPending} onClick={browse}>
+                  Open project…
+                </Button>
+              )}
+              {recents.length > 0 && (
+                <Text size="sm" fw={500}>
+                  Recent projects
+                </Text>
+              )}
+              {recents
+                .filter((path) => path.toLowerCase().includes(projectSearch.toLowerCase()))
+                .map((path) => (
+                  <UnstyledButton
+                    key={path}
+                    py={8}
+                    onClick={() => {
+                      openRecent(path);
+                      setPickerOpen(false);
+                    }}
+                  >
+                    <Text size="sm" truncate>
+                      {baseName(path)}
+                    </Text>
+                    <Text size="xs" c="dimmed" truncate>
+                      {path}
+                    </Text>
+                  </UnstyledButton>
+                ))}
+            </Stack>
+          </Drawer>
+        </>
+      ) : (
+        <ScrollArea type="never" style={{ flex: 1 }}>
+          <Group gap={4} wrap="nowrap">
+            {projects.map((p) => (
+              <ProjectTab
+                {...projectActions}
+                key={p.path}
+                project={p}
+                active={p.path === activeProject}
+              />
+            ))}
+            <Menu position="bottom-start" width="min(320px, calc(100vw - 2rem))">
+              <Menu.Target>
+                <Tooltip label="Open project">
+                  <ActionIcon variant="subtle" color="gray" size="sm" disabled={folderPickPending}>
+                    {folderPickPending ? <Loader size={12} /> : <IconPlus size={14} />}
+                  </ActionIcon>
+                </Tooltip>
+              </Menu.Target>
+              <Menu.Dropdown>
+                {isLocal && (
+                  <Menu.Item leftSection={<IconFolderOpen size={14} />} onClick={browse}>
+                    Browse…
+                  </Menu.Item>
+                )}
+                {recents.length > 0 && <Menu.Label>Recent</Menu.Label>}
+                {recents.map((d) => (
+                  <Menu.Item key={d} onClick={() => openRecent(d)}>
+                    <Text size="xs" truncate ff="monospace">
+                      {d}
+                    </Text>
+                  </Menu.Item>
+                ))}
+              </Menu.Dropdown>
+            </Menu>
+          </Group>
+        </ScrollArea>
+      )}
       <UsageIndicator />
       <HeaderActions />
       <UserMenu />
+      <ConfirmModal
+        opened={pendingRemove !== null}
+        title="Remove folder"
+        message={`Remove ${pendingRemove?.root ?? ''} from this project? Sessions in this tab lose access to it — nothing on disk is deleted.`}
+        confirmLabel="Remove"
+        confirmColor="red"
+        onCancel={() => setPendingRemove(null)}
+        onConfirm={() => {
+          if (pendingRemove)
+            send({
+              type: 'removeProjectRoot',
+              project: pendingRemove.project.path,
+              path: pendingRemove.root,
+            });
+          setPendingRemove(null);
+        }}
+      />
+      {worktreeModal && (
+        <WorktreeModal
+          project={worktreeModal.project}
+          target={worktreeModal.target}
+          onClose={() => setWorktreeModal(null)}
+        />
+      )}
     </Group>
   );
 }

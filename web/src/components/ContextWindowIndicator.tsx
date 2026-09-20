@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Box,
   Button,
@@ -17,7 +17,13 @@ import {
 } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
 import { IconAlertTriangle, IconChevronRight } from '@tabler/icons-react';
-import type { ContextBreakdown, ContextCategory, ContextSummary, ContextUsage, SessionMeta } from '@lines/shared';
+import type {
+  ContextBreakdown,
+  ContextCategory,
+  ContextSummary,
+  ContextUsage,
+  SessionMeta,
+} from '@lines/shared';
 import {
   CONTEXT_WARN_PCT,
   contextCompactBlock,
@@ -28,6 +34,7 @@ import {
 } from '@lines/shared';
 import { sessionCaps } from '../lib/capabilities';
 import { useStore } from '../store';
+import { useSessionMachineHealth } from '../lib/can';
 import { useReveal } from '../lib/layout';
 import { send } from '../ws';
 import { formatDuration, formatSpendUsd, formatTokens, usageColor } from '../lib/format';
@@ -125,7 +132,11 @@ function DetailList({ children, count }: { children: React.ReactNode; count: num
  * off which detail array exists rather than off the label alone, so a CLI
  * category rename loses the styling but not the data.
  */
-function categoryDetail(key: string, deferred: boolean, b: ContextBreakdown): React.ReactNode | null {
+function categoryDetail(
+  key: string,
+  deferred: boolean,
+  b: ContextBreakdown,
+): React.ReactNode | null {
   if (deferred) {
     if (key === 'mcp tools') {
       const unloaded = b.mcpServers.flatMap((s) =>
@@ -265,12 +276,20 @@ function CategoryRow({
         <Box
           w={MARKER_W}
           h={MARKER_W}
-          style={{ flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          style={{
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
         >
           {showChevron ? (
             <IconChevronRight
               size={12}
-              style={{ transform: expanded ? 'rotate(90deg)' : undefined, transition: 'transform 150ms' }}
+              style={{
+                transform: expanded ? 'rotate(90deg)' : undefined,
+                transition: 'transform 150ms',
+              }}
             />
           ) : (
             <Box
@@ -464,10 +483,29 @@ function FallbackBody({ usage }: { usage: ContextUsage }) {
  * assistant-message usage when no live query can be asked. Renders nothing until
  * a turn has produced a reading.
  */
-export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
+export function ContextWindowIndicator({
+  session,
+  inline = false,
+}: {
+  session: SessionMeta;
+  inline?: boolean;
+}) {
   const models = useStore((s) => s.models);
   const entry = useStore((s) => s.contextBreakdowns[session.id]);
   const requestContextBreakdown = useStore((s) => s.requestContextBreakdown);
+  const health = useSessionMachineHealth(session.id);
+  const hasReading = Boolean(session.contextSummary || session.contextUsage);
+  useEffect(() => {
+    if (
+      inline && hasReading && health.connected && health.bridgeAttached &&
+      sessionCaps(session).contextWindow
+    ) {
+      requestContextBreakdown(session.id);
+    }
+  }, [
+    inline, hasReading, health.connected, health.bridgeAttached,
+    session.id, session.model, requestContextBreakdown,
+  ]);
   // Expansion state must live here, not in the dropdown: HoverCard unmounts its
   // dropdown on close, which would reset it every time the pointer leaves.
   const [open, setOpen] = useState<Set<string>>(new Set());
@@ -527,6 +565,81 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
   const nearLimit = !stale && pct != null && pct >= CONTEXT_WARN_PCT;
   const modelLabel = models.find((m) => m.id === model)?.label ?? model;
 
+  const content = (
+    <Stack gap="xs">
+      <Group justify="space-between" gap="xs" wrap="nowrap">
+        <Group gap={6} wrap="nowrap">
+          <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+            Context window
+          </Text>
+          {entry?.loading && <Loader size={10} />}
+        </Group>
+        <Text size="xs" c="dimmed" truncate>
+          {modelLabel}
+        </Text>
+      </Group>
+      {view ? (
+        <BreakdownBody
+          view={view}
+          breakdown={entry?.breakdown ?? null}
+          open={open}
+          toggle={toggle}
+        />
+      ) : (
+        usage && <FallbackBody usage={usage} />
+      )}
+      {entry && !entry.loading && !entry.breakdown && (
+        <Text size="xs" c="dimmed">
+          Live detail unavailable — the session isn't running.
+        </Text>
+      )}
+      {compacted != null && (
+        <Text size="xs" c="dimmed">
+          {session.contextCompact?.trigger === 'auto'
+            ? 'Auto-compacted since the last measured turn'
+            : 'Compacted since the last measured turn'}
+          {` — ${formatTokens(compacted)} in context. The breakdown above predates it.`}
+        </Text>
+      )}
+      <Text size="xs" c="dimmed">
+        {stale
+          ? 'The conversation was reset for a fresh step — this reading is from before that, and refreshes when the next turn completes.'
+          : 'Measured at the last completed turn; the draft you are typing is not counted.'}
+      </Text>
+      {nearLimit && (
+        <Group gap={6} wrap="nowrap">
+          <IconAlertTriangle size={12} color="var(--mantine-color-orange-6)" />
+          <Text size="xs" c="orange">
+            Over {CONTEXT_WARN_PCT}% of the window — compacting now frees room for the rest of the
+            task.
+          </Text>
+        </Group>
+      )}
+      <CompactButton session={session} />
+      <Divider />
+      <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+        Session totals
+      </Text>
+      {session.totalTokens != null && (
+        <TotalRow
+          label="Tokens"
+          dim="(cumulative spend, not context)"
+          value={formatTokens(session.totalTokens)}
+        />
+      )}
+      {session.totalCostUsd != null && (
+        <TotalRow
+          label="Cost"
+          value={formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
+        />
+      )}
+      {session.totalDurationMs != null && (
+        <TotalRow label="Active time" value={formatDuration(session.totalDurationMs)} />
+      )}
+    </Stack>
+  );
+  if (inline) return content;
+
   return (
     <HoverCard
       width="min(340px, calc(100vw - 2rem))"
@@ -540,7 +653,12 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
       <HoverCard.Target>
         <UnstyledButton
           aria-label="Context window usage"
-          style={{ display: 'flex', alignItems: 'center', gap: 2, opacity: stale ? 0.45 : 1 }}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 2,
+            opacity: stale ? 0.45 : 1,
+          }}
         >
           {pct == null ? (
             <Text size="xs" c="dimmed">
@@ -562,68 +680,7 @@ export function ContextWindowIndicator({ session }: { session: SessionMeta }) {
       </HoverCard.Target>
       <HoverCard.Dropdown>
         <ScrollArea.Autosize mah={480} type="auto">
-          <Stack gap="xs">
-            <Group justify="space-between" gap="xs" wrap="nowrap">
-              <Group gap={6} wrap="nowrap">
-                <Text size="xs" fw={700} tt="uppercase" c="dimmed">
-                  Context window
-                </Text>
-                {entry?.loading && <Loader size={10} />}
-              </Group>
-              <Text size="xs" c="dimmed" truncate>
-                {modelLabel}
-              </Text>
-            </Group>
-            {view ? (
-              <BreakdownBody view={view} breakdown={entry?.breakdown ?? null} open={open} toggle={toggle} />
-            ) : (
-              usage && <FallbackBody usage={usage} />
-            )}
-            {entry && !entry.loading && !entry.breakdown && (
-              <Text size="xs" c="dimmed">
-                Live detail unavailable — the session isn't running.
-              </Text>
-            )}
-            {compacted != null && (
-              <Text size="xs" c="dimmed">
-                {session.contextCompact?.trigger === 'auto'
-                  ? 'Auto-compacted since the last measured turn'
-                  : 'Compacted since the last measured turn'}
-                {` — ${formatTokens(compacted)} in context. The breakdown above predates it.`}
-              </Text>
-            )}
-            <Text size="xs" c="dimmed">
-              {stale
-                ? 'The conversation was reset for a fresh step — this reading is from before that, and refreshes when the next turn completes.'
-                : 'Measured at the last completed turn; the draft you are typing is not counted.'}
-            </Text>
-            {nearLimit && (
-              <Group gap={6} wrap="nowrap">
-                <IconAlertTriangle size={12} color="var(--mantine-color-orange-6)" />
-                <Text size="xs" c="orange">
-                  Over {CONTEXT_WARN_PCT}% of the window — compacting now frees room for the rest of
-                  the task.
-                </Text>
-              </Group>
-            )}
-            <CompactButton session={session} />
-            <Divider />
-            <Text size="xs" fw={700} tt="uppercase" c="dimmed">
-              Session totals
-            </Text>
-            {session.totalTokens != null && (
-              <TotalRow label="Tokens" dim="(cumulative spend, not context)" value={formatTokens(session.totalTokens)} />
-            )}
-            {session.totalCostUsd != null && (
-              <TotalRow
-                label="Cost"
-                value={formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
-              />
-            )}
-            {session.totalDurationMs != null && (
-              <TotalRow label="Active time" value={formatDuration(session.totalDurationMs)} />
-            )}
-          </Stack>
+          {content}
         </ScrollArea.Autosize>
       </HoverCard.Dropdown>
     </HoverCard>

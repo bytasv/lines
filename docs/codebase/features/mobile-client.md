@@ -80,9 +80,8 @@ an iPad in landscape is neither.
 - The header's trailing controls fold into one overflow menu on a phone, and the brand mark is
   dropped there. Burger, brand, tabs and five controls do not fit in 390px, and the tabs are what
   gets squeezed out — so the row loses the one thing in it that does nothing.
-- Icon buttons have a 32px minimum on a phone, applied to `.mantine-ActionIcon-root` rather than
-  per call site: there are well over a hundred of them, and a rule per button is a rule somebody
-  forgets on the next one.
+- Phone buttons, menu items, select/text inputs, and permission segments have a 44px minimum
+  touch target, applied through shared CSS selectors rather than per call site.
 - The sidebar is a real drawer on a phone (`useDisclosure`), and picking a session closes it —
   otherwise the thing just picked sits behind it.
 - Sidebar width is clamped against the viewport on every read, so a width saved on a 27" display
@@ -125,6 +124,22 @@ an iPad in landscape is neither.
 - The phone is a *link*, not a mode: `hello.local` is false there, so host-side affordances (the
   Finder folder picker) are hidden by the same rule that hides them on a second laptop. See
   [hosted-machine-access](hosted-machine-access.md).
+
+## Conversation layout
+
+- On phones, the composer keeps attachment, Options, and Send/Queue/Stop in one non-wrapping
+  row. The current permission mode remains visible above the input. Model, reasoning effort,
+  permissions, and context details live in a bottom Options sheet; desktop controls stay inline.
+- The project header shows the active project and opens a searchable bottom sheet. Project paths
+  distinguish duplicate names, while existing status indicators and management actions remain
+  available. Management dialogs are owned above the responsive branch so resizing preserves them.
+- Phone session rows expose one labeled overflow menu. Existing action restrictions and delete
+  confirmations still apply, and opening the menu does not navigate to the session.
+- Bottom sheets use the same keyboard inset and safe-area spacing as the composer. Context details
+  render inline inside Options so reading them does not require hover.
+- Browser checks should cover narrow widths (360, 390, and 430px), running and idle actions, draft
+  preservation across sheets and resizing, project filtering, and session-menu navigation isolation.
+  Physical-device keyboard behavior still requires Safari/Chrome verification.
 
 ## Related decisions
 

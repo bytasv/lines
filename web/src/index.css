@@ -437,15 +437,33 @@
     padding-bottom: max(env(safe-area-inset-bottom), 0.25rem);
   }
 
-  /* Touch targets. Mantine's xs/sm controls are tuned for a mouse; 32px is the
-     floor below which a finger starts missing them. Applied to the components
-     rather than per call site: the app has well over a hundred icon buttons,
-     and a rule per button is a rule somebody forgets on the next one. */
+  /* Keep phone controls easy to tap without enlarging their icons. */
+  .mantine-Button-root,
+  .mantine-Burger-root,
+  .mantine-Menu-item,
+  .mantine-Combobox-option,
+  .mantine-Select-input,
+  .mantine-TextInput-input,
+  .mantine-SegmentedControl-label,
   .mantine-ActionIcon-root,
   .mantine-CloseButton-root,
   .lines-touch-target {
-    min-height: 32px;
-    min-width: 32px;
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .mantine-SegmentedControl-label {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .lines-mobile-sheet-inner {
+    bottom: var(--lines-keyboard);
+  }
+
+  .lines-mobile-sheet {
+    max-height: var(--lines-viewport);
   }
 
   /* 16px is a threshold, not a taste: iOS Safari zooms the whole page in when a

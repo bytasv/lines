@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ActionIcon,
   Box,
+  Button,
+  Drawer,
   Group,
   Modal,
   Paper,
@@ -38,7 +40,13 @@ import {
 } from '@lines/shared';
 import { formatSpendUsd, stepAfterProviderSwitch } from '../lib/format';
 import { agentLabel, sessionCaps } from '../lib/capabilities';
-import { readDraft, readDraftAttachments, useStore, writeDraft, writeDraftAttachments } from '../store';
+import {
+  readDraft,
+  readDraftAttachments,
+  useStore,
+  writeDraft,
+  writeDraftAttachments,
+} from '../store';
 import {
   AUTO_EFFORT,
   describedOptionRenderer,
@@ -48,7 +56,11 @@ import {
   modelSelectData,
   renderOptionWithDescription,
 } from '../lib/modelSelect';
-import { PERMISSION_MODE_SEGMENTS } from '../lib/permissionModes';
+import {
+  permissionModeLabel,
+  PERMISSION_MODES,
+  PERMISSION_MODE_SEGMENTS,
+} from '../lib/permissionModes';
 import { buildExpandedPrompt, uniqueMentions } from '../lib/mentions';
 import { linkedMachineHealth } from '../lib/machineHealth';
 import { useCan, useSessionMachine, useSessionMachineHealth } from '../lib/can';
@@ -58,6 +70,7 @@ import { ContextWindowIndicator } from './ContextWindowIndicator';
 import { SettingsModal } from './SettingsModal';
 import { MentionInput } from './MentionInput';
 import { send } from '../ws';
+import { useIsPhone } from '../lib/layout';
 
 /** Read a File into a raw-base64 PromptAttachment (strips the data: URI prefix). */
 export function fileToAttachment(file: File): Promise<PromptAttachment> {
@@ -94,14 +107,26 @@ function PreviewTile({
       withBorder
       radius="md"
       onClick={isImage ? onOpen : undefined}
-      style={{ position: 'relative', width: 64, height: 64, overflow: 'hidden', flexShrink: 0, cursor: isImage ? 'zoom-in' : 'default' }}
+      style={{
+        position: 'relative',
+        width: 64,
+        height: 64,
+        overflow: 'hidden',
+        flexShrink: 0,
+        cursor: isImage ? 'zoom-in' : 'default',
+      }}
     >
       {isImage ? (
         <>
           <img
             src={`data:${att.mediaType};base64,${att.data}`}
             alt={att.name}
-            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+            style={{
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              display: 'block',
+            }}
           />
           {hovered && (
             <Box
@@ -146,10 +171,14 @@ function PreviewTile({
 }
 
 export function Composer({ session }: { session: SessionMeta }) {
+  const isPhone = useIsPhone();
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const models = useStore((s) => s.models);
   const projects = useStore((s) => s.projects);
   const connectionStatus = useStore((s) => s.connectionStatus);
-  const queuedCount = useStore((s) => s.queuedPrompts.filter((q) => q.sessionId === session.id).length);
+  const queuedCount = useStore(
+    (s) => s.queuedPrompts.filter((q) => q.sessionId === session.id).length,
+  );
   // A guest's grant decides which of these controls exist. All true on your own
   // machine; the bridge refuses anything that slips through regardless.
   const canPrompt = useCan('prompt');
@@ -363,7 +392,10 @@ export function Composer({ session }: { session: SessionMeta }) {
       const rejected = (event as CustomEvent<Extract<ClientMessage, { type: 'prompt' }>>).detail;
       if (rejected.sessionId !== session.id) return;
       event.preventDefault(); // This mounted composer owns attachment persistence.
-      setPrompt((current) => ({ text: [rejected.text, current.text].filter(Boolean).join('\n\n'), ranges: [] }));
+      setPrompt((current) => ({
+        text: [rejected.text, current.text].filter(Boolean).join('\n\n'),
+        ranges: [],
+      }));
       setAttachments((current) => [...(rejected.attachments ?? []), ...current]);
     };
     window.addEventListener('lines:prompt-restored', restore);
@@ -411,10 +443,101 @@ export function Composer({ session }: { session: SessionMeta }) {
       data={PERMISSION_MODE_SEGMENTS}
       value={session.permissionMode}
       onChange={(v) =>
-        send({ type: 'setPermissionMode', sessionId: session.id, mode: v as PermissionMode })
+        send({
+          type: 'setPermissionMode',
+          sessionId: session.id,
+          mode: v as PermissionMode,
+        })
       }
     />
   );
+
+  const modelControls = (
+    <>
+      <Select
+        w={isPhone ? '100%' : 130}
+        label={isPhone ? 'Model' : undefined}
+        maw={isPhone ? undefined : 'calc(100vw - 8rem)'}
+        disabled={!canSetModel}
+        comboboxProps={isPhone ? { withinPortal: false } : modelComboboxProps}
+        dropdownOpened={modelDropdownOpen}
+        onDropdownOpen={() => setModelDropdownOpen(true)}
+        onDropdownClose={() => setModelDropdownOpen(false)}
+        // Both providers, with every model this machine or this session cannot
+        // take rendered disabled. The reason sits on the models it applies to
+        // rather than beside the control, and where the fix is a CLI install
+        // the icon opens the pane that carries it.
+        data={modelSelectData(models, session.model, {
+          unavailable: modelUnavailable,
+          warn: modelWarn,
+        })}
+        renderOption={describedOptionRenderer(() => {
+          setModelDropdownOpen(false);
+          setOptionsOpen(false);
+          setUpdatesOpen(true);
+        })}
+        styles={describedOptionStyles}
+        value={session.model}
+        onChange={(v) => {
+          if (!v || v === session.model) return;
+          // Crossing providers on a session that has run drops its
+          // conversation, so it is confirmed rather than dispatched.
+          if (hasRun && providerForModel(v) !== provider) {
+            setOptionsOpen(false);
+            setSwitchTo(v);
+            return;
+          }
+          send({ type: 'setModel', sessionId: session.id, model: v });
+        }}
+        allowDeselect={false}
+      />
+      {/* Disabled rather than hidden on an engine with no effort control, for
+              the same reason the permission segments above are, and inside a span
+              so the tooltip fires over it. */}
+      <Tooltip
+        label={
+          caps.reasoningEfforts.length
+            ? 'How hard the model thinks. Takes effect on the next turn.'
+            : 'This engine does not expose a reasoning-effort control.'
+        }
+        withArrow
+        openDelay={400}
+      >
+        <span
+          style={{
+            display: 'inline-flex',
+            width: isPhone ? '100%' : undefined,
+          }}
+        >
+          <Select
+            w={isPhone ? '100%' : 120}
+            label={isPhone ? 'Reasoning effort' : undefined}
+            maw={isPhone ? undefined : 'calc(100vw - 8rem)'}
+            disabled={!canSetModel || caps.reasoningEfforts.length === 0}
+            comboboxProps={isPhone ? { withinPortal: false } : modelComboboxProps}
+            data={effortSelectData(caps.reasoningEfforts, session.reasoningEffort)}
+            renderOption={renderOptionWithDescription}
+            value={session.reasoningEffort ?? AUTO_EFFORT}
+            onChange={(v) =>
+              v &&
+              send({
+                type: 'setReasoningEffort',
+                sessionId: session.id,
+                effort: v === AUTO_EFFORT ? null : (v as ReasoningEffort),
+              })
+            }
+            allowDeselect={false}
+          />
+        </span>
+      </Tooltip>
+    </>
+  );
+  const stopWork = () =>
+    send(
+      interruptible
+        ? { type: 'interrupt', sessionId: session.id }
+        : { type: 'stopBackgroundTasks', sessionId: session.id },
+    );
 
   return (
     <Paper
@@ -523,6 +646,19 @@ export function Composer({ session }: { session: SessionMeta }) {
           e.currentTarget.value = '';
         }}
       />
+      {isPhone && (
+        <Button
+          variant="subtle"
+          size="compact-sm"
+          mb={4}
+          onClick={() => setOptionsOpen(true)}
+          aria-label="Permission mode and conversation options"
+        >
+          {caps.approvals
+            ? `Permissions: ${permissionModeLabel(session.permissionMode)}`
+            : 'Permissions: sandboxed'}
+        </Button>
+      )}
       <MentionInput
         value={prompt}
         onChange={setPrompt}
@@ -532,185 +668,216 @@ export function Composer({ session }: { session: SessionMeta }) {
         placeholder={
           session.workflow && !session.workflow.started
             ? 'Describe the task — this kicks off the workflow…'
-            : `Message ${provider === 'openai' ? 'Codex' : 'Claude'}… (↵ to send, ⇧↵ for newline)`
+            : `Message ${provider === 'openai' ? 'Codex' : 'Claude'}…${isPhone ? '' : ' (↵ to send, ⇧↵ for newline)'}`
         }
         textareaRef={textareaRef}
         onFocusChange={setComposerFocused}
         onPasteFiles={(files) => void addFiles(files)}
       />
-      {/* `wrap` rather than `nowrap`: at 390px the model and effort selects do
+      {isPhone ? (
+        <Group justify="space-between" gap={4} wrap="nowrap" pt={4} className="lines-safe-bottom">
+          <Group gap={4} wrap="nowrap">
+            <ActionIcon
+              variant="subtle"
+              aria-label="Attach files"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <IconPaperclip size={18} />
+            </ActionIcon>
+            <Button variant="subtle" px={8} onClick={() => setOptionsOpen(true)}>
+              Options
+            </Button>
+          </Group>
+          <Group gap={4} wrap="nowrap">
+            {(interruptible || bgTasks > 0) && (
+              <Button
+                variant="default"
+                px={8}
+                disabled={!canInterrupt}
+                onClick={stopWork}
+                aria-label={interruptible ? 'Stop current turn' : 'Stop background work'}
+              >
+                Stop
+              </Button>
+            )}
+            <Button px={10} disabled={cannotSend} onClick={submit}>
+              {interruptible ? 'Queue' : 'Send'}
+            </Button>
+          </Group>
+        </Group>
+      ) : (
+        <>
+          {/* `wrap` rather than `nowrap`: at 390px the model and effort selects do
           not fit beside the mode pills, and a horizontally clipped row hides the
           send button. Wrapping costs a line of height on a phone and nothing on
           a desktop, where the row has always fitted. */}
-      <Group justify="space-between" px={4} pt={4} wrap="wrap" gap={6} className="lines-safe-bottom">
-        <Group gap="xs" wrap="wrap">
-          <Tooltip label="Attach files">
-            <ActionIcon variant="subtle" size="lg" onClick={() => fileInputRef.current?.click()}>
-              <IconPaperclip size={16} />
-            </ActionIcon>
-          </Tooltip>
-          {/* Visible but disabled for a codex session, deliberately: its absence
+          <Group
+            justify="space-between"
+            px={4}
+            pt={4}
+            wrap="wrap"
+            gap={6}
+            className="lines-safe-bottom"
+          >
+            <Group gap="xs" wrap="wrap">
+              <Tooltip label="Attach files">
+                <ActionIcon
+                  variant="subtle"
+                  size="lg"
+                  aria-label="Attach files"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <IconPaperclip size={16} />
+                </ActionIcon>
+              </Tooltip>
+              {/* Visible but disabled for a codex session, deliberately: its absence
               would read as a bug, and the tooltip is where the reduced surface
               gets explained. A span so the tooltip fires over a disabled control.
               Only wrapped in that disabled state — each segment carries its own
               description tooltip, and a second one on the control fights them. */}
-          {caps.approvals ? (
-            permissionModeControl
-          ) : (
-            <Tooltip
-              label={
-                'This session runs sandboxed and approves its own tool calls. ' +
-                'Plan mode is read-only here, and your MCP connections do not apply.'
-              }
-              withArrow
-              openDelay={400}
-            >
-              <span style={{ display: 'inline-flex' }}>{permissionModeControl}</span>
-            </Tooltip>
-          )}
-          <Select
-            w={130}
-            maw="calc(100vw - 8rem)"
-            disabled={!canSetModel}
-            comboboxProps={modelComboboxProps}
-            dropdownOpened={modelDropdownOpen}
-            onDropdownOpen={() => setModelDropdownOpen(true)}
-            onDropdownClose={() => setModelDropdownOpen(false)}
-            // Both providers, with every model this machine or this session cannot
-            // take rendered disabled. The reason sits on the models it applies to
-            // rather than beside the control, and where the fix is a CLI install
-            // the icon opens the pane that carries it.
-            data={modelSelectData(models, session.model, {
-              unavailable: modelUnavailable,
-              warn: modelWarn,
-            })}
-            renderOption={describedOptionRenderer(() => {
-              setModelDropdownOpen(false);
-              setUpdatesOpen(true);
-            })}
-            styles={describedOptionStyles}
-            value={session.model}
-            onChange={(v) => {
-              if (!v || v === session.model) return;
-              // Crossing providers on a session that has run drops its
-              // conversation, so it is confirmed rather than dispatched.
-              if (hasRun && providerForModel(v) !== provider) {
-                setSwitchTo(v);
-                return;
-              }
-              send({ type: 'setModel', sessionId: session.id, model: v });
-            }}
-            allowDeselect={false}
-          />
-          {/* Disabled rather than hidden on an engine with no effort control, for
-              the same reason the permission segments above are, and inside a span
-              so the tooltip fires over it. */}
-          <Tooltip
-            label={
-              caps.reasoningEfforts.length
-                ? 'How hard the model thinks. Takes effect on the next turn.'
-                : 'This engine does not expose a reasoning-effort control.'
-            }
-            withArrow
-            openDelay={400}
-          >
-            <span style={{ display: 'inline-flex' }}>
-              <Select
-                w={120}
-                maw="calc(100vw - 8rem)"
-                disabled={!canSetModel || caps.reasoningEfforts.length === 0}
-                comboboxProps={modelComboboxProps}
-                data={effortSelectData(caps.reasoningEfforts, session.reasoningEffort)}
-                renderOption={renderOptionWithDescription}
-                value={session.reasoningEffort ?? AUTO_EFFORT}
-                onChange={(v) =>
-                  v &&
-                  send({
-                    type: 'setReasoningEffort',
-                    sessionId: session.id,
-                    effort: v === AUTO_EFFORT ? null : (v as ReasoningEffort),
-                  })
-                }
-                allowDeselect={false}
-              />
-            </span>
-          </Tooltip>
-        </Group>
-        <Group gap="xs">
-          <ContextWindowIndicator session={session} />
-          {session.totalCostUsd != null && (
-            <Text size="xs" c="dimmed">
-              {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
-            </Text>
-          )}
-          {interruptible || bgTasks > 0 ? (
-            <>
-              <Tooltip
-                label={
-                  interruptible
-                    ? 'Queue message — sends after the current turn'
-                    : 'Send — the background task keeps running'
-                }
-              >
+              {caps.approvals ? (
+                permissionModeControl
+              ) : (
+                <Tooltip
+                  label={
+                    'This session runs sandboxed and approves its own tool calls. ' +
+                    'Plan mode is read-only here, and your MCP connections do not apply.'
+                  }
+                  withArrow
+                  openDelay={400}
+                >
+                  <span style={{ display: 'inline-flex' }}>{permissionModeControl}</span>
+                </Tooltip>
+              )}
+              {modelControls}
+            </Group>
+            <Group gap="xs">
+              <ContextWindowIndicator session={session} />
+              {session.totalCostUsd != null && (
+                <Text size="xs" c="dimmed">
+                  {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
+                </Text>
+              )}
+              {interruptible || bgTasks > 0 ? (
+                <>
+                  <Tooltip
+                    label={
+                      interruptible
+                        ? 'Queue message — sends after the current turn'
+                        : 'Send — the background task keeps running'
+                    }
+                  >
+                    <ActionIcon
+                      variant={interruptible ? 'subtle' : 'filled'}
+                      size="lg"
+                      aria-label={interruptible ? 'Queue message' : 'Send message'}
+                      onClick={submit}
+                      disabled={cannotSend}
+                    >
+                      <IconSend size={16} />
+                    </ActionIcon>
+                  </Tooltip>
+                  <Tooltip
+                    label={
+                      !interruptible
+                        ? 'Stop background work'
+                        : session.workflow?.started &&
+                            session.workflow.stepStatuses[session.workflow.stepIndex] === 'running'
+                          ? 'Stop — the step will wait for your review'
+                          : 'Interrupt'
+                    }
+                  >
+                    <ActionIcon
+                      color="gray"
+                      variant="default"
+                      size="lg"
+                      disabled={!canInterrupt}
+                      aria-label="Stop work"
+                      onClick={stopWork}
+                    >
+                      <IconPlayerStop size={16} />
+                    </ActionIcon>
+                  </Tooltip>
+                </>
+              ) : awaitingApproval ? (
+                <Tooltip label="Send — keeps iterating on this step (won't advance the workflow)">
+                  <ActionIcon
+                    variant="filled"
+                    size="lg"
+                    aria-label={interruptible ? 'Queue message' : 'Send message'}
+                    onClick={submit}
+                    disabled={cannotSend}
+                  >
+                    <IconSend size={16} />
+                  </ActionIcon>
+                </Tooltip>
+              ) : (
                 <ActionIcon
-                  variant={interruptible ? 'subtle' : 'filled'}
+                  variant="filled"
                   size="lg"
+                  aria-label={interruptible ? 'Queue message' : 'Send message'}
                   onClick={submit}
                   disabled={cannotSend}
                 >
                   <IconSend size={16} />
                 </ActionIcon>
-              </Tooltip>
-              <Tooltip
-                label={
-                  !interruptible
-                    ? 'Stop background work'
-                    : session.workflow?.started &&
-                        session.workflow.stepStatuses[session.workflow.stepIndex] === 'running'
-                      ? 'Stop — the step will wait for your review'
-                      : 'Interrupt'
-                }
-              >
-                <ActionIcon
-                  color="gray"
-                  variant="default"
-                  size="lg"
-                  disabled={!canInterrupt}
-                  onClick={() =>
-                    send(
-                      interruptible
-                        ? { type: 'interrupt', sessionId: session.id }
-                        : { type: 'stopBackgroundTasks', sessionId: session.id },
-                    )
-                  }
-                >
-                  <IconPlayerStop size={16} />
-                </ActionIcon>
-              </Tooltip>
-            </>
-          ) : awaitingApproval ? (
-            <Tooltip label="Send — keeps iterating on this step (won't advance the workflow)">
-              <ActionIcon
-                variant="filled"
-                size="lg"
-                onClick={submit}
-                disabled={cannotSend}
-              >
-                <IconSend size={16} />
-              </ActionIcon>
-            </Tooltip>
-          ) : (
-            <ActionIcon
-              variant="filled"
-              size="lg"
-              onClick={submit}
-              disabled={cannotSend}
-            >
-              <IconSend size={16} />
-            </ActionIcon>
+              )}
+            </Group>
+          </Group>
+        </>
+      )}
+      <Drawer
+        opened={isPhone && optionsOpen}
+        onClose={() => setOptionsOpen(false)}
+        position="bottom"
+        size="min(80dvh, var(--lines-viewport))"
+        title="Conversation options"
+        classNames={{ content: 'lines-mobile-sheet', inner: 'lines-mobile-sheet-inner' }}
+      >
+        <Stack gap="md" className="lines-safe-bottom">
+          <Text size="sm" fw={500}>
+            Permissions
+          </Text>
+          {permissionModeControl}
+          <Text size="sm" c="dimmed">
+            {!caps.approvals
+              ? 'This session runs sandboxed and approves its own tool calls. Plan mode is read-only here, and your MCP connections do not apply.'
+              : !canSetMode
+                ? 'Your access does not allow changing permission mode.'
+                : PERMISSION_MODES.find((mode) => mode.value === session.permissionMode)
+                    ?.description}
+          </Text>
+          {modelControls}
+          {!canSetModel && (
+            <Text size="sm" c="dimmed">
+              Your access does not allow changing the model or reasoning effort.
+            </Text>
           )}
-        </Group>
-      </Group>
+          {caps.reasoningEfforts.length === 0 && (
+            <Text size="sm" c="dimmed">
+              This engine does not expose a reasoning-effort control.
+            </Text>
+          )}
+          {[...new Set([...Object.values(modelUnavailable), ...Object.values(modelWarn)])].map(
+            (reason) => (
+              <Text key={reason} size="sm" c="dimmed">
+                {reason}
+              </Text>
+            ),
+          )}
+          <Group gap="xs">
+            <Stack gap="xs" w="100%">
+              <ContextWindowIndicator session={session} inline />
+            </Stack>
+            {session.totalCostUsd != null && (!caps.contextWindow || (!session.contextSummary && !session.contextUsage)) && (
+              <Text size="sm">
+                Session cost:{' '}
+                {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
+              </Text>
+            )}
+          </Group>
+        </Stack>
+      </Drawer>
       {/* Opened only from a model's warning icon — the pane that carries the
           version, the floor and the install command. Rendered here, exactly as
           StorageBanner opens its own copy at Diagnostics. */}
@@ -751,7 +918,11 @@ export function Composer({ session }: { session: SessionMeta }) {
         onConfirm={() => {
           if (!switchTo) return;
           setSwitching(true);
-          send({ type: 'switchProvider', sessionId: session.id, model: switchTo });
+          send({
+            type: 'switchProvider',
+            sessionId: session.id,
+            model: switchTo,
+          });
         }}
         onCancel={() => setSwitchTo(null)}
       />
@@ -768,7 +939,12 @@ export function Composer({ session }: { session: SessionMeta }) {
           <img
             src={lightbox}
             alt=""
-            style={{ maxWidth: '90vw', maxHeight: '90vh', display: 'block', borderRadius: 8 }}
+            style={{
+              maxWidth: '90vw',
+              maxHeight: '90vh',
+              display: 'block',
+              borderRadius: 8,
+            }}
           />
         )}
       </Modal>
