@@ -52,11 +52,13 @@ import {
 } from '../../server/src/device.ts';
 import {
   ENROLL_TTL_MS,
+  currentEnrollment,
   listPeers,
   mintEnrollmentCode,
   revokePeer,
   type EnrolledPeer,
 } from '../../server/src/e2eeIdentity.ts';
+import { e2eeRequired } from '../../server/src/e2eeChannel.ts';
 import {
   CLAUDE_INSTALL_URL,
   claudeCliStatus,
@@ -830,6 +832,35 @@ function appUrl(): string {
 }
 
 /**
+ * The app URL for *our own* window, carrying an enrollment code when this
+ * machine needs one.
+ *
+ * Why this exists: the desktop window is a browser on the hosted origin, so its
+ * traffic goes out to the relay and back — it is not a local connection, and the
+ * machine refuses it like any other unenrolled browser. Making the user read a
+ * code off this machine's tray and type it into this machine's own window is
+ * ceremony with no security value: the shell already holds the private key, and
+ * a window it opened itself is not a party it needs to authenticate.
+ *
+ * So the shell hands its own window the code directly. In the **fragment**, so
+ * the server never sees it, and the page consumes and strips it on arrival.
+ *
+ * A live code is reused rather than replaced: minting here would silently
+ * invalidate a code the user is part-way through typing on their phone.
+ */
+function appUrlForOwnWindow(): string {
+  if (LOCAL_MODE || !e2eeRequired()) return appUrl();
+  try {
+    const code = currentEnrollment()?.code ?? mintEnrollmentCode().code;
+    return `${appUrl()}#enroll=${encodeURIComponent(code)}`;
+  } catch (err) {
+    // A read-only home, say. The window still opens; the user can enrol by hand.
+    shellLog(`[e2ee] could not prepare an enrollment code: ${(err as Error).message}`);
+    return appUrl();
+  }
+}
+
+/**
  * Origin of whatever `appUrl()` currently points at.
  *
  * A function, not a constant: `uiPort` is 0 until `startUiServer()` runs, so a
@@ -1068,7 +1099,7 @@ function openWindow() {
   if (win && !win.isDestroyed()) {
     // "Open Lines" always comes home: a window abandoned mid-sign-in is parked
     // off-app with no address bar, and showing it as-is leaves it stuck.
-    if (isOffApp(win.webContents.getURL())) void win.loadURL(appUrl());
+    if (isOffApp(win.webContents.getURL())) void win.loadURL(appUrlForOwnWindow());
     win.show();
     win.focus();
     return;
@@ -1083,7 +1114,7 @@ function openWindow() {
     webPreferences: { nodeIntegration: false, contextIsolation: true },
   });
   win = w;
-  void w.loadURL(appUrl());
+  void w.loadURL(appUrlForOwnWindow());
   attachNavigationGuards(w, 'app');
   w.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     // -3 is ERR_ABORTED, which every cancelled navigation reports.
@@ -1241,7 +1272,12 @@ function openPairingWindow(code: string) {
  */
 async function openEncryptionWindow(): Promise<void> {
   const { code, expiresAt } = mintEnrollmentCode();
-  const link = `${config.webUrl}?enroll=${encodeURIComponent(code)}`;
+  // Fragment, never a query string. A query string is sent to the server on the
+  // very first request — and the server is precisely the party this code exists
+  // to exclude, so putting it there would hand the secret to the attacker the
+  // out-of-band exchange is defending against. A fragment never leaves the
+  // browser.
+  const link = `${config.webUrl}#enroll=${encodeURIComponent(code)}`;
   // Data URL, generated here: rendering it in the page would mean shipping a QR
   // library into a window that is otherwise inert HTML.
   const qr = await QRCode.toDataURL(link, { margin: 1, width: 240 }).catch(() => '');
@@ -1616,6 +1652,26 @@ function updateTray() {
             },
           },
           { label: 'Reset desktop window…', click: () => void resetDesktopWindow() },
+        ]
+      : []),
+    ...(RELAY_MODE
+      ? [
+          { type: 'separator' as const },
+          {
+            label: 'Show encryption code…',
+            click: () => void openEncryptionWindow(),
+          },
+          ...(enrolledPeers.length
+            ? [
+                { label: 'Encrypted browsers', enabled: false },
+                ...enrolledPeers.map((peer) => ({
+                  label: `  ${peer.label} · ${peer.fingerprint}`,
+                  toolTip: 'Click to revoke',
+                  click: () => revokeEnrolledPeer(peer),
+                })),
+              ]
+            : [{ label: 'No browser enrolled — traffic is relayed in the clear', enabled: false }]),
+          { type: 'separator' as const },
         ]
       : []),
     {

@@ -3,7 +3,7 @@ import { Alert, Badge, Button, Card, Group, Stack, Text, TextInput } from '@mant
 import { IconAlertCircle, IconLock, IconLockOpen } from '@tabler/icons-react';
 import { ENROLL_CODE_LENGTH, normalizeEnrollCode } from '@lines/shared';
 import { useStore } from '../store';
-import { cryptoUnavailable, pinnedKey } from '../lib/e2ee';
+import { cryptoUnavailable, pinnedKey, takeEnrollCodeFromUrl } from '../lib/e2ee';
 import { rememberedDeviceId } from '../lib/storage';
 import { enrollWithCode } from '../ws';
 
@@ -24,18 +24,9 @@ import { enrollWithCode } from '../ws';
 export function EncryptionSection() {
   const deviceId = rememberedDeviceId() ?? '';
   const encrypted = useStore((s) => s.machines[s.primaryDeviceId ?? '']?.encrypted ?? false);
-  // Prefilled from the QR the machine displayed, then stripped from the URL: a
-  // one-time code has no business surviving in history or in a shared link.
-  const [code, setCode] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    const fromQr = params.get('enroll') ?? '';
-    if (fromQr) {
-      params.delete('enroll');
-      const search = params.toString();
-      window.history.replaceState(null, '', `${window.location.pathname}${search ? `?${search}` : ''}`);
-    }
-    return fromQr.toUpperCase();
-  });
+  // Prefilled from the code the machine handed this page (QR, or the desktop
+  // app's own window), consumed and stripped on read.
+  const [code, setCode] = useState(() => takeEnrollCodeFromUrl()?.code ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);

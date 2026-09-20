@@ -139,3 +139,32 @@ export function unpinKey(deviceId: string): void {
 export function pinnedDeviceIds(): string[] {
   return Object.keys(readPins());
 }
+
+/**
+ * An enrollment code handed to this page by the machine itself, consumed once.
+ *
+ * Read from the URL **fragment**: a query string is sent to the server on the
+ * first request, and the server is exactly the party this code exists to
+ * exclude. The query form is still accepted, because a QR printed by an older
+ * desktop build used it — but it is treated as compromised, which is why both
+ * forms are stripped from the URL immediately whether or not they are used.
+ */
+export function takeEnrollCodeFromUrl(): { code: string; viaQuery: boolean } | null {
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const query = new URLSearchParams(window.location.search);
+  const fromHash = hash.get('enroll');
+  const fromQuery = query.get('enroll');
+  const code = fromHash ?? fromQuery;
+  if (!code) return null;
+
+  hash.delete('enroll');
+  query.delete('enroll');
+  const search = query.toString();
+  const rest = hash.toString();
+  window.history.replaceState(
+    null,
+    '',
+    `${window.location.pathname}${search ? `?${search}` : ''}${rest ? `#${rest}` : ''}`,
+  );
+  return { code: code.toUpperCase(), viaQuery: !fromHash };
+}

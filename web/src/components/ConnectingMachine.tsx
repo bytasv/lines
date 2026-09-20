@@ -9,7 +9,7 @@ import {
 } from '@tabler/icons-react';
 import { ENROLL_CODE_LENGTH, normalizeEnrollCode } from '@lines/shared';
 import type { Device } from '../lib/storage';
-import { cryptoUnavailable } from '../lib/e2ee';
+import { cryptoUnavailable, takeEnrollCodeFromUrl } from '../lib/e2ee';
 import { enrollWithCode } from '../ws';
 import { unlinkedMachineHealth } from '../lib/machineHealth';
 import { useStore } from '../store';
@@ -211,7 +211,11 @@ export function ConnectingMachine({
  * ws.ts): the enrollment frame is the only thing it may carry.
  */
 function EnrollGate({ name, reason, deviceId }: { name: string; reason: string; deviceId: string }) {
-  const [code, setCode] = useState('');
+  // A code the machine handed this page — the desktop app's own window always
+  // does, and a scanned QR does too. Read once, on mount, because reading it
+  // also consumes it.
+  const [handed] = useState(() => takeEnrollCodeFromUrl()?.code ?? '');
+  const [code, setCode] = useState(handed);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Read once per render rather than on submit: if this browser cannot do
@@ -238,6 +242,14 @@ function EnrollGate({ name, reason, deviceId }: { name: string; reason: string; 
     }
   };
 
+  // Enrol without asking when the machine itself supplied the code. Typing a
+  // code from this machine's tray into this machine's own window is ceremony
+  // with no security value: the shell holds the private key already.
+  useEffect(() => {
+    if (handed && !busy && !error) void enroll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handed]);
+
   return (
     <GateShell>
       <Stack align="center" gap="md" maw={460} w="100%">
@@ -245,8 +257,10 @@ function EnrollGate({ name, reason, deviceId }: { name: string; reason: string; 
         <Stack align="center" gap={4}>
           <Title order={4}>{name} needs this browser enrolled</Title>
           <GateHint>
-            That machine is set up to accept only browsers it has a key for, so it refused this
-            one. Enrol it once and this computer works like any other.
+            {handed
+              ? `${name} handed this window a key. Setting it up…`
+              : 'That machine is set up to accept only browsers it has a key for, so it refused ' +
+                'this one. Enrol it once and this computer works like any other.'}
           </GateHint>
         </Stack>
 
