@@ -508,17 +508,21 @@ installed icon, no new package). No other new dependencies.
 - The strip's copy switches to an in-progress message ("Approved — wrapping up the output…")
   while advancing, then reverts to normal once the next step's strip (or the workflow-done
   state) replaces it.
-- The stepper has two shapes and no third. Up to four steps on a desktop (one on a phone) it is
-  the row it always was, every step named side by side. Past that it is a list: the current step
-  alone, with `n/total` and a chevron that opens the rest as an accordion. Every step kept an
-  equal share of one row before, which collapses every name into an ellipsis at eight; the
-  in-between version — a few names plus a run of bare numbered circles — showed the shape of the
-  workflow and none of its content, which reads as decoration rather than as state.
-- The chevron is the only thing that opens the list. Clicking the row still jumps the transcript
-  to that step, which is what a click on a step has always meant.
-- A hidden step is `display: none`, never unmounted: `Transcript` counts `[data-progress-fill]`
-  elements to learn how many steps there are, and reads them in DOM order, so both dropping one
-  and reordering them would renumber the workflow's scroll segments underneath it.
+- A desktop shows the whole workflow across the row, however many steps it has — the overview is
+  the point of the stepper, and a desktop row is wide enough to carry it.
+- A phone shows the current step and nothing else, with `n/total` and a chevron beside it. One
+  step is all that fits at 390px with its name readable, and a partial row — a couple of names
+  followed by bare numbered circles — showed the shape of the workflow and none of its content.
+- The chevron opens the other steps as a **bottom sheet**, not an in-place expansion. The stepper
+  sits above the transcript, so expanding in place pushes the conversation down by the height of
+  the list every time the user checks where they are.
+- That sheet renders no `[data-progress-fill]` elements. `Transcript` counts them to learn the
+  workflow's length, so a second set would double it; per-step progress stays on the row behind
+  the sheet, which is the one that can actually be watched filling.
+- A hidden step is `display: none`, never unmounted, for the same reason: the count is read in
+  DOM order, so both dropping a step and reordering them renumber the scroll segments.
+- Tapping a step in the sheet reveals it in the transcript and closes the sheet; a `pending` step
+  has no transcript to jump to and is inert.
 - The consolidation window is bounded: even a hung Sonnet query or token refresh cannot hold
   `advancing` (and thus this loader) open forever.
 - Consolidation only fires when a step ran more than one turn; a single-turn step incurs no

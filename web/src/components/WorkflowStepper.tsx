@@ -4,6 +4,7 @@ import {
   Box,
   Button,
   Center,
+  Drawer,
   Group,
   Loader,
   Paper,
@@ -12,13 +13,7 @@ import {
   ThemeIcon,
   Tooltip,
 } from '@mantine/core';
-import {
-  IconCheck,
-  IconChevronDown,
-  IconChevronUp,
-  IconCoins,
-  IconPlayerPlay,
-} from '@tabler/icons-react';
+import { IconCheck, IconChevronDown, IconCoins, IconPlayerPlay } from '@tabler/icons-react';
 import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@lines/shared';
 import {
   capabilitiesFor,
@@ -168,35 +163,34 @@ export function WorkflowStepper({
   const confirmName = confirmIndex !== null ? nameOf(workflow.steps[confirmIndex]!) : '';
 
   /**
-   * How many steps fit side by side with their names readable — four across a
-   * desktop row, one on a phone.
+   * A desktop shows the whole workflow across the row, however long it is —
+   * that overview is the point of the stepper, and a wide row can carry it.
    *
-   * Past that the row becomes a list instead: the current step alone, with the
-   * rest an accordion behind a chevron. The in-between version — a few names
-   * plus a run of bare numbered circles — showed the shape of the workflow and
-   * none of its content, which reads as decoration rather than as state.
+   * A phone cannot: one step is all that fits with its name readable. So there
+   * it shows the current step and nothing else, and the rest are a tap away in
+   * a sheet rather than folded into the page — expanding in place would push
+   * the transcript down by the height of the list every time you looked.
    */
   const isPhone = useIsPhone();
-  const inRow = workflow.steps.length <= (isPhone ? 1 : 4);
-  const [expanded, setExpanded] = useState(false);
+  const [listOpen, setListOpen] = useState(false);
 
   return (
     <Paper withBorder={false} px="md" pt="xs" pb="xs">
-      {/* Every step stays in the DOM in index order whichever way this renders,
-          hidden rather than dropped: Transcript counts `[data-progress-fill]`
-          elements to learn how many steps there are, so a missing one would
-          renumber the workflow's scroll segments underneath it. */}
+      {/* Every step stays in the DOM in index order on both layouts, hidden
+          rather than dropped: Transcript counts `[data-progress-fill]` elements
+          to learn how many steps there are and reads them in order, so dropping
+          one — or letting the sheet below render a second set — would renumber
+          the workflow's scroll segments. */}
       <Box
         style={{
           display: 'flex',
-          flexDirection: inRow ? 'row' : 'column',
-          alignItems: inRow ? 'center' : 'stretch',
-          gap: inRow ? 12 : 2,
+          alignItems: 'center',
+          gap: 12,
         }}
       >
         {workflow.steps.map((step, i) => {
           const current = i === state.stepIndex;
-          const shown = inRow || expanded || current;
+          const shown = !isPhone || current;
           const status = state.stepStatuses[i];
           const clickable = status !== 'pending';
           const cost = state.stepCostsUsd?.[i] ?? 0;
@@ -218,7 +212,7 @@ export function WorkflowStepper({
               // icon against the column lands it exactly on the progress track.
               align="center"
               style={{
-                flex: inRow ? 1 : undefined,
+                flex: 1,
                 minWidth: 0,
                 display: shown ? undefined : 'none',
                 cursor: clickable ? 'pointer' : undefined,
@@ -319,11 +313,10 @@ export function WorkflowStepper({
                   )}
                 </Group>
               </Stack>
-              {/* The expander rides the current step's row, which is the one row
-                  that never hides — so "3/8" and the chevron stay put whether the
-                  rest of the list is open or closed, and the steps keep their
-                  index order around it. */}
-              {!inRow && current && (
+              {/* Rides the current step's row, the one row a phone always shows,
+                  so "3/8" and the chevron sit beside the step they are counting
+                  and the rows keep their index order around them. */}
+              {isPhone && current && workflow.steps.length > 1 && (
                 <Group gap={2} wrap="nowrap" style={{ flexShrink: 0 }}>
                   <Text fz={11} c="dimmed">
                     {state.stepIndex + 1}/{workflow.steps.length}
@@ -332,15 +325,15 @@ export function WorkflowStepper({
                     variant="subtle"
                     color="gray"
                     size="sm"
-                    aria-label={expanded ? 'Hide the other steps' : 'Show every step'}
+                    aria-label="Show every step"
                     onClick={(e) => {
                       // The row itself jumps the transcript to this step; only the
                       // chevron opens the list.
                       e.stopPropagation();
-                      setExpanded((v) => !v);
+                      setListOpen(true);
                     }}
                   >
-                    {expanded ? <IconChevronUp size={14} /> : <IconChevronDown size={14} />}
+                    <IconChevronDown size={14} />
                   </ActionIcon>
                 </Group>
               )}
@@ -405,6 +398,75 @@ export function WorkflowStepper({
           </Button>
         </Group>
       )}
+      {/* The other steps, over the page rather than wedged into it: the stepper
+          sits above the transcript, so expanding in place pushes the
+          conversation down by the height of the list every time you check where
+          you are. The same bottom sheet the composer's Options uses.
+
+          Deliberately free of `data-progress-fill`: Transcript counts those to
+          learn the workflow's length, so a second set here would double it.
+          Progress per step lives on the row behind the sheet, which is the one
+          you can actually watch fill. */}
+      <Drawer
+        opened={isPhone && listOpen}
+        onClose={() => setListOpen(false)}
+        position="bottom"
+        size="auto"
+        padding="sm"
+        title={`Step ${state.stepIndex + 1} of ${workflow.steps.length}`}
+        classNames={{ content: 'lines-mobile-sheet', inner: 'lines-mobile-sheet-inner' }}
+      >
+        <Stack gap={2} className="lines-safe-bottom">
+          {workflow.steps.map((step, i) => {
+            const status = state.stepStatuses[i];
+            const cost = state.stepCostsUsd?.[i] ?? 0;
+            const tokens = state.stepTokens?.[i] ?? 0;
+            const durationMs = state.stepDurationsMs?.[i] ?? 0;
+            const stepModel = state.stepModels?.[i];
+            const estimated = stepModel
+              ? !capabilitiesFor(providerForModel(stepModel)).cost
+              : hasEstimatedSpend(session.costByModel);
+            const metrics = [
+              cost > 0 ? formatSpendUsd(cost, estimated) : '',
+              tokens > 0 ? `${tokens.toLocaleString()} tokens` : '',
+              durationMs > 0 ? formatDuration(durationMs) : '',
+            ].filter(Boolean);
+            return (
+              <Group
+                key={i}
+                gap="sm"
+                wrap="nowrap"
+                py={6}
+                px={4}
+                style={{
+                  borderRadius: 'var(--mantine-radius-sm)',
+                  background:
+                    i === state.stepIndex ? 'var(--mantine-color-default-hover)' : undefined,
+                  // A pending step has no transcript to jump to yet.
+                  cursor: status === 'pending' ? 'default' : 'pointer',
+                }}
+                onClick={() => {
+                  if (status === 'pending') return;
+                  revealWorkflowStep(i);
+                  setListOpen(false);
+                }}
+              >
+                <StepIcon status={status} index={i} />
+                <Stack gap={0} style={{ minWidth: 0, flex: 1 }}>
+                  <Text size="sm" fw={i === state.stepIndex ? 600 : 400} truncate>
+                    {nameOf(step)}
+                  </Text>
+                  {metrics.length > 0 && (
+                    <Text fz={11} c="dimmed" truncate>
+                      {metrics.join(' · ')}
+                    </Text>
+                  )}
+                </Stack>
+              </Group>
+            );
+          })}
+        </Stack>
+      </Drawer>
       <ConfirmModal
         opened={confirmIndex !== null}
         title={confirmPending ? 'Start this step?' : 'Mark step as completed?'}

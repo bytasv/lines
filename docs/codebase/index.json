@@ -660,9 +660,11 @@
         "force-advance (mark last running step completed) also sets the last step done, so a force-finished workflow shows the filled check too",
         "clicking a step in the stepper still jumps the transcript to that step's start marker, but the marker may not be mounted (Transcript.tsx windows a long transcript to its tail): the click asks revealWorkflowStep() to scroll directly if the marker exists, otherwise it fires an event the transcript handles by dropping its window and scrolling once the marker mounts",
         "the parked state is a one-line strip rather than a card, and does not repeat the step's name: it is on screen for as long as a step is parked (most of a workflow's life) and the stepper directly above already shows that name in bold",
-        "the stepper has two shapes and no third: up to four steps on a desktop (one on a phone) every step is named side by side, and past that it becomes a list showing the current step alone with n/total and a chevron that opens the rest as an accordion \u2014 a few names plus a run of bare numbered circles showed the shape of the workflow and none of its content",
-        "the chevron is the only thing that opens the list; clicking the row still jumps the transcript to that step",
-        "a hidden step is display:none and never unmounted, because Transcript counts [data-progress-fill] elements in DOM order to learn the step count \u2014 dropping or reordering one renumbers the workflow's scroll segments"
+        "a hidden step is display:none and never unmounted, because Transcript counts [data-progress-fill] elements in DOM order to learn the step count \u2014 dropping or reordering one renumbers the workflow's scroll segments",
+        "a desktop shows the whole workflow across the row however many steps it has; a phone shows the current step alone with n/total and a chevron, since one step is all that fits at 390px with its name readable",
+        "the chevron opens the other steps as a bottom sheet rather than an in-place expansion \u2014 the stepper sits above the transcript, so expanding in place pushes the conversation down every time the user checks where they are",
+        "that sheet renders no [data-progress-fill] elements, because Transcript counts them to learn the workflow's length and a second set would double it; per-step progress stays on the row behind the sheet",
+        "tapping a step in the sheet reveals it in the transcript and closes the sheet; a pending step has nothing to jump to and is inert"
       ],
       "architecturalRules": [
         "interrupt() stays intent-free \u2014 no caller may infer \"advance\" from \"stop\"",
