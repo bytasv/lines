@@ -364,10 +364,16 @@ function SettingsButton() {
   // A dismissed allowlist review still needs a way back in; the gear is it.
   const guardReview = useStore((s) => s.guardReview);
   const guest = useIsGuest();
-  // A phone that scanned the machine's QR arrives at `/?enroll=…`. Opening the
+  // A phone that scanned the machine's QR arrives carrying a code. Opening the
   // pane for them is the whole point of the QR — a code they have to go hunting
   // for a settings pane to use is a code they will type by hand instead.
-  const enrolling = new URLSearchParams(window.location.search).has('enroll');
+  //
+  // Both forms: the code moved into the fragment (a query string is sent to the
+  // server, which is the one party it must not reach), but a QR printed by an
+  // older desktop build still uses the query.
+  const enrolling =
+    new URLSearchParams(window.location.search).has('enroll') ||
+    new URLSearchParams(window.location.hash.replace(/^#/, '')).has('enroll');
   useEffect(() => {
     if (enrolling) setOpened(true);
   }, [enrolling]);

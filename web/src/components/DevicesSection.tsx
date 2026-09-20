@@ -12,13 +12,22 @@ import {
   TextInput,
   Tooltip,
 } from '@mantine/core';
-import { IconAlertCircle, IconDeviceLaptop, IconPlus, IconTrash } from '@tabler/icons-react';
+import {
+  IconAlertCircle,
+  IconCheck,
+  IconDeviceLaptop,
+  IconPencil,
+  IconPlus,
+  IconTrash,
+  IconX,
+} from '@tabler/icons-react';
 import { useStore } from '../store';
 import {
   claimDevice,
   forgetDeviceId,
   rememberDeviceId,
   rememberedDeviceId,
+  renameDevice,
   revokeDevice,
   type Device,
 } from '../lib/storage';
@@ -52,6 +61,8 @@ export function DevicesSection() {
   const [code, setCode] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  /** The machine being renamed, and the text so far. */
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
   const connected = useStore((s) => s.connectionStatus === 'connected');
   // Health of the machine this browser is actually linked to comes off the socket,
   // not off the device row: the row is an HTTP snapshot, and only the link knows
@@ -103,6 +114,23 @@ export function DevicesSection() {
   const switchToDevice = (id: string) => {
     rememberDeviceId(id);
     switchDevice(id);
+  };
+
+  const rename = async () => {
+    if (!renaming) return;
+    const name = renaming.name.trim();
+    if (!name) return;
+    setBusyId(renaming.id);
+    setActionError(null);
+    try {
+      await renameDevice(renaming.id, name);
+      setRenaming(null);
+      await load();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
   };
 
   const revoke = async (device: Device) => {
@@ -159,9 +187,34 @@ export function DevicesSection() {
                   <Stack gap={2} style={{ minWidth: 0 }}>
                     <Group gap={6} wrap="nowrap">
                       <MachineDot health={health} />
-                      <Text size="sm" fw={500} truncate>
-                        {device.name}
-                      </Text>
+                      {renaming?.id === device.id ? (
+                        <TextInput
+                          size="xs"
+                          value={renaming.name}
+                          autoFocus
+                          maxLength={64}
+                          onChange={(e) => setRenaming({ id: device.id, name: e.currentTarget.value })}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void rename();
+                            if (e.key === 'Escape') setRenaming(null);
+                          }}
+                          rightSection={
+                            <Group gap={2} wrap="nowrap">
+                              <ActionIcon size="xs" variant="subtle" onClick={() => void rename()} aria-label="Save name">
+                                <IconCheck size={13} />
+                              </ActionIcon>
+                              <ActionIcon size="xs" variant="subtle" color="gray" onClick={() => setRenaming(null)} aria-label="Cancel rename">
+                                <IconX size={13} />
+                              </ActionIcon>
+                            </Group>
+                          }
+                          rightSectionWidth={52}
+                        />
+                      ) : (
+                        <Text size="sm" fw={500} truncate>
+                          {device.name}
+                        </Text>
+                      )}
                       {device.shared && (
                         // Somebody else's computer. Named, because everything you
                         // run there happens on their machine, as them.
@@ -198,6 +251,20 @@ export function DevicesSection() {
                     <Button size="xs" variant="subtle" onClick={() => switchToDevice(device.id)}>
                       Use this
                     </Button>
+                  )}
+                  {/* Renaming somebody else's machine is not ours to do — the
+                      name belongs to its owner's account, not to this grant. */}
+                  {device.shared ? null : (
+                    <Tooltip label="Rename" withArrow>
+                      <ActionIcon
+                        variant="subtle"
+                        color="gray"
+                        onClick={() => setRenaming({ id: device.id, name: device.name })}
+                        aria-label={`Rename ${device.name}`}
+                      >
+                        <IconPencil size={15} />
+                      </ActionIcon>
+                    </Tooltip>
                   )}
                   {device.shared ? null : (
                   <Tooltip label="Revoke access" withArrow>

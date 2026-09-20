@@ -102,6 +102,20 @@ export async function listDevices(): Promise<Device[]> {
 }
 
 /**
+ * Rename a machine.
+ *
+ * Cosmetic — nothing routes on the name — but the default is the machine's
+ * hostname, which is often somebody's actual name, and it is stored in the
+ * hosted database in plaintext. This is how a user takes that back.
+ */
+export async function renameDevice(id: string, name: string): Promise<void> {
+  await call<{ ok: true }>(`/v1/devices/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  });
+}
+
+/**
  * Revoke a machine's access. The relay checks `revokedAt` when a machine
  * attaches, so this stops it reconnecting — it does NOT sever a connection that
  * is already open. Say so in the UI rather than promising an instant kill.

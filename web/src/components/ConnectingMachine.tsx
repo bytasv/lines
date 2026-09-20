@@ -82,7 +82,18 @@ export function ConnectingMachine({
     }
   };
 
-  if (refusal) return <EnrollGate name={name} reason={refusal} deviceId={deviceId} />;
+  if (refusal) {
+    return (
+      <EnrollGate
+        name={name}
+        reason={refusal}
+        deviceId={deviceId}
+        others={others}
+        onSwitch={onSwitch}
+        onPairNew={onPairNew}
+      />
+    );
+  }
 
   return (
     <GateShell>
@@ -210,7 +221,23 @@ export function ConnectingMachine({
  * The socket behind this is deliberately silent (see `needsEnrollment` in
  * ws.ts): the enrollment frame is the only thing it may carry.
  */
-function EnrollGate({ name, reason, deviceId }: { name: string; reason: string; deviceId: string }) {
+function EnrollGate({
+  name,
+  reason,
+  deviceId,
+  others,
+  onSwitch,
+  onPairNew,
+}: {
+  name: string;
+  reason: string;
+  deviceId: string;
+  /** Every other machine on the account. Without these, this screen is a dead
+   *  end that never says which machine it is talking about or offers another. */
+  others: Device[];
+  onSwitch: (id: string) => void;
+  onPairNew: () => void;
+}) {
   // A code the machine handed this page — the desktop app's own window always
   // does, and a scanned QR does too. Read once, on mount, because reading it
   // also consumes it.
@@ -296,6 +323,41 @@ function EnrollGate({ name, reason, deviceId }: { name: string; reason: string; 
             </Button>
           </Stack>
         </Card>
+
+        {others.length > 0 && (
+          <Stack align="stretch" gap={6} w="100%">
+            <Text size="xs" c="dimmed" ta="center">
+              Or use a different machine:
+            </Text>
+            {others.map((device) => {
+              const health = unlinkedMachineHealth(device);
+              return (
+                <Button
+                  key={device.id}
+                  variant="light"
+                  size="xs"
+                  leftSection={<IconDeviceLaptop size={14} />}
+                  rightSection={
+                    <Group gap={5} wrap="nowrap">
+                      <Text size="xs" c="dimmed">
+                        {health.label}
+                      </Text>
+                      <MachineDot health={health} />
+                    </Group>
+                  }
+                  justify="space-between"
+                  onClick={() => onSwitch(device.id)}
+                >
+                  {device.name}
+                </Button>
+              );
+            })}
+          </Stack>
+        )}
+
+        <Button variant="subtle" size="xs" leftSection={<IconPlus size={14} />} onClick={onPairNew}>
+          Pair a different machine
+        </Button>
 
         <Text size="xs" c="dimmed" ta="center">
           {reason}

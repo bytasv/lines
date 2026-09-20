@@ -1128,6 +1128,38 @@ app.get('/v1/devices', async (req, res) => {
 });
 
 /** Revoke. A tombstone rather than a delete, so the row stays as an audit trail. */
+/**
+ * Rename a machine.
+ *
+ * The name is cosmetic — nothing routes on it — but it is the only label a user
+ * has for "which computer is this", and the default is `os.hostname()`, which is
+ * frequently a personal or a client's name. Letting it be changed is also the
+ * only way to correct that after the fact, since the hostname is captured once
+ * at registration and never re-read.
+ *
+ * Ownership-scoped like every other device write: the `where` names `userId`, so
+ * a request for somebody else's machine matches nothing and 404s rather than
+ * renaming it.
+ */
+app.patch('/v1/devices/:id', async (req, res) => {
+  const userId = userIdOf(req);
+  const raw = (req.body as { name?: unknown } | null)?.name;
+  const name = typeof raw === 'string' ? raw.trim() : '';
+  if (!name || name.length > 64) {
+    res.status(400).json({ error: 'name must be 1-64 characters' });
+    return;
+  }
+  const updated = await prisma.device.updateMany({
+    where: { id: req.params.id, userId, revokedAt: null },
+    data: { name },
+  });
+  if (updated.count === 0) {
+    res.status(404).json({ error: 'unknown device' });
+    return;
+  }
+  res.json({ ok: true, name });
+});
+
 app.delete('/v1/devices/:id', async (req, res) => {
   const userId = userIdOf(req);
   const at = new Date();
