@@ -2066,6 +2066,7 @@
         "web/src/lib/devices.ts",
         "web/src/lib/storage.ts",
         "web/src/components/ConnectMachine.tsx",
+        "web/src/components/ChooseMachine.tsx",
         "web/src/components/ConnectingMachine.tsx",
         "web/src/components/GateShell.tsx",
         "web/src/components/PairingDiagram.tsx",
@@ -2134,7 +2135,9 @@
         "EXIT_BRIDGE_LOCK_HELD",
         "resolveRelayIdentity",
         "readRuntimeInfo",
-        "socketGeneration"
+        "socketGeneration",
+        "ChooseMachine",
+        "renameDevice"
       ],
       "tests": [
         "storage/src/schema.credentials.test.ts",
@@ -2197,7 +2200,10 @@
         "with RELAY_URL unset nothing dials and the local-only setup is unchanged",
         "a browser may only reach a device it owns; if storage cannot verify a device's secret the relay refuses the connection rather than admitting it",
         "a browser socket carries a monotonic generation stamp; a frame arriving on a socket whose generation is no longer current is dropped rather than applied \u2014 switchDevice closes the old socket but does not detach its message handler, so a late frame from the previous machine could otherwise reach applyServerMessage after clearBootstrap()",
-        "machineOffline is surfaced by ConnectionBanner after bootstrap too, not only by the pre-bootstrap ConnectingMachine screen \u2014 relay-up-but-machine-gone otherwise rendered as a healthy 'connected' UI in which every action silently went nowhere"
+        "machineOffline is surfaced by ConnectionBanner after bootstrap too, not only by the pre-bootstrap ConnectingMachine screen \u2014 relay-up-but-machine-gone otherwise rendered as a healthy 'connected' UI in which every action silently went nowhere",
+        "the gate never connects to a machine this browser was not shown: on a first visit (no remembered device id) it renders ChooseMachine \u2014 the whole list, with health, platform, last-seen and an owner badge \u2014 and connects only after an explicit pick, even when the account has exactly one machine",
+        "chooseDevice's remembered/most-recent heuristic resumes a choice rather than making one, so a remembered machine that has since been revoked puts the list back up instead of silently falling through to a different computer",
+        "a machine's name is the hostname it registered with, stored in plaintext and shown to everyone it shares a session with; PATCH /v1/devices/:id lets the owner rename it, which is the user's only control over what that hostname leaks"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
@@ -3447,7 +3453,8 @@
         "server/src/index.ts",
         "web/src/lib/e2ee.ts",
         "web/src/ws.ts",
-        "storage/src/index.ts"
+        "storage/src/index.ts",
+        "desktop/src/main.ts"
       ],
       "symbols": [
         "startHandshake",
@@ -3467,7 +3474,10 @@
         "stripSignature",
         "cryptoUnavailable",
         "enrollWithCode",
-        "reconnectMachine"
+        "reconnectMachine",
+        "takeEnrollCodeFromUrl",
+        "appUrlForOwnWindow",
+        "pinnedKey"
       ],
       "tests": [
         "server/src/e2ee.test.ts",
@@ -3485,7 +3495,10 @@
         "revocation works from the tray and the CLI with no browser, because key pinning plus a lost device would otherwise be unrecoverable",
         "signed sync covers /settings, /guard-allowlist and /mcp-connections \u2014 the resources whose envelope storage keeps intact; maps merged in SQL and arrays cannot carry one without a per-row column",
         "an unsigned blob is accepted with a warning during rollout; forged, signer-changed and rolled-back blobs are always refused, and LINES_E2EE_STRICT=1 promotes the first case to a refusal",
-        "machine signing keys are trust-on-first-use then pinned; a changed signer is refused and surfaced, as SSH treats a changed host key"
+        "machine signing keys are trust-on-first-use then pinned; a changed signer is refused and surfaced, as SSH treats a changed host key",
+        "an enrollment code handed to a page travels in the URL fragment, never a query string, and is consumed and stripped on read \u2014 a query string reaches the server, which is the party the code exists to exclude; the query form is still accepted on read only because an older desktop build's QR emitted it",
+        "a machine's own desktop window is handed a live code (appUrlForOwnWindow) rather than asked to type one: the shell and the bridge are already the same trust domain, so hand-enrolling the machine against itself was a step with no security value",
+        "the connect-time EnrollGate states the exchange as numbered steps, because step one happens on a different device from the one the user is looking at, and it is not a dead end \u2014 it also lists the account's other machines and offers pairing a new one"
       ],
       "architecturalRules": [
         "attested.userId is a routing hint, not an authorization decision \u2014 this replaces the former rule that the relay is the auth edge",

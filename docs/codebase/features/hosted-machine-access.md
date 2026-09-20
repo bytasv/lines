@@ -61,8 +61,8 @@ relay pipes frames between them, and the UI that gates all of it.
 - `relay/src/index.ts` — `/agent` (bridge dials in) and `/client` (browser)
 - `server/src/relayClient.ts` — the outbound dialler
 - `storage/src/index.ts` — `POST /v1/devices/register`, `POST /v1/devices/claim`,
-  `GET /v1/devices`, `DELETE /v1/devices/:id`, `POST /v1/devices/verify`,
-  `POST /v1/devices/unpair`
+  `GET /v1/devices`, `PATCH /v1/devices/:id`, `DELETE /v1/devices/:id`,
+  `POST /v1/devices/verify`, `POST /v1/devices/unpair`
 - `server/src/device.ts` — `deviceIdentity`, `registerDevice`, `unpairDevice`; shared by the
   desktop app and `npm run pair -w server`
 - `server/scripts/pair-device.ts` — CLI/Tilt entry point that calls the above and prints the
@@ -105,9 +105,11 @@ relay pipes frames between them, and the UI that gates all of it.
 - `server/src/device.ts` — identity minting/registration, shared to avoid a second
   implementation drifting on the credential format
 - `web/src/lib/devices.ts` — `useDevices`, the shared machine-list store
-- `web/src/lib/storage.ts` — `listDevices`/`claimDevice`/`revokeDevice`, `chooseDevice`,
-  remembered-device persistence, `DESKTOP_DOWNLOAD_URL`
+- `web/src/lib/storage.ts` — `listDevices`/`claimDevice`/`renameDevice`/`revokeDevice`,
+  `chooseDevice`, remembered-device persistence, `DESKTOP_DOWNLOAD_URL`
 - `web/src/components/ConnectMachine.tsx` — pairing screen and its loading/error siblings
+- `web/src/components/ChooseMachine.tsx` — the first-visit machine list, shown before anything
+  connects
 - `web/src/components/ConnectingMachine.tsx` — shown between "device chosen" and the bridge's
   first `hello`; offers the escalating way out once that takes too long, or at once when the relay
   says the machine is offline
@@ -182,7 +184,12 @@ relay pipes frames between them, and the UI that gates all of it.
   trees (the gate, and the Settings pane) must observe and mutate the same machine list; a revoke
   in Settings has to put the gate back up, which a component-local fetch could not do
 - `chooseDevice(devices)` — picks the remembered device if it still exists, else the
-  most-recently-seen one
+  most-recently-seen one. The gate calls it **only when this browser has a remembered device
+  id**: it is the right rule for returning, and the wrong one for a first visit, where it would
+  attach a browser to a computer it never named
+- `renameDevice(id, name)` — `PATCH /v1/devices/:id`, Clerk-authed and scoped to the owner. The
+  name is plaintext in Postgres and is the label every other user in a shared session sees, so
+  renaming is the user's control over what the hostname leaks
 - `bootstrapped` (in `web/src/store.ts`) — true once a `hello` has been received from the
   currently-chosen machine
 - `switchDevice(id)` — closes the current socket and clears `bootstrapped` before opening the
@@ -372,9 +379,15 @@ used because these responses carry Clerk-authenticated user data.
    `ConnectMachineLoading` until it resolves.
 2. Zero devices → `ConnectMachine` (the pairing form + diagram). Claiming a code refreshes the
    list, which re-renders the gate off the new result — no navigation involved.
-3. One or more devices → `chooseDevice` picks one, `ws.ts` gets `setDeviceId` and `connect()` is
-   called.
-4. Between the socket opening and its first `hello`, `bootstrapped` is false —
+3. One or more devices, and this browser has no remembered choice → `ChooseMachine`: the whole
+   list, with each machine's health dot, platform, last-seen, and an owner badge when it is
+   somebody else's. Nothing connects until the user picks, and "Use this" writes the remembered
+   id. A single machine still gets a list of one — the point is that the browser never attaches
+   to a computer the user was not shown.
+4. One or more devices, with a remembered choice → `chooseDevice` picks one, `ws.ts` gets
+   `setDeviceId` and `connect()` is called. A remembered machine that has since been revoked no
+   longer falls through to a different one; `chosen` is null and the list comes back.
+5. Between the socket opening and its first `hello`, `bootstrapped` is false —
    `ConnectingMachine` renders instead of the app, naming the chosen machine. It escalates either
    after 6s with no `hello` **or** immediately on a `deviceOffline` frame, which is a fact where
    the 6s timer is only a guess. Waiting alone is not a recoverable state here — the socket
@@ -392,16 +405,17 @@ used because these responses carry Clerk-authenticated user data.
      → refresh → clear the manual pick), after which `chosen` is null and the gate falls through
      to `ConnectMachine`. The copy names the consequence: the machine's menu-bar icon shows a
      fresh pairing code.
-5. `hello` sets `bootstrapped: true` in the main store; only then does `DeviceGate` render its
+6. `hello` sets `bootstrapped: true` in the main store; only then does `DeviceGate` render its
    children (the real app).
-6. A socket closed with `1008` (bridge/relay rejection) re-reads the device list — a revoked
+7. A socket closed with `1008` (bridge/relay rejection) re-reads the device list — a revoked
    machine and a sleeping one are indistinguishable at the socket layer, and re-reading is what
    tells them apart — then retries slowly rather than parking forever.
 
 `DevicesSection` (Settings → Machines) reads and mutates the same `useDevices` store: pairing
-there behaves like the gate's pairing form, "Use this" calls `switchDevice`, and revoking the
-active machine clears the remembered device id so the gate falls through to the pairing screen
-instead of retrying a device the relay will now refuse.
+there behaves like the gate's pairing form, "Use this" calls `switchDevice`, renaming calls
+`renameDevice` and refreshes, and revoking the active machine clears the remembered device id so
+the gate falls through to the pairing screen instead of retrying a device the relay will now
+refuse.
 
 ## Dependencies
 
@@ -491,6 +505,11 @@ instead of retrying a device the relay will now refuse.
   degrades to "no banner" — the same tolerance `hello.bridge` already relies on.
 - A browser that connects while no bridge is attached is told `deviceOffline` immediately, rather
   than left on an indefinite spinner.
+- A machine's `name` is the hostname it registered with, stored in plaintext and visible to
+  everyone it shares a session with. It is renameable for exactly that reason — the hostname is
+  the one piece of a machine's identity the user did not choose and cannot otherwise change.
+- The gate never connects to a machine this browser has not been shown. The
+  remembered/most-recent heuristic resumes a choice; it does not make one.
 - A bridge restart does **not** disconnect the browser: channels stay open and are replayed to the
   new bridge, which answers with a fresh `hello`.
 - Newest bridge wins. A reconnecting bridge must be able to take over from a half-dead predecessor

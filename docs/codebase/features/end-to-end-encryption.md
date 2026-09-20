@@ -49,7 +49,9 @@ cryptography cannot close that.
 - `server/scripts/enroll-code.ts` — the CLI half of the tray actions
 - `web/src/lib/e2ee.ts` — the browser's identity (IndexedDB, non-extractable) and pinned keys
 - `web/src/ws.ts` — `beginHandshake`, `writeToLink`, `handleE2eeFrame`, `enrollWithCode`,
-  `needsEnrollment`
+  `reconnectMachine`, `needsEnrollment`
+- `desktop/src/main.ts` — `openEncryptionWindow` (code + QR), `revokeEnrolledPeer`,
+  `appUrlForOwnWindow`
 - `storage/src/index.ts` — `carriedSignature`, which carries a signature across the rebuild the
   blob endpoints perform
 
@@ -64,6 +66,15 @@ cryptography cannot close that.
   traffic
 - `signBlob` / `verifyBlob` / `canonicalize` — signed sync
 - `cryptoUnavailable` — why this browser cannot hold a key at all (insecure origin, usually)
+- `takeEnrollCodeFromUrl` — reads a code the machine handed this page, from the URL **fragment**,
+  and strips it. The query form is still read because an older desktop build's QR used it, but a
+  query string reaches the server, which is the one party the code exists to exclude
+- `appUrlForOwnWindow()` — the URL the desktop shell opens its own window with, carrying a live
+  code in the fragment. A machine's own window enrolling by hand-typed code was a step with no
+  security value: the shell and the bridge are already the same trust domain
+- `reconnectMachine(deviceId)` — re-dial the link that was just enrolled. `reconnectNow()` could
+  not serve this: it re-dials the *primary*, which during the connect-time gate is not
+  necessarily the machine the user is enrolling against
 
 ## Data flow
 
@@ -122,6 +133,12 @@ pull, the signer is checked against a pinned key and the counter against the las
 - No key material is ever uploaded. `storage/prisma/schema.prisma` has no public-key column and
   must not gain one: a key the server can rewrite is a key an attacker with the database can
   rewrite.
+- The code travels in a URL **fragment**, never a query string, and is consumed and stripped on
+  read.
+- `EnrollGate` states the exchange as numbered steps, because step one happens on a *different
+  device* from the one the user is looking at. It is also not a dead end: it lists the account's
+  other machines and offers pairing a new one, so a user who cannot reach the machine holding the
+  code has somewhere to go.
 - Revocation is local and needs no browser — tray row, or `npm run enroll -w server -- --revoke`.
   Key pinning plus a lost device would otherwise be unrecoverable.
 - Signed sync covers `/settings`, `/guard-allowlist` and `/mcp-connections` — the resources whose
