@@ -585,7 +585,8 @@
         "server/src/sessions.reconcile.test.ts",
         "web/src/lib/format.ts",
         "web/src/components/Sidebar.tsx",
-        "web/src/lib/workflowReveal.ts"
+        "web/src/lib/workflowReveal.ts",
+        "web/src/lib/workflowSteps.ts"
       ],
       "symbols": [
         "SessionManager.interrupt",
@@ -616,14 +617,16 @@
         "isWorkflowFinished",
         "WorkflowEngine.iterateIfWaiting",
         "SessionManager.compactContext",
-        "SessionManager.restoreCompactedStatus"
+        "SessionManager.restoreCompactedStatus",
+        "namedStepWindow"
       ],
       "tests": [
         "server/src/workflows.advance.test.ts",
         "server/src/sessions.turns.test.ts",
         "server/src/workflows.substitution.test.ts",
         "server/src/sessions.compact.test.ts",
-        "server/src/sessions.reconcile.test.ts"
+        "server/src/sessions.reconcile.test.ts",
+        "server/src/workflowSteps.test.ts"
       ],
       "businessRules": [
         "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
@@ -658,7 +661,10 @@
         "icon precedence: session.completed -> outline check, status running -> Loader, status.actionable -> pulsing dot, isWorkflowFinished -> filled check, otherwise plain dot",
         "actionable states always win over the finished checkmark so a session needing the user is never masked as done",
         "force-advance (mark last running step completed) also sets the last step done, so a force-finished workflow shows the filled check too",
-        "clicking a step in the stepper still jumps the transcript to that step's start marker, but the marker may not be mounted (Transcript.tsx windows a long transcript to its tail): the click asks revealWorkflowStep() to scroll directly if the marker exists, otherwise it fires an event the transcript handles by dropping its window and scrolling once the marker mounts"
+        "clicking a step in the stepper still jumps the transcript to that step's start marker, but the marker may not be mounted (Transcript.tsx windows a long transcript to its tail): the click asks revealWorkflowStep() to scroll directly if the marker exists, otherwise it fires an event the transcript handles by dropping its window and scrolling once the marker mounts",
+        "the parked state is a one-line strip rather than a card, and does not repeat the step's name: it is on screen for as long as a step is parked (most of a workflow's life) and the stepper directly above already shows that name in bold",
+        "only a window of steps shows its name \u2014 namedStepWindow, four on a desktop and one on a phone; the rest keep their numbered icon and move their name into a tooltip, because an equal share of one row collapses every name into an ellipsis at eight steps",
+        "a collapsed step still renders its progress track, hidden rather than absent: Transcript counts [data-progress-fill] elements to learn the step count, so removing one would renumber the workflow underneath it"
       ],
       "architecturalRules": [
         "interrupt() stays intent-free \u2014 no caller may infer \"advance\" from \"stop\"",
@@ -3543,7 +3549,8 @@
         "web/src/components/SessionView.tsx",
         "web/src/lib/viewport.ts",
         "web/src/components/ProjectTabs.tsx",
-        "web/index.html"
+        "web/index.html",
+        "web/src/components/MentionInput.tsx"
       ],
       "symbols": [
         "useIsPhone",
@@ -3571,7 +3578,10 @@
         "the shell subtracts the on-screen keyboard too: iOS shrinks only the visual viewport, so dvh does not move and the composer ends up under the keyboard; trackKeyboardInset measures the difference from visualViewport and publishes --lines-keyboard, while Chrome's interactive-widget=resizes-content shrinks the layout viewport so the same measurement reads ~0 and the two never stack",
         "inputs are 16px on a phone because iOS Safari zooms the page in on focus below that and does not zoom back out on blur, leaving the app permanently magnified; Mantine's default is 14px so every field tripped it",
         "the header's trailing controls fold into one overflow menu on a phone and the brand mark is dropped, since burger + brand + tabs + five controls exceed 390px and the tabs are what gets squeezed out",
-        "icon buttons get a 32px floor from a rule on .mantine-ActionIcon-root rather than per call site"
+        "icon-only controls get a 32px floor on a phone from a rule on .mantine-ActionIcon-root; a 44px minimum across buttons, menu items, inputs and segments was tried and made every control shout, and Mantine's own sizes already clear 32px for anything with a label",
+        "the composer's text is 15px, and 16px on iOS where the zoom rule applies \u2014 @supports (-webkit-touch-callout: none) is the platform test, so Chrome on iOS keeps the floor too",
+        "a bottom sheet is sized by its content (size=\"auto\"), never by a share of the screen: a sheet pinned at 80dvh is the same height whether it holds four controls or one",
+        "the composer's Options button is labelled with the current permission mode, so one control reports the setting that matters before sending and opens the sheet that changes it"
       ],
       "architecturalRules": [
         "adapt in place, never fork a mobile shell: a second transcript renderer either is the same code or drifts and re-loses the batching, windowing and referential-stability work",

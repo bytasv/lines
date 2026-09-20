@@ -646,19 +646,6 @@ export function Composer({ session }: { session: SessionMeta }) {
           e.currentTarget.value = '';
         }}
       />
-      {isPhone && (
-        <Button
-          variant="subtle"
-          size="compact-sm"
-          mb={4}
-          onClick={() => setOptionsOpen(true)}
-          aria-label="Permission mode and conversation options"
-        >
-          {caps.approvals
-            ? `Permissions: ${permissionModeLabel(session.permissionMode)}`
-            : 'Permissions: sandboxed'}
-        </Button>
-      )}
       <MentionInput
         value={prompt}
         onChange={setPrompt}
@@ -671,6 +658,7 @@ export function Composer({ session }: { session: SessionMeta }) {
             : `Message ${provider === 'openai' ? 'Codex' : 'Claude'}…${isPhone ? '' : ' (↵ to send, ⇧↵ for newline)'}`
         }
         textareaRef={textareaRef}
+        minRows={isPhone ? 1 : 2}
         onFocusChange={setComposerFocused}
         onPasteFiles={(files) => void addFiles(files)}
       />
@@ -684,8 +672,17 @@ export function Composer({ session }: { session: SessionMeta }) {
             >
               <IconPaperclip size={18} />
             </ActionIcon>
-            <Button variant="subtle" px={8} onClick={() => setOptionsOpen(true)}>
-              Options
+            {/* The permission mode is the label, so the row that opens the sheet
+                is also the row that reports the one setting worth knowing
+                before you send — one control instead of a button above the
+                input saying the mode and a button below it saying "Options". */}
+            <Button
+              variant="subtle"
+              px={8}
+              onClick={() => setOptionsOpen(true)}
+              aria-label="Options — permission mode, model, context"
+            >
+              {caps.approvals ? permissionModeLabel(session.permissionMode) : 'Sandboxed'}
             </Button>
           </Group>
           <Group gap={4} wrap="nowrap">
@@ -826,22 +823,30 @@ export function Composer({ session }: { session: SessionMeta }) {
           </Group>
         </>
       )}
+      {/* Sized by its content, not by a share of the screen: a sheet pinned at
+          80dvh is the same height whether it holds four controls or one, and
+          four controls do not fill a phone. The max-height on `.lines-mobile-sheet`
+          is what stops a long one running off the top. */}
       <Drawer
         opened={isPhone && optionsOpen}
         onClose={() => setOptionsOpen(false)}
         position="bottom"
-        size="min(80dvh, var(--lines-viewport))"
-        title="Conversation options"
-        classNames={{ content: 'lines-mobile-sheet', inner: 'lines-mobile-sheet-inner' }}
+        size="auto"
+        padding="sm"
+        title="Options"
+        classNames={{
+          content: 'lines-mobile-sheet',
+          inner: 'lines-mobile-sheet-inner',
+        }}
       >
-        <Stack gap="md" className="lines-safe-bottom">
-          <Text size="sm" fw={500}>
-            Permissions
-          </Text>
+        <Stack gap="sm" className="lines-safe-bottom">
           {permissionModeControl}
-          <Text size="sm" c="dimmed">
+          {/* One caption under the control, at caption size. Each of these is a
+              standing explanation rather than news, so it earns a line, not a
+              paragraph. */}
+          <Text size="xs" c="dimmed">
             {!caps.approvals
-              ? 'This session runs sandboxed and approves its own tool calls. Plan mode is read-only here, and your MCP connections do not apply.'
+              ? 'Sandboxed: this session approves its own tool calls. Plan mode is read-only, and your MCP connections do not apply.'
               : !canSetMode
                 ? 'Your access does not allow changing permission mode.'
                 : PERMISSION_MODES.find((mode) => mode.value === session.permissionMode)
@@ -849,33 +854,30 @@ export function Composer({ session }: { session: SessionMeta }) {
           </Text>
           {modelControls}
           {!canSetModel && (
-            <Text size="sm" c="dimmed">
+            <Text size="xs" c="dimmed">
               Your access does not allow changing the model or reasoning effort.
             </Text>
           )}
           {caps.reasoningEfforts.length === 0 && (
-            <Text size="sm" c="dimmed">
+            <Text size="xs" c="dimmed">
               This engine does not expose a reasoning-effort control.
             </Text>
           )}
           {[...new Set([...Object.values(modelUnavailable), ...Object.values(modelWarn)])].map(
             (reason) => (
-              <Text key={reason} size="sm" c="dimmed">
+              <Text key={reason} size="xs" c="dimmed">
                 {reason}
               </Text>
             ),
           )}
-          <Group gap="xs">
-            <Stack gap="xs" w="100%">
-              <ContextWindowIndicator session={session} inline />
-            </Stack>
-            {session.totalCostUsd != null && (!caps.contextWindow || (!session.contextSummary && !session.contextUsage)) && (
-              <Text size="sm">
-                Session cost:{' '}
+          <ContextWindowIndicator session={session} inline />
+          {session.totalCostUsd != null &&
+            (!caps.contextWindow || (!session.contextSummary && !session.contextUsage)) && (
+              <Text size="xs" c="dimmed">
+                Session cost{' '}
                 {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
               </Text>
             )}
-          </Group>
         </Stack>
       </Drawer>
       {/* Opened only from a model's warning icon — the pane that carries the

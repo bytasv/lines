@@ -56,6 +56,7 @@ export function MentionInput({
   roots,
   placeholder,
   textareaRef,
+  minRows = 2,
   onFocusChange,
   onPasteFiles,
 }: {
@@ -67,6 +68,9 @@ export function MentionInput({
   roots: string[];
   placeholder: string;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
+  /** Empty height, in lines. One on a phone, where the composer competes with
+   *  the transcript for a screen that is mostly keyboard once focused. */
+  minRows?: number;
   /**
    * Composer focus, for presence — a focused peer is probably typing, which is
    * the one presence signal worth showing beyond "who is here". Optional so
@@ -328,7 +332,7 @@ export function MentionInput({
             onBlur={() => onFocusChange?.(false)}
             placeholder={placeholder}
             autosize
-            minRows={2}
+            minRows={minRows}
             maxRows={10}
             variant="unstyled"
             value={text}

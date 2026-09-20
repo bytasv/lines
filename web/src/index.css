@@ -437,25 +437,18 @@
     padding-bottom: max(env(safe-area-inset-bottom), 0.25rem);
   }
 
-  /* Keep phone controls easy to tap without enlarging their icons. */
-  .mantine-Button-root,
-  .mantine-Burger-root,
-  .mantine-Menu-item,
-  .mantine-Combobox-option,
-  .mantine-Select-input,
-  .mantine-TextInput-input,
-  .mantine-SegmentedControl-label,
+  /* Touch targets, as a floor rather than a size. 44px is Apple's recommended
+     target and it was applied to buttons, menu items, inputs and segments — the
+     result was an app where every control shouted and a three-mode segmented
+     control was taller than the text it sat under. Mantine's own default sizes
+     already clear 32px for anything with a label; the controls that genuinely
+     fall below it are the icon-only ones, tuned for a mouse. So the floor
+     applies there and nowhere else. */
   .mantine-ActionIcon-root,
   .mantine-CloseButton-root,
   .lines-touch-target {
-    min-height: 44px;
-    min-width: 44px;
-  }
-
-  .mantine-SegmentedControl-label {
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    min-height: 32px;
+    min-width: 32px;
   }
 
   .lines-mobile-sheet-inner {
@@ -481,5 +474,21 @@
      follow. */
   .mantine-Input-input {
     font-size: 16px;
+  }
+
+  /* The composer is the one field big enough for its own size to be felt, and
+     16px there reads as shouting. It can only come down where the zoom rule
+     above does not apply, which is everywhere except WebKit on iOS —
+     `-webkit-touch-callout` is supported there and nowhere else, so it stands in
+     for the platform. Chrome on iOS is the same engine and correctly keeps the
+     floor. */
+  .mantine-Textarea-input {
+    font-size: 15px;
+  }
+
+  @supports (-webkit-touch-callout: none) {
+    .mantine-Textarea-input {
+      font-size: 16px;
+    }
   }
 }

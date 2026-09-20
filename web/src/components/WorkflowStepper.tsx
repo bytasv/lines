@@ -11,7 +11,8 @@ import {
   providerForModel,
 } from '@lines/shared';
 import { formatDuration, formatSpendUsd } from '../lib/format';
-import { useReveal } from '../lib/layout';
+import { useIsPhone, useReveal } from '../lib/layout';
+import { namedStepWindow } from '../lib/workflowSteps';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { revealWorkflowStep } from '../lib/workflowReveal';
@@ -136,8 +137,6 @@ export function WorkflowStepper({
     !advancing &&
     !stopping;
   const connected = useStore((s) => s.connectionStatus === 'connected');
-  const currentStep = workflow.steps[state.stepIndex];
-  const currentName = currentStep ? nameOf(currentStep) : '';
   /** Step index awaiting the "mark as completed" confirmation. */
   const [confirmIndex, setConfirmIndex] = useState<number | null>(null);
   const confirmRunning = confirmIndex !== null && state.stepStatuses[confirmIndex] === 'running';
@@ -146,10 +145,17 @@ export function WorkflowStepper({
   const confirmLast = confirmIndex !== null && confirmIndex === workflow.steps.length - 1;
   const confirmName = confirmIndex !== null ? nameOf(workflow.steps[confirmIndex]!) : '';
 
+  // How many steps may show their name at once. A phone fits one; a desktop row
+  // fits four before the names start truncating into ellipses.
+  const isPhone = useIsPhone();
+  const names = namedStepWindow(workflow.steps.length, state.stepIndex, isPhone ? 1 : 4);
+  const collapsed = names.end - names.start + 1 < workflow.steps.length;
+
   return (
     <Paper withBorder={false} px="md" pt="xs" pb="xs">
-      <Group gap="sm" wrap="nowrap" align="stretch">
+      <Group gap={collapsed ? 6 : 'sm'} wrap="nowrap" align="center">
         {workflow.steps.map((step, i) => {
+          const named = i >= names.start && i <= names.end;
           const status = state.stepStatuses[i];
           const clickable = status !== 'pending';
           const cost = state.stepCostsUsd?.[i] ?? 0;
@@ -170,7 +176,13 @@ export function WorkflowStepper({
               // Title row and metrics row are the same height (18px), so centering the
               // icon against the column lands it exactly on the progress track.
               align="center"
-              style={{ flex: 1, minWidth: 0, cursor: clickable ? 'pointer' : undefined }}
+              style={{
+                // A named step takes a share of the row; a collapsed one takes only
+                // its icon, which is what leaves the named ones room to be read.
+                flex: named ? 1 : '0 0 auto',
+                minWidth: 0,
+                cursor: clickable ? 'pointer' : undefined,
+              }}
               onClick={
                 clickable
                   ? () =>
@@ -180,41 +192,69 @@ export function WorkflowStepper({
                   : undefined
               }
             >
-              <StepIcon
-                status={status}
-                index={i}
-                advanceLabel={
-                  i !== state.stepIndex
-                    ? undefined
-                    : status === 'running'
-                      ? 'Mark as completed'
-                      : status === 'waiting-approval'
-                        ? // Frozen while a compaction runs over the park: approve
-                          // would be refused server-side, so offer nothing.
-                          compacting
-                          ? undefined
-                          : 'Proceed to next step'
-                        : stalled
-                          ? 'Start this step'
-                          : resumable
-                            ? 'Continue to the next step'
-                            : undefined
-                }
-                advanceIcon={(stalled || resumable) && i === state.stepIndex ? 'play' : 'check'}
-                // A resumable step is already done — there is nothing to confirm
-                // overriding, so it skips the modal the other two paths use.
-                onAdvance={() =>
-                  resumable && i === state.stepIndex
-                    ? send({ type: 'workflowForceAdvance', sessionId: session.id, stepIndex: i })
-                    : setConfirmIndex(i)
-                }
-              />
-              <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
+              {/* A collapsed step is a number and nothing else, so its name has
+                  to live somewhere: the tooltip. `Box` because `Tooltip` attaches
+                  a ref to its child and `StepIcon` is a plain function. */}
+              <Tooltip
+                label={`${i + 1}. ${nameOf(step)}`}
+                withArrow
+                fz="xs"
+                disabled={named}
+                openDelay={200}
+              >
+                <Box display="inline-flex">
+                  <StepIcon
+                    status={status}
+                    index={i}
+                    advanceLabel={
+                      i !== state.stepIndex
+                        ? undefined
+                        : status === 'running'
+                          ? 'Mark as completed'
+                          : status === 'waiting-approval'
+                            ? // Frozen while a compaction runs over the park: approve
+                              // would be refused server-side, so offer nothing.
+                              compacting
+                              ? undefined
+                              : 'Proceed to next step'
+                            : stalled
+                              ? 'Start this step'
+                              : resumable
+                                ? 'Continue to the next step'
+                                : undefined
+                    }
+                    advanceIcon={(stalled || resumable) && i === state.stepIndex ? 'play' : 'check'}
+                    // A resumable step is already done — there is nothing to confirm
+                    // overriding, so it skips the modal the other two paths use.
+                    onAdvance={() =>
+                      resumable && i === state.stepIndex
+                        ? send({
+                            type: 'workflowForceAdvance',
+                            sessionId: session.id,
+                            stepIndex: i,
+                          })
+                        : setConfirmIndex(i)
+                    }
+                  />
+                </Box>
+              </Tooltip>
+              <Stack
+                gap={4}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  display: named ? undefined : 'none',
+                }}
+              >
                 <Text size="xs" lh="18px" fw={i === state.stepIndex ? 600 : 500} truncate>
                   {nameOf(step)}
                 </Text>
                 {/* Underline doubles as this step's scroll-progress track,
-                    filled imperatively by Transcript. */}
+                    filled imperatively by Transcript. The collapsed steps keep
+                    theirs in the DOM, hidden by the Stack above: Transcript reads
+                    the number of steps from how many `[data-progress-fill]`
+                    elements exist, so dropping one would renumber the workflow
+                    underneath it. */}
                 <Box
                   style={{
                     width: '100%',
@@ -264,46 +304,69 @@ export function WorkflowStepper({
             </Group>
           );
         })}
+        {/* Where you are, for the steps that lost their names to the window. */}
+        {collapsed && (
+          <Text fz={11} c="dimmed" style={{ flexShrink: 0 }}>
+            {state.stepIndex + 1}/{workflow.steps.length}
+          </Text>
+        )}
       </Group>
       {(waiting || advancing || stopping || stalled || resumable) && (
-        <Paper withBorder radius="md" p="sm" mt="xs" style={{ borderColor: 'var(--mantine-color-sandstone-6)' }}>
-          <Group justify="space-between" wrap="wrap" gap="xs">
-            <Text size="sm" fw={600}>
-              {compacting
-                ? `“${currentName}” is compacting its context — it stays waiting for your approval.`
-                : advancing
-                  ? `“${currentName}” approved — wrapping up its output…`
-                  : stopping
-                    ? `“${currentName}” is stopping — the next step starts as soon as it settles.`
-                    : stalled
-                      ? `“${currentName}” never started and nothing is running — start it to continue.`
-                      : resumable
-                        ? `“${currentName}” is done but the next step never started — continue to resume the hand-off.`
-                        : `“${currentName}” finished — approve to continue, or send a message to keep iterating.`}
-            </Text>
-            {/* Busy state is server-owned (state.advancing) so every tab agrees and the
-                loader can't hang on a dropped message. Disabled offline: ws.ts silently
-                drops non-prompt messages when the socket is closed. */}
-            <Button
-              size="xs"
-              leftSection={compacting || advancing || stopping ? <Loader size={14} /> : undefined}
-              disabled={compacting || advancing || stopping || !connected}
-              onClick={() =>
-                stalled
-                  ? setConfirmIndex(state.stepIndex)
-                  : send({
-                      // A resumable step is already approved and done; re-approving it
-                      // would be refused, so the resume goes through forceAdvance.
-                      type: resumable ? 'workflowForceAdvance' : 'workflowApprove',
-                      sessionId: session.id,
-                      stepIndex: state.stepIndex,
-                    })
-              }
-            >
-              {stalled ? 'Start step' : resumable ? 'Continue → next step' : 'Approve → next step'}
-            </Button>
-          </Group>
-        </Paper>
+        // One line, not a card. This strip is on screen for as long as a step is
+        // parked — which is most of a workflow's life, and the whole of it when
+        // the user is the one being waited on — so it competes with the
+        // transcript for a phone's screen. The step's name is directly above it
+        // in bold, so repeating it here bought a third line of text and no
+        // information.
+        <Group
+          justify="space-between"
+          wrap="nowrap"
+          gap="xs"
+          mt={6}
+          px="xs"
+          py={4}
+          style={{
+            borderRadius: 'var(--mantine-radius-sm)',
+            background: 'var(--mantine-color-default-hover)',
+            boxShadow: 'inset 2px 0 0 var(--mantine-color-sandstone-6)',
+          }}
+        >
+          <Text size="xs" truncate style={{ minWidth: 0 }}>
+            {compacting
+              ? 'Compacting context — still waiting for you'
+              : advancing
+                ? 'Approved — wrapping up the output…'
+                : stopping
+                  ? 'Stopping — the next step starts once it settles'
+                  : stalled
+                    ? 'Never started, and nothing is running'
+                    : resumable
+                      ? 'Done, but the next step never started'
+                      : 'Finished — approve, or reply to keep iterating'}
+          </Text>
+          {/* Busy state is server-owned (state.advancing) so every tab agrees and the
+              loader can't hang on a dropped message. Disabled offline: ws.ts silently
+              drops non-prompt messages when the socket is closed. */}
+          <Button
+            size="compact-xs"
+            style={{ flexShrink: 0 }}
+            leftSection={compacting || advancing || stopping ? <Loader size={12} /> : undefined}
+            disabled={compacting || advancing || stopping || !connected}
+            onClick={() =>
+              stalled
+                ? setConfirmIndex(state.stepIndex)
+                : send({
+                    // A resumable step is already approved and done; re-approving it
+                    // would be refused, so the resume goes through forceAdvance.
+                    type: resumable ? 'workflowForceAdvance' : 'workflowApprove',
+                    sessionId: session.id,
+                    stepIndex: state.stepIndex,
+                  })
+            }
+          >
+            {stalled ? 'Start step' : resumable ? 'Continue' : 'Approve'}
+          </Button>
+        </Group>
       )}
       <ConfirmModal
         opened={confirmIndex !== null}

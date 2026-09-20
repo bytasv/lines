@@ -80,8 +80,21 @@ an iPad in landscape is neither.
 - The header's trailing controls fold into one overflow menu on a phone, and the brand mark is
   dropped there. Burger, brand, tabs and five controls do not fit in 390px, and the tabs are what
   gets squeezed out — so the row loses the one thing in it that does nothing.
-- Phone buttons, menu items, select/text inputs, and permission segments have a 44px minimum
-  touch target, applied through shared CSS selectors rather than per call site.
+- Icon-only controls have a 32px floor on a phone, applied to `.mantine-ActionIcon-root` rather
+  than per call site. It is a floor, not a size: a 44px minimum was tried across buttons, menu
+  items, inputs and segments, and the result was an app where every control shouted and a
+  three-mode segmented control stood taller than the text above it. Mantine's own sizes already
+  clear 32px for anything carrying a label, so the floor only has to catch the mouse-tuned
+  icon buttons.
+- The composer's own text is 15px, and 16px on iOS, where the zoom rule below applies.
+  `@supports (-webkit-touch-callout: none)` is the platform test — that property exists on
+  WebKit/iOS and nowhere else, so Chrome on iOS correctly keeps the floor too.
+- A bottom sheet is sized by its content (`size="auto"`), not by a share of the screen. A sheet
+  pinned at 80dvh is the same height whether it holds four controls or one, and four controls do
+  not fill a phone; `.lines-mobile-sheet`'s max-height is what stops a long one running off the
+  top.
+- The composer's Options button is labelled with the current permission mode, so one control both
+  reports the setting that matters before you send and opens the sheet that changes it.
 - The sidebar is a real drawer on a phone (`useDisclosure`), and picking a session closes it —
   otherwise the thing just picked sits behind it.
 - Sidebar width is clamped against the viewport on every read, so a width saved on a 27" display
