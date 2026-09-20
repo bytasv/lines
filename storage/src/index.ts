@@ -118,7 +118,10 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', origin);
     // The allowed origin varies by request, so caches must key on it.
     res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    // Every method any route here uses, PATCH included — a route whose verb is
+    // missing from this list fails in the browser as an opaque "Failed to
+    // fetch", because the preflight is refused before the request is ever sent.
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'authorization,content-type');
     res.setHeader('Access-Control-Max-Age', '86400');
   }
