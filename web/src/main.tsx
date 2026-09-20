@@ -24,6 +24,7 @@ import {
   DEVICE_PAIRING_ENABLED,
   forgetDeviceId,
   rememberDeviceId,
+  rememberedDeviceId,
   revokeDevice,
   setStorageTokenProvider,
 } from './lib/storage';
@@ -33,6 +34,7 @@ import {
   ConnectMachineError,
   ConnectMachineLoading,
 } from './components/ConnectMachine';
+import { ChooseMachine } from './components/ChooseMachine';
 import { ConnectingMachine } from './components/ConnectingMachine';
 import { JoinPage } from './components/JoinPage';
 import { LandingPage } from './components/LandingPage';
@@ -83,10 +85,22 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
     setPairingNew(false);
   }, [devices?.length]);
 
-  // A manual pick wins over the remembered/most-recent heuristic, which is the
-  // whole point: the heuristic is what chose the unreachable machine.
+  /**
+   * Which machine this browser drives.
+   *
+   * A manual pick wins over everything — that is the point of the picker below
+   * and of `ConnectingMachine`'s switch list: the heuristic is what chose the
+   * unreachable machine.
+   *
+   * Otherwise the heuristic applies **only once this browser has chosen before**.
+   * On a first visit `rememberedDeviceId()` is null and the user picks
+   * explicitly, even from a list of one: attaching silently never tells them
+   * which computer they are about to run commands on.
+   */
+  const remembered = rememberedDeviceId();
   const chosen = devices
-    ? (pickedId ? devices.find((d) => d.id === pickedId) : null) ?? chooseDevice(devices)
+    ? (pickedId ? devices.find((d) => d.id === pickedId) : null) ??
+      (remembered ? chooseDevice(devices) : null)
     : null;
 
   useEffect(() => {
@@ -102,7 +116,22 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
   // machine is already chosen leaves the app running on it.
   if (error && !devices) return <ConnectMachineError error={error} onRetry={() => void refresh()} />;
   if (!devices) return <ConnectMachineLoading />;
-  if (!chosen || pairingNew) return <ConnectMachine />;
+  // Nothing paired at all, or the user asked for the pairing form.
+  if (devices.length === 0 || pairingNew) return <ConnectMachine />;
+  // Paired, but this browser has never chosen — or chose a machine that has
+  // since been revoked, which `chooseDevice` would otherwise paper over.
+  if (!chosen) {
+    return (
+      <ChooseMachine
+        devices={devices}
+        onPick={(id) => {
+          rememberDeviceId(id);
+          setPickedId(id);
+        }}
+        onPairNew={() => setPairingNew(true)}
+      />
+    );
+  }
   // Chosen but not yet heard from: the socket has to open AND deliver `hello`
   // before the store describes anything. Rendering the app in between shows a
   // built-out UI with no sessions in it, behind a red "disconnected" pill.

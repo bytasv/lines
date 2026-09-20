@@ -1,5 +1,16 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button, Card, Group, Loader, Stack, Text, TextInput, Title } from '@mantine/core';
+import {
+  Alert,
+  Button,
+  Card,
+  Group,
+  List,
+  Loader,
+  Stack,
+  Text,
+  TextInput,
+  Title,
+} from '@mantine/core';
 import {
   IconDeviceLaptop,
   IconLock,
@@ -298,12 +309,23 @@ function EnrollGate({
                 {blocked}
               </Alert>
             )}
+            {/* Numbered, because this is the one step in the product that asks
+                the user to walk to another device. A paragraph describing it
+                reads as an explanation; a list reads as something to do. */}
+            <List size="xs" spacing={4} type="ordered" c="dimmed">
+              <List.Item>
+                On <strong>{name}</strong>, click the Lines icon in the menu bar.
+              </List.Item>
+              <List.Item>
+                Choose <strong>Show encryption code…</strong>
+              </List.Item>
+              <List.Item>
+                Scan the QR it shows with this device's camera, or type the code below.
+              </List.Item>
+            </List>
             <Text size="xs" c="dimmed">
-              On {name}: open the Lines menu-bar icon and choose “Show encryption code” — or run{' '}
-              <Text span ff="monospace" size="xs">
-                npm run enroll -w server
-              </Text>
-              . Type what it shows here. The code itself never travels, and it works once.
+              The code works once and expires in 15 minutes. It is never sent anywhere — only a
+              proof computed from it — which is what keeps the server out of this exchange.
             </Text>
             <TextInput
               placeholder="XXXXX XXXXX XXXXX XXXXX"
