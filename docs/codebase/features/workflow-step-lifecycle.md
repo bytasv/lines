@@ -39,8 +39,8 @@ reads as "done" without opening the session.
 
 - `web/src/components/Composer.tsx` (stop button, sends `interrupt`)
 - `web/src/components/WorkflowStepper.tsx` (`StepIcon` hover affordances — checkmark,
-  play-icon, "Continue" — confirmation modal, Approve button, the waiting/advancing strip)
-- `web/src/lib/workflowSteps.ts` (`namedStepWindow` — which steps show their name)
+  play-icon, "Continue" — confirmation modal, Approve button, the waiting/advancing strip, the
+  row/list switch and its accordion)
 - `server/src/index.ts` (`case 'interrupt'`, `case 'workflowForceAdvance'`,
   `case 'workflowStartStep'`)
 - `server/src/sessions.ts` (`SessionManager.interrupt`)
@@ -508,14 +508,17 @@ installed icon, no new package). No other new dependencies.
 - The strip's copy switches to an in-progress message ("Approved — wrapping up the output…")
   while advancing, then reverts to normal once the next step's strip (or the workflow-done
   state) replaces it.
-- Only a window of steps shows its name (`namedStepWindow`): four on a desktop, one on a phone.
-  Every step kept an equal share of one row before, which is right for the three-step workflows
-  the stepper was built against and collapses every name into an ellipsis at eight. The rest keep
-  their numbered icon — which is what carries "four done, this one running, three to go" — and
-  put their name in a tooltip.
-- A collapsed step still renders its progress track, hidden rather than absent: `Transcript`
-  counts `[data-progress-fill]` elements to learn how many steps there are, so removing one would
-  renumber the workflow underneath it.
+- The stepper has two shapes and no third. Up to four steps on a desktop (one on a phone) it is
+  the row it always was, every step named side by side. Past that it is a list: the current step
+  alone, with `n/total` and a chevron that opens the rest as an accordion. Every step kept an
+  equal share of one row before, which collapses every name into an ellipsis at eight; the
+  in-between version — a few names plus a run of bare numbered circles — showed the shape of the
+  workflow and none of its content, which reads as decoration rather than as state.
+- The chevron is the only thing that opens the list. Clicking the row still jumps the transcript
+  to that step, which is what a click on a step has always meant.
+- A hidden step is `display: none`, never unmounted: `Transcript` counts `[data-progress-fill]`
+  elements to learn how many steps there are, and reads them in DOM order, so both dropping one
+  and reordering them would renumber the workflow's scroll segments underneath it.
 - The consolidation window is bounded: even a hung Sonnet query or token refresh cannot hold
   `advancing` (and thus this loader) open forever.
 - Consolidation only fires when a step ran more than one turn; a single-turn step incurs no

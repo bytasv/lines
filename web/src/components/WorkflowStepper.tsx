@@ -1,6 +1,24 @@
 import { useState } from 'react';
-import { Box, Button, Center, Group, Loader, Paper, Stack, Text, ThemeIcon, Tooltip } from '@mantine/core';
-import { IconCheck, IconCoins, IconPlayerPlay } from '@tabler/icons-react';
+import {
+  ActionIcon,
+  Box,
+  Button,
+  Center,
+  Group,
+  Loader,
+  Paper,
+  Stack,
+  Text,
+  ThemeIcon,
+  Tooltip,
+} from '@mantine/core';
+import {
+  IconCheck,
+  IconChevronDown,
+  IconChevronUp,
+  IconCoins,
+  IconPlayerPlay,
+} from '@tabler/icons-react';
 import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@lines/shared';
 import {
   capabilitiesFor,
@@ -12,7 +30,6 @@ import {
 } from '@lines/shared';
 import { formatDuration, formatSpendUsd } from '../lib/format';
 import { useIsPhone, useReveal } from '../lib/layout';
-import { namedStepWindow } from '../lib/workflowSteps';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { revealWorkflowStep } from '../lib/workflowReveal';
@@ -61,7 +78,11 @@ function StepIcon({
       {status === 'running' && !showAdvance ? (
         <Loader size={20} />
       ) : (
-        <ThemeIcon size={22} radius="xl" variant={status === 'pending' && !showAdvance ? 'default' : 'filled'}>
+        <ThemeIcon
+          size={22}
+          radius="xl"
+          variant={status === 'pending' && !showAdvance ? 'default' : 'filled'}
+        >
           {showAdvance ? (
             advanceIcon === 'play' ? (
               <IconPlayerPlay size={12} />
@@ -103,8 +124,9 @@ export function WorkflowStepper({
     if (!isStepRef(step)) return step.name;
     const all = [...pinnedSteps, ...steps, ...sharedSteps];
     const found =
-      all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId && d.version === step.version) ??
-      all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId);
+      all.find(
+        (d) => d.ownerId === step.ownerId && d.id === step.stepId && d.version === step.version,
+      ) ?? all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId);
     return found?.name ?? 'Shared step';
   };
 
@@ -145,17 +167,36 @@ export function WorkflowStepper({
   const confirmLast = confirmIndex !== null && confirmIndex === workflow.steps.length - 1;
   const confirmName = confirmIndex !== null ? nameOf(workflow.steps[confirmIndex]!) : '';
 
-  // How many steps may show their name at once. A phone fits one; a desktop row
-  // fits four before the names start truncating into ellipses.
+  /**
+   * How many steps fit side by side with their names readable — four across a
+   * desktop row, one on a phone.
+   *
+   * Past that the row becomes a list instead: the current step alone, with the
+   * rest an accordion behind a chevron. The in-between version — a few names
+   * plus a run of bare numbered circles — showed the shape of the workflow and
+   * none of its content, which reads as decoration rather than as state.
+   */
   const isPhone = useIsPhone();
-  const names = namedStepWindow(workflow.steps.length, state.stepIndex, isPhone ? 1 : 4);
-  const collapsed = names.end - names.start + 1 < workflow.steps.length;
+  const inRow = workflow.steps.length <= (isPhone ? 1 : 4);
+  const [expanded, setExpanded] = useState(false);
 
   return (
     <Paper withBorder={false} px="md" pt="xs" pb="xs">
-      <Group gap={collapsed ? 6 : 'sm'} wrap="nowrap" align="center">
+      {/* Every step stays in the DOM in index order whichever way this renders,
+          hidden rather than dropped: Transcript counts `[data-progress-fill]`
+          elements to learn how many steps there are, so a missing one would
+          renumber the workflow's scroll segments underneath it. */}
+      <Box
+        style={{
+          display: 'flex',
+          flexDirection: inRow ? 'row' : 'column',
+          alignItems: inRow ? 'center' : 'stretch',
+          gap: inRow ? 12 : 2,
+        }}
+      >
         {workflow.steps.map((step, i) => {
-          const named = i >= names.start && i <= names.end;
+          const current = i === state.stepIndex;
+          const shown = inRow || expanded || current;
           const status = state.stepStatuses[i];
           const clickable = status !== 'pending';
           const cost = state.stepCostsUsd?.[i] ?? 0;
@@ -177,10 +218,9 @@ export function WorkflowStepper({
               // icon against the column lands it exactly on the progress track.
               align="center"
               style={{
-                // A named step takes a share of the row; a collapsed one takes only
-                // its icon, which is what leaves the named ones room to be read.
-                flex: named ? 1 : '0 0 auto',
+                flex: inRow ? 1 : undefined,
                 minWidth: 0,
+                display: shown ? undefined : 'none',
                 cursor: clickable ? 'pointer' : undefined,
               }}
               onClick={
@@ -192,69 +232,47 @@ export function WorkflowStepper({
                   : undefined
               }
             >
-              {/* A collapsed step is a number and nothing else, so its name has
-                  to live somewhere: the tooltip. `Box` because `Tooltip` attaches
-                  a ref to its child and `StepIcon` is a plain function. */}
-              <Tooltip
-                label={`${i + 1}. ${nameOf(step)}`}
-                withArrow
-                fz="xs"
-                disabled={named}
-                openDelay={200}
-              >
-                <Box display="inline-flex">
-                  <StepIcon
-                    status={status}
-                    index={i}
-                    advanceLabel={
-                      i !== state.stepIndex
-                        ? undefined
-                        : status === 'running'
-                          ? 'Mark as completed'
-                          : status === 'waiting-approval'
-                            ? // Frozen while a compaction runs over the park: approve
-                              // would be refused server-side, so offer nothing.
-                              compacting
-                              ? undefined
-                              : 'Proceed to next step'
-                            : stalled
-                              ? 'Start this step'
-                              : resumable
-                                ? 'Continue to the next step'
-                                : undefined
-                    }
-                    advanceIcon={(stalled || resumable) && i === state.stepIndex ? 'play' : 'check'}
-                    // A resumable step is already done — there is nothing to confirm
-                    // overriding, so it skips the modal the other two paths use.
-                    onAdvance={() =>
-                      resumable && i === state.stepIndex
-                        ? send({
-                            type: 'workflowForceAdvance',
-                            sessionId: session.id,
-                            stepIndex: i,
-                          })
-                        : setConfirmIndex(i)
-                    }
-                  />
-                </Box>
-              </Tooltip>
-              <Stack
-                gap={4}
-                style={{
-                  flex: 1,
-                  minWidth: 0,
-                  display: named ? undefined : 'none',
-                }}
-              >
-                <Text size="xs" lh="18px" fw={i === state.stepIndex ? 600 : 500} truncate>
+              <Box display="inline-flex">
+                <StepIcon
+                  status={status}
+                  index={i}
+                  advanceLabel={
+                    i !== state.stepIndex
+                      ? undefined
+                      : status === 'running'
+                        ? 'Mark as completed'
+                        : status === 'waiting-approval'
+                          ? // Frozen while a compaction runs over the park: approve
+                            // would be refused server-side, so offer nothing.
+                            compacting
+                            ? undefined
+                            : 'Proceed to next step'
+                          : stalled
+                            ? 'Start this step'
+                            : resumable
+                              ? 'Continue to the next step'
+                              : undefined
+                  }
+                  advanceIcon={(stalled || resumable) && i === state.stepIndex ? 'play' : 'check'}
+                  // A resumable step is already done — there is nothing to confirm
+                  // overriding, so it skips the modal the other two paths use.
+                  onAdvance={() =>
+                    resumable && i === state.stepIndex
+                      ? send({
+                          type: 'workflowForceAdvance',
+                          sessionId: session.id,
+                          stepIndex: i,
+                        })
+                      : setConfirmIndex(i)
+                  }
+                />
+              </Box>
+              <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
+                <Text size="xs" lh="18px" fw={current ? 600 : 500} truncate>
                   {nameOf(step)}
                 </Text>
                 {/* Underline doubles as this step's scroll-progress track,
-                    filled imperatively by Transcript. The collapsed steps keep
-                    theirs in the DOM, hidden by the Stack above: Transcript reads
-                    the number of steps from how many `[data-progress-fill]`
-                    elements exist, so dropping one would renumber the workflow
-                    underneath it. */}
+                    filled imperatively by Transcript. */}
                 <Box
                   style={{
                     width: '100%',
@@ -301,16 +319,35 @@ export function WorkflowStepper({
                   )}
                 </Group>
               </Stack>
+              {/* The expander rides the current step's row, which is the one row
+                  that never hides — so "3/8" and the chevron stay put whether the
+                  rest of the list is open or closed, and the steps keep their
+                  index order around it. */}
+              {!inRow && current && (
+                <Group gap={2} wrap="nowrap" style={{ flexShrink: 0 }}>
+                  <Text fz={11} c="dimmed">
+                    {state.stepIndex + 1}/{workflow.steps.length}
+                  </Text>
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    size="sm"
+                    aria-label={expanded ? 'Hide the other steps' : 'Show every step'}
+                    onClick={(e) => {
+                      // The row itself jumps the transcript to this step; only the
+                      // chevron opens the list.
+                      e.stopPropagation();
+                      setExpanded((v) => !v);
+                    }}
+                  >
+                    {expanded ? <IconChevronUp size={14} /> : <IconChevronDown size={14} />}
+                  </ActionIcon>
+                </Group>
+              )}
             </Group>
           );
         })}
-        {/* Where you are, for the steps that lost their names to the window. */}
-        {collapsed && (
-          <Text fz={11} c="dimmed" style={{ flexShrink: 0 }}>
-            {state.stepIndex + 1}/{workflow.steps.length}
-          </Text>
-        )}
-      </Group>
+      </Box>
       {(waiting || advancing || stopping || stalled || resumable) && (
         // One line, not a card. This strip is on screen for as long as a step is
         // parked — which is most of a workflow's life, and the whole of it when
