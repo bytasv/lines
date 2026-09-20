@@ -13,7 +13,7 @@ import { BrandMark } from './BrandMark';
  */
 export function GateShell({ children }: { children: React.ReactNode }) {
   return (
-    <Box h="100vh" display="flex" style={{ flexDirection: 'column' }}>
+    <Box h="var(--lines-viewport)" display="flex" style={{ flexDirection: 'column' }}>
       <Group
         h={56}
         px="md"

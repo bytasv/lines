@@ -155,7 +155,7 @@ const MODES: Mode[] = [
  */
 export function LandingPage() {
   return (
-    <Box style={{ minHeight: '100vh', overflowY: 'auto' }}>
+    <Box style={{ minHeight: 'var(--lines-viewport)', overflowY: 'auto' }}>
       <Box
         component="header"
         h={56}

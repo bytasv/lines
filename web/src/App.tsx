@@ -209,7 +209,10 @@ function Shell() {
         )}
       </AppShell.Navbar>
       <AppShell.Main>
-        <Box h={`calc(100vh - ${HEADER_HEIGHT}px)`}>
+        {/* `--lines-viewport`, not `100vh`: on a phone they differ by the
+            browser toolbar and by the keyboard, and the composer lives at the
+            bottom of this box. See lib/viewport.ts. */}
+        <Box h={`calc(var(--lines-viewport) - ${HEADER_HEIGHT}px)`}>
           {!hasWorkspace ? (
             // A guest cannot open a project on somebody else's machine, so the
             // picker would be a dead end offering an action they do not have.

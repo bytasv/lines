@@ -75,7 +75,7 @@ export function DocsPage() {
         />
       </AppShell.Navbar>
       <AppShell.Main>
-        <Box h={`calc(100vh - ${HEADER_HEIGHT}px)`}>
+        <Box h={`calc(var(--lines-viewport) - ${HEADER_HEIGHT}px)`}>
           {loading && !bundle ? (
             <Center h="100%">
               <Loader size="sm" />

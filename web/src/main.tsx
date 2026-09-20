@@ -29,6 +29,7 @@ import {
   setStorageTokenProvider,
 } from './lib/storage';
 import { useDevices } from './lib/devices';
+import { trackKeyboardInset } from './lib/viewport';
 import {
   ConnectMachine,
   ConnectMachineError,
@@ -231,6 +232,11 @@ function Root() {
 // connect() resolves the bridge's port itself, so nothing has to await it here:
 // every workspace read now goes over that same socket.
 if (!CLERK_ENABLED) void connect();
+
+// Before the first render, and never torn down: the value it publishes is read
+// by CSS on every full-height surface, including the gate screens that render
+// instead of the app.
+trackKeyboardInset();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

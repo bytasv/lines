@@ -35,6 +35,7 @@ import { WorktreeModal } from './WorktreeModal';
 import { projectStatusMeta } from '../lib/format';
 import { sessionsInProject, useStore } from '../store';
 import { useIsGuest, useIsLocalMachine } from '../lib/can';
+import { useIsPhone } from '../lib/layout';
 import { send } from '../ws';
 import { BrandMark } from './BrandMark';
 import { SettingsModal } from './SettingsModal';
@@ -278,6 +279,7 @@ export function ProjectTabs() {
   // Finder opens on the host, so Browse… is hidden off-machine. The recents
   // below stay: they are exactly the projects a remote device can reach.
   const isLocal = useIsLocalMachine();
+  const isPhone = useIsPhone();
 
   const browse = () => {
     setFolderPickTarget(null); // a plain browse opens a project rather than widening one
@@ -291,13 +293,22 @@ export function ProjectTabs() {
   const recents = recentDirs.filter((d) => !projects.some((p) => p.path === d)).slice(0, 8);
 
   return (
-    <Group h="100%" px="sm" gap="sm" wrap="nowrap">
+    <Group h="100%" px={isPhone ? 'xs' : 'sm'} gap={isPhone ? 'xs' : 'sm'} wrap="nowrap">
       {/* Connection state lives in ConnectionBanner (a centered pill for every
-          non-connected state), so a dot here would only ever say "fine". */}
-      <Box ml={4} mr={4} display="flex">
-        <BrandMark />
-      </Box>
-      <Box className="brand-separator" mx={8} />
+          non-connected state), so a dot here would only ever say "fine".
+
+          Dropped on a phone along with its separator: it is the one thing in
+          this row that does nothing, and the ~110px it costs is the difference
+          between the project tabs being readable and being a sliver. The burger
+          already anchors the left edge. */}
+      {!isPhone && (
+        <>
+          <Box ml={4} mr={4} display="flex">
+            <BrandMark />
+          </Box>
+          <Box className="brand-separator" mx={8} />
+        </>
+      )}
       <ScrollArea type="never" style={{ flex: 1 }}>
         <Group gap={4} wrap="nowrap">
           {projects.map((p) => (
@@ -330,37 +341,33 @@ export function ProjectTabs() {
         </Group>
       </ScrollArea>
       <UsageIndicator />
-      <DocsButton />
-      <ThemeToggle />
-      <SettingsButton />
+      <HeaderActions />
       <UserMenu />
     </Group>
   );
 }
 
-/** Direct route into the documentation reader; Settings carries the same entry point. */
-function DocsButton() {
+/**
+ * The header's trailing controls: documentation, theme, settings.
+ *
+ * One component rather than three because of the phone branch. At 390px the row
+ * does not fit beside the project tabs — the burger, the brand, the tabs and
+ * five controls add up past the viewport, and the tabs are what gets squeezed
+ * out — so on a phone they fold into one overflow menu. Same handlers, one
+ * decision path.
+ *
+ * The settings modal has to be mounted *outside* that menu: rendered inside the
+ * dropdown, choosing "Settings" closes the menu, which unmounts the dropdown
+ * and takes the modal with it.
+ */
+function HeaderActions() {
+  const isPhone = useIsPhone();
   const navigate = useNavigate();
   const activeProject = useStore((s) => s.activeProject);
   const onDocs = useLocation().pathname.startsWith('/docs');
-  return (
-    <Tooltip label={activeProject ? 'Documentation' : 'Open a project to read its docs'}>
-      <ActionIcon
-        variant={onDocs ? 'light' : 'subtle'}
-        color="gray"
-        size="sm"
-        aria-label="Documentation"
-        disabled={!activeProject}
-        onClick={() => navigate('/docs')}
-      >
-        <IconBooks size={14} />
-      </ActionIcon>
-    </Tooltip>
-  );
-}
-
-function SettingsButton() {
-  const [opened, setOpened] = useState(false);
+  const { colorScheme, toggleColorScheme } = useMantineColorScheme();
+  const dark = colorScheme === 'dark';
+  const [settingsOpen, setSettingsOpen] = useState(false);
   // A dismissed allowlist review still needs a way back in; the gear is it.
   const guardReview = useStore((s) => s.guardReview);
   const guest = useIsGuest();
@@ -375,26 +382,88 @@ function SettingsButton() {
     new URLSearchParams(window.location.search).has('enroll') ||
     new URLSearchParams(window.location.hash.replace(/^#/, '')).has('enroll');
   useEffect(() => {
-    if (enrolling) setOpened(true);
+    if (enrolling) setSettingsOpen(true);
   }, [enrolling]);
+
+  const openDocs = () => navigate('/docs');
+  const themeLabel = dark ? 'Light mode' : 'Dark mode';
+
   return (
     <>
-      <Tooltip label={guardReview ? 'Settings — allowlist needs review' : 'Settings'}>
-        <Indicator size={6} color="yellow" disabled={!guardReview} offset={2}>
-          <ActionIcon
-            variant="subtle"
-            color="gray"
-            size="sm"
-            aria-label="Settings"
-            onClick={() => setOpened(true)}
-          >
-            <IconSettings size={14} />
-          </ActionIcon>
+      {isPhone ? (
+        // The dot rides the whole menu, since the gear it belongs to is inside.
+        <Indicator size={6} color="yellow" disabled={!guardReview} offset={4}>
+          <Menu position="bottom-end" width={220} withinPortal>
+            <Menu.Target>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                aria-label="More"
+              >
+                <IconDots size={16} />
+              </ActionIcon>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Item
+                leftSection={<IconBooks size={14} />}
+                disabled={!activeProject}
+                onClick={openDocs}
+              >
+                Documentation
+              </Menu.Item>
+              <Menu.Item
+                leftSection={dark ? <IconSun size={14} /> : <IconMoon size={14} />}
+                onClick={toggleColorScheme}
+              >
+                {themeLabel}
+              </Menu.Item>
+              <Menu.Item
+                leftSection={<IconSettings size={14} />}
+                onClick={() => setSettingsOpen(true)}
+              >
+                {guardReview ? 'Settings — allowlist needs review' : 'Settings'}
+              </Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
         </Indicator>
-      </Tooltip>
+      ) : (
+        <>
+          <Tooltip label={activeProject ? 'Documentation' : 'Open a project to read its docs'}>
+            <ActionIcon
+              variant={onDocs ? 'light' : 'subtle'}
+              color="gray"
+              size="sm"
+              aria-label="Documentation"
+              disabled={!activeProject}
+              onClick={openDocs}
+            >
+              <IconBooks size={14} />
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip label={themeLabel}>
+            <ActionIcon variant="subtle" color="gray" size="sm" onClick={toggleColorScheme}>
+              {dark ? <IconSun size={14} /> : <IconMoon size={14} />}
+            </ActionIcon>
+          </Tooltip>
+          <Tooltip label={guardReview ? 'Settings — allowlist needs review' : 'Settings'}>
+            <Indicator size={6} color="yellow" disabled={!guardReview} offset={2}>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                aria-label="Settings"
+                onClick={() => setSettingsOpen(true)}
+              >
+                <IconSettings size={14} />
+              </ActionIcon>
+            </Indicator>
+          </Tooltip>
+        </>
+      )}
       <SettingsModal
-        opened={opened}
-        onClose={() => setOpened(false)}
+        opened={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
         // A guest lands on Machines, the one pane that is theirs rather than the
         // host's — and their only way back to their own machine. Hiding the gear
         // outright would strand them on somebody else's computer.
@@ -403,17 +472,5 @@ function SettingsButton() {
         }
       />
     </>
-  );
-}
-
-function ThemeToggle() {
-  const { colorScheme, toggleColorScheme } = useMantineColorScheme();
-  const dark = colorScheme === 'dark';
-  return (
-    <Tooltip label={dark ? 'Light mode' : 'Dark mode'}>
-      <ActionIcon variant="subtle" color="gray" size="sm" onClick={toggleColorScheme}>
-        {dark ? <IconSun size={14} /> : <IconMoon size={14} />}
-      </ActionIcon>
-    </Tooltip>
   );
 }

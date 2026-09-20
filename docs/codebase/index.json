@@ -3528,7 +3528,8 @@
       "entryPoints": [
         "web/index.html",
         "web/src/App.tsx",
-        "web/public/manifest.webmanifest"
+        "web/public/manifest.webmanifest",
+        "web/src/lib/viewport.ts"
       ],
       "files": [
         "web/src/lib/layout.ts",
@@ -3539,14 +3540,21 @@
         "web/src/components/PermissionPrompt.tsx",
         "web/src/components/Composer.tsx",
         "web/src/components/Sidebar.tsx",
-        "web/src/components/SessionView.tsx"
+        "web/src/components/SessionView.tsx",
+        "web/src/lib/viewport.ts",
+        "web/src/components/ProjectTabs.tsx",
+        "web/index.html"
       ],
       "symbols": [
         "useIsPhone",
         "useIsCoarse",
         "useReveal",
         "revealActions",
-        "BestOnDesktop"
+        "BestOnDesktop",
+        "trackKeyboardInset",
+        "HeaderActions",
+        "--lines-viewport",
+        "--lines-keyboard"
       ],
       "tests": [
         "server/src/pointer.test.ts"
@@ -3558,14 +3566,20 @@
         "on a coarse pointer, hover-revealed actions are shown outright \u2014 they were unreachable on touch, and inline styles beat any CSS override",
         "dismissing the permission sheet denies: a swipe is a decision, and the safe reading is no",
         "the file browser, workflow editor and diff modals are deferred behind BestOnDesktop; the file palette is simply absent, since its only entry point is a keyboard shortcut",
-        "installable with no service worker: offline caching buys nothing for a live WebSocket client, and an SW-cached bundle against a newer bridge trips the skew path in the one case a reload cannot fix"
+        "installable with no service worker: offline caching buys nothing for a live WebSocket client, and an SW-cached bundle against a newer bridge trips the skew path in the one case a reload cannot fix",
+        "no full-height surface uses 100vh: on a phone vh is the large viewport (measured as if the browser toolbars were hidden), so a 100vh shell puts the composer under Safari's toolbar \u2014 everything uses --lines-viewport, which is dvh-based like Mantine's own AppShell",
+        "the shell subtracts the on-screen keyboard too: iOS shrinks only the visual viewport, so dvh does not move and the composer ends up under the keyboard; trackKeyboardInset measures the difference from visualViewport and publishes --lines-keyboard, while Chrome's interactive-widget=resizes-content shrinks the layout viewport so the same measurement reads ~0 and the two never stack",
+        "inputs are 16px on a phone because iOS Safari zooms the page in on focus below that and does not zoom back out on blur, leaving the app permanently magnified; Mantine's default is 14px so every field tripped it",
+        "the header's trailing controls fold into one overflow menu on a phone and the brand mark is dropped, since burger + brand + tabs + five controls exceed 390px and the tabs are what gets squeezed out",
+        "icon buttons get a 32px floor from a rule on .mantine-ActionIcon-root rather than per call site"
       ],
       "architecturalRules": [
         "adapt in place, never fork a mobile shell: a second transcript renderer either is the same code or drifts and re-loses the batching, windowing and referential-stability work",
         "PermissionPrompt's phone branch is presentation only \u2014 one component, one approval path, because two answers to 'may this run?' is a security bug rather than a layout one",
         "Transcript.tsx takes layout props only",
         "lib/layout.ts and lib/pointer.ts stay separate: a node:test imports the pure rule, so it must never reach matchMedia",
-        "a fixed width above a leaf icon becomes maw / min(Npx, 100vw - 2rem)"
+        "a fixed width above a leaf icon becomes maw / min(Npx, 100vw - 2rem)",
+        "a phone-only branch that owns state mounts that state above the branch \u2014 HeaderActions is one component rather than three because a settings modal rendered inside the overflow menu is unmounted by the very click that opens it"
       ],
       "relatedDecisions": [
         "transcript-performance",

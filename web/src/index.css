@@ -5,6 +5,22 @@
   --mantine-color-default-border: #c8d2d1;
 }
 
+/* The height a full-screen surface may actually occupy.
+
+   `dvh` rather than `vh` because on a phone they differ by the height of the
+   browser's own toolbars: `100vh` is the *large* viewport, measured as if the
+   URL bar were hidden, so a `100vh` shell puts its bottom row — the composer —
+   underneath Safari's toolbar. Mantine's own AppShell already uses `dvh`; every
+   full-height box in this app has to agree with it or the two disagree by
+   exactly the toolbar.
+
+   `--lines-keyboard` is the on-screen keyboard's share of that, published by
+   lib/viewport.ts, and 0 on every desktop. */
+:root {
+  --lines-keyboard: 0px;
+  --lines-viewport: calc(100dvh - var(--lines-keyboard));
+}
+
 @keyframes status-pulse {
   0% {
     box-shadow: 0 0 0 0 var(--status-pulse-color);
@@ -421,10 +437,31 @@
     padding-bottom: max(env(safe-area-inset-bottom), 0.25rem);
   }
 
-  /* Touch targets. Mantine's xs controls are tuned for a mouse; 32px is the
-     floor below which a finger starts missing them. */
+  /* Touch targets. Mantine's xs/sm controls are tuned for a mouse; 32px is the
+     floor below which a finger starts missing them. Applied to the components
+     rather than per call site: the app has well over a hundred icon buttons,
+     and a rule per button is a rule somebody forgets on the next one. */
+  .mantine-ActionIcon-root,
+  .mantine-CloseButton-root,
   .lines-touch-target {
     min-height: 32px;
     min-width: 32px;
+  }
+
+  /* 16px is a threshold, not a taste: iOS Safari zooms the whole page in when a
+     focused field's text is smaller, and it does not zoom back out on blur. The
+     app then sits permanently magnified, the header is off-screen to the right,
+     and the only fix a user has is a manual pinch. Mantine's default input font
+     size is `sm` (14px), so every field in the app tripped it — the composer
+     first, since that is the one field the product is about.
+
+     Set on the input element rather than via `--input-fz`: Mantine writes that
+     variable inline from the `size` prop, so a stylesheet could only win with
+     `!important`. Specificity ties here and this file is imported after
+     Mantine's, so source order decides it. The mention overlay copies its
+     metrics from the live textarea through a ResizeObserver, so the pills
+     follow. */
+  .mantine-Input-input {
+    font-size: 16px;
   }
 }

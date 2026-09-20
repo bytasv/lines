@@ -3,8 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <!-- viewport-fit=cover lets the layout reach under the iOS home indicator;
-         index.css pays the safe-area inset back where it matters. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+         index.css pays the safe-area inset back where it matters.
+
+         interactive-widget=resizes-content makes the on-screen keyboard shrink
+         the layout viewport, so a fixed-height shell keeps its bottom row (the
+         composer) above the keyboard. Chrome honours it; iOS ignores it, which
+         is why lib/viewport.ts measures the same thing from visualViewport. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <!-- Installable, deliberately without a service worker: this is a live
          WebSocket client, so offline caching buys nothing, and a cached bundle

@@ -20,10 +20,13 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
 
 - `web/src/lib/layout.ts` — `useIsPhone`, `useIsCoarse`, `useReveal`
 - `web/src/lib/pointer.ts` — `revealActions`, the pure rule behind `useReveal`
+- `web/src/lib/viewport.ts` — `trackKeyboardInset`, which publishes `--lines-keyboard`
 - `web/src/App.tsx` — navbar as a drawer on a phone, `Burger` in the header, viewport-clamped
   sidebar width
-- `web/src/index.css` — the app's first `@media` block: `env(safe-area-inset-bottom)` and touch
-  target floors
+- `web/src/components/ProjectTabs.tsx` — `HeaderActions`: the trailing controls as an icon row or
+  a single overflow menu
+- `web/src/index.css` — `--lines-viewport`/`--lines-keyboard`, and the `@media` block:
+  `env(safe-area-inset-bottom)`, the 16px input floor, and touch target floors
 - `web/src/components/BestOnDesktop.tsx` — the shared deferral panel
 - `web/public/manifest.webmanifest`, `web/public/icon-*.png` — installability
 - Adapted surfaces: `Composer`, `PermissionPrompt`, `SessionView`, `Sidebar`, `Transcript`,
@@ -36,6 +39,12 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
 - `useIsCoarse` — `pointer: coarse`. Drives anything that assumed hover exists.
 - `revealActions(hovered, coarse)` — pure; the one rule every hover-revealed control calls
 - `BestOnDesktop` — stands in for a surface that is genuinely not usable at 390px
+- `--lines-viewport` — `calc(100dvh - var(--lines-keyboard))`; the height a full-screen surface
+  may actually occupy. Every full-height box uses it instead of `100vh`
+- `trackKeyboardInset()` — measures the on-screen keyboard from `visualViewport` and publishes it
+  as `--lines-keyboard`. Started once in `main.tsx`, never torn down
+- `HeaderActions` — documentation, theme and settings: an icon row on a desktop, one overflow
+  menu on a phone
 
 ## Data flow
 
@@ -55,6 +64,25 @@ an iPad in landscape is neither.
 ## Business rules
 
 - Phone breakpoint is Mantine's default `sm` (48em/768px). No custom breakpoints were added.
+- No full-height surface uses `100vh`. On a phone `vh` is the *large* viewport — measured as if
+  the browser's toolbars were hidden — so a `100vh` shell puts its bottom row, which here is the
+  composer, underneath Safari's toolbar. Mantine's own `AppShell` already uses `dvh`, so anything
+  still on `vh` disagreed with the framework by exactly the height of the toolbar.
+- The shell also subtracts the keyboard. iOS does not resize the layout viewport when the
+  keyboard opens — it shrinks the *visual* viewport and leaves the page as tall as it was, and
+  `dvh` does not move either — so the composer ended up under the keyboard the moment it was
+  tapped. `trackKeyboardInset` measures the difference and the shell shrinks by it.
+  `interactive-widget=resizes-content` in the viewport meta does the same on Chrome; there the
+  measurement reads ~0 and adds nothing, so the two do not stack.
+- Inputs are 16px on a phone. Below that, iOS Safari zooms the page in on focus and does not zoom
+  back out on blur, which leaves the app permanently magnified with no fix but a manual pinch.
+  Mantine's default is `sm` (14px), so every field in the app tripped it.
+- The header's trailing controls fold into one overflow menu on a phone, and the brand mark is
+  dropped there. Burger, brand, tabs and five controls do not fit in 390px, and the tabs are what
+  gets squeezed out — so the row loses the one thing in it that does nothing.
+- Icon buttons have a 32px minimum on a phone, applied to `.mantine-ActionIcon-root` rather than
+  per call site: there are well over a hundred of them, and a rule per button is a rule somebody
+  forgets on the next one.
 - The sidebar is a real drawer on a phone (`useDisclosure`), and picking a session closes it —
   otherwise the thing just picked sits behind it.
 - Sidebar width is clamped against the viewport on every read, so a width saved on a 27" display
@@ -87,6 +115,10 @@ an iPad in landscape is neither.
 - `lib/layout.ts` and `lib/pointer.ts` are separate modules on purpose: a server-side `node:test`
   imports `pointer.ts`, so it must stay free of `matchMedia` and of any package that reaches for
   it. `lib/machines.ts` is kept browser-free for the same reason.
+- A phone-only branch that owns state must mount that state *above* the branch. `HeaderActions`
+  exists as one component rather than three because the settings modal cannot live inside the
+  overflow menu: choosing "Settings" closes the menu, which unmounts the dropdown and takes the
+  modal with it.
 - Fixed pixel widths on anything above a leaf icon become `maw` / `min(Npx, 100vw - 2rem)`. Most
   of the ~82 hardcoded widths in the app are menus and icon sizes and need nothing; roughly a
   dozen actually broke 390px.
