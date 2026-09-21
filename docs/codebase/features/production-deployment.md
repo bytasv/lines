@@ -137,6 +137,11 @@ are tagged with the pushed commit SHA).
   protects the chunks `index.html` references, not `index.html` itself. Against an attacker who
   can rewrite the served HTML it buys nothing; its value is against a compromised asset host and
   against accidental drift.
+- That limit has a concrete instance: Monaco's four editor surfaces (`MonacoPreviewModal`,
+  `MonacoDiffModal`, `SessionDiffModal`, `FilesView`) are `React.lazy`-loaded rather than statically
+  imported from the entry chunk, so their chunks are never named in `index.html` and carry no SRI
+  hash at all — same-origin `script-src` is what still gates them. Deliberate: bundling Monaco into
+  the entry chunk delayed first paint on every screen, including ones with no editor on them.
 
 ### Deploy mechanics
 

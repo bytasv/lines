@@ -2071,6 +2071,7 @@
         "web/src/main.tsx",
         "web/src/lib/devices.ts",
         "web/src/lib/storage.ts",
+        "web/src/lib/wake.ts",
         "web/src/components/ConnectMachine.tsx",
         "web/src/components/ChooseMachine.tsx",
         "web/src/components/ConnectingMachine.tsx",
@@ -2143,7 +2144,10 @@
         "readRuntimeInfo",
         "socketGeneration",
         "ChooseMachine",
-        "renameDevice"
+        "renameDevice",
+        "bootDial",
+        "waitForAgent",
+        "OWNER_ATTACH_GRACE_MS"
       ],
       "tests": [
         "storage/src/schema.credentials.test.ts",
@@ -2158,7 +2162,8 @@
         "server/src/relayEndToEnd.test.ts",
         "server/src/relayClient.duplicateOpen.test.ts",
         "server/src/bridgeLock.test.ts",
-        "server/src/relayClient.supersede.test.ts"
+        "server/src/relayClient.supersede.test.ts",
+        "server/src/wakeRedial.test.ts"
       ],
       "businessRules": [
         "fromAgent only accepts a frame from the socket the hub currently calls its agent; a superseded (or half-dead) bridge that keeps writing cannot inject state into a live browser channel or close a channel now owned by the bridge that replaced it",
@@ -2200,7 +2205,7 @@
         "a discovery file naming a dead pid is removed on read, not merely ignored",
         "PORT belongs to the storage server alone now; bridge and worker no longer read it",
         "a browser connecting while no bridge is attached is told deviceOffline immediately rather than left on an indefinite spinner",
-        "a bridge restart does not disconnect an owner's browser: their channel stays open and is replayed to the new bridge, which answers with a fresh hello; a guest's channel is dropped instead, not replayed, since the new bridge's protocol is unknown until its hello arrives — see session-collaboration",
+        "a bridge restart does not disconnect an owner's browser: their channel stays open and is replayed to the new bridge, which answers with a fresh hello; a guest's channel is dropped instead, not replayed, since the new bridge's protocol is unknown until its hello arrives \u2014 see session-collaboration",
         "newest bridge wins, so a reconnecting bridge can take over from a half-dead predecessor the relay has not noticed",
         "the relay persists nothing and logs no payload",
         "with RELAY_URL unset nothing dials and the local-only setup is unchanged",
@@ -2209,7 +2214,9 @@
         "machineOffline is surfaced by ConnectionBanner after bootstrap too, not only by the pre-bootstrap ConnectingMachine screen \u2014 relay-up-but-machine-gone otherwise rendered as a healthy 'connected' UI in which every action silently went nowhere",
         "the gate never connects to a machine this browser was not shown: on a first visit (no remembered device id) it renders ChooseMachine \u2014 the whole list, with health, platform, last-seen and an owner badge \u2014 and connects only after an explicit pick, even when the account has exactly one machine",
         "chooseDevice's remembered/most-recent heuristic resumes a choice rather than making one, so a remembered machine that has since been revoked puts the list back up instead of silently falling through to a different computer",
-        "a machine's name is the hostname it registered with, stored in plaintext and shown to everyone it shares a session with; PATCH /v1/devices/:id lets the owner rename it, which is the user's only control over what that hostname leaks"
+        "a machine's name is the hostname it registered with, stored in plaintext and shown to everyone it shares a session with; PATCH /v1/devices/:id lets the owner rename it, which is the user's only control over what that hostname leaks",
+        "DeviceGate dials the remembered machine optimistically (bootDial) before the device list has loaded, since rememberedDeviceId() is a synchronous localStorage read the socket need not wait behind a network round trip; the dial is dropped if the list lands without that id in it, so the gate-never-connects-to-an-unshown-machine rule still holds once the list is authoritative",
+        "/client holds a browser for up to OWNER_ATTACH_GRACE_MS only when hub.ownerId is still null in this relay process (waitForAgent) \u2014 closes a race where a browser reconnects, after a relay restart, faster than its own bridge finishes verifyDevice, which used to refuse the machine's own owner 1008 and cost a 5s backoff per attempt; a running machine with an attached bridge pays nothing, and the hold never widens access, only delays a classification"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
@@ -2248,7 +2255,9 @@
         "only instance:'desktop' is preemptible, and only after cross-checking the pid against readRuntimeInfo('bridge', 'desktop') \u2014 the lock file's word alone must never be enough to SIGTERM a pid, since pids are reused",
         "armLockRelease (process.on('exit', releaseBridgeLock)) is registered only after a successful claim, so a refused start never touches the incumbent's lock file",
         "the supersede circuit breaker lives entirely in RelayClient, never in index.ts or the lock \u2014 it only slows its own retry and never restarts or blocks anything else",
-        "hello.local is a property of the link, not the app: true only for a socket that is both unrelayed and on loopback, since the bridge binds every interface and a LAN socket is as remote as the relay for anything that opens a window on the host's screen. Absent means not local, so it fails closed"
+        "hello.local is a property of the link, not the app: true only for a socket that is both unrelayed and on loopback, since the bridge binds every interface and a LAN socket is as remote as the relay for anything that opens a window on the host's screen. Absent means not local, so it fails closed",
+        "waitForAgent's timeout is deliberately not unref()'d \u2014 unlike WorkerClient.dispose()'s timers, it is cleared the instant a bridge attaches and is bounded at a few seconds, so unref()ing it would let an idle event loop drain before the deadline and the promise would never settle",
+        "HubRegistry.sweep() also skips a hub with a browser parked in waitForAgent (hasPendingClients), so the 60s idle sweep cannot drop a hub out from under a waiter before its bridge attaches"
       ],
       "relatedDecisions": [
         "app-data-root",
@@ -2563,7 +2572,8 @@
         "the relay's health endpoint (GET / on the relay's own host) accepts an optional x-relay-secret header; a request presenting the correct RELAY_SHARED_SECRET gets a hubs array (per-device attach counts/timestamps) alongside the ordinary health body, used to triage a duplicate-bridge or flapping-relay-link report without touching Postgres \u2014 see hosted-machine-access",
         "the deploy SSH key's VPS-side authorized_keys entry forces /root/deploy-lines.sh regardless of the command CI sends \u2014 that key can run nothing else on the box; the script takes three stdin lines (GHCR token, GHCR actor, image tag)",
         "check-migration-safety.sh gates on added migration files (--diff-filter=A) between the push's before/after SHAs; editing an already-applied migration to add something destructive bypasses it \u2014 accepted because Prisma migrations are append-only by convention",
-        "images are pinned to the pushing commit's SHA: build pushes :latest and :<sha>, deploy-lines.sh exports TAG=<sha> from the third stdin line, and compose.yml reads ${TAG:-latest}; rollback is `TAG=<old-sha> docker compose --env-file lines.env up -d` with no rebuild, and an old two-line stdin caller still works and falls back to latest"
+        "images are pinned to the pushing commit's SHA: build pushes :latest and :<sha>, deploy-lines.sh exports TAG=<sha> from the third stdin line, and compose.yml reads ${TAG:-latest}; rollback is `TAG=<old-sha> docker compose --env-file lines.env up -d` with no rebuild, and an old two-line stdin caller still works and falls back to latest",
+        "Monaco's four editor surfaces are React.lazy-loaded rather than statically imported from the entry chunk, so their chunks are never named in index.html and carry no SRI hash \u2014 same-origin script-src is what still gates them; deliberate, since bundling Monaco into the entry chunk delayed first paint on every screen, including ones with no editor on them"
       ],
       "architecturalRules": [
         "npm ci is scoped by --workspace rather than --omit=optional, since --omit=optional also drops @rollup/rollup-linux-x64-gnu (an optional dependency on the same platform-binary mechanism as the Claude SDK's native binary) and breaks vite build",
@@ -2712,6 +2722,7 @@
       ],
       "files": [
         "web/src/lib/machines.ts",
+        "web/src/lib/wake.ts",
         "web/src/ws.ts",
         "web/src/store.ts",
         "web/src/lib/can.ts",
@@ -2735,23 +2746,30 @@
         "useSessionMachine",
         "useSessionMachineHealth",
         "linkedMachineHealth",
-        "unlinkedMachineHealth"
+        "unlinkedMachineHealth",
+        "wakeAction",
+        "probeExpired",
+        "wakeDebounced",
+        "bootDial"
       ],
       "tests": [
-        "server/src/machineMerge.test.ts"
+        "server/src/machineMerge.test.ts",
+        "server/src/wakeRedial.test.ts"
       ],
       "businessRules": [
         "the primary machine's connectionStatus/machineOffline/bootstrapped/protocolSkew/bridge/workerStatus/storageStatus/updateStatus are the only values the global banners read",
         "a shared machine connects automatically up to LINK_CAP; an idle non-primary link disconnects after IDLE_DISCONNECT_MS",
         "sessionMachine is per-client in-memory state, never persisted or synced",
-        "auto-selecting a freshly created session additionally requires the creating frame to have come from the primary machine"
+        "auto-selecting a freshly created session additionally requires the creating frame to have come from the primary machine",
+        "a resumed tab probes every link it holds a socket for (visibilitychange when visible, pageshow with event.persisted, debounced) and redials only one that fails the probe; a link with no socket (idle-disconnected) is left alone so a tab switch cannot defeat IDLE_DISCONNECT_MS"
       ],
       "architecturalRules": [
         "every cross-machine merge/prune/select rule lives in web/src/lib/machines.ts as a plain function, unit-testable without a socket, a store, or React",
         "prunableDraftIds/pruneDrafts/pruneDraftAttachments take the ids to delete, not the ids to keep",
         "MachineLink owns every piece of per-socket state that used to be a ws.ts module global; socketGeneration now holds per link",
         "useSessionMachine/useSessionMachineHealth must be wrapped in useShallow or zustand v5 re-renders without end on their freshly built return object",
-        "web/src/lib/machines.ts is imported directly by a server/-side test file so it can run under node:test without a browser"
+        "web/src/lib/machines.ts is imported directly by a server/-side test file so it can run under node:test without a browser",
+        "lifecycle listeners (visibilitychange, pageshow[persisted]) are registered exactly once, from wireConnectivity() in ws.ts, never from a component effect; the wake probe judges liveness against its own stamp (awaitingProbeSince) and its own timeout, never PONG_TIMEOUT_MS, so the heartbeat's stall-forgiveness (re-baselining lastPongAt on a late tick) cannot extend it"
       ],
       "relatedDecisions": [
         "session-collaboration",

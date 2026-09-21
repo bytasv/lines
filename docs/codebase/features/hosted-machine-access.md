@@ -107,6 +107,9 @@ relay pipes frames between them, and the UI that gates all of it.
 - `web/src/lib/devices.ts` — `useDevices`, the shared machine-list store
 - `web/src/lib/storage.ts` — `listDevices`/`claimDevice`/`renameDevice`/`revokeDevice`,
   `chooseDevice`, remembered-device persistence, `DESKTOP_DOWNLOAD_URL`
+- `web/src/lib/wake.ts` — `bootDial`, the optimistic pre-list dial decision the gate makes at boot
+  (see Data flow); `wakeAction`/`probeExpired`/`wakeDebounced` live in the same file but belong to
+  [multi-machine-client](multi-machine-client.md)
 - `web/src/components/ConnectMachine.tsx` — pairing screen and its loading/error siblings
 - `web/src/components/ChooseMachine.tsx` — the first-visit machine list, shown before anything
   connects
@@ -158,7 +161,17 @@ relay pipes frames between them, and the UI that gates all of it.
   control frames, cleared on `hello` and by `clearBootstrap()`; surfaced by `ConnectionBanner`
   even after bootstrap, not just by the pre-`hello` `ConnectingMachine` screen
 - `reconnectNow()` — re-dial the current machine immediately; `switchDevice` cannot serve this
-  because it early-returns when the device id is unchanged
+  because it early-returns when the device id is unchanged. No longer the only non-heartbeat
+  redial path: a resumed tab's wake probe (see [multi-machine-client](multi-machine-client.md))
+  calls `reconnectMachine(deviceId)` directly, the same lower-level primitive `reconnectNow` wraps
+- `DeviceHub.waitForAgent(timeoutMs)` (`relay/src/mux.ts`) — resolves once a bridge attaches to
+  this hub, or on timeout; used only when `ownerId` is still null, to close the race where a
+  browser reconnects (after a relay restart) faster than its own bridge finishes `verifyDevice`
+- `OWNER_ATTACH_GRACE_MS` (`relay/src/index.ts`, default 2000) — how long `/client` holds a
+  browser via `waitForAgent` before classifying it against whatever the hub knows; paid only when
+  no bridge has attached to the device in this relay process
+- `HubRegistry.sweep()` — now also skips a hub with `hasPendingClients` (a browser parked in
+  `waitForAgent`), so the 60s idle sweep cannot drop a hub out from under a waiter
 - `DeviceHub.isAgent(sink)` — whether a socket is still the hub's current bridge; every per-socket
   timer and handler on the relay checks this before acting, since a superseded socket owns nothing
 - `DeviceHub.agentAttaches` / `lastAttachAt` — how many bridges have ever claimed this device and
@@ -244,6 +257,11 @@ On the browser side, `web/src/ws.ts` stamps each socket with a monotonic generat
 does not detach its listener, so without this a frame already in flight from the old machine could
 still reach `applyServerMessage` after `clearBootstrap()` had already reset the store for the new
 one.
+
+A backgrounded tab that resumes probes its live links and redials a dead one directly, rather than
+waiting for the heartbeat to notice — see
+[multi-machine-client](multi-machine-client.md#waking-a-backgrounded-tab) for the mechanism; it is
+client-side only and changes nothing about this section's protocol.
 
 ### One bridge speaks at a time
 
@@ -352,6 +370,24 @@ protocol change.
 4. A browser connecting to `/client?device=…` is refused unless its verified Clerk `userId`
    equals `hub.ownerId`.
 
+### The owner-attach race
+
+`hub.ownerId` is null until step 3 completes, and a relay restart puts the browser back at step 4
+before its own bridge has finished step 3 again — measured at roughly a one-second gap. Without
+the grace below, `/client` reads that null as "not the owner," routes the machine's own user down
+the guest path, and `authorizeClient` denies an `owner`-shaped grant — so the owner is refused
+`1008` on their own machine and backs off `UNAUTHORIZED_RETRY_DELAY_MS` (5s) before trying again.
+Repeated over a flapping relay, that is the difference between a reload taking about a second and
+taking the better part of a minute.
+
+`handleClient` now calls `hub.waitForAgent(OWNER_ATTACH_GRACE_MS)` before classifying a browser,
+but only when `hub.ownerId === null` — a running machine with an already-attached bridge pays
+nothing. If a bridge attaches inside the grace window, the wait resolves and classification
+proceeds normally (owner or guest, correctly this time); if it does not, the browser is
+classified exactly as it always was. The trust rule is unchanged: ownership is still only ever
+learned from a bridge that proved the device secret, never inferred from storage or from the
+browser's own claim.
+
 ### Un-pairing a machine
 
 Two ways in, one end state — the row is tombstoned and the machine's next `register` mints a
@@ -388,6 +424,16 @@ used because these responses carry Clerk-authenticated user data.
 4. One or more devices, with a remembered choice → `chooseDevice` picks one, `ws.ts` gets
    `setDeviceId` and `connect()` is called. A remembered machine that has since been revoked no
    longer falls through to a different one; `chosen` is null and the list comes back.
+   - Before step 1 resolves, `DeviceGate` runs `bootDial(remembered, devices, dialed)`
+     (`web/src/lib/wake.ts`) against `rememberedDeviceId()` — a synchronous localStorage read — and
+     calls `connectMachine` (not `switchDevice`) on its `dial` result, so the socket does not sit
+     behind the `/v1/devices` round trip it does not actually need. `primaryDeviceId` stays unset
+     until step 4's own effect runs and finds the socket already open, so a wrong optimistic guess
+     never becomes the machine the UI is on. When the list lands, `bootDial`'s `drop` result calls
+     `disconnectMachine` on a dialled id that turns out not to be in the account's list —
+     `chooseDevice`'s most-recently-seen fallback means the optimistic guess and the eventual
+     `chosen` can disagree, and a left-connected wrong guess would retry on every `1008` and
+     re-read the device list each time.
 5. Between the socket opening and its first `hello`, `bootstrapped` is false —
    `ConnectingMachine` renders instead of the app, naming the chosen machine. It escalates either
    after 6s with no `hello` **or** immediately on a `deviceOffline` frame, which is a fact where
@@ -446,7 +492,9 @@ refuse.
   one device; a superseded agent's `data`/`close` frames are refused and cannot touch the live
   agent's channel; `attachAgent` replays `open` only to the new sink and reports who it superseded
   (including that predecessor being `terminate()`d, not just closed); `agentAttaches` increments
-  per attach; `HubRegistry.list()`'s per-hub summary.
+  per attach; `HubRegistry.list()`'s per-hub summary; `waitForAgent` resolving on attach, resolving
+  immediately when already attached, and timing out when none arrives; a hub with a pending waiter
+  surviving `sweep()` that an idle hub with no waiter does not.
 - `relay/src/agentHeartbeat.test.ts` — spawns real relay processes with the intervals compressed
   by env: an agent answering `pong` survives, a silent one is reaped and a later browser gets
   `deviceOffline`, the re-verify asymmetry both ways against a stub storage (403 drops the
@@ -472,6 +520,9 @@ refuse.
 - `storage/src/devices.unpair.test.ts` — the unpair route's failure modes. **Opt-in**: the only
   test in the repo needing a real Postgres, gated on `STORAGE_TEST_DATABASE_URL` (deliberately not
   `DATABASE_URL`, which in a checkout points at the deployment's database) and skipped without it.
+- `server/src/wakeRedial.test.ts` — imports `web/src/lib/wake.ts` directly; covers `bootDial`'s
+  four cases (see [multi-machine-client](multi-machine-client.md) for the full list, shared with
+  the wake-probe coverage there).
 - No web test harness in this repo for the gate's UI flows; verified manually against the
   deployed relay (device rejection close code, re-pairing after revoke, gate transition on a live
   `hello`, sleep/wake recovery, and both escape hatches end to end).
@@ -623,6 +674,14 @@ refuse.
 - `machineOffline` is surfaced by `ConnectionBanner` after bootstrap too, not only by the
   pre-bootstrap `ConnectingMachine` screen — "relay up, machine gone" used to render as a healthy
   "connected" UI in which every action silently went nowhere.
+- `/client` holds a browser for up to `OWNER_ATTACH_GRACE_MS` only when `hub.ownerId` is still
+  null in this relay process — a running machine with an attached bridge is classified
+  immediately, exactly as before. The hold never widens access; it only delays a classification
+  that would otherwise be made on stale information.
+- `DeviceGate` dials the remembered machine optimistically, before the device list has loaded (see
+  Data flow, "The gate"), and drops that dial if the list lands without the id in it — the gate
+  never connects to a machine this browser has not been shown remains true; the optimistic dial is
+  provisional until the list confirms it, not an exception to that rule.
 
 ## Architectural rules
 
@@ -751,6 +810,14 @@ refuse.
 - The supersede circuit breaker lives entirely in `RelayClient`, never in `index.ts` or the lock:
   it is peripheral by the same rule as the rest of this client — it only slows its own retry and
   never restarts or blocks anything else.
+- `waitForAgent`'s timeout is deliberately not `unref()`'d — an unref'd timer lets an otherwise-idle
+  event loop drain before the deadline fires, so the promise it guards would never settle at all.
+  It is cleared the instant a bridge attaches and is bounded at a few seconds, so it is not the
+  kind of long-lived timer `unref()` exists for elsewhere in this feature (contrast
+  `WorkerClient.dispose()` above).
+- `DeviceGate`'s optimistic dial calls `connectMachine`, never `switchDevice`: `primaryDeviceId`
+  must stay unset until the ordinary `chosen` effect runs, so a wrong guess can never become the
+  machine the UI considers itself on, even briefly.
 
 ## Related decisions
 

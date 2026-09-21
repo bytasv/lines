@@ -154,17 +154,10 @@ would close over), stamped with `awaitingProbeSince`, and judged against that st
 idle-disconnected on purpose (`IDLE_DISCONNECT_MS`) and is left alone; reviving it on every tab
 switch would defeat that.
 
-### Optimistic dial at boot
-
-`main.tsx`'s device gate used to compute `chosen` as null while the device list was still in
-flight, even though `rememberedDeviceId()` is a synchronous localStorage read — so the socket sat
-behind a network round trip it did not need to. `bootDial` now dials the remembered machine via
-`connectMachine` (not `switchDevice`, so `primaryDeviceId` stays unset until the ordinary `chosen`
-effect runs and finds the socket already open) while the list is in flight, and drops it once the
-list lands if the remembered id turns out not to be in it — `chooseDevice`'s fallback to the
-most-recently-seen machine means the optimistic guess and the eventual `chosen` can disagree, and
-leaving a wrong guess connected would retry it on every `1008` and re-read the device list each
-time.
+`bootDial` (also in `lib/wake.ts`) decides the optimistic pre-list dial the gate makes at boot —
+see [hosted-machine-access](hosted-machine-access.md#the-gate) for that flow; it lives beside
+`wakeAction` because both are the same kind of pure, dependency-free decision this feature keeps
+out of `ws.ts` and `main.tsx`.
 
 ## Dependencies
 
@@ -212,6 +205,9 @@ time.
   synced, and reset to nothing on reload (re-derived from the next round of `hello`s).
 - Auto-selecting a freshly created session additionally requires the creating frame to have come
   from the primary machine; a session created elsewhere never steals the current view.
+- A resumed tab probes every link it holds a socket for and redials only one that fails the
+  probe; an idle-disconnected link (`socket === null`) stays down — a tab switch must not defeat
+  `IDLE_DISCONNECT_MS`.
 
 ## Architectural rules
 
@@ -236,7 +232,14 @@ time.
 - `web/src/lib/machines.ts` is imported directly by a `server/`-side test file
   (`machineMerge.test.ts`) purely so it can run under `node:test` without a browser — this is the
   same "read the file as a dependency-free module" pattern used for `web/src/lib/identityRule.ts`
-  and is not a real cross-workspace dependency.
+  and is not a real cross-workspace dependency; `web/src/lib/wake.ts` and
+  `server/src/wakeRedial.test.ts` follow the identical pattern.
+- Lifecycle listeners (`visibilitychange`, `pageshow[persisted]`) are registered exactly once,
+  from `wireConnectivity()` in `ws.ts`, never from a component effect — reconnect policy stays
+  owned by `ws.ts`, and a component would register one listener per mount. The wake probe uses its
+  own stamp (`awaitingProbeSince`) and its own timeout (`WAKE_PROBE_TIMEOUT_MS`), never
+  `PONG_TIMEOUT_MS`, so the heartbeat's stall-forgiveness (`ws.ts`'s late-tick re-baseline of
+  `lastPongAt`) cannot extend it.
 
 ## Related decisions
 
