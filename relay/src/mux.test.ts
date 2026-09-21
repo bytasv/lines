@@ -78,6 +78,111 @@ test('a reattaching agent is replayed the live channels and tokens', () => {
   assert.equal(first.frames().filter((f) => f.t === 'open').length, 1, 'only its own original open');
 });
 
+test('a guest channel is dropped on re-attach rather than replayed', () => {
+  const hub = new DeviceHub('d1');
+  const first = fakeSink();
+  hub.attachAgent(first.sink);
+  const owner = fakeSink();
+  const guest = fakeSink();
+  const ownerCh = hub.openChannel('owner', 'ctrl', owner.sink, 'tok');
+  hub.openChannel('guest', 'ctrl', guest.sink, 'gtok', {
+    hostUserId: 'owner',
+    scope: 'machine',
+    caps: { prompt: true },
+  });
+
+  const second = fakeSink();
+  hub.attachAgent(second.sink);
+
+  // The new bridge has not said `hello` yet, so nothing here knows whether it is
+  // new enough to enforce the grant. Replaying the guest to a bridge that ignores
+  // the field would serve them as the owner.
+  const opens = second.frames().filter((f) => f.t === 'open');
+  assert.deepEqual(opens, [{ t: 'open', ch: ownerCh, userId: 'owner', token: 'tok' }]);
+  // 1008, so the browser reconnects and re-runs the /client gate — which is the
+  // check that could not be made at attach time.
+  assert.equal(guest.closed()?.code, 1008);
+  assert.equal(owner.closed(), null, 'an owner still survives a bridge restart');
+  assert.equal(hub.channelCount, 1);
+  assert.equal(hub.guestChannels().length, 0);
+});
+
+test('a guest is refused for a stale bridge only while one is attached', () => {
+  const hub = new DeviceHub('d1');
+  // Nothing has ever attached: `appProtocol` is null because no bridge has stated
+  // a version, not because an old one is running. Refusing here would close an
+  // authorized guest `unauthorized` — byte-identical to a revoked grant — when the
+  // honest answer is that the host is asleep.
+  assert.equal(hub.guestNeedsNewerBridge(3), false);
+
+  const agent = fakeSink();
+  hub.attachAgent(agent.sink);
+  assert.equal(hub.guestNeedsNewerBridge(3), true, 'attached but silent about its version');
+
+  hub.appProtocol = 2;
+  assert.equal(hub.guestNeedsNewerBridge(3), true);
+  hub.appProtocol = 3;
+  assert.equal(hub.guestNeedsNewerBridge(3), false);
+  hub.appProtocol = 4;
+  assert.equal(hub.guestNeedsNewerBridge(3), false);
+
+  // Detaching forgets the version, and with it the reason to refuse: the guest
+  // should now be told the device is offline instead.
+  hub.detachAgent(agent.sink);
+  assert.equal(hub.guestNeedsNewerBridge(3), false);
+});
+
+test('waitForAgent resolves as soon as a bridge attaches', async () => {
+  const hub = new DeviceHub('d1');
+  const waiting = hub.waitForAgent(5_000);
+  assert.equal(hub.hasPendingClients, true);
+
+  const agent = fakeSink();
+  hub.attachAgent(agent.sink);
+
+  assert.equal(await waiting, true);
+  assert.equal(hub.hasPendingClients, false, 'the waiter is released, not left registered');
+});
+
+test('waitForAgent does not wait at all when a bridge is already attached', async () => {
+  const hub = new DeviceHub('d1');
+  hub.attachAgent(fakeSink().sink);
+  // The common case, and it must cost nothing: every /client connection to a
+  // running machine goes through here.
+  assert.equal(await hub.waitForAgent(5_000), true);
+  assert.equal(hub.hasPendingClients, false);
+});
+
+test('waitForAgent gives up when no bridge arrives', async () => {
+  const hub = new DeviceHub('d1');
+  assert.equal(await hub.waitForAgent(10), false);
+  // Cleared on the timeout too, or the sweep below could never drop the hub.
+  assert.equal(hub.hasPendingClients, false);
+});
+
+test('a hub with a browser waiting on it survives the sweep', async () => {
+  // It holds no channel and has no agent, so the plain "idle hub" test drops it
+  // — and the bridge would then attach to a fresh hub while the waiter counts
+  // down against the abandoned one.
+  const hubs = new HubRegistry();
+  const hub = hubs.get('d1');
+  const waiting = hub.waitForAgent(5_000);
+  hubs.sweep();
+  assert.equal(hubs.size, 1);
+  assert.equal(hubs.get('d1'), hub, 'the same hub the waiter is parked on');
+
+  hub.attachAgent(fakeSink().sink);
+  assert.equal(await waiting, true);
+});
+
+test('an idle hub with nobody waiting is still swept', async () => {
+  const hubs = new HubRegistry();
+  const hub = hubs.get('d1');
+  assert.equal(await hub.waitForAgent(10), false);
+  hubs.sweep();
+  assert.equal(hubs.size, 0);
+});
+
 test('a superseded agent cannot speak into a live channel', () => {
   const hub = new DeviceHub('d1');
   const first = fakeSink();

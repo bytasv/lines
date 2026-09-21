@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { Route, Routes, useNavigate, useParams } from 'react-router-dom';
-import { AppShell, Box, Burger, Center, Stack, Text, Title } from '@mantine/core';
+import { AppShell, Box, Burger, Center, Loader, Stack, Text, Title } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { IconMessageChatbot } from '@tabler/icons-react';
 import { useStore } from './store';
@@ -16,17 +16,29 @@ import { UpdateBanner } from './components/UpdateBanner';
 import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/workflow/WorkflowEditor';
 import type { WorkflowEditorView } from './components/workflow/WorkflowEditor';
-import { MonacoPreviewModal } from './components/MonacoPreviewModal';
 import { LoginModal } from './components/LoginModal';
 import { OpenaiLoginModal } from './components/OpenaiLoginModal';
 import { GuardAllowlistReviewModal } from './components/GuardAllowlistReviewModal';
 import { McpConnectionsReviewModal } from './components/McpConnectionsReviewModal';
 import { MemoryReviewModal } from './components/MemoryReviewModal';
 import { FilePalette } from './components/FilePalette';
-import { FilesView } from './components/FilesView';
 import { DocsPage } from './components/docs/DocsPage';
 import { useIsPhone } from './lib/layout';
 import { send } from './ws';
+
+/**
+ * The two editor surfaces reachable from here, split out of the entry chunk.
+ *
+ * Monaco is several megabytes, and a static import anywhere in this graph puts
+ * all of it in front of the first paint — for every screen, including the ones
+ * with no editor on them. Lazy, they are fetched when a file or a diff is
+ * actually opened. Each of these modules imports `lib/monacoSetup` itself, so
+ * the CDN override still runs before the editor mounts.
+ */
+const FilesView = lazy(() => import('./components/FilesView').then((m) => ({ default: m.FilesView })));
+const MonacoPreviewModal = lazy(() =>
+  import('./components/MonacoPreviewModal').then((m) => ({ default: m.MonacoPreviewModal })),
+);
 
 const HEADER_HEIGHT = 56;
 const SIDEBAR_MIN = 280;
@@ -41,6 +53,10 @@ function clampSidebar(w: number) {
 }
 
 export function App() {
+  // Subscribed to as a boolean so the lazy chunk is requested when a preview is
+  // opened and not before — mounting the modal unconditionally would fetch
+  // Monaco on every boot, which is the thing this split exists to avoid.
+  const previewOpen = useStore((s) => s.filePreview !== null);
   return (
     <>
       <Routes>
@@ -54,7 +70,11 @@ export function App() {
           AppShell parentage never mattered. The Cmd+P palette is here for the
           same reason — the shortcut works wherever you are. */}
       <FilePalette />
-      <MonacoPreviewModal />
+      {previewOpen && (
+        <Suspense fallback={null}>
+          <MonacoPreviewModal />
+        </Suspense>
+      )}
       <LoginModal />
       <OpenaiLoginModal />
       <GuardAllowlistReviewModal />
@@ -232,7 +252,15 @@ function Shell() {
               <ProjectPicker />
             )
           ) : sidebarMode === 'files' ? (
-            <FilesView />
+            <Suspense
+              fallback={
+                <Center h="100%">
+                  <Loader />
+                </Center>
+              }
+            >
+              <FilesView />
+            </Suspense>
           ) : selectedSessionId && selectedSession ? (
             <ErrorBoundary key={selectedSessionId}>
               <SessionView sessionId={selectedSessionId} />

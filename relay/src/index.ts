@@ -75,6 +75,16 @@ const GUEST_REAUTH_MS = Number(process.env.RELAY_GUEST_REAUTH_MS ?? 60_000);
  * those fields safe without a RELAY_PROTOCOL_VERSION bump.
  */
 const COLLAB_MIN_PROTOCOL = Number(process.env.RELAY_COLLAB_MIN_PROTOCOL ?? 2);
+/**
+ * How long a browser waits for a bridge to attach before the /client gate gives
+ * up and classifies it against what the relay knows.
+ *
+ * Only ever paid when no bridge has attached for the device in this process, so
+ * a running machine never sees it. Sized against the measured race: a browser
+ * reconnects roughly a second before its bridge finishes `verifyDevice`, and
+ * losing that race costs the browser a five-second backoff, not another second.
+ */
+const OWNER_ATTACH_GRACE_MS = Number(process.env.RELAY_OWNER_ATTACH_GRACE_MS ?? 2000);
 
 if (!AUTH_DISABLED && !CLERK_SECRET_KEY) {
   console.error('[relay] CLERK_SECRET_KEY is required unless RELAY_AUTH_DISABLED=1');
@@ -402,6 +412,25 @@ async function handleClient(
   const hub = hubs.get(deviceId);
 
   /**
+   * Give the bridge a moment before deciding who this is.
+   *
+   * `ownerId` is null until a bridge authenticates, and the gate below reads
+   * "not the owner" off that null — so a browser that reconnects during a relay
+   * restart, a second ahead of its own bridge, is refused `1008` and backs off
+   * five seconds. Repeated over a flapping bridge that is the difference between
+   * a reload taking one second and taking a minute.
+   *
+   * Costs nothing once a bridge has attached, and nothing in the no-auth dev
+   * path. A machine that is genuinely away pays the grace once per attempt and
+   * then gets the same answer it would have got immediately.
+   */
+  if (!AUTH_DISABLED && hub.ownerId === null) {
+    await hub.waitForAgent(OWNER_ATTACH_GRACE_MS);
+    // The browser may have given up while we held it.
+    if (ws.readyState !== ws.OPEN) return;
+  }
+
+  /**
    * Owner fast path, byte for byte what it always was: the machine's own user
    * reaches it without storage being consulted at all — no added latency, no new
    * failure surface, and no dependency on the share tables for the common case.
@@ -413,8 +442,13 @@ async function handleClient(
   let grant: AttestedGrant | undefined;
   if (!AUTH_DISABLED && hub.ownerId !== userId) {
     // A bridge too old to understand the grant would serve this guest as if they
-    // owned the machine, so the version check comes before the grant lookup.
-    if (hub.appProtocol === null || hub.appProtocol < COLLAB_MIN_PROTOCOL) {
+    // owned the machine, so the version check comes before the grant lookup. It
+    // asks only about an *attached* bridge: with the host asleep there is nothing
+    // to be too old, and refusing here would give an authorized guest the same
+    // `unauthorized` a revoke does instead of the offline state `openChannel`
+    // sends. Nothing after this changes — `authorizeClient` still runs for every
+    // non-owner, so an unauthorized one is refused identically either way.
+    if (hub.guestNeedsNewerBridge(COLLAB_MIN_PROTOCOL)) {
       console.warn(
         `[relay] refusing ${userId} on device ${deviceId} (owner ${hub.ownerId ?? 'unknown'}): ` +
           `bridge speaks app v${hub.appProtocol ?? '?'}, sharing needs v${COLLAB_MIN_PROTOCOL}`,

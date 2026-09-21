@@ -17,6 +17,9 @@ import {
   useComputedColorScheme,
 } from '@mantine/core';
 import { DiffEditor } from '@monaco-editor/react';
+// See MonacoPreviewModal: every module that mounts an editor owns this import,
+// and React.lazy is what keeps it out of the entry chunk.
+import '../lib/monacoSetup';
 import {
   IconAlertTriangle,
   IconArrowDown,

@@ -30,6 +30,8 @@ anything newly created — and are the highest-risk part of this feature for exa
 
 - `web/src/lib/machines.ts` — the pure per-machine reducers: `mergeMachineSessions`,
   `prunableDraftIds`, `shouldClaimSelection`, `emptyMachine`, `MachineSlice`
+- `web/src/lib/wake.ts` — the pure per-link wake decision: `wakeAction`, `probeExpired`,
+  `wakeDebounced`, `bootDial`
 - `web/src/ws.ts` — `MachineLink`, the `links: Map<deviceId, MachineLink>`, `connectMachine`,
   `disconnectMachine`, `linkFor`/`linkForMessage`, per-link heartbeat/retry/auth-relay/idle
   timers, `fileRequest`'s machine-aware default
@@ -72,6 +74,14 @@ anything newly created — and are the highest-risk part of this feature for exa
 - `linkedMachineHealth` / `unlinkedMachineHealth` — the three-state model: not linked (only
   `lastSeenAt`, no live claim), linked with no bridge attached (the relay's `deviceOffline`
   frame), and attached (then `worker`/`storage` sub-health)
+- `wakeAction(link, now)` — what a resumed tab does with one link: `'redial'` for a socket already
+  `CLOSED`/`CLOSING`, `'probe'` for `OPEN` (never a close-on-suspicion), `'none'` for `CONNECTING`
+  or a probe already in flight
+- `probeExpired(link, now)` — judges a wake probe against its **own** stamp
+  (`awaitingProbeSince`), not `lastPongAt` alone — the heartbeat's stall guard re-baselines
+  `lastPongAt` on a late tick, which a resumed tab's first tick always is
+- `bootDial(remembered, devices, dialed)` — `{ dial, drop }`: dial the remembered machine while
+  the device list is still in flight, and drop it once the list lands if it isn't in there
 
 ## Data flow
 
@@ -125,6 +135,37 @@ into the wrong machine unaware actually happens. Both read `useSessionMachineHea
 looks up the session's *own* `MachineSlice` rather than the primary's — a shared session hosted on
 a sleeping laptop must show offline even while the machine in front of the user is fine.
 
+### Waking a backgrounded tab
+
+A backgrounded tab is throttled, so a socket the OS tore down while it slept is otherwise only
+discovered by the heartbeat — up to ~11.5s (a full `PONG_TIMEOUT_MS` plus `RECONNECT_DELAY_MS`) —
+and the heartbeat's own stall guard makes that worse: a resumed tab's first tick is always late,
+so the guard re-baselines `lastPongAt` and forgives its way into a second full window.
+
+`wireConnectivity()` listens for `document.visibilitychange` (acting only when `!document.hidden`)
+and `window.pageshow` guarded by `event.persisted` (bfcache restore, which on iOS Safari may not
+come with a visibility change at all), debounced by `WAKE_DEBOUNCE_MS` so the two collapse into
+one wake. For every link that currently holds a socket — the same "a shared machine must be back
+on screen too" reasoning as the `online` handler — a `CLOSED`/`CLOSING` socket is redialled via
+`reconnectMachine` at once; an `OPEN` one is probed rather than closed on suspicion: a ping goes
+out through `writeToLink` (never `socket.send`, to avoid the e2ee plaintext-downgrade the bridge
+would close over), stamped with `awaitingProbeSince`, and judged against that stamp — not
+`PONG_TIMEOUT_MS` — after `WAKE_PROBE_TIMEOUT_MS`. A link with no socket at all was
+idle-disconnected on purpose (`IDLE_DISCONNECT_MS`) and is left alone; reviving it on every tab
+switch would defeat that.
+
+### Optimistic dial at boot
+
+`main.tsx`'s device gate used to compute `chosen` as null while the device list was still in
+flight, even though `rememberedDeviceId()` is a synchronous localStorage read — so the socket sat
+behind a network round trip it did not need to. `bootDial` now dials the remembered machine via
+`connectMachine` (not `switchDevice`, so `primaryDeviceId` stays unset until the ordinary `chosen`
+effect runs and finds the socket already open) while the list is in flight, and drops it once the
+list lands if the remembered id turns out not to be in it — `chooseDevice`'s fallback to the
+most-recently-seen machine means the optimistic guess and the eventual `chosen` can disagree, and
+leaving a wrong guess connected would retry it on every `1008` and re-read the device list each
+time.
+
 ## Dependencies
 
 - [session-collaboration](session-collaboration.md) — the grant model that determines which
@@ -148,10 +189,15 @@ a sleeping laptop must show offline even while the machine in front of the user 
   reporting is dropped but only its own; an unstamped session with no claimant is kept; a draft
   for an unknown session is never pruned; a session created on another machine never steals the
   selection
-- No automated coverage for the transport itself (`ws.ts`'s socket lifecycle, timers, the link
-  cap) — the web workspace has no test runner; verified by hand per the plan's own checklist
+- `server/src/wakeRedial.test.ts` — imports `web/src/lib/wake.ts` directly, the same
+  dependency-free pattern: every `readyState` → expected wake action, a pong that lands after the
+  probe stamp reading as healthy, the heartbeat's stall-forgiveness *not* being able to rescue an
+  unanswered probe, the wake debounce window, and `bootDial`'s four cases (nothing remembered,
+  remembered present, remembered absent → drop, empty list → drop).
+- No automated coverage for the rest of the transport (`ws.ts`'s socket lifecycle, timers, the
+  link cap) — the web workspace has no test runner; verified by hand per the plan's own checklist
   (draft survival across a reconnect, per-machine health while the primary stays healthy, file
-  reads routing to the session's host)
+  reads routing to the session's host, a backgrounded tab's redial time)
 
 ## Business rules
 

@@ -2200,7 +2200,7 @@
         "a discovery file naming a dead pid is removed on read, not merely ignored",
         "PORT belongs to the storage server alone now; bridge and worker no longer read it",
         "a browser connecting while no bridge is attached is told deviceOffline immediately rather than left on an indefinite spinner",
-        "a bridge restart does not disconnect the browser: channels stay open and are replayed to the new bridge, which answers with a fresh hello",
+        "a bridge restart does not disconnect an owner's browser: their channel stays open and is replayed to the new bridge, which answers with a fresh hello; a guest's channel is dropped instead, not replayed, since the new bridge's protocol is unknown until its hello arrives — see session-collaboration",
         "newest bridge wins, so a reconnecting bridge can take over from a half-dead predecessor the relay has not noticed",
         "the relay persists nothing and logs no payload",
         "with RELAY_URL unset nothing dials and the local-only setup is unchanged",
@@ -2591,7 +2591,8 @@
         "storage/src/index.ts",
         "relay/src/index.ts",
         "server/src/index.ts",
-        "web/src/components/CollaboratorsSection.tsx"
+        "web/src/components/CollaboratorsSection.tsx",
+        "web/src/components/DevicesSection.tsx"
       ],
       "files": [
         "shared/types.ts",
@@ -2621,7 +2622,8 @@
         "web/src/components/PromptAuthor.tsx",
         "web/src/components/QueuedMessages.tsx",
         "web/src/components/PermissionPrompt.tsx",
-        "web/src/components/CollaboratorsSection.tsx"
+        "web/src/components/CollaboratorsSection.tsx",
+        "web/src/components/DevicesSection.tsx"
       ],
       "symbols": [
         "ShareCaps",
@@ -2663,6 +2665,8 @@
         "revoking a share, or unpairing/deleting the device, tombstones every grant on that device in one transaction",
         "a guest never gets a UserContext of their own and never sets clerkToken or triggers syncNow",
         "a guest's file access is clamped to the cwds of their granted sessions; the ~/.claude/plans auto-approve exception is owner-only",
+        "the relay's bridge-too-old check for a guest (guestNeedsNewerBridge) applies only while a bridge is attached, so a sleeping host reads as offline, not as a revoked grant",
+        "a guest channel is dropped, not replayed, when its device's bridge re-attaches, since the new bridge's protocol is unknown until its hello arrives; the guest's browser reconnects and re-runs the /client gate",
         "revocation of a live guest channel has a bound, up to GUEST_REAUTH_MS (60s)",
         "a promptNeedsApproval guest's prompt lands queuePaused on the owner's existing queue, no new state machine",
         "presence and attribution identity always come from the connection's attested identity, never a client-supplied field",

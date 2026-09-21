@@ -1,4 +1,4 @@
-import { memo, useState, type ReactNode } from 'react';
+import { lazy, memo, Suspense, useState, type ReactNode } from 'react';
 import {
   ActionIcon,
   Badge,
@@ -22,9 +22,16 @@ import type { ToolBlock, ToolGroupItem, TranscriptItem } from '../lib/transcript
 import { groupSummary, isEditTool, isQuestionTool, toolDiff } from '../lib/transcript';
 import { isAgentTool } from '../lib/agents';
 import { BODY_CAP, toolFields, toolSummary, type ToolField } from '../lib/toolFields';
-import { MonacoDiffModal } from './MonacoDiffModal';
 import { QuestionReview } from './QuestionPrompt';
 import { TaskBody, TaskHeader } from './TaskCall';
+
+// Lazy, and mounted only while open: a transcript can hold hundreds of edit
+// tool cards, and a static import would pull Monaco into the entry chunk for
+// all of them. The module imports `lib/monacoSetup` itself, so the CDN override
+// still runs before the editor mounts.
+const MonacoDiffModal = lazy(() =>
+  import('./MonacoDiffModal').then((m) => ({ default: m.MonacoDiffModal })),
+);
 
 /** The tool calls a subagent made, for the card's activity subtitle. */
 function nestedTools(items: TranscriptItem[]): ToolBlock[] {
@@ -332,14 +339,16 @@ export const ToolCallCard = memo(function ToolCallCard({
           </Box>
         )}
       </Collapse>
-      {diff && (
-        <MonacoDiffModal
-          opened={diffOpen}
-          onClose={() => setDiffOpen(false)}
-          filePath={diff.filePath}
-          before={diff.before}
-          after={diff.after}
-        />
+      {diff && diffOpen && (
+        <Suspense fallback={null}>
+          <MonacoDiffModal
+            opened={diffOpen}
+            onClose={() => setDiffOpen(false)}
+            filePath={diff.filePath}
+            before={diff.before}
+            after={diff.after}
+          />
+        </Suspense>
       )}
     </Box>
   );

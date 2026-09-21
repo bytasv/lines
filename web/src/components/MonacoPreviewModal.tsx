@@ -1,6 +1,11 @@
 import { Modal, Text, Center, Loader, Alert, Box, Group } from '@mantine/core';
 import { useComputedColorScheme } from '@mantine/core';
 import { Editor } from '@monaco-editor/react';
+// Side-effect import, owned by every module that mounts an editor: it points
+// Monaco at this bundle instead of at a CDN, and it has to have run before the
+// first mount. This module is only reached through React.lazy, so evaluating
+// the chunk is what orders it. See the module for why it is a security property.
+import '../lib/monacoSetup';
 import { projectRoots } from '@lines/shared';
 import { useStore } from '../store';
 import { useIsPhone } from '../lib/layout';

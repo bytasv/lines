@@ -19,6 +19,7 @@ import {
   IconPencil,
   IconPlus,
   IconTrash,
+  IconUserPlus,
   IconX,
 } from '@tabler/icons-react';
 import { useStore } from '../store';
@@ -40,9 +41,11 @@ import {
   unlinkedMachineHealth,
   type MachineHealth,
 } from '../lib/machineHealth';
+import { SHARING_ENABLED } from '../lib/shares';
 import { switchDevice } from '../ws';
 import { DownloadDesktopApp } from './DownloadDesktopApp';
 import { MachineDot } from './MachineDot';
+import { ShareModal } from './ShareModal';
 
 /**
  * The machines this account can run agent turns on.
@@ -63,6 +66,13 @@ export function DevicesSection() {
   const [actionError, setActionError] = useState<string | null>(null);
   /** The machine being renamed, and the text so far. */
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  /**
+   * The machine whose share dialog is open. Settings is where people look for
+   * "give someone else access", and until this existed the only way in was the
+   * machine-scope link inside a *session's* share dialog — so a user with no
+   * session open concluded the feature did not exist.
+   */
+  const [sharing, setSharing] = useState<Device | null>(null);
   const connected = useStore((s) => s.connectionStatus === 'connected');
   // Health of the machine this browser is actually linked to comes off the socket,
   // not off the device row: the row is an HTTP snapshot, and only the link knows
@@ -154,8 +164,9 @@ export function DevicesSection() {
   return (
     <Stack gap="sm">
       <Text size="sm" c="dimmed">
-        Lines runs the agent on your own computer. These are the machines paired with this
-        account; one is active at a time, and sessions belong to that machine’s files.
+        Lines runs the agent on your own computer. These are the machines you can reach — the
+        ones paired with this account, plus any shared with you; one is active at a time, and
+        sessions belong to that machine’s files.
       </Text>
 
       {error && (
@@ -252,6 +263,21 @@ export function DevicesSection() {
                       Use this
                     </Button>
                   )}
+                  {/* Handing out access to somebody else's machine is not ours
+                      to do either — the same `shared` guard Rename and Revoke
+                      use, so the three cannot drift apart. */}
+                  {SHARING_ENABLED && !device.shared && (
+                    <Tooltip label="Share this machine" withArrow>
+                      <ActionIcon
+                        variant="subtle"
+                        color="gray"
+                        onClick={() => setSharing(device)}
+                        aria-label={`Share ${device.name}`}
+                      >
+                        <IconUserPlus size={15} />
+                      </ActionIcon>
+                    </Tooltip>
+                  )}
                   {/* Renaming somebody else's machine is not ours to do — the
                       name belongs to its owner's account, not to this grant. */}
                   {device.shared ? null : (
@@ -284,6 +310,17 @@ export function DevicesSection() {
             </Card>
           );
         })
+      )}
+
+      {/* No `session` prop: the dialog opens in machine scope, which is the whole
+          point of reaching it from here. */}
+      {sharing && (
+        <ShareModal
+          opened
+          onClose={() => setSharing(null)}
+          deviceId={sharing.id}
+          machineName={sharing.name}
+        />
       )}
 
       {pairing ? (
@@ -327,6 +364,11 @@ export function DevicesSection() {
           Pair a machine
         </Button>
       )}
+
+      <Text size="xs" c="dimmed">
+        Sharing a machine gives someone else access to it — they sign in with their own account,
+        which does not have to be on your team, and the agent still runs here on your computer.
+      </Text>
 
       <Text size="xs" c="dimmed">
         Revoking stops a machine reconnecting, and ends a connection that is already open

@@ -28,8 +28,14 @@ account) or by a single-use link.
 ## Entry points
 
 - Share button in the session header (`web/src/components/SessionView.tsx`) — owner only, hosted
-  builds only (`SHARING_ENABLED`)
-- `web/src/components/ShareModal.tsx` — presets, invite by email/link, member list, revoke
+  builds only (`SHARING_ENABLED`), opens `ShareModal` in session scope
+- Share action on a machine row in Settings → Machines (`web/src/components/DevicesSection.tsx`)
+  — owner-only (hidden on a `shared: true` row), opens the same `ShareModal` with no `session`
+  prop, so it starts in machine scope. The reachable-from-two-places design is deliberate: the
+  session-header button is easy to miss for someone who wants to hand over a whole machine rather
+  than one conversation.
+- `web/src/components/ShareModal.tsx` — presets, invite by email/link, member list, revoke; scope
+  toggle only renders when a `session` was passed in
 - `web/src/components/JoinPage.tsx` — `/join/:code`, the redeem flow including sign-up
 - The pairing screen's "You've been invited" card (`web/src/components/ConnectMachine.tsx`) —
   discovers a pending invite by the caller's verified email, for someone who signs in without
@@ -101,6 +107,8 @@ account) or by a single-use link.
 - `web/src/components/PermissionPrompt.tsx` — the resolved-card "approved by X" badge
 - `web/src/components/CollaboratorsSection.tsx` — Settings pane over the same
   `/v1/contacts` client; list, forget one, clear all
+- `web/src/components/DevicesSection.tsx` — the Share action on an owned machine row, second
+  `ShareModal` entry point (machine scope, no `session` prop)
 
 ## Symbols
 
@@ -178,10 +186,20 @@ sessionIds?, profile, viewer }` — `profile` is the host's identity for the gue
 the *caller's own* identity, resolved server-side so presence/attribution can't be spoofed. A
 grant additionally requires the bridge to speak `COLLAB_MIN_PROTOCOL`: an older bridge silently
 drops the unknown `grant` field and would serve the guest as the owner, so the version check runs
-before the grant lookup. The grant rides the `open` frame's optional fields, which is what lets
-this ship without a `RELAY_PROTOCOL_VERSION` bump. `reauthorizeGuests` re-checks every live guest
-channel on `GUEST_REAUTH_MS` (60s) and closes one whose grant narrowed or vanished; owner channels
-keep the existing 300s device re-verify.
+before the grant lookup. That check (`DeviceHub.guestNeedsNewerBridge`) applies only while a
+bridge is attached — with none, there is nothing to be too old, and refusing a guest for it would
+be indistinguishable from a revoked grant instead of the offline state `openChannel` already
+sends. The grant rides the `open` frame's optional fields, which is what lets this ship without a
+`RELAY_PROTOCOL_VERSION` bump. `reauthorizeGuests` re-checks every live guest channel on
+`GUEST_REAUTH_MS` (60s) and closes one whose grant narrowed or vanished; owner channels keep the
+existing 300s device re-verify.
+
+A guest channel is dropped, not replayed, when its device's bridge re-attaches
+(`DeviceHub.attachAgent`). The new bridge's `hello` — and with it its app protocol — has not
+arrived yet at replay time, so a bridge too old to understand `grant` would silently serve the
+guest as the owner, exactly what the version check above exists to prevent. Closing the guest's
+socket makes its browser reconnect and re-run the whole `/client` gate once the new bridge's
+protocol is known. Owner channels are unaffected — they carry no grant to lose.
 
 ### The bridge resolves a guest to the host's context
 

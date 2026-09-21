@@ -11,6 +11,7 @@ import { APP_PROTOCOL_VERSION, enrollProof, startHandshake } from '@lines/shared
 import { useStore } from './store';
 import { refreshDevices } from './lib/devices';
 import { cryptoUnavailable, deviceIdentity, pinKey, pinnedKey } from './lib/e2ee';
+import { WAKE_PROBE_TIMEOUT_MS, probeExpired, wakeAction, wakeDebounced } from './lib/wake';
 
 /**
  * One link per machine.
@@ -96,6 +97,13 @@ interface MachineLink {
   authRelayTimer: ReturnType<typeof setInterval> | null;
   idleTimer: ReturnType<typeof setTimeout> | null;
   lastPongAt: number;
+  /**
+   * When a wake probe's ping went out, or null if none is in flight.
+   *
+   * Kept apart from `lastPongAt` because the heartbeat re-baselines that one on
+   * a stalled tick — which a resumed tab's first tick always is. See lib/wake.ts.
+   */
+  awaitingProbeSince: number | null;
   /** In-flight fileRequests for *this* machine, keyed by reqId. */
   pending: Map<string, { resolve: (r: { status: number; body?: unknown }) => void; reject: (e: Error) => void }>;
   reqCounter: number;
@@ -179,6 +187,7 @@ function linkFor(deviceId: string): MachineLink {
       authRelayTimer: null,
       idleTimer: null,
       lastPongAt: 0,
+      awaitingProbeSince: null,
       pending: new Map(),
       reqCounter: 0,
       closing: false,
@@ -366,6 +375,9 @@ function startAuthRelay(link: MachineLink) {
 function startHeartbeat(link: MachineLink) {
   if (link.heartbeatTimer) clearInterval(link.heartbeatTimer);
   link.lastPongAt = Date.now();
+  // A fresh heartbeat supersedes any probe still counting down against the
+  // socket it replaced.
+  link.awaitingProbeSince = null;
   let expectedTick = Date.now() + PING_INTERVAL_MS;
   link.heartbeatTimer = setInterval(() => {
     const now = Date.now();
@@ -568,6 +580,7 @@ async function openSocket(link: MachineLink) {
 
   socket.onopen = () => {
     useStore.getState().setConnectionStatus('connected', link.deviceId);
+    link.awaitingProbeSince = null;
     link.secure = null;
     link.finishHandshake = null;
     // Whatever the previous socket could not deliver describes a state this one
@@ -792,10 +805,75 @@ async function handleE2eeFrame(
 }
 
 
+/** When the last wake event was acted on, so the two that fire together count once. */
+let lastWakeAt = 0;
+
+/**
+ * The tab is back in front of the user. Find out whether its links survived.
+ *
+ * A closed socket is re-dialled immediately rather than waiting out the
+ * heartbeat's pong timeout plus a retry delay — most of the "connecting to your
+ * machine" wait after a resume was that, not the connect itself. An open socket
+ * is only *probed*: it is usually healthy, and closing it to check would cost
+ * every tab switch a reconnect and a fresh `hello`.
+ *
+ * A link with no socket at all was idle-disconnected on purpose
+ * (IDLE_DISCONNECT_MS); reviving it on every tab switch would undo that.
+ */
+function handleWake() {
+  const now = Date.now();
+  if (wakeDebounced(lastWakeAt, now)) return;
+  lastWakeAt = now;
+  for (const link of links.values()) {
+    const socket = link.socket;
+    if (!socket) continue;
+    const state = {
+      readyState: socket.readyState,
+      awaitingProbeSince: link.awaitingProbeSince,
+      lastPongAt: link.lastPongAt,
+    };
+    const action = wakeAction(state, now);
+    if (action === 'none') continue;
+    if (action === 'redial') {
+      link.awaitingProbeSince = null;
+      reconnectMachine(link.deviceId);
+      continue;
+    }
+    const generation = link.generation;
+    link.awaitingProbeSince = now;
+    // writeToLink, never socket.send: on an enrolled machine a raw frame is the
+    // plaintext downgrade the bridge closes the channel over.
+    writeToLink(link, JSON.stringify({ type: 'ping' } satisfies ClientMessage));
+    setTimeout(() => {
+      if (link.generation !== generation) return; // the socket was replaced meanwhile
+      const settled = {
+        readyState: socket.readyState,
+        awaitingProbeSince: link.awaitingProbeSince,
+        lastPongAt: link.lastPongAt,
+      };
+      if (!probeExpired(settled, Date.now())) return;
+      link.awaitingProbeSince = null;
+      reconnectMachine(link.deviceId);
+    }, WAKE_PROBE_TIMEOUT_MS);
+  }
+}
+
 /** Register once: react to the OS network toggling so we don't wait out the heartbeat. */
 function wireConnectivity() {
   if (connectivityWired) return;
   connectivityWired = true;
+  // Lifecycle listeners live here rather than in a component effect: reconnect
+  // policy is this module's, and a component would register one per mount.
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) handleWake();
+    });
+  }
+  // bfcache restore, which on iOS Safari may not come with a visibility change
+  // at all. `persisted` is what separates it from an ordinary load.
+  window.addEventListener('pageshow', (e) => {
+    if ((e as PageTransitionEvent).persisted) handleWake();
+  });
   window.addEventListener('offline', () => {
     for (const link of links.values()) {
       useStore.getState().setConnectionStatus('offline', link.deviceId);

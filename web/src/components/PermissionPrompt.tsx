@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react';
 import {
   ActionIcon,
   Anchor,
@@ -50,9 +50,14 @@ import { useIsPhone } from '../lib/layout';
 import { useIdentityResolver } from '../lib/identity';
 import { QuestionPrompt } from './QuestionPrompt';
 import { Markdown } from './Markdown';
-import { MonacoDiffModal } from './MonacoDiffModal';
 import { computeDiff, isEditTool, type ToolBlock } from '../lib/transcript';
 import { useFileContent } from '../lib/files';
+
+// See ToolCallCard: lazy and mounted only while open, so Monaco stays out of
+// the entry chunk. The module pulls in `lib/monacoSetup` itself.
+const MonacoDiffModal = lazy(() =>
+  import('./MonacoDiffModal').then((m) => ({ default: m.MonacoDiffModal })),
+);
 
 type Resolution = 'allow' | 'deny' | 'expired';
 
@@ -424,14 +429,16 @@ function EditPreview({ data }: { data: PermissionRequestData }) {
           </Code>
         </ScrollArea.Autosize>
       )}
-      {diff && (
-        <MonacoDiffModal
-          opened={diffOpen}
-          onClose={() => setDiffOpen(false)}
-          filePath={diff.filePath}
-          before={diff.before}
-          after={diff.after}
-        />
+      {diff && diffOpen && (
+        <Suspense fallback={null}>
+          <MonacoDiffModal
+            opened={diffOpen}
+            onClose={() => setDiffOpen(false)}
+            filePath={diff.filePath}
+            before={diff.before}
+            after={diff.after}
+          />
+        </Suspense>
       )}
     </>
   );

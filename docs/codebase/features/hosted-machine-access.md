@@ -117,7 +117,8 @@ relay pipes frames between them, and the UI that gates all of it.
   signed build forces
 - `web/src/components/GateShell.tsx` — chrome (header + sign-out) shared by every pre-app screen
 - `web/src/components/PairingDiagram.tsx` — the explainer SVG
-- `web/src/components/DevicesSection.tsx` — the Settings pane: list, pair, switch, revoke
+- `web/src/components/DevicesSection.tsx` — the Settings pane: list, pair, switch, revoke, share
+  (see [session-collaboration](session-collaboration.md) for the share flow itself)
 
 ## Symbols
 
@@ -510,8 +511,11 @@ refuse.
   the one piece of a machine's identity the user did not choose and cannot otherwise change.
 - The gate never connects to a machine this browser has not been shown. The
   remembered/most-recent heuristic resumes a choice; it does not make one.
-- A bridge restart does **not** disconnect the browser: channels stay open and are replayed to the
-  new bridge, which answers with a fresh `hello`.
+- A bridge restart does **not** disconnect an owner's browser: their channel stays open and is
+  replayed to the new bridge, which answers with a fresh `hello`. A guest's channel is the
+  exception — it is dropped rather than replayed, so its browser reconnects and re-runs the
+  `/client` gate against the new bridge's now-known protocol version; see
+  [session-collaboration](session-collaboration.md#the-relay-gate).
 - Newest bridge wins. A reconnecting bridge must be able to take over from a half-dead predecessor
   the relay has not yet noticed.
 - The relay persists nothing and logs no payload.

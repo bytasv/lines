@@ -1,17 +1,28 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { MantineProvider } from '@mantine/core';
-import { ClerkProvider, SignedIn, SignedOut, useAuth, useUser } from '@clerk/clerk-react';
+import {
+  ClerkLoaded,
+  ClerkLoading,
+  ClerkProvider,
+  SignedIn,
+  SignedOut,
+  useAuth,
+  useUser,
+} from '@clerk/clerk-react';
 import '@mantine/core/styles.css';
 import './index.css';
-// Side-effect import, and it has to run before the first editor mounts: it
-// points Monaco at this bundle instead of at a CDN. See the module for why that
-// is a security property and not only a preference.
-import './lib/monacoSetup';
 import { theme } from './theme';
 import { App } from './App';
-import { connect, connectMachine, reconnectNow, setTokenProvider, switchDevice } from './ws';
+import {
+  connect,
+  connectMachine,
+  disconnectMachine,
+  reconnectNow,
+  setTokenProvider,
+  switchDevice,
+} from './ws';
 import {
   CLERK_ENABLED,
   CLERK_PUBLISHABLE_KEY,
@@ -29,6 +40,7 @@ import {
   setStorageTokenProvider,
 } from './lib/storage';
 import { useDevices } from './lib/devices';
+import { bootDial } from './lib/wake';
 import { trackKeyboardInset } from './lib/viewport';
 import {
   ConnectMachine,
@@ -61,6 +73,8 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
   const [pickedId, setPickedId] = useState<string | null>(null);
   /** Show the pairing form even though a machine is already chosen. */
   const [pairingNew, setPairingNew] = useState(false);
+  /** The machine dialled before the list landed, if any. A ref: nothing renders from it. */
+  const dialedRef = useRef<string | null>(null);
 
   useEffect(() => {
     void refresh();
@@ -103,6 +117,37 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
     ? (pickedId ? devices.find((d) => d.id === pickedId) : null) ??
       (remembered ? chooseDevice(devices) : null)
     : null;
+
+  /**
+   * Dial the remembered machine while the device list is still in flight.
+   *
+   * Cold boot was one serialized chain — Clerk, then the device list, then a
+   * token, then the socket — even though the id the socket needs is a
+   * localStorage read that is available immediately. This overlaps the socket
+   * with the list instead of queueing it behind.
+   *
+   * `connectMachine`, deliberately not `switchDevice`: `primaryDeviceId` stays
+   * unset until the effect below decides, so a wrong guess never becomes the
+   * machine the UI is on. That effect then no-ops, because the socket is open.
+   *
+   * It has to be an effect in here rather than module scope: `setTokenProvider`
+   * is assigned during AuthedConnect's render, and child effects are the first
+   * thing to run after it.
+   */
+  useEffect(() => {
+    const { dial, drop } = bootDial(remembered, devices, dialedRef.current);
+    if (dial) {
+      dialedRef.current = dial;
+      void connectMachine(dial);
+    }
+    if (drop) {
+      // The guess is not in the account's list — revoked, or never this
+      // browser's. Left open it retries on 1008 every few seconds, and each
+      // retry re-reads the device list.
+      dialedRef.current = null;
+      disconnectMachine(drop);
+    }
+  }, [devices, remembered]);
 
   useEffect(() => {
     if (!chosen) return;
@@ -176,6 +221,10 @@ function AuthedConnect() {
   setTokenProvider(() => getToken());
   setStorageTokenProvider(() => getToken());
   useEffect(() => {
+    // Warm the token so the mint overlaps the rest of boot rather than sitting
+    // in front of the first storage call and the socket. Clerk memoises until
+    // near expiry, so this is one round trip saved and no token held here.
+    void getToken().catch(() => null);
     // With pairing on, DeviceGate owns the connect() call: opening the socket
     // before a device is known guarantees a 1008 and a reconnect loop.
     if (!DEVICE_PAIRING_ENABLED) void connect();
@@ -214,12 +263,21 @@ function Root() {
           path="*"
           element={
             <>
-              <SignedIn>
-                <AuthedConnect />
-              </SignedIn>
-              <SignedOut>
-                <LandingPage />
-              </SignedOut>
+              {/* Both branches render nothing until Clerk has loaded, which is a
+                  script fetch and a /v1/client round trip — long enough to read
+                  as a blank page. Hold the gate's own spinner for that window so
+                  the boot skeleton hands over to something, not to white. */}
+              <ClerkLoading>
+                <ConnectMachineLoading />
+              </ClerkLoading>
+              <ClerkLoaded>
+                <SignedIn>
+                  <AuthedConnect />
+                </SignedIn>
+                <SignedOut>
+                  <LandingPage />
+                </SignedOut>
+              </ClerkLoaded>
             </>
           }
         />
@@ -238,7 +296,13 @@ if (!CLERK_ENABLED) void connect();
 // instead of the app.
 trackKeyboardInset();
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+const rootElement = document.getElementById('root')!;
+// Drop index.html's boot skeleton explicitly rather than leaving it to React's
+// first commit: the removal is then tied to this line instead of to whenever the
+// container is reconciled, and StrictMode's double render cannot flash it back.
+rootElement.replaceChildren();
+
+ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     <BrowserRouter>
       <MantineProvider theme={theme} defaultColorScheme="dark">

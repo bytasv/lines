@@ -2,6 +2,9 @@ import { Alert, ActionIcon, Box, Center, Group, Loader, Stack, Text, UnstyledBut
 import { useComputedColorScheme } from '@mantine/core';
 import { IconFiles, IconX } from '@tabler/icons-react';
 import { Editor } from '@monaco-editor/react';
+// See MonacoPreviewModal: every module that mounts an editor owns this import,
+// and React.lazy is what keeps it out of the entry chunk.
+import '../lib/monacoSetup';
 import { useStore } from '../store';
 import { useIsPhone } from '../lib/layout';
 import { BestOnDesktop } from './BestOnDesktop';

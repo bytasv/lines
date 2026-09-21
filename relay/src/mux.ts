@@ -63,6 +63,8 @@ export class DeviceHub {
    */
   appProtocol: number | null = null;
   private agent: Sink | null = null;
+  /** Resolved by {@link attachAgent}; see {@link waitForAgent}. */
+  private agentWaiters = new Set<() => void>();
   private channels = new Map<ChannelId, Channel>();
   private nextId = 0;
   /** Last Clerk token seen per user, re-pushed when a bridge (re)attaches. */
@@ -74,8 +76,67 @@ export class DeviceHub {
     return this.agent !== null;
   }
 
+  /**
+   * Whether a guest has to be refused because the attached bridge is too old to
+   * enforce a grant.
+   *
+   * Only while a bridge is attached: with none, `appProtocol` is null because
+   * `detachAgent` forgot it, not because anything old is running. Reading that
+   * null as "too old" refuses an authorized guest with the same
+   * `1008 unauthorized` a revoke produces, so a sleeping host is
+   * indistinguishable from lost access. Offline is the hub's own answer —
+   * `openChannel` sends `deviceOffline` — and this must not pre-empt it.
+   */
+  guestNeedsNewerBridge(minProtocol: number): boolean {
+    return this.online && (this.appProtocol === null || this.appProtocol < minProtocol);
+  }
+
+  /**
+   * Wait for a bridge to attach, resolving true if one does inside the deadline.
+   *
+   * Exists for one race: after a relay restart the browser reconnects about a
+   * second before the bridge finishes `verifyDevice`, so `ownerId` is still null
+   * and the machine's own user is classified as a guest and refused `1008`. The
+   * browser then backs off five seconds and tries again, and with the bridge
+   * flapping that repeats — which is what turned a reload into a minute of
+   * "connecting to your machine".
+   *
+   * A wait rather than trusting storage for ownership: `ownerId` is null until a
+   * bridge proves the device secret, and that is the property the /client gate
+   * rests on. This only gives the proof a moment to arrive.
+   */
+  waitForAgent(timeoutMs: number): Promise<boolean> {
+    if (this.agent) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.agentWaiters.delete(done);
+        resolve(true);
+      };
+      // Deliberately not unref'd: an unref'd timer lets an otherwise-idle event
+      // loop drain before the deadline, so the promise never settles at all.
+      // It is cleared the moment a bridge attaches, and is seconds long at most.
+      const timer = setTimeout(() => {
+        this.agentWaiters.delete(done);
+        resolve(false);
+      }, timeoutMs);
+      this.agentWaiters.add(done);
+    });
+  }
+
   get channelCount(): number {
     return this.channels.size;
+  }
+
+  /**
+   * Whether a browser is parked in {@link waitForAgent} on this hub.
+   *
+   * A waiting browser holds no channel yet, so without this the sweep can drop
+   * the hub out from under it — the bridge would then attach to a fresh one and
+   * the waiter would time out against a hub nothing will ever attach to.
+   */
+  get hasPendingClients(): boolean {
+    return this.agentWaiters.size > 0;
   }
 
   /**
@@ -91,13 +152,26 @@ export class DeviceHub {
    * Attach a bridge. Newest wins — a reconnecting bridge must be able to take
    * over from a half-dead predecessor the relay hasn't noticed yet.
    *
-   * Existing channels are *not* closed: the browser stays connected across a
-   * bridge restart and simply gets a fresh `hello` once it re-opens them.
+   * Existing owner channels are *not* closed: the browser stays connected across
+   * a bridge restart and simply gets a fresh `hello` once it re-opens them.
+   * Guest channels are dropped instead — see below.
    *
    * Returns the sink it superseded, so the caller can log a duplicate attach —
    * which is otherwise indistinguishable from a first one.
    */
   attachAgent(sink: Sink): Sink | null {
+    // Guests are dropped rather than replayed, and before the new bridge is in
+    // place so it never hears about them. It has not said `hello` yet, so its app
+    // protocol is unknown here, and a bridge too old to understand `grant` would
+    // ignore the field and serve the guest as the owner — exactly what the
+    // /client version gate exists to prevent, at the one moment it cannot run.
+    // Closing 1008 makes the browser reconnect on its own and take that gate
+    // again, by which time the `hello` has landed. The cost is a blip for the
+    // guest; the alternative is a silent promotion.
+    for (const { id } of this.guestChannels()) {
+      this.dropChannel(id, 'bridge reattached');
+    }
+
     const previous = this.agent;
     this.agent = sink;
     this.agentAttaches++;
@@ -109,26 +183,25 @@ export class DeviceHub {
       previous.terminate?.();
     }
 
-    // Re-announce every live channel so the new bridge builds its own state,
-    // and re-push tokens, which the bridge needs for storage sync.
+    // Re-announce every live channel — owners only, by now — so the new bridge
+    // builds its own state, and re-push tokens, which it needs for storage sync.
     for (const [userId, token] of this.tokens) {
       sink.send(encode({ t: 'token', userId, token }));
     }
     for (const ch of this.channels.values()) {
-      // The grant goes with it. A re-announced guest channel that arrived without
-      // one would be indistinguishable from an owner connection to the bridge —
-      // a bridge restart would silently promote every guest on the machine.
       sink.send(
         encode({
           t: 'open',
           ch: ch.id,
           userId: ch.userId,
           token: this.tokens.get(ch.userId) ?? null,
-          ...(ch.grant ? { grant: ch.grant } : {}),
         }),
       );
     }
     this.broadcastToClients({ type: 'deviceOnline' });
+    // Last, so anyone released here sees a hub that is fully attached. The
+    // caller has already set `ownerId`, which is the whole point of the wait.
+    for (const wake of [...this.agentWaiters]) wake();
     return previous && previous !== sink ? previous : null;
   }
 
@@ -262,7 +335,7 @@ export class HubRegistry {
 
   sweep(): void {
     for (const [id, hub] of this.hubs) {
-      if (!hub.online && hub.channelCount === 0) this.hubs.delete(id);
+      if (!hub.online && hub.channelCount === 0 && !hub.hasPendingClients) this.hubs.delete(id);
     }
   }
 

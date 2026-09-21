@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import {
   ActionIcon,
   Alert,
@@ -36,7 +36,6 @@ import { Composer } from './Composer';
 import { QueuedMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
 import { ShareModal } from './ShareModal';
-import { SessionDiffModal } from './SessionDiffModal';
 import { MachineDot } from './MachineDot';
 import { PresenceStack } from './PresenceStack';
 import { linkedMachineHealth } from '../lib/machineHealth';
@@ -46,6 +45,14 @@ import { SHARING_ENABLED } from '../lib/shares';
 import { rememberedDeviceId } from '../lib/storage';
 import { useDevices } from '../lib/devices';
 import { presetOfCaps } from '@lines/shared';
+
+// See MonacoPreviewModal: lazy, so the review editor's Monaco is fetched when a
+// review is opened rather than sitting in the entry chunk. The module imports
+// `lib/monacoSetup` itself, which is what still orders the CDN override ahead
+// of the first mount.
+const SessionDiffModal = lazy(() =>
+  import('./SessionDiffModal').then((m) => ({ default: m.SessionDiffModal })),
+);
 
 export function SessionView({ sessionId }: { sessionId: string }) {
   const session = useStore((s) => s.sessions[sessionId]);
@@ -316,7 +323,9 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       <QueuedMessages session={session} />
       <Composer session={session} />
       {reviewing && (
-        <SessionDiffModal opened={reviewing} onClose={() => setReviewing(false)} sessionId={sessionId} />
+        <Suspense fallback={null}>
+          <SessionDiffModal opened={reviewing} onClose={() => setReviewing(false)} sessionId={sessionId} />
+        </Suspense>
       )}
       {sharing && deviceId && (
         <ShareModal

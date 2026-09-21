@@ -25,9 +25,52 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="theme-color" content="#232b2d" />
     <title>Lines</title>
+    <!-- Boot skeleton only. Everything here is inline and unconditional so the
+         page paints from the HTML itself, before the module graph is parsed and
+         long before Clerk has answered. main.tsx clears #root explicitly just
+         before it renders, so this never coexists with the app.
+
+         The colours are literals rather than theme variables on purpose: the
+         stylesheet that defines them is one of the things being waited for. They
+         match `theme-color` above and GateShell's 56px header. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #232b2d;
+      }
+      @keyframes lines-boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div
+        style="
+          display: flex;
+          flex-direction: column;
+          height: 100vh;
+          background: #232b2d;
+        "
+      >
+        <div style="height: 56px; flex-shrink: 0; border-bottom: 1px solid #ffffff1a"></div>
+        <div style="flex: 1; display: flex; align-items: center; justify-content: center">
+          <div
+            style="
+              width: 36px;
+              height: 36px;
+              border: 3px solid #ffffff24;
+              border-top-color: #ffffff8c;
+              border-radius: 50%;
+              animation: lines-boot-spin 0.8s linear infinite;
+            "
+          ></div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
