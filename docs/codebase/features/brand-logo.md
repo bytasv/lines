@@ -22,8 +22,9 @@ no wordmark baked into the art.
   rounded-rect corner mask; notification icon
 - `web/public/favicon.png` — same bytes as `logo-mark-solid.png`, served from `/public` so
   `index.html` can reference it by URL
-- `web/src/index.css` — `.brand-separator` only; the `.brand-wordmark` rules are gone along with
-  the DOM wordmark
+- `web/src/index.css` — the `.brand-wordmark` rules are gone along with the DOM wordmark. The
+  `.brand-separator` dot this file used to note is gone too, replaced in the header by
+  [`MachineSwitcher`](multi-machine-client.md)
 
 ## Data flow
 

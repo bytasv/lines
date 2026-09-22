@@ -1,10 +1,16 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { SessionMeta } from '@lines/shared';
+import type { ServerMessage, SessionMeta } from '@lines/shared';
 import {
+  emptyMachine,
+  emptyView,
+  machineView,
   mergeMachineSessions,
   prunableDraftIds,
+  sessionsOnMachine,
   shouldClaimSelection,
+  type MachineSlice,
+  type MachineView,
 } from '../../web/src/lib/machines.ts';
 
 /**
@@ -128,6 +134,140 @@ describe('prunableDraftIds', () => {
       }),
       [],
     );
+  });
+});
+
+/**
+ * The owner-state half, which is what made the sidebar flicker.
+ *
+ * The bridge already sends a guest a *thin* `hello` — sessions and nothing else
+ * — and the client used to write every field of it into one global set. A shared
+ * machine's hello therefore blanked the projects, the library and the account of
+ * the machine the user was looking at, and that machine's next hello put them
+ * back. The store applies a view to the globals only when it came from the
+ * primary machine; these tests pin the pure half that makes that possible.
+ */
+const hello = (over: Partial<Extract<ServerMessage, { type: 'hello' }>> = {}) =>
+  ({
+    type: 'hello',
+    sessions: [],
+    workflows: [],
+    sharedWorkflows: [],
+    steps: [],
+    sharedSteps: [],
+    pinnedSteps: [],
+    recipes: [],
+    sharedRecipes: [],
+    recipeStats: {},
+    models: [],
+    recentDirs: [],
+    projects: [],
+    projectKeys: {},
+    usage: null,
+    auth: { loggedIn: false },
+    storage: { available: true },
+    ...over,
+  }) as Extract<ServerMessage, { type: 'hello' }>;
+
+/** The store's rule, restated: a hello only ever writes its own machine's slice. */
+const applyHello = (
+  machines: Record<string, MachineSlice>,
+  from: string,
+  msg: Extract<ServerMessage, { type: 'hello' }>,
+): Record<string, MachineSlice> => {
+  const prev = machines[from] ?? emptyMachine(from);
+  return { ...machines, [from]: { ...prev, bootstrapped: true, view: machineView(msg, prev.view) } };
+};
+
+describe('machineView', () => {
+  const owner = hello({
+    projects: [{ path: '/repo' }],
+    projectKeys: { '/repo': 'key' },
+    auth: { loggedIn: true },
+    usage: { pct: 12 } as never,
+  });
+  /** What a guest connection actually receives: sessions, and no owner state. */
+  const guest = hello({
+    access: { scope: 'machine', caps: {} as never, ownerProfile: null, deviceId: 'B' },
+  });
+
+  test("a second machine's hello leaves the primary's view untouched", () => {
+    let machines = applyHello({}, 'A', owner);
+    const before = machines.A.view;
+    machines = applyHello(machines, 'B', guest);
+    assert.equal(machines.A.view, before, "A's view must not be rebuilt by B's hello");
+    assert.deepEqual(machines.A.view.projects, [{ path: '/repo' }]);
+    assert.deepEqual(machines.A.view.projectKeys, { '/repo': 'key' });
+    assert.equal(machines.A.view.access, null, 'A is our own machine');
+    assert.equal(machines.A.view.auth?.loggedIn, true);
+    assert.ok(machines.A.view.usage, "the primary's usage snapshot survives");
+    // And the guest's own slice describes the guest connection, not A's state.
+    assert.deepEqual(machines.B.view.projects, []);
+    assert.ok(machines.B.view.access, 'B is somebody else’s machine');
+  });
+
+  test('a repeated non-primary hello is inert against the primary too', () => {
+    // The duplicate-hello guard cannot damp this one: the relay replays `open`
+    // for every live channel when a bridge attaches, so a guest hello arrives
+    // again with nothing new in it.
+    let machines = applyHello({}, 'A', owner);
+    const before = machines.A.view;
+    machines = applyHello(applyHello(machines, 'B', guest), 'B', guest);
+    assert.equal(machines.A.view, before);
+    assert.deepEqual(machines.A.view.projects, [{ path: '/repo' }]);
+  });
+
+  test('a bridge restart keeps the last good usage snapshot — its own', () => {
+    // The carry-forward reads the machine's previous view, never the globals:
+    // reading globals made a second machine inherit the first machine's chip.
+    const prev: MachineView = { ...emptyView(), usage: { pct: 40 } as never };
+    const restarted = machineView(hello({ auth: { loggedIn: true } }), prev);
+    assert.deepEqual(restarted.usage, { pct: 40 });
+    // But it is dropped once the account behind it is gone.
+    assert.equal(machineView(hello({ auth: { loggedIn: false } }), prev).usage, null);
+  });
+
+  test('switching machines swaps the whole view from the new slice', () => {
+    // `setPrimaryMachine` spreads exactly this object over the globals — every
+    // field of a view is named after its global counterpart — so a switch and a
+    // primary hello project the same set of fields and cannot drift apart.
+    const machines = applyHello(applyHello({}, 'A', owner), 'B', guest);
+    assert.deepEqual(Object.keys(machines.B.view).sort(), Object.keys(emptyView()).sort());
+    assert.deepEqual(machines.B.view.projects, []);
+    assert.equal(machines.B.view.auth?.loggedIn, false);
+  });
+
+  test('bare path strings from an old bridge still become projects', () => {
+    // `hello` carries no protocol version, so a tab left open across the upgrade
+    // renders `[object Object]` tabs without this.
+    const view = machineView(hello({ projects: ['/old'] as never }), emptyView());
+    assert.deepEqual(view.projects, [{ path: '/old' }]);
+  });
+});
+
+describe('sessionsOnMachine', () => {
+  const sessions = { a1: s('a1'), a2: s('a2'), b1: s('b1') };
+
+  test('lists one machine at a time', () => {
+    const stamps = { a1: 'A', a2: 'A', b1: 'B' };
+    assert.deepEqual(ids(sessionsOnMachine(sessions, stamps, 'A')), ['a1', 'a2']);
+    assert.deepEqual(ids(sessionsOnMachine(sessions, stamps, 'B')), ['b1']);
+  });
+
+  test("a direct local bridge's empty device id is a machine like any other", () => {
+    // Local installs stamp '' and have no primary device id at all, so callers
+    // pass `primaryDeviceId ?? ''` — nothing there may be filtered out.
+    assert.deepEqual(ids(sessionsOnMachine(sessions, { a1: '', a2: '', b1: '' }, '')), [
+      'a1',
+      'a2',
+      'b1',
+    ]);
+  });
+
+  test('an unstamped session shows on the machine being asked about', () => {
+    // Same "keep rather than guess" rule as mergeMachineSessions: a session no
+    // hello has claimed yet must not vanish from every list at once.
+    assert.deepEqual(ids(sessionsOnMachine(sessions, { b1: 'B' }, 'A')), ['a1', 'a2']);
   });
 });
 

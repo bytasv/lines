@@ -1189,6 +1189,12 @@ export const useStore = create<UiState>((set, get) => {
     }),
   setPrimaryMachine: (deviceId) =>
     set((state) => {
+      // Already the machine in front of the user: nothing to re-derive, and
+      // re-deriving anyway would be destructive. The device list refreshes on
+      // its own schedule and re-runs the gate's effect with the same machine,
+      // and this now projects a whole `view` — so a no-op here is what keeps a
+      // refresh from reverting the globals to that machine's last `hello`.
+      if (state.primaryDeviceId === deviceId) return {};
       const slice = state.machines[deviceId] ?? emptyMachine(deviceId);
       // Re-derive every scalar from the machine now in front of the user, so the
       // banners describe it rather than whichever machine spoke last.
@@ -1200,7 +1206,13 @@ export const useStore = create<UiState>((set, get) => {
         // and without waiting for a round trip. Held per machine precisely so
         // this is possible; see MachineView.
         ...slice.view,
-        activeProject: pickActive(slice.view.projects, state.activeProject),
+        // Only once that machine has said `hello`. Before it, an empty project
+        // list is "not asked yet", and choosing against it would throw away the
+        // project this browser remembers across a reload — which is exactly the
+        // state the very first switch of a session runs in.
+        activeProject: slice.bootstrapped
+          ? pickActive(slice.view.projects, state.activeProject)
+          : state.activeProject,
         // A session the new machine does not host must not stay selected — the
         // view would be pointed at another computer's session while every control
         // around it describes this one, and App.tsx re-activates a selected

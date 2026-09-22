@@ -14,6 +14,7 @@ import {
   normalizeEmail,
   recordShareContact,
   revokeGrantsForDevice,
+  revokeGrantsForGrantee,
 } from './shares.ts';
 
 /**
@@ -399,6 +400,66 @@ describe('grants', { skip }, () => {
       where: { deviceId_userId: { deviceId: id, userId: guest } },
     });
     assert.ok(member?.revokedAt, 'the grant must be tombstoned, not left live');
+  });
+
+  /**
+   * A guest walking away from a machine shared with them — the one revocation a
+   * grantee may make. Driven through `revokeGrantsForGrantee` rather than the
+   * route, like the unpair case above, because DELETE /v1/shares/self/:id is
+   * behind Clerk auth this suite holds no token for; the route does nothing but
+   * run this in a transaction and count the rows it touched.
+   */
+  test('leaving a shared machine ends that guest’s access and nobody else’s', async () => {
+    const owner = user();
+    const leaver = user();
+    const stays = user();
+    const id = await machine(owner);
+    for (const guest of [leaver, stays]) {
+      await prisma!.deviceMember.create({
+        data: {
+          deviceId: id,
+          userId: guest,
+          ownerId: owner,
+          caps: capsJson(capsForPreset('collaborator', 'machine')),
+        },
+      });
+      await prisma!.sessionShare.create({
+        data: {
+          deviceId: id,
+          userId: guest,
+          sessionId: randomUUID(),
+          ownerId: owner,
+          caps: capsJson(capsForPreset('view', 'session')),
+        },
+      });
+    }
+
+    const counts = await prisma!.$transaction(revokeGrantsForGrantee(prisma!, id, leaver));
+    assert.ok(
+      counts.reduce((n, { count }) => n + count, 0) > 0,
+      'a live grant must be found, or the route would answer 404',
+    );
+
+    assert.deepEqual(await authorizeDevice(prisma!, id, leaver), { allowed: false });
+    // The blast radius is the whole point: device-scoped revocation here would
+    // have taken every other guest with it.
+    assert.equal((await authorizeDevice(prisma!, id, stays)).allowed, true);
+    // A grant went away, not a machine — the owner can share it again.
+    const device = await prisma!.device.findUnique({ where: { id } });
+    assert.ok(device && !device.revokedAt, 'the device row must survive a guest leaving');
+    assert.equal((await authorizeDevice(prisma!, id, owner)).allowed, true);
+    const member = await prisma!.deviceMember.findUnique({
+      where: { deviceId_userId: { deviceId: id, userId: leaver } },
+    });
+    assert.ok(member?.revokedAt, 'tombstoned, never deleted, like every revocation here');
+  });
+
+  test('leaving a machine you hold no grant on matches nothing', async () => {
+    // Nothing to revoke is what the route turns into a 404 — a stranger learns
+    // nothing about whether the machine exists.
+    const id = await machine(user());
+    const counts = await prisma!.$transaction(revokeGrantsForGrantee(prisma!, id, user()));
+    assert.equal(counts.reduce((n, { count }) => n + count, 0), 0);
   });
 
   test('/v1/devices/authorize is refused without the relay secret', async () => {

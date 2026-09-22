@@ -27,6 +27,7 @@ import {
   profileOf,
   recordShareContact,
   revokeGrantsForDevice,
+  revokeGrantsForGrantee,
 } from './shares.ts';
 import { putRecipeImage, r2Configured, r2PublicBaseWarning } from './r2.ts';
 import { listSessions, putSession, putSessions, softDeleteSession, toWire } from './sessionRows.ts';
@@ -1726,7 +1727,8 @@ app.patch('/v1/shares/:kind/:id', async (req, res) => {
 
 /**
  * Revoke a grant or an unclaimed invite. A tombstone, matching every other
- * revocation here, and always scoped by ownerId: a grantee can revoke nothing.
+ * revocation here, and scoped by ownerId: a grantee can revoke nothing — with
+ * the single exception of `self` below, where they revoke only themselves.
  */
 app.delete('/v1/shares/:kind/:id', async (req, res) => {
   const ownerId = userIdOf(req);
@@ -1735,6 +1737,23 @@ app.delete('/v1/shares/:kind/:id', async (req, res) => {
   const sessionId = String(req.query.sessionId ?? '');
   const at = new Date();
 
+  /**
+   * Leaving a machine somebody shared with you: `id` is the device, and the
+   * grantee is always the caller, never a parameter. A branch rather than a
+   * route of its own, which would collide with this one's `:kind` and resolve by
+   * registration order.
+   *
+   * The device row is untouched — this is a grant going away, not a machine —
+   * and nobody else's access is in scope by construction (see
+   * `revokeGrantsForGrantee`). 404 when nothing matched, like its neighbours: a
+   * user who holds no grant here learns nothing about whether the machine exists.
+   */
+  if (kind === 'self') {
+    const counts = await prisma.$transaction(revokeGrantsForGrantee(prisma, id, ownerId, at));
+    const total = counts.reduce((n, { count }) => n + count, 0);
+    res.status(total ? 200 : 404).json(total ? { ok: true } : { error: 'unknown grant' });
+    return;
+  }
   if (kind === 'invite') {
     const { count } = await prisma.shareInvite.updateMany({
       where: { code: id, ownerId, revokedAt: null },

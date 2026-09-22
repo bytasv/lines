@@ -2,18 +2,32 @@
 
 ## Purpose
 
-Hold a live link to more than one machine at once, so a browser can show its own sessions and a
-session shared with it side by side — without the two ever bleeding into each other. This
-dismantles the client's single-socket assumption: `web/src/ws.ts` used to hold one module-level
-`socket`, and `switchDevice` closed it and called `clearBootstrap()` on every switch specifically
-so that "delivering a stale frame to the new machine would attribute a session to the wrong
-host" could never happen. Sharing a session (see
+Hold a live link to more than one machine at once, but show exactly one machine's sessions,
+projects, library and account state at a time — chosen from a switcher in the header — so a
+browser holding a shared machine's link alongside its own never has to merge two owner states.
+This dismantles the client's single-socket assumption: `web/src/ws.ts` used to hold one
+module-level `socket`, and `switchDevice` closed it and called `clearBootstrap()` on every switch
+specifically so that "delivering a stale frame to the new machine would attribute a session to the
+wrong host" could never happen. Sharing a session (see
 [session-collaboration](session-collaboration.md)) means holding two machines' sessions at once,
 so that guard had to become structural instead of a teardown.
 
-Three reducers were correct for exactly one machine and silently destructive for two — replace
-the whole session map on `hello`, prune every draft with no matching live session, auto-select
-anything newly created — and are the highest-risk part of this feature for exactly that reason.
+Earlier revisions of this feature showed a guest's sessions *alongside* the owner's own, merged
+into one sidebar. That inverted the bridge's own contract: a shared machine's `hello` deliberately
+carries only sessions and nothing else (see `server/src/index.ts`'s `buildHello`), and the client
+used to write the rest of a `hello` — projects, the library, usage, account state — straight into
+one global set regardless of which machine sent it. A guest's thin `hello` landing there blanked
+the owner's own UI (empty projects, a narrowed `access`) until the owner's own machine's next
+`hello` put it back — a visible flicker between the two machines' state. The fix scopes a `hello`'s
+owner-state fields to the machine that sent it (`MachineSlice.view`) and projects only the
+*primary* machine's view onto the globals; the session list itself narrows to one machine's
+sessions for display, via `sessionsOnMachine`.
+
+Four reducers were correct for exactly one machine and silently destructive for two — replace the
+whole session map on `hello`, prune every draft with no matching live session, auto-select
+anything newly created, and (added by this scoping) write a machine's owner state into the global
+fields regardless of who sent it — and are the highest-risk part of this feature for exactly that
+reason.
 
 ## Entry points
 
@@ -21,39 +35,60 @@ anything newly created — and are the highest-risk part of this feature for exa
   primary, on device-list load
 - `switchDevice(id)` (`web/src/ws.ts`) — point the UI at a different machine without tearing down
   any other open link
+- `web/src/components/MachineSwitcher.tsx` — the header control that picks the machine the
+  sidebar, project tabs and account UI describe
 - A session row / session header / composer for a session hosted on a non-primary machine
   (`web/src/components/Sidebar.tsx`, `SessionView.tsx`, `Composer.tsx`)
 - Settings → Machines (`web/src/components/DevicesSection.tsx`) — the three-state health dot per
-  machine
+  machine, and the second surface `MachineSwitcher` shares its switch/health logic with
 
 ## Files
 
 - `web/src/lib/machines.ts` — the pure per-machine reducers: `mergeMachineSessions`,
-  `prunableDraftIds`, `shouldClaimSelection`, `emptyMachine`, `MachineSlice`
+  `prunableDraftIds`, `shouldClaimSelection`, `machineView`, `sessionsOnMachine`, `emptyMachine`,
+  `emptyView`, `MachineSlice`, `MachineView`
 - `web/src/lib/wake.ts` — the pure per-link wake decision: `wakeAction`, `probeExpired`,
   `wakeDebounced`, `bootDial`
 - `web/src/ws.ts` — `MachineLink`, the `links: Map<deviceId, MachineLink>`, `connectMachine`,
   `disconnectMachine`, `linkFor`/`linkForMessage`, per-link heartbeat/retry/auth-relay/idle
   timers, `fileRequest`'s machine-aware default
 - `web/src/store.ts` — `machines: Record<string, MachineSlice>`, `primaryDeviceId`,
-  `sessionMachine: Record<sessionId, deviceId>`, `setPrimaryMachine`, the per-machine
-  `applyServerMessage`/`setConnectionStatus`/`setMachineOffline`/`workerStatus`/`storageStatus`/
-  `updateStatus`/`bridge`/`protocolSkew` handling, `draftSessionIds`/`pruneDrafts`/
-  `pruneDraftAttachments` (inverted to take the ids to delete)
+  `sessionMachine: Record<sessionId, deviceId>`, `setPrimaryMachine`, the `hello` reducer's
+  `fromPrimary` gate on every owner-state field, `reconcileSeenStatus` scoped by
+  `sessionsOnMachine`, `draftSessionIds`/`pruneDrafts`/`pruneDraftAttachments` (inverted to take
+  the ids to delete)
 - `web/src/lib/can.ts` — `useSessionMachine`, `useSessionMachineHealth` (both `useShallow`-wrapped
   — see Architectural rules)
 - `web/src/lib/machineHealth.ts` — `linkedMachineHealth`, `unlinkedMachineHealth`,
   `MachineHealthState` (the three-state model)
-- `web/src/components/MachineDot.tsx`, `DevicesSection.tsx`, `ConnectingMachine.tsx` — the health
-  dot and the pairing/connecting screens' "switch to another machine" affordances
-- `web/src/components/Sidebar.tsx` — the remote-session left accent and host avatar chip
+- `web/src/components/MachineDot.tsx`, `MachineSwitcher.tsx`, `DevicesSection.tsx`,
+  `ConnectingMachine.tsx` — the health dot, the header/phone-drawer switcher, and the
+  pairing/connecting screens' "switch to another machine" affordances
+- `web/src/components/Sidebar.tsx` — the three session groups scoped to the active machine, and
+  the remote-session left accent/host avatar chip for anything still routed cross-machine
+- `web/src/components/ProjectTabs.tsx` — mounts `MachineSwitcher` in place of the old
+  brand/tabs separator dot, and scopes the project tab's status dot the same way the sidebar is
+  scoped
 - `web/src/components/Composer.tsx`, `SessionView.tsx` — judge a session's own machine's health,
   not the primary's
 
 ## Symbols
 
 - `MachineSlice` — `{ deviceId, scope, connectionStatus, machineOffline, bootstrapped, worker,
-  storage, update, bridge, ownerProfile }`, one per machine in `store.machines`
+  storage, update, bridge, ownerProfile, view }`, one per machine in `store.machines`; `view` is
+  the machine's `MachineView`
+- `MachineView` — the owner-state payload one machine's `hello` carries: `projects`,
+  `projectKeys`, `recentDirs`, `workflows`/`sharedWorkflows`, `steps`/`sharedSteps`/`pinnedSteps`,
+  `recipes`/`sharedRecipes`/`recipeStats`, `models`, `usage`/`openaiUsage`, `auth`/`openaiAuth`,
+  `access`, `guardAllowlist`/`guardReview`, `memoryReview`, `mcpConnections`/`mcpReview`. Named
+  field-for-field after the matching global store fields — see Architectural rules
+- `machineView(msg, prev)` — pure fold of one `hello` into a `MachineView`; `prev` is that same
+  machine's own previous view (never the globals), which is what lets the "keep the last good
+  `usage`/`openaiUsage` snapshot across a restart" rule survive a second machine's `hello` landing
+  in between
+- `sessionsOnMachine(sessions, sessionMachine, deviceId)` — the sessions hosted by one machine, for
+  display only; the store still holds every linked machine's sessions. A direct local bridge
+  stamps `''` and has `primaryDeviceId: null`, so callers pass `primaryDeviceId ?? ''`
 - `mergeMachineSessions({ sessions, sessionMachine, deviceId, incoming })` — folds one machine's
   `hello` into the shared session map. Drops only the sessions *stamped to this machine* that it
   no longer reports; every other machine's stamped sessions pass through untouched; an unstamped
@@ -74,6 +109,11 @@ anything newly created — and are the highest-risk part of this feature for exa
 - `linkedMachineHealth` / `unlinkedMachineHealth` — the three-state model: not linked (only
   `lastSeenAt`, no live claim), linked with no bridge attached (the relay's `deviceOffline`
   frame), and attached (then `worker`/`storage` sub-health)
+- `MachineSwitcher` — the header/phone-drawer machine picker; reads `useDevices` for the row list,
+  `state.machines[id]` for a linked row's health (`linkedMachineHealth`) or
+  `unlinkedMachineHealth(device)` otherwise, and `machineActivity` (fed a per-machine scoped
+  session set) for each background row's running/needs-you counts. Renders only when
+  `SHARING_ENABLED`
 - `wakeAction(link, now)` — what a resumed tab does with one link: `'redial'` for a socket already
   `CLOSED`/`CLOSING`, `'probe'` for `OPEN` (never a close-on-suspicion), `'none'` for `CONNECTING`
   or a probe already in flight
@@ -95,12 +135,42 @@ connecting to a subset — a silent cap would read as "connected to everything" 
 
 `switchDevice` sets the primary and calls `setPrimaryMachine`, which re-derives the legacy scalar
 fields (`connectionStatus`, `machineOffline`, `bootstrapped`, `workerStatus`, `storageStatus`,
-`updateStatus`, `bridge`, `protocolSkew`) from that machine's `MachineSlice`. `protocolSkew` is
-recomputed rather than copied, gated on `bootstrapped` — before a machine's first `hello`, `bridge`
-is "not asked yet", not a pre-versioning bridge, and reading that as skew would flash the pill on
-every switch. It neither closes the previous link nor calls
-`clearBootstrap()` — the previous machine's sessions and connection stay exactly as they were,
-which is the entire point of holding more than one.
+`updateStatus`, `bridge`, `protocolSkew`) from that machine's `MachineSlice`, and additionally
+spreads its `view` over the same global owner-state fields the `hello` reducer writes (below) —
+one switch swaps projects, library, usage and account state atomically, with no round trip.
+`activeProject` is recomputed against the new `view.projects` (skipped before that machine's first
+`hello`, so a remembered project across a reload survives the pre-bootstrap state), and
+`selectedSessionId` is cleared when the previously selected session's `sessionMachine` stamp isn't
+the new primary — otherwise `App.tsx`'s "a selected session re-activates its project" effect would
+drag the old project tab back across onto the new machine. `protocolSkew` is recomputed rather than
+copied, gated on `bootstrapped` — before a machine's first `hello`, `bridge` is "not asked yet",
+not a pre-versioning bridge, and reading that as skew would flash the pill on every switch.
+`setPrimaryMachine` no-ops entirely when the requested id is already primary, since a refresh that
+re-runs the same pick must not re-derive (and thereby revert) state a later `hello` has since moved
+on from. None of this closes the previous link or calls `clearBootstrap()` — the previous machine's
+sessions and connection stay exactly as they were, which is the entire point of holding more than
+one.
+
+### The `hello` reducer: one machine's owner state, gated by `fromPrimary`
+
+The bridge's own contract for a guest's `hello` is that it carries only `sessions` — `projects`,
+`workflows`, `usage`, `auth`, `access` and the rest are empty or omitted (see
+[session-collaboration](session-collaboration.md)). The reducer honours that contract by folding
+every one of those fields into `machineView(msg, prev)` and writing the result to
+`machines[from].view` unconditionally, but only spreading that `view` onto the matching global
+store fields when `from === primaryDeviceId` (`fromPrimary`). A background machine's `hello` —
+including a *repeated* one, which the duplicate-hello short-circuit below does not by itself make
+inert against these fields — updates its own slice and nothing the user is currently looking at.
+The four auto-open modal flags (`loginModalOpen`, `guardReviewOpen`, `memoryReviewOpen`,
+`mcpReviewOpen`) stay global (a modal is a property of the window, not of a machine) but are gated
+on `fromPrimary` too, so a background machine can never raise a dialog about an account the user
+isn't looking at.
+
+`sessions`, `sessionMachine` and `profiles` are the exceptions, deliberately ungated: `sessions`
+still folds in via `mergeMachineSessions` (below) because the store must hold every machine's
+sessions for message routing and notifications; `sessionMachine` still stamps from every `hello`
+for the same reason; `profiles` is keyed by user id rather than by machine, so it accumulates
+regardless of which machine's `hello` supplied a given collaborator's name.
 
 ### The `hello` merge
 
@@ -125,6 +195,33 @@ the machine that actually hosts it, never the primary. `fileRequest` defaults to
 session's* machine (`machineForSelectedSession()`), not the primary: the file tree, `@mention`
 search and docs are all driven by that session's cwd, so with a shared session open those paths
 exist only on the host's disk.
+
+### The session list is scoped, not merged
+
+The store keeps every linked machine's sessions — `linkForMessage` routes on `sessionMachine`, and
+[session-and-project-ui](session-and-project-ui.md)'s `maybeAlert` still watches all of them so a
+session left running on a background machine still notifies (see Business rules). What changed is
+*display*: the sidebar's three groups (Sessions, Shared-with-me, Archived), and the project tab's
+status dot via `reconcileSeenStatus`, are fed `sessionsOnMachine(sessions, sessionMachine,
+primaryDeviceId ?? '')` rather than the raw `sessions` map, so a tab or a sidebar row can never
+belong to two computers' worth of projects at once. Switching machines is how the other machine's
+sessions come back into view — not a second group in the same list, which is the design this
+feature reverses; see [session-and-project-ui](session-and-project-ui.md) for the groups
+themselves.
+
+### The header switcher
+
+`MachineSwitcher` reads `useDevices` for the row list and the store's `machines` map for live
+health, exactly the split `useSessionMachineHealth` already uses: a device with a held link reads
+`linkedMachineHealth` off its `MachineSlice`, one without reads `unlinkedMachineHealth(device)` off
+the relay's presence report. Each non-active row's running/needs-you counts come from
+`machineActivity` fed that machine's `sessionsOnMachine` slice — null (not zero) for a machine with
+no live link or a shared one, so "not connected" is never misread as "nothing running there".
+Picking a row calls the same `rememberDeviceId` + `switchDevice` pair `DevicesSection.switchToDevice`
+uses, so the two switch surfaces can never disagree about how a pick is made durable.
+`SHARING_ENABLED` gates the whole component — a local build has one machine and no grants — and on
+a phone, where the header has no room for it, the identical control renders as a named row at the
+top of the projects bottom sheet instead of an icon.
 
 ### Session-row and composer differentiation
 
@@ -181,7 +278,10 @@ out of `ws.ts` and `main.tsx`.
   each replaces: another machine's sessions survive a `hello`; a session a machine stops
   reporting is dropped but only its own; an unstamped session with no claimant is kept; a draft
   for an unknown session is never pruned; a session created on another machine never steals the
-  selection
+  selection; a non-primary `hello` (repeated or not) leaves the primary's `projects`/
+  `projectKeys`/`access`/`auth`/`usage` untouched; a bridge restart's `usage` carry-forward reads
+  the machine's own previous view, not the primary's; `sessionsOnMachine` returns only the named
+  machine's sessions and treats `''` as the local bridge
 - `server/src/wakeRedial.test.ts` — imports `web/src/lib/wake.ts` directly, the same
   dependency-free pattern: every `readyState` → expected wake action, a pong that lands after the
   probe stamp reading as healthy, the heartbeat's stall-forgiveness *not* being able to rescue an
@@ -199,6 +299,26 @@ out of `ws.ts` and `main.tsx`.
   `ConnectionBanner`/`SkewBanner`/`WorkerBanner`/`StorageBanner`/`UpdateBanner` read — see
   [turn-recovery](turn-recovery.md#multi-machine). A non-primary machine's health never reaches
   those banners; it surfaces on the session row and header instead.
+- A `hello`'s owner-state fields — `projects`, `projectKeys`, `recentDirs`,
+  `workflows`/`sharedWorkflows`, `steps`/`sharedSteps`/`pinnedSteps`,
+  `recipes`/`sharedRecipes`/`recipeStats`, `models`, `usage`/`openaiUsage`, `auth`/`openaiAuth`,
+  `access`, `guardAllowlist`/`guardReview`, `memoryReview`, `mcpConnections`/`mcpReview` — reach
+  the global store only when the `hello` came from the primary machine; a non-primary `hello`,
+  repeated or not, is inert against every one of them.
+- The four auto-open modal flags (`loginModalOpen`, `guardReviewOpen`, `memoryReviewOpen`,
+  `mcpReviewOpen`) stay global but are gated on `fromPrimary` too, so a background machine can
+  never raise a dialog about an account the user isn't looking at.
+- The sidebar's three groups and the project tab's status dot are scoped to
+  `sessionsOnMachine(sessions, sessionMachine, primaryDeviceId ?? '')` for display; the store
+  itself still holds every linked machine's sessions.
+- `maybeAlert` (`web/src/lib/alerts.ts`) is deliberately **not** scoped this way — a session
+  finishing on a background machine still chimes and notifies, which is the whole point of keeping
+  that machine's link open; the header switcher badges the machine a notification came from. This
+  is the one place the display scope and the store's full session set intentionally diverge.
+- `setPrimaryMachine` spreads the new primary's `view` over the same global fields the `hello`
+  reducer writes — one projection, used by both — and clears `selectedSessionId` when the
+  previously selected session isn't hosted on the new primary; it no-ops when the requested id is
+  already primary.
 - A shared machine connects automatically (up to `LINK_CAP`); an idle non-primary link
   disconnects after `IDLE_DISCONNECT_MS` and reconnects on selection.
 - A session's `sessionMachine` stamp is per-client, in-memory state — never persisted, never
@@ -211,11 +331,21 @@ out of `ws.ts` and `main.tsx`.
 
 ## Architectural rules
 
-- Every merge/prune/select rule that touches more than one machine's state lives in
-  `web/src/lib/machines.ts` as a plain function taking its inputs explicitly, specifically so it
-  is unit-testable without a socket, a store, or React — the single highest-risk surface in this
-  feature is exactly the kind of reducer that looks correct for one machine and is silently
-  destructive for two.
+- Every merge/prune/select rule that touches more than one machine's state — plus `machineView`
+  and `sessionsOnMachine` — lives in `web/src/lib/machines.ts` as a plain function taking its
+  inputs explicitly, specifically so it is unit-testable without a socket, a store, or React — the
+  single highest-risk surface in this feature is exactly the kind of reducer that looks correct
+  for one machine and is silently destructive for two.
+- `MachineView`'s fields are named identically to their global store counterparts, so
+  `...slice.view` *is* the whole projection onto the globals — the `hello` reducer and
+  `setPrimaryMachine` spread the same object rather than hand-listing the field set twice, which
+  is what keeps a field gated in one place from going stale by being forgotten in the other (see
+  Risks in the plan this feature's scoping came from: a field gated but not projected on switch
+  goes stale rather than flickering — quieter, and just as wrong).
+- `machineView(msg, prev)` reads its two "keep the last good snapshot across a restart"
+  carry-forwards (`usage`, `openaiUsage`) from `prev` — that machine's own previous view — never
+  from the global state, so a second machine's `hello` landing in between can never leak its
+  snapshot into the first machine's chip.
 - `prunableDraftIds`/`pruneDrafts`/`pruneDraftAttachments` take the ids to **delete**, not the
   ids to keep — the inverted signature makes the destructive "drop everything not live" version
   impossible to write by accident.

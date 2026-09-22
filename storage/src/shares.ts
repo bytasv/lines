@@ -218,3 +218,34 @@ export function revokeGrantsForDevice(
     }),
   ];
 }
+
+/**
+ * Tombstone the grants *one grantee* holds on a device — the guest walking away
+ * from a machine that was shared with them.
+ *
+ * Deliberately not `revokeGrantsForDevice` with a different argument: that one
+ * is device-scoped and would take every other guest's access with it. `userId`
+ * is in every where clause here by construction, so the widest thing this can
+ * revoke is the caller's own access.
+ *
+ * Unclaimed invites are left alone. They are addressed by email rather than held
+ * by anyone, so they are the owner's to withdraw, and the device row is not
+ * touched at all: this removes a grant, not a machine.
+ */
+export function revokeGrantsForGrantee(
+  prisma: PrismaClient,
+  deviceId: string,
+  userId: string,
+  at: Date = new Date(),
+) {
+  return [
+    prisma.deviceMember.updateMany({
+      where: { deviceId, userId, revokedAt: null },
+      data: { revokedAt: at },
+    }),
+    prisma.sessionShare.updateMany({
+      where: { deviceId, userId, revokedAt: null },
+      data: { revokedAt: at },
+    }),
+  ];
+}

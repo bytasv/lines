@@ -64,8 +64,8 @@ account) or by a single-use link.
 - `storage/prisma/schema.prisma` — `DeviceMember`, `SessionShare`, `ShareInvite`, `UserProfile`,
   `ShareContact` (the collaborator address book), `Device.online`
 - `storage/src/shares.ts` — `authorizeDevice` (the relay's oracle body), `profileOf`,
-  `revokeGrantsForDevice`, `capsJson`, `normalizeEmail`, `recordShareContact`,
-  `forgetShareContact`
+  `revokeGrantsForDevice`, `revokeGrantsForGrantee`, `capsJson`, `normalizeEmail`,
+  `recordShareContact`, `forgetShareContact`
 - `storage/src/presence.ts` — `presenceOf` (the `Device.online` freshness gate)
 - `storage/src/index.ts` — the `/v1/shares/*` and `/v1/devices/authorize`/`presence` routes;
   `cacheProfile`/`verifiedEmails` (Clerk lookups); the unpair/revoke grant cascade; the
@@ -95,7 +95,8 @@ account) or by a single-use link.
 - `server/src/workflows.ts` — `startIfPending`/`iterateIfWaiting`/`runStep`/`runStepSafely` take
   an actor (a workflow-attached session intercepts a prompt *before* `userPrompt` ever runs)
 - `web/src/lib/shares.ts` — the HTTP client for every `/v1/shares/*` route, `PRESET_COPY`,
-  `ShareContact`, `listContacts`/`forgetContact`/`clearContacts` (the `/v1/contacts` routes)
+  `ShareContact`, `listContacts`/`forgetContact`/`clearContacts` (the `/v1/contacts` routes),
+  `leaveShare` (a guest giving up a machine shared with them)
 - `web/src/lib/can.ts` — `useCan`, `useIsGuest`, `useInScope`, `useClaudeLoginNeeded` (guest UI
   narrowing, all reading the same `access` the bridge enforces)
 - `web/src/lib/identityRule.ts` — `resolveIdentity` (pure), `personMeta`, the person palette
@@ -108,7 +109,8 @@ account) or by a single-use link.
 - `web/src/components/CollaboratorsSection.tsx` — Settings pane over the same
   `/v1/contacts` client; list, forget one, clear all
 - `web/src/components/DevicesSection.tsx` — the Share action on an owned machine row, second
-  `ShareModal` entry point (machine scope, no `session` prop)
+  `ShareModal` entry point (machine scope, no `session` prop); the Leave action on a `shared: true`
+  row, the one destructive action a guest can take on someone else's machine
 
 ## Symbols
 
@@ -138,6 +140,12 @@ account) or by a single-use link.
   `userId` in, never clears a name a prior claim earned
 - `forgetShareContact(prisma, ownerId, email)` — hard delete, scoped by `ownerId`, so two
   accounts holding the same address never affect each other's list
+- `revokeGrantsForGrantee(prisma, deviceId, userId, at?)` — tombstones the `DeviceMember`/
+  `SessionShare` rows *one grantee* holds on a device; `userId` is in every where clause, unlike
+  `revokeGrantsForDevice`, so the widest thing it can ever touch is the caller's own access. Never
+  touches the `Device` row or an unclaimed invite (those are the owner's to withdraw)
+- `leaveShare(deviceId)` (`web/src/lib/shares.ts`) — the client call behind `revokeGrantsForGrantee`,
+  via `DELETE /v1/shares/self/:id`
 - `authorizeClient` (relay) — deliberately stricter than the device `verifyDevice`: every
   non-answer (timeout, non-200, malformed body, an owner-shaped answer for a non-owner, a
   session grant with no sessions) denies, because this is an initial grant rather than
@@ -162,6 +170,25 @@ session) before minting a code. `POST /v1/shares/claim` is a compare-and-set on
 replayed code 409s rather than minting a second grant. An email-bound invite is checked against
 the claimer's *verified* Clerk emails — unverified never matches, or anyone could add the
 invitee's address to their own account and claim in their place.
+
+### Leaving a shared machine
+
+Every `/v1/shares/*` revocation route is owner-scoped by construction — a grantee can revoke
+nothing, since the owner is the one paying with their machine's access. `DELETE
+/v1/shares/:kind/:id` gains one exception rather than a new route: a `kind === 'self'` branch,
+where `id` is the deviceId and the grantee is always `userIdOf(req)`, never a request parameter. A
+dedicated `/v1/shares/self/:id` path was rejected — it would collide with this route's `:kind`
+param and depend on registration order — so the branch lives inside the existing handler instead.
+It calls `revokeGrantsForGrantee`, tombstones (never deletes, matching every other revocation
+here), answers `200` when anything matched and `404` otherwise (the same opaque-failure shape as
+every other grant route), and never touches the `Device` row — this removes a grant, not a
+machine, so the owner can share it again.
+
+On the client, `DevicesSection`'s Leave action mirrors its Revoke action's shape: `leaveShare(id)`,
+then `disconnectMachine(id)` (the link to a shared machine is held open in the background and
+would otherwise keep retrying a grant that no longer exists), then `forgetDeviceId()` if the
+machine being left was the active one, then a list reload. With the row gone and the remembered id
+cleared, `DeviceGate` re-derives `chosen` and falls back to `ChooseMachine`.
 
 ### The collaborator address book
 
@@ -285,10 +312,12 @@ resolves a person through — so they can never disagree about who somebody is.
 - `storage/src/shares.test.ts` — capability parsing (fail-closed), preset round-trips,
   `normalizeEmail`, and (opt-in on `STORAGE_TEST_DATABASE_URL`) the full grant matrix:
   owner/member/session-share/revoked/stale grant, intersection over union for overlapping
-  session shares, unpair cascading to every grant, and the address book: mint/claim recording a
-  contact, a repeat mint touching one row instead of duplicating, a revoked grant leaving the
-  contact behind, a claim's `userId` surviving a later email-only mint, and `forgetShareContact`
-  scoped by owner
+  session shares, unpair cascading to every grant, `revokeGrantsForGrantee` (a guest leaving ends
+  only their own access — `authorizeDevice` then denies them, the owner's other guests stay
+  allowed, the `Device` row survives, and a non-grantee's leave matches nothing), and the address
+  book: mint/claim recording a contact, a repeat mint touching one row instead of duplicating, a
+  revoked grant leaving the contact behind, a claim's `userId` surviving a later email-only mint,
+  and `forgetShareContact` scoped by owner
 - `storage/src/devices.presence.test.ts` — `presenceOf`'s freshness gate (the relay-crash case);
   the `/v1/devices/presence` route (opt-in)
 - `relay/src/clientAuthorize.test.ts` — `authorizeClient` against every shape of non-answer; the
@@ -336,6 +365,12 @@ resolves a person through — so they can never disagree about who somebody is.
   `SessionShare`/unclaimed `ShareInvite` on that device in one transaction. A device id is
   re-registerable, so a grant that outlived its device would attach to whoever claims that id
   next.
+- Every grant-revocation route is owner-scoped — a grantee can revoke nothing — with one
+  exception: `DELETE /v1/shares/self/:id` (the `kind === 'self'` branch on the existing route)
+  lets a guest tombstone their own grants on a machine, via `revokeGrantsForGrantee`, which is
+  `userId`-scoped in every where clause so it can never widen past the caller's own access; it
+  never touches the `Device` row or another guest's grant. Reached from Settings → Machines'
+  Leave action.
 - A guest never gets a `UserContext` of their own on the host's machine, and never sets
   `clerkToken` or triggers `syncNow` — the host's sessions must never be pushed to Postgres under
   the guest's identity.

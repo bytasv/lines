@@ -294,6 +294,12 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   the sidebar's Archived group or a deep link — is never overridden by a tab switch.
 - Auto-selection (`latestSessionIn`, "which session does a project switch open") always sorts by
   `createdAt`, independent of the sidebar's own list-sort setting below.
+- All three sidebar groups (Sessions, Shared-with-me, Archived), and the project tab's status dot
+  via `reconcileSeenStatus`, describe one machine's sessions only —
+  `sessionsOnMachine(sessions, sessionMachine, primaryDeviceId ?? '')` — not every machine this
+  browser holds a link to. The store still holds all of them (message routing and notifications
+  need to); which machine is shown is a display scope changed by the header's
+  [`MachineSwitcher`](multi-machine-client.md), not a second group folded into this list.
 - The sidebar session list order is user-selectable via `lines.sessionSort` (persisted
   `localStorage`), applied to all three groups (Sessions, Shared-with-me, Archived): **Status**
   (default) — running first, then the tab-dot urgency order (plan ready > needs answer > needs

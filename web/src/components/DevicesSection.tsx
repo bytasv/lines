@@ -16,6 +16,7 @@ import {
   IconAlertCircle,
   IconCheck,
   IconDeviceLaptop,
+  IconLogout,
   IconPencil,
   IconPlus,
   IconTrash,
@@ -41,8 +42,8 @@ import {
   unlinkedMachineHealth,
   type MachineHealth,
 } from '../lib/machineHealth';
-import { SHARING_ENABLED } from '../lib/shares';
-import { switchDevice } from '../ws';
+import { SHARING_ENABLED, leaveShare } from '../lib/shares';
+import { disconnectMachine, switchDevice } from '../ws';
 import { DownloadDesktopApp } from './DownloadDesktopApp';
 import { MachineDot } from './MachineDot';
 import { ShareModal } from './ShareModal';
@@ -152,6 +153,29 @@ export function DevicesSection() {
       // the choice first, then refresh: the gate reads both, and in that order it
       // falls through to the pairing screen instead of briefly re-selecting a
       // machine the relay will now refuse.
+      if (device.id === activeId) forgetDeviceId();
+      await load();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  /**
+   * Give up a machine somebody shared with you.
+   *
+   * Mirrors `revoke` above, with one step it cannot skip: the link to a shared
+   * machine is held open in the background, so it has to be closed here or it
+   * keeps retrying against a grant that no longer exists. With the row gone and
+   * the remembered id cleared, the device gate falls back to the chooser.
+   */
+  const leave = async (device: Device) => {
+    setBusyId(device.id);
+    setActionError(null);
+    try {
+      await leaveShare(device.id);
+      disconnectMachine(device.id);
       if (device.id === activeId) forgetDeviceId();
       await load();
     } catch (err) {
@@ -292,7 +316,28 @@ export function DevicesSection() {
                       </ActionIcon>
                     </Tooltip>
                   )}
-                  {device.shared ? null : (
+                  {/* The owner revokes; the guest leaves. Both end this browser's
+                      access to the machine and neither touches the machine
+                      itself — but only one of them is the caller's to do, so the
+                      row shows exactly one. */}
+                  {device.shared ? (
+                    <Tooltip
+                      label="Leave this machine — you lose access to it until its owner shares it again"
+                      withArrow
+                      multiline
+                      w={260}
+                    >
+                      <ActionIcon
+                        variant="subtle"
+                        color="red"
+                        loading={busyId === device.id}
+                        onClick={() => void leave(device)}
+                        aria-label={`Leave ${device.name}`}
+                      >
+                        <IconLogout size={16} />
+                      </ActionIcon>
+                    </Tooltip>
+                  ) : (
                   <Tooltip label="Revoke access" withArrow>
                     <ActionIcon
                       variant="subtle"

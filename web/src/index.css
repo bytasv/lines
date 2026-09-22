@@ -75,20 +75,6 @@
   animation: status-pulse 1.4s ease-out infinite;
 }
 
-/* Brand/tabs separator. Deliberately 3px — status dots are 8px and pulse, so
-   this reads as punctuation, not as a state the user should act on. */
-.brand-separator {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: rgba(35, 43, 45, 0.28);
-  flex: 0 0 auto;
-}
-
-[data-mantine-color-scheme='dark'] .brand-separator {
-  background: rgba(255, 255, 255, 0.26);
-}
-
 /* Inline color swatch appended after detected color literals */
 .color-chip {
   display: inline-flex;

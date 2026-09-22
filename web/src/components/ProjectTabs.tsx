@@ -42,8 +42,10 @@ import { projectStatusMeta } from '../lib/format';
 import { sessionsInProject, useStore } from '../store';
 import { useIsGuest, useIsLocalMachine } from '../lib/can';
 import { useIsPhone } from '../lib/layout';
+import { sessionsOnMachine } from '../lib/machines';
 import { send } from '../ws';
 import { BrandMark } from './BrandMark';
+import { MachineSwitcher } from './MachineSwitcher';
 import { SettingsModal } from './SettingsModal';
 import { UsageIndicator } from './UsageIndicator';
 import { UserMenu } from './UserMenu';
@@ -73,6 +75,8 @@ function ProjectTab({
   const setFolderPickPending = useStore((s) => s.setFolderPickPending);
   const setFolderPickTarget = useStore((s) => s.setFolderPickTarget);
   const sessions = useStore((s) => s.sessions);
+  const sessionMachine = useStore((s) => s.sessionMachine);
+  const primaryDeviceId = useStore((s) => s.primaryDeviceId);
   const projectKeys = useStore((s) => s.projectKeys);
   const seen = useStore((s) => s.seenSessionStatus);
   // "Add folder…" shells out to Finder on the host, so it exists only for a
@@ -81,9 +85,18 @@ function ProjectTab({
   // The active project's sessions are already spelled out in the sidebar, so a
   // dot here would only be noise. Leaving keeps it quiet: opening the project
   // marked those states seen, and only a state the user hasn't seen re-lights it.
+  // Scoped to the machine in front of the user, exactly as the sidebar's list is:
+  // a tab that pulses for a session that list does not show has nothing to open.
   const status = active
     ? null
-    : projectStatusMeta(sessionsInProject(sessions, projectKeys, project), seen);
+    : projectStatusMeta(
+        sessionsInProject(
+          sessionsOnMachine(sessions, sessionMachine, primaryDeviceId ?? ''),
+          projectKeys,
+          project,
+        ),
+        seen,
+      );
   const worktrees = project.worktrees ?? [];
   // The label stays the primary's basename; the tooltip is where every root fits.
   // Work trees get their own block: they are attributed to this tab but are not
@@ -348,7 +361,11 @@ export function ProjectTabs() {
           <Box ml={4} mr={4} display="flex">
             <BrandMark />
           </Box>
-          <Box className="brand-separator" mx={8} />
+          {/* Where the brand/tabs separator used to sit. A machine is the one
+              thing the header never said, and switching was buried two clicks
+              deep in Settings — so the punctuation earns its place instead.
+              Icon-only: a name here would eat the tab strip. */}
+          <MachineSwitcher />
         </>
       )}
       {isPhone ? (
@@ -386,6 +403,11 @@ export function ProjectTabs() {
             classNames={{ content: 'lines-mobile-sheet', inner: 'lines-mobile-sheet-inner' }}
           >
             <Stack gap="sm" className="lines-safe-bottom">
+              {/* The header has no room for the switcher on a phone — the brand
+                  and its separator are dropped there for the same reason — so the
+                  machine lives at the top of this sheet, above the projects it
+                  scopes. */}
+              <MachineSwitcher variant="row" onSwitch={() => setPickerOpen(false)} />
               <TextInput
                 label="Search projects"
                 placeholder="Name or path"

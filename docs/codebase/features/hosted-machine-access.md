@@ -120,8 +120,10 @@ relay pipes frames between them, and the UI that gates all of it.
   signed build forces
 - `web/src/components/GateShell.tsx` — chrome (header + sign-out) shared by every pre-app screen
 - `web/src/components/PairingDiagram.tsx` — the explainer SVG
-- `web/src/components/DevicesSection.tsx` — the Settings pane: list, pair, switch, revoke, share
-  (see [session-collaboration](session-collaboration.md) for the share flow itself)
+- `web/src/components/DevicesSection.tsx` — the Settings pane: list, pair, switch, revoke, share,
+  leave (see [session-collaboration](session-collaboration.md) for the share/leave flow itself)
+- `web/src/components/MachineSwitcher.tsx` — a second switch surface, in the header rather than
+  Settings; see [multi-machine-client](multi-machine-client.md), which owns it
 
 ## Symbols
 

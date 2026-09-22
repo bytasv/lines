@@ -254,6 +254,13 @@ interface AlertOpts {
   onClickNotification: () => void;
 }
 
+/**
+ * Deliberately not scoped to the machine in front of the user, unlike the
+ * sidebar's list (see `sessionsOnMachine`). A session left running on another
+ * machine is exactly the one worth being told about — that is the point of
+ * keeping its link open in the background — so the alert fires, and the header's
+ * machine switcher badges the machine it came from.
+ */
 export function maybeAlert(
   prev: SessionMeta | undefined,
   next: SessionMeta,

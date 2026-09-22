@@ -124,6 +124,18 @@ export function revokeGrant(grant: ShareGrant): Promise<{ ok: true }> {
   );
 }
 
+/**
+ * Give up a machine somebody shared with you.
+ *
+ * The one revocation a grantee may make, and it reaches exactly their own grants
+ * on that machine: every other route here is scoped by ownerId, because a
+ * grantee can revoke nothing of anyone else's. The machine itself is untouched —
+ * this drops access, not a computer — so the owner can share it again.
+ */
+export function leaveShare(deviceId: string): Promise<{ ok: true }> {
+  return storageCall(`/v1/shares/self/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
+}
+
 export function revokeInvite(code: string): Promise<{ ok: true }> {
   return storageCall(`/v1/shares/invite/${encodeURIComponent(code)}`, { method: 'DELETE' });
 }

@@ -51,6 +51,7 @@ import {
   sessionRowMeta,
 } from '../lib/format';
 import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
+import { sessionsOnMachine } from '../lib/machines';
 import { useIsPhone, useReveal } from '../lib/layout';
 import { ConfirmModal } from './ConfirmModal';
 import { useIdentityResolver } from '../lib/identity';
@@ -607,6 +608,8 @@ export function Sidebar({
   onNavigate?: () => void;
 }) {
   const sessions = useStore((s) => s.sessions);
+  const sessionMachine = useStore((s) => s.sessionMachine);
+  const primaryDeviceId = useStore((s) => s.primaryDeviceId);
   const workflows = useStore((s) => s.workflows);
   const sharedWorkflows = useStore((s) => s.sharedWorkflows);
   const selectedSessionId = useStore((s) => s.selectedSessionId);
@@ -652,7 +655,20 @@ export function Sidebar({
   const project = projectAt(projects, activeProject);
   const roots = project ? projectRoots(project) : [];
   const activeProjectKey = activeProject ? (projectKeys[activeProject] ?? null) : null;
-  const projectSessions = sessionsInProject(sessions, projectKeys, project);
+  /**
+   * One machine's sessions, not every linked machine's.
+   *
+   * The store deliberately holds them all — that is how a message reaches the
+   * machine that hosts its session, and how a shared machine still raises a
+   * notification — but a list that mixes two computers together cannot say which
+   * one a row runs on, and the projects around it describe only this one. The
+   * switcher in the header is how the other machine's list is reached.
+   */
+  const machineSessions = useMemo(
+    () => sessionsOnMachine(sessions, sessionMachine, primaryDeviceId ?? ''),
+    [sessions, sessionMachine, primaryDeviceId],
+  );
+  const projectSessions = sessionsInProject(machineSessions, projectKeys, project);
   /**
    * Sessions shared with this user that no project tab covers.
    *
@@ -663,7 +679,7 @@ export function Sidebar({
    * and start sessions in a folder they have no standing in.
    */
   const shared = access
-    ? Object.values(sessions)
+    ? Object.values(machineSessions)
         .filter((s) => !s.archived && !projectSessions.some((p) => p.id === s.id))
         .sort(compare)
     : [];
