@@ -13,7 +13,7 @@ const meta = (): SessionMeta =>
     id: 's1',
     name: 's1',
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'auto',
     status: 'idle',
     createdAt: 1,

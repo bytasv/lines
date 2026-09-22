@@ -36,7 +36,7 @@ const meta = (workflow: WorkflowState): SessionMeta =>
     id: 's1',
     name: 's1',
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     status: 'waiting-approval',
     createdAt: 1,
@@ -677,7 +677,7 @@ function compactingParked(stepCount = 2) {
     cacheReadTokens: 1_000,
     cacheCreationTokens: 100,
     outputTokens: 20,
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     at: 1,
   };
   assert.deepEqual(h.sessions.compactContext('s1'), { ok: true });

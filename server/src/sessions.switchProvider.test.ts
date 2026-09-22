@@ -394,10 +394,10 @@ test('a prompt sent while the switch runs waits for it', async () => {
 
 test('a same-provider switchProvider is just a setModel', async () => {
   const h = harness();
-  const verdict = await h.sessions.switchProvider('s1', 'claude-opus-5');
+  const verdict = await h.sessions.switchProvider('s1', 'claude-opus-5-5');
 
   assert.equal(verdict.ok, true);
-  assert.equal(h.s1().model, 'claude-opus-5');
+  assert.equal(h.s1().model, 'claude-opus-5-5');
   assert.equal(h.s1().claudeSessionId, 'claude-abc', 'nothing to drop, so nothing dropped');
   assert.equal(h.prompts.length, 0, 'and no hand-off turn');
   assert.ok(!kinds(h).includes('provider-switch'));

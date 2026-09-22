@@ -26,7 +26,7 @@ function harness(extra: Partial<SessionMeta> = {}) {
     id: 's1',
     name: 'New session',
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     status: 'idle',
     createdAt: 1,

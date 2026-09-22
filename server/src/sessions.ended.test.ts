@@ -21,7 +21,7 @@ const meta = (id: string): SessionMeta =>
     id,
     name: id,
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     status: 'running',
     createdAt: 1,
@@ -837,7 +837,7 @@ test('a settled turn splits its spend under the session model', () => {
 
   const meta = h.sessions.get('s1')!;
   assert.deepEqual(meta.costByModel, {
-    'claude-opus-5': { costUsd: 0.75, tokens: 1_500, turns: 2 },
+    'claude-opus-5-5': { costUsd: 0.75, tokens: 1_500, turns: 2 },
   });
   const summed = Object.values(meta.costByModel!).reduce((n, s) => n + s.costUsd, 0);
   assert.equal(summed, meta.totalCostUsd);
@@ -881,7 +881,7 @@ test('a new lifetime is billed whole even when it opens above the last one', () 
   // would miss here, since $2 is more than $0.25.
   h.sessions.handleWorkerEvent('s1', {
     ...settled(2, 500),
-    modelUsage: { 'claude-opus-5': { inputTokens: 500 } },
+    modelUsage: { 'claude-opus-5-5': { inputTokens: 500 } },
   });
 
   assert.equal(h.sessions.get('s1')!.totalCostUsd, 2.25);
@@ -896,7 +896,7 @@ test('switching model mid-session opens a second row instead of moving the first
 
   const meta = h.sessions.get('s1')!;
   assert.deepEqual(meta.costByModel, {
-    'claude-opus-5': { costUsd: 0.5, tokens: 1_000, turns: 1 },
+    'claude-opus-5-5': { costUsd: 0.5, tokens: 1_000, turns: 1 },
     'claude-haiku-4-5': { costUsd: 0.25, tokens: 200, turns: 1 },
   });
 });
@@ -917,7 +917,7 @@ test('a costless result on a provider that reports cost stays uncosted', () => {
   const meta = h.sessions.get('s1')!;
   assert.equal(meta.totalCostUsd, undefined);
   assert.deepEqual(meta.costByModel, {
-    'claude-opus-5': { costUsd: 0, tokens: 1_000, turns: 1 },
+    'claude-opus-5-5': { costUsd: 0, tokens: 1_000, turns: 1 },
   });
 });
 
@@ -978,7 +978,7 @@ test('a settled turn opens a day row carrying its billed delta', () => {
   // The same numbers as costByModel, under the same resolved model id: $0.75, not
   // the $1.00 the two raw readings sum to.
   assert.deepEqual(onlyDay(h), {
-    'claude-opus-5': { costUsd: 0.75, tokens: 1_500, turns: 2 },
+    'claude-opus-5-5': { costUsd: 0.75, tokens: 1_500, turns: 2 },
   });
   assert.deepEqual(onlyDay(h), h.sessions.get('s1')!.costByModel);
 });
@@ -994,7 +994,7 @@ test('a transparently re-driven attempt bills into the day too', async () => {
   await drain();
 
   assert.deepEqual(onlyDay(h), {
-    'claude-opus-5': { costUsd: 0.1, tokens: 400, turns: 1 },
+    'claude-opus-5-5': { costUsd: 0.1, tokens: 400, turns: 1 },
   });
   // The attempt did not settle the turn, so the ledger and the session agree
   // about spend while the turn is still open.
@@ -1018,6 +1018,6 @@ test('a settled turn broadcasts the whole day row, so a dropped one self-heals',
   assert.deepEqual(rows.at(-1), {
     type: 'spendDay',
     day: Object.keys(h.spendHistory.snapshot.days)[0],
-    spend: { 'claude-opus-5': { costUsd: 0.75, tokens: 1_500, turns: 2 } },
+    spend: { 'claude-opus-5-5': { costUsd: 0.75, tokens: 1_500, turns: 2 } },
   });
 });

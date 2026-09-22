@@ -76,7 +76,7 @@ function harness(over: Partial<WorkflowState> = {}, events: TranscriptEvent[] = 
         id: 's1',
         name: 's1',
         cwd: '/tmp',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         permissionMode: 'default',
         status: 'idle',
         createdAt: 1,

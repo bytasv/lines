@@ -49,7 +49,7 @@ const meta = (id: string, updatedAt: number) => ({
   id,
   name: id,
   cwd: '/tmp',
-  model: 'claude-opus-5',
+  model: 'claude-opus-5-5',
   status: 'idle',
   createdAt: updatedAt,
   updatedAt,

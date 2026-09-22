@@ -249,7 +249,7 @@ test('sessions.json is written compactly', () => {
     id: 'a',
     name: 'n',
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     status: 'idle',
     createdAt: 1,

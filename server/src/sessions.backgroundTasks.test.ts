@@ -13,7 +13,7 @@ const meta = (status: SessionStatus, extra: Partial<SessionMeta> = {}): SessionM
     id: 's1',
     name: 's1',
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     status,
     createdAt: 1,
@@ -105,7 +105,7 @@ test('the records carry the description and type, not just the id', () => {
 test('a CLI (re)start clears the set', () => {
   const h = harness('done');
   h.sessions.handleWorkerEvent('s1', changed(task('a')));
-  h.sessions.handleWorkerEvent('s1', { type: 'system', subtype: 'init', model: 'claude-opus-5' });
+  h.sessions.handleWorkerEvent('s1', { type: 'system', subtype: 'init', model: 'claude-opus-5-5' });
   assert.equal(h.s1().backgroundTasks, undefined);
 });
 

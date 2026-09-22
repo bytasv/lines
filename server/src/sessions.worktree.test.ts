@@ -18,7 +18,7 @@ const meta = (id: string, cwd: string): SessionMeta =>
     id,
     name: id,
     cwd,
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     status: 'idle',
     createdAt: 1,

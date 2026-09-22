@@ -37,7 +37,7 @@ const meta = (over: Partial<SessionMeta> = {}): SessionMeta =>
     id: SID,
     name: SID,
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     // Busy, so userPrompt takes the queue branch instead of starting a real turn.
     status: 'running',

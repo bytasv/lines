@@ -173,7 +173,7 @@ const usage = (at: number) => ({
   cacheReadTokens: 1_000,
   cacheCreationTokens: 100,
   outputTokens: 20,
-  model: 'claude-opus-5',
+  model: 'claude-opus-5-5',
   at,
 });
 
@@ -228,7 +228,7 @@ const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({
   id: 's',
   name: 's',
   cwd: '/tmp',
-  model: 'claude-opus-5',
+  model: 'claude-opus-5-5',
   permissionMode: 'default',
   status: 'idle',
   createdAt: 0,

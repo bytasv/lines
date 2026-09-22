@@ -25,7 +25,7 @@ const raw = () => ({
   maxTokens: 1_000_000,
   rawMaxTokens: 1_000_000,
   percentage: 8.4,
-  model: 'claude-opus-5',
+  model: 'claude-opus-5-5',
   isAutoCompactEnabled: true,
   autoCompactThreshold: 920_000,
   mcpTools: [

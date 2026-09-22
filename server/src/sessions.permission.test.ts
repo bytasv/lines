@@ -180,7 +180,7 @@ function harness(
         id: 's1',
         name: 's1',
         cwd,
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         permissionMode: opts.mode ?? 'default',
         status: 'running',
         createdAt: 1,

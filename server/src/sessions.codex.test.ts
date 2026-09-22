@@ -373,13 +373,13 @@ test('an interjection steers the live turn instead of starting a new one', async
 test('a cross-provider setModel is refused once the session has run', async () => {
   const h = harness();
   // A switch before the first turn is free — that is what makes the picker useful.
-  assert.deepEqual(h.sessions.setModel('s1', 'claude-opus-5'), { ok: true });
+  assert.deepEqual(h.sessions.setModel('s1', 'claude-opus-5-5'), { ok: true });
 
   const back = h.sessions.setModel('s1', 'gpt-5.6-terra');
   assert.deepEqual(back, { ok: true });
   h.sessions.get('s1')!.codexThreadId = 'th_1';
 
-  const verdict = h.sessions.setModel('s1', 'claude-opus-5');
+  const verdict = h.sessions.setModel('s1', 'claude-opus-5-5');
   assert.equal(verdict.ok, false);
   assert.match(
     verdict.ok === false ? verdict.reason : '',
@@ -396,10 +396,10 @@ test('switchProvider is the way past that refusal', async () => {
   (h.sessions as unknown as { handoffQuery: () => Promise<string | null> }).handoffQuery = () =>
     Promise.resolve('what the codex session established');
 
-  const verdict = await h.sessions.switchProvider('s1', 'claude-opus-5');
+  const verdict = await h.sessions.switchProvider('s1', 'claude-opus-5-5');
   assert.equal(verdict.ok, true, verdict.ok === false ? verdict.reason : '');
   const m = h.sessions.get('s1')!;
-  assert.equal(m.model, 'claude-opus-5');
+  assert.equal(m.model, 'claude-opus-5-5');
   // The stranded thread is dropped rather than carried — that is the whole price.
   assert.equal(m.codexThreadId, undefined);
 });

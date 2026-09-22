@@ -21,7 +21,7 @@ const meta = (status: SessionStatus, extra: Partial<SessionMeta> = {}): SessionM
     id: 's1',
     name: 's1',
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     compressResponses: false,
     status,
@@ -522,7 +522,7 @@ test('a compaction that died with the worker is closed by the reconcile', () => 
     cacheReadTokens: 0,
     cacheCreationTokens: 0,
     outputTokens: 0,
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
   };
   const h = harness(
     'waiting-approval',

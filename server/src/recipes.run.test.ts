@@ -70,7 +70,7 @@ const runMsg = (
   runId: 'run1',
   recipes: refs,
   cwd: h.root,
-  model: 'claude-opus-5',
+  model: 'claude-opus-5-5',
   permissionMode: 'default',
   ...over,
 });
@@ -157,7 +157,7 @@ test('one recipe plus a chosen workflow attaches it and hands the prompt over as
       {
         name: 'Do',
         promptTemplate: 'work on {task}',
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         permissionMode: 'default',
         autoAdvance: false,
         freshStart: false,

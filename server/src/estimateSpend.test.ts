@@ -61,7 +61,11 @@ test('the codex fixture prices out as the sum of its four parts', () => {
 test('a retired model id is priced as its replacement', () => {
   assert.equal(
     estimateSpendUsd('claude-opus-4-8', { input_tokens: 1_000_000 }),
+    estimateSpendUsd('claude-opus-5-5', { input_tokens: 1_000_000 }),
+  );
+  assert.equal(
     estimateSpendUsd('claude-opus-5', { input_tokens: 1_000_000 }),
+    estimateSpendUsd('claude-opus-5-5', { input_tokens: 1_000_000 }),
   );
 });
 
@@ -69,14 +73,14 @@ test('spend is marked estimated only where the provider reports no cost', () => 
   assert.equal(hasEstimatedSpend(undefined), false);
   assert.equal(hasEstimatedSpend({}), false);
   assert.equal(
-    hasEstimatedSpend({ 'claude-opus-5': { costUsd: 1, tokens: 10, turns: 1 } }),
+    hasEstimatedSpend({ 'claude-opus-5-5': { costUsd: 1, tokens: 10, turns: 1 } }),
     false,
   );
   assert.equal(hasEstimatedSpend({ [TERRA]: { costUsd: 1, tokens: 10, turns: 1 } }), true);
   // A mixed session — one provider-crossing workflow — marks the total.
   assert.equal(
     hasEstimatedSpend({
-      'claude-opus-5': { costUsd: 1, tokens: 10, turns: 1 },
+      'claude-opus-5-5': { costUsd: 1, tokens: 10, turns: 1 },
       [TERRA]: { costUsd: 0.5, tokens: 10, turns: 1 },
     }),
     true,

@@ -147,7 +147,7 @@ test('a fresh-start step may change provider, and the old conversation is droppe
 });
 
 test('a step applies its own reasoning effort to the session', async () => {
-  const h = harness('claude-opus-5', false, { first: 'high', second: 'xhigh' });
+  const h = harness('claude-opus-5-5', false, { first: 'high', second: 'xhigh' });
   h.workflows.approve('s1', 0);
   await settle();
 
@@ -157,7 +157,7 @@ test('a step applies its own reasoning effort to the session', async () => {
 test('a step with no effort clears the previous step’s', async () => {
   // The leak: apply it only when the step names one and a single high-effort step
   // silently sets the price of every step after it.
-  const h = harness('claude-opus-5', false, { first: 'high' });
+  const h = harness('claude-opus-5-5', false, { first: 'high' });
   assert.equal(h.s1().reasoningEffort, 'high');
 
   h.workflows.approve('s1', 0);
@@ -169,7 +169,7 @@ test('a step with no effort clears the previous step’s', async () => {
 test('changing only the effort does not strand the conversation', async () => {
   // Unlike a model change, effort never crosses a provider — so there is nothing
   // to refuse and nothing to reset.
-  const h = harness('claude-opus-5', false, { second: 'max' });
+  const h = harness('claude-opus-5-5', false, { second: 'max' });
   h.workflows.approve('s1', 0);
   await settle();
 
@@ -184,7 +184,7 @@ test('an inheriting step after a manual provider switch starts fresh, not parked
   // — the shape runStep refuses. But the conversation it would inherit is one the
   // switch already replaced, so there is nothing left to protect, and parking here
   // would strand the run behind an error only a workflow edit could clear.
-  const h = harness('claude-opus-5', false);
+  const h = harness('claude-opus-5-5', false);
   const m = h.s1();
   m.claudeSessionId = undefined;
   m.codexThreadId = 'th_1';
@@ -196,7 +196,7 @@ test('an inheriting step after a manual provider switch starts fresh, not parked
   const after = h.s1();
   assert.notEqual(after.workflow!.stepFailure, 'pre-run');
   assert.equal(after.workflow!.stepStatuses[1], 'running');
-  assert.equal(after.model, 'claude-opus-5', 'the step took its own model back');
+  assert.equal(after.model, 'claude-opus-5-5', 'the step took its own model back');
   assert.equal(after.codexThreadId, undefined, 'and the switched conversation was dropped');
   // One-shot: the step that consumed it must not leave it armed for the next one.
   assert.equal(after.workflow!.providerSwitched, undefined);
@@ -208,7 +208,7 @@ test('without that flag, the same step still parks', async () => {
   // The guard the flag narrows is otherwise untouched: an authoring mistake — a
   // crossing step set to inherit, with nobody having switched anything — still
   // refuses to start.
-  const h = harness('claude-opus-5', false);
+  const h = harness('claude-opus-5-5', false);
   const m = h.s1();
   m.claudeSessionId = undefined;
   m.codexThreadId = 'th_1';
@@ -221,12 +221,12 @@ test('without that flag, the same step still parks', async () => {
 });
 
 test('a same-provider step still inherits the conversation', async () => {
-  const h = harness('claude-opus-5', false);
+  const h = harness('claude-opus-5-5', false);
   h.workflows.approve('s1', 0);
   await settle();
 
   const m = h.s1();
   assert.equal(m.workflow!.stepStatuses[1], 'running');
-  assert.equal(m.model, 'claude-opus-5');
+  assert.equal(m.model, 'claude-opus-5-5');
   assert.equal(m.claudeSessionId, 'claude-abc', 'no provider change, so nothing to drop');
 });

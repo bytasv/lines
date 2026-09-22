@@ -15,7 +15,7 @@ const meta = (over: Partial<SessionMeta> = {}): SessionMeta =>
     id: 's',
     name: 'n',
     cwd: '/tmp/project',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     status: 'idle',
     createdAt: 1,
@@ -365,7 +365,7 @@ const SWITCHED: TranscriptEvent[] = [
   ev(2, 'user', { text: 'claude era, second turn' }),
   assistant(3, 'uuid-claude-2', 'answered again'),
   ev(4, 'provider-switch', {
-    from: 'claude-opus-5',
+    from: 'claude-opus-5-5',
     to: 'gpt-5.6-terra',
     summarized: true,
     fromSessionId: 'cli-claude',
@@ -392,7 +392,7 @@ test('a rewind above a switch restores the conversation and the model it left', 
     { sessionId: 'cli-claude', upToMessageId: 'uuid-claude', dir: '/tmp/project' },
   ]);
   const m = h.sessions.get('s')!;
-  assert.equal(m.model, 'claude-opus-5', 'back on the model that era ran on');
+  assert.equal(m.model, 'claude-opus-5-5', 'back on the model that era ran on');
   assert.equal(m.claudeSessionId, 'cli-2', 'and on the fork of its conversation');
   assert.equal(m.codexThreadId, undefined, 'off the codex thread entirely');
 });
@@ -455,7 +455,7 @@ test('a switch recorded without its pointer degrades to a fresh start on the old
   // the wrong one.
   const older = SWITCHED.map((e) =>
     e.kind === 'provider-switch'
-      ? ev(e.seq, 'provider-switch', { from: 'claude-opus-5', to: 'gpt-5.6-terra', summarized: true })
+      ? ev(e.seq, 'provider-switch', { from: 'claude-opus-5-5', to: 'gpt-5.6-terra', summarized: true })
       : e,
   );
   const h = harness(
@@ -467,7 +467,7 @@ test('a switch recorded without its pointer degrades to a fresh start on the old
   assert.equal(verdict.ok, true, verdict.ok === false ? verdict.reason : '');
   assert.equal(h.forks.length, 0, 'nothing to fork');
   const m = h.sessions.get('s')!;
-  assert.equal(m.model, 'claude-opus-5');
+  assert.equal(m.model, 'claude-opus-5-5');
   assert.equal(m.claudeSessionId, undefined);
   assert.equal(m.codexThreadId, undefined);
 });

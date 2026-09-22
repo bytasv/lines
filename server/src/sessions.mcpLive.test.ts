@@ -24,7 +24,7 @@ const meta = (id: string, status: SessionStatus = 'done'): SessionMeta =>
     id,
     name: id,
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     status,
     createdAt: 1,

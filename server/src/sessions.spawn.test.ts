@@ -16,7 +16,7 @@ const meta = (id: string, extra: Partial<SessionMeta> = {}): SessionMeta =>
     id,
     name: id,
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
     status: 'idle',
     createdAt: 1,

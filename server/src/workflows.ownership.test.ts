@@ -20,7 +20,7 @@ const USER = 'u1';
 const content = (over: Partial<StepContent> = {}): StepContent => ({
   name: 'Plan',
   promptTemplate: 'Plan {task}',
-  model: 'claude-opus-5',
+  model: 'claude-opus-5-5',
   permissionMode: 'plan',
   autoAdvance: false,
   freshStart: false,

@@ -1022,7 +1022,7 @@ export interface ModelOption {
    * (see `shared/estimateSpend.ts`). A provider that reports real money is always
    * billed from what it reported; this number never overrides it.
    *
-   * Rates as published on 2026-09-15. A stale context window shows a slightly
+   * Rates as published on 2026-09-22. A stale context window shows a slightly
    * wrong ring; a stale price shows wrong money — re-check these against each
    * vendor's pricing page when this date ages, and keep the `~` marker on every
    * figure derived from them.
@@ -3182,7 +3182,9 @@ export function subagentParentId(msg: unknown): string | null {
 export const DEFAULT_MODELS: ModelOption[] = [
   // `price` is the vendor list rate per 1M tokens — see ModelOption.price for what
   // it is (and is not) used for, and for when to re-check these numbers.
-  { id: 'claude-opus-5', label: 'Opus 5', description: 'Powerful model for complex work', contextWindow: 1_000_000, price: { input: 5, cachedInput: 0.5, output: 25 } },
+  // `cachedInput` here is 0.05x of `input`, not the 0.1x every other row uses —
+  // that is Anthropic's published cache-read rate for this model, not a typo.
+  { id: 'claude-opus-5-5', label: 'Opus 5.5', description: 'For long-running agentic coding and knowledge work', contextWindow: 1_000_000, price: { input: 4, cachedInput: 0.2, output: 20 } },
   { id: 'claude-fable-5-1', label: 'Fable 5.1', description: 'For demanding reasoning and long-horizon agentic work', contextWindow: 1_000_000, price: { input: 10, cachedInput: 0.25, output: 50 } },
   { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability', contextWindow: 1_000_000, price: { input: 2, cachedInput: 0.2, output: 10 } },
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, for lightweight tasks', contextWindow: 200_000, price: { input: 1, cachedInput: 0.1, output: 5 } },
@@ -3204,15 +3206,21 @@ export const DEFAULT_MODELS: ModelOption[] = [
   { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', description: 'OpenAI — fastest, for lightweight tasks', provider: 'openai', price: { input: 0.2, cachedInput: 0.02, output: 1.2 } },
 ];
 
-export const DEFAULT_MODEL = 'claude-opus-5';
+export const DEFAULT_MODEL = 'claude-opus-5-5';
 
 /**
  * Maps removed/retired model ids to their logical current replacement. Only
  * explicit, deliberate remaps belong here — unknown ids pass through unchanged
  * so valid dated snapshots (e.g. claude-haiku-4-5-20251001) are never downgraded.
+ *
+ * `resolveModelId` looks up exactly once and does not follow chains, so every
+ * value must be an id still in DEFAULT_MODELS. When retiring a model, repoint
+ * the entries that pointed *at* it too, or they resolve to an unknown id and
+ * `priceFor`/`contextWindowFor` silently answer undefined.
  */
 export const LEGACY_MODEL_MAP: Record<string, string> = {
-  'claude-opus-4-8': 'claude-opus-5',
+  'claude-opus-4-8': 'claude-opus-5-5',
+  'claude-opus-5': 'claude-opus-5-5',
   'claude-fable-5': 'claude-fable-5-1',
 };
 

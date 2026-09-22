@@ -33,7 +33,7 @@ shows the model name plus a one-line description to help users pick between mode
   Mantine's disabled-option opacity so the icon does not dim with the row.
 - `modelComboboxProps` — widens the dropdown popover for narrow inputs without widening the input itself; also reused by the permission-mode workflow Selects
 - `LEGACY_MODEL_MAP` — explicit map of retired model ids to their replacement
-- `resolveModelId()` — known ids pass through; otherwise applies `LEGACY_MODEL_MAP`; unmapped unknown ids pass through unchanged
+- `resolveModelId()` — known ids pass through; otherwise applies `LEGACY_MODEL_MAP`; unmapped unknown ids pass through unchanged. The lookup is a single hop, not a chain: retiring a model must repoint every `LEGACY_MODEL_MAP` entry that targeted it, or those entries resolve to an id no longer in `DEFAULT_MODELS` and `priceFor`/`contextWindowFor` silently answer `undefined` for them.
 - `isKnownModel()` — true if an id is in `DEFAULT_MODELS`
 
 ## Data flow

@@ -119,7 +119,7 @@ function hookHarness(permissionMode: PermissionMode) {
         id: 's1',
         name: 's1',
         cwd,
-        model: 'claude-opus-5',
+        model: 'claude-opus-5-5',
         permissionMode,
         status: 'running',
         createdAt: 1,

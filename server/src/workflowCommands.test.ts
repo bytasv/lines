@@ -21,7 +21,7 @@ const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/;
 const content = (over: Partial<StepContent> = {}): StepContent => ({
   name: 'Plan',
   promptTemplate: 'Plan {task}',
-  model: 'claude-opus-5',
+  model: 'claude-opus-5-5',
   permissionMode: 'plan',
   autoAdvance: false,
   freshStart: false,
@@ -285,7 +285,7 @@ test('workflowInUse names the sessions currently running a workflow', () => {
   const meta = h.sessions.createSession({
     name: 'S',
     cwd: '/tmp',
-    model: 'claude-opus-5',
+    model: 'claude-opus-5-5',
     permissionMode: 'default',
   });
   h.workflows.attach(meta.id, saved.id);

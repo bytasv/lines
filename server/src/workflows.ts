@@ -234,7 +234,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       name: 'Plan',
       promptTemplate:
         'We are starting a new feature: {task}\n\nFirst, explore the codebase and produce a concise implementation plan. Do not write any code yet — plan only. Ask clarifying questions if the goal is ambiguous.{feedback}',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       permissionMode: 'plan',
       autoAdvance: false,
       freshStart: false,
@@ -243,7 +243,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       name: 'Implement MVP',
       promptTemplate:
         'Implement the MVP of the planned feature now. Follow the approved plan as supplied in this prompt — that text is the whole plan; never go looking for plan files under ~/.claude/plans/ (they belong to other sessions). Keep the change minimal — no extras beyond the plan.{feedback}',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       permissionMode: 'acceptEdits',
       autoAdvance: false,
       freshStart: true,
@@ -270,7 +270,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       name: 'Review',
       promptTemplate:
         'Do a final review of everything changed in this session. Look for correctness bugs, missed edge cases, and quality issues. Report findings; do not change code.{feedback}',
-      model: 'claude-opus-5',
+      model: 'claude-opus-5-5',
       permissionMode: 'plan',
       autoAdvance: false,
       freshStart: true,

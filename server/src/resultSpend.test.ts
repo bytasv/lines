@@ -15,7 +15,7 @@ const result = (
 ): ResultSpendPayload => ({
   total_cost_usd: cumulativeCost,
   usage: { input_tokens: turnTokens },
-  modelUsage: { 'claude-opus-5': { inputTokens: cumulativeTokens } },
+  modelUsage: { 'claude-opus-5-5': { inputTokens: cumulativeTokens } },
 });
 
 test('a result whose cumulative tokens are its own turn opens a lifetime', () => {
