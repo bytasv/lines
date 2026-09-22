@@ -50,8 +50,11 @@ import {
 import { send } from './ws';
 import {
   emptyMachine,
+  emptyView,
+  machineView,
   mergeMachineSessions,
   prunableDraftIds,
+  sessionsOnMachine,
   shouldClaimSelection,
   type MachineSlice,
 } from './lib/machines';
@@ -1192,6 +1195,21 @@ export const useStore = create<UiState>((set, get) => {
       return {
         primaryDeviceId: deviceId,
         machines: { ...state.machines, [deviceId]: slice },
+        // The same projection the `hello` reducer makes for the primary machine,
+        // so a switch swaps projects, library, usage and account state in one go
+        // and without waiting for a round trip. Held per machine precisely so
+        // this is possible; see MachineView.
+        ...slice.view,
+        activeProject: pickActive(slice.view.projects, state.activeProject),
+        // A session the new machine does not host must not stay selected — the
+        // view would be pointed at another computer's session while every control
+        // around it describes this one, and App.tsx re-activates a selected
+        // session's project, which would drag the tab back across with it.
+        selectedSessionId:
+          state.selectedSessionId &&
+          (state.sessionMachine[state.selectedSessionId] ?? deviceId) === deviceId
+            ? state.selectedSessionId
+            : null,
         connectionStatus: slice.connectionStatus,
         machineOffline: slice.machineOffline,
         bootstrapped: slice.bootstrapped,
@@ -1551,8 +1569,11 @@ export const useStore = create<UiState>((set, get) => {
       case 'hello': {
         const incoming: Record<string, SessionMeta> = {};
         for (const s of msg.sessions) incoming[s.id] = s;
-        const projects = toProjects(msg.projects);
-        const signature = helloSignature(msg.sessions, projects);
+        // Everything this machine says about its own projects, library and
+        // account, folded against what it said last time — never against the
+        // globals, which describe whichever machine is in front of the user.
+        const view = machineView(msg, get().machines[from]?.view ?? emptyView());
+        const signature = helloSignature(msg.sessions, view.projects);
         // A duplicate `hello` has to be inert. The bridge sends a full snapshot per
         // channel `open`, and the relay replays `open` for every live channel each
         // time a bridge attaches — so a takeover delivers one to a browser that never
@@ -1589,6 +1610,7 @@ export const useStore = create<UiState>((set, get) => {
             // Same fail-closed reading as `local`: absent means "no evidence of
             // encryption", which is what an older bridge honestly offers.
             encrypted: msg.encrypted ?? false,
+            view,
           };
           return {
           machines: { ...state.machines, [from]: slice },
@@ -1599,37 +1621,25 @@ export const useStore = create<UiState>((set, get) => {
           helloSignature: fromPrimary ? signature : state.helloSignature,
           seenSessionIds: withSeen(state.seenSessionIds, Object.keys(incoming)),
           ...(repeat ? {} : { sessions: merged.sessions }),
-          workflows: msg.workflows,
-          sharedWorkflows: msg.sharedWorkflows ?? [],
-          steps: msg.steps ?? [],
-          sharedSteps: msg.sharedSteps ?? [],
-          pinnedSteps: msg.pinnedSteps ?? [],
-          recipes: msg.recipes ?? [],
-          sharedRecipes: msg.sharedRecipes ?? [],
-          recipeStats: msg.recipeStats ?? {},
-          models: msg.models,
-          recentDirs: msg.recentDirs,
-          projects,
-          projectKeys: msg.projectKeys ?? {},
-          // Server restarts send hello before the first usage fetch completes;
-          // keep the last good snapshot rather than flickering the chip away.
-          usage: msg.usage ?? (msg.auth.loggedIn ? state.usage : null),
-          // Same rule as `usage` above: a bridge restart sends hello before the
-          // first fetch lands, so keep the last good snapshot rather than
-          // flickering the chip away — but drop it once the account is gone.
-          openaiUsage: msg.openaiUsage ?? (msg.openaiAuth?.loggedIn ? state.openaiUsage : null),
+          // The owner state this machine described, onto the globals — but only
+          // when it *is* the machine in front of the user. Every field of a
+          // `MachineView` is named after its global counterpart, so the spread is
+          // the whole projection and `setPrimaryMachine` can make the identical
+          // one on a switch. A shared machine's thin hello (empty projects, no
+          // account, a narrowed `access`) used to land here and blank the
+          // primary's UI until its next hello put it back.
+          ...(fromPrimary ? { ...view, activeProject: pickActive(view.projects, state.activeProject) } : {}),
           // Gated on `fromPrimary`, like `update`/`bridge`/`claudeCli` below and
           // for the same reason: the ledger is machine-local and a guest `hello`
           // never carries one, so an ungated read would let a second machine wipe
           // the primary's history the moment it says hello.
           spendHistory: fromPrimary ? msg.spendHistory ?? state.spendHistory : state.spendHistory,
-          auth: msg.auth,
-          // Absent on a bridge older than this field — degrades to "no OpenAI
-          // account", which is exactly what such a bridge can offer.
-          openaiAuth: msg.openaiAuth ?? { loggedIn: false },
-          storageStatus: msg.storage ?? null,
+          // Banner scalars, so they follow their `bridge`/`update` neighbours
+          // rather than the machine that happened to speak last;
+          // `setPrimaryMachine` re-derives both from the new machine's slice.
+          storageStatus: fromPrimary ? msg.storage ?? null : state.storageStatus,
           // Absent on a bridge older than this field — degrades to "no strip".
-          workerStatus: msg.worker ?? null,
+          workerStatus: fromPrimary ? msg.worker ?? null : state.workerStatus,
           // Gated on `fromPrimary`, unlike its neighbours: a guest `hello` never
           // carries `update`, so an ungated read would let a second machine's
           // hello wipe a pending update off the primary.
@@ -1644,9 +1654,14 @@ export const useStore = create<UiState>((set, get) => {
           // the moment a second machine says hello.
           claudeCli: fromPrimary ? msg.claudeCli ?? null : state.claudeCli,
           codexCli: fromPrimary ? msg.codexCli ?? null : state.codexCli,
-          // Present only from somebody else's machine. Absent means our own, so
-          // it must reset rather than persist from a previous connection.
-          access: msg.access ?? null,
+          // `access` rides the view spread above, gated with the rest of the
+          // owner state: it says whose machine the UI is describing, and a shared
+          // machine's hello setting it globally is what flipped the sidebar into
+          // its guest layout while the user was looking at their own machine.
+          //
+          // `profiles` stays ungated on purpose — it is keyed by user id, so it
+          // names people rather than describing a machine, and a guest row needs
+          // the host's name whichever machine is primary.
           profiles: msg.access?.ownerProfile
             ? { ...state.profiles, [msg.access.ownerProfile.userId]: msg.access.ownerProfile }
             : state.profiles,
@@ -1665,35 +1680,39 @@ export const useStore = create<UiState>((set, get) => {
           // Gated on "no provider connected", not on Claude alone: an OpenAI-only
           // user is signed in to something and must not be nagged to sign in to
           // Claude on every launch.
-          loginModalOpen: msg.access
-            ? false
-            : state.loginModalOpen ||
-              (!msg.auth.loggedIn &&
-                !msg.openaiAuth?.loggedIn &&
-                state.auth?.loggedIn !== false),
-          guardAllowlist: msg.guardAllowlist ?? [],
-          guardReview: msg.guardAllowlistReview ?? null,
+          //
+          // The four auto-open flags below stay global — a modal is a property of
+          // the window, not of a machine — but every one of them is gated on
+          // `fromPrimary` as well: a background machine must never raise a dialog
+          // about an account the user is not currently looking at.
+          loginModalOpen: !fromPrimary
+            ? state.loginModalOpen
+            : msg.access
+              ? false
+              : state.loginModalOpen ||
+                (!msg.auth.loggedIn &&
+                  !msg.openaiAuth?.loggedIn &&
+                  state.auth?.loggedIn !== false),
           // Same "auto-open on genuinely new news" rule as the login modal: a
           // review the user already dismissed must not reopen on every reconnect,
           // but a divergence they have not seen has to reach them unprompted.
           guardReviewOpen:
             state.guardReviewOpen ||
-            (msg.guardAllowlistReview != null &&
+            (fromPrimary &&
+              msg.guardAllowlistReview != null &&
               msg.guardAllowlistReview.detectedAt !== state.guardReviewDismissedAt),
-          memoryReview: msg.memoryReview ?? null,
           // Same auto-open-on-genuinely-new-news rule as the allowlist review.
           memoryReviewOpen:
             state.memoryReviewOpen ||
-            (msg.memoryReview != null &&
+            (fromPrimary &&
+              msg.memoryReview != null &&
               msg.memoryReview.detectedAt !== state.memoryReviewDismissedAt),
-          mcpConnections: msg.mcpConnections ?? [],
-          mcpReview: msg.mcpConnectionsReview ?? null,
           // Same auto-open-on-new-news rule as the allowlist review above.
           mcpReviewOpen:
             state.mcpReviewOpen ||
-            (msg.mcpConnectionsReview != null &&
+            (fromPrimary &&
+              msg.mcpConnectionsReview != null &&
               msg.mcpConnectionsReview.detectedAt !== state.mcpReviewDismissedAt),
-          activeProject: pickActive(projects, state.activeProject),
           // Transcripts may have missed events while the socket was down, so the
           // open session reloads (SessionView re-sends loadTranscript on `hello`).
           // Keep the cached events until that reply lands — the `transcript`
@@ -2141,13 +2160,17 @@ useStore.subscribe((state, prev) => {
     state.sessions === prev.sessions &&
     state.projectKeys === prev.projectKeys &&
     state.projects === prev.projects &&
-    state.activeProject === prev.activeProject
+    state.activeProject === prev.activeProject &&
+    state.sessionMachine === prev.sessionMachine &&
+    state.primaryDeviceId === prev.primaryDeviceId
   ) {
     return;
   }
   const next = reconcileSeenStatus(
     state.seenSessionStatus,
-    state.sessions,
+    // Scoped to the machine in front of the user, exactly as the sidebar is: a
+    // project tab must not pulse for a session its own list no longer shows.
+    sessionsOnMachine(state.sessions, state.sessionMachine, state.primaryDeviceId ?? ''),
     state.projectKeys,
     // Extra roots widen membership, so the open project's own shape matters here.
     projectAt(state.projects, state.activeProject),

@@ -28,7 +28,7 @@
     "@clerk/backend": "^3.12.0",
     "@lines/shared": "*",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@openai/codex-sdk": "^0.154.0",
+    "@openai/codex-sdk": "^0.155.1",
     "dotenv": "^17.4.2",
     "ws": "^8.18.0",
     "zod": "^4.4.3"

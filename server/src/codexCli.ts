@@ -41,11 +41,13 @@ export { CODEX_INSTALL_COMMAND, CODEX_INSTALL_URL };
  *
  * It is also the floor for the models in `DEFAULT_MODELS`: `gpt-6-astra` and the
  * GPT-5.6 family only exist on 0.153.4 and up, so an older CLI would fail every
- * turn with a model-not-found error instead of this sentence.
+ * turn with a model-not-found error instead of this sentence. The floor for
+ * `gpt-6-sol` and `gpt-6-luna` is not measured yet — no changelog entry through
+ * 0.155.1 names them, so the first live turn on one is what establishes it.
  *
  * Bump this with the SDK dependency, not independently.
  */
-export const MIN_CODEX_VERSION = '0.154.0';
+export const MIN_CODEX_VERSION = '0.155.1';
 
 /** Injection seams, so discovery order is testable without a real filesystem.
  *  Same shape as `claudeCli.ts`'s `DiscoveryDeps`, deliberately. */

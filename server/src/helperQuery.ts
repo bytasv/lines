@@ -49,7 +49,7 @@ import { codexCliStatus } from './codexCli.ts';
  * offers, which is the same reason the Claude path uses Haiku. Deliberately not
  * the session's own model — a helper is Lines' cost, not the user's choice.
  */
-export const CODEX_HELPER_MODEL = 'gpt-5.6-luna';
+export const CODEX_HELPER_MODEL = 'gpt-6-luna';
 
 /** How long a helper may run before its caller gives up and uses its fallback. */
 const HELPER_TIMEOUT_MS = 60_000;

@@ -67,6 +67,20 @@ test('a retired model id is priced as its replacement', () => {
     estimateSpendUsd('claude-opus-5', { input_tokens: 1_000_000 }),
     estimateSpendUsd('claude-opus-5-5', { input_tokens: 1_000_000 }),
   );
+  // A step still stored on a retired OpenAI id is costed at its replacement's
+  // rate, not left undefined — OpenAI reports no cost, so this estimate is the
+  // only figure that step will ever show. Asserted against the literal rate as
+  // well as the replacement, so two unknown ids answering undefined cannot pass.
+  assert.equal(estimateSpendUsd('gpt-5.6-sol', { input_tokens: 1_000_000 }), 2);
+  assert.equal(
+    estimateSpendUsd('gpt-5.6-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
+    estimateSpendUsd('gpt-6-sol', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
+  );
+  assert.equal(estimateSpendUsd('gpt-5.6-luna', { output_tokens: 1_000_000 }), 0.5);
+  assert.equal(
+    estimateSpendUsd('gpt-5.6-luna', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
+    estimateSpendUsd('gpt-6-luna', { input_tokens: 1_000_000, output_tokens: 1_000_000 }),
+  );
 });
 
 test('spend is marked estimated only where the provider reports no cost', () => {

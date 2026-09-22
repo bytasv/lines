@@ -1,13 +1,27 @@
 import type {
+  AuthStatus,
   BridgeInfo,
   ClaudeCliStatus,
   CodexCliStatus,
+  GuardAllowEntry,
+  GuardAllowlistReview,
+  McpConnection,
+  McpConnectionsReview,
+  MemoryReview,
+  ModelOption,
+  Project,
+  ProjectKeyMap,
+  RecipeDef,
+  ServerMessage,
   SessionMeta,
   ShareProfile,
   ShareScope,
+  StepDef,
   StorageStatus,
   UpdateStatus,
+  UsageSnapshot,
   WorkerStatus,
+  WorkflowDef,
 } from '@lines/shared';
 
 /**
@@ -21,6 +35,82 @@ import type {
  */
 
 export type ConnectionState = 'connected' | 'reconnecting' | 'offline';
+
+/** The `hello` frame, as the wire declares it. */
+type Hello = Extract<ServerMessage, { type: 'hello' }>;
+
+/** The `access` block only a guest's `hello` carries; see `GuestAccess` in the store. */
+type Access = NonNullable<Hello['access']>;
+
+/**
+ * The owner-state half of one machine's `hello`.
+ *
+ * The bridge already sends a *thin* `hello` to a guest — a shared machine
+ * contributes sessions and nothing else — so a client holding two links at once
+ * must never merge two of these. Before this existed the reducer wrote every
+ * field below straight into the globals whichever machine spoke last, so a
+ * shared machine's hello blanked the projects, the library and the account of
+ * the machine the user was actually looking at, and the next own-machine hello
+ * put them back: the sidebar flicker.
+ *
+ * Kept as one nested field on the slice rather than twenty-odd parallel ones so
+ * "everything a machine switch has to swap" is a single value. Every field is
+ * named exactly as its counterpart in the store, so spreading a view *is* the
+ * projection onto the globals — the reducer and `setPrimaryMachine` cannot drift
+ * apart about which fields belong to a machine, which is the one real hazard of
+ * scoping them.
+ */
+export interface MachineView {
+  projects: Project[];
+  projectKeys: ProjectKeyMap;
+  recentDirs: string[];
+  workflows: WorkflowDef[];
+  sharedWorkflows: WorkflowDef[];
+  steps: StepDef[];
+  sharedSteps: StepDef[];
+  pinnedSteps: StepDef[];
+  recipes: RecipeDef[];
+  sharedRecipes: RecipeDef[];
+  recipeStats: Record<string, number>;
+  models: ModelOption[];
+  usage: UsageSnapshot | null;
+  openaiUsage: UsageSnapshot | null;
+  auth: AuthStatus | null;
+  openaiAuth: AuthStatus | null;
+  /** Non-null means this machine is somebody else's. */
+  access: Access | null;
+  guardAllowlist: GuardAllowEntry[];
+  guardReview: GuardAllowlistReview | null;
+  memoryReview: MemoryReview | null;
+  mcpConnections: McpConnection[];
+  mcpReview: McpConnectionsReview | null;
+}
+
+/** A machine nothing is known about yet: empty everywhere, never "logged out". */
+export const emptyView = (): MachineView => ({
+  projects: [],
+  projectKeys: {},
+  recentDirs: [],
+  workflows: [],
+  sharedWorkflows: [],
+  steps: [],
+  sharedSteps: [],
+  pinnedSteps: [],
+  recipes: [],
+  sharedRecipes: [],
+  recipeStats: {},
+  models: [],
+  usage: null,
+  openaiUsage: null,
+  auth: null,
+  openaiAuth: null,
+  access: null,
+  guardAllowlist: [],
+  guardReview: null,
+  memoryReview: null,
+  mcpConnections: [],
+  mcpReview: null,
+});
 
 /** Everything the client knows about one machine it is holding a link to. */
 export interface MachineSlice {
@@ -63,6 +153,11 @@ export interface MachineSlice {
    * False until a `hello` says otherwise, and on a bridge too old to say.
    */
   encrypted: boolean;
+  /**
+   * The owner state this machine's last `hello` described. Held per machine
+   * because only the primary's copy may reach the globals — see {@link MachineView}.
+   */
+  view: MachineView;
 }
 
 export const emptyMachine = (deviceId: string): MachineSlice => ({
@@ -80,7 +175,80 @@ export const emptyMachine = (deviceId: string): MachineSlice => ({
   ownerProfile: null,
   local: false,
   encrypted: false,
+  view: emptyView(),
 });
+
+/**
+ * This machine's owner state, folded from its `hello`.
+ *
+ * `prev` is that machine's *own* previous view, never the globals: the two
+ * carry-forward rules below are about one bridge restarting, and reading them
+ * from global state made a second machine's hello inherit the first's chip.
+ */
+export function machineView(msg: Hello, prev: MachineView): MachineView {
+  return {
+    // `hello` carries no protocol version, so a tab left open across the upgrade
+    // — or an old bridge — can still send bare path strings here.
+    projects: (msg.projects as (Project | string)[]).map((p) =>
+      typeof p === 'string' ? { path: p } : p,
+    ),
+    projectKeys: msg.projectKeys ?? {},
+    recentDirs: msg.recentDirs,
+    workflows: msg.workflows,
+    sharedWorkflows: msg.sharedWorkflows ?? [],
+    steps: msg.steps ?? [],
+    sharedSteps: msg.sharedSteps ?? [],
+    pinnedSteps: msg.pinnedSteps ?? [],
+    recipes: msg.recipes ?? [],
+    sharedRecipes: msg.sharedRecipes ?? [],
+    recipeStats: msg.recipeStats ?? {},
+    models: msg.models,
+    // A bridge restart sends hello before its first usage fetch completes; keep
+    // the last good snapshot rather than flickering the chip away — but drop it
+    // once the account behind it is gone.
+    usage: msg.usage ?? (msg.auth.loggedIn ? prev.usage : null),
+    // Same rule as `usage`, against the OpenAI account.
+    openaiUsage: msg.openaiUsage ?? (msg.openaiAuth?.loggedIn ? prev.openaiUsage : null),
+    auth: msg.auth,
+    // Absent on a bridge older than this field — degrades to "no OpenAI account",
+    // which is exactly what such a bridge can offer.
+    openaiAuth: msg.openaiAuth ?? { loggedIn: false },
+    // Present only from somebody else's machine. Absent means our own, so it
+    // must reset rather than persist from a previous connection.
+    access: msg.access ?? null,
+    guardAllowlist: msg.guardAllowlist ?? [],
+    guardReview: msg.guardAllowlistReview ?? null,
+    memoryReview: msg.memoryReview ?? null,
+    mcpConnections: msg.mcpConnections ?? [],
+    mcpReview: msg.mcpConnectionsReview ?? null,
+  };
+}
+
+/**
+ * The sessions hosted by one machine.
+ *
+ * The store holds every linked machine's sessions on purpose — messages route by
+ * `sessionMachine`, and alerts fire for all of them — so this is a *display*
+ * scope, applied where a list would otherwise mix two computers together.
+ *
+ * A direct local bridge stamps `''` and has no device id at all, so callers pass
+ * `primaryDeviceId ?? ''` and a local install is unaffected. An unstamped
+ * session — one no `hello` has claimed yet — is shown on the machine being asked
+ * about rather than hidden: the same "keep rather than guess" rule
+ * `mergeMachineSessions` follows, and a session rendered nowhere is worse than
+ * one rendered here.
+ */
+export function sessionsOnMachine(
+  sessions: Record<string, SessionMeta>,
+  sessionMachine: Record<string, string>,
+  deviceId: string,
+): Record<string, SessionMeta> {
+  const out: Record<string, SessionMeta> = {};
+  for (const [id, session] of Object.entries(sessions)) {
+    if ((sessionMachine[id] ?? deviceId) === deviceId) out[id] = session;
+  }
+  return out;
+}
 
 /**
  * Fold one machine's `hello` into a session map that may hold several machines'

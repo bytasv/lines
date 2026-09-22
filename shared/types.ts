@@ -3193,17 +3193,17 @@ export const DEFAULT_MODELS: ModelOption[] = [
   //
   // All four need a ChatGPT sign-in, which is the only OpenAI credential Lines
   // holds. Deliberately omitted: `gpt-5.3-codex-spark` (a research preview gated
-  // to ChatGPT Pro, so it would 404 for most accounts) and `gpt-5.5` (previous
-  // generation) — this list mirrors the Claude one in showing current models only.
+  // to ChatGPT Pro, so it would 404 for most accounts), `gpt-5.5` (previous
+  // generation), and `gpt-5.6-sol`/`gpt-5.6-luna` — superseded on 2026-09-22 by
+  // their GPT-6 namesakes below and retired through LEGACY_MODEL_MAP. This list
+  // mirrors the Claude one in showing current models only.
   //
   // These four are the only prices that are actually read today: OpenAI reports
   // no cost, so their spend is estimated from these (shared/estimateSpend.ts).
-  // Sol's rate is promotional through at least 2026-11-21 and reverts higher
-  // after it — the first of these to re-check.
   { id: 'gpt-6-astra', label: 'GPT-6 Astra', description: 'OpenAI — most capable, for complex reasoning and long agentic work', provider: 'openai', price: { input: 10, cachedInput: 1, output: 50 } },
-  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', description: 'OpenAI — for complex work', provider: 'openai', price: { input: 4, cachedInput: 0.4, output: 20 } },
+  { id: 'gpt-6-sol', label: 'GPT-6 Sol', description: 'OpenAI — for complex coding and agentic work', provider: 'openai', price: { input: 2, cachedInput: 0.2, output: 10 } },
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', description: 'OpenAI — balanced for everyday work', provider: 'openai', price: { input: 2, cachedInput: 0.2, output: 12 } },
-  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', description: 'OpenAI — fastest, for lightweight tasks', provider: 'openai', price: { input: 0.2, cachedInput: 0.02, output: 1.2 } },
+  { id: 'gpt-6-luna', label: 'GPT-6 Luna', description: 'OpenAI — fastest, for focused high-volume tasks', provider: 'openai', price: { input: 0.1, cachedInput: 0.01, output: 0.5 } },
 ];
 
 export const DEFAULT_MODEL = 'claude-opus-5-5';
@@ -3222,6 +3222,8 @@ export const LEGACY_MODEL_MAP: Record<string, string> = {
   'claude-opus-4-8': 'claude-opus-5-5',
   'claude-opus-5': 'claude-opus-5-5',
   'claude-fable-5': 'claude-fable-5-1',
+  'gpt-5.6-sol': 'gpt-6-sol',
+  'gpt-5.6-luna': 'gpt-6-luna',
 };
 
 /** True when `id` is one of the currently offered models. */
