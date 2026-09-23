@@ -109,6 +109,10 @@ approval staging when they press Send.
   but the CPU is the host's
 - recordings longer than `VOICE_MAX_SECONDS` (90s) auto-stop and are transcribed as caught
 - a model download is refused while `LINES_WHISPER_MODEL` pins a single external model file
+- an iOS home-screen app asks for the mic on every recording: WebKit does not keep the grant once
+  the tracks stop, and standalone apps have no per-site permission setting. In a Safari tab,
+  aA → Website Settings → Microphone → Allow makes it stick. Holding the stream open between
+  recordings would stop the prompts but keep iOS's mic indicator lit, so it is not done
 
 ## Architectural rules
 

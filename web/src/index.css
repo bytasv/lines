@@ -458,8 +458,9 @@
     bottom: var(--lines-keyboard);
   }
 
+  /* A standalone iOS app draws under the Dynamic Island; a tall sheet must stop below it. */
   .lines-mobile-sheet {
-    max-height: var(--lines-viewport);
+    max-height: calc(var(--lines-viewport) - var(--lines-safe-top));
   }
 
   /* 16px is a threshold, not a taste: iOS Safari zooms the whole page in when a

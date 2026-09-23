@@ -3629,7 +3629,8 @@
         "the composer's text is 15px, and 16px on iOS where the zoom rule applies — @supports (-webkit-touch-callout: none) is the platform test, so Chrome on iOS keeps the floor too",
         "a bottom sheet is sized by its content (size=\"auto\"), never by a share of the screen: a sheet pinned at 80dvh is the same height whether it holds four controls or one",
         "the composer's Options button is labelled with the current permission mode, so one control reports the setting that matters before sending and opens the sheet that changes it",
-        "the phone project-picker button is sized and left-aligned to its own label instead of stretching to fill the header, and the composer has no corner radius or left/right/bottom border on a phone, so it reads as a strip spanning the screen"
+        "the phone project-picker button is sized and left-aligned to its own label instead of stretching to fill the header, and the composer has no corner radius or left/right/bottom border on a phone, so it reads as a strip spanning the screen",
+        "bottom sheets cap max-height at --lines-viewport minus --lines-safe-top, so a tall sheet's title and close button clear the Dynamic Island in a home-screen iOS app; PermissionPrompt's sheet carries .lines-mobile-sheet too"
       ],
       "architecturalRules": [
         "adapt in place, never fork a mobile shell: a second transcript renderer either is the same code or drifts and re-loses the batching, windowing and referential-stability work",
@@ -3703,7 +3704,8 @@
         "a named non-English language (or translate) with only the English-only model installed is refused rather than silently mistranscribed",
         "one transcription and one model download run at a time per bridge",
         "recordings longer than VOICE_MAX_SECONDS (90s) auto-stop and are transcribed as caught",
-        "a model download is refused while LINES_WHISPER_MODEL pins a single external model file"
+        "a model download is refused while LINES_WHISPER_MODEL pins a single external model file",
+        "an iOS home-screen app re-prompts for the mic on every recording (WebKit drops the grant once tracks stop, no per-site setting); the stream is not held open between recordings because that keeps the mic indicator lit"
       ],
       "architecturalRules": [
         "voice input is not a ProviderCapabilities field — the prompt reaches either provider as plain text either way",

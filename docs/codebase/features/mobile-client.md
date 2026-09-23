@@ -100,7 +100,9 @@ an iPad in landscape is neither.
 - A bottom sheet is sized by its content (`size="auto"`), not by a share of the screen. A sheet
   pinned at 80dvh is the same height whether it holds four controls or one, and four controls do
   not fill a phone; `.lines-mobile-sheet`'s max-height is what stops a long one running off the
-  top.
+  top. That max-height subtracts `--lines-safe-top` too: a home-screen iOS app draws under the
+  status bar, so a full-height sheet put its title and close button under the Dynamic Island.
+  Every bottom sheet, `PermissionPrompt`'s included, carries the class.
 - The composer's Options button is labelled with the current permission mode, so one control both
   reports the setting that matters before you send and opens the sheet that changes it.
 - The sidebar is a real drawer on a phone (`useDisclosure`), and picking a session closes it —

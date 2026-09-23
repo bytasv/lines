@@ -1666,6 +1666,7 @@ function PermissionCard({
           size="auto"
           padding="md"
           className="lines-safe-bottom"
+          classNames={{ content: 'lines-mobile-sheet' }}
         >
           {body}
         </Drawer>
