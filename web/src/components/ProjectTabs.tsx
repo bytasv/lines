@@ -48,7 +48,8 @@ import { BrandMark } from './BrandMark';
 import { MachineSwitcher } from './MachineSwitcher';
 import { SettingsModal } from './SettingsModal';
 import { UsageIndicator } from './UsageIndicator';
-import { UserMenu } from './UserMenu';
+import { UserMenu, type UserMenuAction } from './UserMenu';
+import { CLERK_ENABLED } from '../lib/clerk';
 
 function baseName(path: string) {
   return path.split('/').filter(Boolean).pop() ?? path;
@@ -379,29 +380,37 @@ export function ProjectTabs() {
       )}
       {isPhone ? (
         <>
-          <Button
-            variant="subtle"
-            color="gray"
-            px={6}
-            rightSection={<IconChevronDown size={16} />}
-            style={{ flex: 1, minWidth: 0 }}
-            styles={{
-              label: {
-                minWidth: 0,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-              },
-            }}
-            aria-label="Switch project"
-            onClick={() => {
-              setProjectSearch('');
-              setPickerOpen(true);
-            }}
-          >
-            <Text component="span" size="sm" truncate>
-              {activeProject ? baseName(activeProject) : 'Projects'}
-            </Text>
-          </Button>
+          {/* Beside the burger: the machine scopes both the sessions the burger
+              opens and the projects to its right. */}
+          <MachineSwitcher />
+          {/* The box takes the free width so the trailing controls stay on the
+              right; the button itself is only as wide as the project name. */}
+          <Box style={{ flex: 1, minWidth: 0, display: 'flex' }}>
+            <Button
+              variant="subtle"
+              color="gray"
+              px={6}
+              maw="100%"
+              justify="flex-start"
+              rightSection={<IconChevronDown size={16} />}
+              styles={{
+                label: {
+                  minWidth: 0,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                },
+              }}
+              aria-label="Switch project"
+              onClick={() => {
+                setProjectSearch('');
+                setPickerOpen(true);
+              }}
+            >
+              <Text component="span" size="sm" truncate>
+                {activeProject ? baseName(activeProject) : 'Projects'}
+              </Text>
+            </Button>
+          </Box>
           <Drawer
             opened={pickerOpen}
             onClose={() => setPickerOpen(false)}
@@ -412,11 +421,6 @@ export function ProjectTabs() {
             classNames={{ content: 'lines-mobile-sheet', inner: 'lines-mobile-sheet-inner' }}
           >
             <Stack gap="sm" className="lines-safe-bottom">
-              {/* The header has no room for the switcher on a phone — the brand
-                  and its separator are dropped there for the same reason — so the
-                  machine lives at the top of this sheet, above the projects it
-                  scopes. */}
-              <MachineSwitcher variant="row" onSwitch={() => setPickerOpen(false)} />
               <TextInput
                 label="Search projects"
                 placeholder="Name or path"
@@ -529,7 +533,6 @@ export function ProjectTabs() {
       )}
       <UsageIndicator />
       <HeaderActions />
-      <UserMenu />
       <ConfirmModal
         opened={pendingRemove !== null}
         title="Remove folder"
@@ -598,10 +601,46 @@ function HeaderActions() {
 
   const openDocs = () => navigate('/docs');
   const themeLabel = dark ? 'Light mode' : 'Dark mode';
+  const settingsLabel = guardReview ? 'Settings — allowlist needs review' : 'Settings';
+
+  // With Clerk the avatar menu carries these instead of separate controls:
+  // Documentation everywhere, theme and Settings only where the header is
+  // short of room. Clerk actions cannot be disabled, so Documentation is left
+  // out rather than greyed out when there is no project to read.
+  const accountActions: UserMenuAction[] = [];
+  if (CLERK_ENABLED) {
+    if (activeProject) {
+      accountActions.push({
+        label: 'Documentation',
+        icon: <IconBooks size={14} />,
+        onClick: openDocs,
+      });
+    }
+    if (isPhone) {
+      accountActions.push(
+        {
+          label: themeLabel,
+          icon: dark ? <IconSun size={14} /> : <IconMoon size={14} />,
+          onClick: toggleColorScheme,
+        },
+        {
+          label: settingsLabel,
+          icon: <IconSettings size={14} />,
+          onClick: () => setSettingsOpen(true),
+        },
+      );
+    }
+  }
 
   return (
     <>
-      {isPhone ? (
+      {isPhone && CLERK_ENABLED ? (
+        // The dot rides the avatar, since the Settings item it belongs to is in
+        // its menu.
+        <Indicator size={6} color="yellow" disabled={!guardReview} offset={4}>
+          <UserMenu actions={accountActions} />
+        </Indicator>
+      ) : isPhone ? (
         // The dot rides the whole menu, since the gear it belongs to is inside.
         <Indicator size={6} color="yellow" disabled={!guardReview} offset={4}>
           <Menu position="bottom-end" width={220} withinPortal>
@@ -633,31 +672,33 @@ function HeaderActions() {
                 leftSection={<IconSettings size={14} />}
                 onClick={() => setSettingsOpen(true)}
               >
-                {guardReview ? 'Settings — allowlist needs review' : 'Settings'}
+                {settingsLabel}
               </Menu.Item>
             </Menu.Dropdown>
           </Menu>
         </Indicator>
       ) : (
         <>
-          <Tooltip label={activeProject ? 'Documentation' : 'Open a project to read its docs'}>
-            <ActionIcon
-              variant={onDocs ? 'light' : 'subtle'}
-              color="gray"
-              size="sm"
-              aria-label="Documentation"
-              disabled={!activeProject}
-              onClick={openDocs}
-            >
-              <IconBooks size={14} />
-            </ActionIcon>
-          </Tooltip>
+          {!CLERK_ENABLED && (
+            <Tooltip label={activeProject ? 'Documentation' : 'Open a project to read its docs'}>
+              <ActionIcon
+                variant={onDocs ? 'light' : 'subtle'}
+                color="gray"
+                size="sm"
+                aria-label="Documentation"
+                disabled={!activeProject}
+                onClick={openDocs}
+              >
+                <IconBooks size={14} />
+              </ActionIcon>
+            </Tooltip>
+          )}
           <Tooltip label={themeLabel}>
             <ActionIcon variant="subtle" color="gray" size="sm" onClick={toggleColorScheme}>
               {dark ? <IconSun size={14} /> : <IconMoon size={14} />}
             </ActionIcon>
           </Tooltip>
-          <Tooltip label={guardReview ? 'Settings — allowlist needs review' : 'Settings'}>
+          <Tooltip label={settingsLabel}>
             <Indicator size={6} color="yellow" disabled={!guardReview} offset={2}>
               <ActionIcon
                 variant="subtle"
@@ -670,6 +711,7 @@ function HeaderActions() {
               </ActionIcon>
             </Indicator>
           </Tooltip>
+          <UserMenu actions={accountActions} />
         </>
       )}
       <SettingsModal

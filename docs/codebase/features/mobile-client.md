@@ -23,8 +23,9 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
 - `web/src/lib/viewport.ts` — `trackKeyboardInset`, which publishes `--lines-keyboard`
 - `web/src/App.tsx` — navbar as a drawer on a phone, `Burger` in the header, viewport-clamped
   sidebar width
-- `web/src/components/ProjectTabs.tsx` — `HeaderActions`: the trailing controls as an icon row or
-  a single overflow menu
+- `web/src/components/ProjectTabs.tsx` — `HeaderActions`: the trailing controls as an icon row
+  (desktop) or folded into the Clerk account menu / an overflow menu (phone, or any build without
+  Clerk); `MachineSwitcher` beside the burger and the left-aligned project-picker button
 - `web/src/index.css` — `--lines-viewport`/`--lines-keyboard`, and the `@media` block:
   `env(safe-area-inset-bottom)`, the 16px input floor, and touch target floors
 - `web/src/components/BestOnDesktop.tsx` — the shared deferral panel
@@ -43,8 +44,10 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
   may actually occupy. Every full-height box uses it instead of `100vh`
 - `trackKeyboardInset()` — measures the on-screen keyboard from `visualViewport` and publishes it
   as `--lines-keyboard`. Started once in `main.tsx`, never torn down
-- `HeaderActions` — documentation, theme and settings: an icon row on a desktop, one overflow
-  menu on a phone
+- `HeaderActions` — documentation, theme and settings. With Clerk enabled, documentation lives in
+  the account menu on every width, and theme/settings join it only on a phone; without Clerk (or
+  on desktop with Clerk) each stays its own icon, and a phone without Clerk still folds all three
+  into one overflow menu
 
 ## Data flow
 
@@ -77,9 +80,14 @@ an iPad in landscape is neither.
 - Inputs are 16px on a phone. Below that, iOS Safari zooms the page in on focus and does not zoom
   back out on blur, which leaves the app permanently magnified with no fix but a manual pinch.
   Mantine's default is `sm` (14px), so every field in the app tripped it.
-- The header's trailing controls fold into one overflow menu on a phone, and the brand mark is
-  dropped there. Burger, brand, tabs and five controls do not fit in 390px, and the tabs are what
-  gets squeezed out — so the row loses the one thing in it that does nothing.
+- The header's trailing controls fold into the Clerk account menu on a phone (or one overflow
+  menu, for a build with no Clerk key), and the brand mark is dropped there. Burger, brand, tabs
+  and five controls do not fit in 390px, and the tabs are what gets squeezed out — so the row
+  loses the one thing in it that does nothing. The machine switcher moves beside the burger
+  instead of dropping out, since it scopes the sessions the burger's drawer opens.
+- The phone project-picker button is sized and left-aligned to its own label rather than
+  stretching to fill the header — Mantine's `Button` centers its content by default, which read as
+  the project name floating in the middle of a full-width bar.
 - Icon-only controls have a 32px floor on a phone, applied to `.mantine-ActionIcon-root` rather
   than per call site. It is a floor, not a size: a 44px minimum was tried across buttons, menu
   items, inputs and segments, and the result was an app where every control shouted and a
@@ -129,8 +137,8 @@ an iPad in landscape is neither.
   it. `lib/machines.ts` is kept browser-free for the same reason.
 - A phone-only branch that owns state must mount that state *above* the branch. `HeaderActions`
   exists as one component rather than three because the settings modal cannot live inside the
-  overflow menu: choosing "Settings" closes the menu, which unmounts the dropdown and takes the
-  modal with it.
+  overflow menu (or Clerk's account menu): choosing "Settings" closes the menu, which unmounts
+  the dropdown and takes the modal with it.
 - Fixed pixel widths on anything above a leaf icon become `maw` / `min(Npx, 100vw - 2rem)`. Most
   of the ~82 hardcoded widths in the app are menus and icon sizes and need nothing; roughly a
   dozen actually broke 390px.
@@ -143,9 +151,13 @@ an iPad in landscape is neither.
 - On phones, the composer keeps attachment, Options, and Send/Queue/Stop in one non-wrapping
   row. The current permission mode remains visible above the input. Model, reasoning effort,
   permissions, and context details live in a bottom Options sheet; desktop controls stay inline.
-- The project header shows the active project and opens a searchable bottom sheet. Project paths
-  distinguish duplicate names, while existing status indicators and management actions remain
-  available. Management dialogs are owned above the responsive branch so resizing preserves them.
+  The composer itself has no corner radius and no left/right/bottom border on a phone, so it reads
+  as a strip spanning the screen rather than a floating card; only its top border and the
+  `lines-safe-bottom` padding above the home indicator remain.
+- The project header shows the active project, left-aligned, and opens a searchable bottom sheet.
+  Project paths distinguish duplicate names, while existing status indicators and management
+  actions remain available. Management dialogs are owned above the responsive branch so resizing
+  preserves them.
 - Phone session rows expose one labeled overflow menu. Existing action restrictions and delete
   confirmations still apply, and opening the menu does not navigate to the session.
 - Bottom sheets use the same keyboard inset and safe-area spacing as the composer. Context details

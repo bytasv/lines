@@ -29,14 +29,7 @@ import { SettingsModal } from './SettingsModal';
  * Hosted deployments only: with no storage server there is one machine and no
  * grants, which is why the Machines pane is hidden there too.
  */
-export function MachineSwitcher({
-  variant = 'icon',
-  onSwitch,
-}: {
-  /** `row` is the phone's projects sheet, where there is room to name the machine. */
-  variant?: 'icon' | 'row';
-  onSwitch?: () => void;
-}) {
+export function MachineSwitcher() {
   const devices = useDevices((s) => s.devices);
   const load = useDevices((s) => s.refresh);
   const machines = useStore((s) => s.machines);
@@ -105,46 +98,27 @@ export function MachineSwitcher({
       rememberDeviceId(id);
       switchDevice(id);
     }
-    onSwitch?.();
   };
 
   const menu = (
     <Menu position="bottom-start" width="min(320px, calc(100vw - 2rem))" withinPortal>
       <Menu.Target>
-        {variant === 'row' ? (
-          <UnstyledButton
-            aria-label="Switch machine"
-            px={8}
-            py={8}
-            style={{ borderRadius: 6, background: 'var(--mantine-color-default-hover)' }}
-          >
-            <Group gap={8} wrap="nowrap">
-              <IconDeviceLaptop size={16} opacity={0.6} />
-              {active && <MachineDot health={healthOf(active)} />}
-              <Text size="sm" truncate style={{ flex: 1, minWidth: 0 }}>
-                {active?.name ?? 'Choose a machine'}
-              </Text>
-              <IconChevronDown size={16} opacity={0.6} />
-            </Group>
-          </UnstyledButton>
-        ) : (
-          // Icon-only, and deliberately: the header's width belongs to the
-          // project tabs, and MachineDot already carries the machine's health in
-          // its own tooltip.
-          <UnstyledButton
-            aria-label="Switch machine"
-            px={4}
-            py={2}
-            style={{ borderRadius: 6, display: 'flex', alignItems: 'center', gap: 2 }}
-          >
-            {active ? (
-              <MachineDot health={healthOf(active)} />
-            ) : (
-              <IconDeviceLaptop size={13} opacity={0.6} />
-            )}
-            <IconChevronDown size={12} opacity={0.6} />
-          </UnstyledButton>
-        )}
+        {/* Icon-only, and deliberately: the header's width belongs to the
+            project tabs, and MachineDot already carries the machine's health in
+            its own tooltip. */}
+        <UnstyledButton
+          aria-label="Switch machine"
+          px={4}
+          py={2}
+          style={{ borderRadius: 6, display: 'flex', alignItems: 'center', gap: 2 }}
+        >
+          {active ? (
+            <MachineDot health={healthOf(active)} />
+          ) : (
+            <IconDeviceLaptop size={13} opacity={0.6} />
+          )}
+          <IconChevronDown size={12} opacity={0.6} />
+        </UnstyledButton>
       </Menu.Target>
       <Menu.Dropdown>
         <Menu.Label>Machine</Menu.Label>
@@ -192,16 +166,12 @@ export function MachineSwitcher({
 
   return (
     <>
-      {variant === 'icon' ? (
-        // The dot rides the whole control, as the gear's does in HeaderActions:
-        // an Indicator inside Menu.Target would sit between the menu and the
-        // element it has to hand its ref to.
-        <Indicator size={6} color="yellow" disabled={elsewhere === 0} offset={2}>
-          {menu}
-        </Indicator>
-      ) : (
-        menu
-      )}
+      {/* The dot rides the whole control, as the gear's does in HeaderActions:
+          an Indicator inside Menu.Target would sit between the menu and the
+          element it has to hand its ref to. */}
+      <Indicator size={6} color="yellow" disabled={elsewhere === 0} offset={2}>
+        {menu}
+      </Indicator>
       {/* Mounted outside the dropdown: choosing the item closes the menu, which
           unmounts the dropdown and would take the modal with it. */}
       <SettingsModal

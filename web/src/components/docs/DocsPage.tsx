@@ -10,7 +10,7 @@ import { DocsSidebar } from './DocsSidebar';
 import { DocsHome } from './DocsHome';
 import { DocView } from './DocView';
 
-const HEADER_HEIGHT = 56;
+const HEADER_HEIGHT = 'calc(56px + var(--lines-safe-top))';
 
 /**
  * The documentation reader: a dedicated page over the active project's `docs/**`.
@@ -60,7 +60,7 @@ export function DocsPage() {
 
   return (
     <AppShell header={{ height: HEADER_HEIGHT }} navbar={{ width: 300, breakpoint: 'xs' }} padding={0}>
-      <AppShell.Header>
+      <AppShell.Header className="lines-safe-top">
         <ProjectTabs />
       </AppShell.Header>
       <AppShell.Navbar>
@@ -75,7 +75,7 @@ export function DocsPage() {
         />
       </AppShell.Navbar>
       <AppShell.Main>
-        <Box h={`calc(var(--lines-viewport) - ${HEADER_HEIGHT}px)`}>
+        <Box h={`calc(var(--lines-viewport) - ${HEADER_HEIGHT})`}>
           {loading && !bundle ? (
             <Center h="100%">
               <Loader size="sm" />

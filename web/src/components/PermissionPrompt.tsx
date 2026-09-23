@@ -1462,7 +1462,11 @@ function PlanApproval({
         withCloseButton={false}
         transitionProps={{ transition: 'fade', duration: 150 }}
       >
-        <Box h="var(--lines-viewport)" style={{ display: 'flex', flexDirection: 'column' }}>
+        <Box
+          h="var(--lines-viewport)"
+          className="lines-safe-top"
+          style={{ display: 'flex', flexDirection: 'column' }}
+        >
           <Group px="xl" py="md" justify="space-between">
             <Group gap="xs">
               <IconMap size={18} color="var(--mantine-color-sandstone-5)" />

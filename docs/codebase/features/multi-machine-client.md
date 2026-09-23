@@ -64,8 +64,8 @@ reason.
 - `web/src/lib/machineHealth.ts` — `linkedMachineHealth`, `unlinkedMachineHealth`,
   `MachineHealthState` (the three-state model)
 - `web/src/components/MachineDot.tsx`, `MachineSwitcher.tsx`, `DevicesSection.tsx`,
-  `ConnectingMachine.tsx` — the health dot, the header/phone-drawer switcher, and the
-  pairing/connecting screens' "switch to another machine" affordances
+  `ConnectingMachine.tsx` — the health dot, the header switcher (icon-only, beside the burger on a
+  phone), and the pairing/connecting screens' "switch to another machine" affordances
 - `web/src/components/Sidebar.tsx` — the three session groups scoped to the active machine, and
   the remote-session left accent/host avatar chip for anything still routed cross-machine
 - `web/src/components/ProjectTabs.tsx` — mounts `MachineSwitcher` in place of the old
@@ -116,7 +116,8 @@ reason.
 - `linkedMachineHealth` / `unlinkedMachineHealth` — the three-state model: not linked (only
   `lastSeenAt`, no live claim), linked with no bridge attached (the relay's `deviceOffline`
   frame), and attached (then `worker`/`storage` sub-health)
-- `MachineSwitcher` — the header/phone-drawer machine picker; reads `useDevices` for the row list,
+- `MachineSwitcher` — the header machine picker (same icon-only control on a phone and desktop);
+  reads `useDevices` for the row list,
   `state.machines[id]` for a linked row's health (`linkedMachineHealth`) or
   `unlinkedMachineHealth(device)` otherwise, and `machineActivity` (fed a per-machine scoped
   session set) for each background row's running/needs-you counts. Renders only when

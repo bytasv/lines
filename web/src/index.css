@@ -15,10 +15,27 @@
    exactly the toolbar.
 
    `--lines-keyboard` is the on-screen keyboard's share of that, published by
-   lib/viewport.ts, and 0 on every desktop. */
+   lib/viewport.ts, and 0 on every desktop.
+
+   `--lines-safe-top` is the status bar / Dynamic Island the page is drawn under
+   when iOS runs it standalone (black-translucent + viewport-fit=cover in
+   index.html). It is 0 in a normal browser tab and on every desktop. */
 :root {
   --lines-keyboard: 0px;
   --lines-viewport: calc(100dvh - var(--lines-keyboard));
+  --lines-safe-top: env(safe-area-inset-top, 0px);
+}
+
+/* Pays the top inset back on anything that starts at the top of the screen.
+   Global rather than phone-only: an iPad home-screen app has the inset too. */
+.lines-safe-top {
+  padding-top: var(--lines-safe-top);
+}
+
+/* Full-screen modals start at the top of the screen as well; their header is
+   the part that has to clear the status bar. */
+.mantine-Modal-content[data-full-screen] .mantine-Modal-header {
+  padding-top: calc(var(--mb-padding, var(--mantine-spacing-md)) + var(--lines-safe-top));
 }
 
 @keyframes status-pulse {

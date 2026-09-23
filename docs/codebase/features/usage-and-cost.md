@@ -506,7 +506,11 @@ session-level `hasEstimatedSpend` reading.
 ## Two providers
 
 There are two plan-usage chips, one per connected account, rendered from one component so they
-cannot drift. Each shows only its own provider's spend rows. The ChatGPT numbers come from
+cannot drift. Each shows only its own provider's spend rows. On a phone, with both accounts
+connected, the two collapse into a single ring — the provider with the least usage left, so the
+one closer to blocking is the one already visible — that opens an accordion listing every
+connected provider's full chip body on tap; on any wider viewport, or with only one account
+connected, the two chips (or the one) still render side by side as before. The ChatGPT numbers come from
 `GET https://chatgpt.com/backend-api/wham/usage` — the same endpoint the Codex CLI's own status
 card reads — polled on the same cadence as the Claude one.
 

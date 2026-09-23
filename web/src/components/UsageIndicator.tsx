@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { forwardRef, useState, type ComponentPropsWithoutRef } from 'react';
 import {
+  Accordion,
   ActionIcon,
   Anchor,
   Box,
@@ -7,6 +8,7 @@ import {
   Group,
   HoverCard,
   Menu,
+  Popover,
   Progress,
   RingProgress,
   Stack,
@@ -36,6 +38,7 @@ import type {
 import { useStore } from '../store';
 import { send } from '../ws';
 import { formatSpendUsd, formatTokens, usageColor } from '../lib/format';
+import { useIsPhone } from '../lib/layout';
 import { ProviderBadge } from './ProviderMark';
 
 /** Anthropic names its windows with stable keys, so the label is a lookup. OpenAI
@@ -303,33 +306,7 @@ interface PlanUsageChipProps {
  * would be the one that quietly stops matching. What differs between them is
  * data — which windows exist, whether a cost is reported — and that is passed in.
  */
-function PlanUsageChip({
-  provider,
-  usage,
-  title,
-  accountLabel,
-  signOut,
-  allTimeRows,
-  periodRows,
-  sessionRows,
-  period,
-  onPeriod,
-  tzNote,
-  models,
-}: PlanUsageChipProps) {
-  const spendRows = period.g === 'all' ? allTimeRows : periodRows;
-  // A deleted session leaves the rollup but not the ledger, so either side alone
-  // is reason enough to show the section.
-  const hasSpend = allTimeRows.length > 0 || periodRows.length > 0;
-  // The chip's whole spend block, marked once at this level rather than per row:
-  // every row under it belongs to this one provider, and `cost` asks exactly the
-  // right question — "is a dollar figure here reported, or computed by us".
-  const estimated = !capabilitiesFor(provider).cost;
-  const worst = usage.windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), usage.windows[0]);
-  // Anthropic's session window by name where it exists, else simply the first —
-  // OpenAI's primary window is already first (see parseOpenaiUsage).
-  const primary = usage.windows.find((w) => w.id === 'five_hour') ?? usage.windows[0];
-
+function PlanUsageChip(props: PlanUsageChipProps) {
   return (
     // Wider than the plan-usage windows alone need: the spend heading now shares
     // its line with the period picker, and the pager's label has to fit between
@@ -343,98 +320,158 @@ function PlanUsageChip({
       closeDelay={100}
     >
       <HoverCard.Target>
-        <UnstyledButton aria-label={title} style={{ display: 'flex', alignItems: 'center' }}>
-          {/* Relative, so the badge can sit on the ring's corner without widening
-              the button — both chips stay the same size either way. */}
-          <Box style={{ position: 'relative', display: 'flex' }}>
-            <RingProgress
-              size={38}
-              thickness={4}
-              sections={[{ value: primary.utilization, color: usageColor(worst.utilization) }]}
-              label={
-                <Text size="8px" ta="center" fw={700}>
-                  {Math.round(primary.utilization)}
-                </Text>
-              }
-            />
-            {/* Always, not only when a second provider is connected: which vendor a
-                number belongs to is part of reading it, and a mark that comes and
-                goes teaches nothing. It also keeps the chip's appearance stable
-                when the other provider is connected or disconnected. */}
-            <ProviderBadge provider={provider} />
-          </Box>
-        </UnstyledButton>
+        <UsageRing provider={props.provider} usage={props.usage} title={props.title} />
       </HoverCard.Target>
       <HoverCard.Dropdown>
-        <Stack gap="xs">
-          <Text size="xs" fw={700} tt="uppercase" c="dimmed">
-            {title}
-          </Text>
-          {usage.windows.map((w) => {
-            const resets = formatResetIn(w.resetsAt);
-            return (
-              <div key={w.id}>
-                <Group justify="space-between" gap="xs" mb={2}>
-                  <Text size="xs">{windowLabel(w.id, w.label)}</Text>
-                  <Text size="xs" fw={600}>
-                    {Math.round(w.utilization)}%
-                  </Text>
-                </Group>
-                <Progress value={w.utilization} color={usageColor(w.utilization)} size="sm" />
-                {resets && (
-                  <Text size="xs" c="dimmed" mt={2}>
-                    {resets}
-                  </Text>
-                )}
-              </div>
-            );
-          })}
-          {hasSpend && (
-            <>
-              <SpendSection
-                rows={spendRows}
-                period={period}
-                onPeriod={onPeriod}
-                models={models}
-                estimated={estimated}
-                tzNote={tzNote}
-              />
-              {/* A single-model session adds nothing over the sidebar's own total. */}
-              {sessionRows.length > 1 && (
-                <>
-                  <Text size="xs" fw={700} tt="uppercase" c="dimmed">
-                    This session
-                  </Text>
-                  <SpendRows rows={sessionRows} models={models} estimated={estimated} />
-                </>
-              )}
-            </>
-          )}
-          <Text size="xs" c="dimmed">
-            {formatAgo(usage.fetchedAt)}
-          </Text>
-          {accountLabel && (
-            <>
-              <Divider />
-              <Group justify="space-between" gap="xs">
-                <Text size="xs" c="dimmed" truncate>
-                  {accountLabel}
-                </Text>
-                <Anchor
-                  component="button"
-                  type="button"
-                  size="xs"
-                  c="red"
-                  onClick={() => send(signOut.message)}
-                >
-                  {signOut.label}
-                </Anchor>
-              </Group>
-            </>
-          )}
-        </Stack>
+        <PlanUsageDetails {...props} />
       </HoverCard.Dropdown>
     </HoverCard>
+  );
+}
+
+/** Primary window (the ring's value) and worst window (its colour) of a snapshot. */
+function ringWindows(usage: UsageSnapshot) {
+  const worst = usage.windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), usage.windows[0]);
+  // Anthropic's session window by name where it exists, else simply the first —
+  // OpenAI's primary window is already first (see parseOpenaiUsage).
+  const primary = usage.windows.find((w) => w.id === 'five_hour') ?? usage.windows[0];
+  return { primary, worst };
+}
+
+/**
+ * The ring a chip opens from. Forwards its ref and props so it can be the
+ * target of either a HoverCard or a Popover.
+ */
+const UsageRing = forwardRef<
+  HTMLButtonElement,
+  { provider: ModelProvider; usage: UsageSnapshot; title: string } & ComponentPropsWithoutRef<'button'>
+>(function UsageRing({ provider, usage, title, ...button }, ref) {
+  const { primary, worst } = ringWindows(usage);
+  return (
+    <UnstyledButton
+      {...button}
+      ref={ref}
+      aria-label={title}
+      style={{ display: 'flex', alignItems: 'center' }}
+    >
+      {/* Relative, so the badge can sit on the ring's corner without widening
+          the button — both chips stay the same size either way. */}
+      <Box style={{ position: 'relative', display: 'flex' }}>
+        <RingProgress
+          size={38}
+          thickness={4}
+          sections={[{ value: primary.utilization, color: usageColor(worst.utilization) }]}
+          label={
+            <Text size="8px" ta="center" fw={700}>
+              {Math.round(primary.utilization)}
+            </Text>
+          }
+        />
+        {/* Always, not only when a second provider is connected: which vendor a
+            number belongs to is part of reading it, and a mark that comes and
+            goes teaches nothing. It also keeps the chip's appearance stable
+            when the other provider is connected or disconnected. */}
+        <ProviderBadge provider={provider} />
+      </Box>
+    </UnstyledButton>
+  );
+});
+
+/** A provider's plan windows, spend and account footer — the body of its chip. */
+function PlanUsageDetails({
+  provider,
+  usage,
+  title,
+  hideTitle,
+  accountLabel,
+  signOut,
+  allTimeRows,
+  periodRows,
+  sessionRows,
+  period,
+  onPeriod,
+  tzNote,
+  models,
+}: PlanUsageChipProps & { hideTitle?: boolean }) {
+  const spendRows = period.g === 'all' ? allTimeRows : periodRows;
+  // A deleted session leaves the rollup but not the ledger, so either side alone
+  // is reason enough to show the section.
+  const hasSpend = allTimeRows.length > 0 || periodRows.length > 0;
+  // The chip's whole spend block, marked once at this level rather than per row:
+  // every row under it belongs to this one provider, and `cost` asks exactly the
+  // right question — "is a dollar figure here reported, or computed by us".
+  const estimated = !capabilitiesFor(provider).cost;
+
+  return (
+    <Stack gap="xs">
+      {!hideTitle && (
+        <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+          {title}
+        </Text>
+      )}
+      {usage.windows.map((w) => {
+        const resets = formatResetIn(w.resetsAt);
+        return (
+          <div key={w.id}>
+            <Group justify="space-between" gap="xs" mb={2}>
+              <Text size="xs">{windowLabel(w.id, w.label)}</Text>
+              <Text size="xs" fw={600}>
+                {Math.round(w.utilization)}%
+              </Text>
+            </Group>
+            <Progress value={w.utilization} color={usageColor(w.utilization)} size="sm" />
+            {resets && (
+              <Text size="xs" c="dimmed" mt={2}>
+                {resets}
+              </Text>
+            )}
+          </div>
+        );
+      })}
+      {hasSpend && (
+        <>
+          <SpendSection
+            rows={spendRows}
+            period={period}
+            onPeriod={onPeriod}
+            models={models}
+            estimated={estimated}
+            tzNote={tzNote}
+          />
+          {/* A single-model session adds nothing over the sidebar's own total. */}
+          {sessionRows.length > 1 && (
+            <>
+              <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+                This session
+              </Text>
+              <SpendRows rows={sessionRows} models={models} estimated={estimated} />
+            </>
+          )}
+        </>
+      )}
+      <Text size="xs" c="dimmed">
+        {formatAgo(usage.fetchedAt)}
+      </Text>
+      {accountLabel && (
+        <>
+          <Divider />
+          <Group justify="space-between" gap="xs">
+            <Text size="xs" c="dimmed" truncate>
+              {accountLabel}
+            </Text>
+            <Anchor
+              component="button"
+              type="button"
+              size="xs"
+              c="red"
+              onClick={() => send(signOut.message)}
+            >
+              {signOut.label}
+            </Anchor>
+          </Group>
+        </>
+      )}
+    </Stack>
   );
 }
 
@@ -463,6 +500,7 @@ export function UsageIndicator() {
   // One period for both chips, so they page together. Above the early return on
   // purpose: a hook placed after it would break hook order.
   const [period, setPeriod] = useState<Period>({ g: 'all', anchor: dayKey(Date.now()) });
+  const isPhone = useIsPhone();
 
   // No login → no chip, independent of usage-message timing (also covers API-key users).
   const showClaude = Boolean(auth?.loggedIn && usage && usage.windows.length > 0);
@@ -484,40 +522,82 @@ export function UsageIndicator() {
   const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const tzNote = spendHistory?.tz && spendHistory.tz !== browserTz ? spendHistory.tz : null;
 
+  const shared = { period, onPeriod: setPeriod, tzNote, models };
+  const chips: PlanUsageChipProps[] = [];
+  if (showClaude && usage) {
+    chips.push({
+      provider: 'anthropic',
+      usage,
+      title: 'Claude plan usage',
+      accountLabel: auth?.account?.email ?? 'Signed in',
+      signOut: { label: 'Log out', message: { type: 'authLogout' } },
+      allTimeRows: rowsFor(globalSpend, 'anthropic'),
+      periodRows: rowsFor(periodSpend, 'anthropic'),
+      sessionRows: rowsFor(sessionSpend, 'anthropic'),
+      ...shared,
+    });
+  }
+  if (showOpenai && openaiUsage) {
+    chips.push({
+      provider: 'openai',
+      usage: openaiUsage,
+      title: 'ChatGPT plan usage',
+      accountLabel: openaiAuth?.account?.email ?? 'Connected to OpenAI',
+      signOut: { label: 'Disconnect', message: { type: 'openaiLogout' } },
+      allTimeRows: rowsFor(globalSpend, 'openai'),
+      periodRows: rowsFor(periodSpend, 'openai'),
+      sessionRows: rowsFor(sessionSpend, 'openai'),
+      ...shared,
+    });
+  }
+
+  // A phone has no room for a ring per provider, so it shows one.
+  if (isPhone && chips.length > 1) return <GroupedUsageChip chips={chips} />;
+
   return (
     <Group gap={2} wrap="nowrap">
-      {showClaude && usage && (
-        <PlanUsageChip
-          provider="anthropic"
-          usage={usage}
-          title="Claude plan usage"
-          accountLabel={auth?.account?.email ?? 'Signed in'}
-          signOut={{ label: 'Log out', message: { type: 'authLogout' } }}
-          allTimeRows={rowsFor(globalSpend, 'anthropic')}
-          periodRows={rowsFor(periodSpend, 'anthropic')}
-          sessionRows={rowsFor(sessionSpend, 'anthropic')}
-          period={period}
-          onPeriod={setPeriod}
-          tzNote={tzNote}
-          models={models}
-        />
-      )}
-      {showOpenai && openaiUsage && (
-        <PlanUsageChip
-          provider="openai"
-          usage={openaiUsage}
-          title="ChatGPT plan usage"
-          accountLabel={openaiAuth?.account?.email ?? 'Connected to OpenAI'}
-          signOut={{ label: 'Disconnect', message: { type: 'openaiLogout' } }}
-          allTimeRows={rowsFor(globalSpend, 'openai')}
-          periodRows={rowsFor(periodSpend, 'openai')}
-          sessionRows={rowsFor(sessionSpend, 'openai')}
-          period={period}
-          onPeriod={setPeriod}
-          tzNote={tzNote}
-          models={models}
-        />
-      )}
+      {chips.map((chip) => (
+        <PlanUsageChip key={chip.provider} {...chip} />
+      ))}
     </Group>
+  );
+}
+
+/**
+ * Every provider behind one ring, for a phone: the ring is the provider with
+ * the least left — its worst window is the one that stops work first — and a
+ * tap opens each provider's details in an accordion. A Popover rather than a
+ * HoverCard, since a touchscreen has no hover.
+ */
+function GroupedUsageChip({ chips }: { chips: PlanUsageChipProps[] }) {
+  const worstOf = (chip: PlanUsageChipProps) => ringWindows(chip.usage).worst.utilization;
+  const tightest = chips.reduce((a, b) => (worstOf(b) > worstOf(a) ? b : a));
+  return (
+    <Popover width="min(340px, calc(100vw - 2rem))" position="bottom-end" withArrow shadow="md">
+      <Popover.Target>
+        <UsageRing provider={tightest.provider} usage={tightest.usage} title="Plan usage" />
+      </Popover.Target>
+      <Popover.Dropdown p={0}>
+        <Accordion defaultValue={tightest.provider}>
+          {chips.map((chip) => (
+            <Accordion.Item key={chip.provider} value={chip.provider}>
+              <Accordion.Control>
+                <Group gap="xs" wrap="nowrap" justify="space-between" pr="xs">
+                  <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+                    {chip.title}
+                  </Text>
+                  <Text size="xs" fw={600} c={usageColor(worstOf(chip))}>
+                    {Math.round(worstOf(chip))}%
+                  </Text>
+                </Group>
+              </Accordion.Control>
+              <Accordion.Panel>
+                <PlanUsageDetails {...chip} hideTitle />
+              </Accordion.Panel>
+            </Accordion.Item>
+          ))}
+        </Accordion>
+      </Popover.Dropdown>
+    </Popover>
   );
 }

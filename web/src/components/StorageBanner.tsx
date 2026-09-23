@@ -34,7 +34,7 @@ export function StorageBanner({ headerHeight }: { headerHeight: number }) {
         title={status.reason}
         style={{
           position: 'fixed',
-          top: headerHeight / 2,
+          top: `calc(var(--lines-safe-top) + ${headerHeight / 2}px)`,
           left: '50%',
           transform: 'translate(-50%, -50%)',
           zIndex: 200,

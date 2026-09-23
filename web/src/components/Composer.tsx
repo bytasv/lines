@@ -540,17 +540,22 @@ export function Composer({ session }: { session: SessionMeta }) {
     );
 
   return (
+    // On a phone the composer is a strip across the bottom rather than a card:
+    // no corners, no side or bottom border, no margin. The footer row's
+    // `lines-safe-bottom` still keeps Send above the home indicator.
     <Paper
       withBorder
-      radius="lg"
+      radius={isPhone ? 0 : 'lg'}
       p="xs"
-      m="md"
-      mt={4}
+      pb={isPhone ? 0 : undefined}
+      m={isPhone ? 0 : 'md'}
+      mt={isPhone ? 0 : 4}
       maw={920}
-      mx="auto"
+      mx={isPhone ? 0 : 'auto'}
       w="100%"
       style={{
         position: 'relative',
+        ...(isPhone && { borderLeft: 'none', borderRight: 'none', borderBottom: 'none' }),
         borderColor: dragging
           ? 'var(--mantine-primary-color-filled)'
           : remote.isRemote

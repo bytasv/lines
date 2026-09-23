@@ -45,6 +45,8 @@ export const ToolGroup = memo(function ToolGroup({
   const failed = group.tools.filter((t) => t.isError).length;
   const totals = groupDiffTotals(group.tools);
 
+  const summary = groupSummary(group.tools);
+
   return (
     <Box>
       <Group
@@ -63,12 +65,19 @@ export const ToolGroup = memo(function ToolGroup({
         }}
       >
         <Group gap="xs" wrap="nowrap" style={{ minWidth: 0, flex: 1 }}>
-          {expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
-          <Text size="xs" fw={600} style={{ flexShrink: 0 }}>
-            {groupSummary(group.tools)}
+          {expanded ? (
+            <IconChevronDown size={13} style={{ flexShrink: 0 }} />
+          ) : (
+            <IconChevronRight size={13} style={{ flexShrink: 0 }} />
+          )}
+          {/* Shrinkable, or a long tool list ("19 actions · ToolSearch ×2, …")
+              pushes the badges on the right out of the row. The label's zero
+              basis makes it give up its width first. */}
+          <Text size="xs" fw={600} truncate title={summary} style={{ minWidth: 0 }}>
+            {summary}
           </Text>
           {group.labelText && (
-            <Text size="xs" c="dimmed" truncate style={{ flex: 1 }}>
+            <Text size="xs" c="dimmed" truncate style={{ flex: '1 1 0', minWidth: 0 }}>
               {group.labelText}
             </Text>
           )}

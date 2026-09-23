@@ -40,7 +40,10 @@ const MonacoPreviewModal = lazy(() =>
   import('./components/MonacoPreviewModal').then((m) => ({ default: m.MonacoPreviewModal })),
 );
 
-const HEADER_HEIGHT = 56;
+// The visible bar, and the header box it sits in: in a standalone iOS app the
+// header also reaches up under the status bar.
+const HEADER_BAR = 56;
+const HEADER_HEIGHT = `calc(${HEADER_BAR}px + var(--lines-safe-top))`;
 const SIDEBAR_MIN = 280;
 const SIDEBAR_MAX = 560;
 const SIDEBAR_STORAGE_KEY = 'sidebarWidth';
@@ -190,7 +193,7 @@ function Shell() {
       }}
       padding={0}
     >
-      <AppShell.Header>
+      <AppShell.Header className="lines-safe-top">
         <Box style={{ display: 'flex', alignItems: 'center', height: '100%' }}>
           {hasWorkspace && (
             <Burger
@@ -207,11 +210,11 @@ function Shell() {
           </Box>
         </Box>
       </AppShell.Header>
-      <ConnectionBanner headerHeight={HEADER_HEIGHT} />
-      <SkewBanner headerHeight={HEADER_HEIGHT} />
-      <StorageBanner headerHeight={HEADER_HEIGHT} />
-      <WorkerBanner headerHeight={HEADER_HEIGHT} />
-      <UpdateBanner headerHeight={HEADER_HEIGHT} />
+      <ConnectionBanner headerHeight={HEADER_BAR} />
+      <SkewBanner headerHeight={HEADER_BAR} />
+      <StorageBanner headerHeight={HEADER_BAR} />
+      <WorkerBanner headerHeight={HEADER_BAR} />
+      <UpdateBanner headerHeight={HEADER_BAR} />
       <AppShell.Navbar>
         {/* Picking a session on a phone has to close the drawer, or the thing
             just picked is behind it. */}
@@ -232,7 +235,7 @@ function Shell() {
         {/* `--lines-viewport`, not `100vh`: on a phone they differ by the
             browser toolbar and by the keyboard, and the composer lives at the
             bottom of this box. See lib/viewport.ts. */}
-        <Box h={`calc(var(--lines-viewport) - ${HEADER_HEIGHT}px)`}>
+        <Box h={`calc(var(--lines-viewport) - ${HEADER_HEIGHT})`}>
           {!hasWorkspace ? (
             // A guest cannot open a project on somebody else's machine, so the
             // picker would be a dead end offering an action they do not have.
