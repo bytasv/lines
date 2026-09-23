@@ -42,7 +42,7 @@ import {
 import { useDevices } from './lib/devices';
 import { bootDial } from './lib/wake';
 import { trackKeyboardInset } from './lib/viewport';
-import { takeHostDeviceIdFromUrl } from './lib/e2ee';
+import { learnHostDeviceIdFromDevServer, takeHostDeviceIdFromUrl } from './lib/e2ee';
 import {
   ConnectMachine,
   ConnectMachineError,
@@ -300,6 +300,9 @@ trackKeyboardInset();
 // Before the first render too, so the "+" menu's Browse gate reads the value the
 // desktop shell handed this window rather than last session's.
 takeHostDeviceIdFromUrl();
+// Dev only: the same answer for a plain browser tab on the dev machine, which a
+// relayed bridge would otherwise treat like a phone.
+void learnHostDeviceIdFromDevServer();
 
 const rootElement = document.getElementById('root')!;
 // Drop index.html's boot skeleton explicitly rather than leaving it to React's

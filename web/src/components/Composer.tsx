@@ -11,11 +11,15 @@ import {
   Select,
   Stack,
   Text,
+  ThemeIcon,
   Tooltip,
 } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
 import {
+  IconAlertTriangle,
+  IconCheck,
   IconFile,
+  IconMicrophone,
   IconPaperclip,
   IconPlayerStop,
   IconSend,
@@ -37,6 +41,9 @@ import {
   providerForModel,
   providerSwitchBlock,
   rootsForCwd,
+  VOICE_LANGUAGES,
+  voiceModelReady,
+  whisperModelFor,
 } from '@lines/shared';
 import { formatSpendUsd, stepAfterProviderSwitch } from '../lib/format';
 import { agentLabel, sessionCaps } from '../lib/capabilities';
@@ -67,9 +74,11 @@ import { useCan, useSessionMachine, useSessionMachineHealth } from '../lib/can';
 import { usePresence } from '../lib/presence';
 import { ConfirmModal } from './ConfirmModal';
 import { ContextWindowIndicator } from './ContextWindowIndicator';
-import { SettingsModal } from './SettingsModal';
-import { MentionInput } from './MentionInput';
-import { send } from '../ws';
+import { SettingsModal, type SettingsSection } from './SettingsModal';
+import { MentionInput, type MentionInputHandle } from './MentionInput';
+import { VoiceWaveform } from './VoiceWaveform';
+import { send, transcribeAudio } from '../ws';
+import { startVoiceRecording, voiceInputSupported, type VoiceRecording } from '../lib/voiceRecorder';
 import { useIsPhone } from '../lib/layout';
 
 /** Read a File into a raw-base64 PromptAttachment (strips the data: URI prefix). */
@@ -87,6 +96,20 @@ export function fileToAttachment(file: File): Promise<PromptAttachment> {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+}
+
+/** What went wrong asking for the mic, in words — the DOMException names are not. */
+function micErrorMessage(err: unknown): string {
+  const name = err instanceof DOMException ? err.name : '';
+  if (name === 'NotAllowedError' || name === 'SecurityError') return 'Microphone access was refused.';
+  if (name === 'NotFoundError') return 'No microphone was found.';
+  return err instanceof Error ? err.message : 'Could not start the microphone.';
+}
+
+/** `m:ss`, for the recording timer. */
+function formatElapsed(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
 /** Square attachment preview; images get a zoom-icon overlay on hover, a remove X on all. */
@@ -240,7 +263,8 @@ export function Composer({ session }: { session: SessionMeta }) {
     ...(cliWarning(codexCli, 'Codex') ? { openai: cliWarning(codexCli, 'Codex')! } : {}),
   };
   /** Opened from a model's warning icon — see describedOptionRenderer. */
-  const [updatesOpen, setUpdatesOpen] = useState(false);
+  /** Which settings pane that icon (or the mic's warning) opened, if any. */
+  const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   /**
    * The picker's dropdown, controlled only so the warning icon can close it on
    * the way to Settings — otherwise the option list stays open around a modal
@@ -313,6 +337,56 @@ export function Composer({ session }: { session: SessionMeta }) {
   const dragDepth = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const mentionRef = useRef<MentionInputHandle>(null);
+  /**
+   * Voice input's transcriber is the *session's* machine's, not the one the UI is
+   * pointed at: a shared session's audio goes to its host, so the mic follows the
+   * host's install. The global copy only for a session whose machine is unknown.
+   */
+  const whisper = useStore((s) => {
+    const slice = remote.deviceId !== null ? s.machines[remote.deviceId] : undefined;
+    return slice ? slice.whisper : s.whisper;
+  });
+  const [voice, setVoice] = useState<'idle' | 'recording' | 'transcribing'>('idle');
+  const [voiceStartedAt, setVoiceStartedAt] = useState(0);
+  const [voiceElapsed, setVoiceElapsed] = useState(0);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const recordingRef = useRef<VoiceRecording | null>(null);
+  /** The warning dot only shows on hover: a mic that is never set up would
+   *  otherwise wear an orange badge in every composer, forever. */
+  const [micHovered, setMicHovered] = useState(false);
+  const ownMachine = useStore((s) => (s.access?.scope ?? 'owner') === 'owner') && !remote.isRemote;
+  const where = ownMachine ? 'this machine' : 'the host’s machine';
+  // The user's own choice, even on somebody else's machine: it is their speech.
+  const voiceLanguage = useStore((s) => s.voiceLanguage);
+  const voiceTranslate = useStore((s) => s.voiceTranslate);
+  const voiceLanguageLabel = VOICE_LANGUAGES.find((l) => l.code === voiceLanguage)?.label ?? voiceLanguage;
+  const voiceModel = whisperModelFor(voiceLanguage);
+  /**
+   * Why the mic cannot record, or null. Rendered rather than hidden, like a model
+   * whose CLI is missing: an absent button reads as "this app has no voice
+   * input", a disabled one with a reason says what to install. Ignored once a
+   * recording has started, so a status flip mid-recording cannot strand it.
+   */
+  const voiceBlock =
+    voice !== 'idle'
+      ? null
+      : !voiceInputSupported()
+        ? 'Voice input needs a secure (https) page'
+        : !whisper
+          ? 'This bridge does not report voice input'
+          : whisper.state === 'missing-binary'
+            ? `Voice input needs whisper.cpp on ${where}`
+            : whisper.state === 'outdated'
+              ? `whisper.cpp on ${where} is out of date`
+              : !voiceModelReady(whisper.models ?? [], voiceLanguage)
+                ? `${voiceLanguage === 'auto' ? 'Voice input' : `Dictating in ${voiceLanguageLabel}`} needs a one-time ` +
+                  `model download (${voiceModel.sizeLabel}) on ${where}`
+                : null;
+  /** Settings → Voice input carries the install command and the model download —
+   *  but only for your own machine; a guest's copy of Settings has no such pane,
+   *  and it would describe the wrong computer anyway. */
+  const voiceBlockActionable = voiceBlock !== null && ownMachine && voiceInputSupported();
   const interruptible = isSessionInterruptible(session.status);
   // Background tasks (backgrounded subagents / Bash) outlive the turn, so a
   // settled session can still have work to stop. Deliberately does not gate Send:
@@ -402,6 +476,141 @@ export function Composer({ session }: { session: SessionMeta }) {
     return () => window.removeEventListener('lines:prompt-restored', restore);
   }, [session.id]);
 
+  // The recording timer, and letting go of the mic if the composer unmounts
+  // mid-recording (switching sessions remounts it).
+  useEffect(() => {
+    if (voice !== 'recording') return;
+    const timer = setInterval(() => setVoiceElapsed(Date.now() - voiceStartedAt), 250);
+    return () => clearInterval(timer);
+  }, [voice, voiceStartedAt]);
+  useEffect(() => () => recordingRef.current?.cancel(), []);
+  /** The live recording's loudness probe, for the waveform. In state rather than
+   *  read off the ref so the overlay re-renders when a recording starts. */
+  const [voiceLevel, setVoiceLevel] = useState<(() => number) | null>(null);
+
+  /** Throw the recording away: the X in the waveform overlay. */
+  const cancelVoice = () => {
+    recordingRef.current?.cancel();
+    recordingRef.current = null;
+    setVoiceLevel(null);
+    setVoice('idle');
+  };
+
+  /** Stop, transcribe on the session's machine, and splice the text in at the
+   *  caret. A failure leaves the prompt exactly as it was. */
+  const finishVoice = async () => {
+    const recording = recordingRef.current;
+    if (!recording) return;
+    recordingRef.current = null;
+    setVoiceLevel(null);
+    setVoice('transcribing');
+    try {
+      const audio = await recording.stop();
+      const text = await transcribeAudio(
+        audio,
+        { language: voiceLanguage, translate: voiceTranslate },
+        remote.deviceId ?? undefined,
+      );
+      if (text) mentionRef.current?.insertText(text);
+      else setVoiceError('Nothing was heard in that recording.');
+    } catch (err) {
+      setVoiceError(err instanceof Error ? err.message : 'Transcription failed.');
+    } finally {
+      setVoice('idle');
+    }
+  };
+
+  const startVoice = async () => {
+    setVoiceError(null);
+    try {
+      // The limit stops capture on its own; transcribing what was caught is the
+      // least surprising thing to do with it.
+      const recording = await startVoiceRecording({ onLimit: () => void finishVoice() });
+      recordingRef.current = recording;
+      setVoiceLevel(() => recording.level);
+      setVoiceStartedAt(Date.now());
+      setVoiceElapsed(0);
+      setVoice('recording');
+    } catch (err) {
+      setVoiceError(micErrorMessage(err));
+    }
+  };
+
+  const micControl = (iconSize: number, size?: string) =>
+    canPrompt && (
+      <Group gap={4} wrap="nowrap">
+        {/* Beside the check, not in the overlay: finish and discard are one
+            decision, so they sit together under the same thumb. */}
+        {voice === 'recording' && (
+          <Tooltip label="Discard recording">
+            <ActionIcon variant="subtle" color="gray" size={size} aria-label="Discard recording" onClick={cancelVoice}>
+              <IconX size={iconSize} />
+            </ActionIcon>
+          </Tooltip>
+        )}
+        <Tooltip
+          label={
+            voiceBlock
+              ? voiceBlockActionable
+                ? `${voiceBlock} — open Voice input settings`
+                : voiceBlock
+              : voice === 'recording'
+                ? 'Finish and transcribe'
+                : voice === 'transcribing'
+                  ? 'Transcribing…'
+                  : 'Dictate'
+          }
+          withArrow
+          multiline
+          maw={260}
+        >
+          {/* Dimmed, not `disabled`: a disabled ActionIcon swallows the click
+              that opens Updates. The warning dot is the model picker's. */}
+          <ActionIcon
+            // Recording: a filled check, the "done" half of the overlay's X.
+            variant={voice === 'recording' ? 'filled' : 'subtle'}
+            color={voiceBlock ? 'gray' : undefined}
+            size={size}
+            loading={voice === 'transcribing'}
+            aria-label={voiceBlock ?? (voice === 'recording' ? 'Finish and transcribe' : 'Dictate')}
+            aria-disabled={voiceBlock !== null}
+            style={{ position: 'relative', overflow: 'visible' }}
+            onMouseEnter={() => setMicHovered(true)}
+            onMouseLeave={() => setMicHovered(false)}
+            onClick={() => {
+              // A tooltip never shows on a phone tap, so the unfixable case
+              // says itself in the composer instead.
+              if (voiceBlock) {
+                if (voiceBlockActionable) setSettingsSection('voice');
+                else setVoiceError(voiceBlock);
+                return;
+              }
+              void (voice === 'recording' ? finishVoice() : startVoice());
+            }}
+          >
+            {/* Only the glyph fades: opacity on the button would fade the
+                warning dot with it, on exactly the state it exists for. */}
+            {voice === 'recording' ? (
+              <IconCheck size={iconSize} />
+            ) : (
+              <IconMicrophone size={iconSize} opacity={voiceBlock ? 0.5 : 1} />
+            )}
+            {voiceBlock && micHovered && (
+              <ThemeIcon
+                size={12}
+                radius="xl"
+                color="orange"
+                variant="filled"
+                style={{ position: 'absolute', top: -2, right: -2, pointerEvents: 'none' }}
+              >
+                <IconAlertTriangle size={8} />
+              </ThemeIcon>
+            )}
+          </ActionIcon>
+        </Tooltip>
+      </Group>
+    );
+
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files);
     if (!list.length) return;
@@ -474,7 +683,7 @@ export function Composer({ session }: { session: SessionMeta }) {
         renderOption={describedOptionRenderer(() => {
           setModelDropdownOpen(false);
           setOptionsOpen(false);
-          setUpdatesOpen(true);
+          setSettingsSection('updates');
         })}
         styles={describedOptionStyles}
         value={session.model}
@@ -641,6 +850,13 @@ export function Composer({ session }: { session: SessionMeta }) {
           {machineBlock}
         </Text>
       )}
+      {voiceError && (
+        // Click to dismiss, like the sidebar's action error: a notice about one
+        // dictation, not a state.
+        <Text size="xs" c="red" px={6} pb={6} onClick={() => setVoiceError(null)} style={{ cursor: 'pointer' }}>
+          {voiceError}
+        </Text>
+      )}
       <input
         ref={fileInputRef}
         type="file"
@@ -651,22 +867,44 @@ export function Composer({ session }: { session: SessionMeta }) {
           e.currentTarget.value = '';
         }}
       />
-      <MentionInput
-        value={prompt}
-        onChange={setPrompt}
-        onSubmit={submit}
-        cwd={session.cwd}
-        roots={rootsForCwd(projects, session.cwd)}
-        placeholder={
-          session.workflow && !session.workflow.started
-            ? 'Describe the task — this kicks off the workflow…'
-            : `Message ${provider === 'openai' ? 'Codex' : 'Claude'}…${isPhone ? '' : ' (↵ to send, ⇧↵ for newline)'}`
-        }
-        textareaRef={textareaRef}
-        minRows={isPhone ? 1 : 2}
-        onFocusChange={setComposerFocused}
-        onPasteFiles={(files) => void addFiles(files)}
-      />
+      {/* Positioned so the recording overlay can sit exactly over the input,
+          which stays mounted underneath — its caret is where the text lands. */}
+      <Box style={{ position: 'relative' }}>
+        <MentionInput
+          value={prompt}
+          onChange={setPrompt}
+          onSubmit={submit}
+          cwd={session.cwd}
+          roots={rootsForCwd(projects, session.cwd)}
+          placeholder={
+            session.workflow && !session.workflow.started
+              ? 'Describe the task — this kicks off the workflow…'
+              : `Message ${provider === 'openai' ? 'Codex' : 'Claude'}…${isPhone ? '' : ' (↵ to send, ⇧↵ for newline)'}`
+          }
+          textareaRef={textareaRef}
+          handleRef={mentionRef}
+          minRows={isPhone ? 1 : 2}
+          onFocusChange={setComposerFocused}
+          onPasteFiles={(files) => void addFiles(files)}
+        />
+        {voice === 'recording' && voiceLevel && (
+          // ChatGPT-style: while recording, the input *is* the waveform. A Paper
+          // so it takes the composer's own background, whatever the theme.
+          <Paper
+            style={{ position: 'absolute', inset: 0, zIndex: 2, display: 'flex', alignItems: 'center' }}
+            px={4}
+          >
+            <Group gap="xs" wrap="nowrap" w="100%">
+              <Box style={{ flex: 1, minWidth: 0 }} c="dimmed">
+                <VoiceWaveform level={voiceLevel} height={isPhone ? 24 : 32} />
+              </Box>
+              <Text size="xs" c="dimmed" style={{ fontVariantNumeric: 'tabular-nums' }}>
+                {formatElapsed(voiceElapsed)}
+              </Text>
+            </Group>
+          </Paper>
+        )}
+      </Box>
       {isPhone ? (
         <Group justify="space-between" gap={4} wrap="nowrap" pt={4} className="lines-safe-bottom">
           <Group gap={4} wrap="nowrap">
@@ -691,6 +929,9 @@ export function Composer({ session }: { session: SessionMeta }) {
             </Button>
           </Group>
           <Group gap={4} wrap="nowrap">
+            {/* Beside Send, where a mic is expected to be: dictating is the
+                other way of writing the message that button sends. */}
+            {micControl(18)}
             {(interruptible || bgTasks > 0) && (
               <Button
                 variant="default"
@@ -760,6 +1001,7 @@ export function Composer({ session }: { session: SessionMeta }) {
                   {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
                 </Text>
               )}
+              {micControl(16, 'lg')}
               {interruptible || bgTasks > 0 ? (
                 <>
                   <Tooltip
@@ -885,13 +1127,13 @@ export function Composer({ session }: { session: SessionMeta }) {
             )}
         </Stack>
       </Drawer>
-      {/* Opened only from a model's warning icon — the pane that carries the
+      {/* Opened only from a model's or the mic's warning icon — the pane that carries the
           version, the floor and the install command. Rendered here, exactly as
           StorageBanner opens its own copy at Diagnostics. */}
       <SettingsModal
-        opened={updatesOpen}
-        onClose={() => setUpdatesOpen(false)}
-        initialSection="updates"
+        opened={settingsSection !== null}
+        onClose={() => setSettingsSection(null)}
+        initialSection={settingsSection ?? 'updates'}
       />
       <ConfirmModal
         opened={switchTo !== null}

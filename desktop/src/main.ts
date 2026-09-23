@@ -32,6 +32,7 @@ import {
   powerSaveBlocker,
   session,
   shell,
+  systemPreferences,
   type MenuItemConstructorOptions,
 } from 'electron';
 import { autoUpdater } from 'electron-updater';
@@ -78,6 +79,8 @@ import { isLocalMode, loadConfig } from './config.ts';
  */
 const ROOT = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..', '..');
 const SERVER_DIR = path.join(ROOT, 'server');
+/** Voice input's transcriber, shipped in the bundle's resources. */
+const BUNDLED_WHISPER = path.join(ROOT, 'whisper', 'whisper-cli');
 const ASSETS = app.isPackaged ? path.join(ROOT, 'assets') : path.resolve(__dirname, '..', 'assets');
 
 const INSTANCE = process.env.LINES_INSTANCE ?? 'desktop';
@@ -299,6 +302,12 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     // autoGuard self-locates from `server/src` under tsx, which matches nothing
     // in a packaged build — so name the files that really back this worker.
     ...(app.isPackaged ? { LINES_WORKER_SOURCES: path.join(SERVER_DIR, 'worker.mjs') } : {}),
+    // The whisper-cli this app ships (desktop/scripts/build-whisper.mjs). Only
+    // when it is really there: a local package built without cmake has none, and
+    // the bridge then falls back to Homebrew's.
+    ...(app.isPackaged && fs.existsSync(BUNDLED_WHISPER)
+      ? { LINES_WHISPER_BUNDLED_BIN: BUNDLED_WHISPER }
+      : {}),
     // In hosted mode the bridge dials out to the relay and syncs to the hosted
     // storage server. Absent, it serves only its local socket, as before.
     ...(RELAY_MODE && device
@@ -881,6 +890,34 @@ function appOrigin(): string {
   } catch {
     return '';
   }
+}
+
+/**
+ * Voice input records through `getUserMedia`, which reaches this handler as a
+ * `media` request. Electron grants every request by default; for media that is
+ * narrowed to the microphone, asked for by the app's own origin — a third-party
+ * page the window wanders onto (an OAuth screen) gets no mic and no camera.
+ * Every other permission keeps Electron's default, which the web app's alerts
+ * rely on.
+ *
+ * On macOS the OS has its own gate on top: `askForMediaAccess` shows the system
+ * prompt the first time, carrying NSMicrophoneUsageDescription from Info.plist,
+ * and answers from the user's choice after that.
+ */
+function installMediaPermissions(): void {
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission !== 'media') return callback(true);
+    let fromApp = false;
+    try {
+      fromApp = new URL(details.requestingUrl).origin === appOrigin();
+    } catch {
+      fromApp = false;
+    }
+    const mediaTypes = 'mediaTypes' in details ? (details.mediaTypes ?? []) : [];
+    if (!fromApp || mediaTypes.some((type) => type !== 'audio')) return callback(false);
+    if (process.platform !== 'darwin') return callback(true);
+    systemPreferences.askForMediaAccess('microphone').then(callback, () => callback(false));
+  });
 }
 
 /**
@@ -1763,6 +1800,7 @@ async function start() {
   // it keys on this token. The standard workaround, not a guarantee. Set on the
   // app rather than per-webContents so OAuth popups carry the scrubbed UA too.
   app.userAgentFallback = app.userAgentFallback.replace(/ Electron\/\S+/, '');
+  installMediaPermissions();
   loadPrefs();
   // "Leave it running" only holds if it comes back after a reboot, so the login
   // item is defaulted on — once. After that the checkbox is the user's, and a

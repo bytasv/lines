@@ -31,6 +31,7 @@ import { DevicesSection } from './DevicesSection';
 import { EncryptionSection } from './EncryptionSection';
 import { CollaboratorsSection } from './CollaboratorsSection';
 import { UpdatesSection } from './UpdatesSection';
+import { VoiceSection } from './VoiceSection';
 import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
 import { SHARING_ENABLED } from '../lib/shares';
 import {
@@ -57,6 +58,7 @@ export type SettingsSection =
   | 'connections'
   | 'diagnostics'
   | 'docs'
+  | 'voice'
   | 'updates';
 
 const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
@@ -80,6 +82,7 @@ const SETTINGS_SECTIONS: { value: SettingsSection; label: string }[] = [
   { value: 'sessions', label: 'Sessions' },
   { value: 'transcript', label: 'Transcript' },
   { value: 'notifications', label: 'Notifications' },
+  { value: 'voice', label: 'Voice input' },
   { value: 'allowlist', label: 'Auto-mode allowlist' },
   { value: 'connections', label: 'Connections' },
   { value: 'diagnostics', label: 'Sync' },
@@ -192,6 +195,7 @@ export function SettingsModal({
             {section === 'notifications' && <NotificationsSection />}
             {section === 'diagnostics' && <SyncLogSection />}
             {section === 'docs' && <DocsSection onClose={onClose} />}
+            {section === 'voice' && <VoiceSection />}
             {section === 'updates' && <UpdatesSection />}
             {section === 'allowlist' && (
               <GuardAllowlistSection

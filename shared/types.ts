@@ -215,6 +215,134 @@ export const CLAUDE_INSTALL_URL = 'https://docs.claude.com/en/docs/claude-code/s
 export const CODEX_INSTALL_URL = 'https://developers.openai.com/codex/cli';
 export const CODEX_INSTALL_COMMAND = 'npm i -g @openai/codex';
 
+export type WhisperState = 'ready' | 'missing-binary' | 'missing-model' | 'outdated';
+
+/**
+ * The local whisper.cpp install the bridge transcribes voice input with, as
+ * discovered by server/src/whisperCli.ts. Here beside the CLI statuses for the
+ * same reason they are: the composer's mic button and Settings -> Updates render
+ * it and must not import server code.
+ *
+ * Not per provider: the prompt reaches the model as typed text either way. And
+ * unlike `claudeCli`, a guest is sent it too — the audio is transcribed on the
+ * machine that hosts the session, so the mic button follows the *host's* install.
+ *
+ * `path` and `modelPaths` are bridge-side only: they are absolute paths under
+ * the host's home directory, so the wire copy is built field by field without
+ * them. `models` (bare file names) is what a client sees instead.
+ */
+export interface WhisperStatus {
+  state: WhisperState;
+  /** Absolute path to `whisper-cli`; absent when `state === 'missing-binary'`, never sent to a client. */
+  path?: string;
+  /** Installed model file name -> absolute path; never sent to a client. */
+  modelPaths?: Record<string, string>;
+  /** Installed model file names, e.g. `ggml-base.en.bin`. Empty when `missing-model`. */
+  models?: string[];
+  /** Parsed `x.y.z`; absent when the binary would not report one. */
+  version?: string;
+  minVersion: string;
+}
+
+/** The one-line install for whisper.cpp, shared so the pane and the bridge's
+ *  refusal name the same command. */
+export const WHISPER_INSTALL_COMMAND = 'brew install whisper-cpp';
+/** Where the bridge keeps downloaded models, as shown to a person. */
+export const WHISPER_MODEL_DIR_HINT = '~/.lines-app/models';
+
+/**
+ * The two models the bridge downloads and looks for. Nobody picks one: the
+ * dictation language does (see {@link whisperModelFor}) — a small, fast
+ * English-only model for English, and the full multilingual one for anything
+ * else, since the smaller multilingual models are poor outside English.
+ */
+export const WHISPER_MODELS = [
+  { file: 'ggml-large-v3-turbo-q5_0.bin', label: 'Multilingual (Large v3 Turbo)', sizeLabel: '574 MB' },
+  { file: 'ggml-base.en.bin', label: 'English (Base)', sizeLabel: '148 MB' },
+] as const;
+export type WhisperModelFile = (typeof WHISPER_MODELS)[number]['file'];
+
+/** The model a dictation language needs. `auto` needs the multilingual one —
+ *  it may hear any language. Translation is irrelevant for English. */
+export function whisperModelFor(language: string): (typeof WHISPER_MODELS)[number] {
+  return language === 'en' ? WHISPER_MODELS[1] : WHISPER_MODELS[0];
+}
+
+/** Whether the installed models can take `language` — the bridge's
+ *  `pickWhisperModel` rule, so the mic and the pane agree with it. */
+export function voiceModelReady(installed: readonly string[], language: string): boolean {
+  return language === 'en' ? installed.length > 0 : installed.some(isMultilingualWhisperModel);
+}
+
+export function isWhisperModelFile(file: string): file is WhisperModelFile {
+  return WHISPER_MODELS.some((m) => m.file === file);
+}
+
+/** `.en` models are English-only; any other ggml model is multilingual. */
+export function isMultilingualWhisperModel(file: string): boolean {
+  return !/\.en(?:[.-]|$)/.test(file);
+}
+
+export function whisperModelUrl(file: WhisperModelFile): string {
+  return `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${file}`;
+}
+
+/**
+ * The bridge fetching one of {@link WHISPER_MODELS} itself, for Settings ->
+ * Updates. `idle` covers both "never started" and "finished" — a finished
+ * download shows up in `WhisperStatus.models`, not here.
+ */
+export type WhisperModelDownload =
+  | { state: 'idle' }
+  | { state: 'downloading'; file: WhisperModelFile; received: number; total: number | null }
+  | { state: 'error'; file: WhisperModelFile; message: string };
+
+/**
+ * Dictation languages offered in Settings. `auto` lets whisper detect the
+ * language per recording, which can misjudge a very short clip — hence the
+ * fixed choices. Codes are whisper's (ISO 639-1); the bridge accepts any code
+ * of that shape, this list is only what the picker shows.
+ */
+export const VOICE_LANGUAGES: readonly { code: string; label: string }[] = [
+  { code: 'auto', label: 'Detect automatically' },
+  { code: 'en', label: 'English' },
+  { code: 'lt', label: 'Lithuanian' },
+  { code: 'lv', label: 'Latvian' },
+  { code: 'et', label: 'Estonian' },
+  { code: 'pl', label: 'Polish' },
+  { code: 'de', label: 'German' },
+  { code: 'fr', label: 'French' },
+  { code: 'es', label: 'Spanish' },
+  { code: 'it', label: 'Italian' },
+  { code: 'pt', label: 'Portuguese' },
+  { code: 'nl', label: 'Dutch' },
+  { code: 'sv', label: 'Swedish' },
+  { code: 'da', label: 'Danish' },
+  { code: 'no', label: 'Norwegian' },
+  { code: 'fi', label: 'Finnish' },
+  { code: 'cs', label: 'Czech' },
+  { code: 'uk', label: 'Ukrainian' },
+  { code: 'ru', label: 'Russian' },
+  { code: 'tr', label: 'Turkish' },
+  { code: 'ja', label: 'Japanese' },
+  { code: 'ko', label: 'Korean' },
+  { code: 'zh', label: 'Chinese' },
+];
+
+/** `auto` or a two/three-letter language code — the shape the bridge will
+ *  pass to `whisper-cli -l`, and nothing else. */
+export function isVoiceLanguage(code: string): boolean {
+  return code === 'auto' || /^[a-z]{2,3}$/.test(code);
+}
+
+/** Longest recording the composer takes; the bridge's byte cap is sized from it. */
+export const VOICE_MAX_SECONDS = 90;
+/**
+ * Decoded WAV bytes the bridge accepts in one `transcribe`. 16 kHz mono 16-bit
+ * PCM is 32 KB/s, so {@link VOICE_MAX_SECONDS} is ~2.9 MB; the rest is headroom.
+ */
+export const VOICE_AUDIO_MAX_BYTES = 4 * 1024 * 1024;
+
 /**
  * 'auto' is UI-level: the SDK runs in acceptEdits underneath while the bridge
  * server auto-approves tool calls its guard considers safe and prompts only
@@ -1881,6 +2009,13 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   deleteRecipe: { needs: 'owner' },
   recipeVersions: { needs: 'owner' },
   uploadRecipeImage: { needs: 'owner' },
+  // Voice input only fills the composer: whoever may write a prompt may dictate
+  // one. A guest whose prompts need approval is still staged when they press
+  // Send, so this cannot bypass that. Not session-scoped — nothing in it names a
+  // session — and the host's CPU is guarded by the bridge's one-at-a-time queue.
+  transcribe: { needs: 'cap', cap: 'prompt' },
+  // Writes a 148 MB file into the host's app folder. Owner only, permanently.
+  installWhisperModel: { needs: 'owner' },
   // Creates sessions *and* workflows from the owner's library — wider than
   // createSession, so no preset reaches it.
   runRecipe: { needs: 'owner' },
@@ -2100,6 +2235,20 @@ export type ClientMessage =
   | { type: 'recipeVersions'; ownerId: string; recipeId: string }
   /** Upload one recipe screenshot; answered with the public URL. `data` is raw base64. */
   | { type: 'uploadRecipeImage'; uploadId: string; name: string; mediaType: string; data: string }
+  /** Dictated audio for the bridge's whisper.cpp; answered with `transcription`.
+   *  `audio` is raw base64 of a 16 kHz mono WAV, at most VOICE_AUDIO_MAX_BYTES decoded. */
+  | {
+      type: 'transcribe';
+      requestId: string;
+      audio: string;
+      /** `auto` or an ISO 639-1 code (see VOICE_LANGUAGES). Absent = `auto`. */
+      language?: string;
+      /** Have whisper translate the speech into English text. */
+      translate?: boolean;
+    }
+  /** Have the bridge download one of WHISPER_MODELS. Progress arrives as
+   *  `whisperModelDownload`; completion as a `cliStatus` listing the model. */
+  | { type: 'installWhisperModel'; file: WhisperModelFile }
   | {
       type: 'runRecipe';
       /** Correlation id echoed on `recipeRun` — the protocol has none of its own. */
@@ -2382,6 +2531,11 @@ export interface UserUiSettings {
    * claims an identity for the path, so a real key arriving later still wins.
    */
   dismissedCheckouts?: string[];
+  /** Dictation language: `auto` or an ISO 639-1 code. Absent = `auto`. Per user,
+   *  not per machine — a guest dictating into a host's session uses their own. */
+  voiceLanguage?: string;
+  /** Turn dictation in any language into English text. Absent = off. */
+  voiceTranslate?: boolean;
   /** ms epoch of the last change — last-write-wins key. */
   updatedAt?: number;
 }
@@ -2973,6 +3127,12 @@ export type ServerMessage =
       /** The other engine's CLI, on the same terms as `claudeCli` above: owner
        *  only, `path` stripped. Absent from a bridge older than this field. */
       codexCli?: CodexCliStatus;
+      /** Voice input's whisper.cpp, `path`s stripped. Sent to guests too — see
+       *  WhisperStatus. Absent from a bridge older than this field. */
+      whisper?: WhisperStatus;
+      /** A model download in progress (or failed), so a reopened pane picks it
+       *  up. Owner only, like `update`. */
+      whisperModelDownload?: WhisperModelDownload;
       settings?: UserUiSettings | null;
       guardAllowlist?: GuardAllowEntry[];
       guardAllowlistReview?: GuardAllowlistReview | null;
@@ -3130,6 +3290,10 @@ export type ServerMessage =
   /** Run counts keyed `ownerId/recipeId`. A PARTIAL map — merge it, never replace. */
   | { type: 'recipeStats'; stats: Record<string, number> }
   | { type: 'recipeImageUploaded'; uploadId: string; url: string }
+  /** Answer to one `transcribe`, on the asking link only. */
+  | { type: 'transcription'; requestId: string; text: string }
+  | { type: 'transcription'; requestId: string; error: string }
+  | { type: 'whisperModelDownload'; status: WhisperModelDownload }
   /** Answer to `runRecipe`, so the client can select the new session deterministically. */
   | { type: 'recipeRun'; runId: string; sessionId: string }
   /** `breakdown: null` = no live query or the control request failed — a state, not an error. */
@@ -3154,7 +3318,7 @@ export type ServerMessage =
   /** The machine's CLIs, re-sent when the answer changes — an install taken in
    *  response to "not found" has to reach the UI without a reconnect. Same
    *  `path`-stripped copies `hello` carries. */
-  | { type: 'cliStatus'; claudeCli: ClaudeCliStatus; codexCli: CodexCliStatus }
+  | { type: 'cliStatus'; claudeCli: ClaudeCliStatus; codexCli: CodexCliStatus; whisper?: WhisperStatus }
   | { type: 'pong' };
 
 /** Path fragment shared by both plan directories. Cheap hint only — the server's

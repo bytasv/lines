@@ -54,6 +54,10 @@
         "to": "config.json"
       },
       {
+        "from": "dist/whisper",
+        "to": "whisper"
+      },
+      {
         "from": "assets",
         "to": "assets",
         "filter": [
@@ -81,7 +85,8 @@
       "icon": "assets/icon.icns",
       "identity": null,
       "extendInfo": {
-        "LSUIElement": true
+        "LSUIElement": true,
+        "NSMicrophoneUsageDescription": "Lines uses the microphone for voice input: your dictation is transcribed by a Lines bridge, never by a cloud service, and typed into the prompt."
       }
     },
     "publish": [

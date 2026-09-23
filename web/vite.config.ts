@@ -20,9 +20,38 @@ import react from '@vitejs/plugin-react';
 function bridgeDiscovery(): Plugin {
   const instance = process.env.LINES_INSTANCE ?? 'default';
   const file = path.join(os.homedir(), '.lines-app', 'run', instance, 'bridge.json');
+  const lockFile = path.join(os.homedir(), '.lines-app', 'bridge.lock');
   return {
     name: 'lines-bridge-discovery',
     configureServer(server) {
+      /**
+       * Which machine this page sits at, when it sits at this one.
+       *
+       * With a relay in the loop the bridge sees every browser as remote, so the
+       * host's own tab loses "Browse…" like a phone does. The dev server can
+       * tell them apart: a request whose source address is one of this
+       * machine's own came from a browser on it. Answers the running bridge's
+       * device id then (from its lock file), `null` otherwise — the same
+       * `lines.hostDeviceId` the desktop shell hands its window. A proxied
+       * request (a tunnel arrives from loopback) never counts.
+       */
+      server.middlewares.use('/__host', (req, res) => {
+        const bare = (a?: string) => (a ?? '').replace(/^::ffff:/, '');
+        const remote = bare(req.socket.remoteAddress);
+        const proxied = !!(req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip']);
+        const sameMachine = !proxied && remote !== '' && remote === bare(req.socket.localAddress);
+        let deviceId: string | null = null;
+        if (sameMachine) {
+          try {
+            deviceId = (JSON.parse(fs.readFileSync(lockFile, 'utf8')) as { deviceId?: string }).deviceId ?? null;
+          } catch {
+            deviceId = null; // no bridge holds the machine right now
+          }
+        }
+        res.setHeader('content-type', 'application/json');
+        res.setHeader('cache-control', 'no-store');
+        res.end(JSON.stringify({ deviceId }));
+      });
       server.middlewares.use('/__bridge', (_req, res) => {
         // Read per request: the bridge republishes on every restart, and a dev
         // server outlives many of those.

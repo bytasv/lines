@@ -3,6 +3,7 @@ import type {
   BridgeInfo,
   ClaudeCliStatus,
   CodexCliStatus,
+  WhisperStatus,
   GuardAllowEntry,
   GuardAllowlistReview,
   McpConnection,
@@ -137,6 +138,9 @@ export interface MachineSlice {
   claudeCli: ClaudeCliStatus | null;
   /** The Codex CLI on this machine, on the same terms as `claudeCli`. */
   codexCli: CodexCliStatus | null;
+  /** This machine's voice-input transcriber. Guests are sent it too: a shared
+   *  session's dictation is transcribed on the machine that hosts it. */
+  whisper: WhisperStatus | null;
   /** Whose machine it is, when it is not ours. */
   ownerProfile: ShareProfile | null;
   /**
@@ -172,6 +176,7 @@ export const emptyMachine = (deviceId: string): MachineSlice => ({
   bridge: null,
   claudeCli: null,
   codexCli: null,
+  whisper: null,
   ownerProfile: null,
   local: false,
   encrypted: false,

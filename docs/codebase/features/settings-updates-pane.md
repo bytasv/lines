@@ -13,6 +13,11 @@ The pane assembles numbers that mostly already crossed the wire — `BridgeInfo.
 Claude's and, since [cross-provider model switching](cross-provider-model-switching.md) made a
 missing Codex CLI a turn-blocking condition the model picker needs to explain, Codex's too.
 
+Voice input's whisper.cpp install (binary + downloaded model) is discovered and cached the same
+self-healing way, but it lives in its own **Settings → Voice input** pane rather than here —
+see [voice-input](voice-input.md) — because it also carries the dictation language setting and
+the model download button, not just a version number.
+
 Both CLI probes are self-healing rather than cached for the life of the process: a working
 answer stays cached, but a "missing"/"outdated" verdict is only trusted for
 `RETRY_FAILED_AFTER_MS` (10s) before the machine is asked again, and the bridge re-broadcasts

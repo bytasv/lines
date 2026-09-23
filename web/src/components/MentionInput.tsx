@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useEffect, useImperativeHandle, useMemo, useRef, useState, type RefObject } from 'react';
 import { Box, Group, Paper, Popover, Text, Textarea } from '@mantine/core';
 import {
   diffEdit,
@@ -40,6 +40,34 @@ function pillColor(kind: string): string {
 }
 
 /**
+ * Splice `inserted` into the prompt over `[at, at + removed)`, shifting every pill
+ * after the edit (and dissolving one it cuts through, as typing would). `added`
+ * are pills the insertion itself creates. Returns where the caret belongs.
+ */
+export function insertAtCaret(
+  value: MentionValue,
+  at: number,
+  removed: number,
+  inserted: string,
+  added: MentionRange[] = [],
+): { value: MentionValue; caret: number } {
+  const shifted = remapRanges(value.ranges, at, removed, inserted.length);
+  return {
+    value: {
+      text: value.text.slice(0, at) + inserted + value.text.slice(at + removed),
+      ranges: added.length ? [...shifted, ...added].sort((a, b) => a.start - b.start) : shifted,
+    },
+    caret: at + inserted.length,
+  };
+}
+
+/** What a parent may do to the prompt from outside — voice input, for one. */
+export interface MentionInputHandle {
+  /** Insert plain text at the caret (over the selection, if any), spaced from its neighbours. */
+  insertText: (text: string) => void;
+}
+
+/**
  * Prompt textarea with inline `@mention` pills.
  *
  * The pills are painted by a mirror `<div>` behind a plain transparent-background
@@ -59,6 +87,7 @@ export function MentionInput({
   minRows = 2,
   onFocusChange,
   onPasteFiles,
+  handleRef,
 }: {
   value: MentionValue;
   onChange: (next: MentionValue) => void;
@@ -78,6 +107,7 @@ export function MentionInput({
    */
   onFocusChange?: (focused: boolean) => void;
   onPasteFiles: (files: File[]) => void;
+  handleRef?: RefObject<MentionInputHandle | null>;
 }) {
   const { text, ranges } = value;
   // The token the caret sits in, the highlighted row, and a "dismissed" token
@@ -155,27 +185,44 @@ export function MentionInput({
   const applyCandidate = (c: MentionCandidate) => {
     if (!token) return;
     const tokenLength = 1 + token.query.length;
-    const before = text.slice(0, token.start);
-    const after = text.slice(token.start + tokenLength);
     // A directory rewrites the token and keeps the popover open one level deeper.
     const isDir = c.kind === 'file' && c.label.endsWith('/');
     const inserted = isDir ? `@${c.id}/` : `@${c.label} `;
-    const shifted = remapRanges(ranges, token.start, tokenLength, inserted.length);
-    const nextRanges = isDir
-      ? shifted
-      : [...shifted, { ...c, start: token.start, end: token.start + 1 + c.label.length }].sort(
-          (a, b) => a.start - b.start,
-        );
+    const next = insertAtCaret(
+      value,
+      token.start,
+      tokenLength,
+      inserted,
+      isDir ? [] : [{ ...c, start: token.start, end: token.start + 1 + c.label.length }],
+    );
 
-    onChange({ text: before + inserted + after, ranges: nextRanges });
+    onChange(next.value);
     if (isDir) {
       setToken({ start: token.start, query: `${c.id}/` });
       setActiveIndex(0);
     } else {
       setToken(null);
     }
-    focusCaret(token.start + inserted.length);
+    focusCaret(next.caret);
   };
+
+  // Re-bound every render, so an insertion that lands after an async wait (a
+  // transcription) splices into the prompt as it is now, not as it was.
+  useImperativeHandle(handleRef, () => ({
+    insertText: (raw: string) => {
+      const words = raw.trim();
+      if (!words) return;
+      const ta = textareaRef.current;
+      const start = ta ? snapCaretOut(ta.selectionStart, ranges, prevCaretRef.current) : text.length;
+      const end = ta && ta.selectionEnd > start ? ta.selectionEnd : start;
+      const lead = start > 0 && !/\s/.test(text.charAt(start - 1)) ? ' ' : '';
+      const trail = end < text.length && !/\s/.test(text.charAt(end)) ? ' ' : '';
+      const next = insertAtCaret(value, start, end - start, lead + words + trail);
+      onChange(next.value);
+      setToken(null);
+      focusCaret(next.caret);
+    },
+  }));
 
   /** Atomic token removal (Backspace/Delete at a pill edge or inside it). */
   const removeRange = (r: MentionRange) => {

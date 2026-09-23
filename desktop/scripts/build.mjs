@@ -2,7 +2,7 @@
 /**
  * Builds everything that goes inside the app bundle.
  *
- * Four artifacts, because the shipped app is three processes plus one thing a
+ * Four artifacts (plus the bundled whisper-cli, see build-whisper.mjs), because the shipped app is three processes plus one thing a
  * process spawns:
  *   dist/main.cjs              — the Electron shell (CJS; Electron's main process)
  *   dist/server/bridge.mjs      — the bridge, as a single ESM file
@@ -27,6 +27,7 @@
 import { build } from 'esbuild';
 import fs from 'node:fs';
 import path from 'node:path';
+import { buildWhisper } from './build-whisper.mjs';
 
 const DESKTOP = path.resolve(import.meta.dirname, '..');
 const REPO = path.resolve(DESKTOP, '..');
@@ -173,4 +174,6 @@ if (!shellOnly) {
   await buildServer('linesMcpStdio', 'linesMcpStdio.ts');
   writeRuntimeModules();
   writeConfig();
+  // Voice input's transcriber, so a user never needs Homebrew for it.
+  buildWhisper();
 }

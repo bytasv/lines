@@ -151,9 +151,11 @@ export function UpdatesSection() {
           ) : undefined
         }
       />
+
     </>
   );
 }
+
 
 /** "not found" / "older than x.y.z" for either CLI, or nothing when it is fine. */
 function CliBadge({ status }: { status: { state: string; minVersion: string } | null }) {
@@ -182,7 +184,7 @@ function CliBadge({ status }: { status: { state: string; minVersion: string } | 
  * pane's shape stays the same whether or not a bridge has said hello yet, and
  * "we don't know" is a different (and more useful) answer than silence.
  */
-function VersionRow({
+export function VersionRow({
   name,
   version,
   detail,

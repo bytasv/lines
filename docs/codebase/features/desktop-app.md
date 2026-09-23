@@ -18,16 +18,22 @@ The bridge and worker stay two separate children, same as under Tilt: the worker
 Claude query, so a bridge crash or restart must not take a turn with it.
 
 Packaging adds the ability to run **away from a repo checkout** — no `tsx`, no repo-root `.env`,
-no `node_modules`. Three decisions shape it, each a recorded trade: the build is ad-hoc signed
-(no Apple Developer ID), the Claude Code CLI is *not* bundled, and the agent SDK is shipped
-unbundled next to the code.
+no `node_modules`. Four decisions shape it, each a recorded trade: the build is ad-hoc signed
+(no Apple Developer ID), the Claude Code CLI is *not* bundled, the agent SDK is shipped unbundled
+next to the code, and — the one exception — a `whisper-cli` binary *is* bundled, compiled from
+source at package time, because [voice-input](voice-input.md) has no equivalent of `npm i -g` to
+point a user at.
 
 ## Entry points
 
 - `desktop/src/main.ts` — the Electron main process
 - `desktop/src/config.ts` — resolved URLs and local-mode switch
 - `server/src/updates.ts` — the bridge-side half of update state
-- `desktop/scripts/build.mjs` — the three esbuild bundles, the pruned SDK tree, `config.json`
+- `desktop/scripts/build.mjs` — the three esbuild bundles, the pruned SDK tree, `config.json`,
+  the bundled `whisper-cli` (see `build-whisper.mjs`)
+- `desktop/scripts/build-whisper.mjs` — compiles a static, Metal-enabled `whisper-cli` from a
+  pinned whisper.cpp release, cached by version; a local build without `cmake` skips it with a
+  warning (falls back to Homebrew's), CI refuses to ship without it
 - `desktop/scripts/afterPack.mjs` — ad-hoc signs the packed bundle
 - `desktop/scripts/release.mjs` — uploads artifacts to the public R2 bucket, plus the stable
   download alias
@@ -48,6 +54,8 @@ unbundled next to the code.
   state is derived from
 - `shared/types.ts` — `UpdateStatus`, `installUpdate`, `updateStatus`
 - `server/src/claudeCli.ts` — finds the machine's `claude`, with a version floor
+- `server/src/whisperCli.ts` — finds `whisper-cli`; `LINES_WHISPER_BUNDLED_BIN` (set from
+  `desktop/whisper/whisper-cli` in the packaged resources) is checked before Homebrew
 - `desktop/assets/` — `trayTemplate.png` (+`@2x`), `icon.icns`, `icon.png`
 - `~/.lines-app/desktop.json` — the shell's own preferences (window vs. browser for "Open Lines",
   keep-awake, whether the login item has been defaulted once); read at boot, written on toggle,
@@ -119,6 +127,10 @@ unbundled next to the code.
 - `standDown` — `{ pid, instance } | null`; set exactly while another bridge owns this machine
 - `EXIT_BRIDGE_LOCK_HELD` (`78`) — duplicated from `server/src/index.ts` rather than imported,
   the same precedent as `APP_ROOT` above it
+- `installMediaPermissions()` — grants Electron's `media` permission request only for a mic,
+  requested by the app's own origin (never a third-party page the window navigated to), then on
+  macOS gates it a second time behind `systemPreferences.askForMediaAccess('microphone')`; every
+  other permission keeps Electron's default
 
 ## Data flow
 

@@ -106,6 +106,8 @@ interface MachineLink {
   awaitingProbeSince: number | null;
   /** In-flight fileRequests for *this* machine, keyed by reqId. */
   pending: Map<string, { resolve: (r: { status: number; body?: unknown }) => void; reject: (e: Error) => void }>;
+  /** In-flight voice transcriptions for this machine, keyed by requestId. */
+  transcriptions: Map<string, { resolve: (text: string) => void; reject: (e: Error) => void }>;
   reqCounter: number;
   /** Set while an intentional close is in flight, so it does not schedule a retry. */
   closing: boolean;
@@ -189,6 +191,7 @@ function linkFor(deviceId: string): MachineLink {
       lastPongAt: 0,
       awaitingProbeSince: null,
       pending: new Map(),
+      transcriptions: new Map(),
       reqCounter: 0,
       closing: false,
       secure: null,
@@ -346,6 +349,50 @@ function machineForSelectedSession(): string | undefined {
 function rejectPending(link: MachineLink) {
   for (const [, p] of link.pending) p.reject(new Error('Connection lost.'));
   link.pending.clear();
+  for (const [, p] of link.transcriptions) p.reject(new Error('Connection lost.'));
+  link.transcriptions.clear();
+}
+
+/** Longer than the bridge's own whisper timeout plus a full queue ahead of it,
+ *  so the bridge's answer — which says *why* — normally arrives first. */
+const TRANSCRIBE_DEADLINE_MS = 180_000;
+
+/**
+ * Send dictated audio (raw base64 WAV) to a machine's whisper.cpp and resolve
+ * with the text.
+ *
+ * Takes the machine for the reason `fileRequest` does: the session's host is
+ * the one that transcribes, and its install is the one the mic button reflects.
+ * Rides the link like any other message, so it is end-to-end encrypted wherever
+ * prompts are.
+ */
+export function transcribeAudio(
+  audio: string,
+  options: { language?: string; translate?: boolean } = {},
+  deviceId?: string,
+): Promise<string> {
+  const link = links.get(deviceId ?? machineForSelectedSession() ?? primaryDeviceId ?? '');
+  if (link?.socket?.readyState !== WebSocket.OPEN) {
+    return Promise.reject(new Error('Not connected to the bridge.'));
+  }
+  const requestId = `t${++link.reqCounter}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      link.transcriptions.delete(requestId);
+      reject(new Error('Transcription timed out.'));
+    }, TRANSCRIBE_DEADLINE_MS);
+    link.transcriptions.set(requestId, {
+      resolve: (text) => {
+        clearTimeout(timer);
+        resolve(text);
+      },
+      reject: (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    });
+    writeToLink(link, JSON.stringify({ type: 'transcribe', requestId, audio, ...options } satisfies ClientMessage));
+  });
 }
 
 function clearTimers(link: MachineLink) {
@@ -697,6 +744,14 @@ function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayContro
     const pending = link.pending.get(msg.reqId);
     link.pending.delete(msg.reqId);
     pending?.resolve({ status: msg.status, body: msg.body });
+    return;
+  }
+  if (msg.type === 'transcription') {
+    // Point-to-point, like fileResponse: settled against this link only.
+    const pending = link.transcriptions.get(msg.requestId);
+    link.transcriptions.delete(msg.requestId);
+    if ('error' in msg) pending?.reject(new Error(msg.error));
+    else pending?.resolve(msg.text);
     return;
   }
   // Which project (if any) this pick adds a root to — read before the reducer

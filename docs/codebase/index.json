@@ -3645,6 +3645,77 @@
         "end-to-end-encryption",
         "multi-machine-client"
       ]
+    },
+    {
+      "id": "voice-input",
+      "name": "Voice input",
+      "doc": "features/voice-input.md",
+      "purpose": "Dictate into the composer via a local whisper.cpp transcriber on the bridge, so audio never leaves the machine hosting the session and the provider only ever sees text.",
+      "covers": [
+        "voice-input",
+        "whisper-transcription",
+        "whisper-model-download"
+      ],
+      "entryPoints": [
+        "web/src/components/Composer.tsx",
+        "web/src/components/VoiceSection.tsx",
+        "server/src/index.ts"
+      ],
+      "files": [
+        "web/src/lib/voiceRecorder.ts",
+        "web/src/components/VoiceWaveform.tsx",
+        "web/src/components/Composer.tsx",
+        "web/src/components/MentionInput.tsx",
+        "web/src/components/VoiceSection.tsx",
+        "web/src/ws.ts",
+        "web/src/store.ts",
+        "web/src/lib/machines.ts",
+        "server/src/whisperCli.ts",
+        "server/src/whisperModel.ts",
+        "server/src/transcribe.ts",
+        "desktop/scripts/build-whisper.mjs",
+        "desktop/src/main.ts",
+        "shared/types.ts"
+      ],
+      "symbols": [
+        "resolveWhisperStatus",
+        "whisperStatus",
+        "refreshWhisperStatus",
+        "publicWhisperStatus",
+        "installedWhisperModels",
+        "pickWhisperModel",
+        "whisperModelFor",
+        "createTranscriber",
+        "languageArgs",
+        "startWhisperModelDownload",
+        "downloadWhisperModel",
+        "insertAtCaret"
+      ],
+      "tests": [
+        "server/src/whisperCli.test.ts",
+        "server/src/transcribe.test.ts",
+        "server/src/whisperModel.test.ts"
+      ],
+      "businessRules": [
+        "transcribe needs the prompt capability, not a session grant — dictating is exactly as privileged as typing",
+        "installWhisperModel is owner-only, permanently — it writes into the host's app data folder",
+        "an English-only model is always run with -l en and never asked to translate, regardless of the language or translate flag requested",
+        "a named non-English language (or translate) with only the English-only model installed is refused rather than silently mistranscribed",
+        "one transcription and one model download run at a time per bridge",
+        "recordings longer than VOICE_MAX_SECONDS (90s) auto-stop and are transcribed as caught",
+        "a model download is refused while LINES_WHISPER_MODEL pins a single external model file"
+      ],
+      "architecturalRules": [
+        "voice input is not a ProviderCapabilities field — the prompt reaches either provider as plain text either way",
+        "insertAtCaret is the one place text is spliced into a MentionValue and its ranges remapped; mention completion and voice insertion both call it",
+        "the model a recording uses is decided twice by the same rule (pickWhisperModel server-side, whisperModelFor shared) rather than the client asking the bridge",
+        "a downloaded model is only renamed into place after its byte count matches the announced content-length and its header carries ggml's magic number"
+      ],
+      "relatedDecisions": [
+        "local whisper.cpp over a hosted STT API: private, no API key, same code path on browser, phone and desktop",
+        "the dictation language decides the model rather than offering a model picker",
+        "auto-download deferred no further than the model: the binary is bundled on desktop but still a manual brew install elsewhere"
+      ]
     }
   ]
 }

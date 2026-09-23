@@ -197,6 +197,24 @@ export function takeHostDeviceIdFromUrl(): void {
   );
 }
 
+/**
+ * The dev-server counterpart of {@link takeHostDeviceIdFromUrl}: ask `/__host`
+ * (web/vite.config.ts) whether this browser runs on the dev machine. Dev builds
+ * only — a hosted origin has no such endpoint. A `null` answer clears the value,
+ * so a tab that is not on the host never keeps a stale claim.
+ */
+export async function learnHostDeviceIdFromDevServer(): Promise<void> {
+  if (!import.meta.env.DEV) return;
+  try {
+    const res = await fetch('/__host', { cache: 'no-store' });
+    const { deviceId } = (await res.json()) as { deviceId: string | null };
+    if (deviceId) localStorage.setItem(HOST_DEVICE_KEY, deviceId);
+    else localStorage.removeItem(HOST_DEVICE_KEY);
+  } catch {
+    // Dev server without the endpoint: leave whatever is there.
+  }
+}
+
 /** The machine the desktop shell said this window runs on, or null outside it. */
 export function readHostDeviceId(): string | null {
   return localStorage.getItem(HOST_DEVICE_KEY);

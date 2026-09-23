@@ -66,6 +66,9 @@ import {
 } from './workerProtocol.ts';
 import { publicClaudeCliStatus } from './claudeCli.ts';
 import { publicCodexCliStatus } from './codexCli.ts';
+import { publicWhisperStatus, refreshWhisperStatus } from './whisperCli.ts';
+import { onWhisperModelDownload, startWhisperModelDownload, whisperModelDownloadState } from './whisperModel.ts';
+import { transcribe } from './transcribe.ts';
 
 /** Explicit pin for local dev (Tilt sets it so its readiness probe has a fixed
  *  target); unset means bind :0 and publish the result to bridge.json. */
@@ -952,6 +955,9 @@ function buildHello(
       openaiAuth: { loggedIn: false },
       storage: ctx.sync.status,
       worker: worker.status,
+      // Unlike `claudeCli`, a guest is told: their dictation is transcribed on
+      // this machine, so whether they get a mic button is this machine's answer.
+      whisper: publicWhisperStatus(),
       // Always false in practice — a guest arrives over the relay — but sent
       // rather than omitted so the client reads one rule for every link.
       local,
@@ -1011,6 +1017,10 @@ function buildHello(
     // it, and until this was on the wire the browser could only find that out by
     // running a turn and watching it fail.
     codexCli: publicCodexCliStatus(),
+    // Voice input's transcriber, `path`s stripped the same way.
+    whisper: publicWhisperStatus(),
+    // Owner-only like `update`: a guest has no button that starts one.
+    whisperModelDownload: whisperModelDownloadState(),
     settings: ctx.store.loadSettings(),
     // Whether this link may drive a dialog that opens on this machine's screen.
     local,
@@ -1507,6 +1517,32 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       );
       break;
     }
+    case 'installWhisperModel':
+      // Fire and forget: progress and the outcome are broadcast (see
+      // onWhisperModelDownload below), so a second tab watches the same bar.
+      startWhisperModelDownload(msg.file);
+      break;
+    case 'transcribe': {
+      // Answered on the asking link only, and always answered: a failure is a
+      // `transcription` with an error rather than a thrown `error`, which carries
+      // no requestId and would leave the composer waiting on its timeout.
+      let reply: ServerMessage;
+      try {
+        reply = {
+          type: 'transcription',
+          requestId: msg.requestId,
+          text: await transcribe(msg.audio, { language: msg.language, translate: msg.translate }),
+        };
+      } catch (err) {
+        reply = {
+          type: 'transcription',
+          requestId: msg.requestId,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+      ws.send(JSON.stringify(reply satisfies ServerMessage));
+      break;
+    }
     case 'runRecipe': {
       // The whole run lives in recipeCommands: its ordering (refuse before any
       // side effect, count last) is the part that must not be re-derived here.
@@ -1996,8 +2032,9 @@ process.on('SIGINT', shutdown);
  * Re-publish the machine's CLI status when it changes.
  *
  * The probes cache a working answer for the life of the process and a failed one
- * for ten seconds (see claudeCli.ts / codexCli.ts), so this only spawns anything
- * while something is actually missing — and stops the moment both report `ok`.
+ * for ten seconds (see claudeCli.ts / codexCli.ts / whisperCli.ts), so this only
+ * spawns anything while something is actually missing — and stops the moment all
+ * three report ready.
  *
  * It exists because the obvious response to "Codex CLI is not installed" is to
  * install it, and until now nothing noticed: `hello` carries the status once per
@@ -2005,10 +2042,11 @@ process.on('SIGINT', shutdown);
  * model disabled until the page was reloaded.
  */
 let lastCliSignature = '';
-setInterval(() => {
+function publishCliStatus(): void {
   const claude = publicClaudeCliStatus();
   const codex = publicCodexCliStatus();
-  const signature = JSON.stringify([claude, codex]);
+  const whisper = publicWhisperStatus();
+  const signature = JSON.stringify([claude, codex, whisper]);
   if (signature === lastCliSignature) return;
   // Not on the first pass: `hello` already carried it, and a broadcast before any
   // client has connected reaches nobody.
@@ -2016,9 +2054,20 @@ setInterval(() => {
   lastCliSignature = signature;
   if (first) return;
   for (const ctx of registry.all()) {
-    ctx.broadcast({ type: 'cliStatus', claudeCli: claude, codexCli: codex });
+    ctx.broadcast({ type: 'cliStatus', claudeCli: claude, codexCli: codex, whisper });
   }
-}, 15_000).unref();
+}
+setInterval(publishCliStatus, 15_000).unref();
+
+// The bridge's own model download: progress to every link, and on success a
+// re-probe so the mic lights up now rather than on the next 15s tick.
+onWhisperModelDownload((status, finished) => {
+  for (const ctx of registry.all()) ctx.broadcast({ type: 'whisperModelDownload', status });
+  if (finished) {
+    refreshWhisperStatus();
+    publishCliStatus();
+  }
+});
 
 devRuntime.configure(() => ({
   ready: server.listening && worker.linkOpen,

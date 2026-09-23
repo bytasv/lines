@@ -31,6 +31,8 @@ import type {
   TranscriptEvent,
   ClaudeCliStatus,
   CodexCliStatus,
+  WhisperModelDownload,
+  WhisperStatus,
   UpdateStatus,
   SpendHistoryBlob,
   UsageSnapshot,
@@ -100,6 +102,8 @@ const AUTO_CONTINUE_KEY = 'lines.autoContinueInterrupted';
 const COMPRESS_RESPONSES_KEY = 'lines.compressResponses';
 const PLAN_REASONING_EFFORT_KEY = 'lines.planReasoningEffort';
 const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
+const VOICE_LANGUAGE_KEY = 'lines.voiceLanguage';
+const VOICE_TRANSLATE_KEY = 'lines.voiceTranslate';
 const DRAFTS_KEY = 'lines.drafts';
 const PLAN_COMMENTS_KEY = 'lines.planComments';
 
@@ -154,6 +158,10 @@ function loadAutoContinueInterrupted(): boolean {
 /** On unless explicitly turned off, matching the bridge-side default. */
 function loadCompressResponses(): boolean {
   return localStorage.getItem(COMPRESS_RESPONSES_KEY) !== 'false';
+}
+
+function loadVoiceLanguage(): string {
+  return localStorage.getItem(VOICE_LANGUAGE_KEY) ?? 'auto';
 }
 
 function loadOpenFiles(): Record<string, OpenFilesState> {
@@ -739,6 +747,11 @@ interface UiState {
    *  OpenAI model cannot run a turn without it, so the picker and the Updates
    *  pane both read this rather than waiting for a turn to fail. */
   codexCli: CodexCliStatus | null;
+  /** Voice input's whisper.cpp on that same machine, for the Updates pane. The
+   *  composer reads the *session's* machine slice instead — see Composer. */
+  whisper: WhisperStatus | null;
+  /** The primary bridge's own model download, for the same pane. */
+  whisperModelDownload: WhisperModelDownload | null;
   /** The bridge speaks a contract this client doesn't. Hosted builds ship ahead
    *  of installed bridges, so this is the expected steady state after a deploy,
    *  not an error — the UI degrades rather than throwing. Shows SkewBanner, which
@@ -833,6 +846,10 @@ interface UiState {
   autoContinueInterrupted: boolean;
   /** Append the response-compression ruleset to every session's system prompt. Global. */
   compressResponses: boolean;
+  /** Dictation language: `auto` or an ISO 639-1 code. Synced with the settings. */
+  voiceLanguage: string;
+  /** Turn dictation in any language into English text. */
+  voiceTranslate: boolean;
   /** Effort every session's plan-mode turns run at. Global, like codex's own
    *  `plan_mode_reasoning_effort`. Undefined = the session's own effort. */
   planReasoningEffort?: ReasoningEffort;
@@ -937,6 +954,8 @@ interface UiState {
   setTurnSummariesEnabled: (on: boolean) => void;
   setAutoContinueInterrupted: (on: boolean) => void;
   setCompressResponses: (on: boolean) => void;
+  setVoiceLanguage: (code: string) => void;
+  setVoiceTranslate: (on: boolean) => void;
   /** `null` clears it back to per-session effort. */
   setPlanReasoningEffort: (effort: ReasoningEffort | null) => void;
   setHideIgnored: (on: boolean) => void;
@@ -962,6 +981,8 @@ export const useStore = create<UiState>((set, get) => {
         turnSummariesEnabled: s.turnSummariesEnabled,
         autoContinueInterrupted: s.autoContinueInterrupted,
         compressResponses: s.compressResponses,
+        voiceLanguage: s.voiceLanguage,
+        voiceTranslate: s.voiceTranslate,
         planReasoningEffort: s.planReasoningEffort,
         alertsEnabled: s.alertsEnabled,
         alertSound: s.alertSound,
@@ -1066,6 +1087,8 @@ export const useStore = create<UiState>((set, get) => {
       turnSummariesEnabled: s.turnSummariesEnabled ?? state.turnSummariesEnabled,
       autoContinueInterrupted: s.autoContinueInterrupted ?? state.autoContinueInterrupted,
       compressResponses: s.compressResponses ?? state.compressResponses,
+      voiceLanguage: s.voiceLanguage ?? state.voiceLanguage,
+      voiceTranslate: s.voiceTranslate ?? state.voiceTranslate,
       planReasoningEffort: s.planReasoningEffort ?? state.planReasoningEffort,
       alertsEnabled: s.alertsEnabled ?? state.alertsEnabled,
       alertSound: (s.alertSound as AlertSound | undefined) ?? state.alertSound,
@@ -1078,6 +1101,8 @@ export const useStore = create<UiState>((set, get) => {
     if (s.turnSummariesEnabled != null) localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(s.turnSummariesEnabled));
     if (s.autoContinueInterrupted != null) localStorage.setItem(AUTO_CONTINUE_KEY, String(s.autoContinueInterrupted));
     if (s.compressResponses != null) localStorage.setItem(COMPRESS_RESPONSES_KEY, String(s.compressResponses));
+    if (s.voiceLanguage) localStorage.setItem(VOICE_LANGUAGE_KEY, s.voiceLanguage);
+    if (s.voiceTranslate != null) localStorage.setItem(VOICE_TRANSLATE_KEY, String(s.voiceTranslate));
     if (s.planReasoningEffort) localStorage.setItem(PLAN_REASONING_EFFORT_KEY, s.planReasoningEffort);
     if (s.alertsEnabled != null) persistAlertsEnabled(s.alertsEnabled);
     if (s.alertSound) persistAlertSound(s.alertSound as AlertSound);
@@ -1144,6 +1169,8 @@ export const useStore = create<UiState>((set, get) => {
   bridge: null,
   claudeCli: null,
   codexCli: null,
+  whisper: null,
+  whisperModelDownload: null,
   protocolSkew: false,
   authorizeUrl: null,
   authError: null,
@@ -1173,6 +1200,8 @@ export const useStore = create<UiState>((set, get) => {
   turnSummariesEnabled: loadTurnSummariesEnabled(),
   autoContinueInterrupted: loadAutoContinueInterrupted(),
   compressResponses: loadCompressResponses(),
+  voiceLanguage: loadVoiceLanguage(),
+  voiceTranslate: localStorage.getItem(VOICE_TRANSLATE_KEY) === 'true',
   planReasoningEffort: loadPlanReasoningEffort(),
   openFiles: loadOpenFiles(),
 
@@ -1231,6 +1260,7 @@ export const useStore = create<UiState>((set, get) => {
         bridge: slice.bridge,
         claudeCli: slice.claudeCli,
         codexCli: slice.codexCli,
+        whisper: slice.whisper,
         // Only meaningful once that machine has said `hello`: before it, a null
         // `bridge` is "not asked yet", not a pre-versioning bridge, and reading it
         // as skew would flash the pill on every machine switch.
@@ -1414,6 +1444,18 @@ export const useStore = create<UiState>((set, get) => {
   setAutoContinueInterrupted: (on) => {
     localStorage.setItem(AUTO_CONTINUE_KEY, String(on));
     set({ autoContinueInterrupted: on });
+    pushSettings();
+  },
+
+  setVoiceLanguage: (code) => {
+    localStorage.setItem(VOICE_LANGUAGE_KEY, code);
+    set({ voiceLanguage: code });
+    pushSettings();
+  },
+
+  setVoiceTranslate: (on) => {
+    localStorage.setItem(VOICE_TRANSLATE_KEY, String(on));
+    set({ voiceTranslate: on });
     pushSettings();
   },
 
@@ -1613,6 +1655,7 @@ export const useStore = create<UiState>((set, get) => {
             bridge: msg.bridge ?? null,
             claudeCli: msg.claudeCli ?? null,
             codexCli: msg.codexCli ?? null,
+            whisper: msg.whisper ?? null,
             scope: msg.access?.scope ?? 'owner',
             ownerProfile: msg.access?.ownerProfile ?? null,
             // Absent on a bridge older than the field, which reads as "not
@@ -1666,6 +1709,8 @@ export const useStore = create<UiState>((set, get) => {
           // the moment a second machine says hello.
           claudeCli: fromPrimary ? msg.claudeCli ?? null : state.claudeCli,
           codexCli: fromPrimary ? msg.codexCli ?? null : state.codexCli,
+          whisper: fromPrimary ? msg.whisper ?? null : state.whisper,
+          whisperModelDownload: fromPrimary ? msg.whisperModelDownload ?? null : state.whisperModelDownload,
           // `access` rides the view spread above, gated with the rest of the
           // owner state: it says whose machine the UI is describing, and a shared
           // machine's hello setting it globally is what flipped the sidebar into
@@ -2102,10 +2147,17 @@ export const useStore = create<UiState>((set, get) => {
               ...(state.machines[from] ?? emptyMachine(from)),
               claudeCli: msg.claudeCli,
               codexCli: msg.codexCli,
+              whisper: msg.whisper ?? null,
             },
           },
-          ...(fromPrimary ? { claudeCli: msg.claudeCli, codexCli: msg.codexCli } : {}),
+          ...(fromPrimary
+            ? { claudeCli: msg.claudeCli, codexCli: msg.codexCli, whisper: msg.whisper ?? null }
+            : {}),
         }));
+        break;
+      case 'whisperModelDownload':
+        // Primary only, like the pane that shows it.
+        if (fromPrimary) set({ whisperModelDownload: msg.status });
         break;
       case 'updateStatus':
         set((state) => ({
