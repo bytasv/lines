@@ -11,6 +11,8 @@ every root.
 ## Entry points
 
 - `web/src/components/ProjectTabs.tsx` — per-tab "Add folder…" / remove-folder menu
+- `web/src/components/ProjectPicker.tsx` — the empty-state "Open a project" screen's own
+  "Browse…"
 - `web/src/components/Sidebar.tsx` — one file tree per root
 
 ## Important files
@@ -111,6 +113,11 @@ None yet for this pass; static (`tsc --noEmit`) verified across `server`, `web`,
 - Removing a root only narrows what the project's sessions may reach; nothing on
   disk is touched, and the learned project key for that path is kept (the
   registry never forgets a resolved identity).
+- "Add folder…" is gated by `useCanBrowseFolders`
+  (see [session-collaboration](session-collaboration.md)), not plain locality: it also opens Finder
+  from the desktop shell's own window in hosted mode, since that window sits at the host even
+  though its socket is relayed — see [desktop-app](desktop-app.md#the-desktop-shells-own-window).
+  A guest never gets it, on any machine.
 
 ## Architectural rules
 

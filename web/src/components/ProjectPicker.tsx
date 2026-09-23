@@ -13,15 +13,15 @@ import {
 } from '@mantine/core';
 import { IconArrowRight, IconFolderOpen, IconFolders } from '@tabler/icons-react';
 import { useStore } from '../store';
-import { useIsLocalMachine } from '../lib/can';
+import { useCanBrowseFolders } from '../lib/can';
 import { send } from '../ws';
 
 export function ProjectPicker() {
   const recentDirs = useStore((s) => s.recentDirs);
   // Browse… opens Finder on the machine running the bridge, so it is offered
-  // only to a browser on that machine. Elsewhere the typed path and the recents
-  // below are the whole story.
-  const isLocal = useIsLocalMachine();
+  // only to a browser on that machine or the desktop shell's own window there.
+  // Elsewhere the typed path and the recents below are the whole story.
+  const canBrowse = useCanBrowseFolders();
   const folderPickPending = useStore((s) => s.folderPickPending);
   const setFolderPickPending = useStore((s) => s.setFolderPickPending);
   const [manualPath, setManualPath] = useState('');
@@ -49,7 +49,7 @@ export function ProjectPicker() {
         <Text size="sm" c="dimmed" ta="center">
           Pick a folder to work in — sessions run in its context.
         </Text>
-        {isLocal && (
+        {canBrowse && (
           <Button
             leftSection={folderPickPending ? <Loader size={14} /> : <IconFolderOpen size={16} />}
             disabled={folderPickPending}
@@ -85,7 +85,7 @@ export function ProjectPicker() {
                   fullWidth
                   onClick={() => open(d)}
                 >
-                  <Text size="xs" ff="monospace" truncate>
+                  <Text size="xs" ff="monospace" truncate="start" title={d}>
                     {d}
                   </Text>
                 </Button>

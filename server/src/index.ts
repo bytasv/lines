@@ -158,6 +158,12 @@ interface ConnState {
    * only connection that may open a native dialog on the host's screen.
    */
   local: boolean;
+  /**
+   * Whether this is the machine's own user rather than a guest. Lets the desktop
+   * shell's own window — relayed, so not `local` — open the folder dialog; the
+   * client decides whether it is sitting at the host.
+   */
+  owner: boolean;
 }
 // Keyed on the link object; relayClient will hold a strong ref per channel,
 // so a WeakMap entry lives exactly as long as its connection.
@@ -830,7 +836,7 @@ async function handleConnection(
   // a laptop on the same LAN, which is as remote as the relay for anything that
   // opens a window here.
   const local = !attested && isLoopbackAddress(req.socket?.remoteAddress);
-  conns.set(ws, { userId, connId, clerkToken, access, local });
+  conns.set(ws, { userId, connId, clerkToken, access, local, owner: !isGuest });
   // A guest's token is never installed on the host's context, and a guest never
   // triggers a sync: either would push this machine's sessions up under the
   // guest's Clerk identity, which is the worst outcome in this whole feature.
@@ -892,7 +898,7 @@ async function handleConnection(
  * For the owner this is everything, unchanged. For a guest it is deliberately
  * thin: their sessions (scope-filtered), the health of the machine they are
  * borrowing, and what they may do — and *nothing* about the host's library,
- * projects, account, settings or usage. That narrowing does double duty: a shared
+ * account, settings or usage. Projects only for a machine share. That narrowing does double duty: a shared
  * machine's `hello` contributes only sessions, so a client holding two machines
  * at once never has to merge two sets of owner state.
  */
@@ -925,7 +931,10 @@ function buildHello(
       recipeStats: {},
       models: DEFAULT_MODELS,
       recentDirs: [],
-      projects: [],
+      // A machine share lends the whole machine, projects included — sessions are
+      // created in them. A session share has no folder of its own to work in, so
+      // it gets none and the client builds its tabs from the shared sessions.
+      projects: access.scope === 'machine' ? ctx.store.loadProjects() : [],
       // Project *identity* only, which is machine-independent and is what lets a
       // shared session group under the project the guest already has open. It
       // names no path the guest may reach.
@@ -1603,8 +1612,12 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
     case 'pickFolder': {
       // The dialog opens on *this* machine's screen. Asked for from anywhere
       // else it would hang a remote user for the full 120s timeout while a
-      // Finder window nobody can see waits on an empty desk.
-      if (!conns.get(ws)?.local) {
+      // Finder window nobody can see waits on an empty desk. An owner channel is
+      // let through too: the desktop shell's own window arrives relayed, and
+      // only the client knows it sits at the host. Not an authz boundary — an
+      // owner already runs agent commands here.
+      const conn = conns.get(ws);
+      if (!conn?.local && !conn?.owner) {
         ws.send(JSON.stringify({ type: 'folderPicked', path: null } satisfies ServerMessage));
         break;
       }

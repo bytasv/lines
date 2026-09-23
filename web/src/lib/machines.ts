@@ -186,13 +186,22 @@ export const emptyMachine = (deviceId: string): MachineSlice => ({
  * from global state made a second machine's hello inherit the first's chip.
  */
 export function machineView(msg: Hello, prev: MachineView): MachineView {
+  const projectKeys = msg.projectKeys ?? {};
   return {
-    // `hello` carries no protocol version, so a tab left open across the upgrade
-    // — or an old bridge — can still send bare path strings here.
-    projects: (msg.projects as (Project | string)[]).map((p) =>
-      typeof p === 'string' ? { path: p } : p,
-    ),
-    projectKeys: msg.projectKeys ?? {},
+    // A session share is sent no project list — it has no folder of its own —
+    // so its tabs are built from the sessions shared with it. A machine share is
+    // sent the host's real list; an older host bridge sends it none, and falls
+    // back the same way. Without this, switching to a shared machine left no tab
+    // to select and nothing listed.
+    projects:
+      msg.access && msg.projects.length === 0
+        ? guestProjects(msg.sessions, projectKeys)
+        : // `hello` carries no protocol version, so a tab left open across the
+          // upgrade — or an old bridge — can still send bare path strings here.
+          (msg.projects as (Project | string)[]).map((p) =>
+            typeof p === 'string' ? { path: p } : p,
+          ),
+    projectKeys,
     recentDirs: msg.recentDirs,
     workflows: msg.workflows,
     sharedWorkflows: msg.sharedWorkflows ?? [],
@@ -222,6 +231,25 @@ export function machineView(msg: Hello, prev: MachineView): MachineView {
     mcpConnections: msg.mcpConnections ?? [],
     mcpReview: msg.mcpConnectionsReview ?? null,
   };
+}
+
+/**
+ * Project tabs for a machine shared with us, derived from its shared sessions.
+ *
+ * Reveals nothing the guest does not already hold: every path here is a shared
+ * session's `cwd`. Sessions whose folders share a project key (a work tree and
+ * its repo, say) collapse into one tab named after the shortest path, which is
+ * the one `sessionsInProject` then matches the rest against by key.
+ */
+export function guestProjects(sessions: SessionMeta[], projectKeys: ProjectKeyMap): Project[] {
+  const byKey = new Map<string, string>();
+  for (const { cwd } of sessions) {
+    if (!cwd) continue;
+    const key = projectKeys[cwd] ?? cwd;
+    const current = byKey.get(key);
+    if (!current || cwd.length < current.length) byKey.set(key, cwd);
+  }
+  return [...byKey.values()].sort().map((path) => ({ path }));
 }
 
 /**

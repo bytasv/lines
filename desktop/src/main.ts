@@ -847,17 +847,25 @@ function appUrl(): string {
  *
  * A live code is reused rather than replaced: minting here would silently
  * invalidate a code the user is part-way through typing on their phone.
+ *
+ * The fragment also names this machine (`host=<deviceId>`), for the same
+ * reason: the bridge sees a relayed socket and cannot tell this window from a
+ * phone, so it would hide "Browse…" — a Finder dialog is only useless on a
+ * screen nobody is at, and this window is on the host's screen.
  */
 function appUrlForOwnWindow(): string {
-  if (LOCAL_MODE || !e2eeRequired()) return appUrl();
-  try {
-    const code = currentEnrollment()?.code ?? mintEnrollmentCode().code;
-    return `${appUrl()}#enroll=${encodeURIComponent(code)}`;
-  } catch (err) {
-    // A read-only home, say. The window still opens; the user can enrol by hand.
-    shellLog(`[e2ee] could not prepare an enrollment code: ${(err as Error).message}`);
-    return appUrl();
+  const params = new URLSearchParams();
+  if (device) params.set('host', device.id);
+  if (!LOCAL_MODE && e2eeRequired()) {
+    try {
+      params.set('enroll', currentEnrollment()?.code ?? mintEnrollmentCode().code);
+    } catch (err) {
+      // A read-only home, say. The window still opens; the user can enrol by hand.
+      shellLog(`[e2ee] could not prepare an enrollment code: ${(err as Error).message}`);
+    }
   }
+  const fragment = params.toString();
+  return fragment ? `${appUrl()}#${fragment}` : appUrl();
 }
 
 /**

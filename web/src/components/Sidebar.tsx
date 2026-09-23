@@ -672,11 +672,10 @@ export function Sidebar({
   /**
    * Sessions shared with this user that no project tab covers.
    *
-   * A guest gets no project list — the host's folders are not theirs to browse —
-   * so `sessionsInProject` matches nothing and every shared session would be
-   * held in the store and rendered nowhere. They get a group of their own rather
-   * than a synthesised project tab, which would imply the guest can open files
-   * and start sessions in a folder they have no standing in.
+   * A guest's tabs are built from the shared sessions in that machine's `hello`
+   * (`guestProjects`), so this catches what arrived after it — a session shared
+   * later, in a folder no tab covers — which would otherwise be held in the
+   * store and rendered nowhere.
    */
   const shared = access
     ? Object.values(machineSessions)

@@ -237,6 +237,40 @@ describe('machineView', () => {
     assert.equal(machines.B.view.auth?.loggedIn, false);
   });
 
+  test("a session share's tabs come from the sessions shared with us", () => {
+    // A session guest's hello carries `projects: []` by design; without derived
+    // tabs a switch to that machine had nothing to select and listed nothing.
+    const sessions = [
+      { ...s('a'), cwd: '/repo' },
+      { ...s('b'), cwd: '/wt/feature' },
+      { ...s('c'), cwd: '/other' },
+      { ...s('d'), cwd: '/other' },
+    ];
+    const view = machineView(
+      hello({
+        access: { scope: 'session', caps: {} as never, ownerProfile: null, deviceId: 'B' },
+        sessions,
+        projectKeys: { '/repo': 'k', '/wt/feature': 'k' },
+      }),
+      emptyView(),
+    );
+    // The work tree folds into its repo's tab by key.
+    assert.deepEqual(view.projects, [{ path: '/other' }, { path: '/repo' }]);
+  });
+
+  test("a machine share's tabs are the host's real projects", () => {
+    // Sessions are created in them, so a project with none yet still needs a tab.
+    const view = machineView(
+      hello({
+        ...guest,
+        sessions: [{ ...s('a'), cwd: '/repo' }],
+        projects: [{ path: '/repo' }, { path: '/empty' }],
+      }),
+      emptyView(),
+    );
+    assert.deepEqual(view.projects, [{ path: '/repo' }, { path: '/empty' }]);
+  });
+
   test('bare path strings from an old bridge still become projects', () => {
     // `hello` carries no protocol version, so a tab left open across the upgrade
     // renders `[object Object]` tabs without this.

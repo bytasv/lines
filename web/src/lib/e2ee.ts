@@ -168,3 +168,36 @@ export function takeEnrollCodeFromUrl(): { code: string; viaQuery: boolean } | n
   );
   return { code: code.toUpperCase(), viaQuery: !fromHash };
 }
+
+const HOST_DEVICE_KEY = 'lines.hostDeviceId';
+
+/**
+ * Record which machine this page is sitting at, when the desktop shell says so.
+ *
+ * The shell opens its own window with `#host=<deviceId>`: that window is a
+ * browser on the hosted origin, so the bridge sees a relayed, non-local socket
+ * and cannot tell it apart from a phone. The shell can, and that is all a
+ * "Browse…" button needs — a Finder dialog is only useful on a screen someone
+ * is looking at. Persisted because the fragment is stripped on arrival and the
+ * window reloads; the desktop window keeps its own storage, so this never
+ * reaches the user's everyday browser.
+ */
+export function takeHostDeviceIdFromUrl(): void {
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const host = hash.get('host');
+  if (!host) return;
+  localStorage.setItem(HOST_DEVICE_KEY, host);
+
+  hash.delete('host');
+  const rest = hash.toString();
+  window.history.replaceState(
+    null,
+    '',
+    `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ''}`,
+  );
+}
+
+/** The machine the desktop shell said this window runs on, or null outside it. */
+export function readHostDeviceId(): string | null {
+  return localStorage.getItem(HOST_DEVICE_KEY);
+}

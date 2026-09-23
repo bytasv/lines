@@ -40,7 +40,7 @@ import { ConfirmModal } from './ConfirmModal';
 import { WorktreeModal } from './WorktreeModal';
 import { projectStatusMeta } from '../lib/format';
 import { sessionsInProject, useStore } from '../store';
-import { useIsGuest, useIsLocalMachine } from '../lib/can';
+import { useCanBrowseFolders, useIsGuest } from '../lib/can';
 import { useIsPhone } from '../lib/layout';
 import { sessionsOnMachine } from '../lib/machines';
 import { send } from '../ws';
@@ -80,8 +80,13 @@ function ProjectTab({
   const projectKeys = useStore((s) => s.projectKeys);
   const seen = useStore((s) => s.seenSessionStatus);
   // "Add folder…" shells out to Finder on the host, so it exists only for a
-  // browser on the host. A remote device widens a project from the typed path.
-  const isLocal = useIsLocalMachine();
+  // browser on the host or the desktop shell's own window there. A remote
+  // device widens a project from the typed path.
+  const canBrowse = useCanBrowseFolders();
+  // A guest's tabs are derived from the sessions shared with them (see
+  // `guestProjects`), not opened by them: closing one, widening it or making a
+  // work tree in it are all owner-only on the host, so the controls are hidden.
+  const guest = useIsGuest();
   // The active project's sessions are already spelled out in the sidebar, so a
   // dot here would only be noise. Leaving keeps it quiet: opening the project
   // marked those states seen, and only a state the user hasn't seen re-lights it.
@@ -214,6 +219,7 @@ function ProjectTab({
           {/* Roots menu. Clicks are stopped on both the trigger and the dropdown —
               a portalled dropdown still bubbles through the React tree, so without
               it managing folders would double as "switch to this tab". */}
+          {!guest && (
           <Menu position="bottom-start" width="min(320px, calc(100vw - 2rem))" withinPortal>
             <Menu.Target>
               <ActionIcon
@@ -232,7 +238,7 @@ function ProjectTab({
                   Close project
                 </Menu.Item>
               )}
-              {isLocal && (
+              {canBrowse && (
                 <Menu.Item leftSection={<IconFolderPlus size={14} />} onClick={addFolder}>
                   Add folder…
                 </Menu.Item>
@@ -289,7 +295,8 @@ function ProjectTab({
               ))}
             </Menu.Dropdown>
           </Menu>
-          {!mobile && (
+          )}
+          {!mobile && !guest && (
             <CloseButton
               aria-label={`Close ${baseName(path)}`}
               size={14}
@@ -312,9 +319,11 @@ export function ProjectTabs() {
   const folderPickPending = useStore((s) => s.folderPickPending);
   const setFolderPickPending = useStore((s) => s.setFolderPickPending);
   const setFolderPickTarget = useStore((s) => s.setFolderPickTarget);
-  // Finder opens on the host, so Browse… is hidden off-machine. The recents
-  // below stay: they are exactly the projects a remote device can reach.
-  const isLocal = useIsLocalMachine();
+  // Finder opens on the host, so Browse… is hidden off-machine (the desktop
+  // shell's own window counts as on it). The recents below stay: they are
+  // exactly the projects a remote device can reach.
+  const canBrowse = useCanBrowseFolders();
+  const guest = useIsGuest();
   const isPhone = useIsPhone();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [projectSearch, setProjectSearch] = useState('');
@@ -439,7 +448,7 @@ export function ProjectTabs() {
                   {projects.length ? 'No matching projects.' : 'No open projects.'}
                 </Text>
               )}
-              {isLocal && (
+              {canBrowse && (
                 <Button variant="light" disabled={folderPickPending} onClick={browse}>
                   Open project…
                 </Button>
@@ -482,6 +491,9 @@ export function ProjectTabs() {
                 active={p.path === activeProject}
               />
             ))}
+            {/* Opening a project is owner-only on the host; a guest's tabs come
+                from what was shared with them. */}
+            {!guest && (
             <Menu position="bottom-start" width="min(320px, calc(100vw - 2rem))">
               <Menu.Target>
                 <Tooltip label="Open project">
@@ -491,21 +503,27 @@ export function ProjectTabs() {
                 </Tooltip>
               </Menu.Target>
               <Menu.Dropdown>
-                {isLocal && (
+                {canBrowse && (
                   <Menu.Item leftSection={<IconFolderOpen size={14} />} onClick={browse}>
                     Browse…
                   </Menu.Item>
                 )}
                 {recents.length > 0 && <Menu.Label>Recent</Menu.Label>}
                 {recents.map((d) => (
-                  <Menu.Item key={d} onClick={() => openRecent(d)}>
-                    <Text size="xs" truncate ff="monospace">
+                  <Menu.Item
+                    key={d}
+                    onClick={() => openRecent(d)}
+                    title={d}
+                    styles={{ itemLabel: { minWidth: 0 } }}
+                  >
+                    <Text size="xs" truncate="start" ff="monospace">
                       {d}
                     </Text>
                   </Menu.Item>
                 ))}
               </Menu.Dropdown>
             </Menu>
+            )}
           </Group>
         </ScrollArea>
       )}

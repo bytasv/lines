@@ -754,8 +754,18 @@ refuse.
   binds every interface, so a direct socket may be a laptop on the same LAN, which is as remote
   as the relay for anything that opens a window on the host's screen. It fails closed: absent
   means not local, so an older bridge simply hides the affordance. Today that gates exactly one
-  thing, the Finder folder picker (`pickFolder`), which is also refused server-side rather than
-  merely hidden.
+  thing, the Finder folder picker (`pickFolder`).
+  - The desktop shell's own window is relayed too (see [desktop-app](desktop-app.md)), so `local`
+    alone would hide the picker there as well — a Finder dialog the shell itself opens is on the
+    host's screen regardless. The bridge instead allows any **owner** channel (`conn.owner`, set
+    from `access.scope === 'owner'`) and leaves the client to decide whether it is actually sitting
+    at the host, via the `host=<deviceId>` fragment described in
+    [desktop-app](desktop-app.md#the-desktop-shells-own-window). This is a UX gate, not an authz
+    one — an owner channel already runs arbitrary agent commands on the host — so widening it to
+    "local or owner" adds no real exposure; it only changes who can get the *client-side* button
+    to trigger the 120s wait on an empty desk. An older desktop build sends no `host`, so
+    `pickFolder` stays hidden there — client-side, `useCanBrowseFolders` fails closed exactly like
+    `local` always did.
 - `relay/` shares no types with the app and the bridge does not import the relay package: the
   frame shapes are duplicated in `relayClient.ts` on purpose, since the bridge ships to users'
   machines.

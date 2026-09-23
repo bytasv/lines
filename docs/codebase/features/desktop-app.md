@@ -158,8 +158,29 @@ it. **The window's cookie jar is not Safari's or Chrome's**: a browser
 sign-in does not carry into the window and vice versa, though a dev run and the packaged app share
 one jar. The dock tile (hidden by default in hosted mode) reappears for as long as any window is
 open (`syncDock`) and disappears once the last one closes, since a visible window with no tile has
-no Cmd-Tab and — the sharper problem — no application menu, so Cmd-C/Cmd-V would not work. If
-registration
+no Cmd-Tab and — the sharper problem — no application menu, so Cmd-C/Cmd-V would not work.
+
+### The desktop shell's own window
+
+The shell's own window opens `appUrlForOwnWindow()`
+(see [end-to-end-encryption](end-to-end-encryption.md)), not `appUrl()` directly: in hosted mode
+its socket goes out over the relay like any other browser's, so the bridge cannot tell it apart
+from a phone by locality alone. Two things ride the URL **fragment** — never the query string,
+which the server would see:
+
+- `enroll=<code>`, when this machine needs one, so the window enrols itself rather than making the
+  user retype a code the tray just showed them.
+- `host=<deviceId>` (`device.id` from `deviceIdentity()`), unconditionally whenever a relay device
+  identity exists. The web client reads it once, saves it to `localStorage` as
+  `lines.hostDeviceId`, and strips it from the URL. `useCanBrowseFolders`
+  (see [session-collaboration](session-collaboration.md)) then treats a window whose saved
+  `hostDeviceId` matches the machine it's connected to as sitting at the host, so "Browse…" opens
+  Finder there even though the link itself isn't local — see the `pickFolder` locality rule in
+  [hosted-machine-access](hosted-machine-access.md)'s Architectural rules for the server-side
+  half. An older desktop build sends no `host`, so that window's "Browse…" simply stays hidden,
+  same as before this existed.
+
+If registration
 returns a pairing code, a small `BrowserWindow` shows it as a data URL, independent of `web/dist`
 even existing. This window navigates nowhere at all — not even to the app's own origin — so
 clicking the web URL printed on the card opens the real browser and leaves the code on screen. The

@@ -108,9 +108,21 @@ describe('broadcast scope', () => {
     );
   });
 
-  test('a machine guest gets every session but still no account state', () => {
+  test('a machine guest gets every session and the projects, but still no account state', () => {
     const machine: SocketAccess = { scope: 'machine', caps: capsForPreset('collaborator', 'machine') };
+    const projectState = new Set(['projects', 'projectKeys']);
     for (const msg of SESSION_BEARING) assert.equal(mayReceiveMsg(msg, machine), true);
-    for (const msg of ACCOUNT_WIDE) assert.equal(mayReceiveMsg(msg, machine), false);
+    for (const msg of ACCOUNT_WIDE) {
+      assert.equal(mayReceiveMsg(msg, machine), projectState.has(msg.type), msg.type);
+    }
+    assert.equal(
+      mayReceiveMsg({ type: 'projectKeys', projectKeys: {} } as ServerMessage, machine),
+      true,
+    );
+    // A session share still gets neither: it has no folder to work in.
+    assert.equal(
+      mayReceiveMsg({ type: 'projectKeys', projectKeys: {} } as ServerMessage, scoped(['s1'])),
+      false,
+    );
   });
 });

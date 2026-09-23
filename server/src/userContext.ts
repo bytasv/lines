@@ -124,9 +124,10 @@ export function sessionIdOf(msg: ServerMessage): string | null {
  * so `settings`, `workflows`, `usage`, `authStatus` and friends are none of their
  * business — and several would leak the host's project paths or Claude account.
  *
- * The two exceptions are the machine's own health, `workerStatus` and
- * `storageStatus`: a guest whose turns are about to fail needs to know why, and
- * neither carries anything private.
+ * The exceptions are the machine's own health, `workerStatus` and
+ * `storageStatus` — a guest whose turns are about to fail needs to know why, and
+ * neither carries anything private — and, for a machine share only, `projects`
+ * and `projectKeys`.
  */
 export function mayReceive(
   msg: ServerMessage,
@@ -138,6 +139,11 @@ export function mayReceive(
     // A machine grant covers every session on the machine; a session share
     // covers exactly its own.
     return access.scope === 'machine' || !!access.sessionIds?.includes(sessionId);
+  }
+  // A machine share lends the projects too (see `buildHello`), so their changes
+  // follow live rather than waiting for the guest's next `hello`.
+  if (access.scope === 'machine' && (msg.type === 'projects' || msg.type === 'projectKeys')) {
+    return true;
   }
   return msg.type === 'workerStatus' || msg.type === 'storageStatus' || msg.type === 'pong';
 }

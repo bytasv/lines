@@ -14,7 +14,9 @@ so that guard had to become structural instead of a teardown.
 
 Earlier revisions of this feature showed a guest's sessions *alongside* the owner's own, merged
 into one sidebar. That inverted the bridge's own contract: a shared machine's `hello` deliberately
-carries only sessions and nothing else (see `server/src/index.ts`'s `buildHello`), and the client
+carries only sessions and nothing else — except `projects`/`projectKeys` at machine scope, since a
+whole-machine grant lends the projects too (see `server/src/index.ts`'s `buildHello`, and
+[session-collaboration](session-collaboration.md)) — and the client
 used to write the rest of a `hello` — projects, the library, usage, account state — straight into
 one global set regardless of which machine sent it. A guest's thin `hello` landing there blanked
 the owner's own UI (empty projects, a narrowed `access`) until the owner's own machine's next
@@ -85,7 +87,12 @@ reason.
 - `machineView(msg, prev)` — pure fold of one `hello` into a `MachineView`; `prev` is that same
   machine's own previous view (never the globals), which is what lets the "keep the last good
   `usage`/`openaiUsage` snapshot across a restart" rule survive a second machine's `hello` landing
-  in between
+  in between. `projects` is the host's own list when `hello` sends one (owner, or a machine-scope
+  guest); otherwise (a session-scope guest, or an old bridge) it falls back to `guestProjects`
+- `guestProjects(sessions, projectKeys)` — synthesises project tabs for a session-scope guest, who
+  gets no project list of their own, from the `cwd` of the sessions actually shared with them.
+  Sessions sharing a project key (a work tree and its repo) collapse into one tab, named after the
+  shortest of their paths
 - `sessionsOnMachine(sessions, sessionMachine, deviceId)` — the sessions hosted by one machine, for
   display only; the store still holds every linked machine's sessions. A direct local bridge
   stamps `''` and has `primaryDeviceId: null`, so callers pass `primaryDeviceId ?? ''`
@@ -171,6 +178,16 @@ still folds in via `mergeMachineSessions` (below) because the store must hold ev
 sessions for message routing and notifications; `sessionMachine` still stamps from every `hello`
 for the same reason; `profiles` is keyed by user id rather than by machine, so it accumulates
 regardless of which machine's `hello` supplied a given collaborator's name.
+
+### `projects`/`projectKeys` also arrive outside `hello`
+
+A machine-scope guest receives live `projects`/`projectKeys` broadcasts too (see
+[session-collaboration](session-collaboration.md)), not just the snapshot in `hello` — so these two
+message types can land from a machine that isn't the primary. The store's handlers for both always
+fold into that machine's own `machines[from].view`, and only additionally write the matching global
+field when `from === primaryDeviceId`, the same `fromPrimary` split the `hello` reducer uses for
+everything else. Skipping the slice write and gating on primary alone would silently drop a
+background machine's project change until its next `hello`.
 
 ### The `hello` merge
 
@@ -281,7 +298,9 @@ out of `ws.ts` and `main.tsx`.
   selection; a non-primary `hello` (repeated or not) leaves the primary's `projects`/
   `projectKeys`/`access`/`auth`/`usage` untouched; a bridge restart's `usage` carry-forward reads
   the machine's own previous view, not the primary's; `sessionsOnMachine` returns only the named
-  machine's sessions and treats `''` as the local bridge
+  machine's sessions and treats `''` as the local bridge; a machine-scope guest's `hello` yields
+  the host's real `projects`; a session-scope guest's tabs are derived via `guestProjects` from
+  their shared sessions' `cwd`, folding a work tree into its repo's tab by project key
 - `server/src/wakeRedial.test.ts` — imports `web/src/lib/wake.ts` directly, the same
   dependency-free pattern: every `readyState` → expected wake action, a pong that lands after the
   probe stamp reading as healthy, the heartbeat's stall-forgiveness *not* being able to rescue an
@@ -321,6 +340,9 @@ out of `ws.ts` and `main.tsx`.
   already primary.
 - A shared machine connects automatically (up to `LINK_CAP`); an idle non-primary link
   disconnects after `IDLE_DISCONNECT_MS` and reconnects on selection.
+- `projects`/`projectKeys` follow the same primary-gate as a `hello`'s owner state even though they
+  can arrive as their own message outside one: always folded into the sending machine's slice,
+  projected onto the globals only when that machine is primary.
 - A session's `sessionMachine` stamp is per-client, in-memory state — never persisted, never
   synced, and reset to nothing on reload (re-derived from the next round of `hello`s).
 - Auto-selecting a freshly created session additionally requires the creating frame to have come

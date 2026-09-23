@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import type { McpConnection, SessionMeta, TranscriptEvent } from '@lines/shared';
 import { createStore } from './store.ts';
+import { WORKTREE_ROOT } from './worktrees.ts';
 
 /** Fixed mtime, restored after an out-of-band write so the cache's stat check
  *  sees an unchanged file. Whole seconds — utimes round-trips those exactly. */
@@ -326,4 +327,30 @@ test('deleting a session takes its rewind sidecars with it', () => {
     fs.readdirSync(path.join(root, 'transcripts')).filter((f) => f.startsWith('s1')),
     [],
   );
+});
+
+test('a managed work tree is never recorded as a recent directory', () => {
+  const { store } = tmpStore();
+  store.addRecentDir('/p');
+  store.addRecentDir(path.join(WORKTREE_ROOT, 'repo', 'feature-x'));
+  assert.deepEqual(store.loadRecentDirs(), ['/p']);
+});
+
+test('an adopted work tree a project records is never recorded as a recent directory', () => {
+  const { store } = tmpStore();
+  store.saveProjects([{ path: '/p', worktrees: [{ path: '/elsewhere/wt' }] }]);
+  store.addRecentDir('/elsewhere/wt');
+  store.addRecentDir('/p');
+  assert.deepEqual(store.loadRecentDirs(), ['/p']);
+});
+
+test('work trees already in the recent-directory file are filtered on read', () => {
+  const { root, store } = tmpStore();
+  store.saveProjects([{ path: '/p', worktrees: [{ path: '/elsewhere/wt' }] }]);
+  const managed = path.join(WORKTREE_ROOT, 'repo', 'feature-x');
+  const file = path.join(root, 'recent-dirs.json');
+  fs.writeFileSync(file, JSON.stringify([managed, '/p', '/elsewhere/wt', '/q']));
+  assert.deepEqual(store.loadRecentDirs(), ['/p', '/q']);
+  // A read filters; it never rewrites the file.
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), [managed, '/p', '/elsewhere/wt', '/q']);
 });

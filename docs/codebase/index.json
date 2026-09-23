@@ -1797,6 +1797,7 @@
         "web/src/store.ts",
         "web/src/lib/files.ts",
         "web/src/lib/mentions.ts",
+        "web/src/components/ProjectPicker.tsx",
         "web/src/components/MentionAutocomplete.tsx",
         "web/src/components/MentionInput.tsx",
         "web/src/components/Composer.tsx",

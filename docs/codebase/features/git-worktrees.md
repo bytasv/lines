@@ -95,8 +95,9 @@ branch is created once, not adjusted later.
 
 **Per-session (the toggle):** `createSession { worktree: {} }` → the server cuts
 a detached worktree at `WORKTREE_ROOT/<repo>/<lines/wt-id>` *before* the session
-exists (`cwd` is identity — project-key anchor, `recentDirs`, roots, attribution
-— and is never rewritten) → `sessions.createSession({ cwd: worktree.path, ... })`
+exists (`cwd` is identity — project-key anchor, roots, attribution — and is
+never rewritten; it is deliberately kept **out** of `recentDirs`, see Business
+rules) → `sessions.createSession({ cwd: worktree.path, ... })`
 → the first prompt starts a turn immediately and, in parallel, the auto-titler
 runs → once it settles, `onAutoNamed` fires → `nameWorktreeBranch` runs
 `git switch -c <title-slug>` inside the worktree, carrying over anything the
@@ -136,7 +137,10 @@ refuses (named count) unless `force`; then `git worktree remove`, then
 - `server/src/projectWorktrees.test.ts` — the shared helpers (`rootsForCwd`,
   `projectRoots` unchanged, `projectPaths`, `findWorktree`)
 - `server/src/store.test.ts` — `sanitizeProjects`'s worktree handling,
-  byte-identical JSON when a project has none
+  byte-identical JSON when a project has none; `addRecentDir` ignoring a
+  `WORKTREE_ROOT` path and an adopted worktree a project records;
+  `loadRecentDirs` filtering both kinds out of a file written before the
+  filter existed, without rewriting it
 - `server/src/autoGuard.worktree.test.ts` — the two new `BASH_RULES` entries
 - `server/src/sessions.worktree.test.ts` — a worktree session spawns with
   `cwd` = the worktree path and no `additionalDirectories` key at all
@@ -146,6 +150,14 @@ refuses (named count) unless `force`; then `git worktree remove`, then
 - Attribution, not capability: a worktree session's project tab widens (it now
   shows in the parent's tab), but its roots never do — `projectRoots` must never
   return a worktree path.
+- A worktree path never appears in the "+" menu's Recent list, on write or on
+  read. `worktreeCommands.register` skips `addRecentDir` for a Lines-created
+  worktree; `server/src/store.ts`'s `addRecentDir`/`loadRecentDirs` filter every
+  path under `WORKTREE_ROOT` plus every worktree path any project records —
+  which also catches one adopted from outside Lines — so a `recent-dirs.json`
+  written before this filter existed cleans itself up on the next read, with no
+  migration. Opening a worktree as its own tab would double-count every session
+  in it, since it resolves to the parent's project key.
 - One path, one owner, and no nesting, extending the rule
   [multi-root-projects](multi-root-projects.md) already applies to roots.
 - A per-session worktree starts detached; its branch is cut once the session's

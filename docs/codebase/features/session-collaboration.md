@@ -97,8 +97,10 @@ account) or by a single-use link.
 - `web/src/lib/shares.ts` — the HTTP client for every `/v1/shares/*` route, `PRESET_COPY`,
   `ShareContact`, `listContacts`/`forgetContact`/`clearContacts` (the `/v1/contacts` routes),
   `leaveShare` (a guest giving up a machine shared with them)
-- `web/src/lib/can.ts` — `useCan`, `useIsGuest`, `useInScope`, `useClaudeLoginNeeded` (guest UI
-  narrowing, all reading the same `access` the bridge enforces)
+- `web/src/lib/can.ts` — `useCan`, `useIsGuest`, `useInScope`, `useClaudeLoginNeeded`,
+  `useCanBrowseFolders` (guest UI narrowing, all reading the same `access` the bridge enforces;
+  `useCanBrowseFolders` also folds in `useIsLocalMachine` and the desktop shell's own-window case —
+  see [hosted-machine-access](hosted-machine-access.md) and [desktop-app](desktop-app.md))
 - `web/src/lib/identityRule.ts` — `resolveIdentity` (pure), `personMeta`, the person palette
 - `web/src/lib/identity.ts` — `useIdentityResolver` (binds the pure rule to the store + Clerk)
 - `web/src/lib/presence.ts` — `usePresence`, `usePeers`
@@ -238,8 +240,12 @@ guest's token arrives there too, every ~50s, from their browser's own auth relay
 
 `buildHello` gives a guest their sessions (scope-filtered), the machine's health, and
 `access: { scope, caps, sessionIds?, ownerProfile, deviceId }` — and nothing account-wide:
-`workflows`, `steps`, `recipes`, `usage`, `auth`, `settings`, `guardAllowlist`, `projects` are all
-empty/omitted for a guest.
+`workflows`, `steps`, `recipes`, `usage`, `auth`, `settings`, `guardAllowlist` are all
+empty/omitted for a guest. `projects`/`projectKeys` are the one exception, and only at machine
+scope: a machine share lends the whole machine, and sessions are created inside its projects, so
+that scope gets the host's real list, live (see below). A session share has no folder of its own
+and still gets none; the client derives its tabs from the shared sessions' own `cwd` instead (see
+[multi-machine-client](multi-machine-client.md)).
 
 ### The authz gate and scoped broadcast
 
@@ -252,7 +258,9 @@ replies `{type:'error', sessionId, message}` on the originating socket and logs 
 `sessionIdOf(msg)` and calls `mayReceive(msg, sessionId, access)` per socket: a session-bearing
 message reaches only sockets whose scope covers it; an account-wide message (no session id)
 reaches the owner only, except `workerStatus`/`storageStatus` — a guest whose turns are about to
-fail needs to know why, and neither carries anything private.
+fail needs to know why, and neither carries anything private — and, at machine scope only,
+`projects`/`projectKeys`, so opening or closing a project reaches a machine guest live rather than
+waiting for their next `hello`.
 
 ### Presence
 
@@ -356,7 +364,11 @@ resolves a person through — so they can never disagree about who somebody is.
   capability.
 - Never grantable at any preset: settings, the guard allowlist, project/worktree management,
   login/logout, device unpair, workflow/step/recipe authoring, `installUpdate`, `deleteSession`,
-  `pickFolder`.
+  `pickFolder`. Seeing the project list (below) is not management — opening, closing, widening a
+  root, or creating/removing a worktree all still need `owner` regardless of preset.
+- A machine-scope grant's `hello` carries the host's real `projects`/`projectKeys`, and later
+  `projects`/`projectKeys` broadcasts reach it too, so the guest's project tabs track the host's
+  live. A session share still gets neither — it has no folder of its own to browse.
 - A machine-scope grant covers every session on the machine and outranks a session share on the
   same machine.
 - Several session shares on one machine intersect to the *narrowest* set of capabilities, never

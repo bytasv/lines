@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { APP_ROOT } from './workerProtocol.ts';
+import { WORKTREE_ROOT } from './worktrees.ts';
 import type {
   GuardAllowEntry,
   McpConnection,
@@ -341,6 +342,19 @@ export function createStore(root: string) {
     return entry;
   }
 
+  /**
+   * A predicate for "is this a work tree": anything under `WORKTREE_ROOT`, plus
+   * every work tree a project records — which covers adopted ones living outside
+   * it. Built once per call so a list filter reads projects.json once.
+   */
+  function worktreePathTest(): (dir: string) => boolean {
+    const recorded = new Set(store.loadProjects().flatMap((p) => (p.worktrees ?? []).map((w) => w.path)));
+    return (dir) =>
+      dir === WORKTREE_ROOT ||
+      dir.startsWith(WORKTREE_ROOT + path.sep) ||
+      recorded.has(normalizeRootPath(dir));
+  }
+
   const store = {
     loadSessions(): SessionMeta[] {
       // In-flight statuses may still be true — the worker process holds queries
@@ -430,11 +444,18 @@ export function createStore(root: string) {
       writeJson(RECIPE_STATS_FILE, stats);
     },
 
+    // Filtered on read as well as write, so a list written before the filter
+    // existed cleans itself up without a migration — and without this read writing.
     loadRecentDirs(): string[] {
-      return readJson<string[]>(RECENT_DIRS_FILE, []);
+      const worktree = worktreePathTest();
+      return readJson<string[]>(RECENT_DIRS_FILE, []).filter((d) => !worktree(d));
     },
 
+    // A work tree never lands in "Recent", whichever path records it (a session's
+    // cwd is one route): opening it as its own tab would double-count every session
+    // in it, since it resolves to the parent's project key.
     addRecentDir(dir: string) {
+      if (worktreePathTest()(dir)) return;
       const dirs = store.loadRecentDirs().filter((d) => d !== dir);
       dirs.unshift(dir);
       writeJson(RECENT_DIRS_FILE, dirs.slice(0, 10));

@@ -70,8 +70,12 @@ cryptography cannot close that.
   and strips it. The query form is still read because an older desktop build's QR used it, but a
   query string reaches the server, which is the one party the code exists to exclude
 - `appUrlForOwnWindow()` — the URL the desktop shell opens its own window with, carrying a live
-  code in the fragment. A machine's own window enrolling by hand-typed code was a step with no
-  security value: the shell and the bridge are already the same trust domain
+  enrollment code in the fragment when this machine needs one. A machine's own window enrolling
+  by hand-typed code was a step with no security value: the shell and the bridge are already the
+  same trust domain. The same fragment also always carries `host=<deviceId>`, unrelated to
+  encryption — see [desktop-app](desktop-app.md#the-desktop-shells-own-window) — which
+  `takeHostDeviceIdFromUrl`/`readHostDeviceId` (`web/src/lib/e2ee.ts`) consume and persist so
+  `useCanBrowseFolders` can tell this window is sitting at the host
 - `reconnectMachine(deviceId)` — re-dial the link that was just enrolled. `reconnectNow()` could
   not serve this: it re-dials the *primary*, which during the connect-time gate is not
   necessarily the machine the user is enrolling against

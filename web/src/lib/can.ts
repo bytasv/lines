@@ -1,6 +1,7 @@
 import type { ShareCaps, ShareProfile, StorageStatus, WorkerStatus } from '@lines/shared';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../store';
+import { readHostDeviceId } from './e2ee';
 
 /**
  * What this browser may do on the machine it is connected to.
@@ -59,6 +60,23 @@ export function useIsLocalMachine(): boolean {
     const deviceId = s.primaryDeviceId ?? '';
     return s.machines[deviceId]?.local ?? false;
   });
+}
+
+/**
+ * Whether to offer controls that open a native folder dialog on the host.
+ *
+ * A browser on the host qualifies, and so does the desktop shell's own window:
+ * its socket is relayed, so the bridge calls it non-local, but the shell told it
+ * which machine it sits at (`readHostDeviceId`). A guest never qualifies — the
+ * dialog would open on somebody else's desk.
+ */
+export function useCanBrowseFolders(): boolean {
+  const isLocal = useIsLocalMachine();
+  const guest = useIsGuest();
+  const primary = useStore((s) => s.primaryDeviceId);
+  if (isLocal) return true;
+  if (guest || !primary) return false;
+  return readHostDeviceId() === primary;
 }
 
 /**

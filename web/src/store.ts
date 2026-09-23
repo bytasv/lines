@@ -1832,11 +1832,31 @@ export const useStore = create<UiState>((set, get) => {
             : state.mcpStatus,
         }));
         break;
-      case 'projectKeys':
-        set({ projectKeys: msg.projectKeys });
+      // Both describe one machine, and since a machine share receives them too
+      // (see `mayReceive`) they can arrive from a machine that is not on screen:
+      // the slice always takes them, the globals only from the primary.
+      case 'projectKeys': {
+        const slice = get().machines[from];
+        if (slice) {
+          set((state) => ({
+            machines: {
+              ...state.machines,
+              [from]: { ...slice, view: { ...slice.view, projectKeys: msg.projectKeys } },
+            },
+          }));
+        }
+        if (fromPrimary) set({ projectKeys: msg.projectKeys });
         break;
+      }
       case 'projects': {
         const projects = toProjects(msg.projects);
+        const slice = get().machines[from];
+        if (slice) {
+          set((state) => ({
+            machines: { ...state.machines, [from]: { ...slice, view: { ...slice.view, projects } } },
+          }));
+        }
+        if (!fromPrimary) break;
         const before = new Set(get().projects.flatMap(worktreePaths));
         const grew = projects.flatMap(worktreePaths).some((p) => !before.has(p));
         set({ projects });
