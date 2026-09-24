@@ -165,8 +165,8 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 - `hasEstimatedSpend(spend)` — true when any row in a `ModelSpendMap` holds estimated money
   (`costUsd > 0` on a model whose `capabilitiesFor(provider).cost` is false); drives the `~`
   marker at the section/session/step level rather than per row
-- `formatSpendUsd(usd, estimated, digits?)` — `$1.23` or `~$1.23`; the one place every cost
-  readout renders its dollar sign
+- `formatSpendUsd(usd, estimated)` — `$1.23` or `~$1.23`, always 2 decimals; the one place
+  every cost readout renders its dollar sign, so no site can pick its own precision
 
 ## Data flow
 

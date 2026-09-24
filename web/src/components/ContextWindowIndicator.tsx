@@ -630,7 +630,7 @@ export function ContextWindowIndicator({
       {session.totalCostUsd != null && (
         <TotalRow
           label="Cost"
-          value={formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
+          value={formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel))}
         />
       )}
       {session.totalDurationMs != null && (

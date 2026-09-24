@@ -704,7 +704,7 @@ function ResultMeta({ item, sessionId }: { item: ResultItem; sessionId: string }
   // re-renders when the estimate flag itself flips.
   const estimated = useStore((s) => hasEstimatedSpend(s.sessions[sessionId]?.costByModel));
   const parts = [
-    item.costUsd != null ? formatSpendUsd(item.costUsd, estimated, 3) : null,
+    item.costUsd != null ? formatSpendUsd(item.costUsd, estimated) : null,
     item.durationMs != null ? formatDuration(item.durationMs) : null,
   ].filter(Boolean);
   if (parts.length === 0) return null;
@@ -752,6 +752,7 @@ const Item = memo(function Item({
 }) {
   const showRetry = item.key === retryKey;
   const isActiveGroup = item.key === activeGroupKey;
+  const estimated = useStore((s) => hasEstimatedSpend(s.sessions[sessionId]?.costByModel));
   switch (item.kind) {
     case 'user':
       // The only bubble in the transcript: a bubble means "a human said this".
@@ -840,7 +841,7 @@ const Item = memo(function Item({
                   one reads neutrally for the same reason — the turn is still going,
                   the bridge is just sending it again. */}
               {item.recovering ? 'retrying…' : item.stopped ? 'turn stopped' : 'turn failed'}
-              {item.costUsd != null ? ` · $${item.costUsd.toFixed(4)}` : ''}
+              {item.costUsd != null ? ` · ${formatSpendUsd(item.costUsd, estimated)}` : ''}
               {item.durationMs != null ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''}
             </Text>
             {showRetry && <FailedTurnActions sessionId={sessionId} />}
@@ -1019,7 +1020,7 @@ const AgentTurn = memo(function AgentTurn({
               row renders nothing inside the card now. */}
           {result?.costUsd != null && (
             <Text size="xs" c="dimmed">
-              {formatSpendUsd(result.costUsd, estimated, 3)}
+              {formatSpendUsd(result.costUsd, estimated)}
             </Text>
           )}
           {result?.durationMs != null && (

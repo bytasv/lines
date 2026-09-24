@@ -1029,7 +1029,7 @@ export function Composer({ session }: { session: SessionMeta }) {
               <ContextWindowIndicator session={session} />
               {session.totalCostUsd != null && (
                 <Text size="xs" c="dimmed">
-                  {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
+                  {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel))}
                 </Text>
               )}
               {micControl(16, 'lg')}
@@ -1149,7 +1149,7 @@ export function Composer({ session }: { session: SessionMeta }) {
             (!caps.contextWindow || (!session.contextSummary && !session.contextUsage)) && (
               <Text size="xs" c="dimmed">
                 Session cost{' '}
-                {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel), 3)}
+                {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel))}
               </Text>
             )}
         </Stack>

@@ -226,7 +226,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                 {session.lastCostUsd != null && (
                   <Menu.Label>
                     last turn{' '}
-                    {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel), 4)}
+                    {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel))}
                   </Menu.Label>
                 )}
                 <Menu.Item leftSection={<IconFileDiff size={14} />} onClick={() => setReviewing(true)}>
@@ -243,7 +243,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
             <>
           {session.lastCostUsd != null && (
             <Text size="xs" c="dimmed">
-              last turn {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel), 4)}
+              last turn {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel))}
             </Text>
           )}
           {/* Opens on click rather than prefetching a count: the diff is a `git
