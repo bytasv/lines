@@ -30,11 +30,16 @@ workflow progress bar's marker scan, the scroll-anchored auto-pin, and find-in-p
 here instead: batch events into one render per frame, make a rebuild cheap enough for React to skip
 re-rendering unchanged rows, and window the initial mount instead of trimming row cost further.
 
+A fourth, related symptom: opening a session could sit on an empty transcript indefinitely with
+no way to tell "still loading" from "dead" — the composite of a slow bridge wake-up and a message
+that silently never arrived (below).
+
 ## Entry points
 
 - `web/src/store.ts` (`applyServerMessage`, `case 'event'`, `flushPendingEvents`)
 - `web/src/components/Transcript.tsx` (the tail window, `showEarlier`, `revealWorkflowStep`
   handling)
+- `web/src/components/SessionView.tsx` (the `loadTranscript` send/retry effect, `TranscriptLoading`)
 
 ## Data flow
 
@@ -61,6 +66,25 @@ re-rendering unchanged rows, and window the initial mount instead of trimming ro
    previous object identity, which is what lets the row-level `memo`s and the `toolDiffCache`
    WeakMap actually skip work across a rebuild instead of recomputing everything from scratch.
 
+### Loading a transcript, and why it used to look dead
+
+`SessionView` sends `{ type: 'loadTranscript' }` once per session, gated on `!loaded &&
+health.connected` (deps include `health.connected`, not just `sessionId`/`loaded`) rather than
+merely `!loaded`. `ws.ts`'s `send()` drops any non-prompt message outright when the session's own
+link is down; with the old `!loaded`-only gate, a `loadTranscript` sent while the link was still
+reconnecting was silently dropped and `loaded` never became true — nothing re-sent it, so the
+transcript stayed on the empty-state copy forever until the user re-picked the session. Keying the
+effect on `health.connected` re-fires it on every reconnect instead.
+
+While `!loaded && !events?.length` (nothing loaded, nothing cached from a previous load to show
+meanwhile), `SessionView` renders `TranscriptLoading` in place of `<Transcript>` — a `Loader` plus
+one reason line, in priority order: link down ("Connecting to …"), bridge not attached
+(`linkedMachineHealth(...).block`), worker not connected ("Machine's worker is restarting…"), else
+"Loading transcript…". Past `SLOW_LOAD_MS` (8s) since the request went out, a dimmed hint and a
+manual Retry button (re-sends `loadTranscript`) appear alongside it. A reconnect reload — `loaded`
+false but `events` already cached from before — never shows this block; the transcript stays on
+screen throughout.
+
 ## Business rules
 
 - A live turn's transcript renders at most once per animation frame, not once per WebSocket event.
@@ -73,6 +97,15 @@ re-rendering unchanged rows, and window the initial mount instead of trimming ro
   stepper's jump-to-step both stay correct against a clipped list — see
   [transcript-rendering](transcript-rendering.md) and
   [workflow-step-lifecycle](workflow-step-lifecycle.md).
+- `loadTranscript` is re-sent on every reconnect, not just once per session — the send is gated on
+  `health.connected`, not merely on `!loaded`, since a send while the link is down is dropped
+  rather than queued (unlike a `prompt` message).
+- The loading placeholder only replaces `<Transcript>` when there is nothing cached to show
+  (`!loaded && !events?.length`); a reconnect reload with cached events keeps the transcript on
+  screen instead of blocking it.
+- The loading reason's precedence is link, then bridge attachment, then worker health, so a merely
+  reconnecting link is never reported as "offline" — the same precedence order the machine-health
+  banners use.
 
 ## Architectural rules
 

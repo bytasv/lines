@@ -655,7 +655,10 @@ note in a small bubble with the same edit/delete actions the list row has.
   Editing a label or description here changes every picker at once, though `PERMISSION_MODE_SEGMENTS`
   only exposes a three-item, independently-ordered subset (`plan`, `auto`, `bypassPermissions`) of
   it — built by mapping over that subset list, not by filtering `PERMISSION_MODES`, so the pill
-  order can differ from the Selects' order.
+  order can differ from the Selects' order. `SEGMENT_MODES` (the plain `PermissionMode[]` behind
+  that mapping) is exported too, so the phone composer's mode `Menu`
+  ([mobile-client](mobile-client.md)) offers the exact same three modes in the same order without
+  a second hand-written list.
 - Mantine `SegmentedControl` has no per-segment tooltip prop, so per-item tooltips are attached
   by wrapping each segment's `label` in a `Tooltip`-wrapped `span` (`display:block; width:100%`
   so the hover target fills the segment instead of shrinking to the text). The composer's

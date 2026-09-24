@@ -54,6 +54,63 @@ const SessionDiffModal = lazy(() =>
   import('./SessionDiffModal').then((m) => ({ default: m.SessionDiffModal })),
 );
 
+/** Past this, the wait is worth explaining and a manual re-send is offered. */
+const SLOW_LOAD_MS = 8000;
+
+/**
+ * Stand-in for the transcript while its first load is outstanding. The reason
+ * line follows the same precedence as the machine dot: the link, then the
+ * bridge, then the worker — so a merely reconnecting link never reads "offline".
+ */
+function TranscriptLoading({
+  health,
+  ownerName,
+  requestedAt,
+  onRetry,
+}: {
+  health: ReturnType<typeof useSessionMachineHealth>;
+  ownerName: string | null;
+  requestedAt: number | null;
+  onRetry: () => void;
+}) {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    setSlow(false);
+    if (requestedAt == null) return;
+    const t = setTimeout(() => setSlow(true), Math.max(0, requestedAt + SLOW_LOAD_MS - Date.now()));
+    return () => clearTimeout(t);
+  }, [requestedAt]);
+
+  const reason = !health.connected
+    ? `Connecting to ${ownerName ? `${ownerName}’s machine` : 'your machine'}…`
+    : !health.bridgeAttached
+      ? linkedMachineHealth(health).block
+      : health.worker?.connected === false
+        ? 'Machine’s worker is restarting…'
+        : 'Loading transcript…';
+
+  return (
+    <Stack flex={1} mih={0} align="center" justify="center" gap="xs" px="md">
+      <Group gap="xs" wrap="nowrap">
+        <Loader size="sm" />
+        <Text size="sm" c="dimmed">
+          {reason}
+        </Text>
+      </Group>
+      {slow && health.connected && (
+        <>
+          <Text size="xs" c="dimmed" ta="center" maw={420}>
+            Taking longer than usual — the machine may be waking from sleep or the transcript is large.
+          </Text>
+          <Button size="compact-xs" variant="light" leftSection={<IconRefresh size={12} />} onClick={onRetry}>
+            Retry
+          </Button>
+        </>
+      )}
+    </Stack>
+  );
+}
+
 export function SessionView({ sessionId }: { sessionId: string }) {
   const session = useStore((s) => s.sessions[sessionId]);
   // Null on your own machine. Present means this session is somebody else's, and
@@ -76,9 +133,21 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const projects = useStore((s) => s.projects);
   const clipboard = useClipboard({ timeout: 1500 });
 
+  // Gated on the session's own link: `send` drops a non-prompt message on a dead
+  // link, and with `loaded` still unset nothing would ever re-send it — the
+  // transcript stayed blank until the session was re-picked. Keying on
+  // `connected` re-sends on every reconnect instead.
+  const [requestedAt, setRequestedAt] = useState<number | null>(null);
   useEffect(() => {
-    if (!loaded) send({ type: 'loadTranscript', sessionId });
-  }, [sessionId, loaded]);
+    setRequestedAt(null);
+  }, [sessionId]);
+  useEffect(() => {
+    if (loaded || !health.connected) return;
+    if (send({ type: 'loadTranscript', sessionId })) setRequestedAt(Date.now());
+  }, [sessionId, loaded, health.connected]);
+  const retryLoad = () => {
+    if (send({ type: 'loadTranscript', sessionId })) setRequestedAt(Date.now());
+  };
 
   // Layout only: what the header can hold at 390px. Never a second decision
   // path — both branches call the same handlers.
@@ -104,8 +173,10 @@ export function SessionView({ sessionId }: { sessionId: string }) {
 
   return (
     <Stack gap={0} h="100%">
-      <Group px="md" py={8} justify="space-between">
-        <Group gap="xs">
+      {/* One line at any width: the name side shrinks and ellipsizes, the
+          trailing actions never wrap under it. */}
+      <Group px="md" py={8} justify="space-between" wrap="nowrap">
+        <Group gap="xs" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
           {/* Ahead of the name, where the path used to trail it: this is the one
               control in the header, and a leading icon reads as one. The path itself
               is noise — a managed work tree's is long and says nothing the branch
@@ -128,17 +199,17 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               {clipboard.copied ? <IconCheck size={13} /> : <IconFolder size={13} />}
             </ActionIcon>
           </Tooltip>
-          <Text fw={600} size="sm">
+          <Text fw={600} size="sm" truncate style={{ minWidth: 0 }}>
             {session.name}
           </Text>
           {worktree && (
-            <Group gap={3} wrap="nowrap" c="dimmed">
+            <Group gap={3} wrap="nowrap" c="dimmed" style={{ flexShrink: 0 }}>
               <IconGitBranch size={12} />
               <Text size="xs">{worktree.branch ?? 'detached'}</Text>
             </Group>
           )}
         </Group>
-        <Group gap="xs" wrap="nowrap">
+        <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
           <PresenceStack sessionId={sessionId} />
           {/* Phone: the two icon buttons and the cost read-out do not fit beside
               a session name at 390px, so they fold into one menu. Same actions,
@@ -302,7 +373,19 @@ export function SessionView({ sessionId }: { sessionId: string }) {
           </Group>
         </Alert>
       )}
-      <Transcript sessionId={sessionId} events={events ?? []} stepCount={workflow?.steps.length} />
+      {/* Only while there is nothing cached to show: a reconnect reload keeps
+          the transcript on screen. Without this gate an unloaded session claimed
+          "Send a prompt to start." — indistinguishable from a dead one. */}
+      {!loaded && !events?.length ? (
+        <TranscriptLoading
+          health={health}
+          ownerName={remote.isRemote ? (remote.ownerProfile?.name ?? null) : null}
+          requestedAt={requestedAt}
+          onRetry={retryLoad}
+        />
+      ) : (
+        <Transcript sessionId={sessionId} events={events ?? []} stepCount={workflow?.steps.length} />
+      )}
       {/* The live truth about work that outlived the turn. The transcript keeps its
           own task rows, but those are a record — this strip is what a page reload
           rebuilds from, and what tells you the session is not as idle as it reads.

@@ -196,6 +196,7 @@
         "PermissionMode",
         "PERMISSION_MODES",
         "PERMISSION_MODE_SEGMENTS",
+        "SEGMENT_MODES",
         "permissionModeLabel",
         "renderPermissionModeOption",
         "PermissionResolutionSource",
@@ -936,7 +937,7 @@
       "id": "session-and-project-ui",
       "name": "Session and project UI",
       "doc": "features/session-and-project-ui.md",
-      "purpose": "The shell around a session: persisted unsent drafts, focus on a new session, which session a project switch opens, the project tab's actionable-status dot, and the tool-aware waiting-permission badge.",
+      "purpose": "The shell around a session: persisted unsent drafts, focus on a new session, which session a project switch opens (preferring the project's remembered last-selected session before falling back to latest-created), the project tab's actionable-status dot, and the tool-aware waiting-permission badge.",
       "covers": [
         "composer-draft-persistence",
         "composer-focus-new-session",
@@ -977,6 +978,9 @@
         "Composer",
         "setActiveProject",
         "latestSessionIn",
+        "rememberedSessionIn",
+        "readLastSessions",
+        "writeLastSession",
         "sessionsInProject",
         "projectStatusMeta",
         "PROJECT_STATUS_ORDER",
@@ -1009,7 +1013,7 @@
         "auto-selection always excludes archived sessions; completed needs no separate check since the server always archives alongside it",
         "a project whose sessions are all archived auto-selects nothing (empty state) rather than opening an archived one",
         "an explicit selection already in the target project, including an archived session, is never overridden by a tab switch",
-        "auto-selection (latestSessionIn, which session a project switch opens) always sorts by createdAt, independent of the sidebar's own list-sort setting",
+        "a project switch prefers the project's remembered last-selected session (lines.lastSessionByProject) over latestSessionIn; latestSessionIn itself is unchanged (most recently created, non-archived) and remains the fallback when nothing is remembered or the remembered session is gone/archived, independent of the sidebar's own list-sort setting",
         "the three sidebar groups (Sessions, Shared-with-me, Archived) and the project tab dot describe one machine's sessions only (sessionsOnMachine, see multi-machine-client) — the store still holds every linked machine's sessions, but the list is a display scope switched by the header's MachineSwitcher, not a merge",
         "the sidebar session list order is user-selectable via lines.sessionSort (persisted localStorage), applied to all three groups (Sessions, Shared-with-me, Archived): Status (default) ranks running first, then the tab-dot urgency order (plan ready > needs answer > needs approval > needs permission > interrupted > error), then background work, then done, then idle, tie-broken by lastActivityAt descending; Last active sorts by lastActivityAt descending; Created sorts by createdAt descending (the sidebar's pre-existing behavior)",
         "a session status label missing from SESSION_SORT_RANK sorts last rather than being guessed at, same rule projectStatusMeta applies by skipping",
@@ -1048,7 +1052,8 @@
         "store changes here (the hello short-circuit, pendingCreate/seenSessionIds) are pure reducer logic with no web test harness backing them (web/ has no test runner) — the highest-risk, least-covered part of this feature; verified manually",
         "SessionRow is memoized — selecting a different session or any sessions-map update (e.g. a live turn ticking status) otherwise re-rendered every row in the list regardless of the size of the session being switched to; the memo relies on `session` keeping its object identity when unchanged, which sessionUpsert already guarantees by only replacing the entry that changed",
         "compareSessions follows the same format.ts-never-imports-store.ts rule as projectStatusMeta: it takes plain SessionMeta and returns a comparator, so Sidebar.tsx is the only place .sort() is called",
-        "SESSION_SORT_ORDER is built from STATUS_META.running, PROJECT_STATUS_ORDER, BACKGROUND_WORK_META, STATUS_META.done/.idle rather than a second hand-written urgency table, so the sidebar list order can never drift from the tab dot it points at"
+        "SESSION_SORT_ORDER is built from STATUS_META.running, PROJECT_STATUS_ORDER, BACKGROUND_WORK_META, STATUS_META.done/.idle rather than a second hand-written urgency table, so the sidebar list order can never drift from the tab dot it points at",
+        "lines.lastSessionByProject follows the same single-JSON-map-under-one-key convention as lines.drafts/lines.openFiles, keyed by project path; written by one store subscription keyed on selectedSessionId rather than at each selection call site"
       ],
       "relatedDecisions": [
         "hosted-machine-access",
@@ -2807,7 +2812,7 @@
       "id": "transcript-performance",
       "name": "Transcript live-update performance",
       "doc": "features/transcript-performance.md",
-      "purpose": "Why a live turn or a session switch used to freeze the UI for a beat, and the three independent fixes: batching WebSocket transcript events into one render per frame, keeping rebuilt transcript items referentially stable so memoization and diff caches survive a rebuild, and windowing a long transcript's initial mount.",
+      "purpose": "Why a live turn or a session switch used to freeze the UI for a beat, and the three independent fixes: batching WebSocket transcript events into one render per frame, keeping rebuilt transcript items referentially stable so memoization and diff caches survive a rebuild, and windowing a long transcript's initial mount. A fourth fix: gate the initial loadTranscript send and its reconnect retry on link health, and show a reasoned loading state instead of the plain empty-state copy while it's outstanding.",
       "entryPoints": [
         "web/src/store.ts",
         "web/src/components/Transcript.tsx"
@@ -2819,7 +2824,8 @@
         "web/src/components/ToolGroup.tsx",
         "web/src/components/ToolCallCard.tsx",
         "web/src/components/Markdown.tsx",
-        "web/src/lib/workflowReveal.ts"
+        "web/src/lib/workflowReveal.ts",
+        "web/src/components/SessionView.tsx"
       ],
       "symbols": [
         "flushPendingEvents",
@@ -2829,14 +2835,19 @@
         "INITIAL_WINDOW",
         "showEarlier",
         "revealWorkflowStep",
-        "REVEAL_STEP_EVENT"
+        "REVEAL_STEP_EVENT",
+        "TranscriptLoading",
+        "SLOW_LOAD_MS"
       ],
       "tests": [],
       "businessRules": [
         "a live turn's transcript renders at most once per animation frame, not once per WebSocket event",
         "a hidden tab accumulates its transcript backlog without rendering at all (no animation frames fire while hidden) and commits it as a single render on refocus, rather than replaying the whole backlog as N sequential renders",
         "a long session's initial mount renders only its last ~40 top-level items; the rest backfill on idle, or immediately on scrolling near the top, with a 'Show earlier messages' button as the always-available affordance",
-        "windowing applies to workflow sessions too; the progress bar and stepper jump-to-step both stay correct against a clipped list (see transcript-rendering.md and workflow-step-lifecycle.md)"
+        "windowing applies to workflow sessions too; the progress bar and stepper jump-to-step both stay correct against a clipped list (see transcript-rendering.md and workflow-step-lifecycle.md)",
+        "loadTranscript is re-sent on every reconnect (gated on health.connected, not merely !loaded), since a send while the link is down is dropped rather than queued",
+        "the loading placeholder only replaces the transcript when nothing is cached to show (!loaded && !events?.length); a reconnect reload with cached events keeps the transcript on screen",
+        "the loading reason's precedence is link, then bridge attachment, then worker health, matching the machine-health banners' own order"
       ],
       "architecturalRules": [
         "contract: nothing outside applyServerMessage may read `transcripts`/`lastEventAt` and assume it's settled — every non-'event' message flushes the pending buffer first (flushPendingEvents at the top of applyServerMessage), so a new message handler that reads transcripts without going through applyServerMessage's switch breaks this silently",
@@ -3597,7 +3608,8 @@
         "web/src/lib/viewport.ts",
         "web/src/components/ProjectTabs.tsx",
         "web/index.html",
-        "web/src/components/MentionInput.tsx"
+        "web/src/components/MentionInput.tsx",
+        "web/src/lib/permissionModes.tsx"
       ],
       "symbols": [
         "useIsPhone",
@@ -3628,9 +3640,10 @@
         "icon-only controls get a 32px floor on a phone from a rule on .mantine-ActionIcon-root; a 44px minimum across buttons, menu items, inputs and segments was tried and made every control shout, and Mantine's own sizes already clear 32px for anything with a label",
         "the composer's text is 15px, and 16px on iOS where the zoom rule applies — @supports (-webkit-touch-callout: none) is the platform test, so Chrome on iOS keeps the floor too",
         "a bottom sheet is sized by its content (size=\"auto\"), never by a share of the screen: a sheet pinned at 80dvh is the same height whether it holds four controls or one",
-        "the composer's Options button is labelled with the current permission mode, so one control reports the setting that matters before sending and opens the sheet that changes it",
+        "the composer's permission mode is its own Menu on the row (SEGMENT_MODES, same three modes and order as the desktop pills), separate from the Options icon button; the Options sheet no longer carries the mode control",
         "the phone project-picker button is sized and left-aligned to its own label instead of stretching to fill the header, and the composer has no corner radius or left/right/bottom border on a phone, so it reads as a strip spanning the screen",
-        "bottom sheets cap max-height at --lines-viewport minus --lines-safe-top, so a tall sheet's title and close button clear the Dynamic Island in a home-screen iOS app; PermissionPrompt's sheet carries .lines-mobile-sheet too"
+        "bottom sheets cap max-height at --lines-viewport minus --lines-safe-top, so a tall sheet's title and close button clear the Dynamic Island in a home-screen iOS app; PermissionPrompt's sheet carries .lines-mobile-sheet too",
+        "the transcript ScrollArea sets scrollbars=\"y\" and styles.content.display=\"block\": Mantine's default display:table content wrapper grows to its widest non-shrinking child, which let one nowrap row widen the whole scroll column past 390px"
       ],
       "architecturalRules": [
         "adapt in place, never fork a mobile shell: a second transcript renderer either is the same code or drifts and re-loses the batching, windowing and referential-stability work",

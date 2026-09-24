@@ -33,6 +33,7 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
 - Adapted surfaces: `Composer`, `PermissionPrompt`, `SessionView`, `Sidebar`, `Transcript`,
   `ContextWindowIndicator`, `UsageIndicator`, `ProjectTabs`, `ProjectPicker`, `SettingsModal`,
   `ConnectionBanner`
+- `web/src/lib/permissionModes.tsx` — `SEGMENT_MODES`, exported for the phone mode `Menu`
 
 ## Symbols
 
@@ -103,8 +104,13 @@ an iPad in landscape is neither.
   top. That max-height subtracts `--lines-safe-top` too: a home-screen iOS app draws under the
   status bar, so a full-height sheet put its title and close button under the Dynamic Island.
   Every bottom sheet, `PermissionPrompt`'s included, carries the class.
-- The composer's Options button is labelled with the current permission mode, so one control both
-  reports the setting that matters before you send and opens the sheet that changes it.
+- The composer's permission mode is its own `Menu` on the row (label + chevron, a description
+  under each item, current mode checked) reusing `permissionModes.tsx`'s exported `SEGMENT_MODES`
+  list — the same three modes the desktop pills offer, in the same order. A separate
+  `IconAdjustmentsHorizontal` icon button opens the Options sheet, which no longer carries the
+  mode control or its caption — model, reasoning effort, context and cost stay there. Disabled
+  states are unchanged: no mode permission disables the menu trigger, and `!caps.approvals` shows
+  a static disabled "Sandboxed" label instead.
 - The sidebar is a real drawer on a phone (`useDisclosure`), and picking a session closes it —
   otherwise the thing just picked sits behind it.
 - Sidebar width is clamped against the viewport on every read, so a width saved on a 27" display
@@ -119,6 +125,12 @@ an iPad in landscape is neither.
   is nothing to defer.
 - `SettingsModal` goes full-screen on a phone; a 90%-wide modal leaves a sliver of backdrop that
   swallows taps meant for the pane.
+- The transcript `ScrollArea` sets `scrollbars="y"` and `styles={{ content: { display: 'block' } }}`.
+  Mantine's default wraps content in `display: table; min-width: 100%`, and a table grows to its
+  widest non-shrinking child — one `nowrap` row (a tool-card header, a long badge) widened the
+  whole scroll column past 390px and made the transcript scroll sideways. `block` pins the content
+  box to the viewport width instead, so children wrap/shrink rather than growing the column; the
+  explicit `y`-only scrollbar is belt-and-suspenders against the same symptom recurring.
 - Installable, with **no service worker**. This is a live WebSocket client: offline caching buys
   nothing, and an SW-cached bundle against a newer bridge trips the version-skew path in the one
   configuration a user cannot fix by reloading, because the cache survives the reload.
@@ -150,9 +162,10 @@ an iPad in landscape is neither.
 
 ## Conversation layout
 
-- On phones, the composer keeps attachment, Options, and Send/Queue/Stop in one non-wrapping
-  row. The current permission mode remains visible above the input. Model, reasoning effort,
-  permissions, and context details live in a bottom Options sheet; desktop controls stay inline.
+- On phones, the composer keeps attachment, the mode dropdown, Options, and Send/Queue/Stop in
+  one non-wrapping row. The permission mode is its own `Menu`, not folded into Options. Model,
+  reasoning effort, and context details live in a bottom Options sheet; desktop controls stay
+  inline.
   The composer itself has no corner radius and no left/right/bottom border on a phone, so it reads
   as a strip spanning the screen rather than a floating card; only its top border and the
   `lines-safe-bottom` padding above the home indicator remain.

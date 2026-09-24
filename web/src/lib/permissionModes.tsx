@@ -46,7 +46,7 @@ export const PERMISSION_MODES: PermissionModeItem[] = [
  * while the copy still comes from the one source. `default` and `acceptEdits`
  * stay selectable in the Selects, they just have no pill.
  */
-const SEGMENT_MODES: PermissionMode[] = ['plan', 'auto', 'bypassPermissions'];
+export const SEGMENT_MODES: PermissionMode[] = ['plan', 'auto', 'bypassPermissions'];
 
 /**
  * SegmentedControl has no per-item tooltip prop, so the description rides along

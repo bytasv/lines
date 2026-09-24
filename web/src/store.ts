@@ -96,6 +96,7 @@ const NEW_SESSION_DEFAULTS_KEY = 'lines.newSessionDefaults';
 const SIDEBAR_MODE_KEY = 'lines.sidebarMode';
 const HIDE_IGNORED_KEY = 'lines.hideIgnored';
 const OPEN_FILES_KEY = 'lines.openFiles';
+const LAST_SESSION_BY_PROJECT_KEY = 'lines.lastSessionByProject';
 const COMPACTION_LEVEL_KEY = 'lines.compactionLevel';
 const TURN_SUMMARIES_ENABLED_KEY = 'lines.turnSummariesEnabled';
 const AUTO_CONTINUE_KEY = 'lines.autoContinueInterrupted';
@@ -175,6 +176,23 @@ function loadOpenFiles(): Record<string, OpenFilesState> {
 
 function persistOpenFiles(openFiles: Record<string, OpenFilesState>) {
   localStorage.setItem(OPEN_FILES_KEY, JSON.stringify(openFiles));
+}
+
+/** Last session the user selected in each project, project path -> session id. */
+function readLastSessions(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(LAST_SESSION_BY_PROJECT_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLastSession(projectPath: string, sessionId: string) {
+  const last = readLastSessions();
+  if (last[projectPath] === sessionId) return;
+  last[projectPath] = sessionId;
+  localStorage.setItem(LAST_SESSION_BY_PROJECT_KEY, JSON.stringify(last));
 }
 
 // ---------------------------------------------------------------------------
@@ -554,6 +572,22 @@ function latestSessionIn(
   return sessionsInProject(sessions, projectKeys, project)
     .filter((s) => !s.archived)
     .sort((a, b) => b.createdAt - a.createdAt)[0];
+}
+
+/**
+ * The project's last selected session, when it still belongs here and is not
+ * archived — the same auto-selection rule `latestSessionIn` keeps. A stale entry
+ * is left in place rather than pruned: the session may simply sit on a machine
+ * whose `hello` has not landed yet, and the next selection overwrites it anyway.
+ */
+function rememberedSessionIn(
+  sessions: Record<string, SessionMeta>,
+  projectKeys: ProjectKeyMap,
+  project: Project,
+): SessionMeta | undefined {
+  const id = readLastSessions()[project.path];
+  if (!id) return undefined;
+  return sessionsInProject(sessions, projectKeys, project).find((s) => s.id === id && !s.archived);
 }
 
 interface UiState {
@@ -1603,8 +1637,14 @@ export const useStore = create<UiState>((set, get) => {
         const inProject =
           current != null &&
           sessionsInProject(state.sessions, state.projectKeys, project).some((s) => s.id === current.id);
-        // Otherwise switching tabs lands on that project's latest active session.
-        if (!inProject) selected = latestSessionIn(state.sessions, state.projectKeys, project)?.id ?? null;
+        // Otherwise switching tabs lands where the user last was in that project,
+        // or on its latest active session when that one is gone or archived.
+        if (!inProject) {
+          selected =
+            rememberedSessionIn(state.sessions, state.projectKeys, project)?.id ??
+            latestSessionIn(state.sessions, state.projectKeys, project)?.id ??
+            null;
+        }
       }
       return { activeProject: path, selectedSessionId: selected };
     });
@@ -2261,4 +2301,16 @@ useStore.subscribe((state, prev) => {
   );
   // Bail on no-op writes: this listener would otherwise re-enter on its own set.
   if (!sameStringMap(next, state.seenSessionStatus)) useStore.setState({ seenSessionStatus: next });
+});
+
+// What `setActiveProject` returns to: recorded here, off the one field, rather
+// than at every call site that selects a session.
+useStore.subscribe((state, prev) => {
+  if (state.selectedSessionId === prev.selectedSessionId || !state.selectedSessionId) return;
+  const project = projectAt(state.projects, state.activeProject);
+  if (!project) return;
+  const id = state.selectedSessionId;
+  if (sessionsInProject(state.sessions, state.projectKeys, project).some((s) => s.id === id)) {
+    writeLastSession(project.path, id);
+  }
 });

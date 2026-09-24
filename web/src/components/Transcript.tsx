@@ -1518,7 +1518,17 @@ export function Transcript({
           />
         </Box>
       )}
-      <ScrollArea h="100%" viewportRef={viewportRef} px="md" onScrollPositionChange={onScroll}>
+      {/* Mantine wraps content in `display: table; min-width: 100%`, and a table
+          grows to its widest non-shrinking row — one nowrap header widened the
+          whole column past a 390px phone. `block` pins it to the viewport width. */}
+      <ScrollArea
+        h="100%"
+        viewportRef={viewportRef}
+        px="md"
+        scrollbars="y"
+        styles={{ content: { display: 'block' } }}
+        onScrollPositionChange={onScroll}
+      >
         <Stack gap="sm" py="md" maw={920} mx="auto" ref={contentRef}>
           {items.length === 0 && (
             <Text size="sm" c="dimmed" ta="center" pt="xl">

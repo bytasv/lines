@@ -16,9 +16,10 @@ and how status is surfaced in the sidebar row and the project tab.
   textarea automatically so the user can type immediately without clicking into it.
 - **Project switch session selection** — decide which session is shown when the active project
   changes (tab click, `hello`/reconnect, or a `/session/<id>` deep link): keep an already-valid
-  selection, or auto-select that project's most recently created *non-archived* session. Never
-  auto-open an archived session — those stay reachable only via the sidebar's "Archived (N)"
-  group.
+  selection, or fall back to the project's own last-selected session
+  (`lines.lastSessionByProject`) when that session still exists and isn't archived, or otherwise
+  auto-select that project's most recently created *non-archived* session. Never auto-open an
+  archived session — those stay reachable only via the sidebar's "Archived (N)" group.
 - **Project tab status dot** — each project tab in the header shows the single most important
   actionable status across that project's sessions as a colored pulsing dot in place of the
   folder icon, so a background project working across multiple repos can signal it needs
@@ -58,7 +59,8 @@ and how status is surfaced in the sidebar row and the project tab.
 - `web/src/store.ts` — `readDraft`, `writeDraft`, `pruneDrafts`, `readDraftAttachments`,
   `writeDraftAttachments`, `pruneDraftAttachments`; `sessionUpsert`'s intent-based auto-select;
   the `hello` reducer's signature short-circuit; `setActiveProject`, `latestSessionIn`,
-  `sessionsInProject`; `seenSessionStatus`, `reconcileSeenStatus`; `actionError`
+  `rememberedSessionIn`, `readLastSessions`/`writeLastSession`, `sessionsInProject`;
+  `seenSessionStatus`, `reconcileSeenStatus`; `actionError`
 - `web/src/ws.ts` — `send()` returning `boolean` and setting `actionError` on a dropped
   non-prompt message
 - `web/src/components/Composer.tsx`
@@ -87,6 +89,13 @@ and how status is surfaced in the sidebar row and the project tab.
   points above call it
 - `latestSessionIn(sessions, projectKeys, project)` — most recently created (`createdAt`)
   non-archived session in a project, or `undefined`
+- `rememberedSessionIn(sessions, projectKeys, project)` — the project's entry in
+  `readLastSessions()`, resolved against current membership; `undefined` if the id is missing,
+  archived, or no longer in the project
+- `readLastSessions()` / `writeLastSession(projectPath, sessionId)` — `lines.lastSessionByProject`,
+  one JSON map (`{ [projectPath]: sessionId }`) in `localStorage`, following the same
+  single-key-map convention as `lines.drafts`/`lines.openFiles`; written by a store subscription
+  keyed on `selectedSessionId`, not at each selection call site
 - `sessionsInProject(sessions, projectKeys, project)` — shared, key-aware project membership
   (by project key, falling back to exact cwd match); shared with the sidebar
 - `projectStatusMeta(sessions, seen)` — scans a project's sessions, skips archived and
@@ -207,8 +216,16 @@ fix (together with the relay/bridge changes) breaks.
 `setActiveProject` first checks whether the currently selected session already belongs to the
 target project (via `sessionsInProject`, so a keyed project matches across machines with
 different absolute paths). If so, the selection is left alone — including an archived session, so
-a deep link to it survives a tab switch. Otherwise it auto-selects via `latestSessionIn`, which
-falls back to `null` (empty state) when the project has no non-archived sessions.
+a deep link to it survives a tab switch. Otherwise it tries `rememberedSessionIn` — the project's
+last-selected session, if it still exists in the project and isn't archived — and only when that
+comes back empty falls through to `latestSessionIn`, which itself falls back to `null` (empty
+state) when the project has no non-archived sessions.
+
+A separate store subscription records `selectedSessionId` into `lines.lastSessionByProject`
+whenever it changes to a session that belongs to the active project — the same "one subscription,
+not scattered mutation sites" shape `reconcileSeenStatus` already follows. A stale entry (the
+remembered session got deleted or archived elsewhere) is not swept on write; `rememberedSessionIn`
+already treats it as absent on read, and the next selection in that project overwrites it anyway.
 
 ### Project tab dot
 
@@ -292,8 +309,11 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   opening an archived one.
 - An explicit selection already in the target project — including an archived session opened via
   the sidebar's Archived group or a deep link — is never overridden by a tab switch.
-- Auto-selection (`latestSessionIn`, "which session does a project switch open") always sorts by
-  `createdAt`, independent of the sidebar's own list-sort setting below.
+- A project switch prefers the project's remembered last-selected session
+  (`lines.lastSessionByProject`) over `latestSessionIn`; `latestSessionIn` itself is unchanged —
+  most recently created (`createdAt`) non-archived session — and remains the fallback when nothing
+  is remembered, the remembered session is gone, or it's now archived. Both are independent of the
+  sidebar's own list-sort setting below.
 - All three sidebar groups (Sessions, Shared-with-me, Archived), and the project tab's status dot
   via `reconcileSeenStatus`, describe one machine's sessions only —
   `sessionsOnMachine(sessions, sessionMachine, primaryDeviceId ?? '')` — not every machine this
@@ -346,6 +366,8 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 
 - Text draft storage follows the existing single-JSON-map-under-one-key convention used elsewhere
   in `store.ts` (e.g. `lines.openFiles`), rather than one `localStorage` key per session.
+  `lines.lastSessionByProject` follows the same convention, keyed by project path instead of
+  session id.
 - Attachment draft storage uses IndexedDB instead of `localStorage` for the same reason
   attachments themselves are staged as raw base64 client-side — size, not structure, is the
   deciding factor.

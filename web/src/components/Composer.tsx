@@ -5,6 +5,7 @@ import {
   Button,
   Drawer,
   Group,
+  Menu,
   Modal,
   Paper,
   SegmentedControl,
@@ -16,8 +17,10 @@ import {
 } from '@mantine/core';
 import { useHover } from '@mantine/hooks';
 import {
+  IconAdjustmentsHorizontal,
   IconAlertTriangle,
   IconCheck,
+  IconChevronDown,
   IconFile,
   IconMicrophone,
   IconPaperclip,
@@ -67,6 +70,7 @@ import {
   permissionModeLabel,
   PERMISSION_MODES,
   PERMISSION_MODE_SEGMENTS,
+  SEGMENT_MODES,
 } from '../lib/permissionModes';
 import { buildExpandedPrompt, uniqueMentions } from '../lib/mentions';
 import { linkedMachineHealth } from '../lib/machineHealth';
@@ -645,20 +649,52 @@ export function Composer({ session }: { session: SessionMeta }) {
     setAttachments([]);
   };
 
+  const setPermissionMode = (mode: PermissionMode) =>
+    send({ type: 'setPermissionMode', sessionId: session.id, mode });
+
   const permissionModeControl = (
     <SegmentedControl
       size="xs"
       disabled={!canSetMode || !caps.approvals}
       data={PERMISSION_MODE_SEGMENTS}
       value={session.permissionMode}
-      onChange={(v) =>
-        send({
-          type: 'setPermissionMode',
-          sessionId: session.id,
-          mode: v as PermissionMode,
-        })
-      }
+      onChange={(v) => setPermissionMode(v as PermissionMode)}
     />
+  );
+
+  // Phone twin of the pills: the same three modes, with the description each
+  // pill carries in its tooltip spelled out under the label instead.
+  const permissionModeMenu = (
+    <Menu position="top-start" width={260} withinPortal>
+      <Menu.Target>
+        <Button
+          variant="subtle"
+          px={8}
+          disabled={!canSetMode || !caps.approvals}
+          rightSection={caps.approvals ? <IconChevronDown size={14} /> : undefined}
+          aria-label="Permission mode"
+        >
+          {caps.approvals ? permissionModeLabel(session.permissionMode) : 'Sandboxed'}
+        </Button>
+      </Menu.Target>
+      <Menu.Dropdown>
+        {SEGMENT_MODES.map((value) => {
+          const mode = PERMISSION_MODES.find((m) => m.value === value)!;
+          return (
+            <Menu.Item
+              key={value}
+              onClick={() => setPermissionMode(value)}
+              rightSection={value === session.permissionMode ? <IconCheck size={14} /> : undefined}
+            >
+              <Text size="sm">{mode.label}</Text>
+              <Text size="xs" c="dimmed">
+                {mode.description}
+              </Text>
+            </Menu.Item>
+          );
+        })}
+      </Menu.Dropdown>
+    </Menu>
   );
 
   const modelControls = (
@@ -915,18 +951,13 @@ export function Composer({ session }: { session: SessionMeta }) {
             >
               <IconPaperclip size={18} />
             </ActionIcon>
-            {/* The permission mode is the label, so the row that opens the sheet
-                is also the row that reports the one setting worth knowing
-                before you send — one control instead of a button above the
-                input saying the mode and a button below it saying "Options". */}
-            <Button
-              variant="subtle"
-              px={8}
-              onClick={() => setOptionsOpen(true)}
-              aria-label="Options — permission mode, model, context"
-            >
-              {caps.approvals ? permissionModeLabel(session.permissionMode) : 'Sandboxed'}
-            </Button>
+            {/* The mode is the one setting worth knowing before you send, so it
+                is its own dropdown; the rarer model/context settings sit behind
+                a separate Options sheet. */}
+            {permissionModeMenu}
+            <ActionIcon variant="subtle" aria-label="Options" onClick={() => setOptionsOpen(true)}>
+              <IconAdjustmentsHorizontal size={18} />
+            </ActionIcon>
           </Group>
           <Group gap={4} wrap="nowrap">
             {/* Beside Send, where a mic is expected to be: dictating is the
@@ -1087,18 +1118,14 @@ export function Composer({ session }: { session: SessionMeta }) {
         }}
       >
         <Stack gap="sm" className="lines-safe-bottom">
-          {permissionModeControl}
-          {/* One caption under the control, at caption size. Each of these is a
-              standing explanation rather than news, so it earns a line, not a
-              paragraph. */}
-          <Text size="xs" c="dimmed">
-            {!caps.approvals
-              ? 'Sandboxed: this session approves its own tool calls. Plan mode is read-only, and your MCP connections do not apply.'
-              : !canSetMode
-                ? 'Your access does not allow changing permission mode.'
-                : PERMISSION_MODES.find((mode) => mode.value === session.permissionMode)
-                    ?.description}
-          </Text>
+          {/* The mode itself lives in its own dropdown on the row; only the
+              sandbox caption stays, since a disabled "Sandboxed" chip cannot
+              explain itself. */}
+          {!caps.approvals && (
+            <Text size="xs" c="dimmed">
+              Sandboxed: this session approves its own tool calls. Plan mode is read-only, and your MCP connections do not apply.
+            </Text>
+          )}
           {modelControls}
           {!canSetModel && (
             <Text size="xs" c="dimmed">
