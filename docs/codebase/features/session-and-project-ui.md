@@ -320,6 +320,10 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   browser holds a link to. The store still holds all of them (message routing and notifications
   need to); which machine is shown is a display scope changed by the header's
   [`MachineSwitcher`](multi-machine-client.md), not a second group folded into this list.
+- Shared-with-me holds a session only when **no** project tab covers it (`sessionsInProject`
+  checked against every tab, not just the active one) — not merely "outside the active tab". A
+  session in another open project tab stays in that tab's Sessions list and never spills into
+  Shared-with-me when you switch away from it.
 - The sidebar session list order is user-selectable via `lines.sessionSort` (persisted
   `localStorage`), applied to all three groups (Sessions, Shared-with-me, Archived): **Status**
   (default) — running first, then the tab-dot urgency order (plan ready > needs answer > needs

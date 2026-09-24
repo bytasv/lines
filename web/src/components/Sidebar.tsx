@@ -675,11 +675,23 @@ export function Sidebar({
    * A guest's tabs are built from the shared sessions in that machine's `hello`
    * (`guestProjects`), so this catches what arrived after it — a session shared
    * later, in a folder no tab covers — which would otherwise be held in the
-   * store and rendered nowhere.
+   * store and rendered nowhere. Every tab counts, not only the active one:
+   * otherwise each other project's sessions would land here too.
    */
+  const covered = useMemo(
+    () =>
+      access
+        ? new Set(
+            projects.flatMap((p) =>
+              sessionsInProject(machineSessions, projectKeys, p).map((s) => s.id),
+            ),
+          )
+        : new Set<string>(),
+    [access, projects, machineSessions, projectKeys],
+  );
   const shared = access
     ? Object.values(machineSessions)
-        .filter((s) => !s.archived && !projectSessions.some((p) => p.id === s.id))
+        .filter((s) => !s.archived && !covered.has(s.id))
         .sort(compare)
     : [];
   const list = projectSessions.filter((s) => !s.archived).sort(compare);
