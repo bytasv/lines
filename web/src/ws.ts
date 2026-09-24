@@ -412,11 +412,24 @@ function startAuthRelay(link: MachineLink) {
   if (link.authRelayTimer) clearInterval(link.authRelayTimer);
   link.authRelayTimer = null;
   if (!tokenProvider) return;
-  link.authRelayTimer = setInterval(async () => {
-    if (link.socket?.readyState !== WebSocket.OPEN) return;
-    const token = await tokenProvider?.().catch(() => null);
-    if (token) writeToLink(link, JSON.stringify({ type: 'auth', token } satisfies ClientMessage));
-  }, AUTH_RELAY_INTERVAL_MS);
+  link.authRelayTimer = setInterval(() => void relayAuth(link), AUTH_RELAY_INTERVAL_MS);
+}
+
+/**
+ * Mint and relay one fresh token now. The bridge's storage client only ever
+ * sees a token a browser relayed, so this is also how a stale-token storage
+ * outage heals: a relay while storage is down makes the bridge probe at once.
+ */
+async function relayAuth(link: MachineLink) {
+  if (link.socket?.readyState !== WebSocket.OPEN) return;
+  const token = await tokenProvider?.().catch(() => null);
+  if (token) writeToLink(link, JSON.stringify({ type: 'auth', token } satisfies ClientMessage));
+}
+
+/** The storage banner's Retry: a fresh token to the primary bridge is the retry. */
+export function retryStorage() {
+  const link = links.get(primaryDeviceId ?? '');
+  if (link) void relayAuth(link);
 }
 
 function startHeartbeat(link: MachineLink) {
@@ -899,6 +912,9 @@ function handleWake() {
     // writeToLink, never socket.send: on an enrolled machine a raw frame is the
     // plaintext downgrade the bridge closes the channel over.
     writeToLink(link, JSON.stringify({ type: 'ping' } satisfies ClientMessage));
+    // A hidden tab stops relaying, so the bridge's token has likely expired;
+    // relaying now heals a stale-token storage outage without waiting a tick.
+    void relayAuth(link);
     setTimeout(() => {
       if (link.generation !== generation) return; // the socket was replaced meanwhile
       const settled = {

@@ -809,10 +809,23 @@ export class StorageSyncClient {
    */
   private startProbe(): void {
     if (this.probeTimer) return;
-    this.probeTimer = setInterval(() => {
-      if (!this.enabled) return;
-      void this.req('GET', '/settings').catch(() => {});
-    }, this.probeMs).unref() as unknown as NodeJS.Timeout;
+    this.probeTimer = setInterval(() => void this.probe(), this.probeMs).unref() as unknown as NodeJS.Timeout;
+  }
+
+  private probe(): Promise<void> {
+    if (!this.enabled) return Promise.resolve();
+    return this.req('GET', '/settings').then(() => {}, () => {});
+  }
+
+  /**
+   * Probe now instead of waiting for the next tick: a freshly relayed token is
+   * the usual fix for an auth outage, and the timer would keep sending the stale
+   * one for up to probeMs. A no-op while the link is up, so the periodic relay
+   * adds no storage traffic on the happy path.
+   */
+  retryNow(): Promise<void> {
+    if (this.available !== false) return Promise.resolve();
+    return this.probe();
   }
 
   private stopProbe(): void {

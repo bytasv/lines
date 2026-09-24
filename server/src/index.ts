@@ -1254,6 +1254,9 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       }
       conn.clerkToken = msg.token;
       ctx.clerkToken = msg.token;
+      // A new token while storage is down is the likely cure: probe now rather
+      // than on the next tick. Owner only, a guest never drives host sync.
+      if (conn.owner) void ctx.sync.retryNow();
       break;
     }
     case 'createSession': {

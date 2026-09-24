@@ -1327,6 +1327,8 @@
         "server/src/store.ts",
         "server/src/userContext.ts",
         "server/src/fileRoutes.ts",
+        "server/src/index.ts",
+        "web/src/ws.ts",
         "web/src/components/StorageBanner.tsx",
         "web/src/components/SettingsModal.tsx"
       ],
@@ -1342,8 +1344,11 @@
         "StorageSyncClient.recordSuccess",
         "StorageSyncClient.startProbe",
         "StorageSyncClient.stopProbe",
+        "StorageSyncClient.retryNow",
         "Store.appendSyncLog",
-        "Store.readSyncLog"
+        "Store.readSyncLog",
+        "relayAuth",
+        "retryStorage"
       ],
       "tests": [
         "server/src/sync.availability.test.ts",
@@ -1354,7 +1359,9 @@
         "while down, a GET /settings probe fires every PROBE_INTERVAL_MS (15s) so recovery is reflected within seconds instead of waiting for the next incidental pull/push",
         "the probe targets /settings, not /health, since /health sits above storage's Clerk gate and would falsely clear an auth-caused outage",
         "sync-log.jsonl only grows on a failed request or an availability transition, capped at ~256 KB and trimmed to its newer half on overflow",
-        "a soft-error request still marks the link available and never touches the auth-grace clock, since a soft 401 is not evidence the token is good"
+        "a soft-error request still marks the link available and never touches the auth-grace clock, since a soft 401 is not evidence the token is good",
+        "a relayed token while down triggers an immediate probe (owner only): the auth handler calls ctx.sync.retryNow() after setting ctx.clerkToken, gated on conn.owner so a guest can't drive the host's storage retry",
+        "the banner's Dismiss is per-tab, keyed by the outage's status.since; a new outage shows again"
       ],
       "architecturalRules": [
         "classifyStatus/classifyError are pure exported functions, unit-testable without constructing a client",

@@ -15,19 +15,27 @@ bridge routinely holds a stale Clerk token and gets a 401 that is indistinguisha
 outage. And once storage did recover, nothing repolled it — `pullAll` is spaced 30s and pushes only
 fire on local change — so the banner could outlive the real outage by minutes.
 
+The auth case previously needed a reload to clear: nothing made the browser relay a fresh token
+outside the 50s interval, so a returning tab (or a manual click) waited out the full interval plus
+the next probe tick. `relayAuth`/`retryNow` close that gap — a relayed token, while down, now
+triggers an immediate `/settings` probe.
+
 ## Entry points
 
-- `web/src/components/StorageBanner.tsx` — the pill itself; click opens Settings → Sync
+- `web/src/components/StorageBanner.tsx` — the pill; click opens Settings → Sync, plus Retry and
+  Dismiss controls
 - `web/src/components/SettingsModal.tsx` — `SyncLogSection` (`diagnostics` tab)
 
 ## Files
 
 - `shared/types.ts` — `StorageErrorKind`, `StorageStatus`, `SyncLogEntry`, `FileRequestKind`
 - `server/src/sync.ts` — `classifyStatus`/`classifyError`, failure/outage bookkeeping, auth grace,
-  recovery probe
+  recovery probe, `retryNow`
 - `server/src/store.ts` — `appendSyncLog`/`readSyncLog` on `sync-log.jsonl`
 - `server/src/userContext.ts` — injects `appendSyncLog` into `StorageSyncClient`
 - `server/src/fileRoutes.ts` — `syncLog` route
+- `server/src/index.ts` — `auth` message handler calls `ctx.sync.retryNow()` for the owner
+- `web/src/ws.ts` — `relayAuth`, `retryStorage`, relay-on-wake
 - `web/src/components/StorageBanner.tsx`, `web/src/components/SettingsModal.tsx`
 
 ## Symbols
@@ -40,7 +48,13 @@ fire on local change — so the banner could outlive the real outage by minutes.
 - `StorageSyncClient.recordFailure`/`recordSuccess` — the two paths every `req()` outcome funnels
   through
 - `StorageSyncClient.startProbe`/`stopProbe` — the down-only re-probe timer
+- `StorageSyncClient.retryNow` — probes `/settings` immediately if down (no-op if up); shares its
+  request body with the periodic probe
 - `Store.appendSyncLog`/`readSyncLog`
+- `relayAuth(link)` (`web/src/ws.ts`) — mints a fresh Clerk token and relays it over one link; used
+  by the periodic auth-relay interval, `retryStorage()`, and wake handling
+- `retryStorage()` (`web/src/ws.ts`) — the banner's Retry action; relays a fresh token to the
+  primary link
 
 ## Data flow
 
@@ -56,6 +70,14 @@ The `syncLog` file-request kind reuses the existing authenticated `fileRequest` 
 ([file-routes-over-ws](file-routes-over-ws.md)) rather than a new socket message: `SyncLogSection`
 calls `fileRequest('syncLog', {})` and renders `{ entries, status }` from `store.readSyncLog(200)`
 and `sync.status`.
+
+Retry needs no new `ClientMessage`/`ServerMessage`: the existing `auth` message *is* the retry.
+`retryStorage()` calls `relayAuth` on the primary link, which relays a fresh Clerk token; the
+bridge's `auth` handler (`server/src/index.ts`) sets `ctx.clerkToken` and then calls
+`ctx.sync.retryNow()` for the owning connection, which probes `/settings` at once. On success the
+existing `recordSuccess` → `setAvailable(true)` → `onStatusChange` path clears the banner through
+the ordinary `storageStatus` broadcast. `handleWake` (`web/src/ws.ts`) also calls `relayAuth` for
+every open link, so a tab returning from background heals a stale-token outage without a reload.
 
 ## Tests
 
@@ -80,6 +102,16 @@ and `sync.status`.
 - A soft-error request (`opts.softErrors`, e.g. a "nothing runnable" 404) still marks the link
   available; it never touches the auth-grace clock either, since a soft 401 is not evidence the
   token is good.
+- A relayed token while down triggers an immediate probe, owner connections only: the `auth`
+  handler calls `ctx.sync.retryNow()` after setting `ctx.clerkToken`, but only when `conn.owner`, so
+  a guest relaying a token never drives the host's storage retry.
+- `retryNow` is a no-op while the link is up, so the periodic 50s auth relay never adds storage
+  traffic on the happy path.
+- The banner's Retry button is client-side feedback only ("Retrying…" for up to 5s, or until
+  `storageStatus` changes) — it has no request/response of its own; the banner disappears when
+  `storageStatus.available` flips.
+- Dismiss is per-tab component state keyed by the outage's `status.since`, not persisted: the same
+  outage stays hidden, but a new outage (a new `since`) shows the banner again.
 
 ## Architectural rules
 

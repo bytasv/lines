@@ -8,8 +8,8 @@ const DISMISSED_KEY = 'lines.updateDismissed';
 /**
  * Indigo pill shown when the desktop shell has spotted a newer release.
  *
- * News, not an outage, which is why it is the calmest colour and the only one of
- * the pills that can be dismissed. All of them render at the same fixed
+ * News, not an outage, which is why it is the calmest colour and its dismissal
+ * outlives a reload (per version, in localStorage). All the pills render at the same fixed
  * coordinates, so exactly one may show: this ranks *below* every failure banner
  * (bridge-down, then contract skew, then worker-down, then storage-down — see
  * StorageBanner), and hides for a guest, whose machine this isn't.

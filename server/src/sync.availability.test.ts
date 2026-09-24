@@ -221,6 +221,57 @@ test('no probe runs while the link is healthy', async (t) => {
   assert.equal(h.calls.length, 1, 'a healthy client only talks when asked to');
 });
 
+test('retryNow while down probes at once and recovers without waiting for the timer', async (t) => {
+  // A long probe interval, so only retryNow can explain the recovery.
+  const h = harness(t, { probeMs: 60_000 });
+  h.respond(() => Promise.reject(new Error('connect ECONNREFUSED')));
+  await oneRequest(h.sync);
+  assert.equal(h.sync.status.available, false);
+
+  const statuses: boolean[] = [];
+  h.sync.onStatusChange = (s) => statuses.push(s.available);
+  h.respond(() => json({}));
+  await h.sync.retryNow();
+
+  assert.equal(h.sync.status.available, true);
+  assert.equal(h.calls.at(-1), `${BASE}/settings`);
+  assert.deepEqual(statuses, [true]);
+  assert.equal(h.rows.at(-1)?.event, 'up');
+});
+
+test('retryNow while up makes no request', async (t) => {
+  const h = harness(t);
+  h.respond(() => json([]));
+  await oneRequest(h.sync);
+
+  await h.sync.retryNow();
+
+  assert.equal(h.calls.length, 1);
+});
+
+test('retryNow that fails on auth stays down, logs the failure and arms no second probe', async (t) => {
+  const h = harness(t, { authGraceMs: 0, probeMs: 20 });
+  h.respond(() => json({ error: 'unauthenticated' }, 401));
+  await oneRequest(h.sync);
+  assert.equal(h.sync.status.available, false);
+
+  const before = h.rows.length;
+  await h.sync.retryNow();
+
+  assert.equal(h.sync.status.available, false);
+  assert.equal(h.sync.status.kind, 'auth');
+  assert.deepEqual(h.rows.slice(before).map((r) => r.event), ['fail']);
+
+  // One recovery clears one handle: if retryNow had armed another interval,
+  // probes would keep coming after the link is back.
+  h.respond(() => json({}));
+  await sleep(120);
+  assert.equal(h.sync.status.available, true);
+  const afterRecovery = h.calls.length;
+  await sleep(80);
+  assert.equal(h.calls.length, afterRecovery, 'no probe may survive the recovery');
+});
+
 test('appendLog is optional — a failure without one still just fails', async (t) => {
   const original = globalThis.fetch;
   globalThis.fetch = (async () => {
