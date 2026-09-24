@@ -532,6 +532,9 @@ if (RELAY_URL) {
       const ctx = registry.peek(userId);
       if (!ctx) return;
       ctx.clerkToken = token;
+      // Same as the in-channel `auth` handler: a fresh token while storage is
+      // down is the likely cure, so probe now. A no-op while the link is up.
+      void ctx.sync.retryNow();
     },
     // Straight through to the desktop shell: it is the only consumer, and the
     // tray is the only place a user can see that this machine is reachable.

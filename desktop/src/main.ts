@@ -1156,7 +1156,10 @@ function openWindow() {
     // The web app's Mantine-dark background, so a slow hosted load is not a
     // white flash.
     backgroundColor: '#1a1b1e',
-    webPreferences: { nodeIntegration: false, contextIsolation: true },
+    // No background throttling: this window is the bridge's only source of
+    // fresh Clerk tokens (the web app's 50s relayAuth timer), and a throttled
+    // timer while minimized lets the ~60s token expire into a sync outage.
+    webPreferences: { nodeIntegration: false, contextIsolation: true, backgroundThrottling: false },
   });
   win = w;
   void w.loadURL(appUrlForOwnWindow());

@@ -713,18 +713,19 @@ export class StorageSyncClient {
     if (verdict.ok) return stripSignature(body);
 
     const refuse = verdict.reason !== 'unsigned' || strictSync();
-    // `fail` with a client kind: the request itself succeeded, the *content*
-    // did not, and this log is the only place a user can see why a resource
-    // stopped applying.
-    this.appendLog({
-      at: Date.now(),
-      event: 'fail',
-      kind: 'client',
-      method: 'GET',
-      path: resource,
-      reason: `signature ${verdict.reason}${refuse ? ' — refused' : ' — accepted (rollout)'}`,
-    });
     if (refuse) {
+      // `fail` with a client kind: the request itself succeeded, the *content*
+      // did not, and this log is the only place a user can see why a resource
+      // stopped applying. Only refusals: an accepted unsigned blob still
+      // applies, so a row for it is noise the user can do nothing about.
+      this.appendLog({
+        at: Date.now(),
+        event: 'fail',
+        kind: 'client',
+        method: 'GET',
+        path: resource,
+        reason: `signature ${verdict.reason} — refused`,
+      });
       console.warn(`[sync] refusing ${resource}: signature ${verdict.reason}`);
       // Null, not a throw: one unverifiable resource must not abort a pull that
       // also carries five verifiable ones.

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import type { SyncLogEntry } from '@lines/shared';
 import { StorageSyncClient, THROTTLED, classifyError, classifyStatus } from './sync.ts';
+import { signBlob, type SignerStore, type SigningIdentity } from './syncSignature.ts';
 
 /**
  * The "cloud sync unavailable" banner used to have exactly one input — a
@@ -32,7 +33,10 @@ interface Harness {
 }
 
 /** A client whose fetch, log sink and timings are all under the test's control. */
-function harness(t: TestContext, opts?: { authGraceMs?: number; probeMs?: number }): Harness {
+function harness(
+  t: TestContext,
+  opts?: { authGraceMs?: number; probeMs?: number; signers?: SignerStore },
+): Harness {
   const original = globalThis.fetch;
   const rows: SyncLogEntry[] = [];
   const calls: string[] = [];
@@ -270,6 +274,52 @@ test('retryNow that fails on auth stays down, logs the failure and arms no secon
   const afterRecovery = h.calls.length;
   await sleep(80);
   assert.equal(h.calls.length, afterRecovery, 'no probe may survive the recovery');
+});
+
+/** In-memory signer pins, so signature checks never touch `~/.lines-app`. */
+function memorySigners(): SignerStore {
+  const map = new Map<string, { key: string; counter: number }>();
+  return {
+    get: (resource) => map.get(resource),
+    set: (resource, record) => void map.set(resource, record),
+  };
+}
+
+async function signingKey(): Promise<SigningIdentity> {
+  const pair = (await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
+    'sign',
+    'verify',
+  ])) as { privateKey: unknown; publicKey: Parameters<typeof crypto.subtle.exportKey>[1] };
+  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+  return { publicKey: Buffer.from(raw).toString('base64'), privateKey: pair.privateKey };
+}
+
+test('an accepted unsigned blob logs no fail row, a refused forged one still does', async (t) => {
+  const h = harness(t, { signers: memorySigners() });
+  h.respond(() => Promise.reject(new Error('connect ECONNREFUSED')));
+  await oneRequest(h.sync);
+
+  // The probe pulls /settings, a signed path. Unsigned is accepted during the
+  // rollout, so the log shows only the recovery.
+  h.respond(() => json({ theme: 'dark' }));
+  const before = h.rows.length;
+  await h.sync.retryNow();
+  assert.equal(h.sync.status.available, true);
+  assert.deepEqual(h.rows.slice(before).map((r) => r.event), ['up']);
+
+  // Down again, then a probe that answers with tampered content under a real
+  // signature: that one is refused, and the user must be able to see why.
+  h.respond(() => Promise.reject(new Error('connect ECONNREFUSED')));
+  await oneRequest(h.sync);
+  const signed = await signBlob({ theme: 'dark' }, await signingKey(), memorySigners());
+  h.respond(() => json({ ...signed, theme: 'light' }));
+  const beforeForged = h.rows.length;
+  await h.sync.retryNow();
+  const rows = h.rows.slice(beforeForged);
+  assert.deepEqual(rows.map((r) => r.event), ['up', 'fail']);
+  assert.equal(rows[1].kind, 'client');
+  assert.equal(rows[1].path, '/settings');
+  assert.match(String(rows[1].reason), /signature forged — refused/);
 });
 
 test('appendLog is optional — a failure without one still just fails', async (t) => {

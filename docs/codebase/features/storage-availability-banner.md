@@ -34,9 +34,12 @@ triggers an immediate `/settings` probe.
 - `server/src/store.ts` — `appendSyncLog`/`readSyncLog` on `sync-log.jsonl`
 - `server/src/userContext.ts` — injects `appendSyncLog` into `StorageSyncClient`
 - `server/src/fileRoutes.ts` — `syncLog` route
-- `server/src/index.ts` — `auth` message handler calls `ctx.sync.retryNow()` for the owner
+- `server/src/index.ts` — `auth` message handler and the relay's `onToken` both call
+  `ctx.sync.retryNow()`
 - `web/src/ws.ts` — `relayAuth`, `retryStorage`, relay-on-wake
 - `web/src/components/StorageBanner.tsx`, `web/src/components/SettingsModal.tsx`
+- `desktop/src/main.ts` — main window `backgroundThrottling: false`, so the token relay keeps
+  firing while the window is hidden
 
 ## Symbols
 
@@ -78,6 +81,8 @@ bridge's `auth` handler (`server/src/index.ts`) sets `ctx.clerkToken` and then c
 existing `recordSuccess` → `setAvailable(true)` → `onStatusChange` path clears the banner through
 the ordinary `storageStatus` broadcast. `handleWake` (`web/src/ws.ts`) also calls `relayAuth` for
 every open link, so a tab returning from background heals a stale-token outage without a reload.
+The desktop relay's `onToken` (a separate token source from the in-channel `auth` message, driven
+by the browser's own 50s relay) follows the identical set-token-then-`retryNow()` shape.
 
 ## Tests
 
@@ -102,11 +107,19 @@ every open link, so a tab returning from background heals a stale-token outage w
 - A soft-error request (`opts.softErrors`, e.g. a "nothing runnable" 404) still marks the link
   available; it never touches the auth-grace clock either, since a soft 401 is not evidence the
   token is good.
-- A relayed token while down triggers an immediate probe, owner connections only: the `auth`
-  handler calls `ctx.sync.retryNow()` after setting `ctx.clerkToken`, but only when `conn.owner`, so
-  a guest relaying a token never drives the host's storage retry.
+- A relayed token while down triggers an immediate probe, owner connections only: the in-channel
+  `auth` handler calls `ctx.sync.retryNow()` after setting `ctx.clerkToken`, but only when
+  `conn.owner`. The relay's `onToken` (desktop's own auth path) calls the same `retryNow()` after
+  setting `ctx.clerkToken`, gated the same way — `registry.peek` never mints a context, so a guest
+  token can't reach it.
 - `retryNow` is a no-op while the link is up, so the periodic 50s auth relay never adds storage
   traffic on the happy path.
+- The desktop main window runs with `backgroundThrottling: false`, so the 50s token-relay timer
+  keeps firing while the window is minimized or covered instead of being throttled toward the
+  token's ~60s lifetime.
+- Only a refused signature verdict (forged, rolled back, or unsigned under `LINES_E2EE_STRICT`)
+  appends a `fail` row and logs a `console.warn`. An accepted-but-unsigned blob (the mixed-fleet
+  rollout case) applies silently — it is not a failure the user can act on.
 - The banner's Retry button is client-side feedback only ("Retrying…" for up to 5s, or until
   `storageStatus` changes) — it has no request/response of its own; the banner disappears when
   `storageStatus.available` flips.

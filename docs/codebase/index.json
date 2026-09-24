@@ -1330,7 +1330,8 @@
         "server/src/index.ts",
         "web/src/ws.ts",
         "web/src/components/StorageBanner.tsx",
-        "web/src/components/SettingsModal.tsx"
+        "web/src/components/SettingsModal.tsx",
+        "desktop/src/main.ts"
       ],
       "symbols": [
         "StorageErrorKind",
@@ -1360,8 +1361,10 @@
         "the probe targets /settings, not /health, since /health sits above storage's Clerk gate and would falsely clear an auth-caused outage",
         "sync-log.jsonl only grows on a failed request or an availability transition, capped at ~256 KB and trimmed to its newer half on overflow",
         "a soft-error request still marks the link available and never touches the auth-grace clock, since a soft 401 is not evidence the token is good",
-        "a relayed token while down triggers an immediate probe (owner only): the auth handler calls ctx.sync.retryNow() after setting ctx.clerkToken, gated on conn.owner so a guest can't drive the host's storage retry",
-        "the banner's Dismiss is per-tab, keyed by the outage's status.since; a new outage shows again"
+        "a relayed token while down triggers an immediate probe (owner only), from either source: the in-channel auth handler calls ctx.sync.retryNow() after setting ctx.clerkToken, and the relay's onToken does the same",
+        "the banner's Dismiss is per-tab, keyed by the outage's status.since; a new outage shows again",
+        "only a refused signature verdict appends a fail row and warns; an accepted unsigned blob (mixed-fleet rollout) applies silently, no log row",
+        "desktop's main window runs with backgroundThrottling: false so the 50s token-relay timer isn't throttled while hidden"
       ],
       "architecturalRules": [
         "classifyStatus/classifyError are pure exported functions, unit-testable without constructing a client",
