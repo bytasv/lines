@@ -219,7 +219,10 @@ function AuthedConnect() {
   // Registered from an effect, the first storage call goes out with no
   // Authorization header (401) and the first socket with no token (1008).
   // These are idempotent module-level assignments, so a re-render is harmless.
-  setTokenProvider(() => getToken());
+  // skipCache: Clerk's own memoised token is what the bridge kept 401ing on —
+  // relayAuth's whole job is delivering a token the bridge hasn't seen fail
+  // yet, so a cache hit here defeats it. Force a real mint every relay.
+  setTokenProvider(() => getToken({ skipCache: true }));
   setStorageTokenProvider(() => getToken());
   useEffect(() => {
     // Warm the token so the mint overlaps the rest of boot rather than sitting
