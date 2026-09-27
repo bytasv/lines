@@ -1252,14 +1252,30 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       break;
     }
     case 'auth': {
-      // Fresh-token relay. Re-verifying catches a revoked Clerk session within
-      // one relay cycle; failure closes the socket like a failed handshake.
-      if (!AUTH_ENABLED) break;
+      // Fresh-token relay — the only thing that keeps storage sync alive between
+      // reconnects, since a hello-time token is good for only ~60s.
+      //
+      // A relayed connection already trusts its hello-time token unconditionally
+      // (attested.clerkToken above, no AUTH_ENABLED check at all — the relay is
+      // who verified it). This reuses that exact trust boundary: nothing about
+      // holding this already-open, already-authorized socket changes on a
+      // refresh, and every other message on it is already trusted the same way.
+      // A local connection has no relay standing behind it, so it re-verifies
+      // through Clerk directly — gated on AUTH_ENABLED like the hello was —
+      // which is what actually catches a revoked session within one relay cycle.
+      // CLERK_SECRET_KEY is a server secret and never ships to a user's
+      // machine, so AUTH_ENABLED is false on every real desktop install; before
+      // this, that silently dropped every relayed refresh, not just the local
+      // recheck it was meant to gate.
       const conn = conns.get(ws);
-      const verified = await verifyClerkUserId(msg.token);
-      if (!conn || verified !== conn.userId) {
-        ws.close(1008, 'unauthorized');
-        break;
+      if (!conn) break;
+      if (conn.local) {
+        if (!AUTH_ENABLED) break;
+        const verified = await verifyClerkUserId(msg.token);
+        if (verified !== conn.userId) {
+          ws.close(1008, 'unauthorized');
+          break;
+        }
       }
       conn.clerkToken = msg.token;
       ctx.clerkToken = msg.token;
