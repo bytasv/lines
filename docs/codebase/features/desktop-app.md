@@ -408,6 +408,13 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
   - `summary.json`: version, relay status and when it last changed, child pids and uptime, last
     power events, window URL
   - device.json is never copied; only the device id appears, in the summary
+- `nudgeWindowAwake`: on `resume`/`unlock-screen`, the shell dispatches a `visibilitychange` event
+  into the app window via `executeJavaScript` (no preload, no IPC channel — this stays a DOM event
+  pushed in, not a message read back out). The window's own wake signals
+  (`visibilitychange`/`pageshow[persisted]`, see multi-machine-client.md) never fire here: it is
+  never hidden and never bfcache-restored by a real sleep, confirmed in the field — the renderer
+  logged nothing for ~100s after a real wake, until the user reloaded by hand, while the bridge had
+  already reconnected. This substitutes the signal the web app cannot generate for itself.
 
 ### Staying awake
 

@@ -321,6 +321,10 @@ out of `ws.ts` and `main.tsx`.
   `web/src/lib/wake.ts`). The primary is never idle-disconnected, so a socket-less primary is a
   connect that died before creating one. Non-primary socket-less links are still left alone, per
   the `IDLE_DISCONNECT_MS` rule below.
+- Neither wake trigger ever fires inside the desktop app's own window (it is never hidden, never
+  bfcache-restored): the shell substitutes by dispatching `visibilitychange` into it on
+  `resume`/`unlock-screen` (`nudgeWindowAwake`, see desktop-app.md). Without it a real sleep left
+  the window's connect logic dormant even though the bridge had already reconnected.
 - The primary machine's `connectionStatus`/`machineOffline`/`bootstrapped`/`protocolSkew`/`bridge`/
   `workerStatus`/`storageStatus`/`updateStatus` are the only values
   `ConnectionBanner`/`SkewBanner`/`WorkerBanner`/`StorageBanner`/`UpdateBanner` read — see

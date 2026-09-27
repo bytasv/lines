@@ -1268,6 +1268,27 @@ function mirrorRendererLog(w: BrowserWindow) {
   w.on('responsive', () => shellLog('[window] responsive again'));
 }
 
+/**
+ * The web app's own wake signal (visibilitychange, pageshow[persisted]) never
+ * fires in this window: it is never hidden and never bfcache-restored, so
+ * `document.hidden` stays false straight through a sleep. Confirmed in the
+ * field — after a real sleep/wake, the renderer logged nothing at all for
+ * ~100s while the bridge/relay had already reconnected, until the user
+ * reloaded by hand. This is the substitute: the one signal the web app
+ * structurally cannot generate for itself, pushed in from outside.
+ *
+ * `visibilitychange` (not a custom event) so it reruns the exact handler
+ * `wireConnectivity` already registers — no new listener needed in ws.ts.
+ * Best-effort: no window, a destroyed one, or a page still loading must not
+ * throw past this into the powerMonitor callback.
+ */
+function nudgeWindowAwake(reason: 'resume' | 'unlock-screen'): void {
+  if (!win || win.isDestroyed()) return;
+  win.webContents
+    .executeJavaScript(`document.dispatchEvent(new Event('visibilitychange'))`)
+    .catch((err: Error) => shellLog(`[window] wake nudge (${reason}) failed: ${err.message}`));
+}
+
 /** The app URL carries an enrollment code in its fragment; never write that to disk. */
 function redactQuery(url: string): string {
   const cut = url.search(/[?#]/);
@@ -1984,6 +2005,7 @@ async function start() {
     powerMonitor.on(event as 'suspend', () => {
       lastPower[event] = Date.now();
       shellLog(`[power] ${event}`);
+      if (event === 'resume' || event === 'unlock-screen') nudgeWindowAwake(event);
     });
   }
   // "Leave it running" only holds if it comes back after a reboot, so the login
