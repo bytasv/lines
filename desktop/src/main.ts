@@ -170,6 +170,11 @@ const CHILD_PATH = loginShellPath();
 
 let worker: ChildProcess | null = null;
 let bridge: ChildProcess | null = null;
+/** When each child last spawned, for exit logs and the diagnostics summary. */
+const childStartedAt: Record<'worker' | 'bridge', number> = { worker: 0, bridge: 0 };
+/** Power transitions and relay changes, kept for the diagnostics summary. */
+const lastPower: Record<string, number> = {};
+let relayChangedAt = 0;
 let tray: Tray | null = null;
 let win: BrowserWindow | null = null;
 let pairingWindow: BrowserWindow | null = null;
@@ -322,14 +327,72 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   };
 }
 
-/** Append child output to the log file, best-effort — a full disk must not kill the app. */
-function appendLog(line: string) {
+/** One previous generation is kept beside the log (`desktop.1.log`) once it passes this. */
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+/** Bytes in LOG_FILE, tracked in memory so rotation needs no stat per write. Null until first write. */
+let logBytes: number | null = null;
+
+function rotateLogIfFull(incoming: number) {
+  if (logBytes === null) {
+    try {
+      logBytes = fs.statSync(LOG_FILE).size;
+    } catch {
+      logBytes = 0;
+    }
+  }
+  if (logBytes + incoming <= LOG_MAX_BYTES) return;
+  try {
+    fs.renameSync(LOG_FILE, LOG_FILE.replace(/\.log$/, '.1.log'));
+  } catch {
+    /* nothing to rotate */
+  }
+  logBytes = 0;
+}
+
+/**
+ * Append to the log file, one ISO timestamp per line — without them nothing in
+ * here could be lined up against a sleep, a wake, or the relay's own logs.
+ * Best-effort: a full disk must not kill the app.
+ */
+function appendLog(text: string) {
+  const stamp = new Date().toISOString();
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  if (!lines.length) return;
+  const out = lines.map((l) => `${stamp} ${l}\n`).join('');
   try {
     fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
-    fs.appendFileSync(LOG_FILE, line);
+    rotateLogIfFull(out.length);
+    fs.appendFileSync(LOG_FILE, out);
+    logBytes = (logBytes ?? 0) + out.length;
   } catch {
     /* logging is not worth crashing over */
   }
+}
+
+/**
+ * Re-cut a child's output into whole lines, each carrying the child's tag. Pipe
+ * chunks split anywhere, so tagging chunks left most lines of a burst untagged
+ * and could glue two lines' halves under one timestamp.
+ */
+function lineForwarder(name: string, write: (text: string) => void) {
+  let carry = '';
+  return (chunk: Buffer) => {
+    const text = carry + chunk.toString();
+    const cut = text.lastIndexOf('\n');
+    if (cut === -1) {
+      carry = text;
+      return;
+    }
+    carry = text.slice(cut + 1);
+    write(
+      text
+        .slice(0, cut)
+        .split('\n')
+        .map((l) => `[${name}] ${l}\n`)
+        .join(''),
+    );
+  };
 }
 
 /**
@@ -415,8 +478,7 @@ function enterStandDown(holder: { pid: number; instance: string }) {
   bridge = null;
   // Nothing of ours is dialling out, so the tray must not claim a link.
   applyRelayStatus({ connected: false });
-  appendLog(`[bridge] standing down — pid ${holder.pid} (${holder.instance}) owns this machine\n`);
-  console.log(`[bridge] standing down — pid ${holder.pid} (${holder.instance}) owns this machine`);
+  shellLog(`[bridge] standing down — pid ${holder.pid} (${holder.instance}) owns this machine`);
   if (!standDownTimer) {
     standDownTimer = setInterval(() => {
       const still = foreignBridgeLock();
@@ -430,7 +492,7 @@ function enterStandDown(holder: { pid: number; instance: string }) {
       clearInterval(standDownTimer!);
       standDownTimer = null;
       standDown = null;
-      console.log('[bridge] machine lock is free — re-arming');
+      shellLog('[bridge] machine lock is free — re-arming');
       // The worker was never stood down, so only replace one that is actually gone.
       if (!worker || worker.exitCode !== null || worker.killed) worker = spawnChild('worker', false);
       bridge = spawnChild('bridge', true);
@@ -457,16 +519,17 @@ function spawnChild(name: 'worker' | 'bridge', ipc: boolean): ChildProcess {
     env: childEnv(),
     stdio: ipc ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'],
   });
-  const forward = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
-    const line = `[${name}] ${chunk}`;
-    process[stream].write(line);
-    appendLog(line);
-  };
+  const forward = (stream: 'stdout' | 'stderr') =>
+    lineForwarder(name, (text) => {
+      process[stream].write(text);
+      appendLog(text);
+    });
   child.stdout?.on('data', forward('stdout'));
   child.stderr?.on('data', forward('stderr'));
+  childStartedAt[name] = Date.now();
+  shellLog(`[${name}] spawned pid=${child.pid}`);
   child.on('exit', (code, signal) => {
-    appendLog(`[${name}] exited code=${code} signal=${signal}\n`);
-    console.log(`[${name}] exited code=${code} signal=${signal}`);
+    shellLog(`[${name}] exited code=${code} signal=${signal} after ${Date.now() - childStartedAt[name]}ms`);
     if (quitting) return;
     // Restart the bridge freely — the worker holds the live turns, so this is
     // survivable. A dead worker is NOT auto-restarted: its queries are gone and
@@ -1170,6 +1233,7 @@ function openWindow() {
     shellLog(`[window] load failed ${code} ${description} ${url}`);
     void w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadErrorHtml(description))}`);
   });
+  mirrorRendererLog(w);
   w.on('closed', () => {
     if (win === w) win = null;
     syncDock();
@@ -1179,6 +1243,35 @@ function openWindow() {
   // The accessory -> regular dock transition leaves the window behind whatever
   // was in front, so focusing after the tile exists is not redundant.
   w.focus();
+}
+
+/**
+ * The renderer's console, onto disk. This window has no devtools open and no
+ * preload, so without this the web app's own record of a stuck connect — the
+ * `[diag]` lines — never leaves it. Filtered: the app is chatty at info level,
+ * and only the connection path and real warnings are worth the log's space.
+ */
+const MIRRORED_TAGS = /^\[(diag|ws|e2ee)\]/;
+
+function mirrorRendererLog(w: BrowserWindow) {
+  const wc = w.webContents;
+  // Electron's legacy positional form: level 0 verbose, 1 info, 2 warning, 3 error.
+  wc.on('console-message', (_event, level, message) => {
+    if (level < 2 && !MIRRORED_TAGS.test(message)) return;
+    shellLog(`[renderer] ${message.length > 2000 ? `${message.slice(0, 2000)}…` : message}`);
+  });
+  wc.on('did-finish-load', () => shellLog(`[window] loaded ${redactQuery(wc.getURL())}`));
+  wc.on('render-process-gone', (_event, details) =>
+    shellLog(`[window] renderer gone reason=${details.reason} exitCode=${details.exitCode}`),
+  );
+  w.on('unresponsive', () => shellLog('[window] unresponsive'));
+  w.on('responsive', () => shellLog('[window] responsive again'));
+}
+
+/** The app URL carries an enrollment code in its fragment; never write that to disk. */
+function redactQuery(url: string): string {
+  const cut = url.search(/[?#]/);
+  return cut === -1 ? url : url.slice(0, cut);
 }
 
 /** Offline used to be a white void. Shares the pairing window's styling. */
@@ -1409,15 +1502,11 @@ async function refreshPairingCode(show: boolean): Promise<void> {
   lastRegisterAt = Date.now();
   try {
     pairingCode = await registerDevice(config.storageUrl, device);
-    console.log(
-      pairingCode
-        ? `[device] ${device.id} awaiting pairing, code ${pairingCode}`
-        : `[device] ${device.id} already paired`,
-    );
+    shellLog(pairingCode ? `[device] ${device.id} awaiting pairing` : `[device] ${device.id} already paired`);
   } catch (err) {
     // Not fatal: the bridge retries the relay forever, so a machine that
     // registers late still comes up once storage is reachable again.
-    console.error(`[device] ${(err as Error).message}`);
+    shellLog(`[device] register failed: ${(err as Error).message}`);
   }
   if (pairingCode && show) openPairingWindow(pairingCode);
   schedulePairingRefresh();
@@ -1441,6 +1530,15 @@ function schedulePairingRefresh() {
  * so that, and not a bare `open`, is what closes the pairing window.
  */
 function applyRelayStatus(status: RelayLinkStatus) {
+  // Logged on change only: the tray repaints every 2s but the link rarely moves.
+  if (relay?.connected !== status.connected || relay?.code !== status.code) {
+    relayChangedAt = Date.now();
+    shellLog(
+      status.connected
+        ? '[relay-status] connected — settling'
+        : `[relay-status] disconnected${status.code ? ` code=${status.code}` : ''}${status.reason ? ` ${status.reason}` : ''}`,
+    );
+  }
   relay = status;
   if (relaySettleTimer) clearTimeout(relaySettleTimer);
   relaySettleTimer = null;
@@ -1463,6 +1561,7 @@ function applyRelayStatus(status: RelayLinkStatus) {
 
 function onRelayVerified() {
   const firstTime = !relayVerified;
+  if (firstTime) shellLog('[relay-status] verified (paired and attached)');
   relayVerified = true;
   // The claim landed, so the code we were showing is spent.
   const wasPairing = Boolean(pairingCode);
@@ -1749,6 +1848,7 @@ function updateTray() {
       },
     },
     { label: 'Open logs', click: openLogs },
+    { label: 'Collect diagnostics…', click: () => void collectDiagnostics() },
     { type: 'separator' as const },
     { label: 'Quit Lines', click: () => app.quit() },
   ];
@@ -1769,6 +1869,78 @@ function updateTray() {
 function openLogs() {
   appendLog('');
   shell.showItemInFolder(LOG_FILE);
+}
+
+/**
+ * One zip holding everything needed to explain "the window won't connect":
+ * shell + child logs, the runtime discovery files, the machine lock, and a
+ * summary of what the shell believes right now. Built with the system's
+ * `ditto`, so no archive dependency ships in the app.
+ *
+ * Secrets never go in: device.json's secret and every runtime file's `token`
+ * are stripped before copying.
+ */
+async function collectDiagnostics(): Promise<void> {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const outDir = path.join(APP_ROOT, 'diagnostics');
+  const staging = path.join(outDir, `lines-diag-${stamp}`);
+  const zip = `${staging}.zip`;
+  try {
+    fs.mkdirSync(path.join(staging, 'logs'), { recursive: true });
+    for (const file of [LOG_FILE, LOG_FILE.replace(/\.log$/, '.1.log')]) {
+      if (fs.existsSync(file)) fs.copyFileSync(file, path.join(staging, 'logs', path.basename(file)));
+    }
+    const runRoot = path.join(APP_ROOT, 'run');
+    for (const instance of fs.existsSync(runRoot) ? fs.readdirSync(runRoot) : []) {
+      const dir = path.join(runRoot, instance);
+      if (!fs.statSync(dir).isDirectory()) continue;
+      fs.mkdirSync(path.join(staging, 'run', instance), { recursive: true });
+      for (const name of fs.readdirSync(dir).filter((n) => n.endsWith('.json'))) {
+        const info = readJsonSafe(path.join(dir, name));
+        if (info && typeof info === 'object') delete (info as Record<string, unknown>).token;
+        fs.writeFileSync(path.join(staging, 'run', instance, name), JSON.stringify(info, null, 2));
+      }
+    }
+    const lock = readJsonSafe(BRIDGE_LOCK_FILE);
+    if (lock) fs.writeFileSync(path.join(staging, 'bridge.lock.json'), JSON.stringify(lock, null, 2));
+    // The id only: the secret is the machine's relay credential.
+    if (device) fs.writeFileSync(path.join(staging, 'device.json'), JSON.stringify({ id: device.id }, null, 2));
+    const now = Date.now();
+    const ago = (t: number) => (t ? `${Math.round((now - t) / 1000)}s ago` : null);
+    const summary = {
+      at: new Date(now).toISOString(),
+      version: APP_VERSION,
+      instance: INSTANCE,
+      relayMode: RELAY_MODE,
+      deviceId: device?.id ?? null,
+      paired: !pairingCode,
+      relay: { ...relay, verified: relayVerified, changed: ago(relayChangedAt) },
+      standDown,
+      children: {
+        bridge: { pid: bridge?.pid ?? null, alive: !!bridge && bridge.exitCode === null, started: ago(childStartedAt.bridge) },
+        worker: { pid: worker?.pid ?? null, alive: !!worker && worker.exitCode === null, started: ago(childStartedAt.worker) },
+      },
+      power: Object.fromEntries(Object.entries(lastPower).map(([k, t]) => [k, new Date(t).toISOString()])),
+      uptimeSec: Math.round(process.uptime()),
+      window: win && !win.isDestroyed() ? redactQuery(win.webContents.getURL()) : null,
+    };
+    fs.writeFileSync(path.join(staging, 'summary.json'), JSON.stringify(summary, null, 2));
+    execFileSync('/usr/bin/ditto', ['-c', '-k', '--keepParent', staging, zip]);
+    fs.rmSync(staging, { recursive: true, force: true });
+    shellLog(`[diag] collected ${zip}`);
+    shell.showItemInFolder(zip);
+  } catch (err) {
+    shellLog(`[diag] collect failed: ${(err as Error).message}`);
+    dialog.showErrorBox('Could not collect diagnostics', (err as Error).message);
+  }
+}
+
+function readJsonSafe(file: string): unknown {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1805,6 +1977,15 @@ async function start() {
   app.userAgentFallback = app.userAgentFallback.replace(/ Electron\/\S+/, '');
   installMediaPermissions();
   loadPrefs();
+  shellLog(`[shell] start v${APP_VERSION} instance=${INSTANCE} relayMode=${RELAY_MODE}`);
+  // Logging only. A post-sleep "won't connect" is unreadable without knowing
+  // exactly when the machine slept and woke.
+  for (const event of ['suspend', 'resume', 'lock-screen', 'unlock-screen'] as const) {
+    powerMonitor.on(event as 'suspend', () => {
+      lastPower[event] = Date.now();
+      shellLog(`[power] ${event}`);
+    });
+  }
   // "Leave it running" only holds if it comes back after a reboot, so the login
   // item is defaulted on — once. After that the checkbox is the user's, and a
   // deliberate off stays off.

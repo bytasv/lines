@@ -11,7 +11,18 @@ import { APP_PROTOCOL_VERSION, enrollProof, startHandshake } from '@lines/shared
 import { useStore } from './store';
 import { refreshDevices } from './lib/devices';
 import { cryptoUnavailable, deviceIdentity, pinKey, pinnedKey } from './lib/e2ee';
-import { WAKE_PROBE_TIMEOUT_MS, probeExpired, wakeAction, wakeDebounced } from './lib/wake';
+import { WAKE_PROBE_TIMEOUT_MS, probeExpired, shouldReviveIdle, wakeAction, wakeDebounced } from './lib/wake';
+import {
+  diag,
+  diagEntries,
+  flushDiag,
+  hasUnsentStall,
+  lastDiagSentAt,
+  markDiagSent,
+  redactUrl,
+  withTimeout,
+} from './lib/diag';
+import { DEVICE_PAIRING_ENABLED, sendDiagnostics } from './lib/storage';
 
 /**
  * One link per machine.
@@ -71,6 +82,11 @@ const RECONNECT_DELAY_MS = 1500;
 // Slower than an ordinary reconnect: a 1008 is usually a state that needs
 // something to change elsewhere (sign in again, start the machine), not a blip.
 const UNAUTHORIZED_RETRY_DELAY_MS = 5000;
+// A fresh Clerk mint that has not answered by now is treated as hung. Clerk's
+// getToken has no deadline of its own, and a connect awaiting it forever creates
+// no socket and schedules no retry — the stuck "connecting" screen.
+const TOKEN_TIMEOUT_MS = 10_000;
+const CACHED_TOKEN_TIMEOUT_MS = 5_000;
 // Re-send a fresh Clerk token before its ~60s expiry.
 const AUTH_RELAY_INTERVAL_MS = 50_000;
 /**
@@ -146,6 +162,14 @@ interface MachineLink {
   enrollWaiter:
     | ((msg: { type: 'e2eeEnrolled'; bridgeKey: string; proof: string } | { type: 'e2eeError'; reason: string }) => void)
     | null;
+  /** When the connect in flight started (awaiting a token or the bridge URL), or null. */
+  connectingSince: number | null;
+  /** Connect attempts since this link last received a `hello`. */
+  attempts: number;
+  /** When the current socket was created, for open/close/hello timings. */
+  dialedAt: number;
+  openedAt: number | null;
+  lastClose: { code: number; reason: string; at: number } | null;
 }
 
 const links = new Map<string, MachineLink>();
@@ -177,6 +201,73 @@ export function setTokenProvider(fn: () => Promise<string | null>) {
   tokenProvider = fn;
 }
 
+/**
+ * Clerk's memoised token, used only when a fresh mint hangs. Possibly the stale
+ * one the bridge refused (why the primary provider skips the cache), but the
+ * relay only needs it to admit the socket; the auth relay mints fresh after.
+ */
+let cachedTokenProvider: (() => Promise<string | null>) | null = null;
+
+export function setCachedTokenProvider(fn: () => Promise<string | null>) {
+  cachedTokenProvider = fn;
+}
+
+/**
+ * The token for one connect, never hanging: a fresh mint, then the cached one.
+ * `undefined` when both failed, so the caller schedules a retry rather than
+ * dialling with nothing. Each fallback is logged.
+ */
+async function connectToken(link: MachineLink): Promise<string | null | undefined> {
+  if (!tokenProvider) return null;
+  const fresh = await withTimeout(tokenProvider(), TOKEN_TIMEOUT_MS);
+  if (fresh.ok) {
+    if (fresh.ms > 2000) diag('token-slow', { device: link.deviceId, ms: fresh.ms });
+    return fresh.value;
+  }
+  diag(fresh.reason === 'timeout' ? 'token-timeout' : 'token-error', {
+    device: link.deviceId,
+    ms: fresh.ms,
+    error: fresh.error instanceof Error ? fresh.error.message : null,
+  });
+  if (!cachedTokenProvider) return undefined;
+  const cached = await withTimeout(cachedTokenProvider(), CACHED_TOKEN_TIMEOUT_MS);
+  diag('token-cached', { device: link.deviceId, ok: cached.ok, ms: cached.ms });
+  return cached.ok ? cached.value : undefined;
+}
+
+/** What the connecting screen shows about a link, and what a report carries. */
+export interface LinkDiagnostics {
+  phase: 'connecting' | 'socket-connecting' | 'open' | 'closed' | 'none';
+  since: number | null;
+  attempts: number;
+  lastClose: { code: number; reason: string; at: number } | null;
+}
+
+export function linkDiagnostics(deviceId: string): LinkDiagnostics {
+  const link = links.get(deviceId);
+  if (!link) return { phase: 'none', since: null, attempts: 0, lastClose: null };
+  const rs = link.socket?.readyState;
+  const phase =
+    link.connectingSince !== null
+      ? 'connecting'
+      : rs === WebSocket.CONNECTING
+        ? 'socket-connecting'
+        : rs === WebSocket.OPEN
+          ? 'open'
+          : link.socket
+            ? 'closed'
+            : 'none';
+  const since =
+    phase === 'connecting'
+      ? link.connectingSince
+      : phase === 'socket-connecting'
+        ? link.dialedAt
+        : phase === 'open'
+          ? link.openedAt
+          : (link.lastClose?.at ?? null);
+  return { phase, since, attempts: link.attempts, lastClose: link.lastClose };
+}
+
 function linkFor(deviceId: string): MachineLink {
   let link = links.get(deviceId);
   if (!link) {
@@ -200,6 +291,11 @@ function linkFor(deviceId: string): MachineLink {
       outbox: [],
       sending: Promise.resolve(),
       enrollWaiter: null,
+      connectingSince: null,
+      attempts: 0,
+      dialedAt: 0,
+      openedAt: null,
+      lastClose: null,
     };
     links.set(deviceId, link);
   }
@@ -620,25 +716,54 @@ export async function connect() {
 
 async function openSocket(link: MachineLink) {
   if (link.socket && link.socket.readyState !== WebSocket.CLOSED) return;
+  // One connect in flight per link: wake, online and retry can all ask at once.
+  if (link.connectingSince !== null) return;
+  // This attempt supersedes any scheduled one. Also forgets a timer that already
+  // fired, which would otherwise read as "retry pending" to handleWake forever.
+  if (link.retryTimer) clearTimeout(link.retryTimer);
+  link.retryTimer = null;
   wireConnectivity();
-  // Re-resolve on every attempt, not just the first: a restarted bridge comes
-  // back on a different ephemeral port, and this is what finds it.
-  await resolveBridgeUrl();
-  if (!WS_URL) {
+  link.connectingSince = Date.now();
+  const attempt = ++link.attempts;
+  let token: string | null | undefined;
+  try {
+    // Re-resolve on every attempt, not just the first: a restarted bridge comes
+    // back on a different ephemeral port, and this is what finds it.
+    await resolveBridgeUrl();
+    if (!WS_URL) {
+      diag('no-bridge-url', { device: link.deviceId, attempt });
+      useStore.getState().setConnectionStatus('reconnecting', link.deviceId);
+      if (link.retryTimer) clearTimeout(link.retryTimer);
+      link.retryTimer = setTimeout(() => void openSocket(link), RECONNECT_DELAY_MS);
+      return;
+    }
+    // Mint a fresh token for every (re)connect — a stale one fails the handshake.
+    token = await connectToken(link);
+  } finally {
+    link.connectingSince = null;
+  }
+  if (link.socket && link.socket.readyState !== WebSocket.CLOSED) return; // raced a parallel connect
+  if (token === undefined) {
+    // No token from either source. Returning here with nothing scheduled is
+    // exactly the stuck spinner, so the ordinary retry takes over.
+    diag('token-unavailable', { device: link.deviceId, attempt });
     useStore.getState().setConnectionStatus('reconnecting', link.deviceId);
     if (link.retryTimer) clearTimeout(link.retryTimer);
     link.retryTimer = setTimeout(() => void openSocket(link), RECONNECT_DELAY_MS);
     return;
   }
-  // Mint a fresh token for every (re)connect — a stale one fails the handshake.
-  const token = tokenProvider ? await tokenProvider().catch(() => null) : null;
-  if (link.socket && link.socket.readyState !== WebSocket.CLOSED) return; // raced a parallel connect
   link.closing = false;
-  const socket = new WebSocket(socketUrl(token, link.deviceId));
+  const url = socketUrl(token, link.deviceId);
+  const socket = new WebSocket(url);
   link.socket = socket;
+  link.dialedAt = Date.now();
+  link.openedAt = null;
   const generation = ++link.generation;
+  diag('dial', { device: link.deviceId, attempt, url: redactUrl(url), token: !!token });
 
   socket.onopen = () => {
+    link.openedAt = Date.now();
+    diag('open', { device: link.deviceId, attempt, ms: link.openedAt - link.dialedAt });
     useStore.getState().setConnectionStatus('connected', link.deviceId);
     link.awaitingProbeSince = null;
     link.secure = null;
@@ -700,6 +825,17 @@ async function openSocket(link: MachineLink) {
   socket.onclose = (e) => {
     clearTimers(link);
     rejectPending(link);
+    const now = Date.now();
+    link.lastClose = { code: e.code, reason: e.reason, at: now };
+    diag('close', {
+      device: link.deviceId,
+      attempt,
+      code: e.code,
+      reason: e.reason || null,
+      openMs: link.openedAt ? now - link.openedAt : null,
+      sinceDialMs: now - link.dialedAt,
+      deliberate: link.closing,
+    });
     // A deliberate disconnect must not immediately dial back.
     if (link.closing) {
       link.closing = false;
@@ -744,6 +880,7 @@ function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayContro
   // behind it is not. Handled here with the other non-app frames because the
   // reducer has no case for them and would drop them silently.
   if (msg.type === 'deviceOffline' || msg.type === 'deviceOnline') {
+    diag(msg.type, { device: link.deviceId });
     useStore.getState().setMachineOffline(msg.type === 'deviceOffline', link.deviceId);
     return;
   }
@@ -776,6 +913,14 @@ function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayContro
   useStore.getState().applyServerMessage(msg, link.deviceId);
   // Flush only after the hello reducer ran: sessions are fresh and transcripts reset.
   if (msg.type === 'hello') {
+    diag('hello', {
+      device: link.deviceId,
+      attempts: link.attempts,
+      sinceDialMs: Date.now() - link.dialedAt,
+      bridge: msg.bridge?.version ?? null,
+    });
+    link.attempts = 0;
+    uploadStallIfAny(link.deviceId);
     if (useStore.getState().protocolSkew) {
       console.warn(
         `[ws] protocol skew: bridge speaks v${msg.bridge?.appProtocol ?? '<pre-versioning>'}, ` +
@@ -804,6 +949,23 @@ function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayContro
       useStore.getState().setActiveProject(msg.path);
     }
   }
+}
+
+/**
+ * A stuck-connecting episode is only worth anything if it reaches whoever is
+ * debugging it, and the moment the link is healthy again is the first moment an
+ * upload can be trusted to get through. Once per episode.
+ */
+function uploadStallIfAny(deviceId: string) {
+  if (!DEVICE_PAIRING_ENABLED) return;
+  const sentAt = lastDiagSentAt();
+  if (!hasUnsentStall(diagEntries(), sentAt)) return;
+  const at = Date.now();
+  markDiagSent(at); // before the await: a second hello must not race a duplicate upload
+  sendDiagnostics(deviceId).catch((err: unknown) => {
+    markDiagSent(sentAt);
+    console.warn('[diag] upload failed', err);
+  });
 }
 
 /**
@@ -892,15 +1054,32 @@ function handleWake() {
   const now = Date.now();
   if (wakeDebounced(lastWakeAt, now)) return;
   lastWakeAt = now;
+  diag('wake', { links: links.size });
   for (const link of links.values()) {
     const socket = link.socket;
-    if (!socket) continue;
+    if (!socket) {
+      const revive = shouldReviveIdle({
+        isPrimary: link.deviceId === primaryDeviceId,
+        hasSocket: false,
+        retryPending: link.retryTimer !== null,
+        connecting: link.connectingSince !== null,
+      });
+      diag('wake-no-socket', {
+        device: link.deviceId,
+        revive,
+        connectingMs: link.connectingSince === null ? null : now - link.connectingSince,
+        retryPending: link.retryTimer !== null,
+      });
+      if (revive) void openSocket(link);
+      continue;
+    }
     const state = {
       readyState: socket.readyState,
       awaitingProbeSince: link.awaitingProbeSince,
       lastPongAt: link.lastPongAt,
     };
     const action = wakeAction(state, now);
+    if (action !== 'probe') diag('wake-link', { device: link.deviceId, action, readyState: socket.readyState });
     if (action === 'none') continue;
     if (action === 'redial') {
       link.awaitingProbeSince = null;
@@ -923,6 +1102,7 @@ function handleWake() {
         lastPongAt: link.lastPongAt,
       };
       if (!probeExpired(settled, Date.now())) return;
+      diag('wake-probe-expired', { device: link.deviceId });
       link.awaitingProbeSince = null;
       reconnectMachine(link.deviceId);
     }, WAKE_PROBE_TIMEOUT_MS);
@@ -937,21 +1117,27 @@ function wireConnectivity() {
   // policy is this module's, and a component would register one per mount.
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
+      diag('visibility', { hidden: document.hidden });
       if (!document.hidden) handleWake();
+      else flushDiag();
     });
   }
+  window.addEventListener('pagehide', () => flushDiag());
   // bfcache restore, which on iOS Safari may not come with a visibility change
   // at all. `persisted` is what separates it from an ordinary load.
   window.addEventListener('pageshow', (e) => {
+    diag('pageshow', { persisted: (e as PageTransitionEvent).persisted });
     if ((e as PageTransitionEvent).persisted) handleWake();
   });
   window.addEventListener('offline', () => {
+    diag('offline');
     for (const link of links.values()) {
       useStore.getState().setConnectionStatus('offline', link.deviceId);
       link.socket?.close();
     }
   });
   window.addEventListener('online', () => {
+    diag('online');
     // Every link, not just the primary: a shared machine that was up when the
     // network went is still expected on screen when it comes back.
     for (const link of links.values()) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DeviceHub, HubRegistry, type Sink } from './mux.ts';
+import { DeviceEvents, DeviceHub, HubRegistry, type Sink } from './mux.ts';
 import { decode, type RelayToAgent } from './protocol.ts';
 
 /** A Sink that records, so routing is testable with no sockets involved. */
@@ -368,4 +368,70 @@ test('channels from different users stay isolated on one device', () => {
   hub.fromAgent({ t: 'data', ch: chA, payload: 'for-a-only' }, agent.sink);
   assert.ok(a.sent.includes('for-a-only'));
   assert.equal(b.sent.length, beforeB, "user-b must not see user-a's traffic");
+});
+
+test('the event history records attach, supersede, channels and detach, in order', () => {
+  const hubs = new HubRegistry();
+  const hub = hubs.get('d1');
+  const client = fakeSink();
+  const ch = hub.openChannel('u1', 'ctrl', client.sink, null);
+  const first = fakeSink();
+  hub.attachAgent(first.sink);
+  const second = fakeSink();
+  hub.attachAgent(second.sink);
+  hub.closeChannel(ch);
+  hub.detachAgent(second.sink);
+
+  assert.deepEqual(
+    hubs.events.get('d1').map((e) => e.kind),
+    ['channel-open', 'agent-attach', 'agent-supersede', 'channel-close', 'agent-detach'],
+  );
+  // The browser that opened with no bridge is the stuck-spinner case; say so.
+  assert.equal(hubs.events.get('d1')[0].detail?.agentOnline, false);
+  assert.ok(hub.lastDetachAt > 0);
+});
+
+test('the event history survives the sweep that drops an idle hub', () => {
+  // Otherwise the evidence is gone by the time anyone looks: a refused browser
+  // holds no channel, so its hub is swept within a minute.
+  const hubs = new HubRegistry();
+  const hub = hubs.get('d1');
+  const agent = fakeSink();
+  hub.attachAgent(agent.sink);
+  hub.detachAgent(agent.sink);
+  hubs.sweep();
+  assert.equal(hubs.size, 0);
+  assert.deepEqual(
+    hubs.events.get('d1').map((e) => e.kind),
+    ['agent-attach', 'agent-detach'],
+  );
+  assert.ok('d1' in hubs.events.snapshot());
+});
+
+test('the event history is bounded per device and across devices', () => {
+  const events = new DeviceEvents(3, 2);
+  for (let i = 0; i < 5; i++) events.record('a', `k${i}`);
+  assert.deepEqual(
+    events.get('a').map((e) => e.kind),
+    ['k2', 'k3', 'k4'],
+  );
+  events.record('b', 'x');
+  events.record('a', 'k5'); // touches a: b is now least recent
+  events.record('c', 'y');
+  assert.equal(events.size, 2);
+  assert.deepEqual(events.get('b'), [], 'least recently touched device evicted');
+  assert.equal(events.get('a').at(-1)?.kind, 'k5');
+});
+
+test('list() reports detach time and parked browsers for triage', async () => {
+  const hubs = new HubRegistry();
+  const hub = hubs.get('d1');
+  const waiting = hub.waitForAgent(5_000);
+  assert.equal(hubs.list()[0].pendingClients, true);
+  assert.equal(hubs.list()[0].lastDetachAt, 0);
+  const agent = fakeSink();
+  hub.attachAgent(agent.sink);
+  await waiting;
+  hub.detachAgent(agent.sink);
+  assert.ok(hubs.list()[0].lastDetachAt > 0);
 });

@@ -385,6 +385,30 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
 
 ## Business rules
 
+### Logging and diagnostics
+
+- `~/.lines-app/logs/desktop.log` stamps every line with an ISO time. Child output is re-cut into
+  whole lines, each tagged `[bridge]`/`[worker]`. Past 5 MB the file rotates once, to
+  `desktop.1.log`.
+- The shell logs:
+  - power transitions (`[power] suspend|resume|lock-screen|unlock-screen`)
+  - each relay link change (`[relay-status] …`)
+  - child spawn/exit with uptime
+  - device registration outcome, never the pairing code
+- The app window's console is mirrored into the log as `[renderer] …`, but only `[diag]`, `[ws]`
+  and `[e2ee]` lines plus warnings and errors. Also mirrored: `did-finish-load` (URL without its
+  fragment, which can carry an enrollment code), `render-process-gone` and
+  `unresponsive`/`responsive`. This keeps the window's no-preload, no-IPC contract, because
+  `console-message` is observed from the main process.
+- The tray's "Collect diagnostics…" builds `~/.lines-app/diagnostics/lines-diag-<ts>.zip` with
+  `/usr/bin/ditto` and reveals it in Finder. The zip holds:
+  - both log generations
+  - every `run/*/*.json` with `token` deleted
+  - the bridge lock
+  - `summary.json`: version, relay status and when it last changed, child pids and uptime, last
+    power events, window URL
+  - device.json is never copied; only the device id appears, in the summary
+
 ### Staying awake
 
 - The shell holds a `powerSaveBlocker('prevent-app-suspension')` for exactly as long as a turn is

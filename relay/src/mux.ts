@@ -27,6 +27,59 @@ export interface Sink {
   terminate?(): void;
 }
 
+export type EventDetail = Record<string, string | number | boolean | null>;
+export interface DeviceEvent {
+  /** ms epoch */
+  t: number;
+  kind: string;
+  detail?: EventDetail;
+}
+
+/**
+ * A short per-device history of what the relay decided, for triage of "my
+ * browser never connects": attaches, detaches, channel opens and every refusal
+ * with its reason. Current hub state alone cannot answer that question — by the
+ * time anyone looks, the refused browser has left and the idle hub was swept.
+ *
+ * Kept apart from the hubs for exactly that reason, and bounded twice: a fixed
+ * number of events per device, and a fixed number of devices, least recently
+ * touched evicted first. Holds no payloads and no tokens.
+ */
+export class DeviceEvents {
+  private byDevice = new Map<string, DeviceEvent[]>();
+
+  constructor(
+    private readonly perDevice = 50,
+    private readonly maxDevices = 1000,
+  ) {}
+
+  record(deviceId: string, kind: string, detail?: EventDetail): void {
+    let list = this.byDevice.get(deviceId);
+    if (list) this.byDevice.delete(deviceId); // re-inserted below: Map order is the LRU
+    else list = [];
+    list.push(detail ? { t: Date.now(), kind, detail } : { t: Date.now(), kind });
+    if (list.length > this.perDevice) list.splice(0, list.length - this.perDevice);
+    this.byDevice.set(deviceId, list);
+    while (this.byDevice.size > this.maxDevices) {
+      const oldest = this.byDevice.keys().next().value as string;
+      this.byDevice.delete(oldest);
+    }
+  }
+
+  get(deviceId: string): DeviceEvent[] {
+    return [...(this.byDevice.get(deviceId) ?? [])];
+  }
+
+  /** Every device with history, including ones whose hub has been swept. */
+  snapshot(): Record<string, DeviceEvent[]> {
+    return Object.fromEntries([...this.byDevice].map(([id, list]) => [id, [...list]]));
+  }
+
+  get size(): number {
+    return this.byDevice.size;
+  }
+}
+
 interface Channel {
   id: ChannelId;
   userId: string;
@@ -56,6 +109,8 @@ export class DeviceHub {
   agentAttaches = 0;
   /** ms epoch of the newest attach; 0 before the first one. */
   lastAttachAt = 0;
+  /** ms epoch of the last time the bridge went away; 0 if it never has. */
+  lastDetachAt = 0;
   /**
    * Browser<->bridge contract the attached bridge speaks, from its `hello`.
    * Null before one arrives. Non-owner access requires a bridge new enough to
@@ -70,7 +125,10 @@ export class DeviceHub {
   /** Last Clerk token seen per user, re-pushed when a bridge (re)attaches. */
   private tokens = new Map<string, string>();
 
-  constructor(readonly deviceId: string) {}
+  constructor(
+    readonly deviceId: string,
+    private readonly record: (kind: string, detail?: EventDetail) => void = () => {},
+  ) {}
 
   get online(): boolean {
     return this.agent !== null;
@@ -176,6 +234,11 @@ export class DeviceHub {
     this.agent = sink;
     this.agentAttaches++;
     this.lastAttachAt = Date.now();
+    this.record(previous && previous !== sink ? 'agent-supersede' : 'agent-attach', {
+      attach: this.agentAttaches,
+      channels: this.channels.size,
+      waiters: this.agentWaiters.size,
+    });
     if (previous && previous !== sink) {
       previous.close(1012, 'superseded');
       // And then hang up on it: a close handshake on a socket whose peer is gone
@@ -209,6 +272,8 @@ export class DeviceHub {
   detachAgent(sink: Sink): void {
     if (this.agent !== sink) return; // a superseded predecessor closing late
     this.agent = null;
+    this.lastDetachAt = Date.now();
+    this.record('agent-detach', { channels: this.channels.size });
     // Forgotten with the bridge: a stale version from a process that is gone must
     // not vouch for whatever attaches next.
     this.appProtocol = null;
@@ -225,6 +290,7 @@ export class DeviceHub {
   ): ChannelId {
     const id = `c${++this.nextId}`;
     this.channels.set(id, { id, userId, cls, sink, grant });
+    this.record('channel-open', { ch: id, userId, guest: !!grant, agentOnline: this.agent !== null });
     if (token) this.tokens.set(userId, token);
     if (this.agent) {
       this.agent.send(encode({ t: 'open', ch: id, userId, token, ...(grant ? { grant } : {}) }));
@@ -238,6 +304,7 @@ export class DeviceHub {
 
   closeChannel(id: ChannelId): void {
     if (!this.channels.delete(id)) return;
+    this.record('channel-close', { ch: id, by: 'client' });
     this.agent?.send(encode({ t: 'close', ch: id }));
   }
 
@@ -253,6 +320,7 @@ export class DeviceHub {
     const ch = this.channels.get(id);
     if (!ch) return;
     this.channels.delete(id);
+    this.record('channel-drop', { ch: id, reason });
     this.agent?.send(encode({ t: 'close', ch: id }));
     ch.sink.close(1008, reason);
   }
@@ -281,6 +349,7 @@ export class DeviceHub {
     if (frame.t === 'close') {
       const ch = this.channels.get(frame.ch);
       this.channels.delete(frame.ch);
+      if (ch) this.record('channel-close', { ch: frame.ch, by: 'bridge' });
       ch?.sink.close(1000, 'closed by bridge');
     }
   }
@@ -312,11 +381,16 @@ export class DeviceHub {
  */
 export class HubRegistry {
   private hubs = new Map<string, DeviceHub>();
+  readonly events: DeviceEvents;
+
+  constructor(events = new DeviceEvents()) {
+    this.events = events;
+  }
 
   get(deviceId: string): DeviceHub {
     let hub = this.hubs.get(deviceId);
     if (!hub) {
-      hub = new DeviceHub(deviceId);
+      hub = new DeviceHub(deviceId, (kind, detail) => this.events.record(deviceId, kind, detail));
       this.hubs.set(deviceId, hub);
     }
     return hub;
@@ -354,6 +428,8 @@ export class HubRegistry {
     channels: number;
     agentAttaches: number;
     lastAttachAt: number;
+    lastDetachAt: number;
+    pendingClients: boolean;
     ownerId: string | null;
     appProtocol: number | null;
   }> {
@@ -363,6 +439,8 @@ export class HubRegistry {
       channels: hub.channelCount,
       agentAttaches: hub.agentAttaches,
       lastAttachAt: hub.lastAttachAt,
+      lastDetachAt: hub.lastDetachAt,
+      pendingClients: hub.hasPendingClients,
       // Both gate inputs for /client. A connection refused as an unauthorized
       // guest is otherwise indistinguishable from one refused for a stale
       // bridge, and the logs cannot say which without them.

@@ -291,6 +291,8 @@ out of `ws.ts` and `main.tsx`.
 
 ## Tests
 
+- `server/src/wakeRedial.test.ts` (`shouldReviveIdle`) — the primary with no socket is redialled
+  on wake; a non-primary idle link, a pending retry and an in-flight connect are not.
 - `server/src/machineMerge.test.ts` — imports `web/src/lib/machines.ts` directly (see
   Architectural rules) and covers every merge/prune/select rule, including the destructive cases
   each replaces: another machine's sessions survive a `hello`; a session a machine stops
@@ -314,6 +316,11 @@ out of `ws.ts` and `main.tsx`.
 
 ## Business rules
 
+- A wake (`visibilitychange`/`pageshow[persisted]`) also revives the **primary** link when it holds
+  no socket, has no retry pending, and has no connect in flight (`shouldReviveIdle` in
+  `web/src/lib/wake.ts`). The primary is never idle-disconnected, so a socket-less primary is a
+  connect that died before creating one. Non-primary socket-less links are still left alone, per
+  the `IDLE_DISCONNECT_MS` rule below.
 - The primary machine's `connectionStatus`/`machineOffline`/`bootstrapped`/`protocolSkew`/`bridge`/
   `workerStatus`/`storageStatus`/`updateStatus` are the only values
   `ConnectionBanner`/`SkewBanner`/`WorkerBanner`/`StorageBanner`/`UpdateBanner` read — see

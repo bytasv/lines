@@ -19,7 +19,7 @@ dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
 import { verifyToken } from '@clerk/backend';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { authorizeClient as authorizeClientAgainst } from './authorize.ts';
-import { HubRegistry, type Sink } from './mux.ts';
+import { HubRegistry, type EventDetail, type Sink } from './mux.ts';
 import {
   RELAY_PROTOCOL_VERSION,
   decode,
@@ -96,6 +96,16 @@ const authorizeClient = (deviceId: string, userId: string) =>
   authorizeClientAgainst({ storageUrl: STORAGE_URL, sharedSecret: RELAY_SHARED_SECRET }, deviceId, userId);
 
 const hubs = new HubRegistry();
+
+/**
+ * Log a relay decision about one device and keep it in that device's event
+ * history (secret-gated `GET /`). Every refusal goes through here: before, a
+ * browser refused at the gate left no trace at all.
+ */
+function note(deviceId: string, kind: string, detail?: EventDetail): void {
+  hubs.events.record(deviceId, kind, detail);
+  console.log(`[relay] ${deviceId} ${kind}${detail ? ` ${JSON.stringify(detail)}` : ''}`);
+}
 setInterval(() => hubs.sweep(), 60_000).unref();
 
 /** Verify a Clerk session token; returns the user id or null. */
@@ -215,7 +225,7 @@ const server = http.createServer((req, res) => {
       ok: true,
       version: RELAY_PROTOCOL_VERSION,
       devices: hubs.size,
-      ...(authorized ? { hubs: hubs.list() } : {}),
+      ...(authorized ? { hubs: hubs.list(), events: hubs.events.snapshot() } : {}),
     }),
   );
 });
@@ -272,12 +282,14 @@ async function route(ws: WebSocket, req: http.IncomingMessage) {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const deviceId = url.searchParams.get('device');
   if (!deviceId) {
+    console.warn(`[relay] refused ${url.pathname}: no device`);
     ws.close(1008, 'device required');
     return;
   }
   const onFrames = deferFrames(ws);
   if (url.pathname === '/agent') return handleAgent(ws, url, deviceId, onFrames);
   if (url.pathname === '/client') return handleClient(ws, url, deviceId, onFrames);
+  note(deviceId, 'refused-endpoint', { path: url.pathname });
   ws.close(1008, 'unknown endpoint');
 }
 
@@ -291,6 +303,9 @@ async function handleAgent(
   const device = await verifyDevice(deviceId, secret);
   // Fail closed on a refusal *and* on an outage: an outage must never widen access.
   if (typeof device === 'string') {
+    // 'unreachable' is a storage outage refusing a healthy machine — the case
+    // that looks, from the browser, exactly like the machine being asleep.
+    note(deviceId, 'agent-refused', { reason: device });
     ws.close(1008, 'unauthorized');
     return;
   }
@@ -332,6 +347,7 @@ async function handleAgent(
     // Re-checked after the await: the takeover may have happened while we asked.
     if (!hub.isAgent(sink)) return;
     console.warn(`[relay] device ${deviceId} is no longer authorized — dropping its hub`);
+    hubs.events.record(deviceId, 'agent-revoked');
     hubs.drop(deviceId, 'revoked');
     if (ws.readyState === ws.OPEN) ws.close(1008, 'revoked');
   }
@@ -345,6 +361,7 @@ async function handleAgent(
     }
     if (Date.now() - lastSeen > AGENT_DEAD_MS) {
       console.warn(`[relay] agent for device ${deviceId} silent for >${AGENT_DEAD_MS}ms — terminating`);
+      hubs.events.record(deviceId, 'agent-silent', { ms: Date.now() - lastSeen });
       // terminate, not close: a close handshake on a half-open socket waits for a
       // reply from a peer that is gone, which is the very state being cleared.
       // The 'close' handler below then detaches the agent, which is what makes
@@ -385,10 +402,11 @@ async function handleAgent(
     // bridge it has already superseded.
     hub.fromAgent(frame, sink);
   });
-  ws.on('close', () => {
+  ws.on('close', (code: number) => {
     clearInterval(health);
+    const current = hub.isAgent(sink);
     hub.detachAgent(sink);
-    console.log(`[relay] agent detached for device ${deviceId}`);
+    console.log(`[relay] agent detached for device ${deviceId} (code ${code}${current ? '' : ', superseded'})`);
     // Only when nothing is attached any more. A superseded predecessor closing
     // late must not report the *replacement* bridge offline — the same reason
     // detachAgent itself is a no-op for a socket that is no longer the agent.
@@ -405,6 +423,7 @@ async function handleClient(
   const token = url.searchParams.get('token');
   const userId = token ? await verifyClerkUserId(token) : AUTH_DISABLED ? DEV_USER : null;
   if (!userId) {
+    note(deviceId, 'client-refused', { reason: token ? 'bad-token' : 'no-token' });
     ws.close(1008, 'unauthorized');
     return;
   }
@@ -425,9 +444,14 @@ async function handleClient(
    * then gets the same answer it would have got immediately.
    */
   if (!AUTH_DISABLED && hub.ownerId === null) {
-    await hub.waitForAgent(OWNER_ATTACH_GRACE_MS);
+    const waitStarted = Date.now();
+    const released = await hub.waitForAgent(OWNER_ATTACH_GRACE_MS);
+    note(deviceId, 'client-wait', { userId, released, ms: Date.now() - waitStarted });
     // The browser may have given up while we held it.
-    if (ws.readyState !== ws.OPEN) return;
+    if (ws.readyState !== ws.OPEN) {
+      note(deviceId, 'client-left-waiting', { userId });
+      return;
+    }
   }
 
   /**
@@ -453,11 +477,20 @@ async function handleClient(
         `[relay] refusing ${userId} on device ${deviceId} (owner ${hub.ownerId ?? 'unknown'}): ` +
           `bridge speaks app v${hub.appProtocol ?? '?'}, sharing needs v${COLLAB_MIN_PROTOCOL}`,
       );
+      hubs.events.record(deviceId, 'client-refused', { reason: 'bridge-too-old', userId });
       ws.close(1008, 'unauthorized');
       return;
     }
     const authorized = await authorizeClient(deviceId, userId);
     if (!authorized || authorized.scope === 'owner') {
+      // ownerId null here means no bridge has proven this device since the relay
+      // started — the machine's own user is refused as a stranger until it does.
+      note(deviceId, 'client-refused', {
+        reason: 'not-owner-no-grant',
+        userId,
+        ownerId: hub.ownerId,
+        agentOnline: hub.online,
+      });
       ws.close(1008, 'unauthorized');
       return;
     }
@@ -465,9 +498,17 @@ async function handleClient(
   }
 
   const ch = hub.openChannel(userId, cls, sinkFor(ws), token, grant);
+  const openedAt = Date.now();
+  console.log(
+    `[relay] client ${userId} → device ${deviceId} ${ch}${grant ? ' (guest)' : ''}` +
+      `${hub.online ? '' : ' — no agent, sent deviceOffline'}`,
+  );
 
   onFrames((raw) => hub.fromClient(ch, String(raw)));
-  ws.on('close', () => hub.closeChannel(ch));
+  ws.on('close', (code: number) => {
+    console.log(`[relay] client ${ch} on device ${deviceId} closed ${code} after ${Date.now() - openedAt}ms`);
+    hub.closeChannel(ch);
+  });
 }
 
 /**

@@ -18,6 +18,7 @@ import {
   presetOfCaps,
   type SharePreset,
 } from '@lines/shared';
+import { DIAG_BODY_LIMIT, sanitizeDiagReport } from './diagnostics.ts';
 import { presenceOf } from './presence.ts';
 import {
   authorizeDevice,
@@ -1033,6 +1034,22 @@ app.post('/v1/devices/register', async (req, res) => {
     update: { ...data, userId: null, revokedAt: null },
   });
   res.json({ pairingCode: code, expiresAt: data.pairingExpiresAt.toISOString() });
+});
+
+/** A client's connection record. Logged, never stored — see diagnostics.ts. */
+app.post('/v1/diagnostics', (req, res) => {
+  const userId = userIdOf(req);
+  if (Number(req.headers['content-length'] ?? 0) > DIAG_BODY_LIMIT) {
+    res.status(413).json({ error: 'report too large' });
+    return;
+  }
+  const report = sanitizeDiagReport(req.body);
+  if (!report) {
+    res.status(400).json({ error: 'entries are required' });
+    return;
+  }
+  console.log(`[diag] userId=${userId} ${JSON.stringify(report)}`);
+  res.json({ ok: true });
 });
 
 /** Claim a pending code. Authenticated: this is the step that binds machine to user. */

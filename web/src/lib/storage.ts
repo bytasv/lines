@@ -11,6 +11,15 @@
  */
 
 import type { ShareProfile } from '@lines/shared';
+import { diag, diagEntries, diagSource, withTimeout, type DiagEntry } from './diag';
+
+/**
+ * No storage call may spin forever: the device gate renders a loading screen
+ * for as long as the list is in flight, and neither Clerk's getToken nor fetch
+ * has a deadline of its own.
+ */
+const TOKEN_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 15_000;
 
 export const STORAGE_URL: string | undefined = import.meta.env.VITE_STORAGE_URL;
 export const DEVICE_PAIRING_ENABLED = Boolean(STORAGE_URL);
@@ -73,8 +82,17 @@ export async function storageCall<T>(path: string, init?: RequestInit): Promise<
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   if (!STORAGE_URL) throw new Error('storage is not configured in this build');
-  const token = tokenProvider ? await tokenProvider() : null;
+  let token: string | null = null;
+  if (tokenProvider) {
+    const minted = await withTimeout(tokenProvider(), TOKEN_TIMEOUT_MS);
+    if (!minted.ok) {
+      diag('storage-token-failed', { path, reason: minted.reason, ms: minted.ms });
+      throw new Error(minted.reason === 'timeout' ? 'sign-in timed out — try again' : 'could not get a sign-in token');
+    }
+    token = minted.value;
+  }
   const res = await fetch(`${STORAGE_URL}${path}`, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     ...init,
     headers: {
       ...(init?.body ? { 'content-type': 'application/json' } : {}),
@@ -97,8 +115,36 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 
 /** Machines this user has paired. Revoked ones are already filtered out server-side. */
 export async function listDevices(): Promise<Device[]> {
-  const { devices } = await call<{ devices: Device[] }>('/v1/devices');
-  return devices;
+  const started = Date.now();
+  try {
+    const { devices } = await call<{ devices: Device[] }>('/v1/devices');
+    diag('devices', {
+      ms: Date.now() - started,
+      count: devices.length,
+      online: devices.filter((d) => d.online).length,
+    });
+    return devices;
+  } catch (err) {
+    diag('devices-error', { ms: Date.now() - started, error: err instanceof Error ? err.message : String(err) });
+    throw err;
+  }
+}
+
+/**
+ * Upload this client's connection record, so a stuck episode on a phone can be
+ * read server-side (`docker compose logs storage | grep '[diag]'`) without the
+ * user having to copy anything off the device.
+ */
+export async function sendDiagnostics(deviceId: string | null, entries: DiagEntry[] = diagEntries()): Promise<void> {
+  await call<{ ok: true }>('/v1/diagnostics', {
+    method: 'POST',
+    body: JSON.stringify({
+      source: diagSource(),
+      deviceId,
+      userAgent: navigator.userAgent,
+      entries,
+    }),
+  });
 }
 
 /**

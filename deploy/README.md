@@ -161,6 +161,16 @@ curl -s -o /dev/null -w '%{http_code}\n' https://<domain>/some/deep/route   # 20
 - [ ] Storage is **not** reachable from outside: it has no published port and no
       Traefik labels.
 - [ ] `docker compose logs relay` shows no `[relay] device verification failed`.
+
+Triaging "stuck connecting to my machine": the relay and storage write no timestamps of their own,
+so always pass `-t`. Run these from `deploy/docker`:
+
+```bash
+docker compose --env-file lines.env logs -t --since 12h relay | grep <deviceId>
+docker compose --env-file lines.env logs -t --since 12h storage | grep '\[diag\]'
+docker compose --env-file lines.env exec relay node -e "fetch('http://127.0.0.1:8791/',{headers:{'x-relay-secret':process.env.RELAY_SHARED_SECRET}}).then(r=>r.json()).then(j=>console.log(JSON.stringify(j.events,null,1)))"
+```
+
 - [ ] A browser socket to `/client` with no `?device=` is rejected with
       `1008 'device required'` — proof the relay is enforcing. The real client
       always names a device, so this is a curl-level check, not a symptom.

@@ -2112,7 +2112,9 @@
         ".env.example",
         "relay/src/protocol.ts",
         "server/src/relayClient.ts",
-        "web/src/components/SkewBanner.tsx"
+        "web/src/components/SkewBanner.tsx",
+        "web/src/lib/diag.ts",
+        "storage/src/diagnostics.ts"
       ],
       "symbols": [
         "Device",
@@ -2167,7 +2169,19 @@
         "renameDevice",
         "bootDial",
         "waitForAgent",
-        "OWNER_ATTACH_GRACE_MS"
+        "OWNER_ATTACH_GRACE_MS",
+        "diag",
+        "withTimeout",
+        "connectToken",
+        "linkDiagnostics",
+        "setCachedTokenProvider",
+        "uploadStallIfAny",
+        "sendDiagnostics",
+        "sanitizeDiagReport",
+        "DeviceEvents",
+        "HubRegistry.events",
+        "DeviceHub.lastDetachAt",
+        "TOKEN_TIMEOUT_MS"
       ],
       "tests": [
         "storage/src/schema.credentials.test.ts",
@@ -2183,7 +2197,9 @@
         "server/src/relayClient.duplicateOpen.test.ts",
         "server/src/bridgeLock.test.ts",
         "server/src/relayClient.supersede.test.ts",
-        "server/src/wakeRedial.test.ts"
+        "server/src/wakeRedial.test.ts",
+        "server/src/diagBuffer.test.ts",
+        "storage/src/diagnostics.test.ts"
       ],
       "businessRules": [
         "fromAgent only accepts a frame from the socket the hub currently calls its agent; a superseded (or half-dead) bridge that keeps writing cannot inject state into a live browser channel or close a channel now owned by the bridge that replaced it",
@@ -2238,7 +2254,13 @@
         "chooseDevice's remembered/most-recent heuristic resumes a choice rather than making one, so a remembered machine that has since been revoked puts the list back up instead of silently falling through to a different computer",
         "a machine's name is the hostname it registered with, stored in plaintext and shown to everyone it shares a session with; PATCH /v1/devices/:id lets the owner rename it, which is the user's only control over what that hostname leaks",
         "DeviceGate dials the remembered machine optimistically (bootDial) before the device list has loaded, since rememberedDeviceId() is a synchronous localStorage read the socket need not wait behind a network round trip; the dial is dropped if the list lands without that id in it, so the gate-never-connects-to-an-unshown-machine rule still holds once the list is authoritative",
-        "/client holds a browser for up to OWNER_ATTACH_GRACE_MS only when hub.ownerId is still null in this relay process (waitForAgent) \u2014 closes a race where a browser reconnects, after a relay restart, faster than its own bridge finishes verifyDevice, which used to refuse the machine's own owner 1008 and cost a 5s backoff per attempt; a running machine with an attached bridge pays nothing, and the hold never widens access, only delays a classification"
+        "/client holds a browser for up to OWNER_ATTACH_GRACE_MS only when hub.ownerId is still null in this relay process (waitForAgent) \u2014 closes a race where a browser reconnects, after a relay restart, faster than its own bridge finishes verifyDevice, which used to refuse the machine's own owner 1008 and cost a 5s backoff per attempt; a running machine with an attached bridge pays nothing, and the hold never widens access, only delays a classification",
+        "a connect never waits on Clerk without a deadline: openSocket races getToken({skipCache:true}) against TOKEN_TIMEOUT_MS (10s), then the cached getToken() against 5s; if both fail it schedules the ordinary RECONNECT_DELAY_MS retry instead of dialling \u2014 a hung mint used to leave a link with no socket and no retry timer, an endless spinner",
+        "one connect in flight per link (connectingSince); wake, online, retry and Reconnect now all funnel into openSocket",
+        "browser storage calls carry a 10s token deadline and a 15s AbortSignal, so ConnectMachineLoading cannot spin forever",
+        "every relay client refusal is logged and recorded with its reason (bad-token/no-token/not-owner-no-grant with ownerId/bridge-too-old), as are waitForAgent outcomes and agent refusals (unauthorized vs unreachable); a per-device event history (50 x 1000 devices, LRU, no payloads or tokens) survives the idle-hub sweep and is served only in the secret-gated GET / as events",
+        "the browser keeps a localStorage diag ring (lines.diag) of connect-path events, echoed as [diag] console lines; ConnectingMachine's slow state shows the link phase with Send diagnostics/Copy, and an unsent stall is uploaded once on the next hello",
+        "POST /v1/diagnostics stores nothing: it sanitises the report (scalar fields only, bounded, token query params redacted) and writes one [diag] userId=\u2026 line to storage stdout"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
@@ -2415,7 +2437,15 @@
         "answerManualCheck",
         "updateRow",
         "updatesEnabled",
-        "updatesDisabledReason"
+        "updatesDisabledReason",
+        "appendLog",
+        "lineForwarder",
+        "rotateLogIfFull",
+        "LOG_MAX_BYTES",
+        "mirrorRendererLog",
+        "collectDiagnostics",
+        "relayChangedAt",
+        "lastPower"
       ],
       "tests": [
         "server/src/updates.test.ts",
@@ -2450,7 +2480,11 @@
         "the desktop window has its own cookie jar, separate from Safari or Chrome \u2014 signing in in a browser does not sign in the window and vice versa; dev and packaged runs share one jar",
         "nothing but the app itself ever loads in the chrome-less window; a navigation stays in-window only as the app origin itself, a dedicated identity host, a scoped OAuth entry path (github.com's /login/oauth/ only), or the continuation of a flow already off-app \u2014 everything else, including any other github.com link, opens in the real browser",
         "the pairing window navigates nowhere at all, not even to the app's own origin - clicking the pairing card's link opens the real browser and leaves the code on screen",
-        "an off-app window always has a way back: a 'Back to Lines' pill is injected into any page the window lands on outside the app origin, and the tray's 'Open Lines' reloads an existing window back to the app instead of just showing it as-is"
+        "an off-app window always has a way back: a 'Back to Lines' pill is injected into any page the window lands on outside the app origin, and the tray's 'Open Lines' reloads an existing window back to the app instead of just showing it as-is",
+        "desktop.log stamps every line with an ISO time, re-cuts child output into whole tagged lines, and rotates once to desktop.1.log past 5MB",
+        "the shell logs power transitions ([power] suspend/resume/lock-screen/unlock-screen), relay link changes ([relay-status]), child spawn/exit with uptime, and device registration outcome (never the pairing code)",
+        "the app window's console is mirrored to the log as [renderer] \u2014 only [diag]/[ws]/[e2ee] lines plus warnings/errors \u2014 along with did-finish-load (URL without fragment), render-process-gone and unresponsive; observed from the main process, so the window keeps its no-preload/no-IPC contract",
+        "the tray's Collect diagnostics\u2026 zips both log generations, run/*/*.json with token deleted, the bridge lock and a summary.json into ~/.lines-app/diagnostics via /usr/bin/ditto; device.json is never copied"
       ],
       "architecturalRules": [
         "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
@@ -2785,7 +2819,8 @@
         "probeExpired",
         "wakeDebounced",
         "bootDial",
-        "MachineSwitcher"
+        "MachineSwitcher",
+        "shouldReviveIdle"
       ],
       "tests": [
         "server/src/machineMerge.test.ts",
@@ -2801,7 +2836,8 @@
         "a shared machine connects automatically up to LINK_CAP; an idle non-primary link disconnects after IDLE_DISCONNECT_MS",
         "sessionMachine is per-client in-memory state, never persisted or synced",
         "auto-selecting a freshly created session additionally requires the creating frame to have come from the primary machine",
-        "a resumed tab probes every link it holds a socket for (visibilitychange when visible, pageshow with event.persisted, debounced) and redials only one that fails the probe; a link with no socket (idle-disconnected) is left alone so a tab switch cannot defeat IDLE_DISCONNECT_MS"
+        "a resumed tab probes every link it holds a socket for (visibilitychange when visible, pageshow with event.persisted, debounced) and redials only one that fails the probe; a link with no socket (idle-disconnected) is left alone so a tab switch cannot defeat IDLE_DISCONNECT_MS",
+        "a wake also revives the primary link when it holds no socket, no pending retry and no connect in flight (shouldReviveIdle) \u2014 the primary is never idle-disconnected, so that state is a connect that died before creating a socket; non-primary socket-less links stay down per IDLE_DISCONNECT_MS"
       ],
       "architecturalRules": [
         "every cross-machine merge/prune/select rule, plus the MachineView projection and sessionsOnMachine, lives in web/src/lib/machines.ts as a plain function, unit-testable without a socket, a store, or React",

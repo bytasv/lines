@@ -20,9 +20,11 @@ import {
   connectMachine,
   disconnectMachine,
   reconnectNow,
+  setCachedTokenProvider,
   setTokenProvider,
   switchDevice,
 } from './ws';
+import { diag, diagSource, noteDesktopWindow } from './lib/diag';
 import {
   CLERK_ENABLED,
   CLERK_PUBLISHABLE_KEY,
@@ -53,6 +55,17 @@ import { ConnectingMachine } from './components/ConnectingMachine';
 import { JoinPage } from './components/JoinPage';
 import { LandingPage } from './components/LandingPage';
 import { useStore } from './store';
+
+noteDesktopWindow(location.hash);
+// First line of every page load: a reload, a PWA relaunch and a discarded tab
+// all look alike from inside the connect path, and this is what tells them apart.
+diag('boot', {
+  source: diagSource(),
+  nav: (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined)?.type ?? null,
+  visible: !document.hidden,
+  online: navigator.onLine,
+  remembered: rememberedDeviceId(),
+});
 
 /**
  * Gate between signing in and opening the socket, in deployments where the agent
@@ -137,6 +150,7 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
    */
   useEffect(() => {
     const { dial, drop } = bootDial(remembered, devices, dialedRef.current);
+    if (dial || drop) diag('boot-dial', { dial, drop });
     if (dial) {
       dialedRef.current = dial;
       void connectMachine(dial);
@@ -223,6 +237,7 @@ function AuthedConnect() {
   // relayAuth's whole job is delivering a token the bridge hasn't seen fail
   // yet, so a cache hit here defeats it. Force a real mint every relay.
   setTokenProvider(() => getToken({ skipCache: true }));
+  setCachedTokenProvider(() => getToken());
   setStorageTokenProvider(() => getToken());
   useEffect(() => {
     // Warm the token so the mint overlaps the rest of boot rather than sitting

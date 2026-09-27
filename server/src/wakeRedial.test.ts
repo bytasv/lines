@@ -3,6 +3,7 @@ import { describe, test } from 'node:test';
 import {
   bootDial,
   probeExpired,
+  shouldReviveIdle,
   wakeAction,
   wakeDebounced,
   WAKE_DEBOUNCE_MS,
@@ -129,5 +130,28 @@ describe('bootDial', () => {
 
   test('with the list in hand and nothing dialled, the gate is left to choose', () => {
     assert.deepEqual(bootDial('m1', [{ id: 'm1' }], null), { dial: null, drop: null });
+  });
+});
+
+describe('shouldReviveIdle', () => {
+  const idle = { isPrimary: true, hasSocket: false, retryPending: false, connecting: false };
+
+  test('the primary with no socket, no retry and no connect in flight is dialled on wake', () => {
+    // The stuck-spinner case: a connect that died before creating a socket left
+    // nothing scheduled, and wake used to skip every socket-less link.
+    assert.equal(shouldReviveIdle(idle), true);
+  });
+
+  test('a non-primary socket-less link was idle-disconnected on purpose and stays down', () => {
+    assert.equal(shouldReviveIdle({ ...idle, isPrimary: false }), false);
+  });
+
+  test('a pending retry or an in-flight connect already owns the next attempt', () => {
+    assert.equal(shouldReviveIdle({ ...idle, retryPending: true }), false);
+    assert.equal(shouldReviveIdle({ ...idle, connecting: true }), false);
+  });
+
+  test('a link that has a socket is judged by wakeAction instead', () => {
+    assert.equal(shouldReviveIdle({ ...idle, hasSocket: true }), false);
   });
 });

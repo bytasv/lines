@@ -12,16 +12,19 @@ import {
   Title,
 } from '@mantine/core';
 import {
+  IconCopy,
   IconDeviceLaptop,
   IconLock,
+  IconSend,
   IconPlus,
   IconRefresh,
   IconUnlink,
 } from '@tabler/icons-react';
 import { ENROLL_CODE_LENGTH, normalizeEnrollCode } from '@lines/shared';
-import type { Device } from '../lib/storage';
+import { sendDiagnostics, type Device } from '../lib/storage';
 import { cryptoUnavailable, takeEnrollCodeFromUrl } from '../lib/e2ee';
-import { enrollWithCode } from '../ws';
+import { enrollWithCode, linkDiagnostics, type LinkDiagnostics } from '../ws';
+import { diag, diagReport, markDiagSent } from '../lib/diag';
 import { unlinkedMachineHealth } from '../lib/machineHealth';
 import { useStore } from '../store';
 import { MachineDot } from './MachineDot';
@@ -83,6 +86,23 @@ export function ConnectingMachine({
     const timer = setTimeout(() => setSlow(true), SLOW_MS);
     return () => clearTimeout(timer);
   }, []);
+
+  // The marker the auto-upload keys on (see ws.ts), and the one line that says
+  // what the link was doing when the user started waiting.
+  useEffect(() => {
+    if (!slow) return;
+    const link = linkDiagnostics(deviceId);
+    diag('connecting-slow', {
+      device: deviceId,
+      status,
+      offline,
+      phase: link.phase,
+      phaseMs: link.since === null ? null : Date.now() - link.since,
+      attempts: link.attempts,
+      lastCloseCode: link.lastClose?.code ?? null,
+    });
+    // Once per stall, not per status flicker: status/offline deliberately omitted.
+  }, [slow, deviceId]);
 
   const reconnect = async () => {
     setBusy(true);
@@ -213,10 +233,92 @@ export function ConnectingMachine({
                 pairing code you can enter here.
               </Text>
             </Stack>
+
+            <DiagnosticsFooter deviceId={deviceId} />
           </Stack>
         )}
       </Stack>
     </GateShell>
+  );
+}
+
+function describeLink(d: LinkDiagnostics, now: number): string {
+  const secs = d.since === null ? null : Math.round((now - d.since) / 1000);
+  const age = secs === null ? '' : ` ${secs}s`;
+  const tries = d.attempts > 1 ? ` · attempt ${d.attempts}` : '';
+  const close = d.lastClose ? ` · last close ${d.lastClose.code}${d.lastClose.reason ? ` ${d.lastClose.reason}` : ''}` : '';
+  const phase = {
+    connecting: 'waiting for sign-in token',
+    'socket-connecting': 'opening socket',
+    open: 'socket open, waiting for machine',
+    closed: 'socket closed',
+    none: 'no socket',
+  }[d.phase];
+  return `${phase}${age}${tries}${close}`;
+}
+
+/**
+ * What the link is doing right now, and a way to hand the record to whoever is
+ * debugging — uploaded, or copied when the upload itself can't get through.
+ */
+function DiagnosticsFooter({ deviceId }: { deviceId: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  const [sent, setSent] = useState<'idle' | 'sending' | 'sent' | 'failed' | 'copied'>('idle');
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const upload = async () => {
+    setSent('sending');
+    const at = Date.now();
+    try {
+      await sendDiagnostics(deviceId);
+      markDiagSent(at);
+      setSent('sent');
+    } catch (err) {
+      diag('diag-upload-failed', { error: err instanceof Error ? err.message : String(err) });
+      setSent('failed');
+    }
+  };
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(diagReport());
+      setSent('copied');
+    } catch {
+      setSent('failed');
+    }
+  };
+
+  return (
+    <Stack align="center" gap={4} mt="sm">
+      <Text size="xs" c="dimmed" ta="center" ff="monospace">
+        {describeLink(linkDiagnostics(deviceId), now)}
+      </Text>
+      <Group gap={6}>
+        <Button
+          variant="subtle"
+          size="compact-xs"
+          color="gray"
+          leftSection={<IconSend size={12} />}
+          loading={sent === 'sending'}
+          onClick={() => void upload()}
+        >
+          {sent === 'sent' ? 'Diagnostics sent' : sent === 'failed' ? 'Send failed — copy instead' : 'Send diagnostics'}
+        </Button>
+        <Button
+          variant="subtle"
+          size="compact-xs"
+          color="gray"
+          leftSection={<IconCopy size={12} />}
+          onClick={() => void copy()}
+        >
+          {sent === 'copied' ? 'Copied' : 'Copy'}
+        </Button>
+      </Group>
+    </Stack>
   );
 }
 

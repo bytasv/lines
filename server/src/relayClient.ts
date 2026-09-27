@@ -195,6 +195,11 @@ export class RelayClient {
   private escalated = false;
   /** When the current socket opened, 0 if none is open. */
   private openedAt = 0;
+  /** Dials since this process started, and when the current one began — for the log only. */
+  private dials = 0;
+  private dialedAt = 0;
+  /** When each channel opened, so its close can say how long it lived. */
+  private channelOpenedAt = new Map<string, number>();
 
   constructor(
     private url: string,
@@ -241,6 +246,7 @@ export class RelayClient {
     const cap = escalating ? SUPERSEDE_CAP_MS : RECONNECT_CAP_MS;
     const backoff = Math.min(RECONNECT_BASE_MS * 2 ** this.attempt++, cap);
     const delay = backoff / 2 + Math.random() * (backoff / 2);
+    console.log(`[relay] re-dial in ${Math.round(delay)}ms (backoff step ${this.attempt})`);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.connect();
@@ -266,10 +272,19 @@ export class RelayClient {
   private startHealthCheck(ws: WebSocket): void {
     this.stopHealthCheck();
     this.lastFrameAt = Date.now();
+    let lastTick = Date.now();
     this.healthTimer = setInterval(() => {
+      const now = Date.now();
+      // A tick far later than scheduled means the process was frozen — on a
+      // laptop, almost always sleep. Logged because it dates the wake exactly.
+      const late = now - lastTick - RELAY_HEALTH_MS;
+      lastTick = now;
+      if (late > RELAY_HEALTH_MS) console.log(`[relay] health tick ${late}ms late — process was suspended (sleep?)`);
       if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
-      if (Date.now() - this.lastFrameAt <= RELAY_IDLE_MS) return;
-      console.warn(`[relay] no frame for >${RELAY_IDLE_MS}ms — terminating and re-dialling`);
+      if (now - this.lastFrameAt <= RELAY_IDLE_MS) return;
+      console.warn(
+        `[relay] no frame for ${now - this.lastFrameAt}ms (limit ${RELAY_IDLE_MS}ms) — terminating and re-dialling`,
+      );
       // terminate, not close: a close handshake on a half-open socket waits for a
       // peer that is gone. The 'close' handler drops channels and retries.
       ws.terminate();
@@ -278,8 +293,10 @@ export class RelayClient {
   }
 
   private dropAllChannels(): void {
+    if (this.channels.size) console.log(`[relay] dropping ${this.channels.size} channel(s) with the socket`);
     for (const ch of this.channels.values()) ch.remoteClosed();
     this.channels.clear();
+    this.channelOpenedAt.clear();
   }
 
   private connect(): void {
@@ -301,11 +318,15 @@ export class RelayClient {
     const url = `${this.url}/agent?device=${encodeURIComponent(this.deviceId)}&secret=${encodeURIComponent(this.secret)}`;
     const ws = new WebSocket(url);
     this.ws = ws;
+    this.dials++;
+    this.dialedAt = Date.now();
+    console.log(`[relay] dial #${this.dials} ${this.url}/agent`);
 
     ws.on('open', () => {
       // Deliberately no `attempt = 0` here: see RELAY_STABLE_MS. The close handler
       // resets it, and only for a socket that lasted.
       this.openedAt = Date.now();
+      console.log(`[relay] open after ${this.openedAt - this.dialedAt}ms (dial #${this.dials})`);
       // APP_PROTOCOL_VERSION, never a literal: the relay reads this to decide
       // whether this bridge is new enough to be shared into (COLLAB_MIN_PROTOCOL).
       // Hardcoded, it silently advertises an old contract and every guest
@@ -340,6 +361,9 @@ export class RelayClient {
       // /agent itself) and for a device it cannot verify. Retrying cannot fix
       // either, so it must not be silent. Backoff bounds the log volume.
       const text = reason.toString();
+      const now = Date.now();
+      const lived = this.openedAt ? `open ${now - this.openedAt}ms` : `never opened, ${now - this.dialedAt}ms after dial`;
+      const silent = this.lastFrameAt ? `, last frame ${now - this.lastFrameAt}ms ago` : '';
       // A link that lasted is the only evidence the dial actually worked, so it is
       // the only thing that clears the backoff. A supersede is by definition a
       // short-lived socket, which is what makes the exponent accumulate at all.
@@ -357,7 +381,9 @@ export class RelayClient {
         // The supersede count is the bridge-side tell for two processes sharing one
         // device identity: one line per takeover looks like an ordinary restart.
         const tally = code === 1012 ? ` (superseded ${this.supersededCount} times)` : '';
-        console.warn(`[relay] closed ${code} ${text || '(no reason)'}${tally} — dialling ${this.url}/agent`);
+        console.warn(`[relay] closed ${code} ${text || '(no reason)'}${tally} (${lived}${silent}) — dialling ${this.url}/agent`);
+      } else {
+        console.log(`[relay] closed 1000 (${lived}${silent})`);
       }
       this.callbacks.onStatus?.({ connected: false, code, ...(text ? { reason: text } : {}) });
       this.dropAllChannels();
@@ -392,11 +418,14 @@ export class RelayClient {
           (payload) => this.ws?.send(JSON.stringify({ t: 'data', ch: frame.ch, payload })),
           (id) => {
             this.channels.delete(id);
+            this.channelOpenedAt.delete(id);
             this.ws?.send(JSON.stringify({ t: 'close', ch: id }));
           },
           () => this.ws?.bufferedAmount ?? 0,
         );
         this.channels.set(frame.ch, ch);
+        this.channelOpenedAt.set(frame.ch, Date.now());
+        console.log(`[relay] channel ${frame.ch} open user=${frame.userId}${frame.grant ? ' (guest)' : ''}`);
         // The relay verified this Clerk token and the bridge does not re-verify
         // it: a second verifier would mean two failure modes, and would make
         // every relayed connection depend on this machine reaching Clerk's JWKS.
@@ -421,6 +450,9 @@ export class RelayClient {
       case 'close': {
         const ch = this.channels.get(frame.ch);
         this.channels.delete(frame.ch);
+        const opened = this.channelOpenedAt.get(frame.ch);
+        this.channelOpenedAt.delete(frame.ch);
+        if (ch) console.log(`[relay] channel ${frame.ch} closed by relay after ${opened ? Date.now() - opened : '?'}ms`);
         ch?.remoteClosed();
         break;
       }

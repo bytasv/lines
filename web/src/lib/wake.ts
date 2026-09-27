@@ -67,6 +67,23 @@ export function wakeAction(s: LinkProbeState, now: number): 'redial' | 'probe' |
 }
 
 /**
+ * Whether a link holding no socket should be dialled on wake.
+ *
+ * Only the primary: a non-primary link with no socket was idle-disconnected on
+ * purpose (IDLE_DISCONNECT_MS). The primary is never idle-disconnected, so no
+ * socket there means a connect that never got as far as creating one — the
+ * stuck-spinner case — and nothing else will ever retry it.
+ */
+export function shouldReviveIdle(s: {
+  isPrimary: boolean;
+  hasSocket: boolean;
+  retryPending: boolean;
+  connecting: boolean;
+}): boolean {
+  return s.isPrimary && !s.hasSocket && !s.retryPending && !s.connecting;
+}
+
+/**
  * Whether boot can dial the remembered machine before the device list lands, and
  * whether an already-dialled one has to be dropped once it does.
  *

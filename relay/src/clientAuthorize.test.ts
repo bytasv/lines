@@ -197,5 +197,18 @@ describe('the /client gate with auth on', () => {
     });
     assert.equal(await clientCloseCode(port, ''), 1008, 'no token must be refused');
     assert.equal(await clientCloseCode(port, '&token=not-a-jwt'), 1008, 'a junk token must be refused');
+
+    // Both refusals are in the device's history, with their reason, and only
+    // behind the secret — the public health shape must not grow device ids.
+    const health = async (secret?: string) => {
+      const res = await fetch(`http://127.0.0.1:${port}/`, { headers: secret ? { 'x-relay-secret': secret } : {} });
+      return (await res.json()) as { events?: Record<string, { kind: string; detail?: { reason?: string } }[]> };
+    };
+    assert.equal((await health()).events, undefined, 'events are secret-gated');
+    const refusals = ((await health('shared')).events?.['d-gate'] ?? []).filter((e) => e.kind === 'client-refused');
+    assert.deepEqual(
+      refusals.map((e) => e.detail?.reason),
+      ['no-token', 'bad-token'],
+    );
   });
 });

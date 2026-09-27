@@ -226,6 +226,32 @@ test('re-verify leaves a live device alone when storage cannot be asked', async 
   agent.ws.close();
 });
 
+test('an attach refusal lands in the device history with its reason', async () => {
+  // Refused vs storage down: identical to the browser (the machine looks asleep),
+  // so the secret-gated history is the only place that tells them apart.
+  const storagePort = await startStubStorage([
+    { status: 403 },
+    { status: 500, body: { error: 'boom' } },
+  ]);
+  const port = await startRelay({
+    RELAY_AUTH_DISABLED: '',
+    CLERK_SECRET_KEY: 'sk_test_not_used_on_the_agent_path',
+    RELAY_SHARED_SECRET: 'shared',
+    STORAGE_URL: `http://127.0.0.1:${storagePort}`,
+  });
+  const refused = openAgent(port, 'd-refused', { answerPings: true });
+  assert.equal((await until(() => refused.closed(), 'the first attach to be refused')).code, 1008);
+  const outage = openAgent(port, 'd-refused', { answerPings: true });
+  assert.equal((await until(() => outage.closed(), 'the second attach to be refused')).code, 1008);
+
+  const res = await fetch(`http://127.0.0.1:${port}/`, { headers: { 'x-relay-secret': 'shared' } });
+  const body = (await res.json()) as { events: Record<string, { kind: string; detail?: { reason?: string } }[]> };
+  assert.deepEqual(
+    body.events['d-refused'].filter((e) => e.kind === 'agent-refused').map((e) => e.detail?.reason),
+    ['unauthorized', 'unreachable'],
+  );
+});
+
 const reportsFor = (device: string) => presenceReports.filter((r) => r.deviceId === device);
 
 /**

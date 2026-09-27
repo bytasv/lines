@@ -853,6 +853,11 @@ async function handleConnection(
   }
   ctx.sockets.set(ws, access);
   ws.send(JSON.stringify(buildHello(ctx, access, { local, encrypted: !!peerKey }, attested?.grant)));
+  const helloAt = Date.now();
+  console.log(
+    `[ws] hello → ${connId.slice(0, 8)} user=${userId} ${attested ? 'relayed' : local ? 'local' : 'lan'}` +
+      `${peerKey ? ' encrypted' : ''}${isGuest ? ' guest' : ''}`,
+  );
 
   if (isGuest) {
     console.log(
@@ -864,6 +869,7 @@ async function handleConnection(
 
   ws.on('close', () => {
     ctx.sockets.delete(ws);
+    console.log(`[ws] link ${connId.slice(0, 8)} closed after ${Date.now() - helloAt}ms`);
     // Announce the departure before the socket is forgotten, or the avatar of
     // someone who closed their tab sits in everyone else's header forever.
     for (const sessionId of ctx.presence.drop(connId)) {

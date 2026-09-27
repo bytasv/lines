@@ -480,6 +480,14 @@ refuse.
 
 ## Tests
 
+- `server/src/diagBuffer.test.ts` — the browser's diag ring (count and byte trims, garbage in
+  storage), `withTimeout` on a never-settling promise, URL redaction, and the unsent-stall
+  trigger.
+- `storage/src/diagnostics.test.ts` — the upload sanitiser: malformed entries dropped, unknown
+  source not echoed, tokens redacted, entry and string bounds.
+- `relay/src/mux.test.ts` (events) — attach/supersede/channel/detach history in order, surviving
+  the sweep, bounded per device and across devices; `list()` reports `lastDetachAt` and parked
+  browsers.
 - `server/src/portDiscovery.test.ts` — round-trip, `0600`, no temp files left, dead-pid unlink,
   unparseable/partial files, independence of the two names.
 - `server/src/workerHandshake.test.ts` — spawns a real worker: ephemeral bind and publish, hello
@@ -685,6 +693,20 @@ refuse.
   never connects to a machine this browser has not been shown remains true; the optimistic dial is
   provisional until the list confirms it, not an exception to that rule.
 
+- A connect never waits on Clerk without a deadline. `openSocket` races `getToken({ skipCache:
+  true })` against 10s, then the cached `getToken()` against 5s. If both fail it schedules the
+  ordinary `RECONNECT_DELAY_MS` retry rather than dialling with no token. A hung mint used to leave
+  a link with no socket and no retry timer, which is a spinner that never ends.
+- Only one connect is in flight per link (`connectingSince`). Wake, online, retry and "Reconnect
+  now" all funnel into `openSocket`, and parallel mints would each wait out the same timeout.
+- Storage calls from the browser carry a 10s token deadline and a 15s request `AbortSignal`, so
+  `ConnectMachineLoading` cannot spin forever either.
+- The relay records every client refusal with its reason and keeps a bounded per-device event
+  history (50 events × 1000 devices, LRU). It holds no payloads and no tokens, and it is exposed
+  only behind the relay secret.
+- `POST /v1/diagnostics` stores nothing. It sanitises the report (known scalar fields only,
+  bounded, token-shaped query params redacted) and writes one `[diag] userId=…` line to stdout.
+
 ## Architectural rules
 
 - The port-discovery helpers live in `workerProtocol.ts`, not a module of their own: port
@@ -830,6 +852,53 @@ refuse.
 - `DeviceGate`'s optimistic dial calls `connectMachine`, never `switchDevice`: `primaryDeviceId`
   must stay unset until the ordinary `chosen` effect runs, so a wrong guess can never become the
   machine the UI considers itself on, even briefly.
+
+## Connection triage
+
+When a window sits on "Connecting to <machine>" with no end, each hop now leaves a timestamped
+record. Read them in order (browser → relay → bridge) and line them up by time:
+
+1. **The browser** (`web/src/lib/diag.ts`). A ring buffer in `localStorage` (`lines.diag`, ~1000
+   entries, 128 KB) that survives a reload. It holds `boot` (navigation type, source), `devices`,
+   `dial` (URL without its query), `open`, `close` (code, reason, how long the socket was open),
+   `hello`, `token-slow`/`token-timeout`/`token-cached`, `wake`/`wake-no-socket`/`wake-link`,
+   `visibility`, `pageshow`, `online`/`offline` and `connecting-slow`.
+   - In the desktop window, every entry is echoed as `[diag]` on the console, and the shell mirrors
+     that into `~/.lines-app/logs/desktop.log` as `[renderer] [diag] …`.
+   - On a phone or in a browser, ConnectingMachine's slow state shows the link's live phase and has
+     **Send diagnostics** / **Copy** buttons. A stall is also uploaded automatically on the next
+     `hello`. Uploads land in the storage logs:
+     `docker compose --env-file lines.env logs -t storage | grep '\[diag\]'`.
+2. **The relay.** Every client refusal is logged with a reason:
+   - `client-refused` with `bad-token` / `no-token` / `not-owner-no-grant` (including `ownerId`) /
+     `bridge-too-old`
+   - `client-wait` (released or timed out), `client-left-waiting`
+   - `agent-refused` (`unauthorized` vs `unreachable`)
+   - attach/supersede/detach/silent
+
+   A per-device history of the last 50 events survives the idle-hub sweep and is served under
+   `events` in the secret-gated `GET /`, next to `hubs[].lastDetachAt` and `pendingClients`.
+   Logs: `docker compose --env-file lines.env logs -t --since 12h relay`.
+3. **The bridge** (inside `desktop.log`, tagged `[bridge]`). Covers:
+   - `[relay] dial #N`, `open after Xms`, `re-dial in Xms`
+   - `closed CODE … (open Xms, last frame Yms ago)`
+   - `health tick Xms late` (dates a sleep)
+   - channel open/close
+   - `[ws] hello →` / `link … closed after`
+4. **The shell** (`desktop.log`). Covers:
+   - `[power] suspend/resume/lock-screen/unlock-screen`
+   - `[relay-status] connected/disconnected/verified`
+   - child spawn/exit with uptime
+   - `[window] loaded/unresponsive/renderer gone`
+
+**Collect diagnostics…** in the tray zips all of the desktop-side logs into
+`~/.lines-app/diagnostics/`. It includes the logs, the runtime files with their token stripped,
+the lock, and `summary.json`. No secrets are included.
+
+Guards that came with it (see Business rules):
+- the connect's fresh Clerk mint times out after 10s and falls back to the cached token
+- a wake revives a primary link with no socket
+- storage calls time out after 15s
 
 ## Related decisions
 
