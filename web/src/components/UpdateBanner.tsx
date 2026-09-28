@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Box, CloseButton, Text } from '@mantine/core';
 import { useStore } from '../store';
 import { DESKTOP_DOWNLOAD_URL } from '../lib/storage';
+import { useIsPhone } from '../lib/layout';
 
 const DISMISSED_KEY = 'lines.updateDismissed';
 
@@ -17,7 +18,7 @@ const DISMISSED_KEY = 'lines.updateDismissed';
  * The action is a plain download link rather than the owner-gated `installUpdate`
  * message: with self-install off, a restart request only opens the download page
  * on the *tray* machine, which a remote browser never sees — the click would look
- * like it did nothing.
+ * like it did nothing. Hidden on a phone, because that link is the desktop download.
  */
 export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
   const status = useStore((s) => s.updateStatus);
@@ -27,11 +28,13 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
   const access = useStore((s) => s.access);
   const skew = useStore((s) => s.protocolSkew);
   const [dismissed, setDismissed] = useState(() => localStorage.getItem(DISMISSED_KEY));
+  const isPhone = useIsPhone();
 
   if (connection !== 'connected') return null;
   if (skew) return null;
   if (worker?.connected === false || storage?.available === false) return null;
   if (access) return null;
+  if (isPhone) return null;
   if (status?.state !== 'available' || !DESKTOP_DOWNLOAD_URL) return null;
   const version = status.version;
   // Per-version, so dismissing 0.1.4 doesn't also silence 0.1.5. `UpdateStatus`

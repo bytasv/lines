@@ -3667,7 +3667,8 @@
         "web/src/components/ProjectTabs.tsx",
         "web/index.html",
         "web/src/components/MentionInput.tsx",
-        "web/src/lib/permissionModes.tsx"
+        "web/src/lib/permissionModes.tsx",
+        "web/src/components/UpdateBanner.tsx"
       ],
       "symbols": [
         "useIsPhone",
@@ -3701,7 +3702,8 @@
         "the composer's permission mode is its own Menu on the row (SEGMENT_MODES, same three modes and order as the desktop pills), separate from the Options icon button; the Options sheet no longer carries the mode control",
         "the phone project-picker button is sized and left-aligned to its own label instead of stretching to fill the header, and the composer has no corner radius or left/right/bottom border on a phone, so it reads as a strip spanning the screen",
         "bottom sheets cap max-height at --lines-viewport minus --lines-safe-top, so a tall sheet's title and close button clear the Dynamic Island in a home-screen iOS app; PermissionPrompt's sheet carries .lines-mobile-sheet too",
-        "the transcript ScrollArea sets scrollbars=\"y\" and styles.content.display=\"block\": Mantine's default display:table content wrapper grows to its widest non-shrinking child, which let one nowrap row widen the whole scroll column past 390px"
+        "the transcript ScrollArea sets scrollbars=\"y\" and styles.content.display=\"block\": Mantine's default display:table content wrapper grows to its widest non-shrinking child, which let one nowrap row widen the whole scroll column past 390px",
+        "the desktop-update pill (UpdateBanner) is hidden on a phone; its only action is the macOS download link"
       ],
       "architecturalRules": [
         "adapt in place, never fork a mobile shell: a second transcript renderer either is the same code or drifts and re-loses the batching, windowing and referential-stability work",

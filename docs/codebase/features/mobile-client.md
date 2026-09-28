@@ -29,10 +29,12 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
 - `web/src/index.css` — `--lines-viewport`/`--lines-keyboard`, and the `@media` block:
   `env(safe-area-inset-bottom)`, the 16px input floor, and touch target floors
 - `web/src/components/BestOnDesktop.tsx` — the shared deferral panel
+- `web/src/components/UpdateBanner.tsx` — hidden on a phone (`useIsPhone`); its only action is the
+  desktop download link
 - `web/public/manifest.webmanifest`, `web/public/icon-*.png` — installability
 - Adapted surfaces: `Composer`, `PermissionPrompt`, `SessionView`, `Sidebar`, `Transcript`,
   `ContextWindowIndicator`, `UsageIndicator`, `ProjectTabs`, `ProjectPicker`, `SettingsModal`,
-  `ConnectionBanner`
+  `ConnectionBanner`, `UpdateBanner`
 - `web/src/lib/permissionModes.tsx` — `SEGMENT_MODES`, exported for the phone mode `Menu`
 
 ## Symbols
@@ -68,6 +70,9 @@ an iPad in landscape is neither.
 ## Business rules
 
 - Phone breakpoint is Mantine's default `sm` (48em/768px). No custom breakpoints were added.
+- The desktop-update pill (`UpdateBanner`) is hidden on a phone. Its only action is a link to the
+  macOS download page, which a phone cannot install; showing it there was pure noise stealing
+  header space.
 - No full-height surface uses `100vh`. On a phone `vh` is the *large* viewport — measured as if
   the browser's toolbars were hidden — so a `100vh` shell puts its bottom row, which here is the
   composer, underneath Safari's toolbar. Mantine's own `AppShell` already uses `dvh`, so anything
