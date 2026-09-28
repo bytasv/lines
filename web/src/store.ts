@@ -100,8 +100,10 @@ const LAST_SESSION_BY_PROJECT_KEY = 'lines.lastSessionByProject';
 const COMPACTION_LEVEL_KEY = 'lines.compactionLevel';
 const TURN_SUMMARIES_ENABLED_KEY = 'lines.turnSummariesEnabled';
 const AUTO_CONTINUE_KEY = 'lines.autoContinueInterrupted';
+const PLAN_REJECT_WRITES_KEY = 'lines.planModeRejectWrites';
 const COMPRESS_RESPONSES_KEY = 'lines.compressResponses';
 const PLAN_REASONING_EFFORT_KEY = 'lines.planReasoningEffort';
+const SMART_ROUTING_KEY = 'lines.smartRouting';
 const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
 const VOICE_LANGUAGE_KEY = 'lines.voiceLanguage';
 const VOICE_TRANSLATE_KEY = 'lines.voiceTranslate';
@@ -154,6 +156,11 @@ function loadTurnSummariesEnabled(): boolean {
 /** On unless explicitly turned off, matching the bridge-side default. */
 function loadAutoContinueInterrupted(): boolean {
   return localStorage.getItem(AUTO_CONTINUE_KEY) !== 'false';
+}
+
+/** Off unless explicitly turned on, matching the bridge-side default. */
+function loadPlanModeRejectWrites(): boolean {
+  return localStorage.getItem(PLAN_REJECT_WRITES_KEY) === 'true';
 }
 
 /** On unless explicitly turned off, matching the bridge-side default. */
@@ -420,6 +427,16 @@ function loadNewSessionDefaults(): NewSessionDefaults {
 function loadPlanReasoningEffort(): ReasoningEffort | undefined {
   const raw = localStorage.getItem(PLAN_REASONING_EFFORT_KEY);
   return isReasoningEffort(raw) ? raw : undefined;
+}
+
+function loadSmartRouting(): UserUiSettings['smartRouting'] {
+  try {
+    const raw = localStorage.getItem(SMART_ROUTING_KEY);
+    const parsed = raw ? (JSON.parse(raw) as UserUiSettings['smartRouting']) : undefined;
+    return parsed && typeof parsed === 'object' && parsed.mode ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Selected session from the current URL, so a reload keeps its route. */
@@ -777,6 +794,9 @@ interface UiState {
    *  first hello, on a bridge too old to send it, and on a guest connection.
    *  Shown in Settings -> Updates. Never carries the binary's path. */
   claudeCli: ClaudeCliStatus | null;
+  /** Whether the primary bridge has a TypeSafe key for smart routing; null
+   *  until the first hello and on a bridge too old to say. */
+  smartRoutingAvailable: boolean | null;
   /** The Codex CLI on that same machine, on the same terms as `claudeCli`: an
    *  OpenAI model cannot run a turn without it, so the picker and the Updates
    *  pane both read this rather than waiting for a turn to fail. */
@@ -878,6 +898,8 @@ interface UiState {
   turnSummariesEnabled: boolean;
   /** Let the bridge resume a turn that died with the app, instead of waiting for the Continue banner. */
   autoContinueInterrupted: boolean;
+  /** In plan mode, deny non-read calls instead of raising a card. Global. */
+  planModeRejectWrites: boolean;
   /** Append the response-compression ruleset to every session's system prompt. Global. */
   compressResponses: boolean;
   /** Dictation language: `auto` or an ISO 639-1 code. Synced with the settings. */
@@ -887,6 +909,8 @@ interface UiState {
   /** Effort every session's plan-mode turns run at. Global, like codex's own
    *  `plan_mode_reasoning_effort`. Undefined = the session's own effort. */
   planReasoningEffort?: ReasoningEffort;
+  /** Per-turn model/effort routing through JEV. Global, synced with the settings. */
+  smartRouting?: UserUiSettings['smartRouting'];
   /** Open editor tabs per project path; persisted in localStorage. */
   openFiles: Record<string, OpenFilesState>;
 
@@ -987,11 +1011,13 @@ interface UiState {
   setCompactionLevel: (level: CompactionLevel) => void;
   setTurnSummariesEnabled: (on: boolean) => void;
   setAutoContinueInterrupted: (on: boolean) => void;
+  setPlanModeRejectWrites: (on: boolean) => void;
   setCompressResponses: (on: boolean) => void;
   setVoiceLanguage: (code: string) => void;
   setVoiceTranslate: (on: boolean) => void;
   /** `null` clears it back to per-session effort. */
   setPlanReasoningEffort: (effort: ReasoningEffort | null) => void;
+  setSmartRouting: (routing: UserUiSettings['smartRouting']) => void;
   setHideIgnored: (on: boolean) => void;
   openFileTab: (path: string) => void;
   closeFileTab: (path: string) => void;
@@ -1014,10 +1040,12 @@ export const useStore = create<UiState>((set, get) => {
         compactionLevel: s.compactionLevel,
         turnSummariesEnabled: s.turnSummariesEnabled,
         autoContinueInterrupted: s.autoContinueInterrupted,
+        planModeRejectWrites: s.planModeRejectWrites,
         compressResponses: s.compressResponses,
         voiceLanguage: s.voiceLanguage,
         voiceTranslate: s.voiceTranslate,
         planReasoningEffort: s.planReasoningEffort,
+        smartRouting: s.smartRouting,
         alertsEnabled: s.alertsEnabled,
         alertSound: s.alertSound,
         dismissedCheckouts: s.dismissedCheckouts,
@@ -1120,10 +1148,12 @@ export const useStore = create<UiState>((set, get) => {
       compactionLevel: s.compactionLevel ?? state.compactionLevel,
       turnSummariesEnabled: s.turnSummariesEnabled ?? state.turnSummariesEnabled,
       autoContinueInterrupted: s.autoContinueInterrupted ?? state.autoContinueInterrupted,
+      planModeRejectWrites: s.planModeRejectWrites ?? state.planModeRejectWrites,
       compressResponses: s.compressResponses ?? state.compressResponses,
       voiceLanguage: s.voiceLanguage ?? state.voiceLanguage,
       voiceTranslate: s.voiceTranslate ?? state.voiceTranslate,
       planReasoningEffort: s.planReasoningEffort ?? state.planReasoningEffort,
+      smartRouting: s.smartRouting ?? state.smartRouting,
       alertsEnabled: s.alertsEnabled ?? state.alertsEnabled,
       alertSound: (s.alertSound as AlertSound | undefined) ?? state.alertSound,
       dismissedCheckouts: s.dismissedCheckouts ?? state.dismissedCheckouts,
@@ -1134,10 +1164,12 @@ export const useStore = create<UiState>((set, get) => {
     if (s.compactionLevel) localStorage.setItem(COMPACTION_LEVEL_KEY, s.compactionLevel);
     if (s.turnSummariesEnabled != null) localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(s.turnSummariesEnabled));
     if (s.autoContinueInterrupted != null) localStorage.setItem(AUTO_CONTINUE_KEY, String(s.autoContinueInterrupted));
+    if (s.planModeRejectWrites != null) localStorage.setItem(PLAN_REJECT_WRITES_KEY, String(s.planModeRejectWrites));
     if (s.compressResponses != null) localStorage.setItem(COMPRESS_RESPONSES_KEY, String(s.compressResponses));
     if (s.voiceLanguage) localStorage.setItem(VOICE_LANGUAGE_KEY, s.voiceLanguage);
     if (s.voiceTranslate != null) localStorage.setItem(VOICE_TRANSLATE_KEY, String(s.voiceTranslate));
     if (s.planReasoningEffort) localStorage.setItem(PLAN_REASONING_EFFORT_KEY, s.planReasoningEffort);
+    if (s.smartRouting) localStorage.setItem(SMART_ROUTING_KEY, JSON.stringify(s.smartRouting));
     if (s.alertsEnabled != null) persistAlertsEnabled(s.alertsEnabled);
     if (s.alertSound) persistAlertSound(s.alertSound as AlertSound);
     if (s.dismissedCheckouts) {
@@ -1202,6 +1234,7 @@ export const useStore = create<UiState>((set, get) => {
   updateStatus: null,
   bridge: null,
   claudeCli: null,
+  smartRoutingAvailable: null,
   codexCli: null,
   whisper: null,
   whisperModelDownload: null,
@@ -1233,10 +1266,12 @@ export const useStore = create<UiState>((set, get) => {
   compactionLevel: loadCompactionLevel(),
   turnSummariesEnabled: loadTurnSummariesEnabled(),
   autoContinueInterrupted: loadAutoContinueInterrupted(),
+  planModeRejectWrites: loadPlanModeRejectWrites(),
   compressResponses: loadCompressResponses(),
   voiceLanguage: loadVoiceLanguage(),
   voiceTranslate: localStorage.getItem(VOICE_TRANSLATE_KEY) === 'true',
   planReasoningEffort: loadPlanReasoningEffort(),
+  smartRouting: loadSmartRouting(),
   openFiles: loadOpenFiles(),
 
   setConnectionStatus: (status, deviceId) =>
@@ -1481,6 +1516,12 @@ export const useStore = create<UiState>((set, get) => {
     pushSettings();
   },
 
+  setPlanModeRejectWrites: (on) => {
+    localStorage.setItem(PLAN_REJECT_WRITES_KEY, String(on));
+    set({ planModeRejectWrites: on });
+    pushSettings();
+  },
+
   setVoiceLanguage: (code) => {
     localStorage.setItem(VOICE_LANGUAGE_KEY, code);
     set({ voiceLanguage: code });
@@ -1503,6 +1544,13 @@ export const useStore = create<UiState>((set, get) => {
     if (effort) localStorage.setItem(PLAN_REASONING_EFFORT_KEY, effort);
     else localStorage.removeItem(PLAN_REASONING_EFFORT_KEY);
     set({ planReasoningEffort: effort ?? undefined });
+    pushSettings();
+  },
+
+  setSmartRouting: (routing) => {
+    if (routing) localStorage.setItem(SMART_ROUTING_KEY, JSON.stringify(routing));
+    else localStorage.removeItem(SMART_ROUTING_KEY);
+    set({ smartRouting: routing });
     pushSettings();
   },
 
@@ -1748,6 +1796,7 @@ export const useStore = create<UiState>((set, get) => {
           // `hello` never carries it, so an ungated read would blank the pane
           // the moment a second machine says hello.
           claudeCli: fromPrimary ? msg.claudeCli ?? null : state.claudeCli,
+          smartRoutingAvailable: fromPrimary ? msg.smartRoutingAvailable ?? null : state.smartRoutingAvailable,
           codexCli: fromPrimary ? msg.codexCli ?? null : state.codexCli,
           whisper: fromPrimary ? msg.whisper ?? null : state.whisper,
           whisperModelDownload: fromPrimary ? msg.whisperModelDownload ?? null : state.whisperModelDownload,

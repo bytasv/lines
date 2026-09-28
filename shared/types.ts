@@ -382,6 +382,46 @@ export function isReasoningEffort(value: unknown): value is ReasoningEffort {
   return typeof value === 'string' && (REASONING_EFFORTS as readonly string[]).includes(value);
 }
 
+/**
+ * Smart turn routing (see server/src/turnRouting.ts): before a turn starts, the
+ * bridge may ask TypeSafe's JEV classifier which of an allowed set of models and
+ * efforts the turn should run on. `off` never calls it; `auto` applies a
+ * confident pick silently; `ask` holds the turn until the user accepts or
+ * declines the suggestion.
+ */
+export type RoutingMode = 'off' | 'auto' | 'ask';
+
+export const ROUTING_MODES: readonly RoutingMode[] = ['off', 'auto', 'ask'];
+
+/** Confidence below which a routing pick is ignored, when a rule sets none. */
+export const DEFAULT_ROUTING_MIN_CONFIDENCE = 0.7;
+
+/**
+ * What a turn may be routed to, and the plain-language rule for choosing. Every
+ * model belongs to one provider — routing never crosses providers, so it can
+ * never hit `setModel`'s cross-provider refusal.
+ */
+export interface RoutingRule {
+  /** e.g. "max effort for architecture/debugging questions or after a failed turn; low for small edits". */
+  rule: string;
+  /** Allowed model ids, all on one provider. */
+  models: string[];
+  /** Allowed efforts, a subset of the provider's own levels. */
+  efforts: ReasoningEffort[];
+  /** 0-1; a pick whose confidence is below this is ignored. Default 0.7. */
+  minConfidence?: number;
+}
+
+/** One routing decision the bridge made (or suggested) for a turn. */
+export interface RoutingPick {
+  model: string;
+  /** Absent = the provider's default effort (the session had none and the pick left it). */
+  effort?: ReasoningEffort;
+  /** Lowest confidence of the parts that changed. */
+  confidence: number;
+  at: number;
+}
+
 export type SessionStatus =
   | 'idle'
   | 'running'
@@ -544,6 +584,12 @@ export interface StepContent {
    * *clears* the session's effort rather than inheriting the previous step's.
    */
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Smart-routing rule for this step's turns. Overrides the user's global rule
+   * while the step runs; absent = the global rule (if routing is on) applies.
+   * `reasoningEffort`/`model` above stay the baseline the step starts on.
+   */
+  routing?: RoutingRule;
   autoAdvance: boolean;
   /**
    * When true, the step runs in a fresh Claude CLI session instead of inheriting
@@ -1014,6 +1060,16 @@ export interface SessionMeta {
    * rebuilds it with the new value.
    */
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Ask-mode routing: the pick waiting on the user while the turn is held in
+   * bridge memory. Cleared when answered, interrupted, or at bridge boot.
+   */
+  routingSuggestion?: RoutingPick;
+  /** The last routing change actually applied, for the composer's badge. */
+  lastRouting?: RoutingPick;
+  /** Set by a manual model/effort change; routing skips this session until
+   *  resumed from the composer or the next workflow step starts. */
+  routingPaused?: boolean;
   permissionMode: PermissionMode;
   status: SessionStatus;
   createdAt: number;
@@ -1266,6 +1322,7 @@ export type PermissionResolutionSource =
   | 'user'
   | 'plan-reply'
   | 'auto'
+  | 'plan-readonly'
   | 'recovery'
   | 'workflow-advance'
   | 'interrupt-expire'
@@ -1334,6 +1391,13 @@ export interface PermissionRequestData {
  */
 export const KEEP_PLANNING_MESSAGE =
   'The user is not ready to proceed — stay in plan mode and refine the plan based on their next message.';
+
+/**
+ * Deny reason for a plan-mode call rejected by `planModeRejectWrites` instead of
+ * raising a card. Worded so the model keeps researching rather than stopping.
+ */
+export const PLAN_MODE_REJECT_MESSAGE =
+  'Plan mode is read-only, so this call was rejected automatically because it may change files or state. Continue with read-only tools, and put this change in the plan instead.';
 
 /**
  * One note the user attached to a passage of the plan while reviewing it.
@@ -1969,6 +2033,10 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // how hard it thinks. A cap here would have to be re-granted across every preset
   // and carry denial copy nobody would reason about.
   setReasoningEffort: { needs: 'session', cap: 'setModel' },
+  // Answering a routing suggestion changes the model and effort, so it rides the
+  // same capability as setModel; pausing routing is the same choice made ahead.
+  routingChoice: { needs: 'session', cap: 'setModel' },
+  setRoutingPaused: { needs: 'session', cap: 'setModel' },
   // No preset grants this: permission mode is the guard around everything else.
   setPermissionMode: { needs: 'session', cap: 'setPermissionMode' },
 
@@ -2192,6 +2260,11 @@ export type ClientMessage =
    *  a session thinks is strictly weaker than choosing what it runs on. */
   | { type: 'setReasoningEffort'; sessionId: string; effort: ReasoningEffort | null }
   | { type: 'setPermissionMode'; sessionId: string; mode: PermissionMode }
+  /** Ask-mode routing answer for the held turn: `accept` switches to the
+   *  suggestion first, otherwise the turn is sent on its current settings. */
+  | { type: 'routingChoice'; sessionId: string; accept: boolean }
+  /** Pause (`true`) or resume (`false`) smart routing for one session. */
+  | { type: 'setRoutingPaused'; sessionId: string; paused: boolean }
   | {
       type: 'permissionResponse';
       sessionId: string;
@@ -2508,6 +2581,9 @@ export interface UserUiSettings {
    * unattended turns.
    */
   autoContinueInterrupted?: boolean;
+  /** In plan mode, deny any call not auto-approved as a read instead of asking.
+   *  Off unless explicitly `true`. Global, read fresh on every call. */
+  planModeRejectWrites?: boolean;
   /** Append the response-compression ruleset to every session's system prompt.
    *  On unless explicitly `false` — absent means enabled. Global: sessions no
    *  longer carry their own toggle, so changing it applies the next time each
@@ -2523,6 +2599,15 @@ export interface UserUiSettings {
    * default. A value the session's provider does not offer is ignored.
    */
   planReasoningEffort?: ReasoningEffort;
+  /**
+   * Per-turn model/effort routing through JEV. Absent or `mode: 'off'` = never
+   * routed. One global rule per provider; a workflow step's own `routing`
+   * overrides it while that step runs.
+   */
+  smartRouting?: {
+    mode: RoutingMode;
+    rules: Partial<Record<ModelProvider, RoutingRule>>;
+  };
   alertsEnabled?: boolean;
   alertSound?: string;
   /**
@@ -3134,6 +3219,9 @@ export type ServerMessage =
        *  up. Owner only, like `update`. */
       whisperModelDownload?: WhisperModelDownload;
       settings?: UserUiSettings | null;
+      /** Whether this bridge has a TypeSafe key, so smart routing can run.
+       *  Owner only; absent from a bridge older than this field. */
+      smartRoutingAvailable?: boolean;
       guardAllowlist?: GuardAllowEntry[];
       guardAllowlistReview?: GuardAllowlistReview | null;
       /** Staged agent-memory writes, read from persisted state like the guard's
@@ -3790,6 +3878,7 @@ export {
   MAX_WORKFLOW_NAME_LEN,
   OUTPUT_NAME_HINT,
   OUTPUT_NAME_RE,
+  validateRoutingRule,
   validateStepContent,
   validateWorkflow,
   type StepForValidation,

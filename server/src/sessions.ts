@@ -34,6 +34,7 @@ import type {
   ProviderSwitchData,
   ReasoningEffort,
   ResultSpendPayload,
+  RoutingRule,
   RewindBlockInfo,
   RewindPrompt,
   SdkShapedMessage,
@@ -59,6 +60,7 @@ import {
   isSessionInterruptible,
   KEEP_PLANNING_MESSAGE,
   keepPlanningReason,
+  PLAN_MODE_REJECT_MESSAGE,
   normalizeCodexNotification,
   planCommentsBody,
   providerForModel,
@@ -72,6 +74,8 @@ import {
   subagentParentId,
 } from '@lines/shared';
 import { LINES_MCP_SERVER } from './mcpWorkflowTools.ts';
+import { decideTurn } from './jev.ts';
+import { acceptPick, resolveRule } from './turnRouting.ts';
 import { linesMcpServerConfig } from './linesMcpStdio.ts';
 import { mergeMcpServers } from './workerProtocol.ts';
 import type { Store } from './store.ts';
@@ -93,6 +97,7 @@ import {
   allowEntryFor,
   assessToolCall,
   isPlanPath,
+  isSafePlanModeRead,
   isSafePlanWrite,
   isSafeReadOnly,
   type GuardAllowlist,
@@ -1156,6 +1161,22 @@ interface LiveState {
  */
 export type RewindListener = (sessionId: string) => boolean;
 
+/**
+ * The routing rule a workflow step carries for its session, if it is running a
+ * step that has one — registered by WorkflowEngine so this manager learns nothing
+ * else about workflows (same injection style as TurnCompleteListener).
+ */
+export type StepRoutingProvider = (
+  sessionId: string,
+) => { rule?: RoutingRule; stepName?: string } | undefined;
+
+/** What pushTurn needs to route a turn that opens here (see prompt). */
+interface TurnRouteHint {
+  source: 'user' | 'workflow';
+  lastTurnFailed: boolean;
+  retryWithFeedback: boolean;
+}
+
 export type TurnCompleteListener = (
   sessionId: string,
   source: 'user' | 'workflow',
@@ -1260,6 +1281,18 @@ export class SessionManager {
    */
   private authHolds = new Map<string, number>();
   private onTurnComplete: TurnCompleteListener | null = null;
+  private stepRoutingFor: StepRoutingProvider | null = null;
+  /**
+   * Ask-mode routing: the SDK-shaped message of a turn held until the user
+   * answers `routingChoice`. Bridge memory only — a restart loses it, and
+   * reconcile then demotes the orphaned `running` turn the usual way.
+   */
+  private heldTurns = new Map<string, Record<string, unknown>>();
+  /** Sessions whose next turn is a retry (Retry button, or a step retried with
+   *  feedback) — one routing signal, consumed by the push. */
+  private retryHints = new Set<string>();
+  /** The JEV call, a field so tests can stand in for it. */
+  decideTurn: typeof decideTurn = decideTurn;
   private onRewind: RewindListener | null = null;
   private worker!: WorkerClient;
   /** In-flight `/context` fetches, so a hover during the post-turn refresh reuses
@@ -1367,6 +1400,10 @@ export class SessionManager {
 
   setTurnCompleteListener(fn: TurnCompleteListener) {
     this.onTurnComplete = fn;
+  }
+
+  setStepRoutingProvider(fn: StepRoutingProvider) {
+    this.stepRoutingFor = fn;
   }
 
   setRewindListener(fn: RewindListener) {
@@ -2187,8 +2224,19 @@ export class SessionManager {
   private async pushTurn(
     meta: SessionMeta,
     message: Record<string, unknown>,
-    opts: { intoLiveTurn?: boolean } = {},
+    opts: { intoLiveTurn?: boolean; route?: TurnRouteHint } = {},
   ) {
+    // Smart routing, before either engine's push: an interjection joins a turn
+    // already running and is never routed. Resolved synchronously, so a session
+    // with no rule reaches the push exactly as before — no await in between.
+    if (opts.route && !opts.intoLiveTurn) {
+      const rule = this.routingRuleFor(meta);
+      if (rule) {
+        const outcome = await this.routeTurn(meta, message, rule.rule, opts.route, rule.stepName);
+        if (outcome !== 'push') return;
+      }
+    }
+
     // Engine first, before anything reads the Claude token. A codex session has no
     // Claude credential, no CLI and no in-process tools — running it through the
     // checks below would refuse every turn on `claudeCliRefusalMessage()` and then
@@ -2281,12 +2329,130 @@ export class SessionManager {
     );
   }
 
+  /** The routing rule for this session's next turn: a routed step's own rule,
+   *  else the global one for its provider (see turnRouting.resolveRule). */
+  private routingRuleFor(meta: SessionMeta): { rule: RoutingRule; stepName?: string } | undefined {
+    const step = meta.workflow ? this.stepRoutingFor?.(meta.id) : undefined;
+    const rule = resolveRule(meta, this.store.loadSettings(), step?.rule);
+    return rule ? { rule, stepName: step?.stepName } : undefined;
+  }
+
+  /**
+   * Ask JEV about one turn and act on the answer. `'push'` = carry on pushing
+   * (changed or not); `'held'` = ask mode parked it for `routingChoice`;
+   * `'dropped'` = the turn was stopped or superseded while JEV was answering.
+   *
+   * Runs before `pushWithToken`'s stale check, so an effort change made here
+   * recycles the Claude query on *this* push, once. Codex rebuilds its options
+   * per push and needs nothing extra.
+   */
+  private async routeTurn(
+    meta: SessionMeta,
+    message: Record<string, unknown>,
+    rule: RoutingRule,
+    hint: TurnRouteHint,
+    stepName?: string,
+  ): Promise<'push' | 'held' | 'dropped'> {
+    const startedAt = meta.turnStartedAt;
+    const pick = await this.decideTurn({
+      rule,
+      prompt: promptTextOf(message),
+      currentModel: meta.model,
+      currentEffort: meta.reasoningEffort,
+      source: hint.source,
+      lastTurnFailed: hint.lastTurnFailed,
+      retryWithFeedback: hint.retryWithFeedback,
+      stepName,
+    });
+    const now = this.sessions.get(meta.id);
+    // A Stop (or a newer turn) landed while JEV was answering: this turn is
+    // not the session's any more.
+    if (!now || now !== meta || now.turnStartedAt !== startedAt) return 'dropped';
+    const change = acceptPick(pick, rule, { model: meta.model, effort: meta.reasoningEffort });
+    if (!change) return 'push';
+    const routed = {
+      model: change.model ?? meta.model,
+      effort: change.effort ?? meta.reasoningEffort,
+      confidence: change.confidence,
+      at: Date.now(),
+    };
+    if (this.store.loadSettings()?.smartRouting?.mode === 'ask') {
+      this.heldTurns.set(meta.id, message);
+      meta.routingSuggestion = routed;
+      this.upsert(meta);
+      return 'held';
+    }
+    this.applyRouting(meta, routed);
+    return 'push';
+  }
+
+  /** Move the session onto a routed model/effort. Deliberately not a manual
+   *  change: routingPaused is only ever set from the client-message path. */
+  private applyRouting(meta: SessionMeta, routed: NonNullable<SessionMeta['lastRouting']>) {
+    if (routed.model !== meta.model) {
+      const res = this.setModel(meta.id, routed.model);
+      if (!res.ok) {
+        console.warn(`[routing] [session ${meta.id}] model change refused: ${res.reason}`);
+        routed = { ...routed, model: meta.model };
+      }
+    }
+    if (routed.effort !== meta.reasoningEffort) this.setReasoningEffort(meta.id, routed.effort ?? null);
+    meta.lastRouting = routed;
+    this.upsert(meta);
+  }
+
+  /**
+   * The user's answer to an ask-mode suggestion: switch to it first, or not, then
+   * send the held turn. The push goes through pushTurn again — without routing —
+   * so the CLI check and the token refresh run fresh, which a long hold needs.
+   */
+  routingChoice(sessionId: string, accept: boolean) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    const held = this.heldTurns.get(sessionId);
+    const suggestion = meta.routingSuggestion;
+    meta.routingSuggestion = undefined;
+    if (!held) {
+      this.upsert(meta);
+      return;
+    }
+    this.heldTurns.delete(sessionId);
+    if (accept && suggestion) this.applyRouting(meta, { ...suggestion, at: Date.now() });
+    else this.upsert(meta);
+    this.pushTurnSafely(meta, held);
+  }
+
+  /** Pause or resume routing for one session (the composer's badge). */
+  setRoutingPaused(sessionId: string, paused: boolean) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta || (meta.routingPaused ?? false) === paused) return;
+    meta.routingPaused = paused || undefined;
+    this.upsert(meta);
+  }
+
+  /**
+   * A person changed this session's model or effort by hand: stop routing from
+   * overriding them. Only when routing is on at all — otherwise there is nothing
+   * to pause. Called from the client-message path only, never from routing or
+   * WorkflowEngine.runStep.
+   */
+  pauseRoutingForManualChange(sessionId: string) {
+    const mode = this.store.loadSettings()?.smartRouting?.mode;
+    if (!mode || mode === 'off') return;
+    this.setRoutingPaused(sessionId, true);
+  }
+
+  /** Mark the next turn as a retry, for routing's signals. */
+  markRetry(sessionId: string) {
+    this.retryHints.add(sessionId);
+  }
+
   /** pushTurn is fire-and-forget, so a throw past its own handling must not
    *  become an unhandled rejection. */
   private pushTurnSafely(
     meta: SessionMeta,
     message: Record<string, unknown>,
-    opts: { intoLiveTurn?: boolean } = {},
+    opts: { intoLiveTurn?: boolean; route?: TurnRouteHint } = {},
   ) {
     void this.pushTurn(meta, message, opts).catch((err) => {
       console.error(`[session ${meta.id}] push failed:`, err);
@@ -3138,6 +3304,7 @@ export class SessionManager {
     if (!meta || this.isBusy(meta)) return;
     const last = this.lastPromptForRetry(sessionId);
     if (!last) return;
+    this.markRetry(sessionId);
     this.prompt(sessionId, last.text, last.source, last.attachments);
   }
 
@@ -3491,6 +3658,9 @@ export class SessionManager {
   ) {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`unknown session ${sessionId}`);
+    // Read before setStatus('running') below overwrites it: a routing signal.
+    const lastTurnFailed = meta.status === 'error';
+    const retryWithFeedback = this.retryHints.delete(sessionId);
 
     // Sending a message reactivates an archived/completed session.
     if (meta.archived) {
@@ -3544,7 +3714,11 @@ export class SessionManager {
     this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
     const content = this.promptContent(text, attachments);
-    this.pushTurnSafely(meta, { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
+    this.pushTurnSafely(
+      meta,
+      { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null },
+      { route: { source, lastTurnFailed, retryWithFeedback } },
+    );
   }
 
   /**
@@ -4135,6 +4309,10 @@ export class SessionManager {
    */
   interrupt(sessionId: string) {
     const meta = this.sessions.get(sessionId);
+    if (meta && this.heldTurns.has(sessionId)) {
+      this.dropHeldTurn(meta);
+      return;
+    }
     this.interrupting.add(sessionId);
     // Stop means stop: a turn being re-driven under the covers is still a turn.
     this.cancelRecovery(sessionId);
@@ -4152,6 +4330,23 @@ export class SessionManager {
     // would drop the park and leave the step with no way to be approved.
     if (reparked) this.persistMeta(sessionId);
     else this.setStatus(sessionId, 'idle');
+  }
+
+  /**
+   * Stop a turn parked on an ask-mode suggestion. Nothing reached the worker, so
+   * no `result` or `ended` will come: settle it here through failTurn, whose
+   * Retry re-sends the prompt, and tell the listener so a workflow step parks
+   * rather than dangling at 'running'.
+   */
+  private dropHeldTurn(meta: SessionMeta) {
+    this.heldTurns.delete(meta.id);
+    meta.routingSuggestion = undefined;
+    if (meta.queued?.length) meta.queuePaused = true;
+    meta.turnStartedAt = undefined;
+    const source = meta.turnSource;
+    meta.turnSource = undefined;
+    this.failTurn(meta.id, 'Stopped before the turn was sent.');
+    if (source) this.onTurnComplete?.(meta.id, source, true, true);
   }
 
   /**
@@ -4958,8 +5153,15 @@ export class SessionManager {
           })),
         );
       }
+      // A suggestion whose held turn this process no longer has (a bridge
+      // restart) can never be answered.
+      if (meta.routingSuggestion && !this.heldTurns.has(meta.id)) {
+        meta.routingSuggestion = undefined;
+        changed = true;
+      }
       // `busy: undefined` = a worker too old to report it; demote-only, as before.
-      const noTurn = !info || info.busy === false;
+      // A turn held for a routing answer has no query by design.
+      const noTurn = (!info || info.busy === false) && !this.heldTurns.has(meta.id);
       // A turn being re-driven transparently deliberately has no query for the
       // length of the recovery, so a `hello` landing in that window is not evidence
       // the turn died — demoting it here would stamp a Continue banner and possibly
@@ -6087,6 +6289,62 @@ export class SessionManager {
   }
 
   /**
+   * Record a plan-mode call the bridge rejected on its own (planModeRejectWrites).
+   * The deny twin of recordAutoAllow, and skipped on a resend for the same reason.
+   */
+  private recordAutoDeny(
+    sessionId: string,
+    toolName: string,
+    input: Record<string, unknown>,
+    resend: boolean,
+    message: string,
+  ) {
+    if (resend) return;
+    this.emitEvent(sessionId, 'permission', {
+      requestId: randomUUID(),
+      toolName,
+      input,
+      resolution: 'deny',
+      auto: true,
+      resolvedBy: 'plan-readonly',
+      denyMessage: message,
+    } satisfies PermissionRequestData);
+  }
+
+  /**
+   * Plan mode auto-approves every observation, read-only Bash included. Not for
+   * codex: its plan mode is a read-only sandbox already, so whatever reaches the
+   * permission handlers is an escalation and stays the user's call.
+   */
+  private isPlanModeRead(
+    meta: SessionMeta,
+    toolName: string,
+    input: Record<string, unknown>,
+    roots: string[],
+  ): boolean {
+    return (
+      meta.permissionMode === 'plan' &&
+      !isCodexSession(meta) &&
+      isSafePlanModeRead(toolName, input, roots, this.guard.list())
+    );
+  }
+
+  /**
+   * True when a plan-mode call that wasn't auto-approved should be denied instead
+   * of asked. EnterPlanMode is exempt: the hook has just mirrored it into
+   * meta.permissionMode, and denying it would leave the meta in plan mode while
+   * the CLI never entered it.
+   */
+  private rejectsPlanModeWrite(meta: SessionMeta | undefined, toolName: string): boolean {
+    return (
+      meta?.permissionMode === 'plan' &&
+      !ALWAYS_ASK_TOOLS.has(toolName) &&
+      toolName !== 'EnterPlanMode' &&
+      this.store.loadSettings()?.planModeRejectWrites === true
+    );
+  }
+
+  /**
    * PreToolUse hook body. The auto-mode guard lives here, NOT only in
    * canUseTool: allow rules from user settings resolve before canUseTool,
    * but hooks run before the whole permission flow — so this is the only
@@ -6189,7 +6447,8 @@ export class SessionManager {
     } else if (
       meta &&
       (isSafeReadOnly(toolName, toolInput, roots, this.guard.list()) ||
-        isSafePlanWrite(toolName, toolInput, roots))
+        isSafePlanWrite(toolName, toolInput, roots) ||
+        this.isPlanModeRead(meta, toolName, toolInput, roots))
     ) {
       // Outside auto mode every call reaches the user, including plain reads —
       // so an approved plan re-prompts on each Read/Grep. Let observation-only
@@ -6201,6 +6460,20 @@ export class SessionManager {
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
           permissionDecision: 'allow',
+        },
+      };
+    }
+    // Here, not only in canUseTool: a settings.json permissions.allow entry
+    // (`Bash(npm:*)`) resolves before canUseTool runs and would slip a write
+    // past the setting.
+    if (this.rejectsPlanModeWrite(meta, toolName)) {
+      this.recordAutoDeny(sessionId, toolName, toolInput, resend, PLAN_MODE_REJECT_MESSAGE);
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: PLAN_MODE_REJECT_MESSAGE,
         },
       };
     }
@@ -6283,13 +6556,22 @@ export class SessionManager {
       } else if (
         meta &&
         (isSafeReadOnly(toolName, input, roots, this.guard.list()) ||
-          isSafePlanWrite(toolName, input, roots))
+          isSafePlanWrite(toolName, input, roots) ||
+          this.isPlanModeRead(meta, toolName, input, roots))
       ) {
         // Other modes: observation-only calls and plan-file writes still
         // auto-approve (see handlePreToolUse) so post-plan reads don't ask again.
         this.recordAutoAllow(sessionId, toolName, input, resend);
         return { behavior: 'allow', updatedInput: input };
       }
+    }
+
+    // Fail-closed backstop for the hook's plan-mode rejection, like the bypass
+    // branch above. After the Lines-MCP read allow, so Lines writes (save_step)
+    // are rejected too: plan mode shouldn't change a workflow.
+    if (this.rejectsPlanModeWrite(this.sessions.get(sessionId), toolName)) {
+      this.recordAutoDeny(sessionId, toolName, input, resend, PLAN_MODE_REJECT_MESSAGE);
+      return { behavior: 'deny', message: PLAN_MODE_REJECT_MESSAGE };
     }
 
     // On a resend whose card is already in the transcript (unanswered), don't

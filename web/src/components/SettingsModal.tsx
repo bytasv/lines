@@ -20,8 +20,9 @@ import {
 } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import { IconAlertCircle, IconCopy, IconPlayerPlay } from '@tabler/icons-react';
-import type { PermissionMode, ReasoningEffort, SyncLogEntry } from '@lines/shared';
-import { capabilitiesForModel, providerForModel, REASONING_EFFORTS } from '@lines/shared';
+import type { ModelProvider, PermissionMode, ReasoningEffort, RoutingMode, RoutingRule, SyncLogEntry } from '@lines/shared';
+import { capabilitiesForModel, providerForModel, REASONING_EFFORTS, validateRoutingRule } from '@lines/shared';
+import { emptyRoutingRule, RoutingRuleFields } from './RoutingRuleFields';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
 import { GuardAllowlistSection } from './GuardAllowlistSection';
@@ -355,6 +356,8 @@ function SessionsSection({ onOpenUpdates }: { onOpenUpdates: () => void }) {
   const setCompressResponses = useStore((s) => s.setCompressResponses);
   const planReasoningEffort = useStore((s) => s.planReasoningEffort);
   const setPlanReasoningEffort = useStore((s) => s.setPlanReasoningEffort);
+  const planModeRejectWrites = useStore((s) => s.planModeRejectWrites);
+  const setPlanModeRejectWrites = useStore((s) => s.setPlanModeRejectWrites);
 
   return (
     <>
@@ -443,6 +446,13 @@ function SessionsSection({ onOpenUpdates }: { onOpenUpdates: () => void }) {
         }
         allowDeselect={false}
       />
+      <Switch
+        checked={planModeRejectWrites}
+        onChange={(e) => setPlanModeRejectWrites(e.currentTarget.checked)}
+        label="Auto-reject writes in plan mode"
+        description="Deny edits, non-read shell commands and other writes instead of asking. The agent keeps planning."
+      />
+      <SmartRoutingSettings />
       {/* Global, not a newSessionDefaults member — hence its own subgroup. */}
       <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
         Recovery
@@ -464,6 +474,115 @@ function SessionsSection({ onOpenUpdates }: { onOpenUpdates: () => void }) {
         description="Claude replies in a terse, compressed register — articles, filler and pleasantries dropped, technical detail kept — which cuts output tokens. Code, commits and security warnings stay in normal prose. Ruleset adapted from the MIT caveman project. Applies to every session; a change takes effect the next time a session starts a fresh turn."
       />
     </>
+  );
+}
+
+const ROUTING_MODE_SEGMENTS: { value: RoutingMode; label: string }[] = [
+  { value: 'off', label: 'Disabled' },
+  { value: 'auto', label: 'Enabled, auto' },
+  { value: 'ask', label: 'Enabled, ask' },
+];
+
+/**
+ * Smart routing: JEV may move each turn to another allowed model or effort.
+ * Global, one rule per connected provider. The mode applies at once; a rule is
+ * saved with its own button, because the bridge refuses an incomplete one and a
+ * save per keystroke would be refused until the last.
+ */
+function SmartRoutingSettings() {
+  const models = useStore((s) => s.models);
+  const openaiConnected = useStore((s) => s.openaiAuth?.loggedIn === true);
+  const available = useStore((s) => s.smartRoutingAvailable);
+  const routing = useStore((s) => s.smartRouting);
+  const setSmartRouting = useStore((s) => s.setSmartRouting);
+  const mode = routing?.mode ?? 'off';
+  const rules = routing?.rules ?? {};
+  const providers: ModelProvider[] = openaiConnected ? ['anthropic', 'openai'] : ['anthropic'];
+
+  return (
+    <>
+      <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
+        Smart routing
+      </Text>
+      <Text size="xs" c="dimmed">
+        Before each turn, TypeSafe's JEV picks a model and effort from the lists below, by your rule.
+        The turn's prompt text is sent to TypeSafe; the transcript is not. A manual model or effort
+        change pauses routing for that session.
+      </Text>
+      {available === false && (
+        <Alert color="yellow" icon={<IconAlertCircle size={16} />} p="xs">
+          No TypeSafe API key on this machine. Set TYPESAFE_API_KEY for the bridge; until then every
+          turn runs on its current settings.
+        </Alert>
+      )}
+      <SegmentedControl
+        size="xs"
+        data={ROUTING_MODE_SEGMENTS}
+        value={mode}
+        onChange={(v) => setSmartRouting({ mode: v as RoutingMode, rules })}
+      />
+      {mode !== 'off' &&
+        providers.map((provider) => (
+          <ProviderRoutingRule
+            key={provider}
+            provider={provider}
+            models={models}
+            saved={rules[provider]}
+            onSave={(rule) => {
+              const next = { ...rules };
+              if (rule) next[provider] = rule;
+              else delete next[provider];
+              setSmartRouting({ mode, rules: next });
+            }}
+          />
+        ))}
+    </>
+  );
+}
+
+function ProviderRoutingRule({
+  provider,
+  models,
+  saved,
+  onSave,
+}: {
+  provider: ModelProvider;
+  models: ReturnType<typeof useStore.getState>['models'];
+  saved: RoutingRule | undefined;
+  onSave: (rule: RoutingRule | null) => void;
+}) {
+  const [draft, setDraft] = useState<RoutingRule>(saved ?? emptyRoutingRule());
+  // Follow a save from another tab, unless this one is mid-edit.
+  const savedJson = JSON.stringify(saved ?? null);
+  const [lastSaved, setLastSaved] = useState(savedJson);
+  if (savedJson !== lastSaved) {
+    setLastSaved(savedJson);
+    setDraft(saved ?? emptyRoutingRule());
+  }
+  const issues = validateRoutingRule(draft, provider);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(saved ?? emptyRoutingRule());
+  return (
+    <Stack gap="xs">
+      <Text size="sm" fw={500}>
+        {provider === 'openai' ? 'OpenAI sessions' : 'Claude sessions'}
+      </Text>
+      <RoutingRuleFields provider={provider} models={models} value={draft} onChange={setDraft} />
+      {dirty && issues.length > 0 && (
+        <Text size="xs" c="red">
+          {issues[0]}
+        </Text>
+      )}
+      <Group gap="xs">
+        <Button size="xs" disabled={!dirty || issues.length > 0} onClick={() => onSave(draft)}>
+          Save rule
+        </Button>
+        {saved && (
+          <Button size="xs" variant="subtle" color="gray" onClick={() => onSave(null)}>
+            Remove rule
+          </Button>
+        )}
+      </Group>
+    </Stack>
   );
 }
 

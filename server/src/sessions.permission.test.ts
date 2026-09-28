@@ -11,10 +11,12 @@ import type {
   SessionMeta,
   SessionStatus,
   TranscriptEvent,
+  UserUiSettings,
   WorkflowState,
 } from '@lines/shared';
 import {
   KEEP_PLANNING_MESSAGE,
+  PLAN_MODE_REJECT_MESSAGE,
   PLAN_REPLY_MARKER,
   formatPlanComments,
   keepPlanningReason,
@@ -170,7 +172,12 @@ const cwd = '/tmp';
 
 /** A manager over a throwaway store with one session and a seeded transcript. */
 function harness(
-  opts: { mode?: PermissionMode; events?: TranscriptEvent[]; workflow?: WorkflowState } = {},
+  opts: {
+    mode?: PermissionMode;
+    events?: TranscriptEvent[];
+    workflow?: WorkflowState;
+    settings?: UserUiSettings;
+  } = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-provenance-'));
   fs.writeFileSync(
@@ -195,6 +202,7 @@ function harness(
       opts.events.map((e) => JSON.stringify(e)).join('\n') + '\n',
     );
   }
+  if (opts.settings) fs.writeFileSync(path.join(root, 'settings.json'), JSON.stringify(opts.settings));
   const store = createStore(root);
   const sessions = new SessionManager(store, new GuardAllowlist(store), () => {});
   const answered: unknown[] = [];
@@ -264,6 +272,15 @@ const canUseTool = (requestId: string, toolName: string, resend = false): Worker
   kind: 'canUseTool',
   resend,
   payload: { toolName, input: { command: 'ls' } },
+});
+
+/** A canUseTool rpc with an explicit input, for calls other than a bare `ls`. */
+const canUseToolWith = (requestId: string, toolName: string, input: Record<string, unknown>): WorkerRpc => ({
+  id: requestId,
+  sessionId: 's1',
+  kind: 'canUseTool',
+  resend: false,
+  payload: { toolName, input },
 });
 
 /** Let the fire-and-forget rpc chain settle (no timers involved). */
@@ -672,4 +689,139 @@ test('a model-initiated EnterPlanMode is mirrored into the session mode', async 
   });
 
   assert.equal(h.s1().permissionMode, 'plan', 'so a query restart keeps edits gated');
+});
+
+// ---------------------------------------------------------------------------
+// Plan mode: read-only auto-approve and the reject-writes setting
+// ---------------------------------------------------------------------------
+
+const readOnlyBash = { command: 'cd /tmp && ls | grep -i lines' };
+const projectEdit = { file_path: path.join(cwd, 'a.ts'), old_string: 'a', new_string: 'b' };
+const rejectWrites: UserUiSettings = { planModeRejectWrites: true };
+
+test('plan mode auto-approves read-only Bash without a card', async () => {
+  const h = harness({ mode: 'plan' });
+  await h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Bash', readOnlyBash));
+
+  assert.deepEqual(h.answered, [{ behavior: 'allow', updatedInput: readOnlyBash }]);
+  assert.deepEqual(
+    h.cards().map((c) => [c.resolution, c.resolvedBy]),
+    [['allow', 'auto']],
+  );
+  assert.notEqual(h.s1().status, 'waiting-permission');
+});
+
+test('plan mode still parks a writing Bash command', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Bash', { command: 'npm install x' }));
+  await settle();
+
+  assert.deepEqual(h.answered, []);
+  assert.equal(h.s1().status, 'waiting-permission');
+});
+
+test('plan mode still parks an edit of a project file', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Edit', projectEdit));
+  await settle();
+
+  assert.deepEqual(h.answered, []);
+  assert.equal(h.s1().status, 'waiting-permission');
+});
+
+test('plan mode still parks ExitPlanMode', async () => {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+
+  assert.deepEqual(h.answered, []);
+  assert.equal(h.s1().status, 'waiting-permission');
+});
+
+test('read-only Bash outside plan mode still parks', async () => {
+  const h = harness({ mode: 'default' });
+  void h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Bash', readOnlyBash));
+  await settle();
+
+  assert.deepEqual(h.answered, []);
+  assert.equal(h.s1().status, 'waiting-permission');
+});
+
+test('reject-writes denies a plan-mode edit without a card', async () => {
+  const h = harness({ mode: 'plan', settings: rejectWrites });
+  await h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Edit', projectEdit));
+
+  assert.deepEqual(h.answered, [{ behavior: 'deny', message: PLAN_MODE_REJECT_MESSAGE }]);
+  const cards = h.cards();
+  assert.deepEqual(
+    cards.map((c) => [c.resolution, c.resolvedBy, c.auto]),
+    [['deny', 'plan-readonly', true]],
+  );
+  assert.equal(cards[0].denyMessage, PLAN_MODE_REJECT_MESSAGE);
+  assert.notEqual(h.s1().status, 'waiting-permission');
+});
+
+test('reject-writes denies a writing Bash command but still allows a read', async () => {
+  const h = harness({ mode: 'plan', settings: rejectWrites });
+  await h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Bash', { command: 'npm install x' }));
+  await h.sessions.handleWorkerRpc(canUseToolWith('r2', 'Bash', readOnlyBash));
+
+  assert.deepEqual(h.answered, [
+    { behavior: 'deny', message: PLAN_MODE_REJECT_MESSAGE },
+    { behavior: 'allow', updatedInput: readOnlyBash },
+  ]);
+});
+
+test('reject-writes still parks the always-ask tools', async () => {
+  for (const tool of ['ExitPlanMode', 'AskUserQuestion']) {
+    const h = harness({ mode: 'plan', settings: rejectWrites });
+    void h.sessions.handleWorkerRpc(canUseTool('p1', tool));
+    await settle();
+
+    assert.deepEqual(h.answered, [], tool);
+    assert.equal(h.s1().status, 'waiting-permission', tool);
+  }
+});
+
+test('reject-writes denies a Lines workflow write', async () => {
+  const h = harness({ mode: 'plan', settings: rejectWrites });
+  await h.sessions.handleWorkerRpc(canUseToolWith('r1', 'mcp__lines__save_step', {}));
+
+  assert.deepEqual(h.answered, [{ behavior: 'deny', message: PLAN_MODE_REJECT_MESSAGE }]);
+});
+
+test('reject-writes does nothing outside plan mode', async () => {
+  const h = harness({ mode: 'default', settings: rejectWrites });
+  void h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Edit', projectEdit));
+  await settle();
+
+  assert.deepEqual(h.answered, []);
+  assert.equal(h.s1().status, 'waiting-permission');
+});
+
+test('with reject-writes off a plan-mode edit still parks', async () => {
+  const h = harness({ mode: 'plan', settings: { planModeRejectWrites: false } });
+  void h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Edit', projectEdit));
+  await settle();
+
+  assert.deepEqual(h.answered, []);
+  assert.equal(h.s1().status, 'waiting-permission');
+});
+
+test('the PreToolUse hook denies a plan-mode edit when reject-writes is on', async () => {
+  const h = harness({ mode: 'plan', settings: rejectWrites });
+  await h.sessions.handleWorkerRpc({
+    id: 'h1',
+    sessionId: 's1',
+    kind: 'preToolUse',
+    resend: false,
+    payload: { tool_name: 'Edit', tool_input: projectEdit },
+  });
+
+  const out = h.answered[0] as { hookSpecificOutput?: { permissionDecision?: string } };
+  assert.equal(out.hookSpecificOutput?.permissionDecision, 'deny');
+  assert.deepEqual(
+    h.cards().map((c) => [c.resolution, c.resolvedBy]),
+    [['deny', 'plan-readonly']],
+  );
 });

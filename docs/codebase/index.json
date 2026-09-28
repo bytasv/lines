@@ -157,7 +157,9 @@
         "plan-file-auto-approve",
         "plan-review-card",
         "plan-reply-keeps-planning",
-        "plan-comments"
+        "plan-comments",
+        "plan-mode-reads",
+        "plan-mode-write-rejection"
       ],
       "entryPoints": [
         "web/src/components/Composer.tsx",
@@ -190,7 +192,8 @@
         "web/src/lib/guardEntries.ts",
         "server/src/workspacePaths.ts",
         "server/src/index.planFile.test.ts",
-        "web/src/lib/files.ts"
+        "web/src/lib/files.ts",
+        "web/src/components/Transcript.tsx"
       ],
       "symbols": [
         "PermissionMode",
@@ -235,7 +238,12 @@
         "prunePlanComments",
         "CommentablePlan",
         "locateQuotes",
-        "PlanReply"
+        "PlanReply",
+        "isReadOnlyBash",
+        "isSafePlanModeRead",
+        "READ_ONLY_COMMANDS",
+        "PLAN_MODE_READ_TOOLS",
+        "PLAN_MODE_REJECT_MESSAGE"
       ],
       "tests": [
         "server/src/autoGuard.plan.test.ts",
@@ -284,7 +292,9 @@
         "a workflow-gated plan step folds its comments into the gate's deny message and never interjects",
         "plan comments require the prompt capability in addition to approvePermissions, and are dropped for an actor with promptNeedsApproval",
         "a comment's quote is never editable, only its note",
-        "a quote that no longer matches the live plan text silently drops its highlight; the comment itself is unaffected"
+        "a quote that no longer matches the live plan text silently drops its highlight; the comment itself is unaffected",
+        "plan mode auto-approves read-only Bash, web reads, subagent/skill calls and read-shaped MCP tools (isSafePlanModeRead), fail-closed and skipped for codex sessions; BASH_RULES still wins over the allowlist",
+        "the 'Auto-reject writes in plan mode' setting (planModeRejectWrites) denies any plan-mode call the read allowlist didn't approve instead of prompting, checked in both handlePreToolUse (so a settings.json permissions.allow can't pre-empt it) and handleCanUseTool (fail-closed backstop); off by default, never touches ALWAYS_ASK_TOOLS, and rejects Lines MCP writes too; auto-denies are recorded with resolvedBy: 'plan-readonly' and stay visible in the transcript"
       ],
       "architecturalRules": [
         "single shared PERMISSION_MODES list \u2014 no component defines its own label/description array; PERMISSION_MODE_SEGMENTS is a three-item, independently-ordered subset (plan, auto, bypassPermissions) built by mapping over that subset, not by filtering PERMISSION_MODES",

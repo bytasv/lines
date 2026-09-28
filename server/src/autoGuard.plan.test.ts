@@ -4,7 +4,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import type { PermissionMode, SessionMeta } from '@lines/shared';
-import { assessToolCall, GuardAllowlist, isPlanPath, isSafePlanWrite, isSafeReadOnly } from './autoGuard.ts';
+import {
+  assessToolCall,
+  GuardAllowlist,
+  isPlanPath,
+  isReadOnlyBash,
+  isSafePlanModeRead,
+  isSafePlanWrite,
+  isSafeReadOnly,
+} from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
 import type { WorkerClient, WorkerRpc } from './workerClient.ts';
@@ -177,4 +185,108 @@ test('the hook forces a prompt for always-ask tools in every mode', async () => 
       );
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// Plan-mode read allowlist (isReadOnlyBash / isSafePlanModeRead)
+// ---------------------------------------------------------------------------
+
+// Real planning-step commands from transcripts that raised a card.
+const READ_ONLY_SAMPLES = [
+  'cd /x && ls',
+  'grep -rn A web/src --include="*.tsx" | grep -v B',
+  'git log --oneline -3; echo ---; grep -n x f',
+  'for f in a b; do echo "== $f"; grep -n x $f; done',
+  "find ~/Downloads -maxdepth 2 -iname '*.png' 2>/dev/null | head",
+  'ls /tmp | grep -i lines',
+  'npx tsc --noEmit -p apps/generator 2>&1 | head -20',
+  "sed -n '1,120p' f",
+  'grep -E "a|b" f > /dev/null',
+  'git branch',
+  'git branch -a',
+  'git tag --list v1*',
+  'git remote -v',
+  'git config --get user.name',
+];
+
+const WRITE_SAMPLES = [
+  "python3 - <<'EOF'\nprint(1)\nEOF",
+  "cat > /tmp/x <<'EOF'\nhi\nEOF",
+  'echo x >> f',
+  'echo x > f',
+  'sed -i s/a/b/ f',
+  "sed -n 'w out' f",
+  'find . -delete',
+  'find . -exec rm {} \;',
+  'npm install',
+  'rm -f x',
+  'git commit-tree HEAD^{tree}',
+  'git worktree add ../x',
+  'git push origin main',
+  'git log --output=x',
+  'git branch newname',
+  'git tag v2',
+  'f=$(grep -rl x .)',
+  'ls `pwd`',
+  'diff <(ls a) <(ls b)',
+  "ssh host 'ls'",
+  'cat ~/.ssh/config',
+  `cat ${home}/.ssh/id_rsa`,
+  "awk 'BEGIN{system(\"rm x\")}'",
+  "awk '{print > \"out\"}' f",
+  "node -e 'console.log(1)'",
+  "python3 -c 'print(1)'",
+  'sort -o out f',
+  'tree -o out',
+  'env X=1 rm x',
+  'ls & rm x',
+  '(cd x && rm y)',
+  'PATH=/evil ls',
+  'rg --pre ./script x',
+  'uniq in out',
+  'tsc',
+];
+
+test('read-only Bash from real planning transcripts is recognised', () => {
+  for (const command of READ_ONLY_SAMPLES) {
+    assert.equal(isReadOnlyBash(command), true, command);
+  }
+});
+
+test('writes, execution, substitutions and credential reads are not read-only', () => {
+  for (const command of WRITE_SAMPLES) {
+    assert.equal(isReadOnlyBash(command), false, command);
+  }
+});
+
+test('an empty command is not read-only', () => {
+  assert.equal(isReadOnlyBash('  '), false);
+});
+
+test('plan-mode reads never cover the always-ask tools', () => {
+  assert.equal(isSafePlanModeRead('ExitPlanMode', {}, roots, []), false);
+  assert.equal(isSafePlanModeRead('AskUserQuestion', {}, roots, []), false);
+});
+
+test('plan-mode reads cover web reads, subagents and skills', () => {
+  for (const tool of ['WebFetch', 'WebSearch', 'Agent', 'Skill', 'TaskCreate']) {
+    assert.equal(isSafePlanModeRead(tool, {}, roots, []), true, tool);
+  }
+});
+
+test('plan-mode reads cover MCP read tools only', () => {
+  assert.equal(isSafePlanModeRead('mcp__x__list_things', {}, roots, []), true);
+  assert.equal(isSafePlanModeRead('mcp__x__create_thing', {}, roots, []), false);
+  // "review" contains "view" but is a write.
+  assert.equal(isSafePlanModeRead('mcp__x__submit_diff_review', {}, roots, []), false);
+});
+
+test('plan-mode reads keep escalating credential reads and project edits', () => {
+  assert.equal(isSafePlanModeRead('Read', { file_path: path.join(home, '.ssh', 'id_rsa') }, roots, []), false);
+  assert.equal(isSafePlanModeRead('Edit', { file_path: path.join(cwd, 'a.ts') }, roots, []), false);
+});
+
+test('plan-mode reads classify Bash with the read-only allowlist', () => {
+  assert.equal(isSafePlanModeRead('Bash', { command: 'ls | head' }, roots, []), true);
+  assert.equal(isSafePlanModeRead('Bash', { command: 'npm install x' }, roots, []), false);
 });

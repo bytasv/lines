@@ -75,6 +75,7 @@ const RESOLUTION_BADGE: Record<Resolution, { color: string; label: string }> = {
 const SOURCE_NOTE: Partial<Record<PermissionResolutionSource, string>> = {
   'plan-reply': 'resolved by your reply in the composer',
   auto: 'approved automatically by the auto-mode guard',
+  'plan-readonly': 'rejected automatically — plan mode is read-only',
   recovery: 'resolved by recovery after an interrupted turn',
   'workflow-advance': 'you approved this; the workflow advanced instead of implementing here',
   'interrupt-expire': 'closed when the interrupted session was resumed',

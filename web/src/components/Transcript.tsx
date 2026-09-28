@@ -909,7 +909,8 @@ const Item = memo(function Item({
  * Claude will ask again") exists nowhere else.
  */
 function isRedundant(item: { data: PermissionRequestData; resolution?: string }): boolean {
-  if (item.data.auto) return true;
+  // Auto-denies stay visible: the user should see what plan mode rejected.
+  if (item.data.auto) return item.resolution !== 'deny';
   return item.data.toolName === 'AskUserQuestion' && item.resolution === 'allow';
 }
 
