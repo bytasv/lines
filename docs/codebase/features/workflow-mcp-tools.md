@@ -246,6 +246,10 @@ eleven are unaffected — they are about stored data, not about the calling sess
 
 ## Related decisions
 
+- [smart-turn-routing](smart-turn-routing.md) — `save_step`/`create_workflow`/`update_workflow`
+  also accept a step-level `routing` field (rule + allowed models/efforts), validated the same way
+  as `model`/`reasoningEffort` via `shared/workflowValidation.ts` before it reaches
+  `WorkflowEngine.save()`.
 - [permissions-and-plan-mode](permissions-and-plan-mode.md) —
   same `PreToolUse`/`canUseTool` hook path this feature adds a namespace branch
   to; no new hook mechanism was introduced.

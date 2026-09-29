@@ -142,7 +142,8 @@
       ],
       "relatedDecisions": [
         "cross-provider-model-switching",
-        "settings-updates-pane"
+        "settings-updates-pane",
+        "smart-turn-routing"
       ]
     },
     {
@@ -709,7 +710,8 @@
         "transcript-performance",
         "context-window",
         "session-rewind",
-        "reasoning-effort-selection"
+        "reasoning-effort-selection",
+        "smart-turn-routing"
       ]
     },
     {
@@ -1765,7 +1767,8 @@
       "relatedDecisions": [
         "permissions-and-plan-mode",
         "context-window",
-        "workflow-step-versioning"
+        "workflow-step-versioning",
+        "smart-turn-routing"
       ]
     },
     {
@@ -3486,7 +3489,8 @@
         "model-selector",
         "openai-codex-sessions",
         "permissions-and-plan-mode",
-        "workflow-step-lifecycle"
+        "workflow-step-lifecycle",
+        "smart-turn-routing"
       ]
     },
     {
@@ -3793,6 +3797,93 @@
         "local whisper.cpp over a hosted STT API: private, no API key, same code path on browser, phone and desktop",
         "the dictation language decides the model rather than offering a model picker",
         "auto-download deferred no further than the model: the binary is bundled on desktop but still a manual brew install elsewhere"
+      ]
+    },
+    {
+      "id": "smart-turn-routing",
+      "name": "Smart turn routing (JEV)",
+      "doc": "features/smart-turn-routing.md",
+      "purpose": "Before each turn, optionally ask TypeSafe's JEV classifier which of an allowed set of models and reasoning efforts that turn should run on, per a plain-language rule; off by default, applied silently in auto mode, or held for the user to accept/decline in ask mode. A workflow step's own rule overrides the global one while it runs.",
+      "entryPoints": [
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/Composer.tsx",
+        "server/src/mcpWorkflowTools.ts"
+      ],
+      "files": [
+        "shared/types.ts",
+        "shared/workflowValidation.ts",
+        "server/src/jev.ts",
+        "server/src/turnRouting.ts",
+        "server/src/sessions.ts",
+        "server/src/workflows.ts",
+        "server/src/index.ts",
+        "server/src/mcpWorkflowTools.ts",
+        "web/src/components/RoutingRuleFields.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "web/src/components/Composer.tsx",
+        "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/workflow/useWorkflowDraft.ts",
+        "web/src/store.ts"
+      ],
+      "symbols": [
+        "RoutingMode",
+        "RoutingRule",
+        "RoutingPick",
+        "StepContent.routing",
+        "SessionMeta.routingSuggestion",
+        "SessionMeta.lastRouting",
+        "SessionMeta.routingPaused",
+        "UserUiSettings.smartRouting",
+        "decideTurn",
+        "jevConfigured",
+        "resolveRule",
+        "acceptPick",
+        "smartRoutingIssues",
+        "SessionManager.routeTurn",
+        "SessionManager.routingChoice",
+        "SessionManager.applyRouting",
+        "SessionManager.pauseRoutingForManualChange",
+        "SessionManager.setRoutingPaused",
+        "SessionManager.markRetry",
+        "WorkflowEngine.stepRouting",
+        "validateRoutingRule"
+      ],
+      "tests": [
+        "server/src/turnRouting.test.ts",
+        "server/src/jev.test.ts",
+        "server/src/sessions.routing.test.ts",
+        "server/src/workflows.providers.test.ts",
+        "server/src/workflows.advance.test.ts",
+        "server/src/messageAuthz.test.ts"
+      ],
+      "businessRules": [
+        "off never calls JEV, and off is the default: no session is routed and no prompt text leaves the bridge until a user opts in",
+        "plan mode is never routed \u2014 the global plan-mode effort keeps winning",
+        "a routing rule never crosses providers: every model in RoutingRule.models must be on the rule's own provider, or the rule is treated as absent",
+        "model and effort picks are gated independently by their own confidence, so one can apply while the other is skipped",
+        "a pick equal to the session's current setting is a no-op: no query recycle, no lastRouting update",
+        "a manual model or effort change pauses routing for that session until the composer badge resumes it or the next workflow step starts",
+        "a step's own routing rule overrides the global rule for its provider while that step runs",
+        "no LLM fallback: a missing key, non-2xx, malformed body or timeout all leave the turn on its current settings",
+        "only the turn's own prompt text (capped) plus a few plain-line signals are sent to JEV \u2014 never the transcript, never tool output"
+      ],
+      "architecturalRules": [
+        "the hook lives in SessionManager.pushTurn, the single async point every turn passes through, after the intoLiveTurn early return and before the codex branch and pushWithToken",
+        "the step rule reaches SessionManager through an injected StepRoutingProvider callback registered by WorkflowEngine, the same injection style as TurnCompleteListener",
+        "heldTurns is bridge-memory only; a restart loses it and boot reconcile clears the matching routingSuggestion",
+        "a held turn's release goes back through pushTurn, not straight to pushWithToken, so the CLI check and token refresh run fresh",
+        "routing's own setModel/setReasoningEffort calls never set routingPaused \u2014 the pause is set only from the client-message handler path",
+        "server/src/jev.ts only calls the official TypeSafe endpoint, hardcoded as a source constant rather than read from env",
+        "sameContent (workflow versioning) compares routing via a stable key-sorted JSON serialization"
+      ],
+      "relatedDecisions": [
+        "reasoning-effort-selection",
+        "model-selector",
+        "workflow-step-lifecycle",
+        "workflow-mcp-tools",
+        "session-collaboration",
+        "openai-codex-sessions"
       ]
     }
   ]

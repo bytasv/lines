@@ -156,3 +156,12 @@ how hard the chosen model thinks, not just which model it is. It is its own feat
 [reasoning-effort-selection](reasoning-effort-selection.md) — but reuses this file's
 `modelComboboxProps` and `renderOptionWithDescription`, and its own `effortSelectData()` is
 `web/src/lib/modelSelect.tsx`'s second entry point.
+
+## Smart routing
+
+The model a session or step is set to is otherwise fixed until someone changes it by hand. With
+[smart-turn-routing](smart-turn-routing.md) turned on, a per-turn classifier (JEV) may move an
+individual turn to another model within an allowed list — never across providers, never outside
+that list — before the turn is pushed. The composer shows this with a small "auto" badge beside
+the model picker; the picker itself, `modelSelectData()`, and `setModel`'s cross-provider refusal
+are all unchanged.

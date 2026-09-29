@@ -106,16 +106,20 @@ The Agent SDK's top-level `effort` option (`Options.effort`); codex's `collabora
 - **Plan mode has its own global effort**, `UserUiSettings.planReasoningEffort`, mirroring codex's
   own `plan_mode_reasoning_effort` config key. It overrides the session's own effort only while
   that session is in plan mode; an ordinary turn in the same session is unaffected.
-- **A workflow step's effort is absolute, not additive.** A step with no effort *clears* the
+- **A workflow step's effort is a baseline, not additive.** A step with no effort *clears* the
   session back to the provider default rather than inheriting the previous step's — `setModel`'s
-  sibling call is made every step start, including when the step's own effort is `undefined`.
+  sibling call is made every step start, including when the step's own effort is `undefined`. This
+  was "absolute" before [smart-turn-routing](smart-turn-routing.md) existed: with routing on, a
+  rule may still move an individual turn away from the step's own effort, per turn.
 - **No cross-provider refusal.** Unlike `setModel`, changing effort never strands a conversation,
   so `setReasoningEffort` has no verdict to report and no fresh-start machinery.
 - **Filtered at push time, not at write time.** A stored effort the session's current provider
   does not offer (reachable via a pre-first-turn provider switch) is silently dropped rather than
   sent — the alternative is the provider rejecting the whole turn.
 - **Effect lands on the next turn, never the running one** — same promise the model pill already
-  makes.
+  makes. A routing-driven effort change is the one exception: it is decided *before* the turn it
+  applies to is pushed, so it lands on that same turn — see
+  [smart-turn-routing](smart-turn-routing.md).
 
 ## Architectural rules
 
@@ -147,6 +151,8 @@ The Agent SDK's top-level `effort` option (`Options.effort`); codex's `collabora
 
 ## Related decisions
 
+- [smart-turn-routing](smart-turn-routing.md) — may override this control per turn, within an
+  allowed set, when a routing rule applies.
 - **The plan's assumed codex vocabulary (`minimal`) was wrong**, and would have shipped a picker
   whose weakest option 400s on every codex turn — corrected after probing a real `codex
   app-server` directly rather than trusting OpenAI's published config reference.

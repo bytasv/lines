@@ -706,3 +706,6 @@ is attached to, which is not known until the run. The runner handles it with the
 - [reasoning-effort-selection](reasoning-effort-selection.md) — a step's `reasoningEffort` is
   applied by `runStep` beside `setModel`/`setPermissionMode`, including when it is unset: an
   absent effort clears the session's, it never inherits the previous step's.
+- [smart-turn-routing](smart-turn-routing.md) — `runStep` also clears `SessionMeta.routingPaused`
+  on step entry (alongside its `stepFailure` reset), and a step's own `routing` rule overrides the
+  global smart-routing rule for the turns it runs, while it runs.
