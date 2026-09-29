@@ -1,11 +1,11 @@
-import type { SessionMeta, SessionStatus } from '@lines/shared';
+import { ALERT_STATUSES, alertBody, isAlertTransition } from '@lines/shared';
+import type { SessionMeta } from '@lines/shared';
 import logoUrl from '../assets/logo-mark-solid.png';
-import { waitingPermissionMeta } from './format';
+import { diag, diagSource } from './diag';
+import { serviceWorkerRegistration } from './push';
 
 const ALERTS_KEY = 'lines.alerts';
 const ALERT_SOUND_KEY = 'lines.alertSound';
-
-const ALERT_STATUSES: SessionStatus[] = ['done', 'waiting-permission', 'waiting-approval'];
 
 export type AlertSound =
   | 'chime'
@@ -118,14 +118,6 @@ export function persistAlertSound(sound: AlertSound): void {
   localStorage.setItem(ALERT_SOUND_KEY, sound);
 }
 
-const STATUS_BODY: Partial<Record<SessionStatus, string>> = {
-  done: 'Task complete',
-  'waiting-permission': 'Needs permission',
-  'waiting-approval': 'Needs approval',
-};
-
-const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-
 export function loadAlertsEnabled(): boolean {
   return localStorage.getItem(ALERTS_KEY) === 'on';
 }
@@ -189,27 +181,60 @@ export async function requestNotifyPermission(): Promise<NotificationPermission>
   return Notification.permission;
 }
 
-function notify(session: SessionMeta, onClick: () => void): void {
-  if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const body =
-    session.status === 'waiting-permission'
-      ? capitalize(waitingPermissionMeta(session.pendingPermissionTool).label)
-      : STATUS_BODY[session.status];
-  if (!body) return;
+/**
+ * Page-level notifications still showing, by tag. Held so the click handler is
+ * not garbage-collected with the object — a dropped `onclick` is a click that
+ * only focuses the app.
+ */
+const pageNotifications = new Map<string, Notification>();
+
+function pageNotification(session: SessionMeta, body: string, onClick: () => void): void {
   try {
-    const n = new Notification(session.name, {
-      body,
-      tag: session.id,
-      icon: logoUrl,
-    });
+    const n = new Notification(session.name, { body, tag: session.id, icon: logoUrl });
+    pageNotifications.set(session.id, n);
     n.onclick = () => {
+      // Whether the page-level handler fires at all is the open question behind
+      // "clicking the banner only focused Lines" — see lib/diag.ts.
+      diag('notify-click', { via: 'page' });
       window.focus();
       onClick();
       n.close();
     };
+    n.onclose = () => {
+      if (pageNotifications.get(session.id) === n) pageNotifications.delete(session.id);
+    };
   } catch {
-    // ignore
+    // ignore — Android Chrome and iOS refuse the constructor outright
   }
+}
+
+/**
+ * Show the alert. Through the service worker where there is one: a persistent
+ * notification's click reaches `sw.js`'s `notificationclick` even from
+ * Notification Center, where a page-level `onclick` is routinely lost — and phones
+ * accept nothing else. `tag` is the session id either way, so this and a Web Push
+ * for the same session collapse into one.
+ *
+ * The desktop shell's window keeps the page-level path: Electron's support for
+ * service-worker notifications is unverified, and that window has no IPC through
+ * which a worker could raise it.
+ */
+function notify(session: SessionMeta, onClick: () => void): void {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const body = alertBody(session);
+  if (!body) return;
+  if (diagSource() === 'desktop-window') return pageNotification(session, body, onClick);
+  void serviceWorkerRegistration()
+    .then((reg) => {
+      if (!reg?.active) return pageNotification(session, body, onClick);
+      return reg.showNotification(session.name, {
+        body,
+        tag: session.id,
+        icon: logoUrl,
+        data: { sessionId: session.id },
+      });
+    })
+    .catch(() => pageNotification(session, body, onClick));
 }
 
 /** Sessions that are finished or blocked on the user — what the badge counts. */
@@ -267,13 +292,9 @@ export function maybeAlert(
   opts: AlertOpts,
 ): void {
   if (!opts.enabled) return;
-  if (!prev || prev.status === next.status) return;
-  if (!ALERT_STATUSES.includes(next.status)) return;
-  if (next.archived) return;
-  // Work is still running, just not in the turn that settled — a "finished" chime
-  // now would be a lie. The notification turn the task produces settles later,
-  // with the set empty, and chimes normally.
-  if (next.backgroundTasks?.length) return;
+  // Shared with the bridge's Web Push (see `isAlertTransition`), so the chime and
+  // the push fire on exactly the same transitions.
+  if (!isAlertTransition(prev?.status, next)) return;
   // User is already looking at this session.
   if (document.hasFocus() && opts.selectedSessionId === next.id) return;
   playSound(opts.sound);

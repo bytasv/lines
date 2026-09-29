@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ServerMessage, SessionMeta } from '@lines/shared';
 import {
+  alertTarget,
   emptyMachine,
   emptyView,
   machineView,
@@ -326,5 +327,73 @@ describe('shouldClaimSelection', () => {
     // createdAt is stamped on the bridge machine, so a clock slightly ahead made
     // every upsert look freshly created; this is the half that fixed it.
     assert.equal(shouldClaimSelection({ ...base, alreadySeen: true }), false);
+  });
+});
+
+describe('alertTarget', () => {
+  // Where a notification click has to land: `selectSession` alone left the UI on
+  // the other machine or tab, so the click read as "only focused Lines".
+  const at = (id: string, cwd: string): SessionMeta => ({ id, name: id, cwd }) as SessionMeta;
+  const machine = (deviceId: string, view: Partial<MachineView>): MachineSlice => ({
+    ...emptyMachine(deviceId),
+    view: { ...emptyView(), ...view },
+  });
+
+  test('a session on the primary machine, in another project, targets that tab', () => {
+    const target = alertTarget({
+      sessionId: 'b1',
+      sessions: { a1: at('a1', '/repo/a'), b1: at('b1', '/repo/b') },
+      sessionMachine: { a1: 'laptop', b1: 'laptop' },
+      machines: {},
+      primaryDeviceId: 'laptop',
+      projects: [{ path: '/repo/a' }, { path: '/repo/b' }],
+      projectKeys: {},
+    });
+    assert.deepEqual(target, { deviceId: 'laptop', switchMachine: false, projectPath: '/repo/b' });
+  });
+
+  test("a session on a non-primary machine switches machine and uses that machine's projects", () => {
+    const target = alertTarget({
+      sessionId: 'd1',
+      sessions: { d1: at('d1', '/home/me/repo') },
+      sessionMachine: { d1: 'desktop' },
+      machines: { desktop: machine('desktop', { projects: [{ path: '/home/me/repo' }] }) },
+      primaryDeviceId: 'laptop',
+      // The globals describe the laptop, which has no such project.
+      projects: [{ path: '/Users/me/other' }],
+      projectKeys: {},
+    });
+    assert.deepEqual(target, { deviceId: 'desktop', switchMachine: true, projectPath: '/home/me/repo' });
+  });
+
+  test("a worktree session whose cwd is not the project's path still finds its tab", () => {
+    const base = {
+      sessions: {
+        w1: at('w1', '/wt/repo-feature'),
+        k1: at('k1', '/elsewhere/repo'),
+      },
+      sessionMachine: { w1: 'laptop', k1: 'laptop' },
+      machines: {},
+      primaryDeviceId: 'laptop',
+      projects: [{ path: '/repo/other' }, { path: '/repo/main', worktrees: [{ path: '/wt/repo-feature' }] }] as never,
+      projectKeys: { '/repo/main': 'github.com/me/repo', '/elsewhere/repo': 'github.com/me/repo' },
+    };
+    // Through the project's linked work trees (no key needed)…
+    assert.equal(alertTarget({ ...base, sessionId: 'w1' })?.projectPath, '/repo/main');
+    // …and through a shared project key, cwd ≠ any project path.
+    assert.equal(alertTarget({ ...base, sessionId: 'k1' })?.projectPath, '/repo/main');
+  });
+
+  test('an unknown session has no target', () => {
+    const target = alertTarget({
+      sessionId: 'gone',
+      sessions: {},
+      sessionMachine: {},
+      machines: {},
+      primaryDeviceId: null,
+      projects: [],
+      projectKeys: {},
+    });
+    assert.equal(target, null);
   });
 });

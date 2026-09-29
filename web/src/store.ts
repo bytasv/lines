@@ -45,15 +45,16 @@ import {
   DEFAULT_MODEL,
   isReasoningEffort,
   normalizePlanComments,
-  projectPaths,
   resolveModelId,
   worktreePaths,
 } from '@lines/shared';
-import { send } from './ws';
+import { send, sendToMachine, switchDevice } from './ws';
 import {
+  alertTarget,
   emptyMachine,
   emptyView,
   machineView,
+  inProject,
   mergeMachineSessions,
   prunableDraftIds,
   sessionsOnMachine,
@@ -87,6 +88,8 @@ import {
   setBadge,
 } from './lib/alerts';
 import { setBridgeOwnerId } from './lib/clerk';
+import { ensurePushSubscription, removePushSubscription } from './lib/push';
+import { rememberDeviceId } from './lib/storage';
 import { updateFavicon } from './lib/favicon';
 import { sessionRowMeta } from './lib/format';
 import type { MentionValue } from './lib/mentions';
@@ -492,6 +495,33 @@ function withSeen(seen: Set<string>, ids: string[]): Set<string> {
   return next;
 }
 
+/** Owned machines whose bridge accepts push registration. */
+function pushMachines(state: { machines: Record<string, MachineSlice> }): string[] {
+  return Object.values(state.machines)
+    .filter((m) => m.push)
+    .map((m) => m.deviceId);
+}
+
+/**
+ * Hand this device's push subscription to each machine. Every owned machine, not
+ * only the primary: each bridge pushes for the sessions it hosts, the same
+ * "not scoped to the machine in front of you" rule `maybeAlert` follows.
+ */
+async function registerPushWith(deviceIds: string[]): Promise<void> {
+  if (!deviceIds.length) return;
+  const reg = await ensurePushSubscription();
+  if (!reg) return;
+  for (const id of deviceIds) sendToMachine(id, { type: 'registerPush', ...reg });
+}
+
+/** Unsubscribe this device and tell the machines. One that is offline keeps the
+ *  row until its next push is answered 410, which removes it there. */
+async function unregisterPushFrom(deviceIds: string[]): Promise<void> {
+  const endpoint = await removePushSubscription();
+  if (!endpoint) return;
+  for (const id of deviceIds) sendToMachine(id, { type: 'unregisterPush', endpoint });
+}
+
 /** The open project with this path, if any — what `sessionsInProject` wants. */
 /**
  * Whether a device id is the machine the UI is on.
@@ -528,11 +558,7 @@ export function sessionsInProject(
   project: Project | null,
 ): SessionMeta[] {
   if (!project) return [];
-  const paths = projectPaths(project);
-  const keys = new Set(paths.map((r) => projectKeys[r]).filter((k): k is string => k != null));
-  return Object.values(sessions).filter(
-    (s) => paths.includes(s.cwd) || keys.has(projectKeys[s.cwd]),
-  );
+  return Object.values(sessions).filter((s) => inProject(s, projectKeys, project));
 }
 
 /**
@@ -944,6 +970,12 @@ interface UiState {
   /** Return and clear the queue atomically; caller re-sends the drained prompts. */
   drainQueuedPrompts: () => QueuedPrompt[];
   selectSession: (id: string | null) => void;
+  /**
+   * Land on a session from a notification click: its machine, then its project
+   * tab, then the session itself. `selectSession` alone left the UI on another
+   * machine or tab, so the click read as "only focused Lines".
+   */
+  openSessionFromAlert: (id: string) => void;
   /** Fetch the live `/context` breakdown for a session (hover-triggered). */
   requestContextBreakdown: (sessionId: string) => void;
   /** Consume a session's rewind prefill — returns it and clears it, so the text is
@@ -1397,6 +1429,31 @@ export const useStore = create<UiState>((set, get) => {
     return queued;
   },
   selectSession: (id) => set({ selectedSessionId: id }),
+  openSessionFromAlert: (id) => {
+    const state = get();
+    const target = alertTarget({
+      sessionId: id,
+      sessions: state.sessions,
+      sessionMachine: state.sessionMachine,
+      machines: state.machines,
+      primaryDeviceId: state.primaryDeviceId,
+      projects: state.projects,
+      projectKeys: state.projectKeys,
+    });
+    if (target?.switchMachine) {
+      // What the machine switcher's pick does: remembered too, or the device
+      // gate re-chooses the old machine on its next refresh.
+      rememberDeviceId(target.deviceId);
+      switchDevice(target.deviceId);
+    }
+    // Before selecting: the session belongs to this tab, so `setActiveProject`
+    // keeps whatever is selected there only if it is already this session —
+    // selecting afterwards is what guarantees it.
+    if (target?.projectPath && target.projectPath !== get().activeProject) {
+      get().setActiveProject(target.projectPath);
+    }
+    get().selectSession(id);
+  },
   setFolderPickPending: (pending) => set({ folderPickPending: pending }),
   setFolderPickTarget: (project) => set({ folderPickTarget: project }),
   setWorktreePending: (pending) => set({ worktreePending: pending }),
@@ -1612,8 +1669,10 @@ export const useStore = create<UiState>((set, get) => {
       primeAudio();
       const permission = await requestNotifyPermission();
       set({ alertsEnabled: true, notifyPermission: permission });
+      if (permission === 'granted') void registerPushWith(pushMachines(get()));
     } else {
       set({ alertsEnabled: false });
+      void unregisterPushFrom(pushMachines(get()));
     }
     pushSettings();
   },
@@ -1764,6 +1823,8 @@ export const useStore = create<UiState>((set, get) => {
             // Same fail-closed reading as `local`: absent means "no evidence of
             // encryption", which is what an older bridge honestly offers.
             encrypted: msg.encrypted ?? false,
+            // Owner links only: a guest may not subscribe, and the bridge says so.
+            push: !msg.access && msg.pushAvailable === true,
             view,
           };
           return {
@@ -1904,6 +1965,10 @@ export const useStore = create<UiState>((set, get) => {
         // own library with it.
         if (!msg.access) setBridgeOwnerId(msg.userId ?? null);
         if (msg.settings) applySettings(msg.settings);
+        // Every owner hello, not just the first: `registerPush` is an idempotent
+        // upsert, and this is how a newly linked machine — or one whose file was
+        // lost — picks up this device's subscription.
+        if (get().alertsEnabled && get().machines[from]?.push) void registerPushWith([from]);
         break;
       }
       case 'settings':
@@ -2047,7 +2112,7 @@ export const useStore = create<UiState>((set, get) => {
           enabled: get().alertsEnabled,
           sound: get().alertSound,
           selectedSessionId: get().selectedSessionId,
-          onClickNotification: () => get().selectSession(msg.session.id),
+          onClickNotification: () => get().openSessionFromAlert(msg.session.id),
         });
         break;
       }

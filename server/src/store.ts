@@ -10,6 +10,7 @@ import type {
   MemoryReviewEntry,
   Project,
   ProjectKeyMap,
+  PushRegistration,
   RecipeDef,
   SessionMeta,
   SpendHistoryBlob,
@@ -281,6 +282,10 @@ export function createStore(root: string) {
   // cadence. New file, so the bare-array/envelope hazard noted above cannot
   // apply — no older build ever reads it.
   const SPEND_HISTORY_FILE = path.join(root, 'spend-history.json');
+  // Web Push subscriptions of this user's devices, each with the VAPID keypair
+  // the device minted. Bridge-local, never synced, 0600: the private keys sign
+  // pushes to those devices.
+  const PUSH_SUBSCRIPTIONS_FILE = path.join(root, 'push-subscriptions.json');
   const MEMORY_MANIFEST_FILE = path.join(root, 'memory-manifest.json');
   // Staged remote memory writes plus the last rejection, kept out of the
   // manifest for the same reason the guard's two files are split: the manifest
@@ -708,6 +713,22 @@ export function createStore(root: string) {
 
     saveSpendHistory(blob: SpendHistoryBlob) {
       writeJson(SPEND_HISTORY_FILE, blob);
+    },
+
+    /** Missing or corrupt reads as "no devices subscribed"; rows are validated by PushNotifier. */
+    loadPushSubscriptions(): PushRegistration[] {
+      const raw = readJson<unknown>(PUSH_SUBSCRIPTIONS_FILE, []);
+      return Array.isArray(raw) ? (raw as PushRegistration[]) : [];
+    },
+
+    savePushSubscriptions(rows: PushRegistration[]) {
+      // 0600 like AUTH_FILE, and chmod'd too in case the file already exists.
+      fs.writeFileSync(PUSH_SUBSCRIPTIONS_FILE, JSON.stringify(rows, null, 2), { mode: 0o600 });
+      try {
+        fs.chmodSync(PUSH_SUBSCRIPTIONS_FILE, 0o600);
+      } catch {
+        // best-effort on platforms without POSIX perms
+      }
     },
 
     saveGuardAllowlist(entries: unknown) {

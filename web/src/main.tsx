@@ -45,6 +45,7 @@ import { useDevices } from './lib/devices';
 import { bootDial } from './lib/wake';
 import { mountViewportDiag, trackKeyboardInset } from './lib/viewport';
 import { learnHostDeviceIdFromDevServer, takeHostDeviceIdFromUrl } from './lib/e2ee';
+import { registerServiceWorker } from './lib/push';
 import {
   ConnectMachine,
   ConnectMachineError,
@@ -323,6 +324,10 @@ takeHostDeviceIdFromUrl();
 // Dev only: the same answer for a plain browser tab on the dev machine, which a
 // relayed bridge would otherwise treat like a phone.
 void learnHostDeviceIdFromDevServer();
+
+// Push-only (no fetch handler, no cache — see public/sw.js). A notification
+// clicked while this window is open arrives here as `openSession`.
+registerServiceWorker((id) => useStore.getState().openSessionFromAlert(id));
 
 const rootElement = document.getElementById('root')!;
 // Drop index.html's boot skeleton explicitly rather than leaving it to React's

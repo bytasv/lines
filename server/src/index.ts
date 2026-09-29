@@ -1036,6 +1036,8 @@ function buildHello(
     // Owner-only like `settings`: whether routing can call out at all, for the
     // Settings notice. Never the key itself.
     smartRoutingAvailable: jevConfigured(),
+    // Owner-only like `settings`: a guest may not subscribe (see MESSAGE_AUTHZ).
+    pushAvailable: true,
     // Whether this link may drive a dialog that opens on this machine's screen.
     local,
     // Whether this link is end-to-end encrypted against a key this machine
@@ -1560,6 +1562,21 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       );
       break;
     }
+    case 'registerPush':
+      // Refused rather than stored when the endpoint is not a known push service
+      // or a key is malformed: the bridge POSTs to that URL on every alert.
+      if (!ctx.pushNotifier.register({ subscription: msg.subscription, vapid: msg.vapid })) {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            message: 'This machine could not register the device for notifications.',
+          } satisfies ServerMessage),
+        );
+      }
+      break;
+    case 'unregisterPush':
+      ctx.pushNotifier.unregister(msg.endpoint);
+      break;
     case 'installWhisperModel':
       // Fire and forget: progress and the outcome are broadcast (see
       // onWhisperModelDownload below), so a second tab watches the same bar.

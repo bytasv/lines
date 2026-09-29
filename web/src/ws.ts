@@ -1167,6 +1167,16 @@ function linkForMessage(msg: ClientMessage): MachineLink | undefined {
   return links.get(deviceId ?? '');
 }
 
+/**
+ * Send to one machine's link, bypassing `linkForMessage`'s routing. For messages
+ * every owned machine has to receive (push registration), not just the primary.
+ * Silent when the link is down: callers resend on that machine's next `hello`.
+ */
+export function sendToMachine(deviceId: string, msg: ClientMessage): boolean {
+  const link = links.get(deviceId);
+  return !!link && writeToLink(link, JSON.stringify(msg));
+}
+
 /** False when the message was dropped — the caller can then say so instead of
  *  leaving the user with a button that appears to do nothing. */
 export function send(msg: ClientMessage): boolean {

@@ -24,6 +24,7 @@ import type {
   WorkerStatus,
   WorkflowDef,
 } from '@lines/shared';
+import { projectPaths } from '@lines/shared';
 
 /**
  * Per-machine state and the merge rules that keep two machines' sessions apart.
@@ -157,6 +158,9 @@ export interface MachineSlice {
    * False until a `hello` says otherwise, and on a bridge too old to say.
    */
   encrypted: boolean;
+  /** This bridge accepts `registerPush`; false until a `hello` says so, and on a
+   *  bridge too old to — which would refuse the message with a visible error. */
+  push: boolean;
   /**
    * The owner state this machine's last `hello` described. Held per machine
    * because only the primary's copy may reach the globals — see {@link MachineView}.
@@ -180,6 +184,7 @@ export const emptyMachine = (deviceId: string): MachineSlice => ({
   ownerProfile: null,
   local: false,
   encrypted: false,
+  push: false,
   view: emptyView(),
 });
 
@@ -372,4 +377,50 @@ export function shouldClaimSelection(input: {
   alreadySeen: boolean;
 }): boolean {
   return input.fromPrimary && input.pendingCreate && !input.alreadySeen;
+}
+
+/**
+ * Whether a session belongs to a project tab — every one of its paths, matched by
+ * project key when that checkout has one. The single membership rule behind the
+ * store's `sessionsInProject`; see there for why keys and `projectPaths`.
+ */
+export function inProject(
+  session: Pick<SessionMeta, 'cwd'>,
+  projectKeys: ProjectKeyMap,
+  project: Project,
+): boolean {
+  const paths = projectPaths(project);
+  if (paths.includes(session.cwd)) return true;
+  const key = projectKeys[session.cwd];
+  return key != null && paths.some((p) => projectKeys[p] === key);
+}
+
+/**
+ * Where a notification click has to take the UI for this session: the machine
+ * hosting it, and the project tab it belongs to on that machine.
+ *
+ * The machine's own view, not the globals: when the session is on a non-primary
+ * machine, the globals describe the machine being left. `projectPath` is null when
+ * no open tab claims the session — the caller then selects it where it stands.
+ */
+export function alertTarget(input: {
+  sessionId: string;
+  sessions: Record<string, SessionMeta>;
+  sessionMachine: Record<string, string>;
+  machines: Record<string, MachineSlice>;
+  primaryDeviceId: string | null;
+  /** The globals, used when the target machine has no slice (a direct local bridge). */
+  projects: Project[];
+  projectKeys: ProjectKeyMap;
+}): { deviceId: string; switchMachine: boolean; projectPath: string | null } | null {
+  const session = input.sessions[input.sessionId];
+  if (!session) return null;
+  const primary = input.primaryDeviceId ?? '';
+  const deviceId = input.sessionMachine[input.sessionId] ?? primary;
+  const switchMachine = deviceId !== primary;
+  const view = switchMachine ? input.machines[deviceId]?.view : undefined;
+  const projects = view?.projects ?? input.projects;
+  const projectKeys = view?.projectKeys ?? input.projectKeys;
+  const project = projects.find((p) => inProject(session, projectKeys, p)) ?? null;
+  return { deviceId, switchMachine, projectPath: project?.path ?? null };
 }

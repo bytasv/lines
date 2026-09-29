@@ -4,6 +4,7 @@ import { AppShell, Box, Burger, Center, Loader, Stack, Text, Title } from '@mant
 import { useDisclosure } from '@mantine/hooks';
 import { IconMessageChatbot } from '@tabler/icons-react';
 import { useStore } from './store';
+import { inProject } from './lib/machines';
 import { Sidebar } from './components/Sidebar';
 import { SessionView } from './components/SessionView';
 import { ProjectTabs } from './components/ProjectTabs';
@@ -97,6 +98,7 @@ function Shell() {
   const selectedSession = useStore((s) => (s.selectedSessionId ? s.sessions[s.selectedSessionId] : undefined));
   const projects = useStore((s) => s.projects);
   const activeProject = useStore((s) => s.activeProject);
+  const projectKeys = useStore((s) => s.projectKeys);
   const setActiveProject = useStore((s) => s.setActiveProject);
   const sidebarMode = useStore((s) => s.sidebarMode);
   const [workflowEditorOpen, setWorkflowEditorOpen] = useState(false);
@@ -171,14 +173,17 @@ function Shell() {
     }
   }, [selectedSession?.id, selectedSession?.status]);
 
-  // Selecting a session (URL, auto-select) activates its project tab.
+  // Selecting a session (URL, auto-select) activates its project tab. Key-aware,
+  // like the sidebar's `sessionsInProject`: a work-tree or extra-root session's
+  // cwd is not the tab's path, yet it belongs to that tab.
   useEffect(() => {
-    const cwd = selectedSession?.cwd;
-    if (cwd && cwd !== activeProject && projects.some((p) => p.path === cwd)) {
-      setActiveProject(cwd);
-    }
+    if (!selectedSession?.cwd) return;
+    const current = projects.find((p) => p.path === activeProject);
+    if (current && inProject(selectedSession, projectKeys, current)) return;
+    const owner = projects.find((p) => inProject(selectedSession, projectKeys, p));
+    if (owner) setActiveProject(owner.path);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSessionId, selectedSession?.cwd, projects]);
+  }, [selectedSessionId, selectedSession?.cwd, projects, projectKeys]);
 
   return (
     <AppShell

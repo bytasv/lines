@@ -9,6 +9,7 @@ import { GuardAllowlist } from './autoGuard.ts';
 import { McpConnections } from './mcpConnections.ts';
 import { SessionManager } from './sessions.ts';
 import { SpendHistory } from './spendHistory.ts';
+import { PushNotifier } from './pushNotifier.ts';
 import { UsagePoller } from './usage.ts';
 import { WorkflowEngine } from './workflows.ts';
 import { RecipeEngine } from './recipes.ts';
@@ -174,6 +175,8 @@ export interface UserContext {
   usage: UsagePoller;
   /** This machine's day-resolution spend ledger, for the hello snapshot. */
   spendHistory: SpendHistory;
+  /** This user's subscribed devices, and the Web Push of session alerts to them. */
+  pushNotifier: PushNotifier;
   /** cwd -> machine-independent project identity; groups sessions across installs. */
   projectKeys: ProjectKeyRegistry;
   /**
@@ -238,13 +241,21 @@ export function buildUserContext(
   // Storage/Supabase reachability flips → tell this user's browsers so they can
   // show the "cloud sync unavailable" notice (local persistence still works).
   sync.onStatusChange = (storage) => broadcast({ type: 'storageStatus', storage });
+  const pushNotifier = new PushNotifier(store);
 
   const broadcast = (msg: ServerMessage) => {
     observe?.(msg);
     // Push-on-persist: every state change surfaces as a broadcast, so this one
     // hook covers all persist paths. No-ops while pulled state is applied.
-    if (msg.type === 'sessionUpsert') sync.pushSession(msg.session);
-    else if (msg.type === 'sessionDeleted') sync.deleteSession(msg.sessionId);
+    if (msg.type === 'sessionUpsert') {
+      sync.pushSession(msg.session);
+      // Not while pulled state is applied: `adoptSynced` upserts sessions that ran
+      // on another machine, reset to idle here — that machine pushes for them.
+      if (!sync.applying) pushNotifier.onSessionUpsert(msg.session);
+    } else if (msg.type === 'sessionDeleted') {
+      sync.deleteSession(msg.sessionId);
+      pushNotifier.forget(msg.sessionId);
+    }
     else if (msg.type === 'workflows') sync.pushWorkflows(msg.workflows);
     // Push the full own history, not just the heads in msg.steps — else the debounce
     // coalesces intermediate versions away and storage never records them.
@@ -518,6 +529,7 @@ export function buildUserContext(
     recipes,
     usage,
     spendHistory,
+    pushNotifier,
     projectKeys,
     sockets,
     presence,

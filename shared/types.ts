@@ -434,6 +434,83 @@ export type SessionStatus =
 export const isSessionInterruptible = (s: SessionStatus) =>
   s === 'running' || s === 'waiting-permission';
 
+/** Statuses that mean "finished or blocked on the user" — what alerts fire on. */
+export const ALERT_STATUSES: readonly SessionStatus[] = ['done', 'waiting-permission', 'waiting-approval'];
+
+/**
+ * Whether a status change is one worth alerting on. The one rule behind both the
+ * in-page alert (web `maybeAlert`) and the bridge's Web Push, so a phone and a
+ * desktop tab can never disagree about what counted.
+ *
+ * No previous status means "first sighting", not a transition: a reconnect or a
+ * bridge restart must not replay alerts for sessions that settled long ago.
+ */
+export function isAlertTransition(prev: SessionStatus | undefined, next: SessionMeta): boolean {
+  if (!prev || prev === next.status) return false;
+  if (!ALERT_STATUSES.includes(next.status)) return false;
+  if (next.archived) return false;
+  // Work is still running, just not in the turn that settled — a "finished"
+  // alert now would be a lie. The notification turn the task produces settles
+  // later, with the set empty, and alerts normally.
+  if (next.backgroundTasks?.length) return false;
+  return true;
+}
+
+/**
+ * The notification body for a session in an alert status, or null for any other.
+ * Labels match web `waitingPermissionMeta`, capitalised; shared so a push and the
+ * in-page alert it collapses with (same `tag`) read the same.
+ */
+export function alertBody(session: Pick<SessionMeta, 'status' | 'pendingPermissionTool'>): string | null {
+  switch (session.status) {
+    case 'done':
+      return 'Task complete';
+    case 'waiting-approval':
+      return 'Needs approval';
+    case 'waiting-permission':
+      switch (session.pendingPermissionTool) {
+        case 'ExitPlanMode':
+          return 'Plan ready';
+        case 'AskUserQuestion':
+          return 'Needs answer';
+        default:
+          return 'Needs permission';
+      }
+    default:
+      return null;
+  }
+}
+
+/** `PushSubscription.toJSON()`, narrowed to what the bridge needs to send. */
+export interface PushSubscriptionJson {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+
+/**
+ * The VAPID keypair a device minted for itself (base64url, raw P-256 point and
+ * scalar). The device mints it, not the bridge: one browser registration holds
+ * one subscription tied to one key, so every machine the user owns has to sign
+ * with the same one.
+ */
+export interface VapidKeyPair {
+  publicKey: string;
+  privateKey: string;
+}
+
+/** One subscribed device, as the bridge persists it. */
+export interface PushRegistration {
+  subscription: PushSubscriptionJson;
+  vapid: VapidKeyPair;
+}
+
+/** What the bridge pushes and `sw.js` shows. Kept minimal — no transcript text. */
+export interface PushPayload {
+  sessionId: string;
+  title: string;
+  body: string;
+}
+
 /**
  * The session is not free to take a new prompt straight through — it is either
  * interruptible or paused awaiting a workflow-step approval. Sends should be
@@ -2084,6 +2161,11 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   transcribe: { needs: 'cap', cap: 'prompt' },
   // Writes a 148 MB file into the host's app folder. Owner only, permanently.
   installWhisperModel: { needs: 'owner' },
+  // Push alerts cover every session on the machine, so only its owner may
+  // subscribe — a guest subscription would leak sessions the grant hides. The
+  // bridge also POSTs to the supplied endpoint, which is a second reason.
+  registerPush: { needs: 'owner' },
+  unregisterPush: { needs: 'owner' },
   // Creates sessions *and* workflows from the owner's library — wider than
   // createSession, so no preset reaches it.
   runRecipe: { needs: 'owner' },
@@ -2322,6 +2404,11 @@ export type ClientMessage =
   /** Have the bridge download one of WHISPER_MODELS. Progress arrives as
    *  `whisperModelDownload`; completion as a `cliStatus` listing the model. */
   | { type: 'installWhisperModel'; file: WhisperModelFile }
+  /** Have this bridge Web Push this device's session alerts. Idempotent — an
+   *  upsert by `subscription.endpoint` — so the client resends it on every hello. */
+  | { type: 'registerPush'; subscription: PushSubscriptionJson; vapid: VapidKeyPair }
+  /** Stop pushing to this device. Unknown endpoints are a no-op. */
+  | { type: 'unregisterPush'; endpoint: string }
   | {
       type: 'runRecipe';
       /** Correlation id echoed on `recipeRun` — the protocol has none of its own. */
@@ -3222,6 +3309,10 @@ export type ServerMessage =
       /** Whether this bridge has a TypeSafe key, so smart routing can run.
        *  Owner only; absent from a bridge older than this field. */
       smartRoutingAvailable?: boolean;
+      /** This bridge understands `registerPush`/`unregisterPush`. Owner only;
+       *  absent from a bridge older than this field, which the client then
+       *  leaves alone rather than drawing an "action not available" error. */
+      pushAvailable?: boolean;
       guardAllowlist?: GuardAllowEntry[];
       guardAllowlistReview?: GuardAllowlistReview | null;
       /** Staged agent-memory writes, read from persisted state like the guard's

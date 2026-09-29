@@ -96,6 +96,11 @@ reason.
 - `sessionsOnMachine(sessions, sessionMachine, deviceId)` — the sessions hosted by one machine, for
   display only; the store still holds every linked machine's sessions. A direct local bridge
   stamps `''` and has `primaryDeviceId: null`, so callers pass `primaryDeviceId ?? ''`
+- `alertTarget({ sessionId, sessions, sessionMachine, machines, primaryDeviceId, projects,
+  projectKeys })` — where a notification click has to land: the session's machine (with
+  `switchMachine` set when it isn't the primary) and, on that machine's own project list, the tab
+  the session belongs to. Backs `openSessionFromAlert`; see
+  [web-push-notifications](web-push-notifications.md)
 - `mergeMachineSessions({ sessions, sessionMachine, deviceId, incoming })` — folds one machine's
   `hello` into the shared session map. Drops only the sessions *stamped to this machine* that it
   no longer reports; every other machine's stamped sessions pass through untouched; an unstamped
@@ -295,7 +300,9 @@ out of `ws.ts` and `main.tsx`.
   on wake; a non-primary idle link, a pending retry and an in-flight connect are not.
 - `server/src/machineMerge.test.ts` — imports `web/src/lib/machines.ts` directly (see
   Architectural rules) and covers every merge/prune/select rule, including the destructive cases
-  each replaces: another machine's sessions survive a `hello`; a session a machine stops
+  each replaces, plus `alertTarget`: a session on the primary machine but a different project tab,
+  a session on a non-primary machine, and a work-tree session whose `cwd` isn't any project's
+  path; another machine's sessions survive a `hello`; a session a machine stops
   reporting is dropped but only its own; an unstamped session with no claimant is kept; a draft
   for an unknown session is never pruned; a session created on another machine never steals the
   selection; a non-primary `hello` (repeated or not) leaves the primary's `projects`/
@@ -346,6 +353,14 @@ out of `ws.ts` and `main.tsx`.
   finishing on a background machine still chimes and notifies, which is the whole point of keeping
   that machine's link open; the header switcher badges the machine a notification came from. This
   is the one place the display scope and the store's full session set intentionally diverge.
+- Web Push (see [web-push-notifications](web-push-notifications.md)) follows the same rule as
+  `maybeAlert`, one level down: each bridge keeps its own last-seen status per session and pushes
+  for the sessions it hosts, whether or not it is the primary machine. The device registers its
+  subscription with every owned machine, not only the primary, so a session finishing on a
+  background machine still reaches the phone.
+- A notification click (page-level or a Web Push) routes through `openSessionFromAlert`, which
+  switches the primary machine when the session isn't hosted there before selecting it — plain
+  `selectSession` left the sidebar on the previous machine.
 - `setPrimaryMachine` spreads the new primary's `view` over the same global fields the `hello`
   reducer writes — one projection, used by both — and clears `selectedSessionId` when the
   previously selected session isn't hosted on the new primary; it no-ops when the requested id is
@@ -415,3 +430,5 @@ out of `ws.ts` and `main.tsx`.
   unchanged inside `shouldClaimSelection`.
 - [turn-recovery](turn-recovery.md) — the banner precedence rule, now qualified to the primary
   machine only.
+- [web-push-notifications](web-push-notifications.md) — the same not-scoped-to-primary rule as
+  `maybeAlert`, plus the machine-and-project routing a notification click uses.

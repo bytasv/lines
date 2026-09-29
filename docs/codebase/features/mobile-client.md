@@ -32,6 +32,8 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
 - `web/src/components/UpdateBanner.tsx` — hidden on a phone (`useIsPhone`); its only action is the
   desktop download link
 - `web/public/manifest.webmanifest`, `web/public/icon-*.png` — installability
+- `web/public/sw.js`, `web/src/lib/push.ts` — push-only service worker and this device's
+  subscription; see [web-push-notifications](web-push-notifications.md)
 - Adapted surfaces: `Composer`, `PermissionPrompt`, `SessionView`, `Sidebar`, `Transcript`,
   `ContextWindowIndicator`, `UsageIndicator`, `ProjectTabs`, `ProjectPicker`, `SettingsModal`,
   `ConnectionBanner`, `UpdateBanner`
@@ -158,9 +160,13 @@ an iPad in landscape is neither.
   whole scroll column past 390px and made the transcript scroll sideways. `block` pins the content
   box to the viewport width instead, so children wrap/shrink rather than growing the column; the
   explicit `y`-only scrollbar is belt-and-suspenders against the same symptom recurring.
-- Installable, with **no service worker**. This is a live WebSocket client: offline caching buys
-  nothing, and an SW-cached bundle against a newer bridge trips the version-skew path in the one
-  configuration a user cannot fix by reloading, because the cache survives the reload.
+- Installable, with a **push-only service worker** (`web/public/sw.js`) — see
+  [web-push-notifications](web-push-notifications.md). It has no `fetch` handler and no cache, so
+  the reasoning behind the old "no service worker" rule still holds: offline caching buys nothing
+  for a live WebSocket client, and a worker that served a stale bundle against a newer bridge would
+  trip the version-skew path in the one configuration a user cannot fix by reloading, because the
+  cache survives the reload. Serving `sw.js` with `no-cache` means an updated worker still takes
+  effect on the next navigation.
 
 ## Architectural rules
 
@@ -215,3 +221,5 @@ an iPad in landscape is neither.
 - [end-to-end-encryption](end-to-end-encryption.md) — a phone on plain http has no WebCrypto and
   cannot enrol; it needs an https origin
 - [multi-machine-client](multi-machine-client.md)
+- [web-push-notifications](web-push-notifications.md) — how a phone gets an alert while the app
+  is backgrounded or closed, which the page's own JS cannot do on iOS

@@ -88,6 +88,10 @@ describe('MESSAGE_AUTHZ', () => {
     assert.ok(ownerOnly.includes('authLogout'));
     assert.ok(ownerOnly.includes('installUpdate'));
     assert.ok(ownerOnly.includes('pickFolder'));
+    // Push covers every session on the machine, and the bridge POSTs to the
+    // endpoint the message supplies.
+    assert.ok(ownerOnly.includes('registerPush'));
+    assert.ok(ownerOnly.includes('unregisterPush'));
 
     for (const scope of ['machine', 'session'] as const) {
       for (const type of ownerOnly) {

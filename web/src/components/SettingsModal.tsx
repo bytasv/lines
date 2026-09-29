@@ -25,6 +25,7 @@ import { capabilitiesForModel, providerForModel, REASONING_EFFORTS, validateRout
 import { emptyRoutingRule, RoutingRuleFields } from './RoutingRuleFields';
 import { useStore, type CompactionLevel } from '../store';
 import { ALERT_SOUND_OPTIONS } from '../lib/alerts';
+import { isIos, isStandalone } from '../lib/push';
 import { GuardAllowlistSection } from './GuardAllowlistSection';
 import { McpConnectionsSection } from './McpConnectionsSection';
 import { useIsPhone } from '../lib/layout';
@@ -752,6 +753,8 @@ function NotificationsSection() {
     alertsEnabled && notifyPermission !== 'granted'
       ? 'Sound only — notifications blocked in browser settings'
       : 'Chime and desktop notification when a session finishes or needs input';
+  // iOS only delivers Web Push to the home-screen app, never to a Safari tab.
+  const needsHomeScreen = isIos() && !isStandalone();
 
   return (
     <>
@@ -761,6 +764,11 @@ function NotificationsSection() {
         label="Alerts"
         description={alertsDescription}
       />
+      {needsHomeScreen && (
+        <Text size="xs" c="dimmed">
+          Add to Home Screen to receive notifications on this device.
+        </Text>
+      )}
       <Group gap="xs" align="flex-end" wrap="nowrap">
         <Select
           label="Sound"
