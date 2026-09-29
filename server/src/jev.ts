@@ -123,7 +123,6 @@ export async function decideTurn(input: DecideTurnInput, deps: JevDeps = {}): Pr
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? JEV_TIMEOUT_MS);
-  timer.unref?.();
   try {
     const res = await doFetch(JEV_URL, {
       method: 'POST',

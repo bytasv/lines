@@ -66,6 +66,15 @@ function captureFetch(t: { after: (fn: () => void) => void }): Sent[] {
 const DEBOUNCE_WAIT_MS = 2_200;
 const flush = (ms = 50) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Signed paths await key generation + signing before fetch; the first push in a
+ * cold process generates the signing key, which can outlast a fixed short wait.
+ */
+async function until(pred: () => boolean, ms = 2_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!pred() && Date.now() < deadline) await flush(10);
+}
+
 /** A token that would be unmistakable if it ever leaked into a payload. */
 const CLERK_TOKEN = 'clerk-session-token-CANARY';
 /** Shaped like a real Claude OAuth token, to catch a value-level leak. */
@@ -83,7 +92,7 @@ test('every push carries the Clerk token as a header, never in the body', async 
   // The undebounced pushes: these hit the wire synchronously.
   sync.pushSettings({ theme: 'dark' });
   sync.pushGuardAllowlist({ entries: [], updatedAt: 1 } as never);
-  await flush();
+  await until(() => sent.length >= 2);
 
   assert.ok(sent.length >= 2, 'expected the undebounced pushes to fire');
   for (const req of sent) {
