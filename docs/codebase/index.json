@@ -677,7 +677,8 @@
         "a desktop shows the whole workflow across the row however many steps it has; a phone shows the current step alone with n/total and a chevron, since one step is all that fits at 390px with its name readable",
         "the chevron opens the other steps as a bottom sheet rather than an in-place expansion — the stepper sits above the transcript, so expanding in place pushes the conversation down every time the user checks where they are",
         "that sheet renders no [data-progress-fill] elements, because Transcript counts them to learn the workflow's length and a second set would double it; per-step progress stays on the row behind the sheet",
-        "tapping a step in the sheet reveals it in the transcript and closes the sheet; a pending step has nothing to jump to and is inert"
+        "tapping a step in the sheet reveals it in the transcript and closes the sheet; a pending step has nothing to jump to and is inert",
+        "a non-last step's settle (done while its step still reads running) raises no Task complete alert or push — isAlertTransition suppresses it because an advance follows and a park re-alerts as waiting-approval; only the last step's done alerts; see web-push-notifications"
       ],
       "architecturalRules": [
         "interrupt() stays intent-free — no caller may infer \"advance\" from \"stop\"",
@@ -3700,7 +3701,7 @@
       "businessRules": [
         "phone is Mantine's default sm breakpoint (48em); no custom breakpoints were added",
         "the sidebar is a real drawer on a phone and closes when a session is picked or created; createSession also synchronously focuses a hidden keyboard-primer input so iOS keeps its keyboard up across the round-trip to the new session's composer",
-        "in a standalone iOS home-screen app, 100dvh resolves to the screen height minus the top safe-area inset while the header subtracts that inset again, leaving the composer short by --lines-safe-top; index.css pays it back inside @media (display-mode: standalone) only",
+        "full-screen modals and bottom sheets never size from 100dvh/--lines-viewport, which is not reliably the screen height in a standalone iOS home-screen app: they size against the fixed Mantine overlay inner (the screen) and pad by env(safe-area-inset-*); the full-screen modal rule is global, not phone-only, so an iPad home-screen app gets it too",
         "sidebar width is clamped against the viewport on every read, so a width saved on a large display cannot cover a 390px screen",
         "on a coarse pointer, hover-revealed actions are shown outright — they were unreachable on touch, and inline styles beat any CSS override",
         "dismissing the permission sheet denies: a swipe is a decision, and the safe reading is no",
@@ -3715,7 +3716,7 @@
         "a bottom sheet is sized by its content (size=\"auto\"), never by a share of the screen: a sheet pinned at 80dvh is the same height whether it holds four controls or one",
         "the composer's permission mode is its own Menu on the row (SEGMENT_MODES, same three modes and order as the desktop pills), separate from the Options icon button; the Options sheet no longer carries the mode control",
         "the phone project-picker button is sized and left-aligned to its own label instead of stretching to fill the header, and the composer has no corner radius or left/right/bottom border on a phone, so it reads as a strip spanning the screen",
-        "bottom sheets cap max-height at --lines-viewport minus --lines-safe-top, so a tall sheet's title and close button clear the Dynamic Island in a home-screen iOS app; PermissionPrompt's sheet carries .lines-mobile-sheet too",
+        "a bottom sheet's top clearance is padding on .lines-mobile-sheet-inner (--lines-safe-top plus a gap), not a content max-height, so its title and close button clear the Dynamic Island; a full-screen modal's content is the fixed inner minus --lines-keyboard with the bottom inset as padding (dropped while the keyboard is up) and its header padded by --lines-safe-top, with no inline height or header padding-top on a phone; PermissionPrompt's sheet carries .lines-mobile-sheet and .lines-mobile-sheet-inner",
         "the transcript ScrollArea sets scrollbars=\"y\" and styles.content.display=\"block\": Mantine's default display:table content wrapper grows to its widest non-shrinking child, which let one nowrap row widen the whole scroll column past 390px",
         "the desktop-update pill (UpdateBanner) is hidden on a phone; its only action is the macOS download link"
       ],
@@ -3945,6 +3946,7 @@
         "the bridge accepts only https: endpoints on fcm.googleapis.com or hosts ending in .push.apple.com, .push.services.mozilla.com, or .notify.windows.com — an SSRF guard on that POST",
         "not scoped to the primary machine, like maybeAlert: a device registers with every owned machine, and each bridge pushes for the sessions it hosts",
         "no push for a session adopted from sync (adoptSynced), since that broadcast means the session ran elsewhere and was just reset to idle here",
+        "no alert between workflow steps: isAlertTransition is false for a done whose workflow is started, whose current step still reads running, and which is not the last step — an advance follows silently and a park re-alerts as waiting-approval; see workflow-step-lifecycle",
         "a push and an in-page alert for the same session share tag: sessionId, so they collapse into one notification on a device that would otherwise get both",
         "the owner hello carries pushAvailable: true; the client only sends registerPush to a machine that said so, so an older bridge is never asked to handle an unknown message type",
         "push only reaches iOS/iPadOS from the home-screen app (display-mode: standalone), iOS 16.4+, with the permission prompt triggered by a tap; Settings shows an Add to Home Screen hint otherwise",

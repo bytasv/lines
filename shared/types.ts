@@ -444,6 +444,9 @@ export const ALERT_STATUSES: readonly SessionStatus[] = ['done', 'waiting-permis
  *
  * No previous status means "first sighting", not a transition: a reconnect or a
  * bridge restart must not replay alerts for sessions that settled long ago.
+ *
+ * Intermediate workflow steps don't alert on settle: only the last step's
+ * `done`, or a park's `waiting-approval`, reaches the user.
  */
 export function isAlertTransition(prev: SessionStatus | undefined, next: SessionMeta): boolean {
   if (!prev || prev === next.status) return false;
@@ -453,6 +456,20 @@ export function isAlertTransition(prev: SessionStatus | undefined, next: Session
   // alert now would be a lie. The notification turn the task produces settles
   // later, with the set empty, and alerts normally.
   if (next.backgroundTasks?.length) return false;
+  // A non-last workflow step's turn just settled and the engine hasn't decided
+  // yet: its step is still 'running'. An advance broadcasts the next step
+  // running, so "Task complete" between steps is noise; a park follows with
+  // 'waiting-approval', which re-alerts as "Needs approval". The last step is
+  // not guarded, so the workflow's end still alerts.
+  const wf = next.workflow;
+  if (
+    next.status === 'done' &&
+    wf?.started &&
+    wf.stepStatuses[wf.stepIndex] === 'running' &&
+    wf.stepIndex < wf.stepStatuses.length - 1
+  ) {
+    return false;
+  }
   return true;
 }
 

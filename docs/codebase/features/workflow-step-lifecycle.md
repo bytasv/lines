@@ -616,6 +616,10 @@ no crossing at all.
 
 Step 0 is the one case the editor cannot judge: its predecessor is whatever session the workflow
 is attached to, which is not known until the run. The runner handles it with the same rule.
+- A non-last step's settle (`done` while its step still reads `running`) does not raise a
+  "Task complete" alert or push: `isAlertTransition` suppresses it, since an advance follows
+  and a park re-alerts as `waiting-approval`. Only the last step's `done` alerts. See
+  [web-push-notifications](web-push-notifications.md).
 
 ## Architectural rules
 

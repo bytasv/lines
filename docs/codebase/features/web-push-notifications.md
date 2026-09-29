@@ -132,6 +132,12 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
 - **No push for synced sessions.** `adoptSynced` broadcasts `sessionUpsert` for a session that ran
   on another machine and has been reset to idle here; `userContext` skips `onSessionUpsert` while
   `sync.applying`, so that reset never reads as a transition worth pushing.
+- **No alert between workflow steps.** `isAlertTransition` is false for a `done` whose workflow
+  is started, whose current step still reads `running` (the engine hasn't decided yet), and which
+  is not the last step. An advance then broadcasts the next step running; a park broadcasts
+  `waiting-approval`, which still alerts as "Needs approval". The last step's `done` alerts.
+  Relies on the settle upsert going out before `onWorkflowTurnComplete` updates step statuses.
+  See [workflow-step-lifecycle](workflow-step-lifecycle.md).
 - **Tag-based dedupe.** A push and an in-page alert for the same session both use
   `tag: sessionId`, so on one device they collapse into a single notification instead of stacking.
 - **Version skew.** The owner `hello` carries `pushAvailable: true`; the client only sends

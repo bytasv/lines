@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { isAlertTransition } from '@lines/shared';
-import type { PushRegistration, SessionMeta } from '@lines/shared';
+import type { PushRegistration, SessionMeta, WorkflowState, WorkflowStepStatus } from '@lines/shared';
 import { PushNotifier, isAllowedPushEndpoint, parseRegistration, pushPayload } from './pushNotifier.ts';
 
 /**
@@ -21,6 +21,13 @@ const reg = (endpoint = 'https://fcm.googleapis.com/fcm/send/abc'): PushRegistra
 
 const session = (over: Partial<SessionMeta> = {}): SessionMeta =>
   ({ id: 's1', name: 'Fix the build', status: 'idle', ...over }) as SessionMeta;
+
+const wf = (stepIndex: number, stepStatuses: WorkflowStepStatus[], started = true): WorkflowState => ({
+  workflowId: 'w1',
+  stepIndex,
+  stepStatuses,
+  started,
+});
 
 /** An in-memory stand-in for the two Store methods the notifier uses. */
 function memStore(initial: PushRegistration[] = []) {
@@ -81,6 +88,31 @@ describe('isAlertTransition', () => {
   test('no push while background tasks are still running', () => {
     const next = session({ status: 'done', backgroundTasks: [{}] as SessionMeta['backgroundTasks'] });
     assert.equal(isAlertTransition('running', next), false);
+  });
+
+  test('no push when an intermediate workflow step settles', () => {
+    const next = session({ status: 'done', workflow: wf(0, ['running', 'pending', 'pending']) });
+    assert.equal(isAlertTransition('running', next), false);
+  });
+
+  test('pushes when the last workflow step settles', () => {
+    const next = session({ status: 'done', workflow: wf(2, ['done', 'done', 'running']) });
+    assert.equal(isAlertTransition('running', next), true);
+  });
+
+  test('pushes when a workflow step parks for approval', () => {
+    const next = session({ status: 'waiting-approval', workflow: wf(0, ['waiting-approval', 'pending', 'pending']) });
+    assert.equal(isAlertTransition('done', next), true);
+  });
+
+  test('pushes on a follow-up chat after the workflow finished', () => {
+    const next = session({ status: 'done', workflow: wf(2, ['done', 'done', 'done']) });
+    assert.equal(isAlertTransition('running', next), true);
+  });
+
+  test('pushes in a workflow that has not started', () => {
+    const next = session({ status: 'done', workflow: wf(0, ['running', 'pending', 'pending'], false) });
+    assert.equal(isAlertTransition('running', next), true);
   });
 });
 
@@ -196,6 +228,19 @@ describe('PushNotifier', () => {
     await settle();
     assert.equal(rec.calls.length, 1);
     assert.equal((rec.calls[0].payload as { body: string }).body, 'Needs permission');
+  });
+
+  test('a mid-workflow settle does not push, the park that follows does', async () => {
+    const rec = recorder();
+    const n = new PushNotifier(memStore([reg()]), rec.send);
+    n.onSessionUpsert(session({ status: 'running', workflow: wf(0, ['running', 'pending']) }));
+    n.onSessionUpsert(session({ status: 'done', workflow: wf(0, ['running', 'pending']) }));
+    await settle();
+    assert.equal(rec.calls.length, 0);
+    n.onSessionUpsert(session({ status: 'waiting-approval', workflow: wf(0, ['waiting-approval', 'pending']) }));
+    await settle();
+    assert.equal(rec.calls.length, 1);
+    assert.equal((rec.calls[0].payload as { body: string }).body, 'Needs approval');
   });
 
   test('a 410 from the push service deletes the subscription', async () => {
