@@ -3966,6 +3966,42 @@
         "session-and-project-ui",
         "end-to-end-encryption"
       ]
+    },
+    {
+      "id": "landing-page",
+      "name": "Landing page",
+      "doc": "features/landing-page.md",
+      "purpose": "Provider-neutral signed-out marketing page; the hero cycles through the supported coding agents (Claude Code, Codex) so visitors see both at a glance.",
+      "entryPoints": [
+        "web/src/components/LandingPage.tsx",
+        "web/src/components/AgentRotator.tsx"
+      ],
+      "files": [
+        "web/src/components/LandingPage.tsx",
+        "web/src/components/AgentRotator.tsx",
+        "web/src/index.css",
+        "web/src/components/DownloadDesktopApp.tsx",
+        "web/src/components/PairingDiagram.tsx",
+        "web/index.html"
+      ],
+      "symbols": [
+        "AGENTS",
+        "AgentRotator"
+      ],
+      "tests": [],
+      "businessRules": [
+        "generic claims say coding agent or list providers; strings that are truly provider-specific (Claude CLI status, Claude sign-in, SDK internals) stay provider-specific",
+        "supporting another provider in the copy is one new AGENTS entry, kept local to LandingPage because shared/providers.ts is capability data, not marketing copy",
+        "the install card says at least one of Claude Code or Codex must be installed on the paired machine"
+      ],
+      "architecturalRules": [
+        "the rotating word sits on its own line with every word stacked in one grid cell and centred independently, so a short word leaves no gap and a long one never re-wraps the heading; mid-sentence placement shifts the surrounding text on every swap",
+        "the visible heading is aria-hidden and a VisuallyHidden sibling carries the full sentence naming every agent, so assistive tech never hears the words cycle",
+        "under prefers-reduced-motion the rotator renders the first word and starts no timer, with the CSS animation disabled as a second guard; the interval is cleared on unmount"
+      ],
+      "relatedDecisions": [
+        "openai-codex-sessions"
+      ]
     }
   ]
 }

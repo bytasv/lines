@@ -189,6 +189,76 @@
   animation: tx-caret 1s step-end infinite;
 }
 
+/* Landing hero word swap (AgentRotator). A block of its own line, with every
+   word stacked in one grid cell and centred on its own: the line height never
+   changes and a short word leaves no gap. */
+.agent-rotator {
+  display: grid;
+  justify-items: center;
+  white-space: nowrap;
+}
+
+.agent-rotator-word {
+  grid-area: 1 / 1;
+  opacity: 0;
+  visibility: hidden;
+  background-image: linear-gradient(
+    90deg,
+    var(--mantine-primary-color-filled),
+    var(--mantine-color-violet-5),
+    var(--mantine-color-teal-5)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.agent-rotator-word.is-active {
+  opacity: 1;
+  visibility: visible;
+  animation: agent-in 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.agent-rotator-word.is-leaving {
+  visibility: visible;
+  animation: agent-out 0.4s ease-in both;
+}
+
+@keyframes agent-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.4em);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes agent-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-0.4em);
+    filter: blur(8px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-rotator-word.is-active {
+    animation: none;
+  }
+  .agent-rotator-word.is-leaving {
+    visibility: hidden;
+  }
+}
+
 /* Passages of a plan the user has commented on.
 
    Painted with the CSS Custom Highlight API rather than wrapping the text in

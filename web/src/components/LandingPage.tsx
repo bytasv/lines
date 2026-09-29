@@ -12,6 +12,7 @@ import {
   Text,
   ThemeIcon,
   Title,
+  VisuallyHidden,
 } from '@mantine/core';
 import { SignedIn, SignedOut, SignInButton, SignUpButton } from '@clerk/clerk-react';
 import { Link } from 'react-router-dom';
@@ -31,11 +32,17 @@ import {
   IconStack2,
   IconTerminal2,
 } from '@tabler/icons-react';
+import { AgentRotator } from './AgentRotator';
 import { BrandMark } from './BrandMark';
 import { DownloadDesktopApp } from './DownloadDesktopApp';
 
 const REPO_URL = 'https://github.com/bytasv/lines';
-const CLAUDE_CODE_SETUP_URL = 'https://docs.claude.com/en/docs/claude-code/setup';
+// Supported agent CLIs, in the order the hero cycles through them. Adding a
+// provider to the landing copy is one entry here.
+const AGENTS = [
+  { name: 'Claude Code', setupUrl: 'https://docs.claude.com/en/docs/claude-code/setup' },
+  { name: 'Codex', setupUrl: 'https://github.com/openai/codex' },
+];
 
 type Feature = {
   icon: typeof IconBolt;
@@ -48,7 +55,7 @@ const FEATURES: Feature[] = [
     icon: IconBolt,
     title: 'Parallel sessions, live',
     description:
-      'Run several Claude sessions at once, one per project directory, with token-level streaming into a markdown transcript and live status badges.',
+      'Run several agent sessions at once — Claude or Codex, one per project directory — with token-level streaming into a markdown transcript and live status badges.',
   },
   {
     icon: IconGitCompare,
@@ -143,7 +150,7 @@ const MODES: Mode[] = [
     title: 'Hosted',
     where: 'agent still runs on a machine you pair',
     description:
-      'Sign in from any browser. This site only relays and stores metadata — your code, your git, your Claude login never leave your machine.',
+      'Sign in from any browser. This site only relays and stores metadata — your code, your git, your agent logins never leave your machine.',
   },
 ];
 
@@ -189,16 +196,27 @@ export function LandingPage() {
       <Container size="lg" py={80}>
         <Stack align="center" gap="lg" ta="center" mb={96}>
           <Badge variant="light" size="lg" radius="sm">
-            Built on the Claude Agent SDK
+            Works with Claude Code and Codex
           </Badge>
           <Title order={1} fz={{ base: 32, sm: 48 }} maw={720} lh={1.15}>
-            Run Claude Code from anywhere. Your machine still does the work.
+            <VisuallyHidden>
+              Your machine does the work. Run it from anywhere with{' '}
+              {AGENTS.map((agent) => agent.name).join(' or ')}.
+            </VisuallyHidden>
+            {/* The rotating word gets a line of its own: each word centres itself,
+                so a short one leaves no gap and a long one never re-wraps the
+                text around it. */}
+            <span aria-hidden="true">
+              <span style={{ display: 'block' }}>Your machine does the work.</span>
+              Run it from anywhere with
+              <AgentRotator words={AGENTS.map((agent) => agent.name)} />
+            </span>
           </Title>
           <Text size="lg" c="dimmed" maw={620}>
-            Lines is a web GUI for Claude Code: parallel sessions, live streaming, inline
-            diffs, multi-step workflows, and a shareable prompt library — while every
-            agent turn executes on your own filesystem, your own git, your own Claude
-            login.
+            Lines is a web GUI for coding agents like Claude Code and Codex: parallel
+            sessions, live streaming, inline diffs, multi-step workflows, and a shareable
+            prompt library — while every agent turn executes on your own filesystem, your
+            own git, your own agent login.
           </Text>
           <Group>
             <SignUpButton mode="modal">
@@ -220,7 +238,7 @@ export function LandingPage() {
               Everything a long agent session needs
             </Title>
             <Text c="dimmed" maw={560} mx="auto">
-              Not just a chat window — the tooling to run Claude Code for real work, at scale,
+              Not just a chat window — the tooling to run coding agents for real work, at scale,
               without losing track of cost, context, or control.
             </Text>
           </Stack>
@@ -309,9 +327,11 @@ export function LandingPage() {
             <Anchor href={REPO_URL} target="_blank" rel="noreferrer" size="sm">
               Source on GitHub
             </Anchor>
-            <Anchor href={CLAUDE_CODE_SETUP_URL} target="_blank" rel="noreferrer" size="sm">
-              Install Claude Code
-            </Anchor>
+            {AGENTS.map((agent) => (
+              <Anchor key={agent.name} href={agent.setupUrl} target="_blank" rel="noreferrer" size="sm">
+                Install {agent.name}
+              </Anchor>
+            ))}
           </Group>
           <Text size="sm" c="dimmed">
             Prefer to run the whole thing yourself? Everything here — relay, storage, and web

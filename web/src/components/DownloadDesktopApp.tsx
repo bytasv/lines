@@ -95,11 +95,15 @@ export function DownloadDesktopApp() {
         </Alert>
 
         <Text size="sm" c="dimmed">
-          Lines runs the agent through Claude Code on your machine, so you need it installed —{' '}
+          Lines runs the agent through a coding-agent CLI on your machine — install{' '}
           <Anchor href="https://docs.claude.com/en/docs/claude-code/setup" target="_blank" rel="noreferrer">
-            install Claude Code
-          </Anchor>
-          . A paired machine without it cannot run a session.
+            Claude Code
+          </Anchor>{' '}
+          or{' '}
+          <Anchor href="https://github.com/openai/codex" target="_blank" rel="noreferrer">
+            Codex
+          </Anchor>{' '}
+          (at least one). A paired machine with neither cannot run a session.
         </Text>
       </Stack>
     </Card>

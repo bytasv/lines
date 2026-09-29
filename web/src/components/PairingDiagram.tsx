@@ -23,7 +23,7 @@ export function PairingDiagram() {
       viewBox="0 42 660 198"
       width="100%"
       role="img"
-      aria-label="This browser talks to the Lines relay, which forwards to Lines running on your own machine, where Claude Code and your files stay."
+      aria-label="This browser talks to the Lines relay, which forwards to Lines running on your own machine, where your agent runs and your files stay."
       style={{ display: 'block' }}
     >
       <defs>
@@ -69,7 +69,7 @@ export function PairingDiagram() {
           Your machine
         </text>
         <text x="562" y="124" textAnchor="middle" fill={dim} fontSize="11">
-          Claude Code runs here
+          your agent runs here
         </text>
         <text x="562" y="140" textAnchor="middle" fill={dim} fontSize="11">
           your files stay here
