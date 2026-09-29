@@ -3438,7 +3438,7 @@ export const DEFAULT_MODELS: ModelOption[] = [
   // that is Anthropic's published cache-read rate for this model, not a typo.
   { id: 'claude-opus-5-5', label: 'Opus 5.5', description: 'For long-running agentic coding and knowledge work', contextWindow: 1_000_000, price: { input: 4, cachedInput: 0.2, output: 20 } },
   { id: 'claude-fable-5-1', label: 'Fable 5.1', description: 'For demanding reasoning and long-horizon agentic work', contextWindow: 1_000_000, price: { input: 10, cachedInput: 0.25, output: 50 } },
-  { id: 'claude-sonnet-5', label: 'Sonnet 5', description: 'Balanced speed and capability', contextWindow: 1_000_000, price: { input: 2, cachedInput: 0.2, output: 10 } },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5', description: 'Balanced speed and capability', contextWindow: 1_000_000, price: { input: 2, cachedInput: 0.2, output: 10 } },
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5', description: 'Fastest, for lightweight tasks', contextWindow: 200_000, price: { input: 1, cachedInput: 0.1, output: 5 } },
   // OpenAI models run through the `codex` CLI, not the Claude SDK. No
   // contextWindow on any of them — see ModelOption.contextWindow.
@@ -3473,6 +3473,7 @@ export const DEFAULT_MODEL = 'claude-opus-5-5';
 export const LEGACY_MODEL_MAP: Record<string, string> = {
   'claude-opus-4-8': 'claude-opus-5-5',
   'claude-opus-5': 'claude-opus-5-5',
+  'claude-sonnet-5': 'claude-sonnet-5-5',
   'claude-fable-5': 'claude-fable-5-1',
   'gpt-5.6-sol': 'gpt-6-sol',
   'gpt-5.6-luna': 'gpt-6-luna',

@@ -30,7 +30,7 @@ test('well-formed assistant usage yields all four components', () => {
 test('missing usage fields coerce to 0, never NaN', () => {
   const got = extractContextUsage(
     assistantMsg({ input_tokens: 5, cache_read_input_tokens: 10, output_tokens: 7 }),
-    'claude-sonnet-5',
+    'claude-sonnet-5-5',
     1,
   );
   assert.equal(got?.cacheCreationTokens, 0);
@@ -88,6 +88,7 @@ test('reported prompt total equal to the component sum is not flagged', () => {
 test('contextWindowFor resolves known, legacy and unknown ids', () => {
   assert.equal(contextWindowFor('claude-opus-5-5', DEFAULT_MODELS), 1_000_000);
   assert.equal(contextWindowFor('claude-opus-5', DEFAULT_MODELS), 1_000_000);
+  assert.equal(contextWindowFor('claude-sonnet-5', DEFAULT_MODELS), 1_000_000);
   assert.equal(contextWindowFor('claude-opus-4-8', DEFAULT_MODELS), 1_000_000);
   assert.equal(contextWindowFor('claude-fable-5', DEFAULT_MODELS), 1_000_000);
   assert.equal(contextWindowFor('claude-haiku-4-5', DEFAULT_MODELS), 200_000);

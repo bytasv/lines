@@ -4058,7 +4058,7 @@ export class SessionManager {
           'You consolidate an iterated workflow step into its single final ' +
           'deliverable. You never ask questions, never refuse, and never add ' +
           'commentary or preamble — you output only the deliverable.',
-        claudeModel: 'claude-sonnet-5',
+        claudeModel: 'claude-sonnet-5-5',
       });
     } catch (err) {
       console.warn('[consolidateStepOutput]', err);
@@ -4079,7 +4079,7 @@ export class SessionManager {
     // Runs on whichever provider is connected. Before this was provider-neutral,
     // an OpenAI-only user had no judge at all — every connection read UNCHECKED,
     // which is safe (never "allowed") but is the protection simply being absent.
-    const answer = await this.helper({ prompt, systemPrompt, claudeModel: 'claude-sonnet-5' });
+    const answer = await this.helper({ prompt, systemPrompt, claudeModel: 'claude-sonnet-5-5' });
     return answer;
   };
 
@@ -4840,7 +4840,7 @@ export class SessionManager {
           'continue. You summarize only the conversation you are given, never your ' +
           'own context. You are terse: no preamble, no commentary, no advice — the ' +
           'briefing and nothing else.',
-        claudeModel: 'claude-sonnet-5',
+        claudeModel: 'claude-sonnet-5-5',
       });
       // A cap in case the instruction is ignored: this text is about to be sent
       // as a turn, and a runaway summary would cost more than the conversation it

@@ -62,7 +62,7 @@ const runMsg = (
   runId: 'run1',
   recipes: refs,
   cwd: h.root,
-  model: 'claude-sonnet-5',
+  model: 'claude-sonnet-5-5',
   permissionMode: 'acceptEdits',
   ...over,
 });
@@ -96,7 +96,7 @@ test('a multi-recipe run synthesizes a saved workflow with one step per recipe, 
     // Cumulative by definition: step N must see what step N-1 built.
     assert.equal(step.freshStart, false);
     assert.equal(step.autoAdvance, true);
-    assert.equal(step.model, 'claude-sonnet-5');
+    assert.equal(step.model, 'claude-sonnet-5-5');
     assert.equal(step.permissionMode, 'acceptEdits');
   }
   // The property the whole design hinges on: an unsaved def would make every

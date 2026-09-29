@@ -44,7 +44,7 @@ const twoStep = (
     {
       name: 'Step 1',
       promptTemplate: 'do step 1',
-      model: 'claude-sonnet-5',
+      model: 'claude-sonnet-5-5',
       permissionMode: 'default',
       autoAdvance: false,
       freshStart: false,
@@ -74,7 +74,7 @@ function harness(secondModel: string, secondFreshStart: boolean, efforts: StepEf
     id: 's1',
     name: 's1',
     cwd: '/tmp',
-    model: 'claude-sonnet-5',
+    model: 'claude-sonnet-5-5',
     permissionMode: 'default',
     status: 'waiting-approval',
     createdAt: 1,
@@ -236,11 +236,11 @@ test('a step routing rule naming another provider’s model is rejected', () => 
   const step = twoStep('claude-opus-5-5', false).steps[0] as Parameters<typeof validateStepContent>[0];
   const issues = validateStepContent({
     ...step,
-    routing: { rule: 'r', models: ['claude-sonnet-5', 'gpt-6-sol'], efforts: ['low'] },
+    routing: { rule: 'r', models: ['claude-sonnet-5-5', 'gpt-6-sol'], efforts: ['low'] },
   });
   assert.ok(issues.some((i) => i.field === 'routing' && /gpt-6-sol/.test(i.message)));
   assert.deepEqual(
-    validateStepContent({ ...step, routing: { rule: 'r', models: ['claude-sonnet-5'], efforts: ['low'] } }),
+    validateStepContent({ ...step, routing: { rule: 'r', models: ['claude-sonnet-5-5'], efforts: ['low'] } }),
     [],
   );
 });

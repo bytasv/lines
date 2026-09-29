@@ -38,7 +38,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         name: 'Add tests',
         promptTemplate:
           'Add tests covering the feature just implemented. Run them and make sure they pass.{feedback}',
-        model: 'claude-sonnet-5',
+        model: 'claude-sonnet-5-5',
         permissionMode: 'acceptEdits',
         autoAdvance: false,
         freshStart: true,
@@ -47,7 +47,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         name: 'Refactor',
         promptTemplate:
           'Refactor the new code for clarity and consistency with the rest of the codebase. Keep tests green.{feedback}',
-        model: 'claude-sonnet-5',
+        model: 'claude-sonnet-5-5',
         permissionMode: 'acceptEdits',
         autoAdvance: false,
         freshStart: true,
@@ -90,7 +90,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         name: 'Regression test',
         promptTemplate:
           'Add a regression test that fails without the fix and passes with it. Run it.{feedback}',
-        model: 'claude-sonnet-5',
+        model: 'claude-sonnet-5-5',
         permissionMode: 'acceptEdits',
         autoAdvance: false,
         freshStart: true,
@@ -124,7 +124,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         name: 'Write docs',
         promptTemplate:
           'Write clear documentation for what you explored above. Match the style of existing docs in the repo.{feedback}',
-        model: 'claude-sonnet-5',
+        model: 'claude-sonnet-5-5',
         permissionMode: 'acceptEdits',
         autoAdvance: false,
         freshStart: true,

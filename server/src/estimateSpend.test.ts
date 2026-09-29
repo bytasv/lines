@@ -67,6 +67,10 @@ test('a retired model id is priced as its replacement', () => {
     estimateSpendUsd('claude-opus-5', { input_tokens: 1_000_000 }),
     estimateSpendUsd('claude-opus-5-5', { input_tokens: 1_000_000 }),
   );
+  assert.equal(
+    estimateSpendUsd('claude-sonnet-5', { input_tokens: 1_000_000 }),
+    estimateSpendUsd('claude-sonnet-5-5', { input_tokens: 1_000_000 }),
+  );
   // A step still stored on a retired OpenAI id is costed at its replacement's
   // rate, not left undefined — OpenAI reports no cost, so this estimate is the
   // only figure that step will ever show. Asserted against the literal rate as

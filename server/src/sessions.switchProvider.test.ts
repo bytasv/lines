@@ -60,7 +60,7 @@ function harness(opts: HarnessOptions = {}) {
     id: 's1',
     name: 's1',
     cwd: '/tmp',
-    model: opts.model ?? 'claude-sonnet-5',
+    model: opts.model ?? 'claude-sonnet-5-5',
     permissionMode: 'default',
     status: opts.status ?? 'idle',
     createdAt: 1,
@@ -164,7 +164,7 @@ test('a cross-provider switch drops the conversation and seeds the new one', asy
     .loadTranscript('s1')
     .find((e) => e.kind === 'provider-switch')!.data as Record<string, unknown>;
   assert.deepEqual(marker, {
-    from: 'claude-sonnet-5',
+    from: 'claude-sonnet-5-5',
     to: 'gpt-5.6-terra',
     summarized: true,
     // The conversation being left behind, recorded because the reset below is
@@ -191,7 +191,7 @@ test('a stop the worker never answers refuses, atomically', async () => {
 
   assert.equal(verdict.ok, false);
   assert.equal(verdict.ok === false ? verdict.code : '', 'turn-running');
-  assert.equal(h.s1().model, 'claude-sonnet-5');
+  assert.equal(h.s1().model, 'claude-sonnet-5-5');
   assert.equal(h.s1().claudeSessionId, 'claude-abc', 'the conversation survived the refusal');
   assert.equal(h.prompts.length, 0);
 });
@@ -287,7 +287,7 @@ test('queued prompts refuse the switch, atomically', async () => {
 
   assert.equal(verdict.ok, false);
   assert.equal(verdict.ok === false ? verdict.code : '', 'queued');
-  assert.equal(h.s1().model, 'claude-sonnet-5');
+  assert.equal(h.s1().model, 'claude-sonnet-5-5');
   assert.equal(h.s1().claudeSessionId, 'claude-abc');
   assert.equal(h.s1().queued?.length, 1);
 });
@@ -306,7 +306,7 @@ test('a missing target CLI refuses *before* the conversation is dropped', async 
     assert.equal(verdict.ok === false ? verdict.code : '', 'cli-missing');
     assert.match(verdict.ok === false ? verdict.reason : '', /not installed/);
     assert.equal(h.s1().claudeSessionId, 'claude-abc', 'the conversation survived the refusal');
-    assert.equal(h.s1().model, 'claude-sonnet-5');
+    assert.equal(h.s1().model, 'claude-sonnet-5-5');
     assert.equal(h.closed.length, 0, 'and its worker was never closed');
     assert.equal(h.prompts.length, 0);
   } finally {
@@ -325,7 +325,7 @@ test('no OpenAI account refuses *before* the conversation is dropped', async () 
   assert.equal(verdict.ok, false);
   assert.equal(verdict.ok === false ? verdict.code : '', 'not-connected');
   assert.equal(h.s1().claudeSessionId, 'claude-abc', 'the conversation survived the refusal');
-  assert.equal(h.s1().model, 'claude-sonnet-5');
+  assert.equal(h.s1().model, 'claude-sonnet-5-5');
   assert.equal(h.closed.length, 0, 'and its worker was never closed');
 });
 

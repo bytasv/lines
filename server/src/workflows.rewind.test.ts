@@ -23,7 +23,7 @@ const wfDef: WorkflowDef = {
   steps: [0, 1, 2].map((n) => ({
     name: `Step ${n + 1}`,
     promptTemplate: `do step ${n + 1}{feedback}`,
-    model: 'claude-sonnet-5',
+    model: 'claude-sonnet-5-5',
     permissionMode: 'default' as const,
     outputName: `out${n}`,
     autoAdvance: false,

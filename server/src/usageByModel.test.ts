@@ -29,9 +29,9 @@ test('repeat turns accumulate cost, tokens and turn count', () => {
 
 test('a zero-cost turn still counts a turn and produces no NaN', () => {
   const map: ModelSpendMap = {};
-  addSpend(map, 'claude-sonnet-5', 0, 0);
-  addSpend(map, 'claude-sonnet-5', Number.NaN, Number.NaN);
-  assert.deepEqual(map['claude-sonnet-5'], { costUsd: 0, tokens: 0, turns: 2 });
+  addSpend(map, 'claude-sonnet-5-5', 0, 0);
+  addSpend(map, 'claude-sonnet-5-5', Number.NaN, Number.NaN);
+  assert.deepEqual(map['claude-sonnet-5-5'], { costUsd: 0, tokens: 0, turns: 2 });
 });
 
 test('mergeSpend sums across maps and skips undefined entries', () => {
@@ -56,11 +56,11 @@ test('sortedSpend orders rows by cost, most expensive first', () => {
   const map: ModelSpendMap = {
     'claude-haiku-4-5': { costUsd: 0.01, tokens: 5, turns: 1 },
     'claude-opus-5-5': { costUsd: 2.5, tokens: 50, turns: 2 },
-    'claude-sonnet-5': { costUsd: 0.4, tokens: 20, turns: 1 },
+    'claude-sonnet-5-5': { costUsd: 0.4, tokens: 20, turns: 1 },
   };
   assert.deepEqual(
     sortedSpend(map).map(([id]) => id),
-    ['claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-4-5'],
   );
 });
 

@@ -23,7 +23,7 @@ const wfDef = (stepCount: number, autoAdvance = false): WorkflowDef => ({
   steps: Array.from({ length: stepCount }, (_, n) => ({
     name: `Step ${n + 1}`,
     promptTemplate: `do step ${n + 1}{feedback}`,
-    model: 'claude-sonnet-5',
+    model: 'claude-sonnet-5-5',
     permissionMode: 'default' as const,
     autoAdvance,
     // No fresh start: keeps runStep off the git/diff hand-off path in a temp dir.
@@ -760,7 +760,7 @@ test('{changed} and {diff} resolve in an inheriting (non-fresh-start) step, neve
       {
         name: 'Step 1',
         promptTemplate: 'do step 1{feedback}',
-        model: 'claude-sonnet-5',
+        model: 'claude-sonnet-5-5',
         permissionMode: 'default',
         autoAdvance: false,
         freshStart: false,
@@ -768,7 +768,7 @@ test('{changed} and {diff} resolve in an inheriting (non-fresh-start) step, neve
       {
         name: 'Commit',
         promptTemplate: 'Stage: {changed}\nDiff: {diff}{feedback}',
-        model: 'claude-sonnet-5',
+        model: 'claude-sonnet-5-5',
         permissionMode: 'default',
         autoAdvance: false,
         // Inheriting step — no fresh start — but {changed}/{diff} must still resolve.

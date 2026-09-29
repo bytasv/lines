@@ -265,7 +265,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       name: 'Add tests',
       promptTemplate:
         'Add tests covering the feature just implemented. Run them and make sure they pass.{feedback}',
-      model: 'claude-sonnet-5',
+      model: 'claude-sonnet-5-5',
       permissionMode: 'acceptEdits',
       autoAdvance: false,
       freshStart: true,
@@ -274,7 +274,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       name: 'Refactor',
       promptTemplate:
         'Refactor the new code for clarity and consistency with the rest of the codebase. Keep tests green.{feedback}',
-      model: 'claude-sonnet-5',
+      model: 'claude-sonnet-5-5',
       permissionMode: 'acceptEdits',
       autoAdvance: false,
       freshStart: true,
