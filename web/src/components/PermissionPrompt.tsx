@@ -1462,11 +1462,17 @@ function PlanApproval({
         padding={0}
         withCloseButton={false}
         transitionProps={{ transition: 'fade', duration: 150 }}
+        // Height comes from the full-screen content rule in index.css (the
+        // screen, not `dvh`); the chain flexes down to the ScrollArea so the
+        // footer always stays on screen.
+        styles={{
+          content: { display: 'flex', flexDirection: 'column' },
+          body: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' },
+        }}
       >
         <Box
-          h="var(--lines-viewport)"
           className="lines-safe-top"
-          style={{ display: 'flex', flexDirection: 'column' }}
+          style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
         >
           <Group px="xl" py="md" justify="space-between">
             <Group gap="xs">
@@ -1666,10 +1672,9 @@ function PermissionCard({
           title="Needs your approval"
           size="auto"
           padding="md"
-          className="lines-safe-bottom"
-          classNames={{ content: 'lines-mobile-sheet' }}
+          classNames={{ content: 'lines-mobile-sheet', inner: 'lines-mobile-sheet-inner' }}
         >
-          {body}
+          <Box className="lines-safe-bottom">{body}</Box>
         </Drawer>
       </>
     );

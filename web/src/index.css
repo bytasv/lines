@@ -26,18 +26,6 @@
   --lines-safe-top: env(safe-area-inset-top, 0px);
 }
 
-/* A standalone iOS app (black-translucent + viewport-fit=cover) resolves `100dvh`
-   to the screen minus the top inset, while the header still reaches up under the
-   status bar and subtracts that inset a second time — leaving an empty band of
-   exactly `--lines-safe-top` under the composer. Paid back here only: in a
-   browser tab and on desktop `dvh` is already right. Pending on-device check via
-   `?diag=viewport` (lib/viewport.ts). */
-@media (display-mode: standalone) {
-  :root {
-    --lines-viewport: calc(100dvh + var(--lines-safe-top) - var(--lines-keyboard));
-  }
-}
-
 /* Pays the top inset back on anything that starts at the top of the screen.
    Global rather than phone-only: an iPad home-screen app has the inset too. */
 .lines-safe-top {
@@ -48,6 +36,19 @@
    the part that has to clear the status bar. */
 .mantine-Modal-content[data-full-screen] .mantine-Modal-header {
   padding-top: calc(var(--mb-padding, var(--mantine-spacing-md)) + var(--lines-safe-top));
+}
+
+/* Sized against the fixed overlay inner (top: 0; bottom: 0, i.e. the screen)
+   rather than Mantine's `100dvh`, which a standalone iOS app does not resolve to
+   the screen height. The bottom inset is padded so footers clear the home
+   indicator; with the keyboard up the indicator is covered, so it is dropped. */
+.mantine-Modal-root[data-full-screen] .mantine-Modal-content[data-full-screen] {
+  --modal-content-height: calc(100% - var(--lines-keyboard));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+:root[data-keyboard] .mantine-Modal-root[data-full-screen] .mantine-Modal-content[data-full-screen] {
+  padding-bottom: 0;
 }
 
 @keyframes status-pulse {
@@ -452,6 +453,13 @@
     padding-bottom: max(env(safe-area-inset-bottom), 0.25rem);
   }
 
+  /* The keyboard covers the home indicator, so the inset above is empty space
+     between the composer and the keyboard. `data-keyboard` is set by
+     lib/viewport.ts whenever `--lines-keyboard` is non-zero. */
+  :root[data-keyboard] .lines-safe-bottom {
+    padding-bottom: 0.25rem;
+  }
+
   /* Touch targets, as a floor rather than a size. 44px is Apple's recommended
      target and it was applied to buttons, menu items, inputs and segments — the
      result was an app where every control shouted and a three-mode segmented
@@ -466,13 +474,13 @@
     min-width: 32px;
   }
 
+  /* A standalone iOS app draws under the Dynamic Island; a tall sheet must stop
+     below it. Clearance lives on the inner, so Mantine's own content
+     `max-height: calc(100% - offset * 2)` resolves against the padded box and
+     never depends on what `dvh` reports. */
   .lines-mobile-sheet-inner {
     bottom: var(--lines-keyboard);
-  }
-
-  /* A standalone iOS app draws under the Dynamic Island; a tall sheet must stop below it. */
-  .lines-mobile-sheet {
-    max-height: calc(var(--lines-viewport) - var(--lines-safe-top));
+    padding-top: calc(var(--lines-safe-top) + var(--mantine-spacing-xs));
   }
 
   /* 16px is a threshold, not a taste: iOS Safari zooms the whole page in when a

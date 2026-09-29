@@ -140,10 +140,20 @@ export function SettingsModal({
       centered
       padding={0}
       transitionProps={{ transition: 'fade' }}
+      // On a phone the full-screen rules in index.css own the height and the
+      // header's top padding (safe-area inset), so no inline height or
+      // padding-top here: inline styles would beat them.
       styles={{
-        content: { height: '88vh', display: 'flex', flexDirection: 'column' },
+        content: isPhone
+          ? { display: 'flex', flexDirection: 'column' }
+          : { height: '88vh', display: 'flex', flexDirection: 'column' },
         body: { flex: 1, minHeight: 0, display: 'flex', padding: 0 },
-        header: { padding: 'var(--mantine-spacing-md)', paddingBottom: 'var(--mantine-spacing-xs)' },
+        header: isPhone
+          ? {
+              '--mb-padding': 'var(--mantine-spacing-md)',
+              paddingBottom: 'var(--mantine-spacing-xs)',
+            }
+          : { padding: 'var(--mantine-spacing-md)', paddingBottom: 'var(--mantine-spacing-xs)' },
       }}
     >
       <Group align="stretch" gap={0} wrap="nowrap" style={{ flex: 1, minHeight: 0 }}>

@@ -1594,7 +1594,7 @@ export function Transcript({
           <img
             src={lightbox}
             alt=""
-            style={{ maxWidth: '90vw', maxHeight: '90vh', display: 'block', borderRadius: 8 }}
+            style={{ maxWidth: '90vw', maxHeight: 'calc(var(--lines-viewport) - var(--lines-safe-top) - 2rem)', display: 'block', borderRadius: 8 }}
           />
         )}
       </Modal>

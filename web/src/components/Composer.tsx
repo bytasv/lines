@@ -1167,8 +1167,8 @@ export function Composer({ session }: { session: SessionMeta }) {
       )}
       {/* Sized by its content, not by a share of the screen: a sheet pinned at
           80dvh is the same height whether it holds four controls or one, and
-          four controls do not fill a phone. The max-height on `.lines-mobile-sheet`
-          is what stops a long one running off the top. */}
+          four controls do not fill a phone. The top padding on
+          `.lines-mobile-sheet-inner` is what stops a long one running off the top. */}
       <Drawer
         opened={isPhone && optionsOpen}
         onClose={() => setOptionsOpen(false)}
@@ -1281,7 +1281,7 @@ export function Composer({ session }: { session: SessionMeta }) {
             alt=""
             style={{
               maxWidth: '90vw',
-              maxHeight: '90vh',
+              maxHeight: 'calc(var(--lines-viewport) - var(--lines-safe-top) - 2rem)',
               display: 'block',
               borderRadius: 8,
             }}

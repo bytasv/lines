@@ -46,8 +46,8 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
 - `revealActions(hovered, coarse)` — pure; the one rule every hover-revealed control calls
 - `BestOnDesktop` — stands in for a surface that is genuinely not usable at 390px
 - `--lines-viewport` — `calc(100dvh - var(--lines-keyboard))`; the height a full-screen surface
-  may actually occupy. Every full-height box uses it instead of `100vh`. Overridden inside
-  `@media (display-mode: standalone)` to add back `--lines-safe-top` (see business rules)
+  may actually occupy. Every full-height box uses it instead of `100vh`. Not trusted for
+  full-screen modals or sheets in a standalone app (see business rules)
 - `trackKeyboardInset()` — measures the on-screen keyboard from `visualViewport` and publishes it
   as `--lines-keyboard`. Started once in `main.tsx`, never torn down
 - `HeaderActions` — documentation, theme and settings. With Clerk enabled, documentation lives in
@@ -86,15 +86,18 @@ an iPad in landscape is neither.
   tapped. `trackKeyboardInset` measures the difference and the shell shrinks by it.
   `interactive-widget=resizes-content` in the viewport meta does the same on Chrome; there the
   measurement reads ~0 and adds nothing, so the two do not stack.
-- In a standalone iOS home-screen app (`black-translucent` + `viewport-fit=cover`), `100dvh`
-  resolves to the screen height *minus* the top safe-area inset, while the header still reaches up
-  under the status bar/Dynamic Island and subtracts that same inset a second time via
-  `HEADER_HEIGHT` — leaving the composer short by exactly `--lines-safe-top`, visible as an empty
-  band under it even before the keyboard ever opens. `index.css` pays the inset back, scoped to
-  `@media (display-mode: standalone)` only: `--lines-viewport: calc(100dvh + var(--lines-safe-top)
-  - var(--lines-keyboard))`. Browser tabs and desktop are untouched — `dvh` is already correct
-  there. `lib/viewport.ts` carried a temporary `?diag=viewport` on-device readout while this was
-  being confirmed; it's removed once confirmed correct.
+- In a standalone iOS home-screen app (`black-translucent` + `viewport-fit=cover`), `100dvh` is
+  not reliably the screen height, so full-screen modals and bottom sheets take no height from
+  `dvh` or `--lines-viewport` arithmetic. Mantine's overlay inner is `position: fixed; top: 0;
+  bottom: 0`, i.e. exactly the screen, and they size against that and pad by
+  `env(safe-area-inset-*)`. A full-screen modal's content is the inner minus `--lines-keyboard`,
+  with the bottom inset as padding (dropped while `data-keyboard` is set, since the keyboard
+  covers the home indicator) and the header padded by `--lines-safe-top`. These rules are global,
+  not phone-only: an iPad home-screen app has the insets too. A modal that lays out its own
+  height (the plan focus modal) flexes down to its scroll area instead of setting `h`, so its
+  footer stays on screen. `SettingsModal` sets no inline `height` or header `padding-top` on a
+  phone, because inline styles beat the global rules. `lib/viewport.ts` carries a `[diag]`
+  viewport readout for confirming `dvh` and the insets on a device.
 - Inputs are 16px on a phone. Below that, iOS Safari zooms the page in on focus and does not zoom
   back out on blur, which leaves the app permanently magnified with no fix but a manual pinch.
   Mantine's default is `sm` (14px), so every field in the app tripped it.
@@ -117,10 +120,13 @@ an iPad in landscape is neither.
   WebKit/iOS and nowhere else, so Chrome on iOS correctly keeps the floor too.
 - A bottom sheet is sized by its content (`size="auto"`), not by a share of the screen. A sheet
   pinned at 80dvh is the same height whether it holds four controls or one, and four controls do
-  not fill a phone; `.lines-mobile-sheet`'s max-height is what stops a long one running off the
-  top. That max-height subtracts `--lines-safe-top` too: a home-screen iOS app draws under the
-  status bar, so a full-height sheet put its title and close button under the Dynamic Island.
-  Every bottom sheet, `PermissionPrompt`'s included, carries the class.
+  not fill a phone. What stops a long one running off the top is padding on
+  `.lines-mobile-sheet-inner`: `--lines-safe-top` plus a small gap, so Mantine's own content
+  `max-height: calc(100% - offset * 2)` resolves against the padded box. The title and close
+  button clear the Dynamic Island in a home-screen iOS app whatever `dvh` reports. The inner also
+  sits above the keyboard (`bottom: var(--lines-keyboard)`). Every bottom sheet, `PermissionPrompt`'s
+  included, carries `.lines-mobile-sheet` and `.lines-mobile-sheet-inner`, and wraps its body in
+  `lines-safe-bottom` (the Drawer root has no layout box, so padding there never applied).
 - The composer's permission mode is its own `Menu` on the row (label + chevron, a description
   under each item, current mode checked) reusing `permissionModes.tsx`'s exported `SEGMENT_MODES`
   list — the same three modes the desktop pills offer, in the same order. A separate
