@@ -10,7 +10,7 @@
  * Nothing here may read a runtime binding from `./types.ts` at module top level
  * — only inside function bodies, by which time both modules are initialized.
  */
-import type { PermissionMode, StepContent } from './types.ts';
+import type { ModelProvider, PermissionMode, RoutingRule, StepContent } from './types.ts';
 import { isKnownModel, LEGACY_MODEL_MAP, providerForModel } from './types.ts';
 // Safe despite the cycle note below: providers.ts imports only *types* from
 // './types.ts', so it holds no runtime binding that could still be uninitialized.
@@ -42,7 +42,8 @@ export type WorkflowIssueField =
   | 'outputName'
   | 'model'
   | 'permissionMode'
-  | 'reasoningEffort';
+  | 'reasoningEffort'
+  | 'routing';
 
 export interface WorkflowIssue {
   /** Absent for workflow-level issues (name, no steps). */
@@ -109,6 +110,14 @@ export function validateStepContent(c: StepContent, opts: ValidateOptions = {}):
     }
   }
 
+  if (c.routing !== undefined) {
+    // A step's rule is checked against the provider of the model it runs on:
+    // routing may only move a turn within one provider.
+    for (const message of validateRoutingRule(c.routing, providerForModel(String(c.model ?? '')))) {
+      issues.push({ field: 'routing', message });
+    }
+  }
+
   if (c.model && providerForModel(String(c.model)) === 'openai') {
     issues.push({
       field: 'model',
@@ -116,6 +125,42 @@ export function validateStepContent(c: StepContent, opts: ValidateOptions = {}):
     });
   }
 
+  return issues;
+}
+
+/**
+ * Problems with one smart-routing rule, as messages. Every model has to be a
+ * known one on `provider` — which is what keeps a routed turn clear of
+ * setModel's cross-provider refusal — and every effort one that provider offers.
+ */
+export function validateRoutingRule(rule: RoutingRule, provider: ModelProvider): string[] {
+  const issues: string[] = [];
+  if (!rule || typeof rule !== 'object') return ['Routing rule must be an object'];
+  if (typeof rule.rule !== 'string' || !rule.rule.trim()) issues.push('Routing rule text is required');
+  if (!Array.isArray(rule.models) || rule.models.length === 0) {
+    issues.push('Routing needs at least one allowed model');
+  } else {
+    for (const m of rule.models) {
+      if (typeof m !== 'string' || !isKnownModel(m)) issues.push(`Unknown routing model "${String(m)}"`);
+      else if (providerForModel(m) !== provider) {
+        issues.push(`Routing model "${m}" is not a ${provider === 'openai' ? 'OpenAI' : 'Claude'} model`);
+      }
+    }
+  }
+  const allowed = capabilitiesFor(provider).reasoningEfforts;
+  if (!Array.isArray(rule.efforts) || rule.efforts.length === 0) {
+    issues.push('Routing needs at least one allowed effort');
+  } else {
+    for (const e of rule.efforts) {
+      if (!allowed.includes(e)) {
+        issues.push(`Unknown routing effort "${String(e)}" — expected one of ${allowed.join(', ')}`);
+      }
+    }
+  }
+  const min = rule.minConfidence;
+  if (min !== undefined && (typeof min !== 'number' || !Number.isFinite(min) || min < 0 || min > 1)) {
+    issues.push('Routing minConfidence must be between 0 and 1');
+  }
   return issues;
 }
 

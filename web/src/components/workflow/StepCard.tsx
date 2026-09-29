@@ -55,6 +55,7 @@ import {
   renderOptionWithDescription,
   STEP_EFFORTS,
 } from '../../lib/modelSelect';
+import { emptyRoutingRule, RoutingRuleFields } from '../RoutingRuleFields';
 import styles from './workflow.module.css';
 
 const cn = (...xs: (string | false | undefined)[]) => xs.filter(Boolean).join(' ');
@@ -68,10 +69,18 @@ const FIELD_LABELS: Record<keyof StepContent, string> = {
   autoAdvance: 'Auto-advance',
   freshStart: 'Fresh start',
   outputName: 'Output name',
+  routing: 'Smart routing',
 };
 
+/** One field's value as diff text; objects (the routing rule) as JSON, so an
+ *  edit inside one is visible rather than two identical `[object Object]`s. */
+function fieldText(v: StepContent[keyof StepContent]): string {
+  if (v === undefined) return '';
+  return typeof v === 'object' ? JSON.stringify(v) : String(v);
+}
+
 function changedFields(a: StepContent, b: StepContent): (keyof StepContent)[] {
-  return (Object.keys(FIELD_LABELS) as (keyof StepContent)[]).filter((k) => String(a[k]) !== String(b[k]));
+  return (Object.keys(FIELD_LABELS) as (keyof StepContent)[]).filter((k) => fieldText(a[k]) !== fieldText(b[k]));
 }
 
 /** Compact relative time ("3d ago"); falls back to empty when no timestamp. */
@@ -96,8 +105,8 @@ export function FieldDiffList({ from, to }: { from: StepContent; to: StepContent
         {fields.map((f) => (
           <Stack key={f} gap={2}>
             <Text size="xs" fw={600} c="dimmed">{FIELD_LABELS[f]}</Text>
-            <Text size="xs" c="red" style={{ whiteSpace: 'pre-wrap' }}>- {String(from[f]) || '(empty)'}</Text>
-            <Text size="xs" c="teal" style={{ whiteSpace: 'pre-wrap' }}>+ {String(to[f]) || '(empty)'}</Text>
+            <Text size="xs" c="red" style={{ whiteSpace: 'pre-wrap' }}>- {fieldText(from[f]) || '(empty)'}</Text>
+            <Text size="xs" c="teal" style={{ whiteSpace: 'pre-wrap' }}>+ {fieldText(to[f]) || '(empty)'}</Text>
           </Stack>
         ))}
       </Stack>
@@ -520,6 +529,29 @@ export function StepCard({
                 onChange={(e) => onPatch({ outputName: e.currentTarget.value })}
               />
             </div>
+            <Switch
+              label="Own routing rule"
+              description="Override the global smart-routing rule while this step runs"
+              checked={step.routing !== undefined}
+              disabled={contentReadOnly}
+              onChange={(e) => onPatch({ routing: e.currentTarget.checked ? emptyRoutingRule() : undefined })}
+            />
+            {step.routing && (
+              <Stack gap={4} w="100%">
+                <RoutingRuleFields
+                  provider={providerForModel(step.model)}
+                  models={models}
+                  value={step.routing}
+                  disabled={contentReadOnly}
+                  onChange={(routing) => onPatch({ routing })}
+                />
+                {errors?.routing && (
+                  <Text size="xs" c="red">
+                    {errors.routing}
+                  </Text>
+                )}
+              </Stack>
+            )}
           </div>
         </div>
       </Collapse>

@@ -47,3 +47,45 @@ export function trackKeyboardInset(): () => void {
     vv.removeEventListener('scroll', apply);
   };
 }
+
+/**
+ * TEMPORARY — remove before commit. `?diag=viewport` pins a readout of the numbers
+ * that decide the standalone-PWA bottom gap, so the `--lines-viewport` correction
+ * in index.css can be checked on a real device.
+ */
+export function mountViewportDiag(): void {
+  if (new URLSearchParams(window.location.search).get('diag') !== 'viewport') return;
+  const probe = document.createElement('div');
+  probe.style.cssText =
+    'position:fixed;top:0;left:0;width:0;visibility:hidden;pointer-events:none;height:100dvh;' +
+    'padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);box-sizing:content-box';
+  // Resolves the variable to pixels; getPropertyValue would return the calc() text.
+  const shell = document.createElement('div');
+  shell.style.cssText =
+    'position:fixed;top:0;left:0;width:0;visibility:hidden;pointer-events:none;height:var(--lines-viewport)';
+  const out = document.createElement('pre');
+  out.style.cssText =
+    'position:fixed;top:40%;left:8px;z-index:99999;margin:0;padding:6px;font:11px/1.3 monospace;' +
+    'background:rgba(0,0,0,.8);color:#0f0;pointer-events:none;white-space:pre';
+  document.body.append(probe, shell, out);
+  const render = () => {
+    const cs = getComputedStyle(probe);
+    const root = getComputedStyle(document.documentElement);
+    const vv = window.visualViewport;
+    out.textContent = [
+      `standalone ${matchMedia('(display-mode: standalone)').matches}`,
+      `innerHeight ${window.innerHeight}`,
+      `vv.height ${vv?.height ?? '-'} off ${vv?.offsetTop ?? '-'}`,
+      `screen.height ${screen.height}`,
+      `clientHeight ${document.documentElement.clientHeight}`,
+      `100dvh ${cs.height}`,
+      `safe top ${cs.paddingTop} bottom ${cs.paddingBottom}`,
+      `--lines-viewport ${shell.getBoundingClientRect().height}`,
+      `--lines-keyboard ${root.getPropertyValue('--lines-keyboard')}`,
+    ].join('\n');
+  };
+  render();
+  window.addEventListener('resize', render);
+  window.visualViewport?.addEventListener('resize', render);
+  window.visualViewport?.addEventListener('scroll', render);
+}

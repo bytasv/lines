@@ -5,6 +5,7 @@ import type {
   PromptAttachment,
   ServerMessage,
   SessionMeta,
+  RoutingRule,
   StepContent,
   StepDef,
   StepRef,
@@ -47,7 +48,19 @@ function sameContent(a: StepContent, b: StepContent): boolean {
     (a.reasoningEffort ?? '') === (b.reasoningEffort ?? '') &&
     a.autoAdvance === b.autoAdvance &&
     a.freshStart === b.freshStart &&
-    (a.outputName ?? '') === (b.outputName ?? '')
+    (a.outputName ?? '') === (b.outputName ?? '') &&
+    // Same idiom for the routing rule: a routing-only edit must mint a version.
+    stableJson(a.routing) === stableJson(b.routing)
+  );
+}
+
+/** JSON with object keys sorted, so two equal values compare equal whatever
+ *  order their keys were written in. `undefined` stays `undefined`. */
+function stableJson(value: unknown): string | undefined {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([x], [y]) => x.localeCompare(y)))
+      : v,
   );
 }
 
@@ -369,6 +382,19 @@ export class WorkflowEngine {
     // on the meta and would otherwise still point at a step whose start marker is
     // gone (see rollbackToTranscript).
     sessions.setRewindListener((sessionId) => this.rollbackToTranscript(sessionId));
+    // A running step's own routing rule overrides the global one for its turns.
+    sessions.setStepRoutingProvider((sessionId) => this.stepRouting(sessionId));
+  }
+
+  /** The current step's routing rule and name, for SessionManager's router. */
+  private stepRouting(sessionId: string): { rule?: RoutingRule; stepName?: string } | undefined {
+    const meta = this.sessions.get(sessionId);
+    const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
+    if (!meta?.workflow || !wf) return undefined;
+    const step = wf.steps[meta.workflow.stepIndex];
+    const content = step && this.stepContent(step);
+    if (!content) return undefined;
+    return { rule: content.routing, stepName: content.name };
   }
 
   /**
@@ -1009,6 +1035,9 @@ export class WorkflowEngine {
     meta.workflow.stepStatuses[i] = 'running';
     meta.workflow.stepPermissionMode = content.permissionMode;
     meta.workflow.stepFailure = undefined; // the step is running again; judge this attempt on its own
+    // A manual model/effort change paused routing for the step it was made in;
+    // a new step starts routed again.
+    if (entry) meta.routingPaused = undefined;
     // Clear any stale waiting-approval status before the async model/mode setup below.
     this.sessions.setStatus(sessionId, 'running');
     this.marker(sessionId, {
@@ -1113,6 +1142,7 @@ export class WorkflowEngine {
       this.sessions.resetClaudeSession(sessionId);
     }
 
+    if (feedback !== undefined) this.sessions.markRetry(sessionId);
     this.sessions.prompt(sessionId, prompt, 'workflow', attachments, [], actor);
   }
 

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ActionIcon,
+  Badge,
   Box,
   Button,
   Drawer,
@@ -201,6 +202,7 @@ export function Composer({ session }: { session: SessionMeta }) {
   const isPhone = useIsPhone();
   const [optionsOpen, setOptionsOpen] = useState(false);
   const models = useStore((s) => s.models);
+  const smartRoutingMode = useStore((s) => s.smartRouting?.mode ?? 'off');
   const projects = useStore((s) => s.projects);
   const connectionStatus = useStore((s) => s.connectionStatus);
   const queuedCount = useStore(
@@ -421,10 +423,17 @@ export function Composer({ session }: { session: SessionMeta }) {
   const nothingToSend = !prompt.text.trim() && attachments.length === 0;
   const cannotSend = nothingToSend || machineBlock !== null || !canPrompt;
 
-  // Focus the prompt on a freshly created session (reuses the store's 5s justCreated heuristic).
+  // Focus the prompt on a session this tab just created. Keyed on the store's
+  // create intent rather than `createdAt`, which is stamped on the bridge machine's
+  // clock. On a phone this moves focus off the Sidebar's keyboard primer, so iOS
+  // keeps the keyboard it raised inside the tap.
+  const focusComposerFor = useStore((s) => s.focusComposerFor);
+  const takeComposerFocus = useStore((s) => s.takeComposerFocus);
   useEffect(() => {
-    if (Date.now() - session.createdAt < 5000) textareaRef.current?.focus();
-  }, [session.id]);
+    if (focusComposerFor !== session.id) return;
+    textareaRef.current?.focus();
+    takeComposerFocus();
+  }, [focusComposerFor, session.id, takeComposerFocus]);
 
   // Mirror the draft into localStorage so a reload/restart keeps unsent text.
   useEffect(() => {
@@ -697,6 +706,15 @@ export function Composer({ session }: { session: SessionMeta }) {
     </Menu>
   );
 
+  const routingOn = smartRoutingMode !== 'off' && session.permissionMode !== 'plan';
+  const suggestion = session.routingSuggestion;
+  const routingTooltip = session.routingPaused
+    ? 'Smart routing is paused for this session. Click to resume.'
+    : session.lastRouting
+      ? `Smart routing is on. Last change: ${modelLabel(session.lastRouting.model)} · ${
+          session.lastRouting.effort ?? 'default'
+        } (confidence ${session.lastRouting.confidence.toFixed(2)}). Click to pause.`
+      : 'Smart routing is on: each turn may move to another allowed model or effort. Click to pause.';
   const modelControls = (
     <>
       <Select
@@ -775,6 +793,24 @@ export function Composer({ session }: { session: SessionMeta }) {
           />
         </span>
       </Tooltip>
+      {routingOn && (
+        // Smart routing's state for this session; a click pauses or resumes it.
+        // A manual model/effort change pauses it on the bridge.
+        <Tooltip label={routingTooltip} withArrow openDelay={300} multiline maw={260}>
+          <Badge
+            size="sm"
+            variant={session.routingPaused ? 'outline' : 'light'}
+            color={session.routingPaused ? 'gray' : 'violet'}
+            style={{ cursor: canSetModel ? 'pointer' : undefined, alignSelf: 'center' }}
+            onClick={() =>
+              canSetModel &&
+              send({ type: 'setRoutingPaused', sessionId: session.id, paused: !session.routingPaused })
+            }
+          >
+            {session.routingPaused ? 'auto off' : 'auto'}
+          </Badge>
+        </Tooltip>
+      )}
     </>
   );
   const stopWork = () =>
@@ -857,6 +893,34 @@ export function Composer({ session }: { session: SessionMeta }) {
             />
           ))}
         </Group>
+      )}
+      {suggestion && (
+        // Ask-mode routing: the turn is held on the bridge until one of these.
+        <Paper withBorder radius="md" p="xs" mx={6} mb={6}>
+          <Group justify="space-between" gap="xs" wrap="nowrap">
+            <Text size="sm">
+              JEV suggests {modelLabel(suggestion.model)} · {suggestion.effort ?? 'default'} (
+              {suggestion.confidence.toFixed(2)})
+            </Text>
+            <Group gap={6} wrap="nowrap">
+              <Button
+                size="compact-xs"
+                disabled={!canSetModel}
+                onClick={() => send({ type: 'routingChoice', sessionId: session.id, accept: true })}
+              >
+                Switch &amp; send
+              </Button>
+              <Button
+                size="compact-xs"
+                variant="default"
+                disabled={!canSetModel}
+                onClick={() => send({ type: 'routingChoice', sessionId: session.id, accept: false })}
+              >
+                Send as is
+              </Button>
+            </Group>
+          </Group>
+        </Paper>
       )}
       {connectionStatus !== 'connected' && (
         <Text size="xs" c="dimmed" px={6} pb={6}>

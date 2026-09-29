@@ -26,6 +26,18 @@
   --lines-safe-top: env(safe-area-inset-top, 0px);
 }
 
+/* A standalone iOS app (black-translucent + viewport-fit=cover) resolves `100dvh`
+   to the screen minus the top inset, while the header still reaches up under the
+   status bar and subtracts that inset a second time — leaving an empty band of
+   exactly `--lines-safe-top` under the composer. Paid back here only: in a
+   browser tab and on desktop `dvh` is already right. Pending on-device check via
+   `?diag=viewport` (lib/viewport.ts). */
+@media (display-mode: standalone) {
+  :root {
+    --lines-viewport: calc(100dvh + var(--lines-safe-top) - var(--lines-keyboard));
+  }
+}
+
 /* Pays the top inset back on anything that starts at the top of the screen.
    Global rather than phone-only: an iPad home-screen app has the inset too. */
 .lines-safe-top {

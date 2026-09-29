@@ -74,6 +74,22 @@ const STEP: JsonSchemaNode = {
       description:
         "How hard the model thinks on this step. Omit to run at the model's own default. Cleared for the next step unless that step sets one too.",
     },
+    routing: {
+      type: 'object',
+      description:
+        "Optional smart-routing rule for this step's turns, overriding the user's global rule while the step runs: before each turn a classifier may move it to one of `models`/`efforts` per `rule`. Models must be on the same provider as `model`. Omit to use the global rule.",
+      required: ['rule', 'models', 'efforts'],
+      properties: {
+        rule: { type: 'string', description: 'Plain-language rule, e.g. "max effort for debugging; low for small edits".' },
+        models: { type: 'array', items: { type: 'string' }, description: 'Allowed model ids.' },
+        efforts: {
+          type: 'array',
+          items: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
+          description: 'Allowed efforts.',
+        },
+        minConfidence: { type: 'number', description: 'Ignore picks below this confidence (0-1). Default 0.7.' },
+      },
+    },
     autoAdvance: {
       type: 'boolean',
       description: 'Advance to the next step without waiting for approval. Defaults to false.',
@@ -224,6 +240,7 @@ const WRITE_TOOLS: McpToolSpec[] = [
         model: STEP.properties!.model!,
         permissionMode: STEP.properties!.permissionMode!,
         reasoningEffort: STEP.properties!.reasoningEffort!,
+        routing: STEP.properties!.routing!,
         autoAdvance: STEP.properties!.autoAdvance!,
         freshStart: STEP.properties!.freshStart!,
         outputName: STEP.properties!.outputName!,
@@ -374,15 +391,34 @@ function toStepContent(s: Record<string, unknown>): StepContent {
   // Kept absent rather than defaulted: absent is what "the model's own effort"
   // means, and an unknown value is left in place for validation to reject by name.
   const effort = str(s.reasoningEffort).trim();
+  const routing = toRoutingRule(s.routing);
   return {
     name: str(s.name).trim(),
     promptTemplate: str(s.promptTemplate),
     model: str(s.model).trim() || DEFAULT_MODEL,
     permissionMode: (str(s.permissionMode).trim() || 'default') as StepContent['permissionMode'],
     ...(effort ? { reasoningEffort: effort as StepContent['reasoningEffort'] } : {}),
+    ...(routing ? { routing } : {}),
     autoAdvance: bool(s.autoAdvance, false),
     freshStart: bool(s.freshStart, false),
     ...(outputName ? { outputName } : {}),
+  };
+}
+
+/**
+ * A step's routing rule as sent, shaped but not judged: an unknown model or
+ * effort is left in place for validateStepContent to reject by name. Absent or
+ * not an object = no rule.
+ */
+function toRoutingRule(value: unknown): StepContent['routing'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const r = value as Record<string, unknown>;
+  const list = (v: unknown) => (Array.isArray(v) ? v.map((x) => str(x).trim()).filter(Boolean) : []);
+  return {
+    rule: str(r.rule).trim(),
+    models: list(r.models),
+    efforts: list(r.efforts) as NonNullable<StepContent['routing']>['efforts'],
+    ...(typeof r.minConfidence === 'number' ? { minConfidence: r.minConfidence } : {}),
   };
 }
 

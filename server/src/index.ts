@@ -24,6 +24,8 @@ for (const envFile of [
 }
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Actor, ClientMessage, ServerMessage, SocketAccess } from '@lines/shared';
+import { jevConfigured } from './jev.ts';
+import { smartRoutingIssues } from './turnRouting.ts';
 import {
   APP_PROTOCOL_VERSION,
   DEFAULT_MODELS,
@@ -1031,6 +1033,9 @@ function buildHello(
     // Owner-only like `update`: a guest has no button that starts one.
     whisperModelDownload: whisperModelDownloadState(),
     settings: ctx.store.loadSettings(),
+    // Owner-only like `settings`: whether routing can call out at all, for the
+    // Settings notice. Never the key itself.
+    smartRoutingAvailable: jevConfigured(),
     // Whether this link may drive a dialog that opens on this machine's screen.
     local,
     // Whether this link is end-to-end encrypted against a key this machine
@@ -1395,6 +1400,9 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       // A cross-provider switch on a session that has already run is refused —
       // nothing carries the conversation across, so the user has to hear why.
       const verdict = sessions.setModel(msg.sessionId, msg.model);
+      // A person chose this model: routing stops overriding it (see
+      // pauseRoutingForManualChange — never set by routing's own setModel).
+      if (verdict.ok) sessions.pauseRoutingForManualChange(msg.sessionId);
       if (!verdict.ok) {
         ws.send(
           JSON.stringify({
@@ -1433,6 +1441,13 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       // No verdict to report: unlike a model change, effort never strands a
       // conversation, so there is nothing to refuse.
       sessions.setReasoningEffort(msg.sessionId, msg.effort);
+      sessions.pauseRoutingForManualChange(msg.sessionId);
+      break;
+    case 'routingChoice':
+      sessions.routingChoice(msg.sessionId, msg.accept);
+      break;
+    case 'setRoutingPaused':
+      sessions.setRoutingPaused(msg.sessionId, msg.paused);
       break;
     case 'setPermissionMode':
       sessions.setPermissionMode(msg.sessionId, msg.mode);
@@ -1746,6 +1761,19 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       const local = store.loadSettings();
       const incoming = { ...msg.settings, updatedAt: msg.settings.updatedAt ?? Date.now() };
       if ((incoming.updatedAt ?? 0) <= (local?.updatedAt ?? 0)) break;
+      // A routing rule that could move a turn across providers or onto an
+      // unknown model/effort is refused; the rest of the save still lands.
+      const routingIssues = smartRoutingIssues(incoming.smartRouting);
+      if (routingIssues.length) {
+        incoming.smartRouting = local?.smartRouting;
+        if (!incoming.smartRouting) delete incoming.smartRouting;
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            message: `Smart routing not saved: ${routingIssues.join('; ')}`,
+          } satisfies ServerMessage),
+        );
+      }
       store.saveSettings(incoming);
       ctx.sync.pushSettings(incoming);
       // Other tabs of this user follow along; the sender applies idempotently.

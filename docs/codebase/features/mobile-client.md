@@ -44,7 +44,8 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
 - `revealActions(hovered, coarse)` — pure; the one rule every hover-revealed control calls
 - `BestOnDesktop` — stands in for a surface that is genuinely not usable at 390px
 - `--lines-viewport` — `calc(100dvh - var(--lines-keyboard))`; the height a full-screen surface
-  may actually occupy. Every full-height box uses it instead of `100vh`
+  may actually occupy. Every full-height box uses it instead of `100vh`. Overridden inside
+  `@media (display-mode: standalone)` to add back `--lines-safe-top` (see business rules)
 - `trackKeyboardInset()` — measures the on-screen keyboard from `visualViewport` and publishes it
   as `--lines-keyboard`. Started once in `main.tsx`, never torn down
 - `HeaderActions` — documentation, theme and settings. With Clerk enabled, documentation lives in
@@ -83,6 +84,15 @@ an iPad in landscape is neither.
   tapped. `trackKeyboardInset` measures the difference and the shell shrinks by it.
   `interactive-widget=resizes-content` in the viewport meta does the same on Chrome; there the
   measurement reads ~0 and adds nothing, so the two do not stack.
+- In a standalone iOS home-screen app (`black-translucent` + `viewport-fit=cover`), `100dvh`
+  resolves to the screen height *minus* the top safe-area inset, while the header still reaches up
+  under the status bar/Dynamic Island and subtracts that same inset a second time via
+  `HEADER_HEIGHT` — leaving the composer short by exactly `--lines-safe-top`, visible as an empty
+  band under it even before the keyboard ever opens. `index.css` pays the inset back, scoped to
+  `@media (display-mode: standalone)` only: `--lines-viewport: calc(100dvh + var(--lines-safe-top)
+  - var(--lines-keyboard))`. Browser tabs and desktop are untouched — `dvh` is already correct
+  there. `lib/viewport.ts` carried a temporary `?diag=viewport` on-device readout while this was
+  being confirmed; it's removed once confirmed correct.
 - Inputs are 16px on a phone. Below that, iOS Safari zooms the page in on focus and does not zoom
   back out on blur, which leaves the app permanently magnified with no fix but a manual pinch.
   Mantine's default is `sm` (14px), so every field in the app tripped it.
@@ -116,8 +126,20 @@ an iPad in landscape is neither.
   mode control or its caption — model, reasoning effort, context and cost stay there. Disabled
   states are unchanged: no mode permission disables the menu trigger, and `!caps.approvals` shows
   a static disabled "Sandboxed" label instead.
-- The sidebar is a real drawer on a phone (`useDisclosure`), and picking a session closes it —
-  otherwise the thing just picked sits behind it.
+- The sidebar is a real drawer on a phone (`useDisclosure`), and picking **or creating** a session
+  closes it — otherwise the thing just picked/created sits behind it. `createSession` calls
+  `onNavigate` itself, so this covers the New session button, the workflow-picker menu items, and
+  the split-button's workflow entries alike.
+- On a phone, `createSession` also focuses a hidden "keyboard primer" `<input>` (16px, so it
+  doesn't trip the zoom rule below) synchronously inside the tap, before the drawer closes. iOS
+  only raises the keyboard for a `focus()` made inside a user gesture, and the new session's
+  composer doesn't mount until a `sessionUpsert` round-trip later — without the primer, the
+  keyboard drops the instant the gesture ends and nothing brings it back up. The composer's own
+  focus effect (`focusComposerFor`, see [session-and-project-ui](session-and-project-ui.md)) then
+  moves focus from the primer to the real textarea, and the keyboard stays open across that
+  handoff. The primer blurs itself if the create fails (`actionError`) or its intent expires
+  (`pendingCreate`/`worktreePending`/`focusComposerFor` all clear) with nothing having taken focus
+  from it.
 - Sidebar width is clamped against the viewport on every read, so a width saved on a 27" display
   cannot open a 560px drawer over a 390px screen.
 - On a coarse pointer, hover-revealed actions are shown outright. They were previously

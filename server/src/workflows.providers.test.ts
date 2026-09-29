@@ -10,6 +10,7 @@ import type {
   WorkflowDef,
   WorkflowState,
 } from '@lines/shared';
+import { validateStepContent } from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -229,4 +230,17 @@ test('a same-provider step still inherits the conversation', async () => {
   assert.equal(m.workflow!.stepStatuses[1], 'running');
   assert.equal(m.model, 'claude-opus-5-5');
   assert.equal(m.claudeSessionId, 'claude-abc', 'no provider change, so nothing to drop');
+});
+
+test('a step routing rule naming another provider’s model is rejected', () => {
+  const step = twoStep('claude-opus-5-5', false).steps[0] as Parameters<typeof validateStepContent>[0];
+  const issues = validateStepContent({
+    ...step,
+    routing: { rule: 'r', models: ['claude-sonnet-5', 'gpt-6-sol'], efforts: ['low'] },
+  });
+  assert.ok(issues.some((i) => i.field === 'routing' && /gpt-6-sol/.test(i.message)));
+  assert.deepEqual(
+    validateStepContent({ ...step, routing: { rule: 'r', models: ['claude-sonnet-5'], efforts: ['low'] } }),
+    [],
+  );
 });

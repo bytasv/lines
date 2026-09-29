@@ -38,7 +38,7 @@ import {
 } from '@tabler/icons-react';
 import { useLocalStorage } from '@mantine/hooks';
 import type { CSSProperties } from 'react';
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
 import { findWorktree, hasEstimatedSpend, projectPaths, projectRoots } from '@lines/shared';
@@ -708,8 +708,30 @@ export function Sidebar({
   const setSidebarActionError = useStore((s) => s.setActionError);
   const worktreePending = useStore((s) => s.worktreePending);
   const setWorktreePending = useStore((s) => s.setWorktreePending);
+  const pendingCreate = useStore((s) => s.pendingCreate);
+  const focusComposerFor = useStore((s) => s.focusComposerFor);
+  const isPhone = useIsPhone();
+  // iOS raises the keyboard only for a focus() made inside the tap itself, and the
+  // new session's composer mounts a round-trip later. Focusing this offscreen field
+  // in the tap brings the keyboard up; the composer then takes focus from it and
+  // the keyboard stays.
+  const keyboardPrimer = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const primer = keyboardPrimer.current;
+    if (!primer || document.activeElement !== primer) return;
+    // Still waiting: the create is in flight, or it landed and its composer is
+    // about to take focus.
+    if (!actionError && (pendingCreate || worktreePending || focusComposerFor)) return;
+    // The create failed or its intent expired — nothing will take the focus over.
+    primer.blur();
+  }, [pendingCreate, worktreePending, focusComposerFor, actionError]);
   const createSession = (workflowId?: string) => {
     if (!activeProject) return;
+    if (isPhone) {
+      // A stale error would blur the primer on the spot.
+      setSidebarActionError(null);
+      keyboardPrimer.current?.focus();
+    }
     // Records the intent that lets the resulting upsert take the selection; the
     // reducer no longer guesses from `createdAt` (a timestamp from another machine).
     markSessionCreatePending();
@@ -732,6 +754,8 @@ export function Sidebar({
       ...(worktreeMode ? { worktree: {} } : {}),
     });
     setLastChoice(workflowId ?? '');
+    // On a phone the drawer sits over the composer the user is about to type in.
+    onNavigate?.();
   };
 
   // The dropdown spans the whole split button rather than a fixed 240px. Measured
@@ -821,6 +845,27 @@ export function Sidebar({
           session share has no folder to create in, and the bridge refuses it. */}
       {sidebarMode === 'sessions' && canCreate && (
         <Box px="sm" pb="xs" ref={setCreateRow}>
+          {/* The keyboard primer. 16px so iOS does not zoom in on focus; pinned
+              in view so focusing it does not scroll anything. */}
+          {isPhone && (
+            <input
+              ref={keyboardPrimer}
+              aria-hidden
+              tabIndex={-1}
+              style={{
+                position: 'fixed',
+                top: 0,
+                left: 0,
+                width: 1,
+                height: 1,
+                padding: 0,
+                border: 0,
+                opacity: 0,
+                fontSize: 16,
+                pointerEvents: 'none',
+              }}
+            />
+          )}
           <Button.Group style={{ width: '100%' }}>
             <Button
               style={{ flex: 1 }}

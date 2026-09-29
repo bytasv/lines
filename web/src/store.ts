@@ -698,6 +698,12 @@ interface UiState {
    * *bridge* machine, so hosted the comparison was against a foreign clock.
    */
   pendingCreate: boolean;
+  /**
+   * The session a `pendingCreate` just handed the selection to, waiting for its
+   * composer to take focus (see takeComposerFocus). Same create intent, so the
+   * composer no longer guesses "new" from `createdAt` either.
+   */
+  focusComposerFor: string | null;
   /** Prompts waiting for the socket to come back, flushed FIFO after the next `hello`. */
   queuedPrompts: QueuedPrompt[];
   sessions: Record<string, SessionMeta>;
@@ -943,6 +949,8 @@ interface UiState {
   /** Consume a session's rewind prefill — returns it and clears it, so the text is
    *  handed to the composer exactly once and a remount cannot re-apply it. */
   takeComposerPrefill: (sessionId: string) => RewindPrompt | null;
+  /** Clear `focusComposerFor` once the composer has focused itself. */
+  takeComposerFocus: () => void;
   /**
    * Register/settle a recipe screenshot upload. The `recipeImageUploaded` reply
    * carries only an uploadId, so the sender records the file name here first;
@@ -1215,6 +1223,7 @@ export const useStore = create<UiState>((set, get) => {
   transcriptLoaded: {},
   lastEventAt: {},
   composerPrefill: {},
+  focusComposerFor: null,
   contextBreakdowns: {},
   selectedSessionId: sessionIdFromUrl(),
   folderPickPending: false,
@@ -1375,6 +1384,7 @@ export const useStore = create<UiState>((set, get) => {
       helloSignature: null,
       seenSessionIds: new Set<string>(),
       pendingCreate: false,
+      focusComposerFor: null,
       // Goes with `pendingCreate` for the same reason: it describes a create in
       // flight on the machine we are leaving, and leaving it set would keep the
       // new machine's New session button disabled.
@@ -1665,6 +1675,7 @@ export const useStore = create<UiState>((set, get) => {
     });
     return prefill;
   },
+  takeComposerFocus: () => set({ focusComposerFor: null }),
 
   setActiveProject: (path) => {
     if (path) localStorage.setItem(ACTIVE_PROJECT_KEY, path);
@@ -2029,6 +2040,7 @@ export const useStore = create<UiState>((set, get) => {
             seenSessionIds: withSeen(state.seenSessionIds, [msg.session.id]),
             pendingCreate: claim ? false : state.pendingCreate,
             selectedSessionId: claim ? msg.session.id : state.selectedSessionId,
+            focusComposerFor: claim ? msg.session.id : state.focusComposerFor,
           };
         });
         maybeAlert(prev, msg.session, {

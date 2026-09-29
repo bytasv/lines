@@ -13,7 +13,8 @@ and how status is surfaced in the sidebar row and the project tab.
   pills, and staged attachments) per session, so a page reload or a bridge/server restart never
   loses what the user was composing.
 - **Composer focus on a new session** — when a brand-new session is created, focus the prompt
-  textarea automatically so the user can type immediately without clicking into it.
+  textarea automatically so the user can type immediately without clicking into it. Driven by the
+  same create-intent signal as session-create auto-select (below), not a `createdAt` age check.
 - **Project switch session selection** — decide which session is shown when the active project
   changes (tab click, `hello`/reconnect, or a `/session/<id>` deep link): keep an already-valid
   selection, or fall back to the project's own last-selected session
@@ -57,8 +58,8 @@ and how status is surfaced in the sidebar row and the project tab.
 ## Files
 
 - `web/src/store.ts` — `readDraft`, `writeDraft`, `pruneDrafts`, `readDraftAttachments`,
-  `writeDraftAttachments`, `pruneDraftAttachments`; `sessionUpsert`'s intent-based auto-select;
-  the `hello` reducer's signature short-circuit; `setActiveProject`, `latestSessionIn`,
+  `writeDraftAttachments`, `pruneDraftAttachments`; `sessionUpsert`'s intent-based auto-select and
+  `focusComposerFor`; the `hello` reducer's signature short-circuit; `setActiveProject`, `latestSessionIn`,
   `rememberedSessionIn`, `readLastSessions`/`writeLastSession`, `sessionsInProject`;
   `seenSessionStatus`, `reconcileSeenStatus`; `actionError`
 - `web/src/ws.ts` — `send()` returning `boolean` and setting `actionError` on a dropped
@@ -84,7 +85,7 @@ and how status is surfaced in the sidebar row and the project tab.
 - `readDraftAttachments`, `writeDraftAttachments`, `pruneDraftAttachments` (`store.ts`) — staged
   files, IndexedDB
 - `Composer` — draft-seeded state, mirror-to-storage effects for both; `textareaRef`, focus
-  effect
+  effect keyed on `focusComposerFor`
 - `setActiveProject(path)` — single entry point for changing the active project; all three entry
   points above call it
 - `latestSessionIn(sessions, projectKeys, project)` — most recently created (`createdAt`)
@@ -136,6 +137,12 @@ and how status is surfaced in the sidebar row and the project tab.
   merge doesn't trigger a re-render
 - `pendingCreate` (store field) — true from `markSessionCreatePending()` until the matching
   `sessionUpsert` arrives or `CREATE_INTENT_TTL_MS` (15s) elapses
+- `focusComposerFor` (store field) — set to a session id in the same `sessionUpsert` claim branch
+  that grants `pendingCreate` the selection; `Composer` focuses its textarea when this matches
+  `session.id` and then calls `takeComposerFocus()` to clear it. Reuses the create-intent signal
+  instead of a `createdAt`-age check, so it isn't fooled by clock skew between the bridge and the
+  browser (see session-create auto-select) and can't re-fire on a later switch back to the session
+- `takeComposerFocus()` — clears `focusComposerFor`; called once by the composer that consumes it
 - `seenSessionIds` (store field) — every session id this browser has ever been told about, via
   either `hello` or `sessionUpsert`; maintained so a session can never look "new" a second time
 - `markSessionCreatePending()` — called by every `createSession` sender (the sidebar's New
@@ -168,13 +175,19 @@ next mirror-effect run. On each `hello` from the server, `pruneDrafts` and
 
 ### Focus on a new session
 
-`Composer` re-runs a focus effect keyed on `session.id` and calls `.focus()` on the textarea ref
-when `Date.now() - session.createdAt < 5000` — its own independent heuristic, so it only fires for
-genuinely new sessions rather than on every session switch. This no longer shares a mechanism with
-session *selection* (below); the two used to lean on the same clock comparison, but selection has
-since moved to an intent flag because it has to survive the bridge and the browser being different
-machines, while focus's blast radius (which textarea gets focus, on the machine the user is
-already looking at) never had that problem.
+Focus now shares its mechanism with session *selection* (below) instead of running its own clock
+check. The `sessionUpsert` reducer's claim branch — the same branch that decides `pendingCreate`
+gets the selection — also sets `focusComposerFor` to that session's id. `Composer` runs an effect
+keyed on `focusComposerFor === session.id`: it calls `.focus()` on the textarea ref, then
+`takeComposerFocus()` clears the field so it can't re-fire on a later switch back to the same
+session. This replaces the old `Date.now() - session.createdAt < 5000` heuristic, which read
+`createdAt` off the *bridge* machine's clock and could silently never fire when that clock ran
+ahead of the browser's — see session-create auto-select for the same failure mode.
+
+On a phone, closing the sidebar drawer on create (see [mobile-client](mobile-client.md)) leaves a
+gap between the tap and this effect running (a `sessionUpsert` round-trip), during which iOS would
+otherwise drop the keyboard it needs a synchronous in-gesture `focus()` to keep open — the sidebar
+covers that half with a keyboard-primer input; see mobile-client's business rules.
 
 ### Session-create auto-select
 
@@ -281,9 +294,9 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   `localStorage` quotas.
 - An empty text draft (`text === ''`) or empty attachment list deletes its storage entry rather
   than storing an empty one.
-- Focus fires only when the session is younger than 5 seconds — its own heuristic, no longer
-  shared with the store's session-select logic (see below); switching to an older existing
-  session does not steal focus.
+- Focus is driven by `focusComposerFor`, set only in the `sessionUpsert` claim branch that also
+  grants selection (see below) — not a `createdAt` age check; switching to an older existing
+  session does not steal focus, since that session's upsert (if any) never claims selection.
 - A `sessionUpsert` only takes the selection when `pendingCreate` is true **and** the session id
   is not already in `seenSessionIds` — never merely because the id is new to the *current* map.
   `pendingCreate` expires on its own after 15 seconds if no matching upsert ever arrives, so a
@@ -375,8 +388,8 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 - Attachment draft storage uses IndexedDB instead of `localStorage` for the same reason
   attachments themselves are staged as raw base64 client-side — size, not structure, is the
   deciding factor.
-- Focus reuses the store's existing `justCreated` 5s threshold instead of introducing a new "is
-  this session new" flag or protocol field.
+- Focus reuses the same `sessionUpsert` claim branch that decides selection (`focusComposerFor`
+  set alongside `selectedSessionId`) instead of a second, independent "is this session new" flag.
 - The project membership check reuses `sessionsInProject` rather than an inline `cwd` comparison,
   so it stays key-aware like every other project-scoped scan (`reconcileSeenStatus`,
   `projectStatusMeta`, the sidebar list).

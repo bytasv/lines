@@ -812,3 +812,12 @@ test('{changed} and {diff} resolve in an inheriting (non-fresh-start) step, neve
   assert.match(text, /Stage: No files changed since this workflow run started\./);
   assert.match(text, /Diff: No tracked changes since this workflow run started\./);
 });
+
+test('entering a step clears a manual routing pause', async () => {
+  const h = harness(2);
+  h.s1().routingPaused = true;
+  h.workflows.approve('s1', 0);
+  await settle();
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().routingPaused, undefined);
+});

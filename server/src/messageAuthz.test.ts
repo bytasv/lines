@@ -124,6 +124,10 @@ describe('MESSAGE_AUTHZ', () => {
     // Effort rides the setModel cap rather than one of its own, so it has to be
     // denied in exactly the same places.
     assert.equal(authorizeMessage(msg('setReasoningEffort'), prompter).ok, false);
+    // Answering a routing suggestion switches model and effort, so it rides the
+    // same cap — and so does pausing routing.
+    assert.equal(authorizeMessage(msg('routingChoice'), prompter).ok, false);
+    assert.equal(authorizeMessage(msg('setRoutingPaused'), prompter).ok, false);
   });
 
   test('editQueued follows prompt, not interrupt', () => {
@@ -156,6 +160,7 @@ describe('MESSAGE_AUTHZ', () => {
     assert.equal(authorizeMessage(msg('workflowApprove'), collab).ok, true);
     assert.equal(authorizeMessage(msg('setModel'), collab).ok, true);
     assert.equal(authorizeMessage(msg('setReasoningEffort'), collab).ok, true);
+    assert.equal(authorizeMessage(msg('routingChoice'), collab).ok, true);
     assert.equal(authorizeMessage(msg('deleteSession'), collab).ok, false);
   });
 

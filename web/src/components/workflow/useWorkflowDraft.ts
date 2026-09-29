@@ -5,6 +5,7 @@ import {
   isStepRef,
   providerForModel,
   providerSwitchNeedsFreshStart,
+  validateRoutingRule,
 } from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
@@ -40,6 +41,7 @@ export interface StepErrors {
   prompt?: string;
   ref?: string;
   outputName?: string;
+  routing?: string;
 }
 
 /** The server reads `{outputs.<name>}` with `[\w-]+`, so anything else is unreferenceable. */
@@ -77,6 +79,7 @@ function contentOf(s: StepContent): StepContent {
     autoAdvance: s.autoAdvance,
     freshStart: s.freshStart,
     outputName: s.outputName ?? '',
+    ...(s.routing ? { routing: s.routing } : {}),
   };
 }
 
@@ -645,6 +648,7 @@ function toWire(d: DraftWorkflow): WorkflowDef {
           // unchanged would store a step the runner refuses to start.
           freshStart: s.freshStart || crossesProviderAt(d.steps, i),
           outputName: s.outputName ?? '',
+          ...(s.routing ? { routing: s.routing } : {}),
         },
   );
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -687,7 +691,11 @@ export function validate(
     if (out && !OUTPUT_NAME_RE.test(out)) e.outputName = OUTPUT_NAME_HINT;
     else if (out && (counts.get(out) ?? 0) > 1) e.outputName = 'Another step already publishes this name';
     if (out) published.add(out);
-    if (e.name || e.prompt || e.ref || e.outputName) steps[s._uid] = e;
+    if (!s.ref && s.routing) {
+      const issues = validateRoutingRule(s.routing, providerForModel(s.model));
+      if (issues.length) e.routing = issues[0];
+    }
+    if (e.name || e.prompt || e.ref || e.outputName || e.routing) steps[s._uid] = e;
   }
   const name = d.name.trim() ? undefined : 'Workflow name is required';
   const noSteps = d.steps.length === 0 ? 'Add at least one step' : undefined;
