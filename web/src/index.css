@@ -395,7 +395,45 @@
   }
 }
 
+/* Find in files / find in sessions. The snippet marks are real <mark>s; the
+   transcript's are CSS Custom Highlight ranges (see Transcript.tsx), painted
+   over the text without touching the DOM. Same colour for both. */
+.lines-search-mark {
+  background: var(--mantine-color-yellow-light);
+  color: inherit;
+  border-radius: 2px;
+}
+
+::highlight(lines-search) {
+  background-color: var(--mantine-color-yellow-5);
+  color: var(--mantine-color-black);
+}
+
+.lines-search-row:hover {
+  background: var(--mantine-color-default-hover);
+}
+
+/* The row a search hit jumped to, for when its text is folded out of sight. */
+.lines-jump-pulse {
+  animation: lines-jump-pulse 1.6s ease-out;
+  border-radius: 8px;
+}
+
+@keyframes lines-jump-pulse {
+  0%,
+  30% {
+    box-shadow: 0 0 0 3px var(--mantine-color-yellow-5);
+  }
+  100% {
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .lines-jump-pulse {
+    animation: none;
+    outline: 2px solid var(--mantine-color-yellow-5);
+  }
   .lines-progress-fill[data-running]::after {
     animation: none;
     display: none;

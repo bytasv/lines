@@ -1031,6 +1031,33 @@ export function foldAgentTurns(items: TranscriptItem[]): TranscriptItem[] {
   return out;
 }
 
+/**
+ * Index of the top-level item that renders the transcript event at `seq`, or -1.
+ *
+ * Read off the keys buildTranscript already derives from seqs (`u12`, `a12`,
+ * `a12.1`, `i12`, `r12`, `p12`) rather than a seq field on every item: a new
+ * field would have to be threaded through reconcileItems' equality checks to
+ * keep rows referentially stable. Tool cards are keyed by tool-use id instead,
+ * so a hit inside a tool call carries `toolUseId`. Nested items — a folded
+ * turn's children, a subagent's transcript under its Task card — count as the
+ * top-level item that contains them, since that is what is on screen.
+ */
+export function findItemIndexForSeq(items: TranscriptItem[], seq: number, toolUseId?: string): number {
+  const direct = new Set([`u${seq}`, `i${seq}`, `a${seq}`, `r${seq}`, `p${seq}`]);
+  const assistantPrefix = `a${seq}.`;
+  const contains = (item: TranscriptItem): boolean => {
+    if (direct.has(item.key) || item.key.startsWith(assistantPrefix)) return true;
+    if (item.kind === 'agent-turn') return item.items.some(contains);
+    if (item.kind === 'tool-group') {
+      return item.tools.some(
+        (tool) => (toolUseId !== undefined && tool.id === toolUseId) || !!tool.children?.some(contains),
+      );
+    }
+    return false;
+  };
+  return items.findIndex(contains);
+}
+
 /** True when an assistant item carries a non-empty text block (not thinking-only). */
 function hasText(item: Extract<TranscriptItem, { kind: 'assistant' }>): boolean {
   return item.blocks.some((b) => b.type === 'text' && b.text.trim().length > 0);

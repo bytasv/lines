@@ -15,6 +15,7 @@ import {
   Stack,
   Switch,
   Text,
+  TextInput,
   Tooltip,
   UnstyledButton,
 } from '@mantine/core';
@@ -34,14 +35,16 @@ import {
   IconLink,
   IconPlus,
   IconRoute,
+  IconSearch,
   IconTrash,
+  IconX,
 } from '@tabler/icons-react';
-import { useLocalStorage } from '@mantine/hooks';
+import { useHotkeys, useLocalStorage } from '@mantine/hooks';
 import type { CSSProperties } from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { SessionMeta } from '@lines/shared';
-import { findWorktree, hasEstimatedSpend, projectPaths, projectRoots } from '@lines/shared';
+import { findWorktree, hasEstimatedSpend, projectPaths, projectRoots, rootsForCwd } from '@lines/shared';
 import type { SessionSort } from '../lib/format';
 import {
   compareSessions,
@@ -51,14 +54,17 @@ import {
   sessionRowMeta,
 } from '../lib/format';
 import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
+import { searchSessions } from '../lib/files';
 import { sessionsOnMachine } from '../lib/machines';
 import { useIsPhone, useReveal } from '../lib/layout';
 import { ConfirmModal } from './ConfirmModal';
 import { useIdentityResolver } from '../lib/identity';
-import type { SidebarMode } from '../store';
+import type { SidebarMode, SidebarSearchScope } from '../store';
 import { projectAt, sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
+import { FileSearchResults, FlagToggle } from './FileSearchPanel';
 import { FileTree } from './FileTree';
+import { SearchPlaceholder, SessionSearchResults } from './SessionSearchResults';
 
 /**
  * Archived rows rendered before the "show more" step. Uncapped, a project with a
@@ -73,6 +79,23 @@ const SORT_OPTIONS: { value: SessionSort; label: string }[] = [
   { value: 'activity', label: 'Last active' },
   { value: 'created', label: 'Created' },
 ];
+
+/**
+ * Is a Mantine overlay that owns Esc on screen right now? Matched by Mantine's
+ * own classes, and only when actually rendered: a bare `[role="dialog"]` query
+ * also matched elements that are always mounted but hidden (and third-party
+ * widgets), so the global Esc never fired at all.
+ */
+function overlayOpen(): boolean {
+  const open = document.querySelectorAll(
+    '.mantine-Modal-content, .mantine-Drawer-content, .mantine-Menu-dropdown, ' +
+      '.mantine-Popover-dropdown, .mantine-Combobox-dropdown, .mantine-HoverCard-dropdown',
+  );
+  return [...open].some((el) => el.getClientRects().length > 0);
+}
+
+/** Find-in-sessions re-queries this long after the last keystroke. */
+const SESSION_SEARCH_DEBOUNCE_MS = 250;
 
 /** One formatter for the whole list: `toLocaleDateString` builds a new one per call. */
 const rowDate = new Intl.DateTimeFormat('en-GB', {
@@ -780,6 +803,125 @@ export function Sidebar({
     activeProject ? (s.openFiles[activeProject]?.active ?? null) : null,
   );
 
+  // The sidebar search, open over the session list. Its input takes the New
+  // session row's place, and the scope toggle under it picks what is searched.
+  const sidebarSearch = useStore((s) => s.sidebarSearch);
+  const setSidebarSearch = useStore((s) => s.setSidebarSearch);
+  const openSidebarSearch = useStore((s) => s.openSidebarSearch);
+  const searchFocus = useStore((s) => s.searchFocus);
+  const fileSearch = useStore((s) => s.fileSearch);
+  const setFileSearch = useStore((s) => s.setFileSearch);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const searchQuery = sidebarSearch?.query ?? '';
+  const searchScope = sidebarSearch?.scope ?? 'all';
+  const searching = sidebarMode === 'sessions' && !!sidebarSearch;
+
+  useEffect(() => {
+    if (!searchFocus) return;
+    // After the commit that mounts the input, when the search was just opened.
+    requestAnimationFrame(() => {
+      searchInput.current?.focus();
+      searchInput.current?.select();
+    });
+  }, [searchFocus]);
+
+  // Cmd/Ctrl+F opens the search on a session scope — the one it last had, All
+  // sessions for a fresh search or when coming from Files; Cmd/Ctrl+Shift+F
+  // opens it on Files. Cmd+F deliberately takes
+  // over the browser's find-in-page — the transcript is windowed, so that only
+  // ever searched the rows that happened to be mounted. Same rule as Cmd+P: with
+  // no project (a guest, the folder picker) both keys are left to the browser,
+  // and on a phone the search icon is the way in. A Monaco editor keeps its own
+  // Cmd+F: it handles and stops the key before it reaches the document.
+  const canSearch = !isPhone && roots.length > 0;
+  useHotkeys(
+    [
+      [
+        'mod+F',
+        // From the Files scope, Cmd+F means "sessions" — the pair reads as
+        // Cmd+F sessions / Cmd+Shift+F files, as the placeholder says.
+        () =>
+          canSearch &&
+          openSidebarSearch(useStore.getState().sidebarSearch?.scope === 'files' ? 'all' : undefined),
+        { preventDefault: canSearch },
+      ],
+      ['mod+shift+F', () => canSearch && openSidebarSearch('files'), { preventDefault: canSearch }],
+    ],
+    [], // no tag is ignored — the shortcut has to work from the composer textarea too
+    true,
+  );
+
+  // Session scopes search the ids this sidebar lists for the project (or just
+  // the selected one), so a hit is always a session the user can see here. The
+  // Files scope runs its own request in FileSearchResults.
+  const searchRootsKey = activeProject ? rootsForCwd(projects, activeProject).join('\n') : '';
+  const searchIdsKey = !searching || searchScope === 'files'
+    ? ''
+    : searchScope === 'session'
+      ? (selectedSessionId ?? '')
+      : [...shared, ...list, ...archived].map((s) => s.id).join('\n');
+  // Results are shown only for the request they answered. Until a new reply
+  // lands they are hidden, not left up: after a keystroke, a scope flip or a
+  // reopen they describe a different search.
+  const sessionSearchKey = `${searchQuery}\0${searchIdsKey}`;
+  const searchSeq = useRef(0);
+  useEffect(() => {
+    const seq = ++searchSeq.current;
+    if (!searchQuery || !searchIdsKey) {
+      if (sidebarSearch?.results || sidebarSearch?.loading) {
+        setSidebarSearch({ results: null, resultsFor: '', loading: false, error: null });
+      }
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setSidebarSearch({ loading: true });
+      try {
+        const results = await searchSessions(
+          searchRootsKey ? searchRootsKey.split('\n') : [],
+          searchQuery,
+          {},
+          searchIdsKey.split('\n'),
+        );
+        if (seq !== searchSeq.current) return;
+        setSidebarSearch({ results, resultsFor: sessionSearchKey, loading: false, error: null });
+      } catch (err) {
+        if (seq !== searchSeq.current) return;
+        setSidebarSearch({
+          results: null,
+          loading: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, SESSION_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+    // The session list churns through every live turn; only the ids matter, and
+    // re-querying on each status change is deliberately not done.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery, searchIdsKey, searchRootsKey]);
+  // A project switch starts the search over: its hits describe the old tab.
+  useEffect(() => {
+    setSidebarSearch(null);
+  }, [activeProject, setSidebarSearch]);
+  // Esc anywhere closes the search, not only from its input. Bubble phase on
+  // window, so every nearer Esc owner has had its turn first, and it steps
+  // aside for them: a handled key (a mention menu, an inline edit), an open
+  // overlay (a modal, menu or popover closes on Esc itself), or a Monaco editor
+  // (Esc closes its find widget).
+  useEffect(() => {
+    if (!searching) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest('.monaco-editor')) return;
+      if (overlayOpen()) return;
+      setSidebarSearch(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [searching, setSidebarSearch]);
+  const toggleSearch = () => (sidebarSearch ? setSidebarSearch(null) : openSidebarSearch());
+  const searchLoading = searchScope === 'files' ? fileSearch.loading : !!sidebarSearch?.loading;
+
   return (
     <Stack gap={0} h="100%">
       <Group px="sm" py="xs" justify="space-between">
@@ -813,6 +955,19 @@ export function Sidebar({
               </Menu.Dropdown>
             </Menu>
           )}
+          {sidebarMode === 'sessions' && (
+            <Tooltip label={sidebarSearch ? 'Close search' : 'Search sessions and files'}>
+              <ActionIcon
+                variant={sidebarSearch ? 'light' : 'subtle'}
+                color="gray"
+                size="sm"
+                aria-pressed={!!sidebarSearch}
+                onClick={toggleSearch}
+              >
+                <IconSearch size={15} />
+              </ActionIcon>
+            </Tooltip>
+          )}
         </Group>
         {sidebarMode === 'files' && (
           <Switch
@@ -841,9 +996,98 @@ export function Sidebar({
           </Group>
         )}
       </Group>
+      {searching && sidebarSearch && (
+        <Stack gap={4} px="sm" pb="xs">
+          <TextInput
+            ref={searchInput}
+            size="xs"
+            value={searchQuery}
+            placeholder={searchScope === 'files' ? 'Search in files' : 'Search sessions'}
+            leftSection={searchLoading ? <Loader size={10} /> : <IconSearch size={13} />}
+            rightSectionWidth={searchScope === 'files' ? 126 : undefined}
+            rightSection={
+              <Group gap={2} wrap="nowrap">
+                {searchScope === 'files' && (
+                  <>
+                    <FlagToggle
+                      label="Aa"
+                      tip="Match case"
+                      on={fileSearch.caseSensitive}
+                      onToggle={() => setFileSearch({ caseSensitive: !fileSearch.caseSensitive })}
+                    />
+                    <FlagToggle
+                      label="ab"
+                      tip="Match whole word"
+                      on={fileSearch.wholeWord}
+                      onToggle={() => setFileSearch({ wholeWord: !fileSearch.wholeWord })}
+                    />
+                    <FlagToggle
+                      label=".*"
+                      tip="Use regular expression"
+                      on={fileSearch.regex}
+                      onToggle={() => setFileSearch({ regex: !fileSearch.regex })}
+                    />
+                    {/* The same flag the file tree and Cmd+P read, as a toggle in
+                        the row rather than a switch under it: a row of its own made
+                        the results area — and its placeholder — jump on a scope flip. */}
+                    <Tooltip label={hideIgnored ? 'Show ignored files' : 'Hide ignored files'} openDelay={300}>
+                      <ActionIcon
+                        size="sm"
+                        variant={hideIgnored ? 'filled' : 'subtle'}
+                        color="gray"
+                        aria-pressed={hideIgnored}
+                        aria-label="Hide ignored files"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => setHideIgnored(!hideIgnored)}
+                      >
+                        <IconEyeOff size={13} />
+                      </ActionIcon>
+                    </Tooltip>
+                  </>
+                )}
+                <ActionIcon
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  aria-label="Close search"
+                  onClick={() => setSidebarSearch(null)}
+                >
+                  <IconX size={12} />
+                </ActionIcon>
+              </Group>
+            }
+            onChange={(e) => setSidebarSearch({ query: e.currentTarget.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.stopPropagation();
+                setSidebarSearch(null);
+              }
+            }}
+          />
+          <SegmentedControl
+            size="xs"
+            fullWidth
+            value={searchScope}
+            onChange={(v) => {
+              setSidebarSearch({ scope: v as SidebarSearchScope });
+              searchInput.current?.focus();
+            }}
+            data={[
+              { value: 'all', label: 'All sessions' },
+              { value: 'session', label: 'This session', disabled: !selectedSessionId },
+              { value: 'files', label: 'Files', disabled: roots.length === 0 },
+            ]}
+          />
+          {searchScope !== 'files' && sidebarSearch.error && (
+            <Text size="xs" c="red">
+              {sidebarSearch.error}
+            </Text>
+          )}
+        </Stack>
+      )}
       {/* A guest creates sessions only with an explicit machine-scope grant: a
           session share has no folder to create in, and the bridge refuses it. */}
-      {sidebarMode === 'sessions' && canCreate && (
+      {sidebarMode === 'sessions' && !searching && canCreate && (
         <Box px="sm" pb="xs" ref={setCreateRow}>
           {/* The keyboard primer. 16px so iOS does not zoom in on focus; pinned
               in view so focusing it does not scroll anything. */}
@@ -969,8 +1213,25 @@ export function Sidebar({
           </Text>
         </Box>
       )}
+      {searching && !searchQuery ? (
+        // Outside the ScrollArea: its content box is only as tall as what it
+        // holds, so a placeholder inside could never centre in the free space.
+        <Box style={{ flex: 1, minHeight: 0 }}>
+          <SearchPlaceholder scope={searchScope} />
+        </Box>
+      ) : (
       <ScrollArea style={{ flex: 1 }} px={6}>
-        {sidebarMode === 'files' ? (
+        {searching ? (
+          searchScope === 'files' ? (
+            <FileSearchResults query={searchQuery} onNavigate={onNavigate} />
+          ) : sidebarSearch?.results && sidebarSearch.resultsFor === sessionSearchKey ? (
+            <SessionSearchResults
+              results={sidebarSearch.results}
+              query={searchQuery}
+              onNavigate={onNavigate}
+            />
+          ) : null
+        ) : sidebarMode === 'files' ? (
           roots.length > 0 ? (
             <Box pb="sm">
               {roots.map((root) => (
@@ -1076,6 +1337,7 @@ export function Sidebar({
           </Stack>
         )}
       </ScrollArea>
+      )}
       <Box px="sm" py={6} style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}>
         <SegmentedControl
           fullWidth

@@ -53,13 +53,14 @@ import type {
   TranscriptEvent,
   WorkflowMarkerData,
 } from '@lines/shared';
-import { hasEstimatedSpend, rewindBlock } from '@lines/shared';
+import { buildMatcher, hasEstimatedSpend, rewindBlock } from '@lines/shared';
 import { agentLabel, sessionCaps } from '../lib/capabilities';
 import { useStore } from '../store';
 import { useReveal } from '../lib/layout';
 import { send } from '../ws';
 import {
   buildTranscript,
+  findItemIndexForSeq,
   foldAgentTurns,
   reconcileItems,
   turnToolStats,
@@ -1081,6 +1082,56 @@ const SCROLL_KEYS = new Set([
   ' ',
 ]);
 
+/** The CSS Custom Highlight registered for session-search marks (see index.css). */
+const SEARCH_HIGHLIGHT = 'lines-search';
+/** Ceiling on marks per jump, so a one-letter query can't build thousands of ranges. */
+const MAX_HIGHLIGHT_RANGES = 200;
+const JUMP_PULSE_MS = 1600;
+
+/** The Custom Highlight API, where the engine has it (Chromium, Safari ≥17.2). */
+function highlightRegistry(): { set: (name: string, h: unknown) => void; delete: (name: string) => void } | null {
+  const registry = (CSS as unknown as { highlights?: unknown }).highlights;
+  return registry && typeof (globalThis as { Highlight?: unknown }).Highlight === 'function'
+    ? (registry as { set: (name: string, h: unknown) => void; delete: (name: string) => void })
+    : null;
+}
+
+function clearSearchHighlight() {
+  highlightRegistry()?.delete(SEARCH_HIGHLIGHT);
+}
+
+/**
+ * Mark every match of `query` inside `root`'s text nodes, without touching the
+ * DOM or React: ranges registered as a CSS highlight paint over the text as it
+ * is, so memoized rows are not re-rendered and Markdown needs no changes. Text
+ * collapsed out of the DOM (a folded turn, a closed tool card) is not marked —
+ * the row pulse still shows where the hit is. Returns the first range, which is
+ * what the jump scrolls to.
+ */
+function highlightMatches(root: Element, query: string): Range | null {
+  const registry = highlightRegistry();
+  if (!registry || !query) return null;
+  let match;
+  try {
+    match = buildMatcher(query);
+  } catch {
+    return null;
+  }
+  const ranges: Range[] = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node && ranges.length < MAX_HIGHLIGHT_RANGES; node = walker.nextNode()) {
+    for (const [start, end] of match(node.nodeValue ?? '')) {
+      const range = document.createRange();
+      range.setStart(node, start);
+      range.setEnd(node, end);
+      ranges.push(range);
+    }
+  }
+  const HighlightCtor = (globalThis as unknown as { Highlight: new (...r: Range[]) => unknown }).Highlight;
+  registry.set(SEARCH_HIGHLIGHT, new HighlightCtor(...ranges));
+  return ranges[0] ?? null;
+}
+
 export function Transcript({
   sessionId,
   events,
@@ -1305,6 +1356,50 @@ export function Transcript({
     pinnedRef.current = false;
     suppressUnpinUntilRef.current = 0;
   }, [revealStep, visibleItems]);
+
+  // A session-search hit asked for an event in this transcript. Resolve it to a
+  // row, grow the window if the row is clipped, and once it has mounted, scroll
+  // it to the centre and highlight the match. Waits across renders for the
+  // transcript to load when the jump selected a session that was not open.
+  const transcriptJump = useStore((s) =>
+    s.transcriptJump?.sessionId === sessionId ? s.transcriptJump : null,
+  );
+  const clearTranscriptJump = useStore((s) => s.clearTranscriptJump);
+  const searchOpen = useStore((s) => s.sidebarSearch !== null);
+  const [jumpKey, setJumpKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!transcriptJump) return;
+    const index = findItemIndexForSeq(items, transcriptJump.seq, transcriptJump.toolUseId);
+    if (index < 0) return;
+    const needed = items.length - index;
+    if (needed > windowSize) setWindowSize(needed + INITIAL_WINDOW);
+    setJumpKey(items[index].key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transcriptJump, items]);
+  useEffect(() => {
+    if (!jumpKey || !transcriptJump) return;
+    const row = viewportRef.current?.querySelector(`[data-item-key="${CSS.escape(jumpKey)}"]`);
+    if (!row) return;
+    setJumpKey(null);
+    clearTranscriptJump();
+    // Unpinned first, exactly like a step reveal: a live turn's follow-the-stream
+    // would otherwise snap the view straight back to the bottom.
+    pinnedRef.current = false;
+    suppressUnpinUntilRef.current = 0;
+    const first = highlightMatches(row, transcriptJump.query);
+    const target = first?.startContainer.parentElement ?? row.firstElementChild ?? row;
+    // Not smooth: the window may just have grown by hundreds of rows.
+    target.scrollIntoView({ block: 'center' });
+    const pulsed = [...row.children];
+    pulsed.forEach((el) => el.classList.add('lines-jump-pulse'));
+    setTimeout(() => pulsed.forEach((el) => el.classList.remove('lines-jump-pulse')), JUMP_PULSE_MS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpKey, visibleItems]);
+  // Marks go with the search: closing it, or leaving the session, clears them.
+  useEffect(() => {
+    if (!searchOpen) clearSearchHighlight();
+  }, [searchOpen]);
+  useEffect(() => clearSearchHighlight, [sessionId]);
 
   const updateProgress = () => {
     const el = viewportRef.current;
@@ -1546,18 +1641,21 @@ export function Transcript({
               Show earlier messages ({hidden})
             </Button>
           )}
+          {/* `display: contents` keeps each row a direct child of the Stack for
+              layout, while giving a search jump something to find by key. */}
           {visibleItems.map((item) => (
-            <Item
-              key={item.key}
-              item={item}
-              sessionId={sessionId}
-              onImage={setLightbox}
-              renderNested={renderNested}
-              retryKey={retryKey}
-              activeGroupKey={activeGroupKey}
-              activeTurnKey={activeTurnKey}
-              liveCompactKey={liveCompactKey}
-            />
+            <div key={item.key} data-item-key={item.key} style={{ display: 'contents' }}>
+              <Item
+                item={item}
+                sessionId={sessionId}
+                onImage={setLightbox}
+                renderNested={renderNested}
+                retryKey={retryKey}
+                activeGroupKey={activeGroupKey}
+                activeTurnKey={activeTurnKey}
+                liveCompactKey={liveCompactKey}
+              />
+            </div>
           ))}
           {showActivity && (
             <ActivityRow startedAt={activityStartedAt} live={live} lastEventAt={lastEventAt} />

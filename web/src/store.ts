@@ -3,6 +3,7 @@ import type {
   AuthStatus,
   BridgeInfo,
   ContextBreakdown,
+  GrepResponse,
   GuardAllowEntry,
   GuardAllowlistReview,
   McpConnection,
@@ -23,6 +24,7 @@ import type {
   RewindPrompt,
   ServerMessage,
   SessionMeta,
+  SessionSearchResponse,
   ShareCaps,
   ShareProfile,
   ShareScope,
@@ -114,6 +116,57 @@ const DRAFTS_KEY = 'lines.drafts';
 const PLAN_COMMENTS_KEY = 'lines.planComments';
 
 export type SidebarMode = 'sessions' | 'files';
+
+/** What the sidebar search looks through: every session of the project, the
+ *  selected session only, or the project's files. */
+export type SidebarSearchScope = 'all' | 'session' | 'files';
+
+/**
+ * The sidebar search, open over the session list. `null` = closed, and the
+ * sidebar shows its normal list. One query serves every scope, so flipping the
+ * scope re-runs what was typed rather than starting over.
+ */
+export interface SidebarSearchState {
+  query: string;
+  scope: SidebarSearchScope;
+  /** Session-scope results. File results live in `fileSearch`. */
+  results: SessionSearchResponse | null;
+  /** What `results` answered (query + scope + ids). Anything else on screen is
+   *  stale — see searchKey. */
+  resultsFor: string;
+  loading: boolean;
+  error: string | null;
+}
+
+/** The Files scope's match flags and results. Kept apart from the session
+ *  results so switching scope back and forth shows each one's last answer. */
+export interface FileSearchState {
+  caseSensitive: boolean;
+  regex: boolean;
+  wholeWord: boolean;
+  results: GrepResponse | null;
+  /** What `results` answered (query + roots + flags), like SidebarSearchState's. */
+  resultsFor: string;
+  loading: boolean;
+  error: string | null;
+}
+
+/** A file-search hit shown in the main pane, beside the results that found it. */
+export interface SearchPreview {
+  path: string;
+  line?: number;
+  col?: number;
+}
+
+/** A session-search hit the transcript should scroll to and highlight. */
+export interface TranscriptJump {
+  sessionId: string;
+  seq: number;
+  toolUseId?: string;
+  query: string;
+  /** Bumped per click, so jumping to the same hit twice still scrolls. */
+  nonce: number;
+}
 
 /** How aggressively the transcript folds agent activity. Persisted in localStorage. */
 export type CompactionLevel = 'full' | 'grouped' | 'compact';
@@ -922,6 +975,14 @@ interface UiState {
   >;
   /** What the left sidebar shows: session list or project file tree. */
   sidebarMode: SidebarMode;
+  sidebarSearch: SidebarSearchState | null;
+  fileSearch: FileSearchState;
+  /** Bumped when the search is opened, so its input takes focus even when the
+   *  search was already open. */
+  searchFocus: number;
+  /** Set while a file-search hit is open in the main pane. */
+  searchPreview: SearchPreview | null;
+  transcriptJump: TranscriptJump | null;
   /** Keep gitignored files out of the file tree and the Cmd+P palette. Persisted
    *  in localStorage, local-only (never synced — it is a per-browser view choice). */
   hideIgnored: boolean;
@@ -1049,6 +1110,16 @@ interface UiState {
   /** Clear a finished/failed authorization notice for one server. */
   clearMcpAuth: (name: string) => void;
   setSidebarMode: (mode: SidebarMode) => void;
+  /** Open the sidebar search (on the session list) and focus its input;
+   *  `scope` switches it too, as Cmd/Ctrl+Shift+F does for Files. */
+  openSidebarSearch: (scope?: SidebarSearchScope) => void;
+  /** `null` closes the search, restores the session list and drops the preview. */
+  setSidebarSearch: (patch: Partial<SidebarSearchState> | null) => void;
+  setFileSearch: (patch: Partial<FileSearchState>) => void;
+  setSearchPreview: (preview: SearchPreview | null) => void;
+  /** Select `sessionId` and ask its transcript to scroll to the event at `seq`. */
+  jumpToTranscript: (sessionId: string, seq: number, toolUseId?: string) => void;
+  clearTranscriptJump: () => void;
   setCompactionLevel: (level: CompactionLevel) => void;
   setTurnSummariesEnabled: (on: boolean) => void;
   setAutoContinueInterrupted: (on: boolean) => void;
@@ -1304,6 +1375,19 @@ export const useStore = create<UiState>((set, get) => {
   mcpStatus: {},
   mcpAuth: {},
   sidebarMode: loadSidebarMode(),
+  sidebarSearch: null,
+  fileSearch: {
+    caseSensitive: false,
+    regex: false,
+    wholeWord: false,
+    results: null,
+    resultsFor: '',
+    loading: false,
+    error: null,
+  },
+  searchFocus: 0,
+  searchPreview: null,
+  transcriptJump: null,
   hideIgnored: loadHideIgnored(),
   compactionLevel: loadCompactionLevel(),
   turnSummariesEnabled: loadTurnSummariesEnabled(),
@@ -1560,6 +1644,46 @@ export const useStore = create<UiState>((set, get) => {
     set({ sidebarMode: mode });
     pushSettings();
   },
+  openSidebarSearch: (scope) => {
+    // The search lives over the session list; the file tree has no room for it.
+    if (get().sidebarMode !== 'sessions') get().setSidebarMode('sessions');
+    get().setSidebarSearch(scope ? { scope } : {});
+    set((state) => ({ searchFocus: state.searchFocus + 1 }));
+  },
+  setSidebarSearch: (patch) =>
+    set((state) => {
+      if (patch === null) return { sidebarSearch: null, searchPreview: null };
+      const base: SidebarSearchState = state.sidebarSearch ?? {
+        query: '',
+        scope: 'all',
+        results: null,
+        resultsFor: '',
+        loading: false,
+        error: null,
+      };
+      const next = { ...base, ...patch };
+      // The preview belongs to the Files scope's results; leaving it hands the
+      // main pane back to the session.
+      return next.scope === 'files'
+        ? { sidebarSearch: next }
+        : { sidebarSearch: next, searchPreview: null };
+    }),
+  setFileSearch: (patch) => set((state) => ({ fileSearch: { ...state.fileSearch, ...patch } })),
+  setSearchPreview: (preview) => set({ searchPreview: preview }),
+  jumpToTranscript: (sessionId, seq, toolUseId) => {
+    const query = get().sidebarSearch?.query ?? '';
+    if (get().selectedSessionId !== sessionId) get().selectSession(sessionId);
+    set((state) => ({
+      transcriptJump: {
+        sessionId,
+        seq,
+        toolUseId,
+        query,
+        nonce: (state.transcriptJump?.nonce ?? 0) + 1,
+      },
+    }));
+  },
+  clearTranscriptJump: () => set({ transcriptJump: null }),
 
   setHideIgnored: (on) => {
     localStorage.setItem(HIDE_IGNORED_KEY, String(on));

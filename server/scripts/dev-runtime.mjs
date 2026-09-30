@@ -265,37 +265,59 @@ export class Supervisor {
    */
   async forceReload() {
     if (this.stopping) throw new Error('Supervisor is stopping');
-    await this.rebuild();
-    const next = this.candidate ?? this.current;
-    if (!next) throw new Error('No generation to start');
-    const previous = this.current;
-    const requireRelay = !!this.children.get('bridge')?.activity?.relayConnected;
-    this.candidate = null;
-    this.phase = 'reloading';
-    this.publish();
+    // Hold tick() off for the whole restart. It is the crash-recovery loop, and
+    // between stopPair and startPair both children are gone, which is exactly
+    // what it recovers from: it would restart them on `this.current` — the *old*
+    // generation — and startPair would then find a bridge running something else
+    // and reject the build the user just asked for. reload() is immune only
+    // because it runs inside tick.
+    while (this.ticking) await sleep(25);
+    this.ticking = true;
     try {
-      await this.stopPair();
-      await this.startPair(next, requireRelay);
-      this.current = next;
-      writeJson(this.paths.healthy, next);
-      this.error = null;
-    } catch (error) {
-      if (this.stopping) throw error;
-      // Same recovery reload() performs: a candidate that will not start must not
-      // leave the machine with nothing running.
-      this.rejected.add(next.id);
-      this.error = `Rejected ${next.id}: ${error.message}; restoring ${previous.id}`;
-      this.phase = 'restoring';
+      // A deliberate restart means "run what is on disk now", so a build the
+      // automatic path gave up on gets another chance rather than being skipped.
+      this.rejected.clear();
+      await this.rebuild();
+      const next = this.candidate ?? this.current;
+      if (!next) throw new Error('No generation to start');
+      const previous = this.current;
+      const requireRelay = !!this.children.get('bridge')?.activity?.relayConnected;
+      this.candidate = null;
+      this.phase = 'reloading';
       this.publish();
-      await this.stopChild('bridge').catch(() => {});
-      await this.stopChild('worker');
-      await this.startPair(previous);
-      this.current = previous;
+      let failure = null;
+      try {
+        await this.stopPair();
+        await this.startPair(next, requireRelay);
+        this.current = next;
+        writeJson(this.paths.healthy, next);
+        this.error = null;
+      } catch (error) {
+        if (this.stopping) throw error;
+        // Same recovery reload() performs: a candidate that will not start must not
+        // leave the machine with nothing running.
+        this.rejected.add(next.id);
+        failure = `Rejected ${next.id}: ${error.message}; restored ${previous.id}`;
+        this.error = failure;
+        this.phase = 'restoring';
+        this.publish();
+        await this.stopChild('bridge').catch(() => {});
+        await this.stopChild('worker');
+        await this.startPair(previous);
+        this.current = previous;
+      }
+      // A watcher rebuild that finished mid-restart can name what is now running.
+      if (this.candidate?.id === this.current?.id) this.candidate = null;
+      this.phase = 'running';
+      this.idleSince = null;
+      this.publish();
+      // Fail loudly: a restart that kept the old build is not a success, and
+      // reporting it as one is how a stale bridge went unnoticed.
+      if (failure) throw new Error(failure);
+      return this.state();
+    } finally {
+      this.ticking = false;
     }
-    this.phase = 'running';
-    this.idleSince = null;
-    this.publish();
-    return this.state();
   }
   async rebuild() {
     const revision = this.revision;

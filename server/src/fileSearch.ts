@@ -25,7 +25,7 @@ const MAX_FILES = 20_000;
 const CACHE_TTL_MS = 10_000;
 
 /** One root's candidate paths, plus which of them git would ignore. */
-interface Candidates {
+export interface Candidates {
   files: string[];
   ignored: Set<string>;
 }
@@ -103,13 +103,24 @@ function walkFiles(root: string): Candidates {
   return { files: out, ignored: new Set() };
 }
 
-function candidates(root: string): Candidates {
+/**
+ * Every file worth searching under `root`, cached briefly. Shared with the
+ * content search (contentSearch.ts), so find-in-files and quick-open agree on
+ * what a project's files are and on which of them are ignored.
+ */
+export function candidates(root: string): Candidates {
   const cached = cache.get(root);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached;
   const found = gitFiles(root) ?? walkFiles(root);
-  const files = found.files
-    .filter((f) => !f.split('/').some((seg) => IGNORE_DIRS.has(seg)))
-    .slice(0, MAX_FILES);
+  const usable = found.files.filter((f) => !f.split('/').some((seg) => IGNORE_DIRS.has(seg)));
+  // The cap keeps the files people actually work in: non-ignored first, ignored
+  // after. Git lists paths sorted, so an ignored `.cache/` holding a few hundred
+  // thousand paths sorts ahead of `src/` and used to fill the whole cap on its own
+  // — and with "Hide ignored" on, quick-open and find-in-files then found nothing.
+  const files = [
+    ...usable.filter((f) => !found.ignored.has(f)),
+    ...usable.filter((f) => found.ignored.has(f)),
+  ].slice(0, MAX_FILES);
   const result = { files, ignored: found.ignored };
   cache.set(root, { at: Date.now(), ...result });
   return result;

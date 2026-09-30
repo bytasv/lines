@@ -4,6 +4,9 @@ import type {
   DocsResponse,
   FileContentResponse,
   FindResponse,
+  GrepResponse,
+  MatchOptions,
+  SessionSearchResponse,
   TreeEntry,
   TreeResponse,
 } from '@lines/shared';
@@ -50,6 +53,55 @@ export async function searchFiles(
   });
   if (status !== 200) fail(status, {}, 'Failed to search files');
   return (body as FindResponse).files;
+}
+
+const SEARCH_ERROR_MESSAGES: Record<number, string> = {
+  // A bare 400 is the bridge not knowing the request kind at all — one older
+  // than find-in-files. An invalid regex is a 400 too, but says so in its body.
+  400: 'This bridge does not support search yet — restart or update it.',
+  403: 'Access denied — outside the project.',
+};
+
+function failSearch(status: number, body: unknown, fallback: string): never {
+  if (status === 400 && (body as { error?: string } | undefined)?.error === 'invalidRegex') {
+    throw new Error('Invalid regular expression.');
+  }
+  fail(status, SEARCH_ERROR_MESSAGES, fallback);
+}
+
+/**
+ * Content matches for `query` across every project root, grouped by file.
+ * Rejects with "Invalid regular expression." for a bad `regex` query.
+ */
+export async function grepFiles(
+  roots: string[],
+  query: string,
+  opts: MatchOptions & { includeIgnored?: boolean },
+): Promise<GrepResponse> {
+  const { status, body } = await fileRequest('grep', { paths: roots, q: query, ...opts });
+  if (status !== 200) failSearch(status, body, 'Failed to search files');
+  return body as GrepResponse;
+}
+
+/**
+ * Transcript matches for `query`, most recently updated session first. With
+ * `sessionIds` exactly those sessions are searched; without, every session
+ * under `roots`. The bridge clamps either list to the connection's grant.
+ */
+export async function searchSessions(
+  roots: string[],
+  query: string,
+  opts: MatchOptions,
+  sessionIds?: string[],
+): Promise<SessionSearchResponse> {
+  const { status, body } = await fileRequest('sessionSearch', {
+    paths: roots,
+    q: query,
+    ...opts,
+    ...(sessionIds ? { sessionIds } : {}),
+  });
+  if (status !== 200) failSearch(status, body, 'Failed to search sessions');
+  return body as SessionSearchResponse;
 }
 
 const DOCS_ERROR_MESSAGES: Record<number, string> = {

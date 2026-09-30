@@ -14,10 +14,22 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { FileRequestKind, FileRequestParams, SocketAccess } from '@lines/shared';
+import { setImmediate } from 'node:timers/promises';
+import type {
+  FileRequestKind,
+  FileRequestParams,
+  LineMatcher,
+  SessionMeta,
+  SessionSearchHit,
+  SessionSearchResponse,
+  SocketAccess,
+} from '@lines/shared';
+import { buildMatcher } from '@lines/shared';
+import { grepFilesAcross } from './contentSearch.ts';
 import { collectDocs } from './docsBundle.ts';
 import { searchFilesAcross } from './fileSearch.ts';
 import { showFile } from './git.ts';
+import { searchSession } from './sessionSearch.ts';
 import type { UserContext } from './userContext.ts';
 import { resolveWorkspacePath } from './workspacePaths.ts';
 
@@ -162,6 +174,98 @@ function findFiles(ctx: UserContext, params: FileRequestParams, access: SocketAc
 }
 
 /**
+ * A 400 that says why. A bare 400 is also what an unknown kind gets — which is
+ * exactly what a bridge older than this route answers — so the client must be
+ * able to tell "your regex is wrong" from "this bridge can't search".
+ */
+const INVALID_REGEX: FileRouteResult = { status: 400, body: { error: 'invalidRegex' } };
+
+/**
+ * Content search across the project's roots, for the sidebar's Search mode.
+ * Same all-or-nothing root rule as {@link findFiles}; an invalid regex is the
+ * client's mistake to show, so it is a 400 rather than a 500.
+ */
+async function grepFiles(
+  ctx: UserContext,
+  params: FileRequestParams,
+  access: SocketAccess,
+): Promise<FileRouteResult> {
+  const roots = (params.paths ?? []).map((raw) => resolveWorkspacePath(ctx, raw, access));
+  if (!roots.length || roots.some((root) => root === null)) return { status: 403 };
+  try {
+    return {
+      status: 200,
+      body: await grepFilesAcross(roots as string[], params.q ?? '', {
+        caseSensitive: params.caseSensitive,
+        regex: params.regex,
+        wholeWord: params.wholeWord,
+        includeIgnored: params.includeIgnored === true,
+      }),
+    };
+  } catch (err) {
+    if (err instanceof SyntaxError) return INVALID_REGEX;
+    throw err;
+  }
+}
+
+const SESSION_SEARCH_PER_SESSION = 50;
+const SESSION_SEARCH_MAX_SESSIONS = 100;
+const SESSION_SEARCH_BUDGET_MS = 3000;
+
+/**
+ * Transcript search over the project's sessions — or over exactly
+ * `params.sessionIds` — most recently updated first. Every candidate passes
+ * {@link sessionInReach}, so a session-scope guest can never learn what a
+ * sibling session said; an id outside the grant is skipped, not an error,
+ * because "all sessions" from a guest's sidebar is a list the bridge still
+ * clamps.
+ */
+async function searchSessionsRoute(
+  ctx: UserContext,
+  params: FileRequestParams,
+  access: SocketAccess,
+): Promise<FileRouteResult> {
+  let match: LineMatcher;
+  try {
+    match = buildMatcher(params.q ?? '', params);
+  } catch (err) {
+    if (err instanceof SyntaxError) return INVALID_REGEX;
+    throw err;
+  }
+  let metas: SessionMeta[];
+  if (params.sessionIds) {
+    metas = params.sessionIds
+      .map((id) => ctx.sessions.get(id))
+      .filter((s): s is SessionMeta => !!s);
+  } else {
+    const roots = (params.paths ?? []).map((raw) => resolveWorkspacePath(ctx, raw, access));
+    if (!roots.length || roots.some((root) => root === null)) return { status: 403 };
+    const under = (cwd: string) =>
+      (roots as string[]).some((root) => cwd === root || cwd.startsWith(root + path.sep));
+    metas = ctx.sessions.list().filter((s) => under(s.cwd));
+  }
+  metas = metas
+    .filter((s) => sessionInReach(s.id, access))
+    .sort((a, b) => (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt));
+  if (!params.q) return { status: 200, body: { sessions: [] } satisfies SessionSearchResponse };
+  const deadline = Date.now() + SESSION_SEARCH_BUDGET_MS;
+  const sessions: SessionSearchHit[] = [];
+  for (const meta of metas) {
+    // One transcript read per session is the unit of work; yield between them
+    // so a project with hundreds of long sessions does not stall the bridge.
+    await setImmediate();
+    if (Date.now() > deadline) return { status: 200, body: { sessions, truncated: true } };
+    const hit = searchSession(meta.id, ctx.store.loadTranscript(meta.id), match, SESSION_SEARCH_PER_SESSION);
+    if (!hit) continue;
+    sessions.push(hit);
+    if (sessions.length >= SESSION_SEARCH_MAX_SESSIONS) {
+      return { status: 200, body: { sessions, truncated: true } satisfies SessionSearchResponse };
+    }
+  }
+  return { status: 200, body: { sessions } satisfies SessionSearchResponse };
+}
+
+/**
  * A stored attachment as base64, guarding against path traversal. Only the
  * requesting user's own attachments root is searched, so another user's
  * sessionId simply 404s.
@@ -280,6 +384,8 @@ const ROUTES: Record<
   syncLog: readSyncLog,
   sessionDiff: readSessionDiff,
   sessionDiffFile: readSessionDiffFile,
+  grep: grepFiles,
+  sessionSearch: searchSessionsRoute,
 };
 
 /** Dispatch one request. An unknown kind is a client bug, not a path to serve. */

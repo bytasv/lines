@@ -1,7 +1,8 @@
-import { Alert, ActionIcon, Box, Center, Group, Loader, Stack, Text, UnstyledButton } from '@mantine/core';
+import { useEffect, useState } from 'react';
+import { Alert, ActionIcon, Box, Center, Group, Loader, Stack, Text, Tooltip, UnstyledButton } from '@mantine/core';
 import { useComputedColorScheme } from '@mantine/core';
 import { IconFiles, IconX } from '@tabler/icons-react';
-import { Editor } from '@monaco-editor/react';
+import { Editor, type OnMount } from '@monaco-editor/react';
 // See MonacoPreviewModal: every module that mounts an editor owns this import,
 // and React.lazy is what keeps it out of the entry chunk.
 import '../lib/monacoSetup';
@@ -50,9 +51,28 @@ function FileTab({ path, project, active }: { path: string; project: string; act
   );
 }
 
-function FileEditor({ path }: { path: string }) {
+type MonacoEditor = Parameters<OnMount>[0];
+
+function FileEditor({ path, line, col }: { path: string; line?: number; col?: number }) {
   const colorScheme = useComputedColorScheme('dark');
   const { content, error } = useFileContent(path);
+  const [editor, setEditor] = useState<MonacoEditor | null>(null);
+
+  // Re-run on every line change, not only on mount: the search preview keeps one
+  // editor per file and moves it between that file's hits.
+  useEffect(() => {
+    if (!editor || !line) return;
+    const model = editor.getModel();
+    if (!model || line > model.getLineCount()) return;
+    editor.revealLineInCenter(line);
+    editor.setPosition({ lineNumber: line, column: col ?? 1 });
+    editor.setSelection({
+      startLineNumber: line,
+      startColumn: 1,
+      endLineNumber: line,
+      endColumn: model.getLineMaxColumn(line),
+    });
+  }, [editor, line, col]);
 
   if (error) {
     return (
@@ -74,6 +94,7 @@ function FileEditor({ path }: { path: string }) {
       language={languageFor(path)}
       value={content}
       theme={colorScheme === 'dark' ? 'vs-dark' : 'light'}
+      onMount={(mounted) => setEditor(mounted)}
       options={{
         readOnly: true,
         minimap: { enabled: false },
@@ -123,6 +144,41 @@ export function FilesView() {
       </Group>
       <Box style={{ flex: 1, minHeight: 0 }}>
         {openFiles.active ? <FileEditor key={openFiles.active} path={openFiles.active} /> : empty}
+      </Box>
+    </Stack>
+  );
+}
+
+/**
+ * A file-search hit, open in the main pane while the results stay in the
+ * sidebar — the files mode would swap the sidebar for its tree and lose them.
+ */
+export function SearchPreviewView() {
+  const preview = useStore((s) => s.searchPreview);
+  const activeProject = useStore((s) => s.activeProject);
+  const setSearchPreview = useStore((s) => s.setSearchPreview);
+  const isPhone = useIsPhone();
+  if (!preview) return null;
+  if (isPhone) return <BestOnDesktop what="Reading source" onClose={() => setSearchPreview(null)} />;
+  const rel =
+    activeProject && preview.path.startsWith(activeProject + '/')
+      ? preview.path.slice(activeProject.length + 1)
+      : preview.path;
+  return (
+    <Stack gap={0} h="100%">
+      <Group gap={6} px="xs" py={6} wrap="nowrap" justify="space-between">
+        <Text size="xs" ff="monospace" fw={600} truncate title={preview.path}>
+          {rel}
+          {preview.line ? `:${preview.line}` : ''}
+        </Text>
+        <Tooltip label="Close preview">
+          <ActionIcon size="sm" variant="subtle" color="gray" onClick={() => setSearchPreview(null)}>
+            <IconX size={13} />
+          </ActionIcon>
+        </Tooltip>
+      </Group>
+      <Box style={{ flex: 1, minHeight: 0 }}>
+        <FileEditor key={preview.path} path={preview.path} line={preview.line} col={preview.col} />
       </Box>
     </Stack>
   );

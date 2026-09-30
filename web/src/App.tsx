@@ -37,6 +37,9 @@ import { send } from './ws';
  * the CDN override still runs before the editor mounts.
  */
 const FilesView = lazy(() => import('./components/FilesView').then((m) => ({ default: m.FilesView })));
+const SearchPreviewView = lazy(() =>
+  import('./components/FilesView').then((m) => ({ default: m.SearchPreviewView })),
+);
 const MonacoPreviewModal = lazy(() =>
   import('./components/MonacoPreviewModal').then((m) => ({ default: m.MonacoPreviewModal })),
 );
@@ -101,6 +104,7 @@ function Shell() {
   const projectKeys = useStore((s) => s.projectKeys);
   const setActiveProject = useStore((s) => s.setActiveProject);
   const sidebarMode = useStore((s) => s.sidebarMode);
+  const hasSearchPreview = useStore((s) => s.searchPreview !== null);
   const [workflowEditorOpen, setWorkflowEditorOpen] = useState(false);
   // Which library the modal lands on — the sidebar has an entry point per library.
   const [workflowEditorView, setWorkflowEditorView] = useState<WorkflowEditorView>('workflows');
@@ -268,6 +272,17 @@ function Shell() {
               }
             >
               <FilesView />
+            </Suspense>
+          ) : hasSearchPreview ? (
+            // A file-search hit: shown here so the sidebar keeps the results.
+            <Suspense
+              fallback={
+                <Center h="100%">
+                  <Loader />
+                </Center>
+              }
+            >
+              <SearchPreviewView />
             </Suspense>
           ) : selectedSessionId && selectedSession ? (
             <ErrorBoundary key={selectedSessionId}>

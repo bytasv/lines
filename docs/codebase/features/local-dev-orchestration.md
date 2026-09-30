@@ -73,6 +73,11 @@ that otherwise makes "restart the worker resource, then the bridge resource" ind
 nothing. A failed candidate restores the previously running generation, the same rollback
 `reload()` performs.
 
+While it runs, the supervisor's own crash recovery is paused, and a candidate
+rejected earlier is retried. Otherwise recovery would restart the stopped children
+on the old generation and the restart would silently roll back. A restart that
+does roll back fails loudly with the rejection reason instead of reporting success.
+
 **The command only trusts a real restart, not a 200.** The control route answers with a
 `restarted: true` handshake field; a supervisor from before this route existed answers an
 unknown URL with its plain state and a 200 anyway, which is otherwise indistinguishable from

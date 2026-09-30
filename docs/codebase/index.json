@@ -1581,7 +1581,8 @@
         "failed candidate startup restores the last healthy generation",
         "explicit shutdown ends active work and reaps only the resource-owned process tree",
         "restart-backend (a manual Tilt resource plus a button on worker/bridge) rebuilds and cycles the pair without waiting for idle, for the case the automatic path can be blocked on indefinitely (a workflow step parked at waiting-approval anywhere on the machine); the control route answers with a 'restarted: true' handshake so a supervisor predating the route cannot report false success on its plain 200",
-        "enable-all (tilt enable --all, plus a button living on preflight specifically because that resource is never disabled) is the way back from a disabled Tilt resource, whose own buttons disappear along with it"
+        "enable-all (tilt enable --all, plus a button living on preflight specifically because that resource is never disabled) is the way back from a disabled Tilt resource, whose own buttons disappear along with it",
+        "a forced restart pauses the supervisor's crash recovery and retries a previously rejected build; a restart that rolls back fails with the rejection reason instead of reporting success"
       ],
       "architecturalRules": [
         "PORT is injected per resource via serve_env, never a shared env block",
@@ -2354,7 +2355,9 @@
         "AttachmentBody",
         "fileRequest",
         "useAttachmentUrl",
-        "AttachmentTile"
+        "AttachmentTile",
+        "grep",
+        "sessionSearch"
       ],
       "tests": [
         "server/src/fileRoutes.test.ts",
@@ -2364,7 +2367,8 @@
         "status keeps using HTTP codes because the client already maps 403/404/413/415 to user-facing messages",
         "a request made while disconnected rejects immediately; in-flight requests reject on close rather than hanging",
         "find stays all-or-nothing across roots: a partial result reads as 'no match here' and would silently hide a folder",
-        "attachments are capped at the same 2MB as the old /file route"
+        "attachments are capped at the same 2MB as the old /file route",
+        "grep is all-or-nothing across roots like find; sessionSearch clamps every session id through sessionInReach"
       ],
       "architecturalRules": [
         "handlers are pure {status, body} functions in their own module rather than http.ServerResponse writers, so they can serve a relay channel and are testable without a socket (index.ts listens on import)",
@@ -2375,7 +2379,9 @@
       ],
       "relatedDecisions": [
         "hosted-machine-access",
-        "permissions-and-plan-mode"
+        "permissions-and-plan-mode",
+        "find-in-files",
+        "session-search"
       ]
     },
     {
@@ -3240,7 +3246,8 @@
       "businessRules": [
         "Cmd+P searches only the active project's roots (rootsForCwd), not every open project tab",
         "a hit always opens in the preview overlay, never a files-mode tab, regardless of which sidebar mode is active when the palette opens",
-        "hideIgnored defaults to on and is local-only (not part of synced settings)"
+        "hideIgnored defaults to on and is local-only (not part of synced settings)",
+        "non-ignored files fill the capped candidate list before ignored ones, so a large gitignored tree cannot starve the palette or find-in-files"
       ],
       "architecturalRules": [
         "the palette is a global overlay mounted in App.tsx alongside MonacoPreviewModal/LoginModal, not scoped under any route, so the shortcut works from the docs reader too",
@@ -3249,7 +3256,8 @@
       "relatedDecisions": [
         "prompt-mentions",
         "multi-root-projects",
-        "file-routes-over-ws"
+        "file-routes-over-ws",
+        "find-in-files"
       ]
     },
     {
@@ -4015,6 +4023,121 @@
       ],
       "relatedDecisions": [
         "openai-codex-sessions"
+      ]
+    },
+    {
+      "id": "find-in-files",
+      "name": "Find in files (Cmd+Shift+F)",
+      "doc": "features/find-in-files.md",
+      "purpose": "Search the contents of every file in the active project from the sidebar search's Files scope, with results beside a main-pane file preview at the matching line.",
+      "entryPoints": [
+        "web/src/components/Sidebar.tsx",
+        "web/src/components/FileSearchPanel.tsx",
+        "server/src/contentSearch.ts"
+      ],
+      "files": [
+        "server/src/contentSearch.ts",
+        "server/src/fileSearch.ts",
+        "server/src/fileRoutes.ts",
+        "shared/types.ts",
+        "web/src/lib/files.ts",
+        "web/src/store.ts",
+        "web/src/components/FileSearchPanel.tsx",
+        "web/src/components/FilesView.tsx",
+        "web/src/components/Sidebar.tsx",
+        "web/src/App.tsx"
+      ],
+      "symbols": [
+        "grepFilesAcross",
+        "buildMatcher",
+        "clipAround",
+        "GrepHit",
+        "GrepResponse",
+        "SearchPreview",
+        "grepFiles",
+        "FileSearchResults"
+      ],
+      "tests": [
+        "server/src/contentSearch.test.ts",
+        "server/src/sessionSearch.test.ts",
+        "server/src/fileRoutes.test.ts"
+      ],
+      "businessRules": [
+        "searches only the active project's roots, sharing hideIgnored with Cmd+P and the file tree",
+        "files over 1 MB and binary files are skipped; results are capped by files, matches and time and marked truncated",
+        "grep is all-or-nothing across roots: one root out of reach is a 403",
+        "an invalid regex is a 400 with an invalidRegex body; a bare 400 means an older bridge",
+        "results are shown only while they match the current query, roots and flags"
+      ],
+      "architecturalRules": [
+        "reuses the file-request handler, so auth, relay encryption and root containment are inherited",
+        "server search and web highlighting share buildMatcher",
+        "search yields to the event loop between batches of files",
+        "non-ignored files fill the candidate cap before ignored ones"
+      ],
+      "relatedDecisions": [
+        "session-search",
+        "file-routes-over-ws",
+        "file-quick-open",
+        "multi-root-projects"
+      ]
+    },
+    {
+      "id": "session-search",
+      "name": "Find in sessions",
+      "doc": "features/session-search.md",
+      "purpose": "Search session transcripts from the sidebar, replace the session list with matching snippets, and jump to and highlight the hit in the transcript.",
+      "entryPoints": [
+        "web/src/components/Sidebar.tsx",
+        "web/src/components/SessionSearchResults.tsx",
+        "server/src/sessionSearch.ts"
+      ],
+      "files": [
+        "server/src/sessionSearch.ts",
+        "server/src/fileRoutes.ts",
+        "shared/types.ts",
+        "web/src/lib/files.ts",
+        "web/src/lib/transcript.ts",
+        "web/src/store.ts",
+        "web/src/components/Sidebar.tsx",
+        "web/src/components/SessionSearchResults.tsx",
+        "web/src/components/Transcript.tsx",
+        "web/src/index.css"
+      ],
+      "symbols": [
+        "searchSession",
+        "searchableTexts",
+        "findItemIndexForSeq",
+        "SessionSearchHit",
+        "SessionSearchResponse",
+        "TranscriptJump",
+        "jumpToTranscript",
+        "SidebarSearchScope",
+        "searchSessions"
+      ],
+      "tests": [
+        "server/src/sessionSearch.test.ts",
+        "server/src/fileRoutes.test.ts"
+      ],
+      "businessRules": [
+        "searched text is prompts, interjections, assistant text, key tool-input fields and tool results; thinking, compacted spans and ephemeral system events are excluded",
+        "every session id is clamped through sessionInReach and the route needs the readFiles capability",
+        "Cmd/Ctrl+F opens session search and replaces browser find-in-page only while a project is open on a non-phone client",
+        "Esc closes the search from anywhere unless another handler took it, a Mantine overlay is open, or focus is in Monaco",
+        "old results are never shown while a new search loads"
+      ],
+      "architecturalRules": [
+        "search is an overlay state over the session list, not a sidebar mode, and is never persisted",
+        "a hit's row is found from item keys that embed the event seq; items carry no separate seq",
+        "text highlighting uses the CSS Custom Highlight API, leaving the markdown tree untouched",
+        "search runs on the bridge because the transcript only mounts its most recent rows"
+      ],
+      "relatedDecisions": [
+        "find-in-files",
+        "file-routes-over-ws",
+        "transcript-performance",
+        "transcript-rendering",
+        "session-change-tracking"
       ]
     }
   ]

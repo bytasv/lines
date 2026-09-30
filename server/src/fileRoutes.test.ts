@@ -138,6 +138,84 @@ test('sessionDiff: a session-scope grant cannot read a session outside it', asyn
   assert.equal((await handleFileRequest(ctx(), 'sessionDiff', { sessionId: 'known' }, allowed)).status, 200);
 });
 
+test('grep: searches file contents, all-or-nothing on roots', async () => {
+  const res = await call('grep', { paths: [root], q: 'hi there' });
+  assert.equal(res.status, 200);
+  const files = (res.body as { files: { rel: string }[] }).files;
+  assert.deepEqual(files.map((f) => f.rel), ['hello.txt']);
+  assert.equal((await call('grep', { paths: [root, '/etc'], q: 'hi' })).status, 403);
+  assert.equal((await call('grep', { paths: [], q: 'hi' })).status, 403);
+});
+
+test('grep and sessionSearch: an invalid regex is a 400', async () => {
+  // The body is what tells this apart from the bare 400 an unknown kind gets.
+  for (const kind of ['grep', 'sessionSearch'] as const) {
+    const res = await call(kind, { paths: [root], q: '(', regex: true });
+    assert.equal(res.status, 400);
+    assert.deepEqual(res.body, { error: 'invalidRegex' });
+  }
+});
+
+/** Three sessions: two in the project, one elsewhere, each saying "needle". */
+const SEARCH_SESSIONS: SessionMeta[] = [
+  { id: 'inA', cwd: root, createdAt: 1, updatedAt: 10 },
+  { id: 'inB', cwd: path.join(root, 'sub'), createdAt: 2, updatedAt: 20 },
+  { id: 'away', cwd: '/elsewhere', createdAt: 3, updatedAt: 30 },
+] as SessionMeta[];
+
+function searchCtx(): UserContext {
+  const base = ctx({
+    list: () => SEARCH_SESSIONS,
+    get: (id: string) => SEARCH_SESSIONS.find((s) => s.id === id),
+  });
+  return {
+    ...base,
+    store: {
+      ...base.store,
+      loadTranscript: (id: string) => [
+        { seq: 1, ts: 1, kind: 'user', data: { text: `needle from ${id}` } },
+      ],
+    },
+  } as unknown as UserContext;
+}
+
+const sessionIdsOf = (res: { body?: unknown }) =>
+  (res.body as { sessions: { sessionId: string }[] }).sessions.map((s) => s.sessionId);
+
+test('sessionSearch: the owner sees every session under the project, newest first', async () => {
+  const res = await handleFileRequest(searchCtx(), 'sessionSearch', { paths: [root], q: 'needle' }, OWNER_ACCESS);
+  assert.equal(res.status, 200);
+  assert.deepEqual(sessionIdsOf(res), ['inB', 'inA']);
+  assert.equal(
+    (await handleFileRequest(searchCtx(), 'sessionSearch', { paths: ['/etc'], q: 'needle' }, OWNER_ACCESS))
+      .status,
+    403,
+  );
+});
+
+test('sessionSearch: explicit sessionIds scope the search to exactly those', async () => {
+  const res = await handleFileRequest(
+    searchCtx(),
+    'sessionSearch',
+    { sessionIds: ['inA', 'missing'], q: 'needle' },
+    OWNER_ACCESS,
+  );
+  assert.deepEqual(sessionIdsOf(res), ['inA']);
+});
+
+test('sessionSearch: a session-scope grant never reaches a session outside it', async () => {
+  const guest = { scope: 'session' as const, caps: OWNER_ACCESS.caps, sessionIds: ['inA'] };
+  const all = await handleFileRequest(searchCtx(), 'sessionSearch', { paths: [root], q: 'needle' }, guest);
+  assert.deepEqual(sessionIdsOf(all), ['inA']);
+  const asked = await handleFileRequest(
+    searchCtx(),
+    'sessionSearch',
+    { sessionIds: ['inB', 'away'], q: 'needle' },
+    guest,
+  );
+  assert.deepEqual(sessionIdsOf(asked), []);
+});
+
 test('sessionDiffFile: refuses a path outside the repo, and a repo outside the session', async () => {
   assert.equal(
     (await call('sessionDiffFile', { sessionId: 'known', paths: [root], rel: '../../etc/hosts' })).status,

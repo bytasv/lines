@@ -105,23 +105,12 @@ test('active work blocks edits; freeze and resume keep PIDs; idle reloads the pa
 });
 
 /*
- * Skipped, with the reason written down rather than the name changed.
- *
- * Both have failed since before 5cc56e5 — `git` shows the deploy workflow red or
- * cancelled since 14 September, so they have not been green in CI for days
- * either. The symptom is the assertion below: the generation does not change.
- * The cause is one level down — `buildGeneration` is healthy (it mints a fresh
- * id for the edited fixture), the candidate is computed, and then `startPair`
- * rejects on the new generation, so `forceReload` rolls back to the previous one
- * exactly as designed. `rebuild()` swallows that rejection into `this.error`,
- * which is why the test can only see the rollback and not the reason.
- *
- * Skipped to unblock a deploy, not because the behaviour is unimportant: a
- * forced restart that silently keeps the old build is a real bug in the dev
- * supervisor. The first move when picking this up is to make `forceReload`
- * surface why `startPair` rejected instead of discarding it.
+ * These two failed for weeks, for one reason: forceReload ran outside tick(), so
+ * the crash-recovery loop saw both children stopped mid-restart and brought them
+ * back on the *old* generation. startPair then found a bridge on a different
+ * generation and rejected the new build, and the rollback reported success.
  */
-test('a forced restart rebuilds and cycles the pair while work is live', { skip: 'pre-existing failure: startPair rejects the new generation and forceReload rolls back — see note above' }, async (t) => {
+test('a forced restart rebuilds and cycles the pair while work is live', async (t) => {
   // The gap this closes: `isSessionActive` counts a workflow step parked for
   // approval, so a machine with one parked step never reaches idle and the
   // automatic reload waits forever, however long the edits pile up.
@@ -171,8 +160,7 @@ test('a restart a supervisor is too old to understand fails loudly', async (t) =
   assert.equal(supervisor.current.id, original, 'and it really did not restart');
 });
 
-// Same pre-existing failure as the forced-restart test above; see that note.
-test('a forced restart that will not start puts the working build back', { skip: 'pre-existing failure: see the note on the forced-restart test above' }, async (t) => {
+test('a forced restart that will not start puts the working build back', async (t) => {
   const { root, supervisor } = await running(t);
   const original = supervisor.current.id;
   fs.writeFileSync(path.join(root, 'server/src/index.ts'), 'FAIL');

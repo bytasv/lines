@@ -62,18 +62,28 @@ export type FileRequestKind =
   | 'attachment'
   | 'syncLog'
   | 'sessionDiff'
-  | 'sessionDiffFile';
+  | 'sessionDiffFile'
+  | 'grep'
+  | 'sessionSearch';
 
 export interface FileRequestParams {
-  /** file/tree/docs: exactly one. find: one per project root.
-   *  sessionDiffFile: the repo root the file lives in. */
+  /** file/tree/docs: exactly one. find/grep: one per project root.
+   *  sessionDiffFile: the repo root the file lives in.
+   *  sessionSearch: the project roots whose sessions are searched when
+   *  `sessionIds` is absent. */
   paths?: string[];
-  /** find only. */
+  /** find/grep/sessionSearch: the query. */
   q?: string;
   limit?: number;
-  /** find: also match gitignored files (`.env`, build output). Defaults to false —
+  /** find/grep: also match gitignored files (`.env`, build output). Defaults to false —
    *  the `@mention` menu never asks for them, only the file palette's toggle does. */
   includeIgnored?: boolean;
+  /** grep/sessionSearch: how `q` is matched — see {@link buildMatcher}. */
+  caseSensitive?: boolean;
+  regex?: boolean;
+  wholeWord?: boolean;
+  /** sessionSearch: exactly these sessions. Absent = every session under `paths`. */
+  sessionIds?: string[];
   /** attachment: path relative to the user's attachments root.
    *  sessionDiffFile: path relative to `paths[0]`. */
   rel?: string;
@@ -1632,6 +1642,94 @@ export interface TreeResponse {
 export interface FindResponse {
   /** Ranked matches; `rel` is relative to the absolute `root` it was found under. */
   files: { root: string; rel: string }[];
+}
+
+/** One file with content matches, for find-in-files. Mirrors {@link DocSearchHit}. */
+export interface GrepHit {
+  /** Absolute project root `rel` is relative to. */
+  root: string;
+  rel: string;
+  /** One entry per matching line. `line` and `col` are 1-based; `text` is the
+   *  line, clipped around the first match when long. */
+  matches: { line: number; col: number; text: string }[];
+}
+
+export interface GrepResponse {
+  files: GrepHit[];
+  /** A cap (files, matches or time) was hit, so `files` is partial. */
+  truncated?: boolean;
+}
+
+/** One session with transcript matches, for find-in-sessions. */
+export interface SessionSearchHit {
+  sessionId: string;
+  /** `seq` is the transcript event the text came from; `start`/`end` are the
+   *  first match's offsets into `text`. `toolUseId` is set when the text belongs
+   *  to a tool call (its input or its result), which is how the transcript finds
+   *  the card that renders it. */
+  matches: { seq: number; text: string; start: number; end: number; toolUseId?: string }[];
+}
+
+export interface SessionSearchResponse {
+  sessions: SessionSearchHit[];
+  truncated?: boolean;
+}
+
+export interface MatchOptions {
+  caseSensitive?: boolean;
+  /** `q` is a JavaScript regular expression rather than literal text. */
+  regex?: boolean;
+  /** Only matches bounded by `\b` on both sides. */
+  wholeWord?: boolean;
+}
+
+/** `[start, end)` offsets of every match in one line. */
+export type LineMatcher = (line: string) => [number, number][];
+
+/**
+ * The one definition of "does this line match" for find-in-files and
+ * find-in-sessions, shared so the bridge's search and the browser's highlighting
+ * can never disagree. Throws a `SyntaxError` on an invalid regex; an empty query
+ * matches nothing. Zero-length matches (`^`, `a*`) are skipped rather than
+ * reported — they highlight nothing and would loop.
+ */
+export function buildMatcher(q: string, opts: MatchOptions = {}): LineMatcher {
+  if (!q) return () => [];
+  let source = opts.regex ? q : q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (opts.wholeWord) source = `\\b(?:${source})\\b`;
+  const re = new RegExp(source, opts.caseSensitive ? 'g' : 'gi');
+  return (line) => {
+    const out: [number, number][] = [];
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(line)) !== null) {
+      if (m[0].length === 0) {
+        re.lastIndex++;
+        continue;
+      }
+      out.push([m.index, m.index + m[0].length]);
+    }
+    return out;
+  };
+}
+
+/**
+ * At most `max` characters of `line` around `[start, end)`, with an ellipsis on
+ * each clipped side, and the match's offsets into the clipped text.
+ */
+export function clipAround(
+  line: string,
+  start: number,
+  end: number,
+  max = 200,
+): { text: string; start: number; end: number } {
+  if (line.length <= max) return { text: line, start, end };
+  const from = Math.max(0, Math.min(start - Math.floor((max - (end - start)) / 2), line.length - max));
+  const to = Math.min(line.length, from + max);
+  const lead = from > 0 ? '…' : '';
+  const text = `${lead}${line.slice(from, to)}${to < line.length ? '…' : ''}`;
+  const s = Math.max(0, start - from) + lead.length;
+  return { text, start: s, end: Math.min(text.length, s + (end - start)) };
 }
 
 // ---------------------------------------------------------------------------

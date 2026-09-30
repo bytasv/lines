@@ -51,6 +51,11 @@ store: it is a point-to-point reply, not application state.
 Attachments come back as base64 and become blob URLs client-side, symmetric with
 the upload path, which was already base64.
 
+Two search kinds ride the same route table: `grep` (file contents, see
+[find-in-files](find-in-files.md)) and `sessionSearch` (transcripts, see
+[session-search](session-search.md)). Both share `buildMatcher` from
+`shared/types.ts`; an invalid regex returns a 400 with an `invalidRegex` body.
+
 ## Dependencies
 
 Reuses `resolveWorkspacePath`/`workspaceRoots` for containment (including the
@@ -71,6 +76,8 @@ an open socket — there is no unauthenticated fallback.
   on close rather than hanging forever.
 - `find` stays all-or-nothing across roots: a partial result reads as "no match
   here" and would silently hide a whole folder from the mention list.
+- `grep` is all-or-nothing across roots like `find`; `sessionSearch` clamps every
+  session id through `sessionInReach`.
 - Attachments are capped at the same 2 MB as `/file` was.
 
 ## Architectural rules
