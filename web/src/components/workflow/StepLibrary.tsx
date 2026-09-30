@@ -144,7 +144,7 @@ function RestoreHistoryPopover({
                       <Text size="sm" fw={600}>v{v.version}</Text>
                       <Text size="xs" c="dimmed" style={{ flex: 1, minWidth: 0 }} truncate>{relTime(v.updatedAt)}</Text>
                       {v.version === currentVersion && (
-                        <Badge size="xs" variant="light" color="sandstone">current</Badge>
+                        <Badge size="xs" variant="light">current</Badge>
                       )}
                     </UnstyledButton>
                   ))}

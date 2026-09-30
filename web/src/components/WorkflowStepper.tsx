@@ -33,12 +33,15 @@ import { ConfirmModal } from './ConfirmModal';
 function StepIcon({
   status,
   index,
+  current = false,
   advanceLabel,
   advanceIcon = 'check',
   onAdvance,
 }: {
   status: WorkflowStepStatus;
   index: number;
+  /** The step the workflow is on. With no accent hue, it is the one solid chip. */
+  current?: boolean;
   /** Tooltip for the force-advance affordance; undefined when this step can't be advanced. */
   advanceLabel?: string;
   /** What the affordance does: complete this step, or start one that never began. */
@@ -53,6 +56,11 @@ function StepIcon({
   // affordance lives on the icon only, so the rest of the row keeps its
   // scroll-to-marker click.
   const showAdvance = !!advanceLabel && show;
+  // Monochrome, so emphasis is fill: the current step (and the advance glyph) is
+  // solid, finished steps recede to a tint, and steps still to come are a
+  // hairline outline with a dimmed number.
+  const variant =
+    showAdvance || current ? 'filled' : status === 'done' ? 'light' : 'default';
   // Fixed width so the title (and the metrics row indented under it) never shifts
   // when a step flips between the 20px loader and the 22px icon.
   const icon = (
@@ -76,7 +84,8 @@ function StepIcon({
         <ThemeIcon
           size={22}
           radius="xl"
-          variant={status === 'pending' && !showAdvance ? 'default' : 'filled'}
+          variant={variant}
+          c={variant === 'default' ? 'dimmed' : undefined}
         >
           {showAdvance ? (
             advanceIcon === 'play' ? (
@@ -230,6 +239,7 @@ export function WorkflowStepper({
                 <StepIcon
                   status={status}
                   index={i}
+                  current={current}
                   advanceLabel={
                     i !== state.stepIndex
                       ? undefined
@@ -262,7 +272,13 @@ export function WorkflowStepper({
                 />
               </Box>
               <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
-                <Text size="xs" lh="18px" fw={current ? 600 : 500} truncate>
+                <Text
+                  size="xs"
+                  lh="18px"
+                  fw={current ? 600 : 500}
+                  c={status === 'pending' && !current ? 'dimmed' : undefined}
+                  truncate
+                >
                   {nameOf(step)}
                 </Text>
                 {/* Underline doubles as this step's scroll-progress track,
@@ -273,17 +289,14 @@ export function WorkflowStepper({
                     minWidth: 12,
                     height: 3,
                     borderRadius: 2,
-                    background: 'var(--mantine-color-default-hover)',
+                    background: 'var(--mantine-color-default-border)',
                   }}
                 >
                   <Box
                     data-progress-fill
-                    style={{
-                      height: '100%',
-                      width: 0,
-                      borderRadius: 2,
-                      background: 'var(--mantine-color-sandstone-6)',
-                    }}
+                    className="lines-progress-fill"
+                    data-running={status === 'running' || undefined}
+                    style={{ height: '100%', width: 0, borderRadius: 2 }}
                   />
                 </Box>
                 {/* Always rendered — an invisible placeholder holds the row's height so
@@ -358,7 +371,7 @@ export function WorkflowStepper({
           style={{
             borderRadius: 'var(--mantine-radius-sm)',
             background: 'var(--mantine-color-default-hover)',
-            boxShadow: 'inset 2px 0 0 var(--mantine-color-sandstone-6)',
+            boxShadow: 'inset 2px 0 0 var(--mantine-color-text)',
           }}
         >
           <Text size="xs" truncate style={{ minWidth: 0 }}>
@@ -451,7 +464,7 @@ export function WorkflowStepper({
                   setListOpen(false);
                 }}
               >
-                <StepIcon status={status} index={i} />
+                <StepIcon status={status} index={i} current={i === state.stepIndex} />
                 <Stack gap={0} style={{ minWidth: 0, flex: 1 }}>
                   <Text size="sm" fw={i === state.stepIndex ? 600 : 400} truncate>
                     {nameOf(step)}

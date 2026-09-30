@@ -1,7 +1,7 @@
 const FAVICON_SRC = '/favicon.png';
-// Matches Mantine blue-6 / red-6 used by the sidebar status dots.
-const RUNNING_BLUE = '#228be6';
-const ATTENTION_RED = '#fa5252';
+// Matches the theme's blue-6 / red-6 used by the sidebar status dots.
+const RUNNING_BLUE = '#4b84be';
+const ATTENTION_RED = '#bf5f5a';
 
 interface FaviconState {
   attention: number;

@@ -1354,7 +1354,7 @@ function PlanApproval({
         withBorder
         radius="md"
         p="sm"
-        style={{ borderColor: resolution ? undefined : 'var(--mantine-color-sandstone-6)' }}
+        style={{ borderColor: resolution ? undefined : 'var(--mantine-color-yellow-6)' }}
       >
         <Group
           className="tx-row"
@@ -1385,14 +1385,14 @@ function PlanApproval({
                 <IconPointFilled size={6} opacity={0.35} />
               </Center>
             )}
-            <IconMap size={16} color="var(--mantine-color-sandstone-5)" />
+            <IconMap size={16} color="var(--mantine-color-violet-5)" />
             <Text size="sm" fw={600}>
               {agent} finished planning
             </Text>
             {resolution && (
               <ResolutionBadge
                 data={data}
-                color={resolution === 'deny' ? 'sandstone' : RESOLUTION_BADGE[resolution].color}
+                color={resolution === 'deny' ? 'gray' : RESOLUTION_BADGE[resolution].color}
               >
                 {resolution === 'allow' ? 'plan approved' : null}
                 {/* A denied plan is not a rejection — the session stayed in plan mode. */}
@@ -1476,7 +1476,7 @@ function PlanApproval({
         >
           <Group px="xl" py="md" justify="space-between">
             <Group gap="xs">
-              <IconMap size={18} color="var(--mantine-color-sandstone-5)" />
+              <IconMap size={18} color="var(--mantine-color-violet-5)" />
               <Text fw={700}>Plan review</Text>
             </Group>
             <Button variant="subtle" color="gray" size="xs" onClick={dismissFocus}>

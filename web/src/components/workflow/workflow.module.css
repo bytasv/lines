@@ -1,5 +1,6 @@
 /* Workflow / step editor visual language — elevated cards, inset fields,
-   accent-tinted chrome. Uses the sandstone brand palette from theme.ts. */
+   monochrome chrome. Uses the neutral palette from theme.ts; "active" is
+   carried by contrast (a near-white rail, inverted step number), not hue. */
 
 .card {
   background: var(--mantine-color-dark-6);
@@ -12,9 +13,10 @@
   border-color: rgba(255, 255, 255, 0.11);
 }
 .cardExpanded {
-  border-color: color-mix(in srgb, var(--mantine-color-sandstone-6) 40%, transparent);
+  background: var(--mantine-color-dark-5);
+  border-color: color-mix(in srgb, var(--mantine-color-text) 25%, transparent);
   box-shadow:
-    inset 3px 0 0 var(--mantine-color-sandstone-6),
+    inset 3px 0 0 var(--mantine-color-text),
     0 2px 10px rgba(0, 0, 0, 0.25);
 }
 .cardInvalid {
@@ -69,9 +71,15 @@
   place-items: center;
   font-size: 12px;
   font-weight: 700;
-  color: var(--mantine-color-sandstone-3);
-  background: color-mix(in srgb, var(--mantine-color-sandstone-6) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--mantine-color-sandstone-6) 32%, transparent);
+  color: var(--mantine-color-dimmed);
+  background: transparent;
+  border: 1px solid var(--mantine-color-default-border);
+}
+/* The open step inverts: solid primary fill (white in dark, black in light). */
+.cardExpanded .num:not(.numInvalid) {
+  color: var(--mantine-primary-color-contrast);
+  background: var(--mantine-primary-color-filled);
+  border-color: var(--mantine-primary-color-filled);
 }
 .numInvalid {
   color: var(--mantine-color-red-4);
@@ -119,7 +127,7 @@
   padding: 10px 12px !important;
 }
 .promptInput:focus {
-  border-color: var(--mantine-color-sandstone-6) !important;
+  border-color: var(--mantine-primary-color-filled) !important;
 }
 .promptInput::placeholder {
   color: var(--mantine-color-dark-3) !important;

@@ -198,7 +198,7 @@ function VersionHistoryPopover({
                         {relTime(v.updatedAt)}{v.ownerName ? ` · ${v.ownerName}` : ''}
                       </Text>
                       {v.version === pinnedVersion && (
-                        <Badge size="xs" variant="light" color="sandstone">pinned</Badge>
+                        <Badge size="xs" variant="light">pinned</Badge>
                       )}
                     </UnstyledButton>
                   ))}
@@ -345,7 +345,7 @@ export function StepCard({
                 <Badge
                   size="sm"
                   variant="light"
-                  color={ownsRef ? 'sandstone' : 'grape'}
+                  color={ownsRef ? undefined : 'grape'}
                   leftSection={<IconLock size={10} />}
                   style={{ cursor: 'pointer' }}
                   onClick={openHistory}
@@ -354,7 +354,7 @@ export function StepCard({
                 </Badge>
               </VersionHistoryPopover>
             ) : (
-              <Badge size="sm" variant="light" color={ownsRef ? 'sandstone' : 'grape'} leftSection={<IconLock size={10} />}>
+              <Badge size="sm" variant="light" color={ownsRef ? undefined : 'grape'} leftSection={<IconLock size={10} />}>
                 {ownsRef ? `v${step.ref!.version}` : `${step.ref!.ownerName ?? 'shared'} · v${step.ref!.version}`}
               </Badge>
             ))}
@@ -370,7 +370,7 @@ export function StepCard({
             <Group gap={6} wrap="nowrap" visibleFrom="md">
               <Badge size="sm" variant="default">{modelLabel}</Badge>
               <Badge size="sm" variant="default">{modeLabel}</Badge>
-              {step.autoAdvance && <Badge size="sm" variant="light" color="sandstone">auto</Badge>}
+              {step.autoAdvance && <Badge size="sm" variant="light">auto</Badge>}
               {step.freshStart && <Badge size="sm" variant="light" color="grape">fresh</Badge>}
             </Group>
           )}

@@ -271,7 +271,7 @@ user dismiss by clicking it) instead of the delete looking like it silently did 
 - `@mention` pill data model (`MentionValue` = `{ text, ranges }`) from `web/src/lib/mentions.ts`
   — see [prompt-mentions](prompt-mentions.md).
 - Browser IndexedDB, for staged attachments only.
-- The existing `.status-dot` CSS (`web/src/index.css`) and Mantine theme colors (`sandstone`,
+- The existing `.status-dot` CSS (`web/src/index.css`) and Mantine theme colors (`cyan`,
   `violet`, `teal`, `yellow`, `red`); Mantine `Badge` color props.
 - [hosted-machine-access](hosted-machine-access.md) — why a `hello` can repeat with no browser
   reconnect, and the socket-generation guard that keeps a stale one's frames from landing at all.
@@ -351,7 +351,7 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   session first (archiving is an upsert, so it bumps `updatedAt`), but Created mode now means
   creation order, not archive order.
 - Project tab dot priority, highest first: plan ready (violet) > needs answer (teal) > needs
-  approval (sandstone) > needs permission (yellow) > interrupted (yellow) > error (red).
+  approval (cyan) > needs permission (yellow) > interrupted (yellow) > error (red).
 - `running` / `done` / `idle` never show a dot (not actionable) — folder icon.
 - A finished workflow never surfaces on a project tab: it is not actionable, so it never reaches
   `projectStatusMeta`. Only the sidebar row shows the filled checkmark — see

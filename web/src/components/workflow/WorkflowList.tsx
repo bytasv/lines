@@ -11,7 +11,7 @@ function DirtyDot() {
         width: 6,
         height: 6,
         borderRadius: '50%',
-        background: 'var(--mantine-color-sandstone-6)',
+        background: 'var(--mantine-primary-color-filled)',
         flexShrink: 0,
       }}
     />

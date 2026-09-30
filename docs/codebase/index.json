@@ -1035,7 +1035,7 @@
         "the sidebar session list order is user-selectable via lines.sessionSort (persisted localStorage), applied to all three groups (Sessions, Shared-with-me, Archived): Status (default) ranks running first, then the tab-dot urgency order (plan ready > needs answer > needs approval > needs permission > interrupted > error), then background work, then done, then idle, tie-broken by lastActivityAt descending; Last active sorts by lastActivityAt descending; Created sorts by createdAt descending (the sidebar's pre-existing behavior)",
         "a session status label missing from SESSION_SORT_RANK sorts last rather than being guessed at, same rule projectStatusMeta applies by skipping",
         "the archived group's sort key changed from archivedAt ?? createdAt to the same compareSessions comparator the other two groups use: Status/Last-active mode still puts the most-recently-archived session first since archiving is an upsert that bumps updatedAt, but Created mode now means creation order, not archive order",
-        "priority highest first: plan ready (violet) > needs answer (teal) > needs approval (sandstone) > needs permission (yellow) > interrupted (yellow) > error (red)",
+        "priority highest first: plan ready (violet) > needs answer (teal) > needs approval (cyan) > needs permission (yellow) > interrupted (yellow) > error (red)",
         "running/done/idle sessions never show a dot",
         "archived sessions are excluded; completed sessions are always archived too, so no separate guard is needed",
         "the active project's tab always shows the plain folder icon, suppressed at render time",
@@ -3971,7 +3971,7 @@
       "id": "landing-page",
       "name": "Landing page",
       "doc": "features/landing-page.md",
-      "purpose": "Provider-neutral signed-out marketing page; the hero cycles through the supported coding agents (Claude Code, Codex) so visitors see both at a glance.",
+      "purpose": "Provider-neutral signed-out marketing page: a hero cycling through the supported coding agents (Claude Code, Codex), then illustrated sections for how it works, features, security, ways to run it and getting started, in the app's monochrome theme.",
       "entryPoints": [
         "web/src/components/LandingPage.tsx",
         "web/src/components/AgentRotator.tsx"
@@ -3982,7 +3982,15 @@
         "web/src/index.css",
         "web/src/components/DownloadDesktopApp.tsx",
         "web/src/components/PairingDiagram.tsx",
-        "web/index.html"
+        "web/index.html",
+        "web/src/components/LandingPage.module.css",
+        "web/src/theme.ts",
+        "web/src/components/ProviderMark.tsx",
+        "web/src/components/landing/art.tsx",
+        "web/src/components/landing/StepArt.tsx",
+        "web/src/components/landing/FeatureArt.tsx",
+        "web/src/components/landing/SecurityArt.tsx",
+        "web/src/components/landing/RunModeArt.tsx"
       ],
       "symbols": [
         "AGENTS",
@@ -3992,12 +4000,17 @@
       "businessRules": [
         "generic claims say coding agent or list providers; strings that are truly provider-specific (Claude CLI status, Claude sign-in, SDK internals) stay provider-specific",
         "supporting another provider in the copy is one new AGENTS entry, kept local to LandingPage because shared/providers.ts is capability data, not marketing copy",
-        "the install card says at least one of Claude Code or Codex must be installed on the paired machine"
+        "the install card says at least one of Claude Code or Codex must be installed on the paired machine",
+        "encryption copy says end-to-end encryption is opt-in per browser and that the relay carries traffic it cannot read or forge; it never claims everything is encrypted or zero-knowledge"
       ],
       "architecturalRules": [
         "the rotating word sits on its own line with every word stacked in one grid cell and centred independently, so a short word leaves no gap and a long one never re-wraps the heading; mid-sentence placement shifts the surrounding text on every swap",
         "the visible heading is aria-hidden and a VisuallyHidden sibling carries the full sentence naming every agent, so assistive tech never hears the words cycle",
-        "under prefers-reduced-motion the rotator renders the first word and starts no timer, with the CSS animation disabled as a second guard; the interval is cleared on unmount"
+        "under prefers-reduced-motion the rotator renders the first word and starts no timer, with the CSS animation disabled as a second guard; the interval is cleared on unmount",
+        "hero words are split into letters: the outgoing word dissolves letter by letter, then the next forms; each letter paints its slice of one word-wide brand-colour gradient (AgentRotator measures width and offsets) that drifts slowly, with a solid-colour fallback where background-clip text is unsupported",
+        "the illustrations are decorative aria-hidden inline SVG using Mantine colour variables, so they follow the colour scheme; the card text carries the meaning",
+        "the app theme is monochrome (mono primary as a light/dark virtual colour, softened neutral dark scheme); status hues are muted OKLCH ramps on one shared lightness curve, with teal and cyan spread apart so done, needs answer and needs approval stay distinct, gray without its blue tint, and dark-scheme light-variant badges re-pointed in index.css to a translucent tint with hue text; the old sandstone and slate palettes are removed and needs-approval is cyan",
+        "header anchors scroll smoothly only while the landing page is mounted and never under prefers-reduced-motion"
       ],
       "relatedDecisions": [
         "openai-codex-sessions"

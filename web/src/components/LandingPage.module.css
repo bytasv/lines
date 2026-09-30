@@ -1,0 +1,235 @@
+/* Landing page chrome. Monochrome like the rest of the app: depth comes from
+   hairline borders, one soft white glow and surface steps, never an accent hue. */
+
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 var(--mantine-spacing-md);
+  background: color-mix(in srgb, var(--mantine-color-body) 72%, transparent);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.navLink {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  text-decoration: none;
+  transition: color 150ms ease;
+}
+.navLink:hover {
+  color: var(--mantine-color-text);
+}
+
+/* Anchor targets land below the sticky header rather than under it. */
+.section {
+  scroll-margin-top: 80px;
+}
+
+/* The header links are plain #anchors, so the browser does the scrolling (and
+   keeps the hash and the back button honest); this only makes it glide. Keyed
+   on the page being mounted so the app's own scrolls stay instant, and on the
+   root because the document is the scroller — a value on body would not
+   reach the viewport. */
+@media (prefers-reduced-motion: no-preference) {
+  :root:has(.page) {
+    scroll-behavior: smooth;
+  }
+}
+
+/* Hero backdrop: a radial glow from the top plus a faint grid that fades out
+   toward the edges. Both are pseudo-elements so the content needs no wrapper. */
+.hero {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+.hero::before,
+.hero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+.hero::before {
+  background: radial-gradient(
+    ellipse 60% 55% at 50% 0%,
+    color-mix(in srgb, var(--mantine-color-text) 14%, transparent),
+    transparent 70%
+  );
+}
+.hero::after {
+  background-image:
+    linear-gradient(to right, var(--mantine-color-default-border) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--mantine-color-default-border) 1px, transparent 1px);
+  background-size: 48px 48px;
+  opacity: 0.45;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 20%, #000 20%, transparent 75%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 20%, #000 20%, transparent 75%);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--mantine-color-default-border);
+  background: color-mix(in srgb, var(--mantine-color-body) 60%, transparent);
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+}
+.pillDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mantine-color-text);
+}
+
+.panel {
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-lg);
+  background: var(--mantine-color-default);
+}
+
+.stepNum {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mantine-primary-color-contrast);
+  background: var(--mantine-primary-color-filled);
+}
+
+/* Features bento: 1 column on phones, 2 on tablets, 6 tracks on desktop with
+   the two headline groups wide and the other three sharing a row. */
+.bento {
+  display: grid;
+  gap: var(--mantine-spacing-md);
+  grid-template-columns: 1fr;
+}
+@media (min-width: 48em) {
+  .bento {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .tile:last-child {
+    grid-column: span 2;
+  }
+}
+@media (min-width: 75em) {
+  .bento {
+    grid-template-columns: repeat(6, 1fr);
+  }
+  .tile:nth-child(1),
+  .tile:nth-child(2) {
+    grid-column: span 3;
+  }
+  .tile:nth-child(n + 3) {
+    grid-column: span 2;
+  }
+}
+
+.artCard:hover {
+  border-color: color-mix(in srgb, var(--mantine-color-text) 35%, transparent);
+}
+
+/* Every illustrated card (how it works, features, security, ways to run it):
+   the drawing on a dotted canvas across the top, the text below. */
+.artCard {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: border-color 150ms ease;
+}
+
+.artCanvas {
+  padding: var(--mantine-spacing-md);
+  border-bottom: 1px solid var(--mantine-color-default-border);
+  background:
+    radial-gradient(
+      ellipse 80% 70% at 50% 0%,
+      color-mix(in srgb, var(--mantine-color-text) 7%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+        circle,
+        color-mix(in srgb, var(--mantine-color-text) 16%, transparent) 1px,
+        transparent 1.5px
+      )
+      0 0 / 14px 14px,
+    var(--mantine-color-body);
+}
+
+/* Drawn at 280 units wide, so a full-width phone or tablet card does not blow
+   the text inside the drawings up past the size of the copy under them. */
+.artCanvas svg {
+  max-width: 320px;
+  margin-inline: auto;
+}
+
+.artBody {
+  flex: 1;
+  padding: var(--mantine-spacing-lg);
+}
+
+.eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--mantine-color-dimmed);
+}
+
+.items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+.items li {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: var(--mantine-font-size-sm);
+  color: var(--mantine-color-dimmed);
+}
+.items li svg {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  color: var(--mantine-color-text);
+}
+
+/* Fade-up on scroll where scroll-driven animations exist. Without support (or
+   with reduced motion) the rule never applies and content is simply visible. */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal {
+      animation: reveal linear both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 40%;
+    }
+  }
+}
+
+@keyframes reveal {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

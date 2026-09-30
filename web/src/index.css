@@ -1,8 +1,66 @@
-/* Sandstone brand: paper body + mist-tinted borders in light scheme
-   (cards/Paper stay --brand-surface white via Mantine defaults) */
+/* Monochrome palette: white body + neutral hairline borders in the light
+   scheme (cards/Paper stay white via Mantine defaults) */
 :root[data-mantine-color-scheme='light'] {
-  --mantine-color-body: #f7f5f0;
-  --mantine-color-default-border: #c8d2d1;
+  --mantine-color-body: #ffffff;
+  --mantine-color-default-border: #e5e5e5;
+}
+
+/* Dark scheme: `default` buttons take the off-white body text rather than
+   Mantine's pure white, which glares on the charcoal surfaces. */
+:root[data-mantine-color-scheme='dark'] {
+  --mantine-color-default-color: var(--mantine-color-text);
+}
+
+/* Dark-scheme `light` variant (status badges, soft buttons, alert titles): a
+   translucent tint with text in the hue. Mantine's own is near-white text on a
+   darkened, near-opaque chip, which loses the hue once the palette is muted.
+   The doubled :root outranks the variables MantineProvider injects after this. */
+:root:root[data-mantine-color-scheme='dark'] {
+  --mantine-color-red-light: color-mix(in srgb, var(--mantine-color-red-6) 16%, transparent);
+  --mantine-color-red-light-hover: color-mix(in srgb, var(--mantine-color-red-6) 22%, transparent);
+  --mantine-color-red-light-color: var(--mantine-color-red-4);
+  --mantine-color-pink-light: color-mix(in srgb, var(--mantine-color-pink-6) 16%, transparent);
+  --mantine-color-pink-light-hover: color-mix(in srgb, var(--mantine-color-pink-6) 22%, transparent);
+  --mantine-color-pink-light-color: var(--mantine-color-pink-4);
+  --mantine-color-grape-light: color-mix(in srgb, var(--mantine-color-grape-6) 16%, transparent);
+  --mantine-color-grape-light-hover: color-mix(in srgb, var(--mantine-color-grape-6) 22%, transparent);
+  --mantine-color-grape-light-color: var(--mantine-color-grape-4);
+  --mantine-color-violet-light: color-mix(in srgb, var(--mantine-color-violet-6) 16%, transparent);
+  --mantine-color-violet-light-hover: color-mix(in srgb, var(--mantine-color-violet-6) 22%, transparent);
+  --mantine-color-violet-light-color: var(--mantine-color-violet-4);
+  --mantine-color-indigo-light: color-mix(in srgb, var(--mantine-color-indigo-6) 16%, transparent);
+  --mantine-color-indigo-light-hover: color-mix(in srgb, var(--mantine-color-indigo-6) 22%, transparent);
+  --mantine-color-indigo-light-color: var(--mantine-color-indigo-4);
+  --mantine-color-blue-light: color-mix(in srgb, var(--mantine-color-blue-6) 16%, transparent);
+  --mantine-color-blue-light-hover: color-mix(in srgb, var(--mantine-color-blue-6) 22%, transparent);
+  --mantine-color-blue-light-color: var(--mantine-color-blue-4);
+  --mantine-color-cyan-light: color-mix(in srgb, var(--mantine-color-cyan-6) 16%, transparent);
+  --mantine-color-cyan-light-hover: color-mix(in srgb, var(--mantine-color-cyan-6) 22%, transparent);
+  --mantine-color-cyan-light-color: var(--mantine-color-cyan-4);
+  --mantine-color-teal-light: color-mix(in srgb, var(--mantine-color-teal-6) 16%, transparent);
+  --mantine-color-teal-light-hover: color-mix(in srgb, var(--mantine-color-teal-6) 22%, transparent);
+  --mantine-color-teal-light-color: var(--mantine-color-teal-4);
+  --mantine-color-green-light: color-mix(in srgb, var(--mantine-color-green-6) 16%, transparent);
+  --mantine-color-green-light-hover: color-mix(in srgb, var(--mantine-color-green-6) 22%, transparent);
+  --mantine-color-green-light-color: var(--mantine-color-green-4);
+  --mantine-color-lime-light: color-mix(in srgb, var(--mantine-color-lime-6) 16%, transparent);
+  --mantine-color-lime-light-hover: color-mix(in srgb, var(--mantine-color-lime-6) 22%, transparent);
+  --mantine-color-lime-light-color: var(--mantine-color-lime-4);
+  --mantine-color-yellow-light: color-mix(in srgb, var(--mantine-color-yellow-6) 16%, transparent);
+  --mantine-color-yellow-light-hover: color-mix(in srgb, var(--mantine-color-yellow-6) 22%, transparent);
+  --mantine-color-yellow-light-color: var(--mantine-color-yellow-4);
+  --mantine-color-orange-light: color-mix(in srgb, var(--mantine-color-orange-6) 16%, transparent);
+  --mantine-color-orange-light-hover: color-mix(in srgb, var(--mantine-color-orange-6) 22%, transparent);
+  --mantine-color-orange-light-color: var(--mantine-color-orange-4);
+  --mantine-color-gray-light: color-mix(in srgb, var(--mantine-color-gray-6) 16%, transparent);
+  --mantine-color-gray-light-hover: color-mix(in srgb, var(--mantine-color-gray-6) 22%, transparent);
+  --mantine-color-gray-light-color: var(--mantine-color-gray-4);
+}
+
+/* A checked switch fills with the primary colour, which in the dark scheme is
+   light gray — Mantine's white thumb would vanish into it, so it inverts. */
+[data-mantine-color-scheme='dark'] .mantine-Switch-input:checked + .mantine-Switch-track {
+  --switch-thumb-bg: var(--mantine-color-body);
 }
 
 /* The height a full-screen surface may actually occupy.
@@ -191,8 +249,18 @@
 
 /* Landing hero word swap (AgentRotator). A block of its own line, with every
    word stacked in one grid cell and centred on its own: the line height never
-   changes and a short word leaves no gap. */
+   changes and a short word leaves no gap. Each word wears a gradient in its
+   vendor's own palette (--agent-from/mid/to, set inline).
+
+   The swap runs letter by letter, --agent-stagger apart: the outgoing word
+   dissolves (each letter drifts up, swells and blurs away), then the next one
+   forms from below once the last letter has gone. --i is the letter's index;
+   --agent-enter-delay is set by AgentRotator from the outgoing word's length. */
 .agent-rotator {
+  --agent-stagger: 30ms;
+  --agent-out: 0.3s;
+  --agent-in: 0.35s;
+  --agent-drift: 10s;
   display: grid;
   justify-items: center;
   white-space: nowrap;
@@ -200,58 +268,139 @@
 
 .agent-rotator-word {
   grid-area: 1 / 1;
+  /* What the letters' offsets (--agent-letter-x) are measured from. */
+  position: relative;
   opacity: 0;
   visibility: hidden;
-  background-image: linear-gradient(
-    90deg,
-    var(--mantine-primary-color-filled),
-    var(--mantine-color-violet-5),
-    var(--mantine-color-teal-5)
-  );
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
 }
 
-.agent-rotator-word.is-active {
+.agent-rotator-word.is-active,
+.agent-rotator-word.is-leaving {
   opacity: 1;
   visibility: visible;
-  animation: agent-in 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }
 
-.agent-rotator-word.is-leaving {
-  visibility: visible;
-  animation: agent-out 0.4s ease-in both;
+/* Inline-block, or the letters could not move: transforms skip inline boxes. */
+.agent-rotator-letter {
+  display: inline-block;
+  color: var(--agent-mid);
 }
 
-@keyframes agent-in {
+/* One gradient across the whole word, although every letter is its own box:
+   each paints the word-wide gradient shifted back by its own offset, so it
+   shows just its slice. AgentRotator measures both. Guarded, because clipped
+   text with no clip support would be transparent — the solid colour above is
+   the fallback.
+
+   The gradient is a mirrored band twice the word's width, so it tiles without
+   a seam; at rest the word shows its first half (from → mid → to). agent-drift
+   slides every letter's slice by one whole band per cycle, all in step, so the
+   colour flows slowly through the word and loops invisibly. */
+@supports (-webkit-background-clip: text) or (background-clip: text) {
+  .agent-rotator-letter {
+    background-image: linear-gradient(
+      90deg,
+      var(--agent-from),
+      var(--agent-mid),
+      var(--agent-to),
+      var(--agent-mid),
+      var(--agent-from)
+    );
+    background-size: calc(2 * var(--agent-word-width, 100%)) 100%;
+    background-position: calc(-1 * var(--agent-letter-x, 0px)) 0;
+    background-repeat: repeat-x;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+@keyframes agent-drift {
+  from {
+    background-position: calc(-1 * var(--agent-letter-x, 0px)) 0;
+  }
+  to {
+    background-position: calc(2 * var(--agent-word-width, 100%) - var(--agent-letter-x, 0px)) 0;
+  }
+}
+
+/* agent-drift rides along with the swap in both lists, under the same name,
+   so it carries on rather than restarting when a word starts to leave. */
+.agent-rotator-word.is-active .agent-rotator-letter {
+  animation:
+    agent-letter-in var(--agent-in)
+      calc(var(--agent-enter-delay, 0ms) + var(--i) * var(--agent-stagger))
+      cubic-bezier(0.2, 0.7, 0.2, 1) both,
+    agent-drift var(--agent-drift) linear infinite;
+}
+
+.agent-rotator-word.is-leaving .agent-rotator-letter {
+  animation:
+    agent-letter-out var(--agent-out) calc(var(--i) * var(--agent-stagger)) ease-in both,
+    agent-drift var(--agent-drift) linear infinite;
+}
+
+@keyframes agent-letter-in {
   from {
     opacity: 0;
-    transform: translateY(0.4em);
-    filter: blur(8px);
+    transform: translateY(0.2em) scale(0.85);
+    filter: blur(6px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
     filter: blur(0);
   }
 }
 
-@keyframes agent-out {
+@keyframes agent-letter-out {
   from {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
     filter: blur(0);
   }
   to {
     opacity: 0;
-    transform: translateY(-0.4em);
-    filter: blur(8px);
+    transform: translateY(-0.2em) scale(1.25);
+    filter: blur(6px);
+  }
+}
+
+/* Scroll-progress fill (Transcript, WorkflowStepper). The palette has no accent,
+   so the fill is plain text colour on a border-gray track; while the turn is
+   running a slow sheen sweeps across it so the bar reads as live. */
+.lines-progress-fill {
+  position: relative;
+  overflow: hidden;
+  background: var(--mantine-color-text);
+}
+
+.lines-progress-fill[data-running]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--mantine-color-body) 60%, transparent),
+    transparent
+  );
+  transform: translateX(-100%);
+  animation: lines-progress-shimmer 2.4s linear infinite;
+}
+
+@keyframes lines-progress-shimmer {
+  to {
+    transform: translateX(100%);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-rotator-word.is-active {
+  .lines-progress-fill[data-running]::after {
+    animation: none;
+    display: none;
+  }
+  .agent-rotator-word.is-active .agent-rotator-letter {
     animation: none;
   }
   .agent-rotator-word.is-leaving {

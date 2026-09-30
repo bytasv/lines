@@ -3,7 +3,7 @@ import type { ModelProvider } from '@lines/shared';
 
 /** Anthropic's clay, the brand colour the Spark mark ships with. Falls back to the
  *  literal when the design-system variable is absent, which it is here. */
-const ANTHROPIC_CLAY = 'var(--cds-clay, #d97757)';
+export const ANTHROPIC_CLAY = 'var(--cds-clay, #d97757)';
 
 /**
  * The Anthropic and OpenAI marks, as inline SVG.

@@ -106,7 +106,7 @@ function WorkflowMarker({ data }: { data: WorkflowMarkerData }) {
         </Group>
       }
       labelPosition="center"
-      color={data.event === 'workflow-done' ? 'teal' : 'slate'}
+      color={data.event === 'workflow-done' ? 'teal' : 'gray'}
     />
   );
 }
@@ -138,7 +138,7 @@ function ContextCompactMarker({ data, stale }: { data: ContextCompactData; stale
         </Group>
       }
       labelPosition="center"
-      color={failed ? 'orange' : 'slate'}
+      color={failed ? 'orange' : 'gray'}
     />
   );
 }
@@ -179,7 +179,7 @@ function ProviderSwitchMarker({ data, handoff }: { data: ProviderSwitchData; han
           </Group>
         }
         labelPosition="center"
-        color={data.summarized ? 'slate' : 'orange'}
+        color={data.summarized ? 'gray' : 'orange'}
       />
       {handoff && (
         <Collapse expanded={open} transitionDuration={150}>
@@ -1511,12 +1511,14 @@ export function Transcript({
             height: 3,
             zIndex: 2,
             display: 'none',
-            background: 'var(--mantine-color-default-hover)',
+            background: 'var(--mantine-color-default-border)',
           }}
         >
           <Box
             data-progress-fill
-            style={{ height: '100%', width: 0, background: 'var(--mantine-color-sandstone-6)' }}
+            className="lines-progress-fill"
+            data-running={status === 'running' || undefined}
+            style={{ height: '100%', width: 0 }}
           />
         </Box>
       )}

@@ -1,0 +1,36 @@
+/* Motion inside the landing illustrations, kept to two quiet kinds: a
+   blinking cursor or caret, and dashed connections flowing the way they are
+   drawn (start to end). Both stop under reduced motion. */
+.cursor {
+  animation: art-blink 1.1s steps(1, end) infinite;
+}
+
+.flow {
+  stroke-dasharray: 3 3;
+  animation: art-flow 0.8s linear infinite;
+}
+
+@keyframes art-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes art-flow {
+  to {
+    stroke-dashoffset: -6;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cursor,
+  .flow {
+    animation: none;
+  }
+}
+
+/* The Lines mark as a menu bar template image: the source art is near-black,
+   so the dark scheme inverts it to the body text's off-white. */
+:global([data-mantine-color-scheme='dark']) .template {
+  filter: invert(0.87);
+}

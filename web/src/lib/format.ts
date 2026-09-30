@@ -6,7 +6,7 @@ const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
   running: { color: 'blue', label: 'running' },
   done: { color: 'green', label: 'done' },
   'waiting-permission': { color: 'yellow', label: 'needs permission' },
-  'waiting-approval': { color: 'sandstone', label: 'needs approval' },
+  'waiting-approval': { color: 'cyan', label: 'needs approval' },
   error: { color: 'red', label: 'error' },
 };
 
@@ -129,7 +129,7 @@ export function waitingPermissionMeta(tool?: string): { label: string; color: st
 const PROJECT_STATUS_ORDER = [
   waitingPermissionMeta('ExitPlanMode'), // plan ready       — violet
   waitingPermissionMeta('AskUserQuestion'), // needs answer     — teal
-  STATUS_META['waiting-approval'], // needs approval   — sandstone
+  STATUS_META['waiting-approval'], // needs approval   — cyan
   waitingPermissionMeta(undefined), // needs permission — yellow
   INTERRUPTED_META, // interrupted      — yellow
   STATUS_META.error, // error            — red

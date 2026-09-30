@@ -869,7 +869,9 @@ export function Sidebar({
           <Button.Group style={{ width: '100%' }}>
             <Button
               style={{ flex: 1 }}
-              leftSection={worktreePending ? <Loader size={12} color="white" /> : <IconPlus size={14} />}
+              // currentColor: the button is disabled while this shows, so the
+              // loader follows the disabled text colour in either scheme.
+              leftSection={worktreePending ? <Loader size={12} color="currentColor" /> : <IconPlus size={14} />}
               onClick={() => createSession(lastWorkflow?.id)}
               disabled={!activeProject || worktreePending}
             >
@@ -880,7 +882,16 @@ export function Sidebar({
                 half can no longer depend on a workflow existing. */}
             <Menu position="bottom-end" width={menuWidth ?? 240}>
               <Menu.Target>
-                <Button px={6} disabled={!activeProject}>
+                {/* A hairline in the button's own text colour, so the split reads
+                    as two halves on a flat monochrome fill. */}
+                <Button
+                  px={6}
+                  disabled={!activeProject}
+                  style={{
+                    borderInlineStartWidth: 1,
+                    borderInlineStartColor: 'color-mix(in srgb, currentColor 25%, transparent)',
+                  }}
+                >
                   <IconChevronDown size={14} />
                 </Button>
               </Menu.Target>

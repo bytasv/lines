@@ -274,7 +274,7 @@ function RestoreHistoryPopover({
                       <Text size="sm" fw={600}>v{v.version}</Text>
                       <Text size="xs" c="dimmed" style={{ flex: 1, minWidth: 0 }} truncate>{relTime(v.updatedAt)}</Text>
                       {v.version === currentVersion && (
-                        <Badge size="xs" variant="light" color="sandstone">current</Badge>
+                        <Badge size="xs" variant="light">current</Badge>
                       )}
                     </UnstyledButton>
                   ))}
@@ -514,7 +514,7 @@ export function RecipeLibrary({
   const TagChips = ({ tags, bundle }: { tags: string[]; bundle?: boolean }) => (
     <Group gap={4} wrap="wrap">
       {bundle && (
-        <Badge size="xs" variant="light" color="sandstone" component="span" style={{ cursor: 'pointer' }} onClick={(e) => {
+        <Badge size="xs" variant="light" component="span" style={{ cursor: 'pointer' }} onClick={(e) => {
           e.stopPropagation();
           setTagFilter([BUNDLE_FILTER]);
         }}>

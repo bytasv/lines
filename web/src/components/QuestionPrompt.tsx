@@ -83,8 +83,10 @@ function OptionCard({
       px="sm"
       py={8}
       style={{
+        // No accent hue in the palette, so "picked" is a heavier primary border.
         borderColor: checked ? 'var(--mantine-primary-color-filled)' : undefined,
-        background: checked ? 'var(--mantine-color-default-hover)' : undefined,
+        borderWidth: checked ? 1.5 : undefined,
+        background: checked ? 'var(--mantine-primary-color-light)' : undefined,
         // Unpicked options are context, not choices, once the question is answered.
         opacity: readOnly && !checked ? 0.55 : undefined,
         outline: focused ? '2px solid var(--mantine-primary-color-filled)' : undefined,
@@ -97,11 +99,30 @@ function OptionCard({
           button is the sole click target. Plain `Checkbox`/`Radio` render a real
           (if visually hidden) input that keeps its own pointer-events via Mantine's
           CSS, so a click landing on it never reached the wrapper button.
+
+          Outline, in the picked card's own border colour. Filled, the monochrome
+          primary is a light-gray disc, and the indicators' auto-contrast cannot
+          read the virtual primary colour, so the dot or tick came out white on
+          it. The checkbox needs `iconColor` too: auto-contrast sets its icon
+          colour inline, which overrides the outline variant's own.
         */}
         {multi ? (
-          <Checkbox.Indicator checked={checked} size="xs" mt={2} />
+          <Checkbox.Indicator
+            checked={checked}
+            size="xs"
+            mt={2}
+            variant="outline"
+            color="var(--mantine-primary-color-filled)"
+            iconColor="var(--mantine-primary-color-filled)"
+          />
         ) : (
-          <Radio.Indicator checked={checked} size="xs" mt={2} />
+          <Radio.Indicator
+            checked={checked}
+            size="xs"
+            mt={2}
+            variant="outline"
+            color="var(--mantine-primary-color-filled)"
+          />
         )}
         {/* Labels and descriptions are tool-supplied free text, and the Group above is
             `nowrap` — without minWidth: 0 an unbroken token sizes this child by its

@@ -58,7 +58,7 @@ function AddStepMenu({
       key={`${s.ownerId}/${s.id}`}
       onClick={() => onPick(s)}
       rightSection={
-        <Badge size="xs" variant="light" color={s.published ? 'sandstone' : 'gray'}>
+        <Badge size="xs" variant="light" color={s.published ? undefined : 'gray'}>
           v{s.version}
         </Badge>
       }
