@@ -2,7 +2,10 @@ import { createTheme, rem, virtualColor, type MantineColorsTuple } from '@mantin
 
 // Monochrome palette: black, white and neutral grays. There is no accent hue —
 // "active" is carried by contrast and shape, and colour is reserved for status
-// and attention (blue running, green done, yellow needs you, red error).
+// and attention (blue running, green done, yellow needs you, red error). The one
+// exception is links inside rendered markdown (`.md-body a` in index.css): muted
+// blue text with a faint underline, so they don't read as body text. That is
+// scoped to markdown; `--mantine-color-anchor` stays the primary shade.
 //
 // Primary is `mono`, a virtual colour: near-black in the light scheme and a soft
 // light gray in the dark one, so filled controls invert with the scheme. It has

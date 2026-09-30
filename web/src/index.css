@@ -514,6 +514,58 @@
   margin-top: 2px;
 }
 
+/* Links — the one accent hue outside status colours (see theme.ts). The monochrome
+   theme resolves --mantine-color-anchor to the primary shade and Typography strips the
+   underline, so without this a link reads as body text. Specificity: `.md-body a`
+   (0,1,1) beats Typography's `:where(a)` (0,1,0). Scoped to .md-body so Mantine
+   <Anchor> elsewhere keeps the theme default. */
+.md-body {
+  --md-link: var(--mantine-color-blue-6);
+}
+
+[data-mantine-color-scheme='dark'] .md-body {
+  --md-link: var(--mantine-color-blue-4);
+}
+
+.md-body a:not(.file-link) {
+  color: var(--md-link);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--md-link) 35%, transparent);
+  transition: text-decoration-color 120ms;
+}
+
+.md-body a:not(.file-link):hover,
+.md-body a:not(.file-link):focus-visible {
+  text-decoration-color: currentColor;
+}
+
+/* Auto-detected file paths (rehypeFilePaths) open the file preview, not a URL, so they
+   read as a monospace pill instead of a blue link. The border keeps the pill visible
+   inside the user bubble, whose background is also default-hover. */
+.md-body a.file-link {
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 12px;
+  padding: 0 4px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: 4px;
+  color: inherit;
+  background: var(--mantine-color-default-hover);
+  text-decoration: none;
+}
+
+.md-body a.file-link:hover,
+.md-body a.file-link:focus-visible {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.md-body a:focus-visible {
+  outline: 1px solid var(--md-link);
+  outline-offset: 1px;
+}
+
 /* Mantine ships fz=lg on blockquote — reset to inherit. */
 .md-body blockquote {
   font-size: inherit;
