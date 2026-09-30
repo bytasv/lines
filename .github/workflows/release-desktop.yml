@@ -33,7 +33,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run typecheck -w desktop
+      # The same suites ship.mjs runs locally; the release job below skips them
+      # (LINES_SHIP_TESTED) rather than paying for them again at 10x.
+      - run: npm run typecheck
+      - run: npm run test -w server
+      - run: npm run test -w relay
       - name: Check the version is not already published
         if: ${{ !inputs.force }}
         env:
@@ -63,6 +67,7 @@ jobs:
       # package step; codesign ships with the GitHub macOS image.
       - name: Ship
         env:
+          LINES_SHIP_TESTED: '1'
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

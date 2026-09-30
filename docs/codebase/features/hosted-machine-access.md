@@ -285,8 +285,9 @@ re-verify tick and the ping/health interval both bail out the instant their own 
 `hub.isAgent(sink)`, so a superseded socket's still-running timer can never tear down the hub (or
 evict the browser's channels) that replaced it.
 
-Bridge-side, `RelayClient.dispatch`'s `open` case is now idempotent: every agent attach replays
-`open` for all live channels, so a takeover re-delivers channel ids the bridge already serves.
+Bridge-side, `RelayClient.dispatch`'s `open` case is now idempotent. Agent attach used to replay
+`open` for all live channels, so a takeover re-delivered channel ids the bridge already served.
+The relay no longer replays (it closes every channel on attach, below), but the guard stays.
 Handling one again used to build a second `RelayChannel`, run `handleConnection` a second time, and
 push a second full `hello` snapshot down a browser socket that never reconnected — the other half of
 the flicker loop. A repeated `open` for a channel id already held is now a no-op (logged); a
@@ -500,7 +501,8 @@ refuse.
 - `relay/src/mux.test.ts` — routing, agent takeover, offline notification, per-channel isolation,
   token replay, registry sweep and revoke; `ownerId` recording; cross-user channel isolation on
   one device; a superseded agent's `data`/`close` frames are refused and cannot touch the live
-  agent's channel; `attachAgent` replays `open` only to the new sink and reports who it superseded
+  agent's channel; `attachAgent` closes every channel (owners 1012, guests 1008), replays only
+  tokens to the new sink, and reports who it superseded
   (including that predecessor being `terminate()`d, not just closed); `agentAttaches` increments
   per attach; `HubRegistry.list()`'s per-hub summary; `waitForAgent` resolving on attach, resolving
   immediately when already attached, and timing out when none arrives; a hub with a pending waiter
@@ -572,11 +574,18 @@ refuse.
   the one piece of a machine's identity the user did not choose and cannot otherwise change.
 - The gate never connects to a machine this browser has not been shown. The
   remembered/most-recent heuristic resumes a choice; it does not make one.
-- A bridge restart does **not** disconnect an owner's browser: their channel stays open and is
-  replayed to the new bridge, which answers with a fresh `hello`. A guest's channel is the
-  exception — it is dropped rather than replayed, so its browser reconnects and re-runs the
-  `/client` gate against the new bridge's now-known protocol version; see
-  [session-collaboration](session-collaboration.md#the-relay-gate).
+- A bridge attach (restart, re-dial or takeover) closes every channel on that device, and the
+  browser redials the new bridge. Owner channels close with 1012, so the browser takes its quick
+  redial: an owner channel is end-to-end encrypted, its session lived in the bridge socket that
+  went away, and replaying `open` would hand the new bridge a channel with no session that the
+  browser believes it can still use. A browser that opened while the bridge was away is closed
+  the same way, since its handshake frame was dropped with no bridge to receive it. Guests close
+  with 1008 instead, so their browser re-runs the `/client` gate against the new bridge's
+  now-known protocol version; see [session-collaboration](session-collaboration.md#the-relay-gate).
+  Tokens are still replayed, since storage sync needs one before any browser is back.
+- A `RelayChannel` holds frames that arrive before the bridge attaches its handler, and so does
+  `SecureChannel`. The bridge loads its e2ee key asynchronously before it listens, and on an
+  encrypted channel the browser speaks first, so dropping them there loses the handshake.
 - Newest bridge wins. A reconnecting bridge must be able to take over from a half-dead predecessor
   the relay has not yet noticed.
 - The relay persists nothing and logs no payload.
@@ -654,9 +663,9 @@ refuse.
   additionally returns `hubs` (per-device `online`/`channels`/`agentAttaches`/`lastAttachAt`).
   Device ids must never leak to an unauthenticated caller.
 - The bridge rejects a duplicate `open` for a channel id it already serves (warns, keeps the
-  existing link) rather than building a second `RelayChannel` — a takeover (or any re-announcement)
-  re-delivers ids already held, and building a second link means a second full `hello` down a
-  browser socket that never reconnected.
+  existing link) rather than building a second `RelayChannel` — building a second link means a
+  second full `hello` down a browser socket that never reconnected. The relay no longer replays
+  `open` on attach, so this is a guard against a relay that does.
 - `RelayClient.connect()` closes any pre-existing socket (and drops its channels) before dialling
   a new one, so one `RelayClient` instance can never hold two live sockets for the same device.
 - Every bridge takes this machine's single-instance lock (`~/.lines-app/bridge.lock`, pid + start

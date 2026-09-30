@@ -248,4 +248,17 @@ describe('an adversarial relay', () => {
     await settle();
     assert.equal(raw.closedWith, null, 'plaintext is still how a guest talks');
   });
+
+  test('a frame that arrives before the bridge listens is kept, not dropped', async () => {
+    const { bridge } = await bridgeAndClient();
+    const raw = new FakeChannel();
+    let link: BrowserLink | undefined;
+    guardRelayChannel(raw, bridge, true, (secured) => { link = secured; }, policyFor([]));
+
+    raw.deliver({ type: 'ping' });
+    await settle();
+    const received: string[] = [];
+    link!.on('message', (frame) => received.push(String(frame)));
+    assert.deepEqual(received.map((f) => JSON.parse(f).type), ['ping']);
+  });
 });

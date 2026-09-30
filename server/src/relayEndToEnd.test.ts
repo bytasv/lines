@@ -173,14 +173,17 @@ interface Client {
  * against the pinned bridge key, then seals and opens every app frame.
  */
 async function openClient(): Promise<Client> {
+  // Before the socket exists: an `await` between creating it and listening for
+  // `open` lets the event fire unheard, and the helper then waits forever.
+  const initiator = await startHandshake(client, bridgeKey);
   const ws = new WebSocket(`ws://127.0.0.1:${relayPort}/client?device=${DEVICE}`);
+  const opened = new Promise((resolve) => ws.once('open', resolve));
   const messages: Record<string, unknown>[] = [];
   let session: SecureSession | null = null;
   // Opened in arrival order: the receiver refuses a counter it has passed, so
   // two frames decrypting out of order would read as a replay.
   let opening = Promise.resolve();
   let sending = Promise.resolve();
-  const initiator = await startHandshake(client, bridgeKey);
   ws.on('message', (raw) => {
     const msg = JSON.parse(String(raw)) as Record<string, unknown>;
     opening = opening.then(async () => {
@@ -200,7 +203,7 @@ async function openClient(): Promise<Client> {
   ws.on('error', () => {
     /* surfaces as a timeout in the assertions below */
   });
-  await new Promise((resolve) => ws.once('open', resolve));
+  await opened;
   ws.send(JSON.stringify({ type: 'e2eeHello', offer: initiator.offer } satisfies ClientMessage));
   await until(() => find(messages, 'e2eeReady'), 'the encrypted channel');
   const send = (msg: Record<string, unknown>) => {
@@ -274,6 +277,15 @@ test('the bridge gives up on a silent relay and re-dials', async () => {
   // SIGSTOP, not a kill: the socket stays open at the OS level and simply goes
   // quiet, which is exactly the half-open state that used to strand the tunnel —
   // both ends report OPEN, so nothing but silence can reveal it.
+  // A browser already on the encrypted channel. Its session lives in the bridge
+  // process's socket, so it cannot survive the re-dial: the relay must send it
+  // to redial (1012, the quick path) rather than replay a channel it cannot use.
+  const before = await openClient();
+  await until(() => find(before.messages, 'hello'), 'hello before the stall');
+  let closeCode = 0;
+  before.ws.on('close', (code) => { closeCode = code; });
+  const attaches = bridgeLog.split('[relay] open after').length;
+
   relay.kill('SIGSTOP');
   await until(
     () => bridgeLog.includes('no frame for') || null,
@@ -282,6 +294,8 @@ test('the bridge gives up on a silent relay and re-dials', async () => {
   );
 
   relay.kill('SIGCONT');
+  await until(() => bridgeLog.split('[relay] open after').length > attaches || null, 'the bridge to re-attach');
+  assert.equal(await until(() => closeCode, 'the old channel to be closed'), 1012);
   // Recovery is the point, not just the detection: the bridge's own retry re-attaches
   // and a browser gets a fresh hello with no user action anywhere.
   const { ws, messages } = await openClient();

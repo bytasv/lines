@@ -193,6 +193,13 @@ pull, the signer is checked against a pinned key and the counter against the las
   `handleConnection` sends `hello` on open and the browser waits for it — so deferring a guest's
   handover until its first frame would deadlock every relayed guest connection.
   `relayEndToEnd.test.ts` caught exactly this.
+- The reverse holds on an owner channel: the browser speaks first. The bridge attaches its
+  handler only after loading its key asynchronously, so `RelayChannel` and `SecureChannel` hold
+  frames that arrive before anyone listens rather than dropping them — a dropped `e2eeHello` or
+  `e2eeEnroll` leaves the browser waiting forever.
+- An encrypted session cannot outlive the bridge socket it was made on, so the relay closes owner
+  channels (1012) whenever a bridge attaches rather than replaying them; the browser redials and
+  handshakes again.
 - A client that a machine has refused reconnects **silently**: no heartbeat, no auth relay. The
   bridge refuses the first plaintext app frame, and the heartbeat is one a second in, so without
   this there is no window in which to enrol.

@@ -38,9 +38,9 @@ and how status is surfaced in the sidebar row and the project tab.
   the user's own machine).
 - **`hello` duplicate inertness** — a repeated `hello` carrying the same session/project snapshot
   as the last one applied does nothing visible: it must not replace `sessions` or blank the
-  transcript/context-breakdown caches. The relay replays a channel's `open` (and with it, a fresh
-  `hello`) on every bridge attach or takeover, so a browser that never itself reconnected can still
-  receive one.
+  transcript/context-breakdown caches. An older relay replayed a channel's `open` (and with it, a
+  fresh `hello`) on every bridge attach or takeover, so a browser that never itself reconnected
+  could receive one; the guard stays for a relay that still does.
 - **Session list sorting** — a per-browser choice of sidebar session order: Status (default,
   urgency-ranked), Last active, or Created. Applies to all three sidebar groups (Sessions,
   Shared-with-me, Archived). Distinct from auto-selection (`latestSessionIn`), which still always
@@ -214,9 +214,9 @@ the signature it stored on the previous `hello`. On a match, every other field (
 worker/storage health, projects, etc.) still applies exactly as before, but `sessions`,
 `transcriptLoaded` and `contextBreakdowns` are left untouched.
 
-This matters because a `hello` is not always proof of a fresh reconnect. The relay replays a
-channel's `open` — and the bridge answers each one with a full `hello` — every time a bridge
-attaches, including a takeover by a second bridge process that superseded the first (see
+This matters because a `hello` is not always proof of a fresh reconnect. The relay used to replay a
+channel's `open` — and the bridge answered each one with a full `hello` — every time a bridge
+attached (it now closes the channel instead), including a takeover by a second bridge process that superseded the first (see
 [hosted-machine-access](hosted-machine-access.md)). A browser that never itself reconnected could
 receive two different `hello` snapshots (one from each bridge process) in quick succession;
 applying each one wholesale replaced `sessions` and blanked the transcript/breakdown caches, which
@@ -431,7 +431,8 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   icon's fourth branch.
 - [prompt-mentions](prompt-mentions.md) — the `MentionValue` the text draft persists.
 - [hosted-machine-access](hosted-machine-access.md) — why a `hello` can repeat with no browser
-  reconnect (relay `open` replay on a bridge attach/takeover).
+  reconnect (relay `open` replay on a bridge attach/takeover, in relays before owner channels
+  were closed on attach).
 - [transcript-performance](transcript-performance.md) — the sidebar re-render cost measured
   alongside the transcript's own session-switch cost.
 - [cloud-sync-sessions](cloud-sync-sessions.md) — what actually makes a delete stick once the

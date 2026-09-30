@@ -53,7 +53,7 @@ test('frames route between the browser and the bridge', () => {
   assert.equal(client.sent.at(-1), '{"type":"pong"}');
 });
 
-test('a reattaching agent is replayed the live channels and tokens', () => {
+test('a reattaching agent gets the tokens, and every browser is sent to redial it', () => {
   const hub = new DeviceHub('d1');
   const first = fakeSink();
   hub.attachAgent(first.sink);
@@ -63,18 +63,21 @@ test('a reattaching agent is replayed the live channels and tokens', () => {
   const second = fakeSink();
   hub.attachAgent(second.sink);
 
-  // The browser stays connected across a bridge restart, so the new bridge has
-  // to be told what already exists rather than waiting for a reconnect.
+  // Tokens carry over, since storage sync needs one before any browser is back.
+  // Channels do not: an owner channel is end-to-end encrypted, the session died
+  // with the old bridge, and a replayed `open` would hand the new one a channel
+  // the browser can never use. 1012, so the browser takes its quick redial.
   const frames = second.frames();
-  assert.deepEqual(frames[0], { t: 'token', userId: 'u1', token: 'tok' });
-  assert.deepEqual(frames[1], { t: 'open', ch, userId: 'u1', token: 'tok' });
+  assert.deepEqual(frames, [{ t: 'token', userId: 'u1', token: 'tok' }]);
+  assert.equal(client.closed()?.code, 1012);
+  assert.equal(hub.channelCount, 0);
+  // The old bridge is told, so it does not keep serving a channel it lost.
+  assert.deepEqual(first.frames().at(-1), { t: 'close', ch });
   // Newest agent wins; the predecessor is hung up on.
   assert.equal(first.closed()?.code, 1012);
   // And terminated: a close handshake on a socket whose peer is gone never
   // completes, so without this the loser lingers OPEN on the relay for minutes.
   assert.equal(first.terminated(), true, 'a superseded predecessor is dropped, not drained');
-  // Replayed only to the new sink — the predecessor must not be handed the channel
-  // it is about to lose, or it starts serving a browser it no longer owns.
   assert.equal(first.frames().filter((f) => f.t === 'open').length, 1, 'only its own original open');
 });
 
@@ -84,7 +87,7 @@ test('a guest channel is dropped on re-attach rather than replayed', () => {
   hub.attachAgent(first.sink);
   const owner = fakeSink();
   const guest = fakeSink();
-  const ownerCh = hub.openChannel('owner', 'ctrl', owner.sink, 'tok');
+  hub.openChannel('owner', 'ctrl', owner.sink, 'tok');
   hub.openChannel('guest', 'ctrl', guest.sink, 'gtok', {
     hostUserId: 'owner',
     scope: 'machine',
@@ -97,13 +100,12 @@ test('a guest channel is dropped on re-attach rather than replayed', () => {
   // The new bridge has not said `hello` yet, so nothing here knows whether it is
   // new enough to enforce the grant. Replaying the guest to a bridge that ignores
   // the field would serve them as the owner.
-  const opens = second.frames().filter((f) => f.t === 'open');
-  assert.deepEqual(opens, [{ t: 'open', ch: ownerCh, userId: 'owner', token: 'tok' }]);
+  assert.deepEqual(second.frames().filter((f) => f.t === 'open'), []);
   // 1008, so the browser reconnects and re-runs the /client gate — which is the
   // check that could not be made at attach time.
   assert.equal(guest.closed()?.code, 1008);
-  assert.equal(owner.closed(), null, 'an owner still survives a bridge restart');
-  assert.equal(hub.channelCount, 1);
+  assert.equal(owner.closed()?.code, 1012, 'an owner redials quickly instead');
+  assert.equal(hub.channelCount, 0);
   assert.equal(hub.guestChannels().length, 0);
 });
 
@@ -187,10 +189,10 @@ test('a superseded agent cannot speak into a live channel', () => {
   const hub = new DeviceHub('d1');
   const first = fakeSink();
   hub.attachAgent(first.sink);
-  const client = fakeSink();
-  const ch = hub.openChannel('u1', 'ctrl', client.sink, null);
   const second = fakeSink();
   hub.attachAgent(second.sink);
+  const client = fakeSink();
+  const ch = hub.openChannel('u1', 'ctrl', client.sink, null);
   const before = client.sent.length;
 
   // The whole flicker loop: a superseded (or half-dead) bridge still writing frames
@@ -206,10 +208,10 @@ test("a superseded agent's close does not kill the current agent's channel", () 
   const hub = new DeviceHub('d1');
   const first = fakeSink();
   hub.attachAgent(first.sink);
-  const client = fakeSink();
-  const ch = hub.openChannel('u1', 'ctrl', client.sink, null);
   const second = fakeSink();
   hub.attachAgent(second.sink);
+  const client = fakeSink();
+  const ch = hub.openChannel('u1', 'ctrl', client.sink, null);
 
   hub.fromAgent({ t: 'close', ch }, first.sink);
   assert.equal(client.closed(), null, 'the browser belongs to the live bridge now');
@@ -373,18 +375,19 @@ test('channels from different users stay isolated on one device', () => {
 test('the event history records attach, supersede, channels and detach, in order', () => {
   const hubs = new HubRegistry();
   const hub = hubs.get('d1');
-  const client = fakeSink();
-  const ch = hub.openChannel('u1', 'ctrl', client.sink, null);
+  const early = fakeSink();
+  hub.openChannel('u1', 'ctrl', early.sink, null);
   const first = fakeSink();
   hub.attachAgent(first.sink);
   const second = fakeSink();
   hub.attachAgent(second.sink);
+  const ch = hub.openChannel('u1', 'ctrl', fakeSink().sink, null);
   hub.closeChannel(ch);
   hub.detachAgent(second.sink);
 
   assert.deepEqual(
     hubs.events.get('d1').map((e) => e.kind),
-    ['channel-open', 'agent-attach', 'agent-supersede', 'channel-close', 'agent-detach'],
+    ['channel-open', 'channel-drop', 'agent-attach', 'agent-supersede', 'channel-open', 'channel-close', 'agent-detach'],
   );
   // The browser that opened with no bridge is the stuck-spinner case; say so.
   assert.equal(hubs.events.get('d1')[0].detail?.agentOnline, false);

@@ -20,6 +20,12 @@
  * `R2_RELEASE_PUBLIC_BASE_URL` instead of exported from memory. A feed URL typed
  * wrong bakes a dead updater into the shipped app, and nothing notices until a
  * user's copy quietly stops finding releases.
+ *
+ * It also runs the typecheck and the server and relay suites before building:
+ * the bridge ships inside the app, and a release cut from a commit whose tests
+ * fail puts that failure on every user's machine. There is no flag to skip them.
+ * `LINES_SHIP_TESTED=1` is for the release workflow only, whose cheap guard job
+ * has already run the same suites on the same commit.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -180,6 +186,14 @@ if (bumped) {
  * failure you have to think about.
  */
 fs.rmSync(RELEASE_DIR, { recursive: true, force: true });
+
+if (process.env.LINES_SHIP_TESTED === '1') {
+  console.log('\nLINES_SHIP_TESTED=1: the guard job already ran typecheck and tests.');
+} else {
+  run('npm', ['run', 'typecheck']);
+  run('npm', ['run', 'test', '-w', 'server']);
+  run('npm', ['run', 'test', '-w', 'relay']);
+}
 
 run('npm', ['run', 'package', '-w', 'desktop'], { env });
 

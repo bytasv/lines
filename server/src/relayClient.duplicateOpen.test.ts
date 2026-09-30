@@ -98,3 +98,29 @@ test('an open after the channel closed is a real new channel', async () => {
   ws.send(JSON.stringify({ t: 'open', ch: 'c9', userId: 'u1', token: null }));
   await until(() => bridge.opened.length === 2, 'a genuinely new channel on the same id');
 });
+
+test('frames that arrive before the bridge listens are delivered, in order', async () => {
+  // The bridge attaches its message handler only after loading its e2ee key,
+  // and on an encrypted channel the browser speaks first. A frame dropped in
+  // that window is the handshake itself, and the browser then waits forever.
+  const relay = await fakeRelay();
+  const delivered: string[] = [];
+  const client = new RelayClient(`ws://127.0.0.1:${relay.port}`, 'dev', 'secret', {
+    onChannel: (link) => {
+      setTimeout(() => link.on('message', (raw) => delivered.push(String(raw))), 100);
+    },
+    onToken: () => {},
+  });
+  clients.push(client);
+  const ws = await until(() => relay.socket(), 'the bridge to dial in');
+
+  ws.send(JSON.stringify({ t: 'open', ch: 'c2', userId: 'u1', token: null }));
+  ws.send(JSON.stringify({ t: 'data', ch: 'c2', payload: 'first' }));
+  ws.send(JSON.stringify({ t: 'data', ch: 'c2', payload: 'second' }));
+  await until(() => delivered.length === 2, 'the early frames');
+  assert.deepEqual(delivered, ['first', 'second']);
+
+  ws.send(JSON.stringify({ t: 'data', ch: 'c2', payload: 'third' }));
+  await until(() => delivered.length === 3, 'a frame after the handler');
+  assert.deepEqual(delivered, ['first', 'second', 'third']);
+});

@@ -210,9 +210,11 @@ export class DeviceHub {
    * Attach a bridge. Newest wins — a reconnecting bridge must be able to take
    * over from a half-dead predecessor the relay hasn't noticed yet.
    *
-   * Existing owner channels are *not* closed: the browser stays connected across
-   * a bridge restart and simply gets a fresh `hello` once it re-opens them.
-   * Guest channels are dropped instead — see below.
+   * Every existing channel is closed first, so its browser redials the new
+   * bridge. Owner channels are end-to-end encrypted, and that session lives in
+   * the bridge process that just went away — replaying `open` to its successor
+   * hands over a channel with no session, which the browser, believing it has
+   * one, can never use. Guests are dropped for a reason of their own, below.
    *
    * Returns the sink it superseded, so the caller can log a duplicate attach —
    * which is otherwise indistinguishable from a first one.
@@ -228,6 +230,11 @@ export class DeviceHub {
     // guest; the alternative is a silent promotion.
     for (const { id } of this.guestChannels()) {
       this.dropChannel(id, 'bridge reattached');
+    }
+    // 1012, not 1008: an owner has nothing to re-check, so the browser takes its
+    // ordinary quick redial rather than the slow "rejected" one.
+    for (const id of [...this.channels.keys()]) {
+      this.dropChannel(id, 'bridge reattached', 1012);
     }
 
     const previous = this.agent;
@@ -246,20 +253,10 @@ export class DeviceHub {
       previous.terminate?.();
     }
 
-    // Re-announce every live channel — owners only, by now — so the new bridge
-    // builds its own state, and re-push tokens, which it needs for storage sync.
+    // Re-push tokens, which the new bridge needs for storage sync before any
+    // browser has redialled.
     for (const [userId, token] of this.tokens) {
       sink.send(encode({ t: 'token', userId, token }));
-    }
-    for (const ch of this.channels.values()) {
-      sink.send(
-        encode({
-          t: 'open',
-          ch: ch.id,
-          userId: ch.userId,
-          token: this.tokens.get(ch.userId) ?? null,
-        }),
-      );
     }
     this.broadcastToClients({ type: 'deviceOnline' });
     // Last, so anyone released here sees a hub that is fully attached. The
@@ -316,13 +313,13 @@ export class DeviceHub {
   }
 
   /** Drop one channel and tell its browser why. Used when a grant is revoked or narrowed. */
-  dropChannel(id: ChannelId, reason: string): void {
+  dropChannel(id: ChannelId, reason: string, code = 1008): void {
     const ch = this.channels.get(id);
     if (!ch) return;
     this.channels.delete(id);
     this.record('channel-drop', { ch: id, reason });
     this.agent?.send(encode({ t: 'close', ch: id }));
-    ch.sink.close(1008, reason);
+    ch.sink.close(code, reason);
   }
 
   /** Browser -> bridge. Dropped silently when no bridge is attached. */

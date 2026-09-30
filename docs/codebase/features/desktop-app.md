@@ -331,8 +331,11 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
 
 `npm run ship -w desktop` is the one command for the whole release, local or CI — the same entry
 point either way, so the two never drift into two procedures. It: runs `check-unreleased.mjs`
-(skippable with `--force`), clears `desktop/release/`, runs `package`, then runs `release` (skippable
-with `--dry-run`). Both `LINES_UPDATE_FEED_URL` and `LINES_DOWNLOAD_URL` are derived from
+(skippable with `--force`), clears `desktop/release/`, runs the root `typecheck` and the server and
+relay test suites, runs `package`, then runs `release` (skippable with `--dry-run`). The tests have
+no skip flag: the bridge ships inside the app, so a release cut from a failing commit puts the
+failure on every machine. Only the release workflow sets `LINES_SHIP_TESTED=1`, because its ubuntu
+`guard` job has already run the same suites on the same commit. Both `LINES_UPDATE_FEED_URL` and `LINES_DOWNLOAD_URL` are derived from
 `R2_RELEASE_PUBLIC_BASE_URL` rather than hand-set, so a build-time URL cannot be typed wrong without
 also breaking the derivation everywhere else.
 
@@ -361,7 +364,7 @@ build rather than a release whose update feed never finished publishing.
 
 `.github/workflows/release-desktop.yml` (`workflow_dispatch`, `dry_run`/`force` inputs) runs the
 same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behind a cheap ubuntu
-`guard` job that runs `typecheck` and `check-unreleased.mjs` first — a stale version fails there at
+`guard` job that runs `typecheck`, the server and relay tests, and `check-unreleased.mjs` first — a stale version fails there at
 1x billing rather than on the 10x mac runner.
 
 ## Dependencies

@@ -117,6 +117,12 @@ class RelayChannel implements BrowserLink {
   private onMessage: ((raw: unknown) => void) | null = null;
   private onClose: (() => void) | null = null;
   private closed = false;
+  /**
+   * Frames that arrived before anyone listened. The bridge attaches its handler
+   * only after an async step (loading its e2ee key), and the browser speaks
+   * first on an encrypted channel — dropping here loses the handshake itself.
+   */
+  private early: string[] = [];
 
   constructor(
     readonly id: string,
@@ -143,8 +149,12 @@ class RelayChannel implements BrowserLink {
   }
 
   on(event: 'message' | 'close' | 'error', cb: (arg: never) => void): this {
-    if (event === 'message') this.onMessage = cb as (raw: unknown) => void;
-    else if (event === 'close') this.onClose = cb as () => void;
+    if (event === 'message') {
+      this.onMessage = cb as (raw: unknown) => void;
+      const early = this.early;
+      this.early = [];
+      for (const payload of early) this.onMessage(payload);
+    } else if (event === 'close') this.onClose = cb as () => void;
     // 'error' is accepted and ignored: a channel has no independent error
     // condition — the relay socket owns failure, and it surfaces as a close.
     return this;
@@ -172,7 +182,8 @@ class RelayChannel implements BrowserLink {
   }
 
   deliver(payload: string): void {
-    this.onMessage?.(payload);
+    if (this.onMessage) this.onMessage(payload);
+    else if (!this.closed) this.early.push(payload);
   }
 }
 

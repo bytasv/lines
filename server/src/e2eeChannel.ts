@@ -52,6 +52,8 @@ export const filePolicy: ChannelPolicy = {
 class SecureChannel implements BrowserLink {
   private onMessage: ((raw: unknown) => void) | null = null;
   private onClose: (() => void) | null = null;
+  /** App frames that arrived before the bridge listened; replayed in order on `on('message')`. */
+  private early: string[] = [];
   private session: SecureSession | null = null;
   /**
    * Serialises outbound frames. `seal` assigns a counter synchronously but
@@ -131,8 +133,12 @@ class SecureChannel implements BrowserLink {
   }
 
   on(event: 'message' | 'close' | 'error', cb: (arg: never) => void): this {
-    if (event === 'message') this.onMessage = cb as (raw: unknown) => void;
-    else if (event === 'close') this.onClose = cb as () => void;
+    if (event === 'message') {
+      this.onMessage = cb as (raw: unknown) => void;
+      const early = this.early;
+      this.early = [];
+      for (const frame of early) this.onMessage(frame);
+    } else if (event === 'close') this.onClose = cb as () => void;
     return this;
   }
 
@@ -145,6 +151,11 @@ class SecureChannel implements BrowserLink {
   }
 
   // --- the gate ----------------------------------------------------------
+
+  private forward(frame: string): void {
+    if (this.onMessage) this.onMessage(frame);
+    else if (!this.closed) this.early.push(frame);
+  }
 
   /** Send in the clear. Only for the handshake itself, which has no key yet. */
   private sendPlain(msg: ServerMessage): void {
@@ -212,8 +223,7 @@ class SecureChannel implements BrowserLink {
         // trying to author traffic. It is not recoverable and must not be
         // ignored: the counter check is only protection if a violation ends the
         // channel rather than skipping one message.
-        const plaintext = await this.session.open({ n: msg.n, d: msg.d });
-        this.onMessage?.(plaintext);
+        this.forward(await this.session.open({ n: msg.n, d: msg.d }));
         return;
       }
       default: {
@@ -228,7 +238,7 @@ class SecureChannel implements BrowserLink {
             `this machine requires an end-to-end encrypted channel (got a plaintext '${msg.type}' frame)`,
           );
         }
-        this.onMessage?.(String(frame));
+        this.forward(String(frame));
       }
     }
   }

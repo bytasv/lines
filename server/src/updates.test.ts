@@ -38,9 +38,14 @@ function withSend<T>(fn: (calls: unknown[]) => T): T {
     return true;
   };
   Object.defineProperty(process, 'connected', { value: true, configurable: true });
+  // Set when the suite runs from a shell the Lines dev supervisor started, and it
+  // turns the desktop-shell path off entirely.
+  const supervised = process.env.LINES_DEV_SUPERVISED;
+  delete process.env.LINES_DEV_SUPERVISED;
   try {
     return fn(calls);
   } finally {
+    if (supervised !== undefined) process.env.LINES_DEV_SUPERVISED = supervised;
     (process as { send?: unknown }).send = original;
     if (connected) Object.defineProperty(process, 'connected', connected);
     else delete (process as { connected?: unknown }).connected;
