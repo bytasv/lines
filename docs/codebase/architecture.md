@@ -85,9 +85,8 @@ on the user's machine. The hosted side relays and stores; it never runs a turn.
   relay used to be the auth edge: it named the user and the bridge believed it, so controlling the
   relay meant being able to drive any machine it brokered. The attested identity is now a routing
   hint; authority comes from a static key exchanged out of band at enrollment and held only on the
-  two ends. Once a machine has an enrolled device it refuses any owner channel that cannot present
-  one. A machine with none behaves as before, which is what let this ship without locking existing
-  installs out. See [features/end-to-end-encryption.md](features/end-to-end-encryption.md).
+  two ends. A machine refuses any relayed owner channel that cannot present a pinned key, from its first
+  launch — every browser enrols once, and there is no plaintext owner path. See [features/end-to-end-encryption.md](features/end-to-end-encryption.md).
 - **Storage is a blob store that cannot author content, within limits.** Blobs this fleet pushes
   are signed and verified against a pinned signer with a monotonic counter, so a compromised
   database can delete, withhold or replay — not forge. Where a resource cannot carry a signature

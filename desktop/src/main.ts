@@ -59,7 +59,6 @@ import {
   revokePeer,
   type EnrolledPeer,
 } from '../../server/src/e2eeIdentity.ts';
-import { e2eeRequired } from '../../server/src/e2eeChannel.ts';
 import {
   CLAUDE_INSTALL_URL,
   claudeCliStatus,
@@ -904,8 +903,9 @@ function appUrl(): string {
 }
 
 /**
- * The app URL for *our own* window, carrying an enrollment code when this
- * machine needs one.
+ * The app URL for *our own* window, carrying an enrollment code whenever it
+ * goes through the relay — which, in relay mode, is always, since every relayed
+ * owner channel must be end-to-end encrypted from this machine's first launch.
  *
  * Why this exists: the desktop window is a browser on the hosted origin, so its
  * traffic goes out to the relay and back — it is not a local connection, and the
@@ -928,7 +928,7 @@ function appUrl(): string {
 function appUrlForOwnWindow(): string {
   const params = new URLSearchParams();
   if (device) params.set('host', device.id);
-  if (!LOCAL_MODE && e2eeRequired()) {
+  if (!LOCAL_MODE) {
     try {
       params.set('enroll', currentEnrollment()?.code ?? mintEnrollmentCode().code);
     } catch (err) {
@@ -1456,8 +1456,8 @@ async function openEncryptionWindow(): Promise<void> {
   .hint { color:#909296; font-size:12px; margin-top:16px }
 </style>
 <div class="card">
-  <h2>Encrypt this machine's connection</h2>
-  <p>In Lines, open Settings → Encryption and enter this code:</p>
+  <h2>Enrol a browser on this machine</h2>
+  <p>Every browser needs this once to connect. In Lines, enter it when asked, or under Settings → Encryption:</p>
   <div class="code">${escapeHtml(grouped)}</div>
   ${qr ? `<img src="${qr}" alt="Enrollment QR code" width="240" height="240">` : ''}
   <p class="hint">Scan with a phone to open Lines with the code filled in.<br>
@@ -1838,7 +1838,7 @@ function updateTray() {
                   click: () => revokeEnrolledPeer(peer),
                 })),
               ]
-            : [{ label: 'No browser enrolled — traffic is relayed in the clear', enabled: false }]),
+            : [{ label: 'No browser enrolled yet — enrol one to connect', enabled: false }]),
           { type: 'separator' as const },
         ]
       : []),

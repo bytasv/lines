@@ -3570,7 +3570,7 @@
       "id": "end-to-end-encryption",
       "name": "End-to-end encryption",
       "doc": "features/end-to-end-encryption.md",
-      "purpose": "Make the hosted server untrusted: a browser and a machine agree on keys out of band and authenticate each other directly, so the relay carries ciphertext it can neither read nor forge, and storage holds blobs it cannot author.",
+      "purpose": "Make the hosted server untrusted: a browser and a machine agree on keys out of band and authenticate each other directly, so the relay carries ciphertext it can neither read nor forge, and storage holds blobs it cannot author. On by default: every relayed owner channel must authenticate from a machine's first launch, and sync refuses unsigned blobs.",
       "covers": [],
       "entryPoints": [
         "web/src/components/EncryptionSection.tsx",
@@ -3597,7 +3597,6 @@
         "enrollProof",
         "generateEnrollCode",
         "guardRelayChannel",
-        "e2eeRequired",
         "SecureChannel",
         "bridgeIdentity",
         "enrollPeer",
@@ -3617,18 +3616,19 @@
         "server/src/e2ee.test.ts",
         "server/src/e2eeChannel.test.ts",
         "server/src/syncSignature.test.ts",
-        "server/src/relayEndToEnd.test.ts"
+        "server/src/relayEndToEnd.test.ts",
+        "server/src/sync.availability.test.ts"
       ],
       "businessRules": [
-        "a machine requires an authenticated channel only once a device is enrolled — shipping any other way would have locked every existing install out of its own bridge on upgrade",
-        "that requirement is machine-wide, never per-device: per-device is no protection, because an attacker simply declines to enrol and takes the unencrypted path",
+        "every relayed owner channel must authenticate from a machine's first launch, enrolled device or not — there is no plaintext owner path; before enrolling, the only thing a channel can do is enrol",
+        "that requirement is machine-wide, never per-device: per-device is no protection, because an attacker simply declines to enrol and takes the unencrypted path; every browser enrols once (the desktop's own window automatically, others via EnrollGate with a tray or CLI code)",
         "an enrollment code is single-use, expires in 15 minutes, and minting a new one invalidates the outstanding one",
         "20 characters of a 32-symbol alphabet is 100 bits, which is what makes a typed code safe against an attacker who can watch the exchange; a short code would need a PAKE, which is deliberately not here",
         "the browser's private key is non-extractable in IndexedDB — a later XSS can use it but cannot carry it away",
         "no key material is ever uploaded, and the storage schema must not gain a public-key column: a key the server can rewrite is a key an attacker with the database can rewrite",
         "revocation works from the tray and the CLI with no browser, because key pinning plus a lost device would otherwise be unrecoverable",
         "signed sync covers /settings, /guard-allowlist and /mcp-connections — the resources whose envelope storage keeps intact; maps merged in SQL and arrays cannot carry one without a per-row column",
-        "an unsigned blob is accepted with a warning during rollout; forged, signer-changed and rolled-back blobs are always refused, and LINES_E2EE_STRICT=1 promotes the first case to a refusal",
+        "sync is strict by default: unsigned, forged, signer-changed and rolled-back blobs are all refused, and LINES_E2EE_STRICT=0 (recovery only) accepts unsigned ones with a warning; a refusal is re-pushed signed on the same sync pass",
         "machine signing keys are trust-on-first-use then pinned; a changed signer is refused and surfaced, as SSH treats a changed host key",
         "an enrollment code handed to a page travels in the URL fragment, never a query string, and is consumed and stripped on read — a query string reaches the server, which is the party the code exists to exclude; the query form is still accepted on read only because an older desktop build's QR emitted it",
         "a machine's own desktop window is handed a live code (appUrlForOwnWindow) rather than asked to type one: the shell and the bridge are already the same trust domain, so hand-enrolling the machine against itself was a step with no security value",
@@ -3640,7 +3640,7 @@
         "the construction follows Noise IK's shape, written longhand so it is auditable in one file — do not invent a variant; follow Noise IK precisely or get the change externally reviewed",
         "the crypto layer wraps a byte channel, not a WebSocket, so a WebRTC DataChannel can be slotted underneath with no protocol change",
         "guardRelayChannel sits between RelayClient and handleConnection: the bridge's message switch must not grow a crypto branch",
-        "on a machine that requires no key the channel is handed over in the constructor — the bridge speaks first, so deferring until the client's first frame deadlocks every relayed connection",
+        "a guest channel is handed over in the constructor while an owner channel only after the handshake — the bridge speaks first, so deferring a guest's handover until its first frame deadlocks every relayed guest connection",
         "a refused client reconnects silently (no heartbeat, no auth relay), which is the only window in which enrollment is possible",
         "enrollment re-dials the link by name (reconnectMachine), never the primary: on the connect-time gate the primary is a different machine or unset",
         "base64 inflates payloads ~33%, so broadcast backpressure thresholds were raised by a third; isDroppable still runs pre-serialization"
@@ -4001,7 +4001,7 @@
         "generic claims say coding agent or list providers; strings that are truly provider-specific (Claude CLI status, Claude sign-in, SDK internals) stay provider-specific",
         "supporting another provider in the copy is one new AGENTS entry, kept local to LandingPage because shared/providers.ts is capability data, not marketing copy",
         "the install card says at least one of Claude Code or Codex must be installed on the paired machine",
-        "encryption copy says end-to-end encryption is opt-in per browser and that the relay carries traffic it cannot read or forge; it never claims everything is encrypted or zero-knowledge"
+        "encryption copy says end-to-end encryption is on by default, that every browser enrols once with a code from the machine, and that the relay carries traffic it cannot read or forge; it never claims everything is encrypted or zero-knowledge"
       ],
       "architecturalRules": [
         "the rotating word sits on its own line with every word stacked in one grid cell and centred independently, so a short word leaves no gap and a long one never re-wraps the heading; mid-sentence placement shifts the surrounding text on every swap",

@@ -134,8 +134,8 @@ export function LocalOnlyArt() {
   );
 }
 
-/** Opt-in end-to-end encryption: an enrolled browser and the machine exchange
- *  traffic the relay carries but cannot read or forge. */
+/** End-to-end encryption, on by default: every browser enrols once, then it and
+ *  the machine exchange traffic the relay carries but cannot read or forge. */
 export function EncryptionArt() {
   return (
     <Art>
@@ -180,7 +180,7 @@ export function EncryptionArt() {
       <Glyph icon={IconLock} x={87} y={47} size={10} weight={1.3} />
       <Glyph icon={IconLock} x={183} y={47} size={10} weight={1.3} />
       <text x="140" y="134" textAnchor="middle" fill={dim} fontSize="8">
-        opt-in, per browser
+        on by default
       </text>
     </Art>
   );

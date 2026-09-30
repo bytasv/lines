@@ -786,8 +786,8 @@ async function openSocket(link: MachineLink) {
     }
     if (bridgeKey) {
       // Heartbeat and auth relay start only once the channel is authenticated:
-      // both write, and a write before the handshake would either be refused by
-      // a strict bridge or travel in the clear past the relay.
+      // both write, and a write before the handshake would be refused by the
+      // bridge, which never accepts a plaintext owner channel over the relay.
       void beginHandshake(link, bridgeKey).catch((err) => {
         console.warn('[e2ee] handshake could not start', err);
         socket.close();
@@ -1183,7 +1183,7 @@ export function send(msg: ClientMessage): boolean {
   const link = linkForMessage(msg);
   // Through `writeToLink`, never straight at the socket: this is the path every
   // prompt and control message takes, so writing it raw put the app's entire
-  // payload past the relay in the clear on an enrolled machine — and the bridge,
+  // payload past the relay in the clear — and the bridge,
   // correctly, closed the channel over it.
   // One exception to that routing: a prompt written while the handshake is still
   // in flight goes to the durable queue below instead of the link's outbox. The

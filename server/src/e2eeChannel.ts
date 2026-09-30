@@ -21,25 +21,8 @@ import {
   type SecureSession,
   type ServerMessage,
 } from '@lines/shared';
-import { enrollPeer, isEnrolled, listPeers, strictMode, touchPeer } from './e2eeIdentity.ts';
+import { enrollPeer, isEnrolled, touchPeer } from './e2eeIdentity.ts';
 import type { BrowserLink } from './userContext.ts';
-
-/**
- * Does this machine insist on an authenticated channel?
- *
- * True once the user has enrolled a device, because from that moment they have a
- * client that can do the handshake and an unauthenticated channel is a
- * downgrade. Also true under strict mode, which additionally refuses clients
- * that are merely too old.
- *
- * False on a machine with no enrolled device at all — otherwise shipping this
- * would lock every existing install out of its own bridge on upgrade. That is
- * the whole of the rollout story, and it is why enrolling one device is the
- * step that actually turns the protection on.
- */
-export function e2eeRequired(): boolean {
-  return strictMode() || listPeers().length > 0;
-}
 
 /**
  * A channel presented to the bridge, with the crypto folded in.
@@ -52,8 +35,6 @@ export function e2eeRequired(): boolean {
 export interface ChannelPolicy {
   /** Is this client key on this machine's enrolled list? The pin check. */
   isEnrolled(key: PublicKeyB64): boolean;
-  /** Must an owner channel authenticate before it carries app traffic? */
-  required(): boolean;
   /** Bind a new device against a code the host displayed. */
   enroll(identity: Identity, clientKey: PublicKeyB64, proof: string): Promise<{ proof: string } | { error: string }>;
   /** Note that a pinned device connected. Best-effort bookkeeping. */
@@ -64,7 +45,6 @@ export interface ChannelPolicy {
  *  adversarial harness can drive this without a home directory. */
 export const filePolicy: ChannelPolicy = {
   isEnrolled: (key) => isEnrolled(key),
-  required: () => e2eeRequired(),
   enroll: (identity, clientKey, proof) => enrollPeer(identity, clientKey, proof, 'browser'),
   touch: (key) => touchPeer(key),
 };
@@ -106,14 +86,11 @@ class SecureChannel implements BrowserLink {
       /* the relay owns socket failure; it surfaces as a close */
     });
     // The bridge speaks first: `handleConnection` sends `hello` the moment it is
-    // given a channel, and the browser waits for it. So on a machine that does
-    // not require an authenticated channel, hand it over straight away —
-    // anything else deadlocks, each side waiting for the other's first frame.
-    //
-    // A pinned client cannot be surprised by this. A pin exists only for a
-    // browser that enrolled here, and one enrolled browser is what makes
-    // `required` true in the first place; so on a machine where this branch
-    // runs, no client has a key to offer.
+    // given a channel, and the browser waits for it. So a channel that does not
+    // have to authenticate — only a guest's, which has no key to offer — is
+    // handed over straight away; anything else deadlocks, each side waiting for
+    // the other's first frame. An owner channel is always required, so it
+    // reaches the bridge only after the handshake below.
     if (!this.required) this.handOver(null);
   }
 
@@ -211,9 +188,9 @@ class SecureChannel implements BrowserLink {
         // public, and it is what lets the client notice a bridge that answered
         // with a key other than the one it pinned.
         this.sendPlain({ type: 'e2eeReady', bridgeKey: this.identity.publicKey });
-        // Usually the first handover. On an unenrolled machine the bridge
-        // already has the channel, and this only upgrades it in place — every
-        // later frame is sealed either way.
+        // The first handover for an owner channel. Were this ever a channel the
+        // bridge already held, it would only upgrade it in place — every later
+        // frame is sealed either way.
         this.handOver(this.session.peerPublicKey);
         return;
       }
@@ -240,9 +217,9 @@ class SecureChannel implements BrowserLink {
         return;
       }
       default: {
-        // Plaintext app traffic. Permitted only while this machine has nothing
-        // to compare a key against; once a device is enrolled, an unencrypted
-        // channel is a downgrade and is refused.
+        // Plaintext app traffic. Permitted only on a guest channel, which has no
+        // key to present; an owner channel is always end-to-end encrypted, and a
+        // plaintext frame on one is refused, whether or not anything is enrolled.
         // The frame type is named on purpose: a bare "requires encryption" says
         // nothing about which client, or which of its writers, skipped the seal,
         // and that is the one thing you need to fix it.
@@ -262,8 +239,9 @@ class SecureChannel implements BrowserLink {
  * Wrap a relay channel, and call `onReady` when — and only when — it may carry
  * app traffic.
  *
- * Owner channels on a machine with an enrolled device must authenticate first.
- * Guest channels are unchanged: v1 enrolls owner devices only, so a guest has no
+ * Owner channels must always authenticate first, from the machine's first
+ * launch: with nothing enrolled, the only thing an owner channel can do is
+ * enrol. Guest channels are unchanged: v1 enrolls owner devices only, so a guest has no
  * key to present, and their identity stays as relay-forgeable as it is today.
  * That gap is real and is written down rather than papered over.
  */
@@ -274,6 +252,6 @@ export function guardRelayChannel(
   onReady: (link: BrowserLink, peerKey: PublicKeyB64 | null) => void,
   policy: ChannelPolicy = filePolicy,
 ): void {
-  const required = !isGuest && policy.required();
+  const required = !isGuest;
   new SecureChannel(raw, identity, required, policy, onReady);
 }

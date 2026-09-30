@@ -888,10 +888,11 @@ interface UiState {
   /**
    * Why the machine refused this browser's channel, when it did.
    *
-   * Load-bearing rather than cosmetic: a machine with an enrolled device refuses
-   * any browser that cannot present a pinned key, and the only place to enrol one
-   * used to be inside the app shell — which never loads, because the channel was
-   * refused. Without this the second computer spins forever with no way forward.
+   * Load-bearing rather than cosmetic: a machine refuses any relayed browser that
+   * cannot present a pinned key — from its first launch, not only once something
+   * is enrolled — and the only place to enrol one used to be inside the app shell,
+   * which never loads, because the channel was refused. Without this a new
+   * browser spins forever with no way forward.
    */
   e2eeRefusal: string | null;
   /**

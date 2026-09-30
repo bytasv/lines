@@ -700,12 +700,16 @@ export class StorageSyncClient {
   /**
    * Verify a pulled blob, and decide what to do about a failure.
    *
-   * The two halves, and why they differ: a *forged* or *rolled back* blob is
-   * always refused — those are things only an attacker produces, and accepting
-   * one is the whole risk this closes. An *unsigned* blob is accepted with a
-   * warning while the fleet is still mixed, because refusing it before every
-   * machine writes signatures is just a way to stop syncing. Strict mode is what
-   * turns the second into the first, once that is true.
+   * A *forged* or *rolled back* blob is always refused — those are things only
+   * an attacker produces, and accepting one is the whole risk this closes. An
+   * *unsigned* blob is refused too, by default: it is what a storage server
+   * authoring rows on its own would write. `LINES_E2EE_STRICT=0` accepts it with
+   * a warning, for recovering a fleet with a bridge too old to sign.
+   *
+   * A refusal does not strand the resource. It comes back as null, which the
+   * pull treats as an empty cloud, and `syncNow` pushes this machine's copy
+   * straight after — signed — so the refused row is overwritten on the same
+   * round trip rather than refused on every pull from then on.
    */
   private async checkSignature(resource: string, body: unknown): Promise<unknown> {
     if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
@@ -716,8 +720,8 @@ export class StorageSyncClient {
     if (refuse) {
       // `fail` with a client kind: the request itself succeeded, the *content*
       // did not, and this log is the only place a user can see why a resource
-      // stopped applying. Only refusals: an accepted unsigned blob still
-      // applies, so a row for it is noise the user can do nothing about.
+      // stopped applying. Only refusals: an unsigned blob accepted under
+      // `LINES_E2EE_STRICT=0` still applies, so a row for it is noise.
       this.appendLog({
         at: Date.now(),
         event: 'fail',

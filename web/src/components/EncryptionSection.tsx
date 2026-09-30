@@ -11,11 +11,11 @@ import { enrollWithCode } from '../ws';
  * Bind this browser to a machine with a key, so the relay in the middle stops
  * being something either end has to trust.
  *
- * Until a browser is enrolled, the relay is the authority on who is connected:
- * it tells the machine who you are and the machine believes it. Enrolling swaps
- * that for a key the two ends agreed on directly, via a code the user carries
- * from the machine's own screen — which is the one exchange a compromised server
- * cannot sit in the middle of.
+ * A machine never takes the relay's word for who is connected: every browser
+ * enrols once, with a code the user carries from the machine's own screen —
+ * which is the one exchange a compromised server cannot sit in the middle of —
+ * and from then on the two ends check a key they agreed on directly. The badge
+ * below only reads "not end-to-end encrypted" for a guest or a direct link.
  *
  * Says plainly what it does *not* cover: this page is served by the same
  * deployment it distrusts, so a modified bundle defeats everything here. That
@@ -61,9 +61,10 @@ export function EncryptionSection() {
   return (
     <Stack gap="sm">
       <Text size="sm" c="dimmed">
-        With a key enrolled, this browser and your machine encrypt everything between them and
-        each checks the other’s key directly. The relay that connects you can still carry the
-        traffic — it can no longer read it, and it can no longer pretend to be either of you.
+        Every browser enrols once with a code from your machine. From then on, this browser and
+        your machine encrypt everything between them and each checks the other’s key directly.
+        The relay that connects you carries the traffic — it cannot read it, and it cannot
+        pretend to be either of you.
       </Text>
 
       <Card withBorder padding="sm" radius="sm">

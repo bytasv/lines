@@ -43,7 +43,7 @@ import {
 } from './lib/storage';
 import { useDevices } from './lib/devices';
 import { bootDial } from './lib/wake';
-import { mountViewportDiag, trackKeyboardInset } from './lib/viewport';
+import { trackKeyboardInset } from './lib/viewport';
 import { learnHostDeviceIdFromDevServer, takeHostDeviceIdFromUrl } from './lib/e2ee';
 import { registerServiceWorker } from './lib/push';
 import {
@@ -315,8 +315,6 @@ if (!CLERK_ENABLED) void connect();
 // by CSS on every full-height surface, including the gate screens that render
 // instead of the app.
 trackKeyboardInset();
-// TEMPORARY — remove before commit (see lib/viewport.ts).
-mountViewportDiag();
 
 // Before the first render too, so the "+" menu's Browse gate reads the value the
 // desktop shell handed this window rather than last session's.

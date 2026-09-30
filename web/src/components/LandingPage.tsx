@@ -142,8 +142,9 @@ const SECURITY = [
   },
   {
     art: EncryptionArt,
-    title: 'Opt-in end-to-end encryption',
-    description: 'Enrol a browser and the relay carries traffic it can’t read or forge.',
+    title: 'End-to-end encrypted by default',
+    description:
+      'Every browser enrols with a one-time code from your machine; the relay carries traffic it can’t read or forge.',
   },
   {
     art: OpenSourceArt,

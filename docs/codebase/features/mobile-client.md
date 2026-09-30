@@ -58,7 +58,8 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
 ## Data flow
 
 Nothing new travels. The phone holds the same `MachineLink`, speaks the same protocol, and (once
-enrolled) the same encrypted channel as any other browser. Only presentation branches.
+enrolled — every browser must, over the relay) the same encrypted channel as any other browser.
+A phone on a plain-http origin has no WebCrypto, so it cannot connect over the relay at all. Only presentation branches.
 
 Two decisions are read per render rather than stored: width (`useIsPhone`) and pointer type
 (`useIsCoarse`). They are deliberately distinct — a touchscreen laptop is coarse but not narrow,
@@ -224,8 +225,8 @@ an iPad in landscape is neither.
 
 - [transcript-performance](transcript-performance.md)
 - [hosted-machine-access](hosted-machine-access.md)
-- [end-to-end-encryption](end-to-end-encryption.md) — a phone on plain http has no WebCrypto and
-  cannot enrol; it needs an https origin
+- [end-to-end-encryption](end-to-end-encryption.md) — a phone on plain http has no WebCrypto, so it
+  cannot enrol and cannot connect over the relay at all; it needs an https origin
 - [multi-machine-client](multi-machine-client.md)
 - [web-push-notifications](web-push-notifications.md) — how a phone gets an alert while the app
   is backgrounded or closed, which the page's own JS cannot do on iOS

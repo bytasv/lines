@@ -265,13 +265,14 @@ export function stripSignature<T>(value: T): T {
 }
 
 /**
- * Whether an unsigned or unverifiable blob is refused outright.
+ * Whether an unsigned blob is refused outright.
  *
- * Off during rollout: every machine in a fleet has to be writing signatures
- * before refusing unsigned ones is anything other than a way to stop syncing.
- * The same switch as the channel's strict mode, deliberately — a deployment is
- * either taking the server's word for things or it is not.
+ * On by default: a blob without a signature is exactly what a storage server
+ * that wanted to author this machine's settings would write, so accepting one
+ * is taking the server's word for it. `LINES_E2EE_STRICT=0` turns it off, and
+ * is for recovery only — say, a fleet with a bridge too old to sign. A blob
+ * that is signed but does not verify is refused either way.
  */
 export function strictSync(): boolean {
-  return process.env.LINES_E2EE_STRICT === '1';
+  return process.env.LINES_E2EE_STRICT !== '0';
 }

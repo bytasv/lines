@@ -42,7 +42,7 @@ import { WORKER_LOST_MS, WorkerClient, type WorkerRpc } from './workerClient.ts'
 import { RelayClient, type AttestedGrant, type AttestedIdentity } from './relayClient.ts';
 import { deviceIdentity } from './device.ts';
 import { bridgeIdentity } from './e2eeIdentity.ts';
-import { e2eeRequired, guardRelayChannel } from './e2eeChannel.ts';
+import { guardRelayChannel } from './e2eeChannel.ts';
 import { isLoopbackAddress } from './locality.ts';
 import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
@@ -505,9 +505,9 @@ if (RELAY_URL) {
   new RelayClient(RELAY_URL, relayIdentity!.id, relayIdentity!.secret, {
     onChannel: (link, identity) => {
       // Never straight to handleConnection any more. A relay channel passes
-      // through the e2ee gate first: on a machine with an enrolled device it
-      // only reaches the bridge once it has authenticated with a key this
-      // machine pinned itself, rather than on the relay's say-so.
+      // through the e2ee gate first: an owner channel only reaches the bridge
+      // once it has authenticated with a key this machine pinned itself, rather
+      // than on the relay's say-so — from first launch, enrolled device or not.
       void bridgeIdentity()
         .then((self) => {
           const isGuest = !!identity.grant && identity.grant.scope !== 'owner';
@@ -828,11 +828,11 @@ async function handleConnection(
       }
     : OWNER_ACCESS;
 
-  // The E3 gate, stated once. The channel guard already refuses an
-  // unauthenticated owner channel on a machine with an enrolled device, so this
+  // The E3 gate, stated once. The channel guard already refuses every
+  // unauthenticated owner channel over the relay, so this
   // is the second lock on the same door: an owner grant over a relay needs a key
   // this machine pinned, never the relay's assertion about who is calling.
-  if (attested && !isGuest && !peerKey && e2eeRequired()) {
+  if (attested && !isGuest && !peerKey) {
     console.warn('[e2ee] refused an unauthenticated owner channel');
     ws.close(1008, 'unauthorized');
     return;

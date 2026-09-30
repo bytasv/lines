@@ -117,9 +117,9 @@ by the browser's own 50s relay) follows the identical set-token-then-`retryNow()
 - The desktop main window runs with `backgroundThrottling: false`, so the 50s token-relay timer
   keeps firing while the window is minimized or covered instead of being throttled toward the
   token's ~60s lifetime.
-- Only a refused signature verdict (forged, rolled back, or unsigned under `LINES_E2EE_STRICT`)
-  appends a `fail` row and logs a `console.warn`. An accepted-but-unsigned blob (the mixed-fleet
-  rollout case) applies silently — it is not a failure the user can act on.
+- Only a refused signature verdict (forged, rolled back, or unsigned, unless `LINES_E2EE_STRICT=0`)
+  appends a `fail` row and logs a `console.warn`. An unsigned blob accepted under
+  `LINES_E2EE_STRICT=0` applies silently — it is not a failure the user can act on.
 - The banner's Retry button is client-side feedback only ("Retrying…" for up to 5s, or until
   `storageStatus` changes) — it has no request/response of its own; the banner disappears when
   `storageStatus.available` flips.

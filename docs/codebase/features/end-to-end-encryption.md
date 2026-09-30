@@ -19,7 +19,8 @@ session on the machine. Anyone who could write those Postgres rows, or who obtai
 token the bridge forwards to storage, had prompt injection with a persistence guarantee.
 
 Both are closed here: the channel is authenticated against keys the machine pinned itself, and
-content is signed by the machine that wrote it.
+content is signed by the machine that wrote it. Both are **on by default** — there is no
+plaintext owner path and no opt-in.
 
 What this deliberately does **not** claim is in [Residual risks](#residual-risks). The headline:
 the code holding the keys is served by the deployment it distrusts, and browser-delivered
@@ -27,10 +28,11 @@ cryptography cannot close that.
 
 ## Entry points
 
-- Settings → **Encryption** (`web/src/components/EncryptionSection.tsx`) — enrol this browser,
-  see whether the current link is encrypted
-- The connect-time gate (`ConnectingMachine.tsx` → `EnrollGate`) — the *only* way to enrol a
-  browser that a machine is already refusing, and the reason it exists at all
+- Settings → **Encryption** (`web/src/components/EncryptionSection.tsx`) — see whether the
+  current link is encrypted, and enrol another key
+- The connect-time gate (`ConnectingMachine.tsx` → `EnrollGate`) — where every browser but the
+  desktop app's own window enrols first, since a machine refuses all relayed browsers until they
+  do; the reason it exists at all
 - Tray → **Show encryption code…**, and the enrolled-browser rows beneath it
   (`desktop/src/main.ts`)
 - `npm run enroll -w server` — the same actions without Electron: mint a code, `--list`,
@@ -42,7 +44,7 @@ cryptography cannot close that.
 - `server/src/e2eeIdentity.ts` — this machine's static key, the enrolled-peer list, the one-time
   enrollment code; all three 0600 under `~/.lines-app`, none ever uploaded
 - `server/src/e2eeChannel.ts` — the gate in front of `handleConnection`; `SecureChannel`,
-  `guardRelayChannel`, `e2eeRequired`
+  `guardRelayChannel`
 - `server/src/syncSignature.ts` — blob signing/verification, canonicalisation, signer pinning
 - `server/src/sync.ts` — `SIGNED_PATHS`, signing on push and `checkSignature` on pull
 - `server/src/index.ts` — the relay `onChannel` path, and `handleConnection`'s `peerKey` gate
@@ -61,7 +63,6 @@ cryptography cannot close that.
   predicate and refuses an unknown key before deriving anything from it
 - `SecureSession.seal` / `.open` — the record layer, with per-direction counters
 - `enrollProof` — HMAC under the one-time code; two labels, deliberately asymmetric
-- `e2eeRequired` — whether this machine refuses an unauthenticated owner channel
 - `guardRelayChannel` — wraps a relay channel, hands it to the bridge only when it may carry
   traffic
 - `signBlob` / `verifyBlob` / `canonicalize` — signed sync
@@ -70,7 +71,7 @@ cryptography cannot close that.
   and strips it. The query form is still read because an older desktop build's QR used it, but a
   query string reaches the server, which is the one party the code exists to exclude
 - `appUrlForOwnWindow()` — the URL the desktop shell opens its own window with, carrying a live
-  enrollment code in the fragment when this machine needs one. A machine's own window enrolling
+  enrollment code in the fragment whenever it runs in relay mode (a machine always needs one). A machine's own window enrolling
   by hand-typed code was a step with no security value: the shell and the bridge are already the
   same trust domain. The same fragment also always carries `host=<deviceId>`, unrelated to
   encryption — see [desktop-app](desktop-app.md#the-desktop-shells-own-window) — which
@@ -112,21 +113,32 @@ pull, the signer is checked against a pinned key and the counter against the las
   fails confirmation; a copied public key cannot confirm; replay, reorder, truncated tag, and
   re-labelled counter all refused; enrollment proof binds both keys
 - `server/src/e2eeChannel.test.ts` — the adversarial relay: forged `open` with no key, unknown
-  key, key substitution, a replay that must end the channel, and the unenrolled machine still
-  working in the clear
+  key, key substitution, a replay that must end the channel, an unenrolled machine refusing a
+  plaintext owner frame with 1008, and a guest channel still handed over in the constructor
 - `server/src/syncSignature.test.ts` — canonicalisation is order-independent; unsigned, forged,
   signer-changed and rolled-back blobs each refused with their own verdict
-- `server/src/relayEndToEnd.test.ts` — the honest-relay path still works end to end, which is
-  what caught the deadlock described below
+- `server/src/relayEndToEnd.test.ts` — the honest-relay path works end to end with a real
+  enrolment and handshake in the fixture, and a browser with no key is refused; this is what
+  caught the deadlock described below
+- `server/src/sync.availability.test.ts` — unsigned blob refused by default, accepted under
+  `LINES_E2EE_STRICT=0`, forged refused either way
 
 ## Business rules
 
-- A machine requires an authenticated channel **only once a device is enrolled**
-  (`e2eeRequired`). Shipping any other way would have locked every existing install out of its
-  own bridge on upgrade. Enrolling one browser is the step that turns the protection on.
+- Every relayed **owner** channel must authenticate, from a machine's first launch, whether or
+  not anything is enrolled — there is no plaintext owner path and no escape hatch. Before a
+  browser enrols, the only thing such a channel can do is enrol.
 - That requirement is machine-wide, not per-device. Per-device would be no protection at all: an
-  attacker simply declines to enrol and takes the unencrypted path. The cost is real and is
-  stated in the UI — after enrolling one browser, every other browser you own must enrol too.
+  attacker simply declines to enrol and takes the unencrypted path. Every browser you own
+  enrols once, and the UI says so.
+- The first browser gets in through the existing bootstrap: the desktop's own window is handed a
+  code by the shell and enrols itself; any other browser lands on `EnrollGate` and needs a code
+  from the tray ("Show encryption code…") or `npm run enroll -w server`. Direct (non-relay)
+  local sockets are unaffected, and guest channels are still plaintext (see residual risks).
+- Upgrade note: an existing install with nothing enrolled starts refusing web and phone browsers
+  after updating, until the user fetches a code. Desktop windows self-enrol; headless or Docker
+  bridges need the CLI. A browser on a plain-http origin has no WebCrypto and cannot connect over
+  the relay at all.
 - A code is single-use and expires in 15 minutes. Minting a new one invalidates the outstanding
   one.
 - 20 characters of a 32-symbol alphabet is 100 bits, which is what makes a *typed* code safe
@@ -150,9 +162,11 @@ pull, the signer is checked against a pinned key and the counter against the las
   sessions/workflows/steps/recipes are arrays; none can carry an envelope signature without a
   per-row column. Those rely on the review gate in front of pulled memory and on `adoptSynced`'s
   field stripping instead.
-- An unsigned blob is accepted with a warning during rollout; a forged, signer-changed or
-  rolled-back blob is always refused. `LINES_E2EE_STRICT=1` promotes the first case to a refusal
-  too.
+- Sync is strict by default: an unsigned blob is refused, as are forged, signer-changed and
+  rolled-back ones. `LINES_E2EE_STRICT=0` accepts unsigned blobs with a warning and is for
+  recovery only (say, a fleet with a bridge too old to sign). A refusal is logged and treated as
+  an empty cloud row, so the same sync pass pushes this machine's copy signed and overwrites it.
+  A mixed fleet is the cost: a bridge that never signs has its blobs refused by upgraded ones.
 - Machine signing keys are trust-on-first-use, then pinned. A *changed* signer is refused and
   surfaced, the way SSH treats a changed host key. The weakness is the first blob — a database
   compromised before this machine ever pulled from it can seed its own key.
@@ -174,9 +188,10 @@ pull, the signer is checked against a pinned key and the counter against the las
 - `guardRelayChannel` sits between `RelayClient` and `handleConnection`, not inside either: the
   bridge's message switch should not grow a crypto branch, and the relay client should stay a
   transport.
-- On a machine that requires no key, the channel is handed over **in the constructor**. The
-  bridge speaks first — `handleConnection` sends `hello` on open and the browser waits for it —
-  so deferring the handover until the first client frame deadlocks every relayed connection.
+- A **guest** channel, which has no key to present, is handed over **in the constructor**; an
+  owner channel is handed over only after the handshake. The bridge speaks first —
+  `handleConnection` sends `hello` on open and the browser waits for it — so deferring a guest's
+  handover until its first frame would deadlock every relayed guest connection.
   `relayEndToEnd.test.ts` caught exactly this.
 - A client that a machine has refused reconnects **silently**: no heartbeat, no auth relay. The
   bridge refuses the first plaintext app frame, and the heartbeat is one a second in, so without
@@ -210,8 +225,10 @@ Stated plainly, because a claim of "untrusted server" that ignores these is wors
 - **Availability.** A compromised relay can always drop or delay traffic. Integrity is
   defensible; uptime is not.
 - **Metadata.** The relay still sees which device, when, and how much.
-- **Strict mode has never run against a live client.** Do not default it on before the tray-side
-  re-enrolment path has been tested end to end.
+- **Strict sync is now the default but has not run against a live account.** It is covered by
+  unit tests only. Rows written before signing existed are refused until the first re-push
+  overwrites them, so verify against a real account before release; until then a mixed fleet
+  loses sync between signing and non-signing bridges.
 
 ## Related decisions
 

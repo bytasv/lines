@@ -59,11 +59,10 @@ class FakeChannel implements BrowserLink {
   }
 }
 
-/** A machine with exactly one device enrolled, and nothing on disk. */
-function policyFor(enrolled: string[], required = true): ChannelPolicy {
+/** A machine with exactly these devices enrolled, and nothing on disk. */
+function policyFor(enrolled: string[]): ChannelPolicy {
   return {
     isEnrolled: (key) => enrolled.includes(key),
-    required: () => required,
     enroll: async () => ({ error: 'not under test' }),
     touch: () => {},
   };
@@ -213,17 +212,40 @@ describe('an adversarial relay', () => {
     assert.equal(raw.closedWith?.code, 1008, 'and the channel is ended, not merely skipped');
   });
 
-  test('a machine with nothing enrolled still works in the clear', async () => {
-    // The rollout property: shipping this must not lock an existing install out
-    // of its own bridge before the user has enrolled anything.
+  test('a machine with nothing enrolled still refuses a plaintext owner channel', async () => {
+    // Encrypted by default: there is no "nothing enrolled, so anything goes"
+    // window for a relay to open a channel through. The only thing an owner
+    // channel can do before a browser enrols is enrol.
+    const { bridge } = await bridgeAndClient();
+    const raw = new FakeChannel();
+    let ready = false;
+    guardRelayChannel(raw, bridge, false, () => { ready = true; }, policyFor([]));
+    await settle();
+    assert.equal(ready, false, 'an owner channel is never handed over before the handshake');
+
+    raw.deliver({ type: 'ping' });
+    await until(() => raw.closedWith ?? undefined, 'the channel to be closed');
+    assert.equal(ready, false);
+    assert.equal(raw.closedWith?.code, 1008);
+    assert.match(
+      (raw.last('e2eeError') as { reason: string }).reason,
+      /end-to-end encrypted channel/,
+      'the reason the client keys its enrol gate on',
+    );
+  });
+
+  test('a guest channel is handed over at once, with no key', async () => {
+    // The bridge speaks first: `handleConnection` sends `hello` as soon as it
+    // has a channel, and the browser waits for it. A guest has no key to offer,
+    // so anything but a handover in the constructor deadlocks both sides.
     const { bridge } = await bridgeAndClient();
     const raw = new FakeChannel();
     let peerKey: string | null | undefined;
-    guardRelayChannel(raw, bridge, false, (_link, key) => { peerKey = key; }, policyFor([], false));
+    guardRelayChannel(raw, bridge, true, (_link, key) => { peerKey = key; }, policyFor([]));
+    assert.equal(peerKey, null, 'handed over synchronously, with no key to claim');
 
     raw.deliver({ type: 'ping' });
     await settle();
-    assert.equal(peerKey, null, 'handed over, with no key to claim');
-    assert.equal(raw.closedWith, null);
+    assert.equal(raw.closedWith, null, 'plaintext is still how a guest talks');
   });
 });

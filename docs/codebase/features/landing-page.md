@@ -79,9 +79,9 @@ None; the page is presentational.
   shows a status.
 - The header links are plain `#anchors`; smooth scrolling is scoped to the mounted page and is off
   under reduced motion.
-- Encryption copy states that end-to-end encryption is opt-in per browser: an enrolled browser's
-  traffic is carried by the relay but cannot be read or forged. It never claims everything is
-  encrypted or zero-knowledge.
+- Encryption copy states that end-to-end encryption is on by default: every browser enrols once
+  with a code from the machine, and its traffic is carried by the relay but cannot be read or
+  forged. It never claims everything is encrypted or zero-knowledge.
 - The app-wide theme is black, white and gray (`mono` primary as a light/dark virtual colour, a
   softened neutral dark scheme). Status colours keep their hues but are muted: `theme.ts` re-ramps
   Mantine's hues on one shared OKLCH lightness curve at lower chroma, with teal and cyan spread

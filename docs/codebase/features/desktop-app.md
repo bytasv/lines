@@ -180,8 +180,9 @@ its socket goes out over the relay like any other browser's, so the bridge canno
 from a phone by locality alone. Two things ride the URL **fragment** — never the query string,
 which the server would see:
 
-- `enroll=<code>`, when this machine needs one, so the window enrols itself rather than making the
-  user retype a code the tray just showed them.
+- `enroll=<code>`, always present in relay mode (every relayed owner channel must be encrypted),
+  so the window enrols itself rather than making the user retype a code the tray just showed
+  them.
 - `host=<deviceId>` (`device.id` from `deviceIdentity()`), unconditionally whenever a relay device
   identity exists. The web client reads it once, saves it to `localStorage` as
   `lines.hostDeviceId`, and strips it from the URL. `useCanBrowseFolders`
@@ -439,8 +440,10 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
 
 ### Encryption
 
-- The tray mints the one-time enrollment code ("Show encryption code…"), shows it as text and as
-  a QR, and lists enrolled browsers by fingerprint; clicking a row revokes it after a confirm.
+- Every browser other than the shell's own window needs a code before it can connect over the
+  relay. The tray mints the one-time enrollment code ("Show encryption code…"), shows it as text
+  and as a QR, and lists enrolled browsers by fingerprint; clicking a row revokes it after a
+  confirm. With none enrolled, the tray reads "No browser enrolled yet — enrol one to connect".
 - The QR encodes `<webUrl>?enroll=<code>`, so a phone's own camera opens the app with the code
   filled in — no scanner in the web bundle, nothing to install. The web app strips the parameter
   from the URL immediately, since a one-time code has no business surviving in history.

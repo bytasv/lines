@@ -224,16 +224,3 @@ export function touchPeer(publicKey: PublicKeyB64, file = E2EE_PEERS_FILE): void
     // A read-only home must not fail a connection over a timestamp.
   }
 }
-
-/**
- * Whether this bridge refuses any relay channel that has not authenticated with
- * a pinned key.
- *
- * Off by default, and that is deliberate: turning it on before every client the
- * user owns has enrolled locks them out of their own machine. The path back in
- * without a browser — re-enroll from the tray — has to be tested before this
- * defaults on.
- */
-export function strictMode(): boolean {
-  return process.env.LINES_E2EE_STRICT === '1';
-}

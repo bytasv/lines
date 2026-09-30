@@ -234,7 +234,9 @@ test('retryNow while down probes at once and recovers without waiting for the ti
 
   const statuses: boolean[] = [];
   h.sync.onStatusChange = (s) => statuses.push(s.available);
-  h.respond(() => json({}));
+  // An array, which carries no signature: an unsigned object at /settings would
+  // be refused and log a fail row after the recovery.
+  h.respond(() => json([]));
   await h.sync.retryNow();
 
   assert.equal(h.sync.status.available, true);
@@ -294,34 +296,65 @@ async function signingKey(): Promise<SigningIdentity> {
   return { publicKey: Buffer.from(raw).toString('base64'), privateKey: pair.privateKey };
 }
 
-test('an accepted unsigned blob logs no fail row, a refused forged one still does', async (t) => {
+/** Run `fn` with `LINES_E2EE_STRICT` set, restoring the previous value after. */
+function withStrictEnv(t: TestContext, value: string | undefined): void {
+  const previous = process.env.LINES_E2EE_STRICT;
+  if (value === undefined) delete process.env.LINES_E2EE_STRICT;
+  else process.env.LINES_E2EE_STRICT = value;
+  t.after(() => {
+    if (previous === undefined) delete process.env.LINES_E2EE_STRICT;
+    else process.env.LINES_E2EE_STRICT = previous;
+  });
+}
+
+test('an unsigned blob is refused by default, with a fail row saying why', async (t) => {
+  withStrictEnv(t, undefined);
+  const h = harness(t, { signers: memorySigners() });
+  // Everything answers an empty list except the signed settings row, which is
+  // what a storage server writing on its own would produce: no signature.
+  h.respond(() => (h.calls.at(-1)?.endsWith('/settings') ? json({ theme: 'dark' }) : json([])));
+
+  const pulled = await h.sync.pullAll();
+
+  assert.ok(pulled !== null && pulled !== THROTTLED, 'one refused resource must not abort the pull');
+  assert.equal(pulled.settings, null);
+  const fails = h.rows.filter((r) => r.event === 'fail');
+  assert.equal(fails.length, 1);
+  assert.equal(fails[0].kind, 'client');
+  assert.equal(fails[0].path, '/settings');
+  assert.match(String(fails[0].reason), /signature unsigned — refused/);
+});
+
+test('LINES_E2EE_STRICT=0 accepts an unsigned blob and logs no fail row', async (t) => {
+  withStrictEnv(t, '0');
+  const h = harness(t, { signers: memorySigners() });
+  h.respond(() => (h.calls.at(-1)?.endsWith('/settings') ? json({ theme: 'dark' }) : json([])));
+
+  const pulled = await h.sync.pullAll();
+
+  assert.ok(pulled !== null && pulled !== THROTTLED);
+  assert.deepEqual(pulled.settings, { theme: 'dark' });
+  assert.deepEqual(h.rows.filter((r) => r.event === 'fail'), []);
+});
+
+test('a forged blob is refused even with LINES_E2EE_STRICT=0', async (t) => {
+  withStrictEnv(t, '0');
   const h = harness(t, { signers: memorySigners() });
   h.respond(() => Promise.reject(new Error('connect ECONNREFUSED')));
   await oneRequest(h.sync);
 
-  // The probe pulls /settings, a signed path. Unsigned is accepted during the
-  // rollout, so the log shows only the recovery.
-  h.respond(() => json({ theme: 'dark' }));
-  const before = h.rows.length;
-  await h.sync.retryNow();
-  assert.equal(h.sync.status.available, true);
-  assert.deepEqual(h.rows.slice(before).map((r) => r.event), ['up']);
-
-  // Down again, then a probe that answers with tampered content under a real
-  // signature: that one is refused, and the user must be able to see why.
-  h.respond(() => Promise.reject(new Error('connect ECONNREFUSED')));
-  await oneRequest(h.sync);
+  // A probe that answers with tampered content under a real signature: that one
+  // is refused whatever the switch says, and the user must be able to see why.
   const signed = await signBlob({ theme: 'dark' }, await signingKey(), memorySigners());
   h.respond(() => json({ ...signed, theme: 'light' }));
-  const beforeForged = h.rows.length;
+  const before = h.rows.length;
   await h.sync.retryNow();
-  const rows = h.rows.slice(beforeForged);
+  const rows = h.rows.slice(before);
   assert.deepEqual(rows.map((r) => r.event), ['up', 'fail']);
   assert.equal(rows[1].kind, 'client');
   assert.equal(rows[1].path, '/settings');
   assert.match(String(rows[1].reason), /signature forged — refused/);
 });
-
 test('appendLog is optional — a failure without one still just fails', async (t) => {
   const original = globalThis.fetch;
   globalThis.fetch = (async () => {

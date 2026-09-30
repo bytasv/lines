@@ -325,11 +325,11 @@ function DiagnosticsFooter({ deviceId }: { deviceId: string }) {
 /**
  * The way back in when a machine refuses this browser for want of a key.
  *
- * This screen has to exist, and it has to be *here*: once a machine has an
- * enrolled browser it refuses every channel that cannot present a pinned key, so
- * a second computer never loads the app — and Settings → Encryption, the only
- * other place to enrol, lives behind the app. Without this, adding a second
- * machine after turning encryption on is impossible without a terminal.
+ * This screen has to exist, and it has to be *here*: a machine refuses every
+ * relayed channel that cannot present a pinned key — from its first launch, with
+ * nothing enrolled yet — so a new browser never loads the app, and Settings →
+ * Encryption, the only other place to enrol, lives behind the app. Without this,
+ * connecting any browser but the desktop app's own window would need a terminal.
  *
  * The socket behind this is deliberately silent (see `needsEnrollment` in
  * ws.ts): the enrollment frame is the only thing it may carry.
@@ -399,8 +399,8 @@ function EnrollGate({
           <GateHint>
             {handed
               ? `${name} handed this window a key. Setting it up…`
-              : 'That machine is set up to accept only browsers it has a key for, so it refused ' +
-                'this one. Enrol it once and this computer works like any other.'}
+              : 'That machine only accepts browsers it has a key for, and this one has none yet. ' +
+                'Enrol it once with a code from the machine and it connects from then on.'}
           </GateHint>
         </Stack>
 

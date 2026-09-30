@@ -762,10 +762,10 @@ refuse.
   on a relay channel comes from a static key the machine pinned itself, out of band, at
   enrollment. See [end-to-end-encryption](end-to-end-encryption.md); `guardRelayChannel` refuses
   an unauthenticated owner channel before `handleConnection` ever sees it.
-  - Rollout shape, which is why the old behaviour is still reachable: a machine with **no**
-    enrolled device behaves exactly as it did, because requiring a key before any exists would
-    have locked every install out of its own bridge. Enrolling one browser turns the requirement
-    on, machine-wide.
+  - Encrypted by default: the requirement holds from a machine's first launch, machine-wide, with
+    no plaintext owner path even when nothing is enrolled. Every browser must enrol once — the
+    desktop's own window does it automatically, any other lands on the connect-time gate. Guest
+    channels are the exception and stay plaintext.
   - The bridge still does not re-verify the Clerk token on a relay channel, and that part of the
     original reasoning stands: a second verifier means two failure modes and would make every
     relayed connection depend on the user's machine reaching Clerk's JWKS. The token is
