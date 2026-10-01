@@ -68,8 +68,11 @@ cryptography cannot close that.
 - `signBlob` / `verifyBlob` / `canonicalize` — signed sync
 - `cryptoUnavailable` — why this browser cannot hold a key at all (insecure origin, usually)
 - `takeEnrollCodeFromUrl` — reads a code the machine handed this page, from the URL **fragment**,
-  and strips it. The query form is still read because an older desktop build's QR used it, but a
+  and strips it (`dropEnrollParamFromUrl` is the shared strip). The query form is still read because an older desktop build's QR used it, but a
   query string reaches the server, which is the one party the code exists to exclude
+- `ProjectTabs` opens Settings > Encryption for an `enroll` fragment/query only while the current
+  machine is unpinned; for an already-enrolled browser (e.g. the desktop's own window, which
+  always carries a code) the stale param is dropped from the URL and the app lands on the index
 - `appUrlForOwnWindow()` — the URL the desktop shell opens its own window with, carrying a live
   enrollment code in the fragment whenever it runs in relay mode (a machine always needs one). A machine's own window enrolling
   by hand-typed code was a step with no security value: the shell and the bridge are already the

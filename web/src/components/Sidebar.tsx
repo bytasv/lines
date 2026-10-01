@@ -51,6 +51,7 @@ import {
   formatDuration,
   formatSpendUsd,
   isWorkflowFinished,
+  SESSION_SORT_KEY,
   sessionRowMeta,
 } from '../lib/format';
 import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
@@ -662,7 +663,7 @@ export function Sidebar({
   // Persisted like the toggles above. Defaults to urgency order: the session that
   // needs the user must not sit below newer idle ones in a busy project.
   const [sessionSort, setSessionSort] = useLocalStorage<SessionSort>({
-    key: 'lines.sessionSort',
+    key: SESSION_SORT_KEY,
     defaultValue: 'status',
   });
   const compare = useMemo(() => compareSessions(sessionSort), [sessionSort]);

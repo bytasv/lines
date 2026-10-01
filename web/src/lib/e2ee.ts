@@ -157,6 +157,20 @@ export function takeEnrollCodeFromUrl(): { code: string; viaQuery: boolean } | n
   const code = fromHash ?? fromQuery;
   if (!code) return null;
 
+  dropEnrollParamFromUrl();
+  return { code: code.toUpperCase(), viaQuery: !fromHash };
+}
+
+/**
+ * Strip `enroll` from both the query and the fragment, leaving everything else
+ * where it was. For a code that arrived but will not be used — a browser that
+ * already pinned this machine — so a reload cannot act on it again.
+ */
+export function dropEnrollParamFromUrl(): void {
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const query = new URLSearchParams(window.location.search);
+  if (!hash.has('enroll') && !query.has('enroll')) return;
+
   hash.delete('enroll');
   query.delete('enroll');
   const search = query.toString();
@@ -166,7 +180,6 @@ export function takeEnrollCodeFromUrl(): { code: string; viaQuery: boolean } | n
     '',
     `${window.location.pathname}${search ? `?${search}` : ''}${rest ? `#${rest}` : ''}`,
   );
-  return { code: code.toUpperCase(), viaQuery: !fromHash };
 }
 
 const HOST_DEVICE_KEY = 'lines.hostDeviceId';

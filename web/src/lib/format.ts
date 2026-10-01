@@ -141,6 +141,9 @@ const PROJECT_STATUS_RANK = new Map(PROJECT_STATUS_ORDER.map((m, i) => [m.label,
 /** How the sidebar orders a session list — persisted per browser. */
 export type SessionSort = 'status' | 'activity' | 'created';
 
+/** localStorage key the sidebar's sort persists under; the store reads it too. */
+export const SESSION_SORT_KEY = 'lines.sessionSort';
+
 /**
  * Sidebar row order for `status` mode, most urgent first: the running turn, then
  * the states that need the user in the tab-dot order above, then everything

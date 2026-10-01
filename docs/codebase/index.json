@@ -994,6 +994,8 @@
         "latestSessionIn",
         "rememberedSessionIn",
         "readLastSessions",
+        "readSessionSort",
+        "SESSION_SORT_KEY",
         "writeLastSession",
         "sessionsInProject",
         "projectStatusMeta",
@@ -1029,7 +1031,7 @@
         "auto-selection always excludes archived sessions; completed needs no separate check since the server always archives alongside it",
         "a project whose sessions are all archived auto-selects nothing (empty state) rather than opening an archived one",
         "an explicit selection already in the target project, including an archived session, is never overridden by a tab switch",
-        "a project switch prefers the project's remembered last-selected session (lines.lastSessionByProject) over latestSessionIn; latestSessionIn itself is unchanged (most recently created, non-archived) and remains the fallback when nothing is remembered or the remembered session is gone/archived, independent of the sidebar's own list-sort setting",
+        "a project switch prefers the project's remembered last-selected session (lines.lastSessionByProject) over latestSessionIn; latestSessionIn (top non-archived session under the user's sidebar sort) remains the fallback when nothing is remembered or the remembered session is gone/archived; the same pick also runs after the primary machine's hello when a cold launch left nothing selected and no create is pending",
         "the three sidebar groups (Sessions, Shared-with-me, Archived) and the project tab dot describe one machine's sessions only (sessionsOnMachine, see multi-machine-client) — the store still holds every linked machine's sessions, but the list is a display scope switched by the header's MachineSwitcher, not a merge",
         "Shared-with-me holds a session only when no project tab covers it — sessionsInProject checked against every tab, not just the active one — so a session belonging to another open tab never appears here just because a different tab is active",
         "the sidebar session list order is user-selectable via lines.sessionSort (persisted localStorage), applied to all three groups (Sessions, Shared-with-me, Archived): Status (default) ranks running first, then the tab-dot urgency order (plan ready > needs answer > needs approval > needs permission > interrupted > error), then background work, then done, then idle, tie-broken by lastActivityAt descending; Last active sorts by lastActivityAt descending; Created sorts by createdAt descending (the sidebar's pre-existing behavior)",
@@ -1068,7 +1070,7 @@
         "helloSignature is a cheap string (each session's id:updatedAt joined, plus project paths) rather than a hash of the whole hello payload, precisely so volatile fields (usage, worker/storage health) stay outside it and keep applying on every hello regardless of the short-circuit",
         "store changes here (the hello short-circuit, pendingCreate/seenSessionIds) are pure reducer logic with no web test harness backing them (web/ has no test runner) — the highest-risk, least-covered part of this feature; verified manually",
         "SessionRow is memoized — selecting a different session or any sessions-map update (e.g. a live turn ticking status) otherwise re-rendered every row in the list regardless of the size of the session being switched to; the memo relies on `session` keeping its object identity when unchanged, which sessionUpsert already guarantees by only replacing the entry that changed",
-        "compareSessions follows the same format.ts-never-imports-store.ts rule as projectStatusMeta: it takes plain SessionMeta and returns a comparator, so Sidebar.tsx is the only place .sort() is called",
+        "compareSessions follows the same format.ts-never-imports-store.ts rule as projectStatusMeta: it takes plain SessionMeta and returns a comparator, so Sidebar.tsx and the store's latestSessionIn (via a validated readSessionSort of the shared SESSION_SORT_KEY) are the only places it is applied",
         "SESSION_SORT_ORDER is built from STATUS_META.running, PROJECT_STATUS_ORDER, BACKGROUND_WORK_META, STATUS_META.done/.idle rather than a second hand-written urgency table, so the sidebar list order can never drift from the tab dot it points at",
         "lines.lastSessionByProject follows the same single-JSON-map-under-one-key convention as lines.drafts/lines.openFiles, keyed by project path; written by one store subscription keyed on selectedSessionId rather than at each selection call site"
       ],
@@ -1811,10 +1813,10 @@
         "the header <img> is height-driven (height 24, width auto) inside a plate with padding 4 and borderRadius 6",
         "alt=\"Lines\" on the header <img> is the only accessible name for the brand",
         "the boot splash is static HTML in index.html outside #root, one persistent element that React never renders or remounts, so its loop does not restart between boot steps or machine switches; lib/splash.ts only changes the caption and its state (shown, finishing, finished, leaving, hidden)",
-        "each boot step holds the splash with its own caption (Starting Lines, Signing you in, Finding your machines, Connecting to <machine>, Loading your sessions and projects, Opening your session); the splash has no header",
-        "the app is not rendered until the mark has finished drawing onto the static logo; it then mounts hidden under the splash, the splash fades out, and the app fades in the moment the splash is gone, with a 4s fallback if an expected app never mounts",
         "the splash is skipped before first paint (inline script in index.html) when Clerk is configured and the route is /welcome or /join/:code or there is no signed-in Clerk cookie; splashSkippedAtBoot exposes this; a wrong guess for a signed-in user is corrected when the app's first claim shows the splash again; builds without Clerk always keep it",
         "the splash layer scrolls only while shown (connecting help panel); in finishing, finished and leaving it clips, so the hand-over scale and the app mounting beneath cannot produce scrollbars",
+        "each boot step holds the splash with its own caption (Starting Lines, Signing you in, Finding your machines, Connecting to <machine>, Loading your sessions and projects, Opening your session); the splash has no header",
+        "the app is not rendered until the mark has finished drawing onto the static logo; it then mounts hidden under the splash, the splash fades out, and the app fades in the moment the splash is gone, with a 4s fallback if an expected app never mounts",
         "when the app opens on a session with no transcript loaded, the splash waits for it (capped at 6s) once per page load; a machine switch remounts the app and replays the sequence"
       ],
       "architecturalRules": [
@@ -3636,6 +3638,7 @@
         "enrollWithCode",
         "reconnectMachine",
         "takeEnrollCodeFromUrl",
+        "dropEnrollParamFromUrl",
         "appUrlForOwnWindow",
         "pinnedKey"
       ],
@@ -4010,10 +4013,10 @@
         "web/src/components/DownloadDesktopApp.tsx",
         "web/src/components/PairingDiagram.tsx",
         "web/index.html",
+        "web/src/lib/splash.ts",
         "web/src/components/LandingPage.module.css",
         "web/src/theme.ts",
         "web/src/components/ProviderMark.tsx",
-        "web/src/lib/splash.ts",
         "web/src/components/landing/art.tsx",
         "web/src/components/landing/StepArt.tsx",
         "web/src/components/landing/FeatureArt.tsx",
@@ -4026,10 +4029,10 @@
       ],
       "tests": [],
       "businessRules": [
+        "the landing page paints immediately, never behind the boot splash: index.html hides the splash before first paint for landing routes and signed-out visitors, and the root route renders LandingPage directly while Clerk is still loading for a guest, at the same tree position it keeps once signed out, so it does not remount",
         "generic claims say coding agent or list providers; strings that are truly provider-specific (Claude CLI status, Claude sign-in, SDK internals) stay provider-specific",
         "supporting another provider in the copy is one new AGENTS entry, kept local to LandingPage because shared/providers.ts is capability data, not marketing copy",
         "the install card says at least one of Claude Code or Codex must be installed on the paired machine",
-        "the landing page paints immediately, never behind the boot splash: index.html hides the splash before first paint for landing routes and signed-out visitors, and the root route renders LandingPage directly while Clerk is still loading for a guest, at the same tree position it keeps once signed out, so it does not remount",
         "encryption copy says end-to-end encryption is on by default, that every browser enrols once with a code from the machine, and that the relay carries traffic it cannot read or forge; it never claims everything is encrypted or zero-knowledge"
       ],
       "architecturalRules": [

@@ -93,7 +93,12 @@ import { setBridgeOwnerId } from './lib/clerk';
 import { ensurePushSubscription, removePushSubscription } from './lib/push';
 import { rememberDeviceId } from './lib/storage';
 import { updateFavicon } from './lib/favicon';
-import { sessionRowMeta } from './lib/format';
+import {
+  compareSessions,
+  SESSION_SORT_KEY,
+  sessionRowMeta,
+  type SessionSort,
+} from './lib/format';
 import type { MentionValue } from './lib/mentions';
 
 const ACTIVE_PROJECT_KEY = 'lines.activeProject';
@@ -248,6 +253,19 @@ function readLastSessions(): Record<string, string> {
     return raw ? (JSON.parse(raw) as Record<string, string>) : {};
   } catch {
     return {};
+  }
+}
+
+/**
+ * The sidebar's session sort, read from where its `useLocalStorage` keeps it
+ * (a JSON string), so auto-selection lands on the row the sidebar shows first.
+ */
+function readSessionSort(): SessionSort {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SESSION_SORT_KEY) ?? 'null') as unknown;
+    return raw === 'status' || raw === 'activity' || raw === 'created' ? raw : 'status';
+  } catch {
+    return 'status';
   }
 }
 
@@ -654,7 +672,8 @@ function sameStringMap(a: Record<string, string>, b: Record<string, string>): bo
 }
 
 /**
- * Most recently created non-archived session in the given project, if any.
+ * Top row of the user's sidebar sort among the project's non-archived sessions,
+ * if any.
  *
  * Archived sessions are skipped so auto-selection never lands on a row the
  * sidebar hides in its "Archived (N)" group. `completed` needs no separate
@@ -667,7 +686,7 @@ function latestSessionIn(
 ): SessionMeta | undefined {
   return sessionsInProject(sessions, projectKeys, project)
     .filter((s) => !s.archived)
-    .sort((a, b) => b.createdAt - a.createdAt)[0];
+    .sort(compareSessions(readSessionSort()))[0];
 }
 
 /**
@@ -2071,6 +2090,16 @@ export const useStore = create<UiState>((set, get) => {
         const { selectedSessionId } = get();
         if (selectedSessionId && !sessions[selectedSessionId]) {
           set({ selectedSessionId: null });
+        }
+        // A cold launch at `/` restores the tab but nothing ever picked a session
+        // for it — `projects` only arrives on change. Run the tab's own pick
+        // (remembered, else top sidebar row). Not while a create is pending: its
+        // claim hands the selection to the new session instead.
+        {
+          const { activeProject, pendingCreate } = get();
+          if (fromPrimary && activeProject && !get().selectedSessionId && !pendingCreate) {
+            get().setActiveProject(activeProject);
+          }
         }
         // Scoped to THIS machine's sessions. Unscoped, one machine's hello deletes
         // the drafts of another machine's sessions — unsent text the user typed,

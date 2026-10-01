@@ -50,6 +50,8 @@ import { SettingsModal } from './SettingsModal';
 import { UsageIndicator } from './UsageIndicator';
 import { UserMenu, type UserMenuAction } from './UserMenu';
 import { CLERK_ENABLED } from '../lib/clerk';
+import { dropEnrollParamFromUrl, pinnedKey } from '../lib/e2ee';
+import { rememberedDeviceId } from '../lib/storage';
 
 function baseName(path: string) {
   return path.split('/').filter(Boolean).pop() ?? path;
@@ -592,12 +594,18 @@ function HeaderActions() {
   // Both forms: the code moved into the fragment (a query string is sent to the
   // server, which is the one party it must not reach), but a QR printed by an
   // older desktop build still uses the query.
-  const enrolling =
+  //
+  // Only while the machine is still unpinned: the desktop's own window always
+  // carries a code, and a browser that is already enrolled has no use for it —
+  // that stale code is dropped from the URL instead of popping Settings.
+  const hasEnrollParam =
     new URLSearchParams(window.location.search).has('enroll') ||
     new URLSearchParams(window.location.hash.replace(/^#/, '')).has('enroll');
+  const enrolling = hasEnrollParam && !pinnedKey(rememberedDeviceId() ?? '');
   useEffect(() => {
     if (enrolling) setSettingsOpen(true);
-  }, [enrolling]);
+    else if (hasEnrollParam) dropEnrollParamFromUrl();
+  }, [enrolling, hasEnrollParam]);
 
   const openDocs = () => navigate('/docs');
   const themeLabel = dark ? 'Light mode' : 'Dark mode';

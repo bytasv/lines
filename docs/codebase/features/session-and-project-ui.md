@@ -19,7 +19,9 @@ and how status is surfaced in the sidebar row and the project tab.
   changes (tab click, `hello`/reconnect, or a `/session/<id>` deep link): keep an already-valid
   selection, or fall back to the project's own last-selected session
   (`lines.lastSessionByProject`) when that session still exists and isn't archived, or otherwise
-  auto-select that project's most recently created *non-archived* session. Never auto-open an
+  auto-select the top row of the user's sidebar sort among that project's *non-archived* sessions.
+  Also runs after the primary machine's `hello` when a cold launch restored an active project but
+  no session is selected (and no create is pending). Never auto-open an
   archived session — those stay reachable only via the sidebar's "Archived (N)" group.
 - **Project tab status dot** — each project tab in the header shows the single most important
   actionable status across that project's sessions as a colored pulsing dot in place of the
@@ -43,8 +45,8 @@ and how status is surfaced in the sidebar row and the project tab.
   could receive one; the guard stays for a relay that still does.
 - **Session list sorting** — a per-browser choice of sidebar session order: Status (default,
   urgency-ranked), Last active, or Created. Applies to all three sidebar groups (Sessions,
-  Shared-with-me, Archived). Distinct from auto-selection (`latestSessionIn`), which still always
-  picks by `createdAt` regardless of this setting.
+  Shared-with-me, Archived). Auto-selection (`latestSessionIn`) follows the same setting, so a
+  launch lands on the row the sidebar shows first.
 
 ## Entry points
 
@@ -60,7 +62,7 @@ and how status is surfaced in the sidebar row and the project tab.
 - `web/src/store.ts` — `readDraft`, `writeDraft`, `pruneDrafts`, `readDraftAttachments`,
   `writeDraftAttachments`, `pruneDraftAttachments`; `sessionUpsert`'s intent-based auto-select and
   `focusComposerFor`; the `hello` reducer's signature short-circuit; `setActiveProject`, `latestSessionIn`,
-  `rememberedSessionIn`, `readLastSessions`/`writeLastSession`, `sessionsInProject`;
+  `rememberedSessionIn`, `readLastSessions`/`writeLastSession`, `readSessionSort`, `sessionsInProject`;
   `seenSessionStatus`, `reconcileSeenStatus`; `actionError`
 - `web/src/ws.ts` — `send()` returning `boolean` and setting `actionError` on a dropped
   non-prompt message
@@ -88,8 +90,10 @@ and how status is surfaced in the sidebar row and the project tab.
   effect keyed on `focusComposerFor`
 - `setActiveProject(path)` — single entry point for changing the active project; all three entry
   points above call it
-- `latestSessionIn(sessions, projectKeys, project)` — most recently created (`createdAt`)
-  non-archived session in a project, or `undefined`
+- `latestSessionIn(sessions, projectKeys, project)` — top non-archived session in a project under
+  the user's sidebar sort (`compareSessions(readSessionSort())`), or `undefined`
+- `readSessionSort()` — reads the sidebar's persisted sort from `SESSION_SORT_KEY` (`lib/format.ts`,
+  shared with `Sidebar.tsx`), validated, defaulting to `status`
 - `rememberedSessionIn(sessions, projectKeys, project)` — the project's entry in
   `readLastSessions()`, resolved against current membership; `undefined` if the id is missing,
   archived, or no longer in the project
@@ -234,6 +238,12 @@ last-selected session, if it still exists in the project and isn't archived — 
 comes back empty falls through to `latestSessionIn`, which itself falls back to `null` (empty
 state) when the project has no non-archived sessions.
 
+On a cold launch the active project is restored from localStorage but the URL names no session,
+and the server's `projects` message only arrives on change. So the `hello` reducer, after
+clearing a dangling selection, calls `setActiveProject` again when the primary machine's `hello`
+leaves nothing selected — unless a create is pending, whose claim must own the selection. A
+second machine's `hello` never triggers it.
+
 A separate store subscription records `selectedSessionId` into `lines.lastSessionByProject`
 whenever it changes to a session that belongs to the active project — the same "one subscription,
 not scattered mutation sites" shape `reconcileSeenStatus` already follows. A stale entry (the
@@ -323,10 +333,10 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 - An explicit selection already in the target project — including an archived session opened via
   the sidebar's Archived group or a deep link — is never overridden by a tab switch.
 - A project switch prefers the project's remembered last-selected session
-  (`lines.lastSessionByProject`) over `latestSessionIn`; `latestSessionIn` itself is unchanged —
-  most recently created (`createdAt`) non-archived session — and remains the fallback when nothing
-  is remembered, the remembered session is gone, or it's now archived. Both are independent of the
-  sidebar's own list-sort setting below.
+  (`lines.lastSessionByProject`) over `latestSessionIn`; `latestSessionIn` — the top non-archived
+  session in the user's sidebar sort — remains the fallback when nothing
+  is remembered, the remembered session is gone, or it's now archived. Both also run on the primary
+  machine's `hello` when nothing is selected.
 - All three sidebar groups (Sessions, Shared-with-me, Archived), and the project tab's status dot
   via `reconcileSeenStatus`, describe one machine's sessions only —
   `sessionsOnMachine(sessions, sessionMachine, primaryDeviceId ?? '')` — not every machine this
