@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Alert,
   Button,
   Card,
   Group,
   List,
-  Loader,
   Stack,
   Text,
   TextInput,
@@ -26,9 +26,11 @@ import { cryptoUnavailable, takeEnrollCodeFromUrl } from '../lib/e2ee';
 import { enrollWithCode, linkDiagnostics, type LinkDiagnostics } from '../ws';
 import { diag, diagReport, markDiagSent } from '../lib/diag';
 import { unlinkedMachineHealth } from '../lib/machineHealth';
+import { useSplash } from '../lib/splash';
 import { useStore } from '../store';
 import { MachineDot } from './MachineDot';
 import { GateHint, GateShell } from './GateShell';
+import { UserMenu } from './UserMenu';
 
 /** After this long, a connection that has not landed is worth explaining rather than just spinning. */
 const SLOW_MS = 6000;
@@ -97,12 +99,26 @@ export function ConnectingMachine({
       status,
       offline,
       phase: link.phase,
+      stage: link.stage,
       phaseMs: link.since === null ? null : Date.now() - link.since,
       attempts: link.attempts,
       lastCloseCode: link.lastClose?.code ?? null,
     });
     // Once per stall, not per status flicker: status/offline deliberately omitted.
   }, [slow, deviceId]);
+
+  // Named, because the whole point of the split is that the work happens on a
+  // specific computer of theirs. Held from here rather than rendered: the splash
+  // that started at first paint stays up, so its loop runs straight through.
+  const slot = useSplash(
+    refusal
+      ? null
+      : offline
+        ? `${name} is not connected right now`
+        : status === 'connected'
+          ? 'Loading your sessions and projects…'
+          : `Connecting to ${name}…`,
+  );
 
   const reconnect = async () => {
     setBusy(true);
@@ -126,120 +142,139 @@ export function ConnectingMachine({
     );
   }
 
-  return (
-    <GateShell>
-      <Stack align="center" gap="md">
-        <Loader size="lg" />
-        <Stack align="center" gap={4}>
-          <Title order={4}>
-            {/* Named, because the whole point of the split is that the work
-                happens on a specific computer of theirs. */}
-            Connecting to {name}
-          </Title>
+  if (!offline && !slow) return null;
+
+  // Only the escalation is React's, rendered into the slot under the caption.
+  const help = (
+    <>
+      {/* The splash has no header, and without the account menu this screen is
+          a dead end for anyone signed in as the wrong account (see GateShell). */}
+      <div className="lines-splash-account">
+        <UserMenu />
+      </div>
+      <Stack className="lines-splash-panel" align="center" gap="xs" mt="lg" maw={420} mx="auto">
+        {offline ? (
           <GateHint>
-            {offline
-              ? 'That machine is not connected right now.'
-              : status === 'connected'
-                ? 'Loading your sessions and projects…'
-                : 'Waiting for your machine to answer…'}
+            Lines is not running on {name}, or the machine is asleep. Wake it and open Lines, then reconnect.
           </GateHint>
-        </Stack>
+        ) : (
+          <SlowHint deviceId={deviceId} name={name} />
+        )}
 
-        {(offline || slow) && (
-          <Stack align="center" gap="xs" mt="xs" maw={420}>
-            <GateHint>
-              {offline
-                ? `Lines is not running on ${name}, or the machine is asleep. Wake it and open Lines, then reconnect.`
-                : `Taking longer than usual. Check that Lines is running on ${name} and that the machine is awake.`}
-            </GateHint>
+        <Button
+          variant="light"
+          size="xs"
+          leftSection={<IconRefresh size={14} />}
+          loading={busy}
+          onClick={() => void reconnect()}
+          mt={4}
+        >
+          Reconnect now
+        </Button>
 
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<IconRefresh size={14} />}
-              loading={busy}
-              onClick={() => void reconnect()}
-              mt={4}
-            >
-              Reconnect now
-            </Button>
-
-            {others.length > 0 && (
-              <Stack align="stretch" gap={6} w="100%" mt={4}>
-                <Text size="xs" c="dimmed" ta="center">
-                  Or use a different machine:
-                </Text>
-                {others.map((device) => {
-                  // No socket to these, so the only honest signal is the relay's
-                  // presence report — and "seen 2h ago" once that goes stale.
-                  // Switching to a machine that is also asleep is the dead end
-                  // this screen exists to avoid.
-                  const health = unlinkedMachineHealth(device);
-                  return (
-                    <Button
-                      key={device.id}
-                      variant="light"
-                      size="xs"
-                      leftSection={<IconDeviceLaptop size={14} />}
-                      rightSection={
-                        <Group gap={5} wrap="nowrap">
-                          <Text size="xs" c="dimmed">
-                            {health.label}
-                          </Text>
-                          <MachineDot health={health} />
-                        </Group>
-                      }
-                      justify="space-between"
-                      onClick={() => onSwitch(device.id)}
-                    >
-                      {device.name}
-                    </Button>
-                  );
-                })}
-              </Stack>
-            )}
-
-            <Button
-              variant="subtle"
-              size="xs"
-              color="gray"
-              leftSection={<IconPlus size={14} />}
-              onClick={onPairNew}
-            >
-              Pair another machine
-            </Button>
-
-            <Stack align="center" gap={2} mt={4}>
-              <Button
-                variant="subtle"
-                size="xs"
-                color="red"
-                leftSection={<IconUnlink size={14} />}
-                onClick={() => {
-                  if (!confirmUnpair) {
-                    setConfirmUnpair(true);
-                    return;
+        {others.length > 0 && (
+          <Stack align="stretch" gap={6} w="100%" mt={4}>
+            <Text size="xs" c="dimmed" ta="center">
+              Or use a different machine:
+            </Text>
+            {others.map((device) => {
+              // No socket to these, so the only honest signal is the relay's
+              // presence report — and "seen 2h ago" once that goes stale.
+              // Switching to a machine that is also asleep is the dead end
+              // this screen exists to avoid.
+              const health = unlinkedMachineHealth(device);
+              return (
+                <Button
+                  key={device.id}
+                  variant="light"
+                  size="xs"
+                  leftSection={<IconDeviceLaptop size={14} />}
+                  rightSection={
+                    <Group gap={5} wrap="nowrap">
+                      <Text size="xs" c="dimmed">
+                        {health.label}
+                      </Text>
+                      <MachineDot health={health} />
+                    </Group>
                   }
-                  void onUnpair();
-                }}
-              >
-                {confirmUnpair ? 'Unpair — you’ll need a new code' : `Unpair ${name}`}
-              </Button>
-              <Text size="xs" c="dimmed" ta="center">
-                {/* Says what happens next, because otherwise this looks like a
-                    one-way door: the previous escape hatch asked for a pairing
-                    code the machine would not issue while still claimed. */}
-                Unpairing frees the machine. The Lines icon in its menu bar will show a fresh
-                pairing code you can enter here.
-              </Text>
-            </Stack>
-
-            <DiagnosticsFooter deviceId={deviceId} />
+                  justify="space-between"
+                  onClick={() => onSwitch(device.id)}
+                >
+                  {device.name}
+                </Button>
+              );
+            })}
           </Stack>
         )}
+
+        <Button
+          variant="subtle"
+          size="xs"
+          color="gray"
+          leftSection={<IconPlus size={14} />}
+          onClick={onPairNew}
+        >
+          Pair another machine
+        </Button>
+
+        <Stack align="center" gap={2} mt={4}>
+          <Button
+            variant="subtle"
+            size="xs"
+            color="red"
+            leftSection={<IconUnlink size={14} />}
+            onClick={() => {
+              if (!confirmUnpair) {
+                setConfirmUnpair(true);
+                return;
+              }
+              void onUnpair();
+            }}
+          >
+            {confirmUnpair ? 'Unpair — you’ll need a new code' : `Unpair ${name}`}
+          </Button>
+          <Text size="xs" c="dimmed" ta="center">
+            {/* Says what happens next, because otherwise this looks like a
+                one-way door: the previous escape hatch asked for a pairing
+                code the machine would not issue while still claimed. */}
+            Unpairing frees the machine. The Lines icon in its menu bar will show a fresh
+            pairing code you can enter here.
+          </Text>
+        </Stack>
+
+        <DiagnosticsFooter deviceId={deviceId} />
       </Stack>
-    </GateShell>
+    </>
   );
+  return slot ? createPortal(help, slot) : help;
+}
+
+/**
+ * Why a connection is slow, read off what the link is doing. Only the states in
+ * which the machine has not been heard from are reason to suspect it: once it has
+ * answered, the wait is the network's, and sending the user to check a computer
+ * that is fine helps nobody.
+ */
+function slowHint(link: LinkDiagnostics, name: string): string {
+  if (link.phase === 'connecting') return 'Still signing you in. Your network may be slow.';
+  if (link.phase === 'socket-connecting') return 'Still connecting. Your network may be slow.';
+  if (link.stage === 'handshake') return `Setting up an encrypted connection to ${name}. Your network may be slow.`;
+  if (link.stage === 'hello') {
+    return link.encrypted
+      ? `${name} answered and is sending your sessions. This network is slow, so it can take a while.`
+      : `Waiting for ${name} to send your sessions. Your network may be slow.`;
+  }
+  return `Taking longer than usual. Check that Lines is running on ${name} and that the machine is awake.`;
+}
+
+/** Re-reads the link every second: nothing in the store announces its progress. */
+function SlowHint({ deviceId, name }: { deviceId: string; name: string }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return <GateHint>{slowHint(linkDiagnostics(deviceId), name)}</GateHint>;
 }
 
 function describeLink(d: LinkDiagnostics, now: number): string {
@@ -247,10 +282,12 @@ function describeLink(d: LinkDiagnostics, now: number): string {
   const age = secs === null ? '' : ` ${secs}s`;
   const tries = d.attempts > 1 ? ` · attempt ${d.attempts}` : '';
   const close = d.lastClose ? ` · last close ${d.lastClose.code}${d.lastClose.reason ? ` ${d.lastClose.reason}` : ''}` : '';
+  const open =
+    d.stage === 'live' ? 'connected' : d.stage === 'hello' ? 'channel ready, waiting for hello' : 'socket open, encrypting';
   const phase = {
     connecting: 'waiting for sign-in token',
     'socket-connecting': 'opening socket',
-    open: 'socket open, waiting for machine',
+    open,
     closed: 'socket closed',
     none: 'no socket',
   }[d.phase];

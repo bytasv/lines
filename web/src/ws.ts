@@ -74,10 +74,21 @@ async function resolveBridgeUrl(): Promise<void> {
 }
 
 const PING_INTERVAL_MS = 1000;
-// Declare the link dead after this long without a pong (~10 missed pings). Generous
+// Declare the link dead after this long without a pong (~30 missed pings). Generous
 // on purpose: pings are sent and pongs are handled on the main thread, so a long
-// render blocks both and a tight timeout kills a perfectly healthy socket.
-const PONG_TIMEOUT_MS = 10_000;
+// render blocks both and a tight timeout kills a perfectly healthy socket. A pong
+// also queues behind any large frame already on its way, such as a transcript on a
+// slow link, and arrives only once all of it has.
+const PONG_TIMEOUT_MS = 30_000;
+// Before the first `hello` the pong timeout does not apply. The bridge sends its
+// full snapshot first, so on a slow link every pong waits behind it, and closing the
+// socket at the pong timeout redialled into the same download: a loop that never
+// reached the app. The channel gets this long from ready to `hello` instead.
+const HELLO_TIMEOUT_MS = 60_000;
+// From socket open to an established encrypted channel. The heartbeat only starts
+// once the channel is ready, so without this a lost handshake frame, or a bridge or
+// IndexedDB that never answers, left an open socket that never retried.
+const HANDSHAKE_TIMEOUT_MS = 20_000;
 const RECONNECT_DELAY_MS = 1500;
 // Slower than an ordinary reconnect: a 1008 is usually a state that needs
 // something to change elsewhere (sign in again, start the machine), not a blip.
@@ -158,6 +169,14 @@ interface MachineLink {
    * sends resolving out of order would look like a replay rather than a race.
    */
   sending: Promise<void>;
+  /** This socket has delivered its `hello`. Reset on every open. */
+  greeted: boolean;
+  /**
+   * The relay told this socket that no bridge is attached. Per socket, not the
+   * store's `machineOffline`: that one lasts until a `hello` clears it, so it
+   * would still read "away" on the socket a re-attach redials.
+   */
+  away: boolean;
   /** Resolver for an enrollment in flight on this link, if any. */
   enrollWaiter:
     | ((msg: { type: 'e2eeEnrolled'; bridgeKey: string; proof: string } | { type: 'e2eeError'; reason: string }) => void)
@@ -238,6 +257,13 @@ async function connectToken(link: MachineLink): Promise<string | null | undefine
 /** What the connecting screen shows about a link, and what a report carries. */
 export interface LinkDiagnostics {
   phase: 'connecting' | 'socket-connecting' | 'open' | 'closed' | 'none';
+  /**
+   * How far an open socket has got: the encrypted handshake, then the wait for
+   * `hello`, then live. Null unless `phase` is 'open'.
+   */
+  stage: 'handshake' | 'hello' | 'live' | null;
+  /** The channel is end-to-end encrypted, which also proves the machine answered. */
+  encrypted: boolean;
   since: number | null;
   attempts: number;
   lastClose: { code: number; reason: string; at: number } | null;
@@ -245,7 +271,9 @@ export interface LinkDiagnostics {
 
 export function linkDiagnostics(deviceId: string): LinkDiagnostics {
   const link = links.get(deviceId);
-  if (!link) return { phase: 'none', since: null, attempts: 0, lastClose: null };
+  if (!link) {
+    return { phase: 'none', stage: null, encrypted: false, since: null, attempts: 0, lastClose: null };
+  }
   const rs = link.socket?.readyState;
   const phase =
     link.connectingSince !== null
@@ -265,7 +293,15 @@ export function linkDiagnostics(deviceId: string): LinkDiagnostics {
         : phase === 'open'
           ? link.openedAt
           : (link.lastClose?.at ?? null);
-  return { phase, since, attempts: link.attempts, lastClose: link.lastClose };
+  const stage = phase !== 'open' ? null : link.expectsSecure ? 'handshake' : link.greeted ? 'live' : 'hello';
+  return {
+    phase,
+    stage,
+    encrypted: link.secure !== null,
+    since,
+    attempts: link.attempts,
+    lastClose: link.lastClose,
+  };
 }
 
 function linkFor(deviceId: string): MachineLink {
@@ -290,6 +326,8 @@ function linkFor(deviceId: string): MachineLink {
       finishHandshake: null,
       outbox: [],
       sending: Promise.resolve(),
+      greeted: false,
+      away: false,
       enrollWaiter: null,
       connectingSince: null,
       attempts: 0,
@@ -528,9 +566,32 @@ export function retryStorage() {
   if (link) void relayAuth(link);
 }
 
+/**
+ * Close a socket whose encrypted handshake has not finished in time.
+ *
+ * Re-armed rather than fired while the relay says the machine is away, as the
+ * hello deadline is: the relay closes every channel the moment a bridge attaches,
+ * which is the redial that state needs, and closing earlier only spends a fresh
+ * token and socket per attempt on a machine that is asleep.
+ */
+function armHandshakeDeadline(link: MachineLink, generation: number) {
+  setTimeout(() => {
+    if (generation !== link.generation || !link.expectsSecure) return;
+    if (link.socket?.readyState !== WebSocket.OPEN) return;
+    if (link.away) {
+      armHandshakeDeadline(link, generation);
+      return;
+    }
+    diag('handshake-timeout', { device: link.deviceId, attempt: link.attempts });
+    link.socket.close();
+  }, HANDSHAKE_TIMEOUT_MS);
+}
+
 function startHeartbeat(link: MachineLink) {
   if (link.heartbeatTimer) clearInterval(link.heartbeatTimer);
   link.lastPongAt = Date.now();
+  // When this channel started waiting for its `hello`.
+  let helloSince = link.lastPongAt;
   // A fresh heartbeat supersedes any probe still counting down against the
   // socket it replaced.
   link.awaitingProbeSince = null;
@@ -546,6 +607,17 @@ function startHeartbeat(link: MachineLink) {
     writeToLink(link, JSON.stringify({ type: 'ping' } satisfies ClientMessage));
     if (stalledMs > PING_INTERVAL_MS) {
       link.lastPongAt = now;
+      return;
+    }
+    // Before `hello`, a missing pong says nothing: see HELLO_TIMEOUT_MS. Nor does
+    // the wait count while the relay says the machine is away (armHandshakeDeadline).
+    if (!link.greeted) {
+      if (link.away) {
+        helloSince = now;
+      } else if (now - helloSince > HELLO_TIMEOUT_MS) {
+        diag('hello-timeout', { device: link.deviceId, attempt: link.attempts });
+        link.socket.close();
+      }
       return;
     }
     // No pong for a while means the socket is dead even if the OS never told us.
@@ -766,6 +838,8 @@ async function openSocket(link: MachineLink) {
     diag('open', { device: link.deviceId, attempt, ms: link.openedAt - link.dialedAt });
     useStore.getState().setConnectionStatus('connected', link.deviceId);
     link.awaitingProbeSince = null;
+    link.greeted = false;
+    link.away = false;
     link.secure = null;
     link.finishHandshake = null;
     // Whatever the previous socket could not deliver describes a state this one
@@ -792,6 +866,7 @@ async function openSocket(link: MachineLink) {
         console.warn('[e2ee] handshake could not start', err);
         socket.close();
       });
+      armHandshakeDeadline(link, generation);
       return;
     }
     startHeartbeat(link);
@@ -881,7 +956,8 @@ function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayContro
   // reducer has no case for them and would drop them silently.
   if (msg.type === 'deviceOffline' || msg.type === 'deviceOnline') {
     diag(msg.type, { device: link.deviceId });
-    useStore.getState().setMachineOffline(msg.type === 'deviceOffline', link.deviceId);
+    link.away = msg.type === 'deviceOffline';
+    useStore.getState().setMachineOffline(link.away, link.deviceId);
     return;
   }
   if (msg.type === 'pong') {
@@ -920,6 +996,7 @@ function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayContro
       bridge: msg.bridge?.version ?? null,
     });
     link.attempts = 0;
+    link.greeted = true;
     uploadStallIfAny(link.deviceId);
     if (useStore.getState().protocolSkew) {
       console.warn(

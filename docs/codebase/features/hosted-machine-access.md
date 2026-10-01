@@ -110,12 +110,13 @@ relay pipes frames between them, and the UI that gates all of it.
 - `web/src/lib/wake.ts` — `bootDial`, the optimistic pre-list dial decision the gate makes at boot
   (see Data flow); `wakeAction`/`probeExpired`/`wakeDebounced` live in the same file but belong to
   [multi-machine-client](multi-machine-client.md)
-- `web/src/components/ConnectMachine.tsx` — pairing screen and its loading/error siblings
+- `web/src/components/ConnectMachine.tsx` — pairing screen and its error siblings
 - `web/src/components/ChooseMachine.tsx` — the first-visit machine list, shown before anything
   connects
 - `web/src/components/ConnectingMachine.tsx` — shown between "device chosen" and the bridge's
-  first `hello`; offers the escalating way out once that takes too long, or at once when the relay
-  says the machine is offline
+  first `hello`; holds the boot splash with a caption and, once that takes too long or the relay
+  says the machine is offline, portals the escalating way out into the splash
+- `web/src/lib/splash.ts` — the boot splash controller; see [brand-logo](brand-logo.md)
 - `web/src/components/DownloadDesktopApp.tsx` — the DMG link and the Gatekeeper steps an ad-hoc
   signed build forces
 - `web/src/components/GateShell.tsx` — chrome (header + sign-out) shared by every pre-app screen
@@ -416,7 +417,7 @@ used because these responses carry Clerk-authenticated user data.
 ### The gate
 
 1. `DeviceGate` mounts, calls `useDevices().refresh()` (`GET /v1/devices`), and renders
-   `ConnectMachineLoading` until it resolves.
+   the boot splash ("Finding your machines…") until it resolves.
 2. Zero devices → `ConnectMachine` (the pairing form + diagram). Claiming a code refreshes the
    list, which re-renders the gate off the new result — no navigation involved.
 3. One or more devices, and this browser has no remembered choice → `ChooseMachine`: the whole
@@ -438,7 +439,8 @@ used because these responses carry Clerk-authenticated user data.
      `chosen` can disagree, and a left-connected wrong guess would retry on every `1008` and
      re-read the device list each time.
 5. Between the socket opening and its first `hello`, `bootstrapped` is false —
-   `ConnectingMachine` renders instead of the app, naming the chosen machine. It escalates either
+   `ConnectingMachine` holds the splash instead of showing the app, naming the chosen machine in
+   the caption. Its help appears under the caption either
    after 6s with no `hello` **or** immediately on a `deviceOffline` frame, which is a fact where
    the 6s timer is only a guess. Waiting alone is not a recoverable state here — the socket
    reaches the relay fine and simply finds no agent attached, so the reconnect loop by itself
@@ -709,7 +711,16 @@ refuse.
 - Only one connect is in flight per link (`connectingSince`). Wake, online, retry and "Reconnect
   now" all funnel into `openSocket`, and parallel mints would each wait out the same timeout.
 - Storage calls from the browser carry a 10s token deadline and a 15s request `AbortSignal`, so
-  `ConnectMachineLoading` cannot spin forever either.
+  the device-list splash step cannot spin forever either.
+- The connect has deadlines of its own, since a throttled network used to loop on a 10s pong
+  timeout that the large `hello` frame could not beat. An encrypted socket has
+  `HANDSHAKE_TIMEOUT_MS` (20s) from open to a ready channel. Once ready it has `HELLO_TIMEOUT_MS`
+  (60s) to deliver `hello`, with no pong check in that window. After `hello` the pong timeout is
+  30s. Each expiry closes the socket and redials, and is logged as `handshake-timeout` or
+  `hello-timeout`. Neither timer runs down while the relay says no bridge is attached, tracked per
+  socket, because the bridge attach closes every channel anyway.
+- The slow-connecting help follows the link's stage (token, socket, handshake, awaiting `hello`,
+  between retries, machine offline) instead of one generic message, and refreshes every second.
 - The relay records every client refusal with its reason and keeps a bounded per-device event
   history (50 events × 1000 devices, LRU). It holds no payloads and no tokens, and it is exposed
   only behind the relay secret.
@@ -871,7 +882,8 @@ record. Read them in order (browser → relay → bridge) and line them up by ti
    entries, 128 KB) that survives a reload. It holds `boot` (navigation type, source), `devices`,
    `dial` (URL without its query), `open`, `close` (code, reason, how long the socket was open),
    `hello`, `token-slow`/`token-timeout`/`token-cached`, `wake`/`wake-no-socket`/`wake-link`,
-   `visibility`, `pageshow`, `online`/`offline` and `connecting-slow`.
+   `visibility`, `pageshow`, `online`/`offline`, `connecting-slow` (with the link stage),
+   `handshake-timeout` and `hello-timeout`.
    - In the desktop window, every entry is echoed as `[diag]` on the console, and the shell mirrors
      that into `~/.lines-app/logs/desktop.log` as `[renderer] [diag] …`.
    - On a phone or in a browser, ConnectingMachine's slow state shows the link's live phase and has

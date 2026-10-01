@@ -1777,36 +1777,49 @@
       "id": "brand-logo",
       "name": "Brand logo assets",
       "doc": "features/brand-logo.md",
-      "purpose": "Renders the Lines brand mark across the tab-bar header, browser tab favicon, and desktop notification icon; there is no wordmark anywhere, baked or DOM.",
+      "purpose": "Renders the Lines brand mark across the tab-bar header, browser tab favicon, desktop notification icon, and the animated boot splash; there is no wordmark anywhere, baked or DOM.",
       "entryPoints": [
         "web/src/components/ProjectTabs.tsx",
         "web/index.html",
         "web/src/lib/favicon.ts",
-        "web/src/lib/alerts.ts"
+        "web/src/lib/alerts.ts",
+        "web/src/lib/splash.ts"
       ],
       "files": [
         "web/src/assets/logo-mark.png",
         "web/src/assets/logo-mark-solid.png",
         "web/public/favicon.png",
-        "web/src/index.css"
+        "web/src/index.css",
+        "web/src/loader.css"
       ],
       "symbols": [
         "FAVICON_SRC",
         "drawLogo",
-        "restorePlain"
+        "restorePlain",
+        "useSplash",
+        "SplashStep",
+        "awaitApp",
+        "appMounted",
+        "settleSplash",
+        "useSplashState"
       ],
       "tests": [],
       "businessRules": [
         "the header, favicon, and notification icon all use the same mark art now - no separate lockup - logo-mark.png for the header, logo-mark-solid.png/favicon.png for the other two",
         "favicon.png and logo-mark-solid.png are the same art at two paths because index.html needs a /public URL while alerts.ts wants a Vite asset import",
         "the header <img> is height-driven (height 24, width auto) inside a plate with padding 4 and borderRadius 6",
-        "alt=\"Lines\" on the header <img> is the only accessible name for the brand"
+        "alt=\"Lines\" on the header <img> is the only accessible name for the brand",
+        "the boot splash is static HTML in index.html outside #root, one persistent element that React never renders or remounts, so its loop does not restart between boot steps or machine switches; lib/splash.ts only changes the caption and its state (shown, finishing, finished, leaving, hidden)",
+        "each boot step holds the splash with its own caption (Starting Lines, Signing you in, Finding your machines, Connecting to <machine>, Loading your sessions and projects, Opening your session); the splash has no header",
+        "the app is not rendered until the mark has finished drawing onto the static logo; it then mounts hidden under the splash, the splash fades out, and the app fades in the moment the splash is gone, with a 4s fallback if an expected app never mounts",
+        "when the app opens on a session with no transcript loaded, the splash waits for it (capped at 6s) once per page load; a machine switch remounts the app and replays the sequence"
       ],
       "architecturalRules": [
         "the white plate in ProjectTabs is load-bearing: logo-mark.png is transparent with no background of its own, so without the plate the art would sit directly on the dark header; the plate also supplies the header's corner rounding since that asset carries no baked mask",
         "logo-mark-solid.png/favicon.png bake their own rounded-rect corner mask (RGBA), unlike the header asset, because nothing downstream - the favicon <link>, the Notification icon - can round them at render time",
         "link.type must track the real bytes: index.html declares image/png and restorePlain resets to image/png after render installs a data URL",
-        "committed PNGs are cropped derivatives of a single 1254x1254 RGB-on-white source that is not in the repo; a future re-crop or re-tone must start from that source, not from the committed derivatives"
+        "committed PNGs are cropped derivatives of a single 1254x1254 RGB-on-white source that is not in the repo; a future re-crop or re-tone must start from that source, not from the committed derivatives",
+        "the splash mark is a hand-built SVG in index.html, separate from the PNG assets, so changing the mark means changing that markup too"
       ],
       "relatedDecisions": []
     },
@@ -2131,7 +2144,8 @@
         "server/src/relayClient.ts",
         "web/src/components/SkewBanner.tsx",
         "web/src/lib/diag.ts",
-        "storage/src/diagnostics.ts"
+        "storage/src/diagnostics.ts",
+        "web/src/lib/splash.ts"
       ],
       "symbols": [
         "Device",
@@ -2274,10 +2288,11 @@
         "/client holds a browser for up to OWNER_ATTACH_GRACE_MS only when hub.ownerId is still null in this relay process (waitForAgent) — closes a race where a browser reconnects, after a relay restart, faster than its own bridge finishes verifyDevice, which used to refuse the machine's own owner 1008 and cost a 5s backoff per attempt; a running machine with an attached bridge pays nothing, and the hold never widens access, only delays a classification",
         "a connect never waits on Clerk without a deadline: openSocket races getToken({skipCache:true}) against TOKEN_TIMEOUT_MS (10s), then the cached getToken() against 5s; if both fail it schedules the ordinary RECONNECT_DELAY_MS retry instead of dialling — a hung mint used to leave a link with no socket and no retry timer, an endless spinner",
         "one connect in flight per link (connectingSince); wake, online, retry and Reconnect now all funnel into openSocket",
-        "browser storage calls carry a 10s token deadline and a 15s AbortSignal, so ConnectMachineLoading cannot spin forever",
+        "browser storage calls carry a 10s token deadline and a 15s AbortSignal, so the device-list splash step cannot spin forever",
         "every relay client refusal is logged and recorded with its reason (bad-token/no-token/not-owner-no-grant with ownerId/bridge-too-old), as are waitForAgent outcomes and agent refusals (unauthorized vs unreachable); a per-device event history (50 x 1000 devices, LRU, no payloads or tokens) survives the idle-hub sweep and is served only in the secret-gated GET / as events",
-        "the browser keeps a localStorage diag ring (lines.diag) of connect-path events, echoed as [diag] console lines; ConnectingMachine's slow state shows the link phase with Send diagnostics/Copy, and an unsent stall is uploaded once on the next hello",
-        "POST /v1/diagnostics stores nothing: it sanitises the report (scalar fields only, bounded, token query params redacted) and writes one [diag] userId=… line to storage stdout"
+        "the browser keeps a localStorage diag ring (lines.diag) of connect-path events, echoed as [diag] console lines; ConnectingMachine's slow help (portalled into the boot splash) shows the link phase with Send diagnostics/Copy, and an unsent stall is uploaded once on the next hello",
+        "POST /v1/diagnostics stores nothing: it sanitises the report (scalar fields only, bounded, token query params redacted) and writes one [diag] userId=… line to storage stdout",
+        "connect deadlines: an encrypted socket has HANDSHAKE_TIMEOUT_MS (20s) from open to a ready channel, then HELLO_TIMEOUT_MS (60s) to deliver hello with no pong check in that window, and the post-hello PONG_TIMEOUT_MS is 30s; expiry closes and redials (diag handshake-timeout / hello-timeout), and none of the timers run down while the relay says no bridge is attached (tracked per socket)"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",

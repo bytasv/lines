@@ -258,7 +258,7 @@ a sleeping laptop must show offline even while the machine in front of the user 
 ### Waking a backgrounded tab
 
 A backgrounded tab is throttled, so a socket the OS tore down while it slept is otherwise only
-discovered by the heartbeat — up to ~11.5s (a full `PONG_TIMEOUT_MS` plus `RECONNECT_DELAY_MS`) —
+discovered by the heartbeat — up to ~31.5s (a full `PONG_TIMEOUT_MS`, 30s, plus `RECONNECT_DELAY_MS`) —
 and the heartbeat's own stall guard makes that worse: a resumed tab's first tick is always late,
 so the guard re-baselines `lastPongAt` and forgives its way into a second full window.
 

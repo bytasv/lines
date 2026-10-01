@@ -29,50 +29,73 @@
       name="description"
       content="Lines — a web GUI for coding agents (Claude Code, Codex). Run parallel sessions from anywhere; the agent runs on your machine."
     />
-    <!-- Boot skeleton only. Everything here is inline and unconditional so the
-         page paints from the HTML itself, before the module graph is parsed and
-         long before Clerk has answered. main.tsx clears #root explicitly just
-         before it renders, so this never coexists with the app.
+    <!-- The boot splash (#lines-splash, below). It is static and unconditional
+         so the page paints from the HTML itself, before the module graph is
+         parsed and long before Clerk has answered. It lives outside #root and
+         React never renders it: lib/splash.ts only swaps its caption and fades
+         it out, so the loop that starts here runs unbroken through every boot
+         step and into the app.
 
-         The colours are literals rather than theme variables on purpose: the
-         stylesheet that defines them is one of the things being waited for. They
-         match `theme-color` above and GateShell's 56px header. -->
+         The mark is a vector redraw of src/assets/logo-mark.png, animated by
+         src/loader.css (linked here so it does not wait on the script). A
+         re-tone or re-crop of the source art has to be mirrored in it.
+
+         The body colour is a literal rather than a theme variable on purpose:
+         the stylesheet that defines it is one of the things being waited for. It
+         matches `theme-color` above. -->
+    <link rel="stylesheet" href="/src/loader.css" />
     <style>
       html,
       body {
         margin: 0;
         background: #1e1e1e;
       }
-      @keyframes lines-boot-spin {
-        to {
-          transform: rotate(360deg);
-        }
-      }
     </style>
   </head>
   <body>
-    <div id="root">
-      <div
-        style="
-          display: flex;
-          flex-direction: column;
-          height: 100vh;
-          background: #1e1e1e;
-        "
-      >
-        <div style="height: 56px; flex-shrink: 0; border-bottom: 1px solid #ffffff1a"></div>
-        <div style="flex: 1; display: flex; align-items: center; justify-content: center">
-          <div
-            style="
-              width: 36px;
-              height: 36px;
-              border: 3px solid #ffffff24;
-              border-top-color: #ffffff8c;
-              border-radius: 50%;
-              animation: lines-boot-spin 0.8s linear infinite;
-            "
-          ></div>
+    <div id="root"></div>
+    <div id="lines-splash" class="lines-splash" data-state="shown">
+      <div class="lines-splash-content">
+        <div class="lines-splash-hero">
+          <div class="lines-loader-stage">
+            <svg
+              class="lines-loader"
+              width="88"
+              height="92.33"
+              viewBox="0 0 122 128"
+              role="img"
+              aria-label="Lines"
+            >
+              <g class="lines-loader-anim lines-loader-body">
+                <path class="lines-loader-anim lines-loader-bracket" style="--i: 0" pathLength="1" d="M 8 6.5 V 84.5 A 35.5 35.5 0 0 0 43.5 120 H 117" />
+                <path class="lines-loader-anim lines-loader-bracket" style="--i: 1" pathLength="1" d="M 22 6.5 V 84.5 A 21.5 21.5 0 0 0 43.5 106 H 117" />
+                <path class="lines-loader-anim lines-loader-bracket" style="--i: 2" pathLength="1" d="M 35.5 6.5 V 84.5 A 8 8 0 0 0 43.5 92.5 H 117" />
+                <path class="lines-loader-anim lines-loader-comet" style="--i: 0" pathLength="1" d="M 8 6.5 V 84.5 A 35.5 35.5 0 0 0 43.5 120 H 117" />
+                <path class="lines-loader-anim lines-loader-comet" style="--i: 1" pathLength="1" d="M 22 6.5 V 84.5 A 21.5 21.5 0 0 0 43.5 106 H 117" />
+                <path class="lines-loader-anim lines-loader-comet" style="--i: 2" pathLength="1" d="M 35.5 6.5 V 84.5 A 8 8 0 0 0 43.5 92.5 H 117" />
+                <g class="lines-loader-anim lines-loader-row" style="--i: 0">
+                  <circle class="lines-loader-anim lines-loader-dot" style="--i: 0" cx="50.5" cy="32.5" r="2.5" />
+                  <rect class="lines-loader-anim lines-loader-bar" style="--i: 1" x="58" y="30.25" width="24" height="4.5" rx="2.25" />
+                </g>
+                <g class="lines-loader-anim lines-loader-row" style="--i: 1">
+                  <rect class="lines-loader-anim lines-loader-bar" style="--i: 2" x="58" y="42.75" width="15" height="4.5" rx="2.25" />
+                  <rect class="lines-loader-anim lines-loader-bar" style="--i: 3" x="78" y="42.75" width="18" height="4.5" rx="2.25" />
+                </g>
+                <g class="lines-loader-anim lines-loader-row" style="--i: 2">
+                  <rect class="lines-loader-anim lines-loader-bar" style="--i: 4" x="58" y="55.75" width="59" height="4.5" rx="2.25" />
+                </g>
+                <g class="lines-loader-anim lines-loader-row" style="--i: 3">
+                  <circle class="lines-loader-anim lines-loader-dot" style="--i: 5" cx="50.5" cy="71" r="2.5" />
+                  <rect class="lines-loader-anim lines-loader-bar" style="--i: 6" x="58" y="68.75" width="15" height="4.5" rx="2.25" />
+                  <rect class="lines-loader-anim lines-loader-bar" style="--i: 7" x="78" y="68.75" width="20" height="4.5" rx="2.25" />
+                </g>
+              </g>
+            </svg>
+            <img class="lines-loader-reference" src="/src/assets/logo-mark.png" alt="" width="88" height="92.33" />
+          </div>
+          <p id="lines-splash-caption" class="lines-splash-caption" role="status">Starting Lines…</p>
         </div>
+        <div id="lines-splash-slot" class="lines-splash-slot"></div>
       </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>

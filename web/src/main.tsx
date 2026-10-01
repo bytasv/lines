@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { MantineProvider } from '@mantine/core';
@@ -20,6 +20,7 @@ import {
   connectMachine,
   disconnectMachine,
   reconnectNow,
+  send,
   setCachedTokenProvider,
   setTokenProvider,
   switchDevice,
@@ -46,15 +47,12 @@ import { bootDial } from './lib/wake';
 import { trackKeyboardInset } from './lib/viewport';
 import { learnHostDeviceIdFromDevServer, takeHostDeviceIdFromUrl } from './lib/e2ee';
 import { registerServiceWorker } from './lib/push';
-import {
-  ConnectMachine,
-  ConnectMachineError,
-  ConnectMachineLoading,
-} from './components/ConnectMachine';
+import { ConnectMachine, ConnectMachineError } from './components/ConnectMachine';
 import { ChooseMachine } from './components/ChooseMachine';
 import { ConnectingMachine } from './components/ConnectingMachine';
 import { JoinPage } from './components/JoinPage';
 import { LandingPage } from './components/LandingPage';
+import { appMounted, awaitApp, settleSplash, SplashStep, useSplash, useSplashState } from './lib/splash';
 import { useStore } from './store';
 
 noteDesktopWindow(location.hash);
@@ -177,7 +175,7 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
   // Only a failure with nothing cached is fatal — a refresh that fails while a
   // machine is already chosen leaves the app running on it.
   if (error && !devices) return <ConnectMachineError error={error} onRetry={() => void refresh()} />;
-  if (!devices) return <ConnectMachineLoading />;
+  if (!devices) return <SplashStep caption="Finding your machines…" />;
   // Nothing paired at all, or the user asked for the pairing form.
   if (devices.length === 0 || pairingNew) return <ConnectMachine />;
   // Paired, but this browser has never chosen — or chose a machine that has
@@ -254,16 +252,106 @@ function AuthedConnect() {
     setOwnerId(user?.id ?? null);
     setOwnerImageUrl(user?.imageUrl ?? null);
   }, [user]);
-  if (!DEVICE_PAIRING_ENABLED) return <App />;
+  if (!DEVICE_PAIRING_ENABLED) return <AppWhenReady />;
   return (
     <DeviceGate>
-      <App />
+      <AppWhenReady />
     </DeviceGate>
   );
 }
 
+/** How long the splash may cover the app for each of AppWhenReady's waits. */
+const SPLASH_CAP_MS = 6000;
+
+/**
+ * The app, behind the boot splash until there is something to show. Two waits,
+ * each capped at SPLASH_CAP_MS:
+ *
+ * - The machine's first `hello`, on the paths with no DeviceGate to wait for it
+ *   (no Clerk, or no pairing), so the app comes up with its sessions rather than
+ *   empty. Past the cap, a bridge that never answers is for the app's own
+ *   connection banner to explain.
+ * - The transcript of the session the app opens on, so it comes up showing that
+ *   rather than a loader. Past the cap, the session view's own loading state,
+ *   with its retry, is the better place to wait.
+ *
+ * The app itself mounts only once the splash has finished its mark and stands
+ * still, out of sight under it. It is the heaviest render boot does, and doing it
+ * under the running loop stalled the mark and the fade. The splash then fades,
+ * and the app fades in the moment it has gone (see lib/splash.ts).
+ *
+ * Once per mount: every reconnect's `hello` clears the loaded transcripts, and
+ * must not put the splash back over a running app.
+ */
+function AppWhenReady() {
+  const status = useStore((s) => s.connectionStatus);
+  const bootstrapped = useStore((s) => s.bootstrapped);
+  // The session the app opens on while its transcript is not in yet: the same
+  // test SessionView uses to show its loader in place of the transcript.
+  const opening = useStore((s) => {
+    const id = s.selectedSessionId;
+    return id && s.sessions[id] && !s.transcriptLoaded[id] && !s.transcripts[id]?.length ? id : null;
+  });
+  const [lifted, setLifted] = useState(false);
+  const waiting = !lifted && (!bootstrapped || opening !== null);
+  useEffect(() => {
+    if (!waiting) {
+      setLifted(true);
+      return;
+    }
+    // Restarted when the wait moves on from `hello` to the transcript.
+    const timer = setTimeout(() => setLifted(true), SPLASH_CAP_MS);
+    return () => clearTimeout(timer);
+  }, [waiting, bootstrapped]);
+  // Asked for here, because SessionView, which otherwise asks, is not mounted
+  // yet. Re-sent on a reconnect; the reply is merged by seq, so a repeat is inert.
+  useEffect(() => {
+    if (lifted || !bootstrapped || !opening) return;
+    send({ type: 'loadTranscript', sessionId: opening });
+  }, [lifted, bootstrapped, opening, status]);
+  useSplash(
+    !waiting
+      ? null
+      : !bootstrapped
+        ? status === 'connected'
+          ? 'Loading your sessions and projects…'
+          : 'Connecting to your machine…'
+        : 'Opening your session…',
+  );
+
+  const splash = useSplashState();
+  // In the commit that releases the claim above, so the splash's leave stops at
+  // `finished` and waits for the app. Never re-run: `waiting` does not come back.
+  useLayoutEffect(() => {
+    if (waiting) return;
+    return awaitApp();
+  }, [waiting]);
+  // Latched: a later splash, for a machine switch, must not unmount a running app.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    if (!waiting && (splash === 'finished' || splash === 'hidden')) setMounted(true);
+  }, [waiting, splash]);
+  useLayoutEffect(() => {
+    if (mounted) appMounted();
+  }, [mounted]);
+  // One element for good, so following the splash through its fade never
+  // re-renders the app under it.
+  const app = useMemo(() => <App />, []);
+  return mounted ? app : null;
+}
+
+/**
+ * Lets the boot splash go after the first commit if no screen claimed it: the
+ * landing page, /welcome, /join. A passive effect runs after every
+ * layout effect in the commit, so any claim has landed by then.
+ */
+function SplashSettle() {
+  useEffect(() => settleSplash(), []);
+  return null;
+}
+
 function Root() {
-  if (!CLERK_ENABLED) return <App />;
+  if (!CLERK_ENABLED) return <AppWhenReady />;
   return (
     <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY!}>
       <Routes>
@@ -285,10 +373,9 @@ function Root() {
             <>
               {/* Both branches render nothing until Clerk has loaded, which is a
                   script fetch and a /v1/client round trip — long enough to read
-                  as a blank page. Hold the gate's own spinner for that window so
-                  the boot skeleton hands over to something, not to white. */}
+                  as a blank page. Hold the boot splash up for that window. */}
               <ClerkLoading>
-                <ConnectMachineLoading />
+                <SplashStep caption="Signing you in…" />
               </ClerkLoading>
               <ClerkLoaded>
                 <SignedIn>
@@ -327,17 +414,12 @@ void learnHostDeviceIdFromDevServer();
 // clicked while this window is open arrives here as `openSession`.
 registerServiceWorker((id) => useStore.getState().openSessionFromAlert(id));
 
-const rootElement = document.getElementById('root')!;
-// Drop index.html's boot skeleton explicitly rather than leaving it to React's
-// first commit: the removal is then tied to this line instead of to whenever the
-// container is reconciled, and StrictMode's double render cannot flash it back.
-rootElement.replaceChildren();
-
-ReactDOM.createRoot(rootElement).render(
+ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter>
       <MantineProvider theme={theme} defaultColorScheme="dark">
         <Root />
+        <SplashSettle />
       </MantineProvider>
     </BrowserRouter>
   </React.StrictMode>,

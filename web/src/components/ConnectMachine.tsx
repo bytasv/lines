@@ -8,7 +8,6 @@ import {
   Divider,
   Group,
   List,
-  Loader,
   Stack,
   Text,
   TextInput,
@@ -216,15 +215,6 @@ function PendingInvitations() {
         </Text>
       </Stack>
     </Card>
-  );
-}
-
-/** Full-page spinner while the machine list is in flight — the gate cannot decide without it. */
-export function ConnectMachineLoading() {
-  return (
-    <GateShell>
-      <Loader />
-    </GateShell>
   );
 }
 

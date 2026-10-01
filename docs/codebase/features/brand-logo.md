@@ -2,8 +2,8 @@
 
 ## Purpose
 
-Renders the Lines brand mark across the three surfaces that show it: the tab-bar header, the
-browser tab favicon, and the desktop notification icon. There is no wordmark anywhere anymore —
+Renders the Lines brand mark across the surfaces that show it: the tab-bar header, the browser tab
+favicon, the desktop notification icon, and the animated boot splash. There is no wordmark anywhere anymore —
 the header shows the mark plus `alt="Lines"` for the accessible name, no `<Text>Lines</Text>` and
 no wordmark baked into the art.
 
@@ -13,6 +13,7 @@ no wordmark baked into the art.
 - `web/index.html` — `<link rel="icon">`
 - `web/src/lib/favicon.ts` — favicon canvas with the attention/running badge overlay
 - `web/src/lib/alerts.ts` — desktop notification icon
+- `web/src/lib/splash.ts` — controller for the boot splash declared in `web/index.html`
 
 ## Important files
 
@@ -22,6 +23,8 @@ no wordmark baked into the art.
   rounded-rect corner mask; notification icon
 - `web/public/favicon.png` — same bytes as `logo-mark-solid.png`, served from `/public` so
   `index.html` can reference it by URL
+- `web/src/loader.css` — the splash layer, the animated mark's keyframes, and the fades; linked
+  straight from `index.html` so it paints before any script runs
 - `web/src/index.css` — the `.brand-wordmark` rules are gone along with the DOM wordmark. The
   `.brand-separator` dot this file used to note is gone too, replaced in the header by
   [`MachineSwitcher`](multi-machine-client.md)
@@ -34,7 +37,35 @@ rounded plate (the PNG has no background of its own). `favicon.ts` loads `/favic
 attention count or blue running dot; when idle, `restorePlain` points the `<link>` straight back
 at the plain PNG.
 
+## Boot splash
+
+`web/index.html` holds the splash markup outside `#root`: a vector copy of the mark that loops at
+0.5× speed over a faint copy of `logo-mark.png`, with a caption beneath. It paints before any
+script runs and is one persistent element, so the loop never restarts between boot steps. React
+never renders it; `lib/splash.ts` only swaps the caption and drives its state
+(`shown` → `finishing` → `finished` → `leaving` → `hidden`). There is no header on it. The
+account menu appears top-right only while the connecting help is showing.
+
+Each boot step holds the splash with its own caption: "Starting Lines…" (static HTML),
+"Signing you in…", "Finding your machines…", "Connecting to <machine>…", "Loading your sessions
+and projects…", "Opening your session…". The connecting help panel (see
+[hosted-machine-access](hosted-machine-access.md)) is portalled into the splash slot.
+
+Hand-over to the app is sequential, so nothing heavy runs while the loop is on screen: the mark
+finishes drawing onto the static logo, the app mounts hidden beneath it, the splash fades out,
+and the app fades in the moment the splash is gone. When the app opens on a session with no
+transcript loaded, the splash also waits for that transcript, capped at 6s. This happens once per
+page load; switching machines remounts the app and replays the sequence. Reduced motion shows a
+static mark with a slow opacity pulse; the fades stay.
+
 ## Business rules
+
+- The splash mark is a hand-built SVG in `index.html`, separate from the PNG assets; changing the
+  mark means changing that markup as well as the PNGs.
+- The splash is never rendered by React and is never remounted, so animation state survives every
+  boot step and machine switch.
+- The app is not rendered at all until the mark has finished and the splash is ready to hand over;
+  a 4s fallback fades the splash anyway if an expected app never mounts.
 
 - The header, favicon, and notification icon all use the same mark artwork now (no separate
   lockup) — `logo-mark.png` for the header, `logo-mark-solid.png`/`favicon.png` for the other two.
