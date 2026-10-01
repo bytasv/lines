@@ -248,6 +248,13 @@
    the app's fade-in that follows eases out: the hand-off falls where both move
    fastest, so nothing reads as a pause between them. lib/splash.ts's fallback
    timer has to outlast this. */
+/* Only the help panel, shown while the splash is up, needs to scroll. Outside
+   `shown` the layer clips, so neither the hand-over's scale below nor the app
+   mounting under the finished mark can grow scrollbars on it. */
+.lines-splash:not([data-state='shown']) {
+  overflow: hidden;
+}
+
 .lines-splash[data-state='leaving'] {
   opacity: 0;
   pointer-events: none;

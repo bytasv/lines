@@ -25,6 +25,13 @@ const slot = document.getElementById('lines-splash-slot');
 const appRoot = document.getElementById('root');
 
 /**
+ * index.html hid the splash before first paint: a landing route, or a visitor
+ * with no signed-in Clerk cookie. Read at module load, before any claim can
+ * change it.
+ */
+export const splashSkippedAtBoot = root?.dataset.state === 'hidden';
+
+/**
  * `finishing`: the mark is settling onto the finished logo. `finished`: it has,
  * and the splash is waiting for the app to mount under it.
  */

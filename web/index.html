@@ -29,8 +29,8 @@
       name="description"
       content="Lines — a web GUI for coding agents (Claude Code, Codex). Run parallel sessions from anywhere; the agent runs on your machine."
     />
-    <!-- The boot splash (#lines-splash, below). It is static and unconditional
-         so the page paints from the HTML itself, before the module graph is
+    <!-- The boot splash (#lines-splash, below). It is static, and skipped only
+         by the inline check right after it, so the page paints from the HTML itself, before the module graph is
          parsed and long before Clerk has answered. It lives outside #root and
          React never renders it: lib/splash.ts only swaps its caption and fades
          it out, so the loop that starts here runs unbroken through every boot
@@ -98,6 +98,22 @@
         <div id="lines-splash-slot" class="lines-splash-slot"></div>
       </div>
     </div>
+    <!-- Before first paint: the splash is for the app, not the landing page. With
+         Clerk configured, /welcome, /join/:code and a visitor with no signed-in
+         Clerk cookie (__client_uat is 0 once signed out, a timestamp once signed
+         in) never see it. A wrong guess is harmless: the app's first claim brings
+         the splash back (lib/splash.ts). Vite leaves the literal %…% in place
+         when the key is unset, so a build without Clerk keeps the splash. -->
+    <script>
+      (function () {
+        var clerkKey = '%VITE_CLERK_PUBLISHABLE_KEY%';
+        if (!clerkKey || clerkKey.charAt(0) === '%') return;
+        var path = location.pathname;
+        var landing = path === '/welcome' || path.indexOf('/join/') === 0;
+        var signedIn = /(?:^|; )__client_uat(?:_[^=]*)?=[1-9]/.test(document.cookie);
+        if (landing || !signedIn) document.getElementById('lines-splash').dataset.state = 'hidden';
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

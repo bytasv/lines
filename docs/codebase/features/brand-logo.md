@@ -41,10 +41,17 @@ at the plain PNG.
 
 `web/index.html` holds the splash markup outside `#root`: a vector copy of the mark that loops at
 0.5× speed over a faint copy of `logo-mark.png`, with a caption beneath. It paints before any
-script runs and is one persistent element, so the loop never restarts between boot steps. React
+script runs (unless skipped, see below) and is one persistent element, so the loop never restarts between boot steps. React
 never renders it; `lib/splash.ts` only swaps the caption and drives its state
 (`shown` → `finishing` → `finished` → `leaving` → `hidden`). There is no header on it. The
 account menu appears top-right only while the connecting help is showing.
+
+The splash is for the app only. An inline script right after the markup hides it before first
+paint when Clerk is configured and the route is `/welcome` or `/join/:code`, or the visitor has no
+signed-in Clerk cookie (`__client_uat*` missing or `0`), so the landing page appears immediately.
+`lib/splash.ts` exports `splashSkippedAtBoot` so the root route knows. The cookie is a guess: if
+a signed-in user is taken for a guest, the app's first claim brings the splash back over the
+landing page. Builds without Clerk always keep the splash.
 
 Each boot step holds the splash with its own caption: "Starting Lines…" (static HTML),
 "Signing you in…", "Finding your machines…", "Connecting to <machine>…", "Loading your sessions
@@ -62,6 +69,10 @@ static mark with a slow opacity pulse; the fades stay.
 
 - The splash mark is a hand-built SVG in `index.html`, separate from the PNG assets; changing the
   mark means changing that markup as well as the PNGs.
+- The splash is skipped before first paint for landing routes and signed-out visitors (Clerk cookie
+  heuristic); a later app claim shows it again.
+- The splash layer scrolls only while `shown` (the connecting help panel); in every later state it
+  clips, so the hand-over scale and the app mounting beneath cannot produce scrollbars.
 - The splash is never rendered by React and is never remounted, so animation state survives every
   boot step and machine switch.
 - The app is not rendered at all until the mark has finished and the splash is ready to hand over;

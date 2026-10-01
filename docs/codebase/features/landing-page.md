@@ -26,7 +26,9 @@ Architectural rules), and the page follows it.
 - `web/src/components/ProviderMark.tsx` — exports the Anthropic clay colour the hero gradient uses
 - `web/src/components/DownloadDesktopApp.tsx` — the install card; names both CLIs
 - `web/src/components/PairingDiagram.tsx` — diagram text says "your agent runs here"
-- `web/index.html` — `<meta name="description">`
+- `web/index.html` — `<meta name="description">`, and the inline check that skips the boot splash
+  for landing routes and signed-out visitors
+- `web/src/lib/splash.ts` — `splashSkippedAtBoot`, read by the root route
 
 ## Important symbols
 
@@ -56,6 +58,9 @@ None; the page is presentational.
 
 ## Business rules
 
+- The landing page paints immediately, never behind the boot splash. While Clerk is still loading
+  for a visitor judged a guest, the root route renders it directly, at the tree position it keeps
+  once Clerk reports signed out, so it does not remount.
 - Generic claims say "coding agent" or list providers; strings that are truly provider-specific
   (Claude CLI status, Claude sign-in, SDK internals) stay provider-specific.
 - Supporting another provider in the copy is one new `AGENTS` entry. The list is local to the page

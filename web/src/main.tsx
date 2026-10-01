@@ -2,15 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { MantineProvider } from '@mantine/core';
-import {
-  ClerkLoaded,
-  ClerkLoading,
-  ClerkProvider,
-  SignedIn,
-  SignedOut,
-  useAuth,
-  useUser,
-} from '@clerk/clerk-react';
+import { ClerkProvider, useAuth, useUser } from '@clerk/clerk-react';
 import '@mantine/core/styles.css';
 import './index.css';
 import { theme } from './theme';
@@ -52,7 +44,15 @@ import { ChooseMachine } from './components/ChooseMachine';
 import { ConnectingMachine } from './components/ConnectingMachine';
 import { JoinPage } from './components/JoinPage';
 import { LandingPage } from './components/LandingPage';
-import { appMounted, awaitApp, settleSplash, SplashStep, useSplash, useSplashState } from './lib/splash';
+import {
+  appMounted,
+  awaitApp,
+  settleSplash,
+  splashSkippedAtBoot,
+  SplashStep,
+  useSplash,
+  useSplashState,
+} from './lib/splash';
 import { useStore } from './store';
 
 noteDesktopWindow(location.hash);
@@ -350,6 +350,20 @@ function SplashSettle() {
   return null;
 }
 
+/**
+ * `/` and everything under it. Clerk takes a script fetch and a /v1/client round
+ * trip to answer, long enough to read as a blank page, so that window shows the
+ * boot splash, unless index.html already judged this a guest and skipped it:
+ * then the landing page paints right away, at the same tree position it keeps
+ * once Clerk says signed out, so it does not remount. A wrong guess is caught
+ * when AuthedConnect claims the splash back.
+ */
+function Home() {
+  const { isLoaded, isSignedIn } = useAuth();
+  if (!isLoaded) return splashSkippedAtBoot ? <LandingPage /> : <SplashStep caption="Signing you in…" />;
+  return isSignedIn ? <AuthedConnect /> : <LandingPage />;
+}
+
 function Root() {
   if (!CLERK_ENABLED) return <AppWhenReady />;
   return (
@@ -369,24 +383,7 @@ function Root() {
             so /docs/* and /session/:id keep resolving against the full path. */}
         <Route
           path="*"
-          element={
-            <>
-              {/* Both branches render nothing until Clerk has loaded, which is a
-                  script fetch and a /v1/client round trip — long enough to read
-                  as a blank page. Hold the boot splash up for that window. */}
-              <ClerkLoading>
-                <SplashStep caption="Signing you in…" />
-              </ClerkLoading>
-              <ClerkLoaded>
-                <SignedIn>
-                  <AuthedConnect />
-                </SignedIn>
-                <SignedOut>
-                  <LandingPage />
-                </SignedOut>
-              </ClerkLoaded>
-            </>
-          }
+          element={<Home />}
         />
       </Routes>
     </ClerkProvider>
