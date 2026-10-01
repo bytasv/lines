@@ -25,6 +25,7 @@
     "dev": "concurrently -n backend,web,storage -c blue,green,yellow \"npm run dev:backend\" \"npm run dev -w web\" \"npm run dev -w storage\"",
     "typecheck": "npm run typecheck -w server && npm run typecheck -w relay && npm run typecheck -w web && npm run typecheck -w storage && npm run typecheck -w desktop",
     "test": "npm run test -w server",
+    "docs:validate": "node scripts/validate-docs-index.mjs",
     "dev:storage": "npm run dev -w storage",
     "dev:backend": "node server/scripts/dev-runtime.mjs"
   },

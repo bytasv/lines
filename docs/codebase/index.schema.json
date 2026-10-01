@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "docs/codebase/index.schema.json",
+  "title": "Codebase documentation index",
+  "description": "Machine-readable navigation index for docs/codebase. Validate with `npm run docs:validate`.",
+  "type": "object",
+  "required": ["version", "features"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "features": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/feature" }
+    }
+  },
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "feature": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "doc",
+        "purpose",
+        "entryPoints",
+        "files",
+        "symbols",
+        "tests",
+        "businessRules",
+        "architecturalRules",
+        "relatedDecisions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+        "name": { "type": "string", "minLength": 1 },
+        "doc": { "type": "string", "pattern": "^features/[a-z0-9-]+\\.md$" },
+        "purpose": { "type": "string", "minLength": 1 },
+        "covers": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" }
+        },
+        "entryPoints": { "$ref": "#/$defs/stringList" },
+        "files": { "$ref": "#/$defs/stringList" },
+        "symbols": { "$ref": "#/$defs/stringList" },
+        "tests": { "$ref": "#/$defs/stringList" },
+        "businessRules": { "$ref": "#/$defs/stringList" },
+        "architecturalRules": { "$ref": "#/$defs/stringList" },
+        "relatedDecisions": { "$ref": "#/$defs/stringList" },
+        "dependencies": { "$ref": "#/$defs/stringList" }
+      }
+    }
+  }
+}

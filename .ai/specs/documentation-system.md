@@ -47,4 +47,6 @@ Use stable IDs.
 
 Update only affected entries.
 
+Validate the index with `npm run docs:validate`, which checks it against `docs/codebase/index.schema.json` plus unique feature IDs and existing `doc` paths.
+
 The source code remains the source of truth.
