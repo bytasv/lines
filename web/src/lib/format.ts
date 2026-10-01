@@ -17,10 +17,15 @@ const INTERRUPTED_META = { color: 'yellow', label: 'interrupted' };
  *  `SessionMeta.backgroundTasks`. Not a status: the turn really is over. */
 const BACKGROUND_WORK_META = { color: 'blue', label: 'background work' };
 
+/** Archived sessions keep their last `status` (so unarchive restores it), but the
+ *  row always reads as completed. Label must stay distinct — both ranks key on it. */
+const ARCHIVED_META = { color: 'green', label: 'completed' };
+
 /**
- * Dot color + badge label for a sidebar session row. Precedence mirrors the
- * banner order in `SessionView`: a pending permission first, then an
- * interrupted-but-continuable turn, then the plain status mapping.
+ * Dot color + badge label for a sidebar session row. Archived wins over
+ * everything. Otherwise precedence mirrors the banner order in `SessionView`: a
+ * pending permission first, then an interrupted-but-continuable turn, then the
+ * plain status mapping.
  */
 export function sessionRowMeta(session: SessionMeta): {
   color: string;
@@ -28,6 +33,7 @@ export function sessionRowMeta(session: SessionMeta): {
   /** Interrupted sessions are `idle`, but must still read as actionable. */
   actionable: boolean;
 } {
+  if (session.archived) return { ...ARCHIVED_META, actionable: false };
   if (session.status === 'waiting-permission') {
     return { ...waitingPermissionMeta(session.pendingPermissionTool), actionable: true };
   }
@@ -155,6 +161,7 @@ const SESSION_SORT_ORDER = [
   ...PROJECT_STATUS_ORDER,
   BACKGROUND_WORK_META,
   STATUS_META.done,
+  ARCHIVED_META,
   STATUS_META.idle,
 ];
 

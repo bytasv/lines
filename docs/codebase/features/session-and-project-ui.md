@@ -125,15 +125,18 @@ and how status is surfaced in the sidebar row and the project tab.
   `lastActivityAt` descending; `created` sorts by `createdAt` descending (today's pre-existing
   order)
 - `SESSION_SORT_ORDER`/`SESSION_SORT_RANK` — the `status`-mode urgency table: running, then
-  `PROJECT_STATUS_ORDER` (the same table the tab dot uses), then background work, done, idle
+  `PROJECT_STATUS_ORDER` (the same table the tab dot uses), then background work, done, archived,
+  idle
 - `sessionRowMeta(session)` — maps a full session to `{ color, label, actionable }` for the
-  sidebar row: `waitingPermissionMeta` first, then the [turn-recovery](turn-recovery.md) yellow
+  sidebar row: an archived session short-circuits first to a non-actionable green "completed"
+  (`ARCHIVED_META`), whatever its stored status; then `waitingPermissionMeta`, then the [turn-recovery](turn-recovery.md) yellow
   interrupted state, then a settled session's own live
   [background-tasks](background-tasks.md#business-rules) row (`actionable: false`), then the plain
   status table. Sits alongside a separate sibling predicate,
   `isWorkflowFinished` (also in `format.ts`), which is not part of this return shape — see
   [workflow-step-lifecycle](workflow-step-lifecycle.md). The sidebar row's icon has a fourth
-  branch (finished-workflow filled checkmark) beyond what `sessionRowMeta` alone drives
+  branch (finished-workflow filled checkmark) beyond what `sessionRowMeta` alone drives; archived
+  rows render the same completed check icon as manually completed ones
 - `helloSignature(sessions, projects)` — a cheap string (each session's `id:updatedAt`, joined,
   plus project paths); the `hello` reducer compares it against the last one it stored and, on a
   match, skips replacing `sessions`/`transcriptLoaded`/`contextBreakdowns`
@@ -408,8 +411,11 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   is preserved. `compareSessions` follows the same rule: it takes plain `SessionMeta` and returns
   a comparator, so `Sidebar.tsx` is the only place `.sort()` is actually called.
 - `SESSION_SORT_ORDER` is built from `STATUS_META.running`, `PROJECT_STATUS_ORDER`,
-  `BACKGROUND_WORK_META`, `STATUS_META.done`/`.idle` rather than a second, hand-written urgency
+  `BACKGROUND_WORK_META`, `STATUS_META.done`, `ARCHIVED_META`, `STATUS_META.idle` rather than a second, hand-written urgency
   table — the sidebar list order can never drift from the tab dot it points at.
+- Archived rows read as completed client-side only: the server keeps the session's last `status`
+  and `pendingPermissionTool`, so unarchiving restores the real state. `ARCHIVED_META` is not in
+  `PROJECT_STATUS_ORDER` because it is not actionable.
 - `seenSessionStatus` is maintained in one place (a single store subscription), not scattered
   across every mutation site that could change what counts as seen.
 - `completed` needs no separate guard in `projectStatusMeta`: the server always sets `completed`

@@ -182,7 +182,7 @@ const SessionRow = memo(function SessionRow({
   // Ran its workflow to the end but not manually completed — and never allowed to
   // mask a session that still needs the user.
   const finished = !session.completed && !status.actionable && isWorkflowFinished(session);
-  const wide = session.completed || finished;
+  const wide = session.completed || session.archived || finished;
 
   return (
     <UnstyledButton
@@ -245,7 +245,7 @@ const SessionRow = memo(function SessionRow({
               </Tooltip>
             )}
             <Center w={wide ? 14 : 10} style={{ flex: wide ? '0 0 14px' : '0 0 10px' }}>
-              {session.completed ? (
+              {session.completed || session.archived ? (
                 <IconCircleCheck size={14} color="var(--mantine-color-green-6)" style={{ flexShrink: 0 }} />
               ) : session.status === 'running' ? (
                 <Loader size={10} />

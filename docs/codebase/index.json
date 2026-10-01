@@ -1018,6 +1018,7 @@
         "SessionSort",
         "SESSION_SORT_ORDER",
         "SESSION_SORT_RANK",
+        "ARCHIVED_META",
         "lastActivityAt",
         "compareSessions"
       ],
@@ -1066,12 +1067,12 @@
         "pendingPermissionTool rides the existing sessionUpsert broadcast, no new message type",
         "cleared centrally in setStatus for any non-waiting-permission status, plus the worker-reconcile and sync-adopt paths that can force waiting-permission back to idle out from under a live turn",
         "concurrent permission asks on the same session: last askPermission call wins the label/color, consistent with pre-existing status-overwrite behavior",
-        "sessionRowMeta is the single row-presentation entry point: waitingPermissionMeta first, then the interrupted-turn-recovery yellow state, then the plain per-status table (moved into format.ts from Sidebar.tsx)",
+        "sessionRowMeta is the single row-presentation entry point: archived sessions first (non-actionable green completed, stored status untouched so unarchive restores it), then waitingPermissionMeta, then the interrupted-turn-recovery yellow state, then the plain per-status table (moved into format.ts from Sidebar.tsx)",
         "helloSignature is a cheap string (each session's id:updatedAt joined, plus project paths) rather than a hash of the whole hello payload, precisely so volatile fields (usage, worker/storage health) stay outside it and keep applying on every hello regardless of the short-circuit",
         "store changes here (the hello short-circuit, pendingCreate/seenSessionIds) are pure reducer logic with no web test harness backing them (web/ has no test runner) — the highest-risk, least-covered part of this feature; verified manually",
         "SessionRow is memoized — selecting a different session or any sessions-map update (e.g. a live turn ticking status) otherwise re-rendered every row in the list regardless of the size of the session being switched to; the memo relies on `session` keeping its object identity when unchanged, which sessionUpsert already guarantees by only replacing the entry that changed",
         "compareSessions follows the same format.ts-never-imports-store.ts rule as projectStatusMeta: it takes plain SessionMeta and returns a comparator, so Sidebar.tsx and the store's latestSessionIn (via a validated readSessionSort of the shared SESSION_SORT_KEY) are the only places it is applied",
-        "SESSION_SORT_ORDER is built from STATUS_META.running, PROJECT_STATUS_ORDER, BACKGROUND_WORK_META, STATUS_META.done/.idle rather than a second hand-written urgency table, so the sidebar list order can never drift from the tab dot it points at",
+        "SESSION_SORT_ORDER is built from STATUS_META.running, PROJECT_STATUS_ORDER, BACKGROUND_WORK_META, STATUS_META.done, ARCHIVED_META, STATUS_META.idle rather than a second hand-written urgency table, so the sidebar list order can never drift from the tab dot it points at",
         "lines.lastSessionByProject follows the same single-JSON-map-under-one-key convention as lines.drafts/lines.openFiles, keyed by project path; written by one store subscription keyed on selectedSessionId rather than at each selection call site"
       ],
       "relatedDecisions": [
