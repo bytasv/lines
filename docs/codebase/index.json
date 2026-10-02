@@ -2664,7 +2664,7 @@
       "id": "production-deployment",
       "name": "Production deployment",
       "doc": "features/production-deployment.md",
-      "purpose": "Runs the server side of a hosted install (relay, storage, static web bundle) as containers behind Traefik, with per-hostname TLS. Excludes the bridge and worker entirely - the agent runs on each user's own machine.",
+      "purpose": "Runs the server side of a hosted install (relay, storage, static web bundle, static marketing page) as containers behind Traefik, with per-hostname TLS. Excludes the bridge and worker entirely - the agent runs on each user's own machine.",
       "entryPoints": [
         "deploy/docker/compose.yml",
         "deploy/docker/Dockerfile",
@@ -4045,10 +4045,11 @@
       "id": "landing-page",
       "name": "Landing page",
       "doc": "features/landing-page.md",
-      "purpose": "Provider-neutral signed-out marketing page: a hero cycling through the supported coding agents (Claude Code, Codex), then illustrated sections for how it works, features, security, ways to run it and getting started, in the app's monochrome theme.",
+      "purpose": "Provider-neutral marketing page (signed-out in the app, and a standalone static build on the apex): a hero cycling through the supported coding agents (Claude Code, Codex), then illustrated sections for how it works, features, security, ways to run it and getting started, in the app's monochrome theme.",
       "entryPoints": [
         "web/src/components/LandingPage.tsx",
-        "web/src/components/AgentRotator.tsx"
+        "web/src/components/AgentRotator.tsx",
+        "web/src/landing.tsx"
       ],
       "files": [
         "web/src/components/LandingPage.tsx",
@@ -4065,7 +4066,10 @@
         "web/src/components/landing/StepArt.tsx",
         "web/src/components/landing/FeatureArt.tsx",
         "web/src/components/landing/SecurityArt.tsx",
-        "web/src/components/landing/RunModeArt.tsx"
+        "web/src/components/landing/RunModeArt.tsx",
+        "web/src/landing.tsx",
+        "web/landing/index.html",
+        "web/vite.landing.config.ts"
       ],
       "symbols": [
         "AGENTS",

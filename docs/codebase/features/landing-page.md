@@ -2,7 +2,8 @@
 
 ## Purpose
 
-The marketing page shown to signed-out visitors at `/` and to anyone at `/welcome`. It sells
+The marketing page: shown to signed-out visitors at `/` and to anyone at `/welcome` inside the
+app, and served on its own as a static, keyless build on the apex of a hosted deployment. It sells
 Lines as a web GUI for **coding agents** — Claude Code and Codex today, more later — rather than
 for one provider. The hero cycles through the supported agent names so a visitor sees both at a
 glance. Below the hero the page walks through how it works, the feature groups, security, the ways
@@ -12,6 +13,8 @@ Architectural rules), and the page follows it.
 ## Entry points
 
 - `web/src/components/LandingPage.tsx` — the page
+- `web/src/landing.tsx`, `web/landing/index.html`, `web/vite.landing.config.ts` — the standalone
+  marketing build (`npm run build:landing -w web`, output `web/dist-landing`)
 - `web/src/components/AgentRotator.tsx` — the animated word in the hero heading
 - `web/src/components/landing/` — the inline-SVG illustrations, one file per section (steps,
   features, security, ways to run) plus a shared kit and its CSS
@@ -50,7 +53,8 @@ Section content (feature groups, security cards, ways to run, how-it-works steps
 
 ## Dependencies
 
-Mantine (`VisuallyHidden`, layout), Clerk signed-in/out components for the header action.
+Mantine (`VisuallyHidden`, layout), Clerk signed-in/out components for the header action (in-app
+only). The standalone build also uses `subresourceIntegrity` exported from `web/vite.config.ts`.
 
 ## Tests
 
@@ -70,6 +74,13 @@ None; the page is presentational.
 
 ## Architectural rules
 
+- `LandingPage` takes an optional `appUrl`. Set (only by `landing.tsx`, from `VITE_APP_URL`), the
+  header action and both call-to-action pairs are plain links to `<appUrl>/sign-in`, replacing the
+  Clerk and router components; unset, the in-app behaviour is unchanged. The standalone entry
+  mounts only Mantine and the page, so the apex never loads Clerk or any key (see
+  [production-deployment](production-deployment.md#origin-separation)). The app host's
+  `/sign-in` route is where those links land; local and dev builds have no apex, so signed-out
+  `/` there still renders the page.
 - The rotating word sits on its own line with every word stacked in one grid cell and centred
   independently. A short word ("Codex") therefore leaves no gap, and a long one never re-wraps the
   heading, whatever the viewport. Placing it mid-sentence was tried and rejected: the text around

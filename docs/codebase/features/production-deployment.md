@@ -3,7 +3,7 @@
 ## Purpose
 
 Runs the server side of a hosted Lines install — the relay, the storage server,
-and the static web bundle — as containers behind an existing Traefik instance,
+the static web bundle, and the static marketing page — as containers behind an existing Traefik instance,
 issuing its own TLS certificate per hostname. Deliberately excludes the bridge
 and worker: the agent runs on each user's own machine (see
 [hosted-machine-access](hosted-machine-access.md) and
@@ -13,7 +13,7 @@ host, and the images ship without `server/`'s Claude Agent SDK dependency.
 ## Entry points
 
 - `deploy/docker/compose.yml` — `docker compose --env-file lines.env up -d`
-- `deploy/docker/Dockerfile` — `relay` / `storage` / `web` build targets
+- `deploy/docker/Dockerfile` — `relay` / `storage` / `web` / `landing` build targets
 - `deploy/README.md` — the runbook this doc summarizes
 - `.github/workflows/deploy.yml` — CI: on push to `main`, runs `test` →
   `check-migrations` → `build` (push images to GHCR) → `deploy` (SSH into the
@@ -28,10 +28,10 @@ host, and the images ship without `server/`'s Claude Agent SDK dependency.
 ## Important files
 
 - `deploy/docker/Dockerfile` — multi-stage build; one `deps` layer shared by
-  all three targets
+  all the targets
 - `deploy/docker/compose.yml` — service definitions and Traefik labels
-- `deploy/docker/web-nginx.conf` — the bundle's own static-file server; Traefik
-  cannot serve files, so `web` ships one
+- `deploy/docker/web-nginx.conf` — the static-file server for `web` and `landing`; Traefik
+  cannot serve files, so each ships one
 - `deploy/docker/env.example` — template for `lines.env`
 - `.github/workflows/deploy.yml` — the auto-deploy pipeline
 - `deploy/scripts/deploy-lines.sh` — kept byte-identical to the copy installed
@@ -45,12 +45,15 @@ None — this is infrastructure, not application code.
 
 ## Data flow
 
-`docker compose build` produces three images from one `deps` layer (installed
+`docker compose build` produces four images from one `deps` layer (installed
 with `--ignore-scripts`, scoped to the `shared`/`relay`/`storage`/`web`
 workspaces via `npm ci --workspace`). The `web` build stage bakes
 `VITE_BRIDGE_WS_URL`, `VITE_CLERK_PUBLISHABLE_KEY`, `VITE_STORAGE_URL`, and
 `VITE_DESKTOP_DOWNLOAD_URL` into the bundle as build args — none of the four can
-be changed by restarting the container, only by rebuilding it. The build fails
+be changed by restarting the container, only by rebuilding it. The `landing` stage is a
+separate, keyless build (`npm run build:landing -w web`) that bakes in only `VITE_APP_URL` (the
+app host, where every call to action points) and `VITE_DESKTOP_DOWNLOAD_URL`; it fails the
+image if `VITE_APP_URL` is empty or absent from the output. The `web` build fails
 if the WS URL is not actually present in the output; the download URL gets the
 same assertion but only when set, since an empty value is the legitimate state
 before a desktop release exists (see [desktop-app](desktop-app.md)).
@@ -62,9 +65,10 @@ was a versioned filename hand-pasted after every release, forcing a `web` rebuil
 `desktop-app`'s release step; that ordering no longer exists.
 
 At runtime, Traefik routes by `Host()`/`PathPrefix()` label rules on the
-existing Docker socket provider: `web` takes **its own host** (`app.<domain>`),
-`relay` takes `/agent` and `/client` on the apex (which otherwise redirects to
-`app.`, as does `www`), and
+existing Docker socket provider: `web` takes **its own host** (`run.<domain>`, and `app.<domain>` while released desktop
+builds still open it), `relay` takes `/agent` and `/client` on the apex (priority 100), `landing`
+takes the rest of the apex (priority 1), `www` redirects to the apex, apex `/join/` links
+redirect to `run.` (priority 50, for invites minted before the move), and
 `storage` gets its own subdomain (`api.<domain>`) with `/v1/devices/verify`,
 `/v1/devices/presence`, and `/v1/devices/authorize` excluded from that router —
 see Architectural rules. `storage` carries no
@@ -95,7 +99,7 @@ unit suites and `npm run typecheck` (all five workspaces, including `relay`),
 then `check-migrations`, `build`, and `deploy` gate on each other in sequence.
 Manual verification is still `deploy/README.md`'s checklist (health endpoints,
 CORS preflight, the `/v1/devices/verify` 404 at the edge, cert issuance for
-both the apex and `www`, and — after a deploy — confirming the running images
+the apex, `run.` and `www`, the `www` and `/join/` redirects, and — after a deploy — confirming the running images
 are tagged with the pushed commit SHA).
 
 ## Business rules
@@ -106,18 +110,25 @@ are tagged with the pushed commit SHA).
   containers; sharing an origin was purely a Traefik routing accident, and it meant that code
   execution inside the relay — the most exposed process here — could serve JavaScript to the page
   holding the end-to-end encryption keys and defeat all of it in one line. The bundle lives on
-  `app.<domain>`; the apex keeps `/agent` and `/client` (priority 100) and redirects everything
-  else.
-- The apex redirects rather than serving a second copy. Two origins serving one app are two
-  origins whose compromise is equivalent, which is exactly what the split removes.
+  `run.<domain>`; the apex keeps `/agent` and `/client` (priority 100).
+- The apex serves **only** the `landing` build: a static page with no Clerk, no router, no store
+  and no socket, whose actions are plain links to `<VITE_APP_URL>/sign-in`. It never serves the
+  app bundle, so a relay compromise has nothing to steal there. Storage's `WEB_ORIGINS` does not
+  list the apex, since the page never calls it.
+- The app is served from two hosts only temporarily: released desktop builds hardcode
+  `app.<domain>` and their navigation guard trusts only the app origin, so it cannot become a
+  redirect until most installs have updated. Then `app.` becomes a 301 to `run.` and leaves
+  `lines-web.rule` and `WEB_ORIGINS`. Whether an old window follows that redirect in-window (it
+  fires `will-redirect`, not `will-navigate`) is unverified.
+- Every origin has its own E2EE pins and key, so a browser re-enrols once on `run.`.
 - This narrows the exposure from "any server-side compromise" to "host or reverse-proxy
   compromise". It is a reduction, not a solution: whoever controls Traefik or the host can still
   serve arbitrary JavaScript from the bundle's origin. See
   [end-to-end-encryption](end-to-end-encryption.md#residual-risks).
-- Deploying the split needs two things in place **first**: an A record for `app.<domain>`, and
-  that origin in the production Clerk instance's allowed origins and redirect URLs. Without the
-  DNS record the apex redirects to a name that resolves nowhere; without Clerk, sign-in breaks at
-  the cutover.
+- Deploying the split needs two things in place **first**: an A record for `run.<domain>`, and
+  that origin in the Clerk instance's allowed origins and redirect URLs. Without the DNS record
+  the landing page's buttons point at a name that resolves nowhere; without Clerk, sign-in breaks
+  at the cutover.
 
 ### Content security
 
@@ -206,7 +217,7 @@ are tagged with the pushed commit SHA).
 - The image installs `openssl` explicitly in the `storage` stage: `node:22-slim`
   ships without libssl, and Prisma's query engine falls back to a guessed build
   and warns at every boot without it.
-- The four `VITE_*` build args exist in two places that must be kept in sync by
+- The `VITE_*` build args (five, with `VITE_APP_URL`) exist in two places that must be kept in sync by
   hand: GitHub Actions secrets (used by `.github/workflows/deploy.yml`'s image
   build) and `lines.env` on the VPS (used only for a manual `docker compose
   build`). Nothing checks the two agree; the Dockerfile only asserts

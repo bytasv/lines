@@ -225,7 +225,9 @@ Stated plainly, because a claim of "untrusted server" that ignores these is wors
 - **The web origin.** The bundle is served by the same deployment it distrusts. Anyone who can
   serve modified JavaScript from that origin owns the code holding the keys. Origin separation
   (see [production-deployment](production-deployment.md)) narrows this from "any server-side
-  compromise" to "host or reverse-proxy compromise" — a real reduction, not a solution. The
+  compromise" to "host or reverse-proxy compromise" — a real reduction, not a solution. The apex
+  (the relay's host) serves only a keyless static marketing page, never the app bundle. Keys and
+  pins are per origin, so moving the app host (`app.` to `run.`) makes every browser enrol again. The
   desktop app would close it for laptops; only a native app would close it on a phone.
 - **Guests.** v1 enrols owner devices only. A guest's identity, caps and attribution remain
   relay-forgeable. Closing it needs owner-device-mediated key distribution and a revocation

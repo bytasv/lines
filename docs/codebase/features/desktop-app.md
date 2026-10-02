@@ -159,7 +159,8 @@ server (`appUrl()` picks between them). The choice persists in `~/.lines-app/des
 (`openIn: 'desktop' | 'browser'`); the tray's second row is always the other route, labelled "Open
 in Browser" or "Open Desktop Window". Navigation inside the window stays in-window only as the app
 origin itself (per `appUrl()`, so local mode trusts the local origin), a dedicated identity host
-Clerk's OAuth redirects go through, a scoped OAuth entry path (`github.com`'s `/login/oauth/`
+Clerk's OAuth redirects go through (`clerk.` and `accounts.` on the parent domain of the app host,
+that is the app host less its first label — not on the app subdomain itself), a scoped OAuth entry path (`github.com`'s `/login/oauth/`
 only — the one identity host that is also a content site), or the continuation of a flow already
 off-app; everything else is handed to the real browser and logged, including which rule allowed an
 in-app hop and the reason `will-navigate` blocked one — Clerk's own full-page OAuth redirect has to
@@ -542,6 +543,12 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
   browser does not sign in the window and vice versa; a dev run and the packaged app share one jar.
 
 ## Architectural rules
+
+- The default `webUrl` is `https://run.linesapp.cloud`; `downloadUrl` stays on the apex, which now
+  serves the marketing page (see [production-deployment](production-deployment.md#origin-separation)).
+  Builds released before the move hardcode `app.linesapp.cloud`, which therefore has to keep
+  serving the app until most installs update; the window's navigation guard trusts only the app
+  origin, so those builds cannot yet follow a redirect to `run.`.
 
 - A GUI-launched macOS app inherits a minimal PATH (no Homebrew, often no `git` or `rg`).
   `loginShellPath()` resolves the login shell's PATH once and hands it to both children; without
