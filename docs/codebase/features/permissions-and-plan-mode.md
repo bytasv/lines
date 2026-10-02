@@ -263,7 +263,9 @@ deliverable is written and reviewed.
   session id *and* `requestId`, so comments belong to the plan round they were written against
 - `CommentablePlan` — wraps a rendered plan copy with select-to-comment (an `ActionIcon` at the
   selection, an overlay `Textarea`) and the highlight paint/hover-bubble machinery; rendered once
-  for the inline card and once for fullscreen focus mode, each its own instance
+  for the inline card and once for fullscreen focus mode, each its own instance. Selection capture
+  listens on the document (not the plan wrapper), so a drag released outside the text still
+  surfaces the icon
 - `locateQuotes(root, comments)` / `flattenText(root)` — best-effort re-location of each comment's
   stored quote inside the currently-rendered plan text, for painting the highlight; a passage the
   agent has since rewritten simply isn't found, and its highlight is silently dropped
@@ -504,6 +506,11 @@ and only its highlight is lost — the comment itself still shows in the list an
 model. Hovering a highlighted passage is hit-tested geometrically against the `Range`s'
 `getClientRects()` (a `Range` has no box and receives no native hover), and pops up the comment's
 note in a small bubble with the same edit/delete actions the list row has.
+
+Hover only highlights. Neither hovering a list row nor a highlighted passage scrolls the plan;
+clicking a list row scrolls its passage into view (nearest edge, so an already-visible passage
+doesn't jolt), and only in the copy the user is looking at — the fullscreen copy when focus mode
+is open, otherwise the inline one.
 
 ## Dependencies
 

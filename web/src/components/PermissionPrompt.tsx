@@ -670,7 +670,7 @@ function CommentablePlan({
   onHover,
   onEditComment,
   onDeleteComment,
-  scrollToActive,
+  scrollRequest,
   fz,
 }: {
   text: string;
@@ -686,8 +686,12 @@ function CommentablePlan({
   /** Rewrite a note from the hover bubble; same handler the list row uses. */
   onEditComment?: (id: string, note: string) => void;
   onDeleteComment?: (id: string) => void;
-  /** Only the copy the user is looking at may scroll to the active passage. */
-  scrollToActive?: boolean;
+  /**
+   * Scroll this comment's passage into view. Sent only by a click on a comment
+   * row, and only to the copy the user is looking at; the nonce lets a second
+   * click on the same row scroll again.
+   */
+  scrollRequest?: { id: string; nonce: number } | null;
   fz?: string;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -714,10 +718,6 @@ function CommentablePlan({
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    // Only the first paint of each run may scroll. Later ones come from the
-    // observer — a markdown re-render fires a burst of them, and scrolling on
-    // every one would fight the user for the scrollbar.
-    let mayScroll = true;
     const paint = () => {
       const found = locateQuotes(wrap, comments);
       const active = activeId ? found.get(activeId) : undefined;
@@ -731,12 +731,6 @@ function CommentablePlan({
       // Kept for the pointer hit-test below. A Range is live, so the rects it
       // reports stay correct as the card scrolls or reflows.
       locatedRef.current = found;
-      if (active && scrollToActive && mayScroll) {
-        // 'nearest' is a no-op when the passage is already on screen, so hovering
-        // a comment whose text is visible never jolts the view.
-        active.startContainer.parentElement?.scrollIntoView({ block: 'nearest' });
-      }
-      mayScroll = false;
     };
     paint();
     // The markdown re-renders after mount (lite -> full plugins) and again on
@@ -749,7 +743,25 @@ function CommentablePlan({
       planHighlights.delete(instanceId);
       republishPlanHighlights();
     };
-  }, [text, comments, activeId, scrollToActive, instanceId]);
+  }, [text, comments, activeId, instanceId]);
+
+  // Declared after the paint effect so `locatedRef` is already fresh when both
+  // run in the same commit. Hover never gets here — only a deliberate click on
+  // a comment row does, so a passage near the bottom no longer drags the view.
+  useEffect(() => {
+    if (!scrollRequest) return;
+    const range = locatedRef.current.get(scrollRequest.id);
+    // 'nearest' is a no-op when the passage is already on screen, so clicking a
+    // comment whose text is visible never jolts the view.
+    range?.startContainer.parentElement?.scrollIntoView({ block: 'nearest' });
+  }, [scrollRequest]);
+
+  // Deleting a comment from its list row never runs clearHover, so a bubble
+  // left open on it (and, worse, `peekEditing`) would outlive the comment and
+  // block every later selection.
+  useEffect(() => {
+    if (peek && !comments.some((c) => c.id === peek.comment.id)) clearHover();
+  }, [comments]);
 
   const close = () => {
     setEditing(false);
@@ -792,6 +804,35 @@ function CommentablePlan({
       top: rect.bottom - wrapRect.top,
     });
   };
+  // The document listener below is registered once; it reads the latest
+  // closure (readOnly, editing, peekEditing) through this ref.
+  const captureRef = useRef(captureSelection);
+  captureRef.current = captureSelection;
+
+  // Listened for on the document, not the wrapper: a drag that overshoots the
+  // text and is released in the card's padding, below the last line or off the
+  // card entirely never reaches a wrapper handler, leaving a selection with no
+  // icon. The read waits a frame because a click inside an existing selection
+  // collapses it only after mouseup handlers run. Selections outside this copy
+  // are filtered by the `contains` check in captureSelection.
+  useEffect(() => {
+    let frame: number | null = null;
+    const onUp = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        captureRef.current();
+      });
+    };
+    document.addEventListener('mouseup', onUp);
+    // Keyboard selection (shift+arrows) never fires a mouseup.
+    document.addEventListener('keyup', onUp);
+    return () => {
+      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('keyup', onUp);
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
+  }, []);
 
   /**
    * Which commented passage is under the pointer, resolved geometrically.
@@ -897,9 +938,6 @@ function CommentablePlan({
       ref={wrapRef}
       style={{ position: 'relative' }}
       fz={fz}
-      onMouseUp={captureSelection}
-      // Keyboard selection (shift+arrows) never fires a mouseup.
-      onKeyUp={captureSelection}
       onMouseMove={trackHover}
       onMouseLeave={scheduleHide}
     >
@@ -1166,6 +1204,15 @@ function PlanApproval({
   // Which comment's passage to emphasize in the plan body. Hovering the row is
   // the whole interaction: the list says what was said, the highlight says where.
   const [activeId, setActiveId] = useState<string | null>(null);
+  // Hover only highlights; clicking a row asks the visible copy to scroll its
+  // passage into view. The nonce makes a repeat click on the same row a new
+  // request; `focus` pins it to the copy that was visible when clicked, so
+  // toggling focus mode never hands a stale request to the other copy.
+  const [scrollRequest, setScrollRequest] = useState<{
+    id: string;
+    nonce: number;
+    focus: boolean;
+  } | null>(null);
   // The comment row currently open for rewriting, and the text in its box.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
@@ -1253,6 +1300,11 @@ function PlanApproval({
             onPointerDown={() => setActiveId(c.id)}
             onFocusCapture={() => setActiveId(c.id)}
             onMouseLeave={() => setActiveId((id) => (id === c.id ? null : id))}
+            onClick={(e) => {
+              // Placing the caret while rewriting the note must not re-scroll.
+              if ((e.target as Element | null)?.closest?.('textarea')) return;
+              setScrollRequest((r) => ({ id: c.id, nonce: (r?.nonce ?? 0) + 1, focus }));
+            }}
           >
             <Box
               style={{
@@ -1445,7 +1497,7 @@ function PlanApproval({
                 onDeleteComment={removeComment}
                 // The focus-mode copy is on top when it is open; only the one the
                 // user can actually see may scroll itself.
-                scrollToActive={!focus}
+                scrollRequest={scrollRequest?.focus === false ? scrollRequest : null}
               />
             </Paper>
           </ScrollArea.Autosize>
@@ -1496,7 +1548,7 @@ function PlanApproval({
                 onEditComment={updateComment}
 
                 onDeleteComment={removeComment}
-                scrollToActive={focus}
+                scrollRequest={scrollRequest?.focus ? scrollRequest : null}
                 fz="md"
               />
               {!resolution && commentList}
