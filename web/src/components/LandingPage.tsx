@@ -1,4 +1,5 @@
 import {
+  ActionIcon,
   Anchor,
   Box,
   Button,
@@ -11,9 +12,9 @@ import {
   VisuallyHidden,
 } from '@mantine/core';
 import { SignedIn, SignedOut, SignInButton, SignUpButton } from '@clerk/clerk-react';
-import type { ComponentType, ReactNode } from 'react';
+import { useState, type ComponentType, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { IconArrowRight, IconBrandGithub, IconCheck } from '@tabler/icons-react';
+import { IconArrowRight, IconBrandGithub, IconCheck, IconStar } from '@tabler/icons-react';
 import { AgentRotator, type RotatorWord } from './AgentRotator';
 import { BrandMark } from './BrandMark';
 import { DownloadDesktopApp } from './DownloadDesktopApp';
@@ -31,6 +32,11 @@ import { InstallArt, PairArt, RunArt } from './landing/StepArt';
 import classes from './LandingPage.module.css';
 
 const REPO_URL = 'https://github.com/bytasv/lines';
+const PRIVACY_URL = `${REPO_URL}/blob/main/PRIVACY.md`;
+// Self-hosted and same-origin on purpose: an embedded player (YouTube) would be
+// third-party script on the origin that holds the end-to-end encryption keys.
+const DEMO_VIDEO = '/demo.mp4';
+const DEMO_POSTER = '/og.png';
 // Supported agent CLIs, in the order the hero cycles through them. Adding a
 // provider to the landing copy is one entry here. `gradient` is the hero word's,
 // in the vendor's own palette, as ProviderMark draws their marks: tints and
@@ -138,7 +144,7 @@ const SECURITY = [
     art: LocalOnlyArt,
     title: 'Runs on your machine',
     description:
-      'The agent, your code, your git and your agent logins stay local. Every turn executes there.',
+      'The agent runs on your machine, with your files, git and CLI login. Nothing is executed in the cloud.',
   },
   {
     art: EncryptionArt,
@@ -150,6 +156,34 @@ const SECURITY = [
     art: OpenSourceArt,
     title: 'Open source',
     description: 'Licensed under AGPL-3.0. Read every line that touches your machine.',
+  },
+];
+
+// "Where your data goes": mirrors PRIVACY.md, row for row. Every claim here has
+// to trace to storage/prisma/schema.prisma or the end-to-end encryption doc, and
+// stays within the approved copy — never "your code never leaves your machine",
+// "zero-knowledge" or "we can't see anything". Storage holds session metadata in
+// plaintext today, so it is named here rather than glossed over.
+const DATA_FLOWS = [
+  {
+    where: 'Stays on your machine',
+    description:
+      'Transcripts and files never leave your machine. Your source, git, terminal, agent process and CLI logins stay there too.',
+  },
+  {
+    where: 'Goes to Anthropic or OpenAI',
+    description:
+      'Prompts go to Anthropic or OpenAI under your own account, same as using the CLI directly.',
+  },
+  {
+    where: 'Passes through our relay',
+    description:
+      'Live traffic between your own devices and your machine is end-to-end encrypted. The relay still sees which device connects, when, and how much, and guests you invite into a session are not encrypted yet.',
+  },
+  {
+    where: 'Stored on Lines storage',
+    description:
+      'Session list, workflows and memory sync to Lines storage so every device sees them. Self-host it if you’d rather own that too.',
   },
 ];
 
@@ -196,7 +230,7 @@ const MODES: Mode[] = [
     title: 'Hosted',
     where: 'agent still runs on a machine you pair',
     description:
-      'Sign in from any browser. This site only relays and stores metadata; your code, git and agent logins stay on your machine.',
+      'Sign in from any browser. The agent runs on your machine, with your files, git and CLI login; nothing is executed in the cloud.',
   },
 ];
 
@@ -232,6 +266,37 @@ function ArtCard({
       </div>
       <div className={classes.artBody}>{children}</div>
     </div>
+  );
+}
+
+/**
+ * The hero demo loop: autoplays muted, as browsers allow. Under reduced motion
+ * it does not move on its own; it shows the poster and plays only on request.
+ * Hidden if the file fails to load, so a deployment without it shows nothing
+ * rather than an empty frame.
+ */
+function DemoVideo() {
+  const [failed, setFailed] = useState(false);
+  const [reducedMotion] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  );
+  if (failed) return null;
+  return (
+    <Box className={classes.panel} w="100%" maw={960} style={{ overflow: 'hidden' }}>
+      <video
+        src={DEMO_VIDEO}
+        poster={DEMO_POSTER}
+        autoPlay={!reducedMotion}
+        loop={!reducedMotion}
+        controls={reducedMotion}
+        preload={reducedMotion ? 'metadata' : 'auto'}
+        muted
+        playsInline
+        aria-label="Lines driving a coding agent from a phone"
+        onError={() => setFailed(true)}
+        style={{ display: 'block', width: '100%', height: 'auto' }}
+      />
+    </Box>
   );
 }
 
@@ -293,6 +358,9 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
           <a className={classes.navLink} href="#security">
             Security
           </a>
+          <a className={classes.navLink} href="#privacy">
+            Privacy
+          </a>
           <a className={classes.navLink} href="#get-started">
             Get started
           </a>
@@ -302,6 +370,20 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
             cannot tell them apart, and the app host sends a signed-in visitor
             on from /sign-in anyway. */}
         <div className={classes.headerAction}>
+          {/* A plain link, not a star-count badge: fetching the count would be a
+              third-party request from the origin that holds the encryption keys. */}
+          <ActionIcon
+            component="a"
+            href={REPO_URL}
+            target="_blank"
+            rel="noreferrer"
+            variant="subtle"
+            color="gray"
+            size={36}
+            aria-label="Lines on GitHub"
+          >
+            <IconBrandGithub size={20} stroke={1.5} />
+          </ActionIcon>
           {appUrl ? (
             <Button component="a" href={`${appUrl}/sign-in`} variant="default" size="sm">
               Sign in
@@ -352,6 +434,18 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
               your own git and your own agent login.
             </Text>
             <GetStartedButtons appUrl={appUrl} />
+            <Stack gap={6} align="center">
+              <Text size="sm" c="dimmed">
+                Free and open source (AGPL). Bring your own Claude Code or Codex.
+              </Text>
+              <Anchor href={REPO_URL} target="_blank" rel="noreferrer" size="sm" c="dimmed">
+                <Group gap={6} component="span">
+                  <IconStar size={16} stroke={1.5} />
+                  Star Lines on GitHub
+                </Group>
+              </Anchor>
+            </Stack>
+            <DemoVideo />
           </Stack>
         </Container>
       </Box>
@@ -419,8 +513,8 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
           <Stack gap="xl" id="security" className={`${classes.section} ${classes.reveal}`}>
             <SectionHeading
               eyebrow="Security"
-              title="Your code never has to leave your machine"
-              blurb="The hosted app relays and stores metadata. Everything that matters runs on hardware you own."
+              title="The agent runs on hardware you own"
+              blurb="Transcripts and files never leave your machine. Live traffic through our relay is end-to-end encrypted."
             />
             {/* Two by two, not four across: at a quarter of the row the drawings'
                 labels would be too small to read. */}
@@ -442,6 +536,31 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
                   <IconBrandGithub size={16} stroke={1.5} />
                   View the source on GitHub
                 </Group>
+              </Anchor>
+            </Group>
+          </Stack>
+
+          <Stack gap="xl" id="privacy" className={`${classes.section} ${classes.reveal}`}>
+            <SectionHeading
+              eyebrow="Privacy"
+              title="Where your data goes"
+              blurb="Exactly what stays local, what leaves, and where it is kept."
+            />
+            <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">
+              {DATA_FLOWS.map((flow) => (
+                <Box key={flow.where} className={classes.panel} p="lg">
+                  <Stack gap={4}>
+                    <Text fw={600}>{flow.where}</Text>
+                    <Text size="sm" c="dimmed">
+                      {flow.description}
+                    </Text>
+                  </Stack>
+                </Box>
+              ))}
+            </SimpleGrid>
+            <Group justify="center">
+              <Anchor href={PRIVACY_URL} target="_blank" rel="noreferrer" size="sm" c="dimmed">
+                The full inventory, field by field, in PRIVACY.md
               </Anchor>
             </Group>
           </Stack>

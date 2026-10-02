@@ -109,14 +109,21 @@ on `/agent`. Deliberately dumb: never parses, persists or logs an app payload.
 Holds no database credentials, because it is the most exposed process here — it
 asks storage to verify a device secret and gets back only the owning user id.
 
-**`storage`** — Clerk-authed Express + Prisma against hosted Supabase. **No
-Traefik labels at all**, so it is unroutable from the internet; the relay
-reaches it at `http://storage:8790` on the compose network. This is a stronger
-boundary than the firewall rule it replaces.
+**`storage`** — Clerk-authed Express + Prisma against hosted Supabase. Any
+standalone Postgres works too, including the optional bundled `postgres`
+service (see [Self-hosting](#self-hosting)). Public at `api.<domain>`, minus
+the relay-only device routes; the relay reaches it at `http://storage:8790` on
+the compose network.
 
 **`web`** — `nginx:alpine` with the built bundle. Traefik cannot serve files, so
 the bundle brings its own server. TLS and redirects stay in Traefik; this nginx
-only does SPA fallback and cache headers.
+only does SPA fallback, cache headers, and the `/download` redirect.
+
+**`landing`** — the same nginx config with the keyless marketing build, on the
+apex. It also answers `/download`.
+
+**`postgres`** — optional, only under the `db` profile. No published port; it
+sits on the internal `lines-db` network that only `storage` and `migrate` join.
 
 ## Traps this configuration exists to avoid
 
@@ -135,7 +142,7 @@ only does SPA fallback and cache headers.
   `claude` binary. Nothing on this server spawns an agent query. Do not copy
   that flag to a machine that runs the worker.
 - **Migrate before the first `up`.** `prisma migrate deploy` is forward-only and
-  uses `DIRECT_URL` (`:5432`), not the pooled `:6543`. Started against an empty
+  uses `DIRECT_URL` (on Supabase, `:5432` rather than the pooled `:6543`). Started against an empty
   schema, storage looks healthy while every query fails P2021 — and sync treats
   storage errors as best-effort, so the only symptom is an amber banner in the
   UI.
@@ -208,6 +215,192 @@ Rollback is `git checkout <tag>` plus the same three commands, or re-tagging a
 previously built image. Migrations do **not** roll back: `migrate deploy` is
 forward-only and the schema is additive, so roll the code back and leave the
 schema forward.
+
+## Growth metrics
+
+Neither the app nor the marketing page loads an analytics script, on purpose:
+the app's origin holds the end-to-end encryption keys, and a tracker there would
+be third-party code next to them. Every number comes from server logs and
+read-only SQL instead. Treat them as directional — bots, link previews and
+prefetch inflate them, and log rotation drops history — so snapshot weekly and
+compare channels week against week.
+
+**Channel attribution.** Every shared link carries `?ref=<channel>` (`linkedin`,
+`hn`, `reddit-claudeai`, `ph`, `yt`, …). The first visit is a full page load, so
+nginx logs it with its query string and `Referer`. Run these from
+`deploy/docker`:
+
+```bash
+# Visits per ref tag, marketing page and app combined
+docker compose --env-file lines.env logs --no-log-prefix landing web 2>&1 \
+  | grep -oE '[?&]ref=[A-Za-z0-9_-]+' | sort | uniq -c | sort -rn
+
+# Download clicks: every button goes through /download, a logged 302
+docker compose --env-file lines.env logs --no-log-prefix landing web 2>&1 \
+  | grep -c '"GET /download'
+
+# Full report (needs goaccess on the VPS); open report.html locally
+docker compose --env-file lines.env logs --no-log-prefix landing 2>&1 \
+  | goaccess - --log-format=COMBINED -o report.html
+```
+
+nginx sits behind Traefik, so the client address it logs is Traefik's. Unique
+visitor counts in GoAccess are therefore meaningless; use requests and ref tags.
+
+**Funnel.** Signups are on the Clerk dashboard. The rest is in Postgres, in a
+read-only transaction:
+
+```sql
+BEGIN READ ONLY;
+-- Users with at least one paired, unrevoked machine
+SELECT count(DISTINCT user_id) FROM devices
+ WHERE user_id IS NOT NULL AND revoked_at IS NULL;
+-- Machines registered per week
+SELECT date_trunc('week', created_at) AS week, count(*) FROM devices
+ WHERE user_id IS NOT NULL GROUP BY 1 ORDER BY 1 DESC LIMIT 12;
+-- Weekly active machines
+SELECT count(*) FROM devices
+ WHERE revoked_at IS NULL AND last_seen_at > now() - interval '7 days';
+-- Synced sessions per user
+SELECT user_id, count(*) FROM sessions
+ WHERE deleted_at IS NULL GROUP BY user_id ORDER BY 2 DESC;
+ROLLBACK;
+```
+
+Against the bundled database:
+`docker compose --env-file lines.env exec -T postgres psql -U lines -d lines < metrics.sql`.
+Against a managed one, `psql "<DIRECT_URL>" -f metrics.sql`, pasting the URL
+rather than sourcing `lines.env` (its unquoted `&` would background the shell).
+
+## Self-hosting
+
+A self-hosted deployment runs the relay, storage and both web servers on your
+own server, so none of it touches linesapp.cloud. The database is wherever
+`DATABASE_URL` points: a Supabase project of your own, as `env.example`
+assumes, or a standalone Postgres. [PRIVACY.md](../PRIVACY.md) lists what each
+piece holds.
+
+**Requirements:**
+
+- Docker and a Traefik stack (see [Prerequisites](#prerequisites)), with DNS for
+  `<domain>`, `run.<domain>` and `api.<domain>`. `app.<domain>` is only a
+  transitional alias for older linesapp.cloud desktop builds and can be left out
+  of a fresh deployment's DNS.
+- **Postgres.** Supabase, as in production, or any standalone Postgres you run
+  or rent — including the bundled `postgres` service: uncomment
+  `COMPOSE_PROFILES=db`, `POSTGRES_PASSWORD` and its two URLs in `lines.env`.
+  With no pooler in front, `DATABASE_URL` and `DIRECT_URL` are the same string.
+- **Clerk — required, and an accepted external dependency.** Sign-in, the
+  relay's browser tokens and storage's auth all verify Clerk sessions, and
+  there is no other identity provider. The free tier is enough. Create a Clerk
+  application, allow `https://run.<domain>` (and `https://app.<domain>` while
+  that alias exists) as origins and redirect URLs, and put its keys in
+  `VITE_CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY`. **Clerk holds every
+  user's identity (user id, email, profile) even when everything else is
+  self-hosted** — say so to your users, as PRIVACY.md does.
+- **Cloudflare R2 — optional.** `R2_*` enables recipe screenshot uploads (a
+  public-read bucket); unset, recipes still work and the upload route answers
+  503. The release bucket is needed only if you publish your own desktop builds.
+- **A desktop build pointed at your domains.** Released DMGs talk to
+  linesapp.cloud. Build your own with `desktop/config.json` (or the
+  `LINES_RELAY_URL`, `LINES_STORAGE_URL` and `LINES_WEB_URL` variables) naming
+  your hosts — see `docs/codebase/features/desktop-app.md` — or run the bridge
+  from source on each machine.
+
+Then follow [Deploy](#deploy). With the bundled database, start it first:
+`docker compose --env-file lines.env up -d postgres`, then `run --rm migrate`.
+
+### Moving from Supabase to the bundled Postgres
+
+Optional, and not the default: production runs on Supabase, and a managed
+Postgres keeps working exactly as before. Rehearse the
+whole sequence on a scratch VPS or a throwaway compose project first, from a
+real dump, before doing it for real.
+
+The commands run from `deploy/docker`. `SUPABASE_DIRECT_URL` is your current
+`DIRECT_URL`: the `:5432` connection, never the `:6543` transaction pooler,
+which `pg_dump` cannot use. Paste it in, quoted:
+
+```bash
+SUPABASE_DIRECT_URL='postgresql://postgres.<ref>:<password>@<region>.pooler.supabase.com:5432/postgres'
+```
+
+1. **Take a maintenance window and stop storage.** Bridges keep running turns
+   and show the storage banner; nothing new is written.
+   ```bash
+   docker compose --env-file lines.env stop storage
+   ```
+2. **Dump from Supabase**, the `public` schema only (Prisma's tables and
+   `_prisma_migrations` live there; Supabase's own `auth`/`storage` schemas are
+   not ours). Use a `pg_dump` at least as new as the server.
+   ```bash
+   docker run --rm --network host postgres:17 \
+     pg_dump "$SUPABASE_DIRECT_URL" --schema=public --no-owner --no-privileges -Fc > lines.dump
+   ```
+3. **Start the bundled Postgres.** In `lines.env`, uncomment `COMPOSE_PROFILES=db`
+   and set `POSTGRES_PASSWORD` (`openssl rand -hex 32`), then:
+   ```bash
+   docker compose --env-file lines.env up -d postgres
+   ```
+4. **Restore into it.**
+   ```bash
+   docker compose --env-file lines.env exec -T postgres \
+     pg_restore -U lines -d lines --no-owner --no-privileges < lines.dump
+   ```
+   One `schema "public" already exists` error is expected and harmless: the new
+   database already has it. Any other error means stop, drop the volume
+   (`docker compose --env-file lines.env down postgres && docker volume rm lines-postgres`)
+   and fix it before going further.
+5. **Point storage at it.** In `lines.env`, set both URLs to the new instance
+   (and delete the Supabase ones):
+   ```
+   DATABASE_URL=postgresql://lines:<password>@postgres:5432/lines
+   DIRECT_URL=postgresql://lines:<password>@postgres:5432/lines
+   ```
+6. **Migrate and check for drift.** `migrate` should report no pending
+   migrations, and the diff should exit 0:
+   ```bash
+   docker compose --env-file lines.env run --rm migrate
+   docker compose --env-file lines.env run --rm migrate \
+     ../node_modules/.bin/prisma migrate diff --from-url "postgresql://lines:<password>@postgres:5432/lines" \
+     --to-schema-datamodel prisma/schema.prisma --exit-code
+   ```
+   Compare row counts on both sides for `sessions`, `devices`, `workflows` and
+   `agent_memory_files` too.
+7. **Start storage and smoke-test**: sign in, see the session list, open a
+   session on a paired machine, and pair a new device.
+   ```bash
+   docker compose --env-file lines.env up -d
+   ```
+8. **Keep the Supabase project untouched** for a rollback window (a couple of
+   weeks), then pause or delete it. Rolling back is restoring the old two URLs
+   in `lines.env` and `up -d storage`; anything written after the cutover stays
+   behind in the new database.
+
+### Backups
+
+Supabase keeps its own backups, on terms that depend on the plan — check its
+retention, and keep an off-platform dump too if it is short. The same
+`pg_dump` works against `DIRECT_URL`.
+
+The bundled database has no backups at all until you add them, and it is then
+the only copy of synced metadata. A nightly dump with two weeks of history,
+from root's crontab:
+
+```cron
+15 3 * * * cd /path/to/lines/deploy/docker && docker compose --env-file lines.env exec -T postgres pg_dump -U lines -Fc lines > /var/backups/lines/lines-$(date +\%F).dump && find /var/backups/lines -name 'lines-*.dump' -mtime +14 -delete
+```
+
+Copy the dumps off the box too. Test a restore at least once, into a throwaway
+container rather than the live one:
+
+```bash
+docker run -d --name lines-restore-test -e POSTGRES_PASSWORD=test postgres:17
+docker exec -i lines-restore-test sh -c 'until pg_isready -U postgres; do sleep 1; done; createdb -U postgres lines'
+docker exec -i lines-restore-test pg_restore -U postgres -d lines --no-owner < /var/backups/lines/lines-<date>.dump
+docker exec lines-restore-test psql -U postgres -d lines -c 'SELECT count(*) FROM sessions'
+docker rm -f lines-restore-test
+```
 
 ## Releasing the desktop app
 

@@ -88,7 +88,7 @@ export function DocsPage() {
               rel={rel}
               root={bundle.root}
               onDocLink={onDocLink}
-              onOpenSource={openFilePreview}
+              onOpenSource={(p) => openFilePreview(p, { raw: true })}
             />
           ) : (
             <DocsHome

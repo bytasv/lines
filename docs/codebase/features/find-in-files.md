@@ -21,7 +21,9 @@ session scopes are described in [session-search](session-search.md).
   `MatchOptions`
 - `web/src/lib/files.ts` — `grepFiles`
 - `web/src/store.ts` — `fileSearch`, `searchPreview`, `openSidebarSearch`
-- `web/src/components/FilesView.tsx` — `SearchPreviewView`
+- `web/src/components/FilesView.tsx` — `SearchPreviewView`, `FileContentView`
+- `web/src/lib/language.ts` — `isMarkdownPath`
+- `web/src/components/Markdown.tsx` — Preview body for markdown files
 - `web/src/App.tsx` — swaps the main pane to the preview
 
 ## Important symbols
@@ -30,6 +32,7 @@ session scopes are described in [session-search](session-search.md).
 - `buildMatcher(query, opts)` — case, whole-word and regex flags; throws
   `SyntaxError` on a bad regex
 - `SearchPreview` `{ path, line, col }`
+- `FileContentView`, `useMarkdownMode`, `isMarkdownPath`
 
 ## Data flow
 
@@ -58,6 +61,7 @@ or switching to a session scope clears it.
 
 ## Business rules
 
+- A hit on a markdown file opens in Raw at its line, not Preview, because a hit carries a line and a line only exists in the source. The header toggle switches to Preview; picking another hit returns to Raw. The choice is not persisted.
 - Searches only the active project's roots, like Cmd+P.
 - The eye toggle is the same `hideIgnored` as Cmd+P and the file tree; on by
   default, so gitignored files are excluded.

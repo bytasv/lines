@@ -2068,7 +2068,9 @@
         "web/src/components/docs/DocView.tsx",
         "web/src/App.tsx",
         "web/src/components/SettingsModal.tsx",
-        "web/src/index.css"
+        "web/src/index.css",
+        "web/src/components/FilesView.tsx",
+        "web/src/store.ts"
       ],
       "symbols": [
         "collectDocs",
@@ -2084,7 +2086,8 @@
         "toDocTreeNodes",
         "featureCards",
         "unindexedDocs",
-        "Markdown.onLinkClick"
+        "Markdown.onLinkClick",
+        "openFilePreview"
       ],
       "tests": [
         "server/src/docsBundle.test.ts",
@@ -2095,7 +2098,8 @@
         "an index entry whose doc is missing from the bundle still renders as a card with a 'no doc' badge; a bundle doc no entry claims lists under 'Other documents'; a missing/unparseable index degrades to a plain document list",
         "a markdown link target always resolves to kind: 'doc' and opens inside the reader even when the target isn't in this corpus, surfacing a 'not in this corpus' panel instead of a source-preview 404",
         "a link that escapes the docs root, or isn't markdown, opens the existing file-preview modal instead",
-        "no project open, or no docs/ folder in the active project, shows an empty state instead of an error boundary"
+        "no project open, or no docs/ folder in the active project, shows an empty state instead of an error boundary",
+        "the reader's Open source button opens the file preview with raw: true, so it shows the markdown source rather than the rendered preview"
       ],
       "architecturalRules": [
         "one bundle request (GET /docs?path=) powers the tree, cards, search and cross-links; no per-file fan-out and no separate search route",
@@ -2699,7 +2703,10 @@
         "the deploy SSH key's VPS-side authorized_keys entry forces /root/deploy-lines.sh regardless of the command CI sends — that key can run nothing else on the box; the script takes three stdin lines (GHCR token, GHCR actor, image tag)",
         "check-migration-safety.sh gates on added migration files (--diff-filter=A) between the push's before/after SHAs; editing an already-applied migration to add something destructive bypasses it — accepted because Prisma migrations are append-only by convention",
         "images are pinned to the pushing commit's SHA: build pushes :latest and :<sha>, deploy-lines.sh exports TAG=<sha> from the third stdin line, and compose.yml reads ${TAG:-latest}; rollback is `TAG=<old-sha> docker compose --env-file lines.env up -d` with no rebuild, and an old two-line stdin caller still works and falls back to latest",
-        "Monaco's four editor surfaces are React.lazy-loaded rather than statically imported from the entry chunk, so their chunks are never named in index.html and carry no SRI hash — same-origin script-src is what still gates them; deliberate, since bundling Monaco into the entry chunk delayed first paint on every screen, including ones with no editor on them"
+        "Monaco's four editor surfaces are React.lazy-loaded rather than statically imported from the entry chunk, so their chunks are never named in index.html and carry no SRI hash — same-origin script-src is what still gates them; deliberate, since bundling Monaco into the entry chunk delayed first paint on every screen, including ones with no editor on them",
+        "the production database is hosted Supabase; any standalone Postgres is a drop-in alternative with DATABASE_URL and DIRECT_URL set to the same string and no pgbouncer param, including the optional bundled postgres service under the db compose profile",
+        "web and landing answer /download with a 302 to the runtime DESKTOP_DOWNLOAD_URL (compose passes VITE_DESKTOP_DOWNLOAD_URL, defaulting to /), so download clicks are counted from the access log",
+        "neither origin serves analytics JS or third-party embeds; growth metrics are the nginx access log (?ref= tags, /download 302s) plus read-only SQL"
       ],
       "architecturalRules": [
         "npm ci is scoped by --workspace rather than --omit=optional, since --omit=optional also drops @rollup/rollup-linux-x64-gnu (an optional dependency on the same platform-binary mechanism as the Claude SDK's native binary) and breaks vite build",
@@ -2708,7 +2715,9 @@
         "the deps layer's inputs are normalized by deploy/docker/normalize-manifests.mjs in a manifests stage: every version becomes 0.0.0 (manifests plus the lockfile's top level, root and workspace entries, by exact key), and scripts and desktop's build block are dropped, so version bumps and script edits no longer invalidate deps or force a new ~230 MB layer onto the registry and VPS; safe because npm ci runs --ignore-scripts and every @lines/* spec is \"*\" (the script exits 1 otherwise); any stage that runs a workspace script or reads its version must COPY that workspace first",
         "the build job's services leg builds relay and storage together so both images share one deps blob; in separate jobs each would rerun npm ci on a deps miss and the VPS would pull two ~230 MB layers",
         "the storage image installs openssl explicitly - node:22-slim ships without libssl and Prisma's query engine otherwise falls back to a guessed build and warns at every boot",
-        "the four VITE_* build args exist in two places kept in sync by hand: GitHub Actions secrets (CI image build) and lines.env on the VPS (manual build only) — nothing checks the two agree"
+        "the four VITE_* build args exist in two places kept in sync by hand: GitHub Actions secrets (CI image build) and lines.env on the VPS (manual build only) — nothing checks the two agree",
+        "nginx's envsubst filter is ^(CSP_CONNECT_SRC|DESKTOP_DOWNLOAD_URL)$, and the image defaults DESKTOP_DOWNLOAD_URL to / because an unsubstituted ${DESKTOP_DOWNLOAD_URL} is an unknown nginx variable that fails the config at start",
+        "the optional postgres service publishes no port and sits only on the internal lines-db network shared with storage and migrate; their depends_on is required: false so Supabase deployments start without it, and POSTGRES_PASSWORD is not ${...:?} because compose interpolates profiled services too"
       ],
       "relatedDecisions": [
         "desktop-app",
@@ -3288,14 +3297,21 @@
         "shared/types.ts",
         "web/src/store.ts",
         "web/src/components/FileTree.tsx",
-        "web/src/components/Sidebar.tsx"
+        "web/src/components/Sidebar.tsx",
+        "web/src/components/FilesView.tsx",
+        "web/src/components/MonacoPreviewModal.tsx",
+        "web/src/lib/language.ts",
+        "web/src/components/Markdown.tsx"
       ],
       "symbols": [
         "FilePalette",
         "hideIgnored",
         "setHideIgnored",
         "includeIgnored",
-        "TreeEntry.ignored"
+        "TreeEntry.ignored",
+        "isMarkdownPath",
+        "FileContentView",
+        "useMarkdownMode"
       ],
       "tests": [
         "server/src/fileSearch.test.ts",
@@ -3304,6 +3320,8 @@
       "businessRules": [
         "Cmd+P searches only the active project's roots (rootsForCwd), not every open project tab",
         "a hit always opens in the preview overlay, never a files-mode tab, regardless of which sidebar mode is active when the palette opens",
+        "a .md/.markdown hit or tree open renders in Preview with a Preview/Raw header toggle; other files and .mdx open in Monaco with no toggle, and the mode is not persisted",
+        "relative links in the rendered file resolve against its own directory and open in the same preview; relative images are not resolved",
         "hideIgnored defaults to on and is local-only (not part of synced settings)",
         "non-ignored files fill the capped candidate list before ignored ones, so a large gitignored tree cannot starve the palette or find-in-files"
       ],
@@ -4051,7 +4069,7 @@
       "id": "landing-page",
       "name": "Landing page",
       "doc": "features/landing-page.md",
-      "purpose": "Provider-neutral marketing page (signed-out in the app, and a standalone static build on the apex): a hero cycling through the supported coding agents (Claude Code, Codex), then illustrated sections for how it works, features, security, ways to run it and getting started, in the app's monochrome theme.",
+      "purpose": "Provider-neutral marketing page (signed-out in the app, and a standalone static build on the apex): a hero cycling through the supported coding agents (Claude Code, Codex) with a self-hosted demo loop, then illustrated sections for how it works, features, security, where your data goes, ways to run it and getting started, in the app's monochrome theme.",
       "entryPoints": [
         "web/src/components/LandingPage.tsx",
         "web/src/components/AgentRotator.tsx",
@@ -4075,11 +4093,18 @@
         "web/src/components/landing/RunModeArt.tsx",
         "web/src/landing.tsx",
         "web/landing/index.html",
-        "web/vite.landing.config.ts"
+        "web/vite.landing.config.ts",
+        "web/public/og.png",
+        "web/public/demo.mp4",
+        "deploy/docker/web-nginx.conf",
+        "PRIVACY.md"
       ],
       "symbols": [
         "AGENTS",
-        "AgentRotator"
+        "AgentRotator",
+        "DATA_FLOWS",
+        "DemoVideo",
+        "DOWNLOAD_HREF"
       ],
       "tests": [],
       "businessRules": [
@@ -4087,7 +4112,12 @@
         "generic claims say coding agent or list providers; strings that are truly provider-specific (Claude CLI status, Claude sign-in, SDK internals) stay provider-specific",
         "supporting another provider in the copy is one new AGENTS entry, kept local to LandingPage because shared/providers.ts is capability data, not marketing copy",
         "the install card says at least one of Claude Code or Codex must be installed on the paired machine",
-        "encryption copy says end-to-end encryption is on by default, that every browser enrols once with a code from the machine, and that the relay carries traffic it cannot read or forge; it never claims everything is encrypted or zero-knowledge"
+        "encryption copy says end-to-end encryption is on by default, that every browser enrols once with a code from the machine, and that the relay carries traffic it cannot read or forge; it never claims everything is encrypted or zero-knowledge",
+        "privacy copy uses only the approved lines in the feature doc (agent runs on your machine; transcripts and files never leave it; owner-device relay traffic is end-to-end encrypted, guests not yet; session list, workflows and memory sync to storage; prompts go to the provider under the user's own account); 'your code never leaves your machine', 'zero-knowledge' and 'we can't see anything' are banned",
+        "the Where your data goes section mirrors PRIVACY.md and links to it; a change to what is stored or relayed updates both together",
+        "shared links carry ?ref=<channel>, and the nginx access log is the only channel attribution",
+        "copy says works with Claude Code and Codex and never implies an Anthropic or OpenAI partnership or endorsement",
+        "the install card points Windows and Linux users at running from source"
       ],
       "architecturalRules": [
         "the rotating word sits on its own line with every word stacked in one grid cell and centred independently, so a short word leaves no gap and a long one never re-wraps the heading; mid-sentence placement shifts the surrounding text on every swap",
@@ -4097,7 +4127,12 @@
         "the illustrations are decorative aria-hidden inline SVG using Mantine colour variables, so they follow the colour scheme; the card text carries the meaning",
         "the app theme is monochrome (mono primary as a light/dark virtual colour, softened neutral dark scheme); status hues are muted OKLCH ramps on one shared lightness curve, with teal and cyan spread apart so done, needs answer and needs approval stay distinct, gray without its blue tint, and dark-scheme light-variant badges re-pointed in index.css to a translucent tint with hue text; the old sandstone and slate palettes are removed and needs-approval is cyan",
         "header anchors scroll smoothly only while the landing page is mounted and never under prefers-reduced-motion",
-        "the header is a three-column grid with the action pinned to column 3, so the nav does not move while Clerk resolves the signed-in/out action"
+        "the header is a three-column grid with the action pinned to column 3, so the nav does not move while Clerk resolves the signed-in/out action",
+        "no analytics script and no third-party embed on either build: the app origin holds the end-to-end encryption keys, so measurement is server-side only (access log, /download redirect)",
+        "the download button links to /download in production builds, which the serving nginx 302s to DESKTOP_DOWNLOAD_URL so every click is logged; dev builds link to the DMG directly",
+        "DemoVideo plays muted, looping and inline from a same-origin file; under prefers-reduced-motion it shows the poster with controls and never autoplays; it renders nothing if the file fails to load",
+        "og:image and og:url are absolute linesapp.cloud URLs, set identically in web/index.html and web/landing/index.html",
+        "the header action column holds a GitHub icon link beside Sign in / Open app, a plain link with no star-count fetch, since that would be a third-party request from the origin holding the encryption keys"
       ],
       "relatedDecisions": [
         "openai-codex-sessions"
@@ -4123,7 +4158,10 @@
         "web/src/components/FileSearchPanel.tsx",
         "web/src/components/FilesView.tsx",
         "web/src/components/Sidebar.tsx",
-        "web/src/App.tsx"
+        "web/src/App.tsx",
+        "web/src/lib/language.ts",
+        "web/src/components/Markdown.tsx",
+        "web/src/components/MonacoPreviewModal.tsx"
       ],
       "symbols": [
         "grepFilesAcross",
@@ -4133,7 +4171,10 @@
         "GrepResponse",
         "SearchPreview",
         "grepFiles",
-        "FileSearchResults"
+        "FileSearchResults",
+        "isMarkdownPath",
+        "FileContentView",
+        "useMarkdownMode"
       ],
       "tests": [
         "server/src/contentSearch.test.ts",
@@ -4145,7 +4186,8 @@
         "files over 1 MB and binary files are skipped; results are capped by files, matches and time and marked truncated",
         "grep is all-or-nothing across roots: one root out of reach is a 403",
         "an invalid regex is a 400 with an invalidRegex body; a bare 400 means an older bridge",
-        "results are shown only while they match the current query, roots and flags"
+        "results are shown only while they match the current query, roots and flags",
+        "a hit on a markdown file opens Raw at its line, not Preview, because a hit carries a line; picking another hit returns to Raw, and the toggle choice is not persisted"
       ],
       "architecturalRules": [
         "reuses the file-request handler, so auth, relay encryption and root containment are inherited",

@@ -107,3 +107,8 @@ export function languageFor(filePath: string): string {
   const ext = base.includes('.') ? base.split('.').pop()! : base;
   return EXT_LANG[ext] ?? 'plaintext';
 }
+
+/** Markdown the viewer renders. `.mdx` stays out: it is JSX, not markdown react-markdown can render. */
+export function isMarkdownPath(filePath: string): boolean {
+  return /\.(md|markdown)$/i.test(filePath);
+}

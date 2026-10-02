@@ -14,7 +14,8 @@ host, and the images ship without `server/`'s Claude Agent SDK dependency.
 
 - `deploy/docker/compose.yml` — `docker compose --env-file lines.env up -d`
 - `deploy/docker/Dockerfile` — `relay` / `storage` / `web` / `landing` build targets
-- `deploy/README.md` — the runbook this doc summarizes
+- `deploy/README.md` — the runbook this doc summarizes, plus growth metrics, self-hosting, the
+  optional Supabase-to-Postgres move and backups
 - `.github/workflows/deploy.yml` — CI: on push to `main`, the three `test` legs
   (`typecheck`, `server`, `runtime`) and `check-migrations` run in parallel; once
   all pass, the two `build` legs (`services`, `web`) push images to GHCR in
@@ -70,6 +71,13 @@ re-publishes that same key, so it never needs a matching web rebuild. Before the
 was a versioned filename hand-pasted after every release, forcing a `web` rebuild in lockstep with
 `desktop-app`'s release step; that ordering no longer exists.
 
+The same URL also reaches `web` and `landing` at runtime, as `DESKTOP_DOWNLOAD_URL` (compose passes
+`${VITE_DESKTOP_DOWNLOAD_URL:-/}`). Both nginx servers answer `/download` with a 302 to it, and the
+install card links there in production builds, so every download click is a line in the access
+log. nginx's envsubst renders `${CSP_CONNECT_SRC}` and `${DESKTOP_DOWNLOAD_URL}` only (the filter
+is the regex `^(CSP_CONNECT_SRC|DESKTOP_DOWNLOAD_URL)$`); every other `$` in the conf reaches nginx
+intact.
+
 At runtime, Traefik routes by `Host()`/`PathPrefix()` label rules on the
 existing Docker socket provider: `web` takes **its own host** (`run.<domain>`, and `app.<domain>` while released desktop
 builds still open it), `relay` takes `/agent` and `/client` on the apex (priority 100), `landing`
@@ -87,7 +95,9 @@ intentionally public (Clerk-authenticated) on that one subdomain.
 - Traefik (external to this repo — the deploy assumes a running instance with
   `--providers.docker.exposedbydefault=false` and an ACME resolver named
   `letsencrypt`)
-- Hosted Supabase (`DATABASE_URL`/`DIRECT_URL` in `lines.env`)
+- Hosted Supabase (`DATABASE_URL`/`DIRECT_URL` in `lines.env`) — the production database. Any
+  standalone Postgres works as well, including the optional bundled `postgres` service; see
+  Deploy mechanics and `deploy/README.md`'s Self-hosting section
 - A production Clerk instance (or the dev instance, for testing)
 
 ## Tests
@@ -153,6 +163,10 @@ are tagged with the pushed commit SHA).
   `?worker` import, and without it every editor silently fails to load. `style-src` allows
   `'unsafe-inline'` because Mantine sets inline styles throughout — style injection is not script
   execution.
+- Neither origin serves an analytics script or a third-party embed. Growth numbers come from the
+  nginx access log (`?ref=<channel>` tags on shared links, `/download` 302s) and read-only SQL —
+  `deploy/README.md`, Growth metrics. A tracker would be third-party code beside the encryption
+  keys, and would fail the CSP once it enforces.
 - SRI is added to the emitted chunks by a post-build step, and its limit is worth stating: it
   protects the chunks `index.html` references, not `index.html` itself. Against an attacker who
   can rewrite the served HTML it buys nothing; its value is against a compromised asset host and
@@ -176,9 +190,21 @@ are tagged with the pushed commit SHA).
   routes, everything else is called by the relay over the internal Docker
   network.
 - Migrations (`docker compose run --rm migrate`) run before the first `up`
-  against a new database — `prisma migrate deploy` uses the direct (`:5432`)
-  connection string, and starting `storage` first lets it connect successfully
-  against an empty schema while looking healthy.
+  against a new database — `prisma migrate deploy` uses `DIRECT_URL` (on
+  Supabase the direct `:5432` string, not the pooled `:6543`), and starting
+  `storage` first lets it connect successfully against an empty schema while
+  looking healthy.
+- The database stays Supabase in production. A standalone Postgres is a
+  drop-in alternative: point both `DATABASE_URL` and `DIRECT_URL` at it, the
+  same string, with no `pgbouncer` param. `compose.yml` carries one as an
+  optional `postgres` service under the `db` profile (`COMPOSE_PROFILES=db` in
+  `lines.env`, commented out in `env.example`). It publishes no port and sits
+  only on `lines-db`, an `internal: true` network that `storage` and `migrate`
+  join besides `lines`. Their `depends_on` on it is `required: false`, so a
+  Supabase deployment starts with no `postgres` service at all.
+  `POSTGRES_PASSWORD` is deliberately not `${…:?}`: compose interpolates every
+  service, profiled or not, so a required variable there would break every
+  deployment without the profile.
 - The same ordering applies to every later schema change, not just first
   bring-up: `migrate deploy` must run against the live database before a new
   `storage` image serves traffic, or the new code 500s with a Prisma

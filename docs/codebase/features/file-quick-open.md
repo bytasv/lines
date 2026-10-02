@@ -24,6 +24,11 @@ in a floating palette.
 - `shared/types.ts` — `FileRequestParams.includeIgnored`, `TreeEntry.ignored`
 - `web/src/store.ts` — `hideIgnored`/`setHideIgnored` (persisted, shared with
   the sidebar file tree)
+- `web/src/components/FilesView.tsx`, `web/src/components/MonacoPreviewModal.tsx`
+  — `FileContentView`, the viewer a hit opens in; `useMarkdownMode` and
+  `MarkdownModeToggle` for the Preview/Raw header toggle
+- `web/src/lib/language.ts` — `isMarkdownPath`
+- `web/src/components/Markdown.tsx` — renders the Preview body
 - `web/src/components/FileTree.tsx`, `web/src/components/Sidebar.tsx` — the
   same toggle and dimming applied to the sidebar's file tree
 
@@ -35,6 +40,7 @@ in a floating palette.
 - `includeIgnored` — `FileRequestParams`, threaded through
   `searchFiles`/`searchFilesAcross`
 - `TreeEntry.ignored`
+- `isMarkdownPath`, `FileContentView`, `useMarkdownMode`
 
 ## Data flow
 
@@ -82,6 +88,12 @@ listing) so the toggle never needs a round trip.
   open project tab.
 - A hit always opens in the preview overlay, never a files-mode tab,
   regardless of which sidebar mode is active when the palette opens.
+- A `.md`/`.markdown` hit (and a tree open) opens rendered in Preview, with a
+  Preview/Raw toggle in the header; other files, and `.mdx`, open in Monaco
+  with no toggle. The mode is not persisted: every open starts in its default.
+- Relative links in the rendered file resolve against the file's own directory
+  and open in the same preview; relative images are not resolved and do not
+  load.
 - `hideIgnored` defaults to on and is local-only (not part of synced
   settings) — a per-browser view choice, not a project setting.
 

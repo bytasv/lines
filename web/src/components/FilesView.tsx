@@ -1,16 +1,31 @@
-import { useEffect, useState } from 'react';
-import { Alert, ActionIcon, Box, Center, Group, Loader, Stack, Text, Tooltip, UnstyledButton } from '@mantine/core';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  Alert,
+  ActionIcon,
+  Box,
+  Center,
+  Group,
+  Loader,
+  ScrollArea,
+  SegmentedControl,
+  Stack,
+  Text,
+  Tooltip,
+  UnstyledButton,
+} from '@mantine/core';
 import { useComputedColorScheme } from '@mantine/core';
-import { IconFiles, IconX } from '@tabler/icons-react';
+import { IconCode, IconEye, IconFiles, IconX } from '@tabler/icons-react';
 import { Editor, type OnMount } from '@monaco-editor/react';
 // See MonacoPreviewModal: every module that mounts an editor owns this import,
 // and React.lazy is what keeps it out of the entry chunk.
 import '../lib/monacoSetup';
+import { docDirname, normalizeDocPath } from '@lines/shared';
 import { useStore } from '../store';
 import { useIsPhone } from '../lib/layout';
 import { BestOnDesktop } from './BestOnDesktop';
 import { useFileContent } from '../lib/files';
-import { languageFor } from '../lib/language';
+import { isMarkdownPath, languageFor } from '../lib/language';
+import { Markdown } from './Markdown';
 
 function FileTab({ path, project, active }: { path: string; project: string; active: boolean }) {
   const setActiveFileTab = useStore((s) => s.setActiveFileTab);
@@ -53,9 +68,8 @@ function FileTab({ path, project, active }: { path: string; project: string; act
 
 type MonacoEditor = Parameters<OnMount>[0];
 
-function FileEditor({ path, line, col }: { path: string; line?: number; col?: number }) {
+function MonacoView({ path, content, line, col }: { path: string; content: string; line?: number; col?: number }) {
   const colorScheme = useComputedColorScheme('dark');
-  const { content, error } = useFileContent(path);
   const [editor, setEditor] = useState<MonacoEditor | null>(null);
 
   // Re-run on every line change, not only on mount: the search preview keeps one
@@ -74,20 +88,6 @@ function FileEditor({ path, line, col }: { path: string; line?: number; col?: nu
     });
   }, [editor, line, col]);
 
-  if (error) {
-    return (
-      <Alert color="red" m="xs">
-        {error}
-      </Alert>
-    );
-  }
-  if (content === null) {
-    return (
-      <Center h="100%">
-        <Loader />
-      </Center>
-    );
-  }
   return (
     <Editor
       height="100%"
@@ -106,11 +106,119 @@ function FileEditor({ path, line, col }: { path: string; line?: number; col?: nu
   );
 }
 
+export type MarkdownMode = 'preview' | 'raw';
+
+/**
+ * Preview/Raw state for the file a header shows, or `null` for a non-markdown
+ * file (no toggle). Markdown opens rendered unless the caller asks for source
+ * (`forceRaw`) or points at a line — a line only means something in the source.
+ * The choice is not persisted: it resets whenever `openKey` changes, so every
+ * open starts in its default mode.
+ */
+export function useMarkdownMode(
+  path: string | undefined,
+  { line, forceRaw, openKey = path }: { line?: number; forceRaw?: boolean; openKey?: unknown } = {},
+): [MarkdownMode, (mode: MarkdownMode) => void] | null {
+  const [chosen, setChosen] = useState<{ key: unknown; mode: MarkdownMode } | null>(null);
+  if (chosen && chosen.key !== openKey) setChosen(null);
+  if (!path || !isMarkdownPath(path)) return null;
+  const mode = chosen && chosen.key === openKey ? chosen.mode : !line && !forceRaw ? 'preview' : 'raw';
+  return [mode, (next) => setChosen({ key: openKey, mode: next })];
+}
+
+function ModeLabel({ icon: Icon, label }: { icon: typeof IconEye; label: string }) {
+  return (
+    <Group gap={4} wrap="nowrap">
+      <Icon size={13} />
+      <span>{label}</span>
+    </Group>
+  );
+}
+
+/** The header control for `useMarkdownMode`; renders nothing for non-markdown files. */
+export function MarkdownModeToggle({ state }: { state: ReturnType<typeof useMarkdownMode> }) {
+  if (!state) return null;
+  const [mode, setMode] = state;
+  return (
+    <SegmentedControl
+      size="xs"
+      value={mode}
+      onChange={(v) => setMode(v as MarkdownMode)}
+      data={[
+        { value: 'preview', label: <ModeLabel icon={IconEye} label="Preview" /> },
+        { value: 'raw', label: <ModeLabel icon={IconCode} label="Raw" /> },
+      ]}
+    />
+  );
+}
+
+/**
+ * A workspace file, read-only: rendered markdown when `mode` is `'preview'`,
+ * Monaco otherwise. The mode comes from the host's header (`useMarkdownMode`).
+ */
+export function FileContentView({
+  path,
+  line,
+  col,
+  mode = 'raw',
+}: {
+  path: string;
+  line?: number;
+  col?: number;
+  mode?: MarkdownMode;
+}) {
+  // Fetched once here, so flipping Preview/Raw does not refetch.
+  const { content, error } = useFileContent(path);
+
+  // Relative links resolve against the file's own directory. Without a handler
+  // Markdown renders them as plain hrefs, which would navigate the app away.
+  // Stable reference: Markdown is memo'd.
+  const onLink = useCallback(
+    (href: string) => {
+      if (href.startsWith('#')) return;
+      const target = href.replace(/[?#].*$/, '');
+      if (!target) return;
+      const abs =
+        target.startsWith('/') || target.startsWith('~')
+          ? target
+          : '/' + normalizeDocPath(`${docDirname(path)}/${target}`);
+      useStore.getState().openFilePreview(abs);
+    },
+    [path],
+  );
+
+  if (error) {
+    return (
+      <Alert color="red" m="xs">
+        {error}
+      </Alert>
+    );
+  }
+  if (content === null) {
+    return (
+      <Center h="100%">
+        <Loader />
+      </Center>
+    );
+  }
+  if (mode === 'preview') {
+    return (
+      <ScrollArea h="100%" type="hover">
+        <Box className="docs-body" px="lg" pb="xl">
+          <Markdown text={content} onLinkClick={onLink} />
+        </Box>
+      </ScrollArea>
+    );
+  }
+  return <MonacoView path={path} content={content} line={line} col={col} />;
+}
+
 /** Main-pane files mode: tab bar of opened files + read-only Monaco editor. */
 export function FilesView() {
   const activeProject = useStore((s) => s.activeProject);
   const openFiles = useStore((s) => activeProject ? s.openFiles[activeProject] : undefined);
   const isPhone = useIsPhone();
+  const mdMode = useMarkdownMode(openFiles?.active ?? undefined);
 
   const empty = (
     <Center h="100%">
@@ -132,18 +240,25 @@ export function FilesView() {
 
   return (
     <Stack gap={0} h="100%">
-      <Group gap={4} px="xs" py={6} wrap="nowrap" style={{ overflowX: 'auto' }}>
-        {openFiles.tabs.map((path) => (
-          <FileTab
-            key={path}
-            path={path}
-            project={activeProject}
-            active={path === openFiles.active}
-          />
-        ))}
+      <Group gap={6} px="xs" py={6} wrap="nowrap">
+        <Group gap={4} wrap="nowrap" style={{ flex: 1, minWidth: 0, overflowX: 'auto' }}>
+          {openFiles.tabs.map((path) => (
+            <FileTab
+              key={path}
+              path={path}
+              project={activeProject}
+              active={path === openFiles.active}
+            />
+          ))}
+        </Group>
+        <MarkdownModeToggle state={mdMode} />
       </Group>
       <Box style={{ flex: 1, minHeight: 0 }}>
-        {openFiles.active ? <FileEditor key={openFiles.active} path={openFiles.active} /> : empty}
+        {openFiles.active ? (
+          <FileContentView key={openFiles.active} path={openFiles.active} mode={mdMode?.[0]} />
+        ) : (
+          empty
+        )}
       </Box>
     </Stack>
   );
@@ -158,6 +273,9 @@ export function SearchPreviewView() {
   const activeProject = useStore((s) => s.activeProject);
   const setSearchPreview = useStore((s) => s.setSearchPreview);
   const isPhone = useIsPhone();
+  // Keyed by the hit, so picking another hit in a file left on Preview goes
+  // back to Raw, where its line is visible.
+  const mdMode = useMarkdownMode(preview?.path, { line: preview?.line, openKey: preview });
   if (!preview) return null;
   if (isPhone) return <BestOnDesktop what="Reading source" onClose={() => setSearchPreview(null)} />;
   const rel =
@@ -171,14 +289,23 @@ export function SearchPreviewView() {
           {rel}
           {preview.line ? `:${preview.line}` : ''}
         </Text>
-        <Tooltip label="Close preview">
-          <ActionIcon size="sm" variant="subtle" color="gray" onClick={() => setSearchPreview(null)}>
-            <IconX size={13} />
-          </ActionIcon>
-        </Tooltip>
+        <Group gap={6} wrap="nowrap">
+          <MarkdownModeToggle state={mdMode} />
+          <Tooltip label="Close preview">
+            <ActionIcon size="sm" variant="subtle" color="gray" onClick={() => setSearchPreview(null)}>
+              <IconX size={13} />
+            </ActionIcon>
+          </Tooltip>
+        </Group>
       </Group>
       <Box style={{ flex: 1, minHeight: 0 }}>
-        <FileEditor key={preview.path} path={preview.path} line={preview.line} col={preview.col} />
+        <FileContentView
+          key={preview.path}
+          path={preview.path}
+          line={preview.line}
+          col={preview.col}
+          mode={mdMode?.[0]}
+        />
       </Box>
     </Stack>
   );

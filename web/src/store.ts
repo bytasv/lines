@@ -871,7 +871,7 @@ interface UiState {
   alertSound: AlertSound;
   notifyPermission: NotificationPermission;
   /** File the preview modal is showing; null when closed. */
-  filePreview: { path: string; display: string; line?: number; col?: number } | null;
+  filePreview: { path: string; display: string; line?: number; col?: number; raw?: boolean } | null;
   /** Claude-plan usage snapshot from the bridge; null when unavailable (API-key users). */
   usage: UsageSnapshot | null;
   /** ChatGPT-plan usage snapshot; null when no OpenAI account is connected, or
@@ -1081,7 +1081,7 @@ interface UiState {
   setAlertsEnabled: (on: boolean) => Promise<void>;
   setAlertSound: (sound: AlertSound) => void;
   testAlertSound: () => void;
-  openFilePreview: (raw: string) => void;
+  openFilePreview: (raw: string, opts?: { raw?: boolean }) => void;
   closeFilePreview: () => void;
   openLoginModal: () => void;
   closeLoginModal: () => void;
@@ -1565,7 +1565,7 @@ export const useStore = create<UiState>((set, get) => {
   setFolderPickTarget: (project) => set({ folderPickTarget: project }),
   setWorktreePending: (pending) => set({ worktreePending: pending }),
 
-  openFilePreview: (raw) => {
+  openFilePreview: (raw, opts) => {
     // Split off a trailing :line(:col); the path itself never ends in a digit-only segment.
     const m = raw.match(/^(.*?)(?::(\d+)(?::(\d+))?)?$/);
     const rawPath = m?.[1] ?? raw;
@@ -1581,7 +1581,7 @@ export const useStore = create<UiState>((set, get) => {
       if (!cwd) return; // no base to resolve against
       resolved = `${cwd}/${rawPath.replace(/^\.\//, '')}`;
     }
-    set({ filePreview: { path: resolved, display: rawPath, line, col } });
+    set({ filePreview: { path: resolved, display: rawPath, line, col, raw: opts?.raw } });
   },
   closeFilePreview: () => set({ filePreview: null }),
 

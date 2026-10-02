@@ -1,18 +1,12 @@
-import { Modal, Text, Center, Loader, Alert, Box, Group } from '@mantine/core';
-import { useComputedColorScheme } from '@mantine/core';
-import { Editor } from '@monaco-editor/react';
-// Side-effect import, owned by every module that mounts an editor: it points
-// Monaco at this bundle instead of at a CDN, and it has to have run before the
-// first mount. This module is only reached through React.lazy, so evaluating
-// the chunk is what orders it. See the module for why it is a security property.
-import '../lib/monacoSetup';
+import { Modal, Text, Box, Group } from '@mantine/core';
 import { projectRoots } from '@lines/shared';
 import { useStore } from '../store';
 import { useIsPhone } from '../lib/layout';
 import { BestOnDesktop } from './BestOnDesktop';
-import { useFileContent } from '../lib/files';
-import { languageFor } from '../lib/language';
 import { FileTree } from './FileTree';
+// The editor (and its monacoSetup import) lives in FilesView; this module is
+// only reached through React.lazy, which keeps both out of the entry chunk.
+import { FileContentView, MarkdownModeToggle, useMarkdownMode } from './FilesView';
 
 export function MonacoPreviewModal() {
   const filePreview = useStore((s) => s.filePreview);
@@ -20,12 +14,13 @@ export function MonacoPreviewModal() {
   const openFilePreview = useStore((s) => s.openFilePreview);
   const projects = useStore((s) => s.projects);
   const activeProject = useStore((s) => s.activeProject);
-  const colorScheme = useComputedColorScheme('dark');
 
   const path = filePreview?.path;
   const line = filePreview?.line;
-  const { content, error } = useFileContent(path);
   const isPhone = useIsPhone();
+  // Keyed by the preview object, not the path: each openFilePreview is a new
+  // open, so the toggle starts over even when the same file is reopened.
+  const mdMode = useMarkdownMode(path, { line, forceRaw: filePreview?.raw, openKey: filePreview });
 
   // Root the tree at the root that contains the previewed file — any root of any
   // open project, since a project spans several — else the active project.
@@ -47,11 +42,15 @@ export function MonacoPreviewModal() {
       onClose={closeFilePreview}
       fullScreen
       padding="xs"
+      styles={{ title: { flex: 1, minWidth: 0, marginRight: 'var(--mantine-spacing-xs)' } }}
       title={
-        <Text ff="monospace" size="sm" fw={600}>
-          {filePreview?.display ?? ''}
-          {line ? `:${line}` : ''}
-        </Text>
+        <Group gap="xs" wrap="nowrap" justify="space-between">
+          <Text ff="monospace" size="sm" fw={600} truncate>
+            {filePreview?.display ?? ''}
+            {line ? `:${line}` : ''}
+          </Text>
+          <MarkdownModeToggle state={mdMode} />
+        </Group>
       }
     >
       <Group align="stretch" gap={0} wrap="nowrap" h="calc(100vh - 70px)">
@@ -73,37 +72,13 @@ export function MonacoPreviewModal() {
           </Box>
         )}
         <Box style={{ flex: 1, minWidth: 0 }}>
-          {error ? (
-            <Alert color="red">{error}</Alert>
-          ) : content === null ? (
-            <Center h="100%">
-              <Loader />
-            </Center>
-          ) : (
-            <Editor
+          {path && (
+            <FileContentView
               key={path}
-              height="100%"
-              language={filePreview ? languageFor(filePreview.display) : 'plaintext'}
-              value={content}
-              theme={colorScheme === 'dark' ? 'vs-dark' : 'light'}
-              onMount={(editor, monaco) => {
-                if (!line) return;
-                const model = editor.getModel();
-                editor.revealLineInCenter(line);
-                editor.setPosition({ lineNumber: line, column: filePreview?.col ?? 1 });
-                if (model) {
-                  editor.setSelection(
-                    new monaco.Selection(line, 1, line, model.getLineMaxColumn(line)),
-                  );
-                }
-              }}
-              options={{
-                readOnly: true,
-                minimap: { enabled: false },
-                fontSize: 12,
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-              }}
+              path={path}
+              line={line}
+              col={filePreview?.col}
+              mode={mdMode?.[0]}
             />
           )}
         </Box>

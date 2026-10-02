@@ -30,6 +30,7 @@ An in-app reader for a project's `docs/**` markdown corpus: a doc tree, an `inde
 - `useDocs`, `fetchDocs`, `docsRootFor`
 - `toDocTreeNodes`, `ancestorDirs`, `featureCards`, `FeatureCard`, `unindexedDocs`
 - `Markdown.onLinkClick`
+- `openFilePreview(path, { raw })`
 
 ## Data flow
 
@@ -53,6 +54,7 @@ No front-end tests — `web/` has no test runner; the pure logic (link resolutio
 - The corpus and `docs/codebase/index.json` are allowed to disagree: an index entry whose `doc` is missing from the bundle still renders as a card (name/purpose are useful on their own) with a "no doc" badge; a bundle doc no entry claims lists under "Other documents"; a missing/unparseable index degrades to a plain "All documents" list, not an error page.
 - A markdown link target always resolves to `kind: 'doc'` and opens inside the reader — even when the target isn't in this corpus — so a broken cross-link surfaces as a "not in this corpus" panel rather than a source-preview 404.
 - A link that escapes the docs root, or isn't markdown, opens the existing file-preview modal instead.
+- The reader's "Open source" button opens the file preview with `raw: true`, so it lands on the markdown source, not the rendered preview.
 - No project open, or no `docs/` folder in the active project, shows an empty state instead of an error boundary.
 
 ## Architectural rules
