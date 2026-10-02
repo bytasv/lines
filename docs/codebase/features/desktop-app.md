@@ -35,14 +35,14 @@ point a user at.
   pinned whisper.cpp release, cached by version; a local build without `cmake` skips it with a
   warning (falls back to Homebrew's), CI refuses to ship without it
 - `desktop/scripts/afterPack.mjs` — ad-hoc signs the packed bundle
-- `desktop/scripts/release.mjs` — uploads artifacts to the public R2 bucket, plus the stable
-  download alias
+- `desktop/scripts/release.mjs` — the upload-only step (`npm run upload -w desktop`): artifacts to the
+  public R2 bucket, plus the stable download alias
 - `desktop/scripts/ship.mjs` — the one-command release: version guard, clean build, publish
 - `desktop/scripts/check-unreleased.mjs` — refuses to publish a version already at the edge
 - `.github/workflows/release-desktop.yml` — `workflow_dispatch` that runs `ship.mjs` on a
   GitHub-hosted mac runner
-- `desktop/package.json` — the `build` block (electron-builder config) and `package`/`release`/`ship`
-  scripts
+- `desktop/package.json` — the `build` block (electron-builder config) and `package`/`upload`/`release`/`ship`
+  scripts (`release` and `ship` both run `ship.mjs`)
 
 ## Files
 
@@ -62,7 +62,7 @@ point a user at.
   best-effort like the log
 - `server/scripts/enroll-code.ts` — the tray's encryption actions without Electron, for a bridge
   under Tilt or on a headless box
-- `desktop/scripts/ship.mjs` — orchestrates `check-unreleased.mjs`, `package`, `release` behind one
+- `desktop/scripts/ship.mjs` — orchestrates `check-unreleased.mjs`, `package`, `upload` behind one
   command, local or CI
 - `desktop/scripts/check-unreleased.mjs` — compares `desktop/package.json`'s version against the
   published `latest-mac.yml`
@@ -338,9 +338,10 @@ otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own
 ### Releasing
 
 `npm run ship -w desktop` is the one command for the whole release, local or CI — the same entry
-point either way, so the two never drift into two procedures. It: runs `check-unreleased.mjs`
+point either way (`npm run release -w desktop` is an alias of it; the upload-only step is
+`npm run upload -w desktop`), so the two never drift into two procedures. It: runs `check-unreleased.mjs`
 (skippable with `--force`), clears `desktop/release/`, runs the root `typecheck` and the server and
-relay test suites, runs `package`, then runs `release` (skippable with `--dry-run`). The tests have
+relay test suites, runs `package`, then runs `upload` (skippable with `--dry-run`). The tests have
 no skip flag: the bridge ships inside the app, so a release cut from a failing commit puts the
 failure on every machine. Only the release workflow sets `LINES_SHIP_TESTED=1`, because its ubuntu
 `guard` job has already run the same suites on the same commit. Both `LINES_UPDATE_FEED_URL` and `LINES_DOWNLOAD_URL` are derived from
@@ -359,7 +360,7 @@ not `--dry-run`, it offers to bump the patch version, commit, and push — `Bump
 bump), CI, or any piped/non-interactive invocation all fall through to the original behaviour:
 print the "already published" message and fail. The bump — a targeted string replace, not
 `JSON.parse`/`stringify`, so formatting is untouched — is written before `package` runs (so
-`build.mjs` and electron-builder both pick it up) but only committed and pushed after `release`
+`build.mjs` and electron-builder both pick it up) but only committed and pushed after `upload`
 succeeds, so a failed build never leaves a pushed bump for a release that didn't ship. A push
 rejection (remote ahead) is reported, not fatal — the release already succeeded.
 
@@ -521,6 +522,7 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
   caller explicitly passes `--force` (or the workflow's `force` input) — artifacts are immutable at
   the edge (one-year max-age), so a same-version re-upload can leave stale bytes cached rather than
   replacing them.
+- `npm run release -w desktop` is an alias of `ship`; the upload-only step is `upload`.
 - `npm run ship -w desktop` is destructive on purpose: it deletes `desktop/release/` before every
   build, since that directory is electron-builder output and nothing else is meant to live there.
 - The desktop release pipeline is manual-dispatch only — no tag convention, no release on push to

@@ -111,7 +111,7 @@ if (!files.length) {
  * A DMG left over from an earlier build is indistinguishable from this one's
  * here, and it would be published as the alias — the download link for everyone,
  * pointing at the wrong version. `npm run ship -w desktop` clears the directory
- * first; a bare `npm run release` in a dirty tree is what this catches.
+ * first; a bare `npm run upload` in a dirty tree is what this catches.
  */
 const dmgs = files.filter((name) => name.endsWith('.dmg'));
 if (dmgs.length !== 1) {

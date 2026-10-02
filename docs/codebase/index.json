@@ -2575,6 +2575,7 @@
         "when a different installation (a dev checkout, most commonly Tilt) holds the lock instead, the tray's own bridge stands down rather than fighting for it — no bridge or worker spawns at startup, or the running bridge is not respawned after exiting/being preempted — until the lock clears, and the tray reports this plainly ('Paused — another bridge owns this machine') rather than 'Connecting…' or a silent retry loop",
         "the worker is never part of a stand-down: only the bridge collides on the machine lock and the relay device identity, so a worker mid-turn is left alone when a sibling process collides on a resource the worker doesn't touch",
         "a release is refused when desktop/package.json's version is already published, unless --force (or the workflow's force input) is passed — artifacts are immutable at the edge",
+        "npm run release -w desktop is an alias of ship; the upload-only step is upload",
         "npm run ship -w desktop deletes desktop/release/ before every build",
         "npm run ship -w desktop runs the root typecheck and the server and relay suites before packaging, with no skip flag; only the release workflow sets LINES_SHIP_TESTED=1, because its guard job already ran them on the same commit",
         "the desktop release pipeline is manual workflow_dispatch only — no tag convention, no release on push to main",

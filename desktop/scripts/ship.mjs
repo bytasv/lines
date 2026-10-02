@@ -6,6 +6,9 @@
  *   npm run ship -w desktop -- --dry-run  # build and sign, publish nothing
  *   npm run ship -w desktop -- --force    # re-publish a version on purpose
  *
+ * `npm run release -w desktop` is an alias of `ship`: the command people reach
+ * for first has to be the full release, bump offer included.
+ *
  * The `--` is npm's argument separator: without it npm keeps the flag and this
  * script never sees it. A swallowed `--dry-run` would mean a real publish, so
  * an unrecognised argument is an error here rather than something ignored.
@@ -15,7 +18,7 @@
  * the local one is what you reach for when CI is broken.
  *
  * It orchestrates the existing scripts rather than replacing them; `package` and
- * `release` stay usable on their own. What it adds is the part that is easy to
+ * `upload` stay usable on their own. What it adds is the part that is easy to
  * get wrong by hand: both build-time URLs are *derived* from
  * `R2_RELEASE_PUBLIC_BASE_URL` instead of exported from memory. A feed URL typed
  * wrong bakes a dead updater into the shipped app, and nothing notices until a
@@ -47,7 +50,7 @@ const flags = new Set(['--dry-run', '--force']);
 const unknown = process.argv.slice(2).filter((arg) => !flags.has(arg));
 if (unknown.length) {
   console.error(`Unrecognised argument: ${unknown.join(' ')}`);
-  console.error('Usage: npm run ship -w desktop [-- --dry-run --force]');
+  console.error('Usage: npm run ship|release -w desktop [-- --dry-run --force]');
   process.exit(1);
 }
 const dryRun = process.argv.includes('--dry-run');
@@ -205,7 +208,7 @@ if (dryRun) {
   process.exit(0);
 }
 
-run('npm', ['run', 'release', '-w', 'desktop'], { env });
+run('npm', ['run', 'upload', '-w', 'desktop'], { env });
 
 /**
  * Record the bump only now: a failed build must never leave a pushed bump for a
