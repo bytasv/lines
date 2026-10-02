@@ -24,11 +24,32 @@
     <meta name="apple-mobile-web-app-title" content="Lines" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="theme-color" content="#1e1e1e" />
-    <title>Lines</title>
+    <title>Lines — a web and phone GUI for Claude Code and Codex</title>
     <meta
       name="description"
-      content="Lines — a web GUI for coding agents (Claude Code, Codex). Run parallel sessions from anywhere; the agent runs on your machine."
+      content="Drive Claude Code or Codex from any browser or your phone. The agent runs on your machine, with your files, git and CLI login. Nothing is executed in the cloud."
     />
+    <!-- Link previews (LinkedIn, X, Slack, HN aggregators). Crawlers do not run
+         the bundle, so these must be static, and og:image must be absolute. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Lines" />
+    <meta property="og:title" content="Lines — a web and phone GUI for Claude Code and Codex" />
+    <meta
+      property="og:description"
+      content="The agent runs on your machine, with your files, git and CLI login. Drive it from any browser or your phone."
+    />
+    <meta property="og:url" content="https://linesapp.cloud/" />
+    <meta property="og:image" content="https://linesapp.cloud/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Lines running a coding agent session in the browser and on a phone" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Lines — a web and phone GUI for Claude Code and Codex" />
+    <meta
+      name="twitter:description"
+      content="The agent runs on your machine, with your files, git and CLI login. Drive it from any browser or your phone."
+    />
+    <meta name="twitter:image" content="https://linesapp.cloud/og.png" />
     <!-- The boot splash (#lines-splash, below). It is static, and skipped only
          by the inline check right after it, so the page paints from the HTML itself, before the module graph is
          parsed and long before Clerk has answered. It lives outside #root and
