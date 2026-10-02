@@ -219,6 +219,10 @@ session's* machine (`machineForSelectedSession()`), not the primary: the file tr
 search and docs are all driven by that session's cwd, so with a shared session open those paths
 exist only on the host's disk.
 
+A message `send()` cannot deliver is dropped. User actions then raise `actionError`; the
+`BACKGROUND_TYPES` set (presence, transcript reload, MCP status, context breakdown, step and
+recipe versions) drops silently with a console warning only, since callers resend them.
+
 ### The session list is scoped, not merged
 
 The store keeps every linked machine's sessions — `linkForMessage` routes on `sessionMachine`, and

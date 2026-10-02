@@ -155,7 +155,8 @@ and how status is surfaced in the sidebar row and the project tab.
 - `markSessionCreatePending()` — called by every `createSession` sender (the sidebar's New
   session button and its workflow-picker menu); sets `pendingCreate`
 - `actionError` / `setActionError(message)` — a control message the socket couldn't carry; set by
-  `ws.ts`'s `send()` on the dropped-non-prompt path, rendered (and dismissed on click) by the
+  `ws.ts`'s `send()` on the dropped-non-prompt path (not for `BACKGROUND_TYPES`, which drop
+  with a console warning only), rendered (and dismissed on click) by the
   sidebar
 
 ## Data flow
@@ -325,6 +326,8 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   never mistaken for one that worked.
 - A dropped non-prompt control message (delete included) sets `actionError`, rendered by the
   sidebar and dismissed by clicking it — replacing a `console.warn` nobody saw.
+  Automatic messages (`BACKGROUND_TYPES`: presence, transcript reload, etc.) are exempt, so a
+  reconnect never raises the banner unprompted.
 - A server-side refusal (`{type:'error'}`, e.g. a rejected mutation) also sets `actionError`
   instead of only logging to the console — see [git-worktrees](git-worktrees.md), whose worktree
   removal/creation refusals were the case that made the gap visible; the same fix also

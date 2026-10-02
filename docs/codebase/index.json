@@ -1098,7 +1098,7 @@
         "pendingCreate is set by markSessionCreatePending() (called by every createSession sender: the sidebar's New session button/menu, and the recipe-run path already selects explicitly via its own sessionId and does not need it) and expires on its own after 15s if no matching upsert ever arrives",
         "seenSessionIds is maintained by both the hello reducer and sessionUpsert, so a session that leaves and re-enters the map — deleted then resurrected, or replayed by a duplicate hello — is never treated as new again",
         "a repeated hello (same session/project signature as the last one applied) is inert: sessions, transcriptLoaded and contextBreakdowns are left untouched, while every other field (usage, worker/storage health, auth) still applies as normal — an older relay replayed open (and its full hello) for every live channel on any bridge attach or takeover, and wholesale-replacing state on each one is what turned two alternating bridge snapshots into a self-sustaining flicker loop across sessions and transcript reloads",
-        "send() (ws.ts) returns false when the socket is not open and the message is not a prompt (prompts alone queue for replay); the caller sets actionError so a dropped control message — e.g. a delete sent while disconnected — is visible instead of a console.warn nobody saw",
+        "send() (ws.ts) returns false when the socket is not open and the message is not a prompt (prompts alone queue for replay); the caller sets actionError so a dropped control message — e.g. a delete sent while disconnected — is visible instead of a console.warn nobody saw; automatic traffic callers resend on their own (BACKGROUND_TYPES: presence, loadTranscript, mcpServerStatus, contextBreakdown, stepVersions, recipeVersions) drops silently with a console.warn only and never sets actionError — a reconnect must not raise a banner nobody triggered",
         "deleting a session shows a loading state on its own row and leaves the row in place until the sessionDeleted echo removes it — no optimistic removal, so a delete that silently failed to send is never mistaken for one that worked",
         "archived sessions in the sidebar render 20 at a time behind a 'Show N more' button instead of the full archived list, since lines.showArchived defaults to on and a long-lived project can accumulate hundreds of them"
       ],
@@ -2923,6 +2923,7 @@
         "MachineLink",
         "linkFor",
         "linkForMessage",
+        "BACKGROUND_TYPES",
         "useSessionMachine",
         "useSessionMachineHealth",
         "linkedMachineHealth",

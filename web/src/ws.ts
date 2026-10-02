@@ -1254,6 +1254,19 @@ export function sendToMachine(deviceId: string, msg: ClientMessage): boolean {
   return !!link && writeToLink(link, JSON.stringify(msg));
 }
 
+/** Automatic traffic its callers resend or retry on their own. A drop of one of
+ *  these is not something the user did, so it stays out of the action banner —
+ *  otherwise a reconnect flashes "not connected" with nobody having clicked
+ *  anything. A denylist on purpose: a new user action keeps the safeguard. */
+const BACKGROUND_TYPES: ReadonlySet<ClientMessage['type']> = new Set<ClientMessage['type']>([
+  'presence',
+  'loadTranscript',
+  'mcpServerStatus',
+  'contextBreakdown',
+  'stepVersions',
+  'recipeVersions',
+]);
+
 /** False when the message was dropped — the caller can then say so instead of
  *  leaving the user with a button that appears to do nothing. */
 export function send(msg: ClientMessage): boolean {
@@ -1281,10 +1294,11 @@ export function send(msg: ClientMessage): boolean {
     return true;
   }
   console.warn('ws not connected, dropped', msg.type);
+  if (BACKGROUND_TYPES.has(msg.type)) return false;
   // Not only a console line: a silently dropped control message is exactly what
   // "delete does nothing" looked like from the outside.
   useStore
     .getState()
-    .setActionError(`Not connected to your machine — that action wasn't sent. Try again once it reconnects.`);
+    .setActionError(`Not connected to that machine — that action wasn't sent. Try again once it reconnects.`);
   return false;
 }
