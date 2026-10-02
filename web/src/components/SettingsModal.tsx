@@ -287,32 +287,33 @@ function ClaudeAccountRow({ onClose }: { onClose: () => void }) {
   return auth?.loggedIn ? (
     <Group justify="space-between" wrap="nowrap">
       <Text size="sm" truncate>
-        {auth.account?.email ?? 'Signed in'}
+        {auth.account?.email ?? 'Connected to Claude'}
         {auth.account?.organization ? ` · ${auth.account.organization}` : ''}
       </Text>
       <Button size="xs" variant="default" onClick={() => send({ type: 'authLogout' })}>
-        Log out
+        Disconnect
       </Button>
     </Group>
   ) : (
     <Group justify="space-between" wrap="nowrap">
       <Text size="sm" c="dimmed">
-        Not signed in to Claude
+        No Claude account connected
       </Text>
       <Button
         size="xs"
+        variant="default"
         onClick={() => {
           onClose();
           openLoginModal();
         }}
       >
-        Sign in…
+        Connect…
       </Button>
     </Group>
   );
 }
 
-/** Hand-off to the documentation reader — close first, like the sign-in and allowlist-review buttons. */
+/** Hand-off to the documentation reader — close first, like the connect and allowlist-review buttons. */
 function DocsSection({ onClose }: { onClose: () => void }) {
   const activeProject = useStore((s) => s.activeProject);
   const navigate = useNavigate();
