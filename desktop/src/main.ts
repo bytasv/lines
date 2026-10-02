@@ -26,6 +26,7 @@ import {
   Menu,
   Notification,
   Tray,
+  clipboard,
   dialog,
   nativeImage,
   powerMonitor,
@@ -1116,6 +1117,8 @@ function isOffApp(currentUrl: string): boolean {
  */
 function attachNavigationGuards(w: BrowserWindow, role: WindowRole) {
   const contents = w.webContents;
+  // Every window passes through here, popups included, so the menu rides along.
+  attachContextMenu(contents);
   // A real child window in the same session, so cookies are shared — what a Clerk
   // OAuth popup needs. Anything else goes to the real browser.
   contents.setWindowOpenHandler(({ url }) => {
@@ -1159,6 +1162,78 @@ function attachNavigationGuards(w: BrowserWindow, role: WindowRole) {
       if (!isOffApp(url)) return;
       void injectBackToLines(contents);
     });
+  }
+}
+
+/**
+ * The right-click menu. Electron ships none, so without this the window has no
+ * Cut/Copy/Paste or link actions at all. Link items never load anything in the
+ * window — they copy, or hand `EXTERNAL_SCHEMES` URLs to the real browser — so
+ * the navigation policy above stays the only way in. A custom web menu must
+ * `preventDefault` its `contextmenu` event or this one pops up as well.
+ */
+function attachContextMenu(contents: Electron.WebContents) {
+  contents.on('context-menu', (_event, params) => {
+    const sections: MenuItemConstructorOptions[][] = [];
+    if (params.misspelledWord && params.dictionarySuggestions.length) {
+      sections.push(
+        params.dictionarySuggestions.map((suggestion) => ({
+          label: suggestion,
+          click: () => contents.replaceMisspelling(suggestion),
+        })),
+      );
+    }
+    if (params.isEditable) {
+      const flags = params.editFlags;
+      sections.push(
+        [
+          { role: 'undo', enabled: flags.canUndo },
+          { role: 'redo', enabled: flags.canRedo },
+        ],
+        [
+          { role: 'cut', enabled: flags.canCut },
+          { role: 'copy', enabled: flags.canCopy },
+          { role: 'paste', enabled: flags.canPaste },
+          { role: 'selectAll', enabled: flags.canSelectAll },
+        ],
+      );
+    } else if (params.selectionText.trim()) {
+      sections.push([{ role: 'copy' }]);
+    }
+    if (params.linkURL) {
+      const link = params.linkURL;
+      const items: MenuItemConstructorOptions[] = [
+        { label: 'Copy Link', click: () => clipboard.writeText(link) },
+      ];
+      if (isExternalScheme(link)) {
+        items.push({ label: 'Open Link in Browser', click: () => void shell.openExternal(link) });
+      }
+      sections.push(items);
+    }
+    if (params.mediaType === 'image' && params.srcURL) {
+      sections.push([
+        { label: 'Copy Image', click: () => contents.copyImageAt(params.x, params.y) },
+      ]);
+    }
+    if (!app.isPackaged) {
+      sections.push([
+        { label: 'Inspect Element', click: () => contents.inspectElement(params.x, params.y) },
+      ]);
+    }
+    const template = sections.flatMap((section, i) =>
+      i === 0 ? section : [{ type: 'separator' as const }, ...section],
+    );
+    const owner = BrowserWindow.fromWebContents(contents);
+    if (!template.length || !owner || owner.isDestroyed()) return;
+    Menu.buildFromTemplate(template).popup({ window: owner });
+  });
+}
+
+function isExternalScheme(raw: string): boolean {
+  try {
+    return EXTERNAL_SCHEMES.includes(new URL(raw).protocol);
+  } catch {
+    return false;
   }
 }
 

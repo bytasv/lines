@@ -164,7 +164,14 @@ that is the app host less its first label — not on the app subdomain itself), 
 only — the one identity host that is also a content site), or the continuation of a flow already
 off-app; everything else is handed to the real browser and logged, including which rule allowed an
 in-app hop and the reason `will-navigate` blocked one — Clerk's own full-page OAuth redirect has to
-survive this or sign-in breaks with no way back, since the window has no address bar. A window that
+survive this or sign-in breaks with no way back, since the window has no address bar. The shell also supplies a native right-click menu in every window (Electron ships none): edit
+actions in inputs, Copy on selected text, spelling suggestions, Copy Link, Copy Image, and Inspect
+Element in unpackaged builds only. It is built from the `context-menu` event with built-in role
+items, so it needs no preload or IPC, and it is attached inside `attachNavigationGuards` so popups
+get it too. Link items never navigate the window: Copy Link writes the URL to the clipboard, and
+Open Link in Browser appears only for `EXTERNAL_SCHEMES` and goes through `shell.openExternal`, so
+`blob:` attachment links get Copy only. A custom web-side `contextmenu` handler must
+`preventDefault`, or both menus appear. A window that
 ends up stuck off-app (an abandoned sign-in) gets a "Back to Lines" pill injected into the page, and
 the tray's "Open Lines" reloads an existing off-app window back to the app instead of just showing
 it. **The window's cookie jar is not Safari's or Chrome's**: a browser

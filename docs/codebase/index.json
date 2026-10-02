@@ -2491,6 +2491,7 @@
         "appOrigin",
         "navigationVerdict",
         "attachNavigationGuards",
+        "attachContextMenu",
         "injectBackToLines",
         "openLinesDefault",
         "loadPrefs",
@@ -2518,6 +2519,7 @@
         "server/src/sessions.claudeCli.test.ts"
       ],
       "businessRules": [
+        "right-click shows a native context menu in every shell window; link actions copy or open externally, never in-window",
         "a restart is refused while any session is running, waiting-permission, or waiting-approval, since a restart kills bridge and worker together under one atomic update",
         "closing the window does not quit the app, and must not kill an in-flight turn",
         "restartForUpdate never installs on an unsigned build - CAN_SELF_INSTALL is false until real code signing exists, so it opens the download page instead of pretending to update in place",
@@ -2553,6 +2555,7 @@
         "the tray's Collect diagnostics… zips both log generations, run/*/*.json with token deleted, the bridge lock and a summary.json into ~/.lines-app/diagnostics via /usr/bin/ditto; device.json is never copied"
       ],
       "architecturalRules": [
+        "context menu hooked inside attachNavigationGuards so every window, including popups, gets it without a preload",
         "loginShellPath() resolves the login shell's PATH once for both children, because a GUI-launched macOS app inherits a minimal PATH that breaks the agent's shell-outs",
         "children are spawned with ELECTRON_RUN_AS_NODE=1, since process.execPath inside Electron is the Electron binary and would otherwise relaunch the app",
         "the worker is never auto-restarted on crash - its live queries are gone, and a silent respawn would look like a healthy session that lost its turn; the bridge is restarted freely",
