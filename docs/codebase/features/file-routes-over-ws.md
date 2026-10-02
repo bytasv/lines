@@ -2,8 +2,8 @@
 
 ## Purpose
 
-File contents, directory listings, the docs bundle, `@mention` file search, and
-stored attachments travel over the browser's existing WebSocket instead of the
+File contents, directory listings, the docs bundle, `@mention` file search,
+stored attachments, and previewable media (images, video, audio, pdf) travel over the browser's existing WebSocket instead of the
 bridge's HTTP server.
 
 They used to be `GET /file`, `/tree`, `/find`, `/docs` and `/attachments/*` with
@@ -19,7 +19,9 @@ WebSocket multiplexer.
 ## Entry points
 
 - `web/src/lib/files.ts` — `fetchTree`, `searchFiles`, `fetchDocs`,
-  `useFileContent`, `useAttachmentUrl`
+  `useFileContent`, `useAttachmentUrl`, `useMediaUrl`
+- `web/src/components/FilesView.tsx` — `FileContentView` sends media paths to
+  `MediaView` before any text fetch
 - `server/src/index.ts` — the `fileRequest` case in `handleMessage`
 
 ## Important files
@@ -27,7 +29,9 @@ WebSocket multiplexer.
 - `server/src/fileRoutes.ts` — every handler, as pure functions
 - `server/src/workspacePaths.ts` — the root containment check, unchanged
 - `web/src/ws.ts` — `fileRequest`, the pending-request map
-- `shared/types.ts` — `FileRequestKind`, `FileRequestParams`, `AttachmentBody`
+- `shared/types.ts` — `FileRequestKind`, `FileRequestParams`, `AttachmentBody`,
+  `MediaChunkBody`
+- `web/src/lib/language.ts` — `mediaKindFor`, the extension → image/video/audio/pdf map
 - `web/src/components/Transcript.tsx` — `AttachmentTile`
 
 ## Important symbols
@@ -37,6 +41,8 @@ WebSocket multiplexer.
   two kinds that read git; every other handler still resolves synchronously
 - `fileRequest(kind, params)` — client side, promise keyed by `reqId`
 - `useAttachmentUrl(rel)` — base64 → blob URL, revoked on unmount
+- `useMediaUrl(path)` — pulls `media` chunks sequentially into one blob URL,
+  reports progress, stops and revokes on unmount
 - `ClientMessage.fileRequest` / `ServerMessage.fileResponse`
 
 ## Data flow
@@ -50,6 +56,14 @@ store: it is a point-to-point reply, not application state.
 
 Attachments come back as base64 and become blob URLs client-side, symmetric with
 the upload path, which was already base64.
+
+Media (`media` kind) is pulled in chunks, not one frame: the client requests
+`offset`/`length` slices one after another until it has the file's `size`, then
+builds a `Blob`. Each reply carries the whole file's `size` so the client knows
+when to stop. A separate kind (rather than a new body on `file`) keeps version
+skew safe: an old bridge answers a bare 400, which the client shows as "restart
+or update the bridge". `file` is unchanged, so text and unknown binaries still
+get 415 "Binary files cannot be previewed.".
 
 Two search kinds ride the same route table: `grep` (file contents, see
 [find-in-files](find-in-files.md)) and `sessionSearch` (transcripts, see
@@ -65,7 +79,8 @@ an open socket — there is no unauthenticated fallback.
 ## Tests
 
 - `server/src/fileRoutes.test.ts` — every route: containment, size cap, binary
-  rejection, all-or-nothing `find`, attachment traversal, unknown kind
+  rejection, all-or-nothing `find`, attachment traversal, unknown kind, and
+  `media` chunking, clamping, 403/404/413/415 and bad-offset 400
 - `server/src/index.planFile.test.ts` — the plan-directory exception, unchanged
 
 ## Business rules
@@ -79,6 +94,13 @@ an open socket — there is no unauthenticated fallback.
 - `grep` is all-or-nothing across roots like `find`; `sessionSearch` clamps every
   session id through `sessionInReach`.
 - Attachments are capped at the same 2 MB as `/file` was.
+- `media` serves only an allowlist of browser-renderable extensions (images,
+  mp4/webm/mov/m4v, mp3/wav/ogg/m4a/flac, pdf); anything else is 415. A request
+  is clamped to 1 MB, files over 200 MB are 413, and an offset outside the file
+  is 400. Chunks go one at a time so live transcript frames interleave on the
+  shared socket and relay instead of waiting behind one large frame.
+- The browser buffers the whole file (chunks plus Blob), so the 200 MB cap bounds
+  memory; video plays only after every chunk arrives.
 
 ## Architectural rules
 
@@ -91,6 +113,9 @@ an open socket — there is no unauthenticated fallback.
 - The bridge's only remaining HTTP surface is its status page, so `corsFor`,
   `httpUserId`, `WEB_ORIGIN` and `withAuthToken` are all deleted rather than
   retained "just in case" — each was a second auth path to keep in step.
+- SVG renders through `<img>`, never inline, so its scripts do not run.
+- Media blob URLs are revoked on unmount, and the chunk loop stops after the
+  in-flight request.
 - Attachment blob URLs are revoked when the tile unmounts; without that every
   re-render would leak a blob for the life of the page.
 

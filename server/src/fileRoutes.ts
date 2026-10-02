@@ -1,6 +1,7 @@
 /**
  * Workspace reads requested by the browser: file contents, directory listings,
- * the docs bundle, `@mention` file search, and stored attachments.
+ * the docs bundle, `@mention` file search, stored attachments, and chunked
+ * media (image/video/audio/pdf) for the file viewer.
  *
  * Pure functions returning `{ status, body }` rather than writing to a
  * `http.ServerResponse`, so they can be driven over the WebSocket (and, later,
@@ -19,6 +20,7 @@ import type {
   FileRequestKind,
   FileRequestParams,
   LineMatcher,
+  MediaChunkBody,
   SessionMeta,
   SessionSearchHit,
   SessionSearchResponse,
@@ -39,6 +41,10 @@ export interface FileRouteResult {
 }
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+/** Largest file the viewer previews as media; the browser buffers all of it. */
+export const MAX_MEDIA_BYTES = 200 * 1024 * 1024;
+/** One media request's worth: small enough that live frames interleave between chunks. */
+export const MEDIA_CHUNK_BYTES = 1024 * 1024;
 const FIND_MAX_LIMIT = 25;
 
 /**
@@ -48,14 +54,31 @@ const FIND_MAX_LIMIT = 25;
  */
 const TREE_IGNORE = new Set(['node_modules', '.git']);
 
-const MIME: Record<string, string> = {
+/** What the browser renders natively — the only extensions `media` serves. */
+const MEDIA_MIME: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
   '.svg': 'image/svg+xml',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.m4v': 'video/x-m4v',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.m4a': 'audio/mp4',
+  '.flac': 'audio/flac',
   '.pdf': 'application/pdf',
+};
+
+const MIME: Record<string, string> = {
+  ...MEDIA_MIME,
   '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8',
   '.json': 'application/json',
@@ -297,6 +320,54 @@ function readAttachment(ctx: UserContext, params: FileRequestParams, access: Soc
 }
 
 /**
+ * One chunk of a previewable workspace file, base64. Chunked rather than whole:
+ * every read shares the session's socket (and the relay), so one 200 MB frame
+ * would stall live transcript traffic. The client asks for chunks one at a time
+ * until `offset` reaches `size`.
+ */
+function readMedia(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
+  const abs = soleRoot(ctx, params, access);
+  if (!abs) return { status: 403 };
+  const mediaType = MEDIA_MIME[path.extname(abs).toLowerCase()];
+  if (!mediaType) return { status: 415 };
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(abs);
+  } catch {
+    return { status: 404 };
+  }
+  if (!stat.isFile()) return { status: 404 };
+  if (stat.size > MAX_MEDIA_BYTES) return { status: 413 };
+  const offset = params.offset ?? 0;
+  if (!Number.isInteger(offset) || offset < 0 || offset > stat.size) return { status: 400 };
+  // A missing or non-positive length means "a full chunk", so a client loop
+  // always makes progress.
+  const asked = params.length && params.length > 0 ? Math.floor(params.length) : MEDIA_CHUNK_BYTES;
+  const length = Math.min(asked, MEDIA_CHUNK_BYTES, stat.size - offset);
+  const buf = Buffer.alloc(length);
+  let read = 0;
+  let fd: number;
+  try {
+    fd = fs.openSync(abs, 'r');
+  } catch {
+    return { status: 404 };
+  }
+  try {
+    while (read < length) {
+      const n = fs.readSync(fd, buf, read, length - read, offset + read);
+      if (n === 0) break;
+      read += n;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return {
+    status: 200,
+    body: { data: buf.subarray(0, read).toString('base64'), mediaType, size: stat.size } satisfies MediaChunkBody,
+  };
+}
+
+/**
  * The bridge's storage-sync diagnostics: why the "cloud sync unavailable" pill
  * appeared, and whether it is still up. Rides this already-authenticated
  * plumbing rather than a socket message of its own — it is a read of a file
@@ -381,6 +452,7 @@ const ROUTES: Record<
   docs: readDocs,
   find: findFiles,
   attachment: readAttachment,
+  media: readMedia,
   syncLog: readSyncLog,
   sessionDiff: readSessionDiff,
   sessionDiffFile: readSessionDiffFile,

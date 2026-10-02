@@ -5,7 +5,7 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import type { SessionDiffResponse, SessionMeta } from '@lines/shared';
 import { OWNER_ACCESS } from '@lines/shared';
-import { handleFileRequest } from './fileRoutes.ts';
+import { handleFileRequest, MAX_MEDIA_BYTES, MEDIA_CHUNK_BYTES } from './fileRoutes.ts';
 import type { UserContext } from './userContext.ts';
 
 /**
@@ -26,6 +26,13 @@ fs.writeFileSync(path.join(root, 'binary.bin'), Buffer.from([0x41, 0x00, 0x42]))
 fs.mkdirSync(path.join(root, 'sub'));
 fs.mkdirSync(path.join(root, 'node_modules'));
 fs.writeFileSync(path.join(root, '.hidden'), 'x');
+// Media fixtures: a NUL byte the `file` kind would 415 on, and a clip spanning
+// several chunks with a short last one.
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d]);
+fs.writeFileSync(path.join(root, 'pic.png'), PNG);
+const CLIP = Buffer.alloc(Math.floor(2.5 * 1024 * 1024), 0xab);
+CLIP.writeUInt32BE(0xdeadbeef, CLIP.length - 4);
+fs.writeFileSync(path.join(root, 'clip.mp4'), CLIP);
 fs.writeFileSync(path.join(attachments, 'pic.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 
 const EMPTY_DIFF: SessionDiffResponse = { repos: [], orphans: [] };
@@ -75,7 +82,7 @@ test('tree: lists entries including dotfiles, hiding node_modules', async () => 
   const res = await call('tree', { paths: [root] });
   assert.equal(res.status, 200);
   const names = (res.body as { entries: { name: string }[] }).entries.map((e) => e.name);
-  assert.deepEqual(names, ['sub', '.hidden', 'binary.bin', 'hello.txt']); // dirs first, then alpha
+  assert.deepEqual(names, ['sub', '.hidden', 'binary.bin', 'clip.mp4', 'hello.txt', 'pic.png']); // dirs first, then alpha
   assert.ok(!names.includes('node_modules'));
 });
 
@@ -116,6 +123,73 @@ test('attachment: path traversal is refused', async () => {
   // must fail even though the target exists and is readable.
   assert.equal((await call('attachment', { rel: '../../etc/hosts' })).status, 403);
   assert.equal((await call('attachment', { rel: 'missing.png' })).status, 404);
+});
+
+type MediaBody = { data: string; mediaType: string; size: number };
+
+test('media: returns base64, the media type, and the whole file size', async () => {
+  const res = await call('media', { paths: [path.join(root, 'pic.png')] });
+  assert.equal(res.status, 200);
+  const body = res.body as MediaBody;
+  assert.equal(body.mediaType, 'image/png');
+  assert.equal(body.size, PNG.length);
+  assert.deepEqual(Buffer.from(body.data, 'base64'), PNG);
+});
+
+test('media: chunks are clamped, the last is the remainder, and they rebuild the file', async () => {
+  const clip = path.join(root, 'clip.mp4');
+  const first = await call('media', { paths: [clip], offset: 0, length: 50 * 1024 * 1024 });
+  assert.equal(first.status, 200);
+  assert.equal(Buffer.from((first.body as MediaBody).data, 'base64').length, MEDIA_CHUNK_BYTES);
+
+  const parts: Buffer[] = [];
+  let offset = 0;
+  while (offset < CLIP.length) {
+    const res = await call('media', { paths: [clip], offset, length: MEDIA_CHUNK_BYTES });
+    assert.equal(res.status, 200);
+    const body = res.body as MediaBody;
+    assert.equal(body.mediaType, 'video/mp4');
+    assert.equal(body.size, CLIP.length);
+    const part = Buffer.from(body.data, 'base64');
+    parts.push(part);
+    offset += part.length;
+  }
+  assert.equal(parts.length, 3);
+  assert.equal(parts[2].length, CLIP.length - 2 * MEDIA_CHUNK_BYTES);
+  assert.ok(Buffer.concat(parts).equals(CLIP));
+});
+
+test('media: 403 outside every root, 404 when missing or a directory', async () => {
+  assert.equal((await call('media', { paths: ['/etc/hosts.png'] })).status, 403);
+  assert.equal((await call('media', { paths: [path.join(root, 'nope.png')] })).status, 404);
+  fs.mkdirSync(path.join(root, 'dir.png'));
+  try {
+    assert.equal((await call('media', { paths: [path.join(root, 'dir.png')] })).status, 404);
+  } finally {
+    fs.rmdirSync(path.join(root, 'dir.png'));
+  }
+});
+
+test('media: 415 for an extension the browser cannot preview', async () => {
+  assert.equal((await call('media', { paths: [path.join(root, 'binary.bin')] })).status, 415);
+});
+
+test('media: 413 over the size cap', async () => {
+  // Sparse, so the oversized file costs no real disk.
+  const big = path.join(root, 'big.mp4');
+  fs.writeFileSync(big, '');
+  fs.truncateSync(big, MAX_MEDIA_BYTES + 1);
+  try {
+    assert.equal((await call('media', { paths: [big] })).status, 413);
+  } finally {
+    fs.rmSync(big);
+  }
+});
+
+test('media: 400 for an offset outside the file', async () => {
+  const pic = path.join(root, 'pic.png');
+  assert.equal((await call('media', { paths: [pic], offset: -1 })).status, 400);
+  assert.equal((await call('media', { paths: [pic], offset: PNG.length + 1 })).status, 400);
 });
 
 test('an unknown kind is refused rather than served', async () => {

@@ -64,10 +64,11 @@ export type FileRequestKind =
   | 'sessionDiff'
   | 'sessionDiffFile'
   | 'grep'
-  | 'sessionSearch';
+  | 'sessionSearch'
+  | 'media';
 
 export interface FileRequestParams {
-  /** file/tree/docs: exactly one. find/grep: one per project root.
+  /** file/tree/docs/media: exactly one. find/grep: one per project root.
    *  sessionDiffFile: the repo root the file lives in.
    *  sessionSearch: the project roots whose sessions are searched when
    *  `sessionIds` is absent. */
@@ -89,6 +90,10 @@ export interface FileRequestParams {
   rel?: string;
   /** sessionDiff / sessionDiffFile: which session's changes to read. */
   sessionId?: string;
+  /** media only: byte offset of the chunk to read. */
+  offset?: number;
+  /** media only: chunk length in bytes; the bridge clamps it to its chunk size. */
+  length?: number;
 }
 
 export type FileChangeStatus = 'A' | 'M' | 'D';
@@ -143,6 +148,18 @@ export interface SessionDiffFileResponse {
 export interface AttachmentBody {
   data: string;
   mediaType: string;
+}
+
+/**
+ * One chunk of a previewable workspace file (image, video, audio, pdf). Media is
+ * pulled a chunk per request so one large frame never holds the shared socket.
+ */
+export interface MediaChunkBody {
+  /** This chunk's bytes, base64. */
+  data: string;
+  mediaType: string;
+  /** The whole file's size, so the client knows when to stop. */
+  size: number;
 }
 
 /**

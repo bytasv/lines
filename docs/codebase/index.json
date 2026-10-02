@@ -2417,10 +2417,11 @@
       "id": "file-routes-over-ws",
       "name": "Workspace reads over the WebSocket",
       "doc": "features/file-routes-over-ws.md",
-      "purpose": "File contents, directory listings, the docs bundle, @mention search and attachments travel over the authenticated WebSocket instead of bridge HTTP routes, removing the Clerk token from query strings and leaving the bridge with no file-serving HTTP surface.",
+      "purpose": "File contents, directory listings, the docs bundle, @mention search, attachments and chunked media previews (image, video, audio, pdf) travel over the authenticated WebSocket instead of bridge HTTP routes, removing the Clerk token from query strings and leaving the bridge with no file-serving HTTP surface.",
       "entryPoints": [
         "web/src/lib/files.ts",
-        "server/src/index.ts"
+        "server/src/index.ts",
+        "web/src/components/FilesView.tsx"
       ],
       "files": [
         "server/src/fileRoutes.ts",
@@ -2429,6 +2430,8 @@
         "web/src/lib/files.ts",
         "web/src/lib/features.ts",
         "web/src/components/Transcript.tsx",
+        "web/src/components/FilesView.tsx",
+        "web/src/lib/language.ts",
         "shared/types.ts"
       ],
       "symbols": [
@@ -2440,7 +2443,11 @@
         "useAttachmentUrl",
         "AttachmentTile",
         "grep",
-        "sessionSearch"
+        "sessionSearch",
+        "useMediaUrl",
+        "MediaChunkBody",
+        "mediaKindFor",
+        "media"
       ],
       "tests": [
         "server/src/fileRoutes.test.ts",
@@ -2451,14 +2458,18 @@
         "a request made while disconnected rejects immediately; in-flight requests reject on close rather than hanging",
         "find stays all-or-nothing across roots: a partial result reads as 'no match here' and would silently hide a folder",
         "attachments are capped at the same 2MB as the old /file route",
-        "grep is all-or-nothing across roots like find; sessionSearch clamps every session id through sessionInReach"
+        "grep is all-or-nothing across roots like find; sessionSearch clamps every session id through sessionInReach",
+        "media serves only browser-renderable extensions (415 otherwise), clamps each request to 1MB, returns 413 over 200MB and 400 for an offset outside the file",
+        "media is pulled one chunk at a time so live frames interleave on the shared socket and relay instead of queuing behind one large frame"
       ],
       "architecturalRules": [
         "handlers are pure {status, body} functions in their own module rather than http.ServerResponse writers, so they can serve a relay channel and are testable without a socket (index.ts listens on import)",
         "fileResponse is settled in ws.ts before applyServerMessage and returns early; the store never sees it",
         "replies go to the originating link, never via broadcast, since two tabs each have their own in-flight reqIds",
         "corsFor, httpUserId, WEB_ORIGIN and withAuthToken are deleted rather than retained: each was a second auth path to keep in step with the socket's",
-        "attachment blob URLs are revoked on unmount, else every re-render leaks a blob for the life of the page"
+        "attachment blob URLs are revoked on unmount, else every re-render leaks a blob for the life of the page",
+        "media is its own FileRequestKind rather than a new body on file, so version skew is safe: an old bridge answers 400, shown as 'update the bridge'",
+        "media blob URLs are revoked on unmount and the chunk loop stops after the in-flight request; SVG renders via <img>, never inline"
       ],
       "relatedDecisions": [
         "hosted-machine-access",

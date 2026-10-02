@@ -6,6 +6,7 @@ import type {
   FindResponse,
   GrepResponse,
   MatchOptions,
+  MediaChunkBody,
   SessionSearchResponse,
   TreeEntry,
   TreeResponse,
@@ -235,4 +236,76 @@ export function useAttachmentUrl(rel: string | undefined): { url: string | null;
   }, [rel]);
 
   return { url, error };
+}
+
+/** Matches the bridge's per-request cap; asking for more is clamped anyway. */
+const MEDIA_CHUNK_BYTES = 1024 * 1024;
+
+const MEDIA_ERROR_MESSAGES: Record<number, string> = {
+  ...ERROR_MESSAGES,
+  // A bare 400 is a bridge older than the `media` kind.
+  400: 'This bridge cannot preview media yet — restart or update it.',
+};
+
+/**
+ * A previewable workspace file (image, video, audio, pdf) as an object URL,
+ * pulled one chunk at a time so live socket traffic interleaves between chunks.
+ * `progress` is 0–1. Unmounting (or a new path) stops the loop after the
+ * in-flight chunk and revokes the URL.
+ */
+export function useMediaUrl(path: string | undefined): {
+  url: string | null;
+  error: string | null;
+  progress: number;
+} {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
+
+  useEffect(() => {
+    if (!path) return;
+    setUrl(null);
+    setError(null);
+    setProgress(0);
+    let revoked: string | null = null;
+    let cancelled = false;
+    (async () => {
+      const chunks: Uint8Array<ArrayBuffer>[] = [];
+      let offset = 0;
+      let size = 0;
+      let mediaType = 'application/octet-stream';
+      do {
+        const { status, body } = await fileRequest('media', {
+          paths: [path],
+          offset,
+          length: MEDIA_CHUNK_BYTES,
+        });
+        if (cancelled) return;
+        if (status !== 200) {
+          setError(MEDIA_ERROR_MESSAGES[status] ?? `Failed to load file (${status}).`);
+          return;
+        }
+        const chunk = body as MediaChunkBody;
+        const bytes = Uint8Array.from(atob(chunk.data), (c) => c.charCodeAt(0));
+        // An empty chunk short of `size` means the file shrank under us; stop
+        // rather than loop forever.
+        if (!bytes.length && offset < chunk.size) break;
+        chunks.push(bytes);
+        offset += bytes.length;
+        size = chunk.size;
+        mediaType = chunk.mediaType;
+        setProgress(size ? offset / size : 1);
+      } while (offset < size);
+      revoked = URL.createObjectURL(new Blob(chunks, { type: mediaType }));
+      setUrl(revoked);
+    })().catch((err) => {
+      if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+    });
+    return () => {
+      cancelled = true;
+      if (revoked) URL.revokeObjectURL(revoked);
+    };
+  }, [path]);
+
+  return { url, error, progress };
 }

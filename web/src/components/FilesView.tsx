@@ -23,8 +23,8 @@ import { docDirname, normalizeDocPath } from '@lines/shared';
 import { useStore } from '../store';
 import { useIsPhone } from '../lib/layout';
 import { BestOnDesktop } from './BestOnDesktop';
-import { useFileContent } from '../lib/files';
-import { isMarkdownPath, languageFor } from '../lib/language';
+import { useFileContent, useMediaUrl } from '../lib/files';
+import { isMarkdownPath, languageFor, mediaKindFor, type MediaKind } from '../lib/language';
 import { Markdown } from './Markdown';
 
 function FileTab({ path, project, active }: { path: string; project: string; active: boolean }) {
@@ -152,11 +152,58 @@ export function MarkdownModeToggle({ state }: { state: ReturnType<typeof useMark
   );
 }
 
+const MEDIA_FILL = { width: '100%', height: '100%', border: 0 } as const;
+
 /**
- * A workspace file, read-only: rendered markdown when `mode` is `'preview'`,
- * Monaco otherwise. The mode comes from the host's header (`useMarkdownMode`).
+ * An image, video, audio clip or pdf, rendered by the browser from a blob URL.
+ * SVG goes through `<img>` like any other image, so its scripts never run.
  */
-export function FileContentView({
+function MediaView({ path, kind }: { path: string; kind: MediaKind }) {
+  const { url, error, progress } = useMediaUrl(path);
+  if (error) {
+    return (
+      <Alert color="red" m="xs">
+        {error}
+      </Alert>
+    );
+  }
+  if (!url) {
+    return (
+      <Center h="100%">
+        <Stack align="center" gap="xs">
+          <Loader />
+          <Text size="xs" c="dimmed">
+            Loading… {Math.round(progress * 100)}%
+          </Text>
+        </Stack>
+      </Center>
+    );
+  }
+  if (kind === 'pdf') return <iframe src={url} title={path} style={MEDIA_FILL} />;
+  return (
+    <Center h="100%" p="md">
+      {kind === 'image' && (
+        <img src={url} alt={path} style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }} />
+      )}
+      {kind === 'video' && <video controls src={url} style={{ maxWidth: '100%', maxHeight: '100%' }} />}
+      {kind === 'audio' && <audio controls src={url} />}
+    </Center>
+  );
+}
+
+/**
+ * A workspace file, read-only: the browser's own rendering for media, rendered
+ * markdown when `mode` is `'preview'`, Monaco otherwise. The mode comes from the
+ * host's header (`useMarkdownMode`).
+ */
+export function FileContentView(props: { path: string; line?: number; col?: number; mode?: MarkdownMode }) {
+  // Branch before any text fetch, so media never goes through the `file` kind.
+  const kind = mediaKindFor(props.path);
+  if (kind) return <MediaView path={props.path} kind={kind} />;
+  return <TextContentView {...props} />;
+}
+
+function TextContentView({
   path,
   line,
   col,

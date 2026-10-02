@@ -112,3 +112,35 @@ export function languageFor(filePath: string): string {
 export function isMarkdownPath(filePath: string): boolean {
   return /\.(md|markdown)$/i.test(filePath);
 }
+
+export type MediaKind = 'image' | 'video' | 'audio' | 'pdf';
+
+/** Extensions the viewer renders natively instead of as text — mirrors the bridge's `media` MIME map. */
+const MEDIA_EXT: Record<string, MediaKind> = {
+  png: 'image',
+  jpg: 'image',
+  jpeg: 'image',
+  gif: 'image',
+  webp: 'image',
+  avif: 'image',
+  bmp: 'image',
+  ico: 'image',
+  svg: 'image',
+  mp4: 'video',
+  webm: 'video',
+  mov: 'video',
+  m4v: 'video',
+  mp3: 'audio',
+  wav: 'audio',
+  ogg: 'audio',
+  m4a: 'audio',
+  flac: 'audio',
+  pdf: 'pdf',
+};
+
+/** How the viewer previews `filePath`, or `null` for a file shown as text. */
+export function mediaKindFor(filePath: string): MediaKind | null {
+  const base = filePath.split('/').pop()?.toLowerCase() ?? '';
+  if (!base.includes('.')) return null;
+  return MEDIA_EXT[base.split('.').pop()!] ?? null;
+}
