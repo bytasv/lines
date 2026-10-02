@@ -235,7 +235,24 @@ function ArtCard({
   );
 }
 
-function GetStartedButtons() {
+/**
+ * `appUrl` is set only by the static marketing build (web/src/landing.tsx),
+ * which runs on the relay's apex with no Clerk and no router: every action is
+ * then a plain link to the app's own host, which owns sign-in.
+ */
+function GetStartedButtons({ appUrl }: { appUrl?: string }) {
+  if (appUrl) {
+    return (
+      <Group justify="center">
+        <Button component="a" href={`${appUrl}/sign-in`} size="lg" rightSection={<IconArrowRight size={18} />}>
+          Get started
+        </Button>
+        <Button component="a" href={`${appUrl}/sign-in`} size="lg" variant="outline">
+          Sign in
+        </Button>
+      </Group>
+    );
+  }
   return (
     <Group justify="center">
       <SignUpButton mode="modal">
@@ -257,8 +274,12 @@ function GetStartedButtons() {
  * Clerk's hosted sign-in. Kept in this file (not a separate static site) so it
  * shares the app's theme, brand assets, and Clerk instance instead of drifting
  * from a second copy.
+ *
+ * The same component is also built on its own, keyless and Clerk-free, for the
+ * apex (`appUrl` set; see web/src/landing.tsx). Nothing Clerk or router-bound
+ * renders on that path.
  */
-export function LandingPage() {
+export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
   return (
     <Box className={`lines-safe-top ${classes.page}`} style={{ minHeight: 'var(--lines-viewport)' }}>
       <Box component="header" className={classes.header}>
@@ -277,20 +298,30 @@ export function LandingPage() {
           </a>
         </Group>
         {/* This page also renders at /welcome for an already-signed-in visitor,
-            so the header action has to work in both states. */}
+            so the header action has to work in both states. The marketing build
+            cannot tell them apart, and the app host sends a signed-in visitor
+            on from /sign-in anyway. */}
         <div className={classes.headerAction}>
-          <SignedIn>
-            <Button component={Link} to="/" variant="default" size="sm">
-              Open app
+          {appUrl ? (
+            <Button component="a" href={`${appUrl}/sign-in`} variant="default" size="sm">
+              Sign in
             </Button>
-          </SignedIn>
-          <SignedOut>
-            <SignInButton mode="modal">
-              <Button variant="default" size="sm">
-                Sign in
-              </Button>
-            </SignInButton>
-          </SignedOut>
+          ) : (
+            <>
+              <SignedIn>
+                <Button component={Link} to="/" variant="default" size="sm">
+                  Open app
+                </Button>
+              </SignedIn>
+              <SignedOut>
+                <SignInButton mode="modal">
+                  <Button variant="default" size="sm">
+                    Sign in
+                  </Button>
+                </SignInButton>
+              </SignedOut>
+            </>
+          )}
         </div>
       </Box>
 
@@ -320,7 +351,7 @@ export function LandingPage() {
               workflows and a recipe library, while every agent turn runs on your own filesystem,
               your own git and your own agent login.
             </Text>
-            <GetStartedButtons />
+            <GetStartedButtons appUrl={appUrl} />
           </Stack>
         </Container>
       </Box>
@@ -458,7 +489,7 @@ export function LandingPage() {
                   Sign in, pair a machine and start a session, or run Lines entirely locally with
                   nothing hosted at all.
                 </Text>
-                <GetStartedButtons />
+                <GetStartedButtons appUrl={appUrl} />
               </Stack>
             </Box>
           </Stack>

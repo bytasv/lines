@@ -9,7 +9,7 @@ cd "${LINES_DEPLOY_ROOT:-/docker/lines}"
 git fetch origin main
 git merge --ff-only origin/main
 cd deploy/docker
-docker compose --env-file lines.env pull relay storage web
+docker compose --env-file lines.env pull relay storage web landing
 docker compose --env-file lines.env run --rm migrate
 docker compose --env-file lines.env up -d
 docker compose --env-file lines.env ps

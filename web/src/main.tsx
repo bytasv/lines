@@ -1,8 +1,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { MantineProvider } from '@mantine/core';
-import { ClerkProvider, useAuth, useUser } from '@clerk/clerk-react';
+import { ClerkProvider, SignIn, useAuth, useUser } from '@clerk/clerk-react';
 import '@mantine/core/styles.css';
 import './index.css';
 import { theme } from './theme';
@@ -42,6 +42,7 @@ import { registerServiceWorker } from './lib/push';
 import { ConnectMachine, ConnectMachineError } from './components/ConnectMachine';
 import { ChooseMachine } from './components/ChooseMachine';
 import { ConnectingMachine } from './components/ConnectingMachine';
+import { GateShell } from './components/GateShell';
 import { JoinPage } from './components/JoinPage';
 import { LandingPage } from './components/LandingPage';
 import {
@@ -364,6 +365,17 @@ function Home() {
   return isSignedIn ? <AuthedConnect /> : <LandingPage />;
 }
 
+/** `/sign-in`: Clerk's sign-in, or straight on to the app when already signed in. */
+function SignInPage() {
+  const { isLoaded, isSignedIn } = useAuth();
+  if (isLoaded && isSignedIn) return <Navigate to="/" replace />;
+  return (
+    <GateShell>
+      <SignIn routing="path" path="/sign-in" forceRedirectUrl="/" />
+    </GateShell>
+  );
+}
+
 function Root() {
   if (!CLERK_ENABLED) return <AppWhenReady />;
   return (
@@ -379,6 +391,10 @@ function Root() {
             through the gate would send them to the landing page and lose the
             code. */}
         <Route path="/join/:code" element={<JoinPage />} />
+        {/* Where the apex's static marketing page sends its CTAs. It cannot open
+            Clerk itself (no keys there by design), so it needs a landing spot on
+            this host that is not the landing page again. */}
+        <Route path="/sign-in/*" element={<SignInPage />} />
         {/* App mounts its own <Routes> underneath this splat (descendant routes),
             so /docs/* and /session/:id keep resolving against the full path. */}
         <Route

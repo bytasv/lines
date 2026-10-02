@@ -82,7 +82,7 @@ function bridgeDiscovery(): Plugin {
  * JavaScript from it at all, which is why the relay now lives on a different
  * hostname (see deploy/docker/compose.yml).
  */
-function subresourceIntegrity(): Plugin {
+export function subresourceIntegrity(): Plugin {
   return {
     name: 'lines-sri',
     enforce: 'post',

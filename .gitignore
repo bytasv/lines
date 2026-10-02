@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 dist/
+dist-landing/
 build/
 # electron-builder output: DMGs, zips and the unpacked app bundle.
 desktop/release/

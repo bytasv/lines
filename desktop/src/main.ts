@@ -991,6 +991,21 @@ function installMediaPermissions(): void {
 const APP_HOST = hostLabel(config.webUrl);
 
 /**
+ * The domain the Clerk instance is bound to: APP_HOST less its first label
+ * (`run.linesapp.cloud` → `linesapp.cloud`). Clerk's `clerk.` and `accounts.`
+ * hosts hang off that, not off the app's own subdomain. A host with no
+ * subdomain to drop — an IP, `localhost`, a bare domain — is left as is.
+ */
+function clerkDomain(host: string): string {
+  const name = host.replace(/:\d+$/, '');
+  if (/^[\d.]+$/.test(name) || name.startsWith('[')) return host;
+  const labels = name.split('.');
+  return labels.length > 2 ? labels.slice(1).join('.') : host;
+}
+
+const CLERK_DOMAIN = clerkDomain(APP_HOST);
+
+/**
  * Hosts that are nothing but identity infrastructure, trusted host-wide.
  *
  * Nothing on them is content an agent would link to, so path-scoping is pure
@@ -1001,9 +1016,9 @@ const IDENTITY_HOSTS = [
   'accounts.google.com',
   'appleid.apple.com',
   'login.microsoftonline.com',
-  `accounts.${APP_HOST}`,
+  `accounts.${CLERK_DOMAIN}`,
   // Clerk's Frontend API host, which serves /v1/oauth_callback.
-  `clerk.${APP_HOST}`,
+  `clerk.${CLERK_DOMAIN}`,
 ];
 
 /** Clerk's Account Portal on development instances, with or without a `clerk.` label. */

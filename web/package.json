@@ -12,6 +12,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:landing": "vite build --config vite.landing.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

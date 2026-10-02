@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Server-side Lines images: relay, storage, web. Build a target explicitly:
+# Server-side Lines images: relay, storage, web, landing. Build a target explicitly:
 #   docker build -f deploy/docker/Dockerfile --target relay -t lines-relay .
 # The build context is the REPO ROOT, not this directory (npm workspaces).
 #
@@ -123,4 +123,36 @@ COPY deploy/docker/web-nginx.conf /etc/nginx/templates/default.conf.template
 ENV NGINX_ENVSUBST_FILTER=CSP_CONNECT_SRC
 ENV CSP_CONNECT_SRC="${VITE_BRIDGE_WS_URL} ${VITE_STORAGE_URL} https://*.clerk.accounts.dev https://*.clerk.com"
 COPY --from=web-build /app/web/dist /usr/share/nginx/html
+EXPOSE 80
+
+# ---------- landing (build stage) ----------
+# The static marketing page for the apex. Deliberately NOT the web bundle: the
+# apex is the relay's host, and the relay must never be able to serve JavaScript
+# to the page holding the end-to-end encryption keys. This build has no Clerk
+# key, no relay URL and no storage URL — it links to the app host and nothing
+# else.
+FROM deps AS landing-build
+WORKDIR /app
+COPY shared shared
+COPY web web
+#   VITE_APP_URL — origin of the app host (https://run.<domain>), where every
+#     call to action on the page points.
+ARG VITE_APP_URL
+#   VITE_DESKTOP_DOWNLOAD_URL — the same DMG link as the web build.
+ARG VITE_DESKTOP_DOWNLOAD_URL
+RUN test -n "$VITE_APP_URL" || { echo "FATAL: --build-arg VITE_APP_URL is required"; exit 1; }
+RUN printf 'VITE_APP_URL=%s\nVITE_DESKTOP_DOWNLOAD_URL=%s\n' \
+      "$VITE_APP_URL" "$VITE_DESKTOP_DOWNLOAD_URL" > .env
+RUN npm run build:landing -w web
+# Unset or mistyped, every button on the page goes nowhere — fail the image.
+RUN grep -qF "$VITE_APP_URL" web/dist-landing/assets/*.js \
+ || { echo "FATAL: VITE_APP_URL is not in the built landing bundle"; exit 1; }
+
+# ---------- landing (runtime) ----------
+FROM nginx:alpine AS landing
+COPY deploy/docker/web-nginx.conf /etc/nginx/templates/default.conf.template
+ENV NGINX_ENVSUBST_FILTER=CSP_CONNECT_SRC
+# Empty: the page talks to nothing but its own origin.
+ENV CSP_CONNECT_SRC=""
+COPY --from=landing-build /app/web/dist-landing /usr/share/nginx/html
 EXPOSE 80

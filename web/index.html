@@ -99,7 +99,7 @@
       </div>
     </div>
     <!-- Before first paint: the splash is for the app, not the landing page. With
-         Clerk configured, /welcome, /join/:code and a visitor with no signed-in
+         Clerk configured, /welcome, /join/:code, /sign-in and a visitor with no signed-in
          Clerk cookie (__client_uat is 0 once signed out, a timestamp once signed
          in) never see it. A wrong guess is harmless: the app's first claim brings
          the splash back (lib/splash.ts). Vite leaves the literal %…% in place
@@ -109,7 +109,8 @@
         var clerkKey = '%VITE_CLERK_PUBLISHABLE_KEY%';
         if (!clerkKey || clerkKey.charAt(0) === '%') return;
         var path = location.pathname;
-        var landing = path === '/welcome' || path.indexOf('/join/') === 0;
+        var landing =
+          path === '/welcome' || path.indexOf('/join/') === 0 || path.indexOf('/sign-in') === 0;
         var signedIn = /(?:^|; )__client_uat(?:_[^=]*)?=[1-9]/.test(document.cookie);
         if (landing || !signedIn) document.getElementById('lines-splash').dataset.state = 'hidden';
       })();

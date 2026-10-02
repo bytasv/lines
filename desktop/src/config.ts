@@ -41,7 +41,7 @@ export interface DesktopConfig {
 export const DEFAULT_CONFIG: DesktopConfig = {
   relayUrl: 'wss://linesapp.cloud',
   storageUrl: 'https://api.linesapp.cloud',
-  webUrl: 'https://app.linesapp.cloud',
+  webUrl: 'https://run.linesapp.cloud',
   updateFeedUrl: '',
   downloadUrl: 'https://linesapp.cloud',
 };
