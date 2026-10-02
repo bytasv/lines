@@ -46,6 +46,7 @@ import {
   APP_PROTOCOL_VERSION,
   DEFAULT_MODEL,
   isReasoningEffort,
+  isSessionInterruptible,
   normalizePlanComments,
   resolveModelId,
   worktreePaths,
@@ -881,6 +882,10 @@ interface UiState {
    *  `hello` from it, and on a bridge too old to send one. Machine-local by
    *  construction — see `SpendHistoryBlob`. */
   spendHistory: SpendHistoryBlob | null;
+  /** In-flight turns' estimated spend so far, by session id, from `turnSpend`.
+   *  Transient and never part of `totalCostUsd`: dropped when the turn settles
+   *  and the billed figure replaces it. */
+  turnSpend: Record<string, { costUsd: number; tokens: number }>;
   /** App login state from the bridge; null until the first `hello`. */
   auth: AuthStatus | null;
   /** Bridge->storage/Supabase link health; null until first `hello`. `available: false` shows the sync-degraded banner. */
@@ -1363,6 +1368,7 @@ export const useStore = create<UiState>((set, get) => {
   usage: null,
   openaiUsage: null,
   spendHistory: null,
+  turnSpend: {},
   auth: null,
   storageStatus: null,
   workerStatus: null,
@@ -2268,7 +2274,15 @@ export const useStore = create<UiState>((set, get) => {
             pendingCreate: state.pendingCreate,
             alreadySeen: state.seenSessionIds.has(msg.session.id),
           });
+          // Safety net for a dropped `turnSpend: null`: a session no longer
+          // running has no in-flight estimate.
+          let turnSpend = state.turnSpend;
+          if (turnSpend[msg.session.id] && !isSessionInterruptible(msg.session.status)) {
+            turnSpend = { ...turnSpend };
+            delete turnSpend[msg.session.id];
+          }
           return {
+            turnSpend,
             sessions: { ...state.sessions, [msg.session.id]: msg.session },
             // Stamped from the link it arrived on, so `send` can route this
             // session's messages back to the machine that actually hosts it.
@@ -2436,6 +2450,14 @@ export const useStore = create<UiState>((set, get) => {
         break;
       case 'openaiUsage':
         set({ openaiUsage: msg.usage });
+        break;
+      case 'turnSpend':
+        set((state) => {
+          const turnSpend = { ...state.turnSpend };
+          if (msg.spend) turnSpend[msg.sessionId] = msg.spend;
+          else delete turnSpend[msg.sessionId];
+          return { turnSpend };
+        });
         break;
       case 'spendDay':
         // Whole-row replace, never a merge: the bridge sends the day as it now

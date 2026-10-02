@@ -343,8 +343,10 @@ function completedItem(item: ThreadItem, deps: CodexNormalizeDeps): SdkShapedMes
   }
 }
 
-/** The token counts a settling `result` carries, in the SDK's own field names. */
-function resultUsage(usage: TokenUsageBreakdown | null | undefined) {
+/** The token counts a settling `result` carries, in the SDK's own field names.
+ *  Exported so the bridge's live in-flight estimate reads codex usage exactly as
+ *  the settle does. */
+export function resultUsage(usage: TokenUsageBreakdown | null | undefined) {
   return {
     input_tokens: usage?.inputTokens ?? 0,
     // Exactly what the provider called output, and nothing else.

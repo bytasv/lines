@@ -53,6 +53,7 @@ import {
   isWorkflowFinished,
   SESSION_SORT_KEY,
   sessionRowMeta,
+  withLiveSpend,
 } from '../lib/format';
 import { useCan, useCanOnSession, useSessionMachine } from '../lib/can';
 import { searchSessions } from '../lib/files';
@@ -139,6 +140,9 @@ const SessionRow = memo(function SessionRow({
   onSelect?: () => void;
 }) {
   const status = sessionRowMeta(session);
+  // Settled total plus the in-flight turn's live estimate, while one runs.
+  const liveSpend = useStore((s) => s.turnSpend[session.id]);
+  const cost = withLiveSpend(session.totalCostUsd, liveSpend, hasEstimatedSpend(session.costByModel));
   // Archive/complete and delete need Full access on a shared machine: a guest
   // without them never gets the controls, rather than ones that answer with an error.
   const canManage = useCanOnSession(session.id, 'manageSessions');
@@ -316,12 +320,12 @@ const SessionRow = memo(function SessionRow({
                 <Text size="xs" c="dimmed">
                   {rowDate.format(session.createdAt)}
                 </Text>
-                {session.totalCostUsd != null && (
+                {cost.usd != null && (
                   <Text size="xs" c="dimmed">
                     {/* Derived from the session's own rows rather than its current
                         model: a provider-crossing workflow keeps one session, so
                         the model it is on now need not be the one it spent on. */}
-                    {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel))}
+                    {formatSpendUsd(cost.usd, cost.estimated)}
                   </Text>
                 )}
                 {session.totalTokens != null && (

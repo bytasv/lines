@@ -378,7 +378,9 @@
         "shared/providers.ts",
         "web/src/components/SessionView.tsx",
         "web/src/components/ContextWindowIndicator.tsx",
-        "web/src/components/Composer.tsx"
+        "web/src/components/Composer.tsx",
+        "shared/codex.ts",
+        "web/src/components/Transcript.tsx"
       ],
       "symbols": [
         "UsagePoller",
@@ -418,13 +420,20 @@
         "estimateSpendUsd",
         "hasEstimatedSpend",
         "formatSpendUsd",
-        "WorkflowState.stepModels"
+        "WorkflowState.stepModels",
+        "LiveState.turnUsage",
+        "turnSpend",
+        "withLiveSpend",
+        "resultUsage"
       ],
       "tests": [
         "server/src/usageByModel.test.ts",
         "server/src/resultSpend.test.ts",
         "server/src/sessions.ended.test.ts",
-        "server/src/estimateSpend.test.ts"
+        "server/src/estimateSpend.test.ts",
+        "server/src/sessions.turnSpend.test.ts",
+        "server/src/sessions.codex.test.ts",
+        "server/src/broadcastScope.test.ts"
       ],
       "businessRules": [
         "result.total_cost_usd is cumulative across the query-process lifetime, not per-turn; a turn's billed cost is the delta against the last reading billed for that lifetime (resultSpend), with the first reading of a new lifetime billed whole",
@@ -460,7 +469,9 @@
         "every figure derived from an estimate is marked with a ~ prefix (formatSpendUsd) rather than a dimmed style or a tooltip, decided once per spend surface (section/session/step) rather than per row, since each surface is already narrowed to one provider",
         "every spend readout renders through formatSpendUsd, which always formats to 2 decimals; no call site can pick its own precision",
         "WorkflowState.stepModels[i] records the model id a step's turns actually ran on, because a provider-crossing workflow stays inside one SessionMeta and the session's current model cannot answer for an earlier step; absent on a step run before this field existed, which falls back to the session-level hasEstimatedSpend reading",
-        "server/scripts/repair-spend.ts and server/scripts/backfill-spend-history.ts both call the same estimateSpendUsd behind the same capability gate as the live accumulator, so a repaired or rebuilt historical figure agrees with what a live turn would have recorded"
+        "server/scripts/repair-spend.ts and server/scripts/backfill-spend-history.ts both call the same estimateSpendUsd behind the same capability gate as the live accumulator, so a repaired or rebuilt historical figure agrees with what a live turn would have recorded",
+        "the live in-flight spend estimate is never persisted and never enters totalCostUsd/lastCostUsd/costByModel/the ledger/lastCostCumulativeUsd; it is replaced by the billed figure at settle, and anything shown that includes it is ~-marked (an unpriced model shows no live figure, never $0.00)",
+        "live usage is deduped by message.id (one assistant message per content block repeats the call's usage), subagent messages are included, and the broadcast is throttled to about 1s per session"
       ],
       "architecturalRules": [
         "reuses the existing accumulate-on-result pass in server/src/sessions.ts that already owns totalCostUsd/totalTokens, instead of a new tracking mechanism",
@@ -482,7 +493,8 @@
         "the period picker is plain useState lifted only as far as UsageIndicator, not zustand state, since it is ephemeral view state shared only between the two provider chips",
         "the period-picker menu renders with withinPortal={false} because a portaled dropdown would render outside the HoverCard's DOM subtree and dismiss it on pointer move",
         "estimation is kept out of shared/resultSpend.ts, which does cumulative-delta arithmetic for a genuinely cumulative total_cost_usd; an estimate is per-turn, so shared/estimateSpend.ts is its own module called from accumulateResultSpend only after resultSpend comes back empty",
-        "shared/estimateSpend.ts and shared/types.ts form a deliberate import cycle (the estimator reads priceFor/DEFAULT_MODELS; types.ts re-exports the estimator) safe only because the estimator reads those bindings inside function bodies, never at its own top level"
+        "shared/estimateSpend.ts and shared/types.ts form a deliberate import cycle (the estimator reads priceFor/DEFAULT_MODELS; types.ts re-exports the estimator) safe only because the estimator reads those bindings inside function bodies, never at its own top level",
+        "the live estimate is an ephemeral session-scoped {type: 'turnSpend'} message rather than an upsert, because upsert bumps the LWW updatedAt, persists sessions.json and broadcasts the whole meta; null means the turn settled and the figure is dropped"
       ],
       "relatedDecisions": []
     },

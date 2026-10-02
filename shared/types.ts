@@ -3610,6 +3610,19 @@ export type ServerMessage =
    * message self-heals on the next turn instead of leaving a permanent gap.
    */
   | { type: 'spendDay'; day: string; spend: ModelSpendMap }
+  /**
+   * The in-flight turn's estimated spend so far, priced live from its token
+   * usage; `null` once the turn settles and the billed figure replaces it.
+   * Transient: never persisted, never part of `totalCostUsd`. Its own message
+   * rather than a `sessionUpsert` because an upsert bumps the LWW `updatedAt` and
+   * writes sessions.json. Session-bearing, so the scoped fan-out delivers it to
+   * that session's viewers only.
+   */
+  | {
+      type: 'turnSpend';
+      sessionId: string;
+      spend: { costUsd: number; tokens: number } | null;
+    }
   /** ChatGPT plan usage, the OpenAI mirror of `usage`. A separate message rather
    *  than a provider field, so a client that does not know about it simply never
    *  renders a second chip. */

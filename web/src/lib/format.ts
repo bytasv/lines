@@ -280,6 +280,23 @@ export function formatSpendUsd(usd: number, estimated: boolean): string {
   return `${estimated ? '~' : ''}$${usd.toFixed(2)}`;
 }
 
+/**
+ * A spend figure with the in-flight turn's live estimate (`turnSpend`) added on.
+ * Anything that includes the estimate is an estimate, so `estimated` follows the
+ * live part as well as the base. `usd` is undefined only when there is neither a
+ * base nor a live figure — callers render nothing then, never `$0.00`.
+ */
+export function withLiveSpend(
+  baseUsd: number | undefined,
+  live: { costUsd: number } | undefined,
+  baseEstimated: boolean,
+): { usd: number | undefined; estimated: boolean } {
+  return {
+    usd: baseUsd == null && live == null ? undefined : (baseUsd ?? 0) + (live?.costUsd ?? 0),
+    estimated: baseEstimated || live != null,
+  };
+}
+
 /** Human-friendly duration for step/session scale: `Xs` under a minute,
  *  `Xm Ys` under an hour, else `Xh Ym`. */
 export function formatDuration(ms: number): string {

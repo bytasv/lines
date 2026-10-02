@@ -27,6 +27,10 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   reports a price, so its turns are priced from a static per-model rate table instead
   (`shared/estimateSpend.ts`) and every figure derived from that estimate is marked with a `~`
   prefix, everywhere a real cost would otherwise render bare.
+- **Live in-flight spend** — while a turn runs, its token usage is priced with the same estimator
+  and shown as `~$X.XX` on the session view turn label, the active transcript turn card, the
+  session totals (sidebar row, composer, context popover) and the running workflow step; the
+  real billed figure replaces it when the turn settles.
 
 ## Entry points
 
@@ -207,6 +211,34 @@ every one of these sites, and a tooltip is invisible on touch. The usage card's 
 out once, at the section level, what the `~` means: estimated from token counts at API list
 prices, not what a flat-rate plan actually billed.
 
+### Live in-flight spend
+
+The SDK reports `total_cost_usd` only on the final `result`, so mid-turn there is no real cost —
+but there is token usage, and that is priced live with `estimateSpendUsd` (list price, so it is
+always an estimate and always marked `~`).
+
+- **Source per provider.** Claude: every `assistant` message's `message.usage`, subagent messages
+  included (their tokens are the turn's spend). Codex: `live.codexUsage`, fed by
+  `thread/tokenUsage/updated` — the same field mapping (`resultUsage`) the settle bills from.
+- **Dedupe by `message.id`.** The SDK emits one `assistant` message per content block of an API
+  call, each repeating the call's usage, so readings are kept in `LiveState.turnUsage` keyed by
+  `message.id` and overwritten; summing per message would multiply the cost.
+- **Throttle.** A trailing ~1s timer per session broadcasts `{type: 'turnSpend', sessionId,
+  spend: {costUsd, tokens} | null}`; not per message. Nothing is sent for a model with no price
+  (never `$0.00`) or while the session is not running.
+- **Clear on settle.** `spend: null` drops the figure. It is sent after the settling upsert (so the
+  billed total is already on the client), on a recovery result (the failed attempt was billed for
+  real, so the next attempt starts from zero), on `closeQuery` and on `handleWorkerEnded`. The web
+  store also drops the entry when a `sessionUpsert` shows the session no longer running, covering
+  a dropped `null`.
+- **Display.** `withLiveSpend(base, live, baseEstimated)` adds the live figure onto a settled
+  base and forces the `~` marker; surfaces render through `formatSpendUsd`. Only the running
+  workflow step gets the live figure; steps are billed at `onWorkflowTurnComplete`.
+- **Known limits.** The estimate can step up or down at settle (list price, cache creation billed
+  as plain input). A client that connects mid-turn sees no figure until the next broadcast (not in
+  `hello`). `transcript.ts` still shows the raw cumulative `total_cost_usd` on the settled turn
+  card.
+
 ### Usage history
 
 Same accumulate-on-`result` pass, one line further: inside `accumulateResultSpend`'s existing
@@ -300,6 +332,13 @@ session-level `hasEstimatedSpend` reading.
   reasoning bills as output, a retired model id prices as its replacement; `hasEstimatedSpend`:
   a Claude row never marks, an OpenAI row with `costUsd > 0` does, a mixed session marks, and a
   zero-cost OpenAI row (recorded before estimation existed) does not.
+- `server/src/sessions.turnSpend.test.ts` — live spend: repeated blocks with one `message.id` count
+  once and different ids sum; subagent messages count; the broadcast is throttled to one per
+  window; the settling `result` broadcasts `spend: null` after the upsert and bills exactly the
+  reported figure into `totalCostUsd`/`costByModel`/the ledger; a recovery result resets the live
+  figure; an unpriced model broadcasts nothing; `handleWorkerEnded` and `closeQuery` clear it.
+  `server/src/sessions.codex.test.ts` also checks the codex live figure equals the settle-time
+  estimate, and `server/src/broadcastScope.test.ts` lists `turnSpend` as session-scoped.
 - No test infrastructure covers `UsagePoller`, the Sidebar/`SessionMeta` display, or
   `WorkflowStepper` rendering at time of writing; natural first targets are `UsagePoller`
   (mocked `fetch`/`AuthManager`) and `parseSnapshot`.
@@ -407,6 +446,11 @@ session-level `hasEstimatedSpend` reading.
   a note rather than corrected.
 - The ledger is additive only: nothing ever rewrites an existing day row except the one-time
   backfill script, which replaces the whole file. Live turns can only add to it.
+- The live in-flight estimate (`turnSpend`) is never persisted and never enters `totalCostUsd`,
+  `lastCostUsd`, `costByModel`, the spend-history ledger or `lastCostCumulativeUsd`; it exists
+  only in `LiveState` and the web store, and is replaced by the billed figure at settle. Anything
+  shown that includes it is `~`-marked, and an unpriced model shows no live figure rather than
+  `$0.00`.
 - `server/scripts/backfill-spend-history.ts` is best-effort, not authoritative: a session whose
   transcript was deleted (session delete, or a rewind that truncated it) contributes nothing and
   cannot be recovered, so a later run can produce a *smaller* history than an earlier one. It
@@ -447,7 +491,11 @@ session-level `hasEstimatedSpend` reading.
   the established pattern this follows (bridge-running guard, dry-run default, JSON backup).
 - No new persistence and no new ws message for spend-by-model: `costByModel` travels inside the
   existing `SessionMeta` blob, and the rollup is computed in the browser from data already
-  pushed via `sessionUpsert`/`hello`.
+  pushed via `sessionUpsert`/`hello`. (The live in-flight estimate is the exception, below.)
+- The live in-flight estimate rides its own ephemeral, session-scoped `turnSpend` message, not
+  `upsert`: an upsert bumps `updatedAt` (the last-write-wins sync key), persists `sessions.json`
+  and broadcasts the whole meta, none of which a throwaway per-second figure should do. Being
+  session-bearing, `sessionIdOf`/`mayReceive` scope it to that session's viewers automatically.
 - Duration is sourced from the SDK `result` event's `duration_ms` rather than clock math against
   `turnStartedAt`, so it excludes idle time by construction. Permission-wait deduction lives in
   `LiveState.permissionWaitMs` (transient, in-memory, not persisted) rather than

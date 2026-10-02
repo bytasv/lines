@@ -49,7 +49,7 @@ import {
   voiceModelReady,
   whisperModelFor,
 } from '@lines/shared';
-import { formatSpendUsd, stepAfterProviderSwitch } from '../lib/format';
+import { formatSpendUsd, stepAfterProviderSwitch, withLiveSpend } from '../lib/format';
 import { useStepResolver } from '../lib/useStepResolver';
 import { agentLabel, sessionCaps } from '../lib/capabilities';
 import {
@@ -203,6 +203,13 @@ export function Composer({ session }: { session: SessionMeta }) {
   const isPhone = useIsPhone();
   const [optionsOpen, setOptionsOpen] = useState(false);
   const models = useStore((s) => s.models);
+  // Settled total plus the in-flight turn's live estimate, while one runs.
+  const liveSpend = useStore((s) => s.turnSpend[session.id]);
+  const sessionCost = withLiveSpend(
+    session.totalCostUsd,
+    liveSpend,
+    hasEstimatedSpend(session.costByModel),
+  );
   const smartRoutingMode = useStore((s) => s.smartRouting?.mode ?? 'off');
   const projects = useStore((s) => s.projects);
   const connectionStatus = useStore((s) => s.connectionStatus);
@@ -1082,9 +1089,9 @@ export function Composer({ session }: { session: SessionMeta }) {
             </Group>
             <Group gap="xs">
               <ContextWindowIndicator session={session} />
-              {session.totalCostUsd != null && (
+              {sessionCost.usd != null && (
                 <Text size="xs" c="dimmed">
-                  {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel))}
+                  {formatSpendUsd(sessionCost.usd, sessionCost.estimated)}
                 </Text>
               )}
               {micControl(16, 'lg')}
@@ -1200,11 +1207,10 @@ export function Composer({ session }: { session: SessionMeta }) {
             ),
           )}
           <ContextWindowIndicator session={session} inline />
-          {session.totalCostUsd != null &&
+          {sessionCost.usd != null &&
             (!caps.contextWindow || (!session.contextSummary && !session.contextUsage)) && (
               <Text size="xs" c="dimmed">
-                Session cost{' '}
-                {formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel))}
+                Session cost {formatSpendUsd(sessionCost.usd, sessionCost.estimated)}
               </Text>
             )}
         </Stack>

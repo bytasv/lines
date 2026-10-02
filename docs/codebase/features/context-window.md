@@ -193,6 +193,9 @@ ring/warning from `effectiveContextTokens` on every `SessionMeta` update.
 - When a workflow step resets the Claude session (fresh start), `contextResetAt` is stamped; any
   reading older than that is rendered as stale (dimmed ring, explanatory footnote) until the
   next turn reports a fresh value — the underlying conversation it described no longer exists.
+- The same per-call `assistant` usage also feeds live in-flight spend (see
+  [usage-and-cost](usage-and-cost.md)); unlike the occupancy reading, that path includes subagent
+  messages, since their tokens are spend.
 - The fallback reading is main-agent-only: an `assistant` message produced by a subagent
   (`parent_tool_use_id` set) never updates it, so a spawned Task's small context can't clobber
   the ring with a number that isn't the main agent's — see

@@ -37,7 +37,7 @@ import { useStore } from '../store';
 import { useSessionMachineHealth } from '../lib/can';
 import { useReveal } from '../lib/layout';
 import { send } from '../ws';
-import { formatDuration, formatSpendUsd, formatTokens, usageColor } from '../lib/format';
+import { formatDuration, formatSpendUsd, formatTokens, usageColor, withLiveSpend } from '../lib/format';
 
 /** Category name as a lookup key: lowercased, with a trailing ` (deferred)`
  *  stripped, so a deferred row shares its category's colour and detail. */
@@ -493,6 +493,9 @@ export function ContextWindowIndicator({
   const models = useStore((s) => s.models);
   const entry = useStore((s) => s.contextBreakdowns[session.id]);
   const requestContextBreakdown = useStore((s) => s.requestContextBreakdown);
+  // Settled total plus the in-flight turn's live estimate, while one runs.
+  const liveSpend = useStore((s) => s.turnSpend[session.id]);
+  const cost = withLiveSpend(session.totalCostUsd, liveSpend, hasEstimatedSpend(session.costByModel));
   const health = useSessionMachineHealth(session.id);
   const hasReading = Boolean(session.contextSummary || session.contextUsage);
   useEffect(() => {
@@ -627,12 +630,7 @@ export function ContextWindowIndicator({
           value={formatTokens(session.totalTokens)}
         />
       )}
-      {session.totalCostUsd != null && (
-        <TotalRow
-          label="Cost"
-          value={formatSpendUsd(session.totalCostUsd, hasEstimatedSpend(session.costByModel))}
-        />
-      )}
+      {cost.usd != null && <TotalRow label="Cost" value={formatSpendUsd(cost.usd, cost.estimated)} />}
       {session.totalDurationMs != null && (
         <TotalRow label="Active time" value={formatDuration(session.totalDurationMs)} />
       )}

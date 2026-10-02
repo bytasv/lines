@@ -15,6 +15,7 @@ import type {
   ContextCompactBlockInfo,
   ContextCompactData,
   ContextUsage,
+  EstimateUsage,
   FileChange,
   FilesChangedData,
   FileSnapshotData,
@@ -52,6 +53,7 @@ import {
   addSpend,
   contextCompactBlock,
   estimateSpendUsd,
+  resultUsage,
   formatPlanComments,
   isPlanFilePath,
   isSessionActive,
@@ -320,6 +322,8 @@ const RECOVERY_REFRESH_TIMEOUT_MS = 20_000;
 
 /** Connectivity hold: first probe delay, its ceiling, and the total budget after
  *  which the turn fails for real with the refusal banner. */
+/** Trailing throttle on the live in-flight spend broadcast (`turnSpend`). */
+const TURN_SPEND_THROTTLE_MS = 1_000;
 const CONNECTIVITY_PROBE_MS = 5_000;
 const CONNECTIVITY_PROBE_CAP_MS = 60_000;
 const CONNECTIVITY_HOLD_MS = 5 * 60_000;
@@ -1100,6 +1104,16 @@ interface LiveState {
   /** Reading from the latest `assistant` message of the in-flight turn; committed
    *  to the meta when the turn settles, so the sidebar isn't re-rendered per message. */
   contextUsage?: ContextUsage;
+  /** Claude usage of the in-flight turn, keyed by `message.id` — the latest
+   *  reading per API call, subagents included. Overwritten, never summed per
+   *  message: the SDK emits one `assistant` message per content block with the
+   *  same id and the same usage. Priced live into the transient `turnSpend`
+   *  broadcast; never billed (the `result` is). */
+  turnUsage?: Map<string, EstimateUsage>;
+  /** Trailing throttle for the `turnSpend` broadcast. */
+  turnSpendTimer?: ReturnType<typeof setTimeout>;
+  /** A live figure reached clients, so the settle must send the `null` that drops it. */
+  turnSpendSent?: boolean;
   /** A compaction boundary landed inside the turn still in flight. Its remaining
    *  `assistant` messages can describe either side of the boundary, so none of
    *  them is a trustworthy occupancy reading — compact_metadata is. */
@@ -2238,6 +2252,8 @@ export class SessionManager {
     // this one left behind must not be subtracted from the next one's first turn.
     const live = this.live.get(sessionId);
     if (live) live.lastCostCumulativeUsd = undefined;
+    // A closed query reports no more usage, so its in-flight estimate is over.
+    this.clearTurnSpend(sessionId);
     // A closed query never reports again, so a turn the user stopped on it is
     // settled here or never. Last, so whatever the settle starts (an advance, a
     // queued prompt) pushes onto the bookkeeping above, not under it.
@@ -5732,6 +5748,19 @@ export class SessionManager {
       if (reading) this.liveState(sessionId).contextUsage = reading;
     }
 
+    // The same per-call usage priced live, subagents included: their tokens are
+    // this turn's spend. Codex reports through its own notification instead.
+    if (msg.type === 'assistant' && meta && !isCodexSession(meta)) {
+      const message = msg.message as { id?: unknown; usage?: unknown } | undefined;
+      if (typeof message?.id === 'string' && message.usage && typeof message.usage === 'object') {
+        const live = this.liveState(sessionId);
+        // Keyed by id and overwritten: one API call arrives as several messages
+        // (one per content block) repeating the same usage.
+        (live.turnUsage ??= new Map()).set(message.id, message.usage as EstimateUsage);
+        this.scheduleTurnSpend(sessionId);
+      }
+    }
+
     // Background tasks (backgrounded subagents / Bash commands) outlive the turn
     // that started them. The level signal names every live one, so the set is
     // replaced wholesale; `init` means the CLI process (re)started, which emits
@@ -5878,6 +5907,9 @@ export class SessionManager {
         // attempt's file attribution. So do contextUsage and compactedInTurn —
         // the turn continues, and they describe it.
         this.upsert(metaNow); // so the spend reaches the client
+        // That attempt is billed for real now, so its live estimate must not
+        // carry into the next one and be counted twice.
+        this.clearTurnSpend(sessionId);
         this.beginRecovery(sessionId, recoveryKind, resultText);
         return;
       }
@@ -5920,6 +5952,9 @@ export class SessionManager {
         metaNow.turnStartedAt = undefined;
         this.upsert(metaNow);
       }
+      // After the upsert, so the billed figure is already on the client when the
+      // estimate it replaces is dropped — never both shown added together.
+      this.clearTurnSpend(sessionId);
       // After the upsert, so the revision guard can tell "still my banner" from
       // "the session moved on". This branch bypasses failTurn by design (the SDK
       // reported the result itself), so it classifies here instead.
@@ -5968,7 +6003,10 @@ export class SessionManager {
     if (turnId) live.codexTurnId = turnId;
     // Usage arrives on its own notification ahead of the settling turn, so it is
     // remembered here and folded into the `result` when that lands.
-    if (usage) live.codexUsage = usage;
+    if (usage) {
+      live.codexUsage = usage;
+      this.scheduleTurnSpend(sessionId);
+    }
     // Occupancy arrives on its own channel here rather than on each assistant
     // message, so this is the codex entry to the same `live.contextUsage` the
     // Claude path fills from `extractContextUsage`. Both settle onto the meta at
@@ -6171,9 +6209,83 @@ export class SessionManager {
     }
   }
 
+  /**
+   * The in-flight turn's estimated spend so far, or undefined when there is
+   * nothing to price or the model has no price. Priced with the same model id and
+   * estimator the settle uses; tokens summed the way `accumulateResultSpend`
+   * sums them. Never billed — the settling `result` is.
+   */
+  private computeTurnSpend(sessionId: string): { costUsd: number; tokens: number } | undefined {
+    const meta = this.sessions.get(sessionId);
+    const live = this.live.get(sessionId);
+    if (!meta || !live) return undefined;
+    const modelId = resolveModelId(meta.model);
+    const readings: EstimateUsage[] = isCodexSession(meta)
+      ? live.codexUsage
+        ? [resultUsage(live.codexUsage)]
+        : []
+      : [...(live.turnUsage?.values() ?? [])];
+    if (!readings.length) return undefined;
+    let costUsd = 0;
+    let tokens = 0;
+    for (const usage of readings) {
+      const usd = estimateSpendUsd(modelId, usage);
+      if (usd == null) return undefined;
+      costUsd += usd;
+      tokens +=
+        (usage.input_tokens ?? 0) +
+        (usage.output_tokens ?? 0) +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0) +
+        (usage.reasoning_output_tokens ?? 0);
+    }
+    return { costUsd, tokens };
+  }
+
+  /** Broadcast the live estimate at most once a second per session, trailing,
+   *  rather than per message. */
+  private scheduleTurnSpend(sessionId: string) {
+    const live = this.liveState(sessionId);
+    if (live.turnSpendTimer) return;
+    live.turnSpendTimer = setTimeout(() => this.flushTurnSpend(sessionId), TURN_SPEND_THROTTLE_MS);
+    live.turnSpendTimer.unref?.();
+  }
+
+  private flushTurnSpend(sessionId: string) {
+    const live = this.live.get(sessionId);
+    if (!live) return;
+    live.turnSpendTimer = undefined;
+    // Usage that trickles in after the settle (a background task) must not raise
+    // a live figure on an idle session; it stays in the readings for the next turn.
+    const meta = this.sessions.get(sessionId);
+    if (!meta || !isSessionInterruptible(meta.status)) return;
+    const spend = this.computeTurnSpend(sessionId);
+    // An unpriced model shows nothing live, never a $0.00.
+    if (!spend) return;
+    live.turnSpendSent = true;
+    this.broadcast({ type: 'turnSpend', sessionId, spend });
+  }
+
+  /** End the in-flight estimate: drop the pending broadcast and the readings,
+   *  and tell clients to drop the figure if one ever reached them. */
+  private clearTurnSpend(sessionId: string) {
+    const live = this.live.get(sessionId);
+    if (!live) return;
+    if (live.turnSpendTimer) clearTimeout(live.turnSpendTimer);
+    live.turnSpendTimer = undefined;
+    live.turnUsage = undefined;
+    if (live.turnSpendSent) {
+      live.turnSpendSent = false;
+      this.broadcast({ type: 'turnSpend', sessionId, spend: null });
+    }
+  }
+
   handleWorkerEnded(sessionId: string, error?: string) {
     // Cards stay open; answers recover via the resume path.
     this.flushPending(sessionId);
+    // No more usage will arrive for this turn. A synthesized result below
+    // clears it again, harmlessly.
+    this.clearTurnSpend(sessionId);
     // The query is gone, so every background task it owned went with it.
     this.setBackgroundTasks(sessionId, []);
     // A dead query says nothing about whether compaction is supported — close the

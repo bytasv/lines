@@ -114,6 +114,8 @@ function TranscriptLoading({
 
 export function SessionView({ sessionId }: { sessionId: string }) {
   const session = useStore((s) => s.sessions[sessionId]);
+  // While a turn runs, its live estimate stands in for the last settled turn.
+  const liveSpend = useStore((s) => s.turnSpend[sessionId]);
   // Null on your own machine. Present means this session is somebody else's, and
   // the header says so — typing into a colleague's laptop unaware is the failure
   // this exists to prevent.
@@ -227,11 +229,15 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                 </ActionIcon>
               </Menu.Target>
               <Menu.Dropdown>
-                {session.lastCostUsd != null && (
-                  <Menu.Label>
-                    last turn{' '}
-                    {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel))}
-                  </Menu.Label>
+                {liveSpend ? (
+                  <Menu.Label>this turn {formatSpendUsd(liveSpend.costUsd, true)}</Menu.Label>
+                ) : (
+                  session.lastCostUsd != null && (
+                    <Menu.Label>
+                      last turn{' '}
+                      {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel))}
+                    </Menu.Label>
+                  )
                 )}
                 <Menu.Item leftSection={<IconFileDiff size={14} />} onClick={() => setReviewing(true)}>
                   Review changes
@@ -245,10 +251,16 @@ export function SessionView({ sessionId }: { sessionId: string }) {
             </Menu>
           ) : (
             <>
-          {session.lastCostUsd != null && (
+          {liveSpend ? (
             <Text size="xs" c="dimmed">
-              last turn {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel))}
+              this turn {formatSpendUsd(liveSpend.costUsd, true)}
             </Text>
+          ) : (
+            session.lastCostUsd != null && (
+              <Text size="xs" c="dimmed">
+                last turn {formatSpendUsd(session.lastCostUsd, hasEstimatedSpend(session.costByModel))}
+              </Text>
+            )
           )}
           {/* Opens on click rather than prefetching a count: the diff is a `git
               diff` per repo, and paying for one every time a session is selected

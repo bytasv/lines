@@ -966,6 +966,8 @@ const AgentTurn = memo(function AgentTurn({
   const turnSummariesEnabled = useStore((s) => s.turnSummariesEnabled);
   // A boolean selector, so a memoized turn card only re-renders when the flag flips.
   const estimated = useStore((s) => hasEstimatedSpend(s.sessions[sessionId]?.costByModel));
+  // The open turn's live estimate, until its result lands with the billed figure.
+  const liveSpend = useStore((s) => (active ? s.turnSpend[sessionId] : undefined));
   // Walks every tool call in the turn (and diffs the edits) — recomputing it on
   // an unrelated re-render is pure waste; `turn.items` is rebuilt only when the
   // transcript itself changes.
@@ -1020,10 +1022,17 @@ const AgentTurn = memo(function AgentTurn({
           )}
           {/* What the turn cost, where the result row used to say it — the success
               row renders nothing inside the card now. */}
-          {result?.costUsd != null && (
+          {result?.costUsd != null ? (
             <Text size="xs" c="dimmed">
               {formatSpendUsd(result.costUsd, estimated)}
             </Text>
+          ) : (
+            !result &&
+            liveSpend && (
+              <Text size="xs" c="dimmed">
+                {formatSpendUsd(liveSpend.costUsd, true)}
+              </Text>
+            )
           )}
           {result?.durationMs != null && (
             <Text size="xs" c="dimmed">

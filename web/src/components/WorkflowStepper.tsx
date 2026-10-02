@@ -40,7 +40,7 @@ import {
   providerForModel,
 } from '@lines/shared';
 import { useCan } from '../lib/can';
-import { formatDuration, formatSpendUsd } from '../lib/format';
+import { formatDuration, formatSpendUsd, withLiveSpend } from '../lib/format';
 import { permissionModeLabel } from '../lib/permissionModes';
 import { useStepResolver } from '../lib/useStepResolver';
 import { useIsPhone, useReveal } from '../lib/layout';
@@ -261,6 +261,9 @@ export function WorkflowStepper({
     !advancing &&
     !stopping;
   const connected = useStore((s) => s.connectionStatus === 'connected');
+  /** The in-flight turn's live estimate; only the running step is charged it,
+   *  since steps are billed when their turn completes. */
+  const liveSpend = useStore((s) => s.turnSpend[session.id]);
   /** Step index awaiting the "mark as completed" confirmation. */
   const [confirmIndex, setConfirmIndex] = useState<number | null>(null);
   const confirmRunning = confirmIndex !== null && state.stepStatuses[confirmIndex] === 'running';
@@ -300,16 +303,21 @@ export function WorkflowStepper({
           const shown = !isPhone || current;
           const status = state.stepStatuses[i];
           const clickable = status !== 'pending';
-          const cost = state.stepCostsUsd?.[i] ?? 0;
           const tokens = state.stepTokens?.[i] ?? 0;
           const durationMs = state.stepDurationsMs?.[i] ?? 0;
           // The step's own model where the server stamped one — a workflow may
           // cross providers, so only that answers per step. Steps run before
           // `stepModels` existed fall back to the session-wide reading.
           const stepModel = state.stepModels?.[i];
-          const estimated = stepModel
-            ? !capabilitiesFor(providerForModel(stepModel)).cost
-            : hasEstimatedSpend(session.costByModel);
+          const stepCost = withLiveSpend(
+            state.stepCostsUsd?.[i],
+            current && status === 'running' ? liveSpend : undefined,
+            stepModel
+              ? !capabilitiesFor(providerForModel(stepModel)).cost
+              : hasEstimatedSpend(session.costByModel),
+          );
+          const cost = stepCost.usd ?? 0;
+          const estimated = stepCost.estimated;
           const content = contents[i];
           const next = contents[i + 1];
           // The gate between this step and the next, in the editor's words.
@@ -595,13 +603,18 @@ export function WorkflowStepper({
         <Stack gap={2} className="lines-safe-bottom">
           {workflow.steps.map((step, i) => {
             const status = state.stepStatuses[i];
-            const cost = state.stepCostsUsd?.[i] ?? 0;
             const tokens = state.stepTokens?.[i] ?? 0;
             const durationMs = state.stepDurationsMs?.[i] ?? 0;
             const stepModel = state.stepModels?.[i];
-            const estimated = stepModel
-              ? !capabilitiesFor(providerForModel(stepModel)).cost
-              : hasEstimatedSpend(session.costByModel);
+            const stepCost = withLiveSpend(
+              state.stepCostsUsd?.[i],
+              i === state.stepIndex && status === 'running' ? liveSpend : undefined,
+              stepModel
+                ? !capabilitiesFor(providerForModel(stepModel)).cost
+                : hasEstimatedSpend(session.costByModel),
+            );
+            const cost = stepCost.usd ?? 0;
+            const estimated = stepCost.estimated;
             const metrics = [
               cost > 0 ? formatSpendUsd(cost, estimated) : '',
               tokens > 0 ? `${tokens.toLocaleString()} tokens` : '',

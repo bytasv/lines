@@ -295,6 +295,45 @@ test('a codex turn settles to done with its tokens accumulated', async () => {
   assert.equal(settled.totalCostUsd, 0.000644);
 });
 
+test('codex usage is priced live and matches the settle-time estimate', async (t) => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.prompt('s1', 'hello');
+  await settle();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('thread/tokenUsage/updated', {
+      tokenUsage: {
+        last: {
+          totalTokens: 137,
+          inputTokens: 100,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 30,
+          reasoningOutputTokens: 7,
+        },
+      },
+    }),
+  );
+  t.mock.timers.tick(1_000);
+  const turnSpends = () =>
+    h.broadcasts.filter((m): m is Extract<ServerMessage, { type: 'turnSpend' }> => m.type === 'turnSpend');
+  const live = turnSpends().at(-1)!;
+  assert.deepEqual(live.spend, { costUsd: 0.000644, tokens: 137 });
+
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('turn/completed', { turn: { id: 't1', status: 'completed' } }),
+  );
+  await settle();
+  const settled = h.sessions.get('s1')!;
+  assert.equal(settled.totalCostUsd, live.spend?.costUsd);
+  assert.equal(turnSpends().at(-1)!.spend, null);
+});
+
 test('a stopped codex turn settles as stopped, not as a failure', async () => {
   process.env.LINES_CODEX_PATH = FAKE_CODEX;
   await refreshCodex();

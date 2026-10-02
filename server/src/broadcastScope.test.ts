@@ -24,6 +24,7 @@ const SESSION_BEARING: ServerMessage[] = [
   { type: 'sessionDeleted', sessionId: 's1' } as ServerMessage,
   { type: 'stream', sessionId: 's1' } as unknown as ServerMessage,
   { type: 'error', sessionId: 's1', message: 'x' } as ServerMessage,
+  { type: 'turnSpend', sessionId: 's1', spend: { costUsd: 0.01, tokens: 100 } } as ServerMessage,
 ];
 
 const ACCOUNT_WIDE: ServerMessage[] = [
