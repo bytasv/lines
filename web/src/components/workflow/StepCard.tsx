@@ -3,14 +3,11 @@ import {
   Badge,
   Box,
   Button,
-  Collapse,
   Group,
   Menu,
   Popover,
   ScrollArea,
-  Select,
   Stack,
-  Switch,
   Text,
   TextInput,
   Tooltip,
@@ -20,42 +17,23 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   IconAlertTriangle,
-  IconChevronDown,
+  IconArrowDown,
+  IconArrowUp,
   IconCopy,
   IconDots,
-  IconGripVertical,
   IconHistory,
+  IconLibrary,
   IconLock,
   IconPencil,
+  IconPin,
   IconTrash,
-  IconWorld,
 } from '@tabler/icons-react';
-import type { DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
-import type {
-  PermissionMode,
-  ModelOption,
-  ReasoningEffort,
-  StepContent,
-  StepDef,
-} from '@lines/shared';
-import { providerForModel, providerSwitchNeedsFreshStart } from '@lines/shared';
+import type { ModelOption, StepContent, StepDef } from '@lines/shared';
 import type { DraftStep, StepErrors } from './useWorkflowDraft';
-import {
-  PERMISSION_MODES,
-  permissionModeLabel,
-  renderPermissionModeOption,
-} from '../../lib/permissionModes';
+import { permissionModeLabel } from '../../lib/permissionModes';
 import { PromptEditor } from './PromptEditor';
-import {
-  AUTO_EFFORT,
-  effortSelectData,
-  modelComboboxProps,
-  modelSelectData,
-  renderModelOption,
-  renderOptionWithDescription,
-  STEP_EFFORTS,
-} from '../../lib/modelSelect';
-import { emptyRoutingRule, RoutingRuleFields } from '../RoutingRuleFields';
+import { crossesProvider, effortLabel, gateLabel, startLabel, StepSettings } from './StepSettings';
+import { StepBanner, StepPane } from './StepPane';
 import styles from './workflow.module.css';
 
 const cn = (...xs: (string | false | undefined)[]) => xs.filter(Boolean).join(' ');
@@ -64,23 +42,30 @@ const FIELD_LABELS: Record<keyof StepContent, string> = {
   name: 'Name',
   promptTemplate: 'Prompt',
   model: 'Model',
-  reasoningEffort: 'Reasoning effort',
+  reasoningEffort: 'Effort',
   permissionMode: 'Permission',
-  autoAdvance: 'Auto-advance',
-  freshStart: 'Fresh start',
+  autoAdvance: 'When it finishes',
+  freshStart: 'How it starts',
   outputName: 'Output name',
-  routing: 'Smart routing',
+  routing: 'Routing rule',
 };
 
-/** One field's value as diff text; objects (the routing rule) as JSON, so an
- *  edit inside one is visible rather than two identical `[object Object]`s. */
-function fieldText(v: StepContent[keyof StepContent]): string {
+/** One field's value as diff text, in the words the editor shows it in; objects
+ *  (the routing rule) as JSON, so an edit inside one is visible rather than two
+ *  identical `[object Object]`s. */
+function fieldText<K extends keyof StepContent>(k: K, v: StepContent[K]): string {
+  if (k === 'autoAdvance') return gateLabel(v === true);
+  if (k === 'freshStart') return startLabel(v === true);
+  if (k === 'reasoningEffort') return effortLabel(v as StepContent['reasoningEffort']);
+  if (k === 'permissionMode') return permissionModeLabel(String(v));
   if (v === undefined) return '';
   return typeof v === 'object' ? JSON.stringify(v) : String(v);
 }
 
 function changedFields(a: StepContent, b: StepContent): (keyof StepContent)[] {
-  return (Object.keys(FIELD_LABELS) as (keyof StepContent)[]).filter((k) => fieldText(a[k]) !== fieldText(b[k]));
+  return (Object.keys(FIELD_LABELS) as (keyof StepContent)[]).filter(
+    (k) => fieldText(k, a[k]) !== fieldText(k, b[k]),
+  );
 }
 
 /** Compact relative time ("3d ago"); falls back to empty when no timestamp. */
@@ -95,7 +80,7 @@ export function relTime(ms?: number): string {
   return 'just now';
 }
 
-/** Per-field diff of two step contents (red − / teal +), or an empty-state note. */
+/** Per-field diff of two step contents (red − / green +), or an empty-state note. */
 export function FieldDiffList({ from, to }: { from: StepContent; to: StepContent }) {
   const fields = changedFields(from, to);
   if (fields.length === 0) return <Text size="xs" c="dimmed">No field changes.</Text>;
@@ -105,8 +90,8 @@ export function FieldDiffList({ from, to }: { from: StepContent; to: StepContent
         {fields.map((f) => (
           <Stack key={f} gap={2}>
             <Text size="xs" fw={600} c="dimmed">{FIELD_LABELS[f]}</Text>
-            <Text size="xs" c="red" style={{ whiteSpace: 'pre-wrap' }}>- {fieldText(from[f]) || '(empty)'}</Text>
-            <Text size="xs" c="teal" style={{ whiteSpace: 'pre-wrap' }}>+ {fieldText(to[f]) || '(empty)'}</Text>
+            <Text size="xs" c="red" style={{ whiteSpace: 'pre-wrap' }}>- {fieldText(f, from[f]) || '(empty)'}</Text>
+            <Text size="xs" c="green" style={{ whiteSpace: 'pre-wrap' }}>+ {fieldText(f, to[f]) || '(empty)'}</Text>
           </Stack>
         ))}
       </Stack>
@@ -114,16 +99,21 @@ export function FieldDiffList({ from, to }: { from: StepContent; to: StepContent
   );
 }
 
-function UpdatePopover({ pinned, head, onUpdate }: { pinned: StepContent; head: StepDef; onUpdate: () => void }) {
+/** The diff a pinned step would take on updating, behind whatever `children` is. */
+function UpdatePopover({
+  pinned,
+  head,
+  onUpdate,
+  children,
+}: {
+  pinned: StepContent;
+  head: StepDef;
+  onUpdate: () => void;
+  children: ReactNode;
+}) {
   return (
     <Popover width={360} position="bottom-end" withArrow shadow="md">
-      <Popover.Target>
-        <Tooltip label={`Update available — v${head.version}`}>
-          <ActionIcon size="sm" variant="light" color="yellow" radius="xl">
-            <IconAlertTriangle size={14} />
-          </ActionIcon>
-        </Tooltip>
-      </Popover.Target>
+      <Popover.Target>{children}</Popover.Target>
       <Popover.Dropdown>
         <Stack gap={10}>
           <Text size="xs" fw={600}>
@@ -174,9 +164,7 @@ function VersionHistoryPopover({
       }}
     >
       <Popover.Target>
-        <Box data-no-toggle onClick={(e) => e.stopPropagation()} style={{ display: 'inline-flex' }}>
-          {children}
-        </Box>
+        <Box style={{ display: 'inline-flex' }}>{children}</Box>
       </Popover.Target>
       <Popover.Dropdown>
         <Stack gap={10}>
@@ -198,7 +186,7 @@ function VersionHistoryPopover({
                         {relTime(v.updatedAt)}{v.ownerName ? ` · ${v.ownerName}` : ''}
                       </Text>
                       {v.version === pinnedVersion && (
-                        <Badge size="xs" variant="light">pinned</Badge>
+                        <Badge size="xs" variant="light" tt="none">pinned</Badge>
                       )}
                     </UnstyledButton>
                   ))}
@@ -227,24 +215,31 @@ function VersionHistoryPopover({
   );
 }
 
+/**
+ * The pane that edits the workflow step picked in the outline: what the step is
+ * (pinned, someone else's, being edited, a copy), its prompt at full height, and
+ * its settings. The gate and start mode are not here — they sit on the outline's
+ * links, between the steps they connect.
+ */
 export function StepCard({
   step,
   index,
+  total,
   previousModel,
-  collapsed,
   errors,
   readOnly,
   models,
   ownsRef,
   updateDef,
-  dragHandleProps,
+  editingFrom,
+  unavailable = false,
   onPatch,
-  onToggle,
-  onExpand,
   onDuplicate,
   onRemove,
   onPublish,
   onEdit,
+  onDetach,
+  onMove,
   onUpdateToLatest,
   versions,
   onShowVersions,
@@ -253,27 +248,31 @@ export function StepCard({
 }: {
   step: DraftStep;
   index: number;
+  total: number;
   /** The model the step before this one runs on; undefined for step 0, whose
    *  predecessor is the session itself and is not known until the run. */
   previousModel?: string;
   /** Output names published by earlier steps — offered as {outputs.<name>} tokens. */
   availableOutputs: string[];
-  collapsed: boolean;
   errors?: StepErrors;
   readOnly: boolean;
   models: ModelOption[];
   ownsRef: boolean;
   updateDef?: StepDef;
+  /** The library step an inline step was opened from for editing (`publishStepId`);
+   *  saving it to the library mints the version after this one. */
+  editingFrom?: StepDef;
+  /** A ref whose pinned version is not known here, so there is no content to copy. */
+  unavailable?: boolean;
   /** Fetched version history for this ref; undefined while loading. */
   versions?: StepDef[];
-  dragHandleProps?: DraggableProvidedDragHandleProps | null;
   onPatch: (patch: Partial<StepContent>) => void;
-  onToggle: () => void;
-  onExpand: () => void;
   onDuplicate: () => void;
   onRemove: () => void;
   onPublish: () => void;
   onEdit: () => void;
+  onDetach: () => void;
+  onMove: (delta: -1 | 1) => void;
   onUpdateToLatest: () => void;
   onShowVersions: () => void;
   onPinVersion: (def: StepDef) => void;
@@ -281,280 +280,249 @@ export function StepCard({
   const isRef = !!step.ref;
   const contentReadOnly = readOnly || isRef;
   // Changing provider between steps drops the conversation — nothing carries
-  // context from a Claude session to a codex thread. So a crossing step is a
-  // fresh start whether or not the user asked for one, and saying so here is
-  // what stops that being a surprise at run time.
-  const crossesProvider =
-    previousModel !== undefined &&
-    providerSwitchNeedsFreshStart(providerForModel(previousModel), providerForModel(step.model));
-  const modeLabel = permissionModeLabel(step.permissionMode);
-  const modelLabel = models.find((m) => m.id === step.model)?.label ?? step.model;
-  const modelKnown = models.some((m) => m.id === step.model);
+  // context from a Claude session to a codex thread — so a crossing step is a
+  // fresh start whether or not the user asked for one.
+  const forcedFresh = crossesProvider(previousModel, step.model);
+  const modelKnown = models.length === 0 || models.some((m) => m.id === step.model);
   const modelWarning = contentReadOnly
-    ? `Model "${step.model}" is no longer available — update, re-pin, or duplicate this step to pick a current model`
+    ? `Model "${step.model}" is no longer available — update, re-pin, or make an editable copy of this step to pick a current model`
     : `Model "${step.model}" is no longer available — pick a current model`;
-  const invalid = !!errors;
   const canBrowseHistory = isRef && !readOnly;
   const [historyOpen, setHistoryOpen] = useState(false);
   const openHistory = () => {
     onShowVersions();
     setHistoryOpen(true);
   };
+  const nextLibraryVersion = (editingFrom?.version ?? 0) + 1;
+  const label = step.name.trim() || 'Untitled step';
 
-  return (
-    <Box
-      data-step-uid={step._uid}
-      onFocusCapture={collapsed ? onExpand : undefined}
-      className={cn(styles.card, !collapsed && styles.cardExpanded, invalid && styles.cardInvalid)}
-    >
-      {/* Header — click anywhere (except controls) to collapse/expand */}
-      <div
-        className={styles.header}
-        onClick={(e) => {
-          if ((e.target as HTMLElement).closest('input,button,a,[data-no-toggle]')) return;
-          onToggle();
-        }}
+  const source = step.ref
+    ? {
+        icon: ownsRef ? <IconPin size={12} /> : <IconLock size={12} />,
+        text: ownsRef ? `Pinned v${step.ref.version}` : `${step.ref.ownerName ?? 'Shared'} · v${step.ref.version}`,
+      }
+    : null;
+  const sourceControl =
+    source &&
+    (canBrowseHistory ? (
+      <VersionHistoryPopover
+        step={step}
+        versions={versions}
+        opened={historyOpen}
+        onOpenChange={(o) => (o ? openHistory() : setHistoryOpen(false))}
+        onPin={onPinVersion}
       >
-        {!readOnly && (
-          <span {...dragHandleProps} data-no-toggle className={styles.grip} onClick={(e) => e.stopPropagation()}>
-            <IconGripVertical size={16} />
-          </span>
-        )}
-        <span className={cn(styles.num, invalid && styles.numInvalid)}>{index + 1}</span>
+        <Tooltip label="Version history" withArrow>
+          <UnstyledButton className={styles.link} onClick={openHistory} aria-label={`${source.text} — version history`}>
+            {source.icon}
+            {source.text}
+            <IconHistory size={12} />
+          </UnstyledButton>
+        </Tooltip>
+      </VersionHistoryPopover>
+    ) : (
+      <span className={styles.link} data-static>
+        {source.icon}
+        {source.text}
+      </span>
+    ));
+
+  const updateButton = updateDef && (
+    <UpdatePopover pinned={step} head={updateDef} onUpdate={onUpdateToLatest}>
+      <Button size="compact-xs" variant="light" color="yellow">
+        Update to v{updateDef.version}
+      </Button>
+    </UpdatePopover>
+  );
+
+  const banner = isRef ? (
+    unavailable ? (
+      <StepBanner icon={<IconAlertTriangle size={14} />}>
+        <b>Pinned step unavailable.</b> Version {step.ref!.version} is not known on this machine, so it can
+        neither be shown nor run.
+      </StepBanner>
+    ) : ownsRef ? (
+      <StepBanner
+        icon={<IconPin size={14} />}
+        actions={
+          !readOnly && (
+            <>
+              {updateButton}
+              <Button size="compact-xs" variant="default" leftSection={<IconPencil size={12} />} onClick={onEdit}>
+                Edit in library
+              </Button>
+              <Button size="compact-xs" variant="default" leftSection={<IconCopy size={12} />} onClick={onDetach}>
+                Make an editable copy
+              </Button>
+            </>
+          )
+        }
+      >
+        <b>
+          Pinned to {step.name} v{step.ref!.version}
+        </b>{' '}
+        from your library{updateDef ? ` — v${updateDef.version} is available` : ''}. Its prompt and settings are
+        the library step's.
+      </StepBanner>
+    ) : (
+      <StepBanner
+        icon={<IconLock size={14} />}
+        actions={
+          !readOnly && (
+            <>
+              {updateButton}
+              <Button size="compact-xs" variant="default" leftSection={<IconCopy size={12} />} onClick={onDetach}>
+                Make an editable copy
+              </Button>
+            </>
+          )
+        }
+      >
+        <b>From {step.ref!.ownerName ?? 'another user'}</b>, read-only · pinned to v{step.ref!.version}
+        {updateDef ? ` — v${updateDef.version} is available` : ''}.
+      </StepBanner>
+    )
+  ) : step.publishStepId ? (
+    <StepBanner
+      icon={<IconPencil size={14} />}
+      actions={
+        !readOnly && (
+          <Button size="compact-xs" variant="default" leftSection={<IconLibrary size={12} />} onClick={onPublish}>
+            Save to library as v{nextLibraryVersion}
+          </Button>
+        )
+      }
+    >
+      <b>Editing {editingFrom?.name ?? step.name}</b> from your library. Save it there to publish
+      v{nextLibraryVersion}; until then these edits stay in this workflow only.
+    </StepBanner>
+  ) : step.copiedFrom ? (
+    <StepBanner icon={<IconCopy size={14} />}>
+      Editable copy of{' '}
+      <b>
+        {step.copiedFrom.name} v{step.copiedFrom.version}
+      </b>
+      . Changes stay in this workflow; the library step is untouched.
+    </StepBanner>
+  ) : undefined;
+
+  const header = (
+    <>
+      <div className={styles.paneTitle}>
+        <div className={styles.label}>
+          Step {index + 1} of {total}
+        </div>
         <TextInput
-          data-no-toggle
           variant="unstyled"
           placeholder="Untitled step"
-          style={{ flex: 1, minWidth: 0 }}
+          aria-label="Step name"
           classNames={{ input: styles.titleInput }}
           value={step.name}
-          disabled={contentReadOnly}
+          readOnly={contentReadOnly}
+          error={errors?.name}
           onChange={(e) => onPatch({ name: e.currentTarget.value })}
         />
-
-        <Group gap={8} wrap="nowrap" data-no-toggle>
-          {isRef &&
-            (canBrowseHistory ? (
-              <VersionHistoryPopover
-                step={step}
-                versions={versions}
-                opened={historyOpen}
-                onOpenChange={(o) => (o ? openHistory() : setHistoryOpen(false))}
-                onPin={onPinVersion}
-              >
-                <Badge
-                  size="sm"
-                  variant="light"
-                  color={ownsRef ? undefined : 'grape'}
-                  leftSection={<IconLock size={10} />}
-                  style={{ cursor: 'pointer' }}
-                  onClick={openHistory}
-                >
-                  {ownsRef ? `v${step.ref!.version}` : `${step.ref!.ownerName ?? 'shared'} · v${step.ref!.version}`}
-                </Badge>
-              </VersionHistoryPopover>
-            ) : (
-              <Badge size="sm" variant="light" color={ownsRef ? undefined : 'grape'} leftSection={<IconLock size={10} />}>
-                {ownsRef ? `v${step.ref!.version}` : `${step.ref!.ownerName ?? 'shared'} · v${step.ref!.version}`}
-              </Badge>
-            ))}
-          {isRef && updateDef && <UpdatePopover pinned={step} head={updateDef} onUpdate={onUpdateToLatest} />}
-          {!modelKnown && (
-            <Tooltip label={modelWarning} multiline w={240} withArrow>
-              <ActionIcon size="sm" variant="light" color="yellow" radius="xl">
-                <IconAlertTriangle size={14} />
-              </ActionIcon>
-            </Tooltip>
-          )}
-          {collapsed && !isRef && (
-            <Group gap={6} wrap="nowrap" visibleFrom="md">
-              <Badge size="sm" variant="default">{modelLabel}</Badge>
-              <Badge size="sm" variant="default">{modeLabel}</Badge>
-              {step.autoAdvance && <Badge size="sm" variant="light">auto</Badge>}
-              {step.freshStart && <Badge size="sm" variant="light" color="grape">fresh</Badge>}
-            </Group>
-          )}
-          {!readOnly && (
-            <Menu position="bottom-end" width={190} withinPortal>
-              <Menu.Target>
-                <ActionIcon variant="subtle" color="gray" onClick={(e) => e.stopPropagation()}>
-                  <IconDots size={16} />
-                </ActionIcon>
-              </Menu.Target>
-              <Menu.Dropdown>
-                {isRef && ownsRef && (
-                  <Menu.Item leftSection={<IconPencil size={14} />} onClick={onEdit}>
-                    Edit (new version)
-                  </Menu.Item>
-                )}
-                {canBrowseHistory && (
-                  <Menu.Item leftSection={<IconHistory size={14} />} onClick={openHistory}>
-                    Version history
-                  </Menu.Item>
-                )}
-                {!isRef && (
-                  <Menu.Item leftSection={<IconWorld size={14} />} onClick={onPublish}>
-                    Save as reusable step
-                  </Menu.Item>
-                )}
-                <Menu.Item leftSection={<IconCopy size={14} />} onClick={onDuplicate}>
-                  {isRef ? 'Duplicate as editable' : 'Duplicate'}
-                </Menu.Item>
-                <Menu.Divider />
-                <Menu.Item color="red" leftSection={<IconTrash size={14} />} onClick={onRemove}>
-                  Remove
-                </Menu.Item>
-              </Menu.Dropdown>
-            </Menu>
-          )}
-          <ActionIcon variant="subtle" color="gray" onClick={onToggle}>
-            <IconChevronDown
-              size={16}
-              style={{ transform: collapsed ? 'rotate(-90deg)' : undefined, transition: 'transform 150ms' }}
-            />
-          </ActionIcon>
-        </Group>
       </div>
+      <Group gap={4} wrap="nowrap" pt={18}>
+        {sourceControl}
+        {!modelKnown && (
+          <Tooltip label={modelWarning} multiline w={240} withArrow>
+            <ActionIcon size="sm" variant="subtle" color="yellow" aria-label={modelWarning}>
+              <IconAlertTriangle size={14} />
+            </ActionIcon>
+          </Tooltip>
+        )}
+        {!readOnly && (
+          <Menu position="bottom-end" width={230} withinPortal>
+            <Menu.Target>
+              <ActionIcon variant="subtle" color="gray" aria-label={`Actions for ${label}`}>
+                <IconDots size={16} />
+              </ActionIcon>
+            </Menu.Target>
+            <Menu.Dropdown>
+              {isRef && ownsRef && (
+                <Menu.Item leftSection={<IconPencil size={14} />} onClick={onEdit}>
+                  Edit in library
+                </Menu.Item>
+              )}
+              {canBrowseHistory && (
+                <Menu.Item leftSection={<IconHistory size={14} />} onClick={openHistory}>
+                  Version history
+                </Menu.Item>
+              )}
+              {isRef && (
+                <Menu.Item leftSection={<IconCopy size={14} />} disabled={unavailable} onClick={onDetach}>
+                  Make an editable copy
+                </Menu.Item>
+              )}
+              {!isRef && (
+                <Menu.Item leftSection={<IconLibrary size={14} />} onClick={onPublish}>
+                  {step.publishStepId ? `Save to library as v${nextLibraryVersion}` : 'Save to library'}
+                </Menu.Item>
+              )}
+              {!isRef && (
+                <Menu.Item leftSection={<IconCopy size={14} />} onClick={onDuplicate}>
+                  Duplicate
+                </Menu.Item>
+              )}
+              <Menu.Divider />
+              <Menu.Item leftSection={<IconArrowUp size={14} />} disabled={index === 0} onClick={() => onMove(-1)}>
+                Move up
+              </Menu.Item>
+              <Menu.Item
+                leftSection={<IconArrowDown size={14} />}
+                disabled={index === total - 1}
+                onClick={() => onMove(1)}
+              >
+                Move down
+              </Menu.Item>
+              <Menu.Divider />
+              <Menu.Item color="red" leftSection={<IconTrash size={14} />} onClick={onRemove}>
+                Remove
+              </Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
+        )}
+      </Group>
+    </>
+  );
 
-      <Collapse expanded={!collapsed}>
-        <div className={styles.body}>
-          {errors?.ref && <Text size="xs" c="red" mb={8}>{errors.ref}</Text>}
-
-          <div className={styles.label}>Prompt</div>
-          <PromptEditor
-            value={step.promptTemplate}
-            readOnly={contentReadOnly}
-            error={errors?.prompt}
-            inputClassName={styles.promptInput}
-            freshStart={step.freshStart}
-            availableOutputs={availableOutputs}
-            onChange={(v) => onPatch({ promptTemplate: v })}
-          />
-
-          <div className={styles.settings}>
-            <div className={styles.control}>
-              <span className={styles.controlLabel}>Model</span>
-              <Select
-                w={168}
-                comboboxProps={modelComboboxProps}
-                data={modelSelectData(models, step.model)}
-                renderOption={renderModelOption}
-                value={step.model}
-                disabled={contentReadOnly}
-                allowDeselect={false}
-                classNames={{ input: styles.fieldInput }}
-                // Picking a model that changes provider turns Fresh start on in the
-                // same patch. The alternative — letting it save and refusing at run
-                // time — is the same outcome discovered several minutes later.
-                onChange={(v) =>
-                  v &&
-                  onPatch({
-                    model: v,
-                    ...(previousModel !== undefined &&
-                    providerSwitchNeedsFreshStart(
-                      providerForModel(previousModel),
-                      providerForModel(v),
-                    )
-                      ? { freshStart: true }
-                      : {}),
-                  })
-                }
-              />
-            </div>
-            <div className={styles.control}>
-              <span className={styles.controlLabel}>Reasoning effort</span>
-              <Select
-                w={140}
-                comboboxProps={modelComboboxProps}
-                // Claude's list, whichever model the step names: a step carrying an
-                // OpenAI model is rejected by validation, so codex's `minimal` is
-                // not a level a step can ever run at.
-                data={effortSelectData(STEP_EFFORTS, step.reasoningEffort)}
-                renderOption={renderOptionWithDescription}
-                value={step.reasoningEffort ?? AUTO_EFFORT}
-                disabled={contentReadOnly}
-                allowDeselect={false}
-                classNames={{ input: styles.fieldInput }}
-                onChange={(v) =>
-                  v &&
-                  onPatch({
-                    reasoningEffort: v === AUTO_EFFORT ? undefined : (v as ReasoningEffort),
-                  })
-                }
-              />
-            </div>
-            <div className={styles.control}>
-              <span className={styles.controlLabel}>Permission mode</span>
-              <Select
-                w={158}
-                comboboxProps={modelComboboxProps}
-                data={PERMISSION_MODES}
-                renderOption={renderPermissionModeOption}
-                value={step.permissionMode}
-                disabled={contentReadOnly}
-                allowDeselect={false}
-                classNames={{ input: styles.fieldInput }}
-                onChange={(v) => v && onPatch({ permissionMode: v as PermissionMode })}
-              />
-            </div>
-            <Switch
-              label="Auto-advance"
-              description="Skip approval; run the next step automatically"
-              checked={step.autoAdvance}
-              disabled={contentReadOnly}
-              onChange={(e) => onPatch({ autoAdvance: e.currentTarget.checked })}
-            />
-            <Switch
-              label="Fresh start"
-              description={
-                crossesProvider
-                  ? 'Required: this step changes provider, and a conversation cannot move between providers'
-                  : "Run in a clean session; seed with prior step's output + diff, not the full conversation"
-              }
-              checked={step.freshStart || crossesProvider}
-              // Locked rather than merely defaulted: switching it back off would
-              // save a step the runner then refuses to start.
-              disabled={contentReadOnly || crossesProvider}
-              onChange={(e) => onPatch({ freshStart: e.currentTarget.checked })}
-            />
-            <div className={styles.control}>
-              <span className={styles.controlLabel}>Output name</span>
-              <TextInput
-                w={168}
-                placeholder="e.g. plan"
-                value={step.outputName ?? ''}
-                disabled={contentReadOnly}
-                error={errors?.outputName}
-                classNames={{ input: styles.fieldInput }}
-                onChange={(e) => onPatch({ outputName: e.currentTarget.value })}
-              />
-            </div>
-            <Switch
-              label="Own routing rule"
-              description="Override the global smart-routing rule while this step runs"
-              checked={step.routing !== undefined}
-              disabled={contentReadOnly}
-              onChange={(e) => onPatch({ routing: e.currentTarget.checked ? emptyRoutingRule() : undefined })}
-            />
-            {step.routing && (
-              <Stack gap={4} w="100%">
-                <RoutingRuleFields
-                  provider={providerForModel(step.model)}
-                  models={models}
-                  value={step.routing}
-                  disabled={contentReadOnly}
-                  onChange={(routing) => onPatch({ routing })}
-                />
-                {errors?.routing && (
-                  <Text size="xs" c="red">
-                    {errors.routing}
-                  </Text>
-                )}
-              </Stack>
-            )}
-          </div>
-        </div>
-      </Collapse>
-    </Box>
+  return (
+    <StepPane
+      header={header}
+      banner={
+        <>
+          {banner}
+          {errors?.ref && (
+            <Text size="xs" c="red">
+              {errors.ref}
+            </Text>
+          )}
+        </>
+      }
+      prompt={
+        <PromptEditor
+          fill
+          value={step.promptTemplate}
+          readOnly={contentReadOnly}
+          error={errors?.prompt}
+          inputClassName={styles.promptInput}
+          freshStart={step.freshStart || forcedFresh}
+          availableOutputs={availableOutputs}
+          onChange={(v) => onPatch({ promptTemplate: v })}
+        />
+      }
+      settings={
+        <StepSettings
+          flow="none"
+          value={step}
+          readOnly={contentReadOnly}
+          models={models}
+          errors={errors}
+          previousModel={previousModel}
+          onPatch={onPatch}
+        />
+      }
+    />
   );
 }

@@ -13,8 +13,8 @@ the same thinking budget.
 - Session composer, next to the model `Select` (`web/src/components/Composer.tsx`)
 - New-session defaults and the global plan-mode effort in the settings modal's Sessions/Plan-mode
   groups of the Sessions pane (`web/src/components/SessionsSection.tsx`)
-- Workflow step editor and step library (`web/src/components/workflow/StepCard.tsx`,
-  `web/src/components/workflow/StepLibrary.tsx`)
+- Workflow step editor and step library (`web/src/components/workflow/StepSettings.tsx`, rendered
+  by `StepCard.tsx` and `StepLibrary.tsx`)
 - `save_step`/`create_workflow`/`update_workflow` MCP tools (`server/src/mcpWorkflowTools.ts`)
 
 ## Important files
@@ -54,7 +54,7 @@ the same thinking budget.
 
 ## Data flow
 
-Composer/Settings/StepCard write `SessionMeta.reasoningEffort` / `StepContent.reasoningEffort` /
+Composer/Settings/StepSettings write `SessionMeta.reasoningEffort` / `StepContent.reasoningEffort` /
 `UserUiSettings.newSessionDefaults.reasoningEffort` / `UserUiSettings.planReasoningEffort` via
 `setReasoningEffort` / `saveSettings` / a workflow save, exactly like the model picker does. Both
 of `SessionManager`'s option builders (`buildQueryOptions` for Claude, `buildCodexOptions` for

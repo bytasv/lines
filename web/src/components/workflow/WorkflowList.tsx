@@ -1,8 +1,11 @@
-import { Box, Button, Group, Menu, ScrollArea, Stack, Text } from '@mantine/core';
+import { Box, Button, Menu, ScrollArea, Text, UnstyledButton } from '@mantine/core';
 import { IconChevronDown, IconPlus } from '@tabler/icons-react';
 import type { WorkflowDef } from '@lines/shared';
 import { WORKFLOW_PRESETS } from '../../lib/workflowPresets';
 import type { WorkflowPreset } from '../../lib/workflowPresets';
+import styles from './workflow.module.css';
+
+const cn = (...xs: (string | false | undefined)[]) => xs.filter(Boolean).join(' ');
 
 function DirtyDot() {
   return (
@@ -17,6 +20,8 @@ function DirtyDot() {
     />
   );
 }
+
+const stepCount = (w: WorkflowDef) => `${w.steps.length} step${w.steps.length === 1 ? '' : 's'}`;
 
 export function WorkflowList({
   workflows,
@@ -37,71 +42,78 @@ export function WorkflowList({
   // published row pulled back under a second identity) — render it once, above.
   const foreign = sharedWorkflows.filter((s) => !workflows.some((w) => w.id === s.id));
   return (
-    <Stack gap="xs" w={240} style={{ flexShrink: 0 }} h="100%">
+    <div className={styles.listColumn} style={{ width: 'clamp(190px, 15vw, 230px)' }}>
       <ScrollArea style={{ flex: 1 }} type="hover">
-        <Stack gap="xs" pr="xs">
+        <div className={styles.listBody}>
+          <div className={styles.listSection}>Your workflows</div>
           {workflows.map((w) => (
-            <Button
+            <UnstyledButton
               key={w.id}
-              variant={w.id === selectedId ? 'light' : 'subtle'}
-              color="gray"
-              justify="start"
+              className={cn(styles.listRow, w.id === selectedId && styles.rowActive)}
               onClick={() => onSelect(w)}
             >
-              <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
-                <Text size="xs" truncate>
-                  {w.name}
-                </Text>
-                {w.id === selectedId && dirty && <DirtyDot />}
-              </Group>
-            </Button>
+              <span className={styles.rowText}>
+                <span className={styles.rowName}>{w.name}</span>
+                <span className={styles.rowMeta}>
+                  {stepCount(w)}
+                  {w.published ? ' · shared' : ''}
+                </span>
+              </span>
+              {w.id === selectedId && dirty && <DirtyDot />}
+            </UnstyledButton>
           ))}
+          {workflows.length === 0 && (
+            <Text size="xs" c="dimmed" px={10} py={6}>
+              No workflows yet.
+            </Text>
+          )}
           {foreign.length > 0 && (
             <>
-              <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="xs">
-                Shared by others
-              </Text>
+              <div className={styles.listSection}>Shared by others</div>
               {foreign.map((w) => (
-                <Button
+                <UnstyledButton
                   key={w.id}
-                  variant={w.id === selectedId ? 'light' : 'subtle'}
-                  color="gray"
-                  justify="start"
+                  className={cn(styles.listRow, w.id === selectedId && styles.rowActive)}
                   onClick={() => onSelect(w)}
                 >
-                  <Stack gap={0} style={{ minWidth: 0 }}>
-                    <Text size="xs" truncate>
-                      {w.name}
-                    </Text>
-                    <Text size="10px" c="dimmed" truncate>
-                      {w.ownerName ?? 'Unknown'}
-                    </Text>
-                  </Stack>
-                </Button>
+                  <span className={styles.rowText}>
+                    <span className={styles.rowName}>{w.name}</span>
+                    <span className={styles.rowMeta}>
+                      {w.ownerName ?? 'Unknown'} · {stepCount(w)}
+                    </span>
+                  </span>
+                </UnstyledButton>
               ))}
             </>
           )}
-        </Stack>
+        </div>
       </ScrollArea>
-      <Menu position="bottom-start" width={240} withinPortal>
-        <Menu.Target>
-          <Button variant="default" leftSection={<IconPlus size={13} />} rightSection={<IconChevronDown size={13} />}>
-            New workflow
-          </Button>
-        </Menu.Target>
-        <Menu.Dropdown>
-          <Menu.Item onClick={() => onNew(null)}>Blank workflow</Menu.Item>
-          <Menu.Label>From preset</Menu.Label>
-          {WORKFLOW_PRESETS.map((p) => (
-            <Menu.Item key={p.id} onClick={() => onNew(p)}>
-              <Text size="sm">{p.name}</Text>
-              <Text size="xs" c="dimmed">
-                {p.description}
-              </Text>
-            </Menu.Item>
-          ))}
-        </Menu.Dropdown>
-      </Menu>
-    </Stack>
+      <Box p={10}>
+        <Menu position="bottom-start" width={240} withinPortal>
+          <Menu.Target>
+            <Button
+              fullWidth
+              variant="default"
+              leftSection={<IconPlus size={13} />}
+              rightSection={<IconChevronDown size={13} />}
+            >
+              New workflow
+            </Button>
+          </Menu.Target>
+          <Menu.Dropdown>
+            <Menu.Item onClick={() => onNew(null)}>Blank workflow</Menu.Item>
+            <Menu.Label>From preset</Menu.Label>
+            {WORKFLOW_PRESETS.map((p) => (
+              <Menu.Item key={p.id} onClick={() => onNew(p)}>
+                <Text size="sm">{p.name}</Text>
+                <Text size="xs" c="dimmed">
+                  {p.description}
+                </Text>
+              </Menu.Item>
+            ))}
+          </Menu.Dropdown>
+        </Menu>
+      </Box>
+    </div>
   );
 }

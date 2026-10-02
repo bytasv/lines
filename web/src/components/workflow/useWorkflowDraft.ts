@@ -24,12 +24,14 @@ export interface DraftRef {
  * Editor step: always carries resolved content for display/validation. `ref`
  * marks it as a pinned reference (content is read-only). `publishStepId` is set
  * when an inline step was detached from an owned published step to be edited and
- * re-published under the same id.
+ * re-published under the same id. `copiedFrom` names the pinned step an editable
+ * copy replaced — editor-only, never sent, so it is gone after a reload.
  */
 export type DraftStep = StepContent & {
   _uid: string;
   ref?: DraftRef;
   publishStepId?: string;
+  copiedFrom?: { name: string; version: number; ownerName?: string };
 };
 
 export interface DraftWorkflow extends Omit<WorkflowDef, 'steps'> {
@@ -70,17 +72,26 @@ const EMPTY_CONTENT: StepContent = {
   outputName: '',
 };
 
-function contentOf(s: StepContent): StepContent {
+/**
+ * A step's content and nothing else, every field named. The `satisfies` clause
+ * is the point: a field added to `StepContent` and not listed here fails the
+ * build, instead of being dropped on load, save, publish and re-pin the way
+ * `reasoningEffort` was. Optional fields are present as `undefined`, which
+ * `JSON.stringify` drops — so the dirty check, `stepsKey` and the wire shape see
+ * no key at all for them.
+ */
+export function contentOf(s: StepContent): StepContent {
   return {
     name: s.name,
     promptTemplate: s.promptTemplate,
     model: s.model,
     permissionMode: s.permissionMode,
+    reasoningEffort: s.reasoningEffort,
+    routing: s.routing,
     autoAdvance: s.autoAdvance,
     freshStart: s.freshStart,
     outputName: s.outputName ?? '',
-    ...(s.routing ? { routing: s.routing } : {}),
-  };
+  } satisfies Record<keyof StepContent, unknown>;
 }
 
 export function useWorkflowDraft(opened: boolean, onClose: () => void) {
@@ -94,7 +105,10 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<DraftWorkflow | null>(null);
   const [baseline, setBaseline] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // The step open in the editor's pane; null = the workflow itself. Every load
+  // resets it, so a step only opens on an explicit pick — a loaded workflow
+  // opens on its overview, never on whichever step happens to be first.
+  const [selectedStep, setSelectedStep] = useState<string | null>(null);
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -150,7 +164,7 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
       setDraft(d);
       setSelectedId(id);
       setBaseline(d ? JSON.stringify(toWire(d)) : null);
-      setCollapsed(new Set(d?.steps.map((s) => s._uid) ?? []));
+      setSelectedStep(null);
       setSubmitAttempted(false);
       // Switching drafts abandons any unconfirmed save: a broadcast for the old
       // one must not set a baseline on the new draft.
@@ -196,8 +210,9 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
       d ? { ...d, steps: d.steps.map((s) => (s._uid === u && !s.ref ? { ...s, ...patch } : s)) } : d,
     );
 
-  const addStep = () => {
-    const step: DraftStep = { ...EMPTY_CONTENT, _uid: uid() };
+  /** Append an inline step: blank, or a copy of `content` (a preset's step). */
+  const addStep = (content?: StepContent) => {
+    const step: DraftStep = { ...(content ? contentOf(content) : EMPTY_CONTENT), _uid: uid() };
     setDraft((d) => (d ? { ...d, steps: [...d.steps, step] } : d));
     return step._uid;
   };
@@ -226,8 +241,15 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
       return { ...d, steps };
     });
 
-  const removeStep = (u: string) =>
+  const removeStep = (u: string) => {
+    // The pane moves to the step that takes this one's place, else the one
+    // before it, else the workflow itself.
+    if (selectedStep === u && draft) {
+      const i = draft.steps.findIndex((s) => s._uid === u);
+      setSelectedStep((draft.steps[i + 1] ?? draft.steps[i - 1])?._uid ?? null);
+    }
     setDraft((d) => (d ? { ...d, steps: d.steps.filter((s) => s._uid !== u) } : d));
+  };
 
   const reorder = (from: number, to: number) =>
     setDraft((d) => {
@@ -421,23 +443,31 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
         : d,
     );
 
-  // ---- collapse/expand ----
-  const toggleCollapsed = (u: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      next.has(u) ? next.delete(u) : next.add(u);
-      return next;
-    });
+  /**
+   * Replace a ref, in place, with an inline step carrying the same content — no
+   * longer tied to the library, so neither an update nor a republish reaches it.
+   * In place rather than added below: a copy beside its original ran both.
+   */
+  const detachStep = (u: string) =>
+    setDraft((d) =>
+      d
+        ? {
+            ...d,
+            steps: d.steps.map((s) =>
+              s._uid === u && s.ref
+                ? {
+                    ...contentOf(s),
+                    _uid: u,
+                    copiedFrom: { name: s.name, version: s.ref.version, ownerName: s.ref.ownerName },
+                  }
+                : s,
+            ),
+          }
+        : d,
+    );
 
-  const expandStep = (u: string) =>
-    setCollapsed((prev) => {
-      if (!prev.has(u)) return prev;
-      const next = new Set(prev);
-      next.delete(u);
-      return next;
-    });
-
-  const collapseAll = () => setCollapsed(new Set(draft?.steps.map((s) => s._uid) ?? []));
+  /** Open a step in the pane, or the workflow itself with `null`. */
+  const selectStep = (u: string | null) => setSelectedStep(u);
 
   // ---- guarded navigation ----
   const doNew = (preset: WorkflowPreset | null) => {
@@ -554,7 +584,7 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
     dirty,
     validation,
     submitAttempted,
-    collapsed,
+    selectedStep,
     pendingAction,
     confirmDelete,
     // step helpers
@@ -572,14 +602,13 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
     reorder,
     publishStep,
     editStep,
+    detachStep,
     updateStepToLatest,
     updateAllToLatest,
     requestStepVersions,
     versionsFor,
     pinStepToVersion,
-    toggleCollapsed,
-    expandStep,
-    collapseAll,
+    selectStep,
     select,
     newFromPreset,
     requestClose,
@@ -637,18 +666,12 @@ function toWire(d: DraftWorkflow): WorkflowDef {
     s.ref
       ? { kind: 'ref', stepId: s.ref.stepId, ownerId: s.ref.ownerId, ownerName: s.ref.ownerName, version: s.ref.version }
       : {
-          name: s.name,
-          promptTemplate: s.promptTemplate,
-          model: s.model,
-          permissionMode: s.permissionMode,
-          autoAdvance: s.autoAdvance,
-          // Forced on for a step that changes provider, matching what the card
-          // shows. The card locks the switch, but a workflow saved before this
-          // rule existed can still hold `false` here, and saving it back
+          ...contentOf(s),
+          // Forced on for a step that changes provider, matching what the
+          // connector shows. The editor locks it, but a workflow saved before
+          // this rule existed can still hold `false` here, and saving it back
           // unchanged would store a step the runner refuses to start.
           freshStart: s.freshStart || crossesProviderAt(d.steps, i),
-          outputName: s.outputName ?? '',
-          ...(s.routing ? { routing: s.routing } : {}),
         },
   );
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -675,7 +698,7 @@ export function validate(
     const e: StepErrors = {};
     const content = s.ref ? resolveRef(s.ref) : s;
     if (s.ref) {
-      if (!content) e.ref = 'Shared step unavailable';
+      if (!content) e.ref = 'Pinned step unavailable';
     } else {
       if (!s.name.trim()) e.name = 'Required';
       if (!s.promptTemplate.trim()) e.prompt = 'Prompt is required';

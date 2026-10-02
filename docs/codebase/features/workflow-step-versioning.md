@@ -11,8 +11,8 @@ all that is happening.
 
 When a workflow step is pinned (`ref`) to a published step definition and a newer version exists,
 show a warning popover with a field-by-field diff (old vs new) and an action to update the step
-to the latest version. A banner above the step list also lets the user update every outdated step
-at once, without reviewing each diff.
+to the latest version. A banner in the workflow overview pane (shown when no step is selected) also
+lets the user update every outdated step at once, without reviewing each diff.
 
 Separately, let a step's full immutable version history be browsed and diffed, and reused two
 ways:
@@ -47,19 +47,25 @@ that user's own step history.
   from the version `Badge` or the step's kebab menu "Version history" item)
 - `web/src/components/workflow/StepLibrary.tsx` (`RestoreHistoryPopover`, opened from the history
   icon next to the step's version badge)
-- `web/src/components/workflow/WorkflowEditor.tsx` (outdated-steps banner "Update all" button;
-  the editor modal whose draft selection is governed here)
+- `web/src/components/workflow/WorkflowEditor.tsx` (overview-pane "Update all" banner; the editor
+  modal whose draft selection is governed here)
+- `web/src/components/workflow/StepOutline.tsx` (the flow outline: step rows, per-step update dot,
+  drag/Move up/Move down reorder, gate and start-mode links between steps)
 - `web/src/components/workflow/StepLibrary.tsx` (the detail-header `Created`/`Updated` lines,
   read from the live store row rather than the draft)
 
 ## Files
 
-- `web/src/components/workflow/StepCard.tsx`
+- `web/src/components/workflow/StepCard.tsx` (the selected step's pane: banners, prompt, actions)
+- `web/src/components/workflow/StepSettings.tsx` (model/effort/permission, output name, gate and
+  start mode, own routing rule — shared by the workflow editor and the step library)
+- `web/src/components/workflow/StepPane.tsx`, `web/src/components/workflow/StepOutline.tsx`
 - `web/src/components/workflow/StepLibrary.tsx`
-- `web/src/components/workflow/useWorkflowDraft.ts` (`updateFor`, `updateStepToLatest`,
+- `web/src/components/workflow/useWorkflowDraft.ts` (`contentOf`, `selectStep`, `detachStep`,
+  `updateFor`, `updateStepToLatest`,
   `updateAllToLatest`, `requestStepVersions`, `versionsFor`, `pinStepToVersion`, `versionMap`;
   init effect, id-reconciliation effect, `loadFrom`, `doNew`, `save`)
-- `web/src/components/workflow/WorkflowEditor.tsx` (wires `updateDef` prop and the banner's
+- `web/src/components/workflow/WorkflowEditor.tsx` (wires `updateDef` prop and the overview banner's
   bulk-update button)
 - `web/src/components/workflow/WorkflowList.tsx`, `web/src/components/Sidebar.tsx` (filter
   "Shared by others" against the owned list)
@@ -103,7 +109,8 @@ that user's own step history.
 ### Update popover (stale-pin warning)
 
 `WorkflowEditor` computes `updateDef` via `wf.updateFor(step)` (version mismatch check) and
-passes it to `StepCard`. When set, `StepCard` renders `UpdatePopover`, which diffs the pinned
+passes it to `StepCard` for the selected step (the outline row shows only an update dot). When set,
+`StepCard` renders `UpdatePopover`, which diffs the pinned
 `StepContent` against the head `StepDef` per field and calls `onUpdateToLatest` (bound to
 `updateStepToLatest`) on confirm. The banner counts steps where `updateFor` returns a value and,
 on "Update all", calls `updateAllToLatest`, which re-pins every ref step whose head version is
@@ -165,6 +172,22 @@ the full owned history (not just heads) to the storage server on the `'steps'` b
 reconnect, so the debounced push can't coalesce away an intermediate version before it reaches
 Postgres.
 
+### Editor layout and step selection
+
+The Workflows view is three columns: workflow list, flow outline, and a pane. The outline lists
+every step with a one-line summary and the gate/start-mode link between neighbours; the pane shows
+the one selected step (`selectedStep`, set by `selectStep`) or, when none is selected, the workflow
+overview (name, sharing switch, "Update all"). Selection is by the step's draft uid, and removing
+the selected step moves it to a neighbour. A pinned step is read-only in the pane and offers
+update, "Edit in library" and "Make an editable copy" (`detachStep`, which replaces the ref in place
+with an inline copy recording `copiedFrom`). Saving a workflow whose steps came from "Edit in
+library" with unpublished library edits asks for confirmation rather than blocking.
+
+The step library reuses the same pane and `StepSettings`, so both editors write the same
+`StepContent` fields; `contentOf` is the single field list for loading, saving, publishing and
+duplicating (guarded by `satisfies Record<keyof StepContent, unknown>`), which is what keeps
+`reasoningEffort` and `routing` from being dropped on any of those paths.
+
 ### Draft selection
 
 On modal open, an effect picks the previously-selected workflow (or first owned one) and calls
@@ -220,8 +243,9 @@ The web draft/editor side (`useWorkflowDraft.ts`, `WorkflowEditor.tsx`, `StepCar
 - A `workflows`/`sharedWorkflows` length change while the modal is already open with a live draft
   must not re-trigger the "pick a workflow" fallback — only the open transition (or no-draft
   state) does.
-- `loadFrom` collapses every step of the loaded workflow by default; a step only opens later via
-  explicit selection (`selectStep`), keeping the editor compact for workflows with many steps.
+- `loadFrom` selects no step of the loaded workflow (the pane shows the overview); a step opens
+  only via explicit selection (`selectStep`). There is one selected step at a time, not per-step
+  expand/collapse.
 - Every version of one step reports the same `createdAt` (the lineage's, not the version's); a
   content change or a publish-toggle-only save both keep it, and it only ever moves earlier
   (`earliest`/`LEAST`), never later — a peer or older client that omits the field can't erase it.

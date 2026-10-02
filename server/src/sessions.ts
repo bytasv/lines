@@ -505,6 +505,22 @@ function isBackgroundTaskSignal(msg: { type: string }): boolean {
   );
 }
 
+/**
+ * True only for an event the main agent emits while it is mid-turn: its own
+ * output (`assistant`, `stream_event`) or a tool result fed back to it (`user`).
+ *
+ * Strict on purpose, because it re-opens a parked step (see handleWorkerEvent) and
+ * a false positive leaves that step running with no `result` coming. So a
+ * background subagent's stream (which carries its parent `Task` call), a `user`
+ * replay (the CLI echoing a pushed prompt back), and everything that can arrive
+ * between turns — `system/*`, `rate_limit_event`, hook noise — prove nothing.
+ */
+function provesMainThreadTurn(msg: Record<string, unknown> & { type: string }): boolean {
+  if (msg.type !== 'assistant' && msg.type !== 'stream_event' && msg.type !== 'user') return false;
+  if (msg.type === 'user' && msg.isReplay === true) return false;
+  return !subagentParentId(msg);
+}
+
 interface PermissionAnswer {
   allow: boolean;
   updatedInput?: Record<string, unknown>;
@@ -1162,6 +1178,18 @@ interface LiveState {
 export type RewindListener = (sessionId: string) => boolean;
 
 /**
+ * Fired by {@link SessionManager.handleWorkerEvent} when a session with no turn on
+ * record shows the main agent at work: the `result` that settled it was not the
+ * conversation's last word (a notification turn, an interjection the CLI ran as a
+ * turn of its own, a recovery re-push), and another one is coming.
+ *
+ * Returns true when the listener took the turn as its own — re-opened a parked
+ * workflow step for it — and the caller then marks the turn live as that step's.
+ * False leaves the event to the ordinary stale-status heal.
+ */
+export type TurnResumedListener = (sessionId: string) => boolean;
+
+/**
  * The routing rule a workflow step carries for its session, if it is running a
  * step that has one — registered by WorkflowEngine so this manager learns nothing
  * else about workflows (same injection style as TurnCompleteListener).
@@ -1294,6 +1322,7 @@ export class SessionManager {
   /** The JEV call, a field so tests can stand in for it. */
   decideTurn: typeof decideTurn = decideTurn;
   private onRewind: RewindListener | null = null;
+  private onTurnResumed: TurnResumedListener | null = null;
   private worker!: WorkerClient;
   /** In-flight `/context` fetches, so a hover during the post-turn refresh reuses
    *  it instead of issuing a second control request. */
@@ -1408,6 +1437,10 @@ export class SessionManager {
 
   setRewindListener(fn: RewindListener) {
     this.onRewind = fn;
+  }
+
+  setTurnResumedListener(fn: TurnResumedListener) {
+    this.onTurnResumed = fn;
   }
 
   list(): SessionMeta[] {
@@ -1714,6 +1747,9 @@ export class SessionManager {
     // held): closing a query the worker has no record of is a pointless round trip.
     if (!this.sessions.has(id) && !this.live.has(id)) return;
     this.cancelRecovery(id); // nothing left to re-drive the turn into
+    // A Stop in flight has no step left to settle, and no `ended` is coming to
+    // clear it — dropped first, so the close below settles nothing either.
+    this.interrupting.delete(id);
     this.closeQuery(id);
     this.flushPending(id); // the session is gone with its cards
     this.sessions.delete(id);
@@ -2075,15 +2111,23 @@ export class SessionManager {
    */
   recycleIdleQueries() {
     for (const meta of this.sessions.values()) {
-      if (isSessionInterruptible(meta.status)) continue;
-      // Closing the query kills the CLI child, and with it every background task
-      // it owns — silently, with no notification and no transcript trace.
-      if (this.live.get(meta.id)?.backgroundTasks?.length) continue;
-      // Same reasoning, different casualty: it would also kill the PKCE verifier
-      // an in-flight MCP OAuth handshake is waiting to finish with.
-      if (this.heldForAuth(meta.id)) continue;
+      if (this.queryInUse(meta)) continue;
       this.closeQuery(meta.id);
     }
+  }
+
+  /**
+   * Whether closing this session's query now would kill work in flight — the
+   * three cases a recycle has to wait out (see recycleIdleQueries).
+   */
+  private queryInUse(meta: SessionMeta): boolean {
+    if (isSessionInterruptible(meta.status)) return true;
+    // Closing the query kills the CLI child, and with it every background task
+    // it owns — silently, with no notification and no transcript trace.
+    if (this.live.get(meta.id)?.backgroundTasks?.length) return true;
+    // Same reasoning, different casualty: it would also kill the PKCE verifier
+    // an in-flight MCP OAuth handshake is waiting to finish with.
+    return this.heldForAuth(meta.id);
   }
 
   /** Keep this session's query alive across an MCP OAuth handshake. */
@@ -2194,6 +2238,10 @@ export class SessionManager {
     // this one left behind must not be subtracted from the next one's first turn.
     const live = this.live.get(sessionId);
     if (live) live.lastCostCumulativeUsd = undefined;
+    // A closed query never reports again, so a turn the user stopped on it is
+    // settled here or never. Last, so whatever the settle starts (an advance, a
+    // queued prompt) pushes onto the bookkeeping above, not under it.
+    this.settleStoppedTurnOnClose(sessionId);
   }
 
   /**
@@ -2896,6 +2944,10 @@ export class SessionManager {
     // sent in that window would open a turn on the conversation about to be
     // dropped, and would then be queued behind the seed with no author.
     if (this.switchingProvider.has(meta.id)) return true;
+    // Same for a workflow advancing: the turn has settled, but a prompt sent while
+    // the step's output consolidates would open a turn on a conversation the next
+    // step may drop — and dropping it now kills that turn with it.
+    if (meta.workflow?.advancing) return true;
     return isSessionActive(meta.status);
   }
 
@@ -2991,6 +3043,9 @@ export class SessionManager {
     // and the conversation under this prompt is about to be dropped. The seed
     // turn's own settle calls back here, so the item only waits.
     if (this.switchingProvider.has(sessionId)) return;
+    // Likewise mid-advance (see isBusy). The next step's settle drains the item
+    // into that step, and a finished workflow's 'idle' calls back here.
+    if (meta.workflow?.advancing) return;
     if (meta.status !== 'idle' && meta.status !== 'done' && meta.status !== 'error') return;
 
     const item = meta.queued.shift()!;
@@ -3893,6 +3948,8 @@ export class SessionManager {
     this.worker.close(sessionId);
     // Same reason as closeQuery: the CLI child that owned them is gone.
     this.setBackgroundTasks(sessionId, []);
+    // …and nothing will report a turn the user stopped on it, either.
+    this.settleStoppedTurnOnClose(sessionId);
   }
 
   /**
@@ -5095,8 +5152,11 @@ export class SessionManager {
     const wfStepRunning =
       meta.workflow?.started &&
       meta.workflow.stepStatuses[meta.workflow.stepIndex] === 'running';
-    meta.status = 'running';
+    // A card already up is the more specific live state — a background subagent's,
+    // say, over a step that is being re-opened under it.
+    if (meta.status !== 'waiting-permission') meta.status = 'running';
     meta.errorMessage = undefined;
+    meta.errorKind = undefined; // shares errorMessage's lifetime
     meta.turnSource = wfStepRunning ? 'workflow' : 'user';
     meta.turnStartedAt ??= Date.now(); // keep the real start if we still know it
     meta.interruptedAt = undefined; // not dead after all — no Continue banner
@@ -5373,8 +5433,13 @@ export class SessionManager {
         return { error: authRefusalMessage(err) };
       }
     }
-    if (this.queryTokens.get(sessionId) !== accessToken) this.closeQuery(sessionId);
-    this.queryTokens.set(sessionId, accessToken);
+    // A query in use stays as it is — closing it would kill a running turn on a
+    // Refresh or an Authorize click — and so does its token record: recording the
+    // current token would hide the mismatch the next push recycles it on.
+    if (!this.queryInUse(meta)) {
+      if (this.queryTokens.get(sessionId) !== accessToken) this.closeQuery(sessionId);
+      this.queryTokens.set(sessionId, accessToken);
+    }
 
     try {
       const servers = normalizeMcpStatuses(
@@ -5586,14 +5651,32 @@ export class SessionManager {
       meta.claudeSessionId = claudeSessionId;
       metaChanged = true;
     }
-    // Any message but the turn's own result proves a turn is live, so a status
-    // that says otherwise is stale (see markTurnLive) — heal it. A `result` on
-    // an inactive session means the turn is over; let it settle below instead.
-    // `interrupting` is read live, not snapshotted: an event racing a Stop must
-    // not resurrect the turn the user just killed. A background-task signal is
-    // excluded outright: it proves a task is alive, not a turn, and those keep
+    // A parked workflow step whose conversation keeps working: the `result` that
+    // parked it was not the step's last (see TurnResumedListener), so the step is
+    // re-opened and the turn marked live under it until the real one lands. Gated
+    // on `turnSource` rather than on the status: every turn the bridge starts sets
+    // it and every settle clears it, so a turn on record — a compaction over the
+    // park, a provider switch's hand-off, a recovery — is never taken for this,
+    // while a park whose status a background subagent's card flipped to 'running'
+    // still is. Ahead of the heal below, which skips every parked session.
+    //
+    // Otherwise: any message but the turn's own result proves a turn is live, so
+    // a status that says otherwise is stale (see markTurnLive) — heal it. A
+    // `result` on an inactive session means the turn is over; let it settle below
+    // instead. `interrupting` is read live, not snapshotted: an event racing a Stop
+    // must not resurrect the turn the user just killed. A background-task signal
+    // is excluded outright: it proves a task is alive, not a turn, and those keep
     // arriving after the turn that spawned them has settled.
     if (
+      meta &&
+      !meta.turnSource &&
+      !this.interrupting.has(sessionId) &&
+      provesMainThreadTurn(msg) &&
+      this.onTurnResumed?.(sessionId)
+    ) {
+      this.markTurnLive(meta);
+      metaChanged = true;
+    } else if (
       meta &&
       !isSessionActive(meta.status) &&
       msg.type !== 'result' &&
@@ -6151,21 +6234,42 @@ export class SessionManager {
       return;
     }
     // An interrupted query sometimes dies without emitting a final `result`;
-    // settle the turn here so a stopped workflow step doesn't dangle at
-    // 'running'. Gated on the interrupt flag — routine `ended` events (e.g.
-    // fresh-start step boundaries closing the old query) must not misfire.
-    if (this.interrupting.delete(sessionId)) {
-      const meta = this.sessions.get(sessionId);
-      if (meta?.turnSource) {
-        const source = meta.turnSource;
-        meta.turnSource = undefined;
-        meta.turnStartedAt = undefined;
-        this.liveState(sessionId).permissionWaitMs = 0;
-        this.upsert(meta);
-        this.onTurnComplete?.(sessionId, source, true, false); // gated on the interrupt flag above
-        this.maybeFlush(sessionId);
-      }
-    }
+    // settle the turn here so a stopped workflow step doesn't dangle at 'running'.
+    this.settleStoppedTurn(sessionId);
+  }
+
+  /**
+   * Settle a turn the user stopped that nothing else will report: its query died
+   * without a final `result`, or was closed under it (a rewind, a recycle, a
+   * fresh-start step) — a closed query never speaks again, so no `ended` is coming
+   * for it either, and the close settles it instead (see settleStoppedTurnOnClose).
+   *
+   * Gated on the interrupt flag, so a routine end or close settles nothing; and a
+   * turn started since the Stop has already cleared that flag in prompt().
+   */
+  private settleStoppedTurn(sessionId: string) {
+    if (!this.interrupting.delete(sessionId)) return;
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.turnSource) return;
+    const source = meta.turnSource;
+    meta.turnSource = undefined;
+    meta.turnStartedAt = undefined;
+    this.liveState(sessionId).permissionWaitMs = 0;
+    this.upsert(meta);
+    this.onTurnComplete?.(sessionId, source, true, false); // gated on the interrupt flag above
+    this.maybeFlush(sessionId);
+  }
+
+  /**
+   * settleStoppedTurn for a query that was just closed. Skipped while a turn is
+   * live: one started on top of the Stop without going through prompt() — a
+   * compaction, or a step that resets its conversation before prompting — owns
+   * the turn bookkeeping now, and settling would park it before it ran.
+   */
+  private settleStoppedTurnOnClose(sessionId: string) {
+    const meta = this.sessions.get(sessionId);
+    if (meta && isSessionInterruptible(meta.status)) return;
+    this.settleStoppedTurn(sessionId);
   }
 
   /** The CLI aborted a pending permission request (e.g. interrupt) — close the card. */

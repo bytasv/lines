@@ -75,6 +75,7 @@ function harness(stepCount: number, workflow: Partial<WorkflowState> = {}, autoA
     close: () => {},
     setModel: () => {},
     setPermissionMode: () => {},
+    rpcResult: () => {},
   } as never);
   const workflows = new WorkflowEngine(store, sessions, broadcast, 'u1');
   return { root, store, sessions, workflows, upserts, events, s1: () => sessions.get('s1')! };
@@ -393,6 +394,34 @@ test('a plan-approval advance still fires on a normal settle', async () => {
   assert.equal(h.s1().workflow?.stepIndex, 1);
   assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
   assert.ok(markerEvents(h).includes('approved'));
+});
+
+test('a prompt sent mid-advance waits for the next step instead of joining the old conversation', async () => {
+  // A plan-approval advance: the step's turn has settled ('done'), so only the
+  // advance itself can hold the prompt back.
+  const h = running(2, { workflow: { advanceOnComplete: true, advanceOnCompleteStep: 0 } });
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  h.sessions.consolidateStepOutput = async () => {
+    await held;
+    return '';
+  };
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  assert.equal(h.s1().workflow?.advancing, true);
+
+  h.sessions.userPrompt('s1', 'also do X');
+  assert.equal(h.s1().queued?.length, 1, 'held, not pushed into a conversation the next step may drop');
+  assert.notEqual(h.s1().status, 'running');
+
+  release();
+  await settle();
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().queued?.length, 1, 'still held while the next step runs');
+
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  assert.equal(h.s1().queued?.length ?? 0, 0, 'drained into the next step');
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+  assert.equal(markerEvents(h).at(-1), 'retried');
 });
 
 test('a queued follow-up survives the park', () => {
@@ -731,6 +760,168 @@ test('a parked compaction with nothing queued settles straight back to the park'
   // Approve works again the moment it settles.
   h.workflows.approve('s1', 0);
   assert.equal(h.s1().workflow?.advancing, true);
+});
+
+// ---------------------------------------------------------------------------
+// A `result` is not always a step's last word: the CLI can run another turn in
+// the same conversation (a notification turn for a background task, an
+// interjection run as a turn of its own). The park re-opens when the main agent
+// visibly carries on, and the real result settles the step.
+// ---------------------------------------------------------------------------
+
+/** A stream delta, from the main agent unless it names a parent `Task` call. */
+const streamDelta = (parent: string | null = null) => ({
+  type: 'stream_event',
+  parent_tool_use_id: parent,
+  event: { type: 'content_block_delta' },
+});
+
+test('a parked step re-opens when its conversation keeps working, then re-parks on the real result', () => {
+  const h = harness(2, { stepCostsUsd: [0.5] });
+  h.sessions.handleWorkerEvent('s1', streamDelta());
+
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'running');
+  assert.equal(h.s1().status, 'running', 'so the composer offers Stop and Queue again');
+  assert.equal(h.s1().turnSource, 'workflow', 'so the real result settles the step');
+  assert.equal(h.upserts.at(-1)?.workflow?.stepStatuses[0], 'running', 'and the client was told');
+  assert.equal(markerEvents(h).length, 0, 'no marker: the resumed turn is part of the step');
+
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success', total_cost_usd: 0.25 });
+
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval');
+  assert.equal(h.s1().status, 'waiting-approval');
+  assert.equal(h.s1().workflow?.stepCostsUsd?.[0], 0.75, 'the resumed turn bills to the step');
+  assert.deepEqual(markerEvents(h), ['waiting-approval']);
+});
+
+test('activity that does not prove the main agent is mid-turn re-opens nothing', () => {
+  const quiet: (Record<string, unknown> & { type: string })[] = [
+    streamDelta('toolu_bg'), // a background subagent, streaming on its own schedule
+    { type: 'assistant', parent_tool_use_id: 'toolu_bg', message: { content: [] } },
+    { type: 'system', subtype: 'task_started', task_id: 't1' },
+    { type: 'system', subtype: 'task_notification', task_id: 't1' },
+    { type: 'system', subtype: 'init' },
+    { type: 'user', isReplay: true, parent_tool_use_id: null, message: { content: [] } },
+    { type: 'rate_limit_event' },
+  ];
+  for (const msg of quiet) {
+    const h = harness(2);
+    h.sessions.handleWorkerEvent('s1', msg);
+    const label = JSON.stringify(msg);
+    assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval', label);
+    assert.equal(h.s1().status, 'waiting-approval', label);
+    assert.equal(h.s1().turnSource, undefined, label);
+  }
+});
+
+test('events trailing a Stop over a parked step re-open nothing', () => {
+  const h = harness(2);
+  // A background subagent's answered card left the park reading 'running', which
+  // is what put Stop in front of the user.
+  h.s1().status = 'running';
+  h.sessions.interrupt('s1');
+  h.sessions.handleWorkerEvent('s1', streamDelta());
+
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval');
+  assert.notEqual(h.s1().status, 'running');
+});
+
+test('a compaction over the park is not taken for the step resuming', () => {
+  const h = compactingParked();
+  h.sessions.handleWorkerEvent('s1', streamDelta());
+
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval', 'the compaction is a turn on record');
+  assert.equal(h.s1().turnSource, 'user');
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  assert.equal(h.s1().status, 'waiting-approval', 'and settles straight back to the park');
+});
+
+test('a step that failed before its prompt ran stays parked whatever arrives', () => {
+  const h = harness(2, { stepFailure: 'pre-run' });
+  h.s1().status = 'error';
+  h.sessions.handleWorkerEvent('s1', streamDelta());
+
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval');
+  assert.equal(h.s1().workflow?.stepFailure, 'pre-run', 'its Retry still re-renders the step');
+  assert.notEqual(h.s1().turnSource, 'workflow', 'no result settles it as the step’s');
+});
+
+test('activity during an advance re-opens nothing', async () => {
+  const h = harness(2);
+  let release = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  h.sessions.consolidateStepOutput = async () => {
+    await held;
+    return '';
+  };
+  h.workflows.approve('s1', 0);
+  h.sessions.handleWorkerEvent('s1', streamDelta());
+
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'done');
+  assert.equal(h.s1().workflow?.advancing, true);
+  release();
+  await settle();
+  assert.equal(h.s1().workflow?.stepIndex, 1, 'the advance went ahead untouched');
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+});
+
+test('a follow-up sent while a re-opened step runs re-runs the step on the real result', () => {
+  const h = harness(2);
+  h.sessions.handleWorkerEvent('s1', streamDelta());
+  assert.equal(h.workflows.iterateIfWaiting('s1', 'also do X'), false, 'the step is running, so it queues');
+  h.sessions.userPrompt('s1', 'also do X');
+  assert.equal(h.s1().queued?.length, 1);
+
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+
+  assert.equal(h.s1().queued?.length ?? 0, 0, 'drained, not stranded');
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'running', 'iterated, never advanced');
+  assert.equal(h.s1().workflow?.stepIndex, 0);
+  assert.equal(markerEvents(h).at(-1), 'retried');
+});
+
+test('a failed autoAdvance step that keeps working advances on its real result', async () => {
+  const h = harness(2, { stepFailure: 'turn' }, true);
+  const m = h.s1();
+  m.status = 'error';
+  m.errorMessage = 'API Error: 529 overloaded';
+  m.errorKind = 'overloaded';
+  h.sessions.handleWorkerEvent('s1', streamDelta());
+
+  assert.equal(h.s1().workflow?.stepFailure, undefined, 'the verdict was the premature result’s');
+  assert.equal(h.s1().errorMessage, undefined);
+  assert.equal(h.s1().errorKind, undefined, 'cleared with the message it qualifies');
+
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  await settle();
+
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+});
+
+test('a plan approved while a re-opened plan step runs still advances the workflow', async () => {
+  const h = harness(2, { stepPermissionMode: 'plan' });
+  h.sessions.handleWorkerEvent('s1', streamDelta());
+  void h.sessions.handleWorkerRpc({
+    id: 'p1',
+    sessionId: 's1',
+    kind: 'canUseTool',
+    resend: false,
+    payload: { toolName: 'ExitPlanMode', input: { plan: '1. do it' } },
+  });
+  await microtasks();
+  assert.equal(h.s1().status, 'waiting-permission');
+  h.sessions.resolvePermission('s1', 'p1', true);
+
+  assert.equal(h.s1().workflow?.advanceOnComplete, true, 'the plan-step gate saw a running step');
+  assert.equal(h.s1().workflow?.advanceOnCompleteStep, 0);
+
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  await settle();
+
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+  assert.ok(markerEvents(h).includes('approved'));
 });
 
 test('advancing clears on the wire when the workflow vanishes mid-advance', async () => {

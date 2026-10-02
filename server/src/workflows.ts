@@ -384,6 +384,9 @@ export class WorkflowEngine {
     // on the meta and would otherwise still point at a step whose start marker is
     // gone (see rollbackToTranscript).
     sessions.setRewindListener((sessionId) => this.rollbackToTranscript(sessionId));
+    // A step parked by a `result` that was not its conversation's last goes back
+    // to running when the agent visibly carries on (see reopenParkedStep).
+    sessions.setTurnResumedListener((sessionId) => this.reopenParkedStep(sessionId));
     // A running step's own routing rule overrides the global one for its turns.
     sessions.setStepRoutingProvider((sessionId) => this.stepRouting(sessionId));
   }
@@ -478,6 +481,37 @@ export class WorkflowEngine {
       stepName: this.stepName(def?.steps[stepIndex]),
       event: 'waiting-approval',
     });
+    return true;
+  }
+
+  /**
+   * Put a parked step back to running because its conversation is visibly still
+   * working. Called by SessionManager.handleWorkerEvent when the main agent emits
+   * on a session with no turn on record: the `result` that parked the step was not
+   * the conversation's last — a notification turn for a background task, an
+   * interjection the CLI ran as a turn of its own — and another one is coming.
+   * Returns true when it re-opened the step; the caller then marks the turn live.
+   *
+   * Running is what the stepper and the composer then show, and what makes
+   * approve and iterate refuse until the turn ends. The real result settles the
+   * step the ordinary way: its cost onto this step, then the park, the advance or
+   * a queued iterate. No marker — findStepStart keys on `started`, and collectTurns
+   * already folds the resumed turn into the step's output.
+   *
+   * A pre-run failure stays parked: its prompt never ran, so the activity is not
+   * its turn, and re-parking it afterwards as a clean park would drop the failure
+   * and its Retry, leaving a step that never ran looking ready to approve.
+   */
+  reopenParkedStep(sessionId: string): boolean {
+    const state = this.sessions.get(sessionId)?.workflow;
+    if (!state?.started || state.advancing) return false;
+    const i = state.stepIndex;
+    if (!this.resolveFor(state)?.steps[i]) return false;
+    if (state.stepStatuses[i] !== 'waiting-approval') return false;
+    if (state.stepFailure === 'pre-run') return false;
+    state.stepStatuses[i] = 'running';
+    // The verdict belonged to the result that turned out not to be the last.
+    state.stepFailure = undefined;
     return true;
   }
 

@@ -17,7 +17,7 @@ step may carry its own rule, overriding the global one while that step runs.
 
 - Settings modal, "Smart routing" pane (`web/src/components/RoutingSection.tsx`, its own rail item
   in the Agent group) — mode and one rule per connected provider
-- Workflow step editor, "Own routing rule" (`web/src/components/workflow/StepCard.tsx`)
+- Workflow step editor and step library, "Own routing rule" (`web/src/components/workflow/StepSettings.tsx`)
 - Composer badge and ask-mode suggestion card (`web/src/components/Composer.tsx`)
 - `save_step`/`create_workflow`/`update_workflow` MCP tools' `routing` field
   (`server/src/mcpWorkflowTools.ts`)

@@ -53,6 +53,9 @@ function harness(metas: SessionMeta[], answers: Answers = {}) {
   );
   // Every call the stub saw, so a test can assert on what was *not* called too.
   const calls: string[] = [];
+  // Kept apart from `calls`: a warm closes a query it cannot vouch for as a
+  // matter of course, and most tests are not about that.
+  const closes: string[] = [];
   const answer = <K extends keyof Answers>(method: K, fallback: unknown) =>
     (async (sessionId: string, ...rest: unknown[]) => {
       calls.push(`${method}:${sessionId}`);
@@ -64,13 +67,13 @@ function harness(metas: SessionMeta[], answers: Answers = {}) {
     });
   sessions.attachWorker({
     push: () => {},
-    close: () => {},
+    close: (sessionId: string) => closes.push(sessionId),
     mcpSetServers: answer('mcpSetServers', { result: { errors: {} }, servers: [] }),
     mcpWarm: answer('mcpWarm', []),
     mcpStatus: answer('mcpStatus', []),
     mcpAuthStart: answer('mcpAuthStart', {}),
   } as never);
-  return { sessions, mcp, broadcasts, calls };
+  return { sessions, mcp, broadcasts, calls, closes };
 }
 
 const statuses = (...names: string[]) => names.map((name) => ({ name, status: 'needs-auth' }));
@@ -150,6 +153,20 @@ test('a status read only warms when asked to', async () => {
   const warmed = harness([meta('s1')], { mcpWarm: () => statuses('figma') });
   assert.deepEqual(await warmed.sessions.mcpServerStatus('s1', { warm: true }), statuses('figma'));
   assert.deepEqual(warmed.calls, ['mcpWarm:s1']);
+});
+
+test('a warm never closes a query mid-turn, whatever token it was spawned with', async () => {
+  // No token on record for a running query (a bridge restart mid-turn, say) reads
+  // as a mismatch, and closing on it killed the turn on a Refresh click.
+  const h = harness([meta('s1', 'running')], { mcpWarm: () => statuses('figma') });
+  assert.deepEqual(await h.sessions.mcpServerStatus('s1', { warm: true }), statuses('figma'));
+  assert.deepEqual(h.closes, [], 'the running turn kept its CLI child');
+
+  // Nor was the current token recorded for it, so once the turn is over the
+  // mismatch still recycles the query onto that token.
+  h.sessions.get('s1')!.status = 'done';
+  await h.sessions.mcpServerStatus('s1', { warm: true });
+  assert.deepEqual(h.closes, ['s1']);
 });
 
 test('startMcpAuth warms a session with no query, then completes on the retry', async () => {

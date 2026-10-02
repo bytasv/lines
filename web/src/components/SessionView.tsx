@@ -30,6 +30,7 @@ import { findWorktree, hasEstimatedSpend, isSessionActive } from '@lines/shared'
 import { useStore } from '../store';
 import { formatSpendUsd, skippableFailedStep } from '../lib/format';
 import { useIsPhone } from '../lib/layout';
+import { useStepResolver } from '../lib/useStepResolver';
 import { send } from '../ws';
 import { Transcript } from './Transcript';
 import { Composer } from './Composer';
@@ -126,7 +127,9 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const devices = useDevices((d) => d.devices);
   const events = useStore((s) => s.transcripts[sessionId]);
   const loaded = useStore((s) => s.transcriptLoaded[sessionId]);
-  const workflows = useStore((s) => s.workflows);
+  // Own workflows first, then shared ones: a run of someone else's published
+  // workflow gets its stepper too. The same lookup the composer uses.
+  const { findWorkflow } = useStepResolver();
   const loggedOut = useClaudeLoginNeeded();
   const openLoginModal = useStore((s) => s.openLoginModal);
   const connected = useStore((s) => s.connectionStatus === 'connected');
@@ -163,7 +166,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const skipStep = skippableFailedStep(session);
   // An inline snapshot (a guest's own workflow) wins: it is not in any library here.
   const workflow = session.workflow
-    ? (session.workflow.def ?? workflows.find((w) => w.id === session.workflow!.workflowId))
+    ? (session.workflow.def ?? findWorkflow(session.workflow.workflowId))
     : undefined;
   // A work-tree session is confined to that checkout, which the path alone doesn't
   // say — the branch is what makes it identifiable at a glance.

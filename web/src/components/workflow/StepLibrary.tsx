@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  ActionIcon,
   Badge,
   Box,
   Button,
@@ -8,7 +7,6 @@ import {
   Group,
   Popover,
   ScrollArea,
-  Select,
   Stack,
   Switch,
   Text,
@@ -16,27 +14,23 @@ import {
   Tooltip,
   UnstyledButton,
 } from '@mantine/core';
-import { IconCopy, IconHistory, IconPlus, IconTrash } from '@tabler/icons-react';
-import type { PermissionMode, ReasoningEffort, StepContent, StepDef } from '@lines/shared';
-import { DEFAULT_MODEL, formatTimestamp } from '@lines/shared';
+import { useHotkeys } from '@mantine/hooks';
+import { IconCopy, IconHistory, IconLock, IconPlus, IconSearch, IconTrash, IconWorld } from '@tabler/icons-react';
+import type { StepContent, StepDef } from '@lines/shared';
+import { DEFAULT_MODEL, formatTimestamp, isStepRef, providerForModel, validateRoutingRule } from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
-import {
-  AUTO_EFFORT,
-  effortSelectData,
-  modelComboboxProps,
-  modelSelectData,
-  renderModelOption,
-  renderOptionWithDescription,
-  STEP_EFFORTS,
-} from '../../lib/modelSelect';
+import { MOD } from '../../lib/platform';
 import { send } from '../../ws';
 import { ConfirmModal } from '../ConfirmModal';
-import { OUTPUT_NAME_HINT, OUTPUT_NAME_RE } from './useWorkflowDraft';
-import { PERMISSION_MODES, renderPermissionModeOption } from '../../lib/permissionModes';
+import { contentOf, OUTPUT_NAME_HINT, OUTPUT_NAME_RE } from './useWorkflowDraft';
 import { FieldDiffList, relTime } from './StepCard';
 import { PromptEditor } from './PromptEditor';
+import { modelLabel, StepSettings } from './StepSettings';
+import { StepBanner, StepPane } from './StepPane';
 import styles from './workflow.module.css';
+
+const cn = (...xs: (string | false | undefined)[]) => xs.filter(Boolean).join(' ');
 
 type Draft = StepContent & {
   id?: string;
@@ -61,19 +55,21 @@ const BLANK: Draft = {
 
 /** Dirty/baseline key — content plus the published flag (a publish toggle is a change). */
 function snapshot(d: Draft): string {
-  return JSON.stringify({ ...content(d), published: d.published ?? false });
+  return JSON.stringify({ ...contentOf(d), published: d.published ?? false });
 }
 
-function content(d: Draft): StepContent {
-  return {
-    name: d.name,
-    promptTemplate: d.promptTemplate,
-    model: d.model,
-    permissionMode: d.permissionMode,
-    autoAdvance: d.autoAdvance,
-    freshStart: d.freshStart,
-    outputName: d.outputName ?? '',
-  };
+function DirtyDot() {
+  return (
+    <Box
+      style={{
+        width: 6,
+        height: 6,
+        borderRadius: '50%',
+        background: 'var(--mantine-primary-color-filled)',
+        flexShrink: 0,
+      }}
+    />
+  );
 }
 
 /**
@@ -108,11 +104,10 @@ function RestoreHistoryPopover({
       onChange={setOpened}
     >
       <Popover.Target>
-        <Tooltip label="Version history">
-          <ActionIcon
-            variant="subtle"
-            color="gray"
-            mb={4}
+        <Tooltip label="Version history" withArrow>
+          <UnstyledButton
+            className={styles.link}
+            aria-label={`v${currentVersion ?? 1} — version history`}
             onClick={() => {
               // Fire the fetch here — Mantine's onChange doesn't fire when we drive `opened` ourselves.
               if (!opened) {
@@ -122,8 +117,9 @@ function RestoreHistoryPopover({
               setOpened((o) => !o);
             }}
           >
-            <IconHistory size={16} />
-          </ActionIcon>
+            <IconHistory size={12} />
+            v{currentVersion ?? 1}
+          </UnstyledButton>
         </Tooltip>
       </Popover.Target>
       <Popover.Dropdown>
@@ -144,7 +140,7 @@ function RestoreHistoryPopover({
                       <Text size="sm" fw={600}>v{v.version}</Text>
                       <Text size="xs" c="dimmed" style={{ flex: 1, minWidth: 0 }} truncate>{relTime(v.updatedAt)}</Text>
                       {v.version === currentVersion && (
-                        <Badge size="xs" variant="light">current</Badge>
+                        <Badge size="xs" variant="light" tt="none">current</Badge>
                       )}
                     </UnstyledButton>
                   ))}
@@ -178,12 +174,14 @@ export function StepLibrary() {
   const sharedSteps = useStore((s) => s.sharedSteps);
   const stepVersions = useStore((s) => s.stepVersions);
   const models = useStore((s) => s.models);
+  const workflows = useStore((s) => s.workflows);
 
   // Selected key: `own:<id>` | `shared:<ownerId>/<id>` | null (creating new).
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [baseline, setBaseline] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [query, setQuery] = useState('');
 
   const load = (d: Draft | null, key: string | null) => {
     setDraft(d);
@@ -205,6 +203,23 @@ export function StepLibrary() {
     () => sharedSteps.filter((s) => !steps.some((own) => own.id === s.id)),
     [sharedSteps, steps],
   );
+  // How many of the user's own workflows pin each step — what an edit to it can
+  // reach (each as an update offer there, never silently).
+  const usage = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const w of workflows) {
+      for (const id of new Set(w.steps.filter(isStepRef).map((s) => s.stepId))) {
+        m.set(id, (m.get(id) ?? 0) + 1);
+      }
+    }
+    return m;
+  }, [workflows]);
+  const q = query.trim().toLowerCase();
+  const matches = (s: StepDef) =>
+    !q || s.name.toLowerCase().includes(q) || s.promptTemplate.toLowerCase().includes(q);
+  const ownShown = steps.filter(matches);
+  const foreignShown = foreignSteps.filter(matches);
+
   const dirty = useMemo(
     () => (draft && baseline ? snapshot(draft) !== baseline : false),
     [draft, baseline],
@@ -214,8 +229,17 @@ export function StepLibrary() {
     draft && (draft.outputName ?? '').trim() && !OUTPUT_NAME_RE.test((draft.outputName ?? '').trim())
       ? OUTPUT_NAME_HINT
       : undefined;
+  // The same check the workflow editor and the bridge's shared validator run:
+  // a rule saved here unchecked only failed later, in whichever workflow pinned it.
+  const routingError = draft?.routing
+    ? validateRoutingRule(draft.routing, providerForModel(draft.model))[0]
+    : undefined;
   const valid =
-    !!draft && draft.name.trim() !== '' && draft.promptTemplate.trim() !== '' && !outputNameError;
+    !!draft &&
+    draft.name.trim() !== '' &&
+    draft.promptTemplate.trim() !== '' &&
+    !outputNameError &&
+    !routingError;
 
   const patch = (p: Partial<Draft>) => setDraft((d) => (d ? { ...d, ...p } : d));
 
@@ -252,24 +276,37 @@ export function StepLibrary() {
         sharedSteps.find((s) => s.id === d.id && s.ownerId === ownerIdOf(d)))
       : undefined;
   const stepRow = draft ? storeRow(draft) : undefined;
+  const usedIn = draft?.id && !readOnly ? (usage.get(draft.id) ?? 0) : 0;
 
-  /** Load an older version's content into the draft; Save republishes it as a new head version. */
-  const restore = (def: StepDef) => patch(content(def));
+  /**
+   * Load an older version's content into the draft; Save republishes it as a new
+   * head version. Every field is replaced, so one the old version lacked (an
+   * effort, a routing rule) is cleared rather than carried over.
+   */
+  const restore = (def: StepDef) => patch(contentOf(def));
 
   const newStep = () => load({ ...BLANK }, null);
 
+  const canSave = !!draft && !readOnly && valid && (!draft.id || dirty);
   const save = () => {
     if (!draft || readOnly || !valid) return;
     const stepId = draft.id ?? crypto.randomUUID();
     const published = draft.published ?? false;
-    send({ type: 'saveStep', step: content(draft), stepId, published, ownerName: getOwnerName() ?? undefined });
+    send({ type: 'saveStep', step: contentOf(draft), stepId, published, ownerName: getOwnerName() ?? undefined });
     // Select the (soon-updated) own step; the broadcast refreshes its version.
     load({ ...draft, id: stepId, published }, `own:${stepId}`);
   };
 
+  const saveHotkey = canSave && !confirmDelete;
+  useHotkeys(
+    [['mod+S', () => saveHotkey && save(), { preventDefault: saveHotkey }]],
+    [], // from the prompt and name fields too — that is where the edits happen
+    true,
+  );
+
   const duplicate = () => {
     if (!draft) return;
-    load({ ...content(draft), name: `${draft.name} (copy)` }, null);
+    load({ ...contentOf(draft), name: `${draft.name} (copy)` }, null);
   };
 
   const doDelete = () => {
@@ -279,223 +316,231 @@ export function StepLibrary() {
     load(steps.find((s) => s.id !== draft.id) ?? null, null);
   };
 
-  const StepButton = ({ def, key: k }: { def: StepDef; key: string }) => (
-    <Button
-      variant={selected === k ? 'light' : 'subtle'}
-      color="gray"
-      justify="start"
-      onClick={() => load(def, k)}
-    >
-      <Group gap={6} wrap="nowrap" style={{ minWidth: 0, width: '100%' }} justify="space-between">
-        <Text size="xs" truncate>{def.name}</Text>
-        <Badge size="xs" variant="default">v{def.version}</Badge>
-      </Group>
-    </Button>
-  );
+  const metaLine = !draft
+    ? ''
+    : readOnly
+      ? `By ${draft.ownerName ?? 'another user'}${stepRow ? ` · updated ${relTime(stepRow.updatedAt)}` : ''}`
+      : !draft.id
+        ? 'Not saved yet'
+        : [
+            stepRow?.createdAt !== undefined ? `Created ${formatTimestamp(stepRow.createdAt)}` : null,
+            stepRow ? `Updated ${formatTimestamp(stepRow.updatedAt)}` : null,
+            usedIn === 0
+              ? 'Not pinned in any of your workflows yet'
+              : `Pinned in ${usedIn} of your workflows`,
+          ]
+            .filter(Boolean)
+            .join(' · ');
 
   return (
     <Group align="stretch" gap={0} wrap="nowrap" style={{ flex: 1, minHeight: 0 }}>
-      <Box p="md" style={{ display: 'flex' }}>
-        <Stack gap="xs" w={240} style={{ flexShrink: 0 }} h="100%">
-          <ScrollArea style={{ flex: 1 }} type="hover">
-            <Stack gap="xs" pr="xs">
-              {steps.map((s) => (
-                <StepButton key={`own:${s.id}`} def={s} />
-              ))}
-              {steps.length === 0 && (
-                <Text size="xs" c="dimmed" py="sm" ta="center">No steps yet.</Text>
-              )}
-              {foreignSteps.length > 0 && (
-                <>
-                  <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="xs">Shared by others</Text>
-                  {foreignSteps.map((s) => (
-                    <Button
-                      key={`shared:${s.ownerId}/${s.id}`}
-                      variant={selected === `shared:${s.ownerId}/${s.id}` ? 'light' : 'subtle'}
-                      color="gray"
-                      justify="start"
-                      onClick={() => load(s, `shared:${s.ownerId}/${s.id}`)}
+      <div className={styles.listColumn} style={{ width: 'clamp(240px, 20vw, 280px)' }}>
+        <Box px={10} pt={10}>
+          <TextInput
+            size="xs"
+            aria-label="Search steps"
+            placeholder="Search steps"
+            leftSection={<IconSearch size={13} />}
+            value={query}
+            onChange={(e) => setQuery(e.currentTarget.value)}
+          />
+        </Box>
+        <ScrollArea style={{ flex: 1 }} type="hover">
+          <div className={styles.listBody}>
+            <div className={styles.listSection}>Your library · {steps.length}</div>
+            {ownShown.map((s) => {
+              // The key is a local, not a prop: React never passes `key` down,
+              // so a row reading it from props matched every row at once.
+              const k = `own:${s.id}`;
+              const used = usage.get(s.id) ?? 0;
+              return (
+                <UnstyledButton
+                  key={k}
+                  className={cn(styles.listRow, selected === k && styles.rowActive)}
+                  onClick={() => load(s, k)}
+                >
+                  <span className={styles.rowText}>
+                    <span className={styles.rowName}>{s.name}</span>
+                    <span className={styles.rowMeta}>
+                      {[`v${s.version}`, modelLabel(models, s.model), used ? `in ${used} workflow${used === 1 ? '' : 's'}` : null]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </span>
+                  </span>
+                  {selected === k && dirty && <DirtyDot />}
+                  {s.published && (
+                    <Tooltip label="Shared with everyone" withArrow>
+                      <span className={styles.rowAside}>
+                        <IconWorld size={12} />
+                      </span>
+                    </Tooltip>
+                  )}
+                </UnstyledButton>
+              );
+            })}
+            {steps.length === 0 ? (
+              <Text size="xs" c="dimmed" px={10} py={6}>
+                No steps yet. A step saved here can be pinned in any of your workflows.
+              </Text>
+            ) : (
+              ownShown.length === 0 && (
+                <Text size="xs" c="dimmed" px={10} py={6}>
+                  No matches.
+                </Text>
+              )
+            )}
+            {foreignShown.length > 0 && (
+              <>
+                <div className={styles.listSection}>Shared by others · {foreignSteps.length}</div>
+                {foreignShown.map((s) => {
+                  const k = `shared:${s.ownerId}/${s.id}`;
+                  return (
+                    <UnstyledButton
+                      key={k}
+                      className={cn(styles.listRow, selected === k && styles.rowActive)}
+                      onClick={() => load(s, k)}
                     >
-                      <Stack gap={0} style={{ minWidth: 0 }}>
-                        <Text size="xs" truncate>{s.name}</Text>
-                        <Text fz={10} c="dimmed" truncate>{s.ownerName ?? 'Unknown'} · v{s.version}</Text>
-                      </Stack>
-                    </Button>
-                  ))}
-                </>
-              )}
-            </Stack>
-          </ScrollArea>
-          <Button variant="default" leftSection={<IconPlus size={13} />} onClick={newStep}>
+                      <span className={styles.rowText}>
+                        <span className={styles.rowName}>{s.name}</span>
+                        <span className={styles.rowMeta}>
+                          {s.ownerName ?? 'Unknown'} · v{s.version} · {modelLabel(models, s.model)}
+                        </span>
+                      </span>
+                    </UnstyledButton>
+                  );
+                })}
+              </>
+            )}
+          </div>
+        </ScrollArea>
+        <Box p={10}>
+          <Button fullWidth variant="default" leftSection={<IconPlus size={13} />} onClick={newStep}>
             New step
           </Button>
-        </Stack>
-      </Box>
+        </Box>
+      </div>
       <Divider orientation="vertical" />
 
       {draft ? (
-        <ScrollArea style={{ flex: 1 }} type="hover">
-          <Stack gap="sm" p="md">
-            <Group justify="space-between" align="flex-end" wrap="nowrap" gap="md">
-              <TextInput
-                label="Step name"
-                style={{ flex: 1 }}
-                value={draft.name}
-                disabled={readOnly}
-                onChange={(e) => patch({ name: e.currentTarget.value })}
-              />
-              {draft.id && (
-                <Badge variant="default" mb={6} style={{ whiteSpace: 'nowrap' }}>
-                  v{draft.version ?? 1}
-                </Badge>
-              )}
-              {draft.id && !readOnly && (
-                <RestoreHistoryPopover
-                  current={content(draft)}
-                  currentVersion={draft.version}
-                  versions={versionsFor(draft)}
-                  onOpen={requestVersions}
-                  onRestore={restore}
-                />
-              )}
-              {stepRow?.createdAt !== undefined && (
-                <Stack gap={0} pb={8} style={{ whiteSpace: 'nowrap' }}>
-                  <Text size="xs" c="dimmed">Created {formatTimestamp(stepRow.createdAt)}</Text>
-                  <Text size="xs" c="dimmed">Updated {formatTimestamp(stepRow.updatedAt)}</Text>
-                </Stack>
-              )}
-              {readOnly ? (
-                <Text size="xs" c="dimmed" pb={8} style={{ whiteSpace: 'nowrap' }}>
-                  Shared by {draft.ownerName ?? 'another user'}
-                </Text>
-              ) : (
-                <Switch
-                  mb={7}
-                  label="Published"
-                  description="Share with everyone"
-                  checked={draft.published ?? false}
-                  onChange={(e) => patch({ published: e.currentTarget.checked })}
-                />
-              )}
-            </Group>
-
-            <Box>
-              <div className={styles.label}>Prompt</div>
-              <PromptEditor
-                value={draft.promptTemplate}
-                readOnly={readOnly}
-                inputClassName={styles.promptInput}
-                freshStart={draft.freshStart}
-                onChange={(v) => patch({ promptTemplate: v })}
-              />
-            </Box>
-
-            <div className={styles.settings}>
-              <div className={styles.control}>
-                <span className={styles.controlLabel}>Model</span>
-                <Select
-                  w={168}
-                  comboboxProps={modelComboboxProps}
-                  // Any provider. A library step has no predecessor to cross, so
-                  // the fresh-start rule is applied where it is knowable: on the
-                  // step's position in a workflow, in StepCard.
-                  data={modelSelectData(models, draft.model)}
-                  renderOption={renderModelOption}
-                  value={draft.model}
-                  disabled={readOnly}
-                  allowDeselect={false}
-                  classNames={{ input: styles.fieldInput }}
-                  onChange={(v) => v && patch({ model: v })}
-                />
-              </div>
-              <div className={styles.control}>
-                <span className={styles.controlLabel}>Reasoning effort</span>
-                <Select
-                  w={140}
-                  comboboxProps={modelComboboxProps}
-                  data={effortSelectData(STEP_EFFORTS, draft.reasoningEffort)}
-                  renderOption={renderOptionWithDescription}
-                  value={draft.reasoningEffort ?? AUTO_EFFORT}
-                  disabled={readOnly}
-                  allowDeselect={false}
-                  classNames={{ input: styles.fieldInput }}
-                  onChange={(v) =>
-                    v &&
-                    patch({
-                      reasoningEffort: v === AUTO_EFFORT ? undefined : (v as ReasoningEffort),
-                    })
-                  }
-                />
-              </div>
-              <div className={styles.control}>
-                <span className={styles.controlLabel}>Permission mode</span>
-                <Select
-                  w={158}
-                  comboboxProps={modelComboboxProps}
-                  data={PERMISSION_MODES}
-                  renderOption={renderPermissionModeOption}
-                  value={draft.permissionMode}
-                  disabled={readOnly}
-                  allowDeselect={false}
-                  classNames={{ input: styles.fieldInput }}
-                  onChange={(v) => v && patch({ permissionMode: v as PermissionMode })}
-                />
-              </div>
-              <Switch
-                label="Auto-advance"
-                description="Skip approval; run the next step automatically"
-                checked={draft.autoAdvance}
-                disabled={readOnly}
-                onChange={(e) => patch({ autoAdvance: e.currentTarget.checked })}
-              />
-              <Switch
-                label="Fresh start"
-                description="Run in a clean session; seed with prior step's output + diff, not the full conversation"
-                checked={draft.freshStart}
-                disabled={readOnly}
-                onChange={(e) => patch({ freshStart: e.currentTarget.checked })}
-              />
-              <div className={styles.control}>
-                <span className={styles.controlLabel}>Output name</span>
+        <StepPane
+          header={
+            <>
+              <div className={styles.paneTitle}>
+                <div className={styles.label}>
+                  {readOnly ? 'Shared step' : draft.id ? 'Library step' : 'New library step'}
+                </div>
                 <TextInput
-                  w={158}
-                  placeholder="e.g. plan"
-                  value={draft.outputName ?? ''}
-                  disabled={readOnly}
-                  error={outputNameError}
-                  classNames={{ input: styles.fieldInput }}
-                  onChange={(e) => patch({ outputName: e.currentTarget.value })}
+                  variant="unstyled"
+                  placeholder="Step name"
+                  aria-label="Step name"
+                  classNames={{ input: styles.titleInput }}
+                  value={draft.name}
+                  readOnly={readOnly}
+                  onChange={(e) => patch({ name: e.currentTarget.value })}
                 />
+                <Text fz={11} c="dimmed" mt={2}>
+                  {metaLine}
+                </Text>
               </div>
-            </div>
-
-            {readOnly ? (
-              <Group justify="flex-end">
-                <Button variant="default" leftSection={<IconCopy size={13} />} onClick={duplicate}>
-                  Duplicate to my steps
-                </Button>
-              </Group>
-            ) : (
-              <Group justify="space-between">
-                {draft.id ? (
-                  <Button variant="subtle" color="red" leftSection={<IconTrash size={13} />} onClick={() => setConfirmDelete(true)}>
-                    Delete
-                  </Button>
-                ) : (
-                  <span />
+              <Group gap={10} wrap="nowrap" pt={18}>
+                {draft.id && !readOnly && (
+                  <RestoreHistoryPopover
+                    current={contentOf(draft)}
+                    currentVersion={draft.version}
+                    versions={versionsFor(draft)}
+                    onOpen={requestVersions}
+                    onRestore={restore}
+                  />
                 )}
-                <Group gap="xs">
+                {readOnly && (
+                  <span className={styles.link} data-static>
+                    v{draft.version ?? 1}
+                  </span>
+                )}
+                {!readOnly && (
+                  <Switch
+                    size="xs"
+                    label="Share with everyone"
+                    checked={draft.published ?? false}
+                    onChange={(e) => patch({ published: e.currentTarget.checked })}
+                  />
+                )}
+              </Group>
+            </>
+          }
+          banner={
+            readOnly ? (
+              <StepBanner
+                icon={<IconLock size={14} />}
+                actions={
+                  <Button size="compact-xs" variant="default" leftSection={<IconCopy size={12} />} onClick={duplicate}>
+                    Make an editable copy
+                  </Button>
+                }
+              >
+                From <b>{draft.ownerName ?? 'another user'}</b>, read-only. Pin it from a workflow's Add step menu,
+                or make an editable copy in your library to change it.
+              </StepBanner>
+            ) : undefined
+          }
+          prompt={
+            <PromptEditor
+              fill
+              value={draft.promptTemplate}
+              readOnly={readOnly}
+              inputClassName={styles.promptInput}
+              freshStart={draft.freshStart}
+              onChange={(v) => patch({ promptTemplate: v })}
+            />
+          }
+          settings={
+            <StepSettings
+              // Remounted per step, so the Advanced disclosure opens for the step
+              // that has a routing rule rather than staying as the last one left it.
+              key={selected ?? 'new'}
+              flow="inline"
+              value={draft}
+              readOnly={readOnly}
+              models={models}
+              errors={{ outputName: outputNameError, routing: routingError }}
+              onPatch={patch}
+            />
+          }
+          footer={
+            readOnly ? undefined : (
+              <>
+                <Group gap="xs" wrap="nowrap">
+                  {draft.id && (
+                    <Button
+                      variant="subtle"
+                      color="red"
+                      leftSection={<IconTrash size={13} />}
+                      onClick={() => setConfirmDelete(true)}
+                    >
+                      Delete
+                    </Button>
+                  )}
                   <Button variant="default" leftSection={<IconCopy size={13} />} onClick={duplicate}>
                     Duplicate
                   </Button>
-                  <Button disabled={!valid || (!!draft.id && !dirty)} onClick={save}>
+                </Group>
+                <Group gap="sm" wrap="nowrap">
+                  {(dirty || !draft.id) && (
+                    <Group gap={6} wrap="nowrap">
+                      <DirtyDot />
+                      <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+                        {draft.id ? 'Unsaved changes' : 'Not saved yet'} · {MOD}S
+                      </Text>
+                    </Group>
+                  )}
+                  <Button disabled={!canSave} onClick={save}>
                     {draft.id ? (dirty ? 'Save changes' : 'Saved') : 'Save step'}
                   </Button>
                 </Group>
-              </Group>
-            )}
-          </Stack>
-        </ScrollArea>
+              </>
+            )
+          }
+        />
       ) : (
         <Stack align="center" justify="center" style={{ flex: 1 }} gap="xs">
           <Text size="sm" c="dimmed">Select a step or create a new one.</Text>

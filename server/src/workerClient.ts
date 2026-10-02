@@ -53,6 +53,13 @@ export interface WorkerClientCallbacks {
   onHello(live: LiveSessionInfo[]): void;
   onEvent(sessionId: string, message: Record<string, unknown> & { type: string }): void;
   onEnded(sessionId: string, error?: string): void;
+  /**
+   * This bridge closed the session's query. Fired on the way out rather than on
+   * a worker reply: a closed query is killed and never reports again — no
+   * `ended` — so the cleanup `onEnded` does for a query that died has to happen
+   * here for one that was closed.
+   */
+  onClosed?(sessionId: string): void;
   onRpc(rpc: WorkerRpc): void;
   onRpcCancel(id: string): void;
   /**
@@ -380,6 +387,7 @@ export class WorkerClient {
 
   close(sessionId: string) {
     this.send({ type: 'close', sessionId });
+    this.callbacks.onClosed?.(sessionId);
   }
 
   rpcResult(id: string, result: unknown) {

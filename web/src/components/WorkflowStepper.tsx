@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import {
   ActionIcon,
   Box,
@@ -6,6 +6,7 @@ import {
   Center,
   Drawer,
   Group,
+  HoverCard,
   Loader,
   Paper,
   Stack,
@@ -18,9 +19,19 @@ import {
   IconCheck,
   IconChevronDown,
   IconCoins,
+  IconHandStop,
   IconPlayerPlay,
+  IconPlayerTrackNext,
 } from '@tabler/icons-react';
-import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@lines/shared';
+import type {
+  ModelOption,
+  SessionMeta,
+  StepContent,
+  WorkflowDef,
+  WorkflowStep,
+  WorkflowStepOverride,
+  WorkflowStepStatus,
+} from '@lines/shared';
 import {
   capabilitiesFor,
   hasEstimatedSpend,
@@ -30,6 +41,7 @@ import {
 } from '@lines/shared';
 import { useCan } from '../lib/can';
 import { formatDuration, formatSpendUsd } from '../lib/format';
+import { permissionModeLabel } from '../lib/permissionModes';
 import { useStepResolver } from '../lib/useStepResolver';
 import { useIsPhone, useReveal } from '../lib/layout';
 import { useStore } from '../store';
@@ -37,6 +49,81 @@ import { send } from '../ws';
 import { revealWorkflowStep } from '../lib/workflowReveal';
 import { ConfirmModal } from './ConfirmModal';
 import { WorkflowRunModal } from './workflow/WorkflowRunModal';
+import { crossesProvider, effortLabel, gateLabel, modelLabel, startLabel } from './workflow/StepSettings';
+
+/**
+ * What a step runs on, for the desktop stepper's hover card: the step's own
+ * settings, and this run's override of them when there is one. Holds no
+ * `[data-progress-fill]` — Transcript counts those across the whole document.
+ */
+function StepDetails({
+  name,
+  content,
+  freshStart,
+  last,
+  override,
+  models,
+}: {
+  name: string;
+  content: StepContent | undefined;
+  /** Whether the step starts fresh, provider switches included. */
+  freshStart: boolean;
+  last: boolean;
+  override?: WorkflowStepOverride | null;
+  models: ModelOption[];
+}) {
+  if (!content) {
+    return (
+      <Text size="xs" c="dimmed">
+        This pinned step is not available here.
+      </Text>
+    );
+  }
+  const rows: [string, string][] = [
+    ['Model', modelLabel(models, content.model)],
+    ['Effort', effortLabel(content.reasoningEffort)],
+    ['Permission', permissionModeLabel(content.permissionMode)],
+    ['Starts with', startLabel(freshStart)],
+    ['When it finishes', gateLabel(content.autoAdvance, last)],
+  ];
+  // Absent fields mean "the step's own"; a null effort means Auto even when the
+  // step names one.
+  const overridden = override
+    ? [
+        override.model ? modelLabel(models, override.model) : null,
+        override.reasoningEffort !== undefined ? effortLabel(override.reasoningEffort) : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : '';
+  return (
+    <Stack gap={5}>
+      <Text size="xs" fw={600} truncate>
+        {name}
+      </Text>
+      {rows.map(([label, value]) => (
+        <Group key={label} justify="space-between" gap="md" wrap="nowrap">
+          <Text fz={11} c="dimmed" style={{ flexShrink: 0 }}>
+            {label}
+          </Text>
+          <Text fz={11} truncate>
+            {value}
+          </Text>
+        </Group>
+      ))}
+      {overridden && (
+        <Group justify="space-between" gap="md" wrap="nowrap">
+          <Text fz={11} c="dimmed" style={{ flexShrink: 0 }}>
+            This run
+          </Text>
+          <Text fz={11} fw={600} truncate>
+            {overridden}
+          </Text>
+        </Group>
+      )}
+    </Stack>
+  );
+}
 
 function StepIcon({
   status,
@@ -128,9 +215,17 @@ export function WorkflowStepper({
 }) {
   const state = session.workflow!;
   const { resolveStepContent } = useStepResolver();
+  const models = useStore((s) => s.models);
 
   /** Display name for a step, resolving pinned references through the step library. */
-  const nameOf = (step: WorkflowStep): string => resolveStepContent(step)?.name ?? 'Shared step';
+  const nameOf = (step: WorkflowStep): string => resolveStepContent(step)?.name ?? 'Pinned step';
+  const contents = workflow.steps.map((step) => resolveStepContent(step));
+  /** Starts fresh, by its own setting or because the step before it is on another provider. */
+  const startsFresh = (i: number): boolean => {
+    const c = contents[i];
+    if (!c) return false;
+    return c.freshStart || crossesProvider(contents[i - 1]?.model, c.model);
+  };
 
   /** Per-run model/effort editor: offered while a step is still to come. */
   const canSetModel = useCan('setModel');
@@ -215,9 +310,14 @@ export function WorkflowStepper({
           const estimated = stepModel
             ? !capabilitiesFor(providerForModel(stepModel)).cost
             : hasEstimatedSpend(session.costByModel);
+          const content = contents[i];
+          const next = contents[i + 1];
+          // The gate between this step and the next, in the editor's words.
+          const gate =
+            content && next ? `${gateLabel(content.autoAdvance)} · ${startLabel(startsFresh(i + 1))}` : '';
           return (
+            <Fragment key={i}>
             <Group
-              key={i}
               gap={8}
               wrap="nowrap"
               // Title row and metrics row are the same height (18px), so centering the
@@ -275,15 +375,39 @@ export function WorkflowStepper({
                 />
               </Box>
               <Stack gap={4} style={{ flex: 1, minWidth: 0 }}>
-                <Text
-                  size="xs"
-                  lh="18px"
-                  fw={current ? 600 : 500}
-                  c={status === 'pending' && !current ? 'dimmed' : undefined}
-                  truncate
+                {/* Hover only: a phone has none, and its row is the current step,
+                    whose settings the composer already shows. */}
+                <HoverCard
+                  disabled={isPhone}
+                  openDelay={350}
+                  closeDelay={80}
+                  position="bottom-start"
+                  width={240}
+                  shadow="md"
+                  withArrow
                 >
-                  {nameOf(step)}
-                </Text>
+                  <HoverCard.Target>
+                    <Text
+                      size="xs"
+                      lh="18px"
+                      fw={current ? 600 : 500}
+                      c={status === 'pending' && !current ? 'dimmed' : undefined}
+                      truncate
+                    >
+                      {nameOf(step)}
+                    </Text>
+                  </HoverCard.Target>
+                  <HoverCard.Dropdown>
+                    <StepDetails
+                      name={nameOf(step)}
+                      content={content}
+                      freshStart={startsFresh(i)}
+                      last={i === workflow.steps.length - 1}
+                      override={state.stepOverrides?.[i]}
+                      models={models}
+                    />
+                  </HoverCard.Dropdown>
+                </HoverCard>
                 {/* Underline doubles as this step's scroll-progress track,
                     filled imperatively by Transcript. */}
                 <Box
@@ -354,6 +478,17 @@ export function WorkflowStepper({
                 </Group>
               )}
             </Group>
+            {/* The gate to the next step. Holds no `[data-progress-fill]` —
+                Transcript counts those, in DOM order, as the steps. Desktop
+                only: a phone's row is the current step alone. */}
+            {!isPhone && gate && (
+              <Tooltip label={gate} withArrow fz="xs">
+                <Center c="dimmed" role="img" aria-label={gate} style={{ flexShrink: 0 }}>
+                  {content!.autoAdvance ? <IconPlayerTrackNext size={12} /> : <IconHandStop size={12} />}
+                </Center>
+              </Tooltip>
+            )}
+            </Fragment>
           );
         })}
         {tunable && (

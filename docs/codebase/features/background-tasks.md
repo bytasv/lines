@@ -119,7 +119,9 @@ extra render.
 the query of every session that wasn't mid-turn, which also kills the CLI child and every task it
 owns, silently: no notification, no transcript trace. It now skips a session whose `LiveState`
 carries a non-empty `backgroundTasks` list, in addition to its existing interruptible-status
-skip.
+skip. Both now go through the `queryInUse` predicate (interruptible status, live tasks, or held for
+auth), which `warmQuery` also honours so a token mismatch never kills a query that is mid-turn or
+owns a task.
 
 ### Stopping
 
@@ -254,6 +256,11 @@ transcript card.
   *interruptible*-status guard rather than its background-task guard, and let a `busy: false`
   `reconcileWithWorker` pass wrongly demote, auto-continue, and (via `closeQuery`) clear the task
   set of a session whose task was still live.
+- The exception is an event that proves a **main-thread** turn (`assistant`, `stream_event`,
+  non-replay `user`, no subagent parent): when it arrives on a settled session with no
+  bridge-started turn, it heals the status to `running` — the notification turn a finished
+  background task triggers — and re-opens a workflow step parked by the previous `result`. See
+  [workflow-step-lifecycle](workflow-step-lifecycle.md#a-parked-step-that-was-not-really-finished).
 - `stopBackgroundTasks` stops each live task, then clears the set itself, optimistically — the
   user's manual escape hatch for a task the CLI has already forgotten (where `stopTask` is a no-op
   and no level signal ever arrives to clear the set otherwise). A task that really is still alive

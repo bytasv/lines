@@ -162,7 +162,11 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `SessionManager.reconcileWithWorker` — takes `{ autoContinue?: boolean }`; the worker-lost
   path passes `autoContinue: false` so sessions are flagged for the banner without also firing
   a resume that would just re-queue into `WorkerClient.pending`
-- `SessionManager.markTurnLive` (promote a stale-idle session back to running)
+- `SessionManager.markTurnLive` (promote a stale-idle session back to running; leaves
+  `waiting-permission` alone and clears `errorKind`)
+- `SessionManager.settleStoppedTurn` / `SessionManager.queryInUse` (close-time Stop settle; "is this
+  query mid-turn or owning work")
+- `WorkerClientCallbacks.onClosed` (bridge-side cleanup when a query is closed)
 - `SessionManager.continueTurn`
 - `hasUnresolvedAlwaysAsk` (`server/src/sessions.ts`) — gates both auto-continue's `flagged`
   list and `expireUnresolvedPermissions`
@@ -341,7 +345,7 @@ instance is the one running it now.
 
 Reconcile then moves in both directions for every session that passes that check. `busy: true` on
 a session we believe is idle calls `markTurnLive` (status back to `running`, keep a known
-`turnStartedAt`, clear `interruptedAt`). Absent from the list, or `busy: false`, on a session we
+`turnStartedAt`, clear `interruptedAt` and `errorKind`). Absent from the list, or `busy: false`, on a session we
 believe is `running`/`waiting-permission` demotes it — to `idle`, pausing any queue and stamping
 `interruptedAt`, *unless* its current workflow step already reads `waiting-approval`: the only
 turn that runs on an already-parked step is a manual context compaction (see
@@ -603,6 +607,30 @@ instead of "turn failed" (red) — `Transcript.tsx`'s retry affordance keys off 
 disappears with no extra logic. The stamp is written into the persisted event, not computed
 only for the live broadcast, so a page reload renders the same neutral row.
 
+### Closing a query is final
+
+A query closed by `SessionManager.closeQuery`, `resetClaudeSession` or `forget` used to keep
+draining in the worker: it finished its turn, ran notification turns and forwarded their `result`
+and `ended` under the same session id, so a dead conversation could park a workflow step that had
+already moved on or flip a settled session back to running. The worker now stamps each query with
+a generation. Only the session's current query may emit events or `ended`; its pending RPCs
+(permission, elicitation, MCP tool) settle as unavailable once it is stale, and `close` also calls
+the SDK query's `close()` so the CLI child dies.
+
+Bridge bookkeeping on close:
+
+- A Stop still settling when its query closes would never see its `result`/`ended`, leaving the
+  step unparked and the queue held. `closeQuery` and `resetClaudeSession` run the same
+  `settleStoppedTurn` as `handleWorkerEnded`, skipped while the session is already interruptible
+  (a fresh-start step whose status moved to `running` before its prompt) and skipped by `forget`,
+  which clears the interrupt entry first.
+- `WorkerClient.close()` fires `onClosed`, where `index.ts` clears pending MCP OAuth state and
+  releases an auth hold for that session — the PKCE verifier lives in the CLI process that just
+  died.
+- `queryInUse` (interruptible status, live background tasks, or held for auth) is the one predicate
+  for "do not close this query": `recycleIdleQueries` uses it, and `warmQuery` no longer closes a
+  query on a token mismatch, or records the new token for it, while it is in use.
+
 ### A worker query outlives the bridge, so a failed turn always drops it
 
 The worker is a separate long-lived process; the bridge (tsx watch, crash, deploy) restarts
@@ -717,6 +745,10 @@ message type, no new modal, no new client state, no DB migration.
 
 ## Tests
 
+- `server/src/sessions.ended.test.ts` also covers a Stop whose query closes before settling (idle
+  recycle, rewind, a newer turn started on top, delete mid-Stop); `server/src/sessions.mcpLive.test.ts`
+  covers `warmQuery` never closing a query mid-turn. The worker generation guard has no unit test
+  (manual repro only).
 - `server/src/caveman.test.ts` — the ruleset carries its safety carve-outs (security
   warnings, irreversible actions, multi-step ambiguity, clarify-on-request), the
   code/commits/PRs-normal boundary, and the persistence clause, so a future trim can't
@@ -845,6 +877,10 @@ message type, no new modal, no new client state, no DB migration.
   into the flagged state so its banner returns, and the sessions after it still resume.
 - Settings pulled from the storage server are merged field-wise, not replaced wholesale, so a
   client that predates a setting cannot erase it by omitting it from its payload.
+- A closed query never reaches the session again: its events, `ended` and pending RPC results are
+  dropped, `close` kills the CLI child, and a Stop settling under it is settled by the bridge.
+- `warmQuery` and `recycleIdleQueries` never close a query that is mid-turn, owns a background
+  task or is held for auth (`queryInUse`).
 - `interruptedAt` is cleared by a new prompt, by a `result` (the turn had in fact finished), by
   `markTurnLive`, and by archive/complete. It is deliberately **not** cleared by `ackSession` —
   viewing a session must not hide the banner before it can be read.

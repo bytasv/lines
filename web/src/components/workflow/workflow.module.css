@@ -1,45 +1,15 @@
-/* Workflow / step editor visual language — elevated cards, inset fields,
-   monochrome chrome. Uses the neutral palette from theme.ts; "active" is
-   carried by contrast (a near-white rail, inverted step number), not hue. */
+/* Workflow / step editor visual language — monochrome chrome, inset fields,
+   "active" carried by contrast (an inverted step number, a raised row) rather
+   than hue. Surfaces go through light-dark() so the editor reads in both
+   schemes; colour is only for status (yellow: an update waits, red: an error). */
 
-.card {
-  background: var(--mantine-color-dark-6);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 14px;
-  overflow: hidden;
-  transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
-}
-.card:hover {
-  border-color: rgba(255, 255, 255, 0.11);
-}
-.cardExpanded {
-  background: var(--mantine-color-dark-5);
-  border-color: color-mix(in srgb, var(--mantine-color-text) 25%, transparent);
-  box-shadow:
-    inset 3px 0 0 var(--mantine-color-text),
-    0 2px 10px rgba(0, 0, 0, 0.25);
-}
-.cardInvalid {
-  border-color: var(--mantine-color-red-7) !important;
-}
-
-.header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 11px 14px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.grip {
-  display: flex;
-  align-items: center;
-  color: var(--mantine-color-dark-3);
-  cursor: grab;
-}
-.grip:hover {
-  color: var(--mantine-color-dark-1);
+.label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  color: var(--mantine-color-dimmed);
+  margin-bottom: 6px;
 }
 
 /* One row in the version-history popover — compact, single line, hover/active feedback. */
@@ -55,72 +25,34 @@
   transition: background 120ms ease;
 }
 .versionRow:hover {
-  background: var(--mantine-color-dark-5);
+  background: var(--mantine-color-default-hover);
 }
 .versionRowActive,
 .versionRowActive:hover {
-  background: var(--mantine-color-dark-4);
-}
-
-.num {
-  flex: 0 0 auto;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--mantine-color-dimmed);
-  background: transparent;
-  border: 1px solid var(--mantine-color-default-border);
-}
-/* The open step inverts: solid primary fill (white in dark, black in light). */
-.cardExpanded .num:not(.numInvalid) {
-  color: var(--mantine-primary-color-contrast);
-  background: var(--mantine-primary-color-filled);
-  border-color: var(--mantine-primary-color-filled);
-}
-.numInvalid {
-  color: var(--mantine-color-red-4);
-  background: color-mix(in srgb, var(--mantine-color-red-6) 16%, transparent);
-  border-color: color-mix(in srgb, var(--mantine-color-red-6) 40%, transparent);
+  background: light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
 }
 
 /* borderless title that reads as a heading */
 .titleInput {
-  font-size: 15px !important;
+  font-size: 17px !important;
   font-weight: 600 !important;
   padding: 0 !important;
   min-height: 0 !important;
   height: auto !important;
   line-height: 1.4 !important;
-  color: var(--mantine-color-dark-0) !important;
+  color: var(--mantine-color-text) !important;
 }
 .titleInput::placeholder {
-  color: var(--mantine-color-dark-3) !important;
+  color: var(--mantine-color-placeholder) !important;
   font-weight: 500 !important;
-}
-
-.body {
-  padding: 2px 14px 14px;
-}
-
-.label {
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-weight: 700;
-  color: var(--mantine-color-dark-2);
-  margin-bottom: 6px;
 }
 
 /* prompt textarea: recessed, mono, high-contrast text */
 .promptInput {
-  background: var(--mantine-color-dark-8) !important;
-  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8)) !important;
+  border: 1px solid light-dark(var(--mantine-color-gray-3), rgba(255, 255, 255, 0.06)) !important;
   border-radius: 10px !important;
-  color: var(--mantine-color-dark-0) !important;
+  color: var(--mantine-color-text) !important;
   font-family: var(--mantine-font-family-monospace) !important;
   font-size: 12.5px !important;
   line-height: 1.6 !important;
@@ -130,34 +62,394 @@
   border-color: var(--mantine-primary-color-filled) !important;
 }
 .promptInput::placeholder {
-  color: var(--mantine-color-dark-3) !important;
+  color: var(--mantine-color-placeholder) !important;
 }
 
-/* settings row: inset strip, clearly distinct from the card surface */
-.settings {
+/* "PROMPT … Insert ▾" */
+.promptHeader {
   display: flex;
-  gap: 22px;
   align-items: center;
-  flex-wrap: wrap;
-  margin-top: 14px;
-  padding: 12px 14px;
-  background: var(--mantine-color-dark-8);
-  border-radius: 10px;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 22px;
+  margin-bottom: 6px;
+}
+.promptHeader .label {
+  margin-bottom: 0;
 }
 
-.control {
+/* A prompt that takes whatever height its pane leaves it, and scrolls inside
+   itself — the pane around it never scrolls as well. */
+.promptFill,
+.promptFillRoot,
+.promptFillWrapper {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
 }
-.controlLabel {
+.promptFillInput {
+  flex: 1;
+  min-height: 0 !important;
+  height: auto !important;
+  resize: none;
+}
+
+/* ---- the step pane: header, banner, prompt (fills), settings, footer ---- */
+
+.pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 18px 12px;
+  /* A fallback for a very short window only: the prompt and the settings each
+     scroll on their own long before this does. */
+  overflow-y: auto;
+}
+.paneHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.paneTitle {
+  flex: 1;
+  min-width: 0;
+}
+.panePrompt {
+  flex: 1 1 auto;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+}
+.paneSettings {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 48%;
+  overflow-y: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--mantine-color-default-border);
+}
+.paneFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--mantine-color-default-border);
+}
+
+/* What the open step is — pinned, someone else's, being edited, a copy. */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6));
+}
+.bannerIcon {
+  display: flex;
+  color: var(--mantine-color-dimmed);
+}
+
+/* The "Advanced" disclosure in the step settings. */
+.disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mantine-color-dimmed);
+}
+.disclosure .label {
+  margin-bottom: 0;
+}
+
+/* A text control: dimmed until hovered, no border. Connectors, the version
+   trigger, the start mode. */
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--mantine-color-dimmed);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+}
+.link:hover {
+  color: var(--mantine-color-text);
+  background: var(--mantine-color-default-hover);
+}
+.link:focus-visible {
+  outline: 2px solid var(--mantine-primary-color-filled);
+  outline-offset: 1px;
+}
+.link[data-static],
+.link[data-static]:hover {
+  cursor: default;
+  color: var(--mantine-color-dimmed);
+  background: none;
+}
+.linkText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.linkChevron {
+  flex: 0 0 auto;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.link:hover .linkChevron,
+.link:focus-visible .linkChevron {
+  opacity: 1;
+}
+
+/* ---- lists: workflows, library steps, the outline's rows ---- */
+
+.listColumn {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.listBody {
+  padding: 4px 10px 12px;
+}
+.listSection {
+  padding: 12px 10px 4px;
   font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-weight: 700;
-  color: var(--mantine-color-dark-2);
+  color: var(--mantine-color-dimmed);
 }
-.fieldInput {
-  background: var(--mantine-color-dark-6) !important;
-  border-color: rgba(255, 255, 255, 0.08) !important;
+
+.listRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 10px;
+  text-align: left;
+  transition: background 120ms ease;
+}
+.listRow:hover {
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-6));
+}
+.rowActive,
+.rowActive:hover {
+  background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5));
+}
+.listRow:focus-visible,
+.rowButton:focus-visible {
+  outline: 2px solid var(--mantine-primary-color-filled);
+  outline-offset: -2px;
+}
+
+.rowText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.rowName {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--mantine-color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rowMeta {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--mantine-color-dimmed);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rowMetaError {
+  color: var(--mantine-color-red-5);
+}
+.rowAside {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--mantine-color-dimmed);
+}
+
+.updateDot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mantine-color-yellow-5);
+}
+
+/* ---- the outline: start → step → connector → step → … → done ----
+   The rail runs through the centre of each step number: 18px grip + 2px
+   button padding + half the 22px number = 31px from the row's left edge. */
+
+.outlineRow {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  border-radius: 10px;
+  transition: background 120ms ease;
+}
+.outlineRow:hover {
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-6));
+}
+.outlineRowDragging,
+.outlineRowDragging:hover {
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-6));
+  box-shadow: 0 8px 24px light-dark(rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0.5));
+}
+
+.grip {
+  flex: 0 0 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--mantine-color-dimmed);
+  border-radius: 4px;
+  opacity: 0;
+  cursor: grab;
+  transition: opacity 120ms ease;
+}
+.outlineRow:hover .grip,
+.grip:focus-visible {
+  opacity: 1;
+}
+.grip:focus-visible {
+  outline: 2px solid var(--mantine-primary-color-filled);
+}
+
+.rowButton {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 10px 7px 2px;
+  border-radius: 10px;
+  text-align: left;
+}
+
+.num {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--mantine-color-dimmed);
+  background: var(--mantine-color-body);
+  border: 1px solid var(--mantine-color-default-border);
+}
+/* The open step inverts: solid primary fill (white in dark, black in light). */
+.numActive {
+  color: var(--mantine-primary-color-contrast);
+  background: var(--mantine-primary-color-filled);
+  border-color: var(--mantine-primary-color-filled);
+}
+.numInvalid {
+  color: var(--mantine-color-red-4);
+  background: color-mix(in srgb, var(--mantine-color-red-6) 16%, var(--mantine-color-body));
+  border-color: color-mix(in srgb, var(--mantine-color-red-6) 40%, transparent);
+}
+
+/* Link text starts where the row names do: 18 + 2 + 22 + 10 = 52px, less the
+   link's own 6px padding. */
+.connector,
+.firstLink {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-left: 46px;
+}
+.connector {
+  min-height: 28px;
+}
+.firstLink {
+  height: 8px;
+}
+.connector::before,
+.firstLink::before {
+  content: '';
+  position: absolute;
+  left: 30.5px;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--mantine-color-default-border);
+}
+/* The connector riding on the dragged row keeps its height, draws nothing. */
+.connectorHidden {
+  visibility: hidden;
+}
+/* Where the dragged step would land. */
+.connectorDrop::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -1px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--mantine-primary-color-filled);
+}
+
+.cap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding-left: 21px;
+}
+.capIcon {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  margin-right: 4px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--mantine-color-default-border);
+  background: var(--mantine-color-body);
+  color: var(--mantine-color-dimmed);
+}
+.capIconEnd {
+  border-radius: 6px;
+}
+
+/* A connector's text wraps onto a second line rather than lose its end — the
+   outline is narrow, and "uses plan" is the part worth reading. */
+.linkWrap {
+  white-space: normal;
+  align-items: flex-start;
+  text-align: left;
+}
+.linkWrap > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+.linkWrap .linkText {
+  overflow: visible;
 }

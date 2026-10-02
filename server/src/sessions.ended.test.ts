@@ -800,6 +800,62 @@ test('a clean end writes no synthetic result', () => {
   assert.deepEqual(h.transcript(), []);
 });
 
+/**
+ * A workflow turn the user stopped, whose `result` has not arrived. Once its query
+ * is closed nothing will ever report it — a closed query is killed and sends no
+ * `ended` — so the close has to deliver the settle a workflow step parks on.
+ */
+function stoppedStep() {
+  const h = harness();
+  const settles: [string, string, boolean, boolean][] = [];
+  h.sessions.setTurnCompleteListener((...args) => settles.push(args));
+  const m = h.sessions.get('s1')!;
+  m.turnSource = 'workflow';
+  m.claudeSessionId = 'cli-1';
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 1', source: 'workflow' });
+  h.sessions.interrupt('s1');
+  return { ...h, settles };
+}
+
+test('a stopped turn settles when an idle recycle closes its query', () => {
+  const h = stoppedStep();
+  h.sessions.recycleIdleQueries();
+
+  assert.deepEqual(h.closes, ['s1']);
+  assert.deepEqual(h.settles, [['s1', 'workflow', true, false]], 'settled as stopped, not failed');
+  assert.equal(h.sessions.get('s1')!.turnSource, undefined);
+  assert.deepEqual(h.sessions.devReloadBlockers(), [], 'and the Stop no longer counts as in flight');
+});
+
+test('a stopped turn settles when a rewind drops its query', async () => {
+  const h = stoppedStep();
+  const rewound = await h.sessions.rewindSession('s1', 0);
+
+  assert.equal(rewound.ok, true);
+  assert.deepEqual(h.settles, [['s1', 'workflow', true, false]]);
+  assert.deepEqual(h.sessions.devReloadBlockers(), []);
+});
+
+test('a close under a turn started on top of the Stop leaves that turn alone', () => {
+  const h = stoppedStep();
+  // A fresh-start step on entry: its own turn already reads 'running' when the
+  // old conversation is dropped, and only its prompt, which clears the Stop, is
+  // still to come.
+  h.sessions.setStatus('s1', 'running');
+  h.sessions.resetClaudeSession('s1');
+
+  assert.deepEqual(h.settles, [], 'the new turn was not settled before it ran');
+  assert.equal(h.sessions.get('s1')!.turnSource, 'workflow');
+});
+
+test('deleting a session mid-Stop leaves nothing blocking a dev reload', () => {
+  const h = stoppedStep();
+  h.sessions.deleteSession('s1');
+
+  assert.deepEqual(h.settles, [], 'a deleted session has no step left to settle');
+  assert.deepEqual(h.sessions.devReloadBlockers(), []);
+});
+
 test('an auth-failure result message notifies auth', () => {
   const h = harness();
   h.sessions.handleWorkerEvent('s1', {

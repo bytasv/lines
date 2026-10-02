@@ -201,6 +201,12 @@ const worker = new WorkerClient({
     ended.sessions.releaseAuthHold(sessionId);
     ended.sessions.handleWorkerEnded(sessionId, error);
   }),
+  // A closed query is killed and sends no `ended`, so the same two lines run
+  // here: its PKCE verifier died with it just the same.
+  onClosed: (sessionId) => {
+    mcpAuthPending.forgetSession(sessionId);
+    registry.forSession(sessionId).sessions.releaseAuthHold(sessionId);
+  },
   onRpc: (rpc) => devRuntime.whenActive(() => {
     const ctx = registry.forSession(rpc.sessionId);
     // Workflow tool calls are the bridge's own business, not the session's —

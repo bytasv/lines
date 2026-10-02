@@ -40,7 +40,9 @@ reads as "done" without opening the session.
 - `web/src/components/Composer.tsx` (stop button, sends `interrupt`)
 - `web/src/components/WorkflowStepper.tsx` (`StepIcon` hover affordances — checkmark,
   play-icon, "Continue" — confirmation modal, Approve button, the waiting/advancing strip, the
-  row/list switch and its accordion)
+  row/list switch and its accordion; on desktop, gate markers between rows show whether the
+  previous step waits for approval or auto-advances, and a step name's hover card summarises that
+  step's model, effort, permission, start mode and finish rule; shared workflows get a stepper too)
 - `server/src/index.ts` (`case 'interrupt'`, `case 'workflowForceAdvance'`,
   `case 'workflowStartStep'`, `case 'setWorkflowStepOverrides'`)
 - `server/src/sessions.ts` (`SessionManager.interrupt`)
@@ -82,6 +84,10 @@ reads as "done" without opening the session.
 - `SessionManager.interrupting` (in-flight interrupt set)
 - `SessionManager.handleWorkerEnded` (ended-without-result fallback)
 - `SessionManager.TurnCompleteListener` (`interrupted` third argument)
+- `WorkflowEngine.reopenParkedStep` (parked step back to `running`)
+- `SessionManager.setTurnResumedListener` / `TurnResumedListener`
+- `provesMainThreadTurn` (which events prove a main-thread turn)
+- `SessionManager.settleStoppedTurn` (settle a Stop whose query closed)
 - `SessionManager.consolidateStepOutput`
 - `SessionManager.consolidateQuery`
 - `SessionManager.consolidateTimeoutMs`
@@ -180,6 +186,43 @@ path) the moment the compaction settles and finds the step still parked with not
 running. The stepper mirrors this: `WorkflowStepper` derives `compacting = waiting &&
 isSessionInterruptible(session.status)` and disables the Approve/checkmark affordance for the
 duration, so the button never offers a click the server would refuse.
+
+### A parked step that was not really finished
+
+`onWorkflowTurnComplete` parks a step on any `result`. A `result` is not always the end of the
+step's work: a turn that kicked off a background task is followed by a notification turn on the
+same query, and that turn's own `result` arrives after the park. Without a correction the
+stepper reads "no longer active" and the composer offers Send while the transcript keeps
+growing.
+
+`SessionManager.handleWorkerEvent` therefore treats an event that proves a *main-thread* turn is
+running (`provesMainThreadTurn`: an `assistant`, `stream_event` or non-replay `user` message with
+no subagent parent — never a system, rate-limit, replay or subagent event) as a reason to ask
+`WorkflowEngine.reopenParkedStep` (wired through `SessionManager.setTurnResumedListener`). The
+engine flips the step back to `running` only when the step is parked, no advance is in flight
+and the park was not a `'pre-run'` failure; `markTurnLive` then restores the session to
+`running`. The next `result` parks it again through the normal settle, so cost keeps
+accumulating on the same step. The branch is gated on `!meta.turnSource` and no in-flight
+interrupt, which excludes every turn the bridge itself started over a park (compaction,
+provider-switch hand-off, recovery, held turns) and a Stop still settling.
+
+`markTurnLive` no longer downgrades `waiting-permission` and clears `errorKind`, so a heal never
+hides a pending permission card or leaves a stale failure kind behind.
+
+Not undone by the re-open: side effects of the premature park that already fired (an
+`autoAdvance` advance, the "Needs approval" push, an Approve clicked in the gap).
+
+### A closed query is dead
+
+The step boundary closes the previous conversation's query. The worker tags each query with a
+generation, so a closed query can no longer emit events, `ended`, or RPC results under the
+session id, and `close` really closes the SDK query (killing its CLI child) instead of only
+ending its input queue. On the bridge, closing a query while a Stop is still settling runs the
+same settle as `handleWorkerEnded` (`SessionManager.settleStoppedTurn`) so the step parks and
+the queue flushes, unless the session is already in a newer turn (a fresh-start step reset
+between its status change and its prompt). While a workflow is `advancing`, `isBusy` and
+`maybeFlush` hold: a prompt sent mid-advance queues and drains into the next step instead of
+being lost with the closed query. See [turn-recovery](turn-recovery.md#closing-a-query-is-final).
 
 ### Force-advance: manual escape hatch
 
@@ -443,7 +486,12 @@ installed icon, no new package). No other new dependencies.
   failure; cleared by the constructor load loop after a simulated crash; cleared by
   `adoptSynced()`; left alone by `reconcileWithWorker()`; approve/force-advance are refused and
   a typed prompt queues (instead of iterating) while a parked step compacts; a prompt queued
-  during that compaction drains into the same step on settle.
+  during that compaction drains into the same step on settle; a parked step re-opens when a
+  main-thread event proves a notification turn is running and re-parks on its result (cost
+  accumulates); quiet events (subagent, system task events, replay, rate limit) re-open nothing;
+  a Stop, a compaction, a pre-run failure and an in-flight advance each leave the park alone; a
+  failed `autoAdvance` step still advances; a plan approved during the re-open still advances;
+  a prompt sent mid-advance waits for the next step.
 - `server/src/sessions.compact.test.ts` — status restore around a compaction over a parked or
   failed step: settles back to the same status (not `done`), a stopped or dead-query compaction
   restores it too, and a compaction that itself fails does not overwrite it.
@@ -480,6 +528,12 @@ installed icon, no new package). No other new dependencies.
   `'interrupted'` flag and its step stamp (the user chose to keep working on the step).
 - Deny-pending-permissions and queue-pause semantics of interrupt are unchanged; queued
   messages stay held until the next explicit user send or an `iterateIfWaiting` follow-up.
+- A parked step re-opens to `running` when a main-thread event proves a turn is live on it that
+  the bridge did not start (a background-task notification turn); it parks again on that
+  turn's result. A `'pre-run'` failure, an in-flight advance, a Stop in progress and any
+  bridge-started turn never re-open it.
+- A closed query is final: nothing it emits afterwards reaches the session, and a workflow
+  advance holds prompts and queue flushes until it finishes.
 - A parked step's status (`waiting-approval`, or `error` for a failed step) survives a manual
   compaction turn — approve/force-advance/retry/prompt are all held while it runs, and a
   typed prompt queues instead of iterating, draining into the same step (never advancing) once
@@ -632,7 +686,7 @@ rather than of a provider — which is why it is a function,
 A step that changes provider is therefore a fresh start, enforced in three places because each
 catches a case the others cannot:
 
-- **The editor** (`StepCard.tsx`) turns `freshStart` on in the same patch as the model change and
+- **The editor** (`StepSettings.tsx`, with the gate/start link in `StepOutline.tsx`) turns `freshStart` on in the same patch as the model change and
   locks the switch, so the rule is visible while the workflow is being assembled rather than
   discovered minutes into a run.
 - **The draft serializer** (`useWorkflowDraft.ts`, `crossesProviderAt`) forces it again on save,

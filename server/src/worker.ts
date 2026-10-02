@@ -91,6 +91,8 @@ class AsyncQueue<T> implements AsyncIterable<T> {
 interface SessionState {
   queue: AsyncQueue<SDKUserMessage>;
   query: Query;
+  /** Which query this is for its session id (see nextQueryGen). */
+  gen: number;
   claudeSessionId?: string;
   /** A pushed turn has not produced its `result` yet. Reported in hello so the
    *  bridge can reconcile a status in either direction, not just demote. */
@@ -117,6 +119,8 @@ interface PendingRpc {
   kind: RpcKind;
   payload: Record<string, unknown>;
   settle: (result: unknown) => void;
+  /** The asking query's generation; absent for codex, which has no Query. */
+  gen?: number;
 }
 
 /**
@@ -144,6 +148,13 @@ const startedAt = Date.now();
 const bootToken = newRuntimeToken();
 const sessions = new Map<string, SessionState>();
 const pendingRpcs = new Map<string, PendingRpc>();
+/**
+ * Counter behind SessionState.gen. A closed query lives on for a moment under the
+ * same session id as its successor: the SDK keeps reading the dying CLI until its
+ * kill lands. The generation is what tells that query's callbacks they are no
+ * longer the session's.
+ */
+let nextQueryGen = 0;
 
 let bridge: WebSocket | null = null;
 
@@ -348,7 +359,15 @@ function rpcCall(
   kind: RpcKind,
   payload: Record<string, unknown>,
   signal?: AbortSignal,
+  /** The asking query's generation. Codex passes none: it has no Query to close. */
+  gen?: number,
 ): Promise<unknown> {
+  // Asked by a query that has been closed: no session the bridge knows is behind
+  // it, so the bridge never sees the request — a card it raised would belong to
+  // whichever query runs under this id now.
+  if (gen !== undefined && sessions.get(sessionId)?.gen !== gen) {
+    return Promise.resolve(unavailableResult(kind, 'Session ended.'));
+  }
   const id = randomUUID();
   return new Promise((resolve) => {
     let timer: NodeJS.Timeout | null = null;
@@ -357,7 +376,7 @@ function rpcCall(
       if (timer) clearTimeout(timer);
       resolve(result);
     };
-    pendingRpcs.set(id, { sessionId, kind, payload, settle });
+    pendingRpcs.set(id, { sessionId, kind, payload, settle, gen });
 
     const fallback = RPC_FALLBACK[kind];
     if (fallback) {
@@ -388,6 +407,9 @@ function ensureSession(
   let state = sessions.get(sessionId);
   if (state) return state;
 
+  // Taken before any callback closes over it: every rpc this query asks is
+  // stamped with it (see rpcCall).
+  const gen = ++nextQueryGen;
   const queue = new AsyncQueue<SDKUserMessage>();
   // Built ahead of the options object so the instance can be kept on the session
   // state — see SessionState.linesServer for why a later replace needs it.
@@ -395,7 +417,7 @@ function ensureSession(
     ? buildMcpServer(
         tools,
         (toolName, args, signal) =>
-          rpcCall(sessionId, 'mcpTool', { tool: toolName, args }, signal) as Promise<McpToolResult>,
+          rpcCall(sessionId, 'mcpTool', { tool: toolName, args }, signal, gen) as Promise<McpToolResult>,
       )
     : undefined;
   const fullOptions = {
@@ -404,13 +426,13 @@ function ensureSession(
       if (data.trim()) console.error(`[claude:${sessionId.slice(0, 8)}]`, data.trim());
     },
     canUseTool: (toolName: string, input: Record<string, unknown>, opts: { signal: AbortSignal }) =>
-      rpcCall(sessionId, 'canUseTool', { toolName, input }, opts.signal),
+      rpcCall(sessionId, 'canUseTool', { toolName, input }, opts.signal, gen),
     // An MCP server asking the user for something — in practice an OAuth
     // authorization URL. Lives here for the same reason canUseTool does: it is a
     // function, so it cannot ride the serialized options, and the decision itself
     // belongs to the bridge.
     onElicitation: (request: Record<string, unknown>, opts: { signal: AbortSignal }) =>
-      rpcCall(sessionId, 'elicitation', { request }, opts.signal) as Promise<{
+      rpcCall(sessionId, 'elicitation', { request }, opts.signal, gen) as Promise<{
         action: 'accept' | 'decline' | 'cancel';
       }>,
     hooks: {
@@ -419,7 +441,7 @@ function ensureSession(
           timeout: 600, // seconds; generous so a bridge restart never lapses the hook
           hooks: [
             (input: unknown, _toolUseID: string | undefined, opts: { signal: AbortSignal }) =>
-              rpcCall(sessionId, 'preToolUse', input as Record<string, unknown>, opts.signal),
+              rpcCall(sessionId, 'preToolUse', input as Record<string, unknown>, opts.signal, gen),
           ],
         },
       ],
@@ -440,6 +462,7 @@ function ensureSession(
   state = {
     queue,
     query: q,
+    gen,
     busy: false,
     ...(tools && linesServer ? { linesServerName: tools.serverName, linesServer } : {}),
   };
@@ -449,6 +472,12 @@ function ensureSession(
 }
 
 async function pump(sessionId: string, state: SessionState, q: Query) {
+  // Only the session's current query speaks for it. `close` drops a query from
+  // the map before killing it, and whatever it still emits on the way down — the
+  // rest of a turn, a notification turn, its `ended` — would otherwise reach the
+  // bridge as the session's own: settling its next turn, flushing that turn's
+  // cards, re-pointing its resume id.
+  const current = () => sessions.get(sessionId) === state;
   try {
     for await (const message of q) {
       const msg = message as Record<string, unknown> & { type: string; session_id?: string };
@@ -464,18 +493,22 @@ async function pump(sessionId: string, state: SessionState, q: Query) {
           state.backgroundTasks = undefined;
         }
       }
-      send({ type: 'event', sessionId, message: msg });
+      if (current()) send({ type: 'event', sessionId, message: msg });
     }
-    send({ type: 'ended', sessionId });
+    if (current()) send({ type: 'ended', sessionId });
   } catch (err) {
-    console.error(`[worker] session ${sessionId} query failed:`, err);
-    send({ type: 'ended', sessionId, error: err instanceof Error ? err.message : String(err) });
+    // A closed query failing on its way down is the kill landing, not news.
+    if (current()) {
+      console.error(`[worker] session ${sessionId} query failed:`, err);
+      send({ type: 'ended', sessionId, error: err instanceof Error ? err.message : String(err) });
+    }
   } finally {
     state.busy = false;
     if (sessions.get(sessionId) === state) sessions.delete(sessionId);
-    // Settle rpcs still waiting on this dead query so their promises resolve.
+    // Settle rpcs still waiting on this dead query so their promises resolve —
+    // its own only: a newer query under the same session id has its own.
     for (const [, p] of [...pendingRpcs]) {
-      if (p.sessionId !== sessionId) continue;
+      if (p.sessionId !== sessionId || p.gen !== state.gen) continue;
       p.settle(unavailableResult(p.kind, 'Session ended.'));
     }
   }
@@ -553,6 +586,11 @@ function handleBridgeMessage(msg: BridgeToWorker) {
       if (state) {
         sessions.delete(msg.sessionId); // next push re-creates (resume keeps context)
         state.queue.close();
+        // Kill the CLI child, not just its input: a query whose input merely ends
+        // finishes its turn and runs notification turns for its background tasks,
+        // all of it after the bridge has moved on. The SDK aborts the in-flight
+        // callbacks, and their abort listeners cancel the bridge's cards.
+        try { state.query.close(); } catch { /* already closed */ }
       }
       break;
     }

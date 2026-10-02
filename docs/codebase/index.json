@@ -499,7 +499,8 @@
       "entryPoints": [
         "web/src/components/workflow/StepCard.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
-        "web/src/components/workflow/WorkflowEditor.tsx"
+        "web/src/components/workflow/WorkflowEditor.tsx",
+        "web/src/components/workflow/StepOutline.tsx"
       ],
       "files": [
         "shared/types.ts",
@@ -511,6 +512,9 @@
         "web/src/store.ts",
         "web/src/components/workflow/useWorkflowDraft.ts",
         "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/workflow/StepSettings.tsx",
+        "web/src/components/workflow/StepPane.tsx",
+        "web/src/components/workflow/StepOutline.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
         "web/src/components/workflow/WorkflowEditor.tsx",
         "server/src/workflows.ownership.test.ts",
@@ -537,7 +541,10 @@
         "WorkflowEngine.isForeign",
         "WorkflowEngine.normalizeRefs",
         "earliest",
-        "lineageCreatedAt"
+        "lineageCreatedAt",
+        "useWorkflowDraft.selectStep",
+        "useWorkflowDraft.detachStep",
+        "contentOf"
       ],
       "tests": [
         "server/src/workflows.ownership.test.ts"
@@ -551,9 +558,10 @@
         "diff list scrolls independently (ScrollArea.Autosize, mah 280) once it exceeds popover height, so the Update button stays reachable regardless of diff length",
         "Update all re-pins every outdated ref step directly, skipping the per-field diff review",
         "a workflows/sharedWorkflows length change while the modal is already open with a live draft must not re-trigger the pick-a-workflow fallback",
-        "loadFrom collapses every step of the loaded workflow by default; a step opens only via explicit selection",
+        "loadFrom selects no step of the loaded workflow (the pane shows the workflow overview); a step opens only via explicit selection, one at a time",
         "own beats shared: an id/step present in both the own and shared maps is owned, editable, and never rendered under \"Shared by others\"; a StepRef.ownerId drifted from the bridge's own id is healed on re-pin/update and on WorkflowEngine.save(), plus once at boot",
-        "every version of one step reports the same createdAt (the lineage's, not the version's); a content change or a publish-toggle-only save both keep it, and it only ever moves earlier, never later"
+        "every version of one step reports the same createdAt (the lineage's, not the version's); a content change or a publish-toggle-only save both keep it, and it only ever moves earlier, never later",
+        "contentOf is the single StepContent field list for loading, saving, publishing and duplicating steps in both the workflow editor and step library, so no field (reasoningEffort, routing) is dropped on any path"
       ],
       "architecturalRules": [
         "immutable step versions are never deleted or edited, on disk or in storage — only the head list and published flag change",
@@ -609,7 +617,8 @@
         "web/src/components/workflow/WorkflowRunModal.tsx",
         "web/src/lib/useStepResolver.ts",
         "web/src/lib/platform.ts",
-        "shared/workflowValidation.ts"
+        "shared/workflowValidation.ts",
+        "server/src/sessions.ended.test.ts"
       ],
       "symbols": [
         "SessionManager.interrupt",
@@ -646,7 +655,12 @@
         "WorkflowEngine.setStepOverrides",
         "sanitizeStepOverrides",
         "WorkflowRunModal",
-        "useStepResolver"
+        "useStepResolver",
+        "WorkflowEngine.reopenParkedStep",
+        "SessionManager.setTurnResumedListener",
+        "SessionManager.TurnResumedListener",
+        "provesMainThreadTurn",
+        "SessionManager.settleStoppedTurn"
       ],
       "tests": [
         "server/src/workflows.advance.test.ts",
@@ -655,7 +669,8 @@
         "server/src/sessions.compact.test.ts",
         "server/src/sessions.reconcile.test.ts",
         "server/src/workflows.providers.test.ts",
-        "server/src/messageAuthz.test.ts"
+        "server/src/messageAuthz.test.ts",
+        "server/src/sessions.ended.test.ts"
       ],
       "businessRules": [
         "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
@@ -700,7 +715,9 @@
         "a non-last step's settle (done while its step still reads running) raises no Task complete alert or push — isAlertTransition suppresses it because an advance follows and a park re-alerts as waiting-approval; only the last step's done alerts; see web-push-notifications",
         "Per-run overrides never mutate stored steps; runStep merges WorkflowState.stepOverrides over the step's model and effort.",
         "Only pending steps accept override edits; running and done steps keep what they ran on.",
-        "Overrides are Claude-only: a non-Anthropic model or unknown effort is dropped by sanitizeStepOverrides."
+        "Overrides are Claude-only: a non-Anthropic model or unknown effort is dropped by sanitizeStepOverrides.",
+        "a parked step re-opens to running when a main-thread event proves a turn is live on it that the bridge did not start (a background-task notification turn) and parks again on that turn's result; a pre-run failure, an in-flight advance, a Stop in progress and any bridge-started turn never re-open it",
+        "a closed query is final: nothing it emits afterwards reaches the session, and a workflow advance holds prompts and queue flushes until it finishes"
       ],
       "architecturalRules": [
         "interrupt() stays intent-free — no caller may infer \"advance\" from \"stop\"",
@@ -861,7 +878,10 @@
         "AuthManager.lastRefreshAt",
         "RECENT_REFRESH_MS",
         "isRecoveringResult",
-        "ResultItem.recovering"
+        "ResultItem.recovering",
+        "SessionManager.settleStoppedTurn",
+        "SessionManager.queryInUse",
+        "WorkerClientCallbacks.onClosed"
       ],
       "tests": [
         "server/src/sessions.reconcile.test.ts",
@@ -875,7 +895,8 @@
         "server/src/turnFailure.test.ts",
         "server/src/sessions.compact.test.ts",
         "server/src/caveman.test.ts",
-        "server/src/sessions.permission.test.ts"
+        "server/src/sessions.permission.test.ts",
+        "server/src/sessions.mcpLive.test.ts"
       ],
       "businessRules": [
         "a turn the user stopped is not classified as a failure: no dropFailedQuery, no red banner, no Retry — the stopped result is recorded verbatim but the turn settles clean",
@@ -919,7 +940,9 @@
         "a query the bridge cannot vouch for (e.g. no queryTokens entry after a bridge restart) is recycled, not reused",
         "any failed turn drops that session's query, recognised or not, so a single Retry cannot reuse the child that just failed",
         "a failed attempt inside a transparent recovery still bills its spend (totalCostUsd/totalTokens/costByModel), and never appends a second 'user' transcript event",
-        "a transparent recovery holds no query for the length of its backoff/refresh; reconcileWithWorker must not read that absence as a dead turn"
+        "a transparent recovery holds no query for the length of its backoff/refresh; reconcileWithWorker must not read that absence as a dead turn",
+        "a closed query never reaches the session again: its events, ended and pending RPC results are dropped, close kills the CLI child, and a Stop settling under it is settled by the bridge (skipped while the session is already in a newer turn, and for a deleted session)",
+        "warmQuery and recycleIdleQueries never close a query that is mid-turn, owns a background task or is held for auth (queryInUse)"
       ],
       "architecturalRules": [
         "SessionManager.interrupting is the only authoritative Stop signal; the SDK's terminal_reason is unpublished and never consulted",
@@ -3181,7 +3204,9 @@
         "BACKGROUND_WORK_META",
         "ToolBlock.background",
         "isBackgroundTaskSignal",
-        "BACKGROUND_TASK_SYSTEM_SUBTYPES"
+        "BACKGROUND_TASK_SYSTEM_SUBTYPES",
+        "provesMainThreadTurn",
+        "SessionManager.queryInUse"
       ],
       "tests": [
         "server/src/sessions.backgroundTasks.test.ts"
@@ -3197,7 +3222,8 @@
         "the composer's Send action is never blocked by a live background task; only Stop's target message (interrupt vs stopBackgroundTasks) changes based on whether a turn is also live",
         "the sidebar's background-work row is not actionable and is checked after waiting-permission and the interrupted-turn state, both of which do need the user",
         "the finish chime/notification is suppressed while backgroundTasks is non-empty; it fires normally for the eventual notification turn once the set has emptied",
-        "a task that vanishes silently (no task_notification, no further background_tasks_changed naming it) is not self-healing under this invariant — the user still needs to click Stop; fully self-healing that needs per-task timestamps plus a timer, out of scope here"
+        "a task that vanishes silently (no task_notification, no further background_tasks_changed naming it) is not self-healing under this invariant — the user still needs to click Stop; fully self-healing that needs per-task timestamps plus a timer, out of scope here",
+        "an event proving a main-thread turn (assistant, stream_event, non-replay user, no subagent parent) on a settled session with no bridge-started turn does heal the status to running and re-opens a parked workflow step — unlike the background-task-only system events above"
       ],
       "architecturalRules": [
         "SessionStatus is deliberately not overloaded to represent background work — a separate SessionMeta field keeps the turn lifecycle (workflow advance, queue flush, turn-complete accounting) byte-identical",
@@ -3520,6 +3546,7 @@
         "web/src/components/Composer.tsx",
         "web/src/components/SessionsSection.tsx",
         "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/workflow/StepSettings.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
         "server/src/mcpWorkflowTools.ts"
       ],
@@ -3906,6 +3933,7 @@
       "entryPoints": [
         "web/src/components/RoutingSection.tsx",
         "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/workflow/StepSettings.tsx",
         "web/src/components/Composer.tsx",
         "server/src/mcpWorkflowTools.ts"
       ],
@@ -3923,6 +3951,7 @@
         "web/src/components/RoutingSection.tsx",
         "web/src/components/Composer.tsx",
         "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/workflow/StepSettings.tsx",
         "web/src/components/workflow/useWorkflowDraft.ts",
         "web/src/store.ts"
       ],

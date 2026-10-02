@@ -128,7 +128,7 @@ export function WorkflowRunModal({
                     c={disabled ? 'dimmed' : undefined}
                     style={{ flex: 1, minWidth: 0 }}
                   >
-                    {content?.name ?? 'Shared step'}
+                    {content?.name ?? 'Pinned step'}
                   </Text>
                   <Select
                     w={170}
