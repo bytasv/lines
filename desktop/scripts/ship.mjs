@@ -152,6 +152,19 @@ async function promptForBump(message) {
   return next;
 }
 
+/** The working-tree version when it differs from HEAD's, else null (also null if git cannot say). */
+function uncommittedVersion() {
+  try {
+    const head = JSON.parse(
+      execFileSync('git', ['show', `HEAD:${MANIFEST}`], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }),
+    ).version;
+    const current = JSON.parse(fs.readFileSync(path.join(REPO, MANIFEST), 'utf8')).version;
+    return current !== head ? current : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The version this run wrote, if it wrote one. Null on every other path. */
 let bumped = null;
 
@@ -215,19 +228,25 @@ run('npm', ['run', 'upload', '-w', 'desktop'], { env });
  * release that did not ship. Deliberately not via `run` — that exits on a
  * non-zero status, which would report an already-published release as a
  * failure. The release is done; the worst case here is a commit you push later.
+ *
+ * Also covers a version bumped by hand (or left behind by an earlier failed
+ * ship): if the manifest differs from HEAD's, the release just published a
+ * version nobody recorded, so commit it the same way. Terminal only — CI has no
+ * business committing to the branch it was dispatched from.
  */
-if (bumped) {
+const toCommit = bumped ?? (process.stdin.isTTY && process.stdout.isTTY ? uncommittedVersion() : null);
+if (toCommit) {
   const git = (args) => execFileSync('git', args, { cwd: REPO, stdio: 'inherit' });
   try {
-    git(['commit', MANIFEST, '-m', `chore(desktop): bump version to ${bumped}`]);
+    git(['commit', MANIFEST, '-m', `chore(desktop): bump version to ${toCommit}`]);
   } catch {
-    console.error(`\npublished ${bumped}; ${MANIFEST} is written but uncommitted — commit and push it.`);
+    console.error(`\npublished ${toCommit}; ${MANIFEST} is written but uncommitted — commit and push it.`);
     process.exit(0);
   }
   try {
     git(['push']);
   } catch {
-    console.error(`\npublished ${bumped}; the bump commit is local — run \`git push\`.`);
+    console.error(`\npublished ${toCommit}; the bump commit is local — run \`git push\`.`);
     process.exit(0);
   }
 }
