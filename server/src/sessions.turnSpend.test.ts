@@ -149,7 +149,7 @@ test('the settling result drops the live figure and bills only what it reports',
   const settled = h.sessions.get('s1')!;
   assert.equal(settled.totalCostUsd, 0.5);
   assert.equal(settled.lastCostUsd, 0.5);
-  assert.deepEqual(settled.costByModel?.[MODEL], { costUsd: 0.5, tokens: 3_300 });
+  assert.deepEqual(settled.costByModel?.[MODEL], { costUsd: 0.5, tokens: 3_300, turns: 1 });
   const day = h.broadcasts.filter((m) => m.type === 'spendDay').at(-1) as Extract<
     ServerMessage,
     { type: 'spendDay' }
