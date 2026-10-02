@@ -12,6 +12,7 @@
 
 import type { ShareProfile } from '@lines/shared';
 import { diag, diagEntries, diagSource, withTimeout, type DiagEntry } from './diag';
+import { rememberedDeviceId } from './deviceMemory';
 
 /**
  * No storage call may spin forever: the device gate renders a loading screen
@@ -170,23 +171,8 @@ export async function revokeDevice(id: string): Promise<void> {
   await call<{ ok: true }>(`/v1/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
-/**
- * Which machine this browser is talking to. Persisted so a reload lands on the
- * same one, and read by the device gate at startup.
- */
-const DEVICE_STORAGE_KEY = 'lines.deviceId';
-
-export function rememberedDeviceId(): string | null {
-  return localStorage.getItem(DEVICE_STORAGE_KEY);
-}
-
-export function rememberDeviceId(id: string): void {
-  localStorage.setItem(DEVICE_STORAGE_KEY, id);
-}
-
-export function forgetDeviceId(): void {
-  localStorage.removeItem(DEVICE_STORAGE_KEY);
-}
+// Kept in its own module, free of `import.meta.env`, so it can be unit tested.
+export { forgetDeviceId, previousDeviceId, rememberDeviceId, rememberedDeviceId } from './deviceMemory';
 
 /**
  * Pick which machine to connect to: the remembered one while it still exists,

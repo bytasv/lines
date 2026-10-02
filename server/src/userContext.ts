@@ -128,7 +128,7 @@ export function sessionIdOf(msg: ServerMessage): string | null {
  * The exceptions are the machine's own health, `workerStatus` and
  * `storageStatus` — a guest whose turns are about to fail needs to know why, and
  * neither carries anything private — and, for a machine share only, `projects`
- * and `projectKeys`.
+ * and `projectKeys`, plus the workflow library when the grant may create sessions.
  */
 export function mayReceive(
   msg: ServerMessage,
@@ -144,6 +144,16 @@ export function mayReceive(
   // A machine share lends the projects too (see `buildHello`), so their changes
   // follow live rather than waiting for the guest's next `hello`.
   if (access.scope === 'machine' && (msg.type === 'projects' || msg.type === 'projectKeys')) {
+    return true;
+  }
+  // A machine guest who may start sessions sees the host's workflow library (see
+  // `buildHello`) so they can start one with a workflow; it follows live too.
+  // Read only — authoring stays owner-only in MESSAGE_AUTHZ.
+  if (
+    access.scope === 'machine' &&
+    access.caps.createSessions &&
+    (msg.type === 'workflows' || msg.type === 'sharedWorkflows')
+  ) {
     return true;
   }
   return msg.type === 'workerStatus' || msg.type === 'storageStatus' || msg.type === 'pong';

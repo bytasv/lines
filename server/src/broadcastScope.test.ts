@@ -108,9 +108,9 @@ describe('broadcast scope', () => {
     );
   });
 
-  test('a machine guest gets every session and the projects, but still no account state', () => {
+  test('a machine guest gets every session, the projects and the workflow library, but no other account state', () => {
     const machine: SocketAccess = { scope: 'machine', caps: capsForPreset('collaborator', 'machine') };
-    const projectState = new Set(['projects', 'projectKeys']);
+    const projectState = new Set(['projects', 'projectKeys', 'workflows']);
     for (const msg of SESSION_BEARING) assert.equal(mayReceiveMsg(msg, machine), true);
     for (const msg of ACCOUNT_WIDE) {
       assert.equal(mayReceiveMsg(msg, machine), projectState.has(msg.type), msg.type);
@@ -124,5 +124,21 @@ describe('broadcast scope', () => {
       mayReceiveMsg({ type: 'projectKeys', projectKeys: {} } as ServerMessage, scoped(['s1'])),
       false,
     );
+  });
+
+  test('the workflow library reaches only a machine guest who may create sessions', () => {
+    const library: ServerMessage[] = [
+      { type: 'workflows', workflows: [] } as ServerMessage,
+      { type: 'sharedWorkflows', workflows: [] } as ServerMessage,
+    ];
+    const full: SocketAccess = { scope: 'machine', caps: capsForPreset('full', 'machine') };
+    const machineView: SocketAccess = { scope: 'machine', caps: capsForPreset('view', 'machine') };
+    for (const msg of library) {
+      assert.equal(mayReceiveMsg(msg, full), true, `full machine guest must receive ${msg.type}`);
+      assert.equal(mayReceiveMsg(msg, machineView), false, `view-only machine guest got ${msg.type}`);
+      assert.equal(mayReceiveMsg(msg, scoped(['s1'])), false, `session guest got ${msg.type}`);
+    }
+    // Step libraries stay owner-only: their client reducers are not per machine.
+    assert.equal(mayReceiveMsg({ type: 'steps', steps: [] } as unknown as ServerMessage, full), false);
   });
 });

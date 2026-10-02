@@ -20,7 +20,7 @@ This inverts the app's original single-owner assumption: a browser reached a mac
   `ClientMessage['type']` in an exhaustive `Record`; a message type added later without a
   classification fails to compile.
 
-Three share presets cover the UI (`view`, `prompt`, `collaborator`); the capability flags exist
+Four share presets cover the UI (`view`, `prompt`, `collaborator`, `full`); the capability flags exist
 underneath so a finer grant can ship later with no migration. Invites work by email (claimable
 only by that address's *verified* Clerk email, so it works before the invitee even has an
 account) or by a single-use link.
@@ -55,6 +55,8 @@ account) or by a single-use link.
 
 ## Files
 
+- `server/src/guestWorkflows.ts` — `guestLibrary` (which workflows a guest's `hello` carries),
+  `clampPermissionMode`, `prepareInlineWorkflow` (validates a guest's own workflow before it runs)
 - `shared/types.ts` — `ShareCaps`, `NO_SHARE_CAPS`, `SharePreset`, `ShareScope`,
   `SHARE_PRESETS`/`capsForPreset`/`parseShareCaps`/`presetOfCaps`, `ShareProfile`, `Actor`,
   `SocketAccess`/`OWNER_ACCESS`, `MessageAuthz`/`MESSAGE_AUTHZ`/`authorizeMessage`,
@@ -117,8 +119,9 @@ account) or by a single-use link.
 ## Symbols
 
 - `ShareCaps` — the flag set: `prompt`, `promptNeedsApproval`, `readFiles`, `interrupt`,
-  `approvePermissions`, `manageWorkflow`, `setModel`, `setPermissionMode` (no preset grants
-  this), `createSessions` (machine scope only)
+  `approvePermissions`, `manageWorkflow`, `setModel`, `setPermissionMode`, `manageSessions`
+  (archive/unarchive/complete), `deleteSessions`, `createSessions` (machine scope only). Only the
+  `full` preset grants `setPermissionMode`, `manageSessions` and `deleteSessions`
 - `parseShareCaps(value)` — reads a stored JSON blob back into `ShareCaps`, **failing closed**:
   anything missing, malformed, or not literally `true` is denied. The load-bearing case is a
   capability added after a grant was written — an old row must not silently acquire it
@@ -240,10 +243,14 @@ guest's token arrives there too, every ~50s, from their browser's own auth relay
 
 `buildHello` gives a guest their sessions (scope-filtered), the machine's health, and
 `access: { scope, caps, sessionIds?, ownerProfile, deviceId }` — and nothing account-wide:
-`workflows`, `steps`, `recipes`, `usage`, `auth`, `settings`, `guardAllowlist` are all
-empty/omitted for a guest. `projects`/`projectKeys` are the one exception, and only at machine
+`recipes`, `usage`, `auth`, `settings`, `guardAllowlist` are all empty/omitted for a guest, and so
+are `workflows`/`steps` except as described below. `projects`/`projectKeys` are the one exception, and only at machine
 scope: a machine share lends the whole machine, and sessions are created inside its projects, so
-that scope gets the host's real list, live (see below). A session share has no folder of its own
+that scope gets the host's real list, live (see below). A machine-scope guest who may create
+sessions likewise gets the host's workflow library read-only (`guestLibrary`), in `hello` and in
+later `workflows`/`sharedWorkflows` broadcasts, so they can start a session with one; any other
+guest gets only the workflows (and the step versions those pin) attached to sessions they can see,
+so the stepper renders. Step-library broadcasts stay owner-only. A session share has no folder of its own
 and still gets none; the client derives its tabs from the shared sessions' own `cwd` instead (see
 [multi-machine-client](multi-machine-client.md)).
 
@@ -358,12 +365,22 @@ resolves a person through — so they can never disagree about who somebody is.
 
 ## Business rules
 
-- Three presets: `view` (read only), `prompt` (queues paused for owner release, always with
+- Four presets: `view` (read only), `prompt` (queues paused for owner release, always with
   `readFiles`), `collaborator` (prompt/interrupt/approve/model/workflow, plus `createSessions` at
-  machine scope). No preset ever grants `setPermissionMode` — it is the guard around every other
-  capability.
+  machine scope), `full` (collaborator plus `setPermissionMode`, archive/unarchive/complete via
+  `manageSessions`, and `deleteSession` via `deleteSessions`). Below `full`, a guest cannot change
+  a session's permission mode — it is the guard around every other capability — and the
+  denial names the "Full access" preset. A grant written before `manageSessions`/`deleteSessions`
+  existed parses them as false.
+- A guest without `setPermissionMode` cannot pick a mode at session creation either: the
+  requested mode (and each inline workflow step's mode) is clamped to the host's
+  new-session default, so a client-sent `bypassPermissions` cannot walk around the cap.
+- A guest holding `manageWorkflow` runs their own workflow on the host's machine by sending it
+  inline with `createSession` (`workflowDef`): it must be self-contained (no step refs), passes
+  the editor's validation, and is stored on the session as a snapshot; it never enters the host's
+  library, and authoring the host's library stays owner-only.
 - Never grantable at any preset: settings, the guard allowlist, project/worktree management,
-  login/logout, device unpair, workflow/step/recipe authoring, `installUpdate`, `deleteSession`,
+  login/logout, device unpair, workflow/step/recipe authoring, `installUpdate`,
   `pickFolder`. Seeing the project list (below) is not management — opening, closing, widening a
   root, or creating/removing a worktree all still need `owner` regardless of preset.
 - A machine-scope grant's `hello` carries the host's real `projects`/`projectKeys`, and later

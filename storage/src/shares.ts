@@ -42,6 +42,8 @@ const OWNER_CAPS: ShareCaps = {
   setModel: true,
   setPermissionMode: true,
   createSessions: true,
+  manageSessions: true,
+  deleteSessions: true,
 };
 
 /**

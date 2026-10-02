@@ -242,6 +242,12 @@ the relay's presence report. Each non-active row's running/needs-you counts come
 no live link or a shared one, so "not connected" is never misread as "nothing running there".
 Picking a row calls the same `rememberDeviceId` + `switchDevice` pair `DevicesSection.switchToDevice`
 uses, so the two switch surfaces can never disagree about how a pick is made durable.
+When the active machine changes, `rememberDeviceId` also records the machine being left as the
+previous one (`web/src/lib/deviceMemory.ts`); a double-click on the control toggles back to it, as
+account switchers do, provided it is still listed and is not the one on screen. Nothing is recorded
+until a switch has happened, so before that a double-click is just two clicks, and the hover
+tooltip names the target once one exists. Machines other than the active one that need the user
+are shown as a count badge on the control, not a second dot beside the health dot.
 `SHARING_ENABLED` gates the whole component — a local build has one machine and no grants — and on
 a phone, where the header has no room for it, the identical control renders as a named row at the
 top of the projects bottom sheet instead of an icon.

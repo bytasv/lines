@@ -292,7 +292,10 @@ export function Composer({ session }: { session: SessionMeta }) {
    * libraries WorkflowStepper reads (useStepResolver).
    */
   const { findWorkflow, lookup: lookupStep } = useStepResolver();
-  const workflowDef = session.workflow ? findWorkflow(session.workflow.workflowId) : undefined;
+  // An inline snapshot (a guest's own workflow) wins: it is not in any library here.
+  const workflowDef = session.workflow
+    ? (session.workflow.def ?? findWorkflow(session.workflow.workflowId))
+    : undefined;
   const nextStep = workflowDef ? stepAfterProviderSwitch(session, workflowDef, lookupStep) : null;
   /** The model a provider switch is being confirmed for, or null. */
   const [switchTo, setSwitchTo] = useState<string | null>(null);

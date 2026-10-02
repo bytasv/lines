@@ -161,8 +161,9 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   // A failed workflow step can be skipped instead of retried — the same Approve
   // the stepper sends, offered where the failure is actually reported.
   const skipStep = skippableFailedStep(session);
+  // An inline snapshot (a guest's own workflow) wins: it is not in any library here.
   const workflow = session.workflow
-    ? workflows.find((w) => w.id === session.workflow!.workflowId)
+    ? (session.workflow.def ?? workflows.find((w) => w.id === session.workflow!.workflowId))
     : undefined;
   // A work-tree session is confined to that checkout, which the path alone doesn't
   // say — the branch is what makes it identifiable at a glance.

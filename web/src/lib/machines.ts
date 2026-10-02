@@ -17,6 +17,8 @@ import type {
   SessionMeta,
   ShareProfile,
   ShareScope,
+  InlineStep,
+  StepContent,
   StepDef,
   StorageStatus,
   UpdateStatus,
@@ -24,7 +26,7 @@ import type {
   WorkerStatus,
   WorkflowDef,
 } from '@lines/shared';
-import { projectPaths } from '@lines/shared';
+import { isStepRef, projectPaths } from '@lines/shared';
 
 /**
  * Per-machine state and the merge rules that keep two machines' sessions apart.
@@ -423,4 +425,51 @@ export function alertTarget(input: {
   const projectKeys = view?.projectKeys ?? input.projectKeys;
   const project = projects.find((p) => inProject(session, projectKeys, p)) ?? null;
   return { deviceId, switchMachine, projectPath: project?.path ?? null };
+}
+
+/** Only the runnable fields of a step — its library identity stays behind. */
+function contentOf(step: StepContent): StepContent {
+  const { name, promptTemplate, model, permissionMode, reasoningEffort, routing, autoAdvance, freshStart, outputName } =
+    step;
+  return {
+    name,
+    promptTemplate,
+    model,
+    permissionMode,
+    autoAdvance,
+    freshStart,
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+    ...(routing !== undefined ? { routing } : {}),
+    ...(outputName !== undefined ? { outputName } : {}),
+  };
+}
+
+/**
+ * A self-contained copy of one of the user's own workflows, every `StepRef`
+ * swapped for its content, so it can run on a machine that has none of their
+ * step library (a shared machine). Refs resolve the way `useStepResolver` does —
+ * the exact pin first, else that step's latest version known here. Null when a
+ * ref cannot be resolved: running a workflow with a step missing is worse than
+ * not starting it.
+ */
+export function inlineWorkflow(
+  def: WorkflowDef,
+  steps: StepDef[],
+  pinned: StepDef[],
+  shared: StepDef[] = [],
+): WorkflowDef | null {
+  const all = [...pinned, ...steps, ...shared];
+  const out: InlineStep[] = [];
+  for (const step of def.steps) {
+    if (!isStepRef(step)) {
+      out.push(step);
+      continue;
+    }
+    const found =
+      all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId && d.version === step.version) ??
+      all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId);
+    if (!found) return null;
+    out.push(contentOf(found));
+  }
+  return { ...def, steps: out };
 }

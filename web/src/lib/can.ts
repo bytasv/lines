@@ -18,6 +18,21 @@ export function useCan(cap: keyof ShareCaps): boolean {
   return useStore((s) => !s.access || s.access.caps[cap]);
 }
 
+/**
+ * `useCan`, judged by the machine that hosts this session rather than the
+ * primary one: the merged sidebar lists sessions from several machines at once,
+ * each under its own grant (or none, on your own machine).
+ */
+export function useCanOnSession(sessionId: string, cap: keyof ShareCaps): boolean {
+  return useStore((s) => {
+    const deviceId = s.sessionMachine[sessionId] ?? s.primaryDeviceId ?? '';
+    const slice = s.machines[deviceId];
+    // No slice yet: fall back to the primary's answer, the same as `useCan`.
+    const access = slice ? slice.view.access : s.access;
+    return !access || access.caps[cap];
+  });
+}
+
 /** True when connected to somebody else's machine. */
 export function useIsGuest(): boolean {
   return useStore((s) => s.access !== null);

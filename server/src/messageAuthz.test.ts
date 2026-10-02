@@ -8,6 +8,7 @@ import {
   parseShareCaps,
   type ClientMessage,
   type ShareCaps,
+  type SharePreset,
   type SocketAccess,
 } from '@lines/shared';
 
@@ -27,7 +28,7 @@ const access = (caps: Partial<ShareCaps>, over: Partial<Omit<SocketAccess, 'caps
   caps: parseShareCaps(caps),
 });
 
-const guest = (preset: 'view' | 'prompt' | 'collaborator', over: Partial<SocketAccess> = {}) => ({
+const guest = (preset: SharePreset, over: Partial<SocketAccess> = {}) => ({
   scope: 'machine' as const,
   caps: capsForPreset(preset, over.scope === 'session' ? 'session' : 'machine'),
   ...over,
@@ -65,14 +66,14 @@ describe('MESSAGE_AUTHZ', () => {
 
   test('the never-grantable set stays never-grantable, even for a collaborator', () => {
     // Settings, the guard allowlist, project and worktree management, the Claude
-    // account, the step/recipe library, deleting a session, installing an update.
+    // account, the step/recipe library, installing an update.
     const ownerOnly = (Object.keys(MESSAGE_AUTHZ) as ClientMessage['type'][]).filter(
       (t) => MESSAGE_AUTHZ[t].needs === 'owner',
     );
     // A canary: if someone reclassifies one of these away from owner-only, the
     // count changes and this test says so out loud.
     assert.ok(ownerOnly.includes('saveSettings'));
-    assert.ok(ownerOnly.includes('deleteSession'));
+    assert.ok(ownerOnly.includes('saveWorkflow'));
     assert.ok(ownerOnly.includes('addGuardAllow'));
     // MCP connections run third-party code inside every session on the machine,
     // and their status report names the host's servers. Both of the last two also
@@ -101,11 +102,38 @@ describe('MESSAGE_AUTHZ', () => {
     }
   });
 
-  test('no preset can change the permission mode', () => {
+  test('only Full access can change the permission mode', () => {
     // It is the guard around every other capability, so it is the one control a
     // Collaborator still cannot touch.
     for (const preset of ['view', 'prompt', 'collaborator'] as const) {
       assert.equal(authorizeMessage(msg('setPermissionMode'), guest(preset)).ok, false, preset);
+    }
+    assert.equal(authorizeMessage(msg('setPermissionMode'), guest('full')).ok, true);
+  });
+
+  test('archive, complete and delete need Full access, not collaborator', () => {
+    const lifecycle = ['archiveSession', 'unarchiveSession', 'completeSession', 'deleteSession'] as const;
+    assert.deepEqual(MESSAGE_AUTHZ.archiveSession, { needs: 'session', cap: 'manageSessions' });
+    assert.deepEqual(MESSAGE_AUTHZ.unarchiveSession, { needs: 'session', cap: 'manageSessions' });
+    assert.deepEqual(MESSAGE_AUTHZ.completeSession, { needs: 'session', cap: 'manageSessions' });
+    assert.deepEqual(MESSAGE_AUTHZ.deleteSession, { needs: 'session', cap: 'deleteSessions' });
+    for (const type of lifecycle) {
+      assert.equal(authorizeMessage(msg(type), guest('collaborator')).ok, false, type);
+      assert.equal(authorizeMessage(msg(type), guest('full')).ok, true, type);
+      // Session scope still clamps to the grant's own sessions.
+      const scoped = guest('full', { scope: 'session', sessionIds: ['s1'] });
+      assert.equal(authorizeMessage(msg(type, 's1'), scoped).ok, true, type);
+      assert.equal(authorizeMessage(msg(type, 's2'), scoped).ok, false, type);
+    }
+    // Archiving does not imply deleting: the caps are separate.
+    const archiver = access({ manageSessions: true });
+    assert.equal(authorizeMessage(msg('archiveSession'), archiver).ok, true);
+    assert.equal(authorizeMessage(msg('deleteSession'), archiver).ok, false);
+  });
+
+  test('Full access still cannot reshape the host’s library or machine', () => {
+    for (const type of ['saveWorkflow', 'deleteWorkflow', 'saveSettings', 'runRecipe'] as const) {
+      assert.equal(authorizeMessage(msg(type), guest('full')).ok, false, type);
     }
   });
 

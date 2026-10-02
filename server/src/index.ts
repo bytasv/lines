@@ -48,6 +48,7 @@ import { APP_ROOT, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
 import type { BrowserLink, UserContext } from './userContext.ts';
 import { handleFileRequest } from './fileRoutes.ts';
+import { clampPermissionMode, guestLibrary, prepareInlineWorkflow } from './guestWorkflows.ts';
 import { reportActivity, reportRelayStatus, UpdateManager } from './updates.ts';
 import {
   LINES_TOOL_MANIFEST,
@@ -911,8 +912,8 @@ async function handleConnection(
  *
  * For the owner this is everything, unchanged. For a guest it is deliberately
  * thin: their sessions (scope-filtered), the health of the machine they are
- * borrowing, and what they may do — and *nothing* about the host's library,
- * account, settings or usage. Projects only for a machine share. That narrowing does double duty: a shared
+ * borrowing, and what they may do — and *nothing* about the host's account,
+ * settings or usage. The workflow library only as far as `guestLibrary` allows. Projects only for a machine share. That narrowing does double duty: a shared
  * machine's `hello` contributes only sessions, so a client holding two machines
  * at once never has to merge two sets of owner state.
  */
@@ -933,13 +934,11 @@ function buildHello(
       type: 'hello',
       bridge: { version: BRIDGE_VERSION, appProtocol: APP_PROTOCOL_VERSION },
       sessions,
+      // The host's library, read only: whole for a machine guest who may start
+      // sessions, else just what their visible sessions run (see guestLibrary).
+      ...guestLibrary(ctx, access, sessions),
       // Empty, not omitted: the client's reducer expects the keys, and an empty
-      // list is the honest answer — a guest has no library on this machine.
-      workflows: [],
-      sharedWorkflows: [],
-      steps: [],
-      sharedSteps: [],
-      pinnedSteps: [],
+      // list is the honest answer — recipes stay the host's own.
       recipes: [],
       sharedRecipes: [],
       recipeStats: {},
@@ -1292,6 +1291,13 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       break;
     }
     case 'createSession': {
+      // A guest's own workflow, checked before anything is created so a refusal
+      // leaves no half state.
+      const inline = msg.workflowDef ? prepareInlineWorkflow(ctx, access, msg.workflowDef) : null;
+      if (inline && !inline.ok) {
+        ws.send(JSON.stringify({ type: 'error', message: inline.reason } satisfies ServerMessage));
+        break;
+      }
       // The work tree is cut first and awaited: cwd is identity (project-key
       // anchor, recentDirs, roots, attribution) and is never rewritten, so it has
       // to be the work tree from the very first upsert. A failed add therefore
@@ -1303,14 +1309,16 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
         name: msg.name,
         cwd: worktree?.path ?? msg.cwd,
         model: msg.model,
-        permissionMode: msg.permissionMode,
+        // Picking a mode at creation is the same authority as changing it later.
+        permissionMode: clampPermissionMode(ctx, access, msg.permissionMode),
         reasoningEffort: msg.reasoningEffort,
       });
       // Only nameable once the session exists; nothing depends on it beyond the
       // UI's "orphaned" label.
       if (worktree) worktreeCommands.attachSession(ctx, worktree.path, meta.id);
       // attach() re-broadcasts the session with workflow state populated.
-      if (msg.workflowId) workflows.attach(meta.id, msg.workflowId, msg.stepOverrides);
+      if (inline?.ok) workflows.attachInline(meta.id, inline.def, msg.stepOverrides);
+      else if (msg.workflowId) workflows.attach(meta.id, msg.workflowId, msg.stepOverrides);
       break;
     }
     case 'deleteSession':

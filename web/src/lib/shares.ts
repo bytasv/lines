@@ -182,4 +182,8 @@ export const PRESET_COPY: Record<SharePreset, { label: string; detail: string }>
     label: 'Collaborator',
     detail: 'Prompt, stop/retry, approve permissions, change model, drive workflow steps.',
   },
+  full: {
+    label: 'Full access',
+    detail: 'Everything a collaborator can, plus change permission mode, archive, complete and delete sessions.',
+  },
 };

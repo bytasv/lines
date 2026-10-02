@@ -54,9 +54,9 @@ import {
   SESSION_SORT_KEY,
   sessionRowMeta,
 } from '../lib/format';
-import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
+import { useCan, useCanOnSession, useSessionMachine } from '../lib/can';
 import { searchSessions } from '../lib/files';
-import { sessionsOnMachine } from '../lib/machines';
+import { inlineWorkflow, sessionsOnMachine } from '../lib/machines';
 import { useIsPhone, useReveal } from '../lib/layout';
 import { MOD, newSessionHotkey } from '../lib/platform';
 import { ConfirmModal } from './ConfirmModal';
@@ -139,9 +139,10 @@ const SessionRow = memo(function SessionRow({
   onSelect?: () => void;
 }) {
   const status = sessionRowMeta(session);
-  // deleteSession/archiveSession are permanently owner-only: a guest never gets
-  // the hover controls, rather than getting ones that answer with an error.
-  const guest = useIsGuest();
+  // Archive/complete and delete need Full access on a shared machine: a guest
+  // without them never gets the controls, rather than ones that answer with an error.
+  const canManage = useCanOnSession(session.id, 'manageSessions');
+  const canDelete = useCanOnSession(session.id, 'deleteSessions');
   const identify = useIdentityResolver();
   // Whose machine this session runs on. A left accent in a colour reserved for
   // "somebody else's machine", plus their avatar — so a shared session is never
@@ -344,7 +345,7 @@ const SessionRow = memo(function SessionRow({
           </Group>
         </Box>
         <Group gap={2} wrap="nowrap">
-          {guest ? null : isPhone ? (
+          {!canManage && !canDelete ? null : isPhone ? (
             <Menu withinPortal position="bottom-end">
               <Menu.Target>
                 <ActionIcon
@@ -359,68 +360,97 @@ const SessionRow = memo(function SessionRow({
               <Menu.Dropdown onClick={stop}>
                 {session.archived ? (
                   <>
-                    <Menu.Item
-                      leftSection={<IconArchiveOff size={16} />}
-                      onClick={() =>
-                        send({
-                          type: 'unarchiveSession',
-                          sessionId: session.id,
-                        })
-                      }
-                    >
-                      Unarchive session
-                    </Menu.Item>
+                    {canManage && (
+                      <Menu.Item
+                        leftSection={<IconArchiveOff size={16} />}
+                        onClick={() =>
+                          send({
+                            type: 'unarchiveSession',
+                            sessionId: session.id,
+                          })
+                        }
+                      >
+                        Unarchive session
+                      </Menu.Item>
+                    )}
+                    {canDelete && (
+                      <Menu.Item
+                        color="red"
+                        disabled={deleting}
+                        leftSection={<IconTrash size={16} />}
+                        onClick={() => deleteSession({ confirmFirst: true })}
+                      >
+                        Delete session
+                      </Menu.Item>
+                    )}
+                  </>
+                ) : isNew ? (
+                  canDelete && (
                     <Menu.Item
                       color="red"
                       disabled={deleting}
                       leftSection={<IconTrash size={16} />}
-                      onClick={() => deleteSession({ confirmFirst: true })}
+                      onClick={() => deleteSession({ confirmFirst: false })}
                     >
                       Delete session
                     </Menu.Item>
-                  </>
-                ) : isNew ? (
-                  <Menu.Item
-                    color="red"
-                    disabled={deleting}
-                    leftSection={<IconTrash size={16} />}
-                    onClick={() => deleteSession({ confirmFirst: false })}
-                  >
-                    Delete session
-                  </Menu.Item>
+                  )
                 ) : (
-                  <>
-                    <Menu.Item
-                      leftSection={<IconCircleCheck size={16} />}
-                      onClick={() => send({ type: 'completeSession', sessionId: session.id })}
-                    >
-                      Mark completed
-                    </Menu.Item>
-                    <Menu.Item
-                      leftSection={<IconArchive size={16} />}
-                      onClick={() => send({ type: 'archiveSession', sessionId: session.id })}
-                    >
-                      Archive session
-                    </Menu.Item>
-                  </>
+                  canManage && (
+                    <>
+                      <Menu.Item
+                        leftSection={<IconCircleCheck size={16} />}
+                        onClick={() => send({ type: 'completeSession', sessionId: session.id })}
+                      >
+                        Mark completed
+                      </Menu.Item>
+                      <Menu.Item
+                        leftSection={<IconArchive size={16} />}
+                        onClick={() => send({ type: 'archiveSession', sessionId: session.id })}
+                      >
+                        Archive session
+                      </Menu.Item>
+                    </>
+                  )
                 )}
               </Menu.Dropdown>
             </Menu>
           ) : session.archived ? (
             <>
-              <Tooltip label="Unarchive session">
-                <ActionIcon
-                  size="xs"
-                  variant="subtle"
-                  color="gray"
-                  onClick={(e) => {
-                    stop(e);
-                    send({ type: 'unarchiveSession', sessionId: session.id });
-                  }}
-                >
-                  <IconArchiveOff size={13} />
-                </ActionIcon>
-              </Tooltip>
+              {canManage && (
+                <Tooltip label="Unarchive session">
+                  <ActionIcon
+                    size="xs"
+                    variant="subtle"
+                    color="gray"
+                    onClick={(e) => {
+                      stop(e);
+                      send({ type: 'unarchiveSession', sessionId: session.id });
+                    }}
+                  >
+                    <IconArchiveOff size={13} />
+                  </ActionIcon>
+                </Tooltip>
+              )}
+              {canDelete && (
+                <Tooltip label={deleting ? 'Deleting…' : 'Delete session'}>
+                  <ActionIcon
+                    size="xs"
+                    variant="subtle"
+                    color="gray"
+                    loading={deleting}
+                    onClick={(e) => {
+                      stop(e);
+                      deleteSession({ confirmFirst: true });
+                    }}
+                  >
+                    <IconTrash size={13} />
+                  </ActionIcon>
+                </Tooltip>
+              )}
+            </>
+          ) : isNew ? (
+            canDelete && (
               <Tooltip label={deleting ? 'Deleting…' : 'Delete session'}>
                 <ActionIcon
                   size="xs"
@@ -428,59 +458,46 @@ const SessionRow = memo(function SessionRow({
                   color="gray"
                   loading={deleting}
                   onClick={(e) => {
+                    // No confirm: a session with no real prompt yet has nothing to lose.
                     stop(e);
-                    deleteSession({ confirmFirst: true });
+                    deleteSession({ confirmFirst: false });
                   }}
                 >
                   <IconTrash size={13} />
                 </ActionIcon>
               </Tooltip>
-            </>
-          ) : isNew ? (
-            <Tooltip label={deleting ? 'Deleting…' : 'Delete session'}>
-              <ActionIcon
-                size="xs"
-                variant="subtle"
-                color="gray"
-                loading={deleting}
-                onClick={(e) => {
-                  // No confirm: a session with no real prompt yet has nothing to lose.
-                  stop(e);
-                  deleteSession({ confirmFirst: false });
-                }}
-              >
-                <IconTrash size={13} />
-              </ActionIcon>
-            </Tooltip>
+            )
           ) : (
-            <>
-              <Tooltip label="Mark completed">
-                <ActionIcon
-                  size="xs"
-                  variant="subtle"
-                  color="gray"
-                  onClick={(e) => {
-                    stop(e);
-                    send({ type: 'completeSession', sessionId: session.id });
-                  }}
-                >
-                  <IconCircleCheck size={13} />
-                </ActionIcon>
-              </Tooltip>
-              <Tooltip label="Archive session">
-                <ActionIcon
-                  size="xs"
-                  variant="subtle"
-                  color="gray"
-                  onClick={(e) => {
-                    stop(e);
-                    send({ type: 'archiveSession', sessionId: session.id });
-                  }}
-                >
-                  <IconArchive size={13} />
-                </ActionIcon>
-              </Tooltip>
-            </>
+            canManage && (
+              <>
+                <Tooltip label="Mark completed">
+                  <ActionIcon
+                    size="xs"
+                    variant="subtle"
+                    color="gray"
+                    onClick={(e) => {
+                      stop(e);
+                      send({ type: 'completeSession', sessionId: session.id });
+                    }}
+                  >
+                    <IconCircleCheck size={13} />
+                  </ActionIcon>
+                </Tooltip>
+                <Tooltip label="Archive session">
+                  <ActionIcon
+                    size="xs"
+                    variant="subtle"
+                    color="gray"
+                    onClick={(e) => {
+                      stop(e);
+                      send({ type: 'archiveSession', sessionId: session.id });
+                    }}
+                  >
+                    <IconArchive size={13} />
+                  </ActionIcon>
+                </Tooltip>
+              </>
+            )
           )}
         </Group>
       </Group>
@@ -652,10 +669,35 @@ export function Sidebar({
     key: 'lines.lastNewSessionChoice',
     defaultValue: '',
   });
-  const lastWorkflow = [...workflows, ...sharedWorkflows].find((w) => w.id === lastChoice);
+  /**
+   * On a shared machine `workflows` is the host's library, and the user's own
+   * comes from their own machine's slice (when one is loaded). A workflow picked
+   * from it runs on the host as an inline snapshot (see `createSession`).
+   */
+  const hostProfile = useStore((s) => (s.access ? s.machines[s.primaryDeviceId ?? '']?.ownerProfile : null));
+  const ownView = useStore((s) =>
+    s.access ? Object.values(s.machines).find((m) => !m.view.access)?.view : undefined,
+  );
+  const hostName = access ? (hostProfile?.name ?? hostProfile?.email ?? 'Host') : null;
+  const ownWorkflows = useMemo(
+    () =>
+      (ownView?.workflows ?? []).filter(
+        (o) => !workflows.some((w) => w.id === o.id) && !sharedWorkflows.some((w) => w.id === o.id),
+      ),
+    [ownView, workflows, sharedWorkflows],
+  );
+  const lastWorkflow = [...workflows, ...sharedWorkflows, ...ownWorkflows].find((w) => w.id === lastChoice);
   // An id present in both lists is owned — it must not also appear under
   // "Shared by others", where picking it would read as running someone else's.
-  const foreignWorkflows = sharedWorkflows.filter((s) => !workflows.some((w) => w.id === s.id));
+  // On a shared machine "owned" covers the user's own library too.
+  const foreignWorkflows = sharedWorkflows.filter(
+    (s) => !workflows.some((w) => w.id === s.id) && !(ownView?.workflows ?? []).some((w) => w.id === s.id),
+  );
+  /** One of the user's own workflows made self-contained for the host, or null. */
+  const ownInline = (workflowId: string): WorkflowDef | null => {
+    const own = ownWorkflows.find((w) => w.id === workflowId);
+    return own && ownView ? inlineWorkflow(own, ownView.steps, ownView.pinnedSteps, ownView.sharedSteps) : null;
+  };
   // Persisted like `lastChoice`: running every new session in its own checkout is a
   // working habit, not a per-click decision.
   const [worktreeMode, setWorktreeMode] = useLocalStorage<boolean>({
@@ -753,6 +795,14 @@ export function Sidebar({
   }, [pendingCreate, worktreePending, focusComposerFor, actionError]);
   const createSession = (workflowId?: string, stepOverrides?: (WorkflowStepOverride | null)[]) => {
     if (!activeProject) return;
+    // The user's own workflow, on a machine whose library does not have it: it
+    // travels inline, every step resolved here, since the host cannot.
+    const isOwn = !!workflowId && ownWorkflows.some((w) => w.id === workflowId);
+    const workflowDef = isOwn ? ownInline(workflowId!) : null;
+    if (isOwn && !workflowDef) {
+      setSidebarActionError('One of this workflow’s shared steps is not available here.');
+      return;
+    }
     if (isPhone) {
       // A stale error would blur the primer on the spot.
       setSidebarActionError(null);
@@ -776,6 +826,7 @@ export function Sidebar({
       permissionMode: newSessionDefaults.permissionMode,
       reasoningEffort: newSessionDefaults.reasoningEffort,
       workflowId,
+      ...(workflowDef ? { workflowDef } : {}),
       ...(workflowId && stepOverrides?.some(Boolean) ? { stepOverrides } : {}),
       // Empty object = let the server name the branch and the path.
       ...(worktreeMode ? { worktree: {} } : {}),
@@ -792,7 +843,12 @@ export function Sidebar({
    * model/effort picker instead of launching; a plain click launches as before.
    */
   const createFromClick = (e: ReactMouseEvent, workflowId?: string) => {
-    const wf = workflowId ? [...workflows, ...sharedWorkflows].find((w) => w.id === workflowId) : undefined;
+    // An own workflow on a shared machine is tuned in its inlined form: its refs
+    // do not resolve against the host's step library.
+    const wf = workflowId
+      ? ((ownWorkflows.some((w) => w.id === workflowId) ? ownInline(workflowId) : null) ??
+        [...workflows, ...sharedWorkflows].find((w) => w.id === workflowId))
+      : undefined;
     if (wf && (e.metaKey || e.ctrlKey)) {
       setTuneWorkflow(wf);
       return;
@@ -1229,6 +1285,37 @@ export function Sidebar({
                       </Group>
                     </Menu.Label>
                     {workflows.map((w) => (
+                      <Menu.Item
+                        key={w.id}
+                        onClick={(e) => createFromClick(e, w.id)}
+                        // On a shared machine these are the host's, so say whose.
+                        rightSection={
+                          hostName && (
+                            <Text size="xs" c="dimmed" truncate maw={90}>
+                              {hostName}
+                            </Text>
+                          )
+                        }
+                      >
+                        {w.name}
+                      </Menu.Item>
+                    ))}
+                  </>
+                )}
+                {ownWorkflows.length > 0 && (
+                  <>
+                    <Menu.Divider />
+                    <Menu.Label>
+                      <Group justify="space-between" wrap="nowrap" gap="xs">
+                        <span>Yours</span>
+                        {!isPhone && workflows.length === 0 && (
+                          <Text fz={10} c="dimmed" truncate>
+                            {modHint}
+                          </Text>
+                        )}
+                      </Group>
+                    </Menu.Label>
+                    {ownWorkflows.map((w) => (
                       <Menu.Item key={w.id} onClick={(e) => createFromClick(e, w.id)}>
                         {w.name}
                       </Menu.Item>
@@ -1242,7 +1329,7 @@ export function Sidebar({
                       <Group justify="space-between" wrap="nowrap" gap="xs">
                         <span>Shared by others</span>
                         {/* The hint rides the first workflow header only. */}
-                        {!isPhone && workflows.length === 0 && (
+                        {!isPhone && workflows.length === 0 && ownWorkflows.length === 0 && (
                           <Text fz={10} c="dimmed" truncate>
                             {modHint}
                           </Text>

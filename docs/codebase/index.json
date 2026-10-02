@@ -2745,6 +2745,7 @@
         "server/src/fileRoutes.ts",
         "server/src/sessions.ts",
         "server/src/workflows.ts",
+        "server/src/guestWorkflows.ts",
         "web/src/lib/shares.ts",
         "web/src/lib/can.ts",
         "web/src/lib/identityRule.ts",
@@ -2778,7 +2779,10 @@
         "revokeGrantsForDevice",
         "revokeGrantsForGrantee",
         "leaveShare",
-        "editQueued"
+        "editQueued",
+        "guestLibrary",
+        "clampPermissionMode",
+        "prepareInlineWorkflow"
       ],
       "tests": [
         "storage/src/shares.test.ts",
@@ -2787,6 +2791,7 @@
         "relay/src/agentHeartbeat.test.ts",
         "server/src/messageAuthz.test.ts",
         "server/src/guestAccess.test.ts",
+        "server/src/inlineWorkflow.test.ts",
         "server/src/broadcastScope.test.ts",
         "server/src/presence.test.ts",
         "server/src/attribution.test.ts",
@@ -2794,8 +2799,9 @@
         "server/src/sessions.queue.test.ts"
       ],
       "businessRules": [
-        "three presets (view, prompt, collaborator); no preset ever grants setPermissionMode",
-        "never grantable at any preset: settings, guard allowlist, project/worktree management, login/logout, device unpair, workflow/step/recipe authoring, installUpdate, deleteSession, pickFolder",
+        "four presets (view, prompt, collaborator, full); only full grants setPermissionMode, manageSessions (archive/unarchive/complete) and deleteSessions; without setPermissionMode a guest's requested session and workflow-step permission modes are clamped to the host's new-session default",
+        "a machine-scope guest with createSessions sees the host's workflow library read-only; other guests see only the workflows their visible sessions use; a guest with manageWorkflow runs their own workflow by sending it inline with createSession (self-contained, validated, stored as a session snapshot, never added to the host's library)",
+        "never grantable at any preset: settings, guard allowlist, project/worktree management, login/logout, device unpair, workflow/step/recipe authoring, installUpdate, pickFolder",
         "a machine-scope grant covers every session on the machine and outranks a session share on the same machine",
         "several session shares on one machine intersect to the narrowest capability set, never the union",
         "revoking a share, or unpairing/deleting the device, tombstones every grant on that device in one transaction",
@@ -2857,6 +2863,7 @@
         "web/src/lib/machineHealth.ts",
         "web/src/components/MachineDot.tsx",
         "web/src/components/MachineSwitcher.tsx",
+        "web/src/lib/deviceMemory.ts",
         "web/src/components/DevicesSection.tsx",
         "web/src/components/ConnectingMachine.tsx",
         "web/src/components/Sidebar.tsx",
@@ -2892,6 +2899,7 @@
       ],
       "tests": [
         "server/src/machineMerge.test.ts",
+        "server/src/deviceMemory.test.ts",
         "server/src/wakeRedial.test.ts"
       ],
       "businessRules": [
@@ -2907,6 +2915,7 @@
         "a resumed tab probes every link it holds a socket for (visibilitychange when visible, pageshow with event.persisted, debounced) and redials only one that fails the probe; a link with no socket (idle-disconnected) is left alone so a tab switch cannot defeat IDLE_DISCONNECT_MS",
         "a wake also revives the primary link when it holds no socket, no pending retry and no connect in flight (shouldReviveIdle) — the primary is never idle-disconnected, so that state is a connect that died before creating a socket; non-primary socket-less links stay down per IDLE_DISCONNECT_MS",
         "Web Push (see web-push-notifications) follows the same not-scoped-to-primary rule as maybeAlert: each bridge keeps its own last-seen status per session and pushes for the sessions it hosts, and a device registers its subscription with every owned machine, not only the primary",
+        "a double-click on the header switcher toggles to the previously active machine (recorded by rememberDeviceId when the active id changes), only while that machine is still listed and is not the active one; the control shows a count badge, not a dot, for sessions needing the user on other machines",
         "a notification click (page-level or Web Push) routes through openSessionFromAlert, which switches the primary machine (via alertTarget) when the session isn't hosted there before selecting it"
       ],
       "architecturalRules": [

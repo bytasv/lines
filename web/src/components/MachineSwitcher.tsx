@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Badge, Group, Indicator, Menu, Text, UnstyledButton } from '@mantine/core';
+import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { Badge, Group, Menu, Text, Tooltip, UnstyledButton } from '@mantine/core';
 import { IconChevronDown, IconDeviceLaptop, IconSettings } from '@tabler/icons-react';
 import { useStore } from '../store';
 import { useDevices } from '../lib/devices';
@@ -10,7 +10,7 @@ import {
   unlinkedMachineHealth,
   type MachineHealth,
 } from '../lib/machineHealth';
-import { rememberDeviceId, rememberedDeviceId, type Device } from '../lib/storage';
+import { previousDeviceId, rememberDeviceId, rememberedDeviceId, type Device } from '../lib/storage';
 import { SHARING_ENABLED } from '../lib/shares';
 import { switchDevice } from '../ws';
 import { MachineDot } from './MachineDot';
@@ -41,6 +41,8 @@ export function MachineSwitcher() {
   const primaryDeviceId = useStore((s) => s.primaryDeviceId);
   const activeId = primaryDeviceId ?? rememberedDeviceId();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Controlled, so a double-click can close the menu its first click opened.
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
     if (SHARING_ENABLED) void load();
@@ -99,26 +101,70 @@ export function MachineSwitcher() {
       switchDevice(id);
     }
   };
+  // The machine a double-click toggles back to: the last one used, while it is
+  // still listed and is not the one already on screen.
+  const previousId = previousDeviceId();
+  const previous =
+    previousId && previousId !== activeId ? (devices?.find((d) => d.id === previousId) ?? null) : null;
+  const needsYou =
+    elsewhere > 0 ? `${elsewhere} ${elsewhere === 1 ? 'session needs' : 'sessions need'} you on other machines` : null;
 
   const menu = (
-    <Menu position="bottom-start" width="min(320px, calc(100vw - 2rem))" withinPortal>
+    <Menu
+      position="bottom-start"
+      width="min(320px, calc(100vw - 2rem))"
+      withinPortal
+      opened={menuOpen}
+      onChange={setMenuOpen}
+    >
       <Menu.Target>
-        {/* Icon-only, and deliberately: the header's width belongs to the
-            project tabs, and MachineDot already carries the machine's health in
-            its own tooltip. */}
-        <UnstyledButton
-          aria-label="Switch machine"
-          px={4}
-          py={2}
-          style={{ borderRadius: 6, display: 'flex', alignItems: 'center', gap: 2 }}
+        <Tooltip
+          // Always on, so the gesture is discoverable before a second machine
+          // has been used; it names the target once there is one.
+          label={
+            previous
+              ? `Switch machine · double-click for ${previous.name}`
+              : 'Switch machine · double-click toggles between the last two'
+          }
+          disabled={menuOpen}
+          openDelay={400}
+          withArrow
+          // On the Tooltip, not the button: Tooltip spreads its child's own props
+          // last, so a child onClick would replace the toggle Menu.Target injects.
+          // Here Menu.Target merges it with that toggle instead. The first click
+          // opens the menu; the second closes it and switches. With no machine to
+          // go back to, a double-click is just two clicks.
+          onClick={(e: ReactMouseEvent) => {
+            if (e.detail === 2 && previous) {
+              setMenuOpen(false);
+              pick(previous.id);
+            }
+          }}
         >
-          {active ? (
-            <MachineDot health={healthOf(active)} />
-          ) : (
-            <IconDeviceLaptop size={13} opacity={0.6} />
-          )}
-          <IconChevronDown size={12} opacity={0.6} />
-        </UnstyledButton>
+          {/* Icon-only, and deliberately: the header's width belongs to the
+              project tabs, and MachineDot already carries the machine's health in
+              its own tooltip. */}
+          <UnstyledButton
+            aria-label={needsYou ? `Switch machine — ${needsYou}` : 'Switch machine'}
+            px={4}
+            py={2}
+            style={{ borderRadius: 6, display: 'flex', alignItems: 'center', gap: 2 }}
+          >
+            {active ? (
+              <MachineDot health={healthOf(active)} />
+            ) : (
+              <IconDeviceLaptop size={13} opacity={0.6} />
+            )}
+            <IconChevronDown size={12} opacity={0.6} />
+            {/* A count, not a second dot: next to the health dot a coloured dot
+                read as another status of this machine. */}
+            {needsYou && (
+              <Badge size="xs" circle color="yellow" aria-label={needsYou}>
+                {elsewhere}
+              </Badge>
+            )}
+          </UnstyledButton>
+        </Tooltip>
       </Menu.Target>
       <Menu.Dropdown>
         <Menu.Label>Machine</Menu.Label>
@@ -166,12 +212,7 @@ export function MachineSwitcher() {
 
   return (
     <>
-      {/* The dot rides the whole control, as the gear's does in HeaderActions:
-          an Indicator inside Menu.Target would sit between the menu and the
-          element it has to hand its ref to. */}
-      <Indicator size={6} color="yellow" disabled={elsewhere === 0} offset={2}>
-        {menu}
-      </Indicator>
+      {menu}
       {/* Mounted outside the dropdown: choosing the item closes the menu, which
           unmounts the dropdown and would take the modal with it. */}
       <SettingsModal

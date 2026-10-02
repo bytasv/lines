@@ -246,7 +246,7 @@ export function ShareModal({
           </Text>
           <Radio.Group value={preset} onChange={(v) => setPreset(v as SharePreset)}>
             <Stack gap={8}>
-              {(['view', 'prompt', 'collaborator'] as SharePreset[]).map((option) => (
+              {(Object.keys(PRESET_COPY) as SharePreset[]).map((option) => (
                 <Radio
                   key={option}
                   value={option}
@@ -255,7 +255,7 @@ export function ShareModal({
                       <Text size="sm">{PRESET_COPY[option].label}</Text>
                       <Text size="xs" c="dimmed">
                         {PRESET_COPY[option].detail}
-                        {option === 'collaborator' && scope === 'machine'
+                        {(option === 'collaborator' || option === 'full') && scope === 'machine'
                           ? ' Can also start new sessions.'
                           : ''}
                       </Text>
@@ -267,7 +267,7 @@ export function ShareModal({
           </Radio.Group>
           {/* Conditional, not permanent: a warning that is always on screen is
               ignored noise, and this one has to actually be read. */}
-          {preset === 'collaborator' && (
+          {(preset === 'collaborator' || preset === 'full') && (
             <Alert
               color="orange"
               variant="light"
@@ -275,6 +275,8 @@ export function ShareModal({
               styles={{ message: { fontSize: 'var(--mantine-font-size-xs)' } }}
             >
               Approving a permission runs commands on your machine, as you, on your Anthropic plan.
+              {preset === 'full' &&
+                ' Full access can also switch a session to Full Auto, which runs commands without asking, and delete sessions.'}
             </Alert>
           )}
         </Stack>
@@ -343,7 +345,7 @@ export function ShareModal({
                   <Select
                     size="xs"
                     w={140}
-                    data={(['view', 'prompt', 'collaborator'] as SharePreset[]).map((p) => ({
+                    data={(Object.keys(PRESET_COPY) as SharePreset[]).map((p) => ({
                       value: p,
                       label: PRESET_COPY[p].label,
                     }))}

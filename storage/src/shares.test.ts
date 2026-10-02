@@ -87,28 +87,58 @@ describe('share capabilities', () => {
     assert.equal(caps.interrupt, false);
   });
 
-  test('no preset ever grants setPermissionMode', () => {
+  test('only Full access grants setPermissionMode and the session lifecycle', () => {
     // Permission mode is the guard around everything else — a guest raising it
     // would widen every other capability they hold.
     for (const preset of ['view', 'prompt', 'collaborator'] as const) {
       for (const scope of ['machine', 'session'] as const) {
-        assert.equal(
-          capsForPreset(preset, scope).setPermissionMode,
-          false,
-          `${preset}/${scope} must not grant setPermissionMode`,
-        );
+        const caps = capsForPreset(preset, scope);
+        assert.equal(caps.setPermissionMode, false, `${preset}/${scope} must not grant setPermissionMode`);
+        assert.equal(caps.manageSessions, false, `${preset}/${scope} must not grant manageSessions`);
+        assert.equal(caps.deleteSessions, false, `${preset}/${scope} must not grant deleteSessions`);
       }
+    }
+    for (const scope of ['machine', 'session'] as const) {
+      const full = capsForPreset('full', scope);
+      assert.equal(full.setPermissionMode, true);
+      assert.equal(full.manageSessions, true);
+      assert.equal(full.deleteSessions, true);
     }
   });
 
-  test('createSessions is machine-scope collaborator only', () => {
+  test('full is collaborator plus mode, lifecycle and delete', () => {
+    for (const scope of ['machine', 'session'] as const) {
+      assert.deepEqual(capsForPreset('full', scope), {
+        ...capsForPreset('collaborator', scope),
+        setPermissionMode: true,
+        manageSessions: true,
+        deleteSessions: true,
+      });
+    }
+  });
+
+  test('createSessions is machine-scope collaborator or full only', () => {
     assert.equal(capsForPreset('collaborator', 'machine').createSessions, true);
+    assert.equal(capsForPreset('full', 'machine').createSessions, true);
     assert.equal(capsForPreset('collaborator', 'session').createSessions, false);
+    assert.equal(capsForPreset('full', 'session').createSessions, false);
     assert.equal(capsForPreset('prompt', 'machine').createSessions, false);
   });
 
+  test('an old collaborator row without the newer caps still reads as collaborator', () => {
+    // Written before manageSessions/deleteSessions existed: the keys are absent,
+    // parse as false, and the grant keeps its label rather than going "custom".
+    for (const scope of ['machine', 'session'] as const) {
+      const { manageSessions: _m, deleteSessions: _d, ...old } = capsForPreset('collaborator', scope);
+      const caps = parseShareCaps(old);
+      assert.equal(caps.manageSessions, false);
+      assert.equal(caps.deleteSessions, false);
+      assert.equal(presetOfCaps(caps, scope), 'collaborator');
+    }
+  });
+
   test('a stored cap set reads back as the preset it was minted from', () => {
-    for (const preset of ['view', 'prompt', 'collaborator'] as const) {
+    for (const preset of ['view', 'prompt', 'collaborator', 'full'] as const) {
       for (const scope of ['machine', 'session'] as const) {
         const caps = parseShareCaps(capsForPreset(preset, scope) as unknown);
         assert.equal(presetOfCaps(caps, scope), preset);

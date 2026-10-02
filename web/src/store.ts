@@ -2298,12 +2298,32 @@ export const useStore = create<UiState>((set, get) => {
           };
         });
         break;
-      case 'workflows':
-        set({ workflows: msg.workflows });
+      // Per machine, like `projects`: a machine share receives the host's library
+      // too (see `mayReceive`), and it must not overwrite the globals while
+      // another machine is on screen.
+      case 'workflows': {
+        const slice = get().machines[from];
+        if (slice) {
+          set((state) => ({
+            machines: { ...state.machines, [from]: { ...slice, view: { ...slice.view, workflows: msg.workflows } } },
+          }));
+        }
+        if (fromPrimary) set({ workflows: msg.workflows });
         break;
-      case 'sharedWorkflows':
-        set({ sharedWorkflows: msg.workflows });
+      }
+      case 'sharedWorkflows': {
+        const slice = get().machines[from];
+        if (slice) {
+          set((state) => ({
+            machines: {
+              ...state.machines,
+              [from]: { ...slice, view: { ...slice.view, sharedWorkflows: msg.workflows } },
+            },
+          }));
+        }
+        if (fromPrimary) set({ sharedWorkflows: msg.workflows });
         break;
+      }
       case 'steps':
         set({ steps: msg.steps });
         break;
