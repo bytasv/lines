@@ -262,7 +262,9 @@ export function LandingPage() {
   return (
     <Box className={`lines-safe-top ${classes.page}`} style={{ minHeight: 'var(--lines-viewport)' }}>
       <Box component="header" className={classes.header}>
-        <BrandMark />
+        <div className={classes.headerBrand}>
+          <BrandMark />
+        </div>
         <Group gap="lg" visibleFrom="sm" className={classes.headerNav}>
           <a className={classes.navLink} href="#features">
             Features

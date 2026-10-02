@@ -18,6 +18,12 @@
   border-bottom: 1px solid var(--mantine-color-default-border);
 }
 
+.headerBrand {
+  grid-column: 1;
+  justify-self: start;
+  display: flex;
+}
+
 .headerNav {
   grid-column: 2;
 }
