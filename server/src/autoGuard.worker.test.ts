@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { test } from 'node:test';
-import { assessToolCall, isSelfWorkerSource } from './autoGuard.ts';
+
+// A packaged desktop shell exports LINES_WORKER_SOURCES, and autoGuard reads it
+// once at load; clear it first so these tests exercise the self-locating default
+// whichever environment runs them.
+delete process.env.LINES_WORKER_SOURCES;
+const { assessToolCall, isSelfWorkerSource } = await import('./autoGuard.ts');
 
 // This test file sits beside autoGuard.ts, so its own dirname is the directory
 // the rule anchors to — no need to reach into module internals for the paths.
