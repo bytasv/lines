@@ -15,7 +15,9 @@ in a floating palette.
 ## Files
 
 - `web/src/components/FilePalette.tsx` — hotkey, debounced search, keyboard
-  nav, "Hide ignored" toggle
+  nav, loading indicator (replaces the search icon while a request is in
+  flight), in-input eye-icon "Hide ignored" toggle (same as the sidebar's
+  find-in-files)
 - `web/src/lib/files.ts` — `searchFiles(roots, query, limit, includeIgnored)`
 - `server/src/fileSearch.ts` — shared ranker, see
   [prompt-mentions](prompt-mentions.md)

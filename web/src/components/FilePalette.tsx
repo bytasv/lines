@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { Box, Group, Modal, Stack, Switch, Text, TextInput } from '@mantine/core';
+import { ActionIcon, Box, Group, Loader, Modal, Stack, Text, TextInput, Tooltip } from '@mantine/core';
 import { useHotkeys } from '@mantine/hooks';
-import { IconFile, IconSearch } from '@tabler/icons-react';
+import { IconEyeOff, IconFile, IconSearch } from '@tabler/icons-react';
 import { rootsForCwd } from '@lines/shared';
 import { useStore } from '../store';
 import { useIsPhone } from '../lib/layout';
@@ -34,6 +34,7 @@ export function FilePalette() {
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<Hit[]>([]);
   const [active, setActive] = useState(0);
+  const [searching, setSearching] = useState(false);
   const seqRef = useRef(0);
   const rowsRef = useRef<(HTMLDivElement | null)[]>([]);
 
@@ -61,6 +62,7 @@ export function FilePalette() {
     setQuery('');
     setHits([]);
     setActive(0);
+    setSearching(false);
     seqRef.current++; // drop whatever is in flight, so a late reply can't repopulate
   };
 
@@ -77,17 +79,23 @@ export function FilePalette() {
     if (!opened) return;
     const q = query.trim();
     if (!q) {
+      seqRef.current++; // a reply still in flight must not refill the cleared list
       setHits([]);
+      setSearching(false);
       return;
     }
     const seq = ++seqRef.current;
     const timer = setTimeout(async () => {
+      // Only the request shows the loader, not the debounce. A superseded reply
+      // leaves it to the newer request, which always clears it (it never rejects).
+      setSearching(true);
       const files = await searchFiles(rootsKey.split('\n'), q, MAX_RESULTS, !hideIgnored).catch(
         () => [],
       );
       if (seq !== seqRef.current) return; // a newer keystroke superseded this one
       setHits(files);
       setActive(0);
+      setSearching(false);
     }, DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [opened, query, rootsKey, hideIgnored]);
@@ -124,41 +132,37 @@ export function FilePalette() {
         onChange={(e) => setQuery(e.currentTarget.value)}
         onKeyDown={onKeyDown}
         placeholder="Search files by name"
-        leftSection={<IconSearch size={15} />}
+        leftSection={searching ? <Loader size={13} /> : <IconSearch size={15} />}
+        // Same toggle as the sidebar's find-in-files row. Mouse-down default is
+        // suppressed so toggling never pulls focus out of the query field;
+        // arrows and Enter have to keep working after a click.
+        rightSection={
+          <Tooltip label={hideIgnored ? 'Show ignored files' : 'Hide ignored files'} openDelay={300}>
+            <ActionIcon
+              size="sm"
+              variant={hideIgnored ? 'filled' : 'subtle'}
+              color="gray"
+              aria-pressed={hideIgnored}
+              aria-label="Hide ignored files"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => setHideIgnored(!hideIgnored)}
+            >
+              <IconEyeOff size={13} />
+            </ActionIcon>
+          </Tooltip>
+        }
         variant="unstyled"
         size="md"
       />
-      {/* Status on the left, toggle on the right, one row that is always there —
-          the toggle must not vanish the moment you start typing. Mouse-down
-          default is suppressed so toggling never pulls focus out of the query
-          field; arrows and Enter have to keep working after a click. */}
-      <Group
-        justify="space-between"
-        wrap="nowrap"
-        gap="sm"
-        px="xs"
-        py={4}
-        onMouseDown={(e) => e.preventDefault()}
-      >
-        <Text size="xs" c="dimmed" lineClamp={1}>
-          {query.trim() === ''
-            ? 'Type part of a file name — characters may be scattered (`mntinpt`).'
-            : hits.length === 0
-              ? 'No matches'
-              : ''}
-        </Text>
-        <Switch
-          size="xs"
-          checked={hideIgnored}
-          onChange={(e) => setHideIgnored(e.currentTarget.checked)}
-          style={{ flexShrink: 0 }}
-          label={
-            <Text size="xs" c="dimmed">
-              Hide ignored
-            </Text>
-          }
-        />
-      </Group>
+      {/* Status line, always rendered so the list below never jumps. "No matches"
+          waits for the first reply rather than flashing while it is in flight. */}
+      <Text size="xs" c="dimmed" lineClamp={1} px="xs" py={4}>
+        {query.trim() === ''
+          ? 'Type part of a file name — characters may be scattered (`mntinpt`).'
+          : hits.length === 0 && !searching
+            ? 'No matches'
+            : ''}
+      </Text>
       <Box style={{ maxHeight: LIST_MAX_HEIGHT, overflowY: 'auto' }}>
         {hits.length > 0 && (
           <Stack gap={2}>
