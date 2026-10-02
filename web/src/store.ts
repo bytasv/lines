@@ -1149,6 +1149,9 @@ interface UiState {
   /** `null` clears it back to per-session effort. */
   setPlanReasoningEffort: (effort: ReasoningEffort | null) => void;
   setSmartRouting: (routing: UserUiSettings['smartRouting']) => void;
+  /** Save this user's TypeSafe key on the primary machine. Write-only. */
+  setTypesafeKey: (key: string) => void;
+  clearTypesafeKey: () => void;
   setHideIgnored: (on: boolean) => void;
   openFileTab: (path: string) => void;
   closeFileTab: (path: string) => void;
@@ -1765,6 +1768,16 @@ export const useStore = create<UiState>((set, get) => {
     pushSettings();
   },
 
+  // No optimistic flip: the bridge may refuse the key, and its
+  // `smartRoutingAvailable` broadcast updates every tab, this one included.
+  setTypesafeKey: (key) => {
+    send({ type: 'setTypesafeKey', key });
+  },
+
+  clearTypesafeKey: () => {
+    send({ type: 'clearTypesafeKey' });
+  },
+
   openFileTab: (path) => {
     const project = get().activeProject;
     if (!project) return;
@@ -2127,6 +2140,10 @@ export const useStore = create<UiState>((set, get) => {
       }
       case 'settings':
         applySettings(msg.settings);
+        break;
+      case 'smartRoutingAvailable':
+        // Gated like the hello field: it describes the primary machine's key.
+        if (fromPrimary) set({ smartRoutingAvailable: msg.available });
         break;
       case 'guardAllowlist':
         set({ guardAllowlist: msg.entries });

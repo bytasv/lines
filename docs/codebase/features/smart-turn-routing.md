@@ -26,12 +26,16 @@ step may carry its own rule, overriding the global one while that step runs.
 
 - `shared/types.ts` — `RoutingMode`, `RoutingRule`, `RoutingPick`, `StepContent.routing`,
   `SessionMeta.routingSuggestion`/`lastRouting`/`routingPaused`, `UserUiSettings.smartRouting`,
-  the `routingChoice`/`setRoutingPaused` `ClientMessage`s and their `MESSAGE_AUTHZ` rows,
-  `ServerMessage['hello'].smartRoutingAvailable`
+  the `routingChoice`/`setRoutingPaused`/`setTypesafeKey`/`clearTypesafeKey` `ClientMessage`s and
+  their `MESSAGE_AUTHZ` rows, `ServerMessage['hello'].smartRoutingAvailable` and the live
+  `smartRoutingAvailable` `ServerMessage`
 - `shared/workflowValidation.ts` — `validateRoutingRule`, called from step validation and from
   the settings save path
-- `server/src/jev.ts` — `decideTurn`, the only code that calls TypeSafe; `jevConfigured`
+- `server/src/jev.ts` — `decideTurn`, the only code that calls TypeSafe, with the caller's key
+  passed in
 - `server/src/turnRouting.ts` — `resolveRule`, `acceptPick`, `smartRoutingIssues` (pure, no I/O)
+- `server/src/store.ts` — `loadTypesafeKey`/`saveTypesafeKey`/`clearTypesafeKey`
+  (`typesafe-key.json`, per-user, mode `0600`)
 - `server/src/sessions.ts` — the hook in `SessionManager.pushTurn`/`routeTurn`, `heldTurns`,
   `routingChoice`, `applyRouting`, `pauseRoutingForManualChange`, `setRoutingPaused`, `markRetry`,
   the reconcile cleanup for an orphaned `routingSuggestion`
@@ -39,12 +43,14 @@ step may carry its own rule, overriding the global one while that step runs.
   `StepRoutingProvider` registered on `SessionManager`), clearing `routingPaused` on step entry
 - `server/src/index.ts` — `routingChoice`/`setRoutingPaused` message handlers, pausing routing on
   a manual `setModel`/`setReasoningEffort`, `smartRoutingAvailable` on `hello`,
+  `setTypesafeKey`/`clearTypesafeKey` handlers (broadcast `smartRoutingAvailable`),
   `smartRoutingIssues` gating `saveSettings`
 - `server/src/mcpWorkflowTools.ts` — the `routing` schema property, `toRoutingRule`
 - `web/src/components/RoutingRuleFields.tsx` — the shared rule/models/efforts editor, used by
   both Settings and the step editor
 - `web/src/components/Composer.tsx` — the "auto"/"auto off" badge and the ask-mode suggestion card
-- `web/src/store.ts` — `smartRouting`, `setSmartRouting`, `smartRoutingAvailable`
+- `web/src/store.ts` — `smartRouting`, `setSmartRouting`, `smartRoutingAvailable`,
+  `setTypesafeKey`, `clearTypesafeKey`
 
 ## Important symbols
 
@@ -53,8 +59,11 @@ step may carry its own rule, overriding the global one while that step runs.
 - `RoutingPick` — `{ model, effort?, confidence, at }`, the shape of both `lastRouting` and
   `routingSuggestion`
 - `decideTurn(input, deps?)` — one JEV call per turn: a `choice` question for the model, a
-  `score` question for the effort, each with its own confidence; never throws, answers `null` on
-  a missing key, non-2xx, malformed body or timeout
+  `score` question for the effort, each with its own confidence; the key arrives as
+  `input.apiKey`; never throws, answers `null` on a missing key, non-2xx, malformed body or
+  timeout
+- `store.loadTypesafeKey()` — this user's key or `null`; read on every routed turn and for
+  `smartRoutingAvailable`, so saving or removing it applies on the next turn
 - `resolveRule(meta, settings, stepRule?)` — the rule for this session's next turn: the step rule
   if given, else the global rule for the session's provider; `undefined` when the mode is `off`,
   routing is paused, or the session is in plan mode
@@ -98,8 +107,10 @@ output.
 ## Dependencies
 
 TypeSafe's official System One Model API — `POST https://api.typesafe.ai/v1/systemone`
-(docs.typesafe.ai), never a third-party proxy. `TYPESAFE_API_KEY` (bridge env; optional
-`TYPESAFE_MODEL`, default `jev-latest`). The base URL is a source constant, not env, so a config
+(docs.typesafe.ai), never a third-party proxy. The key is per user: entered in Settings, stored in
+`typesafe-key.json` under the user's store root (local to the machine, mode `0600`, like
+`mcp-secrets.json`); the bridge env `TYPESAFE_API_KEY` is no longer read. Optional bridge env
+`TYPESAFE_MODEL` (default `jev-latest`) is not a secret and stays. The base URL is a source constant, not env, so a config
 mistake cannot redirect a session's prompt text to an unverified endpoint.
 
 ## Tests
@@ -107,10 +118,11 @@ mistake cannot redirect a session's prompt text to an unverified endpoint.
 - `server/src/turnRouting.test.ts` — rule precedence (step, then global, then none), off/paused/
   plan-mode giving no rule, a rule naming another provider's model never applying,
   `acceptPick`'s allowlist/confidence/no-op gates, `smartRoutingIssues`
-- `server/src/jev.test.ts` — no key, timeout, non-2xx and malformed-body cases all answer `null`;
+- `server/src/jev.test.ts` — no key (and an env key alone), timeout, non-2xx and malformed-body cases all answer `null`;
   the official endpoint and body shape, and the safe-id→model-id mapping
 - `server/src/sessions.routing.test.ts` — `auto` applying a pick and recycling the query exactly
-  once; a `null` answer pushing unchanged; an interjection skipping JEV; `ask` holding, accepting,
+  once; a `null` answer pushing unchanged; `decideTurn` receiving the store's key, and no key
+  pushing unchanged; an interjection skipping JEV; `ask` holding, accepting,
   declining and interrupting a turn; a queued prompt during a hold; a codex session routed within
   its own provider; a workflow step's rule overriding the global one; reconcile clearing an
   orphaned suggestion
@@ -118,7 +130,9 @@ mistake cannot redirect a session's prompt text to an unverified endpoint.
   rejected by `validateStepContent`
 - `server/src/workflows.advance.test.ts` — step entry clears `routingPaused`
 - `server/src/messageAuthz.test.ts` — `routingChoice`/`setRoutingPaused` require the `setModel`
-  capability, same as `setReasoningEffort`
+  capability, same as `setReasoningEffort`; `setTypesafeKey`/`clearTypesafeKey` are owner-only
+- `server/src/store.test.ts` — key round trip, `0600`, clear, malformed file loads as no key, key
+  absent from other store files
 
 ## Business rules
 
@@ -143,7 +157,12 @@ mistake cannot redirect a session's prompt text to an unverified endpoint.
   step's `model`/`reasoningEffort` stay the turn's starting point, same as before this existed —
   routing may then move a turn away from them per-turn (see the update to
   [reasoning-effort-selection](reasoning-effort-selection.md)'s "absolute, not additive" rule).
-- **No LLM fallback.** With no `TYPESAFE_API_KEY`, a non-2xx response, a malformed body or a
+- **The TypeSafe key is per user and local-only.** Saved from Settings on the machine, never
+  synced (not in `sync.ts`, not in `UserUiSettings`), never echoed back to any client and never
+  logged; each machine needs it entered. `setTypesafeKey`/`clearTypesafeKey` are owner-only, and
+  the Settings field is hidden for guests. The key is not validated on save: a bad one shows as
+  `[jev] HTTP 401` and the turn fails open.
+- **No LLM fallback.** With no stored key, a non-2xx response, a malformed body or a
   timeout (~1.5s, short because this sits on every routed turn's critical path), the turn runs on
   its current settings — the same fail-open contract `runHelperQuery` uses for title generation.
 - **Only the turn's own prompt text is sent to JEV**, capped in length, plus a few plain-line
@@ -195,8 +214,8 @@ mistake cannot redirect a session's prompt text to an unverified endpoint.
 
 ## Unresolved / left open
 
-- The TypeSafe API key lives in bridge env (`TYPESAFE_API_KEY`) only; a per-user secret is not
-  implemented.
+- A bad key is only visible as `[jev] HTTP 401` in bridge logs; there is no test-call or surfaced
+  error in Settings.
 - The default `minConfidence` (0.7) is uncalibrated against real JEV answers.
 - The ~1.5s timeout has not been measured against real-world JEV latency.
 - TypeSafe's data-retention policy for `state` text has not been reviewed.

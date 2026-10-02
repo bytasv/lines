@@ -2346,6 +2346,9 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   openaiCancelLogin: { needs: 'owner' },
   openaiLogout: { needs: 'owner' },
   saveSettings: { needs: 'owner' },
+  // The host's own TypeSafe key, billed to them — owner only.
+  setTypesafeKey: { needs: 'owner' },
+  clearTypesafeKey: { needs: 'owner' },
   addGuardAllow: { needs: 'owner' },
   removeGuardAllow: { needs: 'owner' },
   reviewGuardAllowlist: { needs: 'owner' },
@@ -2660,6 +2663,10 @@ export type ClientMessage =
   /** Fresh Clerk token relay (~50s cadence) so the bridge's per-connection token never expires. */
   | { type: 'auth'; token: string }
   | { type: 'saveSettings'; settings: UserUiSettings }
+  /** Save this user's TypeSafe API key for smart routing, on this machine only.
+   *  Write-only: the bridge never sends the key back. */
+  | { type: 'setTypesafeKey'; key: string }
+  | { type: 'clearTypesafeKey' }
   /** Auto-mode guard allowlist edits. Intent messages, not a whole-list save: the
    *  server also writes entries on its own (permission cards), so a whole-list
    *  payload from a stale tab would clobber them. */
@@ -3482,8 +3489,8 @@ export type ServerMessage =
        *  up. Owner only, like `update`. */
       whisperModelDownload?: WhisperModelDownload;
       settings?: UserUiSettings | null;
-      /** Whether this bridge has a TypeSafe key, so smart routing can run.
-       *  Owner only; absent from a bridge older than this field. */
+      /** Whether this user has a TypeSafe key saved on this machine, so smart
+       *  routing can run. Owner only; absent from a bridge older than this field. */
       smartRoutingAvailable?: boolean;
       /** This bridge understands `registerPush`/`unregisterPush`. Owner only;
        *  absent from a bridge older than this field, which the client then
@@ -3524,6 +3531,9 @@ export type ServerMessage =
     }
   | { type: 'projectKeys'; projectKeys: ProjectKeyMap }
   | { type: 'settings'; settings: UserUiSettings }
+  /** `hello.smartRoutingAvailable` after a key is saved or removed. Account-wide,
+   *  so owner only like `settings`. */
+  | { type: 'smartRoutingAvailable'; available: boolean }
   /** The whole auto-mode guard allowlist after any change (card, UI edit, accepted review). */
   | { type: 'guardAllowlist'; entries: GuardAllowEntry[] }
   /** A remote allowlist awaiting the user's accept/reject; null once resolved. */

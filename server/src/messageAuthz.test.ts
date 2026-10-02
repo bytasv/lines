@@ -93,6 +93,9 @@ describe('MESSAGE_AUTHZ', () => {
     // endpoint the message supplies.
     assert.ok(ownerOnly.includes('registerPush'));
     assert.ok(ownerOnly.includes('unregisterPush'));
+    // The host's own TypeSafe key, billed to them.
+    assert.ok(ownerOnly.includes('setTypesafeKey'));
+    assert.ok(ownerOnly.includes('clearTypesafeKey'));
 
     for (const scope of ['machine', 'session'] as const) {
       for (const type of ownerOnly) {

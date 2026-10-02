@@ -2363,6 +2363,8 @@ export class SessionManager {
       lastTurnFailed: hint.lastTurnFailed,
       retryWithFeedback: hint.retryWithFeedback,
       stepName,
+      // Read per turn, so saving or removing the key applies on the next one.
+      apiKey: this.store.loadTypesafeKey(),
     });
     const now = this.sessions.get(meta.id);
     // A Stop (or a newer turn) landed while JEV was answering: this turn is

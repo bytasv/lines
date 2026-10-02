@@ -3889,6 +3889,7 @@
         "shared/types.ts",
         "shared/workflowValidation.ts",
         "server/src/jev.ts",
+        "server/src/store.ts",
         "server/src/turnRouting.ts",
         "server/src/sessions.ts",
         "server/src/workflows.ts",
@@ -3911,7 +3912,12 @@
         "SessionMeta.routingPaused",
         "UserUiSettings.smartRouting",
         "decideTurn",
-        "jevConfigured",
+        "loadTypesafeKey",
+        "saveTypesafeKey",
+        "clearTypesafeKey",
+        "setTypesafeKey",
+        "clearTypesafeKey (ClientMessage)",
+        "smartRoutingAvailable",
         "resolveRule",
         "acceptPick",
         "smartRoutingIssues",
@@ -3930,9 +3936,11 @@
         "server/src/sessions.routing.test.ts",
         "server/src/workflows.providers.test.ts",
         "server/src/workflows.advance.test.ts",
-        "server/src/messageAuthz.test.ts"
+        "server/src/messageAuthz.test.ts",
+        "server/src/store.test.ts"
       ],
       "businessRules": [
+        "the TypeSafe key is per user and local-only: stored in typesafe-key.json (0600), never synced, never echoed or logged; env TYPESAFE_API_KEY is no longer read; set/clear are owner-only",
         "off never calls JEV, and off is the default: no session is routed and no prompt text leaves the bridge until a user opts in",
         "plan mode is never routed — the global plan-mode effort keeps winning",
         "a routing rule never crosses providers: every model in RoutingRule.models must be on the rule's own provider, or the rule is treated as absent",
@@ -3940,7 +3948,7 @@
         "a pick equal to the session's current setting is a no-op: no query recycle, no lastRouting update",
         "a manual model or effort change pauses routing for that session until the composer badge resumes it or the next workflow step starts",
         "a step's own routing rule overrides the global rule for its provider while that step runs",
-        "no LLM fallback: a missing key, non-2xx, malformed body or timeout all leave the turn on its current settings",
+        "no LLM fallback: no stored key, non-2xx, malformed body or timeout all leave the turn on its current settings",
         "only the turn's own prompt text (capped) plus a few plain-line signals are sent to JEV — never the transcript, never tool output"
       ],
       "architecturalRules": [

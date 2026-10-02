@@ -159,6 +159,43 @@ test('a non-string secret value is dropped rather than handed to the SDK', () =>
   assert.deepEqual(store.loadMcpSecrets(), { a: { Good: 'v' } });
 });
 
+test('the TypeSafe key round-trips, is 0600, and clear removes the file', () => {
+  const { root, store } = tmpStore();
+  const file = path.join(root, 'typesafe-key.json');
+  assert.equal(store.loadTypesafeKey(), null);
+  store.saveTypesafeKey('ts-secret-key');
+  assert.equal(store.loadTypesafeKey(), 'ts-secret-key');
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  store.clearTypesafeKey();
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(store.loadTypesafeKey(), null);
+  // Clearing twice is harmless.
+  store.clearTypesafeKey();
+});
+
+test('a malformed TypeSafe key file loads as no key', () => {
+  const { root, store } = tmpStore();
+  const file = path.join(root, 'typesafe-key.json');
+  for (const raw of [{ version: 1, key: 42 }, { version: 1, key: '   ' }, { version: 2, key: 'k' }, 'k', null]) {
+    fs.writeFileSync(file, JSON.stringify(raw));
+    assert.equal(store.loadTypesafeKey(), null, JSON.stringify(raw));
+  }
+  fs.writeFileSync(file, JSON.stringify({ version: 1, key: '  padded  ' }));
+  assert.equal(store.loadTypesafeKey(), 'padded');
+});
+
+test('the TypeSafe key stays out of every other store file', () => {
+  const { root, store } = tmpStore();
+  store.saveSettings({ smartRouting: { mode: 'auto', rules: {} } } as never);
+  store.saveTypesafeKey('ts-secret-key');
+  for (const name of fs.readdirSync(root)) {
+    if (name === 'typesafe-key.json') continue;
+    const full = path.join(root, name);
+    if (!fs.statSync(full).isFile()) continue;
+    assert.equal(fs.readFileSync(full, 'utf8').includes('ts-secret-key'), false, name);
+  }
+});
+
 /** projects.json is sanitized on every read; these write the file directly to get
  *  the untrusted forms a real disk can hold. */
 function projectsFile(raw: unknown) {

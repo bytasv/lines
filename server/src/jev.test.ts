@@ -13,21 +13,41 @@ const rule: RoutingRule = {
   models: ['claude-opus-5-5', 'claude-sonnet-5-5'],
   efforts: ['max', 'low', 'high'],
 };
-const input = { rule, prompt: 'fix the typo', currentModel: 'claude-opus-5-5', source: 'user' as const };
-const env = { TYPESAFE_API_KEY: 'k' };
+const input = {
+  rule,
+  prompt: 'fix the typo',
+  currentModel: 'claude-opus-5-5',
+  source: 'user' as const,
+  apiKey: 'k',
+};
+const env = {};
 
 const respond = (body: unknown, status = 200) =>
   (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
 
 test('no key answers null without calling out', async () => {
   let called = false;
-  const answer = await decideTurn(input, {
-    env: {},
-    fetch: (async () => {
-      called = true;
-      return new Response('{}');
-    }) as unknown as typeof fetch,
-  });
+  const fetchStub = (async () => {
+    called = true;
+    return new Response('{}');
+  }) as unknown as typeof fetch;
+  assert.equal(await decideTurn({ ...input, apiKey: null }, { env, fetch: fetchStub }), null);
+  assert.equal(await decideTurn({ ...input, apiKey: '  ' }, { env, fetch: fetchStub }), null);
+  assert.equal(called, false);
+});
+
+test('a bridge env key alone no longer enables a call', async () => {
+  let called = false;
+  const answer = await decideTurn(
+    { ...input, apiKey: null },
+    {
+      env: { TYPESAFE_API_KEY: 'k' },
+      fetch: (async () => {
+        called = true;
+        return new Response('{}');
+      }) as unknown as typeof fetch,
+    },
+  );
   assert.equal(answer, null);
   assert.equal(called, false);
 });

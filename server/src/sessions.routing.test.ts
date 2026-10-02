@@ -49,6 +49,8 @@ interface HarnessOptions {
   session?: Partial<SessionMeta>;
   workflows?: WorkflowDef[];
   codex?: boolean;
+  /** Skip saving a TypeSafe key, as for a user who never entered one. */
+  noKey?: boolean;
 }
 
 function harness(opts: HarnessOptions = {}) {
@@ -60,6 +62,7 @@ function harness(opts: HarnessOptions = {}) {
     smartRouting: { mode: opts.mode ?? 'auto', rules: { anthropic: claudeRule, openai: openaiRule } },
   };
   store.saveSettings(settings);
+  if (!opts.noKey) store.saveTypesafeKey('user-key');
   const broadcasts: ServerMessage[] = [];
   const sessions = opts.codex
     ? new SessionManager(
@@ -86,10 +89,13 @@ function harness(opts: HarnessOptions = {}) {
   let pick: JevDecision | null = null;
   let calls = 0;
   const rules: RoutingRule[] = [];
+  const apiKeys: (string | null)[] = [];
   sessions.decideTurn = async (input) => {
     calls++;
     rules.push(input.rule);
-    return pick;
+    apiKeys.push(input.apiKey);
+    // The real decideTurn's contract: no key, no call, no answer.
+    return input.apiKey ? pick : null;
   };
   const workflows = opts.workflows ? new WorkflowEngine(store, sessions, () => {}, 'u1') : undefined;
   return {
@@ -101,6 +107,7 @@ function harness(opts: HarnessOptions = {}) {
     modelSets,
     broadcasts,
     rules,
+    apiKeys,
     setPick: (p: JevDecision | null) => (pick = p),
     calls: () => calls,
     s1: () => sessions.get('s1')!,
@@ -153,6 +160,33 @@ test('no answer pushes unchanged', async () => {
   assert.equal(h.s1().reasoningEffort, 'high');
   assert.equal(h.closes.length, baseline);
   assert.equal(h.s1().lastRouting, undefined);
+});
+
+test("JEV is asked with the user's stored key", async () => {
+  const h = harness();
+  h.sessions.prompt('s1', 'x');
+  await settle();
+  assert.deepEqual(h.apiKeys, ['user-key']);
+});
+
+test('with no stored key the turn pushes unchanged', async () => {
+  const h = harness({ noKey: true, session: { reasoningEffort: 'high' } });
+  h.setPick({ effort: { level: 'max', confidence: 1 } });
+  h.sessions.prompt('s1', 'x');
+  await settle();
+  assert.deepEqual(h.apiKeys, [null]);
+  assert.equal(h.pushes.length, 1);
+  assert.equal(h.pushes[0]!.options.effort, 'high');
+  assert.equal(h.s1().lastRouting, undefined);
+});
+
+test('a key saved later applies on the next turn', async () => {
+  const h = harness({ noKey: true });
+  await firstTurn(h);
+  h.store.saveTypesafeKey('fresh');
+  h.sessions.prompt('s1', 'x');
+  await settle();
+  assert.deepEqual(h.apiKeys, [null, 'fresh']);
 });
 
 test('mode off never calls JEV', async () => {

@@ -41,6 +41,8 @@ export interface DecideTurnInput {
   lastTurnFailed?: boolean;
   retryWithFeedback?: boolean;
   stepName?: string;
+  /** This user's TypeSafe key (store.loadTypesafeKey); null means no call. */
+  apiKey: string | null;
 }
 
 export interface JevDecision {
@@ -52,11 +54,6 @@ export interface JevDeps {
   fetch?: typeof fetch;
   env?: Record<string, string | undefined>;
   timeoutMs?: number;
-}
-
-/** True when this bridge has a key, i.e. routing can call out at all. */
-export function jevConfigured(env: Record<string, string | undefined> = process.env): boolean {
-  return Boolean(env.TYPESAFE_API_KEY?.trim());
 }
 
 function stateText(input: DecideTurnInput): string {
@@ -92,7 +89,7 @@ function num(value: unknown): number | undefined {
  */
 export async function decideTurn(input: DecideTurnInput, deps: JevDeps = {}): Promise<JevDecision | null> {
   const env = deps.env ?? process.env;
-  const key = env.TYPESAFE_API_KEY?.trim();
+  const key = input.apiKey?.trim();
   if (!key) return null;
   const doFetch = deps.fetch ?? fetch;
   const { rule } = input;

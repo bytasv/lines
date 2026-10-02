@@ -10,6 +10,7 @@ import {
   Indicator,
   Loader,
   Modal,
+  PasswordInput,
   ScrollArea,
   SegmentedControl,
   Select,
@@ -506,6 +507,7 @@ function SmartRoutingSettings() {
   const available = useStore((s) => s.smartRoutingAvailable);
   const routing = useStore((s) => s.smartRouting);
   const setSmartRouting = useStore((s) => s.setSmartRouting);
+  const guest = useIsGuest();
   const mode = routing?.mode ?? 'off';
   const rules = routing?.rules ?? {};
   const providers: ModelProvider[] = openaiConnected ? ['anthropic', 'openai'] : ['anthropic'];
@@ -520,12 +522,7 @@ function SmartRoutingSettings() {
         The turn's prompt text is sent to TypeSafe; the transcript is not. A manual model or effort
         change pauses routing for that session.
       </Text>
-      {available === false && (
-        <Alert color="yellow" icon={<IconAlertCircle size={16} />} p="xs">
-          No TypeSafe API key on this machine. Set TYPESAFE_API_KEY for the bridge; until then every
-          turn runs on its current settings.
-        </Alert>
-      )}
+      {!guest && available !== null && <TypesafeKeyField available={available} />}
       <SegmentedControl
         size="xs"
         data={ROUTING_MODE_SEGMENTS}
@@ -548,6 +545,59 @@ function SmartRoutingSettings() {
           />
         ))}
     </>
+  );
+}
+
+/**
+ * This user's TypeSafe key, on this machine only. Write-only: the bridge never
+ * sends it back, so the saved state shows no part of it.
+ */
+function TypesafeKeyField({ available }: { available: boolean }) {
+  const setTypesafeKey = useStore((s) => s.setTypesafeKey);
+  const clearTypesafeKey = useStore((s) => s.clearTypesafeKey);
+  const [key, setKey] = useState('');
+  const trimmed = key.trim();
+
+  if (available) {
+    return (
+      <Group justify="space-between" wrap="nowrap">
+        <Text size="xs">
+          TypeSafe API key saved on this machine. It is never synced; each machine needs its own.
+        </Text>
+        <Button size="xs" variant="default" onClick={clearTypesafeKey}>
+          Remove
+        </Button>
+      </Group>
+    );
+  }
+  return (
+    <Stack gap={6}>
+      <Alert color="yellow" icon={<IconAlertCircle size={16} />} p="xs">
+        No TypeSafe API key on this machine. Until you add one, every turn runs on its current
+        settings.
+      </Alert>
+      <Group align="flex-end" wrap="nowrap">
+        <PasswordInput
+          size="xs"
+          style={{ flex: 1 }}
+          label="TypeSafe API key"
+          description="Stored only on this machine and never synced. Enter it on each machine you use."
+          value={key}
+          onChange={(e) => setKey(e.currentTarget.value)}
+          autoComplete="off"
+        />
+        <Button
+          size="xs"
+          disabled={!trimmed}
+          onClick={() => {
+            setTypesafeKey(trimmed);
+            setKey('');
+          }}
+        >
+          Save
+        </Button>
+      </Group>
+    </Stack>
   );
 }
 

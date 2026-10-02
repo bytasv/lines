@@ -276,6 +276,9 @@ export function createStore(root: string) {
   // A third file, never read by sync.ts and never broadcast, so a connection that
   // travels to another machine arrives without its credential.
   const MCP_SECRETS_FILE = path.join(root, 'mcp-secrets.json');
+  // This user's TypeSafe API key for smart turn routing. Same posture as
+  // MCP_SECRETS_FILE: 0600, never read by sync.ts, never broadcast.
+  const TYPESAFE_KEY_FILE = path.join(root, 'typesafe-key.json');
   const SETTINGS_FILE = path.join(root, 'settings.json');
   // Day-resolution spend ledger. Its own file rather than a field on
   // SESSIONS_FILE's rows: it is not synced, and it is written on a different
@@ -793,6 +796,27 @@ export function createStore(root: string) {
       } catch {
         // best-effort on platforms without POSIX perms
       }
+    },
+
+    /** TypeSafe API key for smart turn routing, or null when none is saved. Local only. */
+    loadTypesafeKey(): string | null {
+      const raw = readJson<{ version?: unknown; key?: unknown } | null>(TYPESAFE_KEY_FILE, null);
+      if (!raw || typeof raw !== 'object' || raw.version !== 1 || typeof raw.key !== 'string') return null;
+      return raw.key.trim() || null;
+    },
+
+    saveTypesafeKey(key: string) {
+      // 0600 like MCP_SECRETS_FILE, chmod'd too in case the file already exists.
+      fs.writeFileSync(TYPESAFE_KEY_FILE, JSON.stringify({ version: 1, key }, null, 2), { mode: 0o600 });
+      try {
+        fs.chmodSync(TYPESAFE_KEY_FILE, 0o600);
+      } catch {
+        // best-effort on platforms without POSIX perms
+      }
+    },
+
+    clearTypesafeKey() {
+      fs.rmSync(TYPESAFE_KEY_FILE, { force: true });
     },
 
     // Last-synced state of every memory file, keyed by absolute path, so the

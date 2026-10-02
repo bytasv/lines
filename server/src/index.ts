@@ -24,7 +24,6 @@ for (const envFile of [
 }
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Actor, ClientMessage, ServerMessage, SocketAccess } from '@lines/shared';
-import { jevConfigured } from './jev.ts';
 import { smartRoutingIssues } from './turnRouting.ts';
 import {
   APP_PROTOCOL_VERSION,
@@ -328,6 +327,9 @@ const EXIT_BRIDGE_LOCK_HELD = 78;
  */
 const LOCK_WAIT_MS = 2_000;
 const LOCK_POLL_MS = 100;
+
+/** Upper bound on a saved TypeSafe key; real keys are far shorter. */
+const MAX_TYPESAFE_KEY_CHARS = 512;
 
 interface BridgeLock {
   pid: number;
@@ -1032,9 +1034,9 @@ function buildHello(
     // Owner-only like `update`: a guest has no button that starts one.
     whisperModelDownload: whisperModelDownloadState(),
     settings: ctx.store.loadSettings(),
-    // Owner-only like `settings`: whether routing can call out at all, for the
-    // Settings notice. Never the key itself.
-    smartRoutingAvailable: jevConfigured(),
+    // Owner-only like `settings`: whether this user has a TypeSafe key saved on
+    // this machine, for the Settings pane. Never the key itself.
+    smartRoutingAvailable: ctx.store.loadTypesafeKey() !== null,
     // Owner-only like `settings`: a guest may not subscribe (see MESSAGE_AUTHZ).
     pushAvailable: true,
     // Whether this link may drive a dialog that opens on this machine's screen.
@@ -1808,6 +1810,26 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       broadcast({ type: 'settings', settings: incoming });
       break;
     }
+    case 'setTypesafeKey': {
+      // Local only: never synced, never echoed back, never logged.
+      const key = typeof msg.key === 'string' ? msg.key.trim() : '';
+      if (!key || key.length > MAX_TYPESAFE_KEY_CHARS) {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            message: key ? 'TypeSafe API key is too long' : 'TypeSafe API key is empty',
+          } satisfies ServerMessage),
+        );
+        break;
+      }
+      store.saveTypesafeKey(key);
+      broadcast({ type: 'smartRoutingAvailable', available: true });
+      break;
+    }
+    case 'clearTypesafeKey':
+      store.clearTypesafeKey();
+      broadcast({ type: 'smartRoutingAvailable', available: false });
+      break;
     case 'addGuardAllow': {
       // Broadcasts and pushes through guard.onChange. The client runs the same
       // shared validators, so a rejection here is version skew — the generic error
