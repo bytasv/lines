@@ -7,7 +7,7 @@ An in-app reader for a project's `docs/**` markdown corpus: a doc tree, an `inde
 ## Entry points
 
 - `web/src/components/ProjectTabs.tsx` (header books icon)
-- `web/src/components/SettingsModal.tsx` (Documentation section)
+- `web/src/components/SettingsModal.tsx` (Documentation link in the settings rail footer; opens `/docs`, disabled with no open project, hidden for guests)
 - `/docs/*` route (direct URL / deep link)
 
 ## Important files

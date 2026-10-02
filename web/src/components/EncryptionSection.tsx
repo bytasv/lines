@@ -1,11 +1,12 @@
-import { useState } from 'react';
-import { Alert, Badge, Button, Card, Group, Stack, Text, TextInput } from '@mantine/core';
+import { useId, useState } from 'react';
+import { Alert, Badge, Button, Group, TextInput } from '@mantine/core';
 import { IconAlertCircle, IconLock, IconLockOpen } from '@tabler/icons-react';
 import { ENROLL_CODE_LENGTH, normalizeEnrollCode } from '@lines/shared';
 import { useStore } from '../store';
 import { cryptoUnavailable, pinnedKey, takeEnrollCodeFromUrl } from '../lib/e2ee';
 import { rememberedDeviceId } from '../lib/storage';
 import { enrollWithCode } from '../ws';
+import { SettingsGroup, SettingsRow } from './SettingsLayout';
 
 /**
  * Bind this browser to a machine with a key, so the relay in the middle stops
@@ -22,6 +23,7 @@ import { enrollWithCode } from '../ws';
  * limit belongs in front of the user, not only in the docs.
  */
 export function EncryptionSection() {
+  const codeId = useId();
   const deviceId = rememberedDeviceId() ?? '';
   const encrypted = useStore((s) => s.machines[s.primaryDeviceId ?? '']?.encrypted ?? false);
   // Prefilled from the code the machine handed this page (QR, or the desktop
@@ -59,57 +61,55 @@ export function EncryptionSection() {
   const ready = !blocked && normalizeEnrollCode(code).length === ENROLL_CODE_LENGTH;
 
   return (
-    <Stack gap="sm">
-      <Text size="sm" c="dimmed">
-        Every browser enrols once with a code from your machine. From then on, this browser and
-        your machine encrypt everything between them and each checks the other’s key directly.
-        The relay that connects you carries the traffic — it cannot read it, and it cannot
-        pretend to be either of you.
-      </Text>
+    <>
+      <SettingsGroup title="Status">
+        <SettingsRow
+          leftSection={encrypted ? <IconLock size={18} /> : <IconLockOpen size={18} opacity={0.6} />}
+          label="This connection"
+          control={
+            <Badge size="xs" color={encrypted ? 'green' : 'gray'} variant="light">
+              {encrypted ? 'end-to-end encrypted' : 'relayed, not end-to-end encrypted'}
+            </Badge>
+          }
+        />
+        <SettingsRow
+          label="Machine key"
+          description={
+            pinned
+              ? 'This browser has a key for this machine.'
+              : 'This browser has no key for this machine yet.'
+          }
+        />
+      </SettingsGroup>
 
-      <Card withBorder padding="sm" radius="sm">
-        <Group gap="sm">
-          {encrypted ? <IconLock size={18} /> : <IconLockOpen size={18} opacity={0.6} />}
-          <Stack gap={2}>
-            <Group gap={6}>
-              <Text size="sm" fw={500}>
-                This connection
-              </Text>
-              <Badge size="xs" color={encrypted ? 'green' : 'gray'} variant="light">
-                {encrypted ? 'end-to-end encrypted' : 'relayed, not end-to-end encrypted'}
-              </Badge>
-            </Group>
-            <Text size="xs" c="dimmed">
-              {pinned
-                ? 'This browser has a key for this machine.'
-                : 'This browser has no key for this machine yet.'}
-            </Text>
-          </Stack>
-        </Group>
-      </Card>
-
-      <Card withBorder padding="sm" radius="sm">
-        <Stack gap="xs">
-          <Text size="sm" fw={500}>
-            Enrol this browser
-          </Text>
-          <Text size="xs" c="dimmed">
-            On the machine, open the Lines menu-bar icon and choose “Show encryption code”. Type
-            what it shows here. The code is never sent — only a proof computed from it — and it
-            works once.
-          </Text>
+      <SettingsGroup
+        title="Enrol this browser"
+        footer="What this does not cover: this page itself is served by the same deployment. Somebody who can change the code served to your browser can defeat all of the above, because they are the code holding the keys. The desktop app closes that gap on a laptop; on a phone, a browser cannot."
+      >
+        <SettingsRow
+          label="Encryption code"
+          htmlFor={codeId}
+          description="Every browser enrols once. On the machine, open the Lines menu-bar icon, choose “Show encryption code” and type it here. The code is never sent — only a proof computed from it — and it works once."
+        >
           {blocked && (
             <Alert color="orange" variant="light">
               {blocked}
             </Alert>
           )}
-          <TextInput
-            placeholder="XXXXX XXXXX XXXXX XXXXX"
-            value={code}
-            onChange={(e) => setCode(e.currentTarget.value.toUpperCase())}
-            onKeyDown={(e) => e.key === 'Enter' && ready && void enroll()}
-            disabled={busy || !!blocked}
-          />
+          <Group gap="xs" wrap="nowrap">
+            <TextInput
+              id={codeId}
+              placeholder="XXXXX XXXXX XXXXX XXXXX"
+              value={code}
+              onChange={(e) => setCode(e.currentTarget.value.toUpperCase())}
+              onKeyDown={(e) => e.key === 'Enter' && ready && void enroll()}
+              disabled={busy || !!blocked}
+              style={{ flex: 1 }}
+            />
+            <Button size="xs" onClick={() => void enroll()} disabled={!ready || busy} loading={busy}>
+              Enrol
+            </Button>
+          </Group>
           {error && (
             <Alert color="red" icon={<IconAlertCircle size={16} />} variant="light">
               {error}
@@ -120,20 +120,8 @@ export function EncryptionSection() {
               Enrolled. Reconnecting so the link comes up encrypted.
             </Alert>
           )}
-          <Group justify="flex-end">
-            <Button size="xs" onClick={() => void enroll()} disabled={!ready || busy} loading={busy}>
-              Enrol
-            </Button>
-          </Group>
-        </Stack>
-      </Card>
-
-      <Text size="xs" c="dimmed">
-        What this does not cover: this page itself is served by the same deployment. Somebody who
-        can change the code served to your browser can defeat all of the above, because they are
-        the code holding the keys. The desktop app closes that gap on a laptop; on a phone, a
-        browser cannot.
-      </Text>
-    </Stack>
+        </SettingsRow>
+      </SettingsGroup>
+    </>
   );
 }

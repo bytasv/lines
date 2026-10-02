@@ -29,6 +29,7 @@ import {
   mcpStatusMeta,
   codexUnsupportedReason,
 } from '../lib/mcpConnections';
+import { SettingsGroup, SettingsRow } from './SettingsLayout';
 
 const TRANSPORTS = [
   { value: 'http', label: 'HTTP' },
@@ -81,7 +82,7 @@ export function McpConnectionsSection({ onOpenReview }: { onOpenReview: () => vo
   }, [statuses]);
 
   return (
-    <Stack gap="xs">
+    <>
       {review && (
         <Alert color="yellow" icon={<IconAlertTriangle size={16} />} p="xs">
           <Group justify="space-between" wrap="nowrap" gap="xs">
@@ -92,12 +93,7 @@ export function McpConnectionsSection({ onOpenReview }: { onOpenReview: () => vo
           </Group>
         </Alert>
       )}
-      <Text size="xs" c="dimmed">
-        Every enabled connection’s tools are offered to every session. Header values stay on this
-        machine and are never synced, so a connection you add here shows as “Needs authorization”
-        on your other machines until you enter its token there too.
-      </Text>
-      <Group justify="space-between" wrap="nowrap">
+      <Group justify="space-between" wrap="nowrap" px="md">
         <Text size="xs" c="dimmed">
           {!selectedSessionId
             ? 'Open a session to see connection status.'
@@ -127,24 +123,35 @@ export function McpConnectionsSection({ onOpenReview }: { onOpenReview: () => vo
         )}
       </Group>
 
-      {connections.length === 0 ? (
-        <Text size="sm" c="dimmed">
-          No connections yet.
-        </Text>
-      ) : (
-        connections.map((connection) => (
-          <ConnectionRow
-            key={connection.id}
-            connection={connection}
-            status={byName.get(connection.name)}
-            sessionId={selectedSessionId}
-            onToggle={(enabled) => updateMcpConnection(connection.id, { ...connection, enabled })}
-            onRemove={() => removeMcpConnection(connection.id)}
+      {/* A footer rather than trimmed away: header values are secrets, and this
+          says where they live. */}
+      <SettingsGroup
+        title="Servers"
+        footer="Header values stay on this machine and are never synced, so a connection you add here shows as “Needs authorization” on your other machines until you enter its token there too."
+      >
+        {connections.length === 0 ? (
+          <SettingsRow
+            label={
+              <Text span inherit c="dimmed">
+                No connections yet.
+              </Text>
+            }
           />
-        ))
-      )}
+        ) : (
+          connections.map((connection) => (
+            <ConnectionRow
+              key={connection.id}
+              connection={connection}
+              status={byName.get(connection.name)}
+              sessionId={selectedSessionId}
+              onToggle={(enabled) => updateMcpConnection(connection.id, { ...connection, enabled })}
+              onRemove={() => removeMcpConnection(connection.id)}
+            />
+          ))
+        )}
+      </SettingsGroup>
       <AddConnectionForm />
-    </Stack>
+    </>
   );
 }
 
@@ -193,21 +200,23 @@ function ConnectionRow({
   const openaiConnected = useStore((s) => s.openaiAuth?.loggedIn === true);
 
   return (
-    <Stack gap={2}>
-      <Group justify="space-between" wrap="nowrap">
-        <Group gap="xs" wrap="nowrap" style={{ minWidth: 0 }}>
-          <Tooltip label={meta.label}>
-            <span
-              className="status-dot"
-              style={{ ['--status-dot-color' as string]: meta.color }}
-              aria-label={meta.label}
-            />
-          </Tooltip>
-          <Code>{connection.name}</Code>
-          <Text size="xs" c="dimmed" truncate>
-            {connection.transport === 'stdio' ? connection.command : connection.url}
-          </Text>
-        </Group>
+    <SettingsRow
+      leftSection={
+        <Tooltip label={meta.label}>
+          <span
+            className="status-dot"
+            style={{ ['--status-dot-color' as string]: meta.color }}
+            aria-label={meta.label}
+          />
+        </Tooltip>
+      }
+      label={<Code>{connection.name}</Code>}
+      description={
+        <Text inherit truncate>
+          {connection.transport === 'stdio' ? connection.command : connection.url}
+        </Text>
+      }
+      control={
         <Group gap="xs" wrap="nowrap">
           <Switch
             size="xs"
@@ -227,7 +236,8 @@ function ConnectionRow({
             </ActionIcon>
           </Tooltip>
         </Group>
-      </Group>
+      }
+    >
       {connection.headerKeys?.length ? (
         <Text size="xs" c="dimmed">
           Headers: {connection.headerKeys.join(', ')}
@@ -315,7 +325,7 @@ function ConnectionRow({
           </Anchor>
         </Group>
       )}
-    </Stack>
+    </SettingsRow>
   );
 }
 
@@ -386,111 +396,113 @@ function AddConnectionForm() {
         </Button>
       </Group>
       <Collapse expanded={open}>
-        <Stack gap="xs">
-          <Group gap="xs" grow wrap="nowrap" align="flex-start">
-            <TextInput
-              label="Name"
-              size="sm"
-              placeholder="figma"
-              description="Tools arrive as mcp__<name>__*"
-              value={name}
-              onChange={(e) => {
-                setName(e.currentTarget.value);
-                setError(null);
-              }}
-            />
-            <Select
-              label="Transport"
-              size="sm"
-              data={TRANSPORTS}
-              value={transport}
-              allowDeselect={false}
-              onChange={(v) => {
-                setTransport(v ?? 'http');
-                setError(null);
-              }}
-            />
-          </Group>
-          {transport === 'stdio' ? (
-            <>
+        <SettingsGroup>
+          <Stack gap="xs" px="md" py="sm">
+            <Group gap="xs" grow wrap="nowrap" align="flex-start">
               <TextInput
-                label="Command"
+                label="Name"
                 size="sm"
-                placeholder="npx"
-                value={command}
+                placeholder="figma"
+                description="Tools arrive as mcp__<name>__*"
+                value={name}
                 onChange={(e) => {
-                  setCommand(e.currentTarget.value);
+                  setName(e.currentTarget.value);
                   setError(null);
                 }}
               />
-              <TextInput
-                label="Arguments"
+              <Select
+                label="Transport"
                 size="sm"
-                placeholder="-y some-mcp-server"
-                description="Space-separated"
-                value={args}
-                onChange={(e) => setArgs(e.currentTarget.value)}
-              />
-            </>
-          ) : (
-            <>
-              <TextInput
-                label="URL"
-                size="sm"
-                placeholder="https://mcp.figma.com/mcp"
-                value={url}
-                onChange={(e) => {
-                  setUrl(e.currentTarget.value);
+                data={TRANSPORTS}
+                value={transport}
+                allowDeselect={false}
+                onChange={(v) => {
+                  setTransport(v ?? 'http');
                   setError(null);
                 }}
               />
-              <Group gap="xs" grow wrap="nowrap" align="flex-start">
+            </Group>
+            {transport === 'stdio' ? (
+              <>
                 <TextInput
-                  label="Header name"
+                  label="Command"
                   size="sm"
-                  placeholder="Authorization"
-                  description="Optional — for servers that take a token"
-                  value={headerName}
+                  placeholder="npx"
+                  value={command}
                   onChange={(e) => {
-                    setHeaderName(e.currentTarget.value);
+                    setCommand(e.currentTarget.value);
                     setError(null);
                   }}
                 />
                 <TextInput
-                  label="Header value"
+                  label="Arguments"
                   size="sm"
-                  type="password"
-                  placeholder="Bearer …"
-                  description="Stays on this machine"
-                  value={headerValue}
-                  onChange={(e) => setHeaderValue(e.currentTarget.value)}
+                  placeholder="-y some-mcp-server"
+                  description="Space-separated"
+                  value={args}
+                  onChange={(e) => setArgs(e.currentTarget.value)}
                 />
-              </Group>
-            </>
-          )}
-          {error && (
-            <Text size="xs" c="red">
-              {error}
-            </Text>
-          )}
-          <Group gap="xs">
-            <Button size="xs" onClick={submit}>
-              Add
-            </Button>
-            <Anchor
-              component="button"
-              type="button"
-              size="xs"
-              c="dimmed"
-              onClick={() => {
-                reset();
-                setOpen(false);
-              }}
-            >
-              Cancel
-            </Anchor>
-          </Group>
-        </Stack>
+              </>
+            ) : (
+              <>
+                <TextInput
+                  label="URL"
+                  size="sm"
+                  placeholder="https://mcp.figma.com/mcp"
+                  value={url}
+                  onChange={(e) => {
+                    setUrl(e.currentTarget.value);
+                    setError(null);
+                  }}
+                />
+                <Group gap="xs" grow wrap="nowrap" align="flex-start">
+                  <TextInput
+                    label="Header name"
+                    size="sm"
+                    placeholder="Authorization"
+                    description="Optional — for servers that take a token"
+                    value={headerName}
+                    onChange={(e) => {
+                      setHeaderName(e.currentTarget.value);
+                      setError(null);
+                    }}
+                  />
+                  <TextInput
+                    label="Header value"
+                    size="sm"
+                    type="password"
+                    placeholder="Bearer …"
+                    description="Stays on this machine"
+                    value={headerValue}
+                    onChange={(e) => setHeaderValue(e.currentTarget.value)}
+                  />
+                </Group>
+              </>
+            )}
+            {error && (
+              <Text size="xs" c="red">
+                {error}
+              </Text>
+            )}
+            <Group gap="xs">
+              <Button size="xs" onClick={submit}>
+                Add
+              </Button>
+              <Anchor
+                component="button"
+                type="button"
+                size="xs"
+                c="dimmed"
+                onClick={() => {
+                  reset();
+                  setOpen(false);
+                }}
+              >
+                Cancel
+              </Anchor>
+            </Group>
+          </Stack>
+        </SettingsGroup>
       </Collapse>
     </Stack>
   );

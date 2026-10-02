@@ -12,7 +12,7 @@ the same thinking budget.
 
 - Session composer, next to the model `Select` (`web/src/components/Composer.tsx`)
 - New-session defaults and the global plan-mode effort in the settings modal's Sessions/Plan-mode
-  panes (`web/src/components/SettingsModal.tsx`)
+  groups of the Sessions pane (`web/src/components/SessionsSection.tsx`)
 - Workflow step editor and step library (`web/src/components/workflow/StepCard.tsx`,
   `web/src/components/workflow/StepLibrary.tsx`)
 - `save_step`/`create_workflow`/`update_workflow` MCP tools (`server/src/mcpWorkflowTools.ts`)

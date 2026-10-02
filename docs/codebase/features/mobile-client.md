@@ -161,6 +161,9 @@ an iPad in landscape is neither.
   is nothing to defer.
 - `SettingsModal` goes full-screen on a phone; a 90%-wide modal leaves a sliver of backdrop that
   swallows taps meant for the pane.
+- On a phone `SettingsModal` shows a section list first and the chosen pane after it, with a back
+  button to the list; a caller that names a section (an enrolment prompt, a guest, an allowlist
+  review) opens straight on its pane. A desktop shows a rail beside the pane instead.
 - The transcript `ScrollArea` sets `scrollbars="y"` and `styles={{ content: { display: 'block' } }}`.
   Mantine's default wraps content in `display: table; min-width: 100%`, and a table grows to its
   widest non-shrinking child — one `nowrap` row (a tool-card header, a long badge) widened the

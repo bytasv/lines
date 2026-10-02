@@ -1,13 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import {
   ActionIcon,
   Alert,
   Badge,
   Button,
-  Card,
   Group,
   Loader,
-  Stack,
   Text,
   TextInput,
   Tooltip,
@@ -15,7 +13,6 @@ import {
 import {
   IconAlertCircle,
   IconCheck,
-  IconDeviceLaptop,
   IconLogout,
   IconPencil,
   IconPlus,
@@ -44,8 +41,10 @@ import {
 } from '../lib/machineHealth';
 import { SHARING_ENABLED, leaveShare } from '../lib/shares';
 import { disconnectMachine, switchDevice } from '../ws';
+import { ConfirmModal } from './ConfirmModal';
 import { DownloadDesktopApp } from './DownloadDesktopApp';
 import { MachineDot } from './MachineDot';
+import { SettingsGroup, SettingsRow } from './SettingsLayout';
 import { ShareModal } from './ShareModal';
 
 /**
@@ -74,6 +73,9 @@ export function DevicesSection() {
    * session open concluded the feature did not exist.
    */
   const [sharing, setSharing] = useState<Device | null>(null);
+  /** The machine whose revoke is waiting on confirmation. */
+  const [confirmRevoke, setConfirmRevoke] = useState<Device | null>(null);
+  const codeId = useId();
   const connected = useStore((s) => s.connectionStatus === 'connected');
   // Health of the machine this browser is actually linked to comes off the socket,
   // not off the device row: the row is an HTTP snapshot, and only the link knows
@@ -185,14 +187,159 @@ export function DevicesSection() {
     }
   };
 
-  return (
-    <Stack gap="sm">
-      <Text size="sm" c="dimmed">
-        Lines runs the agent on your own computer. These are the machines you can reach — the
-        ones paired with this account, plus any shared with you; one is active at a time, and
-        sessions belong to that machine’s files.
-      </Text>
+  const renderDevice = (device: Device) => {
+    const active = device.id === activeId;
+    // Three states, kept apart: linked (the socket is the source of truth),
+    // and not linked (the relay's presence report, which decays to "last
+    // seen" rather than claiming anything once it goes stale).
+    const health = active && activeHealth ? activeHealth : unlinkedMachineHealth(device);
+    return (
+      <SettingsRow
+        key={device.id}
+        leftSection={<MachineDot health={health} />}
+        label={
+          <Group gap={6}>
+            {renaming?.id === device.id ? (
+              <TextInput
+                size="xs"
+                value={renaming.name}
+                autoFocus
+                maxLength={64}
+                onChange={(e) => setRenaming({ id: device.id, name: e.currentTarget.value })}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void rename();
+                  if (e.key === 'Escape') setRenaming(null);
+                }}
+                rightSection={
+                  <Group gap={2} wrap="nowrap">
+                    <ActionIcon size="xs" variant="subtle" onClick={() => void rename()} aria-label="Save name">
+                      <IconCheck size={13} />
+                    </ActionIcon>
+                    <ActionIcon size="xs" variant="subtle" color="gray" onClick={() => setRenaming(null)} aria-label="Cancel rename">
+                      <IconX size={13} />
+                    </ActionIcon>
+                  </Group>
+                }
+                rightSectionWidth={52}
+              />
+            ) : (
+              <Text inherit truncate>
+                {device.name}
+              </Text>
+            )}
+            {device.shared && (
+              // Somebody else's computer. Named, because everything you
+              // run there happens on their machine, as them.
+              <Badge size="xs" color="grape" variant="light">
+                {device.ownerProfile?.name ?? device.ownerProfile?.email ?? 'shared with you'}
+              </Badge>
+            )}
+            {active && (
+              // Active means "this browser points here". Connected means
+              // the socket is actually open — with the machine asleep the
+              // first is true and the second is not, and conflating them
+              // is what makes a dead link look healthy.
+              <Badge size="xs" color={connected ? 'green' : 'gray'} variant="light">
+                {connected ? 'connected' : 'active, not reachable'}
+              </Badge>
+            )}
+          </Group>
+        }
+        description={
+          <>
+            {device.platform ?? 'unknown platform'} · {health.label}
+            {/* "offline" says the state; "seen 5m ago" says how stale it
+                is. The unknown state already reads as the latter. */}
+            {health.state !== 'unknown' && health.state !== 'online'
+              ? ` · ${lastSeenLabel(device.lastSeenAt)}`
+              : ''}
+            {active && activity.running > 0 ? ` · ${activity.running} running` : ''}
+            {active && activity.actionable > 0
+              ? ` · ${activity.actionable} needs you`
+              : ''}
+          </>
+        }
+        control={
+          <Group gap={4} wrap="nowrap">
+            {!active && (
+              <Button size="xs" variant="subtle" onClick={() => switchToDevice(device.id)}>
+                Use this
+              </Button>
+            )}
+            {/* Handing out access to somebody else's machine is not ours
+                to do either — the same `shared` guard Rename and Revoke
+                use, so the three cannot drift apart. */}
+            {SHARING_ENABLED && !device.shared && (
+              <Tooltip label="Share this machine" withArrow>
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  onClick={() => setSharing(device)}
+                  aria-label={`Share ${device.name}`}
+                >
+                  <IconUserPlus size={15} />
+                </ActionIcon>
+              </Tooltip>
+            )}
+            {/* Renaming somebody else's machine is not ours to do — the
+                name belongs to its owner's account, not to this grant. */}
+            {device.shared ? null : (
+              <Tooltip label="Rename" withArrow>
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  onClick={() => setRenaming({ id: device.id, name: device.name })}
+                  aria-label={`Rename ${device.name}`}
+                >
+                  <IconPencil size={15} />
+                </ActionIcon>
+              </Tooltip>
+            )}
+            {/* The owner revokes; the guest leaves. Both end this browser's
+                access to the machine and neither touches the machine
+                itself — but only one of them is the caller's to do, so the
+                row shows exactly one. */}
+            {device.shared ? (
+              <Tooltip
+                label="Leave this machine — you lose access to it until its owner shares it again"
+                withArrow
+                multiline
+                w={260}
+              >
+                <ActionIcon
+                  variant="subtle"
+                  color="red"
+                  loading={busyId === device.id}
+                  onClick={() => void leave(device)}
+                  aria-label={`Leave ${device.name}`}
+                >
+                  <IconLogout size={16} />
+                </ActionIcon>
+              </Tooltip>
+            ) : (
+              <Tooltip label="Revoke access" withArrow>
+                <ActionIcon
+                  variant="subtle"
+                  color="red"
+                  loading={busyId === device.id}
+                  onClick={() => setConfirmRevoke(device)}
+                  aria-label={`Revoke ${device.name}`}
+                >
+                  <IconTrash size={16} />
+                </ActionIcon>
+              </Tooltip>
+            )}
+          </Group>
+        }
+      />
+    );
+  };
 
+  const own = devices?.filter((device) => !device.shared) ?? [];
+  const sharedWithMe = devices?.filter((device) => device.shared) ?? [];
+
+  return (
+    <>
       {error && (
         <Alert color="red" icon={<IconAlertCircle size={16} />} variant="light">
           {error}
@@ -203,158 +350,30 @@ export function DevicesSection() {
         <Group justify="center" p="md">
           <Loader size="sm" />
         </Group>
-      ) : devices.length === 0 ? (
-        <Text size="sm" c="dimmed">
-          No machines paired yet.
-        </Text>
       ) : (
-        devices.map((device) => {
-          const active = device.id === activeId;
-          // Three states, kept apart: linked (the socket is the source of truth),
-          // and not linked (the relay's presence report, which decays to "last
-          // seen" rather than claiming anything once it goes stale).
-          const health = active && activeHealth ? activeHealth : unlinkedMachineHealth(device);
-          return (
-            <Card key={device.id} withBorder padding="sm" radius="sm">
-              <Group justify="space-between" wrap="nowrap">
-                <Group gap="sm" wrap="nowrap" style={{ minWidth: 0 }}>
-                  <IconDeviceLaptop size={20} opacity={0.6} />
-                  <Stack gap={2} style={{ minWidth: 0 }}>
-                    <Group gap={6} wrap="nowrap">
-                      <MachineDot health={health} />
-                      {renaming?.id === device.id ? (
-                        <TextInput
-                          size="xs"
-                          value={renaming.name}
-                          autoFocus
-                          maxLength={64}
-                          onChange={(e) => setRenaming({ id: device.id, name: e.currentTarget.value })}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') void rename();
-                            if (e.key === 'Escape') setRenaming(null);
-                          }}
-                          rightSection={
-                            <Group gap={2} wrap="nowrap">
-                              <ActionIcon size="xs" variant="subtle" onClick={() => void rename()} aria-label="Save name">
-                                <IconCheck size={13} />
-                              </ActionIcon>
-                              <ActionIcon size="xs" variant="subtle" color="gray" onClick={() => setRenaming(null)} aria-label="Cancel rename">
-                                <IconX size={13} />
-                              </ActionIcon>
-                            </Group>
-                          }
-                          rightSectionWidth={52}
-                        />
-                      ) : (
-                        <Text size="sm" fw={500} truncate>
-                          {device.name}
-                        </Text>
-                      )}
-                      {device.shared && (
-                        // Somebody else's computer. Named, because everything you
-                        // run there happens on their machine, as them.
-                        <Badge size="xs" color="grape" variant="light">
-                          {device.ownerProfile?.name ?? device.ownerProfile?.email ?? 'shared with you'}
-                        </Badge>
-                      )}
-                      {active && (
-                        // Active means "this browser points here". Connected means
-                        // the socket is actually open — with the machine asleep the
-                        // first is true and the second is not, and conflating them
-                        // is what makes a dead link look healthy.
-                        <Badge size="xs" color={connected ? 'green' : 'gray'} variant="light">
-                          {connected ? 'connected' : 'active, not reachable'}
-                        </Badge>
-                      )}
-                    </Group>
-                    <Text size="xs" c="dimmed">
-                      {device.platform ?? 'unknown platform'} · {health.label}
-                      {/* "offline" says the state; "seen 5m ago" says how stale it
-                          is. The unknown state already reads as the latter. */}
-                      {health.state !== 'unknown' && health.state !== 'online'
-                        ? ` · ${lastSeenLabel(device.lastSeenAt)}`
-                        : ''}
-                      {active && activity.running > 0 ? ` · ${activity.running} running` : ''}
-                      {active && activity.actionable > 0
-                        ? ` · ${activity.actionable} needs you`
-                        : ''}
-                    </Text>
-                  </Stack>
-                </Group>
-                <Group gap={4} wrap="nowrap">
-                  {!active && (
-                    <Button size="xs" variant="subtle" onClick={() => switchToDevice(device.id)}>
-                      Use this
-                    </Button>
-                  )}
-                  {/* Handing out access to somebody else's machine is not ours
-                      to do either — the same `shared` guard Rename and Revoke
-                      use, so the three cannot drift apart. */}
-                  {SHARING_ENABLED && !device.shared && (
-                    <Tooltip label="Share this machine" withArrow>
-                      <ActionIcon
-                        variant="subtle"
-                        color="gray"
-                        onClick={() => setSharing(device)}
-                        aria-label={`Share ${device.name}`}
-                      >
-                        <IconUserPlus size={15} />
-                      </ActionIcon>
-                    </Tooltip>
-                  )}
-                  {/* Renaming somebody else's machine is not ours to do — the
-                      name belongs to its owner's account, not to this grant. */}
-                  {device.shared ? null : (
-                    <Tooltip label="Rename" withArrow>
-                      <ActionIcon
-                        variant="subtle"
-                        color="gray"
-                        onClick={() => setRenaming({ id: device.id, name: device.name })}
-                        aria-label={`Rename ${device.name}`}
-                      >
-                        <IconPencil size={15} />
-                      </ActionIcon>
-                    </Tooltip>
-                  )}
-                  {/* The owner revokes; the guest leaves. Both end this browser's
-                      access to the machine and neither touches the machine
-                      itself — but only one of them is the caller's to do, so the
-                      row shows exactly one. */}
-                  {device.shared ? (
-                    <Tooltip
-                      label="Leave this machine — you lose access to it until its owner shares it again"
-                      withArrow
-                      multiline
-                      w={260}
-                    >
-                      <ActionIcon
-                        variant="subtle"
-                        color="red"
-                        loading={busyId === device.id}
-                        onClick={() => void leave(device)}
-                        aria-label={`Leave ${device.name}`}
-                      >
-                        <IconLogout size={16} />
-                      </ActionIcon>
-                    </Tooltip>
-                  ) : (
-                  <Tooltip label="Revoke access" withArrow>
-                    <ActionIcon
-                      variant="subtle"
-                      color="red"
-                      loading={busyId === device.id}
-                      onClick={() => void revoke(device)}
-                      aria-label={`Revoke ${device.name}`}
-                    >
-                      <IconTrash size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-                  )}
-                </Group>
-              </Group>
-            </Card>
-          );
-        })
+        <>
+          {/* What sharing and revoking actually do stays in view under the rows
+              that do them: both are about who can reach this computer. */}
+          <SettingsGroup
+            title="Your machines"
+            footer="Sharing a machine lets someone else use it with their own account, on your team or not; the agent still runs on your computer. Revoking stops a machine reconnecting and ends an open connection within a few minutes; it then shows a fresh pairing code, so you can add it back."
+          >
+            {own.length === 0 ? (
+              <SettingsRow
+                label={
+                  <Text span inherit c="dimmed">
+                    No machines paired yet.
+                  </Text>
+                }
+              />
+            ) : (
+              own.map(renderDevice)
+            )}
+          </SettingsGroup>
+          {sharedWithMe.length > 0 && (
+            <SettingsGroup title="Shared with you">{sharedWithMe.map(renderDevice)}</SettingsGroup>
+          )}
+        </>
       )}
 
       {/* No `session` prop: the dialog opens in machine scope, which is the whole
@@ -369,17 +388,18 @@ export function DevicesSection() {
       )}
 
       {pairing ? (
-        <Card withBorder padding="sm" radius="sm">
-          <Stack gap="xs">
-            <Text size="sm">
-              Run the Lines desktop app on the machine you want to add. It shows a pairing
-              code on first launch.
-            </Text>
+        <SettingsGroup title="Pair a machine">
+          <SettingsRow
+            label="Pairing code"
+            htmlFor={codeId}
+            description="Run the Lines desktop app on the machine you want to add. It shows a pairing code on first launch."
+          >
             {/* The same download surface as the connect gate: this panel's copy also
                 assumed the app was already installed on the new machine. */}
             <DownloadDesktopApp />
             <Group gap="xs" wrap="nowrap">
               <TextInput
+                id={codeId}
                 placeholder="XXXXXXXX"
                 value={code}
                 onChange={(e) => setCode(e.currentTarget.value.toUpperCase())}
@@ -397,8 +417,8 @@ export function DevicesSection() {
             <Text size="xs" c="dimmed">
               Codes expire 15 minutes after the app shows one; it fetches a fresh one on its own.
             </Text>
-          </Stack>
-        </Card>
+          </SettingsRow>
+        </SettingsGroup>
       ) : (
         <Button
           variant="light"
@@ -410,16 +430,18 @@ export function DevicesSection() {
         </Button>
       )}
 
-      <Text size="xs" c="dimmed">
-        Sharing a machine gives someone else access to it — they sign in with their own account,
-        which does not have to be on your team, and the agent still runs here on your computer.
-      </Text>
-
-      <Text size="xs" c="dimmed">
-        Revoking stops a machine reconnecting, and ends a connection that is already open
-        within a few minutes — access is re-checked periodically, not only when the machine
-        reconnects. The machine then shows a fresh pairing code, so you can add it back.
-      </Text>
-    </Stack>
+      <ConfirmModal
+        opened={confirmRevoke !== null}
+        title="Revoke this machine?"
+        message={`${confirmRevoke?.name ?? 'The machine'} stops reconnecting, and a connection that is already open ends within a few minutes. The machine then shows a fresh pairing code, so you can add it back.`}
+        confirmLabel="Revoke"
+        confirmColor="red"
+        confirmLoading={confirmRevoke !== null && busyId === confirmRevoke.id}
+        onConfirm={() => {
+          if (confirmRevoke) void revoke(confirmRevoke).then(() => setConfirmRevoke(null));
+        }}
+        onCancel={() => setConfirmRevoke(null)}
+      />
+    </>
   );
 }

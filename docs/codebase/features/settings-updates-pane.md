@@ -26,7 +26,7 @@ is picked up within seconds, with no restart and no manual "check again".
 
 ## Entry points
 
-- `web/src/components/SettingsModal.tsx` — the `updates` section (`Updates`, last in the rail);
+- `web/src/components/SettingsModal.tsx` — the `updates` section (`Updates`, in the rail's System group);
   not in `GUEST_SECTIONS`, so a guest never sees it (it reports the host's machine)
 - `web/src/components/UpdatesSection.tsx` — the pane itself
 

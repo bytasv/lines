@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Badge, Button, CopyButton, Group, Stack, Text, Tooltip } from '@mantine/core';
+import { Badge, Button, CopyButton, Group, Text, Tooltip } from '@mantine/core';
 import { IconCheck, IconCopy, IconDownload, IconExternalLink } from '@tabler/icons-react';
 import { CLAUDE_INSTALL_URL, CODEX_INSTALL_COMMAND } from '@lines/shared';
 import { useStore } from '../store';
@@ -8,6 +8,7 @@ import {
   DESKTOP_DOWNLOAD_URL,
   DESKTOP_DOWNLOAD_VERSION,
 } from '../lib/storage';
+import { SettingsGroup, SettingsRow } from './SettingsLayout';
 
 /**
  * What this user is actually running, in one place.
@@ -38,33 +39,81 @@ export function UpdatesSection() {
 
   return (
     <>
-      <Text size="xs" fw={600} c="dimmed" tt="uppercase">
-        Versions
-      </Text>
+      <SettingsGroup title="Versions">
+        <VersionRow name="Lines (this tab)" version={__LINES_VERSION__} />
 
-      <VersionRow name="Lines (this tab)" version={__LINES_VERSION__} />
+        <VersionRow
+          name="Bridge"
+          version={bridge?.version}
+          detail={bridge ? `protocol ${bridge.appProtocol}` : undefined}
+        />
 
-      <VersionRow
-        name="Bridge"
-        version={bridge?.version}
-        detail={bridge ? `protocol ${bridge.appProtocol}` : undefined}
-      />
+        {/* The worker outlives bridge restarts, so its version is its own row
+            rather than an assumed match — a frozen worker beside a hot bridge is
+            exactly what this pane exists to make visible. */}
+        <VersionRow
+          name="Worker"
+          version={worker?.version}
+          detail={worker && !worker.connected ? 'not connected' : undefined}
+          badge={
+            worker?.mismatch ? (
+              <Badge size="xs" color="red" variant="light">
+                speaks protocol {worker.mismatch.worker}, bridge speaks {worker.mismatch.bridge}
+              </Badge>
+            ) : undefined
+          }
+        />
 
-      {/* The worker outlives bridge restarts, so its version is its own row
-          rather than an assumed match — a frozen worker beside a hot bridge is
-          exactly what this pane exists to make visible. */}
-      <VersionRow
-        name="Worker"
-        version={worker?.version}
-        detail={worker && !worker.connected ? 'not connected' : undefined}
-        badge={
-          worker?.mismatch ? (
-            <Badge size="xs" color="red" variant="light">
-              speaks protocol {worker.mismatch.worker}, bridge speaks {worker.mismatch.bridge}
-            </Badge>
-          ) : undefined
-        }
-      />
+        <VersionRow
+          name="Claude Code CLI"
+          version={claudeCli?.version}
+          detail={claudeCli ? `minimum ${claudeCli.minVersion}` : undefined}
+          badge={<CliBadge status={claudeCli} />}
+          action={
+            claudeCli && claudeCli.state !== 'ok' ? (
+              <Button
+                size="xs"
+                variant="light"
+                component="a"
+                href={CLAUDE_INSTALL_URL}
+                target="_blank"
+                rel="noreferrer"
+                leftSection={<IconExternalLink size={14} />}
+              >
+                {claudeCli.state === 'missing' ? 'Install' : 'Update'}
+              </Button>
+            ) : undefined
+          }
+        />
+
+        {/* The other engine's CLI, on the same terms. Shown even when it is fine,
+            like the Claude row: "installed, and this is the version" is what makes
+            the missing case legible when it happens. */}
+        <VersionRow
+          name="Codex CLI"
+          version={codexCli?.version}
+          detail={codexCli ? `minimum ${codexCli.minVersion}` : undefined}
+          badge={<CliBadge status={codexCli} />}
+          action={
+            codexCli && codexCli.state !== 'ok' ? (
+              <CopyButton value={CODEX_INSTALL_COMMAND}>
+                {({ copied, copy }) => (
+                  <Tooltip label={copied ? 'Copied' : CODEX_INSTALL_COMMAND} withArrow>
+                    <Button
+                      size="xs"
+                      variant="light"
+                      onClick={copy}
+                      leftSection={copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                    >
+                      {copied ? 'Copied' : 'Copy install command'}
+                    </Button>
+                  </Tooltip>
+                )}
+              </CopyButton>
+            ) : undefined
+          }
+        />
+      </SettingsGroup>
 
       {/* Hidden rather than shown empty when no build has been published: a
           download button pointing at nothing is worse than none (see storage.ts).
@@ -72,86 +121,37 @@ export function UpdatesSection() {
           the running desktop version is the bridge row above, which in a packaged
           install is stamped from the same desktop/package.json. */}
       {DESKTOP_DOWNLOAD_ENABLED && (
-        <VersionRow
-          name="Desktop app"
-          version={DESKTOP_DOWNLOAD_VERSION ?? undefined}
-          detail="latest published"
-          badge={
-            updateAvailable ? (
-              <Badge size="xs" color="indigo" variant="light">
-                update available
-              </Badge>
-            ) : undefined
-          }
-          action={
-            // A plain link, not the owner-gated `installUpdate` message: with
-            // self-install off that only opens the download page on the tray
-            // machine, which a remote browser never sees (see UpdateBanner).
-            <Button
-              size="xs"
-              variant={updateAvailable ? 'filled' : 'light'}
-              component="a"
-              href={DESKTOP_DOWNLOAD_URL}
-              target="_blank"
-              rel="noreferrer"
-              leftSection={<IconDownload size={14} />}
-            >
-              Download
-            </Button>
-          }
-        />
+        <SettingsGroup>
+          <VersionRow
+            name="Desktop app"
+            version={DESKTOP_DOWNLOAD_VERSION ?? undefined}
+            detail="latest published"
+            badge={
+              updateAvailable ? (
+                <Badge size="xs" color="indigo" variant="light">
+                  update available
+                </Badge>
+              ) : undefined
+            }
+            action={
+              // A plain link, not the owner-gated `installUpdate` message: with
+              // self-install off that only opens the download page on the tray
+              // machine, which a remote browser never sees (see UpdateBanner).
+              <Button
+                size="xs"
+                variant={updateAvailable ? 'filled' : 'light'}
+                component="a"
+                href={DESKTOP_DOWNLOAD_URL}
+                target="_blank"
+                rel="noreferrer"
+                leftSection={<IconDownload size={14} />}
+              >
+                Download
+              </Button>
+            }
+          />
+        </SettingsGroup>
       )}
-
-      <VersionRow
-        name="Claude Code CLI"
-        version={claudeCli?.version}
-        detail={claudeCli ? `minimum ${claudeCli.minVersion}` : undefined}
-        badge={<CliBadge status={claudeCli} />}
-        action={
-          claudeCli && claudeCli.state !== 'ok' ? (
-            <Button
-              size="xs"
-              variant="light"
-              component="a"
-              href={CLAUDE_INSTALL_URL}
-              target="_blank"
-              rel="noreferrer"
-              leftSection={<IconExternalLink size={14} />}
-            >
-              {claudeCli.state === 'missing' ? 'Install' : 'Update'}
-            </Button>
-          ) : undefined
-        }
-      />
-
-      {/* The other engine's CLI, on the same terms. Shown even when it is fine,
-          like the Claude row: "installed, and this is the version" is what makes
-          the missing case legible when it happens. */}
-      <VersionRow
-        name="Codex CLI"
-        version={codexCli?.version}
-        detail={codexCli ? `minimum ${codexCli.minVersion}` : undefined}
-        badge={<CliBadge status={codexCli} />}
-        action={
-          codexCli && codexCli.state !== 'ok' ? (
-            <CopyButton value={CODEX_INSTALL_COMMAND}>
-              {({ copied, copy }) => (
-                <Tooltip label={copied ? 'Copied' : CODEX_INSTALL_COMMAND} withArrow>
-                  <Button
-                    size="xs"
-                    variant="light"
-                    onClick={copy}
-                    leftSection={copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-                  >
-                    {copied ? 'Copied' : 'Copy install command'}
-                  </Button>
-                </Tooltip>
-              )}
-            </CopyButton>
-          ) : undefined
-        }
-      />
-
     </>
   );
 }
@@ -178,7 +178,7 @@ function CliBadge({ status }: { status: { state: string; minVersion: string } | 
 }
 
 /**
- * One `name — version — badge` line.
+ * One `name — version — badge` row of a SettingsGroup.
  *
  * An unknown version renders as a dimmed dash rather than dropping the row: the
  * pane's shape stays the same whether or not a bridge has said hello yet, and
@@ -190,37 +190,40 @@ export function VersionRow({
   detail,
   badge,
   action,
+  children,
 }: {
   name: string;
   version?: string;
-  detail?: string;
+  detail?: ReactNode;
   badge?: ReactNode;
   action?: ReactNode;
+  /** Full-width under the row, e.g. a download's progress. */
+  children?: ReactNode;
 }) {
   return (
-    <Group justify="space-between" wrap="nowrap" gap="sm">
-      <Stack gap={0} style={{ minWidth: 0 }}>
-        <Group gap="xs" wrap="nowrap">
-          <Text size="sm">{name}</Text>
+    <SettingsRow
+      label={
+        <Group gap="xs">
+          {name}
           {badge}
         </Group>
-        {detail && (
-          <Text size="xs" c="dimmed">
-            {detail}
-          </Text>
-        )}
-      </Stack>
-      <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
-        {/* The dash is the "we don't know" answer, and it only reads as one when
-            there is nothing beside it. With an action present the row already
-            says what is wrong and what to do, and a dash in front of it is noise. */}
-        {(version || !action) && (
-          <Text size="sm" c={version ? undefined : 'dimmed'} ff="monospace">
-            {version ?? '—'}
-          </Text>
-        )}
-        {action}
-      </Group>
-    </Group>
+      }
+      description={detail}
+      control={
+        <Group gap="xs" wrap="nowrap">
+          {/* The dash is the "we don't know" answer, and it only reads as one when
+              there is nothing beside it. With an action present the row already
+              says what is wrong and what to do, and a dash in front of it is noise. */}
+          {(version || !action) && (
+            <Text size="sm" c={version ? undefined : 'dimmed'} ff="monospace">
+              {version ?? '—'}
+            </Text>
+          )}
+          {action}
+        </Group>
+      }
+    >
+      {children}
+    </SettingsRow>
   );
 }

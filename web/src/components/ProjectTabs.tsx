@@ -727,9 +727,10 @@ function HeaderActions() {
         onClose={() => setSettingsOpen(false)}
         // A guest lands on Machines, the one pane that is theirs rather than the
         // host's — and their only way back to their own machine. Hiding the gear
-        // outright would strand them on somebody else's computer.
+        // outright would strand them on somebody else's computer. Otherwise no
+        // section: a phone then opens on the section list, a desktop on Account.
         initialSection={
-          enrolling ? 'encryption' : guest ? 'devices' : guardReview ? 'allowlist' : 'account'
+          enrolling ? 'encryption' : guest ? 'devices' : guardReview ? 'allowlist' : undefined
         }
       />
     </>

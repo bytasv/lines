@@ -108,7 +108,7 @@ deliverable is written and reviewed.
   helper
 - `web/src/lib/modelSelect.tsx` — `renderOptionWithDescription` (label + dimmed description
   renderer, shared with the model selector), `modelComboboxProps` (popover widener, shared)
-- `web/src/components/Composer.tsx`, `web/src/components/SettingsModal.tsx`
+- `web/src/components/Composer.tsx`, `web/src/components/SessionsSection.tsx`
 - `web/src/components/workflow/StepLibrary.tsx`
 - `web/src/components/workflow/StepCard.tsx` — also shows the collapsed step's mode label
 - `server/src/sessions.ts` — `'auto'` runs the SDK in `acceptEdits` while the bridge guard

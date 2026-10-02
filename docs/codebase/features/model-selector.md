@@ -17,7 +17,7 @@ shows the model name plus a one-line description to help users pick between mode
 - `shared/types.ts` — `ModelOption` type, `DEFAULT_MODELS` list, `DEFAULT_MODEL`, `LEGACY_MODEL_MAP`, `resolveModelId`, `isKnownModel`
 - `web/src/lib/modelSelect.tsx` — shared Mantine `Select` data/render helpers
 - `web/src/components/Composer.tsx`
-- `web/src/components/SettingsModal.tsx`
+- `web/src/components/SessionsSection.tsx` — the Settings Sessions pane's new-session defaults
 - `web/src/components/workflow/StepLibrary.tsx`
 - `web/src/components/workflow/WorkflowRunModal.tsx` — per-step model/effort picker for one run
 - `web/src/components/workflow/StepCard.tsx` — also renders the stale-model warning badge

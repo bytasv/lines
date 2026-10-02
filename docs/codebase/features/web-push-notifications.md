@@ -29,7 +29,7 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
   `openSessionFromAlert`; a `hello` from a push-capable owner machine re-sends `registerPush`
 - `web/src/ws.ts` — `sendToMachine(deviceId, msg)`, the one way to reach a non-primary owned
   machine outside the normal session-routed `send()`
-- `web/src/components/SettingsModal.tsx` — the "Add to Home Screen" hint on iOS outside standalone
+- `web/src/components/NotificationsSection.tsx` — the Alerts pane, including the "Add to Home Screen" hint on iOS outside standalone
 - `server/src/pushNotifier.ts` — `PushNotifier`: registration storage, the endpoint allowlist, and
   the actual send
 - `server/src/store.ts` — `loadPushSubscriptions`/`savePushSubscriptions`

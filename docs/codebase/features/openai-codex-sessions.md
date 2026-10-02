@@ -40,7 +40,7 @@ scattered `=== 'openai'` checks.
 
 ## Entry points
 
-- `web/src/components/SettingsModal.tsx` — the Account pane's OpenAI row and its **Connect…**
+- `web/src/components/AccountSection.tsx` — the Account pane's OpenAI row and its **Connect…**
   button.
 - `web/src/components/OpenaiLoginModal.tsx` — the device-code modal.
 - `server/src/openaiAuth.ts` — the login flow and the connected/disconnected state.

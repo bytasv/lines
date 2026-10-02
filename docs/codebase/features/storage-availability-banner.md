@@ -24,7 +24,7 @@ triggers an immediate `/settings` probe.
 
 - `web/src/components/StorageBanner.tsx` — the pill; click opens Settings → Sync, plus Retry and
   Dismiss controls
-- `web/src/components/SettingsModal.tsx` — `SyncLogSection` (`diagnostics` tab)
+- `web/src/components/SyncSection.tsx` — the Settings Sync pane: status, the failure log and Copy log
 
 ## Files
 
@@ -37,7 +37,7 @@ triggers an immediate `/settings` probe.
 - `server/src/index.ts` — `auth` message handler and the relay's `onToken` both call
   `ctx.sync.retryNow()`
 - `web/src/ws.ts` — `relayAuth`, `retryStorage`, relay-on-wake
-- `web/src/components/StorageBanner.tsx`, `web/src/components/SettingsModal.tsx`
+- `web/src/components/StorageBanner.tsx`, `web/src/components/SyncSection.tsx`
 - `desktop/src/main.ts` — main window `backgroundThrottling: false`, so the token relay keeps
   firing while the window is hidden
 
@@ -70,7 +70,7 @@ state described below. A flip either way appends a `down` or `up` row and fires 
 `ClientMessage`/`ServerMessage`.
 
 The `syncLog` file-request kind reuses the existing authenticated `fileRequest` plumbing
-([file-routes-over-ws](file-routes-over-ws.md)) rather than a new socket message: `SyncLogSection`
+([file-routes-over-ws](file-routes-over-ws.md)) rather than a new socket message: `SyncSection`
 calls `fileRequest('syncLog', {})` and renders `{ entries, status }` from `store.readSyncLog(200)`
 and `sync.status`.
 

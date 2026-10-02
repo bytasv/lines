@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Badge, Button, CopyButton, Progress, Select, Stack, Switch, Text, Tooltip } from '@mantine/core';
+import { useEffect, useId, useState } from 'react';
+import { Badge, Button, CopyButton, Progress, Select, Tooltip } from '@mantine/core';
 import { IconCheck, IconCopy, IconDownload } from '@tabler/icons-react';
 import {
   VOICE_LANGUAGES,
@@ -12,6 +12,7 @@ import type { WhisperStatus } from '@lines/shared';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { VersionRow } from './UpdatesSection';
+import { SettingsGroup, SettingsRow, SettingsSwitchRow } from './SettingsLayout';
 
 /**
  * Settings -> Voice input: the dictation language (which decides the model),
@@ -22,6 +23,7 @@ import { VersionRow } from './UpdatesSection';
  * owner's settings, both of which the bridge refuses to a guest.
  */
 export function VoiceSection() {
+  const languageId = useId();
   const whisper = useStore((s) => s.whisper);
   const modelDownload = useStore((s) => s.whisperModelDownload);
   const downloading = modelDownload?.state === 'downloading' ? modelDownload : null;
@@ -58,61 +60,63 @@ export function VoiceSection() {
 
   return (
     <>
-      <Text size="xs" fw={600} c="dimmed" tt="uppercase">
-        Dictation
-      </Text>
-      <Select
-        size="xs"
-        label="Dictation language"
-        description="Decides the model: English uses a small English-only one, anything else the full multilingual one."
-        data={VOICE_LANGUAGES.map((l) => ({ value: l.code, label: l.label }))}
-        value={voiceLanguage}
-        onChange={(v) => v && setVoiceLanguage(v)}
-        allowDeselect={false}
-        searchable
-      />
-      {voiceLanguage !== 'en' && (
-        <Switch
-          size="sm"
-          checked={voiceTranslate}
-          onChange={(e) => setVoiceTranslate(e.currentTarget.checked)}
-          label="Translate to English"
-          description="Get the prompt in English whatever language you speak."
+      <SettingsGroup title="Dictation">
+        <SettingsRow
+          label="Dictation language"
+          description="Decides the model: English uses a small English-only one, anything else the full multilingual one."
+          htmlFor={languageId}
+          controlWidth={220}
+          control={
+            <Select
+              id={languageId}
+              size="xs"
+              data={VOICE_LANGUAGES.map((l) => ({ value: l.code, label: l.label }))}
+              value={voiceLanguage}
+              onChange={(v) => v && setVoiceLanguage(v)}
+              allowDeselect={false}
+              searchable
+            />
+          }
         />
-      )}
-      <Text size="xs" fw={600} c="dimmed" tt="uppercase" mt="sm">
-        On this machine
-      </Text>
-      {/* The desktop app ships the binary, so the usual fix is the model —
-          which the bridge downloads itself, from the row below. */}
-      <VersionRow
-        name="whisper.cpp"
-        version={whisper?.version}
-        detail={whisper ? `minimum ${whisper.minVersion}` : undefined}
-        badge={<WhisperBadge status={whisper} />}
-        action={
-          whisper && (whisper.state === 'missing-binary' || whisper.state === 'outdated') ? (
-            <CopyButton value={whisperCommand}>
-              {({ copied, copy }) => (
-                <Tooltip label={copied ? 'Copied' : whisperCommand} withArrow>
-                  <Button
-                    size="xs"
-                    variant="light"
-                    onClick={copy}
-                    leftSection={copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-                  >
-                    {copied ? 'Copied' : whisper.state === 'outdated' ? 'Copy update command' : 'Copy install command'}
-                  </Button>
-                </Tooltip>
-              )}
-            </CopyButton>
-          ) : undefined
-        }
-      />
-      {/* The one model this language needs, and nothing to choose. Hidden on a
-          bridge too old to report whisper: nothing there would answer. */}
-      {whisper && (
-        <Stack gap={4}>
+        {voiceLanguage !== 'en' && (
+          <SettingsSwitchRow
+            label="Translate to English"
+            description="Get the prompt in English whatever language you speak."
+            checked={voiceTranslate}
+            onChange={setVoiceTranslate}
+          />
+        )}
+      </SettingsGroup>
+      <SettingsGroup title="On this machine">
+        {/* The desktop app ships the binary, so the usual fix is the model —
+            which the bridge downloads itself, from the row below. */}
+        <VersionRow
+          name="whisper.cpp"
+          version={whisper?.version}
+          detail={whisper ? `minimum ${whisper.minVersion}` : undefined}
+          badge={<WhisperBadge status={whisper} />}
+          action={
+            whisper && (whisper.state === 'missing-binary' || whisper.state === 'outdated') ? (
+              <CopyButton value={whisperCommand}>
+                {({ copied, copy }) => (
+                  <Tooltip label={copied ? 'Copied' : whisperCommand} withArrow>
+                    <Button
+                      size="xs"
+                      variant="light"
+                      onClick={copy}
+                      leftSection={copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                    >
+                      {copied ? 'Copied' : whisper.state === 'outdated' ? 'Copy update command' : 'Copy install command'}
+                    </Button>
+                  </Tooltip>
+                )}
+              </CopyButton>
+            ) : undefined
+          }
+        />
+        {/* The one model this language needs, and nothing to choose. Hidden on a
+            bridge too old to report whisper: nothing there would answer. */}
+        {whisper && (
           <VersionRow
             name={`Model: ${model.label}`}
             detail={
@@ -141,18 +145,19 @@ export function VoiceSection() {
                 </Button>
               )
             }
-          />
-          {downloading && (
-            <Progress
-              size="sm"
-              animated
-              // Indeterminate-looking until the server says how big it is.
-              value={downloading.total ? (downloading.received / downloading.total) * 100 : 100}
-              aria-label="Model download progress"
-            />
-          )}
-        </Stack>
-      )}
+          >
+            {downloading && (
+              <Progress
+                size="sm"
+                animated
+                // Indeterminate-looking until the server says how big it is.
+                value={downloading.total ? (downloading.received / downloading.total) * 100 : 100}
+                aria-label="Model download progress"
+              />
+            )}
+          </VersionRow>
+        )}
+      </SettingsGroup>
     </>
   );
 }

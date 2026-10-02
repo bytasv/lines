@@ -12,7 +12,7 @@
         "provider-capabilities"
       ],
       "entryPoints": [
-        "web/src/components/SettingsModal.tsx",
+        "web/src/components/AccountSection.tsx",
         "web/src/components/OpenaiLoginModal.tsx",
         "server/src/openaiAuth.ts",
         "server/src/workerCodex.ts",
@@ -103,7 +103,7 @@
       "purpose": "Pick which Claude model a session or workflow step runs with, shown with a one-line description per option.",
       "entryPoints": [
         "web/src/components/Composer.tsx",
-        "web/src/components/SettingsModal.tsx",
+        "web/src/components/SessionsSection.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
         "web/src/components/workflow/StepCard.tsx"
       ],
@@ -169,7 +169,7 @@
       ],
       "entryPoints": [
         "web/src/components/Composer.tsx",
-        "web/src/components/SettingsModal.tsx",
+        "web/src/components/SessionsSection.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
         "web/src/components/workflow/StepCard.tsx",
         "server/src/sessions.ts",
@@ -754,7 +754,7 @@
         "server/src/userRegistry.ts",
         "web/src/components/SessionView.tsx",
         "web/src/components/WorkerBanner.tsx",
-        "web/src/components/SettingsModal.tsx",
+        "web/src/components/SessionsSection.tsx",
         "web/src/components/Sidebar.tsx",
         "web/src/components/Transcript.tsx",
         "server/src/index.ts",
@@ -775,7 +775,7 @@
         "web/src/components/SkewBanner.tsx",
         "web/src/components/WorkerBanner.tsx",
         "web/src/components/StorageBanner.tsx",
-        "web/src/components/SettingsModal.tsx",
+        "web/src/components/SessionsSection.tsx",
         "web/src/components/Sidebar.tsx",
         "web/src/lib/format.ts",
         "server/src/workflows.ts",
@@ -1360,7 +1360,7 @@
       "purpose": "Classify why the bridge's storage-server link is down, wait out a routine expired-token 401 instead of raising the \"cloud sync unavailable\" banner, actively re-probe once down so recovery is noticed within seconds, and persist a bounded failure log a user can read and copy from Settings without a bridge console.",
       "entryPoints": [
         "web/src/components/StorageBanner.tsx",
-        "web/src/components/SettingsModal.tsx"
+        "web/src/components/SyncSection.tsx"
       ],
       "files": [
         "shared/types.ts",
@@ -1371,7 +1371,7 @@
         "server/src/index.ts",
         "web/src/ws.ts",
         "web/src/components/StorageBanner.tsx",
-        "web/src/components/SettingsModal.tsx",
+        "web/src/components/SyncSection.tsx",
         "desktop/src/main.ts"
       ],
       "symbols": [
@@ -3518,7 +3518,7 @@
       "purpose": "Let a user or workflow step pick how hard a model thinks, not just which model runs: a control beside the model picker in the composer, on a workflow step, as a new-session default, and as a global effort for plan-mode turns specifically.",
       "entryPoints": [
         "web/src/components/Composer.tsx",
-        "web/src/components/SettingsModal.tsx",
+        "web/src/components/SessionsSection.tsx",
         "web/src/components/workflow/StepCard.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
         "server/src/mcpWorkflowTools.ts"
@@ -3904,7 +3904,7 @@
       "doc": "features/smart-turn-routing.md",
       "purpose": "Before each turn, optionally ask TypeSafe's JEV classifier which of an allowed set of models and reasoning efforts that turn should run on, per a plain-language rule; off by default, applied silently in auto mode, or held for the user to accept/decline in ask mode. A workflow step's own rule overrides the global one while it runs.",
       "entryPoints": [
-        "web/src/components/SettingsModal.tsx",
+        "web/src/components/RoutingSection.tsx",
         "web/src/components/workflow/StepCard.tsx",
         "web/src/components/Composer.tsx",
         "server/src/mcpWorkflowTools.ts"
@@ -3920,7 +3920,7 @@
         "server/src/index.ts",
         "server/src/mcpWorkflowTools.ts",
         "web/src/components/RoutingRuleFields.tsx",
-        "web/src/components/SettingsModal.tsx",
+        "web/src/components/RoutingSection.tsx",
         "web/src/components/Composer.tsx",
         "web/src/components/workflow/StepCard.tsx",
         "web/src/components/workflow/useWorkflowDraft.ts",
@@ -4000,7 +4000,7 @@
       "purpose": "Alert the user about a session (done/needs permission/needs approval) while the mobile client is backgrounded or closed, using Web Push so the bridge — not the suspended page — wakes a push-only service worker to show the notification.",
       "entryPoints": [
         "web/public/sw.js",
-        "web/src/components/SettingsModal.tsx"
+        "web/src/components/NotificationsSection.tsx"
       ],
       "files": [
         "web/public/sw.js",
@@ -4009,7 +4009,7 @@
         "web/src/lib/machines.ts",
         "web/src/store.ts",
         "web/src/ws.ts",
-        "web/src/components/SettingsModal.tsx",
+        "web/src/components/NotificationsSection.tsx",
         "server/src/pushNotifier.ts",
         "server/src/store.ts",
         "server/src/userContext.ts",

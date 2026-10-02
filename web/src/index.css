@@ -163,6 +163,22 @@
   animation: status-pulse 1.4s ease-out infinite;
 }
 
+/* Settings rows share one bordered card per group (SettingsLayout.tsx). The
+   hairline between them is the card's own border variable, so it follows the
+   scheme with no dark-mode branch. */
+.lines-settings-group > * + * {
+  border-top: 1px solid var(--paper-border-color);
+}
+
+/* NavLink's own hover (gray-0 / dark-6) all but vanishes on the modal's white
+   and charcoal surfaces; the light-variant gray reads in both schemes. Active
+   items keep NavLink's own hover. */
+@media (hover: hover) {
+  .lines-settings-nav .mantine-NavLink-root:not([data-active]):hover {
+    background-color: var(--mantine-color-gray-light-hover);
+  }
+}
+
 /* Inline color swatch appended after detected color literals */
 .color-chip {
   display: inline-flex;

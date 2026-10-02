@@ -98,7 +98,7 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
   Skip step buttons in the session-level error alert)
 - `web/src/components/WorkerBanner.tsx` (global "worker not responding" / protocol-mismatch
   strip)
-- `web/src/components/SettingsModal.tsx` (Sessions pane, "Recovery" subgroup)
+- `web/src/components/SessionsSection.tsx` (Sessions pane, "Recovery" group)
 - `web/src/components/Sidebar.tsx` (session row indicator)
 - Retry button click: `web/src/components/Transcript.tsx` → `retryTurn` client message →
   `server/src/index.ts` (`case 'retryTurn'`)
@@ -145,7 +145,7 @@ transiently (offline at wake, 5xx) was never retried, so the token rotted until 
 - `web/src/store.ts` (`autoContinueInterrupted`, `compressResponses`,
   `pushSettings`/`applySettings`,
   `workerStatus`, `authStatus` handler that opens/force-opens the login modal — unchanged)
-- `web/src/components/SessionView.tsx`, `web/src/components/SettingsModal.tsx`
+- `web/src/components/SessionView.tsx`, `web/src/components/SessionsSection.tsx`
 - `web/src/components/Sidebar.tsx`, `web/src/lib/format.ts` (`sessionRowMeta`)
 - `web/src/components/SkewBanner.tsx`, `web/src/components/WorkerBanner.tsx`,
   `web/src/components/StorageBanner.tsx`, `web/src/components/UpdateBanner.tsx` (pill precedence)
