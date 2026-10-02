@@ -2677,6 +2677,7 @@
       ],
       "files": [
         "deploy/docker/Dockerfile",
+        "deploy/docker/normalize-manifests.mjs",
         "deploy/docker/compose.yml",
         "deploy/docker/web-nginx.conf",
         "deploy/docker/env.example",
@@ -2704,6 +2705,8 @@
         "npm ci is scoped by --workspace rather than --omit=optional, since --omit=optional also drops @rollup/rollup-linux-x64-gnu (an optional dependency on the same platform-binary mechanism as the Claude SDK's native binary) and breaks vite build",
         "the relay's Traefik router carries no StripPrefix middleware - relay/src/index.ts matches url.pathname exactly, so a rewritten path closes the socket with 1008",
         "storage's public router excludes /v1/devices/verify by rule, on top of that route's own shared-secret gate - defense in depth: a network-level exclusion and an application-level check, either could fail without the other",
+        "the deps layer's inputs are normalized by deploy/docker/normalize-manifests.mjs in a manifests stage: every version becomes 0.0.0 (manifests plus the lockfile's top level, root and workspace entries, by exact key), and scripts and desktop's build block are dropped, so version bumps and script edits no longer invalidate deps or force a new ~230 MB layer onto the registry and VPS; safe because npm ci runs --ignore-scripts and every @lines/* spec is \"*\" (the script exits 1 otherwise); any stage that runs a workspace script or reads its version must COPY that workspace first",
+        "the build job's services leg builds relay and storage together so both images share one deps blob; in separate jobs each would rerun npm ci on a deps miss and the VPS would pull two ~230 MB layers",
         "the storage image installs openssl explicitly - node:22-slim ships without libssl and Prisma's query engine otherwise falls back to a guessed build and warns at every boot",
         "the four VITE_* build args exist in two places kept in sync by hand: GitHub Actions secrets (CI image build) and lines.env on the VPS (manual build only) — nothing checks the two agree"
       ],

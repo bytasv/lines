@@ -7,9 +7,11 @@
 # The bridge and the worker are deliberately absent. They run on the user's own
 # machine and dial out to the relay, so nothing here executes an agent turn.
 
-# ---------- shared dependency layer ----------
-FROM node:22-slim AS deps
+# ---------- normalized manifests ----------
+FROM node:22-slim AS manifests
 WORKDIR /app
+# Outside /app, so the script itself is not part of what `deps` copies.
+COPY deploy/docker/normalize-manifests.mjs /normalize-manifests.mjs
 
 # Every workspace manifest must be present even though only some workspaces end
 # up in the images: npm ci validates the lockfile against all of them.
@@ -20,6 +22,22 @@ COPY relay/package.json relay/
 COPY storage/package.json storage/
 COPY web/package.json web/
 COPY desktop/package.json desktop/
+RUN node /normalize-manifests.mjs /app
+
+# ---------- shared dependency layer ----------
+FROM node:22-slim AS deps
+WORKDIR /app
+
+# The manifests arrive normalized: versions pinned to 0.0.0, `scripts` and
+# desktop's electron-builder `build` block removed. BuildKit keys COPY --from on
+# file content, not on how the source stage got there, so a desktop version
+# bump or a scripts edit reruns `manifests` (about a second) and leaves this
+# COPY and npm ci CACHED. The ~230 MB layer keeps its digest, and neither the
+# registry nor the VPS has to move it again.
+# Each later stage gets a workspace's real manifest back by copying that
+# workspace, so a stage that runs a workspace script or reads a workspace's
+# version must COPY the workspace first.
+COPY --from=manifests /app/ ./
 
 # --ignore-scripts: desktop's electron postinstall downloads ~100 MB we never
 #   use. It also skips storage's `prisma generate`, which the storage target

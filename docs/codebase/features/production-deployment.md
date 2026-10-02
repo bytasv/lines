@@ -15,9 +15,10 @@ host, and the images ship without `server/`'s Claude Agent SDK dependency.
 - `deploy/docker/compose.yml` — `docker compose --env-file lines.env up -d`
 - `deploy/docker/Dockerfile` — `relay` / `storage` / `web` / `landing` build targets
 - `deploy/README.md` — the runbook this doc summarizes
-- `.github/workflows/deploy.yml` — CI: on push to `main`, runs `test` →
-  `check-migrations` → `build` (push images to GHCR) → `deploy` (SSH into the
-  VPS). Skipped when every changed file matches `paths-ignore`
+- `.github/workflows/deploy.yml` — CI: on push to `main`, the three `test` legs
+  (`typecheck`, `server`, `runtime`) and `check-migrations` run in parallel; once
+  all pass, the two `build` legs (`services`, `web`) push images to GHCR in
+  parallel, then `deploy` SSHes into the VPS. Skipped when every changed file matches `paths-ignore`
   (`desktop/package.json` only — the lone bump commit `ship.mjs` can push, see
   desktop-app's Releasing section); a push touching that file alongside
   anything else still runs normally.
@@ -27,8 +28,11 @@ host, and the images ship without `server/`'s Claude Agent SDK dependency.
 
 ## Important files
 
-- `deploy/docker/Dockerfile` — multi-stage build; one `deps` layer shared by
-  all the targets
+- `deploy/docker/Dockerfile` — multi-stage build; a `manifests` stage feeds one
+  `deps` layer shared by all the targets
+- `deploy/docker/normalize-manifests.mjs` — run by the `manifests` stage; strips
+  the manifests and lockfile to what `npm ci` installs, so `deps` stays cached
+  across version bumps and script edits
 - `deploy/docker/compose.yml` — service definitions and Traefik labels
 - `deploy/docker/web-nginx.conf` — the static-file server for `web` and `landing`; Traefik
   cannot serve files, so each ships one
@@ -47,7 +51,9 @@ None — this is infrastructure, not application code.
 
 `docker compose build` produces four images from one `deps` layer (installed
 with `--ignore-scripts`, scoped to the `shared`/`relay`/`storage`/`web`
-workspaces via `npm ci --workspace`). The `web` build stage bakes
+workspaces via `npm ci --workspace`). `deps` copies its manifests and lockfile
+from the `manifests` stage, which normalizes them first (see Architectural
+rules). The `web` build stage bakes
 `VITE_BRIDGE_WS_URL`, `VITE_CLERK_PUBLISHABLE_KEY`, `VITE_STORAGE_URL`, and
 `VITE_DESKTOP_DOWNLOAD_URL` into the bundle as build args — none of the four can
 be changed by restarting the container, only by rebuilding it. The `landing` stage is a
@@ -94,9 +100,12 @@ workspace slug, the literal forced-command `authorized_keys` line, the
 author's GHCR namespace) comes back.
 
 Otherwise none as a test suite — the `.github/workflows/deploy.yml` pipeline
-itself is the verification path: `test` runs the `server`/`relay`/`storage`
-unit suites and `npm run typecheck` (all five workspaces, including `relay`),
-then `check-migrations`, `build`, and `deploy` gate on each other in sequence.
+itself is the verification path: `test` is a matrix of three legs, each with its
+own `npm ci` and none cancelling the others (`fail-fast: false`, so one run
+reports every failure) — `typecheck` (all five workspaces, including `relay`),
+`server` (`npm run test:unit -w server`), and `runtime` (`test:dev-runtime` for
+`server`, then the `relay` and `storage` suites). `build` waits for every `test`
+leg and `check-migrations`, and `deploy` waits for every `build` leg.
 Manual verification is still `deploy/README.md`'s checklist (health endpoints,
 CORS preflight, the `/v1/devices/verify` 404 at the edge, cert issuance for
 the apex, `run.` and `www`, the `www` and `/join/` redirects, and — after a deploy — confirming the running images
@@ -204,6 +213,23 @@ are tagged with the pushed commit SHA).
   `--omit=optional` would also drop `@rollup/rollup-linux-x64-gnu` (an
   optional dependency of `rollup` on the same platform-binary mechanism used
   for the Claude SDK's native binary) and break `vite build`.
+- The `deps` layer's inputs are normalized by `normalize-manifests.mjs`: every
+  `version` becomes `0.0.0` (in the manifests, and in the lockfile's top level and
+  its root and workspace entries, matched by exact key, never by prefix), and
+  `scripts` and desktop's electron-builder `build` block are dropped. Without it,
+  a desktop version bump or a scripts edit — nearly every manifest-touching
+  commit — invalidated `deps`, reran `npm ci`, and made the registry and the VPS
+  move a new ~230 MB layer for an unchanged dependency tree. It is safe because
+  `npm ci` runs with `--ignore-scripts` and every internal `@lines/*` spec is
+  `"*"`; the script exits 1 if one is not, or if `workspaces` is not a plain list
+  of directories. Any stage that runs a workspace script or reads a workspace's
+  `version` must `COPY` that workspace first, which restores its real manifest —
+  `storage`, `web-build` and `landing-build` already do.
+- The `build` job's `services` leg builds `relay` and `storage` together on
+  purpose: both images contain the `deps` layer, and one buildx builder shares
+  the blob. In separate jobs each would rerun `npm ci` on a `deps` miss and the
+  VPS would pull and store two ~230 MB layers. `web` and `landing` share the
+  other leg.
 - The relay's router carries **no** `StripPrefix` middleware: `relay/src/index.ts`
   matches `url.pathname` exactly against `/agent`/`/client`, so rewriting the
   path closes the socket with `1008` — the container-routing equivalent of the

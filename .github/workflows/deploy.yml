@@ -5,7 +5,7 @@ on:
     branches: [main]
     # `ship.mjs` can author a lone `chore(desktop): bump version to X` commit,
     # and a version string the images never read is not worth a deploy. Scoped
-    # to the one file, not `desktop/**`: the `typecheck` step below chains
+    # to the one file, not `desktop/**`: the `typecheck` leg below chains
     # `npm run typecheck -w desktop`, and `release-desktop` is dispatch-only, so
     # ignoring the whole directory would leave desktop code with no push-time
     # typecheck at all. A run is skipped only when *every* changed file matches,
@@ -21,16 +21,31 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # desktop is only typechecked here; skips electron's ~100 MB binary download
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    strategy:
+      # A red leg must not cancel the others: one run should show every failure.
+      fail-fast: false
+      matrix:
+        leg: [typecheck, server, runtime]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm run test -w server
-      - run: npm run test -w relay
-      - run: npm run test -w storage
+      - if: matrix.leg == 'typecheck'
+        run: npm run typecheck
+      - if: matrix.leg == 'server'
+        run: npm run test:unit -w server
+      - if: matrix.leg == 'runtime'
+        run: npm run test:dev-runtime -w server
+      - if: matrix.leg == 'runtime'
+        run: npm run test -w relay
+      - if: matrix.leg == 'runtime'
+        run: npm run test -w storage
 
   check-migrations:
     runs-on: ubuntu-latest
@@ -49,6 +64,12 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # relay and storage share a leg so both images get the same `deps` blob.
+    # Split, a deps miss would run npm ci in each job and the VPS would pull
+    # two ~230 MB layers.
+    strategy:
+      matrix:
+        group: [services, web]
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -59,6 +80,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build & push relay
+        if: matrix.group == 'services'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -72,6 +94,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=relay
 
       - name: Build & push storage
+        if: matrix.group == 'services'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -85,6 +108,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=storage
 
       - name: Build & push web
+        if: matrix.group == 'web'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -103,6 +127,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=web
 
       - name: Build & push landing
+        if: matrix.group == 'web'
         uses: docker/build-push-action@v6
         with:
           context: .
