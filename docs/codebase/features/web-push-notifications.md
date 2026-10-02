@@ -149,6 +149,10 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
 - **The service worker must always show a notification.** iOS may revoke a subscription that
   receives a push with no visible notification, so `sw.js`'s `push` handler calls
   `showNotification` unconditionally, even on unparseable payload data.
+- **iOS adds "from <app name>" under the title.** iOS renders home-screen web app notifications as
+  title / `from <manifest name>` / body. Nothing in the payload, `showNotification` options or
+  manifest removes it, and blanking the manifest name breaks the "from" line and the home-screen
+  icon label, so leave it. Recheck if a later iOS release changes the format.
 - A bridge restart's transition map starts empty, so a session that settles immediately after
   restart does not push — accepted, since the alternative (persisting last-seen status) risks a
   duplicate push on the next real transition.
