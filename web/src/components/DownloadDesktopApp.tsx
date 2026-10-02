@@ -21,6 +21,16 @@ import {
 const QUARANTINE_COMMAND = 'xattr -dr com.apple.quarantine /Applications/Lines.app';
 
 /**
+ * Production builds link through the serving nginx's /download, which 302s to
+ * the same DMG (deploy/docker/web-nginx.conf). Neither page carries analytics
+ * JS, so that logged redirect is the only download count. The dev server has
+ * no such route, so it links straight to the file.
+ */
+const DOWNLOAD_HREF = import.meta.env.PROD ? '/download' : DESKTOP_DOWNLOAD_URL;
+
+const RUN_FROM_SOURCE_URL = 'https://github.com/bytasv/lines#readme';
+
+/**
  * Where a signed-in user actually gets the app.
  *
  * Every other pairing surface assumed the desktop app was already installed,
@@ -52,7 +62,7 @@ export function DownloadDesktopApp() {
 
         <Button
           component="a"
-          href={DESKTOP_DOWNLOAD_URL}
+          href={DOWNLOAD_HREF}
           target="_blank"
           rel="noreferrer noopener"
           leftSection={<IconDownload size={16} />}
@@ -104,6 +114,14 @@ export function DownloadDesktopApp() {
             Codex
           </Anchor>{' '}
           (at least one). A paired machine with neither cannot run a session.
+        </Text>
+
+        <Text size="sm" c="dimmed">
+          On Windows or Linux? There is no desktop app yet —{' '}
+          <Anchor href={RUN_FROM_SOURCE_URL} target="_blank" rel="noreferrer">
+            run Lines from source
+          </Anchor>{' '}
+          and pair that machine instead.
         </Text>
       </Stack>
     </Card>

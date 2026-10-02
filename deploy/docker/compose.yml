@@ -35,7 +35,14 @@ services:
       # apex is not listed — it serves only the marketing page, which never
       # calls storage.
       WEB_ORIGINS: https://run.${LINES_DOMAIN},https://app.${LINES_DOMAIN}
-    networks: [lines]
+    # lines-db reaches the bundled `postgres`; unused with a managed database.
+    networks: [lines, lines-db]
+    depends_on:
+      # Only when the `db` profile is on. `required: false` lets storage start
+      # against an external DATABASE_URL with no postgres service at all.
+      postgres:
+        condition: service_healthy
+        required: false
     security_opt: [no-new-privileges:true]
     healthcheck:
       test:
@@ -135,6 +142,10 @@ services:
         VITE_DESKTOP_DOWNLOAD_URL: ${VITE_DESKTOP_DOWNLOAD_URL}
     image: ${REGISTRY:-}lines-web:${TAG:-latest}
     restart: unless-stopped
+    environment:
+      # Where /download 302s (web-nginx.conf). Runtime, not baked in: the button
+      # links to /download so each click lands in this container's access log.
+      DESKTOP_DOWNLOAD_URL: ${VITE_DESKTOP_DOWNLOAD_URL:-/}
     networks: [lines]
     security_opt: [no-new-privileges:true]
     labels:
@@ -175,6 +186,9 @@ services:
         VITE_DESKTOP_DOWNLOAD_URL: ${VITE_DESKTOP_DOWNLOAD_URL}
     image: ${REGISTRY:-}lines-landing:${TAG:-latest}
     restart: unless-stopped
+    environment:
+      # As on `web`: the page's download button goes through /download here.
+      DESKTOP_DOWNLOAD_URL: ${VITE_DESKTOP_DOWNLOAD_URL:-/}
     networks: [lines]
     security_opt: [no-new-privileges:true]
     labels:
@@ -227,10 +241,53 @@ services:
       target: storage
     image: ${REGISTRY:-}lines-storage:${TAG:-latest}
     env_file: lines.env
-    networks: [lines]
+    networks: [lines, lines-db]
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
     working_dir: /app/storage
     command: ["../node_modules/.bin/prisma", "migrate", "deploy"]
+
+  # Optional self-hosted database, instead of a managed Postgres (Supabase or
+  # any other). Off unless the `db` profile is on: `--profile db`, or
+  # COMPOSE_PROFILES=db in lines.env so every `up` keeps it. Point both
+  # DATABASE_URL and DIRECT_URL at postgres:5432 (see env.example).
+  #
+  # No published port and no Traefik labels: it sits only on lines-db, which
+  # is internal, so nothing outside storage and migrate can reach it.
+  postgres:
+    profiles: [db]
+    # 17, not older: pg_restore into an older major than the dump came from
+    # is unsupported, and new Supabase projects run 17.
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-lines}
+      POSTGRES_USER: ${POSTGRES_USER:-lines}
+      # Not `:?`: compose interpolates every service, profiled or not, so that
+      # would break deployments without the profile. The image itself refuses
+      # to initialise with no password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    volumes:
+      - lines-postgres:/var/lib/postgresql/data
+    networks: [lines-db]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
 networks:
   lines:
     name: lines
+  # Internal: no route off the host, and Traefik is not on it.
+  lines-db:
+    name: lines-db
+    internal: true
+
+volumes:
+  lines-postgres:
+    name: lines-postgres

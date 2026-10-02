@@ -136,9 +136,15 @@ ARG VITE_BRIDGE_WS_URL
 ARG VITE_STORAGE_URL
 COPY deploy/docker/web-nginx.conf /etc/nginx/templates/default.conf.template
 # nginx's own envsubst entrypoint renders /etc/nginx/templates/*.template into
-# /etc/nginx/conf.d at container start. Restricted to this one variable, because
-# the conf is full of `$uri` and `$host` that nginx must receive intact.
-ENV NGINX_ENVSUBST_FILTER=CSP_CONNECT_SRC
+# /etc/nginx/conf.d at container start. Restricted to these two variables
+# (the filter is a regex), because the conf is full of `$uri` and `$host` that
+# nginx must receive intact.
+ENV NGINX_ENVSUBST_FILTER=^(CSP_CONNECT_SRC|DESKTOP_DOWNLOAD_URL)\$
+# Where /download redirects. A runtime value, set by compose to the same DMG
+# alias as VITE_DESKTOP_DOWNLOAD_URL. The default keeps the template valid: an
+# unsubstituted ${DESKTOP_DOWNLOAD_URL} is an unknown nginx variable, which
+# fails the config at start.
+ENV DESKTOP_DOWNLOAD_URL=/
 ENV CSP_CONNECT_SRC="${VITE_BRIDGE_WS_URL} ${VITE_STORAGE_URL} https://*.clerk.accounts.dev https://*.clerk.com"
 COPY --from=web-build /app/web/dist /usr/share/nginx/html
 EXPOSE 80
@@ -169,7 +175,8 @@ RUN grep -qF "$VITE_APP_URL" web/dist-landing/assets/*.js \
 # ---------- landing (runtime) ----------
 FROM nginx:alpine AS landing
 COPY deploy/docker/web-nginx.conf /etc/nginx/templates/default.conf.template
-ENV NGINX_ENVSUBST_FILTER=CSP_CONNECT_SRC
+ENV NGINX_ENVSUBST_FILTER=^(CSP_CONNECT_SRC|DESKTOP_DOWNLOAD_URL)\$
+ENV DESKTOP_DOWNLOAD_URL=/
 # Empty: the page talks to nothing but its own origin.
 ENV CSP_CONNECT_SRC=""
 COPY --from=landing-build /app/web/dist-landing /usr/share/nginx/html
