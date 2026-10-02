@@ -1310,7 +1310,7 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       // UI's "orphaned" label.
       if (worktree) worktreeCommands.attachSession(ctx, worktree.path, meta.id);
       // attach() re-broadcasts the session with workflow state populated.
-      if (msg.workflowId) workflows.attach(meta.id, msg.workflowId);
+      if (msg.workflowId) workflows.attach(meta.id, msg.workflowId, msg.stepOverrides);
       break;
     }
     case 'deleteSession':
@@ -1495,6 +1495,9 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       break;
     case 'workflowRetry':
       workflows.retry(msg.sessionId, msg.stepIndex, msg.feedback);
+      break;
+    case 'setWorkflowStepOverrides':
+      workflows.setStepOverrides(msg.sessionId, msg.stepOverrides);
       break;
     // The four workflow mutations and the version read below go through
     // workflowCommands.ts, which the session's own MCP tools also call — so the

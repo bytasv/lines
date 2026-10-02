@@ -107,7 +107,9 @@ export function stepAfterProviderSwitch(
   const step = workflow.steps[index];
   if (!step) return null;
   const content = resolveStepContent(step, lookup);
-  return { index, model: content?.model ?? '', inherits: !content?.freshStart };
+  // The model the step will really take back: this run's override, if it set one.
+  const model = wf.stepOverrides?.[index]?.model ?? content?.model ?? '';
+  return { index, model, inherits: !content?.freshStart };
 }
 
 /**

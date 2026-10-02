@@ -10,7 +10,14 @@
  * Nothing here may read a runtime binding from `./types.ts` at module top level
  * — only inside function bodies, by which time both modules are initialized.
  */
-import type { ModelProvider, PermissionMode, RoutingRule, StepContent } from './types.ts';
+import type {
+  ModelProvider,
+  PermissionMode,
+  ReasoningEffort,
+  RoutingRule,
+  StepContent,
+  WorkflowStepOverride,
+} from './types.ts';
 import { isKnownModel, LEGACY_MODEL_MAP, providerForModel } from './types.ts';
 // Safe despite the cycle note below: providers.ts imports only *types* from
 // './types.ts', so it holds no runtime binding that could still be uninitialized.
@@ -243,4 +250,32 @@ export function formatWorkflowIssues(issues: WorkflowIssue[]): string {
   return issues
     .map((i) => (i.stepIndex === undefined ? `${i.field}: ${i.message}` : `step ${i.stepIndex + 1} (${i.field}): ${i.message}`))
     .join('; ');
+}
+
+/**
+ * Normalize client-sent per-run step overrides to at most `stepCount` entries.
+ * Invalid fields are dropped rather than rejected — an override only ever falls
+ * back to the step's own value. Claude models only, for the reason
+ * validateStepContent refuses an OpenAI model on a step: it would carry the run
+ * across providers, and a step's `routing` is validated against a Claude model.
+ */
+export function sanitizeStepOverrides(
+  raw: unknown,
+  stepCount: number,
+): (WorkflowStepOverride | null)[] {
+  if (!Array.isArray(raw)) return [];
+  const allowed: readonly ReasoningEffort[] = capabilitiesFor('anthropic').reasoningEfforts;
+  return raw.slice(0, stepCount).map((entry): WorkflowStepOverride | null => {
+    if (!entry || typeof entry !== 'object') return null;
+    const { model, reasoningEffort } = entry as Record<string, unknown>;
+    const out: WorkflowStepOverride = {};
+    if (typeof model === 'string' && model && providerForModel(model) === 'anthropic') {
+      out.model = model;
+    }
+    if (reasoningEffort === null) out.reasoningEffort = null;
+    else if (allowed.includes(reasoningEffort as ReasoningEffort)) {
+      out.reasoningEffort = reasoningEffort as ReasoningEffort;
+    }
+    return 'model' in out || 'reasoningEffort' in out ? out : null;
+  });
 }

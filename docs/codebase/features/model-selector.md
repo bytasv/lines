@@ -10,6 +10,7 @@ shows the model name plus a one-line description to help users pick between mode
 - Session composer model dropdown
 - New-session defaults in the settings modal's Sessions pane
 - Workflow step editor and step library model dropdowns
+- Per-run step overrides: `WorkflowRunModal`, opened by Cmd/Ctrl+click on a new-session entry or the stepper's tune icon
 
 ## Important files
 
@@ -18,6 +19,7 @@ shows the model name plus a one-line description to help users pick between mode
 - `web/src/components/Composer.tsx`
 - `web/src/components/SettingsModal.tsx`
 - `web/src/components/workflow/StepLibrary.tsx`
+- `web/src/components/workflow/WorkflowRunModal.tsx` — per-step model/effort picker for one run
 - `web/src/components/workflow/StepCard.tsx` — also renders the stale-model warning badge
 - `web/src/store.ts` — client `models: ModelOption[]` state; resolves a stale persisted new-session default on load
 - `server/src/index.ts` — serves `DEFAULT_MODELS` in the `hello` message
@@ -95,7 +97,7 @@ it did: a model has to be *listed* as OpenAI to be treated as one.
 `modelSelectData()` stays the single entry point, and has three options rather than letting
 call sites filter their own lists:
 
-- `providers` — which vendors this picker may offer. No caller narrows it today: the workflow
+- `providers` — which vendors this picker may offer. Only `WorkflowRunModal` narrows it today (to `['anthropic']`, for per-run step overrides). The workflow
   step pickers and the recipe run modal used to pass `['anthropic']`, on the grounds that a
   step's model is applied with `setModel` and would flip a running workflow onto a provider
   holding none of its conversation. That was the right worry attached to the wrong control —
@@ -148,6 +150,15 @@ a reported cost: it exists purely so a provider whose capability table says `cos
 its turns priced from something. See [usage-and-cost](usage-and-cost.md) for `priceFor` /
 `estimateSpendUsd` and the `~` marking that keeps an estimated figure from looking like a
 provider-reported one.
+
+## Per-run overrides
+
+A workflow run can pick a model (and effort) per step without editing the workflow:
+`WorkflowRunModal` lists one row per step, defaulting to the step's own values, and emits only the
+rows that differ as `WorkflowState.stepOverrides`. The override layers over the stored step at
+`runStep` time and is resolved with `resolveModelId` like any step model, so a stale id in an
+override renders disabled via `ensureId` and still runs. It is Claude-only: `sanitizeStepOverrides`
+drops any other provider's model. See [workflow-step-lifecycle](workflow-step-lifecycle.md).
 
 ## Reasoning effort
 

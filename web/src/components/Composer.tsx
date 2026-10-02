@@ -50,6 +50,7 @@ import {
   whisperModelFor,
 } from '@lines/shared';
 import { formatSpendUsd, stepAfterProviderSwitch } from '../lib/format';
+import { useStepResolver } from '../lib/useStepResolver';
 import { agentLabel, sessionCaps } from '../lib/capabilities';
 import {
   readDraft,
@@ -287,25 +288,12 @@ export function Composer({ session }: { session: SessionMeta }) {
   /**
    * The step the workflow would take its own model back at, if this session is
    * mid-workflow. Resolved here rather than server-side because the dialog has to
-   * say it *before* the switch is sent. Step refs resolve through the same three
-   * libraries WorkflowStepper's `nameOf` reads.
+   * say it *before* the switch is sent. Step refs resolve through the same
+   * libraries WorkflowStepper reads (useStepResolver).
    */
-  const workflows = useStore((s) => s.workflows);
-  const pinnedSteps = useStore((s) => s.pinnedSteps);
-  const sharedSteps = useStore((s) => s.sharedSteps);
-  const libSteps = useStore((s) => s.steps);
-  const workflowDef = session.workflow
-    ? workflows.find((w) => w.id === session.workflow!.workflowId)
-    : undefined;
-  const nextStep = workflowDef
-    ? stepAfterProviderSwitch(session, workflowDef, (ownerId, stepId, version) => {
-        const all = [...pinnedSteps, ...libSteps, ...sharedSteps];
-        return (
-          all.find((d) => d.ownerId === ownerId && d.id === stepId && d.version === version) ??
-          all.find((d) => d.ownerId === ownerId && d.id === stepId)
-        );
-      })
-    : null;
+  const { findWorkflow, lookup: lookupStep } = useStepResolver();
+  const workflowDef = session.workflow ? findWorkflow(session.workflow.workflowId) : undefined;
+  const nextStep = workflowDef ? stepAfterProviderSwitch(session, workflowDef, lookupStep) : null;
   /** The model a provider switch is being confirmed for, or null. */
   const [switchTo, setSwitchTo] = useState<string | null>(null);
   /** …and whether that switch has been sent and is still in flight. */

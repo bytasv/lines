@@ -821,3 +821,86 @@ test('entering a step clears a manual routing pause', async () => {
   assert.equal(h.s1().workflow?.stepIndex, 1);
   assert.equal(h.s1().routingPaused, undefined);
 });
+
+test('step overrides persist across an advance, and a retry reuses them', async () => {
+  const h = harness(3, {
+    stepOverrides: [null, { model: 'claude-opus-5-5', reasoningEffort: 'high' }, null],
+  });
+  h.workflows.approve('s1', 0);
+  await settle();
+
+  let m = h.s1();
+  assert.equal(m.workflow!.stepIndex, 1);
+  assert.equal(m.model, 'claude-opus-5-5');
+  assert.equal(m.reasoningEffort, 'high');
+  assert.deepEqual(m.workflow!.stepOverrides?.[1], { model: 'claude-opus-5-5', reasoningEffort: 'high' });
+
+  // Something moved the session off the override in between; Retry re-applies it.
+  m.model = 'claude-sonnet-5-5';
+  m.reasoningEffort = undefined;
+  m.workflow!.stepStatuses[1] = 'waiting-approval';
+  m.status = 'waiting-approval';
+  h.workflows.retry('s1', 1, 'again');
+  await settle();
+
+  m = h.s1();
+  assert.equal(m.workflow!.stepStatuses[1], 'running');
+  assert.equal(m.model, 'claude-opus-5-5');
+  assert.equal(m.reasoningEffort, 'high');
+
+  // And the stored workflow never learned about it.
+  assert.equal((h.workflows.list()[0]!.steps[1] as { model: string }).model, 'claude-sonnet-5-5');
+});
+
+test('setStepOverrides only changes pending steps', () => {
+  const r = running(3, {
+    workflow: {
+      stepIndex: 1,
+      stepStatuses: ['done', 'running', 'pending'],
+      stepOverrides: [{ model: 'claude-opus-5-5' }, null, null],
+    },
+  });
+  r.workflows.setStepOverrides('s1', [
+    { model: 'claude-haiku-4-5' },
+    { model: 'claude-haiku-4-5' },
+    { model: 'claude-opus-5-5', reasoningEffort: null },
+  ]);
+
+  assert.deepEqual(r.s1().workflow!.stepOverrides, [
+    { model: 'claude-opus-5-5' },
+    null,
+    { model: 'claude-opus-5-5', reasoningEffort: null },
+  ]);
+});
+
+test('setStepOverrides before the start re-seeds step 0 on the session', () => {
+  const h = harness(2, { started: false, stepStatuses: ['pending', 'pending'] });
+  h.s1().status = 'idle';
+  h.workflows.setStepOverrides('s1', [{ model: 'claude-opus-5-5', reasoningEffort: 'max' }, null]);
+
+  const m = h.s1();
+  assert.equal(m.model, 'claude-opus-5-5');
+  assert.equal(m.reasoningEffort, 'max');
+
+  // Clearing the overrides puts step 0's own model back.
+  h.workflows.setStepOverrides('s1', []);
+  assert.equal(h.s1().model, 'claude-sonnet-5-5');
+  assert.equal(h.s1().reasoningEffort, undefined);
+  assert.equal(h.s1().workflow!.stepOverrides, undefined);
+});
+
+test('attach with overrides seeds the session from step 0’s effective values', () => {
+  const h = harness(2);
+  h.s1().workflow = undefined;
+  h.workflows.attach('s1', 'wf1', [{ model: 'claude-opus-5-5', reasoningEffort: 'high' }, null]);
+
+  const m = h.s1();
+  assert.equal(m.model, 'claude-opus-5-5');
+  assert.equal(m.reasoningEffort, 'high');
+  assert.deepEqual(m.workflow!.stepOverrides, [{ model: 'claude-opus-5-5', reasoningEffort: 'high' }, null]);
+
+  // Without overrides the step's own values win, and nothing is stored.
+  h.workflows.attach('s1', 'wf1');
+  assert.equal(h.s1().model, 'claude-sonnet-5-5');
+  assert.equal(h.s1().workflow!.stepOverrides, undefined);
+});

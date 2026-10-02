@@ -40,10 +40,10 @@ import {
   IconX,
 } from '@tabler/icons-react';
 import { useHotkeys, useLocalStorage } from '@mantine/hooks';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { SessionMeta } from '@lines/shared';
+import type { SessionMeta, WorkflowDef, WorkflowStepOverride } from '@lines/shared';
 import { findWorktree, hasEstimatedSpend, projectPaths, projectRoots, rootsForCwd } from '@lines/shared';
 import type { SessionSort } from '../lib/format';
 import {
@@ -58,7 +58,9 @@ import { useCan, useIsGuest, useSessionMachine } from '../lib/can';
 import { searchSessions } from '../lib/files';
 import { sessionsOnMachine } from '../lib/machines';
 import { useIsPhone, useReveal } from '../lib/layout';
+import { MOD, newSessionHotkey } from '../lib/platform';
 import { ConfirmModal } from './ConfirmModal';
+import { WorkflowRunModal } from './workflow/WorkflowRunModal';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode, SidebarSearchScope } from '../store';
 import { projectAt, sessionsInProject, useStore } from '../store';
@@ -749,7 +751,7 @@ export function Sidebar({
     // The create failed or its intent expired — nothing will take the focus over.
     primer.blur();
   }, [pendingCreate, worktreePending, focusComposerFor, actionError]);
-  const createSession = (workflowId?: string) => {
+  const createSession = (workflowId?: string, stepOverrides?: (WorkflowStepOverride | null)[]) => {
     if (!activeProject) return;
     if (isPhone) {
       // A stale error would blur the primer on the spot.
@@ -774,6 +776,7 @@ export function Sidebar({
       permissionMode: newSessionDefaults.permissionMode,
       reasoningEffort: newSessionDefaults.reasoningEffort,
       workflowId,
+      ...(workflowId && stepOverrides?.some(Boolean) ? { stepOverrides } : {}),
       // Empty object = let the server name the branch and the path.
       ...(worktreeMode ? { worktree: {} } : {}),
     });
@@ -781,6 +784,40 @@ export function Sidebar({
     // On a phone the drawer sits over the composer the user is about to type in.
     onNavigate?.();
   };
+
+  /** The workflow whose per-step models are being chosen before a launch. */
+  const [tuneWorkflow, setTuneWorkflow] = useState<WorkflowDef | null>(null);
+  /**
+   * A new-session click with a workflow. Cmd/Ctrl+click opens the per-run
+   * model/effort picker instead of launching; a plain click launches as before.
+   */
+  const createFromClick = (e: ReactMouseEvent, workflowId?: string) => {
+    const wf = workflowId ? [...workflows, ...sharedWorkflows].find((w) => w.id === workflowId) : undefined;
+    if (wf && (e.metaKey || e.ctrlKey)) {
+      setTuneWorkflow(wf);
+      return;
+    }
+    createSession(workflowId);
+  };
+  // Mirrors the primary button: a new session with the last choice. Not on a
+  // phone (no keyboard to speak of), and not while a modal or menu owns the keys.
+  const hotkey = newSessionHotkey();
+  const canHotkeyCreate = !isPhone && canCreate && !!activeProject && !worktreePending;
+  useHotkeys(
+    [
+      [
+        hotkey.key,
+        () => {
+          if (!canHotkeyCreate || overlayOpen()) return;
+          createSession(lastWorkflow?.id);
+        },
+        { preventDefault: canHotkeyCreate },
+      ],
+    ],
+    [], // like Cmd+F below: it has to work from the composer textarea too
+    true,
+  );
+  const modHint = `${MOD}-click to choose models per step`;
 
   // The dropdown spans the whole split button rather than a fixed 240px. Measured
   // rather than hard-coded: the sidebar is drag-resizable, and `width="target"`
@@ -1112,17 +1149,25 @@ export function Sidebar({
             />
           )}
           <Button.Group style={{ width: '100%' }}>
-            <Button
-              style={{ flex: 1 }}
-              // currentColor: the button is disabled while this shows, so the
-              // loader follows the disabled text colour in either scheme.
-              leftSection={worktreePending ? <Loader size={12} color="currentColor" /> : <IconPlus size={14} />}
-              onClick={() => createSession(lastWorkflow?.id)}
-              disabled={!activeProject || worktreePending}
+            <Tooltip
+              label={`New session (${hotkey.label})${lastWorkflow ? ` · ${modHint}` : ''}`}
+              withArrow
+              fz="xs"
+              openDelay={500}
+              disabled={isPhone}
             >
-              {lastWorkflow ? lastWorkflow.name : 'New session'}
-              {worktreeMode ? ' in worktree' : ''}
-            </Button>
+              <Button
+                style={{ flex: 1 }}
+                // currentColor: the button is disabled while this shows, so the
+                // loader follows the disabled text colour in either scheme.
+                leftSection={worktreePending ? <Loader size={12} color="currentColor" /> : <IconPlus size={14} />}
+                onClick={(e) => createFromClick(e, lastWorkflow?.id)}
+                disabled={!activeProject || worktreePending}
+              >
+                {lastWorkflow ? lastWorkflow.name : 'New session'}
+                {worktreeMode ? ' in worktree' : ''}
+              </Button>
+            </Tooltip>
             {/* Always rendered now: the worktree toggle lives here, so the split
                 half can no longer depend on a workflow existing. */}
             <Menu position="bottom-end" width={menuWidth ?? 240}>
@@ -1173,9 +1218,18 @@ export function Sidebar({
                 {workflows.length > 0 && (
                   <>
                     <Menu.Divider />
-                    <Menu.Label>With workflow</Menu.Label>
+                    <Menu.Label>
+                      <Group justify="space-between" wrap="nowrap" gap="xs">
+                        <span>With workflow</span>
+                        {!isPhone && (
+                          <Text fz={10} c="dimmed" truncate>
+                            {modHint}
+                          </Text>
+                        )}
+                      </Group>
+                    </Menu.Label>
                     {workflows.map((w) => (
-                      <Menu.Item key={w.id} onClick={() => createSession(w.id)}>
+                      <Menu.Item key={w.id} onClick={(e) => createFromClick(e, w.id)}>
                         {w.name}
                       </Menu.Item>
                     ))}
@@ -1184,11 +1238,21 @@ export function Sidebar({
                 {foreignWorkflows.length > 0 && (
                   <>
                     <Menu.Divider />
-                    <Menu.Label>Shared by others</Menu.Label>
+                    <Menu.Label>
+                      <Group justify="space-between" wrap="nowrap" gap="xs">
+                        <span>Shared by others</span>
+                        {/* The hint rides the first workflow header only. */}
+                        {!isPhone && workflows.length === 0 && (
+                          <Text fz={10} c="dimmed" truncate>
+                            {modHint}
+                          </Text>
+                        )}
+                      </Group>
+                    </Menu.Label>
                     {foreignWorkflows.map((w) => (
                       <Menu.Item
                         key={w.id}
-                        onClick={() => createSession(w.id)}
+                        onClick={(e) => createFromClick(e, w.id)}
                         rightSection={
                           <Text size="xs" c="dimmed" truncate maw={90}>
                             {w.ownerName ?? 'Unknown'}
@@ -1203,6 +1267,15 @@ export function Sidebar({
               </Menu.Dropdown>
             </Menu>
           </Button.Group>
+          {tuneWorkflow && (
+            <WorkflowRunModal
+              opened
+              workflow={tuneWorkflow}
+              confirmLabel="Start session"
+              onConfirm={(overrides) => createSession(tuneWorkflow.id, overrides)}
+              onClose={() => setTuneWorkflow(null)}
+            />
+          )}
         </Box>
       )}
       {actionError && (

@@ -42,7 +42,7 @@ reads as "done" without opening the session.
   play-icon, "Continue" — confirmation modal, Approve button, the waiting/advancing strip, the
   row/list switch and its accordion)
 - `server/src/index.ts` (`case 'interrupt'`, `case 'workflowForceAdvance'`,
-  `case 'workflowStartStep'`)
+  `case 'workflowStartStep'`, `case 'setWorkflowStepOverrides'`)
 - `server/src/sessions.ts` (`SessionManager.interrupt`)
 - `server/src/workflows.ts` (`WorkflowEngine.forceAdvance`, `WorkflowEngine.startStep`,
   `WorkflowEngine.advance`, `WorkflowEngine.runStep`,
@@ -67,10 +67,12 @@ reads as "done" without opening the session.
 - `web/src/components/Transcript.tsx` (`WorkflowMarker`)
 - `web/src/components/Composer.tsx`
 - `web/src/components/WorkflowStepper.tsx`
+- `web/src/components/workflow/WorkflowRunModal.tsx` (per-step model/effort picker, launch and mid-run)
+- `web/src/lib/useStepResolver.ts` (shared step/workflow lookup)
 - `web/src/components/ConfirmModal.tsx` (reused, not modified)
 - `web/src/lib/format.ts` (`isWorkflowFinished`)
 - `web/src/components/Sidebar.tsx` (`SessionRow` icon branch order)
-- `server/src/workflows.advance.test.ts`
+- `server/src/workflows.advance.test.ts` (includes the override persistence/`setStepOverrides` cases)
 - `server/src/sessions.compact.test.ts`
 - `server/src/sessions.reconcile.test.ts`
 
@@ -97,6 +99,10 @@ reads as "done" without opening the session.
 - `WorkflowEngine.startStep`
 - `WorkflowEngine.advance`
 - `WorkflowEngine.runStep`
+- `WorkflowEngine.setStepOverrides`
+- `WorkflowState.stepOverrides`
+- `WorkflowStepOverride`
+- `sanitizeStepOverrides`
 - `WorkflowEngine.onWorkflowTurnComplete`
 - `WorkflowEngine.armSettleWatchdog` / `clearSettleWatchdog`
 - `WorkflowEngine.forceAdvanceSettleMs`
@@ -587,6 +593,33 @@ installed icon, no new package). No other new dependencies.
   follow-the-stream and scrolls straight to it, otherwise it drops the tail window and scrolls
   once the marker mounts.
 
+### Per-run model and effort overrides
+
+A step's stored `model`/`reasoningEffort` are the baseline; a run may lay its own choice over them
+without touching the stored (pinned) step. `WorkflowState.stepOverrides` is indexed by step
+position (`null` = none) and holds `WorkflowStepOverride` entries: an absent field means "use the
+step's value", and `reasoningEffort: null` means Auto even when the step sets an effort.
+
+- **Where they come from.** Cmd/Ctrl+click on the sidebar's new-session button or a workflow menu
+  item opens `WorkflowRunModal` and sends the result on `createSession`; `WorkflowEngine.attach`
+  stores it and seeds step 0's model/effort on the session from the effective values. Mid-run, the
+  stepper's tune icon reopens the same modal and sends `setWorkflowStepOverrides`.
+- **Where they apply.** `runStep` replaces the step's model and effort with the effective ones
+  (`effectiveContent`, which also runs `resolveModelId`) before the provider check, `setModel`,
+  `setReasoningEffort` and the `stepModels` stamp. Retry, force-advance and `startStep` all go
+  through `runStep`, so they inherit overrides with no code of their own.
+- **Only pending steps are editable.** `WorkflowEngine.setStepOverrides` ignores any index whose
+  status is not `pending`, so a running or finished step keeps what it ran on, and a late edit
+  racing an advance either lands before the step starts or is dropped. Before the workflow has
+  started it also re-seeds step 0's session model/effort, as `attach` does.
+- **Claude only.** `sanitizeStepOverrides` (`shared/workflowValidation.ts`) drops a model that is
+  not Anthropic's and an effort outside the Claude list; invalid entries are dropped, not
+  rejected. That keeps a run from crossing providers through an override, which the
+  fresh-start rule below would otherwise have to handle, and keeps a step's `routing` rule valid
+  against its model's provider.
+- **Permissions.** `setWorkflowStepOverrides` is session-scoped and rides the `setModel`
+  capability, like `setReasoningEffort`.
+
 ### Steps across providers
 
 A step may run on **either** provider, but it cannot *carry* a conversation across one: nothing
@@ -710,6 +743,7 @@ is attached to, which is not known until the run. The runner handles it with the
 - [reasoning-effort-selection](reasoning-effort-selection.md) — a step's `reasoningEffort` is
   applied by `runStep` beside `setModel`/`setPermissionMode`, including when it is unset: an
   absent effort clears the session's, it never inherits the previous step's.
+- [model-selector](model-selector.md) — `WorkflowRunModal` is a model `Select` call site, limited to Claude models.
 - [smart-turn-routing](smart-turn-routing.md) — `runStep` also clears `SessionMeta.routingPaused`
   on step entry (alongside its `stepFailure` reset), and a step's own `routing` rule overrides the
   global smart-routing rule for the turns it runs, while it runs.

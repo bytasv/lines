@@ -12,6 +12,7 @@ import type {
   WorkflowDef,
   WorkflowMarkerData,
   WorkflowState,
+  WorkflowStepOverride,
 } from '@lines/shared';
 import {
   isSessionActive,
@@ -21,6 +22,7 @@ import {
   providerSwitchNeedsFreshStart,
   resolveModelId,
   rootsForCwd,
+  sanitizeStepOverrides,
 } from '@lines/shared';
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
@@ -389,7 +391,7 @@ export class WorkflowEngine {
   /** The current step's routing rule and name, for SessionManager's router. */
   private stepRouting(sessionId: string): { rule?: RoutingRule; stepName?: string } | undefined {
     const meta = this.sessions.get(sessionId);
-    const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
+    const wf = meta?.workflow && this.resolveFor(meta.workflow);
     if (!meta?.workflow || !wf) return undefined;
     const step = wf.steps[meta.workflow.stepIndex];
     const content = step && this.stepContent(step);
@@ -463,7 +465,7 @@ export class WorkflowEngine {
     // Outputs published by a step that no longer counts as finished would still be
     // substituted into a later `{outputs.<name>}`, silently handing on work that
     // was rewound away.
-    const def = this.resolve(wf.workflowId);
+    const def = this.resolveFor(wf);
     if (wf.outputs && def) {
       for (let i = stepIndex; i < def.steps.length; i++) {
         const name = this.stepContent(def.steps[i])?.outputName?.trim();
@@ -493,6 +495,8 @@ export class WorkflowEngine {
       const state = s.workflow;
       return (
         state?.workflowId === workflowId &&
+        // An inline snapshot runs its own copy, untouched by a pull of this id.
+        !state.def &&
         state.started &&
         state.stepStatuses.some((status) => status !== 'done')
       );
@@ -527,6 +531,14 @@ export class WorkflowEngine {
   /** Owned first, then shared — resolves a session's attached workflow either way. */
   private resolve(id: string): WorkflowDef | undefined {
     return this.workflows.get(id) ?? this.shared.get(id);
+  }
+
+  /**
+   * The definition a session's run follows: its inline snapshot when it carries
+   * one (a guest's own workflow, absent from this library), else the library row.
+   */
+  private resolveFor(state: WorkflowState): WorkflowDef | undefined {
+    return state.def ?? this.resolve(state.workflowId);
   }
 
   /** True only for an id this user genuinely cannot write. */
@@ -827,26 +839,92 @@ export class WorkflowEngine {
   }
 
   /** Attach a workflow to a session; it starts on the user's first prompt (the task description). */
-  attach(sessionId: string, workflowId: string) {
-    const meta = this.sessions.get(sessionId);
+  attach(sessionId: string, workflowId: string, stepOverrides?: unknown) {
     const wf = this.resolve(workflowId);
-    if (!meta || !wf) return;
+    if (wf) this.attachDef(sessionId, wf, undefined, stepOverrides);
+  }
+
+  /**
+   * Attach a self-contained workflow that is not in this library — a guest's own,
+   * every step already inline. The snapshot rides `meta.workflow.def`, so it
+   * persists with the session and survives a bridge restart.
+   */
+  attachInline(sessionId: string, def: WorkflowDef, stepOverrides?: unknown) {
+    this.attachDef(sessionId, def, def, stepOverrides);
+  }
+
+  private attachDef(
+    sessionId: string,
+    wf: WorkflowDef,
+    inline: WorkflowDef | undefined,
+    stepOverrides?: unknown,
+  ) {
+    const meta = this.sessions.get(sessionId);
+    if (!meta) return;
+    const overrides = sanitizeStepOverrides(stepOverrides, wf.steps.length);
     meta.workflow = {
-      workflowId,
+      workflowId: wf.id,
+      ...(inline ? { def: inline } : {}),
       stepIndex: 0,
       stepStatuses: wf.steps.map(() => 'pending'),
       started: false,
+      ...(overrides.some(Boolean) ? { stepOverrides: overrides } : {}),
     } satisfies WorkflowState;
-    // Reflect step 0's mode/model on the session up front so the composer pill is
-    // correct before the first prompt. runStep re-applies these (via the worker) on start.
-    const step0 = wf.steps[0] && this.stepContent(wf.steps[0]);
-    if (step0) {
-      meta.permissionMode = step0.permissionMode;
-      meta.model = step0.model;
-      meta.reasoningEffort = step0.reasoningEffort;
-      meta.workflow.stepPermissionMode = step0.permissionMode;
-    }
+    this.seedStep0(meta, wf);
     this.sessions.setStatus(sessionId, meta.status); // persist + broadcast the attached workflow
+  }
+
+  /**
+   * Reflect step 0's mode/model on the session up front so the composer pill is
+   * correct before the first prompt. runStep re-applies these (via the worker) on start.
+   */
+  private seedStep0(meta: SessionMeta, wf: WorkflowDef) {
+    const step0 = wf.steps[0] && this.stepContent(wf.steps[0]);
+    if (!step0 || !meta.workflow) return;
+    const effective = this.effectiveContent(meta.workflow, 0, step0);
+    meta.permissionMode = step0.permissionMode;
+    meta.model = effective.model;
+    meta.reasoningEffort = effective.reasoningEffort;
+    meta.workflow.stepPermissionMode = step0.permissionMode;
+  }
+
+  /**
+   * The model and effort step `i` actually runs on: its stored content with this
+   * run's override (if any) laid over it. An override's effort is absolute —
+   * `null` is Auto even when the step sets one; an absent field falls through.
+   */
+  private effectiveContent(
+    state: WorkflowState,
+    i: number,
+    content: StepContent,
+  ): { model: string; reasoningEffort: StepContent['reasoningEffort'] } {
+    const override: WorkflowStepOverride | null | undefined = state.stepOverrides?.[i];
+    const model = resolveModelId(override?.model ?? content.model);
+    const reasoningEffort =
+      override && override.reasoningEffort !== undefined
+        ? (override.reasoningEffort ?? undefined)
+        : content.reasoningEffort;
+    return { model, reasoningEffort };
+  }
+
+  /**
+   * Replace this run's per-step overrides. Only still-pending steps take the new
+   * value — a running or finished step keeps whatever it ran on, so a late edit
+   * racing an advance either lands before the step starts or is ignored. Before
+   * the workflow starts, step 0's seed on the session is refreshed too.
+   */
+  setStepOverrides(sessionId: string, stepOverrides: unknown) {
+    const meta = this.sessions.get(sessionId);
+    const state = meta?.workflow;
+    const wf = state && this.resolveFor(state);
+    if (!meta || !state || !wf) return;
+    const incoming = sanitizeStepOverrides(stepOverrides, wf.steps.length);
+    const next = wf.steps.map((_, i) =>
+      state.stepStatuses[i] === 'pending' ? (incoming[i] ?? null) : (state.stepOverrides?.[i] ?? null),
+    );
+    state.stepOverrides = next.some(Boolean) ? next : undefined;
+    if (!state.started) this.seedStep0(meta, wf);
+    this.sessions.setStatus(sessionId, meta.status); // persist + broadcast
   }
 
   /**
@@ -949,7 +1027,7 @@ export class WorkflowEngine {
     actor?: Actor,
   ) {
     const meta = this.sessions.get(sessionId);
-    const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
+    const wf = meta?.workflow && this.resolveFor(meta.workflow);
     if (!meta || !meta.workflow || !wf) {
       // `advance` clears `advancing` without its own broadcast, riding whatever this
       // call broadcasts next — so a return that broadcasts nothing leaves the client's
@@ -993,7 +1071,8 @@ export class WorkflowEngine {
     // forces freshStart on a crossing step, so reaching this is an older workflow
     // or a hand-edited one — parked as a pre-run failure, the existing mechanism,
     // so Approve can still skip past it.
-    const stepProvider = providerForModel(content.model);
+    const effective = this.effectiveContent(meta.workflow, i, content);
+    const stepProvider = providerForModel(effective.model);
     // Keyed on the conversation the session actually holds, not on `meta.model`:
     // attaching a workflow writes step 0's model onto the session up front, so by
     // the time the step runs `meta.model` already agrees with it and would report
@@ -1020,7 +1099,7 @@ export class WorkflowEngine {
       meta.workflow.stepFailure = 'pre-run';
       this.sessions.failTurn(
         sessionId,
-        `Step ${i + 1} runs on ${content.model}, a different provider from the step before it, ` +
+        `Step ${i + 1} runs on ${effective.model}, a different provider from the step before it, ` +
           'but is set to continue that step’s conversation. A conversation cannot move between ' +
           'providers — turn on “Fresh start” for this step, then Retry.',
       );
@@ -1048,10 +1127,11 @@ export class WorkflowEngine {
     });
 
     // Per-step model + permission mode take effect before the prompt is queued.
-    await this.sessions.setModel(sessionId, content.model);
+    // Both carry this run's override for the step, if any (see effectiveContent).
+    await this.sessions.setModel(sessionId, effective.model);
     // Called even when the step sets none, which is what *clears* it: skipping the
     // call would leak a high-effort step's setting into every later step of the run.
-    await this.sessions.setReasoningEffort(sessionId, content.reasoningEffort ?? null);
+    await this.sessions.setReasoningEffort(sessionId, effective.reasoningEffort ?? null);
     await this.sessions.setPermissionMode(sessionId, content.permissionMode);
 
     const feedbackText = feedback
@@ -1185,7 +1265,7 @@ export class WorkflowEngine {
     failed: boolean,
   ) {
     const meta = this.sessions.get(sessionId);
-    const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
+    const wf = meta?.workflow && this.resolveFor(meta.workflow);
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     const step = wf.steps[i];
@@ -1372,7 +1452,7 @@ export class WorkflowEngine {
     actor?: Actor,
   ) {
     const meta = this.sessions.get(sessionId);
-    const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
+    const wf = meta?.workflow && this.resolveFor(meta.workflow);
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'running';
@@ -1398,7 +1478,7 @@ export class WorkflowEngine {
     // Advancing under it would consolidate the step's output while the CLI is still
     // rewriting its own context, and then prompt the next step into the same query.
     if (isSessionInterruptible(meta.status)) return;
-    const wf = this.resolve(meta.workflow.workflowId);
+    const wf = this.resolveFor(meta.workflow);
     this.marker(sessionId, {
       stepIndex: i,
       stepName: this.stepName(wf?.steps[i]),
@@ -1439,7 +1519,7 @@ export class WorkflowEngine {
       // to survive the stale 'waiting-approval' a died-mid-advance session carries
       // (see WorkflowStepper's `resumable`). A *live* turn here is a compaction.
       if (isSessionInterruptible(meta.status)) return;
-      const done = this.resolve(meta.workflow.workflowId);
+      const done = this.resolveFor(meta.workflow);
       // The last step reading 'done' is a finished workflow, not a stall.
       if (!done || i + 1 >= done.steps.length) return;
       void this.advance(sessionId);
@@ -1460,7 +1540,7 @@ export class WorkflowEngine {
     }
     // Marked running with no turn in flight (e.g. the worker died mid-step): no
     // late result can arrive, so advance straight away.
-    const wf = this.resolve(meta.workflow.workflowId);
+    const wf = this.resolveFor(meta.workflow);
     this.marker(sessionId, {
       stepIndex: i,
       stepName: this.stepName(wf?.steps[i]),
@@ -1505,7 +1585,7 @@ export class WorkflowEngine {
     const timer = setTimeout(() => {
       this.settleWatchdogs.delete(sessionId);
       const meta = this.sessions.get(sessionId);
-      const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
+      const wf = meta?.workflow && this.resolveFor(meta.workflow);
       if (!meta || !meta.workflow || !wf) return;
       // Bail unless nothing has moved since the click: the flag is still ours, the
       // step is still the current running one, and no turn is live — a session back
@@ -1548,7 +1628,7 @@ export class WorkflowEngine {
 
   private async advance(sessionId: string) {
     const meta = this.sessions.get(sessionId);
-    const wf = meta?.workflow && this.resolve(meta.workflow.workflowId);
+    const wf = meta?.workflow && this.resolveFor(meta.workflow);
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'done';

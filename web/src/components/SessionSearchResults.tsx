@@ -5,6 +5,7 @@ import type { SidebarSearchScope } from '../store';
 import type { SessionSearchResponse } from '@lines/shared';
 import { sessionRowMeta } from '../lib/format';
 import { useIsPhone } from '../lib/layout';
+import { MOD } from '../lib/platform';
 import { useStore } from '../store';
 import { HighlightedText } from './FileSearchPanel';
 
@@ -99,9 +100,6 @@ export function SessionSearchResults({
     </Stack>
   );
 }
-
-/** Modifier label for the shortcut hints: ⌘ on Apple platforms, Ctrl elsewhere. */
-const MOD = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘' : 'Ctrl';
 
 const PLACEHOLDER: Record<SidebarSearchScope, { icon: typeof IconFileSearch; title: string; hint: string }> =
   {

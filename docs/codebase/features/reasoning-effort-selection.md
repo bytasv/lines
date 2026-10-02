@@ -31,6 +31,7 @@ the same thinking budget.
 - `server/src/workerCodex.ts` — `applyModePreset` (a non-null effort passes through untouched)
 - `server/src/workflows.ts` — per-step apply/clear, `attach`, `sameContent`
 - `server/src/mcpWorkflowTools.ts` — the `reasoningEffort` schema property, three call sites
+- `web/src/components/workflow/WorkflowRunModal.tsx` — per-step effort picker for a run
 - `web/src/lib/modelSelect.tsx` — `effortSelectData`, `AUTO_EFFORT`, `STEP_EFFORTS`
 - `web/src/store.ts` — `NewSessionDefaults.reasoningEffort`, `planReasoningEffort`,
   `setPlanReasoningEffort`
@@ -70,6 +71,9 @@ fields themselves — and filter the result against that provider's own
 
 A workflow step's effort is applied by `WorkflowEngine.runStep` beside `setModel`/
 `setPermissionMode`, and by `attach` for step 0 up front (mirroring `meta.model = step0.model`).
+Both read the *effective* effort: the step's own value with the run's
+`WorkflowState.stepOverrides` entry for that step laid over it (see
+[workflow-step-lifecycle](workflow-step-lifecycle.md)).
 
 ## Dependencies
 
@@ -89,8 +93,9 @@ The Agent SDK's top-level `effort` option (`Options.effort`); codex's `collabora
   push, and plan mode preferring the global plan effort over the session's own
 - `server/src/workflows.providers.test.ts` — a step applying its own effort, and a following step
   with none clearing it (the leak this feature has to avoid)
-- `server/src/messageAuthz.test.ts` — `setReasoningEffort` denied for a Can-prompt guest, allowed
-  for a collaborator (it reuses the `setModel` capability)
+- `server/src/workflows.providers.test.ts` also covers overrides: an override effort applied, `null` clearing a step's own effort, and an absent field falling through
+- `server/src/messageAuthz.test.ts` — `setReasoningEffort` and `setWorkflowStepOverrides` denied for a Can-prompt guest, allowed
+  for a collaborator (both reuse the `setModel` capability)
 
 ## Business rules
 
@@ -111,6 +116,10 @@ The Agent SDK's top-level `effort` option (`Options.effort`); codex's `collabora
   sibling call is made every step start, including when the step's own effort is `undefined`. This
   was "absolute" before [smart-turn-routing](smart-turn-routing.md) existed: with routing on, a
   rule may still move an individual turn away from the step's own effort, per turn.
+- **A per-run override's effort is absolute.** `WorkflowStepOverride.reasoningEffort` replaces the
+  step's effort for that run: a level sets it, `null` means Auto (provider default) even when the
+  step itself sets one, and an absent field falls through to the step's value. Overrides never
+  mutate the stored step and are limited to Claude's list.
 - **No cross-provider refusal.** Unlike `setModel`, changing effort never strands a conversation,
   so `setReasoningEffort` has no verdict to report and no fresh-start machinery.
 - **Filtered at push time, not at write time.** A stored effort the session's current provider

@@ -865,6 +865,17 @@ export function normalizeRecipeTag(raw: string): string {
 
 export type WorkflowStepStatus = 'pending' | 'running' | 'waiting-approval' | 'done';
 
+/**
+ * A per-run model/effort choice for one step, layered over the step's own
+ * `model`/`reasoningEffort` without touching the stored (pinned) step. An absent
+ * field means "use the step's value"; `reasoningEffort: null` means Auto — the
+ * provider default — even when the step itself sets an effort. Claude models only.
+ */
+export interface WorkflowStepOverride {
+  model?: string;
+  reasoningEffort?: ReasoningEffort | null;
+}
+
 export interface WorkflowState {
   workflowId: string;
   stepIndex: number;
@@ -885,6 +896,10 @@ export interface WorkflowState {
    *  Approve button's loader. In-flight only — never trusted across a bridge
    *  restart or an instance hand-off. */
   advancing?: boolean;
+  /** Self-contained snapshot of the workflow, every step inline. Set when the
+   *  workflow came from outside this machine's library (a guest's own workflow);
+   *  wins over `workflowId` when resolving the definition. */
+  def?: WorkflowDef;
   /** Current step's configured permission mode, snapshotted at step start.
    *  Distinguishes a workflow-mandated 'plan' from a manual mid-step override. */
   stepPermissionMode?: PermissionMode;
@@ -936,6 +951,10 @@ export interface WorkflowState {
    *  (unresolved ref, missing `{outputs.*}`), so Retry re-renders it from scratch.
    *  Cleared the moment the step runs again or the workflow moves on. */
   stepFailure?: 'pre-run' | 'turn';
+  /** Per-run model/effort overrides, indexed by step position (`null` = none).
+   *  Chosen at launch or edited mid-run for still-pending steps; applied by
+   *  runStep over the step's own values. Never written back to the stored step. */
+  stepOverrides?: (WorkflowStepOverride | null)[];
 }
 
 /**
@@ -1971,10 +1990,14 @@ export interface ShareCaps {
   /** Approve, force-advance, start or retry a workflow step. */
   manageWorkflow: boolean;
   setModel: boolean;
-  /** No preset grants this: permission mode is the guard around everything else. */
+  /** Only Full access grants this: permission mode is the guard around everything else. */
   setPermissionMode: boolean;
   /** Machine-scope grants only — a session share has no folder to create in. */
   createSessions: boolean;
+  /** Archive, unarchive and complete a session. Only Full access grants this. */
+  manageSessions: boolean;
+  /** Delete a session outright. Only Full access grants this. */
+  deleteSessions: boolean;
 }
 
 /** Every capability off. The base every grant is built from, so a new flag defaults denied. */
@@ -1988,10 +2011,12 @@ export const NO_SHARE_CAPS: ShareCaps = {
   setModel: false,
   setPermissionMode: false,
   createSessions: false,
+  manageSessions: false,
+  deleteSessions: false,
 };
 
-/** The three grants the UI offers. Stored as caps, so the preset is only a label. */
-export type SharePreset = 'view' | 'prompt' | 'collaborator';
+/** The four grants the UI offers. Stored as caps, so the preset is only a label. */
+export type SharePreset = 'view' | 'prompt' | 'collaborator' | 'full';
 
 /** How wide a grant reaches. `owner` is the host themselves — never a stored row. */
 export type ShareScope = 'owner' | 'machine' | 'session';
@@ -2015,6 +2040,20 @@ export const SHARE_PRESETS: Record<SharePreset, ShareCaps> = {
     manageWorkflow: true,
     setModel: true,
   },
+  // Collaborator plus the controls around the session itself: permission mode
+  // (which can reach Full Auto), archive/complete, and delete.
+  full: {
+    ...NO_SHARE_CAPS,
+    prompt: true,
+    readFiles: true,
+    interrupt: true,
+    approvePermissions: true,
+    manageWorkflow: true,
+    setModel: true,
+    setPermissionMode: true,
+    manageSessions: true,
+    deleteSessions: true,
+  },
 };
 
 /**
@@ -2024,7 +2063,7 @@ export const SHARE_PRESETS: Record<SharePreset, ShareCaps> = {
  */
 export function capsForPreset(preset: SharePreset, scope: ShareScope): ShareCaps {
   const caps = { ...SHARE_PRESETS[preset] };
-  if (preset === 'collaborator' && scope === 'machine') caps.createSessions = true;
+  if ((preset === 'collaborator' || preset === 'full') && scope === 'machine') caps.createSessions = true;
   return caps;
 }
 
@@ -2047,7 +2086,7 @@ export function parseShareCaps(value: unknown): ShareCaps {
 
 /** Which preset a stored cap set corresponds to, or null for a hand-tuned grant. */
 export function presetOfCaps(caps: ShareCaps, scope: ShareScope): SharePreset | null {
-  for (const preset of ['view', 'prompt', 'collaborator'] as SharePreset[]) {
+  for (const preset of Object.keys(SHARE_PRESETS) as SharePreset[]) {
     const expected = capsForPreset(preset, scope);
     if ((Object.keys(expected) as (keyof ShareCaps)[]).every((k) => expected[k] === caps[k])) {
       return preset;
@@ -2138,6 +2177,8 @@ export const OWNER_ACCESS: SocketAccess = {
     setModel: true,
     setPermissionMode: true,
     createSessions: true,
+    manageSessions: true,
+    deleteSessions: true,
   },
 };
 
@@ -2225,11 +2266,14 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // how hard it thinks. A cap here would have to be re-granted across every preset
   // and carry denial copy nobody would reason about.
   setReasoningEffort: { needs: 'session', cap: 'setModel' },
+  // Per-run model/effort for a workflow's pending steps: the same choice as
+  // setModel/setReasoningEffort, made ahead of the step starting.
+  setWorkflowStepOverrides: { needs: 'session', cap: 'setModel' },
   // Answering a routing suggestion changes the model and effort, so it rides the
   // same capability as setModel; pausing routing is the same choice made ahead.
   routingChoice: { needs: 'session', cap: 'setModel' },
   setRoutingPaused: { needs: 'session', cap: 'setModel' },
-  // No preset grants this: permission mode is the guard around everything else.
+  // Only Full access grants this: permission mode is the guard around everything else.
   setPermissionMode: { needs: 'session', cap: 'setPermissionMode' },
 
   // --- watching a session. `cap: null` = any grant, including View only.
@@ -2253,13 +2297,15 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   //     folder to create in.
   createSession: { needs: 'machine', cap: 'createSessions' },
 
+  // --- the session's lifecycle. Only Full access reaches these.
+  archiveSession: { needs: 'session', cap: 'manageSessions' },
+  unarchiveSession: { needs: 'session', cap: 'manageSessions' },
+  completeSession: { needs: 'session', cap: 'manageSessions' },
+  deleteSession: { needs: 'session', cap: 'deleteSessions' },
+
   // --- owner only, permanently.
   //     A guest must never reshape the host's library, projects, settings,
-  //     account or machine — and must never delete their sessions.
-  deleteSession: { needs: 'owner' },
-  archiveSession: { needs: 'owner' },
-  unarchiveSession: { needs: 'owner' },
-  completeSession: { needs: 'owner' },
+  //     account or machine.
   saveWorkflow: { needs: 'owner' },
   deleteWorkflow: { needs: 'owner' },
   saveStep: { needs: 'owner' },
@@ -2373,8 +2419,10 @@ const DENIAL_REASONS: Record<keyof ShareCaps, string> = {
   approvePermissions: 'Only the owner can answer a permission request here.',
   manageWorkflow: 'Only a collaborator can drive workflow steps.',
   setModel: 'Only a collaborator can change the model.',
-  setPermissionMode: 'Only the owner of this machine can change that.',
+  setPermissionMode: 'Changing the permission mode needs Full access.',
   createSessions: 'You cannot create sessions on this machine.',
+  manageSessions: 'Archiving or completing a session needs Full access.',
+  deleteSessions: 'Deleting a session needs Full access.',
 };
 
 const denial = (cap: keyof ShareCaps): string => DENIAL_REASONS[cap];
@@ -2393,6 +2441,12 @@ export type ClientMessage =
       /** Seeded from the user's new-session default; absent = provider default. */
       reasoningEffort?: ReasoningEffort;
       workflowId?: string;
+      /** A guest's own workflow, every step inline (no `ref` steps), run on the
+       *  host without touching its library. Wins over `workflowId`. */
+      workflowDef?: WorkflowDef;
+      /** Per-run model/effort overrides for `workflowId`'s steps, indexed by step
+       *  position. Ignored without a workflow. */
+      stepOverrides?: (WorkflowStepOverride | null)[];
       /**
        * Opt-in: cut a fresh worktree+branch off `cwd`'s repo and run the session
        * there. Rides on createSession rather than a message of its own because the
@@ -2456,6 +2510,13 @@ export type ClientMessage =
    *  analogue for; it reuses the `setModel` *capability*, since choosing how hard
    *  a session thinks is strictly weaker than choosing what it runs on. */
   | { type: 'setReasoningEffort'; sessionId: string; effort: ReasoningEffort | null }
+  /** Replace the run's per-step model/effort overrides. The server applies only
+   *  the entries for still-pending steps; running and done steps keep theirs. */
+  | {
+      type: 'setWorkflowStepOverrides';
+      sessionId: string;
+      stepOverrides: (WorkflowStepOverride | null)[];
+    }
   | { type: 'setPermissionMode'; sessionId: string; mode: PermissionMode }
   /** Ask-mode routing answer for the held turn: `accept` switches to the
    *  suggestion first, otherwise the turn is sent on its current settings. */
@@ -4085,6 +4146,7 @@ export {
   MAX_WORKFLOW_NAME_LEN,
   OUTPUT_NAME_HINT,
   OUTPUT_NAME_RE,
+  sanitizeStepOverrides,
   validateRoutingRule,
   validateStepContent,
   validateWorkflow,

@@ -132,6 +132,15 @@ describe('MESSAGE_AUTHZ', () => {
     // same cap — and so does pausing routing.
     assert.equal(authorizeMessage(msg('routingChoice'), prompter).ok, false);
     assert.equal(authorizeMessage(msg('setRoutingPaused'), prompter).ok, false);
+    // Per-run step overrides are the same model/effort choice, made ahead.
+    assert.equal(authorizeMessage(msg('setWorkflowStepOverrides'), prompter).ok, false);
+  });
+
+  test('setWorkflowStepOverrides is session-scoped on the setModel cap', () => {
+    assert.deepEqual(MESSAGE_AUTHZ.setWorkflowStepOverrides, { needs: 'session', cap: 'setModel' });
+    const scoped = guest('collaborator', { scope: 'session', sessionIds: ['s1'] });
+    assert.equal(authorizeMessage(msg('setWorkflowStepOverrides', 's1'), scoped).ok, true);
+    assert.equal(authorizeMessage(msg('setWorkflowStepOverrides', 's2'), scoped).ok, false);
   });
 
   test('editQueued follows prompt, not interrupt', () => {
@@ -164,6 +173,7 @@ describe('MESSAGE_AUTHZ', () => {
     assert.equal(authorizeMessage(msg('workflowApprove'), collab).ok, true);
     assert.equal(authorizeMessage(msg('setModel'), collab).ok, true);
     assert.equal(authorizeMessage(msg('setReasoningEffort'), collab).ok, true);
+    assert.equal(authorizeMessage(msg('setWorkflowStepOverrides'), collab).ok, true);
     assert.equal(authorizeMessage(msg('routingChoice'), collab).ok, true);
     assert.equal(authorizeMessage(msg('deleteSession'), collab).ok, false);
   });

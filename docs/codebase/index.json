@@ -113,7 +113,9 @@
         "web/src/store.ts",
         "server/src/index.ts",
         "server/src/sessions.ts",
-        "server/src/workflows.ts"
+        "server/src/workflows.ts",
+        "web/src/components/workflow/WorkflowRunModal.tsx",
+        "web/src/lib/useStepResolver.ts"
       ],
       "symbols": [
         "ModelOption",
@@ -125,14 +127,17 @@
         "resolveModelId",
         "isKnownModel",
         "describedOptionRenderer",
-        "describedOptionStyles"
+        "describedOptionStyles",
+        "WorkflowRunModal"
       ],
       "tests": [],
       "businessRules": [
         "description is optional on ModelOption; missing description renders label-only",
         "a step/session keeps a retired model id in storage (no migration); resolveModelId() substitutes the mapped replacement at query time so it still runs, and a warning badge on the step card flags it for the user to update",
         "an unmapped unknown model id passes through resolveModelId() unchanged rather than being forced to a default",
-        "picking the other provider's model on a session that has already run opens a confirm dialog (switchProvider) rather than disabling the option; only providerSwitchBlock's own reasons (a workflow step consolidating, a pending advance, queued messages) and a missing CLI/account still disable it"
+        "picking the other provider's model on a session that has already run opens a confirm dialog (switchProvider) rather than disabling the option; only providerSwitchBlock's own reasons (a workflow step consolidating, a pending advance, queued messages) and a missing CLI/account still disable it",
+        "Overrides never mutate stored steps.",
+        "Claude-only overrides: the run modal offers Anthropic models only."
       ],
       "architecturalRules": [
         "all model Selects must use modelSelectData()/renderModelOption instead of inlining data mapping",
@@ -580,7 +585,9 @@
         "server/src/sessions.ts",
         "server/src/workflows.ts",
         "web/src/components/WorkflowStepper.tsx",
-        "web/src/components/Sidebar.tsx"
+        "web/src/components/Sidebar.tsx",
+        "web/src/components/workflow/WorkflowRunModal.tsx (Cmd/Ctrl+click launch and stepper tune icon)",
+        "server/src/index.ts (case 'setWorkflowStepOverrides')"
       ],
       "files": [
         "shared/types.ts",
@@ -598,7 +605,11 @@
         "server/src/sessions.reconcile.test.ts",
         "web/src/lib/format.ts",
         "web/src/components/Sidebar.tsx",
-        "web/src/lib/workflowReveal.ts"
+        "web/src/lib/workflowReveal.ts",
+        "web/src/components/workflow/WorkflowRunModal.tsx",
+        "web/src/lib/useStepResolver.ts",
+        "web/src/lib/platform.ts",
+        "shared/workflowValidation.ts"
       ],
       "symbols": [
         "SessionManager.interrupt",
@@ -629,14 +640,22 @@
         "isWorkflowFinished",
         "WorkflowEngine.iterateIfWaiting",
         "SessionManager.compactContext",
-        "SessionManager.restoreCompactedStatus"
+        "SessionManager.restoreCompactedStatus",
+        "WorkflowStepOverride",
+        "WorkflowState.stepOverrides",
+        "WorkflowEngine.setStepOverrides",
+        "sanitizeStepOverrides",
+        "WorkflowRunModal",
+        "useStepResolver"
       ],
       "tests": [
         "server/src/workflows.advance.test.ts",
         "server/src/sessions.turns.test.ts",
         "server/src/workflows.substitution.test.ts",
         "server/src/sessions.compact.test.ts",
-        "server/src/sessions.reconcile.test.ts"
+        "server/src/sessions.reconcile.test.ts",
+        "server/src/workflows.providers.test.ts",
+        "server/src/messageAuthz.test.ts"
       ],
       "businessRules": [
         "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
@@ -678,7 +697,10 @@
         "the chevron opens the other steps as a bottom sheet rather than an in-place expansion — the stepper sits above the transcript, so expanding in place pushes the conversation down every time the user checks where they are",
         "that sheet renders no [data-progress-fill] elements, because Transcript counts them to learn the workflow's length and a second set would double it; per-step progress stays on the row behind the sheet",
         "tapping a step in the sheet reveals it in the transcript and closes the sheet; a pending step has nothing to jump to and is inert",
-        "a non-last step's settle (done while its step still reads running) raises no Task complete alert or push — isAlertTransition suppresses it because an advance follows and a park re-alerts as waiting-approval; only the last step's done alerts; see web-push-notifications"
+        "a non-last step's settle (done while its step still reads running) raises no Task complete alert or push — isAlertTransition suppresses it because an advance follows and a park re-alerts as waiting-approval; only the last step's done alerts; see web-push-notifications",
+        "Per-run overrides never mutate stored steps; runStep merges WorkflowState.stepOverrides over the step's model and effort.",
+        "Only pending steps accept override edits; running and done steps keep what they ran on.",
+        "Overrides are Claude-only: a non-Anthropic model or unknown effort is dropped by sanitizeStepOverrides."
       ],
       "architecturalRules": [
         "interrupt() stays intent-free — no caller may infer \"advance\" from \"stop\"",
@@ -3479,7 +3501,8 @@
         "server/src/mcpWorkflowTools.ts",
         "server/src/index.ts",
         "web/src/lib/modelSelect.tsx",
-        "web/src/store.ts"
+        "web/src/store.ts",
+        "web/src/components/workflow/WorkflowRunModal.tsx"
       ],
       "symbols": [
         "ReasoningEffort",
@@ -3496,14 +3519,16 @@
         "applyModePreset",
         "effortSelectData",
         "AUTO_EFFORT",
-        "STEP_EFFORTS"
+        "STEP_EFFORTS",
+        "WorkflowStepOverride.reasoningEffort"
       ],
       "tests": [
         "server/src/sessions.effort.test.ts",
         "server/src/codexPlanMode.test.ts",
         "server/src/sessions.codex.test.ts",
         "server/src/workflows.providers.test.ts",
-        "server/src/messageAuthz.test.ts"
+        "server/src/messageAuthz.test.ts",
+        "server/src/workflows.advance.test.ts"
       ],
       "businessRules": [
         "absent means the provider's own default everywhere; never a sentinel and never null on the wire for Claude — codex alone still receives an explicit null when nothing is chosen, meaning 'ask codex for its own preset', not 'the user chose nothing', and a user-chosen value must never itself be sent as null",
@@ -3512,7 +3537,8 @@
         "a workflow step's effort is absolute, not additive: a step with none clears the session back to the provider default rather than inheriting the previous step's",
         "no cross-provider refusal: unlike setModel, changing effort never strands a conversation",
         "a stored effort the session's current provider does not offer is dropped at push time rather than sent, reachable via a pre-first-turn provider switch",
-        "effect lands on the next turn, never the running one"
+        "effect lands on the next turn, never the running one",
+        "A per-run override's effort is absolute: null means Auto even when the step sets an effort, and an absent field uses the step's value."
       ],
       "architecturalRules": [
         "the worker's ensureSession returns an already-live query early and discards the options of every later push, so an effort change on a live Claude session marks the query stale (SessionManager.staleQueries) rather than editing options in place; pushWithToken drops it there on the next push, reusing recycleIdleQueries' three exemptions (busy, background tasks, MCP OAuth hold) for free",

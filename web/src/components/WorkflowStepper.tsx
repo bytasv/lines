@@ -13,22 +13,30 @@ import {
   ThemeIcon,
   Tooltip,
 } from '@mantine/core';
-import { IconCheck, IconChevronDown, IconCoins, IconPlayerPlay } from '@tabler/icons-react';
+import {
+  IconAdjustmentsHorizontal,
+  IconCheck,
+  IconChevronDown,
+  IconCoins,
+  IconPlayerPlay,
+} from '@tabler/icons-react';
 import type { SessionMeta, WorkflowDef, WorkflowStep, WorkflowStepStatus } from '@lines/shared';
 import {
   capabilitiesFor,
   hasEstimatedSpend,
   isSessionActive,
   isSessionInterruptible,
-  isStepRef,
   providerForModel,
 } from '@lines/shared';
+import { useCan } from '../lib/can';
 import { formatDuration, formatSpendUsd } from '../lib/format';
+import { useStepResolver } from '../lib/useStepResolver';
 import { useIsPhone, useReveal } from '../lib/layout';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { revealWorkflowStep } from '../lib/workflowReveal';
 import { ConfirmModal } from './ConfirmModal';
+import { WorkflowRunModal } from './workflow/WorkflowRunModal';
 
 function StepIcon({
   status,
@@ -119,20 +127,15 @@ export function WorkflowStepper({
   workflow: WorkflowDef;
 }) {
   const state = session.workflow!;
-  const pinnedSteps = useStore((s) => s.pinnedSteps);
-  const sharedSteps = useStore((s) => s.sharedSteps);
-  const steps = useStore((s) => s.steps);
+  const { resolveStepContent } = useStepResolver();
 
   /** Display name for a step, resolving pinned references through the step library. */
-  const nameOf = (step: WorkflowStep): string => {
-    if (!isStepRef(step)) return step.name;
-    const all = [...pinnedSteps, ...steps, ...sharedSteps];
-    const found =
-      all.find(
-        (d) => d.ownerId === step.ownerId && d.id === step.stepId && d.version === step.version,
-      ) ?? all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId);
-    return found?.name ?? 'Shared step';
-  };
+  const nameOf = (step: WorkflowStep): string => resolveStepContent(step)?.name ?? 'Shared step';
+
+  /** Per-run model/effort editor: offered while a step is still to come. */
+  const canSetModel = useCan('setModel');
+  const [tuneOpen, setTuneOpen] = useState(false);
+  const tunable = canSetModel && state.stepStatuses.some((st) => st === 'pending');
 
   const currentStatus = state.stepStatuses[state.stepIndex];
   const waiting = currentStatus === 'waiting-approval';
@@ -353,7 +356,32 @@ export function WorkflowStepper({
             </Group>
           );
         })}
+        {tunable && (
+          <Tooltip label="Models for the steps still to come" withArrow fz="xs">
+            <ActionIcon
+              variant="subtle"
+              color="gray"
+              size="sm"
+              aria-label="Choose models for the remaining steps"
+              style={{ flexShrink: 0 }}
+              onClick={() => setTuneOpen(true)}
+            >
+              <IconAdjustmentsHorizontal size={14} />
+            </ActionIcon>
+          </Tooltip>
+        )}
       </Box>
+      <WorkflowRunModal
+        opened={tuneOpen}
+        workflow={workflow}
+        initialOverrides={state.stepOverrides}
+        lockedIndices={state.stepStatuses.flatMap((st, i) => (st === 'pending' ? [] : [i]))}
+        confirmLabel="Apply"
+        onConfirm={(stepOverrides) =>
+          send({ type: 'setWorkflowStepOverrides', sessionId: session.id, stepOverrides })
+        }
+        onClose={() => setTuneOpen(false)}
+      />
       {(waiting || advancing || stopping || stalled || resumable) && (
         // One line, not a card. This strip is on screen for as long as a step is
         // parked — which is most of a workflow's life, and the whole of it when

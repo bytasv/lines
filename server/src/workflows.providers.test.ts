@@ -9,8 +9,9 @@ import type {
   SessionMeta,
   WorkflowDef,
   WorkflowState,
+  WorkflowStepOverride,
 } from '@lines/shared';
-import { validateStepContent } from '@lines/shared';
+import { sanitizeStepOverrides, validateStepContent } from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -62,13 +63,19 @@ const twoStep = (
   ],
 });
 
-function harness(secondModel: string, secondFreshStart: boolean, efforts: StepEfforts = {}) {
+function harness(
+  secondModel: string,
+  secondFreshStart: boolean,
+  efforts: StepEfforts = {},
+  stepOverrides?: (WorkflowStepOverride | null)[],
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-wf-provider-'));
   const state: WorkflowState = {
     workflowId: 'wf1',
     started: true,
     stepIndex: 0,
     stepStatuses: ['waiting-approval', 'pending'],
+    ...(stepOverrides ? { stepOverrides } : {}),
   };
   const session = {
     id: 's1',
@@ -243,4 +250,65 @@ test('a step routing rule naming another provider’s model is rejected', () => 
     validateStepContent({ ...step, routing: { rule: 'r', models: ['claude-sonnet-5-5'], efforts: ['low'] } }),
     [],
   );
+});
+
+test('a per-run override replaces the step’s model and effort', async () => {
+  const h = harness('claude-sonnet-5-5', false, { second: 'low' }, [
+    null,
+    { model: 'claude-opus-5-5', reasoningEffort: 'high' },
+  ]);
+  h.workflows.approve('s1', 0);
+  await settle();
+
+  const m = h.s1();
+  assert.equal(m.workflow!.stepStatuses[1], 'running');
+  assert.equal(m.model, 'claude-opus-5-5');
+  assert.equal(m.reasoningEffort, 'high');
+  // The stored step is untouched: overrides live on the run only.
+  assert.equal((h.workflows.list()[0]!.steps[1] as { model: string }).model, 'claude-sonnet-5-5');
+});
+
+test('an override effort of null clears the step’s own effort (Auto)', async () => {
+  const h = harness('claude-opus-5-5', false, { second: 'max' }, [null, { reasoningEffort: null }]);
+  h.workflows.approve('s1', 0);
+  await settle();
+
+  const m = h.s1();
+  assert.equal(m.reasoningEffort, undefined);
+  assert.equal(m.model, 'claude-opus-5-5', 'no model override, so the step’s own model');
+});
+
+test('an absent override field falls through to the step’s value', async () => {
+  const h = harness('claude-opus-5-5', false, { second: 'xhigh' }, [null, { model: 'claude-sonnet-5-5' }]);
+  h.workflows.approve('s1', 0);
+  await settle();
+
+  const m = h.s1();
+  assert.equal(m.model, 'claude-sonnet-5-5');
+  assert.equal(m.reasoningEffort, 'xhigh');
+});
+
+test('the sanitizer drops an OpenAI model and an unknown effort from an override', () => {
+  assert.deepEqual(
+    sanitizeStepOverrides(
+      [{ model: 'gpt-5.6-terra', reasoningEffort: 'high' }, { model: 'gpt-5.6-terra' }, { reasoningEffort: 'bogus' }],
+      3,
+    ),
+    [{ reasoningEffort: 'high' }, null, null],
+  );
+  // Extra entries past the workflow's length are cut, and junk is not an override.
+  assert.deepEqual(sanitizeStepOverrides([null, 'x', { model: 'claude-opus-5-5' }], 2), [null, null]);
+  assert.deepEqual(sanitizeStepOverrides('nope', 2), []);
+});
+
+test('an OpenAI override never reaches the step', async () => {
+  const h = harness('claude-opus-5-5', false);
+  h.workflows.setStepOverrides('s1', [null, { model: 'gpt-5.6-terra' }]);
+  assert.equal(h.s1().workflow!.stepOverrides, undefined);
+  h.workflows.approve('s1', 0);
+  await settle();
+
+  const m = h.s1();
+  assert.equal(m.model, 'claude-opus-5-5');
+  assert.equal(m.claudeSessionId, 'claude-abc');
 });
