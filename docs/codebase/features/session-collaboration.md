@@ -23,7 +23,10 @@ This inverts the app's original single-owner assumption: a browser reached a mac
 Four share presets cover the UI (`view`, `prompt`, `collaborator`, `full`); the capability flags exist
 underneath so a finer grant can ship later with no migration. Invites work by email (claimable
 only by that address's *verified* Clerk email, so it works before the invitee even has an
-account) or by a single-use link.
+account) or by a single-use link. No email is sent: an email invite reaches the invitee only when
+they sign in and the pairing screen finds it, or when the owner passes the link on themselves.
+Delivery is proposed, not built — see
+[invite-email-delivery](../../proposals/invite-email-delivery.md).
 
 ## Entry points
 
@@ -479,3 +482,5 @@ resolves a person through — so they can never disagree about who somebody is.
   running, built on this feature's queue, `MESSAGE_AUTHZ`, and attribution.
 - [cross-provider-model-switching](cross-provider-model-switching.md) — `switchProvider`'s
   `MESSAGE_AUTHZ` row and the second authz check the table cannot express.
+- [invite-email-delivery](../../proposals/invite-email-delivery.md) — proposal: actually sending
+  the email for an email invite, with its privacy row and abuse controls.

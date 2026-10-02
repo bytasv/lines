@@ -1,9 +1,50 @@
 # Lines
 
-A web GUI for the Claude Agent SDK / Claude Code CLI. Run, watch, and steer multiple
-Claude sessions in parallel from the browser — live token streaming, inline diffs,
-multi-step workflows, and a reusable prompt library — while the agent itself always
-runs on your own machine, with your own filesystem, `git`, and Claude login.
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/bytasv/lines?style=social)](https://github.com/bytasv/lines/stargazers)
+[![Latest release](https://img.shields.io/github/v/release/bytasv/lines)](https://github.com/bytasv/lines/releases)
+
+**A web and phone GUI for Claude Code and Codex. The agent stays on your machine.**
+
+<!-- Hero GIF goes here once recorded: docs/assets/hero.gif, the phone-driving flow. -->
+
+A web GUI for coding agents: the Claude Agent SDK / Claude Code CLI and the Codex
+CLI. Run, watch, and steer multiple sessions in parallel from the browser or your
+phone — live token streaming, inline diffs, multi-step workflows, and a reusable
+prompt library — while the agent itself always runs on your own machine, with your
+own filesystem, `git`, and CLI login.
+
+Lines works with Claude Code and Codex. It is not affiliated with or endorsed by
+Anthropic or OpenAI.
+
+## Quick start (hosted, macOS)
+
+1. **Install an agent CLI** on your Mac: [Claude Code](https://docs.claude.com/en/docs/claude-code/setup)
+   or [Codex](https://github.com/openai/codex), and sign in to it.
+2. **Install the desktop app** from [linesapp.cloud](https://linesapp.cloud/?ref=github).
+   The build is not notarized yet, so macOS will block it the first time. Drag it
+   to Applications, then run this once:
+
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/Lines.app
+   ```
+
+3. **Sign in and pair.** Open Lines from the menu bar, sign in at
+   [linesapp.cloud](https://linesapp.cloud/?ref=github), and enter the pairing code
+   the app shows. Then start sessions from any browser, or add the site to your
+   phone's home screen.
+
+On Windows or Linux there is no desktop app yet: [run it from source](#run-local-dev)
+instead.
+
+## Where your data goes
+
+The agent, your files, transcripts and CLI logins stay on your machine. Prompts go
+to Anthropic or OpenAI under your own account. Live traffic between your own
+devices and your machine is end-to-end encrypted through the relay. Session
+metadata, workflows and agent memory sync to Lines storage in plaintext so every
+device sees them. [PRIVACY.md](PRIVACY.md) lists every field, and the server side
+can be [self-hosted](deploy/README.md#self-hosting).
 
 Three ways to run it: **locally** (`npm run dev`), as an installable **desktop app**
 (menu-bar, no terminal), or **hosted** — a web app your browser talks to from
@@ -74,7 +115,8 @@ the relay refuses unclaimed or wrongly-claimed connections.
 
 - Node 20+
 - Claude Code CLI authenticated on the machine that runs the agent (the Agent SDK
-  bundles the CLI binary and reuses your existing login)
+  bundles the CLI binary and reuses your existing login), or the Codex CLI signed in
+  to an OpenAI account
 - `git` (for vendoring the caveman plugin, and for diff/commit features; optional
   otherwise)
 
