@@ -84,6 +84,8 @@ None; the page is presentational.
   shows a status.
 - The header links are plain `#anchors`; smooth scrolling is scoped to the mounted page and is off
   under reduced motion.
+- The header is a three-column grid with the action pinned to column 3, so the nav does not move
+  while Clerk resolves the signed-in/out action.
 - Encryption copy states that end-to-end encryption is on by default: every browser enrols once
   with a code from the machine, and its traffic is carried by the relay but cannot be read or
   forged. It never claims everything is encrypted or zero-knowledge.

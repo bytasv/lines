@@ -4043,7 +4043,8 @@
         "hero words are split into letters: the outgoing word dissolves letter by letter, then the next forms; each letter paints its slice of one word-wide brand-colour gradient (AgentRotator measures width and offsets) that drifts slowly, with a solid-colour fallback where background-clip text is unsupported",
         "the illustrations are decorative aria-hidden inline SVG using Mantine colour variables, so they follow the colour scheme; the card text carries the meaning",
         "the app theme is monochrome (mono primary as a light/dark virtual colour, softened neutral dark scheme); status hues are muted OKLCH ramps on one shared lightness curve, with teal and cyan spread apart so done, needs answer and needs approval stay distinct, gray without its blue tint, and dark-scheme light-variant badges re-pointed in index.css to a translucent tint with hue text; the old sandstone and slate palettes are removed and needs-approval is cyan",
-        "header anchors scroll smoothly only while the landing page is mounted and never under prefers-reduced-motion"
+        "header anchors scroll smoothly only while the landing page is mounted and never under prefers-reduced-motion",
+        "the header is a three-column grid with the action pinned to column 3, so the nav does not move while Clerk resolves the signed-in/out action"
       ],
       "relatedDecisions": [
         "openai-codex-sessions"

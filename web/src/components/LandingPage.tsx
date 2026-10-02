@@ -263,7 +263,7 @@ export function LandingPage() {
     <Box className={`lines-safe-top ${classes.page}`} style={{ minHeight: 'var(--lines-viewport)' }}>
       <Box component="header" className={classes.header}>
         <BrandMark />
-        <Group gap="lg" visibleFrom="sm">
+        <Group gap="lg" visibleFrom="sm" className={classes.headerNav}>
           <a className={classes.navLink} href="#features">
             Features
           </a>
@@ -276,18 +276,20 @@ export function LandingPage() {
         </Group>
         {/* This page also renders at /welcome for an already-signed-in visitor,
             so the header action has to work in both states. */}
-        <SignedIn>
-          <Button component={Link} to="/" variant="default" size="sm">
-            Open app
-          </Button>
-        </SignedIn>
-        <SignedOut>
-          <SignInButton mode="modal">
-            <Button variant="default" size="sm">
-              Sign in
+        <div className={classes.headerAction}>
+          <SignedIn>
+            <Button component={Link} to="/" variant="default" size="sm">
+              Open app
             </Button>
-          </SignInButton>
-        </SignedOut>
+          </SignedIn>
+          <SignedOut>
+            <SignInButton mode="modal">
+              <Button variant="default" size="sm">
+                Sign in
+              </Button>
+            </SignInButton>
+          </SignedOut>
+        </div>
       </Box>
 
       <Box component="section" className={classes.hero}>
