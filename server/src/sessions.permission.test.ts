@@ -16,8 +16,8 @@ import type {
 } from '@lines/shared';
 import {
   KEEP_PLANNING_MESSAGE,
-  PLAN_MODE_REJECT_MESSAGE,
   PLAN_REPLY_MARKER,
+  planModeRejectMessage,
   formatPlanComments,
   keepPlanningReason,
   normalizePlanComments,
@@ -751,13 +751,15 @@ test('reject-writes denies a plan-mode edit without a card', async () => {
   const h = harness({ mode: 'plan', settings: rejectWrites });
   await h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Edit', projectEdit));
 
-  assert.deepEqual(h.answered, [{ behavior: 'deny', message: PLAN_MODE_REJECT_MESSAGE }]);
+  const message = planModeRejectMessage('`Edit` edits a file outside the plan');
+  assert.deepEqual(h.answered, [{ behavior: 'deny', message }]);
   const cards = h.cards();
   assert.deepEqual(
     cards.map((c) => [c.resolution, c.resolvedBy, c.auto]),
     [['deny', 'plan-readonly', true]],
   );
-  assert.equal(cards[0].denyMessage, PLAN_MODE_REJECT_MESSAGE);
+  assert.equal(cards[0].denyMessage, message);
+  assert.equal(cards[0].guardReason, '`Edit` edits a file outside the plan');
   assert.notEqual(h.s1().status, 'waiting-permission');
 });
 
@@ -767,9 +769,44 @@ test('reject-writes denies a writing Bash command but still allows a read', asyn
   await h.sessions.handleWorkerRpc(canUseToolWith('r2', 'Bash', readOnlyBash));
 
   assert.deepEqual(h.answered, [
-    { behavior: 'deny', message: PLAN_MODE_REJECT_MESSAGE },
+    { behavior: 'deny', message: planModeRejectMessage('Installing new packages') },
     { behavior: 'allow', updatedInput: readOnlyBash },
   ]);
+});
+
+test('reject-writes parks a command it cannot check, naming the prefix', async () => {
+  const h = harness({ mode: 'plan', settings: rejectWrites });
+  void h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Bash', { command: "node -e 'console.log(1)'" }));
+  await settle();
+
+  assert.deepEqual(h.answered, []);
+  assert.equal(h.s1().status, 'waiting-permission');
+  assert.deepEqual(h.cards()[0].planRead, {
+    reason: "`node -e` isn't on the plan-mode read-only list",
+    prefix: 'node -e',
+  });
+});
+
+test('Allow as read records a plan-read entry, so the same command stops asking', async () => {
+  const h = harness({ mode: 'plan', settings: rejectWrites });
+  const nodeE = { command: "node -e 'console.log(1)'" };
+  void h.sessions.handleWorkerRpc(canUseToolWith('r1', 'Bash', nodeE));
+  await settle();
+  h.sessions.resolvePermission('s1', 'r1', true, undefined, undefined, undefined, false, 'user', undefined, [], true);
+  await h.sessions.handleWorkerRpc(canUseToolWith('r2', 'Bash', { command: "node -e 'console.log(2)'" }));
+
+  await settle();
+
+  // r2 is answered without a card of its own.
+  assert.deepEqual(
+    h.cards().filter((c) => c.requestId !== 'r1').map((c) => [c.resolution, c.resolvedBy]),
+    [['allow', 'auto']],
+  );
+  assert.ok(
+    h.answered.some(
+      (a) => JSON.stringify(a) === JSON.stringify({ behavior: 'allow', updatedInput: { command: "node -e 'console.log(2)'" } }),
+    ),
+  );
 });
 
 test('reject-writes still parks the always-ask tools', async () => {
@@ -787,7 +824,9 @@ test('reject-writes denies a Lines workflow write', async () => {
   const h = harness({ mode: 'plan', settings: rejectWrites });
   await h.sessions.handleWorkerRpc(canUseToolWith('r1', 'mcp__lines__save_step', {}));
 
-  assert.deepEqual(h.answered, [{ behavior: 'deny', message: PLAN_MODE_REJECT_MESSAGE }]);
+  assert.deepEqual(h.answered, [
+    { behavior: 'deny', message: planModeRejectMessage('`save_step` changes state through an MCP server') },
+  ]);
 });
 
 test('reject-writes does nothing outside plan mode', async () => {

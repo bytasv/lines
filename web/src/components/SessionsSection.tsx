@@ -148,7 +148,7 @@ export function SessionsSection({ onOpenUpdates }: { onOpenUpdates: () => void }
         />
         <SettingsSwitchRow
           label="Auto-reject writes in plan mode"
-          description="Deny edits, non-read shell commands and other writes instead of asking. The agent keeps planning."
+          description="Deny edits and recognised writes instead of asking. Commands that can't be checked still ask. The agent keeps planning."
           checked={planModeRejectWrites}
           onChange={setPlanModeRejectWrites}
         />

@@ -62,7 +62,7 @@ import {
   isSessionInterruptible,
   KEEP_PLANNING_MESSAGE,
   keepPlanningReason,
-  PLAN_MODE_REJECT_MESSAGE,
+  planModeRejectMessage,
   normalizeCodexNotification,
   planCommentsBody,
   providerForModel,
@@ -100,6 +100,8 @@ import {
   assessToolCall,
   isPlanPath,
   isSafePlanModeRead,
+  planModeVerdict,
+  type PlanModeVerdict,
   isSafePlanWrite,
   isSafeReadOnly,
   type GuardAllowlist,
@@ -4990,6 +4992,8 @@ export class SessionManager {
      * turn the approval starts, since an SDK allow carries no text.
      */
     planComments?: PlanComment[],
+    /** Plan-mode Bash: also record the card's `planRead.prefix` as a plan-mode read. */
+    allowAsRead?: boolean,
   ) {
     // Persist the exception first so it also covers the recovery path.
     if (allow && alwaysAllow) {
@@ -4999,6 +5003,14 @@ export class SessionManager {
         if (this.guard.add(entry).ok) {
           console.log('[guard] allowlisted:', entry.tool, entry.prefix ?? '');
         }
+      }
+    }
+    if (allow && allowAsRead) {
+      // The prefix comes from the bridge's own record of the card, never from
+      // the client: it is what the card showed when the user clicked.
+      const prefix = this.findPermissionRequest(sessionId, requestId)?.planRead?.prefix;
+      if (prefix && this.guard.add({ tool: 'Bash', prefix, scope: 'plan-read' }).ok) {
+        console.log('[guard] plan-mode read allowlisted:', prefix);
       }
     }
     const state = this.live.get(sessionId);
@@ -6517,6 +6529,8 @@ export class SessionManager {
     input: Record<string, unknown>,
     resend: boolean,
     message: string,
+    /** What made the call a write; shown on the card. */
+    reason?: string,
   ) {
     if (resend) return;
     this.emitEvent(sessionId, 'permission', {
@@ -6527,6 +6541,7 @@ export class SessionManager {
       auto: true,
       resolvedBy: 'plan-readonly',
       denyMessage: message,
+      ...(reason ? { guardReason: reason } : {}),
     } satisfies PermissionRequestData);
   }
 
@@ -6549,18 +6564,37 @@ export class SessionManager {
   }
 
   /**
-   * True when a plan-mode call that wasn't auto-approved should be denied instead
-   * of asked. EnterPlanMode is exempt: the hook has just mirrored it into
-   * meta.permissionMode, and denying it would leave the meta in plan mode while
-   * the CLI never entered it.
+   * Plan mode's verdict on a call that wasn't auto-approved as a read: a
+   * recognised write, or one the classifier can't place (see planModeVerdict).
+   * Null outside plan mode and for the tools plan mode always asks about.
+   * EnterPlanMode is exempt: the hook has just mirrored it into
+   * meta.permissionMode, and rejecting it would leave the meta in plan mode
+   * while the CLI never entered it.
    */
-  private rejectsPlanModeWrite(meta: SessionMeta | undefined, toolName: string): boolean {
-    return (
-      meta?.permissionMode === 'plan' &&
-      !ALWAYS_ASK_TOOLS.has(toolName) &&
-      toolName !== 'EnterPlanMode' &&
-      this.store.loadSettings()?.planModeRejectWrites === true
-    );
+  private planModeCheck(
+    meta: SessionMeta | undefined,
+    toolName: string,
+    input: Record<string, unknown>,
+  ): Exclude<PlanModeVerdict, { kind: 'read' }> | null {
+    if (meta?.permissionMode !== 'plan' || ALWAYS_ASK_TOOLS.has(toolName) || toolName === 'EnterPlanMode') {
+      return null;
+    }
+    // Codex's plan mode is a read-only sandbox already: whatever reaches the
+    // permission handlers is an escalation, never research to tell apart.
+    if (isCodexSession(meta)) return { kind: 'write', reason: '' };
+    const verdict = planModeVerdict(toolName, input, this.guard.list());
+    return verdict.kind === 'read' ? null : verdict;
+  }
+
+  /**
+   * The deny message for a plan-mode call `planModeRejectWrites` rejects without
+   * a card, or null when it must reach the user. Only a recognised write is
+   * rejected: an unrecognised call is usually research the classifier can't
+   * prove, and rejecting those starved planning agents of the reads they needed.
+   */
+  private planModeRejection(check: ReturnType<SessionManager['planModeCheck']>): string | null {
+    if (check?.kind !== 'write' || this.store.loadSettings()?.planModeRejectWrites !== true) return null;
+    return planModeRejectMessage(check.reason);
   }
 
   /**
@@ -6685,14 +6719,28 @@ export class SessionManager {
     // Here, not only in canUseTool: a settings.json permissions.allow entry
     // (`Bash(npm:*)`) resolves before canUseTool runs and would slip a write
     // past the setting.
-    if (this.rejectsPlanModeWrite(meta, toolName)) {
-      this.recordAutoDeny(sessionId, toolName, toolInput, resend, PLAN_MODE_REJECT_MESSAGE);
+    const planCheck = this.planModeCheck(meta, toolName, toolInput);
+    const rejection = this.planModeRejection(planCheck);
+    if (rejection) {
+      this.recordAutoDeny(sessionId, toolName, toolInput, resend, rejection, planCheck?.reason);
       return {
         continue: true,
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
           permissionDecision: 'deny',
-          permissionDecisionReason: PLAN_MODE_REJECT_MESSAGE,
+          permissionDecisionReason: rejection,
+        },
+      };
+    }
+    if (planCheck?.kind === 'unknown' && this.store.loadSettings()?.planModeRejectWrites === true) {
+      // Unrecognised, so the user decides — 'ask', not a bare continue, for the
+      // same settings.json reason as the rejection above.
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'ask',
+          permissionDecisionReason: planCheck.reason,
         },
       };
     }
@@ -6788,10 +6836,18 @@ export class SessionManager {
     // Fail-closed backstop for the hook's plan-mode rejection, like the bypass
     // branch above. After the Lines-MCP read allow, so Lines writes (save_step)
     // are rejected too: plan mode shouldn't change a workflow.
-    if (this.rejectsPlanModeWrite(this.sessions.get(sessionId), toolName)) {
-      this.recordAutoDeny(sessionId, toolName, input, resend, PLAN_MODE_REJECT_MESSAGE);
-      return { behavior: 'deny', message: PLAN_MODE_REJECT_MESSAGE };
+    const planCheck = this.planModeCheck(this.sessions.get(sessionId), toolName, input);
+    const rejection = this.planModeRejection(planCheck);
+    if (rejection) {
+      this.recordAutoDeny(sessionId, toolName, input, resend, rejection, planCheck?.reason);
+      return { behavior: 'deny', message: rejection };
     }
+    // An unrecognised plan-mode call reaches the user with the reason, and for
+    // Bash the prefix "Allow as read" would record.
+    const planRead =
+      planCheck?.kind === 'unknown'
+        ? { reason: planCheck.reason, ...(planCheck.prefix ? { prefix: planCheck.prefix } : {}) }
+        : undefined;
 
     // On a resend whose card is already in the transcript (unanswered), don't
     // emit a duplicate request — just re-register the resolver.
@@ -6823,6 +6879,7 @@ export class SessionManager {
       skipEmit,
       undefined,
       vetting,
+      planRead,
     );
     const finalInput = answer.updatedInput ?? input;
     return answer.allow
@@ -6841,6 +6898,8 @@ export class SessionManager {
     elicitation?: McpElicitation,
     /** Trust check for an agent-proposed MCP server; advisory, never a gate. */
     vetting?: McpVetting,
+    /** Plan mode: why the call couldn't be confirmed as a read. */
+    planRead?: PermissionRequestData['planRead'],
   ): Promise<PermissionAnswer> {
     const state = this.liveState(sessionId);
     if (!skipEmit) {
@@ -6851,6 +6910,7 @@ export class SessionManager {
         guardReason,
         ...(elicitation ? { elicitation } : {}),
         ...(vetting ? { vetting } : {}),
+        ...(planRead ? { planRead } : {}),
       } satisfies PermissionRequestData);
     }
     const pendingMeta = this.sessions.get(sessionId);

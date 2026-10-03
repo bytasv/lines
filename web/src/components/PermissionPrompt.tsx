@@ -1693,7 +1693,8 @@ function PermissionCard({
           {p.body}
           {data.resolvedBy === 'plan-readonly' && (
             <Text size="xs" c="dimmed" mt={6}>
-              Rejected automatically because plan mode is read-only. Turn off{' '}
+              Rejected automatically because plan mode is read-only
+              {data.guardReason ? `: ${data.guardReason}` : ''}. Turn off{' '}
               <em>Auto-reject writes in plan mode</em> in Settings → Sessions to review these
               yourself.
             </Text>
@@ -1716,6 +1717,11 @@ function PermissionCard({
           {data.guardReason && (
             <Text size="xs" c="orange" mb={6}>
               ⚠ Flagged by auto-mode guard: {data.guardReason}
+            </Text>
+          )}
+          {data.planRead && (
+            <Text size="xs" c="dimmed" mb={6}>
+              Plan mode couldn't confirm this is read-only: {data.planRead.reason}
             </Text>
           )}
           {p.body}
@@ -1742,6 +1748,29 @@ function PermissionCard({
                   }
                 >
                   Always allow
+                </Button>
+              </Tooltip>
+            )}
+            {data.planRead?.prefix && (
+              <Tooltip
+                label={`Allow now, and treat every "${data.planRead.prefix} …" command as read-only in plan mode`}
+                multiline
+                maw={320}
+              >
+                <Button
+                  size="xs"
+                  variant="light"
+                  onClick={() =>
+                    send({
+                      type: 'permissionResponse',
+                      sessionId,
+                      requestId: data.requestId,
+                      allow: true,
+                      allowAsRead: true,
+                    })
+                  }
+                >
+                  Allow as read
                 </Button>
               </Tooltip>
             )}

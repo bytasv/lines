@@ -1497,6 +1497,7 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
         'user',
         actor,
         mayPrompt ? normalizePlanComments(msg.planComments) : [],
+        msg.allowAsRead,
       );
       break;
     }

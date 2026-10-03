@@ -1497,8 +1497,18 @@ export interface PermissionRequestData {
   updatedInput?: Record<string, unknown>;
   /** True when the auto-mode guard approved this call without asking. */
   auto?: boolean;
-  /** Why the auto-mode guard flagged this call for manual review. */
+  /**
+   * Why the auto-mode guard flagged this call for manual review. On a
+   * `plan-readonly` rejection: what made the call count as a write.
+   */
   guardReason?: string;
+  /**
+   * Plan mode only: a Bash call the read-only classifier could not confirm as a
+   * read (and did not recognise as a write), so it reached the user instead of
+   * being rejected. `prefix` is what "Allow as read" would record as a
+   * `plan-read` allowlist entry; absent when no single command is to blame.
+   */
+  planRead?: { reason: string; prefix?: string };
   /**
    * Set instead of a tool call when an MCP server asked the user for something
    * — in practice an OAuth authorization URL. Carried on the permission card
@@ -1535,9 +1545,19 @@ export const KEEP_PLANNING_MESSAGE =
 /**
  * Deny reason for a plan-mode call rejected by `planModeRejectWrites` instead of
  * raising a card. Worded so the model keeps researching rather than stopping.
+ * The reason-less form; `planModeRejectMessage` names what was recognised.
  */
 export const PLAN_MODE_REJECT_MESSAGE =
   'Plan mode is read-only, so this call was rejected automatically because it may change files or state. Continue with read-only tools, and put this change in the plan instead.';
+
+/**
+ * PLAN_MODE_REJECT_MESSAGE naming why the call counted as a write, so the model
+ * learns what to avoid instead of assuming every shell command is off limits.
+ */
+export function planModeRejectMessage(reason?: string): string {
+  if (!reason) return PLAN_MODE_REJECT_MESSAGE;
+  return `Plan mode is read-only, so this call was rejected automatically: ${reason}. Continue with read-only tools (Read, Grep, Glob, or read-only shell commands), and put this change in the plan instead.`;
+}
 
 /**
  * One note the user attached to a passage of the plan while reviewing it.
@@ -2557,6 +2577,11 @@ export type ClientMessage =
       /** Add this request's pattern to the auto-mode guard allowlist. */
       alwaysAllow?: boolean;
       /**
+       * Plan-mode Bash only: allow, and record the card's `planRead.prefix` as a
+       * plan-mode read so the same command no longer asks.
+       */
+      allowAsRead?: boolean;
+      /**
        * ExitPlanMode only: notes the user attached to passages of the plan. On an
        * approval they ride into the running turn as an interjection; on a deny the
        * server builds the reason from them, ignoring `denyMessage`. Re-validated
@@ -3089,6 +3114,13 @@ export interface GuardAllowEntry {
   tool: string;
   /** For Bash: command prefix, e.g. "npm run". Absent for every other tool. */
   prefix?: string;
+  /**
+   * Bash only. 'plan-read' marks the prefix as read-only for plan mode's
+   * classifier ("Allow as read" on a plan-mode card). Such an entry never
+   * widens the auto-mode guard, and an unscoped entry never counts as a
+   * plan-mode read: the two lists answer different questions.
+   */
+  scope?: 'plan-read';
 }
 
 /** The synced form of the allowlist. `updatedAt` only orders writes at the storage row —
@@ -3128,10 +3160,10 @@ const GUARD_PREFIX_MAX_LEN = 200;
  * shape the guard's matching rules cannot match.
  */
 export function normalizeAllowEntry(
-  raw: { tool: string; prefix?: string },
+  raw: { tool: string; prefix?: string; scope?: string },
 ): { entry: GuardAllowEntry } | { error: GuardEntryError } {
   // Untrusted callers (disk, a storage row) reach this too, so nothing is assumed.
-  const src = (raw ?? {}) as { tool?: unknown; prefix?: unknown };
+  const src = (raw ?? {}) as { tool?: unknown; prefix?: unknown; scope?: unknown };
   const tool = typeof src.tool === 'string' ? src.tool.trim() : '';
   if (!tool) return { error: 'empty-tool' };
   if (!GUARD_TOOL_RE.test(tool)) return { error: 'bad-tool' };
@@ -3149,16 +3181,17 @@ export function normalizeAllowEntry(
   const prefix = rawPrefix.trim().split(/\s+/).filter(Boolean).join(' ');
   if (!prefix) return { error: 'bash-needs-prefix' };
   if (prefix.length > GUARD_PREFIX_MAX_LEN) return { error: 'prefix-too-long' };
-  return { entry: { tool, prefix } };
+  return { entry: src.scope === 'plan-read' ? { tool, prefix, scope: 'plan-read' } : { tool, prefix } };
 }
 
 export function sameAllowEntry(a: GuardAllowEntry, b: GuardAllowEntry): boolean {
-  return a.tool === b.tool && (a.prefix ?? '') === (b.prefix ?? '');
+  return a.tool === b.tool && (a.prefix ?? '') === (b.prefix ?? '') && (a.scope ?? '') === (b.scope ?? '');
 }
 
-/** Human-readable row label, e.g. "Bash: npm run" / "WebFetch". */
+/** Human-readable row label, e.g. "Bash: npm run" / "WebFetch" / "Bash: node -e (plan-mode read)". */
 export function describeAllowEntry(e: GuardAllowEntry): string {
-  return e.prefix ? `${e.tool}: ${e.prefix}` : e.tool;
+  const label = e.prefix ? `${e.tool}: ${e.prefix}` : e.tool;
+  return e.scope === 'plan-read' ? `${label} (plan-mode read)` : label;
 }
 
 /** Set difference in both directions — what a remote list would widen and narrow. */

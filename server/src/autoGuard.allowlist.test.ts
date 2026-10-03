@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { normalizeAllowEntry, type GuardAllowEntry } from '@lines/shared';
+import { describeAllowEntry, normalizeAllowEntry, sameAllowEntry, type GuardAllowEntry } from '@lines/shared';
 import { assessToolCall, GuardAllowlist } from './autoGuard.ts';
 import { createStore } from './store.ts';
 
@@ -139,4 +139,17 @@ test('acceptReview drops an always-ask entry arriving via a pending blob', () =>
   const guard = new GuardAllowlist(createStore(root));
   assert.equal(guard.acceptReview(), true);
   assert.deepEqual(guard.list(), [{ tool: 'Bash', prefix: 'npm run' }]);
+});
+
+test('a plan-read scope survives normalization on Bash only, and keeps entries apart', () => {
+  assert.deepEqual(normalizeAllowEntry({ tool: 'Bash', prefix: 'node  -e', scope: 'plan-read' }), {
+    entry: { tool: 'Bash', prefix: 'node -e', scope: 'plan-read' },
+  });
+  assert.deepEqual(normalizeAllowEntry({ tool: 'Bash', prefix: 'node -e', scope: 'other' }), {
+    entry: { tool: 'Bash', prefix: 'node -e' },
+  });
+  assert.deepEqual(normalizeAllowEntry({ tool: 'WebFetch', scope: 'plan-read' }), { entry: { tool: 'WebFetch' } });
+  const read: GuardAllowEntry = { tool: 'Bash', prefix: 'node -e', scope: 'plan-read' };
+  assert.equal(sameAllowEntry(read, { tool: 'Bash', prefix: 'node -e' }), false);
+  assert.equal(describeAllowEntry(read), 'Bash: node -e (plan-mode read)');
 });

@@ -3,15 +3,17 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import type { PermissionMode, SessionMeta } from '@lines/shared';
+import type { GuardAllowEntry, PermissionMode, SessionMeta } from '@lines/shared';
 import {
   assessToolCall,
+  classifyPlanBash,
   GuardAllowlist,
   isPlanPath,
   isReadOnlyBash,
   isSafePlanModeRead,
   isSafePlanWrite,
   isSafeReadOnly,
+  planModeVerdict,
 } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -207,6 +209,47 @@ const READ_ONLY_SAMPLES = [
   'git tag --list v1*',
   'git remote -v',
   'git config --get user.name',
+  // Rejected in plan mode before substitutions, stream sed, uppercase
+  // assignments, xargs, find -exec and curl were classified.
+  'f=$(grep -rl x .)',
+  'ls `pwd`',
+  'diff <(ls a) <(ls b)',
+  'echo "n: $(grep -c x f | wc -l)"',
+  "grep -nE '^export ' f | sed -E 's/\\{.*$//' | cut -c1-160",
+  "cat -n f | sed 's/^/L+59 /' | head",
+  "sed -n '/a/,/b/p;3q' f",
+  'F=$(grep -rl x src | head -1); echo "FILE: $F"; grep -n y "$F"',
+  'P=node_modules/x; test -d a/node_modules/x && P=a/node_modules/x; ls $P',
+  "find . -type f -name '*.ts' -exec cat {} + | wc -l",
+  'grep -rl x src | xargs grep -ln y',
+  'curl -sS -m 20 -D - -o /dev/null "https://esm.sh/x?target=es2022" | head -30',
+  'echo $((1 + 2))',
+  'grep x <<< "$v"',
+  '(cd a && ls)',
+  'while read f; do wc -l "$f"; done < list',
+  'git stash list',
+  'npm ls react',
+  // The second mining pass, over every plan-mode call on record.
+  'grep -rniE "vercel|deploy|launchctl" docs',
+  'grep -n "Kill the session" f',
+  "cat <<'EOF'\nany $(text) here\nEOF",
+  "awk 'NR>=1400 && NR<=1640' f",
+  "awk -F: '$1>1283' f",
+  'gh run list --workflow=deploy.yml --limit 12 --json headSha',
+  'gh pr view 12 --json title',
+  "gh api -X GET search/code -f q='x repo:a/b' --jq '.items[].path'",
+  'git config user.name',
+  'git tag --sort=-creatordate | head',
+  'git tag --contains fa1b46b',
+  'git check-ignore -v a/b.ts',
+  'dd if=f bs=1 skip=10 count=20 2>/dev/null',
+  'claude --help 2>&1 | head',
+  'cloudflared tunnel run --help',
+  'time grep -c x f',
+  'timeout 5 ls',
+  'LC_ALL=C /usr/bin/grep -a -o x f | LC_ALL=C sort -u',
+  'command -v tilt >/dev/null && echo yes',
+  'n=0; while [ $n -lt 40 ]; do n=$((n+1)); sleep 5; done; echo waited',
 ];
 
 const WRITE_SAMPLES = [
@@ -226,9 +269,6 @@ const WRITE_SAMPLES = [
   'git log --output=x',
   'git branch newname',
   'git tag v2',
-  'f=$(grep -rl x .)',
-  'ls `pwd`',
-  'diff <(ls a) <(ls b)',
   "ssh host 'ls'",
   'cat ~/.ssh/config',
   `cat ${home}/.ssh/id_rsa`,
@@ -245,6 +285,37 @@ const WRITE_SAMPLES = [
   'rg --pre ./script x',
   'uniq in out',
   'tsc',
+  "sed 's/a/b/w out' f",
+  "sed '1e ls' f",
+  "sed '1r /etc/passwd' f",
+  'echo $(rm x)',
+  'diff <(rm x) f',
+  'echo "$(touch x)"',
+  'find . -exec rm {} +',
+  'ls | xargs rm',
+  'curl -d x https://x',
+  'curl -o out https://x',
+  'curl -sSo out https://x',
+  'curl -X POST https://x',
+  'curl -H @headers https://x',
+  "curl -w '%output{f}' https://x",
+  'GIT_PAGER=x git log',
+  'HOME=/tmp git log',
+  'git -c core.pager=x log',
+  'echo $(( $(rm x) ))',
+  'ls >&out',
+  "bash <<'EOF'\nls\nEOF",
+  'cat <<EOF\n$(rm x)\nEOF',
+  "awk '{print > \"out\"}' f",
+  "awk 'NR>1 {print | \"sh\"}' f",
+  'gh api -X POST repos/a/b/issues',
+  'gh api repos/a/b/issues -f title=x',
+  'gh pr merge 12',
+  'dd if=a of=b',
+  'TMPDIR=/x ls',
+  'git config user.name x',
+  'timeout 5 rm x',
+  'cat > /tmp/x <<EOF\nhi\nEOF',
 ];
 
 test('read-only Bash from real planning transcripts is recognised', () => {
@@ -259,6 +330,90 @@ test('writes, execution, substitutions and credential reads are not read-only', 
   }
 });
 
+test('plan-mode Bash separates recognised writes from commands it cannot check', () => {
+  for (const command of [
+    'rm x',
+    'echo x > f',
+    'npm install x',
+    'git commit -m x',
+    'git -C /x push',
+    'sed -i s/a/b/ f',
+    'ls; rm x',
+    'ls | xargs rm',
+    'echo $(mv a b)',
+    'cat ~/.ssh/config',
+  ]) {
+    assert.equal(classifyPlanBash(command).kind, 'write', command);
+  }
+  for (const command of [
+    "node -e 'console.log(1)'",
+    "python3 - <<'E'\nprint(1)\nE",
+    'make test',
+    'ls & wc',
+    'PATH=/x ls',
+    // Scratch files under a temp dir ask rather than being rejected.
+    "cat > /tmp/x.mjs <<'EOF'\nhi\nEOF",
+    'mkdir -p /tmp/shots',
+    'rm -rf /tmp/clerkloc',
+  ]) {
+    assert.equal(classifyPlanBash(command).kind, 'unknown', command);
+  }
+  // …but never through a traversal, and never into the project.
+  assert.equal(classifyPlanBash('rm -rf /tmp/../Users/x').kind, 'write');
+  assert.equal(classifyPlanBash('echo x > /tmp/../etc/x').kind, 'write');
+  assert.equal(classifyPlanBash('git push --force').kind, 'write');
+  assert.equal(classifyPlanBash('npx -y some-pkg').kind, 'write');
+});
+
+test('a heredoc-fed interpreter names a prefix, and an absolute system path its bare name', () => {
+  const heredoc = classifyPlanBash("python3 - \"$f\" <<'EOF'\nprint(1)\nEOF");
+  assert.equal('prefix' in heredoc && heredoc.prefix, 'python3 -');
+  const abs = classifyPlanBash("/usr/bin/python3 -c 'print(1)'");
+  assert.equal('prefix' in abs && abs.prefix, 'python3 -c');
+  const planRead: GuardAllowEntry[] = [{ tool: 'Bash', prefix: 'python3 -c', scope: 'plan-read' }];
+  assert.equal(isReadOnlyBash("/usr/bin/python3 -c 'print(1)'", planRead), true);
+});
+
+test('Monitor commands are classified like Bash', () => {
+  assert.equal(isSafePlanModeRead('Monitor', { command: 'sleep 240; echo waited' }, roots, []), true);
+  assert.equal(planModeVerdict('Monitor', { command: 'rm x' }, []).kind, 'write');
+});
+
+test('an unrecognised command names the prefix Allow as read would record', () => {
+  assert.deepEqual(classifyPlanBash("cd /x && node -e 'require(1)'"), {
+    kind: 'unknown',
+    reason: "`node -e` isn't on the plan-mode read-only list",
+    prefix: 'node -e',
+  });
+  const background = classifyPlanBash('ls & wc');
+  assert.equal('prefix' in background && background.prefix, false);
+});
+
+test('a plan-read entry makes its prefix a read, and nothing more', () => {
+  const planRead: GuardAllowEntry[] = [{ tool: 'Bash', prefix: 'node -e', scope: 'plan-read' }];
+  assert.equal(isReadOnlyBash("node -e 'console.log(1)'", planRead), true);
+  assert.equal(isReadOnlyBash("cd x && node -e '1' | head", planRead), true);
+  // An auto-mode entry is a different question.
+  assert.equal(isReadOnlyBash("node -e '1'", [{ tool: 'Bash', prefix: 'node -e' }]), false);
+  // Writes and BASH_RULES still win.
+  assert.equal(classifyPlanBash("node -e '1'; rm x", planRead).kind, 'write');
+  assert.equal(classifyPlanBash("node -e '1' && sudo ls", planRead).kind, 'write');
+  assert.equal(isSafePlanModeRead('Bash', { command: "node -e '1'" }, roots, planRead), true);
+});
+
+test('a plan-read entry never widens the auto-mode guard', () => {
+  const planRead: GuardAllowEntry[] = [{ tool: 'Bash', prefix: 'git push', scope: 'plan-read' }];
+  assert.equal(assessToolCall('Bash', { command: 'git push --force' }, roots, planRead).dangerous, true);
+});
+
+test('plan mode rejects recognised writes by tool, and leaves the rest to the user', () => {
+  assert.equal(planModeVerdict('Edit', { file_path: path.join(cwd, 'a.ts') }, []).kind, 'write');
+  assert.equal(planModeVerdict('mcp__x__create_thing', {}, []).kind, 'write');
+  assert.equal(planModeVerdict('mcp__lines__save_step', {}, []).kind, 'write');
+  assert.equal(planModeVerdict('mcp__pencil__batch_get', {}, []).kind, 'unknown');
+  assert.equal(planModeVerdict('CronCreate', {}, []).kind, 'unknown');
+});
+
 test('an empty command is not read-only', () => {
   assert.equal(isReadOnlyBash('  '), false);
 });
@@ -269,7 +424,7 @@ test('plan-mode reads never cover the always-ask tools', () => {
 });
 
 test('plan-mode reads cover web reads, subagents and skills', () => {
-  for (const tool of ['WebFetch', 'WebSearch', 'Agent', 'Skill', 'TaskCreate']) {
+  for (const tool of ['WebFetch', 'WebSearch', 'Agent', 'Skill', 'TaskCreate', 'SendMessage']) {
     assert.equal(isSafePlanModeRead(tool, {}, roots, []), true, tool);
   }
 });

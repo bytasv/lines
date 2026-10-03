@@ -81,7 +81,9 @@ deliverable is written and reviewed.
   via `PreToolUse` and `canUseTool`
 - Any tool call at all while a session sits in `plan` mode — `PreToolUse` and `canUseTool` both
   run `isSafePlanModeRead` first, and, when the "Auto-reject writes in plan mode" setting is on,
-  deny whatever it didn't approve
+  deny what `planModeVerdict` recognises as a write; an unrecognised call still reaches a card
+- "Allow as read" on a plan-mode card for an unrecognised `Bash` command —
+  `permissionResponse.allowAsRead`
 - Settings modal, Sessions pane — the "Auto-reject writes in plan mode" `Switch`, next to the
   plan-effort select
 - A `file` request over the WebSocket, when the resolved path falls outside every
@@ -102,7 +104,9 @@ deliverable is written and reviewed.
   `PermissionRequestData.denyMessage`, `KEEP_PLANNING_MESSAGE`, `PLAN_REPLY_MARKER`,
   `keepPlanningReason`; `PlanComment`, `normalizePlanComments`, `planCommentsBody`,
   `formatPlanComments`; `ClientMessage.permissionResponse.planComments`;
-  `PermissionResolutionSource` (`'plan-readonly'`); `PLAN_MODE_REJECT_MESSAGE`;
+  `PermissionResolutionSource` (`'plan-readonly'`); `PLAN_MODE_REJECT_MESSAGE`,
+  `planModeRejectMessage`; `PermissionRequestData.planRead`; `GuardAllowEntry.scope`
+  (`'plan-read'`); `ClientMessage.permissionResponse.allowAsRead`;
   `UserUiSettings.planModeRejectWrites`
 - `web/src/lib/permissionModes.tsx` — shared mode list, segmented-control data, dropdown render
   helper
@@ -122,8 +126,8 @@ deliverable is written and reviewed.
 - `server/src/autoGuard.ts` — `GuardAllowlist` (CRUD, load-time migration, the review
   lifecycle); re-exports `ALWAYS_ASK_TOOLS`/`GuardAllowEntry` from `shared/types.ts` for
   existing importers; `isPlanPath` (exported), `isSafeReadOnly`, `isSafePlanWrite`,
-  `assessToolCall`; `isReadOnlyBash`, `READ_ONLY_COMMANDS`, `READ_ONLY_ARG_RULES`,
-  `isSafePlanModeRead`, `PLAN_MODE_READ_TOOLS`
+  `assessToolCall`; `classifyPlanBash`, `isReadOnlyBash`, `READ_ONLY_COMMANDS`,
+  `READ_ONLY_ARG_RULES`, `isSafePlanModeRead`, `PLAN_MODE_READ_TOOLS`, `planModeVerdict`
 - `server/src/store.ts` — `GuardSyncState`, `loadGuardSync`/`saveGuardSync`
   (`guard-allowlist-sync.json`, separate from the bare-array `guard-allowlist.json`)
 - `server/src/sync.ts` — `pushGuardAllowlist`, the isolated `/guard-allowlist` pull
@@ -200,18 +204,30 @@ deliverable is written and reviewed.
   may work in (see [multi-root-projects](multi-root-projects.md)), not a single `cwd`
 - `resolveWorkspacePath(ctx, raw)` — the `file`/`tree`/`find` path resolver; falls back to
   `isPlanPath(abs, ctx.sessions.list().map(cwd))` when the project/session root check fails
-- `isReadOnlyBash(command)` — fail-closed allowlist classifier for a `Bash` command: parses quotes
-  and shell operators itself (no shelling out), rejects any redirect/substitution/heredoc/background
-  job it can't prove targets `/dev/null` or is a pure fd duplication, splits the rest on
-  `&& || ; |` and newlines, and requires every resulting segment's first word to be in
-  `READ_ONLY_COMMANDS` or pass that command's entry in `READ_ONLY_ARG_RULES` (`git`, `find`,
-  `sed`, `awk`, `tsc`/`npx tsc`, `sort`, `tree`, `diff`, `uniq`, `rg`, `file`, `env`, `hostname`,
-  `date`). `BASH_RULES` still runs on top, so a credential/destruction rule always wins over the
-  allowlist
+- `classifyPlanBash(command, allowlist)` — three-way, fail-closed classifier for a `Bash` (or
+  `Monitor`) command: `read`; `write` (a credential path anywhere, an output redirect into the
+  project, or — per command, and only for a command that isn't itself a read — a `BASH_RULES`
+  match or a recognised write such as `rm`, `git commit`, `npm install`, `sed -i`); or `unknown`
+  (e.g. `node -e`, a background job, a scratch file written under a temp dir). Parses quotes and
+  shell operators itself (no shelling out); command substitution (`$(…)`, backticks) and process
+  substitution (`<(…)`, `>(…)`) are split recursively and their commands checked like any other;
+  subshell/group parentheses are treated as separators; `$((…))` arithmetic passes unless it
+  substitutes a command; a heredoc body is skipped as input (an unquoted delimiter whose body
+  substitutes a command is unknown). `time`, `timeout`, `env X=…` and `command` are unwrapped,
+  `export`/leading assignments are stripped unless they set a steering variable (`PATH`,
+  `TMPDIR`, `GIT_*`, `LD_*`, …), and a system binary by absolute path (`/usr/bin/grep`) reads as
+  its bare name. A trailing `--help`/`--version` probe is a read. Every segment's first word (after shell keywords and assignments) must be
+  in `READ_ONLY_COMMANDS`, pass its `READ_ONLY_ARG_RULES` entry (`git` incl. key-only `config`
+  gets and filtered `tag`/`branch` listings, `find` incl. a read-only `-exec`, stream-only `sed`
+  scripts, `awk` without print redirection, `xargs` of a read-only command, `curl` fetches to
+  stdout, `gh` list/view/GET-`api`, `dd` without `of=`, `npm`/`pnpm`/`yarn` report subcommands,
+  `tsc --noEmit`, …), or match a `plan-read`
+  allowlist prefix. An `unknown` verdict names the prefix (first two words of the blamed command)
+  that "Allow as read" would record. `isReadOnlyBash` is `kind === 'read'`
 - `isSafePlanModeRead(toolName, input, roots, allowlist)` — the plan-mode gate: `false` for
   `ALWAYS_ASK_TOOLS`; else `true` for `isSafeReadOnly`, a `Bash` command `isReadOnlyBash` accepts,
   a `PLAN_MODE_READ_TOOLS` member (`WebFetch`, `WebSearch`, `Agent`, `Task`, `Skill`,
-  `ToolSearch`, the `Task*` todo tools), or an `mcp__*` tool whose own name (after the
+  `ToolSearch`, `SendMessage`, `ListAgents`, the `Task*` todo tools), or an `mcp__*` tool whose own name (after the
   `mcp__<server>__` prefix) *starts with* a read verb (`read`/`list`/`get`/`search`/`view`) — an
   anchored check, unlike auto mode's looser substring match, so a write like
   `submit_diff_review` (contains "view") is not mistaken for a read
@@ -356,13 +372,20 @@ widening since they share the same resolver.
 ### Plan-mode write rejection
 
 With `UserUiSettings.planModeRejectWrites === true`, a plan-mode call that the read-only branch
-above didn't approve is denied automatically instead of parking on a card. The check lives in
-*both* permission handlers, not only `canUseTool`:
+above didn't approve *and* that `planModeVerdict` recognises as a write is denied automatically
+instead of parking on a card. `planModeVerdict` is `classifyPlanBash` for `Bash`; a write for
+`Edit`/`Write`/`MultiEdit`/`NotebookEdit` and for an `mcp__*` tool whose own name starts with a
+change verb (`create`, `save`, `delete`, `use`, …); unknown for everything else. An unknown call
+is never rejected: with the setting on the hook returns `permissionDecision: 'ask'` (so a
+`settings.json` allow can't pass it silently) and the card carries `planRead` (the reason, plus
+the `Bash` prefix). Codex sessions keep rejecting every non-read plan-mode call. The check lives
+in *both* permission handlers, not only `canUseTool`:
 
 - `handlePreToolUse` checks it right after the read-allow branch, skipping `ALWAYS_ASK_TOOLS` and
   `EnterPlanMode` (denying the very call that just mirrored the session into plan mode would leave
   `meta.permissionMode` out of step with the CLI). It returns `permissionDecision: 'deny'` with
-  `PLAN_MODE_REJECT_MESSAGE` as the reason, and records the rejection via `recordAutoDeny` (the
+  `planModeRejectMessage(reason)` — which names what made the call a write, so the model can
+  rewrite instead of guessing — and records the rejection via `recordAutoDeny` (the
   deny twin of `recordAutoAllow`, skipped on a resend the same way).
 - `handleCanUseTool` repeats the same check as a fail-closed backstop, placed after the Lines-MCP
   read-allow branch so a Lines *write* (`save_step`, `update_workflow`, …) is rejected too — plan
@@ -372,8 +395,8 @@ The hook check exists because a `settings.json` `permissions.allow` entry (e.g. 
 resolves *before* `canUseTool` ever runs — the same reasoning that already put the
 `ALWAYS_ASK_TOOLS` 'ask' branch in the hook rather than relying on `canUseTool` alone.
 
-`recordAutoDeny` writes `resolution: 'deny', auto: true, resolvedBy: 'plan-readonly', denyMessage:
-PLAN_MODE_REJECT_MESSAGE` to the transcript, so the rejection is visible there exactly like every
+`recordAutoDeny` writes `resolution: 'deny', auto: true, resolvedBy: 'plan-readonly', denyMessage`
+(and the write reason as `guardReason`, shown on the expanded card) to the transcript, so the rejection is visible there exactly like every
 other resolution, distinct from a human-clicked deny.
 
 The card stays reviewable: a resolved `PermissionCard` (any tool except the plan and question
@@ -553,8 +576,11 @@ is open, otherwise the inline one.
   containment (home plans dir, `<cwd>/.claude/plans`, out-of-tree paths, and the classic
   `.../plans/../../../.ssh/id_rsa` traversal), plus the `isSafeReadOnly`/`isSafePlanWrite`/
   `assessToolCall` cases; `isReadOnlyBash` table tests built from real transcript samples (compound
-  but read-only commands allowed; writes, execution, substitutions, heredocs, and credential paths
-  rejected, including the sort/tree/diff/git-branch/git-tag/env flag traps); `isSafePlanModeRead`
+  but read-only commands allowed, including substitutions, stream `sed`, `xargs`, `find -exec` and
+  `curl` from the historic auto-rejects; writes, execution, heredocs, write-capable substitutions,
+  curl uploads and credential paths rejected, including the sort/tree/diff/git-branch/git-tag/env
+  flag traps); `classifyPlanBash` write vs. unknown and the recorded prefix; `plan-read` entries
+  extending plan mode but never the auto-mode guard; `planModeVerdict` per tool kind; `isSafePlanModeRead`
   (`ExitPlanMode`/`AskUserQuestion` false; `WebFetch`/`Agent`/`Skill` true; an `mcp__x__list_things`
   tool true and `mcp__x__create_thing`/`mcp__x__submit_diff_review` false; a `Read` of
   `~/.ssh/id_rsa` false; an in-project `Edit` false).
@@ -566,8 +592,10 @@ is open, otherwise the inline one.
   `meta.permissionMode`; a plan-mode session resolves a read-only `Bash` call to `allow` with no
   card while a writing `Bash` command, an in-project `Edit`, and `ExitPlanMode` all still park, and
   the same read-only `Bash` still parks in `default` mode; with `planModeRejectWrites: true`, a
-  plan-mode `Edit` resolves `deny` with `resolvedBy: 'plan-readonly'` and no card, a writing `Bash`
-  command is denied while a read-only one is still allowed, `ExitPlanMode`/`AskUserQuestion` still
+  plan-mode `Edit` resolves `deny` with `resolvedBy: 'plan-readonly'`, the write reason in
+  `guardReason` and no card, a writing `Bash` command is denied with its reason while a read-only
+  one is still allowed, an unrecognised `node -e` parks with `planRead` naming the prefix, "Allow
+  as read" makes the next `node -e` auto-allow, `ExitPlanMode`/`AskUserQuestion` still
   park, a Lines MCP write (`save_step`) is denied, the setting has no effect outside plan mode, and
   leaving it off (or its default) still parks a plan-mode `Edit` as before; a hook-level test
   asserts `handlePreToolUse` itself returns `permissionDecision: 'deny'` for a plan-mode `Edit`
@@ -656,10 +684,21 @@ is open, otherwise the inline one.
   the shape the guard's tool-name match actually compares.
 - Plan-directory reads and writes (`~/.claude/plans/**` or `<cwd>/.claude/plans/**`)
   auto-approve in every permission mode.
+- `BASH_RULES` are matched per command in plan mode, and only against a command that isn't a read:
+  matched over the whole line they fired on pattern text (`grep -E "deploy|launchctl"`). A rule
+  that needs a pipe (`curl … | sh`) therefore no longer matches, so that command goes to the user
+  rather than being rejected.
 - The plan-mode read allowlist is fail-closed: an unrecognised `Bash` command, tool, or MCP name
-  always still prompts (or, with the reject-writes setting, is denied) rather than being guessed
-  safe. Redirects, command/process substitution, heredocs, background jobs, and interpreters
-  (`python`, `node`, …) always fail the classifier and never auto-approve.
+  always still prompts rather than being guessed safe. Output redirects to a file, heredocs,
+  background jobs, and interpreters (`python -c`, `node -e`, …) never auto-approve; a
+  substitution's commands are checked like any other. Only a *recognised* write is auto-rejected
+  by `planModeRejectWrites` — rejecting everything unrecognised starved planning agents of reads
+  they needed (every historic auto-reject was a read).
+- "Allow as read" records `{ tool: 'Bash', prefix, scope: 'plan-read' }` in the guard allowlist,
+  using the prefix from the bridge's own record of the card, never the client's. A `plan-read`
+  entry only extends `classifyPlanBash`; `assessToolCall` ignores it, and an unscoped auto-mode
+  entry never counts as a plan-mode read. `BASH_RULES`, the credential check and recognised writes
+  in another segment still win over it.
 - `BASH_RULES` (the deny-list) is still evaluated over a command `isReadOnlyBash` would otherwise
   allow, so a credential-access or destructive-command rule always wins over the read allowlist.
 - Out-of-root/credential file reads still escalate under `isSafePlanModeRead` exactly as they do
