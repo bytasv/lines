@@ -794,6 +794,26 @@ test('a parked step re-opens when its conversation keeps working, then re-parks 
   assert.deepEqual(markerEvents(h), ['waiting-approval']);
 });
 
+test('a result that lands while the step is parked is charged to that step', () => {
+  // A background agent finishing after the step parked: its spend is the step's,
+  // though no turn of the step's own was running to settle it.
+  const h = harness(2, { stepCostsUsd: [0.5] });
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success', total_cost_usd: 0.25 });
+
+  assert.equal(h.s1().workflow?.stepCostsUsd?.[0], 0.75);
+  assert.equal(h.s1().workflow?.stepStatuses[0], 'waiting-approval', 'still parked');
+});
+
+test('a turn that dies with no result charges its step nothing', () => {
+  // The old rule re-read `lastCostUsd` here — the previous turn's — and charged
+  // the step a second time.
+  const h = running(2, { workflow: { stepCostsUsd: [0.5] } });
+  h.s1().lastCostUsd = 0.5;
+  h.sessions.handleWorkerEnded('s1', 'read ECONNRESET');
+
+  assert.equal(h.s1().workflow?.stepCostsUsd?.[0], 0.5);
+});
+
 test('activity that does not prove the main agent is mid-turn re-opens nothing', () => {
   const quiet: (Record<string, unknown> & { type: string })[] = [
     streamDelta('toolu_bg'), // a background subagent, streaming on its own schedule

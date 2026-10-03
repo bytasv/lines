@@ -11,11 +11,11 @@ import type {
   WorkflowMarkerData,
 } from '@lines/shared';
 import {
+  CostLineage,
   isPlanFilePath,
   isRecoveringResult,
   isStoppedResult,
   resultErrorText,
-  resultSpend,
   subagentParentId,
 } from '@lines/shared';
 import type { ResultSpendPayload } from '@lines/shared';
@@ -273,10 +273,10 @@ export function buildTranscript(
   const snapshots: FileSnapshotData[] = [];
   const permissionItems = new Map<string, { kind: 'permission' } & TranscriptItem>();
   const resultItems = new Map<number, ResultItem>();
-  // Last cumulative `total_cost_usd` read in this query lifetime. The field is
-  // cumulative over the lifetime, so each card shows its delta against this —
-  // the same rule `accumulateResultSpend` bills by (shared/resultSpend.ts).
-  let costCumulative: number | undefined;
+  // Every cost reading so far. `total_cost_usd` is a running total, so each card
+  // shows its growth over the reading it continues — the same rule, over the
+  // same results, that `accumulateResultSpend` bills by (shared/resultSpend.ts).
+  const lineage = new CostLineage();
   let streamingText = '';
   let streamingActive = false;
   let live: LiveActivity | null = null;
@@ -344,15 +344,12 @@ export function buildTranscript(
   };
 
   for (const event of events) {
-    // Every result advances the lifetime's cost reading, including one a
-    // compaction span hides below — skipping it would fold the compaction's cost
-    // into the next card's delta.
-    let resultCostUsd: number | undefined;
-    if (event.kind === 'sdk' && (event.data as { type?: string }).type === 'result') {
-      const spend = resultSpend(event.data as ResultSpendPayload, costCumulative);
-      if (spend) costCumulative = spend.cumulative;
-      resultCostUsd = spend?.billed;
-    }
+    // Every result joins the lineage, including one a compaction span hides
+    // below — skipping it would fold the compaction's cost into the next card's.
+    const resultCostUsd =
+      event.kind === 'sdk' && (event.data as { type?: string }).type === 'result'
+        ? lineage.bill(event.data as ResultSpendPayload)?.billed
+        : undefined;
     // Everything between a compaction's 'requested' and its 'done' belongs to the
     // compaction, not to the conversation: `/compact` rides ordinary prompt text,
     // so a CLI that doesn't dispatch it lets the model answer the literal string.

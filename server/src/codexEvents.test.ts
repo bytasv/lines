@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  addCodexUsage,
   CODEX_NOTIFICATION,
   codexToolUseId,
+  codexUsageStep,
   isCodexNotification,
   normalizeCodexNotification,
 } from '@lines/shared';
+import type { TokenUsageBreakdown } from '@lines/shared';
 
 /** Deterministic ids, so a mapping assertion is about the mapping. */
 function deps(extra: Record<string, unknown> = {}) {
@@ -228,15 +231,19 @@ test('usage is carried forward and folded into the settling result', () => {
     outputTokens: 30,
     reasoningOutputTokens: 7,
   };
-  // Usage arrives on its own notification ahead of the turn settling.
-  const seen = run('thread/tokenUsage/updated', { tokenUsage: { last: usage } });
+  // Usage arrives on its own notification ahead of the turn settling, carrying
+  // the latest request and the thread's running total side by side.
+  const total = { ...usage, totalTokens: 400, inputTokens: 300 };
+  const seen = run('thread/tokenUsage/updated', { tokenUsage: { last: usage, total } });
   assert.deepEqual(seen.usage, usage);
+  assert.deepEqual(seen.usageTotal, total);
   assert.deepEqual(seen.messages, []);
 
+  // The caller sums the turn (see codexUsageStep) and hands it back to settle.
   const out = normalizeCodexNotification(
     'turn/completed',
     { turn: { id: 't', status: 'completed', durationMs: 1234 } },
-    deps({ lastUsage: usage }),
+    deps({ turnUsage: usage }),
   );
   const result = out.messages[0] as unknown as Record<string, unknown> & {
     usage: Record<string, number>;
@@ -253,6 +260,46 @@ test('usage is carried forward and folded into the settling result', () => {
   assert.equal(result.duration_ms, 1234);
   // Codex reports tokens, never a price.
   assert.equal(result.total_cost_usd, undefined);
+});
+
+const breakdown = (inputTokens: number, outputTokens: number): TokenUsageBreakdown => ({
+  totalTokens: inputTokens + outputTokens,
+  inputTokens,
+  cachedInputTokens: 0,
+  cacheWriteInputTokens: 0,
+  outputTokens,
+  reasoningOutputTokens: 0,
+});
+
+test('a turn of several requests is the growth of the running total, not its last request', () => {
+  // Measured against codex's rollout files: `total` grows by exactly `last` on
+  // every model request, across turns. A turn making three requests spent all
+  // three, though `last` only ever names one.
+  let turn: TokenUsageBreakdown | undefined;
+  let total: TokenUsageBreakdown | undefined = breakdown(1_000, 100); // earlier turns
+  for (const request of [breakdown(500, 10), breakdown(600, 20), breakdown(700, 30)]) {
+    const next: TokenUsageBreakdown = addCodexUsage(total, request)!;
+    turn = addCodexUsage(turn, codexUsageStep(total, request, next));
+    total = next;
+  }
+  assert.deepEqual(turn, breakdown(1_800, 60));
+});
+
+test('a repeated usage notification adds nothing', () => {
+  const total = breakdown(1_500, 110);
+  assert.deepEqual(codexUsageStep(total, breakdown(500, 10), total), breakdown(0, 0));
+});
+
+test('a running total that went down started counting again, so all of it is new', () => {
+  assert.deepEqual(
+    codexUsageStep(breakdown(9_000, 900), breakdown(400, 5), breakdown(700, 12)),
+    breakdown(700, 12),
+  );
+});
+
+test('with no running total to compare, the request the notification names is what is known', () => {
+  assert.deepEqual(codexUsageStep(undefined, breakdown(400, 5), breakdown(9_000, 90)), breakdown(400, 5));
+  assert.deepEqual(codexUsageStep(undefined, breakdown(400, 5), undefined), breakdown(400, 5));
 });
 
 test('a failed turn carries its message verbatim, not a result', () => {

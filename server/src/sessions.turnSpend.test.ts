@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import type { ServerMessage, SessionMeta } from '@lines/shared';
-import { estimateSpendUsd } from '@lines/shared';
+import { estimateClaudeCallUsd } from '@lines/shared';
 import type { AuthManager } from './auth.ts';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
@@ -65,13 +65,26 @@ function harness() {
   return { sessions, broadcasts, turnSpends };
 }
 
-type Usage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number };
+type Usage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number };
+};
 
 /** One SDK `assistant` message — one content block of one API call. */
-const assistant = (id: string, usage: Usage, parent: string | null = null) => ({
+const assistant = (id: string, usage: Usage, parent: string | null = null, model?: string) => ({
   type: 'assistant',
   parent_tool_use_id: parent,
-  message: { id, role: 'assistant', content: [{ type: 'text', text: 'x' }], usage },
+  message: { id, role: 'assistant', content: [{ type: 'text', text: 'x' }], usage, ...(model ? { model } : {}) },
+});
+
+/** A raw stream event, as `includePartialMessages` delivers them. */
+const stream = (event: Record<string, unknown>, parent: string | null = null) => ({
+  type: 'stream_event',
+  parent_tool_use_id: parent,
+  event,
 });
 
 async function drain() {
@@ -81,7 +94,7 @@ async function drain() {
 const A: Usage = { input_tokens: 1_000, output_tokens: 100 };
 const B: Usage = { input_tokens: 2_000, output_tokens: 200, cache_read_input_tokens: 5_000 };
 const priced = (...usages: Usage[]) =>
-  usages.reduce((sum, u) => sum + estimateSpendUsd(MODEL, u)!, 0);
+  usages.reduce((sum, u) => sum + estimateClaudeCallUsd(MODEL, u)!, 0);
 
 test('repeated blocks of one API call count once, different calls add up', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -211,4 +224,68 @@ test('closing the query drops the live figure', (t) => {
   h.sessions.handleWorkerEvent('s1', assistant('m2', B));
   t.mock.timers.tick(1_000);
   assert.equal(h.turnSpends().at(-1)!.spend?.costUsd, priced(B));
+});
+
+test('the final output count comes from message_delta, which the assistant messages lack', (t) => {
+  // Measured: the SDK's assistant messages repeat message_start's placeholder
+  // output count — about 1% of what the call really wrote.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  const start: Usage = {
+    input_tokens: 10,
+    output_tokens: 1,
+    cache_read_input_tokens: 100_000,
+    cache_creation_input_tokens: 5_000,
+    cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 5_000 },
+  };
+  h.sessions.handleWorkerEvent('s1', stream({ type: 'message_start', message: { id: 'm1', model: MODEL, usage: start } }));
+  h.sessions.handleWorkerEvent('s1', stream({ type: 'message_delta', usage: { output_tokens: 2_000 } }));
+  // The content block lands after the delta, still carrying the placeholder.
+  h.sessions.handleWorkerEvent('s1', assistant('m1', start));
+  t.mock.timers.tick(1_000);
+
+  // 10 × $4 + 2,000 × $20 + 100,000 × $0.20 + 5,000 × $8 (a 1-hour write), per 1M.
+  const spend = h.turnSpends().at(-1)!.spend!;
+  assert.ok(Math.abs(spend.costUsd - 0.10004) < 1e-12, String(spend.costUsd));
+  assert.equal(spend.tokens, 10 + 2_000 + 100_000 + 5_000);
+});
+
+test('a subagent stream’s delta closes its own call, not the main agent’s', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', stream({ type: 'message_start', message: { id: 'main', usage: { input_tokens: 100 } } }));
+  h.sessions.handleWorkerEvent(
+    's1',
+    stream({ type: 'message_start', message: { id: 'sub', usage: { input_tokens: 200 } } }, 'toolu_task'),
+  );
+  h.sessions.handleWorkerEvent('s1', stream({ type: 'message_delta', usage: { output_tokens: 50 } }, 'toolu_task'));
+  h.sessions.handleWorkerEvent('s1', stream({ type: 'message_delta', usage: { output_tokens: 7 } }));
+  t.mock.timers.tick(1_000);
+
+  assert.equal(
+    h.turnSpends().at(-1)!.spend?.costUsd,
+    priced({ input_tokens: 100, output_tokens: 7 }, { input_tokens: 200, output_tokens: 50 }),
+  );
+});
+
+test('a subagent on another model is priced at its own rates', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  // A dated snapshot id, as the API reports it.
+  h.sessions.handleWorkerEvent('s1', assistant('sub', A, 'toolu_task', 'claude-haiku-4-5-20251001'));
+  t.mock.timers.tick(1_000);
+
+  // 1,000 × $1 + 100 × $5, per 1M — Haiku's, not the session's Opus rates.
+  assert.equal(h.turnSpends().at(-1)!.spend?.costUsd, 0.0015);
+});
+
+test('a synthetic message that spent nothing neither counts nor hides the figure', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', assistant('m1', A));
+  // The SDK's own error message: model `<synthetic>`, no price, zero usage.
+  h.sessions.handleWorkerEvent('s1', assistant('syn', { input_tokens: 0, output_tokens: 0 }, null, '<synthetic>'));
+  t.mock.timers.tick(1_000);
+
+  assert.equal(h.turnSpends().at(-1)!.spend?.costUsd, priced(A));
 });

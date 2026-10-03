@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { estimateSpendUsd, hasEstimatedSpend } from '@lines/shared';
+import { estimateClaudeCallUsd, estimateSpendUsd, hasEstimatedSpend } from '@lines/shared';
 
 // Rates read off DEFAULT_MODELS: gpt-5.6-terra is $2 / $0.20 / $12 per 1M.
 const TERRA = 'gpt-5.6-terra';
@@ -106,4 +106,46 @@ test('spend is marked estimated only where the provider reports no cost', () => 
   // A codex row recorded before estimates existed: tokens, no money. There is
   // nothing estimated about a zero, so it must not put a tilde on the total.
   assert.equal(hasEstimatedSpend({ [TERRA]: { costUsd: 0, tokens: 10, turns: 1 } }), false);
+});
+
+test('a Claude call is priced the way Claude Code prices it', () => {
+  // The implementation step measured against its own transcript: Opus 5.5's
+  // per-model counters and the `costUSD` the CLI reported for them, reproduced
+  // to the cent by list prices with every write at the 1-hour rate.
+  const usd = estimateClaudeCallUsd('claude-opus-5-5', {
+    input_tokens: 230,
+    output_tokens: 211_545,
+    cache_read_input_tokens: 34_464_696,
+    cache_creation_input_tokens: 436_338,
+    cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 436_338 },
+  });
+  assert.ok(Math.abs(usd! - 14.6154632) < 1e-9, String(usd));
+});
+
+test('a Claude call’s input is never reduced by its cache reads', () => {
+  // Codex's input contains the cached share; Anthropic's sits beside it.
+  assert.equal(
+    estimateClaudeCallUsd('claude-sonnet-5-5', { input_tokens: 1_000, cache_read_input_tokens: 10_000 }),
+    (1_000 * 2 + 10_000 * 0.2) / 1_000_000,
+  );
+});
+
+test('a 5-minute cache write costs 1.25x input and an unsplit one is taken as 1-hour', () => {
+  const split = estimateClaudeCallUsd('claude-haiku-4-5', {
+    cache_creation_input_tokens: 3_000,
+    cache_creation: { ephemeral_5m_input_tokens: 1_000, ephemeral_1h_input_tokens: 2_000 },
+  });
+  assert.equal(split, (1_000 * 1.25 + 2_000 * 2) / 1_000_000);
+  assert.equal(
+    estimateClaudeCallUsd('claude-haiku-4-5', { cache_creation_input_tokens: 3_000 }),
+    (3_000 * 2) / 1_000_000,
+  );
+});
+
+test('a dated snapshot id is priced as its model, and an unknown one not at all', () => {
+  assert.equal(
+    estimateClaudeCallUsd('claude-haiku-4-5-20251001', { input_tokens: 1_000_000 }),
+    estimateClaudeCallUsd('claude-haiku-4-5', { input_tokens: 1_000_000 }),
+  );
+  assert.equal(estimateClaudeCallUsd('claude-unlisted-0', { input_tokens: 1 }), undefined);
 });

@@ -1292,18 +1292,59 @@ export class WorkflowEngine {
     return (step && this.stepContent(step)?.name) || '';
   }
 
+  /**
+   * Charge spend the session billed to the step that was current while it was
+   * spent: retries and iterations add to the same slot.
+   *
+   * Taken from the session on every settle, whatever its source, rather than read
+   * off `lastCostUsd` for a workflow turn only — that left out the earlier
+   * attempts of a re-driven turn, every result that landed while the step sat
+   * parked (a background agent finishing), and re-added the previous turn's cost
+   * when one ended with no result at all. A step that is not under way (pending,
+   * or done) takes nothing: that spend is not the step's.
+   */
+  private chargeStep(
+    meta: SessionMeta,
+    i: number,
+    spend: { costUsd: number; tokens: number } | undefined,
+  ) {
+    const wf = meta.workflow;
+    if (!spend || !wf?.started) return;
+    const status = wf.stepStatuses[i];
+    if (status !== 'running' && status !== 'waiting-approval') return;
+    if (spend.costUsd > 0) {
+      const costs = (wf.stepCostsUsd ??= []);
+      costs[i] = (costs[i] ?? 0) + spend.costUsd;
+      // Which model that cost was spent on, so the stepper can tell a reported
+      // figure from an estimated one per step — a provider-crossing workflow
+      // stays in one SessionMeta, so meta.model only answers for the step
+      // running now. Last writer wins: a retried step is marked by the model it
+      // last ran on, which is the one the accumulated cost mostly came from.
+      const models = (wf.stepModels ??= []);
+      models[i] = resolveModelId(meta.model);
+    }
+    if (spend.tokens > 0) {
+      const stepTokens = (wf.stepTokens ??= []);
+      stepTokens[i] = (stepTokens[i] ?? 0) + spend.tokens;
+    }
+  }
+
   private onWorkflowTurnComplete(
     sessionId: string,
     source: 'user' | 'workflow',
     interrupted: boolean,
     failed: boolean,
   ) {
+    // Taken whatever happens below, so spend outside any step is dropped here
+    // rather than charged to whichever step comes next.
+    const spent = this.sessions.takeUnreportedSpend(sessionId);
     const meta = this.sessions.get(sessionId);
     const wf = meta?.workflow && this.resolveFor(meta.workflow);
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     const step = wf.steps[i];
     if (!step) return;
+    this.chargeStep(meta, i, spent);
     if (meta.workflow.stepStatuses[i] !== 'running') {
       // A parked step can still run a turn: a manual compaction (see
       // sessions.compactContext). Anything the user typed during it was queued, and
@@ -1335,31 +1376,9 @@ export class WorkflowEngine {
     this.clearSettleWatchdog(sessionId); // any settle for this step ends the watchdog's job
 
     if (source === 'workflow') {
-      // Accumulate this turn's cost onto the step (retries add to the same slot).
-      const cost = meta.lastCostUsd;
-      if (typeof cost === 'number') {
-        const costs = (meta.workflow.stepCostsUsd ??= []);
-        costs[i] = (costs[i] ?? 0) + cost;
-      }
-
-      // Which model that cost was spent on, so the stepper can tell a reported
-      // figure from an estimated one per step — a provider-crossing workflow
-      // stays in one SessionMeta, so meta.model only answers for the step
-      // running now. Last writer wins: a retried step is marked by the model it
-      // last ran on, which is the one the accumulated cost mostly came from.
-      if (typeof cost === 'number') {
-        const models = (meta.workflow.stepModels ??= []);
-        models[i] = resolveModelId(meta.model);
-      }
-
-      // Same accumulation for tokens (retries add to the same slot).
-      const tokens = meta.lastTokens;
-      if (typeof tokens === 'number') {
-        const stepTokens = (meta.workflow.stepTokens ??= []);
-        stepTokens[i] = (stepTokens[i] ?? 0) + tokens;
-      }
-
-      // Same accumulation for active-turn duration (retries add to the same slot).
+      // Accumulate active-turn duration onto the step (retries add to the same
+      // slot). Cost and tokens were charged above, from every result the step's
+      // turns settled rather than this one alone.
       const durationMs = meta.lastDurationMs;
       if (typeof durationMs === 'number') {
         const durations = (meta.workflow.stepDurationsMs ??= []);

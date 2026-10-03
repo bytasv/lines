@@ -1,50 +1,43 @@
 /**
- * One-time repair of historical session spend.
+ * Rebuilds historical session spend from the transcripts on disk.
  *
  *   npm run repair:spend -w server                # dry run: prints, writes nothing
  *   npm run repair:spend -w server -- --write     # applies
  *   npm run repair:spend -w server -- --user <clerk-user-id>
  *
- * `result.total_cost_usd` is cumulative over the lifetime of the query process,
- * not the turn's own cost, and the accumulator used to add every reading to
- * `SessionMeta.totalCostUsd`. That re-bills every earlier turn of a query on each
- * later one, so stored totals are inflated — measured at roughly 3.5x on a real
- * store. The fix in `server/src/sessions.ts` only corrects new turns; the totals
- * already on disk stay wrong until this runs, because they are additive and never
- * rewound.
+ * Stored totals were billed by rules that got Claude Code's running total wrong
+ * in both directions (see shared/resultSpend.ts): every reading summed whole
+ * before the delta fix; then a whole reading billed again whenever a query was
+ * closed or the bridge restarted, though the resumed CLI usually carries the
+ * total on; and a fresh-start step or fork, whose new session starts from zero,
+ * billed as a delta against the old one. The totals are additive and never
+ * rewound, so they stay wrong until this runs.
  *
- * Recomputation reads the `result` events still present in
- * `transcripts/<sessionId>.jsonl` and folds them with the same shared rule the
- * live accumulator uses (`shared/resultSpend.ts`), so the two cannot disagree
- * about where a query lifetime starts.
+ * It replays every `result` — rewind sidecars included, since a cut tail's spend
+ * was real — through the same shared lineage and attribution the live bridge
+ * now uses (`spendReplay.ts`), and rebuilds, per session:
+ *   - totalCostUsd, lastCostUsd            — Claude Code's reported cost, or the
+ *                                           static-table estimate for a provider
+ *                                           that reports none (codex)
+ *   - totalTokens, lastTokens              — every model's, subagents included,
+ *                                           as live now counts them
+ *   - costByModel                          — split by the models that spent it
+ *   - workflow stepCostsUsd, stepTokens    — charged to the step under way when
+ *                                           each result landed, read off the
+ *                                           transcript's workflow markers; left
+ *                                           alone when no marker survives
+ *   - updatedAt                            — bumped, so the correction wins
+ *                                           last-writer-wins sync and reaches the
+ *                                           user's other machines
+ * Durations are left alone. A session with no `result` events on disk is left
+ * untouched — its spend cannot be recomputed.
  *
- * It also fills in the sessions that never had a cost to inflate. A provider that
- * reports none (codex) left `totalCostUsd` unset and its `costByModel` rows at
- * zero; those turns are now priced from the static table the live path uses
- * (`shared/estimateSpend.ts`), from the same transcripts. Without this the usage
- * card's All-time rollup — which reads these metas, not the day ledger — stays
- * blank for codex however many times `backfill-spend-history.ts` is run.
- *
- * What it touches, per session:
- *   - totalCostUsd, lastCostUsd  — recomputed, estimate included
- *   - costByModel[*].costUsd     — rescaled to the corrected total, keeping the
- *                                  existing split. Historical per-turn model
- *                                  attribution is not recoverable from the meta,
- *                                  and the split was already keyed on whatever
- *                                  `meta.model` was at the time. An estimated
- *                                  share lands on the unpriced rows only, split
- *                                  by tokens — the one weight that survives on a
- *                                  row whose costs are all zero.
- *   - updatedAt                  — bumped, so the correction wins last-writer-wins
- *                                  sync and reaches the user's other machines
- * Tokens and durations are verified correct and left alone. A session with no
- * surviving `result` events is left untouched — its spend cannot be recomputed.
- *
- * Run with the bridge STOPPED: it holds sessions in memory and whole-file
- * persists, so a live bridge would write its inflated totals straight back.
+ * Run with the bridge STOPPED — the desktop app included: it holds sessions in
+ * memory and whole-file persists, so a live bridge would write the old totals
+ * straight back.
  *
  * Rollout note: `adoptSynced` is a last-writer-wins whole-object replace with no
- * field merge, so a machine still on the old build can clobber a correction by
+ * field merge, so a machine still on an older build can clobber a correction by
  * running one turn on the same session. Update every machine before repairing.
  *
  * Throwaway — delete once every store has been repaired. The shared rule it calls
@@ -52,30 +45,14 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
-import {
-  capabilitiesFor,
-  estimateSpendUsd,
-  foldResultSpend,
-  providerForModel,
-  resolveModelId,
-} from '@lines/shared';
-import type { ModelSpendMap, ResultSpendPayload, SessionMeta } from '@lines/shared';
+import { addSpend } from '@lines/shared';
+import type { ModelSpendMap, SessionMeta } from '@lines/shared';
+import { bridgeRunning, replaySpend, sessionEvents, USERS_ROOT } from './spendReplay.ts';
 
 const args = process.argv.slice(2);
 const write = args.includes('--write');
 const userIdx = args.indexOf('--user');
 const onlyUser = userIdx >= 0 ? args[userIdx + 1] : undefined;
-const USERS_ROOT = path.join(os.homedir(), '.lines-app', 'users');
-
-async function bridgeRunning(): Promise<boolean> {
-  try {
-    const res = await fetch('http://localhost:8787/', { signal: AbortSignal.timeout(1500) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
 
 function readJson<T>(file: string, fallback: T): T {
   try {
@@ -85,60 +62,28 @@ function readJson<T>(file: string, fallback: T): T {
   }
 }
 
-const usd = (n: number) => `$${n.toFixed(2)}`;
+const usd = (n: number | undefined) => (n == null ? '—' : `$${n.toFixed(2)}`);
 
-/** The SDK `result` payloads of one session, in transcript order. Transcript
- *  lines are `{ seq, ts, kind, data }`; SDK messages ride under kind 'sdk'. */
-function resultsOf(file: string): ResultSpendPayload[] {
-  if (!fs.existsSync(file)) return [];
-  const out: ResultSpendPayload[] = [];
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-    if (!line.trim()) continue;
-    let event: { kind?: string; data?: { type?: string } };
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue; // a torn trailing line; the rest of the file is still usable
-    }
-    if (event.kind !== 'sdk' || event.data?.type !== 'result') continue;
-    out.push(event.data as ResultSpendPayload);
-  }
-  return out;
-}
-
-/** Spread `total` across the existing rows in proportion to what they hold now,
- *  so the shape of the split survives while its magnitude is corrected. */
-function rescale(map: ModelSpendMap | undefined, total: number): void {
-  if (!map) return;
-  const rows = Object.values(map);
-  const current = rows.reduce((n, row) => n + row.costUsd, 0);
-  if (current <= 0) return; // nothing to spread proportionally against
-  for (const row of rows) row.costUsd = (row.costUsd / current) * total;
-}
-
-/**
- * Put an estimated total onto the rows it belongs to — the ones whose provider
- * reports no cost, since those are the only ones an estimate was computed for.
- *
- * Split by tokens rather than by cost, which is what `rescale` above cannot do
- * here: every one of these rows holds a zero, so there is no existing proportion
- * to preserve. Tokens are the only recorded weight that survived.
- */
-function fillEstimated(map: ModelSpendMap | undefined, total: number): void {
-  if (!map) return;
-  const rows = Object.entries(map)
-    .filter(([id]) => !capabilitiesFor(providerForModel(id)).cost)
-    .map(([, row]) => row);
-  const tokens = rows.reduce((n, row) => n + row.tokens, 0);
-  if (tokens <= 0) return;
-  for (const row of rows) row.costUsd = (row.tokens / tokens) * total;
-}
+/** Equal up to key order and float noise — live and the replay add the same
+ *  numbers in different orders, and that alone must not count as a change. */
+const same = (a: unknown, b: unknown) => {
+  const canonical = (v: unknown): string =>
+    JSON.stringify(v, (_key, value: unknown) =>
+      typeof value === 'number'
+        ? Math.round(value * 1e9) / 1e9
+        : value && typeof value === 'object' && !Array.isArray(value)
+          ? Object.fromEntries(Object.entries(value).sort(([x], [y]) => (x < y ? -1 : 1)))
+          : value,
+    );
+  return canonical(a) === canonical(b);
+};
 
 interface Repair {
-  id: string;
   name: string;
   before: number;
   after: number;
+  /** Per-step cost, when the workflow's figures changed. */
+  steps?: { before: number[]; after: number[] };
 }
 
 function repairUser(userId: string): { repairs: Repair[]; skipped: number } {
@@ -149,45 +94,54 @@ function repairUser(userId: string): { repairs: Repair[]; skipped: number } {
   let skipped = 0;
 
   for (const meta of sessions) {
-    const results = resultsOf(path.join(root, 'transcripts', `${meta.id}.jsonl`));
-    if (results.length === 0) {
-      // No evidence left to recompute from — leave the stored number alone rather
-      // than replacing a wrong total with a made-up one.
+    const replay = replaySpend(meta, sessionEvents(root, meta.id));
+    if (replay.results.length === 0) {
+      // No evidence left to recompute from — leave the stored numbers alone
+      // rather than replacing them with made-up ones.
       if (meta.totalCostUsd != null) skipped++;
       continue;
     }
-    const { totalUsd, lastUsd } = foldResultSpend(results);
-
-    // What the provider never priced, priced from the table — the same gate the
-    // live accumulator uses, so a Claude turn that merely happens to be missing a
-    // cost is still left alone. Attributed to the session's model, which is what
-    // the live path attributes to and what the stored split was already keyed on.
-    const modelId = resolveModelId(meta.model);
-    let estimatedUsd = 0;
-    let lastEstimateUsd: number | undefined;
-    if (!capabilitiesFor(providerForModel(modelId)).cost) {
-      for (const payload of results) {
-        // A result that did report a cost is already inside `totalUsd`.
-        if (payload.total_cost_usd != null) continue;
-        const estimate = estimateSpendUsd(modelId, payload.usage);
-        if (estimate == null) continue;
-        estimatedUsd += estimate;
-        lastEstimateUsd = estimate;
-      }
+    const costByModel: ModelSpendMap = {};
+    for (const result of replay.results) {
+      for (const share of result.models) addSpend(costByModel, share.modelId, share.costUsd, share.tokens);
     }
+    const wf = meta.workflow;
+    const stepsBefore = wf?.stepCostsUsd ? [...wf.stepCostsUsd] : [];
+    const next = {
+      totalCostUsd: replay.totalCostUsd ?? meta.totalCostUsd,
+      lastCostUsd: replay.lastCostUsd,
+      totalTokens: replay.totalTokens ?? meta.totalTokens,
+      lastTokens: replay.lastTokens,
+      costByModel,
+    };
+    const stepsChanged =
+      !!wf &&
+      !!replay.steps &&
+      (!same(wf.stepCostsUsd ?? [], replay.steps.costUsd) || !same(wf.stepTokens ?? [], replay.steps.tokens));
+    const changed =
+      stepsChanged ||
+      !same(next, {
+        totalCostUsd: meta.totalCostUsd,
+        lastCostUsd: meta.lastCostUsd,
+        totalTokens: meta.totalTokens,
+        lastTokens: meta.lastTokens,
+        costByModel: meta.costByModel ?? {},
+      });
+    if (!changed) continue;
 
-    const after = totalUsd + estimatedUsd;
     const before = meta.totalCostUsd ?? 0;
-    if (before === after) continue;
-    meta.totalCostUsd = after;
-    // The last result wins. On a session the estimator ran over, every result is
-    // uncosted, so the last estimate is the last turn.
-    const last = lastEstimateUsd ?? lastUsd;
-    if (last != null) meta.lastCostUsd = last;
-    rescale(meta.costByModel, totalUsd);
-    if (estimatedUsd > 0) fillEstimated(meta.costByModel, estimatedUsd);
+    Object.assign(meta, next);
+    if (stepsChanged) {
+      wf!.stepCostsUsd = replay.steps!.costUsd;
+      wf!.stepTokens = replay.steps!.tokens;
+    }
     meta.updatedAt = Date.now();
-    repairs.push({ id: meta.id, name: meta.name ?? meta.id, before, after });
+    repairs.push({
+      name: meta.name ?? meta.id,
+      before,
+      after: meta.totalCostUsd ?? 0,
+      ...(stepsChanged ? { steps: { before: stepsBefore, after: replay.steps!.costUsd } } : {}),
+    });
   }
 
   if (write && repairs.length > 0) {
@@ -207,9 +161,10 @@ if (onlyUser?.startsWith('--') || (userIdx >= 0 && !onlyUser)) {
   console.error('usage: repair-spend.ts [--write] [--user <clerk-user-id>]');
   process.exit(1);
 }
-if (await bridgeRunning()) {
+const running = await bridgeRunning();
+if (running && write) {
   console.error(
-    'The bridge is running on :8787 — stop it first (it whole-file persists from memory and would write the inflated totals straight back).',
+    `A bridge is running: ${running}. Stop it first — it whole-file persists from memory and would write the old totals straight back.`,
   );
   process.exit(1);
 }
@@ -231,19 +186,26 @@ for (const userId of users) {
     continue;
   }
   console.log(`${userId}: ${repairs.length} sessions`);
-  for (const r of repairs.sort((a, b) => b.before - a.before)) {
+  for (const r of repairs.sort((a, b) => Math.abs(b.after - b.before) - Math.abs(a.after - a.before))) {
     storedTotal += r.before;
     correctedTotal += r.after;
     console.log(`  ${usd(r.before).padStart(10)} → ${usd(r.after).padStart(10)}  ${r.name}`);
+    if (r.steps) {
+      const n = Math.max(r.steps.before.length, r.steps.after.length);
+      for (let i = 0; i < n; i++) {
+        if ((r.steps.before[i] ?? 0) === (r.steps.after[i] ?? 0)) continue;
+        console.log(`      step ${i + 1}: ${usd(r.steps.before[i] ?? 0)} → ${usd(r.steps.after[i] ?? 0)}`);
+      }
+    }
   }
   if (skipped) console.log(`  (${skipped} sessions left as-is: no result events on disk)`);
 }
 
 console.log(`\nStored    ${usd(storedTotal)}`);
 console.log(`Corrected ${usd(correctedTotal)}`);
-// Signed, because this no longer only ever removes: a codex session had no cost
-// stored at all and gains one.
+// Signed: the old rules over-billed and under-billed, so this can go either way.
 const delta = correctedTotal - storedTotal;
 console.log(`${delta < 0 ? 'Removed  ' : 'Added    '} ${usd(Math.abs(delta))}`);
 if (skippedTotal) console.log(`Unrecoverable (left as-is): ${skippedTotal} sessions`);
-if (!write) console.log('\nRe-run with --write to apply.');
+if (running) console.log(`\nNote: ${running}. Stop it before re-running with --write.`);
+else if (!write) console.log('\nRe-run with --write to apply.');

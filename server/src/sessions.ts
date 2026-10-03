@@ -11,11 +11,11 @@ import type {
   Attachment,
   AttachmentKind,
   BackgroundTaskInfo,
+  ClaudeCallUsage,
   ContextBreakdown,
   ContextCompactBlockInfo,
   ContextCompactData,
   ContextUsage,
-  EstimateUsage,
   FileChange,
   FilesChangedData,
   FileSnapshotData,
@@ -50,10 +50,13 @@ import type {
   UserUiSettings,
 } from '@lines/shared';
 import {
+  addCodexUsage,
   addSpend,
+  codexUsageStep,
   contextCompactBlock,
+  CostLineage,
+  estimateClaudeCallUsd,
   estimateSpendUsd,
-  resultUsage,
   formatPlanComments,
   isPlanFilePath,
   isSessionActive,
@@ -70,7 +73,7 @@ import {
   providerSwitchNeedsFreshStart,
   resolveModelId,
   resultErrorText,
-  resultSpend,
+  resultUsage,
   rewindBlock,
   rootsForCwd,
   subagentParentId,
@@ -358,6 +361,35 @@ export function extractContextUsage(
   const reportedTotal =
     typeof reported === 'number' && Number.isFinite(reported) && reported !== sum ? reported : undefined;
   return { inputTokens, cacheReadTokens, cacheCreationTokens, outputTokens, reportedTotal, model, at };
+}
+
+/**
+ * One API call's usage from two partial views of it, field by field. Counts
+ * only grow over a call, so the larger reading is the later one; a field one
+ * view leaves out or nulls (mid-stream) is taken from the other.
+ */
+function mergeCallUsage(a: ClaudeCallUsage | undefined, b: ClaudeCallUsage): ClaudeCallUsage {
+  const max = (x?: number | null, y?: number | null) => Math.max(x ?? 0, y ?? 0);
+  return {
+    input_tokens: max(a?.input_tokens, b.input_tokens),
+    output_tokens: max(a?.output_tokens, b.output_tokens),
+    cache_read_input_tokens: max(a?.cache_read_input_tokens, b.cache_read_input_tokens),
+    cache_creation_input_tokens: max(a?.cache_creation_input_tokens, b.cache_creation_input_tokens),
+    ...(a?.cache_creation || b.cache_creation
+      ? {
+          cache_creation: {
+            ephemeral_5m_input_tokens: max(
+              a?.cache_creation?.ephemeral_5m_input_tokens,
+              b.cache_creation?.ephemeral_5m_input_tokens,
+            ),
+            ephemeral_1h_input_tokens: max(
+              a?.cache_creation?.ephemeral_1h_input_tokens,
+              b.cache_creation?.ephemeral_1h_input_tokens,
+            ),
+          },
+        }
+      : {}),
+  };
 }
 
 /**
@@ -1098,20 +1130,26 @@ interface LiveState {
    *  prompts so far — subtracted from the SDK's duration_ms, which otherwise
    *  counts human approval wait as "active" time. Reset once read. */
   permissionWaitMs: number;
-  /** Last `result.total_cost_usd` billed for the query lifetime currently open.
-   *  That field is cumulative over the lifetime, not per-turn, so a turn's own
-   *  cost is its delta against this. Cleared by closeQuery — the one funnel every
-   *  path that ends a lifetime goes through. See shared/resultSpend.ts. */
-  lastCostCumulativeUsd?: number;
+  /** Every cost reading this session's results have carried — what the next
+   *  one is billed against (see shared/resultSpend.ts). Rebuilt from the
+   *  transcript the first time it is needed (see costLineage), so a bridge
+   *  restart that leaves the worker's query running still bills a delta. */
+  costLineage?: CostLineage;
+  /** Spend billed since the workflow engine last took it (see
+   *  takeUnreportedSpend): every attempt of a re-driven turn, and results that
+   *  land while a step is parked, all reach the step that was current. */
+  unreportedSpend?: { costUsd: number; tokens: number };
   /** Reading from the latest `assistant` message of the in-flight turn; committed
    *  to the meta when the turn settles, so the sidebar isn't re-rendered per message. */
   contextUsage?: ContextUsage;
-  /** Claude usage of the in-flight turn, keyed by `message.id` — the latest
-   *  reading per API call, subagents included. Overwritten, never summed per
-   *  message: the SDK emits one `assistant` message per content block with the
-   *  same id and the same usage. Priced live into the transient `turnSpend`
-   *  broadcast; never billed (the `result` is). */
-  turnUsage?: Map<string, EstimateUsage>;
+  /** Each API call the in-flight Claude turn has made, subagents included,
+   *  keyed by message id: its model and the most complete usage seen for it.
+   *  Priced live into the transient `turnSpend` broadcast; never billed (the
+   *  `result` is). See recordCallUsage. */
+  turnCalls?: Map<string, { model?: string; usage: ClaudeCallUsage }>;
+  /** The call each stream is receiving, by `parent_tool_use_id` ('' for the
+   *  main agent): `message_delta` carries the final output count but no id. */
+  openCalls?: Map<string, string>;
   /** Trailing throttle for the `turnSpend` broadcast. */
   turnSpendTimer?: ReturnType<typeof setTimeout>;
   /** A live figure reached clients, so the settle must send the `null` that drops it. */
@@ -1153,14 +1191,18 @@ interface LiveState {
    *  blank. */
   mcpServers?: McpServerStatusInfo[];
   /**
-   * Last `thread/tokenUsage/updated` for a codex turn.
+   * What the codex turn in flight has spent, summed from its
+   * `thread/tokenUsage/updated` notifications (see `codexUsageStep`).
    *
-   * Codex reports usage on its own notification, ahead of the turn settling, so
+   * Codex reports usage on its own notifications, ahead of the turn settling, so
    * it is held here and folded into the synthesized `result`. Cleared at each
    * settle so a turn that reports nothing cannot re-bill its predecessor's
    * tokens. Live-only, like everything else here.
    */
-  codexUsage?: TokenUsageBreakdown;
+  codexTurnUsage?: TokenUsageBreakdown;
+  /** The thread's running usage total as last reported — what the next
+   *  notification's growth is measured from. Kept across turns. */
+  codexTotal?: TokenUsageBreakdown;
   /** Codex's id for the turn in flight, stamped onto its settling `result` so a
    *  later rewind can name the turn to fork at. */
   codexTurnId?: string;
@@ -2250,10 +2292,9 @@ export class SessionManager {
     this.staleQueries.delete(sessionId);
     // The CLI child that owned them is gone.
     this.setBackgroundTasks(sessionId, []);
-    // The next query starts its cumulative cost counter from zero, so the reading
-    // this one left behind must not be subtracted from the next one's first turn.
-    const live = this.live.get(sessionId);
-    if (live) live.lastCostCumulativeUsd = undefined;
+    // Nothing about billed cost is reset here. A resumed query usually carries
+    // Claude Code's running total on, and a closing one can still report a last
+    // result on it; the lineage tells which from the counters alone.
     // A closed query reports no more usage, so its in-flight estimate is over.
     this.clearTurnSpend(sessionId);
     // A closed query never reports again, so a turn the user stopped on it is
@@ -3643,6 +3684,9 @@ export class SessionManager {
     this.store.truncateTranscript(sessionId, seq);
     // The next emitEvent picks the numbering back up where the discarded tail began.
     this.liveState(sessionId).seq = seq;
+    // Rebuilt from what is left, so the server bills against exactly the readings
+    // the transcript's turn cards do.
+    this.liveState(sessionId).costLineage = undefined;
     // Broadcast from here, not from the WS handler: the listener below may emit
     // events of its own, and a truncation frame sent after them would tell every
     // client to drop exactly those (they carry seq >= this one).
@@ -3786,6 +3830,7 @@ export class SessionManager {
       meta.workflow.advanceOnComplete = undefined;
       meta.workflow.advanceOnCompleteStep = undefined;
     }
+    this.resetTurnFigures(meta);
     this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
 
     const content = this.promptContent(text, attachments);
@@ -3874,6 +3919,7 @@ export class SessionManager {
     }
     meta.turnSource = 'user';
     meta.turnStartedAt = Date.now();
+    this.resetTurnFigures(meta);
     this.setStatus(sessionId, 'running');
 
     // Synchronous { ok: true } stands: an auth refusal after this point surfaces
@@ -5168,6 +5214,18 @@ export class SessionManager {
   // ---------------------------------------------------------------------
 
   /**
+   * Start a turn's own figures empty. They add up as its results settle — every
+   * attempt of a re-driven turn, and a background result landing after it — so
+   * a turn that ends with no result at all (a crashed query, a stop that kills
+   * it) reports no spend, rather than the turn before it.
+   */
+  private resetTurnFigures(meta: SessionMeta) {
+    meta.lastCostUsd = undefined;
+    meta.lastTokens = undefined;
+    meta.lastDurationMs = undefined;
+  }
+
+  /**
    * The turn is demonstrably running in the worker while our status says it
    * isn't — a push queued past the worker's hello snapshot, a blind status
    * clear, a mis-attributed owner, or synced meta adopted from another
@@ -5760,17 +5818,10 @@ export class SessionManager {
       if (reading) this.liveState(sessionId).contextUsage = reading;
     }
 
-    // The same per-call usage priced live, subagents included: their tokens are
-    // this turn's spend. Codex reports through its own notification instead.
-    if (msg.type === 'assistant' && meta && !isCodexSession(meta)) {
-      const message = msg.message as { id?: unknown; usage?: unknown } | undefined;
-      if (typeof message?.id === 'string' && message.usage && typeof message.usage === 'object') {
-        const live = this.liveState(sessionId);
-        // Keyed by id and overwritten: one API call arrives as several messages
-        // (one per content block) repeating the same usage.
-        (live.turnUsage ??= new Map()).set(message.id, message.usage as EstimateUsage);
-        this.scheduleTurnSpend(sessionId);
-      }
+    // Every API call's usage, priced live — subagents included, since their spend
+    // is this turn's. Codex reports through its own notification instead.
+    if (meta && !isCodexSession(meta) && this.recordCallUsage(sessionId, msg)) {
+      this.scheduleTurnSpend(sessionId);
     }
 
     // Background tasks (backgrounded subagents / Bash commands) outlive the turn
@@ -5905,7 +5956,7 @@ export class SessionManager {
       // that attempt's own resultSeq.
       if (recoveryKind && metaNow) {
         // The attempt burned real tokens, so the spend is this turn's either way.
-        this.accumulateResultSpend(metaNow, msg);
+        this.accumulateResultSpend(metaNow, msg, resultSeq);
         // Not reset with the rest of the turn's state, or the same human wait is
         // subtracted a second time from the successor attempt's duration_ms.
         const live = this.liveState(sessionId);
@@ -5929,7 +5980,7 @@ export class SessionManager {
       // A turn settling for real ends any recovery budget it accrued.
       this.cancelRecovery(sessionId);
       if (metaNow) {
-        this.accumulateResultSpend(metaNow, msg);
+        this.accumulateResultSpend(metaNow, msg, resultSeq);
         // Occupancy settles here, from the turn's last assistant message —
         // never from the result's usage, which is cumulative across API calls.
         const live = this.liveState(sessionId);
@@ -6002,22 +6053,27 @@ export class SessionManager {
   ) {
     const meta = this.sessions.get(sessionId);
     const live = this.liveState(sessionId);
-    const { messages, threadId, failure, usage, contextUsage, interrupted, turnId } =
+    const { messages, threadId, failure, usage, usageTotal, contextUsage, interrupted, turnId } =
       normalizeCodexNotification(
       method,
       params,
       {
         newId: () => randomUUID(),
         model: meta ? resolveModelId(meta.model) : '',
-        lastUsage: live.codexUsage,
+        turnUsage: live.codexTurnUsage,
         turnId: live.codexTurnId,
       },
     );
     if (turnId) live.codexTurnId = turnId;
-    // Usage arrives on its own notification ahead of the settling turn, so it is
-    // remembered here and folded into the `result` when that lands.
-    if (usage) {
-      live.codexUsage = usage;
+    // Usage arrives on its own notifications ahead of the settling turn, one per
+    // model request, so the turn's spend is summed here and folded into the
+    // `result` when that lands.
+    if (usage || usageTotal) {
+      live.codexTurnUsage = addCodexUsage(
+        live.codexTurnUsage,
+        codexUsageStep(live.codexTotal, usage, usageTotal),
+      );
+      if (usageTotal) live.codexTotal = usageTotal;
       this.scheduleTurnSpend(sessionId);
     }
     // Occupancy arrives on its own channel here rather than on each assistant
@@ -6057,7 +6113,7 @@ export class SessionManager {
     if (messages.some((m) => m.type === 'result')) {
       // One turn's usage belongs to that turn: clearing at the settle stops a turn
       // that reports nothing from re-billing its predecessor's tokens.
-      live.codexUsage = undefined;
+      live.codexTurnUsage = undefined;
       const plan = live.codexPlanText ?? live.codexLastText;
       live.codexLastText = undefined;
       live.codexPlanText = undefined;
@@ -6145,15 +6201,21 @@ export class SessionManager {
   }
 
   /**
-   * Fold one `result`'s cost and usage into the session's running totals, and into
-   * the by-model split keyed by the model the turn ran on. resolveModelId keeps a
-   * retired stored id from opening a second row for what is really one model; a
-   * result carrying neither number opens no row at all.
+   * Fold one `result`'s cost and usage into the session's running totals, the
+   * by-model split and the day ledger.
    *
-   * Cost is billed as a delta, because `total_cost_usd` is cumulative over the
-   * query lifetime rather than this turn's spend — see shared/resultSpend.ts for
-   * the rule and how a lifetime boundary is recognised. Tokens are genuinely
-   * per-turn and are summed as they read.
+   * Cost is Claude Code's own, billed as this result's growth over the reading it
+   * continues from — `total_cost_usd` is a running total that a restarted process
+   * may carry on, restart, or resume from an older save. See shared/resultSpend.ts
+   * for how the base is chosen. Tokens come from the same base, so they include
+   * subagents exactly as the cost does; only a result without per-model counters
+   * falls back to its own `usage`, which is the main thread's.
+   *
+   * The split follows the per-model counters too, so a subagent's or a helper
+   * model's spend lands on its own row. Without them the whole result goes to the
+   * session's model; resolveModelId keeps a retired stored id from opening a
+   * second row for what is really one model. A result carrying neither a cost nor
+   * usage opens no row at all.
    *
    * A provider that reports no cost at all gets an estimate instead, computed
    * here so the one figure feeds the session totals, the by-model split and the
@@ -6162,15 +6224,9 @@ export class SessionManager {
    * Its own method because a transparently re-driven turn bills every attempt —
    * the failed one burned tokens — while settling only on the last.
    */
-  private accumulateResultSpend(meta: SessionMeta, msg: Record<string, unknown>) {
-    const live = this.liveState(meta.id);
-    const modelId = resolveModelId(meta.model);
-    const spend = resultSpend(msg as ResultSpendPayload, live.lastCostCumulativeUsd);
-    if (spend) {
-      live.lastCostCumulativeUsd = spend.cumulative;
-      meta.lastCostUsd = spend.billed;
-      meta.totalCostUsd = (meta.totalCostUsd ?? 0) + spend.billed;
-    }
+  private accumulateResultSpend(meta: SessionMeta, msg: Record<string, unknown>, resultSeq: number) {
+    const sessionModel = resolveModelId(meta.model);
+    const spend = this.costLineage(meta.id, resultSeq).bill(msg as ResultSpendPayload);
     const usage = (msg as {
       usage?: {
         input_tokens?: number;
@@ -6182,75 +6238,181 @@ export class SessionManager {
         reasoning_output_tokens?: number;
       };
     }).usage;
-    let turnTokens: number | undefined;
-    if (usage) {
-      turnTokens =
-        (usage.input_tokens ?? 0) +
-        (usage.output_tokens ?? 0) +
-        (usage.cache_creation_input_tokens ?? 0) +
-        (usage.cache_read_input_tokens ?? 0) +
-        // Added here rather than folded into output_tokens upstream, so the
-        // canonical field keeps meaning what it says while the total stays right.
-        (usage.reasoning_output_tokens ?? 0);
-      meta.lastTokens = turnTokens;
-      meta.totalTokens = (meta.totalTokens ?? 0) + turnTokens;
-    }
+    const tokens =
+      spend?.tokens ??
+      (usage
+        ? (usage.input_tokens ?? 0) +
+          (usage.output_tokens ?? 0) +
+          (usage.cache_creation_input_tokens ?? 0) +
+          (usage.cache_read_input_tokens ?? 0) +
+          // Added here rather than folded into output_tokens upstream, so the
+          // canonical field keeps meaning what it says while the total stays right.
+          (usage.reasoning_output_tokens ?? 0)
+        : undefined);
     // The estimate stands in only where the provider reports nothing, and the
     // gate is the capability rather than "the cost is missing": a Claude turn
     // that happens to carry no cost must stay uncosted, or one Anthropic row
     // would silently be part-reported and part-estimated.
-    //
-    // `live.lastCostCumulativeUsd` is deliberately left alone — an estimate is
-    // per-turn and has no cumulative reading to carry forward. Setting
-    // `meta.lastCostUsd` is what makes workflow step costs follow for free.
-    let billedUsd = spend?.billed ?? 0;
-    if (!spend && usage && !capabilitiesFor(providerForModel(modelId)).cost) {
-      const estimated = estimateSpendUsd(modelId, usage);
-      if (estimated != null) {
-        billedUsd = estimated;
-        meta.lastCostUsd = estimated;
-        meta.totalCostUsd = (meta.totalCostUsd ?? 0) + estimated;
-      }
+    let costUsd = spend?.billed;
+    if (!spend && usage && !capabilitiesFor(providerForModel(sessionModel)).cost) {
+      costUsd = estimateSpendUsd(sessionModel, usage);
     }
-    if (spend || turnTokens != null) {
-      meta.costByModel ??= {};
-      addSpend(meta.costByModel, modelId, billedUsd, turnTokens ?? 0);
-      // Same arguments, same guard, one line apart: the ledger records what the
-      // session's own split records, so the two can never disagree about what
-      // counted. Stamped now rather than from the result, which carries no time.
-      this.spendHistory?.record(modelId, billedUsd, turnTokens ?? 0, Date.now());
+    // Added, not assigned: a turn's figures start empty (resetTurnFigures) and
+    // every result it settles — each attempt of a re-driven one — is its spend.
+    if (costUsd != null) {
+      meta.lastCostUsd = (meta.lastCostUsd ?? 0) + costUsd;
+      meta.totalCostUsd = (meta.totalCostUsd ?? 0) + costUsd;
+    }
+    if (tokens != null) {
+      meta.lastTokens = (meta.lastTokens ?? 0) + tokens;
+      meta.totalTokens = (meta.totalTokens ?? 0) + tokens;
+    }
+    if (!spend && tokens == null) return;
+    const pending = (this.liveState(meta.id).unreportedSpend ??= { costUsd: 0, tokens: 0 });
+    pending.costUsd += costUsd ?? 0;
+    pending.tokens += tokens ?? 0;
+    meta.costByModel ??= {};
+    // The ledger records what the session's own split records, row for row, so
+    // the two can never disagree about what counted. Stamped now rather than
+    // from the result, which carries no time.
+    const now = Date.now();
+    const shares = spend?.models && Object.entries(spend.models);
+    if (shares?.length) {
+      for (const [key, share] of shares) {
+        const modelId = resolveModelId(share.canonical ?? key);
+        addSpend(meta.costByModel, modelId, share.costUsd, share.tokens);
+        this.spendHistory?.record(modelId, share.costUsd, share.tokens, now);
+      }
+    } else {
+      addSpend(meta.costByModel, sessionModel, costUsd ?? 0, tokens ?? 0);
+      this.spendHistory?.record(sessionModel, costUsd ?? 0, tokens ?? 0, now);
     }
   }
 
   /**
+   * The session's cost lineage, rebuilt from the transcript's earlier `result`
+   * events the first time this bridge needs it — the worker outlives a bridge
+   * restart, so the next result may well continue a reading made before it.
+   */
+  private costLineage(sessionId: string, beforeSeq: number): CostLineage {
+    const live = this.liveState(sessionId);
+    if (!live.costLineage) {
+      const lineage = new CostLineage();
+      // In seq order, as the client orders the same events for its turn cards.
+      const results = this.store
+        .loadTranscript(sessionId)
+        .filter(
+          (e) =>
+            e.seq < beforeSeq && e.kind === 'sdk' && (e.data as { type?: string })?.type === 'result',
+        )
+        .sort((a, b) => a.seq - b.seq);
+      for (const event of results) lineage.bill(event.data as ResultSpendPayload);
+      live.costLineage = lineage;
+    }
+    return live.costLineage;
+  }
+
+  /**
+   * Spend billed since the last call, taken by the workflow engine when a turn
+   * settles to charge it to the step that was current. Kept apart from
+   * `lastCostUsd`, which also carries a turn's earlier attempts and is not reset
+   * by a result arriving between turns.
+   */
+  takeUnreportedSpend(sessionId: string): { costUsd: number; tokens: number } | undefined {
+    const live = this.live.get(sessionId);
+    const spend = live?.unreportedSpend;
+    if (live) live.unreportedSpend = undefined;
+    return spend;
+  }
+
+  /**
+   * Fold one message's view of an API call's usage into the turn in flight, and
+   * say whether it had one.
+   *
+   * Three kinds of message describe a call and none is complete on its own:
+   * `message_start` opens it with the input and cache counts but a placeholder
+   * output count; `message_delta` closes it with the real output count but no
+   * id; the SDK's `assistant` messages — one per content block — repeat the
+   * start's numbers. Every count only grows over a call, so each field keeps the
+   * largest value seen, whatever order they arrive in.
+   */
+  private recordCallUsage(sessionId: string, msg: Record<string, unknown>): boolean {
+    const live = this.liveState(sessionId);
+    const stream = subagentParentId(msg) ?? '';
+    let id: string | undefined;
+    let model: unknown;
+    let usage: unknown;
+    if (msg.type === 'assistant') {
+      const message = msg.message as { id?: unknown; model?: unknown; usage?: unknown } | undefined;
+      if (typeof message?.id === 'string') id = message.id;
+      model = message?.model;
+      usage = message?.usage;
+    } else if (msg.type === 'stream_event') {
+      const event = msg.event as
+        | { type?: unknown; usage?: unknown; message?: { id?: unknown; model?: unknown; usage?: unknown } }
+        | undefined;
+      if (event?.type === 'message_start' && typeof event.message?.id === 'string') {
+        id = event.message.id;
+        model = event.message.model;
+        usage = event.message.usage;
+        (live.openCalls ??= new Map()).set(stream, id);
+      } else if (event?.type === 'message_delta') {
+        id = live.openCalls?.get(stream);
+        usage = event.usage;
+      }
+    }
+    if (!id || !usage || typeof usage !== 'object') return false;
+    const calls = (live.turnCalls ??= new Map());
+    const known = calls.get(id);
+    calls.set(id, {
+      model: known?.model ?? (typeof model === 'string' ? model : undefined),
+      usage: mergeCallUsage(known?.usage, usage as ClaudeCallUsage),
+    });
+    return true;
+  }
+
+  /**
    * The in-flight turn's estimated spend so far, or undefined when there is
-   * nothing to price or the model has no price. Priced with the same model id and
-   * estimator the settle uses; tokens summed the way `accumulateResultSpend`
-   * sums them. Never billed — the settling `result` is.
+   * nothing to price or a model has no price. Claude is priced per API call at
+   * the call's own model (a subagent's may differ from the session's); codex
+   * from the usage its notifications have added up. Never billed — the settling
+   * `result` is.
    */
   private computeTurnSpend(sessionId: string): { costUsd: number; tokens: number } | undefined {
     const meta = this.sessions.get(sessionId);
     const live = this.live.get(sessionId);
     if (!meta || !live) return undefined;
-    const modelId = resolveModelId(meta.model);
-    const readings: EstimateUsage[] = isCodexSession(meta)
-      ? live.codexUsage
-        ? [resultUsage(live.codexUsage)]
-        : []
-      : [...(live.turnUsage?.values() ?? [])];
-    if (!readings.length) return undefined;
+    const sessionModel = resolveModelId(meta.model);
+    if (isCodexSession(meta)) {
+      if (!live.codexTurnUsage) return undefined;
+      const usage = resultUsage(live.codexTurnUsage);
+      const costUsd = estimateSpendUsd(sessionModel, usage);
+      if (costUsd == null) return undefined;
+      const tokens =
+        usage.input_tokens +
+        usage.output_tokens +
+        usage.cache_read_input_tokens +
+        usage.cache_creation_input_tokens +
+        (usage.reasoning_output_tokens ?? 0);
+      return { costUsd, tokens };
+    }
+    if (!live.turnCalls?.size) return undefined;
     let costUsd = 0;
     let tokens = 0;
-    for (const usage of readings) {
-      const usd = estimateSpendUsd(modelId, usage);
+    for (const call of live.turnCalls.values()) {
+      const u = call.usage;
+      const callTokens =
+        (u.input_tokens ?? 0) +
+        (u.output_tokens ?? 0) +
+        (u.cache_read_input_tokens ?? 0) +
+        (u.cache_creation_input_tokens ?? 0);
+      // A call that spent nothing — the SDK's synthetic error message, model
+      // `<synthetic>` — has nothing to price and no price to find.
+      if (callTokens === 0) continue;
+      const usd = estimateClaudeCallUsd(call.model ?? sessionModel, u);
       if (usd == null) return undefined;
       costUsd += usd;
-      tokens +=
-        (usage.input_tokens ?? 0) +
-        (usage.output_tokens ?? 0) +
-        (usage.cache_creation_input_tokens ?? 0) +
-        (usage.cache_read_input_tokens ?? 0) +
-        (usage.reasoning_output_tokens ?? 0);
+      tokens += callTokens;
     }
     return { costUsd, tokens };
   }
@@ -6286,7 +6448,8 @@ export class SessionManager {
     if (!live) return;
     if (live.turnSpendTimer) clearTimeout(live.turnSpendTimer);
     live.turnSpendTimer = undefined;
-    live.turnUsage = undefined;
+    live.turnCalls = undefined;
+    live.openCalls = undefined;
     if (live.turnSpendSent) {
       live.turnSpendSent = false;
       this.broadcast({ type: 'turnSpend', sessionId, spend: null });

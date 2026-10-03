@@ -54,34 +54,39 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   `ModelOption.price`, `ModelPrice`, `priceFor`
 - `shared/usageByModel.ts` — `addSpend`, `mergeSpend`, `sortedSpend`, `dayKey`, `periodBounds`,
   `foldDays`, `shiftPeriod`, `periodLabel`, `Granularity`
-- `shared/estimateSpend.ts` — `estimateSpendUsd`, `hasEstimatedSpend`: prices a turn from
-  `ModelOption.price` for a provider that reports no cost, and answers whether a per-model spend
-  map contains any such estimated money
+- `shared/estimateSpend.ts` — `estimateSpendUsd`, `hasEstimatedSpend`, `estimateClaudeCallUsd`:
+  prices a turn from `ModelOption.price` for a provider that reports no cost, answers whether a
+  per-model spend map contains any such estimated money, and prices one Claude API call the way
+  Claude Code does, for the live in-flight figure
 - `shared/providers.ts` — `capabilitiesFor(provider).cost`: the gate that decides whether a
   turn's cost is provider-reported truth or has to be estimated; see
   [openai-codex-sessions](openai-codex-sessions.md)
-- `server/src/sessions.ts` — accumulates cost/tokens/duration from each turn's SDK `result`
-  message; tags each settled turn's spend onto `costByModel`; sets `SessionMeta.lastTokens` /
-  `SessionMeta.lastDurationMs` per turn; feeds the same billed-or-estimated figure into
-  `SpendHistory`; calls `estimateSpendUsd` when the turn's provider reports no cost at all
-- `shared/resultSpend.ts` — `resultSpend`, `startsQueryLifetime`, `foldResultSpend`, `billRun`:
-  turns a `result`'s cumulative `total_cost_usd` into that turn's own delta. Used by the live
-  accumulator in `server/src/sessions.ts`, the one-time repair script, and the spend-history
-  backfill script, so they cannot disagree about where a query lifetime starts.
-- `server/scripts/repair-spend.ts` — one-time local backfill (`npm run repair:spend -w server`)
-  that recomputes `totalCostUsd`/`lastCostUsd`/`costByModel` from transcript `result` events for
-  sessions whose totals predate the delta fix, and also fills in `estimateSpendUsd` for turns on
-  a no-cost provider whose stored rows are still at zero
+- `server/src/sessions.ts` — `accumulateResultSpend` bills each SDK `result` through the session's
+  `CostLineage`, splits it onto `costByModel` and the ledger by the models that spent it, adds it
+  to the turn's own `lastCostUsd`/`lastTokens` (emptied by `resetTurnFigures` as a turn starts)
+  and holds it for the workflow engine (`takeUnreportedSpend`); calls `estimateSpendUsd` when the
+  turn's provider reports no cost at all; prices the in-flight turn per API call
+  (`recordCallUsage`, `computeTurnSpend`)
+- `shared/resultSpend.ts` — `CostLineage`, `billRun`, `foldResultSpend`: turns a `result`'s
+  `total_cost_usd` — Claude Code's running total — into that result's own cost by choosing the
+  reading it continues from. Used by the live accumulator, the transcript's turn cards, and the
+  repair and backfill scripts, so they cannot disagree about it.
+- `server/scripts/spendReplay.ts` — `replaySpend`, `sessionEvents`, `bridgeRunning`: replays a
+  session's spend from its transcript and rewind sidecars exactly as the live path bills it;
+  shared by both scripts below
+- `server/scripts/repair-spend.ts` — one-time local rebuild (`npm run repair:spend -w server`) of
+  `totalCostUsd`/`lastCostUsd`/`totalTokens`/`lastTokens`/`costByModel` and a workflow's
+  `stepCostsUsd`/`stepTokens` from the replay
 - `server/src/spendHistory.ts` — `SpendHistory`: the day-resolution ledger, fed from
   `accumulateResultSpend`, debounce-persisted, broadcasting one day row per turn
 - `server/src/store.ts` — `loadSpendHistory`/`saveSpendHistory` (flat-JSON, per-user, same
   pattern as every other store file)
 - `server/scripts/backfill-spend-history.ts` — one-time local reconstruction
-  (`npm run backfill:spend-history -w server`) of the ledger from transcript `result` events, for
-  history predating the ledger's existence; also estimates cost for a no-cost provider's turns via
-  `estimateSpendUsd`
-- `server/src/workflows.ts` — `WorkflowEngine.onWorkflowTurnComplete` (accumulates all three
-  per-step numbers, and stamps `WorkflowState.stepModels[stepIndex]`)
+  (`npm run backfill:spend-history -w server`) of the ledger from the same replay, for history
+  predating the ledger's existence
+- `server/src/workflows.ts` — `WorkflowEngine.chargeStep` (charges billed cost and tokens to the
+  step under way, and stamps `WorkflowState.stepModels[stepIndex]`) and
+  `onWorkflowTurnComplete` (accumulates the step's duration)
 - `web/src/components/Sidebar.tsx` — renders date (EU format), cost, token icon + tooltip,
   duration
 - `web/src/components/WorkflowStepper.tsx` — renders the amount, the token tooltip, and the
@@ -108,26 +113,31 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   incrementing `turns` once per call
 - `mergeSpend(maps)` — sums an array of (possibly `undefined`) maps into one rollup
 - `sortedSpend(map)` — rows ordered by `costUsd` descending
-- `resultSpend(msg, previousCumulativeUsd)` — this turn's own cost: the delta against the last
-  cumulative reading billed for the same query lifetime, or the reading whole at a lifetime
-  boundary
-- `startsQueryLifetime(msg)` — true when a `result`'s cumulative `modelUsage` token total equals
-  its own per-turn `usage`, meaning the running total consists of just this turn (a fresh query
-  process)
-- `foldResultSpend(results)` — folds a transcript's `result` events into `{ totalUsd, lastUsd }`,
-  the recomputation the repair script and its test both drive
-- `LiveState.lastCostCumulativeUsd` — the last `total_cost_usd` reading billed for the
-  session's currently-open query lifetime; cleared in `closeQuery` so the next lifetime's first
-  turn is billed whole
+- `CostLineage` — one session's run of cost readings; `bill(msg)` returns a result's
+  `ResultSpend` and records the reading for the ones after it
+- `ResultSpend` — `{ billed, tokens?, models?, basis }`: the result's own cost, its tokens and
+  per-model shares from the same base (absent without `modelUsage`), and which base was chosen
+  (`'continued' | 'restored' | 'fresh'`)
+- `foldResultSpend(results)` — folds a run of `result` events into `{ totalUsd, lastUsd }`
+- `LiveState.costLineage` — the session's lineage, rebuilt lazily from the transcript's earlier
+  results the first time a bridge needs it (so a bridge restart under a live worker query still
+  bills a delta), and dropped when a rewind truncates the transcript
+- `resetTurnFigures(meta)` — empties `lastCostUsd`/`lastTokens`/`lastDurationMs` as a turn starts
+  (`prompt`, `compactContext`)
+- `takeUnreportedSpend(sessionId)` / `LiveState.unreportedSpend` — spend billed since the
+  workflow engine last took it: every attempt of a re-driven turn, and results that land between
+  turns
 - `SessionMeta.totalCostUsd` — cumulative USD cost across the session
 - `SessionMeta.totalTokens` — cumulative tokens across the session (input + output + cache
-  creation + cache read), summed from `result.usage` per turn
+  creation + cache read), every model's and subagent's — from the per-model counters on the same
+  base as the cost, or the result's own `usage` when it carries none
 - `SessionMeta.totalDurationMs` — cumulative active-turn duration across the session in ms,
   summed from `result.duration_ms` per turn minus that turn's permission-wait time; excludes
   idle wait between turns and human approval wait within a turn
 - `SessionsStore` result handler in `server/src/sessions.ts` — where all the totals accumulate
-- `SessionMeta.lastTokens` — tokens spent by the most recent turn (input + output + cache), same
-  composition as `totalTokens`
+- `SessionMeta.lastCostUsd` / `SessionMeta.lastTokens` — the most recent turn's own spend: the sum
+  of every result it settled (each attempt of a re-driven turn, and a background result landing
+  after it), same composition as the totals; unset while a new turn has billed nothing
 - `SessionMeta.lastDurationMs` — active-turn duration of the most recent turn: the SDK `result`
   message's `duration_ms` minus that turn's accumulated `LiveState.permissionWaitMs` (so
   plan-mode / tool-approval waits don't count as step time)
@@ -135,9 +145,12 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 - `WorkflowState.stepTokens` — `number[]` indexed by step position, cumulative across retries
 - `WorkflowState.stepDurationsMs` — `number[]` indexed by step position, cumulative active-turn
   duration across retries; excludes idle wait between turns
-- `WorkflowEngine.onWorkflowTurnComplete` — adds `meta.lastCostUsd` onto
-  `stepCostsUsd[stepIndex]`, `meta.lastTokens` onto `stepTokens[stepIndex]`, and
-  `meta.lastDurationMs` onto `stepDurationsMs[stepIndex]` each time a workflow turn completes
+- `WorkflowEngine.chargeStep` — adds the session's `takeUnreportedSpend()` onto
+  `stepCostsUsd[stepIndex]`/`stepTokens[stepIndex]` on every settle, whatever its source, while
+  the step is running or parked for approval
+- `WorkflowEngine.onWorkflowTurnComplete` — takes the unreported spend first (so spend outside
+  any step is dropped, never charged to a later one), then adds `meta.lastDurationMs` onto
+  `stepDurationsMs[stepIndex]` when a workflow turn completes
 - `formatDuration` — renders ms as `Xs` / `Xm Ys` / `Xh Ym`
 - `SpendHistoryBlob` — `{ v: 1, tz, days: Record<dayKey, ModelSpendMap> }`, one per user, held by
   `SpendHistory` and carried on `hello`
@@ -153,10 +166,10 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 - `shiftPeriod(anchor, g, delta)` — the anchor one period earlier/later; `'all'` cannot page
 - `periodLabel(anchor, g, now?)` — the heading text, e.g. `Today` / `Current month` for a period
   containing `now`, else `4 Oct 2026` / `September 2026` / `2026` / a week's date range
-- `billRun(results)` — bills a transcript's `result` events index-aligned with the input
-  (`undefined` where a result carried no usable cost), so a caller can attribute each turn to
-  something of its own (the day it happened on) without restating the lifetime-boundary rule;
-  `foldResultSpend` is now implemented over it
+- `billRun(results)` — bills a run of `result` events index-aligned with the input
+  (`undefined` where a result carried no usable cost), so a caller can attribute each one to
+  something of its own (the day it happened on) without restating the base rule;
+  `foldResultSpend` is implemented over it
 - `ModelOption.price` / `ModelPrice` — vendor list price in USD per 1M tokens (`input`,
   `cachedInput`, `output`), a static constant on the model list exactly like `contextWindow`
 - `priceFor(modelId)` — resolves a (possibly retired) model id to its `ModelPrice`, or `undefined`
@@ -166,6 +179,11 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
   `input − cacheRead` at `input`, `cacheRead` at `cachedInput`, `cacheCreation` at `input` (no
   separate rate), and `output + reasoning` at `output` — codex's `input_tokens` already contains
   its cached reads, so billing it whole would double-charge them
+- `estimateClaudeCallUsd(modelId, usage)` — one Claude API call at list price, Anthropic's way:
+  `input_tokens` is uncached input (nothing subtracted), cache reads at `cachedInput`, cache writes
+  at 1.25x input for a 5-minute entry and 2x for a 1-hour one (unsplit writes taken as 1-hour, the
+  TTL Claude Code writes with), output at `output`; a dated snapshot id prices as its model;
+  `undefined` for an unpriced model
 - `hasEstimatedSpend(spend)` — true when any row in a `ModelSpendMap` holds estimated money
   (`costUsd > 0` on a model whose `capabilitiesFor(provider).cost` is false); drives the `~`
   marker at the section/session/step level rather than per row
@@ -184,25 +202,35 @@ from it.
 ### Spend by model
 
 SDK `result` message → the same accumulate-on-`result` pass in `server/src/sessions.ts` that
-already owns `totalCostUsd`/`totalTokens` resolves the turn's own cost via `resultSpend` (see
-Per-session totals below) and calls
-`addSpend(metaNow.costByModel, resolveModelId(metaNow.model), billed, turnTokens)` with that
-resolved delta, never the raw `total_cost_usd` reading → persisted via the `SessionMeta` upsert →
+already owns `totalCostUsd`/`totalTokens` bills the result through the session's `CostLineage`
+(see Per-session totals below) and calls `addSpend` once per model in the bill's `models` — each
+model's own growth in Claude Code's per-model counters, keyed by
+`resolveModelId(canonicalModel ?? key)`, so a subagent's Sonnet or a CLI-internal Haiku call lands
+on its own row. A result without per-model counters (codex, old transcripts) goes whole to
+`resolveModelId(meta.model)`. Never the raw `total_cost_usd` reading → persisted via the
+`SessionMeta` upsert →
 `UsageIndicator` reads `mergeSpend(sessions.map(s => s.costByModel))` for the global rollup and
 `session.costByModel` for the current session, both rendered via `sortedSpend`.
 
 ### Estimated spend
 
 A turn on a provider whose `capabilitiesFor(provider).cost` is `false` never carries a
-`total_cost_usd`, so `resultSpend` returns `undefined` and the ordinary delta path bills nothing.
+`total_cost_usd`, so the lineage bills nothing for it (and does not record it).
 `accumulateResultSpend` then calls `estimateSpendUsd(resolveModelId(meta.model), usage)`; if that
-returns a number it becomes `billedUsd` and flows into the same three places a real cost would —
+returns a number it flows into the same three places a real cost would —
 `SessionMeta.lastCostUsd`/`totalCostUsd`, the `costByModel` row via `addSpend`, and
 `SpendHistory.record` — so nothing downstream needs to know the number was computed rather than
 reported. The gate is the capability, not "is the cost missing": a Claude turn that happens to
 carry no cost stays uncosted rather than silently getting an estimate, which would leave one
-Anthropic row part-real and part-computed. `live.lastCostCumulativeUsd` is left untouched, since an
-estimate is genuinely per-turn and has no cumulative reading to carry forward.
+Anthropic row part-real and part-computed.
+
+A codex turn's usage is what its `thread/tokenUsage/updated` notifications add up to. Each names
+the latest model request (`last`) and the thread's running sum of them (`total`, across turns —
+measured against codex's own rollout files); a turn makes many requests, so neither is the turn on
+its own. `codexUsageStep` takes the growth of `total` since the last one seen (nothing for a
+repeated notification; all of it when the total went down, i.e. a restarted app-server; `last`
+when there is no earlier total), `LiveState.codexTurnUsage` sums those steps, and the settling
+`result` carries the sum.
 
 Every render site asks `hasEstimatedSpend(costByModel)` (or, in the workflow stepper,
 `WorkflowState.stepModels[i]` when present) and passes the answer to `formatSpendUsd`, which
@@ -214,15 +242,24 @@ prices, not what a flat-rate plan actually billed.
 ### Live in-flight spend
 
 The SDK reports `total_cost_usd` only on the final `result`, so mid-turn there is no real cost —
-but there is token usage, and that is priced live with `estimateSpendUsd` (list price, so it is
-always an estimate and always marked `~`).
+but there is token usage, and that is priced live (list price, so it is always marked `~`) and
+replaced by Claude Code's reported cost the moment the `result` lands.
 
-- **Source per provider.** Claude: every `assistant` message's `message.usage`, subagent messages
-  included (their tokens are the turn's spend). Codex: `live.codexUsage`, fed by
-  `thread/tokenUsage/updated` — the same field mapping (`resultUsage`) the settle bills from.
-- **Dedupe by `message.id`.** The SDK emits one `assistant` message per content block of an API
-  call, each repeating the call's usage, so readings are kept in `LiveState.turnUsage` keyed by
-  `message.id` and overwritten; summing per message would multiply the cost.
+- **Claude: per API call.** Three messages describe a call and none is complete alone:
+  `message_start` (a `stream_event`) opens it with input and cache counts and a placeholder output
+  count; `message_delta` closes it with the real output count but no id; the SDK's `assistant`
+  messages — one per content block — repeat the start's numbers. Measured, the placeholder is
+  about 1% of the real output, so pricing `assistant` messages alone undercounts badly.
+  `recordCallUsage` keys calls by message id in `LiveState.turnCalls`, routes each
+  `message_delta` to the call its stream (`parent_tool_use_id`, `''` for the main agent) has open
+  (`LiveState.openCalls`), and keeps each field's largest value. Subagent calls count — their
+  spend is the turn's.
+- **Claude pricing.** Each call is priced at its own model (`message.model`; a subagent's may not
+  be the session's) with `estimateClaudeCallUsd`, which reproduces Claude Code's own `costUSD`.
+  A call that spent nothing (the SDK's `<synthetic>` error message) is skipped; any other
+  unpriced call hides the live figure rather than understating it.
+- **Codex.** `estimateSpendUsd` over `LiveState.codexTurnUsage` — the same summed usage the settle
+  bills (see Estimated spend).
 - **Throttle.** A trailing ~1s timer per session broadcasts `{type: 'turnSpend', sessionId,
   spend: {costUsd, tokens} | null}`; not per message. Nothing is sent for a model with no price
   (never `$0.00`) or while the session is not running.
@@ -233,25 +270,25 @@ always an estimate and always marked `~`).
   a dropped `null`.
 - **Display.** `withLiveSpend(base, live, baseEstimated)` adds the live figure onto a settled
   base and forces the `~` marker; surfaces render through `formatSpendUsd`. Only the running
-  workflow step gets the live figure; steps are billed at `onWorkflowTurnComplete`.
-- **Known limits.** The estimate can step up or down at settle (list price, cache creation billed
-  as plain input). A client that connects mid-turn sees no figure until the next broadcast (not in
-  `hello`).
+  workflow step gets the live figure.
+- **Known limits.** Claude Code's own internal calls (a Haiku call it makes for itself) never
+  surface as messages, so the reported cost at settle can be slightly higher; so can a turn whose
+  base carries background spend from after the previous result. A client that connects mid-turn
+  sees no figure until the next broadcast (not in `hello`).
 
 ### Transcript turn cost
 
-The cost on a transcript turn card (and on a result row) is that turn's own billed figure, not
-the raw `total_cost_usd` the `result` carries. `buildTranscript` walks every `result` in order
-through `resultSpend`, carrying the last cumulative reading forward, so each card shows its delta
-by the same lifetime rule the server bills by. Results hidden inside a compaction span still
-advance the reading, so a compaction's cost is never folded into the next card.
+The cost on a transcript turn card (and on a result row) is that result's own billed figure, not
+the raw `total_cost_usd` it carries. `buildTranscript` bills every `result` in seq order through a
+`CostLineage` — the same rule over the same results the server bills by, so a card agrees with
+the session's figures. Results hidden inside a compaction span still join the lineage, so a
+compaction's cost is never folded into the next card.
 
 ### Usage history
 
-Same accumulate-on-`result` pass, one line further: inside `accumulateResultSpend`'s existing
-`if (spend || turnTokens != null)` guard, right after the `addSpend` call that maintains
-`costByModel`, with the identical resolved model id and billed delta →
-`SpendHistory.record(modelId, billed, tokens, Date.now())` folds the turn into
+Same accumulate-on-`result` pass, one line further: beside each `addSpend` call that maintains
+`costByModel`, with the identical resolved model id, cost and tokens →
+`SpendHistory.record(modelId, costUsd, tokens, Date.now())` folds the result into
 `days[dayKey(now)]` → debounce-persisted to `spend-history.json` and broadcast as
 `{ type: 'spendDay', day, spend: days[day] }` (the whole row, not a delta, so a dropped message
 self-heals on the next turn) → the store applies it as a whole-row replace, gated on
@@ -268,33 +305,54 @@ so the picker, the pager and the totals can never disagree about which period is
 
 ### Per-session totals
 
-`usage` and `duration_ms` are genuinely per-turn: `SessionMeta.totalTokens` accumulates `usage`
-directly, and `duration_ms` minus the turn's accumulated `LiveState.permissionWaitMs` (tracked
-from `askPermission` start to resolution, across every permission prompt in the turn) accumulates
-into `SessionMeta.totalDurationMs`.
+`duration_ms` is genuinely per-turn: it minus the turn's accumulated
+`LiveState.permissionWaitMs` (tracked from `askPermission` start to resolution, across every
+permission prompt in the turn) accumulates into `SessionMeta.totalDurationMs`.
 
-`total_cost_usd` is not per-turn — it is cumulative across the lifetime of the underlying query
-process (the CLI child), resetting only when that process is replaced. `accumulateResultSpend`
-calls `resultSpend(msg, live.lastCostCumulativeUsd)` (`shared/resultSpend.ts`) to recover the
-turn's own cost as the delta against the last reading billed for the same lifetime, then adds
-*that* onto `SessionMeta.totalCostUsd`/`lastCostUsd` and stores the raw reading as the new
-`LiveState.lastCostCumulativeUsd`. `closeQuery` — the one function every path that ends a query
-lifetime goes through — clears `lastCostCumulativeUsd`, so the next lifetime's first `result` is
-recognised as having no prior reading and is billed whole. As a safety net for a lifetime the
-runtime failed to observe closing (e.g. a bridge restart that leaves the worker's query alive),
-`resultSpend` also bills a reading whole whenever it is below the stored cumulative value, or
-whenever `startsQueryLifetime` detects the cumulative `modelUsage` token total equals this
-result's own `usage` (the running total consists of just this turn). All three accumulated numbers
-persist via `SessionMeta` upsert → sidebar reads from the session store and renders
-`totalDurationMs` via `formatDuration`.
+`total_cost_usd` is not per-turn. It is Claude Code's cost state: a running total, broken down per
+model in `modelUsage` (whose `costUSD` always sums to it), that lives as long as the CLI process
+does — and that a new process may pick up again. Measured against real transcripts, a result's
+reading can:
+
+- carry the previous reading on, in the same process or in a resumed one (the CLI restores the
+  counters it last saved for the session) — the common case, including after `closeQuery` and
+  after a bridge restart;
+- start from zero in a new process (no restore — e.g. a model switch rebuilt the query);
+- start from zero under a new `session_id` (a fresh-start workflow step, a fork) — however high
+  the new total climbs, even past the old one;
+- carry on from an *older* save than the previous reading, when later processes never saved.
+
+So nothing about the process is trusted. `CostLineage.bill` (`shared/resultSpend.ts`) chooses the
+base a reading continues from by its counters alone: nothing when the counters equal this turn's
+own `usage` exactly (provably fresh); else the previous reading when this one can continue it
+(same session, no counter went down, growth covering this turn's `usage` — the last condition
+catches a fresh process whose first turn outspends the previous lifetime); else an older reading of
+the same session it continues exactly, or one whose cache counters for some model it carries over
+unchanged (a restore — cache counters accumulate over many calls, so an identical pair is no
+coincidence, while a lone small call's counters can repeat across unrelated sessions); else
+nothing. The result is billed as its reading less that base, per model, with tokens from the same
+base — so tokens include subagents exactly as the cost does.
+
+The lineage lives in `LiveState.costLineage`, rebuilt from the transcript's earlier results the
+first time a bridge needs it. `closeQuery` resets nothing about cost: a closing query can still
+report a last result on the old total, and a resumed one usually carries it on.
+
+`lastCostUsd`/`lastTokens` are the turn's own: emptied by `resetTurnFigures` as a turn starts and
+added to by every result it settles. All of it persists via `SessionMeta` upsert → sidebar reads
+from the session store and renders `totalDurationMs` via `formatDuration`.
 
 ### Per-step totals
 
-SDK `result` message → `SessionMeta.lastCostUsd` / `lastTokens` / `lastDurationMs` (the same
-accumulation, estimate included) → read by `onWorkflowTurnComplete` and added onto
-`WorkflowState.stepCostsUsd[stepIndex]` / `stepTokens[stepIndex]` / `stepDurationsMs[stepIndex]`;
-the same block stamps `stepModels[stepIndex] = resolveModelId(meta.model)` (last writer wins
-across retries) → persisted on `SessionMeta` upsert → `WorkflowStepper` renders `stepCostsUsd[i]`
+Every billed result also adds its cost and tokens to `LiveState.unreportedSpend` → on each
+settle, whatever its source, `onWorkflowTurnComplete` takes it (`takeUnreportedSpend`) and
+`chargeStep` adds it onto `WorkflowState.stepCostsUsd[stepIndex]` / `stepTokens[stepIndex]` while
+that step is running or parked for approval, stamping `stepModels[stepIndex] =
+resolveModelId(meta.model)` (last writer wins across retries). Taking it on every settle, rather
+than reading `lastCostUsd` for a workflow turn only, is what charges a step every attempt of a
+re-driven turn and every result that lands while it sits parked (a background agent finishing),
+and never re-charges it the previous turn's cost when a turn ends with no result at all. A
+workflow turn's `lastDurationMs` is added onto `stepDurationsMs[stepIndex]` → persisted on
+`SessionMeta` upsert → `WorkflowStepper` renders `stepCostsUsd[i]`
 via `formatSpendUsd`, `stepTokens[i]` as a coin icon with a "N tokens spent" tooltip, and
 `stepDurationsMs[i]` via `formatDuration`, all in a metrics row below the step name.
 `stepModels[i]` exists only because a provider-crossing workflow keeps one `SessionMeta`: the
@@ -317,55 +375,64 @@ session-level `hasEstimatedSpend` reading.
   January and stepping a day across a month/year boundary; `foldDays` range-inclusive, a single
   day, and empty-range cases; `periodLabel`'s "current period" branch (and that a neighbouring
   period does not falsely match it).
-- `server/src/resultSpend.test.ts` — `resultSpend`/`startsQueryLifetime`/`foldResultSpend`: a
-  second turn in a lifetime bills the delta, a lifetime that opens above the previous one's final
-  reading still bills whole, a cumulative reading that drops bills whole, and a run of results
-  folds to the sum of its lifetimes rather than the sum of its raw readings; `billRun` is
-  index-aligned with its input and yields `undefined` for an uncosted result without breaking
-  alignment for the results around it; a codex-shaped payload yields `undefined` regardless of
-  `estimateSpendUsd`, so the estimator can never reach the cumulative-delta path.
+- `server/src/resultSpend.test.ts` — `CostLineage`, on the shapes measured in real transcripts: a
+  later turn in one process bills its growth; a resumed query carrying the total on bills a delta,
+  not the whole total; subagent spend on top of the turn is still the turn's, split per model; a
+  new session id is billed whole though its total opens higher; a fresh process whose counters rose
+  by less than its own turn is fresh; counters equal to the turn's usage are fresh even after a
+  reading without counters; a restore from an older save is billed against that save, exactly, or
+  found by carried-over cache counters when subagents ran; a lone small call matching by chance is
+  no evidence; a session returning to an earlier id resumes that id's readings; an empty
+  `modelUsage` defers to the total; uncosted results neither bill nor disturb the run.
 - `server/src/sessions.ended.test.ts` — a settled `result` splits spend under the session's
-  model; a second turn in the same query lifetime bills the delta, not the raw reading; a turn
-  after `recycleIdleQueries()` closes the query bills its reading whole; a cumulative reading that
-  drops, or that trips the `startsQueryLifetime` detector, bills whole even when the raw reading
-  rose; `setModel()` between turns opens a second row instead of moving the first; a costless
-  result on a cost-reporting provider (Anthropic) stays uncosted; a codex-shaped result is priced
-  from the table instead, matching the codex fixture's usage composition by hand; a result with
-  neither cost nor usage opens no row; the same settled/recovered/no-op cases open (or don't open)
-  a matching `SpendHistory` day row and broadcast its whole content as `spendDay`.
+  model; a second turn bills the delta, not the raw reading; a query resumed after
+  `recycleIdleQueries()` bills only its growth, while one that starts over bills whole; a new
+  session id bills whole however high it opens; a bridge restart picks the lineage up from the
+  transcript; spend splits by the models that spent it, tokens included; a re-driven turn's
+  `lastCostUsd` adds up its attempts and the next prompt empties it; a reading that went backwards
+  bills whole; `setModel()` between turns opens a second row; a costless result on a
+  cost-reporting provider (Anthropic) stays uncosted; a codex-shaped result is priced from the
+  table instead; a result with neither cost nor usage opens no row; the ledger records what
+  `costByModel` records.
 - `server/src/estimateSpend.test.ts` — `estimateSpendUsd`: an unpriced model returns `undefined`,
   a priced model with no usage returns `0`, a cached read is billed once at the cached rate (not
   the naive double-charge of billing `input_tokens` whole), a cache write bills as input,
   reasoning bills as output, a retired model id prices as its replacement; `hasEstimatedSpend`:
   a Claude row never marks, an OpenAI row with `costUsd > 0` does, a mixed session marks, and a
-  zero-cost OpenAI row (recorded before estimation existed) does not.
-- `server/src/sessions.turnSpend.test.ts` — live spend: repeated blocks with one `message.id` count
-  once and different ids sum; subagent messages count; the broadcast is throttled to one per
+  zero-cost OpenAI row (recorded before estimation existed) does not; `estimateClaudeCallUsd`
+  reproduces the CLI's reported `costUSD` for a real step to the cent, never reduces input by
+  cache reads, prices 5-minute and 1-hour writes apart, and prices a dated snapshot id as its
+  model.
+- `server/src/sessions.turnSpend.test.ts` — live spend: repeated blocks of one call count once
+  and different calls sum; the final output count comes from `message_delta`; a subagent stream's
+  delta closes its own call; a subagent on another model is priced at its own rates; a synthetic
+  zero-usage message neither counts nor hides the figure; the broadcast is throttled to one per
   window; the settling `result` broadcasts `spend: null` after the upsert and bills exactly the
-  reported figure into `totalCostUsd`/`costByModel`/the ledger; a recovery result resets the live
-  figure; an unpriced model broadcasts nothing; `handleWorkerEnded` and `closeQuery` clear it.
-  `server/src/sessions.codex.test.ts` also checks the codex live figure equals the settle-time
-  estimate, and `server/src/broadcastScope.test.ts` lists `turnSpend` as session-scoped.
+  reported figure; a recovery result resets the live figure; an unpriced model broadcasts
+  nothing; `handleWorkerEnded` and `closeQuery` clear it. `server/src/sessions.codex.test.ts`
+  checks the codex live figure equals the settle-time estimate and that a turn is billed for
+  every request it made; `server/src/codexEvents.test.ts` covers `codexUsageStep`;
+  `server/src/broadcastScope.test.ts` lists `turnSpend` as session-scoped.
+- `server/src/workflows.advance.test.ts` — a result landing while a step is parked is charged to
+  it; a turn that dies with no result charges its step nothing.
 - No test infrastructure covers `UsagePoller`, the Sidebar/`SessionMeta` display, or
   `WorkflowStepper` rendering at time of writing; natural first targets are `UsagePoller`
   (mocked `fetch`/`AuthManager`) and `parseSnapshot`.
 
 ## Business rules
 
-- `result.total_cost_usd` is cumulative across the lifetime of the query process that produced
-  it, not this turn's own cost. A turn's billed cost is the delta against the last reading billed
-  for the same lifetime (`resultSpend`, `shared/resultSpend.ts`); the first reading of a new
-  lifetime is billed whole. Getting this wrong compounds quadratically within a long-lived query
-  — every earlier turn gets re-billed on every later one.
-- A lifetime boundary the runtime itself did not observe closing (e.g. a bridge restart that
-  leaves a worker's query alive, so `LiveState.lastCostCumulativeUsd` is lost) is still caught: a
-  reading below the stored cumulative value, or a `startsQueryLifetime` detection (cumulative
-  `modelUsage` tokens equal this turn's own `usage`), forces the whole reading to be billed
-  instead of subtracted.
-- Historical sessions accumulated before this delta fix have inflated `totalCostUsd`/`lastCostUsd`
-  that will not self-correct — the field is additive and never rewound. `server/scripts/repair-spend.ts`
-  is a one-time, per-machine, dry-run-by-default backfill that recomputes them from each session's
-  surviving transcript `result` events; a session with none left is skipped, not zeroed.
+- Settled cost is always Claude Code's own reported cost (`total_cost_usd`/`modelUsage`); a
+  computed figure only ever stands in where none is reported — mid-turn, and for a provider that
+  never reports one.
+- `result.total_cost_usd` is Claude Code's running total, not this turn's own cost. A result is
+  billed as its reading less the reading it continues from, chosen by the counters alone
+  (`CostLineage`, `shared/resultSpend.ts`) — never by what the bridge believes happened to the
+  process: a closed or restarted query usually carries the total on, a new `session_id` starts it
+  from zero however high it climbs, and a resume can continue an older save.
+- Historical totals billed by the earlier rules are wrong in both directions and additive, so they
+  never self-correct. `server/scripts/repair-spend.ts` is a one-time, per-machine,
+  dry-run-by-default rebuild from each session's transcript and rewind sidecars; a session with no
+  results left is skipped, not zeroed.
 - No login → no usage chip. Enforced both server-side (poller never fetches without a session,
   logout nulls the snapshot) and client-side (`UsageIndicator` gates on `auth.loggedIn`).
 - `{type: 'usage', usage: null}` means auth is gone (logout or a revoked/expired OAuth session) —
@@ -377,16 +444,17 @@ session-level `hasEstimatedSpend` reading.
 - `hello` may arrive with `usage: null` before the poller's first fetch completes (e.g. right
   after a server restart); if the client is still logged in, the previously held snapshot is
   kept rather than cleared, so the chip does not flicker away on reconnect.
-- Spend-by-model rows are keyed by `resolveModelId(meta.model)` — a retired stored model id
-  folds into the same row as its replacement rather than opening a second one.
+- Spend-by-model rows are keyed by the model that spent the money — `resolveModelId` of the CLI's
+  `canonicalModel` (or `modelUsage` key), falling back to `meta.model` for a result without
+  per-model counters — so a retired id folds into its replacement's row, and a subagent's or a
+  CLI-internal call's spend sits on its own model's row.
 - A result carrying neither `total_cost_usd` nor `usage` opens no row (no zero-cost
   placeholder).
 - Only chat-turn spend is counted. The internal helper queries (step-output consolidation,
   `autoName`, `summarizeTurn`) hardcode their own cheap model and their `total_cost_usd`/`usage`
   is never read, so their spend is excluded — the table under-reports true account spend by
   whatever those helpers cost.
-- `costByModel` is additive and never backfilled: a session shows nothing until its next turn
-  settles, same convention as `totalTokens`/`totalDurationMs`.
+- `costByModel` is additive; only the repair script rebuilds it.
 - A turn on a provider whose capability table says `cost: false` is priced from
   `ModelOption.price` via `estimateSpendUsd` instead of left uncosted; `estimateSpendUsd` returns
   `undefined` (never `0`) for a model with no price entry, since a zero would render as "this turn
@@ -406,11 +474,9 @@ session-level `hasEstimatedSpend` reading.
   provider-crossing workflow stays inside one `SessionMeta` and the session's *current* model
   cannot answer for an earlier step. Absent on a step run before this field existed, which falls
   back to the session-level `hasEstimatedSpend` reading.
-- `server/scripts/repair-spend.ts` and `server/scripts/backfill-spend-history.ts` both call the
-  same `estimateSpendUsd`, behind the same capability gate, as the live accumulator — so a
-  rebuilt or repaired figure for historical codex spend agrees with what a live turn would have
-  recorded. `repair-spend.ts` splits an estimated total across a session's already-zero rows by
-  token share, since cost cannot be the weight when every row starts at zero.
+- `server/scripts/repair-spend.ts` and `server/scripts/backfill-spend-history.ts` both replay
+  spend through `spendReplay.ts`: the same lineage, attribution, estimator and capability gate as
+  the live accumulator, so a rebuilt figure agrees with what a live turn would now record.
 - The global rollup is derived client-side from the sessions the store already holds — deleting
   a session removes its spend from the rollup; there is no separate persisted total.
 - The "Spend by model" section (and its "This session" sub-section) render nothing at all when
@@ -437,7 +503,9 @@ session-level `hasEstimatedSpend` reading.
   permission-prompt approval wait within a turn (e.g. a plan-mode review card left open) — so a
   step blocked on a slow approval doesn't read as an expensive step.
 - Retries and auto-advance turns on the same step add onto the same array slot rather than
-  overwriting it, for cost, tokens, and duration.
+  overwriting it, for cost, tokens, and duration. A step's cost and tokens also include every
+  attempt of a re-driven turn and every result that lands while the step is parked; a turn that
+  ends with no result charges nothing.
 - Usage-history period totals (day/week/month/year) are computed from this bridge's own
   `spend-history.json` and are **not synced** — they cover only turns run on this machine. The
   all-time rollup, by contrast, is derived from synced sessions and spans every machine the
@@ -454,18 +522,16 @@ session-level `hasEstimatedSpend` reading.
 - The ledger is additive only: nothing ever rewrites an existing day row except the one-time
   backfill script, which replaces the whole file. Live turns can only add to it.
 - The live in-flight estimate (`turnSpend`) is never persisted and never enters `totalCostUsd`,
-  `lastCostUsd`, `costByModel`, the spend-history ledger or `lastCostCumulativeUsd`; it exists
+  `lastCostUsd`, `costByModel`, the spend-history ledger or the cost lineage; it exists
   only in `LiveState` and the web store, and is replaced by the billed figure at settle. Anything
   shown that includes it is `~`-marked, and an unpriced model shows no live figure rather than
   `$0.00`.
 - `server/scripts/backfill-spend-history.ts` is best-effort, not authoritative: a session whose
-  transcript was deleted (session delete, or a rewind that truncated it) contributes nothing and
-  cannot be recovered, so a later run can produce a *smaller* history than an earlier one. It
-  attributes cost by the SDK-reported per-model `modelUsage` delta (falling back to the session's
-  current model when absent) rather than the session's model at that historical moment, which the
-  transcript does not record — a provenance difference from the live path, not a bug, and can
-  cause a turn split across two models to count a `turns` against each. It refuses to run while
-  the bridge is up, mirroring `repair-spend.ts` and `migrate-user.ts`.
+  transcript was deleted contributes nothing and cannot be recovered, so a later run can produce a
+  *smaller* history than an earlier one (a rewind's cut tail survives in its sidecar and is read).
+  Both scripts refuse `--write` while a bridge is up — the dev bridge on :8787, or the desktop
+  app's, named by `~/.lines-app/bridge.lock` — since it would write its in-memory copy back over
+  them; a dry run is fine.
 - The period picker's menu re-anchors on today whenever the granularity changes, so switching
   from "Month" to "Week" (say) never leaves the user looking at a week that has nothing to do
   with the month they were just viewing.
@@ -474,19 +540,17 @@ session-level `hasEstimatedSpend` reading.
 
 - No new message types for the usage chip — it follows the existing `sessionUpsert`-style
   broadcast conventions.
-- Every spend number reuses the existing per-turn accumulation in `server/src/sessions.ts`
-  instead of adding a new tracking mechanism: `totalTokens`/`totalDurationMs`, `costByModel`,
-  and the per-step `lastCostUsd`/`lastTokens`/`lastDurationMs` all follow the same
-  accumulate-on-`result` pass.
-- The query-lifetime-boundary rule for cost lives in `shared/resultSpend.ts`, not inline in
-  `server/src/sessions.ts`, specifically so the live accumulator and `repair-spend.ts` (a
-  standalone script with no access to `LiveState`) share one definition of "where does a
-  lifetime start" and cannot silently diverge.
-- Estimation is deliberately kept out of `shared/resultSpend.ts`: that module does
-  cumulative-delta arithmetic because `total_cost_usd` is cumulative over a query lifetime, while
-  an estimate is genuinely per-turn — running it through the delta path would over- and
-  under-count against the whole-reading guard. `shared/estimateSpend.ts` is its own file for that
-  reason, called once from `accumulateResultSpend` after `resultSpend` comes back empty.
+- Every spend number comes out of the one accumulate-on-`result` pass in `server/src/sessions.ts`:
+  `totalTokens`/`totalDurationMs`, `costByModel`, the ledger, the turn's `lastCostUsd`/`lastTokens`
+  and the workflow step's share all read the same bill.
+- The rule that chooses a reading's base lives in `shared/resultSpend.ts`, not inline in
+  `server/src/sessions.ts`, so the live accumulator, the transcript's turn cards and the scripts
+  share one definition and cannot silently diverge. It reads only the readings themselves, never
+  bridge state, which is what lets the client and the scripts apply it at all.
+- Estimation is deliberately kept out of `shared/resultSpend.ts`: that module subtracts running
+  totals, while an estimate is genuinely per-turn — running it through the base rule would
+  over- and under-count. `shared/estimateSpend.ts` is its own file for that reason, called from
+  `accumulateResultSpend` only when the lineage bills nothing.
 - `shared/estimateSpend.ts` and `shared/types.ts` form an import cycle (the estimator reads
   `priceFor`/`DEFAULT_MODELS`; `types.ts` re-exports the estimator alongside them) — safe only
   because the estimator reads those bindings inside function bodies, never at its own top level,
@@ -526,9 +590,9 @@ session-level `hasEstimatedSpend` reading.
   nullable `{ type: 'usage' }` broadcast: `usage: null` has one fixed meaning ("auth is gone") and
   spend history has nothing to do with plan auth, so overloading it would make that message mean
   two unrelated things depending on which field is set.
-- The ledger write sits *inside* `accumulateResultSpend`'s existing `if (spend || turnTokens !=
-  null)` guard, immediately after the `addSpend` call for `costByModel`, using the identical
-  resolved model id and billed delta — not a second, independently-derived call. This is what
+- The ledger write sits beside each `addSpend` call for `costByModel` in `accumulateResultSpend`,
+  using the identical resolved model id, cost and tokens — not a second, independently-derived
+  call. This is what
   guarantees the ledger and the per-session split can never disagree about what counted; a
   discrepancy between the two would otherwise be a permanent, hard-to-notice reconciliation bug.
 - `SpendDay` broadcasts (and the `hello` snapshot) carry the *whole* day row, not a delta, for the

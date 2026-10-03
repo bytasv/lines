@@ -334,6 +334,35 @@ test('codex usage is priced live and matches the settle-time estimate', async (t
   assert.equal(turnSpends().at(-1)!.spend, null);
 });
 
+test('a codex turn is billed for every request it made, not only its last', async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.prompt('s1', 'hello');
+  await settle();
+
+  const usage = (input: number, output: number) => ({
+    totalTokens: input + output,
+    inputTokens: input,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: output,
+    reasoningOutputTokens: 0,
+  });
+  // `last` is one request; `total` the thread's running sum of them.
+  const update = (last: ReturnType<typeof usage>, total: ReturnType<typeof usage>) =>
+    h.sessions.handleWorkerEvent('s1', notify('thread/tokenUsage/updated', { tokenUsage: { last, total } }));
+  update(usage(1_000, 100), usage(1_000, 100));
+  update(usage(500, 10), usage(1_500, 110));
+  update(usage(600, 20), usage(2_100, 130));
+  update(usage(600, 20), usage(2_100, 130)); // repeated, nothing new
+  h.sessions.handleWorkerEvent('s1', notify('turn/completed', { turn: { id: 't1', status: 'completed' } }));
+  await settle();
+
+  // All three requests — 2,100 in, 130 out — not just the last request's 620.
+  assert.equal(h.sessions.get('s1')!.lastTokens, 2_230);
+});
+
 test('a stopped codex turn settles as stopped, not as a failure', async () => {
   process.env.LINES_CODEX_PATH = FAKE_CODEX;
   await refreshCodex();

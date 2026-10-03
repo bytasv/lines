@@ -4152,9 +4152,9 @@ export {
  */
 export {
   billRun,
+  CostLineage,
   foldResultSpend,
-  resultSpend,
-  startsQueryLifetime,
+  type ModelSpendDelta,
   type ResultSpend,
   type ResultSpendPayload,
 } from './resultSpend.ts';
@@ -4197,8 +4197,10 @@ export * from './e2ee.ts';
  * and this statement runs after `priceFor` and `DEFAULT_MODELS` are initialized.
  */
 export {
+  estimateClaudeCallUsd,
   estimateSpendUsd,
   hasEstimatedSpend,
+  type ClaudeCallUsage,
   type EstimateUsage,
 } from './estimateSpend.ts';
 

@@ -99,6 +99,9 @@ the transport was.
   OpenAI models) and the server (`validateStepContent`, and a pre-run park).
 - `output_tokens` means exactly what the provider called output. Reasoning tokens ride beside
   it in `reasoning_output_tokens` and the spend accumulator adds them explicitly.
+- A turn's usage is every model request it made. `thread/tokenUsage/updated` names the latest
+  request (`last`) and the thread's running sum of them (`total`, across turns), so the bridge
+  sums the growth of `total` over the turn (`codexUsageStep`) — `last` alone is one request.
 - Codex reports tokens and never a price. A codex row shows tokens with an *estimated* `$` instead
   — computed from `ModelOption.price` and always marked with a `~` — never a bare `$`, which is
   reserved for a provider-reported figure. See [usage-and-cost](usage-and-cost.md) for the

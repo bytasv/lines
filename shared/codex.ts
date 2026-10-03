@@ -44,13 +44,14 @@ export interface CodexNormalizeDeps {
    */
   turnId?: string;
   /**
-   * The most recent `thread/tokenUsage/updated` for this thread.
+   * Everything the turn being settled spent, summed by the caller from its
+   * `thread/tokenUsage/updated` notifications (see `codexUsageStep`).
    *
-   * Usage arrives on its own notification *before* `turn/completed`, so the
+   * Usage arrives on its own notifications *before* `turn/completed`, so the
    * caller tracks it and hands it back here — which keeps this module pure while
    * still letting the settling `result` carry real numbers.
    */
-  lastUsage?: TokenUsageBreakdown | null;
+  turnUsage?: TokenUsageBreakdown | null;
 }
 
 export interface CodexNormalized {
@@ -60,8 +61,11 @@ export interface CodexNormalized {
   threadId?: string;
   /** A fatal failure whose text must reach `failTurn` verbatim. */
   failure?: string;
-  /** Token usage seen on this notification, for the caller to remember. */
+  /** The latest model request's usage (`last`), from a usage notification. */
   usage?: TokenUsageBreakdown;
+  /** The thread's running total (`total`), from the same notification. It grows
+   *  by exactly `last` per model request, across every turn of the thread. */
+  usageTotal?: TokenUsageBreakdown;
   /**
    * Context occupancy seen on this notification.
    *
@@ -343,6 +347,50 @@ function completedItem(item: ThreadItem, deps: CodexNormalizeDeps): SdkShapedMes
   }
 }
 
+const USAGE_FIELDS = [
+  'totalTokens',
+  'inputTokens',
+  'cachedInputTokens',
+  'cacheWriteInputTokens',
+  'outputTokens',
+  'reasoningOutputTokens',
+] as const;
+
+/** Field-wise sum of two usage breakdowns; either may be missing. */
+export function addCodexUsage(
+  a: TokenUsageBreakdown | undefined,
+  b: TokenUsageBreakdown | undefined,
+): TokenUsageBreakdown | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const out = { ...a };
+  for (const k of USAGE_FIELDS) out[k] = (a[k] ?? 0) + (b[k] ?? 0);
+  return out;
+}
+
+/**
+ * What one `thread/tokenUsage/updated` adds to the turn in flight.
+ *
+ * `total` is the thread's running sum, so the growth since the last total seen
+ * is exactly the requests made in between — and a notification repeated with
+ * nothing new adds nothing, which summing `last` would get wrong. A total that
+ * went down belongs to an app-server that started counting again, so all of it
+ * is new. With no earlier total to compare (the first notification since the
+ * bridge started), the request this notification reports is all that is known.
+ */
+export function codexUsageStep(
+  previousTotal: TokenUsageBreakdown | undefined,
+  last: TokenUsageBreakdown | undefined,
+  total: TokenUsageBreakdown | undefined,
+): TokenUsageBreakdown | undefined {
+  if (!total) return last;
+  if (!previousTotal) return last ?? total;
+  if (USAGE_FIELDS.some((k) => (total[k] ?? 0) < (previousTotal[k] ?? 0))) return total;
+  const step = { ...total };
+  for (const k of USAGE_FIELDS) step[k] = (total[k] ?? 0) - (previousTotal[k] ?? 0);
+  return step;
+}
+
 /** The token counts a settling `result` carries, in the SDK's own field names.
  *  Exported so the bridge's live in-flight estimate reads codex usage exactly as
  *  the settle does. */
@@ -429,12 +477,15 @@ export function normalizeCodexNotification(
         | { last?: TokenUsageBreakdown; total?: TokenUsageBreakdown; modelContextWindow?: number | null }
         | undefined;
       if (!reported?.last && !reported?.total) return NOTHING;
-      // `last` is this turn's spend; `total` is what is sitting in the context
-      // window. They answer different questions and both are carried.
+      // `last` is the latest model request; `total` is the thread's running sum
+      // of them, across turns — measured against codex's own rollout files. A
+      // turn makes many requests, so neither is the turn's spend on its own: the
+      // caller sums the growth (see `codexUsageStep`).
       const total = reported.total;
       return {
         messages: [],
         ...(reported.last ? { usage: reported.last } : {}),
+        ...(total ? { usageTotal: total } : {}),
         ...(total
           ? {
               contextUsage: {
@@ -490,7 +541,7 @@ export function normalizeCodexNotification(
             type: 'result',
             subtype: 'success',
             is_error: false,
-            usage: resultUsage(deps.lastUsage),
+            usage: resultUsage(deps.turnUsage),
             // No `total_cost_usd`: codex reports tokens, never a price.
             ...(typeof turn?.durationMs === 'number' ? { duration_ms: turn.durationMs } : {}),
             _engine: 'codex',

@@ -13,25 +13,20 @@
  *
  * Two things the rebuilt history is NOT:
  *
- *  - Complete. Deleting a session hard-deletes its transcript and a rewind
- *    truncates one, so a session whose events are gone contributes nothing and
- *    cannot be recovered. A *later* run can therefore produce a SMALLER history
+ *  - Complete. Deleting a session hard-deletes its transcript, so a session
+ *    whose events are gone contributes nothing and cannot be recovered. A *later* run can therefore produce a SMALLER history
  *    than an earlier one, which is why the write is a whole-blob replace with a
  *    backup rather than an addition to whatever is already there.
- *  - Attributed the way the live path attributes. Live, a turn's whole spend goes
- *    under `resolveModelId(meta.model)` — the session's model at that moment,
- *    which the transcript does not record. Here it is split across the models the
- *    SDK itself reported in `modelUsage`, by per-model delta, falling back to the
- *    session's *current* model when a result carries no `modelUsage`. Both land
- *    in the same key space via `resolveModelId`; only the provenance differs. One
- *    visible consequence: a turn split across two models counts a `turns` against
- *    each, so backfilled turn counts can exceed the number of turns actually run.
+ *  - Different from live in where it starts: it replays the transcripts — and
+ *    the rewind sidecars that keep a cut tail — rather than the turns as they
+ *    settled. The billing and the attribution are live's own (`spendReplay.ts`):
+ *    each result billed by the shared cost lineage, split by the models that
+ *    spent it, or under the session's model when it carries no per-model
+ *    counters (codex, and old transcripts). A result split across two models
+ *    counts a turn against each, exactly as live.
  *
- * Cost is always `billRun`'s billed delta, never a raw `total_cost_usd` reading
- * — that field is cumulative over a query lifetime (see shared/resultSpend.ts),
- * and the same shared rule is used here as live so the two cannot diverge. Where
- * the provider reports no cost at all, the same shared estimator the live path
- * uses fills in (see shared/estimateSpend.ts), for exactly that reason.
+ * Where the provider reports no cost at all, the same shared estimator the live
+ * path uses fills in (see shared/estimateSpend.ts), for exactly that reason.
  *
  * Run with the bridge STOPPED: it holds the ledger in memory and whole-file
  * persists, so a live bridge would write its own copy straight back over this.
@@ -40,38 +35,14 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
-import {
-  addSpend,
-  billRun,
-  capabilitiesFor,
-  dayKey,
-  estimateSpendUsd,
-  providerForModel,
-  resolveModelId,
-  sortedSpend,
-} from '@lines/shared';
-import type {
-  ModelSpendMap,
-  ResultSpendPayload,
-  SessionMeta,
-  SpendHistoryBlob,
-} from '@lines/shared';
+import { addSpend, dayKey, sortedSpend } from '@lines/shared';
+import type { ModelSpendMap, SessionMeta, SpendHistoryBlob } from '@lines/shared';
+import { bridgeRunning, replaySpend, sessionEvents, USERS_ROOT } from './spendReplay.ts';
 
 const args = process.argv.slice(2);
 const write = args.includes('--write');
 const userIdx = args.indexOf('--user');
 const onlyUser = userIdx >= 0 ? args[userIdx + 1] : undefined;
-const USERS_ROOT = path.join(os.homedir(), '.lines-app', 'users');
-
-async function bridgeRunning(): Promise<boolean> {
-  try {
-    const res = await fetch('http://localhost:8787/', { signal: AbortSignal.timeout(1500) });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
 
 function readJson<T>(file: string, fallback: T): T {
   try {
@@ -82,85 +53,6 @@ function readJson<T>(file: string, fallback: T): T {
 }
 
 const usd = (n: number) => `$${n.toFixed(2)}`;
-
-/** A transcript `result` with the moment it was written — the whole reason this
- *  script can date spend that `SessionMeta` cannot. */
-interface StampedResult {
-  ts: number;
-  payload: ResultSpendPayload;
-}
-
-/** The SDK `result` events of one session, in transcript order. Transcript lines
- *  are `{ seq, ts, kind, data }`; SDK messages ride under kind 'sdk'. */
-function resultsOf(file: string): StampedResult[] {
-  if (!fs.existsSync(file)) return [];
-  const out: StampedResult[] = [];
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-    if (!line.trim()) continue;
-    let event: { ts?: number; kind?: string; data?: { type?: string } };
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue; // a torn trailing line; the rest of the file is still usable
-    }
-    if (event.kind !== 'sdk' || event.data?.type !== 'result') continue;
-    if (typeof event.ts !== 'number') continue; // undatable, so unusable here
-    out.push({ ts: event.ts, payload: event.data as ResultSpendPayload });
-  }
-  return out;
-}
-
-/** Same composition as the live accumulator's per-turn token sum. */
-function turnTokens(usage: ResultSpendPayload['usage']): number {
-  if (!usage) return 0;
-  return (
-    (usage.input_tokens ?? 0) +
-    (usage.output_tokens ?? 0) +
-    (usage.cache_creation_input_tokens ?? 0) +
-    (usage.cache_read_input_tokens ?? 0)
-  );
-}
-
-type ModelUsage = NonNullable<ResultSpendPayload['modelUsage']>;
-
-function modelTokens(m: ModelUsage[string]): number {
-  return (
-    (m.inputTokens ?? 0) +
-    (m.outputTokens ?? 0) +
-    (m.cacheReadInputTokens ?? 0) +
-    (m.cacheCreationInputTokens ?? 0)
-  );
-}
-
-/**
- * How this result's spend divides between models, as weights summing to 1.
- *
- * `modelUsage` is cumulative over the query lifetime exactly like
- * `total_cost_usd`, so the per-model share of one turn is the delta against the
- * previous result of the same lifetime. Cost deltas first; tokens when the SDK
- * reported no per-model cost (codex). An empty result means "cannot tell".
- */
-function weights(current: ModelUsage, previous: ModelUsage | null): Record<string, number> {
-  for (const read of [
-    (m: ModelUsage[string]) => m.costUSD ?? 0,
-    modelTokens,
-  ]) {
-    const deltas: Record<string, number> = {};
-    let total = 0;
-    for (const [model, usage] of Object.entries(current)) {
-      const before = previous?.[model];
-      const delta = read(usage) - (before ? read(before) : 0);
-      if (delta <= 0) continue;
-      deltas[model] = delta;
-      total += delta;
-    }
-    if (total > 0) {
-      for (const model of Object.keys(deltas)) deltas[model] /= total;
-      return deltas;
-    }
-  }
-  return {};
-}
 
 interface UserResult {
   days: Record<string, ModelSpendMap>;
@@ -178,53 +70,17 @@ function rebuildUser(userId: string): UserResult {
   let total = 0;
 
   for (const meta of metas) {
-    const results = resultsOf(path.join(root, 'transcripts', `${meta.id}.jsonl`));
+    const { results } = replaySpend(meta, sessionEvents(root, meta.id));
     if (results.length === 0) {
       skipped++;
       continue;
     }
     sessionsSeen++;
-    const billed = billRun(results.map((r) => r.payload));
-    const fallbackModel = resolveModelId(meta.model);
-    let previousUsage: ModelUsage | null = null;
-
-    results.forEach(({ ts, payload }, i) => {
-      const spend = billed[i];
-      const tokens = turnTokens(payload.usage);
-      // The live guard, restated: a result carrying neither number opens no row.
-      if (!spend && tokens === 0) return;
-      let cost = spend?.billed ?? 0;
-      // And the live estimator, restated for the same reason: a codex result
-      // carries no cost, so without this the rebuilt ledger would disagree with
-      // the one the bridge wrote for the very same turns. Same gate as live, and
-      // the estimate is attributed to the session's model — codex reports no
-      // `modelUsage`, so there is no split to spread it over anyway.
-      if (!spend && !capabilitiesFor(providerForModel(fallbackModel)).cost) {
-        cost = estimateSpendUsd(fallbackModel, payload.usage) ?? 0;
-      }
-      total += cost;
-
-      // `billRun` bills the whole reading exactly when it decides the lifetime
-      // restarted, which is also when the cumulative `modelUsage` counters reset
-      // — so the previous snapshot must not be subtracted from this one. Read off
-      // its output rather than re-deciding, so the two cannot disagree.
-      const fresh = spend != null && spend.billed === spend.cumulative;
-      const usage = payload.modelUsage;
-      const split = usage ? weights(usage, fresh ? null : previousUsage) : {};
-      if (usage) previousUsage = usage;
-
-      const row = (days[dayKey(ts)] ??= {});
-      const entries = Object.entries(split);
-      if (entries.length === 0) {
-        // No per-model evidence: attribute the turn whole, under the session's
-        // model as the live path would have.
-        addSpend(row, fallbackModel, cost, tokens);
-        return;
-      }
-      for (const [model, weight] of entries) {
-        addSpend(row, resolveModelId(model), cost * weight, tokens * weight);
-      }
-    });
+    for (const result of results) {
+      total += result.costUsd ?? 0;
+      const row = (days[dayKey(result.ts)] ??= {});
+      for (const share of result.models) addSpend(row, share.modelId, share.costUsd, share.tokens);
+    }
   }
 
   return { days, sessions: sessionsSeen, skipped, total };
@@ -255,9 +111,10 @@ if (onlyUser?.startsWith('--') || (userIdx >= 0 && !onlyUser)) {
   console.error('usage: backfill-spend-history.ts [--write] [--user <clerk-user-id>]');
   process.exit(1);
 }
-if (await bridgeRunning()) {
+const running = await bridgeRunning();
+if (running && write) {
   console.error(
-    'The bridge is running on :8787 — stop it first (it holds the ledger in memory and whole-file persists, so it would write its own copy straight back).',
+    `A bridge is running: ${running}. Stop it first — it holds the ledger in memory and whole-file persists, so it would write its own copy straight back.`,
   );
   process.exit(1);
 }
@@ -268,9 +125,8 @@ const users = onlyUser
 
 console.log(write ? 'Rebuilding spend history' : 'Dry run — nothing will be written');
 console.log(
-  'Model attribution here is the SDK-reported modelUsage split, not the session model the live\n' +
-    'path uses, and a turn split across two models counts a turn against each. Sessions whose\n' +
-    'transcripts are gone (deleted, or truncated by a rewind) contribute nothing and cannot.\n',
+  'Sessions whose transcripts are gone (deleted) contribute nothing and cannot; a rewind\n' +
+    "keeps its cut tail in a sidecar, which is read.\n",
 );
 
 let grandTotal = 0;
@@ -301,5 +157,6 @@ for (const userId of users) {
 
 console.log(`\nGrand total ${usd(grandTotal)}`);
 console.log('Compare against the hover card\'s All-time rollup before writing — they should be close,');
-console.log('differing by deleted sessions and by the model-attribution asymmetry above.');
-if (!write) console.log('\nRe-run with --write to apply.');
+console.log('differing by deleted sessions.');
+if (running) console.log(`\nNote: ${running}. Stop it before re-running with --write.`);
+else if (!write) console.log('\nRe-run with --write to apply.');

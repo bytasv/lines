@@ -81,6 +81,7 @@ function harness(
   } as never);
   const transcript = () => store.loadTranscript('s1');
   return {
+    root,
     sessions,
     spendHistory,
     broadcasts,
@@ -901,7 +902,9 @@ test('a settled turn splits its spend under the session model', () => {
 
 test('a second turn in one query lifetime bills the delta, not the reading', () => {
   const h = harness();
+  h.sessions.prompt('s1', 'one');
   h.sessions.handleWorkerEvent('s1', settled(0.25, 1_000));
+  h.sessions.prompt('s1', 'two');
   h.sessions.handleWorkerEvent('s1', settled(0.75, 500));
 
   const meta = h.sessions.get('s1')!;
@@ -910,15 +913,127 @@ test('a second turn in one query lifetime bills the delta, not the reading', () 
   assert.equal(meta.lastCostUsd, 0.5);
 });
 
-test('a turn after the query is recycled bills its reading whole', () => {
+/**
+ * A result as the CLI reports it: Claude Code's running total for session `sid`,
+ * with one model's cumulative counters, for a turn whose own usage was `turn`.
+ */
+const reading = (
+  sid: string,
+  costUsd: number,
+  cumulative: [input: number, output: number],
+  turn: [input: number, output: number],
+  extra: Record<string, unknown> = {},
+) => ({
+  type: 'result',
+  subtype: 'success',
+  result: 'done',
+  session_id: sid,
+  total_cost_usd: costUsd,
+  usage: { input_tokens: turn[0], output_tokens: turn[1] },
+  modelUsage: {
+    'claude-opus-5-5': { inputTokens: cumulative[0], outputTokens: cumulative[1], costUSD: costUsd },
+  },
+  ...extra,
+});
+
+test('a query resumed after a recycle that carries the total on bills only its growth', () => {
   const h = harness();
-  h.sessions.handleWorkerEvent('s1', settled(0.25, 1_000));
-  // The settled result left the session idle, so this closes its query — and the
-  // next one starts its cumulative counter over.
+  h.sessions.handleWorkerEvent('s1', reading('c1', 0.25, [1_000, 100], [1_000, 100]));
+  // The settled result left the session idle, so this closes its query. The CLI
+  // restores the session's running total on resume — the old rule forgot the
+  // last reading here and billed all $0.75 again.
   h.sessions.recycleIdleQueries();
-  h.sessions.handleWorkerEvent('s1', settled(0.5, 500));
+  h.sessions.handleWorkerEvent('s1', reading('c1', 0.75, [1_500, 150], [500, 50]));
 
   assert.equal(h.sessions.get('s1')!.totalCostUsd, 0.75);
+});
+
+test('a query that starts over after a recycle bills its first reading whole', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', reading('c1', 0.25, [1_000, 100], [1_000, 100]));
+  h.sessions.recycleIdleQueries();
+  // Counters equal to the turn's own usage: the new process started from zero.
+  h.sessions.handleWorkerEvent('s1', reading('c1', 0.5, [500, 50], [500, 50]));
+
+  assert.equal(h.sessions.get('s1')!.totalCostUsd, 0.75);
+});
+
+test('a new session id starts its own total, billed whole however high it opens', () => {
+  // The fresh-start workflow step that was billed $0.18 for $14.62 of work: its
+  // new session's total opened above the old one's, so it read as a delta.
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', reading('plan', 14.44, [1_000, 50_000], [1_000, 50_000]));
+  h.sessions.handleWorkerEvent(
+    's1',
+    // More in the counters than the turn alone — a subagent ran — so only the
+    // session id says this is a new total.
+    reading('impl', 14.62, [3_000, 90_000], [2_000, 80_000]),
+  );
+
+  assert.equal(h.sessions.get('s1')!.totalCostUsd, 14.44 + 14.62);
+});
+
+test('a bridge restart picks the lineage back up from the transcript', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', reading('c1', 0.25, [1_000, 100], [1_000, 100]));
+  h.sessions.flushPersist();
+
+  // A new bridge over the same store; the worker — and its query — lived on.
+  const store = createStore(h.root);
+  const restarted = new SessionManager(store, new GuardAllowlist(store), () => {});
+  restarted.attachWorker({ setModel: () => {}, close: () => {}, push: () => {}, interrupt: () => {} } as never);
+  restarted.handleWorkerEvent('s1', reading('c1', 0.75, [1_500, 150], [500, 50]));
+
+  // Not $1.00: the first $0.25 was billed before the restart, and is not again.
+  assert.equal(restarted.get('s1')!.totalCostUsd, 0.75);
+});
+
+test('spend splits by the models that spent it, subagents and helpers included', () => {
+  const h = harness();
+  h.sessions.handleWorkerEvent('s1', {
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    session_id: 'c1',
+    total_cost_usd: 0.505,
+    usage: { input_tokens: 1_000, output_tokens: 100 },
+    modelUsage: {
+      'claude-opus-5-5': { inputTokens: 1_000, outputTokens: 100, costUSD: 0.4 },
+      // An Explore agent on Sonnet, and a CLI-internal Haiku call under its dated id.
+      'claude-sonnet-5-5': { inputTokens: 2_000, outputTokens: 200, costUSD: 0.1 },
+      'claude-haiku-4-5-20251001': {
+        inputTokens: 900,
+        outputTokens: 10,
+        costUSD: 0.005,
+        canonicalModel: 'claude-haiku-4-5',
+      },
+    },
+  });
+
+  const meta = h.sessions.get('s1')!;
+  assert.deepEqual(meta.costByModel, {
+    'claude-opus-5-5': { costUsd: 0.4, tokens: 1_100, turns: 1 },
+    'claude-sonnet-5-5': { costUsd: 0.1, tokens: 2_200, turns: 1 },
+    'claude-haiku-4-5': { costUsd: 0.005, tokens: 910, turns: 1 },
+  });
+  // Tokens are every model's, not just the main thread's `usage`.
+  assert.equal(meta.totalTokens, 1_100 + 2_200 + 910);
+  assert.deepEqual(onlyDay(h), meta.costByModel);
+});
+
+test('a re-driven turn’s figures add up its attempts, and the next prompt starts them empty', async () => {
+  const h = midTurn();
+  h.sessions.handleWorkerEvent('s1', { ...failedResult(CLI_REVOKED), total_cost_usd: 0.2 });
+  await drain();
+  h.sessions.handleWorkerEvent('s1', settled(0.5, 100));
+
+  const meta = h.sessions.get('s1')!;
+  assert.equal(meta.totalCostUsd, 0.5);
+  assert.equal(meta.lastCostUsd, 0.5, 'the failed attempt’s $0.20 and the last one’s $0.30');
+
+  h.sessions.prompt('s1', 'next');
+  assert.equal(h.sessions.get('s1')!.lastCostUsd, undefined);
+  assert.equal(h.sessions.get('s1')!.lastTokens, undefined);
 });
 
 test('a cumulative reading that went backwards bills whole', () => {
