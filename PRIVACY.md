@@ -17,7 +17,9 @@ for what the relay can and cannot see.
 
 ## Stays on your machine
 
-Never sent to Lines.
+Stored only on your machine, never on Lines servers. Anything you open in a
+browser reaches it live through the relay (next section), and the agent sends
+what it reads to your model provider (the section after).
 
 | Data | Notes |
 |---|---|
@@ -27,7 +29,7 @@ Never sent to Lines.
 | MCP header values | The synced MCP list carries header *names* only. |
 | Device pairing secret | Generated on the machine. Storage keeps a SHA-256 hash, never the secret. |
 | End-to-end encryption keys | The machine's key and the enrolled-browser list stay in `~/.lines-app`. A browser's private key stays in that browser. |
-| Voice dictation audio | Transcribed by whisper on your machine. |
+| Voice dictation audio | Transcribed by whisper on your machine. From a phone, the audio reaches the machine through the relay. |
 | Web Push subscriptions | Held by the bridge on each machine, not synced. |
 
 ## Goes to your model provider
@@ -54,7 +56,7 @@ current one.
 | Data | Notes |
 |---|---|
 | Account identity | Clerk user id; email, display name and avatar URL cached for sharing. |
-| Session list metadata | Names, absolute `cwd` paths, model, cost and token counts, error messages, **queued prompts**, **context compaction summaries**, **workflow step outputs**. |
+| Session list metadata | Names, absolute `cwd` paths, model, cost and token counts, error messages, **queued prompts**, **context compaction summaries**, **workflow step outputs**, background task descriptions, and file names (attachments, @-mentioned files, untracked files). Summaries, outputs and queued prompts can quote code. |
 | Workflows, steps and recipes | Your own, including every saved version. **Anything you publish is readable by every signed-in user**, as is its run count. |
 | Settings | UI settings, the auto-mode guard allowlist, and the MCP server list (no header values). |
 | Agent memory | Allowlisted `~/.claude` files, such as `CLAUDE.md` and per-project memory. |

@@ -162,13 +162,16 @@ const SECURITY = [
 // "Where your data goes": mirrors PRIVACY.md, row for row. Every claim here has
 // to trace to storage/prisma/schema.prisma or the end-to-end encryption doc, and
 // stays within the approved copy — never "your code never leaves your machine",
-// "zero-knowledge" or "we can't see anything". Storage holds session metadata in
-// plaintext today, so it is named here rather than glossed over.
+// "transcripts and files never leave your machine", "zero-knowledge" or "we can't
+// see anything". The conversation and the code the agent reads go to the model
+// provider, and live views cross the relay, so the claim is about where things
+// are stored. Storage holds session metadata in plaintext today, so it is named
+// here rather than glossed over.
 const DATA_FLOWS = [
   {
     where: 'Stays on your machine',
     description:
-      'Transcripts and files never leave your machine. Your source, git, terminal, agent process and CLI logins stay there too.',
+      'Your repos, full transcripts and CLI logins live on your machine and are never stored on Lines servers. The agent runs there too.',
   },
   {
     where: 'Goes to Anthropic or OpenAI',
@@ -514,7 +517,7 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
             <SectionHeading
               eyebrow="Security"
               title="The agent runs on hardware you own"
-              blurb="Transcripts and files never leave your machine. Live traffic through our relay is end-to-end encrypted."
+              blurb="Your repos and full transcripts live on your machine and are never stored on Lines servers. Live traffic between your devices and your machine is end-to-end encrypted."
             />
             {/* Two by two, not four across: at a quarter of the row the drawings'
                 labels would be too small to read. */}

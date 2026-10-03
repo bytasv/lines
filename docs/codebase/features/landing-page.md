@@ -84,13 +84,17 @@ None; the page is presentational.
 - Privacy copy uses only these lines, or wording that says no more than they do:
   - "The agent runs on your machine, with your files, git and CLI login. Nothing is executed in
     the cloud."
-  - "Transcripts and files never leave your machine. Live traffic through our relay is end-to-end
-    encrypted." Where space allows, qualify the second sentence: it holds for the owner's own
-    enrolled devices, and guests invited into a session are not end-to-end encrypted yet.
+  - "Your repos and full transcripts live on your machine and are never stored on Lines
+    servers." A claim about storage, not transit: the conversation and the code the agent reads
+    go to the model provider, live views cross the relay, and summaries, workflow outputs and
+    queued prompts (which can quote code) sit in storage, as `PRIVACY.md` says.
+  - "Live traffic between your devices and your machine is end-to-end encrypted." Keep "your
+    devices": guests invited into a session are not end-to-end encrypted yet.
   - "Session list, workflows and memory sync to Lines storage so every device sees them.
     Self-host it if you'd rather own that too."
   - "Prompts go to Anthropic or OpenAI under your own account, same as using the CLI directly."
-- Banned anywhere: "your code never leaves your machine" (prompts carry code to the provider),
+- Banned anywhere: "your code never leaves your machine" and "transcripts and files never leave
+  your machine" (prompts carry code to the provider, and live views cross the relay),
   "zero-knowledge", "we can't see anything". Storage holds session metadata, queued prompts,
   compaction summaries and workflow outputs in plaintext, and the relay sees connection metadata;
   any new claim has to survive `PRIVACY.md`.

@@ -39,12 +39,13 @@ instead.
 
 ## Where your data goes
 
-The agent, your files, transcripts and CLI logins stay on your machine. Prompts go
-to Anthropic or OpenAI under your own account. Live traffic between your own
-devices and your machine is end-to-end encrypted through the relay. Session
-metadata, workflows and agent memory sync to Lines storage in plaintext so every
-device sees them. [PRIVACY.md](PRIVACY.md) lists every field, and the server side
-can be [self-hosted](deploy/README.md#self-hosting).
+The agent runs on your machine. Your repos, full transcripts and CLI logins live
+there and are never stored on Lines servers. Prompts go to Anthropic or OpenAI
+under your own account. Live traffic between your own devices and your machine is
+end-to-end encrypted through the relay. Session metadata, workflows and agent
+memory sync to Lines storage in plaintext so every device sees them.
+[PRIVACY.md](PRIVACY.md) lists every field, and the server side can be
+[self-hosted](deploy/README.md#self-hosting).
 
 Three ways to run it: **locally** (`npm run dev`), as an installable **desktop app**
 (menu-bar, no terminal), or **hosted** — a web app your browser talks to from
