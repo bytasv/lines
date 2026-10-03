@@ -380,7 +380,8 @@
         "web/src/components/ContextWindowIndicator.tsx",
         "web/src/components/Composer.tsx",
         "shared/codex.ts",
-        "web/src/components/Transcript.tsx"
+        "web/src/components/Transcript.tsx",
+        "web/src/lib/transcript.ts"
       ],
       "symbols": [
         "UsagePoller",
@@ -471,7 +472,8 @@
         "WorkflowState.stepModels[i] records the model id a step's turns actually ran on, because a provider-crossing workflow stays inside one SessionMeta and the session's current model cannot answer for an earlier step; absent on a step run before this field existed, which falls back to the session-level hasEstimatedSpend reading",
         "server/scripts/repair-spend.ts and server/scripts/backfill-spend-history.ts both call the same estimateSpendUsd behind the same capability gate as the live accumulator, so a repaired or rebuilt historical figure agrees with what a live turn would have recorded",
         "the live in-flight spend estimate is never persisted and never enters totalCostUsd/lastCostUsd/costByModel/the ledger/lastCostCumulativeUsd; it is replaced by the billed figure at settle, and anything shown that includes it is ~-marked (an unpriced model shows no live figure, never $0.00)",
-        "live usage is deduped by message.id (one assistant message per content block repeats the call's usage), subagent messages are included, and the broadcast is throttled to about 1s per session"
+        "live usage is deduped by message.id (one assistant message per content block repeats the call's usage), subagent messages are included, and the broadcast is throttled to about 1s per session",
+        "a transcript turn card shows that turn's billed delta (resultSpend over every result in order, compaction-hidden ones included), never the raw cumulative total_cost_usd"
       ],
       "architecturalRules": [
         "reuses the existing accumulate-on-result pass in server/src/sessions.ts that already owns totalCostUsd/totalTokens, instead of a new tracking mechanism",

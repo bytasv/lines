@@ -15,8 +15,10 @@ import {
   isRecoveringResult,
   isStoppedResult,
   resultErrorText,
+  resultSpend,
   subagentParentId,
 } from '@lines/shared';
+import type { ResultSpendPayload } from '@lines/shared';
 
 export interface ToolBlock {
   type: 'tool';
@@ -56,6 +58,8 @@ export interface AgentTurnItem {
 export interface ResultItem {
   kind: 'result';
   key: string;
+  /** This turn's own cost: the billed delta, not the raw cumulative
+   *  `total_cost_usd` the result carries (see shared/resultSpend.ts). */
   costUsd?: number;
   durationMs?: number;
   isError: boolean;
@@ -269,6 +273,10 @@ export function buildTranscript(
   const snapshots: FileSnapshotData[] = [];
   const permissionItems = new Map<string, { kind: 'permission' } & TranscriptItem>();
   const resultItems = new Map<number, ResultItem>();
+  // Last cumulative `total_cost_usd` read in this query lifetime. The field is
+  // cumulative over the lifetime, so each card shows its delta against this —
+  // the same rule `accumulateResultSpend` bills by (shared/resultSpend.ts).
+  let costCumulative: number | undefined;
   let streamingText = '';
   let streamingActive = false;
   let live: LiveActivity | null = null;
@@ -336,6 +344,15 @@ export function buildTranscript(
   };
 
   for (const event of events) {
+    // Every result advances the lifetime's cost reading, including one a
+    // compaction span hides below — skipping it would fold the compaction's cost
+    // into the next card's delta.
+    let resultCostUsd: number | undefined;
+    if (event.kind === 'sdk' && (event.data as { type?: string }).type === 'result') {
+      const spend = resultSpend(event.data as ResultSpendPayload, costCumulative);
+      if (spend) costCumulative = spend.cumulative;
+      resultCostUsd = spend?.billed;
+    }
     // Everything between a compaction's 'requested' and its 'done' belongs to the
     // compaction, not to the conversation: `/compact` rides ordinary prompt text,
     // so a CLI that doesn't dispatch it lets the model answer the literal string.
@@ -673,7 +690,6 @@ export function buildTranscript(
             main.lastText = '';
             sinks.clear();
             const r = msg as {
-              total_cost_usd?: number;
               duration_ms?: number;
               is_error?: boolean;
               subtype?: string;
@@ -687,7 +703,7 @@ export function buildTranscript(
             const resultItem: ResultItem = {
               kind: 'result',
               key: `r${event.seq}`,
-              costUsd: r.total_cost_usd,
+              costUsd: resultCostUsd,
               durationMs: r.duration_ms,
               isError,
               stopped: isStoppedResult(r),

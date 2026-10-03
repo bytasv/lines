@@ -236,8 +236,15 @@ always an estimate and always marked `~`).
   workflow step gets the live figure; steps are billed at `onWorkflowTurnComplete`.
 - **Known limits.** The estimate can step up or down at settle (list price, cache creation billed
   as plain input). A client that connects mid-turn sees no figure until the next broadcast (not in
-  `hello`). `transcript.ts` still shows the raw cumulative `total_cost_usd` on the settled turn
-  card.
+  `hello`).
+
+### Transcript turn cost
+
+The cost on a transcript turn card (and on a result row) is that turn's own billed figure, not
+the raw `total_cost_usd` the `result` carries. `buildTranscript` walks every `result` in order
+through `resultSpend`, carrying the last cumulative reading forward, so each card shows its delta
+by the same lifetime rule the server bills by. Results hidden inside a compaction span still
+advance the reading, so a compaction's cost is never folded into the next card.
 
 ### Usage history
 
