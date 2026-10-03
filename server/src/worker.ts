@@ -483,15 +483,12 @@ async function pump(sessionId: string, state: SessionState, q: Query) {
       const msg = message as Record<string, unknown> & { type: string; session_id?: string };
       if (typeof msg.session_id === 'string') state.claudeSessionId = msg.session_id;
       if (msg.type === 'result') state.busy = false; // turn settled; query stays open
-      // Level signal, REPLACE semantics; nothing is emitted at CLI startup, so an
-      // `init` resets the set. Recorded verbatim — the worker interprets nothing.
-      if (msg.type === 'system') {
-        const subtype = (msg as { subtype?: string }).subtype;
-        if (subtype === 'background_tasks_changed') {
-          state.backgroundTasks = (msg as { tasks?: SessionState['backgroundTasks'] }).tasks ?? [];
-        } else if (subtype === 'init') {
-          state.backgroundTasks = undefined;
-        }
+      // Level signal, REPLACE semantics. Recorded verbatim — the worker interprets
+      // nothing. `init` is emitted at the start of every turn (notification turns
+      // included), so it must not reset the set; a fresh query starts with a fresh
+      // SessionState, which is what covers a new CLI child.
+      if (msg.type === 'system' && (msg as { subtype?: string }).subtype === 'background_tasks_changed') {
+        state.backgroundTasks = (msg as { tasks?: SessionState['backgroundTasks'] }).tasks ?? [];
       }
       if (current()) send({ type: 'event', sessionId, message: msg });
     }

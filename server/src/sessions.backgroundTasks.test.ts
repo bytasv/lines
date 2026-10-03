@@ -102,11 +102,15 @@ test('the records carry the description and type, not just the id', () => {
   ]);
 });
 
-test('a CLI (re)start clears the set', () => {
+const init = { type: 'system', subtype: 'init', model: 'claude-opus-5-5' };
+
+test('a per-turn init leaves the set alone', () => {
+  // The SDK emits `init` at the start of every turn, notification turns
+  // included — it is not a CLI restart marker.
   const h = harness('done');
   h.sessions.handleWorkerEvent('s1', changed(task('a')));
-  h.sessions.handleWorkerEvent('s1', { type: 'system', subtype: 'init', model: 'claude-opus-5-5' });
-  assert.equal(h.s1().backgroundTasks, undefined);
+  h.sessions.handleWorkerEvent('s1', init);
+  assert.deepEqual(h.s1().backgroundTasks?.map((t) => t.id), ['a']);
 });
 
 test('a dead query clears the set', () => {
@@ -249,6 +253,27 @@ test('a result with live tasks still settles the turn', () => {
   assert.equal(h.s1().status, 'done');
   assert.equal(h.s1().turnSource, undefined);
   assert.deepEqual(h.s1().backgroundTasks?.map((t) => t.id), ['a']);
+});
+
+test('a notification turn keeps the remaining tasks through init and result', () => {
+  // The observed sequence: one of two background agents reports back, the SDK
+  // opens a notification turn (`init`), the main thread answers and settles.
+  const h = harness('running', { turnSource: 'user' });
+  const ids = () => h.s1().backgroundTasks?.map((t) => t.id);
+  h.sessions.handleWorkerEvent('s1', changed(task('a'), task('b')));
+  h.sessions.handleWorkerEvent('s1', notification('a'));
+  assert.deepEqual(ids(), ['b']);
+  h.sessions.handleWorkerEvent('s1', init);
+  assert.deepEqual(ids(), ['b']);
+  h.sessions.handleWorkerEvent('s1', {
+    type: 'assistant',
+    parent_tool_use_id: null,
+    message: { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'b still running' }] },
+  });
+  assert.deepEqual(ids(), ['b']);
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  assert.equal(h.s1().status, 'done');
+  assert.deepEqual(ids(), ['b']);
 });
 
 test('a persisted set does not come back from disk', () => {

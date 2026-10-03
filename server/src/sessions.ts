@@ -1129,8 +1129,8 @@ interface LiveState {
    *  a turn that never settles simply leaves no window (see collectChangedPaths). */
   turnBaselines?: RepoBaseline[];
   /** Live background tasks, replaced wholesale from `background_tasks_changed`.
-   *  Per-CLI-process: cleared on `init`, on `ended`, and whenever the query closes
-   *  (see setBackgroundTasks). */
+   *  Per-CLI-process: cleared on `ended` and whenever the query closes — never on
+   *  `init`, which fires every turn (see setBackgroundTasks). */
   backgroundTasks?: BackgroundTaskInfo[];
   /** A failed turn being transparently re-driven rather than settled (see
    *  beginRecovery). Live-only on purpose: a bridge restart mid-recovery leaves the
@@ -2168,10 +2168,10 @@ export class SessionManager {
    * Replace the session's live background-task set, mirroring it onto the meta.
    * The SDK's `background_tasks_changed` is a level signal with REPLACE
    * semantics and is the *only* thing that may put an id **into** the set.
-   * Everything else — `init`, `closeQuery`, `handleWorkerEnded`,
-   * `resetClaudeSession`, `task_notification` and `stopBackgroundTasks` — may
-   * only take ids **out**, so membership is monotone toward empty between level
-   * emissions.
+   * Everything else — `closeQuery`, `handleWorkerEnded`, `resetClaudeSession`,
+   * `task_notification` and `stopBackgroundTasks` — may only take ids **out**,
+   * so membership is monotone toward empty between level emissions. `init` is
+   * not among them: the SDK emits it at the start of every turn.
    *
    * That keeps the original rule's intent (a missed bookend must not wedge a
    * stale running indicator) in a stronger form: every failure mode of a
@@ -5763,8 +5763,10 @@ export class SessionManager {
 
     // Background tasks (backgrounded subagents / Bash commands) outlive the turn
     // that started them. The level signal names every live one, so the set is
-    // replaced wholesale; `init` means the CLI process (re)started, which emits
-    // nothing of its own, so the set resets there.
+    // replaced wholesale. `init` is NOT a restart marker: the SDK emits it at the
+    // start of every turn, including each `task_notification` turn, so it never
+    // touches the set. A CLI child going away is covered by closeQuery,
+    // resetClaudeSession, handleWorkerEnded and the worker-hello reconcile.
     if (msg.type === 'system') {
       const subtype = (msg as { subtype?: string }).subtype;
       if (subtype === 'background_tasks_changed') {
@@ -5782,7 +5784,6 @@ export class SessionManager {
           })),
         );
       } else if (subtype === 'init') {
-        this.setBackgroundTasks(sessionId, []);
         // `init` is the only unsolicited report of MCP connection state. It is
         // lossy (name and status, nothing else) but it is the only one available
         // once the query goes idle, so it is kept rather than discarded.

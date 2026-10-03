@@ -43,8 +43,13 @@ export function sessionRowMeta(session: SessionMeta): {
   }
   // Below the two above on purpose: both of those need the user, and this does
   // not. Deliberately not actionable either — a background task is informational,
-  // and a project folder must not light up for it.
-  if (session.backgroundTasks?.length && !isSessionActive(session.status)) {
+  // and a project folder must not light up for it. It also beats a workflow park
+  // (`waiting-approval`, only ever set by one): the main thread ending its turn
+  // while a background agent works is not a step ready for approval.
+  if (
+    session.backgroundTasks?.length &&
+    (!isSessionActive(session.status) || session.status === 'waiting-approval')
+  ) {
     return { ...BACKGROUND_WORK_META, actionable: false };
   }
   const meta = STATUS_META[session.status] ?? STATUS_META.idle;

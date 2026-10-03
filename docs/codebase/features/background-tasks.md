@@ -30,6 +30,7 @@ while its subagent was still streaming into it. A standalone row survives only f
   transcript state only, never used to derive "is work running" for the live set. Matched onto the
   launching tool card by `tool_use_id` (falling back to a standalone row when no card matches).
 - `server/src/sessions.ts` `handleWorkerEvent` (the `system` branch) and `reconcileWithWorker`
+- `web/src/components/WorkflowStepper.tsx` — background-agent hint on a parked step
 - `web/src/components/Composer.tsx` — Stop button, gated on `interruptible || bgTasks > 0`
 - `web/src/components/SessionView.tsx` — the live strip above the composer
 - `web/src/lib/format.ts` `sessionRowMeta` — the sidebar's "background work" row
@@ -40,14 +41,14 @@ while its subagent was still streaming into it. A standalone row survives only f
   `stopBackgroundTasks` `ClientMessage` variant and its `MESSAGE_AUTHZ` entry
 - `server/src/sessions.ts` — `LiveState.backgroundTasks`, `SessionManager.setBackgroundTasks`
   (private), `SessionManager.stopBackgroundTasks` (public), `recycleIdleQueries`'s exemption, the
-  `background_tasks_changed`/`init` branch in `handleWorkerEvent`, the clears in `closeQuery`,
+  `background_tasks_changed` branch in `handleWorkerEvent` (its `init` branch only captures MCP status), the clears in `closeQuery`,
   `resetClaudeSession` and `handleWorkerEnded`, the hydration clear in the constructor, the
   `reconcileWithWorker` hydration from `LiveSessionInfo.backgroundTasks`, and
   `BACKGROUND_TASK_SYSTEM_SUBTYPES`/`isBackgroundTaskSignal` (see Business rules)
 - `server/src/workerProtocol.ts` — the `stopTask` `BridgeToWorker` message, `PROTOCOL_VERSION` 5,
   `LiveSessionInfo.backgroundTasks`
 - `server/src/worker.ts` — `SessionState.backgroundTasks`, the `pump` tracking of
-  `background_tasks_changed`/`init`, the `hello` report, `case 'stopTask'`
+  `background_tasks_changed`, the `hello` report, `case 'stopTask'`
 - `server/src/workerClient.ts` — `WorkerClient.stopTask`
 - `server/src/index.ts` — `case 'stopBackgroundTasks'`
 - `web/src/lib/transcript.ts` — `ToolBlock.background`, `TaskItem`, the `openTasks` map (now keyed
@@ -99,13 +100,13 @@ while its subagent was still streaming into it. A standalone row survives only f
 
 The CLI emits `system/background_tasks_changed` with a full list of every task still live after
 the change (REPLACE semantics — never a delta). `worker.ts`'s `pump` records the payload on
-`SessionState.backgroundTasks` and clears it on `system/init` (the CLI process (re)started, and
-nothing is emitted at startup). The worker reports the set in `hello.live[].backgroundTasks` —
+`SessionState.backgroundTasks`; `system/init` never touches it (the SDK emits `init` at the start
+of every turn, notification turns included, so it is not a restart marker). The worker reports the set in `hello.live[].backgroundTasks` —
 same shape as the existing `busy` field.
 
 The bridge tracks its own copy in `LiveState.backgroundTasks`, written in exactly one place,
 `SessionManager.setBackgroundTasks`: called from `handleWorkerEvent` on the same
-`background_tasks_changed`/`init` messages (the bridge sees the live event stream directly, not
+`background_tasks_changed` messages (the bridge sees the live event stream directly, not
 just the worker's summary), and from `reconcileWithWorker` using `hello`'s report — which is what
 lets the set survive a **bridge** restart even though `LiveState` itself is bridge-memory-only:
 the worker's CLI children (and their tasks) don't restart with the bridge, so the next `hello`
@@ -205,8 +206,9 @@ transcript card.
 
 - `server/src/sessions.backgroundTasks.test.ts` — `background_tasks_changed` replaces the set
   wholesale (including shrinking and emptying it); the record carries `type`/`description`, not
-  just the id; `system/init`, `handleWorkerEnded`, `resetClaudeSession` and `closeQuery` each
-  clear the set; the meta is broadcast on a membership change and only on one;
+  just the id; `handleWorkerEnded`, `resetClaudeSession` and `closeQuery` each clear the set; a
+  per-turn `init` leaves the set alone, including across a notification turn's `init`, assistant
+  and `result`; the meta is broadcast on a membership change and only on one;
   `recycleIdleQueries()` skips a settled session with a live task and still closes one without; a
   `result` arriving with live tasks still settles the turn to `done`; a persisted
   `backgroundTasks` value never survives load from disk; `reconcileWithWorker` repopulates the set
@@ -234,7 +236,7 @@ transcript card.
   worker's `hello` (via `reconcileWithWorker`) or the next `background_tasks_changed` repopulate
   it for whichever tasks are genuinely still running.
 - **Strengthened invariant** (renegotiates the previous rule below): `background_tasks_changed` is
-  the only thing that may put an id **into** the live set. Everything else — `init`, `closeQuery`,
+  the only thing that may put an id **into** the live set. Everything else — `closeQuery`,
   `handleWorkerEnded`, `resetClaudeSession`, and now `task_notification` and
   `stopBackgroundTasks` — may only take ids **out**. Membership is monotone toward empty between
   level emissions. This keeps the original rule's intent (a missed bookend must never wedge a
@@ -243,7 +245,7 @@ transcript card.
   rule's failure mode was a *permanent non-empty* — observed in a real session where two
   concurrent background Explore agents left the level signal naming only one of them; the set,
   the sidebar badge, the Stop button and the chime suppression all stayed on for 661 more events
-  across three complete turns, clearable only by a CLI restart (`system/init`).
+  across three complete turns, clearable only by a CLI restart.
 - A settled session (not interruptible) that still owns a background task is never recycled —
   closing its query would kill the CLI child and the task with it, silently.
 - `handleWorkerEvent`'s staleness heal (any non-`result` event proves a turn is live; see
@@ -283,6 +285,12 @@ transcript card.
 - The sidebar's "background work" row is not `actionable` — a project tab must not light up for
   it — and is checked after `waiting-permission` and the interrupted-turn state, both of which do
   need the user's attention and outrank it.
+- `system/init` is emitted once per turn, never clears the set, and is not a restart signal. A
+  CLI child going away is covered by `closeQuery`, `resetClaudeSession`, `handleWorkerEnded` and
+  the `hello` reconcile.
+- The sidebar shows "background work" over a workflow park (`waiting-approval`, only ever set by
+  a park), never over `waiting-permission`. A parked step with live tasks shows a stepper hint
+  ("Background agent still running"); Proceed/Approve stays enabled.
 - The finish chime/notification is suppressed while `backgroundTasks` is non-empty; it fires
   normally for the eventual notification turn once the set has emptied.
 
@@ -304,7 +312,7 @@ transcript card.
 - Adding `stopTask` to `BridgeToWorker` is a protocol bump (v4 → v5): unlike an added field on an
   existing message (e.g. `LiveSessionInfo.backgroundTasks` itself, additive and non-breaking), a
   new message *type* is not safely ignorable by an old worker.
-- `worker.ts` stays thin: it records the `background_tasks_changed`/`init` payload onto
+- `worker.ts` stays thin: it records the `background_tasks_changed` payload onto
   `SessionState` and forwards it in `hello`, but does not interpret it — the same convention
   `busy` already follows.
 - The `openTasks` map in `buildTranscript` is keyed by `taskId`, not a single slot like

@@ -238,6 +238,10 @@ export function WorkflowStepper({
    *  else runs a turn on a parked step. The server refuses approve/force-advance for
    *  the duration (see WorkflowEngine.approve), so the button must not offer it. */
   const compacting = waiting && isSessionInterruptible(session.status);
+  /** Parked only because the main thread ended its turn while a background agent
+   *  works on; that agent's result opens a turn that re-opens the step. Approve
+   *  stays available — the user may still proceed without waiting. */
+  const backgroundBusy = waiting && !!session.backgroundTasks?.length;
   /** Server-owned: an approve is in flight and the step's output is being consolidated. */
   const advancing = !!state.advancing;
   /** A force-advance stopped the live turn and the advance waits on it settling. */
@@ -552,11 +556,13 @@ export function WorkflowStepper({
                 ? 'Approved — wrapping up the output…'
                 : stopping
                   ? 'Stopping — the next step starts once it settles'
-                  : stalled
-                    ? 'Never started, and nothing is running'
-                    : resumable
-                      ? 'Done, but the next step never started'
-                      : 'Finished — approve, or reply to keep iterating'}
+                  : backgroundBusy
+                    ? 'Background agent still running — its result will resume this step'
+                    : stalled
+                      ? 'Never started, and nothing is running'
+                      : resumable
+                        ? 'Done, but the next step never started'
+                        : 'Finished — approve, or reply to keep iterating'}
           </Text>
           {/* Busy state is server-owned (state.advancing) so every tab agrees and the
               loader can't hang on a dropped message. Disabled offline: ws.ts silently

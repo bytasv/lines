@@ -3215,6 +3215,7 @@
         "web/src/components/Transcript.tsx",
         "web/src/components/SessionView.tsx",
         "web/src/components/Composer.tsx",
+        "web/src/components/WorkflowStepper.tsx",
         "web/src/lib/alerts.ts",
         "web/src/lib/format.ts",
         "web/src/components/ToolCallCard.tsx",
