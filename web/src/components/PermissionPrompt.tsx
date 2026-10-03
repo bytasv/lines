@@ -134,6 +134,18 @@ function ResolutionBadge({
   );
 }
 
+/**
+ * Whether a resolved card has anything worth expanding. Older persisted items can
+ * lack the input, which would otherwise expand to an empty code block or path.
+ */
+function hasResolvedDetail(data: PermissionRequestData, p: ReturnType<typeof toolPresentation>) {
+  if (p.body == null) return false;
+  const input = data.input ?? {};
+  if (data.toolName === 'Bash') return !!String(input.command ?? '');
+  if (isEditTool(data.toolName)) return !!String(input.file_path ?? input.notebook_path ?? '');
+  return true;
+}
+
 function respond(
   sessionId: string,
   requestId: string,
@@ -153,6 +165,8 @@ function toolPresentation(data: PermissionRequestData, agent: string): {
   denyLabel: string;
   denyMessage?: string;
   body: React.ReactNode;
+  /** One line naming what was asked (command, file, URL), shown on resolved cards. */
+  summary?: string;
 } {
   const input = data.input;
 
@@ -186,11 +200,14 @@ function toolPresentation(data: PermissionRequestData, agent: string): {
         title: `${agent} wants to run a command`,
         allowLabel: 'Run command',
         denyLabel: 'Deny',
+        summary: String(input.command ?? '').split('\n')[0],
         body: (
           <>
-            <Code block style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>
-              {String(input.command ?? '')}
-            </Code>
+            <ScrollArea.Autosize mah={220} type="auto">
+              <Code block style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                {String(input.command ?? '')}
+              </Code>
+            </ScrollArea.Autosize>
             {typeof input.description === 'string' && input.description && (
               <Text size="xs" c="dimmed" mt={4}>
                 {input.description}
@@ -210,6 +227,7 @@ function toolPresentation(data: PermissionRequestData, agent: string): {
             : `${agent} wants to search the web`,
         allowLabel: 'Allow',
         denyLabel: 'Deny',
+        summary: String(input.url ?? input.query ?? ''),
         body: (
           <Text size="sm" ff="monospace" style={{ wordBreak: 'break-all' }}>
             {String(input.url ?? input.query ?? '')}
@@ -231,6 +249,7 @@ function toolPresentation(data: PermissionRequestData, agent: string): {
               : `${agent} wants to edit a file`,
           allowLabel: data.toolName === 'Write' ? 'Write file' : 'Apply edit',
           denyLabel: 'Deny',
+          summary: String(input.file_path ?? input.notebook_path ?? ''),
           body: <EditPreview data={data} />,
         };
       }
@@ -1623,13 +1642,37 @@ function PermissionCard({
   const canApprove = useCan('approvePermissions');
   const owner = useStore((s) => s.access?.ownerProfile ?? null);
   const isPhone = useIsPhone();
+  // A resolved card starts collapsed to its header; expanding shows what was
+  // asked. Never any buttons in there — the requestId is dead.
+  const [expanded, setExpanded] = useState(false);
+  const expandable = !!resolution && hasResolvedDetail(data, p);
+  const toggle = () => setExpanded((v) => !v);
   // Exactly one decision path: the same body, in a different container. A
   // phone-shaped approval card with its own logic is how two answers to "may
   // this run?" would drift apart, and this is the one place where that would be
   // a security bug rather than a layout bug.
   const body = (
     <>
-      <Group gap="xs" mb={resolution ? 0 : 8}>
+      <Group
+        gap="xs"
+        mb={resolution ? (expanded && expandable ? 8 : 0) : 8}
+        wrap={resolution ? 'nowrap' : undefined}
+        {...(expandable && {
+          className: 'tx-row',
+          onClick: toggle,
+          role: 'button',
+          tabIndex: 0,
+          'aria-expanded': expanded,
+          onKeyDown: (e: React.KeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              toggle();
+            }
+          },
+        })}
+      >
+        {expandable &&
+          (expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />)}
         {p.icon}
         <Text size="sm" fw={600}>
           {p.title}
@@ -1639,7 +1682,24 @@ function PermissionCard({
             {RESOLUTION_BADGE[resolution].label}
           </ResolutionBadge>
         )}
+        {resolution && p.summary && (
+          <Text size="xs" c="dimmed" ff="monospace" truncate style={{ minWidth: 0, flex: 1 }}>
+            {p.summary}
+          </Text>
+        )}
       </Group>
+      {expandable && (
+        <Collapse expanded={expanded} transitionDuration={150}>
+          {p.body}
+          {data.resolvedBy === 'plan-readonly' && (
+            <Text size="xs" c="dimmed" mt={6}>
+              Rejected automatically because plan mode is read-only. Turn off{' '}
+              <em>Auto-reject writes in plan mode</em> in Settings → Sessions to review these
+              yourself.
+            </Text>
+          )}
+        </Collapse>
+      )}
       {resolution === 'expired' && (
         <Text size="xs" c="dimmed" mt={4}>
           This request is no longer active (the turn ended or the server restarted). Re-send your

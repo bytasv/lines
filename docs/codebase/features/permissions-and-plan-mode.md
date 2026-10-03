@@ -143,8 +143,8 @@ deliverable is written and reviewed.
 - `web/src/lib/transcript.ts` — carries `resolvedBy` from the resolution event onto the merged
   transcript item; `buildTranscript` (`permission` case), `withPlanFileText`; the permission-card
   merge copies `denyMessage` onto the resolved card
-- `web/src/components/PermissionPrompt.tsx` — `ResolutionBadge`, `SOURCE_NOTE`, `PlanApproval`,
-  `PlanReply` (resolved-card reply attribution); `CommentablePlan` (selection-to-comment
+- `web/src/components/PermissionPrompt.tsx` — `ResolutionBadge`, `SOURCE_NOTE`, `PermissionCard`
+  (resolved-card summary and expand), `PlanApproval`, `PlanReply` (resolved-card reply attribution); `CommentablePlan` (selection-to-comment
   affordance, the hover bubble), `locateQuotes`/`flattenText` (quote-to-`Range` anchoring for the
   CSS Custom Highlight paint)
 - `web/src/lib/files.ts` — `useFileContent` (the plan card's live re-read)
@@ -375,6 +375,13 @@ resolves *before* `canUseTool` ever runs — the same reasoning that already put
 `recordAutoDeny` writes `resolution: 'deny', auto: true, resolvedBy: 'plan-readonly', denyMessage:
 PLAN_MODE_REJECT_MESSAGE` to the transcript, so the rejection is visible there exactly like every
 other resolution, distinct from a human-clicked deny.
+
+The card stays reviewable: a resolved `PermissionCard` (any tool except the plan and question
+cards) shows a one-line summary of what was asked after its badge — the first line of a Bash
+command, the file path of a write/edit, or the URL/query of a web call — and expands to the
+original request (command, edit preview, JSON). An auto-denied card adds a note that plan mode is
+read-only and names the setting that turns the rejection off. The expanded view never carries
+action buttons, and an item persisted without its input has nothing to expand.
 
 ### Plan review card
 
@@ -672,6 +679,9 @@ is open, otherwise the inline one.
 - An auto-deny (`resolvedBy: 'plan-readonly'`) stays visible in the transcript: `isRedundant` hides
   an auto item only when it resolved `allow`, so the user can see what plan mode rejected instead
   of every auto-approved read *and* every auto-denied write disappearing the same way.
+- A resolved permission card's request body is visible to anyone who can see the transcript,
+  guests included; only a *pending* body is withheld, and only because the approve buttons would
+  be useless to them. Transcript tool cards already expose the same input.
 - Credential paths (`~/.ssh`, `~/.aws`, `.env`) always escalate even if nested under a `plans`
   directory — the sensitive check runs before the plan check.
 - Any other out-of-root file access is unaffected and still escalates.
