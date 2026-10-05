@@ -79,6 +79,7 @@ current one.
 | Supabase (database hosting) | Hosts the Lines storage database, so it holds everything listed under "Stored on Lines storage". |
 | The VPS provider hosting linesapp.cloud | Runs the relay, the storage server and the web servers, and holds their logs. Like any host, it has access to the machine. |
 | Your browser's push service (Apple, Google, Mozilla or Microsoft) | Only if you turn on push alerts. Each alert carries the session name and a short status ("Task complete", "Needs approval"). The payload is encrypted to your browser; the push service sees when alerts are sent. |
+| TypeSafe (smart routing) | Only if you turn on smart routing in Settings (off by default) and enter your own TypeSafe key. Before each turn, your machine sends that turn's prompt, cut short if it is long, and your routing rule to TypeSafe's API, which picks the model and reasoning effort for the turn. |
 | Cloudflare R2 | As above. |
 | Anthropic or OpenAI | As above, under your own account. |
 
