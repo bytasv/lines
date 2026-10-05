@@ -116,9 +116,10 @@ const config = loadConfig(ROOT);
 /**
  * Squirrel.Mac verifies the code signature of the replacement app, so an
  * in-place install needs a Developer ID signed, notarized build. Releases are
- * signed that way now, so the updater installs in place. Builds from before
- * signing still send the user to the download page, which is how they pick up
- * the first signed build by hand.
+ * signed that way now, so updates download in the background and install on a
+ * restart (see startUpdateChecks). Off, the shell only checks and points at the
+ * download page — all that 0.2.43 and earlier ever do, which is why those
+ * builds pick up the first self-installing one by hand.
  */
 const CAN_SELF_INSTALL = true;
 
@@ -222,6 +223,16 @@ let checkRetryTimer: NodeJS.Timeout | null = null;
  * path is unexercisable outside a DMG — which is how a broken release shipped.
  */
 const FORCE_UPDATE_CHECK = process.env.LINES_FORCE_UPDATE_CHECK === '1';
+/**
+ * Pretend the feed offered this version, without a check. Real checks need a live
+ * feed, so this is the only practical way to exercise the update surfaces (tray
+ * row, notification, title marker, the browser's banner and pane) without a
+ * release. LINES_FAKE_UPDATE_STATE picks where it lands: `available` (the
+ * default), `downloading` or `ready`. A fake 'ready' never restarts.
+ */
+const FAKE_UPDATE_VERSION = process.env.LINES_FAKE_UPDATE_VERSION;
+const FAKE_UPDATE_STATE: 'available' | 'downloading' | 'ready' =
+  (['downloading', 'ready'] as const).find((s) => s === process.env.LINES_FAKE_UPDATE_STATE) ?? 'available';
 /** Where "Open Lines" goes. Read once at boot from {@link PREFS_FILE}. */
 let openIn: 'desktop' | 'browser' = 'desktop';
 /**
@@ -236,6 +247,8 @@ let keepAwake = true;
  * boot, which is the same bug as a setting that does not persist.
  */
 let loginItemDefaulted = false;
+/** The user said no to moving the app into Applications; never ask again. */
+let moveToApplicationsDeclined = false;
 /**
  * The live `powerSaveBlocker` id, or null when nothing is held. A leaked id
  * outlives its turn and keeps the Mac awake forever, so every path that can end
@@ -414,10 +427,12 @@ function loadPrefs() {
       openIn?: unknown;
       keepAwake?: unknown;
       loginItemDefaulted?: unknown;
+      moveToApplicationsDeclined?: unknown;
     };
     if (raw.openIn === 'browser' || raw.openIn === 'desktop') openIn = raw.openIn;
     if (typeof raw.keepAwake === 'boolean') keepAwake = raw.keepAwake;
     if (raw.loginItemDefaulted === true) loginItemDefaulted = true;
+    if (raw.moveToApplicationsDeclined === true) moveToApplicationsDeclined = true;
   } catch {
     /* absent or corrupt: the default stands */
   }
@@ -428,7 +443,7 @@ function savePrefs() {
     fs.mkdirSync(APP_ROOT, { recursive: true });
     fs.writeFileSync(
       PREFS_FILE,
-      `${JSON.stringify({ openIn, keepAwake, loginItemDefaulted }, null, 2)}\n`,
+      `${JSON.stringify({ openIn, keepAwake, loginItemDefaulted, moveToApplicationsDeclined }, null, 2)}\n`,
     );
   } catch (err) {
     shellLog(`[prefs] could not save: ${(err as Error).message}`);
@@ -635,49 +650,92 @@ function setUpdateStatus(status: UpdateStatus) {
 }
 
 /**
- * Announce a newly detected version once, natively.
+ * Announce an update once, natively.
  *
  * The tray menu already lists the update, but nobody opens the tray menu, so a
  * shipped release went unnoticed. Deduped per version rather than per state
- * transition: the 6h re-check re-fires `update-available` with the same version,
- * and nagging four times a day is how a notification gets muted. The dedup is
- * memory-only on purpose — a fresh launch with an update still pending posts one
- * reminder, which is the behaviour we want.
+ * transition: the 6h re-check re-fires the same version, and nagging four times a
+ * day is how a notification gets muted. The dedup is memory-only on purpose — a
+ * fresh launch with an update still pending posts one reminder, which is the
+ * behaviour we want.
+ *
+ * A self-installing build announces 'ready', once the download is staged, never
+ * the download starting: there is nothing to click until then.
  */
-function notifyUpdateAvailable(version: string) {
-  // macOS can drop a notification from an ad-hoc signed bundle, and Electron's
-  // `'failed'` event is Windows-only — so delivery is undetectable from in here.
-  // Recording what we attempted is the only way to tell "never posted" from
-  // "posted and swallowed", and the tray row is the surface that does not depend
-  // on it either way.
+function notifyUpdate(version: string, kind: 'available' | 'ready') {
+  // Electron's `'failed'` event is Windows-only, so delivery is undetectable from
+  // in here. Recording what we attempted is the only way to tell "never posted"
+  // from "posted and swallowed", and the tray row is the surface that does not
+  // depend on it either way.
   shellLog(
-    `[update] notify version=${version} supported=${Notification.isSupported()} deduped=${version === notifiedUpdateVersion}`,
+    `[update] notify ${kind} version=${version} supported=${Notification.isSupported()} deduped=${version === notifiedUpdateVersion}`,
   );
   if (version === notifiedUpdateVersion || !Notification.isSupported()) return;
   notifiedUpdateVersion = version;
-  const notification = new Notification({
-    title: `Lines ${version} is available`,
-    body: 'Click to download. Sessions keep running until you install it.',
+  const notification =
+    kind === 'ready'
+      ? new Notification({
+          title: `Lines ${version} is ready`,
+          body: 'Click to restart and update. It takes a few seconds.',
+        })
+      : new Notification({
+          title: `Lines ${version} is available`,
+          body: 'Click to download. Sessions keep running until you install it.',
+        });
+  notification.on('click', () => {
+    if (kind === 'ready') void confirmRestartForUpdate();
+    else void shell.openExternal(config.downloadUrl);
   });
-  notification.on('click', () => void shell.openExternal(config.downloadUrl));
   notification.show();
 }
 
+/**
+ * Swap in the staged update and relaunch on it.
+ *
+ * Only from 'ready': the bridge forwards a browser's request without knowing the
+ * shell's state, and before 'ready' there is nothing staged to install. Squirrel.Mac
+ * closes the windows, the `before-quit` hook stops both children, and the new
+ * version comes back up on its own.
+ */
 function restartForUpdate() {
-  if (!CAN_SELF_INSTALL) {
-    // Deliberately inert: an ad-hoc signed bundle cannot be replaced in place,
-    // and pretending otherwise would relaunch the old version and look like a
-    // silent failure. The tray offers the download page instead.
-    console.log('[update] self-install needs a signed build — sending the user to the download page');
-    void shell.openExternal(config.downloadUrl);
+  if (!CAN_SELF_INSTALL || update.state !== 'ready') {
+    shellLog(`[update] restart requested in state=${update.state} — nothing staged to install`);
     return;
   }
+  if (FAKE_UPDATE_VERSION) {
+    shellLog('[update] restart requested for a fake update — not restarting');
+    return;
+  }
+  shellLog(`[update] restarting to install ${update.version}`);
   autoUpdater.quitAndInstall();
 }
 
 /**
- * Update checks only. `autoDownload` stays off because a downloaded update we
- * cannot install is just wasted bandwidth and a misleading "ready" state.
+ * The restart the tray and the notification offer. Unlike a browser's, which the
+ * bridge refuses mid-turn, this one is the user at the machine deciding, so a
+ * running turn gets a warning rather than a refusal.
+ */
+async function confirmRestartForUpdate() {
+  if (turnActive) {
+    app.focus({ steal: true });
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Cancel', 'Restart anyway'],
+      defaultId: 0,
+      cancelId: 0,
+      message: 'A session is still running',
+      detail: 'Restarting now stops it mid-turn. Lines comes back on the new version in a few seconds.',
+    });
+    if (response !== 1) return;
+  }
+  restartForUpdate();
+}
+
+/**
+ * Checks, and on a signed build ({@link CAN_SELF_INSTALL}) the rest of the update
+ * too: a newer version downloads in the background, Squirrel.Mac stages it, and
+ * the user restarts into it when it suits them — from the tray, the notification
+ * or a browser. Quitting normally installs it as well.
  *
  * Every exit from this function leaves a state the tray can render. A release
  * that announced itself to nobody is what motivated that: previously a rejected
@@ -698,14 +756,15 @@ function startUpdateChecks() {
     `[update] boot version=${APP_VERSION} appGetVersion=${app.getVersion()} packaged=${app.isPackaged} feed=${config.updateFeedUrl || '(none)'} force=${FORCE_UPDATE_CHECK}`,
   );
 
-  // Real checks need a live feed, which makes every update surface (notification,
-  // tray marker, banner) unexercisable without a release. This is the only
-  // practical way to verify or regression-check them.
-  if (process.env.LINES_FAKE_UPDATE_VERSION) {
-    const version = process.env.LINES_FAKE_UPDATE_VERSION;
-    shellLog(`[update] LINES_FAKE_UPDATE_VERSION=${version} — skipping the real check`);
-    setUpdateStatus({ state: 'available', version });
-    notifyUpdateAvailable(version);
+  if (FAKE_UPDATE_VERSION) {
+    const version = FAKE_UPDATE_VERSION;
+    shellLog(`[update] LINES_FAKE_UPDATE_VERSION=${version} state=${FAKE_UPDATE_STATE} — skipping the real check`);
+    if (FAKE_UPDATE_STATE === 'downloading') {
+      setUpdateStatus({ state: 'downloading', version, progress: 40 });
+    } else {
+      setUpdateStatus({ state: FAKE_UPDATE_STATE, version });
+      notifyUpdate(version, FAKE_UPDATE_STATE);
+    }
     return;
   }
 
@@ -728,13 +787,36 @@ function startUpdateChecks() {
     // `setFeedURL` never reads `app-update.yml`, so this pair genuinely checks the
     // real feed from a checkout.
     autoUpdater.forceDevUpdateConfig = FORCE_UPDATE_CHECK;
-    autoUpdater.autoDownload = false;
-    autoUpdater.autoInstallOnAppQuit = false;
+    autoUpdater.autoDownload = CAN_SELF_INSTALL;
+    // Besides installing on a normal quit, this hands the download to Squirrel.Mac
+    // straight away, so the restart that follows takes seconds, not an unpack.
+    autoUpdater.autoInstallOnAppQuit = CAN_SELF_INSTALL;
     autoUpdater.setFeedURL({ provider: 'generic', url: config.updateFeedUrl });
     autoUpdater.on('update-available', (info: { version: string }) => {
       shellLog(`[update] available version=${info.version}`);
+      if (CAN_SELF_INSTALL) {
+        // Straight to downloading: autoDownload has already started it, and an
+        // "available" with nothing to click would only flash past in the tray.
+        setUpdateStatus({ state: 'downloading', version: info.version, progress: 0 });
+        return;
+      }
       setUpdateStatus({ state: 'available', version: info.version });
-      notifyUpdateAvailable(info.version);
+      notifyUpdate(info.version, 'available');
+    });
+    autoUpdater.on('download-progress', (progress: { percent: number }) => {
+      if (update.state !== 'downloading') return;
+      // In tens: every step reinstalls the tray menu and goes out to every
+      // browser, and a menu swapped a hundred times under an open menu is unusable.
+      const step = Math.floor(progress.percent / 10) * 10;
+      if (step === update.progress) return;
+      setUpdateStatus({ ...update, progress: step });
+    });
+    // Fires once the zip is downloaded; Squirrel.Mac then stages it in the
+    // background, and a restart before it finishes simply waits for it.
+    autoUpdater.on('update-downloaded', (info: { version: string }) => {
+      shellLog(`[update] downloaded version=${info.version}`);
+      setUpdateStatus({ state: 'ready', version: info.version });
+      notifyUpdate(info.version, 'ready');
     });
     autoUpdater.on('update-not-available', () => {
       shellLog(`[update] not available — ${APP_VERSION} is current`);
@@ -742,6 +824,14 @@ function startUpdateChecks() {
     });
     autoUpdater.on('error', (err: Error) => {
       shellLog(`[update] error ${err.message}`);
+      // A version we found but could not download or stage (a dropped network,
+      // a copy macOS runs read-only) falls back to the manual path: the tray row
+      // and the browser banner offer the download page. The next scheduled check
+      // tries again, reusing whatever was already downloaded.
+      if ((update.state === 'downloading' || update.state === 'ready') && update.version) {
+        setUpdateStatus({ state: 'available', version: update.version, message: err.message });
+        return;
+      }
       setUpdateStatus({ state: 'error', message: err.message });
     });
     updatesEnabled = true;
@@ -771,6 +861,13 @@ function startUpdateChecks() {
  * so a double-click on the menu item is safe.
  */
 async function runCheck({ manual }: { manual?: boolean }): Promise<void> {
+  // Nothing to look for while a version is downloading or waiting for a restart:
+  // another check would only fetch and stage the same update again.
+  if (update.state === 'downloading' || update.state === 'ready') {
+    shellLog(`[update] check skipped manual=${Boolean(manual)} — ${update.state} ${update.version}`);
+    if (manual) await answerManualCheck(null);
+    return;
+  }
   checking = true;
   updateTray();
   shellLog(`[update] checking manual=${Boolean(manual)}`);
@@ -816,6 +913,29 @@ function armRetry() {
  */
 async function answerManualCheck(failure: string | null) {
   app.focus({ steal: true });
+  if (update.state === 'ready' && update.version) {
+    const { response } = await dialog.showMessageBox({
+      type: 'info',
+      buttons: ['Later', 'Restart now'],
+      defaultId: 1,
+      cancelId: 0,
+      message: `Lines ${update.version} is ready to install`,
+      detail: turnActive
+        ? 'A session is still running, and restarting now stops it mid-turn.'
+        : 'Lines restarts on the new version in a few seconds.',
+    });
+    if (response === 1) restartForUpdate();
+    return;
+  }
+  if (update.state === 'downloading' && update.version) {
+    await dialog.showMessageBox({
+      type: 'info',
+      buttons: ['OK'],
+      message: `Downloading Lines ${update.version}`,
+      detail: 'Lines asks you to restart once it is ready. Sessions keep running until then.',
+    });
+    return;
+  }
   if (update.state === 'available' && update.version) {
     const { response } = await dialog.showMessageBox({
       type: 'info',
@@ -1807,10 +1927,22 @@ function agoLabel(at: number): string {
  * teaches the user to ignore the only signal that matters.
  */
 function updateRow(): { label: string; enabled: boolean; click?: () => void } {
+  // A staged or downloading version first, ahead of the checking and disabled
+  // cases: runCheck skips while either is in progress, and an offered version is
+  // what the user can act on (or wait for) whatever automatic checking is doing.
+  // These, and 'available', are also the rows LINES_FAKE_UPDATE_VERSION exercises.
+  if (update.state === 'ready') {
+    return {
+      label: `Restart to update to ${update.version}`,
+      enabled: true,
+      click: () => void confirmRestartForUpdate(),
+    };
+  }
+  if (update.state === 'downloading') {
+    return { label: `Downloading ${update.version}… ${update.progress ?? 0}%`, enabled: false };
+  }
   if (checking) return { label: 'Checking for updates…', enabled: false };
-  // Ahead of the disabled case: a version we have actually been offered is
-  // actionable whatever the state of automatic checking, and this is also the
-  // only row `LINES_FAKE_UPDATE_VERSION` can exercise.
+  // From a build that cannot install it, or a download that failed: the manual way.
   if (update.state === 'available') {
     return {
       label: `Update available: ${update.version} — download`,
@@ -1840,7 +1972,7 @@ function updateTray() {
   // dock badge is not an option because hosted mode hides the dock tile when no
   // window is open. Setting '' on any other state is what clears it (including
   // available -> idle).
-  const title = update.state === 'available' ? ' ●' : '';
+  const title = update.state === 'available' || update.state === 'ready' ? ' ●' : '';
   const alive = (c: ChildProcess | null) => Boolean(c && c.exitCode === null && !c.killed);
   // Read once per rebuild rather than per row: this runs every 2s, and the menu
   // is only reinstalled when its rendered text changes (see the signature below).
@@ -2080,6 +2212,42 @@ if (!app.requestSingleInstanceLock()) {
   void start();
 }
 
+/**
+ * Squirrel.Mac replaces the app where it sits, which it cannot do on the mounted
+ * DMG or on the read-only copy macOS runs a quarantined download from. So a
+ * packaged app outside Applications offers, once, to move itself there.
+ * Declining is remembered; an update that then fails to install falls back to
+ * the download page like any other failed install.
+ *
+ * True when the move is under way and the app is about to relaunch from there.
+ */
+async function offerMoveToApplications(): Promise<boolean> {
+  if (!app.isPackaged || process.platform !== 'darwin' || moveToApplicationsDeclined) return false;
+  if (app.isInApplicationsFolder()) return false;
+  app.focus({ steal: true });
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['Move to Applications', 'Not now'],
+    defaultId: 0,
+    cancelId: 1,
+    message: 'Move Lines to your Applications folder?',
+    detail: 'Lines can only update itself from there. It reopens from Applications right away.',
+  });
+  if (response !== 0) {
+    moveToApplicationsDeclined = true;
+    savePrefs();
+    shellLog('[shell] move to Applications declined');
+    return false;
+  }
+  try {
+    shellLog('[shell] moving to Applications');
+    return app.moveToApplicationsFolder();
+  } catch (err) {
+    shellLog(`[shell] move to Applications failed: ${(err as Error).message}`);
+    return false;
+  }
+}
+
 async function start() {
   await app.whenReady();
   // Google refuses OAuth from anything it recognises as an embedded browser, and
@@ -2089,6 +2257,8 @@ async function start() {
   installMediaPermissions();
   loadPrefs();
   shellLog(`[shell] start v${APP_VERSION} instance=${INSTANCE} relayMode=${RELAY_MODE}`);
+  // Before either child exists: a move relaunches the app from Applications.
+  if (await offerMoveToApplications()) return;
   // Logging only. A post-sleep "won't connect" is unreadable without knowing
   // exactly when the machine slept and woke.
   for (const event of ['suspend', 'resume', 'lock-screen', 'unlock-screen'] as const) {

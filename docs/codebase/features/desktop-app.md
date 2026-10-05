@@ -111,14 +111,17 @@ point a user at.
   that has to be diagnosable after the fact goes through it, including `autoUpdater.logger`
 - `runCheck()` / `armRetry()` / `answerManualCheck()` — one update check, automatic or manual; a
   failed automatic check arms a single 5-minute retry, a manual one always answers with a dialog
-- `updateRow()` — the tray's always-present update line; precedence is checking, then an offered
-  version (even with automatic checks off — the only row `LINES_FAKE_UPDATE_VERSION` can exercise),
-  then disabled-and-why, then failed, then last-checked, then never-checked
+- `updateRow()` — the tray's always-present update line; precedence is a staged version ("Restart
+  to update to X"), then a download in progress, then checking, then an offered version (manual
+  download), then disabled-and-why, then failed, then last-checked, then never-checked
 - `updatesEnabled` / `updatesDisabledReason` — whether the updater actually started, and why it
   didn't when it didn't
-- `CAN_SELF_INSTALL` — gates `restartForUpdate`'s real `quitAndInstall()` call; true now that
-  releases are signed and notarized, but see Update flow: nothing downloads an update or
-  triggers a restart yet
+- `CAN_SELF_INSTALL` — turns on the background download, staging and `quitAndInstall()`; true
+  now that releases are signed and notarized. Off, the shell only checks (0.2.43 and earlier)
+- `restartForUpdate()` / `confirmRestartForUpdate()` — install the staged update and relaunch
+  (only from `'ready'`); the tray's and the notification's version warns first while a turn runs
+- `notifyUpdate(version, kind)` — the once-per-version notification, `'ready'` or `'available'`
+- `offerMoveToApplications()` — the once-only offer to move a packaged app into Applications
 - `openPairingWindow` — the data-URL window showing a pairing code
 - `UpdateManager.requestRestart` / `.busy` / `.current`
 - `loadConfig()` / `isLocalMode()` (`desktop/src/config.ts`)
@@ -275,20 +278,33 @@ Update state flows bridge → shell → bridge: the shell pushes `updateStatus` 
 — or refuses outright if any session is active. Every send in both directions is guarded on
 `connected` with a no-op error callback rather than sent bare: a respawned-after-crash or
 killed-on-quit child leaves a non-null handle whose channel is already closed, and `send` into a
-closed channel throws synchronously — uncaught, that took the whole shell down. `electron-updater` only *checks*
-(`autoDownload: false`); an available update surfaces in the tray as a link to the download page
-rather than an in-place install. `CAN_SELF_INSTALL` is true now that releases are signed, but
-the updater still has `autoDownload` off and no UI sends `installUpdate`, so in-place install is
-not reachable yet; builds from before signing take the download-page path and install the first
-signed build by hand once.
+closed channel throws synchronously — uncaught, that took the whole shell down.
 
-Detecting an update announces it three ways: a native macOS notification (`notifyUpdateAvailable`,
-deduped per version in memory — `notifiedUpdateVersion` — so the 6-hourly re-check doesn't re-nag
-for a version already shown; a fresh app launch with an update still pending notifies once, which
-is the intended reminder), a persistent `tray.setTitle(' ●')` marker set from `updateTray()`
-(macOS-only, cleared by any non-`'available'` state), and, for a browser, the blue `UpdateBanner`
-pill (see [turn-recovery](turn-recovery.md#multi-machine) for its place in the banner-precedence
-stack). `buildHello`'s owner branch carries `update: updates.current()` so a browser opened *after*
+On a signed build (`CAN_SELF_INSTALL`) the update installs itself. `autoDownload` fetches a found
+version in the background (`'downloading'`, with progress in steps of ten so the tray menu and the
+browsers are not updated on every chunk), and `autoInstallOnAppQuit` hands the zip to Squirrel.Mac
+straight away, so it is staged by the time the user restarts. `'update-downloaded'` sets `'ready'`.
+From there the user restarts into it: the tray row "Restart to update to X", the `'ready'`
+notification, the manual check's dialog, or a browser's `installUpdate` (refused by the bridge
+while a session is active). Quitting normally installs it too. `restartForUpdate()` acts only from
+`'ready'`; Squirrel.Mac closes the windows, `before-quit` stops both children, and the new version
+relaunches itself. While a version is downloading or staged, `runCheck()` skips, since another
+check would only stage the same update again. A download or staging failure for a known version
+(a dropped network, an app copy macOS runs read-only) falls back to `'available'` with the error
+in `message`: the tray row and the banner then offer the download page, and the next scheduled
+check retries from the cached download. Builds up to 0.2.43 only check, and their users install
+the first self-installing build by hand once.
+
+Detecting an update announces it three ways: a native macOS notification (`notifyUpdate`, posted
+for `'ready'` on a self-installing build and for `'available'` otherwise, deduped per version in
+memory — `notifiedUpdateVersion` — so the 6-hourly re-check doesn't re-nag for a version already
+shown; a fresh app launch with an update still pending notifies once, which is the intended
+reminder), a persistent `tray.setTitle(' ●')` marker set from `updateTray()` (macOS-only, shown
+for `'available'` and `'ready'`), and, for a browser, the blue `UpdateBanner` pill (see
+[turn-recovery](turn-recovery.md#multi-machine) for its place in the banner-precedence stack). The
+pill reads "Restart to update" for `'ready'` and "Download" for `'available'`; the bridge re-sends
+a `'ready'` status whenever a session starts or finishes (`UpdateManager.syncBlocked`), so its
+`restartBlocked` flag follows the sessions rather than the moment the shell last spoke. `buildHello`'s owner branch carries `update: updates.current()` so a browser opened *after*
 detection still learns about it — the guest branch omits the field, since `installUpdate` is
 owner-gated and a guest has no business updating somebody else's machine.
 
@@ -296,8 +312,10 @@ None of those three surfaces is trustworthy on its own — a native notification
 dropped by macOS, and Electron's delivery-failure event is
 Windows-only — so a fourth, unconditional one exists: **every outcome of a check has a permanent
 tray row**, produced by `updateRow()` and no longer gated on `state === 'available'` the way it used
-to be. In order of precedence: `Checking for updates…` while one is in flight; an offered version
-(checked first, so `LINES_FAKE_UPDATE_VERSION` still renders it even with real checks disabled);
+to be. In order of precedence: `Restart to update to X` once a version is staged; `Downloading X…
+NN%` while one downloads; `Checking for updates…` while a check is in flight; an offered version
+for manual download (checked ahead of the disabled case, so `LINES_FAKE_UPDATE_VERSION` still
+renders it even with real checks disabled);
 `Automatic updates off — <reason>` when `startUpdateChecks()` never actually started one (no feed
 URL in this build, a dev build without `LINES_FORCE_UPDATE_CHECK=1`, or the updater throwing on
 start); `Update check failed — open logs` on `'error'` (the message itself stays in the log, since a
@@ -319,9 +337,15 @@ could otherwise go days between checks. `LINES_FORCE_UPDATE_CHECK=1` makes an un
 the real feed — `electron-updater` otherwise gates every check on `app.isPackaged` — the only way to
 exercise the network path itself without a signed build.
 
-Setting `LINES_FAKE_UPDATE_VERSION` still short-circuits `startUpdateChecks()` straight to the
-`'available'` state (skipping the real feed check entirely) — the fastest way to exercise the three
-announcement surfaces without a packaged build and a published release.
+Setting `LINES_FAKE_UPDATE_VERSION` still short-circuits `startUpdateChecks()` (skipping the real
+feed check entirely) — the fastest way to exercise the announcement surfaces without a packaged
+build and a published release. It lands in `'available'` unless `LINES_FAKE_UPDATE_STATE` says
+`downloading` or `ready`; a fake `'ready'` never restarts.
+
+A packaged app running outside Applications offers once at launch, before either child starts, to
+move itself there (`app.moveToApplicationsFolder()` relaunches it), because Squirrel.Mac cannot
+replace a copy on the mounted DMG or one macOS runs read-only from Downloads. Declining is saved
+in `desktop.json`; an update that then fails to install falls back to the download page.
 
 ### Packaging
 
@@ -497,10 +521,10 @@ and push first. See [whats-new](whats-new.md).
   means there is no bridge-only hot-patch path yet.
 - Closing the window does not quit the app; that is the point of a menu-bar app, and it must not
   kill an in-flight turn.
-- `restartForUpdate` installs in place only because releases are signed and notarized
-  (`CAN_SELF_INSTALL` true; Squirrel.Mac verifies the replacement app's signature). The update
-  flow behind it is still check-only (`autoDownload` off, no download/ready states, no UI
-  action), so in practice users are still pointed at the download page.
+- An update installs only from `'ready'`, and only on a signed build (`CAN_SELF_INSTALL`):
+  Squirrel.Mac verifies that the replacement carries the same Developer ID signature. A browser's
+  restart is refused while a session is active; the tray's and the notification's warn and let the
+  user at the machine decide. Nothing restarts the app on its own.
 - The update notification fires at most once per version (in-memory `notifiedUpdateVersion`
   guard), not once per state transition — the 6h re-check re-fires `update-available` with the
   same version, and without the guard the user is nagged four times a day.
@@ -528,7 +552,8 @@ and push first. See [whats-new](whats-new.md).
 - A missing or too-old CLI refuses the turn with an actionable sentence, in the browser and in
   the tray — never a raw SDK error.
 - `LINES_CLAUDE_PATH` is exclusive: set it, and no other location is tried.
-- Update checks only notify. The tray links the download page.
+- Updates download in the background and install on a restart the user chooses, or on a normal
+  quit. A failed download or install falls back to the download page.
 - A bridge child refuses to start if another live process already holds this machine's
   single-instance lock — **unless** that other process names `instance: 'desktop'` (i.e. it is a
   previous tray bridge), in which case ours preempts it instead of refusing. This is a second,
@@ -690,8 +715,9 @@ and push first. See [whats-new](whats-new.md).
   Users on a build from before signing still need one manual install of the first signed build.
   The signing credentials (the exported certificate and its password, the App Store Connect
   `.p8`) can sign software as the team: keep them only in GitHub secrets and a password manager.
-  Wiring in-place updates (download, progress, ready state, a restart action) is the remaining
-  step beyond `CAN_SELF_INSTALL`.
+- In-place updates restart only when asked (tray, notification, browser) or on a normal quit,
+  never silently: a menu-bar app supervising agent turns must not restart under one, and a quit
+  alone might never come for an app left running.
 - Requiring an installed Claude Code trades 231 MB for an install step. If that proves too much
   friction, shipping the platform binary becomes a build flag, not a rewrite — the
   `pathToClaudeCodeExecutable` indirection is the seam.

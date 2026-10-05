@@ -1,13 +1,14 @@
 import { useState } from 'react';
-import { Box, CloseButton, Text } from '@mantine/core';
+import { Box, CloseButton, Text, UnstyledButton } from '@mantine/core';
 import { useStore } from '../store';
+import { send } from '../ws';
 import { DESKTOP_DOWNLOAD_URL } from '../lib/storage';
 import { useIsPhone } from '../lib/layout';
 
 const DISMISSED_KEY = 'lines.updateDismissed';
 
 /**
- * Indigo pill shown when the desktop shell has spotted a newer release.
+ * Indigo pill shown when the desktop shell has a newer release for this machine.
  *
  * News, not an outage, which is why it is the calmest colour and its dismissal
  * outlives a reload (per version, in localStorage). All the pills render at the same fixed
@@ -15,10 +16,13 @@ const DISMISSED_KEY = 'lines.updateDismissed';
  * (bridge-down, then contract skew, then worker-down, then storage-down — see
  * StorageBanner), and hides for a guest, whose machine this isn't.
  *
- * The action is a plain download link rather than the owner-gated `installUpdate`
- * message: with self-install off, a restart request only opens the download page
- * on the *tray* machine, which a remote browser never sees — the click would look
- * like it did nothing. Hidden on a phone, because that link is the desktop download.
+ * Two shapes. A self-installing shell downloads in the background and reports
+ * 'ready': the action restarts the app on that machine into the new version,
+ * through the owner-gated `installUpdate`, which the bridge refuses while a
+ * session is running. 'available' comes from a shell that cannot install it (one
+ * from before self-install, or a download that failed): the action is the
+ * download page. Hidden on a phone, where the header has no room; Settings →
+ * Updates carries both actions there.
  */
 export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
   const status = useStore((s) => s.updateStatus);
@@ -28,6 +32,9 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
   const access = useStore((s) => s.access);
   const skew = useStore((s) => s.protocolSkew);
   const [dismissed, setDismissed] = useState(() => localStorage.getItem(DISMISSED_KEY));
+  // The version this tab asked to restart into, so the pill can say so until the
+  // bridge goes away under it.
+  const [restarting, setRestarting] = useState<string | null>(null);
   const isPhone = useIsPhone();
 
   if (connection !== 'connected') return null;
@@ -35,13 +42,23 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
   if (worker?.connected === false || storage?.available === false) return null;
   if (access) return null;
   if (isPhone) return null;
-  if (status?.state !== 'available' || !DESKTOP_DOWNLOAD_URL) return null;
+  const ready = status?.state === 'ready';
+  if (!ready && (status?.state !== 'available' || !DESKTOP_DOWNLOAD_URL)) return null;
   const version = status.version;
-  // Per-version, so dismissing 0.1.4 doesn't also silence 0.1.5. `UpdateStatus`
-  // allows 'available' with no version, so those share one key rather than
-  // becoming undismissable.
-  const dismissKey = version ?? 'unknown';
+  // Per version, so dismissing 0.1.4 doesn't also silence 0.1.5, and per shape:
+  // having dismissed "available" does not hide "ready to install". `UpdateStatus`
+  // allows no version, so those share one key rather than becoming undismissable.
+  const dismissKey = `${ready ? 'ready:' : ''}${version ?? 'unknown'}`;
   if (dismissed === dismissKey) return null;
+  const blocked = ready && status.restartBlocked === true;
+  // A refusal ends the request: once the session finishes, the pill offers the
+  // restart again rather than claiming one is under way.
+  if (blocked && restarting !== null) setRestarting(null);
+  const asked = ready && restarting === (version ?? 'unknown') && !blocked;
+
+  const restart = () => {
+    if (send({ type: 'installUpdate' })) setRestarting(version ?? 'unknown');
+  };
 
   return (
     <Box
@@ -64,18 +81,50 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
       }}
     >
       <Text size="sm" fw={500}>
-        {version ? `Lines ${version} is available` : 'A new version of Lines is available'}
-        <Text
-          span
-          size="sm"
-          component="a"
-          href={DESKTOP_DOWNLOAD_URL}
-          target="_blank"
-          rel="noreferrer"
-          style={{ color: 'inherit', textDecoration: 'underline', marginLeft: 6 }}
-        >
-          Download
-        </Text>
+        {ready
+          ? version
+            ? `Lines ${version} is ready`
+            : 'An update is ready'
+          : version
+            ? `Lines ${version} is available`
+            : 'A new version of Lines is available'}
+        {ready ? (
+          asked ? (
+            <Text span size="sm" style={{ marginLeft: 6, opacity: 0.85 }}>
+              Restarting…
+            </Text>
+          ) : blocked ? (
+            // Refused, not queued: the bridge will not restart under a running
+            // turn, and nothing restarts it later on its own.
+            <Text span size="sm" style={{ marginLeft: 6, opacity: 0.85 }}>
+              Restart once no session is running
+            </Text>
+          ) : (
+            <UnstyledButton
+              onClick={restart}
+              style={{
+                color: 'inherit',
+                font: 'inherit',
+                textDecoration: 'underline',
+                marginLeft: 6,
+              }}
+            >
+              Restart to update
+            </UnstyledButton>
+          )
+        ) : (
+          <Text
+            span
+            size="sm"
+            component="a"
+            href={DESKTOP_DOWNLOAD_URL}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: 'inherit', textDecoration: 'underline', marginLeft: 6 }}
+          >
+            Download
+          </Text>
+        )}
       </Text>
       <CloseButton
         size="sm"

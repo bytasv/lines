@@ -1,8 +1,16 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Badge, Button, CopyButton, Group, Text, Tooltip } from '@mantine/core';
-import { IconCheck, IconCopy, IconDownload, IconExternalLink, IconSparkles } from '@tabler/icons-react';
-import { CLAUDE_INSTALL_URL, CODEX_INSTALL_COMMAND } from '@lines/shared';
+import {
+  IconCheck,
+  IconCopy,
+  IconDownload,
+  IconExternalLink,
+  IconRefresh,
+  IconSparkles,
+} from '@tabler/icons-react';
+import { CLAUDE_INSTALL_URL, CODEX_INSTALL_COMMAND, type UpdateStatus } from '@lines/shared';
 import { useStore } from '../store';
+import { send } from '../ws';
 import {
   DESKTOP_DOWNLOAD_ENABLED,
   DESKTOP_DOWNLOAD_URL,
@@ -23,7 +31,8 @@ import { SettingsGroup, SettingsRow } from './SettingsLayout';
  * read as "update available" on every dev checkout (bridge 0.1.0 against a
  * published 0.2.x), so the only "available" verdict shown is the desktop shell's
  * own, from `updateStatus`. Nothing here triggers a check either — it shows
- * whatever that shell last reported.
+ * whatever that shell last reported. The one action beyond a link is "Restart to
+ * update", once the shell has a version downloaded and staged.
  *
  * Host-only by construction: SettingsModal's GUEST_SECTIONS filters to Machines,
  * and these rows describe the host's machine.
@@ -36,6 +45,9 @@ export function UpdatesSection({ onOpenWhatsNew }: { onOpenWhatsNew: () => void 
   const codexCli = useStore((s) => s.codexCli);
 
   const updateAvailable = update?.state === 'available';
+  const selfUpdating = update?.state === 'downloading' || update?.state === 'ready';
+  // The version on offer, when the shell has one; the published DMG's otherwise.
+  const offered = updateAvailable || selfUpdating ? update?.version : undefined;
 
   return (
     <>
@@ -126,37 +138,51 @@ export function UpdatesSection({ onOpenWhatsNew }: { onOpenWhatsNew: () => void 
 
       {/* Hidden rather than shown empty when no build has been published: a
           download button pointing at nothing is worse than none (see storage.ts).
-          The version shown is the published DMG's, i.e. what is *available* —
-          the running desktop version is the bridge row above, which in a packaged
-          install is stamped from the same desktop/package.json. */}
-      {DESKTOP_DOWNLOAD_ENABLED && (
+          The version shown is the one on offer — available, downloading or staged
+          — else the published DMG's. The running desktop version is the
+          bridge row above, which in a packaged install is stamped from the same
+          desktop/package.json. */}
+      {(DESKTOP_DOWNLOAD_ENABLED || selfUpdating) && (
         <SettingsGroup>
           <VersionRow
             name="Desktop app"
-            version={DESKTOP_DOWNLOAD_VERSION ?? undefined}
-            detail="latest published"
+            version={offered ?? DESKTOP_DOWNLOAD_VERSION ?? undefined}
+            detail={
+              update?.state === 'ready'
+                ? 'downloaded, ready to install'
+                : update?.state === 'downloading'
+                  ? `downloading · ${update.progress ?? 0}%`
+                  : 'latest published'
+            }
             badge={
               updateAvailable ? (
                 <Badge size="xs" color="indigo" variant="light">
                   update available
                 </Badge>
+              ) : update?.state === 'ready' ? (
+                <Badge size="xs" color="indigo" variant="light">
+                  ready to install
+                </Badge>
               ) : undefined
             }
             action={
-              // A plain link, not the owner-gated `installUpdate` message: with
-              // self-install off that only opens the download page on the tray
-              // machine, which a remote browser never sees (see UpdateBanner).
-              <Button
-                size="xs"
-                variant={updateAvailable ? 'filled' : 'light'}
-                component="a"
-                href={DESKTOP_DOWNLOAD_URL}
-                target="_blank"
-                rel="noreferrer"
-                leftSection={<IconDownload size={14} />}
-              >
-                Download
-              </Button>
+              update?.state === 'ready' ? (
+                <RestartButton status={update} />
+              ) : update?.state === 'downloading' ? undefined : DESKTOP_DOWNLOAD_ENABLED ? (
+                // A plain link while the shell cannot install it itself: a
+                // download only that shell's machine could use (see UpdateBanner).
+                <Button
+                  size="xs"
+                  variant={updateAvailable ? 'filled' : 'light'}
+                  component="a"
+                  href={DESKTOP_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  leftSection={<IconDownload size={14} />}
+                >
+                  Download
+                </Button>
+              ) : undefined
             }
           />
         </SettingsGroup>
@@ -165,6 +191,38 @@ export function UpdatesSection({ onOpenWhatsNew }: { onOpenWhatsNew: () => void 
   );
 }
 
+
+/**
+ * Restart the desktop app on this machine into the staged update. The bridge
+ * refuses while a session is running (`restartBlocked`), and re-sends the flag as
+ * sessions start and finish, so the button follows it.
+ */
+function RestartButton({ status }: { status: UpdateStatus }) {
+  const [asked, setAsked] = useState(false);
+  const blocked = status.restartBlocked === true;
+  if (blocked && asked) setAsked(false);
+  const button = (
+    <Button
+      size="xs"
+      variant="filled"
+      disabled={blocked || asked}
+      loading={asked}
+      leftSection={<IconRefresh size={14} />}
+      onClick={() => {
+        if (send({ type: 'installUpdate' })) setAsked(true);
+      }}
+    >
+      Restart to update
+    </Button>
+  );
+  if (!blocked) return button;
+  return (
+    <Tooltip label="A session is running. Restarting would stop it mid-turn." withArrow>
+      {/* A disabled button fires no pointer events, so the tooltip needs a wrapper. */}
+      <span>{button}</span>
+    </Tooltip>
+  );
+}
 
 /** "not found" / "older than x.y.z" for either CLI, or nothing when it is fine. */
 function CliBadge({ status }: { status: { state: string; minVersion: string } | null }) {

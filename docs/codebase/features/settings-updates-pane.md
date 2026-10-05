@@ -117,15 +117,20 @@ gated for the scalar reads), and the model picker's `warn` option
   current" check. There is no version-string comparison anywhere in the pane: `updateStatus.state
   === 'available'` (the desktop shell's own verdict against its update feed) is the only signal
   that flips the badge to "update available" and the button to its filled variant.
-- **The download button always renders whenever `DESKTOP_DOWNLOAD_ENABLED`** (i.e. a desktop build
-  has been published), regardless of `updateStatus`. Being already on the latest version does not
-  hide it — a user who wants the installer, or wants it on a second machine, should always be able
-  to get it from here. Only the absence of any published build hides the row.
-- The desktop row itself is hidden outright when `DESKTOP_DOWNLOAD_ENABLED` is false — a button
-  pointing at nothing is worse than no row (same rule `DownloadDesktopApp.tsx` follows).
-- The download link is a plain anchor to `DESKTOP_DOWNLOAD_URL`, never the owner-gated
-  `installUpdate` message — with self-install off, that message only opens the download page on
-  the *tray* machine, which a remote browser never sees (see `UpdateBanner.tsx` and
+- **The download button renders whenever `DESKTOP_DOWNLOAD_ENABLED`** (i.e. a desktop build has
+  been published), except while the shell is downloading an update (`'downloading'`, shown as
+  "downloading · NN%") or has one staged (`'ready'`, where the action is "Restart to update"). Being
+  already on the latest version does not hide it — a user who wants the installer, or wants it on a
+  second machine, should always be able to get it from here.
+- **"Restart to update"** sends the owner-gated `installUpdate` once the shell reports `'ready'`.
+  It is disabled, with a tooltip, while `restartBlocked` (a session is active); the bridge re-sends
+  a `'ready'` status as sessions start and finish, so the button follows them. The row's version
+  is the one on offer (available, downloading or staged), else the published DMG's.
+- The desktop row itself is hidden when `DESKTOP_DOWNLOAD_ENABLED` is false and no update is
+  downloading or staged — a button pointing at nothing is worse than no row (same rule
+  `DownloadDesktopApp.tsx` follows).
+- The download link is a plain anchor to `DESKTOP_DOWNLOAD_URL`, not `installUpdate`: a download is
+  the manual path for a shell that cannot install the update itself (see `UpdateBanner.tsx` and
   [desktop-app](desktop-app.md)).
 - An unknown version renders as a dimmed em dash, never an omitted row — the pane's shape is
   stable whether or not a `hello` has landed yet.

@@ -229,6 +229,19 @@ const worker = new WorkerClient({
     for (const ctx of registry.all()) ctx.broadcast({ type: 'workerStatus', worker });
   },
 });
+/**
+ * Desktop update plumbing. Inert unless the tray app spawned us, so Tilt and
+ * `npm run dev` are untouched. Above the registry because the registry's
+ * activity callback reaches it (see syncActivity); both closures here only touch
+ * the registry later, once it exists.
+ */
+const updates = new UpdateManager(
+  () => registry.get(LOCAL_USER).sessions.list(),
+  (msg) => {
+    for (const ctx of registry.all()) ctx.broadcast(msg);
+  },
+);
+
 // Legacy-state adoption is a manual step: server/scripts/migrate-user.ts.
 const registry = new UserRegistry(
   worker,
@@ -257,6 +270,8 @@ function anyTurnActive(): boolean {
  */
 function syncActivity(): void {
   reportActivity(anyTurnActive());
+  // The same edge decides whether a browser may offer "Restart to update".
+  updates.syncBlocked();
 }
 
 /**
@@ -289,17 +304,6 @@ if (!AUTH_ENABLED) {
     console.warn('[auth] ownership seed scan failed:', err);
   }
 }
-
-/**
- * Desktop update plumbing. Inert unless the tray app spawned us, so Tilt and
- * `npm run dev` are untouched.
- */
-const updates = new UpdateManager(
-  () => registry.get(LOCAL_USER).sessions.list(),
-  (msg) => {
-    for (const ctx of registry.all()) ctx.broadcast(msg);
-  },
-);
 
 /**
  * Outbound relay link, so a hosted web app can reach this machine. Opt-in: with

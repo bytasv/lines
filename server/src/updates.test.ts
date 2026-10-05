@@ -113,6 +113,41 @@ test('status from the shell is broadcast with the live busy flag folded in', () 
   assert.equal(mgr.current().restartBlocked, true);
 });
 
+test('a ready update is re-sent when a session starts or finishes', () => {
+  // The shell sends 'ready' once. Without this, the Restart button would keep the
+  // busy flag from that moment: blocked for good after a turn ends, or offered
+  // while one is running.
+  const sessions = [session('idle')];
+  const { mgr, sent } = manager(sessions);
+  process.emit('message', { type: 'updateStatus', status: { state: 'ready', version: '1.2.3' } } as never, undefined);
+  assert.equal(sent.length, 1);
+
+  mgr.syncBlocked();
+  assert.equal(sent.length, 1, 'an unchanged flag sends nothing');
+
+  sessions[0] = session('running');
+  mgr.syncBlocked();
+  assert.equal(sent.length, 2);
+  assert.equal((sent[1] as { status: { restartBlocked: boolean } }).status.restartBlocked, true);
+
+  sessions[0] = session('done');
+  mgr.syncBlocked();
+  assert.equal(sent.length, 3);
+  assert.equal((sent[2] as { status: { restartBlocked: boolean } }).status.restartBlocked, false);
+});
+
+test('only a ready update is re-sent on a busy change', () => {
+  const sessions = [session('idle')];
+  const { mgr, sent } = manager(sessions);
+  for (const state of ['idle', 'available', 'downloading', 'error'] as const) {
+    process.emit('message', { type: 'updateStatus', status: { state } } as never, undefined);
+    const before = sent.length;
+    sessions[0] = session(sessions[0].status === 'running' ? 'done' : 'running');
+    mgr.syncBlocked();
+    assert.equal(sent.length, before, `${state} carries nothing a browser acts on`);
+  }
+});
+
 test('a failed check reaches the browser as an error with its message intact', () => {
   // The shell now emits 'error' routinely — a rejected checkForUpdates, a dev
   // build with no feed, an updater that would not start — rather than only in

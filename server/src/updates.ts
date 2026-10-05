@@ -76,6 +76,8 @@ export function resetActivityForTests(): void {
 
 export class UpdateManager {
   private status: UpdateStatus = { state: 'idle' };
+  /** `restartBlocked` as last broadcast, so {@link syncBlocked} sends only on a change. */
+  private sentBlocked: boolean | null = null;
 
   /**
    * @param listSessions every session, so a restart can be refused while any is active
@@ -88,8 +90,27 @@ export class UpdateManager {
     process.on('message', (msg: FromShell) => {
       if (msg?.type !== 'updateStatus') return;
       this.status = msg.status;
-      this.broadcast({ type: 'updateStatus', status: this.current() });
+      this.publish();
     });
+  }
+
+  private publish(): void {
+    const status = this.current();
+    this.sentBlocked = status.restartBlocked ?? null;
+    this.broadcast({ type: 'updateStatus', status });
+  }
+
+  /**
+   * Re-send the status when `restartBlocked` would now read differently, so a
+   * browser's Restart button follows sessions starting and finishing rather than
+   * whatever was true at the shell's last message, which can be hours old. Only
+   * while a restart is on offer: no other state acts on the flag. Called on every
+   * session upsert, so an unchanged answer costs one comparison.
+   */
+  syncBlocked(): void {
+    if (this.status.state !== 'ready') return;
+    if (this.busy === this.sentBlocked) return;
+    this.publish();
   }
 
   /** True when the shell is supervising us; false under Tilt / npm run dev. */
