@@ -398,7 +398,7 @@ Two ways in, one end state — the row is tombstoned and the machine's next `reg
 fresh code:
 
 1. **From the browser.** `DELETE /v1/devices/:id` (Clerk-authed), from Settings → Machines or from
-   the stuck-connecting screen's "Unpair" action. The relay's next re-verify tick sees the revoked
+   the stuck-connecting screen's "Unpair" action (under its Details toggle). The relay's next re-verify tick sees the revoked
    row and drops the hub; the bridge re-dials into `1008` until a new code is claimed.
 2. **From the machine.** `POST /v1/devices/unpair` with `{id, secret}`, from the tray's
    "Unpair this machine…". This is the lockout-proof path: it needs no browser, which matters
@@ -451,7 +451,8 @@ used because these responses carry Clerk-authenticated user data.
      remembered/most-recent heuristic, since that heuristic is what chose the unreachable one.
    - **Pair another machine** — reopens `ConnectMachine` without losing the account's other
      devices.
-   - **Unpair \<name\>** — last, red, behind an inline confirm, and the only one that cannot
+   - **Unpair \<name\>** — last, red, behind an inline confirm and tucked under the collapsed
+     **Details** toggle with the link line and Send/Copy, and the only one that cannot
      dead-end: "pair another machine" used to ask for a code the claimed machine would never
      issue. It reuses `DevicesSection.revoke`'s exact sequence (`revokeDevice` → `forgetDeviceId`
      → refresh → clear the manual pick), after which `chosen` is null and the gate falls through
@@ -645,7 +646,8 @@ refuse.
   "pair another" action always stays available regardless, since a first-time user with one dead
   machine would otherwise have no path forward at all. Unpair sits behind an inline confirm (the
   second click flips the label) because it is destructive and one click from a screen the user is
-  already frustrated with.
+  already frustrated with. It also lives under the collapsed **Details** toggle, so the default
+  view stays plain; Pair another machine is the visible way forward.
 - `deviceOffline` / `deviceOnline` are relay control frames, not app messages: they are handled in
   `ws.ts` alongside `pong` and `fileResponse`, never in `applyServerMessage`, which has no
   `default` case and would drop them silently — as it did until they were wired up.
@@ -719,8 +721,11 @@ refuse.
   30s. Each expiry closes the socket and redials, and is logged as `handshake-timeout` or
   `hello-timeout`. Neither timer runs down while the relay says no bridge is attached, tracked per
   socket, because the bridge attach closes every channel anyway.
-- The slow-connecting help follows the link's stage (token, socket, handshake, awaiting `hello`,
-  between retries, machine offline) instead of one generic message, and refreshes every second.
+- The slow-connecting hint is one of two plain messages that follow the link state and refresh
+  every second: "still connecting" while the machine has not yet been heard from (token, socket,
+  handshake, awaiting `hello`), and "check Lines is running and the machine is awake" between
+  retries or after a close; a relay offline report has its own hint. The finer stage detail lives
+  in the collapsed **Details** section, not the hint.
 - The relay records every client refusal with its reason and keeps a bounded per-device event
   history (50 events × 1000 devices, LRU). It holds no payloads and no tokens, and it is exposed
   only behind the relay secret.
@@ -886,8 +891,8 @@ record. Read them in order (browser → relay → bridge) and line them up by ti
    `handshake-timeout` and `hello-timeout`.
    - In the desktop window, every entry is echoed as `[diag]` on the console, and the shell mirrors
      that into `~/.lines-app/logs/desktop.log` as `[renderer] [diag] …`.
-   - On a phone or in a browser, ConnectingMachine's slow state shows the link's live phase and has
-     **Send diagnostics** / **Copy** buttons. A stall is also uploaded automatically on the next
+   - On a phone or in a browser, ConnectingMachine's slow state has a subtle **Details** toggle;
+     expanded, it shows the link's live phase and the **Send diagnostics** / **Copy** buttons. A stall is also uploaded automatically on the next
      `hello`. Uploads land in the storage logs:
      `docker compose --env-file lines.env logs -t storage | grep '\[diag\]'`.
 2. **The relay.** Every client refusal is logged with a reason:

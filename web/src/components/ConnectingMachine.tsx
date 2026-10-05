@@ -4,6 +4,7 @@ import {
   Alert,
   Button,
   Card,
+  Collapse,
   Group,
   List,
   Stack,
@@ -12,6 +13,7 @@ import {
   Title,
 } from '@mantine/core';
 import {
+  IconChevronDown,
   IconCopy,
   IconDeviceLaptop,
   IconLock,
@@ -81,8 +83,6 @@ export function ConnectingMachine({
   const refusal = useStore((s) => s.e2eeRefusal);
   const [slow, setSlow] = useState(false);
   const [busy, setBusy] = useState(false);
-  /** Unpair is destructive, so the second click is the one that does it. */
-  const [confirmUnpair, setConfirmUnpair] = useState(false);
 
   useEffect(() => {
     const timer = setTimeout(() => setSlow(true), SLOW_MS);
@@ -217,32 +217,7 @@ export function ConnectingMachine({
           Pair another machine
         </Button>
 
-        <Stack align="center" gap={2} mt={4}>
-          <Button
-            variant="subtle"
-            size="xs"
-            color="red"
-            leftSection={<IconUnlink size={14} />}
-            onClick={() => {
-              if (!confirmUnpair) {
-                setConfirmUnpair(true);
-                return;
-              }
-              void onUnpair();
-            }}
-          >
-            {confirmUnpair ? 'Unpair — you’ll need a new code' : `Unpair ${name}`}
-          </Button>
-          <Text size="xs" c="dimmed" ta="center">
-            {/* Says what happens next, because otherwise this looks like a
-                one-way door: the previous escape hatch asked for a pairing
-                code the machine would not issue while still claimed. */}
-            Unpairing frees the machine. The Lines icon in its menu bar will show a fresh
-            pairing code you can enter here.
-          </Text>
-        </Stack>
-
-        <DiagnosticsFooter deviceId={deviceId} />
+        <DiagnosticsFooter deviceId={deviceId} name={name} onUnpair={onUnpair} />
       </Stack>
     </>
   );
@@ -253,18 +228,17 @@ export function ConnectingMachine({
  * Why a connection is slow, read off what the link is doing. Only the states in
  * which the machine has not been heard from are reason to suspect it: once it has
  * answered, the wait is the network's, and sending the user to check a computer
- * that is fine helps nobody.
+ * that is fine helps nobody. Which stage it is stuck in lives under Details.
  */
 function slowHint(link: LinkDiagnostics, name: string): string {
-  if (link.phase === 'connecting') return 'Still signing you in. Your network may be slow.';
-  if (link.phase === 'socket-connecting') return 'Still connecting. Your network may be slow.';
-  if (link.stage === 'handshake') return `Setting up an encrypted connection to ${name}. Your network may be slow.`;
-  if (link.stage === 'hello') {
-    return link.encrypted
-      ? `${name} answered and is sending your sessions. This network is slow, so it can take a while.`
-      : `Waiting for ${name} to send your sessions. Your network may be slow.`;
-  }
-  return `Taking longer than usual. Check that Lines is running on ${name} and that the machine is awake.`;
+  const stillTrying =
+    link.phase === 'connecting' ||
+    link.phase === 'socket-connecting' ||
+    link.stage === 'handshake' ||
+    link.stage === 'hello';
+  return stillTrying
+    ? `Still connecting to ${name}. This can take a moment on a slow network.`
+    : `Taking longer than usual. Make sure Lines is running on ${name} and the machine is awake.`;
 }
 
 /** Re-reads the link every second: nothing in the store announces its progress. */
@@ -295,17 +269,32 @@ function describeLink(d: LinkDiagnostics, now: number): string {
 }
 
 /**
- * What the link is doing right now, and a way to hand the record to whoever is
- * debugging — uploaded, or copied when the upload itself can't get through.
+ * Collapsed by default: what the link is doing right now, a way to hand the
+ * record to whoever is debugging — uploaded, or copied when the upload itself
+ * can't get through — and the destructive last resort, Unpair.
  */
-function DiagnosticsFooter({ deviceId }: { deviceId: string }) {
+function DiagnosticsFooter({
+  deviceId,
+  name,
+  onUnpair,
+}: {
+  deviceId: string;
+  name: string;
+  onUnpair: () => void | Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [sent, setSent] = useState<'idle' | 'sending' | 'sent' | 'failed' | 'copied'>('idle');
+  /** Unpair is destructive, so the second click is the one that does it. */
+  const [confirmUnpair, setConfirmUnpair] = useState(false);
 
+  // Ticks only while the link line is visible.
   useEffect(() => {
+    if (!open) return;
+    setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [open]);
 
   const upload = async () => {
     setSent('sending');
@@ -330,31 +319,76 @@ function DiagnosticsFooter({ deviceId }: { deviceId: string }) {
   };
 
   return (
-    <Stack align="center" gap={4} mt="sm">
-      <Text size="xs" c="dimmed" ta="center" ff="monospace">
-        {describeLink(linkDiagnostics(deviceId), now)}
-      </Text>
-      <Group gap={6}>
-        <Button
-          variant="subtle"
-          size="compact-xs"
-          color="gray"
-          leftSection={<IconSend size={12} />}
-          loading={sent === 'sending'}
-          onClick={() => void upload()}
-        >
-          {sent === 'sent' ? 'Diagnostics sent' : sent === 'failed' ? 'Send failed — copy instead' : 'Send diagnostics'}
-        </Button>
-        <Button
-          variant="subtle"
-          size="compact-xs"
-          color="gray"
-          leftSection={<IconCopy size={12} />}
-          onClick={() => void copy()}
-        >
-          {sent === 'copied' ? 'Copied' : 'Copy'}
-        </Button>
-      </Group>
+    <Stack align="center" gap={4} mt="sm" w="100%">
+      <Button
+        variant="subtle"
+        size="compact-xs"
+        color="gray"
+        c="dimmed"
+        opacity={0.7}
+        rightSection={
+          <IconChevronDown
+            size={12}
+            style={{ transform: open ? 'rotate(180deg)' : undefined, transition: 'transform 150ms ease' }}
+          />
+        }
+        onClick={() => setOpen((o) => !o)}
+      >
+        {open ? 'Hide details' : 'Details'}
+      </Button>
+      <Collapse expanded={open} transitionDuration={150} w="100%">
+        <Stack align="center" gap={4} pt={4}>
+          <Text size="xs" c="dimmed" ta="center" ff="monospace">
+            {describeLink(linkDiagnostics(deviceId), now)}
+          </Text>
+          <Group gap={6}>
+            <Button
+              variant="subtle"
+              size="compact-xs"
+              color="gray"
+              leftSection={<IconSend size={12} />}
+              loading={sent === 'sending'}
+              onClick={() => void upload()}
+            >
+              {sent === 'sent' ? 'Diagnostics sent' : sent === 'failed' ? 'Send failed — copy instead' : 'Send diagnostics'}
+            </Button>
+            <Button
+              variant="subtle"
+              size="compact-xs"
+              color="gray"
+              leftSection={<IconCopy size={12} />}
+              onClick={() => void copy()}
+            >
+              {sent === 'copied' ? 'Copied' : 'Copy'}
+            </Button>
+          </Group>
+
+          <Stack align="center" gap={2} mt={4}>
+            <Button
+              variant="subtle"
+              size="xs"
+              color="red"
+              leftSection={<IconUnlink size={14} />}
+              onClick={() => {
+                if (!confirmUnpair) {
+                  setConfirmUnpair(true);
+                  return;
+                }
+                void onUnpair();
+              }}
+            >
+              {confirmUnpair ? 'Unpair — you’ll need a new code' : `Unpair ${name}`}
+            </Button>
+            <Text size="xs" c="dimmed" ta="center">
+              {/* Says what happens next, because otherwise this looks like a
+                  one-way door: the previous escape hatch asked for a pairing
+                  code the machine would not issue while still claimed. */}
+              Unpairing frees the machine. The Lines icon in its menu bar will show a fresh
+              pairing code you can enter here.
+            </Text>
+          </Stack>
+        </Stack>
+      </Collapse>
     </Stack>
   );
 }
