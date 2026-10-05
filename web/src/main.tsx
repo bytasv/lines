@@ -306,9 +306,10 @@ function AppWhenReady() {
   }, [waiting, bootstrapped]);
   // Asked for here, because SessionView, which otherwise asks, is not mounted
   // yet. Re-sent on a reconnect; the reply is merged by seq, so a repeat is inert.
+  // The tail page only — SessionView backfills the rest once it mounts.
   useEffect(() => {
     if (lifted || !bootstrapped || !opening) return;
-    send({ type: 'loadTranscript', sessionId: opening });
+    send({ type: 'loadTranscript', sessionId: opening, page: {} });
   }, [lifted, bootstrapped, opening, status]);
   useSplash(
     !waiting

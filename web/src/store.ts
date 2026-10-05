@@ -92,6 +92,7 @@ import {
 } from './lib/alerts';
 import { setBridgeOwnerId } from './lib/clerk';
 import { ensurePushSubscription, removePushSubscription } from './lib/push';
+import { mergeTranscriptPage } from './lib/transcriptPage';
 import { rememberDeviceId } from './lib/storage';
 import { updateFavicon } from './lib/favicon';
 import {
@@ -842,6 +843,9 @@ interface UiState {
   transcripts: Record<string, TranscriptEvent[]>;
   /** Sessions whose on-disk transcript has been requested/loaded. */
   transcriptLoaded: Record<string, boolean>;
+  /** First seq on disk per session, from a paged load. Present only while older
+   *  history may still be unfetched; see transcriptHasMore. Not persisted. */
+  transcriptFloor: Record<string, number>;
   /** ms epoch of the last event seen per session (not persisted) — wedged-agent detection. */
   lastEventAt: Record<string, number>;
   /** Prompt a rewind handed back, waiting for that session's composer to pick it
@@ -1352,6 +1356,7 @@ export const useStore = create<UiState>((set, get) => {
   seenSessionStatus: {},
   transcripts: {},
   transcriptLoaded: {},
+  transcriptFloor: {},
   lastEventAt: {},
   composerPrefill: {},
   focusComposerFor: null,
@@ -2102,7 +2107,7 @@ export const useStore = create<UiState>((set, get) => {
           // which on a large transcript stalls the main thread into another
           // heartbeat timeout: reconnect loop. Skipped entirely on a repeat, where
           // there is by definition nothing new to reload.
-          ...(repeat ? {} : { transcriptLoaded: {}, contextBreakdowns: {} }),
+          ...(repeat ? {} : { transcriptLoaded: {}, transcriptFloor: {}, contextBreakdowns: {} }),
           };
         });
         const sessions = get().sessions;
@@ -2319,11 +2324,14 @@ export const useStore = create<UiState>((set, get) => {
           delete lastEventAt[msg.sessionId];
           const contextBreakdowns = { ...state.contextBreakdowns };
           delete contextBreakdowns[msg.sessionId];
+          const transcriptFloor = { ...state.transcriptFloor };
+          delete transcriptFloor[msg.sessionId];
           return {
             sessions,
             transcripts,
             lastEventAt,
             contextBreakdowns,
+            transcriptFloor,
             selectedSessionId:
               state.selectedSessionId === msg.sessionId ? null : state.selectedSessionId,
           };
@@ -2405,17 +2413,20 @@ export const useStore = create<UiState>((set, get) => {
       }
       case 'transcript':
         set((state) => {
-          const live = state.transcripts[msg.sessionId] ?? [];
-          const merged = [...msg.events];
-          const seen = new Set(merged.map((e) => e.seq));
-          for (const e of live) if (!seen.has(e.seq)) merged.push(e);
-          merged.sort((a, b) => a.seq - b.seq);
+          const merged = mergeTranscriptPage(state.transcripts[msg.sessionId] ?? [], msg.events, msg.page);
+          // A paged reply records the file's floor so SessionView can backfill
+          // toward it; a complete one (or an older bridge, which ignores `page`)
+          // clears it.
+          const transcriptFloor = { ...state.transcriptFloor };
+          if (msg.page) transcriptFloor[msg.sessionId] = msg.page.floor;
+          else delete transcriptFloor[msg.sessionId];
           // Seed the last-activity clock from history, but never move it backwards.
           const lastTs = merged.length > 0 ? merged[merged.length - 1].ts : 0;
           const lastEventAt = Math.max(state.lastEventAt[msg.sessionId] ?? 0, lastTs);
           return {
             transcripts: { ...state.transcripts, [msg.sessionId]: merged },
             transcriptLoaded: { ...state.transcriptLoaded, [msg.sessionId]: true },
+            transcriptFloor,
             ...(lastEventAt > 0
               ? { lastEventAt: { ...state.lastEventAt, [msg.sessionId]: lastEventAt } }
               : {}),

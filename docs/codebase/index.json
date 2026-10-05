@@ -1263,7 +1263,8 @@
         "\"Other…\" never advances on selection (its text input autofocuses instead); a bare Enter inside that input advances once non-empty, and arrow keys keep native caret behaviour there",
         "a system/init row only renders when the model actually differs from the previous init the transcript saw, not once per turn (the CLI process restarts every turn); the first init in a transcript always renders (\"session started · model\"), a later one only on a genuine model change and reads \"model set to model\" instead — a cross-provider switch is a separate ProviderSwitchItem marker and is unaffected",
         "a successful turn's cost and duration render as chips on the turn's header (Compact level) rather than their own centered row; a turn with no header card (text-only, or Full/Grouped level) shows them as a small right-aligned dimmed meta line instead — a failed, stopped, or recovering turn keeps its centered row, error text, and Retry affordance unchanged",
-        "only three workflow-marker events render in the transcript: started, a failure park (waiting-approval with failed or missingOutputs), and workflow-done; a clean park, an approve, a retry, and an interrupt leave no transcript trace since the stepper and the approve card already show that state live, and the emitted/stored event set is unchanged"
+        "only three workflow-marker events render in the transcript: started, a failure park (waiting-approval with failed or missingOutputs), and workflow-done; a clean park, an approve, a retry, and an interrupt leave no transcript trace since the stepper and the approve card already show that state live, and the emitted/stored event set is unchanged",
+        "buildTranscript may see a suffix-only event list until paged backfill completes; cross-turn derivations (CostLineage, sessionPlanWrite fallback, lastInitModel de-duplication, background tasks opened in older history) are transient until then"
       ],
       "architecturalRules": [
         "user and agent transcript text share one markdown renderer instead of separate text-rendering paths; ColorizedText.tsx deleted as dead code",
@@ -2981,6 +2982,8 @@
         "probeExpired",
         "wakeDebounced",
         "bootDial",
+        "showDisconnectBanner",
+        "DISCONNECT_BANNER_GRACE_MS",
         "MachineSwitcher",
         "shouldReviveIdle",
         "alertTarget",
@@ -3029,10 +3032,13 @@
       "id": "transcript-performance",
       "name": "Transcript live-update performance",
       "doc": "features/transcript-performance.md",
-      "purpose": "Why a live turn or a session switch used to freeze the UI for a beat, and the three independent fixes: batching WebSocket transcript events into one render per frame, keeping rebuilt transcript items referentially stable so memoization and diff caches survive a rebuild, and windowing a long transcript's initial mount. A fourth fix: gate the initial loadTranscript send and its reconnect retry on link health, and show a reasoned loading state instead of the plain empty-state copy while it's outstanding.",
+      "purpose": "Why a live turn or a session switch used to freeze the UI for a beat, and the three independent fixes: batching WebSocket transcript events into one render per frame, keeping rebuilt transcript items referentially stable so memoization and diff caches survive a rebuild, and windowing a long transcript's initial mount. A fourth fix: gate the initial loadTranscript send and its reconnect retry on link health, and show a reasoned loading state instead of the plain empty-state copy while it's outstanding. A fifth: page the transcript load (tail first, then byte-bounded background backfill of older history) so the first paint no longer waits on the whole file.",
       "entryPoints": [
         "web/src/store.ts",
-        "web/src/components/Transcript.tsx"
+        "web/src/components/Transcript.tsx",
+        "server/src/transcriptPage.ts",
+        "web/src/lib/transcriptPage.ts",
+        "web/src/lib/transcriptBackfill.ts"
       ],
       "files": [
         "web/src/store.ts",
@@ -3042,7 +3048,13 @@
         "web/src/components/ToolCallCard.tsx",
         "web/src/components/Markdown.tsx",
         "web/src/lib/workflowReveal.ts",
-        "web/src/components/SessionView.tsx"
+        "web/src/components/SessionView.tsx",
+        "shared/types.ts",
+        "server/src/index.ts",
+        "server/src/transcriptPage.ts",
+        "web/src/lib/transcriptPage.ts",
+        "web/src/lib/transcriptBackfill.ts",
+        "web/src/main.tsx"
       ],
       "symbols": [
         "flushPendingEvents",
@@ -3054,9 +3066,19 @@
         "revealWorkflowStep",
         "REVEAL_STEP_EVENT",
         "TranscriptLoading",
-        "SLOW_LOAD_MS"
+        "SLOW_LOAD_MS",
+        "pageTranscript",
+        "PAGE_BYTES",
+        "mergeTranscriptPage",
+        "transcriptHasMore",
+        "transcriptFloor",
+        "requestRest",
+        "requestTranscriptPage"
       ],
-      "tests": [],
+      "tests": [
+        "server/src/transcriptPage.test.ts",
+        "server/src/transcriptMerge.test.ts"
+      ],
       "businessRules": [
         "a live turn's transcript renders at most once per animation frame, not once per WebSocket event",
         "a hidden tab accumulates its transcript backlog without rendering at all (no animation frames fire while hidden) and commits it as a single render on refocus, rather than replaying the whole backlog as N sequential renders",
@@ -3064,7 +3086,11 @@
         "windowing applies to workflow sessions too; the progress bar and stepper jump-to-step both stay correct against a clipped list (see transcript-rendering.md and workflow-step-lifecycle.md)",
         "loadTranscript is re-sent on every reconnect (gated on health.connected, not merely !loaded), since a send while the link is down is dropped rather than queued",
         "the loading placeholder only replaces the transcript when nothing is cached to show (!loaded && !events?.length); a reconnect reload with cached events keeps the transcript on screen",
-        "the loading reason's precedence is link, then bridge attachment, then worker health, matching the machine-health banners' own order"
+        "the loading reason's precedence is link, then bridge attachment, then worker health, matching the machine-health banners' own order",
+        "a transcript load is paged: the tail page paints first and older history backfills in the background, one byte-bounded page in flight at a time, on every device, until the cache reaches transcriptFloor",
+        "a loadTranscript with no page still returns the whole file and a transcript reply with no page is complete, so old clients and old bridges keep working with no version-skew error path",
+        "a tail page whose prevSeq is newer than the last cached seq replaces the disjoint cache instead of leaving a hole",
+        "a page is aligned back to a user event, but extension stops at 4x PAGE_BYTES so one huge turn cannot defeat paging"
       ],
       "architecturalRules": [
         "contract: nothing outside applyServerMessage may read `transcripts`/`lastEventAt` and assume it's settled — every non-'event' message flushes the pending buffer first (flushPendingEvents at the top of applyServerMessage), so a new message handler that reads transcripts without going through applyServerMessage's switch breaks this silently",
@@ -3073,7 +3099,9 @@
         "a setTimeout fallback for the flush arms only when requestAnimationFrame is unavailable; it must never arm merely because the tab is hidden, since a hidden-tab timer firing would defeat the backlog-until-refocus behavior that's the point of batching on rAF in the first place",
         "reconcileItems (transcript.ts) is what makes a rebuild cheap for React, not buildTranscript itself — buildTranscript's own cost was measured at 3-5ms even on a 5540-event/14MB real session, so it was never the dominant cost of a session switch; see transcript-rendering.md's reconcileItems rule for the exhaustive list of fields it must compare",
         "the tail window and the markdown highlight deferral (Markdown.tsx) are the two changes that actually addressed the measured session-switch cost — a 278-row folded session can hold ~90 full Markdown documents, each a synchronous remark/rehype/rehype-highlight parse, all committed in one pass on ErrorBoundary remount (App.tsx keys SessionView by selectedSessionId); windowing bounds how many of those mount at once, and the highlight deferral cuts the cost of each one that does",
-        "the sidebar's own re-render cost (SessionRow memoization, archived-session pagination — session-and-project-ui.md) is a second, independent contributor to 'switching sessions feels slow' that has nothing to do with the size of the session being switched to — it re-rendered every row on every selection change regardless"
+        "the sidebar's own re-render cost (SessionRow memoization, archived-session pagination — session-and-project-ui.md) is a second, independent contributor to 'switching sessions feels slow' that has nothing to do with the size of the session being switched to — it re-rendered every row on every selection change regardless",
+        "pageTranscript lives in its own pure module because index.ts listens on import; the backfill driver lives in SessionView and transcriptBackfill.ts rather than the store, since ws.ts already imports the store",
+        "the backfill in-flight guard is shared module state keyed by `before`, used by both the background driver and the jump/reveal requestRest fetches so they cannot race"
       ],
       "relatedDecisions": [
         "transcript-rendering",
@@ -3851,7 +3879,10 @@
         "web/src/lib/permissionModes.tsx",
         "web/src/components/UpdateBanner.tsx",
         "web/public/sw.js",
-        "web/src/lib/push.ts"
+        "web/src/lib/push.ts",
+        "server/src/transcriptPage.ts",
+        "web/src/lib/transcriptPage.ts",
+        "web/src/lib/transcriptBackfill.ts"
       ],
       "symbols": [
         "useIsPhone",
@@ -4325,7 +4356,8 @@
         "every session id is clamped through sessionInReach and the route needs the readFiles capability",
         "Cmd/Ctrl+F opens session search and replaces browser find-in-page only while a project is open on a non-phone client",
         "Esc closes the search from anywhere unless another handler took it, a Mantine overlay is open, or focus is in Monaco",
-        "old results are never shown while a new search loads"
+        "old results are never shown while a new search loads",
+        "a jump into history not yet fetched triggers one loadTranscript for everything older than the first loaded event, then completes when it lands"
       ],
       "architecturalRules": [
         "search is an overlay state over the session list, not a sidebar mode, and is never persisted",

@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   bootDial,
+  DISCONNECT_BANNER_GRACE_MS,
   probeExpired,
+  showDisconnectBanner,
   shouldReviveIdle,
   wakeAction,
   wakeDebounced,
@@ -153,5 +155,39 @@ describe('shouldReviveIdle', () => {
 
   test('a link that has a socket is judged by wakeAction instead', () => {
     assert.equal(shouldReviveIdle({ ...idle, hasSocket: true }), false);
+  });
+});
+
+describe('showDisconnectBanner', () => {
+  const now = 100_000;
+
+  test('a connected link never shows the pill, whatever downSince says', () => {
+    assert.equal(showDisconnectBanner({ status: 'connected', downSince: null, now }), false);
+    assert.equal(
+      showDisconnectBanner({ status: 'connected', downSince: now - DISCONNECT_BANNER_GRACE_MS * 10, now }),
+      false,
+    );
+  });
+
+  test('reconnecting with no recorded drop yet stays hidden', () => {
+    assert.equal(showDisconnectBanner({ status: 'reconnecting', downSince: null, now }), false);
+  });
+
+  test('a resume redial inside the grace is hidden; one that outlasts it shows', () => {
+    // The flash this exists to stop: every resumed PWA redials, and that redial
+    // used to put the red pill up for a second or two.
+    assert.equal(
+      showDisconnectBanner({ status: 'reconnecting', downSince: now - (DISCONNECT_BANNER_GRACE_MS - 1), now }),
+      false,
+    );
+    assert.equal(
+      showDisconnectBanner({ status: 'reconnecting', downSince: now - DISCONNECT_BANNER_GRACE_MS, now }),
+      true,
+    );
+  });
+
+  test('offline shows at once — navigator.onLine is not a flap', () => {
+    assert.equal(showDisconnectBanner({ status: 'offline', downSince: now, now }), true);
+    assert.equal(showDisconnectBanner({ status: 'offline', downSince: null, now }), true);
   });
 });

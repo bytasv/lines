@@ -71,6 +71,7 @@ import { publicCodexCliStatus } from './codexCli.ts';
 import { publicWhisperStatus, refreshWhisperStatus } from './whisperCli.ts';
 import { onWhisperModelDownload, startWhisperModelDownload, whisperModelDownloadState } from './whisperModel.ts';
 import { transcribe } from './transcribe.ts';
+import { pageTranscript } from './transcriptPage.ts';
 
 /** Explicit pin for local dev (Tilt sets it so its readiness probe has a fixed
  *  target); unset means bind :0 and publish the result to bridge.json. */
@@ -2023,12 +2024,16 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
     }
     case 'loadTranscript': {
       const started = PERF ? performance.now() : 0;
-      const lines = store.loadTranscriptRaw(msg.sessionId);
-      const frame = transcriptFrame(msg.sessionId, lines);
+      const raw = store.loadTranscriptRaw(msg.sessionId);
+      // No `page` = an older client: the whole file in one frame, as always.
+      const paged = msg.page ? pageTranscript(raw, msg.page) : null;
+      const lines = paged ? paged.lines : raw;
+      const frame = transcriptFrame(msg.sessionId, lines, paged);
       ws.send(frame);
       if (PERF) {
         console.log(
-          `[perf] transcript ${msg.sessionId} ${lines.length} events ${frame.length}B ` +
+          `[perf] transcript ${msg.sessionId} ${lines.length}/${raw.length} events ${frame.length}B ` +
+            (paged ? `prevSeq=${paged.prevSeq} ` : '') +
             `${(performance.now() - started).toFixed(1)}ms`,
         );
       }
@@ -2065,8 +2070,14 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
  * it can't be checked with `satisfies ServerMessage`: keep the shape in sync
  * with the `transcript` variant in shared/types.ts by hand.
  */
-function transcriptFrame(sessionId: string, lines: string[]): string {
-  return `{"type":"transcript","sessionId":${JSON.stringify(sessionId)},"events":[${lines.join(',')}]}`;
+function transcriptFrame(
+  sessionId: string,
+  lines: string[],
+  page: { floor: number; prevSeq: number | null } | null = null,
+): string {
+  // Shape: {type, sessionId, events, page?: {floor, prevSeq}}.
+  const suffix = page ? `,"page":${JSON.stringify({ floor: page.floor, prevSeq: page.prevSeq })}` : '';
+  return `{"type":"transcript","sessionId":${JSON.stringify(sessionId)},"events":[${lines.join(',')}]${suffix}}`;
 }
 
 /** Native folder picker. macOS: Finder choose-folder dialog. Returns null on cancel/unsupported. */

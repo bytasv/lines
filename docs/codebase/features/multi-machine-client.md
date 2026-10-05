@@ -50,7 +50,7 @@ reason.
   `prunableDraftIds`, `shouldClaimSelection`, `machineView`, `sessionsOnMachine`, `emptyMachine`,
   `emptyView`, `MachineSlice`, `MachineView`
 - `web/src/lib/wake.ts` — the pure per-link wake decision: `wakeAction`, `probeExpired`,
-  `wakeDebounced`, `bootDial`
+  `wakeDebounced`, `bootDial`, `showDisconnectBanner`, `DISCONNECT_BANNER_GRACE_MS`
 - `web/src/ws.ts` — `MachineLink`, the `links: Map<deviceId, MachineLink>`, `connectMachine`,
   `disconnectMachine`, `linkFor`/`linkForMessage`, per-link heartbeat/retry/auth-relay/idle
   timers, `fileRequest`'s machine-aware default
@@ -135,6 +135,10 @@ reason.
   `lastPongAt` on a late tick, which a resumed tab's first tick always is
 - `bootDial(remembered, devices, dialed)` — `{ dial, drop }`: dial the remembered machine while
   the device list is still in flight, and drop it once the list lands if it isn't in there
+- `showDisconnectBanner({ status, downSince, now })` — whether `ConnectionBanner`'s transport pill
+  is visible: never when `connected`, at once when `offline`, and when `reconnecting` only once
+  `now - downSince` reaches `DISCONNECT_BANNER_GRACE_MS`. Display-only; `connectionStatus` is
+  unchanged
 
 ## Data flow
 
@@ -284,6 +288,15 @@ would close over), stamped with `awaitingProbeSince`, and judged against that st
 idle-disconnected on purpose (`IDLE_DISCONNECT_MS`) and is left alone; reviving it on every tab
 switch would defeat that.
 
+A resume redial is expected — iOS kills the sockets of suspended PWAs — so the red "Disconnected —
+reconnecting…" pill waits `DISCONNECT_BANNER_GRACE_MS` (3s: `RECONNECT_DELAY_MS` plus a typical
+token mint and dial) before showing, decided by `showDisconnectBanner`. `connectionStatus` itself
+flips immediately, so disabled actions and the queued-prompt logic still see the true state; only
+the pill is delayed. `offline` (`navigator.onLine` said so) and `machineOffline` (relay truth about
+the remote machine) are exempt and show at once. The probe-expired path's own
+`WAKE_PROBE_TIMEOUT_MS` wait happens while the status still reads `connected`, so it does not
+count against the grace.
+
 `bootDial` (also in `lib/wake.ts`) decides the optimistic pre-list dial the gate makes at boot —
 see [hosted-machine-access](hosted-machine-access.md#the-gate) for that flow; it lives beside
 `wakeAction` because both are the same kind of pure, dependency-free decision this feature keeps
@@ -325,7 +338,9 @@ out of `ws.ts` and `main.tsx`.
   dependency-free pattern: every `readyState` → expected wake action, a pong that lands after the
   probe stamp reading as healthy, the heartbeat's stall-forgiveness *not* being able to rescue an
   unanswered probe, the wake debounce window, and `bootDial`'s four cases (nothing remembered,
-  remembered present, remembered absent → drop, empty list → drop).
+  remembered present, remembered absent → drop, empty list → drop), and `showDisconnectBanner`
+  (never shown when connected, hidden with no recorded drop and just inside the grace, shown at
+  the grace, `offline` shown at once).
 - No automated coverage for the rest of the transport (`ws.ts`'s socket lifecycle, timers, the
   link cap) — the web workspace has no test runner; verified by hand per the plan's own checklist
   (draft survival across a reconnect, per-machine health while the primary stays healthy, file

@@ -33,6 +33,8 @@ import { useIsPhone } from '../lib/layout';
 import { useStepResolver } from '../lib/useStepResolver';
 import { send } from '../ws';
 import { Transcript } from './Transcript';
+import { transcriptHasMore } from '../lib/transcriptPage';
+import { clearTranscriptPageInFlight, requestTranscriptPage } from '../lib/transcriptBackfill';
 import { Composer } from './Composer';
 import { QueuedMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
@@ -146,13 +148,31 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   useEffect(() => {
     setRequestedAt(null);
   }, [sessionId]);
+  // The tail page only (`page: {}`): a long transcript as one frame kept a phone
+  // on "Loading transcript…" for the whole download and parse. The backfill
+  // below pulls the rest.
   useEffect(() => {
     if (loaded || !health.connected) return;
-    if (send({ type: 'loadTranscript', sessionId })) setRequestedAt(Date.now());
+    if (send({ type: 'loadTranscript', sessionId, page: {} })) setRequestedAt(Date.now());
   }, [sessionId, loaded, health.connected]);
   const retryLoad = () => {
-    if (send({ type: 'loadTranscript', sessionId })) setRequestedAt(Date.now());
+    if (send({ type: 'loadTranscript', sessionId, page: {} })) setRequestedAt(Date.now());
   };
+  // Background backfill: one older page at a time until the cache reaches the
+  // file's floor, so find-in-page, search jumps and rewind see the whole history.
+  // Each reply moves the first seq, which re-runs this for the next page. Only the
+  // open session backfills; others page in when opened.
+  const floor = useStore((s) => s.transcriptFloor[sessionId]);
+  const firstSeq = events?.[0]?.seq;
+  const hasMore = transcriptHasMore(events, floor);
+  useEffect(() => {
+    if (!health.connected) {
+      clearTranscriptPageInFlight(sessionId);
+      return;
+    }
+    if (!loaded || !hasMore || firstSeq === undefined) return;
+    requestTranscriptPage(sessionId, firstSeq);
+  }, [sessionId, loaded, health.connected, hasMore, firstSeq]);
 
   // Layout only: what the header can hold at 390px. Never a second decision
   // path — both branches call the same handlers.

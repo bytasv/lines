@@ -69,6 +69,7 @@ import {
   type TranscriptItem,
 } from '../lib/transcript';
 import { REVEAL_STEP_EVENT } from '../lib/workflowReveal';
+import { requestRest } from '../lib/transcriptBackfill';
 import { useAttachmentUrl } from '../lib/files';
 import { mentionKindMeta } from '../lib/mentions';
 import { formatDuration, formatSpendUsd, formatTokens, skippableFailedStep } from '../lib/format';
@@ -1314,11 +1315,16 @@ export function Transcript({
   // Which workflow steps have started, read off the item list rather than the
   // rendered [data-workflow-step] markers — the list is complete even while the
   // window is clipping, so the progress bar stays right on a workflow session.
+  // Monotonic: until paged backfill reaches the start of the file, early markers
+  // may be missing, and steps run in order, so every step up to the highest
+  // started one has started.
   const startedSteps = useMemo(() => {
-    const set = new Set<number>();
+    let highest = -1;
     for (const it of items) {
-      if (it.kind === 'workflow' && it.data.event === 'started') set.add(it.data.stepIndex);
+      if (it.kind === 'workflow' && it.data.event === 'started') highest = Math.max(highest, it.data.stepIndex);
     }
+    const set = new Set<number>();
+    for (let i = 0; i <= highest; i++) set.add(i);
     return set;
   }, [items]);
   // Set just before the window grows: the rows that appear above the viewport
@@ -1357,7 +1363,15 @@ export function Transcript({
   useEffect(() => {
     if (revealStep == null) return;
     const marker = viewportRef.current?.querySelector(`[data-workflow-step="${revealStep}"]`);
-    if (!marker) return;
+    if (!marker) {
+      // Not even in the item list: its start marker is in history the backfill
+      // has not fetched yet. Pull the rest at once; this re-runs when it lands.
+      const listed = items.some(
+        (it) => it.kind === 'workflow' && it.data.event === 'started' && it.data.stepIndex === revealStep,
+      );
+      if (!listed) requestRest(sessionId);
+      return;
+    }
     setRevealStep(null);
     // Not smooth: the window just grew by hundreds of rows, so an animated scroll
     // would race the reflow.
@@ -1379,7 +1393,12 @@ export function Transcript({
   useEffect(() => {
     if (!transcriptJump) return;
     const index = findItemIndexForSeq(items, transcriptJump.seq, transcriptJump.toolUseId);
-    if (index < 0) return;
+    if (index < 0) {
+      // Older than anything fetched so far: pull the rest of the history in one
+      // frame rather than wait for the background pages. Re-runs when it lands.
+      if (events.length > 0 && transcriptJump.seq < events[0].seq) requestRest(sessionId);
+      return;
+    }
     const needed = items.length - index;
     if (needed > windowSize) setWindowSize(needed + INITIAL_WINDOW);
     setJumpKey(items[index].key);

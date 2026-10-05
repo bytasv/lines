@@ -45,7 +45,8 @@ Clicking a snippet selects the session and sets `transcriptJump`. The transcript
 maps the hit's event `seq` (and tool-use id) to a row, widens its render window
 if the row is above it, scrolls it to the centre, pulses it and highlights the
 matching text. A live turn does not pull the view back to the bottom during the
-jump.
+jump. A hit older than the first loaded event (history is still backfilling) triggers one
+`loadTranscript` for everything older than it, and the jump completes when that lands.
 
 Shortcuts: Cmd/Ctrl+F opens session search, or switches to All sessions from the
 Files scope; Cmd/Ctrl+Shift+F opens Files ([find-in-files](find-in-files.md)).

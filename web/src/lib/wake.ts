@@ -110,3 +110,32 @@ export function bootDial(
   if (dialed && !devices.some((d) => d.id === dialed)) return { dial: null, drop: dialed };
   return { dial: null, drop: null };
 }
+
+/**
+ * How long the link may read `reconnecting` before the red transport pill shows.
+ *
+ * A resumed PWA almost always redials — iOS kills the sockets of suspended
+ * apps — and that redial is RECONNECT_DELAY_MS (1.5s) plus a token mint and a
+ * dial. Without a grace every resume flashed "Disconnected" for a second or
+ * two. The probe-expired path spends its WAKE_PROBE_TIMEOUT_MS while the status
+ * still reads `connected`, so that wait does not count against this.
+ */
+export const DISCONNECT_BANNER_GRACE_MS = 3000;
+
+/**
+ * Whether the transport pill should be visible.
+ *
+ * Display-only: `connectionStatus` itself is untouched, so everything else that
+ * reads it still reacts at once. `offline` skips the grace — `navigator.onLine`
+ * said so, which is real and actionable rather than a flap.
+ */
+export function showDisconnectBanner(s: {
+  status: 'connected' | 'reconnecting' | 'offline';
+  /** When the status left `connected`, or null while it is `connected`. */
+  downSince: number | null;
+  now: number;
+}): boolean {
+  if (s.status === 'connected') return false;
+  if (s.status === 'offline') return true;
+  return s.downSince !== null && s.now - s.downSince >= DISCONNECT_BANNER_GRACE_MS;
+}

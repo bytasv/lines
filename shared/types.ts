@@ -2665,7 +2665,14 @@ export type ClientMessage =
    * (the default) discards it with the rest of the tail. Neither ever re-submits.
    */
   | { type: 'rewindSession'; sessionId: string; seq: number; edit?: boolean }
-  | { type: 'loadTranscript'; sessionId: string }
+  /**
+   * `page` absent = the whole transcript in one frame (what older clients send).
+   * `page: {}` = the recent tail; `before: S` = the page of events with seq < S;
+   * `all` (only with `before`) = everything older than `before` in one frame,
+   * for jump targets. Pages are byte-bounded and aligned to `user` turns where
+   * possible. An older bridge ignores `page` and answers with the whole file.
+   */
+  | { type: 'loadTranscript'; sessionId: string; page?: { before?: number; all?: boolean } }
   /**
    * "I am looking at this session" / "my composer has focus". Debounced hard on
    * the client: writeDraft already fires per keystroke and this must not become
@@ -3727,7 +3734,17 @@ export type ServerMessage =
   /** `breakdown: null` = no live query or the control request failed — a state, not an error. */
   | { type: 'contextBreakdown'; sessionId: string; breakdown: ContextBreakdown | null }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }
-  | { type: 'transcript'; sessionId: string; events: TranscriptEvent[] }
+  /**
+   * `page` absent = the response is the complete transcript. Present on a paged
+   * answer: `floor` is the file's first seq, `prevSeq` the seq of the last event
+   * *not* sent (null when the page reaches the start of the file).
+   */
+  | {
+      type: 'transcript';
+      sessionId: string;
+      events: TranscriptEvent[];
+      page?: { floor: number; prevSeq: number | null };
+    }
   /**
    * Answer to a `rewindSession` that asked to edit, on the asking link only: the
    * rewound prompt, for the composer to prefill. The matching

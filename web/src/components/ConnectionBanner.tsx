@@ -1,4 +1,6 @@
 import { Box, Text } from '@mantine/core';
+import { useEffect, useReducer, useState } from 'react';
+import { DISCONNECT_BANNER_GRACE_MS, showDisconnectBanner } from '../lib/wake';
 import { useStore } from '../store';
 
 /** Floating pill centered in the header while the bridge link is down. `headerHeight` centers it vertically. */
@@ -11,7 +13,25 @@ export function ConnectionBanner({ headerHeight }: { headerHeight: number }) {
   const machineOffline = useStore((s) => s.machineOffline);
   const bootstrapped = useStore((s) => s.bootstrapped);
   const machineGone = machineOffline && bootstrapped;
-  if (status === 'connected' && !machineGone) return null;
+  // When the link left `connected`. Keyed on up/down rather than on the status
+  // itself, so a `reconnecting` <-> `offline` change inside one outage keeps the
+  // original stamp; one timer re-renders once the grace has run out.
+  const down = status !== 'connected';
+  const [downSince, setDownSince] = useState<number | null>(null);
+  const [, rerender] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    if (!down) {
+      setDownSince(null);
+      return;
+    }
+    setDownSince(Date.now());
+    const timer = setTimeout(rerender, DISCONNECT_BANNER_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [down]);
+
+  // machineGone is relay truth about the remote machine, not a resume redial,
+  // so it stays immediate.
+  if (!machineGone && !showDisconnectBanner({ status, downSince, now: Date.now() })) return null;
 
   const base =
     status === 'connected'

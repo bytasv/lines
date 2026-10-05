@@ -142,6 +142,13 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 
 ## Data flow
 
+`buildTranscript` may see only a suffix of a session's events until paged backfill completes (see
+[transcript-performance](transcript-performance.md)), so derivations that look across turns are
+transient until then and fix themselves when it does: `CostLineage` (the first result card in a page
+shows the running total rather than its growth), the `sessionPlanWrite` fallback for a cross-turn
+ExitPlanMode, `lastInitModel` de-duplication, and background tasks opened in older history. Pages
+are aligned to `user` events, which removes the turn-scoped cases.
+
 ### Text
 
 `TranscriptItem` (`user.text` or `assistant.blocks[].text`) → `Markdown` → `ReactMarkdown` +
