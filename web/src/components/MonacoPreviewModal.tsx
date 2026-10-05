@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Modal, Text, Box, Group } from '@mantine/core';
 import { projectRoots } from '@lines/shared';
 import { useStore } from '../store';
@@ -6,7 +7,7 @@ import { BestOnDesktop } from './BestOnDesktop';
 import { FileTree } from './FileTree';
 // The editor (and its monacoSetup import) lives in FilesView; this module is
 // only reached through React.lazy, which keeps both out of the entry chunk.
-import { FileContentView, MarkdownModeToggle, useMarkdownMode } from './FilesView';
+import { FileActionsSlot, FileContentView, MarkdownModeToggle, useMarkdownMode } from './FilesView';
 
 export function MonacoPreviewModal() {
   const filePreview = useStore((s) => s.filePreview);
@@ -21,6 +22,7 @@ export function MonacoPreviewModal() {
   // Keyed by the preview object, not the path: each openFilePreview is a new
   // open, so the toggle starts over even when the same file is reopened.
   const mdMode = useMarkdownMode(path, { line, forceRaw: filePreview?.raw, openKey: filePreview });
+  const [actionsSlot, setActionsSlot] = useState<HTMLDivElement | null>(null);
 
   // Root the tree at the root that contains the previewed file — any root of any
   // open project, since a project spans several — else the active project.
@@ -49,7 +51,10 @@ export function MonacoPreviewModal() {
             {filePreview?.display ?? ''}
             {line ? `:${line}` : ''}
           </Text>
-          <MarkdownModeToggle state={mdMode} />
+          <Group gap={6} wrap="nowrap">
+            <FileActionsSlot onSlot={setActionsSlot} />
+            <MarkdownModeToggle state={mdMode} />
+          </Group>
         </Group>
       }
     >
@@ -79,6 +84,7 @@ export function MonacoPreviewModal() {
               line={line}
               col={filePreview?.col}
               mode={mdMode?.[0]}
+              actionsSlot={actionsSlot}
             />
           )}
         </Box>

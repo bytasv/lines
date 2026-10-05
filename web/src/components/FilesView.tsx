@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Alert,
   ActionIcon,
@@ -25,6 +26,7 @@ import { useStore } from '../store';
 import { useIsPhone } from '../lib/layout';
 import { BestOnDesktop } from './BestOnDesktop';
 import { useIsGuest } from '../lib/can';
+import { MOD } from '../lib/platform';
 import { saveFile, useFileContent, useMediaUrl } from '../lib/files';
 import { isMarkdownPath, languageFor, mediaKindFor, type MediaKind } from '../lib/language';
 import { Markdown } from './Markdown';
@@ -32,6 +34,7 @@ import { Markdown } from './Markdown';
 function FileTab({ path, project, active }: { path: string; project: string; active: boolean }) {
   const setActiveFileTab = useStore((s) => s.setActiveFileTab);
   const closeFileTab = useStore((s) => s.closeFileTab);
+  const dirty = useStore((s) => !!s.dirtyFiles[path]);
   const name = path.split('/').pop() ?? path;
   const rel = path.startsWith(project + '/') ? path.slice(project.length + 1) : path;
 
@@ -51,6 +54,7 @@ function FileTab({ path, project, active }: { path: string; project: string; act
         <Text size="xs" ff="monospace" fw={active ? 600 : 400}>
           {name}
         </Text>
+        {dirty && <DirtyDot />}
         <ActionIcon
           component="span"
           size={14}
@@ -78,6 +82,7 @@ function MonacoView({
   editable = false,
   onChange,
   onSave,
+  editorRef,
 }: {
   path: string;
   content: string;
@@ -86,15 +91,26 @@ function MonacoView({
   editable?: boolean;
   onChange?: (value: string) => void;
   onSave?: () => void;
+  /** Holds the editor while it is mounted, for Discard and refocusing. */
+  editorRef?: MutableRefObject<MonacoEditor | null>;
 }) {
   const colorScheme = useComputedColorScheme('dark');
   const [editor, setEditor] = useState<MonacoEditor | null>(null);
   // Uncontrolled after mount: the text it opened with, never fed back from the
-  // draft, so typing cannot move the cursor. A discard or reload remounts it.
+  // draft, so typing cannot move the cursor. Discard edits it in place; a reload
+  // remounts it.
   const [initial] = useState(content);
   // The save command is registered once on mount; this keeps it on the latest draft.
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
+
+  useEffect(() => {
+    if (!editor || !editorRef) return;
+    editorRef.current = editor;
+    return () => {
+      editorRef.current = null;
+    };
+  }, [editor, editorRef]);
 
   // Re-run on every line change, not only on mount: the search preview keeps one
   // editor per file and moves it between that file's hits.
@@ -224,9 +240,16 @@ function MediaView({ path, kind }: { path: string; kind: MediaKind }) {
 /**
  * A workspace file: the browser's own rendering for media (read-only), rendered
  * markdown when `mode` is `'preview'`, Monaco otherwise — editable on your own
- * machine. The mode comes from the host's header (`useMarkdownMode`).
+ * machine. The mode comes from the host's header (`useMarkdownMode`), and the
+ * save controls go back into it, through `actionsSlot` (see `FileActionsSlot`).
  */
-export function FileContentView(props: { path: string; line?: number; col?: number; mode?: MarkdownMode }) {
+export function FileContentView(props: {
+  path: string;
+  line?: number;
+  col?: number;
+  mode?: MarkdownMode;
+  actionsSlot?: HTMLElement | null;
+}) {
   // Branch before any text fetch, so media never goes through the `file` kind.
   const kind = mediaKindFor(props.path);
   if (kind) return <MediaView path={props.path} kind={kind} />;
@@ -238,11 +261,13 @@ function TextContentView({
   line,
   col,
   mode = 'raw',
+  actionsSlot,
 }: {
   path: string;
   line?: number;
   col?: number;
   mode?: MarkdownMode;
+  actionsSlot?: HTMLElement | null;
 }) {
   // Fetched once here, so flipping Preview/Raw does not refetch.
   const [reloadKey, setReloadKey] = useState(0);
@@ -260,8 +285,7 @@ function TextContentView({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
-  // Bumped by Discard to remount the (uncontrolled) editor on the base text.
-  const [editorKey, setEditorKey] = useState(0);
+  const editorRef = useRef<MonacoEditor | null>(null);
 
   // A fresh read (first load or Reload) is the new base; any draft is gone with it.
   useEffect(() => {
@@ -280,6 +304,14 @@ function TextContentView({
   }, [path, dirty, setFileDirty]);
   useEffect(() => () => setFileDirty(path, false), [path, setFileDirty]);
 
+  // The clicked button leaves with the controls, so focus goes back to the text
+  // — unless the user has moved it somewhere else in the meantime.
+  const refocus = () => {
+    const active = document.activeElement;
+    if (active && active !== document.body && !actionsSlot?.contains(active)) return;
+    editorRef.current?.focus();
+  };
+
   const save = async (overwrite = false) => {
     if (!editable || saving || draft === null || (!dirty && !overwrite)) return;
     const text = draft;
@@ -297,6 +329,7 @@ function TextContentView({
       setBaseMtime(result.mtimeMs);
       setConflict(false);
       useStore.getState().noteFileSaved(path);
+      refocus();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -305,10 +338,21 @@ function TextContentView({
   };
 
   const discard = () => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (editor && model && base !== null) {
+      // In place rather than a remount, so the scroll and cursor stay put and
+      // the discard is one undo away.
+      const view = editor.saveViewState();
+      editor.pushUndoStop();
+      editor.executeEdits('discard', [{ range: model.getFullModelRange(), text: base }]);
+      editor.pushUndoStop();
+      if (view) editor.restoreViewState(view);
+    }
     setDraft(null);
     setSaveError(null);
     setConflict(false);
-    setEditorKey((k) => k + 1);
+    refocus();
   };
 
   // Relative links resolve against the file's own directory. Without a handler
@@ -352,7 +396,6 @@ function TextContentView({
       </ScrollArea>
     ) : (
       <MonacoView
-        key={editorKey}
         path={path}
         content={text}
         line={line}
@@ -360,27 +403,58 @@ function TextContentView({
         editable={editable}
         onChange={setDraft}
         onSave={() => void save()}
+        editorRef={editorRef}
       />
     );
-  if (!dirty && !saveError && !conflict) return body;
+  // Portalled into the host's header rather than stacked over the body: the body
+  // keeps one shape whether or not the controls show, so the first keystroke
+  // neither remounts the editor (losing focus) nor pushes the text down.
+  const showControls = dirty || !!saveError || conflict;
   return (
-    <Stack gap={0} h="100%">
-      <SaveBar
-        conflict={conflict}
-        error={saveError}
-        saving={saving}
-        onSave={() => void save()}
-        onDiscard={discard}
-        onOverwrite={() => void save(true)}
-        onReload={() => setReloadKey((k) => k + 1)}
-      />
-      <Box style={{ flex: 1, minHeight: 0 }}>{body}</Box>
-    </Stack>
+    <>
+      {body}
+      {showControls &&
+        actionsSlot &&
+        createPortal(
+          <SaveControls
+            conflict={conflict}
+            error={saveError}
+            saving={saving}
+            onSave={() => void save()}
+            onDiscard={discard}
+            onOverwrite={() => void save(true)}
+            onReload={() => setReloadKey((k) => k + 1)}
+          />,
+          actionsSlot,
+        )}
+    </>
   );
 }
 
-/** Shown over an editor while it holds an unsaved edit, or after a save failed. */
-function SaveBar({
+/**
+ * Where a host's header shows the open file's save controls, next to its own
+ * buttons. `display: contents` so it adds no box, and no gap, while empty.
+ */
+export function FileActionsSlot({ onSlot }: { onSlot: (el: HTMLDivElement | null) => void }) {
+  return <div ref={onSlot} style={{ display: 'contents' }} />;
+}
+
+function DirtyDot() {
+  return (
+    <Box
+      style={{
+        width: 6,
+        height: 6,
+        borderRadius: '50%',
+        background: 'var(--mantine-primary-color-filled)',
+        flexShrink: 0,
+      }}
+    />
+  );
+}
+
+/** A file's save state, for its host's header: unsaved, failed, or stale on disk. */
+function SaveControls({
   conflict,
   error,
   saving,
@@ -397,39 +471,40 @@ function SaveBar({
   onOverwrite: () => void;
   onReload: () => void;
 }) {
+  const problem = conflict ? 'Changed on disk' : error;
   return (
-    <Group
-      gap="xs"
-      px="xs"
-      py={4}
-      wrap="nowrap"
-      justify="space-between"
-      style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
-    >
-      <Text size="xs" c={conflict || error ? 'red' : 'dimmed'} truncate>
-        {conflict ? 'File changed on disk' : (error ?? 'Unsaved changes')}
-      </Text>
-      <Group gap={6} wrap="nowrap">
-        {conflict ? (
-          <>
-            <Button size="compact-xs" variant="light" color="red" loading={saving} onClick={onOverwrite}>
-              Overwrite
-            </Button>
-            <Button size="compact-xs" variant="subtle" color="gray" disabled={saving} onClick={onReload}>
-              Reload
-            </Button>
-          </>
-        ) : (
-          <>
-            <Button size="compact-xs" variant="light" loading={saving} onClick={onSave}>
-              Save
-            </Button>
-            <Button size="compact-xs" variant="subtle" color="gray" disabled={saving} onClick={onDiscard}>
-              Discard
-            </Button>
-          </>
-        )}
-      </Group>
+    <Group gap={6} wrap="nowrap" style={{ minWidth: 0 }}>
+      {problem ? (
+        <Text size="xs" c="red" truncate maw={280} title={problem}>
+          {problem}
+        </Text>
+      ) : (
+        <>
+          <DirtyDot />
+          <Text size="xs" c="dimmed" style={{ whiteSpace: 'nowrap' }}>
+            Unsaved changes · {MOD}S
+          </Text>
+        </>
+      )}
+      {conflict ? (
+        <>
+          <Button size="compact-xs" variant="subtle" color="gray" disabled={saving} onClick={onReload}>
+            Reload
+          </Button>
+          <Button size="compact-xs" variant="light" color="red" loading={saving} onClick={onOverwrite}>
+            Overwrite
+          </Button>
+        </>
+      ) : (
+        <>
+          <Button size="compact-xs" variant="subtle" color="gray" disabled={saving} onClick={onDiscard}>
+            Discard
+          </Button>
+          <Button size="compact-xs" variant="light" loading={saving} onClick={onSave}>
+            Save
+          </Button>
+        </>
+      )}
     </Group>
   );
 }
@@ -440,6 +515,7 @@ export function FilesView() {
   const openFiles = useStore((s) => activeProject ? s.openFiles[activeProject] : undefined);
   const isPhone = useIsPhone();
   const mdMode = useMarkdownMode(openFiles?.active ?? undefined);
+  const [actionsSlot, setActionsSlot] = useState<HTMLDivElement | null>(null);
 
   const empty = (
     <Center h="100%">
@@ -472,11 +548,17 @@ export function FilesView() {
             />
           ))}
         </Group>
+        <FileActionsSlot onSlot={setActionsSlot} />
         <MarkdownModeToggle state={mdMode} />
       </Group>
       <Box style={{ flex: 1, minHeight: 0 }}>
         {openFiles.active ? (
-          <FileContentView key={openFiles.active} path={openFiles.active} mode={mdMode?.[0]} />
+          <FileContentView
+            key={openFiles.active}
+            path={openFiles.active}
+            mode={mdMode?.[0]}
+            actionsSlot={actionsSlot}
+          />
         ) : (
           empty
         )}
@@ -497,6 +579,7 @@ export function SearchPreviewView() {
   // Keyed by the hit, so picking another hit in a file left on Preview goes
   // back to Raw, where its line is visible.
   const mdMode = useMarkdownMode(preview?.path, { line: preview?.line, openKey: preview });
+  const [actionsSlot, setActionsSlot] = useState<HTMLDivElement | null>(null);
   if (!preview) return null;
   if (isPhone) return <BestOnDesktop what="Reading source" onClose={() => setSearchPreview(null)} />;
   const rel =
@@ -511,6 +594,7 @@ export function SearchPreviewView() {
           {preview.line ? `:${preview.line}` : ''}
         </Text>
         <Group gap={6} wrap="nowrap">
+          <FileActionsSlot onSlot={setActionsSlot} />
           <MarkdownModeToggle state={mdMode} />
           <Tooltip label="Close preview">
             <ActionIcon size="sm" variant="subtle" color="gray" onClick={() => setSearchPreview(null)}>
@@ -526,6 +610,7 @@ export function SearchPreviewView() {
           line={preview.line}
           col={preview.col}
           mode={mdMode?.[0]}
+          actionsSlot={actionsSlot}
         />
       </Box>
     </Stack>

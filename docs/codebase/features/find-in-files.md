@@ -62,8 +62,8 @@ or switching to a session scope clears it.
 
 ## Business rules
 
-- The preview can be edited and saved (Cmd/Ctrl+S or Save; owner only, Raw/Monaco
-  only). Picking another file's hit, closing the preview or the search, or
+- The preview can be edited and saved (Cmd/Ctrl+S or Save in the preview header,
+  beside its close button; owner only, Raw/Monaco only). Picking another file's hit, closing the preview or the search, or
   leaving the Files scope asks before dropping unsaved changes. After a save, the
   current query re-runs if the saved file is among the hits, since the edit may
   have shifted their line numbers.

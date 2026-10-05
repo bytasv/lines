@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.5",
+      "date": "2026-10-06",
+      "items": [
+        "Typing in a file no longer drops your cursor after the first keystroke, and Save and Discard now sit in the file's header."
+      ]
+    },
+    {
       "version": "0.1.4",
       "date": "2026-10-06",
       "items": [

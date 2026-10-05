@@ -3436,7 +3436,8 @@
         "FileContentView",
         "useMarkdownMode",
         "confirmDiscard",
-        "dirtyFiles"
+        "dirtyFiles",
+        "FileActionsSlot"
       ],
       "tests": [
         "server/src/fileSearch.test.ts",
@@ -3448,12 +3449,14 @@
         "a .md/.markdown hit or tree open renders in Preview with a Preview/Raw header toggle; other files and .mdx open in Monaco with no toggle, and the mode is not persisted",
         "relative links in the rendered file resolve against its own directory and open in the same preview; relative images are not resolved",
         "the preview is editable on your own machine (Raw/Monaco only, guests read-only): Cmd/Ctrl+S or Save, no autosave; closing the preview or opening another file asks before discarding, and the tab warns on close or reload while any edit is unsaved",
+        "save state shows in the host's header beside its own buttons (dot + 'Unsaved changes', Discard, Save; on a conflict 'Changed on disk', Reload, Overwrite) and a dirty files-mode tab shows a dot; Discard reverts in place so it is one undo away",
         "hideIgnored defaults to on and is local-only (not part of synced settings)",
         "non-ignored files fill the capped candidate list before ignored ones, so a large gitignored tree cannot starve the palette or find-in-files"
       ],
       "architecturalRules": [
         "the palette is a global overlay mounted in App.tsx alongside MonacoPreviewModal/LoginModal, not scoped under any route, so the shortcut works from the docs reader too",
-        "hideIgnored is a single store field read by both surfaces (palette, sidebar tree) rather than two independent toggles"
+        "hideIgnored is a single store field read by both surfaces (palette, sidebar tree) rather than two independent toggles",
+        "save controls are portalled into the host's header via FileActionsSlot, never stacked over the editor: the editor subtree keeps one shape, since wrapping it on the first edit remounts Monaco and drops focus mid-keystroke; Monaco stays uncontrolled after mount and Discard edits it in place"
       ],
       "relatedDecisions": [
         "prompt-mentions",
@@ -4341,7 +4344,7 @@
         "an invalid regex is a 400 with an invalidRegex body; a bare 400 means an older bridge",
         "results are shown only while they match the current query, roots and flags",
         "a hit on a markdown file opens Raw at its line, not Preview, because a hit carries a line; picking another hit returns to Raw, and the toggle choice is not persisted",
-        "the preview is editable and saveable (owner only, Raw only); picking another file's hit, closing the preview or search, or leaving the Files scope asks before discarding unsaved changes",
+        "the preview is editable and saveable from its header, beside the close button (owner only, Raw only); picking another file's hit, closing the preview or search, or leaving the Files scope asks before discarding unsaved changes",
         "after a save the current query re-runs if the saved file is among the hits, since line numbers may have shifted"
       ],
       "architecturalRules": [

@@ -43,6 +43,8 @@ in a floating palette.
   `searchFiles`/`searchFilesAcross`
 - `TreeEntry.ignored`
 - `isMarkdownPath`, `FileContentView`, `useMarkdownMode`
+- `FileActionsSlot` — the header spot a host gives the open file's save
+  controls
 
 ## Data flow
 
@@ -102,6 +104,11 @@ listing) so the toggle never needs a round trip.
   unsaved changes, and the browser tab warns on close or reload while any edit is
   unsaved. See [file-routes-over-ws](file-routes-over-ws.md) for the write and
   conflict rules.
+- Save state shows in the host's header, beside its own buttons: a dot with
+  "Unsaved changes · ⌘S", Discard and Save; on a conflict, "Changed on disk"
+  with Reload and Overwrite. A files-mode tab with unsaved changes shows a dot.
+  Discard reverts the text in place, so it is one undo away, and clicking Save
+  or Discard hands focus back to the editor.
 - `hideIgnored` defaults to on and is local-only (not part of synced
   settings) — a per-browser view choice, not a project setting.
 
@@ -117,6 +124,11 @@ listing) so the toggle never needs a round trip.
 - `hideIgnored` is a single store field read by both surfaces (palette,
   sidebar tree) rather than two independent toggles, so turning it off in one
   place doesn't leave the other showing a stale set.
+- The save controls are portalled into the host's header (`FileActionsSlot`),
+  never stacked over the editor. The editor's subtree keeps one shape whether or
+  not they show; wrapping it when the first edit lands remounts Monaco, which
+  drops focus mid-keystroke and resets the scroll. Monaco is uncontrolled after
+  mount, and Discard edits it in place rather than remounting it.
 
 ## Related decisions
 
