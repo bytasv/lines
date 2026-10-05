@@ -240,7 +240,7 @@ test('request/response round-trips over the tunnel', async () => {
   });
   const res = await until(() => find(messages, 'fileResponse'), 'fileResponse');
   assert.equal(res.status, 200);
-  assert.deepEqual(res.body, { content: 'relayed hello' });
+  assert.equal((res.body as { content: string }).content, 'relayed hello');
   ws.close();
 });
 

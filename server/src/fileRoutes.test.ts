@@ -310,7 +310,7 @@ test('sessionDiffFile: refuses a path outside the repo, and a repo outside the s
 // ---------------------------------------------------------------------------
 // writeFile
 
-const editDir = path.join(root, 'edit');
+const editDir = path.join(root, 'sub', 'edit');
 fs.mkdirSync(editDir);
 const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-outside-'));
 after(() => fs.rmSync(outside, { recursive: true, force: true }));
