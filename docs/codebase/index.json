@@ -3946,7 +3946,7 @@
         "the phone project-picker button is sized and left-aligned to its own label instead of stretching to fill the header, and the composer has no corner radius or left/right/bottom border on a phone, so it reads as a strip spanning the screen",
         "a bottom sheet's top clearance is padding on .lines-mobile-sheet-inner (--lines-safe-top plus a gap), not a content max-height, so its title and close button clear the Dynamic Island; a full-screen modal's content is the fixed inner minus --lines-keyboard with the bottom inset as padding (dropped while the keyboard is up) and its header padded by --lines-safe-top, with no inline height or header padding-top on a phone; PermissionPrompt's sheet carries .lines-mobile-sheet and .lines-mobile-sheet-inner",
         "the transcript ScrollArea sets scrollbars=\"y\" and styles.content.display=\"block\": Mantine's default display:table content wrapper grows to its widest non-shrinking child, which let one nowrap row widen the whole scroll column past 390px",
-        "the desktop-update pill (UpdateBanner) is hidden on a phone; its only action is the macOS download link"
+        "the desktop-update pill (UpdateBanner) shows on a phone only for a staged (ready) update, compact (Update ready · Restart); an available update, whose only action is the macOS download link, stays hidden there"
       ],
       "architecturalRules": [
         "adapt in place, never fork a mobile shell: a second transcript renderer either is the same code or drifts and re-loses the batching, windowing and referential-stability work",

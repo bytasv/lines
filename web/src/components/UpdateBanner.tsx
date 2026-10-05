@@ -21,8 +21,11 @@ const DISMISSED_KEY = 'lines.updateDismissed';
  * through the owner-gated `installUpdate`, which the bridge refuses while a
  * session is running. 'available' comes from a shell that cannot install it (one
  * from before self-install, or a download that failed): the action is the
- * download page. Hidden on a phone, where the header has no room; Settings →
- * Updates carries both actions there.
+ * download page.
+ *
+ * On a phone only 'ready' shows, and compact: restarting the machine's app works
+ * from anywhere, while the download link is a desktop installer a phone cannot
+ * use. Settings → Updates carries both actions too.
  */
 export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
   const status = useStore((s) => s.updateStatus);
@@ -41,8 +44,8 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
   if (skew) return null;
   if (worker?.connected === false || storage?.available === false) return null;
   if (access) return null;
-  if (isPhone) return null;
   const ready = status?.state === 'ready';
+  if (isPhone && !ready) return null;
   if (!ready && (status?.state !== 'available' || !DESKTOP_DOWNLOAD_URL)) return null;
   const version = status.version;
   // Per version, so dismissing 0.1.4 doesn't also silence 0.1.5, and per shape:
@@ -82,9 +85,11 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
     >
       <Text size="sm" fw={500}>
         {ready
-          ? version
-            ? `Lines ${version} is ready`
-            : 'An update is ready'
+          ? isPhone
+            ? 'Update ready'
+            : version
+              ? `Lines ${version} is ready`
+              : 'An update is ready'
           : version
             ? `Lines ${version} is available`
             : 'A new version of Lines is available'}
@@ -97,7 +102,7 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
             // Refused, not queued: the bridge will not restart under a running
             // turn, and nothing restarts it later on its own.
             <Text span size="sm" style={{ marginLeft: 6, opacity: 0.85 }}>
-              Restart once no session is running
+              {isPhone ? 'Finish sessions first' : 'Restart once no session is running'}
             </Text>
           ) : (
             <UnstyledButton
@@ -109,7 +114,7 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
                 marginLeft: 6,
               }}
             >
-              Restart to update
+              {isPhone ? 'Restart' : 'Restart to update'}
             </UnstyledButton>
           )
         ) : (

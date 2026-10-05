@@ -29,8 +29,8 @@ Adapted **in place** with Mantine breakpoints. There is no separate mobile shell
 - `web/src/index.css` — `--lines-viewport`/`--lines-keyboard`, and the `@media` block:
   `env(safe-area-inset-bottom)`, the 16px input floor, and touch target floors
 - `web/src/components/BestOnDesktop.tsx` — the shared deferral panel
-- `web/src/components/UpdateBanner.tsx` — hidden on a phone (`useIsPhone`); its only action is the
-  desktop download link
+- `web/src/components/UpdateBanner.tsx` — on a phone (`useIsPhone`) shows only a staged update,
+  compact ("Update ready · Restart"); never the desktop download link
 - `web/public/manifest.webmanifest`, `web/public/icon-*.png` — installability
 - `web/public/sw.js`, `web/src/lib/push.ts` — push-only service worker and this device's
   subscription; see [web-push-notifications](web-push-notifications.md)
@@ -74,9 +74,11 @@ an iPad in landscape is neither.
 ## Business rules
 
 - Phone breakpoint is Mantine's default `sm` (48em/768px). No custom breakpoints were added.
-- The desktop-update pill (`UpdateBanner`) is hidden on a phone. Its only action is a link to the
-  macOS download page, which a phone cannot install; showing it there was pure noise stealing
-  header space.
+- The desktop-update pill (`UpdateBanner`) shows on a phone only when the machine's app has an
+  update staged (`'ready'`), in a compact form: "Update ready · Restart", or "Finish sessions first"
+  while the bridge would refuse. Restarting the app on the machine works from anywhere. An
+  `'available'` update stays hidden there, since its only action is the macOS download page,
+  which a phone cannot install.
 - No full-height surface uses `100vh`. On a phone `vh` is the *large* viewport — measured as if
   the browser's toolbars were hidden — so a `100vh` shell puts its bottom row, which here is the
   composer, underneath Safari's toolbar. Mantine's own `AppShell` already uses `dvh`, so anything

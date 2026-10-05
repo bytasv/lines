@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.7",
+      "date": "2026-10-06",
+      "items": [
+        "On your phone, a small banner now tells you when the desktop app has an update ready, with a button to restart it."
+      ]
+    },
+    {
       "version": "0.1.6",
       "date": "2026-10-06",
       "items": [
