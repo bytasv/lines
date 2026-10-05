@@ -4275,7 +4275,8 @@
         "the Where your data goes section mirrors PRIVACY.md and links to it; a change to what is stored or relayed updates both together",
         "shared links carry ?ref=<channel>, and the nginx access log is the only channel attribution",
         "copy says works with Claude Code and Codex and never implies an Anthropic or OpenAI partnership or endorsement",
-        "the Mac panel points Windows and Linux users at running from source"
+        "the Mac panel points Windows and Linux users at running from source",
+        "the phone remote leads: the hero subtitle names the push to your phone and the From anywhere group is the first feature group, in the first wide tile; the other groups follow the growth plan's value ranking (Run agents, Review, Automate, Control), and the recipe library stays out of the hero until it has public content"
       ],
       "architecturalRules": [
         "the rotating word sits on its own line with every word stacked in one grid cell and centred independently, so a short word leaves no gap and a long one never re-wraps the heading; mid-sentence placement shifts the surrounding text on every swap",

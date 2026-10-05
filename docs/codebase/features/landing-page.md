@@ -6,7 +6,7 @@ The marketing page: shown to signed-out visitors at `/` and to anyone at `/welco
 app, and served on its own as a static, keyless build on the apex of a hosted deployment. It sells
 Lines as a web GUI for **coding agents** — Claude Code and Codex today, more later — rather than
 for one provider. The hero cycles through the supported agent names so a visitor sees both at a
-glance. The hero's first action is the Mac download, beside Get started, with the facts a visitor
+glance, and its subtitle names the phone remote: a push when an agent needs you. The hero's first action is the Mac download, beside Get started, with the facts a visitor
 checks before installing (Apple silicon, notarized by Apple); under it sit the open-source line, a
 GitHub star link and a self-hosted demo loop. Below that the page walks through how it works, the
 feature groups, security, where your data goes, the ways to run it and getting started, most with an
@@ -88,6 +88,10 @@ None; the page is presentational.
   on purpose: `shared/providers.ts` is capability data, not marketing copy.
 - The closing panels' footnotes say at least one of Claude Code or Codex must be installed on the
   paired machine, and point Windows and Linux users at running from source.
+- The phone remote leads: it is the hook every post and the demo video open on, so the hero
+  subtitle names the push to your phone, and the "From anywhere" group is the first feature group,
+  in the first wide tile. The groups after it follow the growth plan's value ranking: Run agents,
+  Review, Automate, Control. The recipe library stays out of the hero until it has public content.
 - Download first: the hero leads with the Mac download, then Get started; Sign in lives in the
   header. With no build published the hero falls back to Get started and Sign in, and the account
   panel spans the closing row alone.

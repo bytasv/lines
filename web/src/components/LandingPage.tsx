@@ -81,10 +81,25 @@ type FeatureGroup = {
   items: string[];
 };
 
-// Each group summarises a set of shipped features (docs/codebase/features). Keep
-// the caveats: model switching hands over a summary, not the full context; the
-// phone app is a web app, not a native one; one machine is active at a time.
+// Each group summarises a set of shipped features (docs/codebase/features),
+// ordered by what a visitor gets nowhere else: the phone remote leads and takes
+// the first wide tile, because it is the hook every post and video opens on.
+// Keep the caveats: model switching hands over a summary, not the full context;
+// the phone app is a web app, not a native one; one machine is active at a time.
 const GROUPS: FeatureGroup[] = [
+  {
+    art: AnywhereArt,
+    eyebrow: 'From anywhere',
+    title: 'Your desk, in your pocket',
+    blurb:
+      'The agent keeps working on your machine, and your phone gets a push the moment it needs you. A web app you add to your home screen (push needs iOS 16.4+).',
+    items: [
+      'Allow or Deny, approve a plan or answer a question from your phone',
+      'Reply by voice, with whisper running on your own machine',
+      'Invite others into a live session to view, prompt or collaborate',
+      'Switch between paired machines, one at a time',
+    ],
+  },
   {
     art: ParallelSessionsArt,
     eyebrow: 'Run agents',
@@ -95,6 +110,19 @@ const GROUPS: FeatureGroup[] = [
       'Background subagents and commands you can see and stop',
       '“Send now” drops a message into the turn that is already running',
       'A dead turn gets one-click Retry or resumes on its own',
+      'Switch between Claude and OpenAI with a summarized hand-off',
+    ],
+  },
+  {
+    art: ReviewArt,
+    eyebrow: 'Review',
+    title: 'Every change, readable',
+    blurb:
+      'Diffs instead of raw tool dumps, and a single view of everything a session has changed so far.',
+    items: [
+      'Optional git worktree and branch per session',
+      'Multi-root projects with per-repo commits',
+      'Rewind to an earlier prompt, edit it and send again',
     ],
   },
   {
@@ -117,31 +145,6 @@ const GROUPS: FeatureGroup[] = [
       'A synced allowlist for the safe stuff',
       'Model picker and reasoning effort per session',
       'Cost, usage and a context ring with compaction',
-      'Switch between Claude and OpenAI with a summarized hand-off',
-    ],
-  },
-  {
-    art: ReviewArt,
-    eyebrow: 'Review',
-    title: 'Every change, readable',
-    blurb:
-      'Diffs instead of raw tool dumps, and a single view of everything a session has changed so far.',
-    items: [
-      'Optional git worktree and branch per session',
-      'Multi-root projects with per-repo commits',
-      'Rewind to an earlier prompt, edit it and send again',
-    ],
-  },
-  {
-    art: AnywhereArt,
-    eyebrow: 'From anywhere',
-    title: 'Your desk, in your pocket',
-    blurb:
-      'A phone-ready web app you can add to your home screen, with optional push alerts (iOS 16.4+ from the home screen).',
-    items: [
-      'Voice dictation with whisper running on your own machine',
-      'Switch between paired machines, one at a time',
-      'Invite others into a live session to view, prompt or collaborate',
       'Claude memory syncs across machines, and you approve incoming changes',
     ],
   },
@@ -218,7 +221,7 @@ const HOW_IT_WORKS = [
   {
     art: RunArt,
     title: 'Run from any browser',
-    description: 'Start sessions from your laptop or your phone.',
+    description: 'Start sessions from your laptop or your phone, and get a push when one needs you.',
   },
 ];
 
@@ -614,9 +617,9 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
               </span>
             </Title>
             <Text size="lg" c="dimmed" maw={640}>
-              Lines is a web GUI for coding agents: parallel sessions, readable diffs, multi-step
-              workflows and a recipe library, while every agent turn runs on your own filesystem,
-              your own git and your own agent login.
+              Lines is a web and phone GUI for coding agents: parallel sessions, readable diffs and
+              workflows, plus a push to your phone when an agent needs you. Every turn runs on your
+              own machine, with your own files, git and CLI login.
             </Text>
             <HeroActions appUrl={appUrl} />
             <Stack gap={6} align="center">
