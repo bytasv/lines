@@ -45,6 +45,13 @@
   ],
   "desktop": [
     {
+      "version": "0.2.44",
+      "date": "2026-10-06",
+      "items": [
+        "Lines now updates itself: new versions download in the background, and a restart installs them."
+      ]
+    },
+    {
       "version": "0.2.43",
       "date": "2026-10-06",
       "items": [
@@ -53,7 +60,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Lines now updates itself: new versions download in the background, and a restart installs them."
-  ]
+  "desktopPending": []
 }
