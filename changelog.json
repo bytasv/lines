@@ -22,9 +22,15 @@
       ]
     }
   ],
-  "desktop": [],
-  "desktopPending": [
-    "Saving edits to files from the file viewer now works on your own machine.",
-    "The Mac app is now signed and notarized by Apple, so macOS no longer warns when you open a new download."
-  ]
+  "desktop": [
+    {
+      "version": "0.2.43",
+      "date": "2026-10-06",
+      "items": [
+        "Saving edits to files from the file viewer now works on your own machine.",
+        "The Mac app is now signed and notarized by Apple, so macOS no longer warns when you open a new download."
+      ]
+    }
+  ],
+  "desktopPending": []
 }
