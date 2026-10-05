@@ -1,24 +1,10 @@
-import {
-  Alert,
-  Anchor,
-  Button,
-  Card,
-  Code,
-  CopyButton,
-  Group,
-  List,
-  Stack,
-  Text,
-} from '@mantine/core';
-import { IconAlertTriangle, IconDownload } from '@tabler/icons-react';
+import { Anchor, Button, Card, Stack, Text } from '@mantine/core';
+import { IconDownload } from '@tabler/icons-react';
 import {
   DESKTOP_DOWNLOAD_ENABLED,
   DESKTOP_DOWNLOAD_URL,
   DESKTOP_DOWNLOAD_VERSION,
 } from '../lib/storage';
-
-/** The Gatekeeper workaround, verbatim — the user has to be able to copy it. */
-const QUARANTINE_COMMAND = 'xattr -dr com.apple.quarantine /Applications/Lines.app';
 
 /**
  * Production builds link through the serving nginx's /download, which 302s to
@@ -36,12 +22,10 @@ const RUN_FROM_SOURCE_URL = 'https://github.com/bytasv/lines#readme';
  * Every other pairing surface assumed the desktop app was already installed,
  * which left no path from "signed in" to "has a machine". This is that path.
  *
- * The Gatekeeper block is stated up front rather than buried: the build is
- * ad-hoc signed (no Apple Developer ID yet), so macOS *will* refuse to open it
- * the first time and will usually say the app is damaged. A user who hits that
- * with no warning concludes the download is broken. No wording removes the
- * cliff — only a Developer ID does — so the honest move is to name it and give
- * the two remedies that work.
+ * The build is signed with a Developer ID and notarized, so macOS opens it with
+ * no Gatekeeper prompt and there are no workaround steps to show. A build from
+ * before signing (0.2.42 and earlier) still needs the old Privacy & Security /
+ * `xattr` steps; the download link always serves the newest build.
  *
  * Renders nothing when no build has been published (see DESKTOP_DOWNLOAD_URL).
  */
@@ -70,39 +54,6 @@ export function DownloadDesktopApp() {
         >
           Download Lines for macOS
         </Button>
-
-        <Alert
-          variant="light"
-          color="yellow"
-          icon={<IconAlertTriangle size={16} />}
-          title="macOS will block it the first time"
-        >
-          <Stack gap="xs">
-            <Text size="sm">
-              This build is not notarized yet, so macOS says Lines is damaged or from an
-              unidentified developer. It is neither — either of these opens it:
-            </Text>
-            <List size="sm" spacing={4} type="ordered">
-              <List.Item>
-                Open <b>System Settings → Privacy &amp; Security</b>, scroll to the message about
-                Lines, and click <b>Open Anyway</b>.
-              </List.Item>
-              <List.Item>Or run this in Terminal once, then open Lines normally:</List.Item>
-            </List>
-            <Group gap="xs" wrap="nowrap" align="flex-start">
-              <Code block style={{ flex: 1 }}>
-                {QUARANTINE_COMMAND}
-              </Code>
-              <CopyButton value={QUARANTINE_COMMAND}>
-                {({ copied, copy }) => (
-                  <Button size="xs" variant="light" color={copied ? 'teal' : 'gray'} onClick={copy}>
-                    {copied ? 'Copied' : 'Copy'}
-                  </Button>
-                )}
-              </CopyButton>
-            </Group>
-          </Stack>
-        </Alert>
 
         <Text size="sm" c="dimmed">
           Lines runs the agent through a coding-agent CLI on your machine — install{' '}

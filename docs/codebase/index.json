@@ -2615,7 +2615,7 @@
         "right-click shows a native context menu in every shell window; link actions copy or open externally, never in-window",
         "a restart is refused while any session is running, waiting-permission, or waiting-approval, since a restart kills bridge and worker together under one atomic update",
         "closing the window does not quit the app, and must not kill an in-flight turn",
-        "restartForUpdate never installs on an unsigned build - CAN_SELF_INSTALL is false until real code signing exists, so it opens the download page instead of pretending to update in place",
+        "restartForUpdate installs in place only because releases are signed and notarized (CAN_SELF_INSTALL true), but the update flow is check-only, so users are still pointed at the download page",
         "in hosted mode (the default; local mode needs LINES_LOCAL_MODE=1) the shell serves no local UI - it registers this machine's device identity, spawns the bridge with the relay/storage/device env, and shows a pairing code window only if the machine has not been claimed yet",
         "a relay open alone is not proof of pairing - the relay accepts the socket before asking storage whether the device is claimed, so Connected lags the raw socket by RELAY_SETTLE_MS and a 1008 close reads as Not paired rather than an indefinite Connecting",
         "a pairing code never requires an app restart to refresh, on a timer or on demand",

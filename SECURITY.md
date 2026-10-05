@@ -60,8 +60,6 @@ surfaces most worth your attention:
 - Findings that require an attacker who already has local code execution as the
   user, or root on the user's machine. The agent runs with the user's own
   filesystem access by design.
-- The macOS build being ad-hoc signed rather than notarized. Known, documented in
-  `docs/codebase/features/desktop-app.md`, and tracked as a packaging matter.
 - Vulnerabilities in the Claude or Codex CLIs, the agent SDKs, or any vendor
   service. Report those to the respective vendor; if Lines' use of one makes an
   issue materially worse, that part is in scope here.

@@ -22,13 +22,7 @@ Anthropic or OpenAI.
 1. **Install an agent CLI** on your Mac: [Claude Code](https://docs.claude.com/en/docs/claude-code/setup)
    or [Codex](https://github.com/openai/codex), and sign in to it.
 2. **Install the desktop app** from [linesapp.cloud](https://linesapp.cloud/?ref=github).
-   The build is not notarized yet, so macOS will block it the first time. Drag it
-   to Applications, then run this once:
-
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/Lines.app
-   ```
-
+   The build is signed and notarized by Apple. Drag it to Applications and open it.
 3. **Sign in and pair.** Open Lines from the menu bar, sign in at
    [linesapp.cloud](https://linesapp.cloud/?ref=github), and enter the pairing code
    the app shows. Then start sessions from any browser, or add the site to your

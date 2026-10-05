@@ -117,8 +117,8 @@ relay pipes frames between them, and the UI that gates all of it.
   first `hello`; holds the boot splash with a caption and, once that takes too long or the relay
   says the machine is offline, portals the escalating way out into the splash
 - `web/src/lib/splash.ts` — the boot splash controller; see [brand-logo](brand-logo.md)
-- `web/src/components/DownloadDesktopApp.tsx` — the DMG link and the Gatekeeper steps an ad-hoc
-  signed build forces
+- `web/src/components/DownloadDesktopApp.tsx` — the DMG link, platform note and CLI
+  requirement (the build is notarized, so no Gatekeeper steps)
 - `web/src/components/GateShell.tsx` — chrome (header + sign-out) shared by every pre-app screen
 - `web/src/components/PairingDiagram.tsx` — the explainer SVG
 - `web/src/components/DevicesSection.tsx` — the Settings pane: list, pair, switch, revoke, share,
@@ -478,8 +478,7 @@ refuse.
   transport depends on it — without it `handleConnection` could only take a real socket.
 - The relay depends on storage to verify a device's secret; the relay holds no database
   credentials itself. With `RELAY_URL` unset the bridge behaves exactly as before.
-- [desktop-app](desktop-app.md) — what `DownloadDesktopApp` links to, and why its copy has to
-  name the Gatekeeper steps explicitly.
+- [desktop-app](desktop-app.md) — what `DownloadDesktopApp` links to, and how the build is signed and notarized.
 - [production-deployment](production-deployment.md) — the topology the gate exists for.
 
 ## Tests
