@@ -20,6 +20,8 @@ are auto-discovered and self-healing, on the same pattern as the Claude/Codex CL
 
 - Composer mic button (`web/src/components/Composer.tsx`) — idle / recording (live waveform) /
   transcribing; disabled-with-a-warning-icon, never hidden, when voice input cannot run
+- `DictateButton` (`web/src/components/DictateButton.tsx`) — the same mic beside the AskUserQuestion
+  "Other…" answer field and the plan-comment note fields (new note, bubble rewrite, list-row rewrite)
 - Settings → **Voice input** (`web/src/components/VoiceSection.tsx`) — dictation language,
   translate-to-English, the whisper.cpp binary status, and the one model that language needs
 - `server/src/index.ts` — `transcribe` and `installWhisperModel` message handlers
@@ -29,8 +31,14 @@ are auto-discovered and self-healing, on the same pattern as the Claude/Codex CL
 - `web/src/lib/voiceRecorder.ts` — `getUserMedia` → 16 kHz mono WAV, base64; a loudness probe for
   the waveform; the 90s auto-stop
 - `web/src/components/VoiceWaveform.tsx` — canvas bar waveform drawn from that loudness probe
-- `web/src/components/Composer.tsx` — mic/discard/finish controls, the recording overlay, the
-  disabled-with-reason state and its link into Settings → Voice input
+- `web/src/lib/useVoiceDictation.ts` — the one hook behind every mic: recording state, timer,
+  block reason, transcribe call; hands the text to a caller-supplied `onText`
+- `web/src/components/DictateButton.tsx` — mic/discard/finish controls and the
+  disabled-with-reason state, shared by the composer and the cards
+- `web/src/components/Composer.tsx` — the recording overlay, Send-while-dictating, and the link
+  from a blocked mic into Settings → Voice input
+- `web/src/components/QuestionPrompt.tsx`, `web/src/components/PermissionPrompt.tsx` — mic inside
+  the "Other…" answer and the plan-comment notes
 - `web/src/components/MentionInput.tsx` — `insertAtCaret`, `MentionInputHandle.insertText`: splices
   dictated text at the caret (or over a selection) through the same range-remap mention insertion
   uses, so an @mention pill before the caret shifts correctly
@@ -68,6 +76,9 @@ are auto-discovered and self-healing, on the same pattern as the Claude/Codex CL
   magic-check download; one at a time, refused while `LINES_WHISPER_MODEL` pins a single file
 - `insertAtCaret(value, at, removed, inserted, added?)` — shared splice+remap primitive behind
   both mention insertion and dictated-text insertion
+
+- `useVoiceDictation(sessionId, onText)` — returns the voice state, `start`/`finish`/`cancel`
+  and `voiceBlock`; `cancel` also drops a transcript still in flight
 
 ## Data flow
 
@@ -113,6 +124,10 @@ approval staging when they press Send.
   but the CPU is the host's
 - recordings longer than `VOICE_MAX_SECONDS` (90s) auto-stop and are transcribed as caught
 - Send while recording or transcribing finishes the recording and sends once the transcript is spliced in; a failed or empty transcription sends nothing and leaves the prompt as it was
+- dictation in a card field (an "Other…" answer, a plan-comment note) only fills or appends text;
+  it never picks an option, advances, saves or submits. Those fields show the mic only with the
+  `prompt` capability, and a recording ends when its field closes
+- only one "Other…" answer records at a time; the other questions' mics are disabled
 - a model download is refused while `LINES_WHISPER_MODEL` pins a single external model file
 - an iOS home-screen app asks for the mic on every recording: WebKit does not keep the grant once
   the tracks stop, and standalone apps have no per-site permission setting. In a Safari tab,
@@ -121,6 +136,8 @@ approval staging when they press Send.
 
 ## Architectural rules
 
+- one `useVoiceDictation` serves every mic; the composer and the cards differ only in what
+  `onText` does with the transcript
 - voice input is not a `ProviderCapabilities` field — the prompt reaches either provider as plain
   text either way, so it is not a per-provider concern
 - `insertAtCaret` is the one place text is spliced into a `MentionValue` and its ranges remapped;

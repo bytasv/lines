@@ -46,6 +46,8 @@ import { send } from '../ws';
 import { readPlanComments, useStore, writePlanComments } from '../store';
 import { agentLabel } from '../lib/capabilities';
 import { useCan } from '../lib/can';
+import { appendTranscript, useVoiceDictation } from '../lib/useVoiceDictation';
+import { DictateButton, DictationError, dictateSectionWidth } from './DictateButton';
 import { useIsPhone } from '../lib/layout';
 import { useIdentityResolver } from '../lib/identity';
 import { QuestionPrompt } from './QuestionPrompt';
@@ -681,6 +683,7 @@ function locateQuotes(
  * points at the moment the user scrolls.
  */
 function CommentablePlan({
+  sessionId,
   text,
   readOnly,
   onAdd,
@@ -692,6 +695,8 @@ function CommentablePlan({
   scrollRequest,
   fz,
 }: {
+  /** Whose machine transcribes a dictated note. */
+  sessionId: string;
   text: string;
   /** A resolved card is a record, not a review — no affordance on it. */
   readOnly?: boolean;
@@ -733,6 +738,27 @@ function CommentablePlan({
   const peekEditingRef = useRef(false);
   peekEditingRef.current = peekEditing;
   useEffect(() => () => cancelHide(), []);
+
+  // One mic for whichever note is open — the new one or the bubble's rewrite;
+  // the bubble never opens while a new note is being written. The transcript
+  // only appends: saving stays the user's call.
+  const canDictate = useCan('prompt') && !readOnly;
+  const dictation = useVoiceDictation(sessionId, (text) => {
+    if (editing) setNote((prev) => appendTranscript(prev, text));
+    else if (peekEditing) setPeekDraft((prev) => appendTranscript(prev, text));
+  });
+  // Closing the note (Save, Cancel, Esc) ends any recording for it.
+  useEffect(() => {
+    if (!editing && !peekEditing) dictation.cancel();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, peekEditing]);
+  const dictateSection = canDictate
+    ? {
+        rightSection: <DictateButton dictation={dictation} iconSize={14} size="sm" showTimer keepFocus />,
+        rightSectionWidth: dictateSectionWidth(dictation, true),
+        rightSectionPointerEvents: 'all' as const,
+      }
+    : {};
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -1031,6 +1057,7 @@ function CommentablePlan({
                 autoFocus
                 value={peekDraft}
                 onChange={(e) => setPeekDraft(e.currentTarget.value)}
+                {...dictateSection}
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') {
                     e.preventDefault();
@@ -1042,6 +1069,7 @@ function CommentablePlan({
                   }
                 }}
               />
+              <DictationError dictation={dictation} />
               <Group gap="xs" justify="flex-end" mt={6}>
                 <Button
                   size="compact-xs"
@@ -1110,6 +1138,7 @@ function CommentablePlan({
             placeholder="What should change here?"
             value={note}
             onChange={(e) => setNote(e.currentTarget.value)}
+            {...dictateSection}
             onKeyDown={(e) => {
               if (e.key === 'Escape') {
                 e.preventDefault();
@@ -1121,6 +1150,7 @@ function CommentablePlan({
               }
             }}
           />
+          <DictationError dictation={dictation} />
           <Group gap="xs" justify="flex-end" mt={6}>
             <Button size="compact-xs" variant="subtle" color="gray" onClick={close}>
               Cancel
@@ -1235,6 +1265,16 @@ function PlanApproval({
   // The comment row currently open for rewriting, and the text in its box.
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
+  // The comment list's own mic: it appends to the row being rewritten.
+  const canDictate = useCan('prompt') && !resolution;
+  const editDictation = useVoiceDictation(sessionId, (text) =>
+    setEditDraft((prev) => appendTranscript(prev, text)),
+  );
+  // Save, Cancel, Esc or opening another row ends the recording for this one.
+  useEffect(() => {
+    editDictation.cancel();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingId]);
 
   const addComment = (quote: string, note: string) =>
     // The same gate the server runs, so the cap and the truncation the model
@@ -1321,7 +1361,8 @@ function PlanApproval({
             onMouseLeave={() => setActiveId((id) => (id === c.id ? null : id))}
             onClick={(e) => {
               // Placing the caret while rewriting the note must not re-scroll.
-              if ((e.target as Element | null)?.closest?.('textarea')) return;
+              // Nor may dictating into it.
+              if ((e.target as Element | null)?.closest?.('textarea, [data-dictate]')) return;
               setScrollRequest((r) => ({ id: c.id, nonce: (r?.nonce ?? 0) + 1, focus }));
             }}
           >
@@ -1355,6 +1396,15 @@ function PlanApproval({
                     autoFocus
                     value={editDraft}
                     onChange={(e) => setEditDraft(e.currentTarget.value)}
+                    {...(canDictate
+                      ? {
+                          rightSection: (
+                            <DictateButton dictation={editDictation} iconSize={14} size="sm" showTimer keepFocus />
+                          ),
+                          rightSectionWidth: dictateSectionWidth(editDictation, true),
+                          rightSectionPointerEvents: 'all' as const,
+                        }
+                      : {})}
                     onKeyDown={(e) => {
                       if (e.key === 'Escape') {
                         e.preventDefault();
@@ -1366,6 +1416,7 @@ function PlanApproval({
                       }
                     }}
                   />
+                  <DictationError dictation={editDictation} />
                   <Group gap="xs" justify="flex-end" mt={4}>
                     <Button size="compact-xs" variant="subtle" color="gray" onClick={cancelEdit}>
                       Cancel
@@ -1504,6 +1555,7 @@ function PlanApproval({
             {/* Not default-hover: that shade now reads as a user bubble. */}
             <Paper bg="var(--mantine-color-default)" radius="md" px="sm" py={4}>
               <CommentablePlan
+                sessionId={sessionId}
                 text={shown}
                 readOnly={!!resolution}
                 onAdd={addComment}
@@ -1557,6 +1609,7 @@ function PlanApproval({
           <ScrollArea style={{ flex: 1 }}>
             <Box maw={760} mx="auto" px="xl" pb="xl">
               <CommentablePlan
+                sessionId={sessionId}
                 text={shown}
                 readOnly={!!resolution}
                 onAdd={addComment}

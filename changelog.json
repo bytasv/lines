@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.2",
+      "date": "2026-10-05",
+      "items": [
+        "You can now dictate with your voice into the \"Other…\" answer of a question and into plan comments."
+      ]
+    },
+    {
       "version": "0.1.1",
       "date": "2026-10-05",
       "items": [

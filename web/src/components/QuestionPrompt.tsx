@@ -17,6 +17,9 @@ import { matchAnswerToOptions, parseQuestionAnswers } from '../lib/toolFields';
 import { send } from '../ws';
 import { useStore } from '../store';
 import { agentLabel } from '../lib/capabilities';
+import { useCan } from '../lib/can';
+import { appendTranscript, useVoiceDictation } from '../lib/useVoiceDictation';
+import { DictateButton, DictationError, dictateSectionWidth } from './DictateButton';
 
 const OTHER = '__other__';
 
@@ -260,6 +263,29 @@ export function QuestionPrompt({
   // The send is not idempotent and the card stays pending until the echo lands.
   const sentRef = useRef(false);
 
+  // One mic per card: the question whose "Other…" answer it is filling. The
+  // transcript only appends — it never picks, advances or submits.
+  const canDictate = useCan('prompt');
+  const [dictateTarget, setDictateTarget] = useState<number | null>(null);
+  const dictation = useVoiceDictation(sessionId, (text) => {
+    const target = dictateTarget;
+    if (target === null) return;
+    setState((prev) =>
+      prev.map((s, i) =>
+        i === target ? { ...s, otherText: appendTranscript(s.otherText, text) } : s,
+      ),
+    );
+    otherRef.current[target]?.focus();
+  });
+  const dictating = dictation.voice !== 'idle';
+  // Leaving "Other…" drops its field, so a recording for it has nowhere to land.
+  useEffect(() => {
+    if (dictating && dictateTarget !== null && !state[dictateTarget]?.selected.includes(OTHER)) {
+      dictation.cancel();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, dictating, dictateTarget]);
+
   // Tab and mouse move DOM focus without passing through the key handler, so the
   // cursor has to follow reality or the next ArrowDown steps from a stale spot.
   const markActive = (qi: number, oi: number) => {
@@ -483,6 +509,9 @@ export function QuestionPrompt({
         {questions.map((q, qi) => {
           const multi = Boolean(q.multiSelect);
           const otherIdx = q.options.length;
+          // Another answer's live recording keeps its state there; this mic waits.
+          const elsewhere = dictating && dictateTarget !== qi;
+          const fieldDictation = elsewhere ? { ...dictation, voice: 'idle' as const, voiceBlock: null } : dictation;
           return (
             <div
               key={qi}
@@ -585,8 +614,25 @@ export function QuestionPrompt({
                     e.preventDefault();
                     advance(qi, state);
                   }}
+                  rightSectionWidth={canDictate ? dictateSectionWidth(fieldDictation, true) : undefined}
+                  rightSectionPointerEvents="all"
+                  rightSection={
+                    canDictate ? (
+                      <DictateButton
+                        dictation={fieldDictation}
+                        iconSize={16}
+                        showTimer
+                        keepFocus
+                        disabledReason={elsewhere ? 'Recording in another answer' : undefined}
+                        onPress={() => setDictateTarget(qi)}
+                      />
+                    ) : undefined
+                  }
                   autoFocus
                 />
+              )}
+              {state[qi].selected.includes(OTHER) && dictateTarget === qi && (
+                <DictationError dictation={dictation} />
               )}
             </div>
           );
