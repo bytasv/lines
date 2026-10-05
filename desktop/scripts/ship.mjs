@@ -212,7 +212,11 @@ if (process.env.LINES_SHIP_TESTED === '1') {
   run('npm', ['run', 'test', '-w', 'relay']);
 }
 
-run('npm', ['run', 'package', '-w', 'desktop'], { env });
+// Without forceCodeSigning, electron-builder only warns when the Developer ID is
+// missing or untrusted and packages an unsigned app anyway. A release must fail
+// instead. Passed here rather than set in package.json so a bare `npm run
+// package` still works on a machine without the certificate.
+run('npm', ['run', 'package', '-w', 'desktop', '--', '--config.mac.forceCodeSigning=true'], { env });
 
 if (dryRun) {
   console.log(`\n--dry-run: built and signed, nothing published.`);

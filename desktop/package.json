@@ -42,7 +42,6 @@
       "output": "release",
       "buildResources": "assets"
     },
-    "afterPack": "scripts/afterPack.mjs",
     "files": [
       "dist/main.cjs",
       "package.json"
@@ -86,7 +85,11 @@
       ],
       "category": "public.app-category.developer-tools",
       "icon": "assets/icon.icns",
-      "identity": null,
+      "identity": "B-code MB (DH6NS448W8)",
+      "hardenedRuntime": true,
+      "entitlements": "assets/entitlements.mac.plist",
+      "entitlementsInherit": "assets/entitlements.mac.plist",
+      "notarize": true,
       "extendInfo": {
         "LSUIElement": true,
         "NSMicrophoneUsageDescription": "Lines uses the microphone for voice input: your dictation is transcribed by a Lines bridge, never by a cloud service, and typed into the prompt."

@@ -114,13 +114,13 @@ const RELAY_MODE = !LOCAL_MODE;
 const config = loadConfig(ROOT);
 
 /**
- * Squirrel.Mac verifies the code signature of the replacement app, and macOS
- * quarantine applies to an ad-hoc signed bundle, so an in-place install cannot
- * work before a Developer ID exists. Until then the updater only *checks*, and
- * the user is sent to the download page. Flip this (and electron-builder's
- * `identity`) together once signing exists — nothing else changes.
+ * Squirrel.Mac verifies the code signature of the replacement app, so an
+ * in-place install needs a Developer ID signed, notarized build. Releases are
+ * signed that way now, so the updater installs in place. Builds from before
+ * signing still send the user to the download page, which is how they pick up
+ * the first signed build by hand.
  */
-const CAN_SELF_INSTALL = false;
+const CAN_SELF_INSTALL = true;
 
 /**
  * Injected by esbuild, because `electron dist/main.cjs` passes a *file* — Electron

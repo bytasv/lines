@@ -18,8 +18,8 @@ The bridge and worker stay two separate children, same as under Tilt: the worker
 Claude query, so a bridge crash or restart must not take a turn with it.
 
 Packaging adds the ability to run **away from a repo checkout** — no `tsx`, no repo-root `.env`,
-no `node_modules`. Four decisions shape it, each a recorded trade: the build is ad-hoc signed
-(no Apple Developer ID), the Claude Code CLI is *not* bundled, the agent SDK is shipped unbundled
+no `node_modules`. Four decisions shape it, each a recorded trade: the build is signed with a
+Developer ID and notarized (hardened runtime), the Claude Code CLI is *not* bundled, the agent SDK is shipped unbundled
 next to the code, and — the one exception — a `whisper-cli` binary *is* bundled, compiled from
 source at package time, because [voice-input](voice-input.md) has no equivalent of `npm i -g` to
 point a user at.
@@ -34,7 +34,8 @@ point a user at.
 - `desktop/scripts/build-whisper.mjs` — compiles a static, Metal-enabled `whisper-cli` from a
   pinned whisper.cpp release, cached by version; a local build without `cmake` skips it with a
   warning (falls back to Homebrew's), CI refuses to ship without it
-- `desktop/scripts/afterPack.mjs` — ad-hoc signs the packed bundle
+- `desktop/assets/entitlements.mac.plist` — the hardened-runtime entitlements, used for both the app
+  and its inherited children
 - `desktop/scripts/release.mjs` — the upload-only step (`npm run upload -w desktop`): artifacts to the
   public R2 bucket, plus the stable download alias
 - `desktop/scripts/ship.mjs` — the one-command release: version guard, clean build, publish
@@ -115,8 +116,9 @@ point a user at.
   then disabled-and-why, then failed, then last-checked, then never-checked
 - `updatesEnabled` / `updatesDisabledReason` — whether the updater actually started, and why it
   didn't when it didn't
-- `CAN_SELF_INSTALL` — gates `restartForUpdate`'s real `quitAndInstall()` call behind a signed
-  build existing; false until a Developer ID exists
+- `CAN_SELF_INSTALL` — gates `restartForUpdate`'s real `quitAndInstall()` call; true now that
+  releases are signed and notarized, but see Update flow: nothing downloads an update or
+  triggers a restart yet
 - `openPairingWindow` — the data-URL window showing a pairing code
 - `UpdateManager.requestRestart` / `.busy` / `.current`
 - `loadConfig()` / `isLocalMode()` (`desktop/src/config.ts`)
@@ -275,7 +277,10 @@ Update state flows bridge → shell → bridge: the shell pushes `updateStatus` 
 killed-on-quit child leaves a non-null handle whose channel is already closed, and `send` into a
 closed channel throws synchronously — uncaught, that took the whole shell down. `electron-updater` only *checks*
 (`autoDownload: false`); an available update surfaces in the tray as a link to the download page
-rather than an in-place install, since `CAN_SELF_INSTALL` is false until the build is signed.
+rather than an in-place install. `CAN_SELF_INSTALL` is true now that releases are signed, but
+the updater still has `autoDownload` off and no UI sends `installUpdate`, so in-place install is
+not reachable yet; builds from before signing take the download-page path and install the first
+signed build by hand once.
 
 Detecting an update announces it three ways: a native macOS notification (`notifyUpdateAvailable`,
 deduped per version in memory — `notifiedUpdateVersion` — so the 6-hourly re-check doesn't re-nag
@@ -288,7 +293,7 @@ detection still learns about it — the guest branch omits the field, since `ins
 owner-gated and a guest has no business updating somebody else's machine.
 
 None of those three surfaces is trustworthy on its own — a native notification can be silently
-dropped by macOS for an ad-hoc signed bundle, and Electron's delivery-failure event is
+dropped by macOS, and Electron's delivery-failure event is
 Windows-only — so a fourth, unconditional one exists: **every outcome of a check has a permanent
 tray row**, produced by `updateRow()` and no longer gated on `state === 'available'` the way it used
 to be. In order of precedence: `Checking for updates…` while one is in flight; an offered version
@@ -328,7 +333,21 @@ walk into `dist/server/node_modules`, and writes `dist/config.json` from any `LI
 set at build time.
 
 electron-builder packs `dist/main.cjs` into the asar, copies `dist/server`, `dist/config.json`
-and the tray assets to `Resources/`, runs `afterPack.mjs`, then builds the DMG and the zip.
+and the tray assets to `Resources/`, signs the bundle with the Developer ID (hardened runtime,
+entitlements from `entitlements.mac.plist`), notarizes it with Apple and staples the ticket, then
+builds the DMG and the zip. `ship.mjs` passes `forceCodeSigning`, so a missing or untrusted
+certificate fails the release instead of producing an unsigned app; a plain `npm run package`
+still builds without one.
+
+Signing inputs, none of them in the repo: `mac.identity` names the team's certificate without the
+`Developer ID Application:` prefix (electron-builder rejects it). On CI the certificate comes
+from `CSC_LINK`/`CSC_KEY_PASSWORD` and the notarization App Store Connect key from
+`APPLE_API_KEY` (a *file path* — the workflow decodes the secret to a file and fails if the secret
+is missing), `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`. Locally, electron-builder finds the
+identity in the login keychain, and notarization uses a stored `notarytool` keychain profile via
+`APPLE_KEYCHAIN_PROFILE`; the `APPLE_API_*` variables take precedence when set, so keep them out of
+a local shell. Notarization skipped for want of credentials is only a warning, so check the build
+log for `notarization successful`.
 
 At runtime `main.ts` resolves `ROOT` to `process.resourcesPath` when packaged (the repo root
 otherwise) and spawns `Resources/server/{bridge,worker}.mjs` with Electron's own node via
@@ -478,10 +497,10 @@ and push first. See [whats-new](whats-new.md).
   means there is no bridge-only hot-patch path yet.
 - Closing the window does not quit the app; that is the point of a menu-bar app, and it must not
   kill an in-flight turn.
-- `restartForUpdate` never installs on an unsigned build: `CAN_SELF_INSTALL` is false until real
-  code signing exists (Squirrel.Mac verifies the replacement app's signature, and macOS
-  quarantine compounds it for an ad-hoc bundle), so it opens the download page instead of
-  pretending to update in place.
+- `restartForUpdate` installs in place only because releases are signed and notarized
+  (`CAN_SELF_INSTALL` true; Squirrel.Mac verifies the replacement app's signature). The update
+  flow behind it is still check-only (`autoDownload` off, no download/ready states, no UI
+  action), so in practice users are still pointed at the download page.
 - The update notification fires at most once per version (in-memory `notifiedUpdateVersion`
   guard), not once per state transition — the 6h re-check re-fires `update-available` with the
   same version, and without the guard the user is nagged four times a day.
@@ -582,14 +601,22 @@ and push first. See [whats-new](whats-new.md).
   `npm run pair -w server` (used by Tilt) cannot drift on the credential format.
 - `ROOT` resolves to `process.resourcesPath` when packaged, the repo root otherwise — the one
   branch that lets a dev checkout and an installed app share this file with no other change.
-- **`identity: null` does not ad-hoc sign.** electron-builder skips bundle signing entirely
-  (`skipped macOS code signing`). What remains is the linker's ad-hoc signature on the Mach-O,
+- **Unsigned builds are "damaged", not merely unidentified.** With `identity: null`
+  electron-builder skips bundle signing entirely (`skipped macOS code signing`). What remains is the linker's ad-hoc signature on the Mach-O,
   which declares sealed resources while nothing seals them — no
   `Contents/_CodeSignature/CodeResources`. macOS calls that **"Lines is damaged and can't be
   opened"**, and unlike the unidentified-developer case it offers *no* Open Anyway button, so the
-  download is a dead end by every route. `afterPack.mjs` exists solely to seal the bundle, and it
-  verifies afterwards so a broken bundle fails the build. This shipped once; the verify step is
-  why it cannot again.
+  download is a dead end by every route. This shipped once, as an ad-hoc-signing workaround that
+  has since been removed in favour of real signing; `forceCodeSigning` in `ship.mjs` is what keeps
+  an unsigned build from shipping again.
+- **Hardened runtime needs explicit entitlements.** The app spawns Electron-as-node bridge and
+  worker children and a bundled `whisper-cli`, and records the microphone, so the plist grants JIT,
+  unsigned executable memory, library-validation off, outbound network and `audio-input`. The
+  microphone key is `com.apple.security.device.audio-input`; `device.microphone` is an App Sandbox
+  key the hardened runtime ignores. The set is a first guess: trim what proves unneeded after
+  clean notarized builds.
+- **`whisper-cli` is ad-hoc signed at build time** (`build-whisper.mjs`) so it runs unpackaged on
+  arm64; electron-builder re-signs it with the Developer ID when packaging.
 - **The agent SDK stays external to the bundle.** `sdk.mjs` resolves through
   `createRequire(import.meta.url)`; bundling it moves that anchor into our output and breaks it.
   It ships as a real package under `Resources/server/node_modules/`.
@@ -659,11 +686,12 @@ and push first. See [whats-new](whats-new.md).
 
 ## Related decisions
 
-- Ad-hoc signing is the whole remaining UX cost: a browser download is quarantined and Gatekeeper
-  blocks it until the user allows it in Privacy & Security. A Developer ID ($99/yr) is the only
-  fix. When one exists: set a real `mac.identity`, delete `afterPack.mjs`, and flip
-  `CAN_SELF_INSTALL` — Squirrel.Mac verifies the replacement app's signature, which is why
-  self-install is inert today rather than pretending to work.
+- Developer ID signing plus notarization removes the Gatekeeper warning on a browser download.
+  Users on a build from before signing still need one manual install of the first signed build.
+  The signing credentials (the exported certificate and its password, the App Store Connect
+  `.p8`) can sign software as the team: keep them only in GitHub secrets and a password manager.
+  Wiring in-place updates (download, progress, ready state, a restart action) is the remaining
+  step beyond `CAN_SELF_INSTALL`.
 - Requiring an installed Claude Code trades 231 MB for an install step. If that proves too much
   friction, shipping the platform binary becomes a build flag, not a rewrite — the
   `pathToClaudeCodeExecutable` indirection is the seam.

@@ -407,8 +407,16 @@ docker rm -f lines-restore-test
 Runs on a Mac, not the VPS — it needs Xcode's `codesign` and produces an arm64
 bundle. Nothing in the deployment serves the DMG; it lives in a public R2 bucket.
 
+The build is signed with a Developer ID certificate and notarized. Locally that
+needs the certificate in the login keychain and a notarization profile stored once
+with `xcrun notarytool store-credentials` (then `APPLE_KEYCHAIN_PROFILE` in `.env`;
+do not export `APPLE_API_KEY*` locally, they take precedence). The release
+workflow takes the credentials from GitHub secrets (`MAC_CERT_P12_BASE64`,
+`MAC_CERT_PASSWORD`, `APPLE_API_KEY_B64`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`).
+See `docs/codebase/features/desktop-app.md`.
+
 ```bash
-# 1. build and sign, with the update feed baked in
+# 1. build, sign and notarize, with the update feed baked in
 LINES_UPDATE_FEED_URL="$R2_RELEASE_PUBLIC_BASE_URL/desktop" npm run package -w desktop
 # 2. upload; prints the VITE_DESKTOP_DOWNLOAD_URL to paste into lines.env
 npm run release -w desktop

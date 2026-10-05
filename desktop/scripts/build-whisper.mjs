@@ -87,8 +87,9 @@ export function buildWhisper() {
     });
     fs.copyFileSync(path.join(build, 'bin', 'whisper-cli'), OUT);
     fs.chmodSync(OUT, 0o755);
-    // Ad-hoc, like the app itself (see afterPack.mjs): arm64 refuses to run an
-    // unsigned binary, and a copied linker signature is not worth trusting.
+    // Ad-hoc so it runs unpackaged: arm64 refuses to run an unsigned binary, and
+    // a copied linker signature is not worth trusting. electron-builder re-signs
+    // it with the Developer ID when the app is packaged.
     execFileSync('codesign', ['--force', '--sign', '-', OUT], { stdio: 'inherit' });
     fs.writeFileSync(STAMP, `${WHISPER_CPP_VERSION}\n`);
     console.log(`[whisper] built ${path.relative(DESKTOP, OUT)} (${WHISPER_CPP_VERSION})`);
