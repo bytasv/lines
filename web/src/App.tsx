@@ -65,6 +65,15 @@ export function App() {
   // opened and not before — mounting the modal unconditionally would fetch
   // Monaco on every boot, which is the thing this split exists to avoid.
   const previewOpen = useStore((s) => s.filePreview !== null);
+  // An unsaved edit lives only in its editor's state; closing or reloading the
+  // tab would drop it without a word.
+  const hasUnsavedFiles = useStore((s) => Object.keys(s.dirtyFiles).length > 0);
+  useEffect(() => {
+    if (!hasUnsavedFiles) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [hasUnsavedFiles]);
   return (
     <>
       <Routes>

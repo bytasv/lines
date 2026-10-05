@@ -27,8 +27,8 @@ in a floating palette.
 - `web/src/store.ts` — `hideIgnored`/`setHideIgnored` (persisted, shared with
   the sidebar file tree)
 - `web/src/components/FilesView.tsx`, `web/src/components/MonacoPreviewModal.tsx`
-  — `FileContentView`, the viewer a hit opens in; `useMarkdownMode` and
-  `MarkdownModeToggle` for the Preview/Raw header toggle
+  — `FileContentView`, the viewer (and editor) a hit opens in; `useMarkdownMode`
+  and `MarkdownModeToggle` for the Preview/Raw header toggle
 - `web/src/lib/language.ts` — `isMarkdownPath`
 - `web/src/components/Markdown.tsx` — renders the Preview body
 - `web/src/components/FileTree.tsx`, `web/src/components/Sidebar.tsx` — the
@@ -96,6 +96,12 @@ listing) so the toggle never needs a round trip.
 - Relative links in the rendered file resolve against the file's own directory
   and open in the same preview; relative images are not resolved and do not
   load.
+- The preview is editable on your own machine (Raw/Monaco only; guests get
+  read-only). Cmd/Ctrl+S or the Save button saves; there is no autosave. Closing
+  the preview (Esc, click-outside) or opening another file asks before dropping
+  unsaved changes, and the browser tab warns on close or reload while any edit is
+  unsaved. See [file-routes-over-ws](file-routes-over-ws.md) for the write and
+  conflict rules.
 - `hideIgnored` defaults to on and is local-only (not part of synced
   settings) — a per-browser view choice, not a project setting.
 

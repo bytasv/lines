@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   ActionIcon,
   Box,
+  Button,
   Center,
   Group,
   Loader,
@@ -23,7 +24,8 @@ import { docDirname, normalizeDocPath } from '@lines/shared';
 import { useStore } from '../store';
 import { useIsPhone } from '../lib/layout';
 import { BestOnDesktop } from './BestOnDesktop';
-import { useFileContent, useMediaUrl } from '../lib/files';
+import { useIsGuest } from '../lib/can';
+import { saveFile, useFileContent, useMediaUrl } from '../lib/files';
 import { isMarkdownPath, languageFor, mediaKindFor, type MediaKind } from '../lib/language';
 import { Markdown } from './Markdown';
 
@@ -68,9 +70,31 @@ function FileTab({ path, project, active }: { path: string; project: string; act
 
 type MonacoEditor = Parameters<OnMount>[0];
 
-function MonacoView({ path, content, line, col }: { path: string; content: string; line?: number; col?: number }) {
+function MonacoView({
+  path,
+  content,
+  line,
+  col,
+  editable = false,
+  onChange,
+  onSave,
+}: {
+  path: string;
+  content: string;
+  line?: number;
+  col?: number;
+  editable?: boolean;
+  onChange?: (value: string) => void;
+  onSave?: () => void;
+}) {
   const colorScheme = useComputedColorScheme('dark');
   const [editor, setEditor] = useState<MonacoEditor | null>(null);
+  // Uncontrolled after mount: the text it opened with, never fed back from the
+  // draft, so typing cannot move the cursor. A discard or reload remounts it.
+  const [initial] = useState(content);
+  // The save command is registered once on mount; this keeps it on the latest draft.
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
 
   // Re-run on every line change, not only on mount: the search preview keeps one
   // editor per file and moves it between that file's hits.
@@ -92,11 +116,17 @@ function MonacoView({ path, content, line, col }: { path: string; content: strin
     <Editor
       height="100%"
       language={languageFor(path)}
-      value={content}
+      defaultValue={initial}
       theme={colorScheme === 'dark' ? 'vs-dark' : 'light'}
-      onMount={(mounted) => setEditor(mounted)}
+      onMount={(mounted, monaco) => {
+        setEditor(mounted);
+        if (editable) {
+          mounted.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => onSaveRef.current?.());
+        }
+      }}
+      onChange={(value) => onChange?.(value ?? '')}
       options={{
-        readOnly: true,
+        readOnly: !editable,
         minimap: { enabled: false },
         fontSize: 12,
         scrollBeyondLastLine: false,
@@ -192,9 +222,9 @@ function MediaView({ path, kind }: { path: string; kind: MediaKind }) {
 }
 
 /**
- * A workspace file, read-only: the browser's own rendering for media, rendered
- * markdown when `mode` is `'preview'`, Monaco otherwise. The mode comes from the
- * host's header (`useMarkdownMode`).
+ * A workspace file: the browser's own rendering for media (read-only), rendered
+ * markdown when `mode` is `'preview'`, Monaco otherwise — editable on your own
+ * machine. The mode comes from the host's header (`useMarkdownMode`).
  */
 export function FileContentView(props: { path: string; line?: number; col?: number; mode?: MarkdownMode }) {
   // Branch before any text fetch, so media never goes through the `file` kind.
@@ -215,7 +245,71 @@ function TextContentView({
   mode?: MarkdownMode;
 }) {
   // Fetched once here, so flipping Preview/Raw does not refetch.
-  const { content, error } = useFileContent(path);
+  const [reloadKey, setReloadKey] = useState(0);
+  const { content, mtimeMs, error } = useFileContent(path, reloadKey);
+  // Saving is owner-only on the bridge too; this only keeps a guest from typing
+  // into an editor whose every save would be refused.
+  const editable = !useIsGuest();
+  const setFileDirty = useStore((s) => s.setFileDirty);
+
+  // The edit lives here rather than in Monaco, so Preview renders the unsaved
+  // draft. `saved` is what the last save wrote — the new base without a refetch.
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [baseMtime, setBaseMtime] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  // Bumped by Discard to remount the (uncontrolled) editor on the base text.
+  const [editorKey, setEditorKey] = useState(0);
+
+  // A fresh read (first load or Reload) is the new base; any draft is gone with it.
+  useEffect(() => {
+    setDraft(null);
+    setSaved(null);
+    setBaseMtime(mtimeMs);
+    setSaveError(null);
+    setConflict(false);
+  }, [content, mtimeMs]);
+
+  const base = saved ?? content;
+  const dirty = draft !== null && draft !== base;
+
+  useEffect(() => {
+    setFileDirty(path, dirty);
+  }, [path, dirty, setFileDirty]);
+  useEffect(() => () => setFileDirty(path, false), [path, setFileDirty]);
+
+  const save = async (overwrite = false) => {
+    if (!editable || saving || draft === null || (!dirty && !overwrite)) return;
+    const text = draft;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      // No mtime from an old bridge (or Overwrite): the write is unconditional.
+      const result = await saveFile(path, text, overwrite || baseMtime === null ? undefined : baseMtime);
+      if (result.conflict) {
+        setConflict(true);
+        return;
+      }
+      // Compared against `draft`, not cleared: typing during the save stays dirty.
+      setSaved(text);
+      setBaseMtime(result.mtimeMs);
+      setConflict(false);
+      useStore.getState().noteFileSaved(path);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const discard = () => {
+    setDraft(null);
+    setSaveError(null);
+    setConflict(false);
+    setEditorKey((k) => k + 1);
+  };
 
   // Relative links resolve against the file's own directory. Without a handler
   // Markdown renders them as plain hrefs, which would navigate the app away.
@@ -241,26 +335,106 @@ function TextContentView({
       </Alert>
     );
   }
-  if (content === null) {
+  if (base === null) {
     return (
       <Center h="100%">
         <Loader />
       </Center>
     );
   }
-  if (mode === 'preview') {
-    return (
+  const text = draft ?? base;
+  const body =
+    mode === 'preview' ? (
       <ScrollArea h="100%" type="hover">
         <Box className="docs-body" px="lg" pb="xl">
-          <Markdown text={content} onLinkClick={onLink} />
+          <Markdown text={text} onLinkClick={onLink} />
         </Box>
       </ScrollArea>
+    ) : (
+      <MonacoView
+        key={editorKey}
+        path={path}
+        content={text}
+        line={line}
+        col={col}
+        editable={editable}
+        onChange={setDraft}
+        onSave={() => void save()}
+      />
     );
-  }
-  return <MonacoView path={path} content={content} line={line} col={col} />;
+  if (!dirty && !saveError && !conflict) return body;
+  return (
+    <Stack gap={0} h="100%">
+      <SaveBar
+        conflict={conflict}
+        error={saveError}
+        saving={saving}
+        onSave={() => void save()}
+        onDiscard={discard}
+        onOverwrite={() => void save(true)}
+        onReload={() => setReloadKey((k) => k + 1)}
+      />
+      <Box style={{ flex: 1, minHeight: 0 }}>{body}</Box>
+    </Stack>
+  );
 }
 
-/** Main-pane files mode: tab bar of opened files + read-only Monaco editor. */
+/** Shown over an editor while it holds an unsaved edit, or after a save failed. */
+function SaveBar({
+  conflict,
+  error,
+  saving,
+  onSave,
+  onDiscard,
+  onOverwrite,
+  onReload,
+}: {
+  conflict: boolean;
+  error: string | null;
+  saving: boolean;
+  onSave: () => void;
+  onDiscard: () => void;
+  onOverwrite: () => void;
+  onReload: () => void;
+}) {
+  return (
+    <Group
+      gap="xs"
+      px="xs"
+      py={4}
+      wrap="nowrap"
+      justify="space-between"
+      style={{ borderBottom: '1px solid var(--mantine-color-default-border)' }}
+    >
+      <Text size="xs" c={conflict || error ? 'red' : 'dimmed'} truncate>
+        {conflict ? 'File changed on disk' : (error ?? 'Unsaved changes')}
+      </Text>
+      <Group gap={6} wrap="nowrap">
+        {conflict ? (
+          <>
+            <Button size="compact-xs" variant="light" color="red" loading={saving} onClick={onOverwrite}>
+              Overwrite
+            </Button>
+            <Button size="compact-xs" variant="subtle" color="gray" disabled={saving} onClick={onReload}>
+              Reload
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button size="compact-xs" variant="light" loading={saving} onClick={onSave}>
+              Save
+            </Button>
+            <Button size="compact-xs" variant="subtle" color="gray" disabled={saving} onClick={onDiscard}>
+              Discard
+            </Button>
+          </>
+        )}
+      </Group>
+    </Group>
+  );
+}
+
+/** Main-pane files mode: tab bar of opened files + a Monaco editor. */
 export function FilesView() {
   const activeProject = useStore((s) => s.activeProject);
   const openFiles = useStore((s) => activeProject ? s.openFiles[activeProject] : undefined);

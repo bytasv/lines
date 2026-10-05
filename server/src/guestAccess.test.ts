@@ -122,6 +122,17 @@ describe('guest file scope', () => {
     assert.equal((await handleFileRequest(ctx(), 'syncLog', {}, sessionGuest)).status, 403);
     assert.equal((await handleFileRequest(ctx(), 'syncLog', {}, machineGuest)).status, 403);
   });
+
+  test('writing is owner-only, even at Full and inside the guest’s own root', async () => {
+    const target = path.join(shared, 'ok.txt');
+    const write = (access: SocketAccess) =>
+      handleFileRequest(ctx(), 'writeFile', { paths: [target], content: 'guest was here' }, access);
+    const fullSession: SocketAccess = { ...sessionGuest, caps: capsForPreset('full', 'session') };
+    const fullMachineGuest: SocketAccess = { scope: 'machine', caps: capsForPreset('full', 'machine') };
+    assert.equal((await write(fullSession)).status, 403);
+    assert.equal((await write(fullMachineGuest)).status, 403);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'readable');
+  });
 });
 
 // ---------------------------------------------------------------------------

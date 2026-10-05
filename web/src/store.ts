@@ -1010,6 +1010,12 @@ interface UiState {
   searchFocus: number;
   /** Set while a file-search hit is open in the main pane. */
   searchPreview: SearchPreview | null;
+  /** Files with an unsaved edit in some open editor. Local-only, never synced:
+   *  the drafts themselves live in the editor's component state. */
+  dirtyFiles: Record<string, true>;
+  /** The last file saved from an editor, so file search can re-run a query
+   *  whose line numbers the save may have shifted. */
+  lastFileSave: { path: string; at: number } | null;
   transcriptJump: TranscriptJump | null;
   /** Keep gitignored files out of the file tree and the Cmd+P palette. Persisted
    *  in localStorage, local-only (never synced — it is a per-browser view choice). */
@@ -1145,6 +1151,8 @@ interface UiState {
   setSidebarSearch: (patch: Partial<SidebarSearchState> | null) => void;
   setFileSearch: (patch: Partial<FileSearchState>) => void;
   setSearchPreview: (preview: SearchPreview | null) => void;
+  setFileDirty: (path: string, dirty: boolean) => void;
+  noteFileSaved: (path: string) => void;
   /** Select `sessionId` and ask its transcript to scroll to the event at `seq`. */
   jumpToTranscript: (sessionId: string, seq: number, toolUseId?: string) => void;
   clearTranscriptJump: () => void;
@@ -1165,6 +1173,15 @@ interface UiState {
   openFileTab: (path: string) => void;
   closeFileTab: (path: string) => void;
   setActiveFileTab: (path: string) => void;
+}
+
+/**
+ * Ask before an action unmounts the editor holding an unsaved edit to `path`.
+ * True when there is nothing to lose or the user agreed to lose it.
+ */
+function confirmDiscard(state: Pick<UiState, 'dirtyFiles'>, path: string | null | undefined): boolean {
+  if (!path || !state.dirtyFiles[path]) return true;
+  return window.confirm(`Discard unsaved changes to ${path.split('/').pop() ?? path}?`);
 }
 
 /** How long a "the user asked for a new session" intent stays live. */
@@ -1420,6 +1437,8 @@ export const useStore = create<UiState>((set, get) => {
   },
   searchFocus: 0,
   searchPreview: null,
+  dirtyFiles: {},
+  lastFileSave: null,
   transcriptJump: null,
   hideIgnored: loadHideIgnored(),
   compactionLevel: loadCompactionLevel(),
@@ -1592,9 +1611,15 @@ export const useStore = create<UiState>((set, get) => {
       if (!cwd) return; // no base to resolve against
       resolved = `${cwd}/${rawPath.replace(/^\.\//, '')}`;
     }
+    // The modal's editor is keyed by path; another file replaces it.
+    const open = state.filePreview?.path;
+    if (open && open !== resolved && !confirmDiscard(state, open)) return;
     set({ filePreview: { path: resolved, display: rawPath, line, col, raw: opts?.raw } });
   },
-  closeFilePreview: () => set({ filePreview: null }),
+  closeFilePreview: () => {
+    if (!confirmDiscard(get(), get().filePreview?.path)) return;
+    set({ filePreview: null });
+  },
 
   openLoginModal: () => set({ loginModalOpen: true, authError: null }),
   closeLoginModal: () => set({ loginModalOpen: false, authorizeUrl: null, authError: null }),
@@ -1683,7 +1708,11 @@ export const useStore = create<UiState>((set, get) => {
     get().setSidebarSearch(scope ? { scope } : {});
     set((state) => ({ searchFocus: state.searchFocus + 1 }));
   },
-  setSidebarSearch: (patch) =>
+  setSidebarSearch: (patch) => {
+    // Closing the search, or leaving its Files scope, drops the preview below.
+    const open = get().searchPreview?.path;
+    const dropsPreview = patch === null || (patch.scope !== undefined && patch.scope !== 'files');
+    if (open && dropsPreview && !confirmDiscard(get(), open)) return;
     set((state) => {
       if (patch === null) return { sidebarSearch: null, searchPreview: null };
       const base: SidebarSearchState = state.sidebarSearch ?? {
@@ -1700,9 +1729,24 @@ export const useStore = create<UiState>((set, get) => {
       return next.scope === 'files'
         ? { sidebarSearch: next }
         : { sidebarSearch: next, searchPreview: null };
-    }),
+    });
+  },
   setFileSearch: (patch) => set((state) => ({ fileSearch: { ...state.fileSearch, ...patch } })),
-  setSearchPreview: (preview) => set({ searchPreview: preview }),
+  setSearchPreview: (preview) => {
+    // The preview's editor is keyed by path: another hit in the same file keeps it.
+    const open = get().searchPreview?.path;
+    if (open && open !== preview?.path && !confirmDiscard(get(), open)) return;
+    set({ searchPreview: preview });
+  },
+  setFileDirty: (path, dirty) =>
+    set((state) => {
+      if (!!state.dirtyFiles[path] === dirty) return state;
+      const dirtyFiles = { ...state.dirtyFiles };
+      if (dirty) dirtyFiles[path] = true;
+      else delete dirtyFiles[path];
+      return { dirtyFiles };
+    }),
+  noteFileSaved: (path) => set({ lastFileSave: { path, at: Date.now() } }),
   jumpToTranscript: (sessionId, seq, toolUseId) => {
     const query = get().sidebarSearch?.query ?? '';
     if (get().selectedSessionId !== sessionId) get().selectSession(sessionId);
@@ -1792,6 +1836,9 @@ export const useStore = create<UiState>((set, get) => {
   openFileTab: (path) => {
     const project = get().activeProject;
     if (!project) return;
+    // Only the active tab's editor is mounted; switching away unmounts it.
+    const active = get().openFiles[project]?.active;
+    if (active && active !== path && !confirmDiscard(get(), active)) return;
     set((state) => {
       const current = state.openFiles[project] ?? { tabs: [], active: null };
       const tabs = current.tabs.includes(path) ? current.tabs : [...current.tabs, path];
@@ -1804,6 +1851,7 @@ export const useStore = create<UiState>((set, get) => {
   closeFileTab: (path) => {
     const project = get().activeProject;
     if (!project) return;
+    if (get().openFiles[project]?.active === path && !confirmDiscard(get(), path)) return;
     set((state) => {
       const current = state.openFiles[project];
       if (!current) return state;
@@ -1823,6 +1871,8 @@ export const useStore = create<UiState>((set, get) => {
   setActiveFileTab: (path) => {
     const project = get().activeProject;
     if (!project) return;
+    const active = get().openFiles[project]?.active;
+    if (active && active !== path && !confirmDiscard(get(), active)) return;
     set((state) => {
       const current = state.openFiles[project] ?? { tabs: [], active: null };
       const openFiles = { ...state.openFiles, [project]: { ...current, active: path } };

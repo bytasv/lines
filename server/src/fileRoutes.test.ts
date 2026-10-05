@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { after, test } from 'node:test';
+import { after, mock, test } from 'node:test';
 import type { SessionDiffResponse, SessionMeta } from '@lines/shared';
 import { OWNER_ACCESS } from '@lines/shared';
 import { handleFileRequest, MAX_MEDIA_BYTES, MEDIA_CHUNK_BYTES } from './fileRoutes.ts';
@@ -59,7 +59,10 @@ const call = (kind: Parameters<typeof handleFileRequest>[1], params = {}) =>
 test('file: reads a file inside a project root', async () => {
   const res = await call('file', { paths: [path.join(root, 'hello.txt')] });
   assert.equal(res.status, 200);
-  assert.deepEqual(res.body, { content: 'hi there' });
+  assert.deepEqual(res.body, {
+    content: 'hi there',
+    mtimeMs: fs.statSync(path.join(root, 'hello.txt')).mtimeMs,
+  });
 });
 
 test('file: 403 outside every root, 404 when missing', async () => {
@@ -302,4 +305,102 @@ test('sessionDiffFile: refuses a path outside the repo, and a repo outside the s
       .status,
     404,
   );
+});
+
+// ---------------------------------------------------------------------------
+// writeFile
+
+const editDir = path.join(root, 'edit');
+fs.mkdirSync(editDir);
+const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-outside-'));
+after(() => fs.rmSync(outside, { recursive: true, force: true }));
+
+/** A fresh file per test, so no case sees another's write. */
+function editable(name: string, content = 'before\n'): string {
+  const p = path.join(editDir, name);
+  fs.writeFileSync(p, content);
+  return p;
+}
+
+/** Sibling temp files a write may have left behind. */
+const leftovers = () => fs.readdirSync(editDir).filter((n) => n.includes('.lines-'));
+
+test('writeFile: writes inside a root, returns the new mtime, and a later read sees it', async () => {
+  const p = editable('w1.txt');
+  const res = await call('writeFile', { paths: [p], content: 'after\n' });
+  assert.equal(res.status, 200);
+  const { mtimeMs } = res.body as { mtimeMs: number };
+  assert.equal(mtimeMs, fs.statSync(p).mtimeMs);
+  const read = await call('file', { paths: [p] });
+  assert.deepEqual(read.body, { content: 'after\n', mtimeMs });
+  assert.deepEqual(leftovers(), []);
+});
+
+test('writeFile: 403 outside every root and through a symlink that leaves it', async () => {
+  const target = path.join(outside, 'secret.txt');
+  fs.writeFileSync(target, 'untouched');
+  assert.equal((await call('writeFile', { paths: [target], content: 'x' })).status, 403);
+  // The link sits inside the project, so the prefix check alone would pass it.
+  const link = path.join(editDir, 'escape.txt');
+  fs.symlinkSync(target, link);
+  assert.equal((await call('writeFile', { paths: [link], content: 'x' })).status, 403);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'untouched');
+});
+
+test('writeFile: a symlink inside the root is written through and stays a symlink', async () => {
+  const target = editable('w-target.txt');
+  const link = path.join(editDir, 'w-link.txt');
+  fs.symlinkSync(target, link);
+  assert.equal((await call('writeFile', { paths: [link], content: 'via link' })).status, 200);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'via link');
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+});
+
+test('writeFile: 404 when missing or a directory', async () => {
+  assert.equal((await call('writeFile', { paths: [path.join(editDir, 'nope.txt')], content: 'x' })).status, 404);
+  assert.equal((await call('writeFile', { paths: [path.join(root, 'sub')], content: 'x' })).status, 404);
+});
+
+test('writeFile: 400 without content, 413 over the cap, 415 on a NUL byte', async () => {
+  const p = editable('w2.txt');
+  assert.equal((await call('writeFile', { paths: [p] })).status, 400);
+  const huge = 'a'.repeat(2 * 1024 * 1024 + 1);
+  assert.equal((await call('writeFile', { paths: [p], content: huge })).status, 413);
+  assert.equal((await call('writeFile', { paths: [p], content: 'a\0b' })).status, 415);
+  assert.equal(fs.readFileSync(p, 'utf8'), 'before\n');
+});
+
+test('writeFile: 409 on a stale mtime leaves the file alone; no mtime writes anyway', async () => {
+  const p = editable('w3.txt');
+  const stale = fs.statSync(p).mtimeMs - 1000;
+  const res = await call('writeFile', { paths: [p], content: 'mine', expectedMtimeMs: stale });
+  assert.equal(res.status, 409);
+  assert.deepEqual(res.body, { mtimeMs: fs.statSync(p).mtimeMs });
+  assert.equal(fs.readFileSync(p, 'utf8'), 'before\n');
+
+  const current = fs.statSync(p).mtimeMs;
+  assert.equal((await call('writeFile', { paths: [p], content: 'ok', expectedMtimeMs: current })).status, 200);
+  assert.equal((await call('writeFile', { paths: [p], content: 'forced' })).status, 200);
+  assert.equal(fs.readFileSync(p, 'utf8'), 'forced');
+});
+
+test('writeFile: preserves the file mode', async () => {
+  const p = editable('w4.sh');
+  fs.chmodSync(p, 0o755);
+  assert.equal((await call('writeFile', { paths: [p], content: '#!/bin/sh\n' })).status, 200);
+  assert.equal(fs.statSync(p).mode & 0o777, 0o755);
+});
+
+test('writeFile: a failed write removes its temp file and leaves the original', async () => {
+  const p = editable('w5.txt');
+  const rename = mock.method(fs, 'renameSync', () => {
+    throw new Error('disk full');
+  });
+  try {
+    assert.equal((await call('writeFile', { paths: [p], content: 'lost' })).status, 500);
+  } finally {
+    rename.mock.restore();
+  }
+  assert.equal(fs.readFileSync(p, 'utf8'), 'before\n');
+  assert.deepEqual(leftovers(), []);
 });

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { ActionIcon, Badge, Group, Stack, Text, Tooltip, UnstyledButton } from '@mantine/core';
 import { IconFile } from '@tabler/icons-react';
 import type { GrepHit, MatchOptions } from '@lines/shared';
@@ -96,6 +96,19 @@ export function FileSearchResults({ query, onNavigate }: { query: string; onNavi
   // until they are replaced.
   const key = JSON.stringify([query, rootsKey, caseSensitive, regex, wholeWord, hideIgnored]);
 
+  // A save from an editor shifts the lines its file's hits point at, so a save
+  // to a file among the results re-runs the query. Latched in state: the re-run
+  // may drop that file, and its hit vanishing must not trigger another one.
+  const savedHitAt = useStore((s) => {
+    const saved = s.lastFileSave;
+    const hit = saved && s.fileSearch.results?.files.some((h) => `${h.root}/${h.rel}` === saved.path);
+    return hit ? saved.at : 0;
+  });
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    if (savedHitAt) setRefresh(savedHitAt);
+  }, [savedHitAt]);
+
   // Debounced, with a sequence guard so a slow reply can't overwrite a newer one.
   useEffect(() => {
     const seq = ++seqRef.current;
@@ -122,7 +135,7 @@ export function FileSearchResults({ query, onNavigate }: { query: string; onNavi
     return () => clearTimeout(timer);
     // `key` is derived from the listed inputs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, opts, rootsKey, hideIgnored, setSearch]);
+  }, [query, opts, rootsKey, hideIgnored, refresh, setSearch]);
   const current = search.resultsFor === key;
 
   if (!roots.length) {

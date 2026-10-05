@@ -1,7 +1,8 @@
 /**
  * Workspace reads requested by the browser: file contents, directory listings,
  * the docs bundle, `@mention` file search, stored attachments, and chunked
- * media (image/video/audio/pdf) for the file viewer.
+ * media (image/video/audio/pdf) for the file viewer — plus the one write, the
+ * owner saving an edit to an existing text file (`writeFile`).
  *
  * Pure functions returning `{ status, body }` rather than writing to a
  * `http.ServerResponse`, so they can be driven over the WebSocket (and, later,
@@ -13,12 +14,14 @@
  * would.
  */
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import type {
   FileRequestKind,
   FileRequestParams,
+  FileWriteResponse,
   LineMatcher,
   MediaChunkBody,
   SessionMeta,
@@ -33,7 +36,7 @@ import { searchFilesAcross } from './fileSearch.ts';
 import { showFile } from './git.ts';
 import { searchSession } from './sessionSearch.ts';
 import type { UserContext } from './userContext.ts';
-import { resolveWorkspacePath } from './workspacePaths.ts';
+import { resolveWorkspacePath, workspaceRoots } from './workspacePaths.ts';
 
 export interface FileRouteResult {
   status: number;
@@ -109,7 +112,77 @@ function readFile(ctx: UserContext, params: FileRequestParams, access: SocketAcc
   }
   // Reject binary files (NUL byte in the first 8KB).
   if (buf.subarray(0, 8192).includes(0)) return { status: 415 };
-  return { status: 200, body: { content: buf.toString('utf8') } };
+  return { status: 200, body: { content: buf.toString('utf8'), mtimeMs: stat.mtimeMs } };
+}
+
+/**
+ * Is `real` (an already-resolved realpath) inside the connection's grant? The
+ * prefix check in {@link resolveWorkspacePath} runs on the path as given, so a
+ * symlink inside the project pointing outside it would pass; this reruns it on
+ * where the link lands. Roots are realpath'd too, so a root that is itself
+ * behind a symlink (macOS `/var` → `/private/var`) still contains its files.
+ */
+function realInsideGrant(ctx: UserContext, real: string, access: SocketAccess): boolean {
+  if (resolveWorkspacePath(ctx, real, access)) return true;
+  return workspaceRoots(ctx, access).some((root) => {
+    let realRoot: string;
+    try {
+      realRoot = fs.realpathSync(root);
+    } catch {
+      return false;
+    }
+    return real === realRoot || real.startsWith(realRoot + path.sep);
+  });
+}
+
+/**
+ * Save an edit to an existing text file. Owner-only (also gated in
+ * {@link handleFileRequest}): every file kind rides the `readFiles` cap, so this
+ * check is what keeps a guest — even at Full — from writing to the host's disk.
+ *
+ * `expectedMtimeMs` is the mtime the editor loaded; a file changed since then
+ * (the agent edited it) answers 409 with the current mtime rather than being
+ * overwritten. The write goes to a sibling temp file renamed over the target,
+ * so a crash mid-write never leaves a truncated file, and a symlink stays one.
+ */
+function writeFile(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
+  if (access.scope !== 'owner') return { status: 403 };
+  const abs = soleRoot(ctx, params, access);
+  if (!abs) return { status: 403 };
+  let real: string;
+  try {
+    real = fs.realpathSync(abs);
+  } catch {
+    return { status: 404 };
+  }
+  if (!realInsideGrant(ctx, real, access)) return { status: 403 };
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(real);
+  } catch {
+    return { status: 404 };
+  }
+  if (!stat.isFile()) return { status: 404 };
+  const content = params.content;
+  if (typeof content !== 'string') return { status: 400 };
+  if (Buffer.byteLength(content) > MAX_FILE_BYTES) return { status: 413 };
+  if (content.includes('\0')) return { status: 415 };
+  if (params.expectedMtimeMs !== undefined && params.expectedMtimeMs !== stat.mtimeMs) {
+    return { status: 409, body: { mtimeMs: stat.mtimeMs } satisfies FileWriteResponse };
+  }
+  const tmp = path.join(
+    path.dirname(real),
+    `.${path.basename(real)}.lines-${randomBytes(6).toString('hex')}.tmp`,
+  );
+  try {
+    fs.writeFileSync(tmp, content, { flag: 'wx' });
+    fs.chmodSync(tmp, stat.mode & 0o7777);
+    fs.renameSync(tmp, real);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+  return { status: 200, body: { mtimeMs: fs.statSync(real).mtimeMs } satisfies FileWriteResponse };
 }
 
 /** One directory listing for the sidebar file tree. */
@@ -458,6 +531,7 @@ const ROUTES: Record<
   sessionDiffFile: readSessionDiffFile,
   grep: grepFiles,
   sessionSearch: searchSessionsRoute,
+  writeFile,
 };
 
 /** Dispatch one request. An unknown kind is a client bug, not a path to serve. */
@@ -473,6 +547,9 @@ export async function handleFileRequest(
   // A guest has no store of their own on this machine, so the sync log — which
   // is the host's storage-link history — is owner-only.
   if (kind === 'syncLog' && access.scope !== 'owner') return { status: 403 };
+  // Every file kind rides the `readFiles` cap; writing to the host's disk is the
+  // owner's alone, whatever a guest's share preset says.
+  if (kind === 'writeFile' && access.scope !== 'owner') return { status: 403 };
   try {
     return await route(ctx, params, access);
   } catch (err) {

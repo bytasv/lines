@@ -4,7 +4,7 @@
 
 File contents, directory listings, the docs bundle, `@mention` file search,
 stored attachments, and previewable media (images, video, audio, pdf) travel over the browser's existing WebSocket instead of the
-bridge's HTTP server.
+bridge's HTTP server. One kind, `writeFile`, goes the other way: the owner saving an edit to an existing text file.
 
 They used to be `GET /file`, `/tree`, `/find`, `/docs` and `/attachments/*` with
 the Clerk token in the query string. That put a live credential into URLs — and
@@ -19,7 +19,7 @@ WebSocket multiplexer.
 ## Entry points
 
 - `web/src/lib/files.ts` — `fetchTree`, `searchFiles`, `fetchDocs`,
-  `useFileContent`, `useAttachmentUrl`, `useMediaUrl`
+  `useFileContent`, `saveFile`, `useAttachmentUrl`, `useMediaUrl`
 - `web/src/components/FilesView.tsx` — `FileContentView` sends media paths to
   `MediaView` before any text fetch
 - `server/src/index.ts` — the `fileRequest` case in `handleMessage`
@@ -30,7 +30,7 @@ WebSocket multiplexer.
 - `server/src/workspacePaths.ts` — the root containment check, unchanged
 - `web/src/ws.ts` — `fileRequest`, the pending-request map
 - `shared/types.ts` — `FileRequestKind`, `FileRequestParams`, `AttachmentBody`,
-  `MediaChunkBody`
+  `MediaChunkBody`, `FileContentResponse`, `FileWriteResponse`
 - `web/src/lib/language.ts` — `mediaKindFor`, the extension → image/video/audio/pdf map
 - `web/src/components/Transcript.tsx` — `AttachmentTile`
 
@@ -41,6 +41,8 @@ WebSocket multiplexer.
   two kinds that read git; every other handler still resolves synchronously
 - `fileRequest(kind, params)` — client side, promise keyed by `reqId`
 - `useAttachmentUrl(rel)` — base64 → blob URL, revoked on unmount
+- `saveFile(path, content, expectedMtimeMs?)` — the `writeFile` call; a 409 comes
+  back as a typed `{ conflict: true, mtimeMs }` result instead of a thrown error
 - `useMediaUrl(path)` — pulls `media` chunks sequentially into one blob URL,
   reports progress, stops and revokes on unmount
 - `ClientMessage.fileRequest` / `ServerMessage.fileResponse`
@@ -65,6 +67,15 @@ skew safe: an old bridge answers a bare 400, which the client shows as "restart
 or update the bridge". `file` is unchanged, so text and unknown binaries still
 get 415 "Binary files cannot be previewed.".
 
+Writing (`writeFile`) is the one non-read kind. `file` replies carry the file's
+`mtimeMs`; the editor sends it back as `expectedMtimeMs`. If the file's mtime has
+moved on (the agent edited it meanwhile) the bridge answers 409 with the current
+`mtimeMs` and writes nothing, and the UI offers Overwrite (resend without
+`expectedMtimeMs`) or Reload. The write goes to a sibling temp file that is
+chmod'ed to the original's mode and renamed over the target, so a crash never
+leaves a truncated file and a symlink stays a symlink. Version skew works like
+`media`: an old bridge answers a bare 400, shown as "restart or update it".
+
 Two search kinds ride the same route table: `grep` (file contents, see
 [find-in-files](find-in-files.md)) and `sessionSearch` (transcripts, see
 [session-search](session-search.md)). Both share `buildMatcher` from
@@ -80,7 +91,9 @@ an open socket — there is no unauthenticated fallback.
 
 - `server/src/fileRoutes.test.ts` — every route: containment, size cap, binary
   rejection, all-or-nothing `find`, attachment traversal, unknown kind, and
-  `media` chunking, clamping, 403/404/413/415 and bad-offset 400
+  `media` chunking, clamping, 403/404/413/415 and bad-offset 400; `writeFile`
+  containment, symlink escape, 409, mode preservation and temp-file cleanup
+- `server/src/guestAccess.test.ts` — a Full-share guest still gets 403 on `writeFile`
 - `server/src/index.planFile.test.ts` — the plan-directory exception, unchanged
 
 ## Business rules
@@ -99,6 +112,20 @@ an open socket — there is no unauthenticated fallback.
   is clamped to 1 MB, files over 200 MB are 413, and an offset outside the file
   is 400. Chunks go one at a time so live transcript frames interleave on the
   shared socket and relay instead of waiting behind one large frame.
+- `writeFile` is owner-only, enforced in `handleFileRequest` and the handler. The
+  socket gate for every file kind is the `readFiles` capability, so without this
+  check a guest with View or Full access could write to the host's disk; there is
+  no `ShareCaps` flag for it.
+- `writeFile` re-resolves the target's realpath and requires it to sit inside a
+  granted root: the prefix check alone lets a symlink inside the project point
+  outside it. Only existing regular text files are written (404 otherwise); no
+  create, rename or delete. Content over 2 MB is 413, a NUL byte is 415, missing
+  content is 400, a stale `expectedMtimeMs` is 409.
+- mtime conflict detection misses same-millisecond writes on coarse-mtime
+  filesystems; accepted for basic editing. Content is round-tripped as UTF-8, so a
+  BOM or non-UTF-8 file can change on save.
+- A save made while a turn runs in the session's cwd falls inside that turn's git
+  snapshot window, so the session diff attributes it to the agent.
 - The browser buffers the whole file (chunks plus Blob), so the 200 MB cap bounds
   memory; video plays only after every chunk arrives.
 

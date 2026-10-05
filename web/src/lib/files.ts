@@ -3,6 +3,7 @@ import type {
   AttachmentBody,
   DocsResponse,
   FileContentResponse,
+  FileWriteResponse,
   FindResponse,
   GrepResponse,
   MatchOptions,
@@ -171,11 +172,13 @@ export function useDocs(projectRoot: string | null) {
  */
 export function useFileContent(path: string | undefined, reloadKey?: number) {
   const [content, setContent] = useState<string | null>(null);
+  const [mtimeMs, setMtimeMs] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!path) return;
     setContent(null);
+    setMtimeMs(null);
     setError(null);
     let cancelled = false;
     fileRequest('file', { paths: [path] })
@@ -185,7 +188,10 @@ export function useFileContent(path: string | undefined, reloadKey?: number) {
           setError(ERROR_MESSAGES[status] ?? `Failed to load file (${status}).`);
           return;
         }
-        setContent((body as FileContentResponse).content);
+        const file = body as FileContentResponse;
+        setContent(file.content);
+        // Absent from a bridge older than `writeFile`; a save then goes unchecked.
+        setMtimeMs(typeof file.mtimeMs === 'number' ? file.mtimeMs : null);
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -195,7 +201,40 @@ export function useFileContent(path: string | undefined, reloadKey?: number) {
     };
   }, [path, reloadKey]);
 
-  return { content, error };
+  return { content, mtimeMs, error };
+}
+
+const SAVE_ERROR_MESSAGES: Record<number, string> = {
+  // A bare 400 is a bridge older than the `writeFile` kind.
+  400: 'This bridge cannot save files yet — restart or update it.',
+  403: 'You can only view files on this machine.',
+  404: 'File not found.',
+  413: 'File too large to save.',
+  415: 'Binary content cannot be saved.',
+};
+
+/** What a save came to: the file's new mtime, or — when it changed on disk since
+ *  `expectedMtimeMs` — a conflict the caller resolves (overwrite or reload). */
+export type SaveFileResult = { conflict: false; mtimeMs: number } | { conflict: true; mtimeMs: number };
+
+/**
+ * Write `content` over an existing workspace file. With `expectedMtimeMs` the
+ * bridge refuses (409, returned as `conflict`) if the file changed since; without
+ * it the write is unconditional. Other failures reject with a user-facing message.
+ */
+export async function saveFile(
+  path: string,
+  content: string,
+  expectedMtimeMs?: number,
+): Promise<SaveFileResult> {
+  const { status, body } = await fileRequest('writeFile', {
+    paths: [path],
+    content,
+    ...(expectedMtimeMs !== undefined ? { expectedMtimeMs } : {}),
+  });
+  if (status === 409) return { conflict: true, mtimeMs: (body as FileWriteResponse).mtimeMs };
+  if (status !== 200) fail(status, SAVE_ERROR_MESSAGES, 'Failed to save file');
+  return { conflict: false, mtimeMs: (body as FileWriteResponse).mtimeMs };
 }
 
 /**

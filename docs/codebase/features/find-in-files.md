@@ -22,6 +22,7 @@ session scopes are described in [session-search](session-search.md).
 - `web/src/lib/files.ts` — `grepFiles`
 - `web/src/store.ts` — `fileSearch`, `searchPreview`, `openSidebarSearch`
 - `web/src/components/FilesView.tsx` — `SearchPreviewView`, `FileContentView`
+  (the preview is editable)
 - `web/src/lib/language.ts` — `isMarkdownPath`
 - `web/src/components/Markdown.tsx` — Preview body for markdown files
 - `web/src/App.tsx` — swaps the main pane to the preview
@@ -61,6 +62,11 @@ or switching to a session scope clears it.
 
 ## Business rules
 
+- The preview can be edited and saved (Cmd/Ctrl+S or Save; owner only, Raw/Monaco
+  only). Picking another file's hit, closing the preview or the search, or
+  leaving the Files scope asks before dropping unsaved changes. After a save, the
+  current query re-runs if the saved file is among the hits, since the edit may
+  have shifted their line numbers.
 - A hit on a markdown file opens in Raw at its line, not Preview, because a hit carries a line and a line only exists in the source. The header toggle switches to Preview; picking another hit returns to Raw. The choice is not persisted.
 - Searches only the active project's roots, like Cmd+P.
 - The eye toggle is the same `hideIgnored` as Cmd+P and the file tree; on by

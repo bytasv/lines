@@ -2446,7 +2446,7 @@
       "id": "file-routes-over-ws",
       "name": "Workspace reads over the WebSocket",
       "doc": "features/file-routes-over-ws.md",
-      "purpose": "File contents, directory listings, the docs bundle, @mention search, attachments and chunked media previews (image, video, audio, pdf) travel over the authenticated WebSocket instead of bridge HTTP routes, removing the Clerk token from query strings and leaving the bridge with no file-serving HTTP surface.",
+      "purpose": "File contents, directory listings, the docs bundle, @mention search, attachments and chunked media previews (image, video, audio, pdf) travel over the authenticated WebSocket instead of bridge HTTP routes, removing the Clerk token from query strings and leaving the bridge with no file-serving HTTP surface. One kind, writeFile, lets the owner save an edit to an existing text file.",
       "entryPoints": [
         "web/src/lib/files.ts",
         "server/src/index.ts",
@@ -2476,10 +2476,14 @@
         "useMediaUrl",
         "MediaChunkBody",
         "mediaKindFor",
-        "media"
+        "media",
+        "writeFile",
+        "saveFile",
+        "FileWriteResponse"
       ],
       "tests": [
         "server/src/fileRoutes.test.ts",
+        "server/src/guestAccess.test.ts",
         "server/src/index.planFile.test.ts"
       ],
       "businessRules": [
@@ -2489,7 +2493,11 @@
         "attachments are capped at the same 2MB as the old /file route",
         "grep is all-or-nothing across roots like find; sessionSearch clamps every session id through sessionInReach",
         "media serves only browser-renderable extensions (415 otherwise), clamps each request to 1MB, returns 413 over 200MB and 400 for an offset outside the file",
-        "media is pulled one chunk at a time so live frames interleave on the shared socket and relay instead of queuing behind one large frame"
+        "media is pulled one chunk at a time so live frames interleave on the shared socket and relay instead of queuing behind one large frame",
+        "writeFile is owner-only, enforced in handleFileRequest and the handler: every file kind rides the readFiles cap, so a View or Full guest would otherwise write to the host's disk",
+        "writeFile rechecks the realpath against the granted roots (a symlink inside the project must not reach outside), writes only existing regular text files, and answers 413 over 2MB, 415 on a NUL byte, 400 without content",
+        "writeFile with a stale expectedMtimeMs answers 409 with the current mtime and writes nothing; absent expectedMtimeMs writes unconditionally",
+        "a save made during a running turn in the session cwd is attributed to the agent by the session diff"
       ],
       "architecturalRules": [
         "handlers are pure {status, body} functions in their own module rather than http.ServerResponse writers, so they can serve a relay channel and are testable without a socket (index.ts listens on import)",
@@ -2498,7 +2506,9 @@
         "corsFor, httpUserId, WEB_ORIGIN and withAuthToken are deleted rather than retained: each was a second auth path to keep in step with the socket's",
         "attachment blob URLs are revoked on unmount, else every re-render leaks a blob for the life of the page",
         "media is its own FileRequestKind rather than a new body on file, so version skew is safe: an old bridge answers 400, shown as 'update the bridge'",
-        "media blob URLs are revoked on unmount and the chunk loop stops after the in-flight request; SVG renders via <img>, never inline"
+        "media blob URLs are revoked on unmount and the chunk loop stops after the in-flight request; SVG renders via <img>, never inline",
+        "writeFile is its own FileRequestKind, so an old bridge answers 400, shown as 'restart or update it'",
+        "writeFile writes a sibling temp file, chmods it to the original's mode, then renames over the realpath target, so a failure never truncates the file and a symlink stays a symlink"
       ],
       "relatedDecisions": [
         "hosted-machine-access",
@@ -3424,7 +3434,9 @@
         "TreeEntry.ignored",
         "isMarkdownPath",
         "FileContentView",
-        "useMarkdownMode"
+        "useMarkdownMode",
+        "confirmDiscard",
+        "dirtyFiles"
       ],
       "tests": [
         "server/src/fileSearch.test.ts",
@@ -3435,6 +3447,7 @@
         "a hit always opens in the preview overlay, never a files-mode tab, regardless of which sidebar mode is active when the palette opens",
         "a .md/.markdown hit or tree open renders in Preview with a Preview/Raw header toggle; other files and .mdx open in Monaco with no toggle, and the mode is not persisted",
         "relative links in the rendered file resolve against its own directory and open in the same preview; relative images are not resolved",
+        "the preview is editable on your own machine (Raw/Monaco only, guests read-only): Cmd/Ctrl+S or Save, no autosave; closing the preview or opening another file asks before discarding, and the tab warns on close or reload while any edit is unsaved",
         "hideIgnored defaults to on and is local-only (not part of synced settings)",
         "non-ignored files fill the capped candidate list before ignored ones, so a large gitignored tree cannot starve the palette or find-in-files"
       ],
@@ -4319,7 +4332,9 @@
         "grep is all-or-nothing across roots: one root out of reach is a 403",
         "an invalid regex is a 400 with an invalidRegex body; a bare 400 means an older bridge",
         "results are shown only while they match the current query, roots and flags",
-        "a hit on a markdown file opens Raw at its line, not Preview, because a hit carries a line; picking another hit returns to Raw, and the toggle choice is not persisted"
+        "a hit on a markdown file opens Raw at its line, not Preview, because a hit carries a line; picking another hit returns to Raw, and the toggle choice is not persisted",
+        "the preview is editable and saveable (owner only, Raw only); picking another file's hit, closing the preview or search, or leaving the Files scope asks before discarding unsaved changes",
+        "after a save the current query re-runs if the saved file is among the hits, since line numbers may have shifted"
       ],
       "architecturalRules": [
         "reuses the file-request handler, so auth, relay encryption and root containment are inherited",

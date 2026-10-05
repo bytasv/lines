@@ -65,10 +65,11 @@ export type FileRequestKind =
   | 'sessionDiffFile'
   | 'grep'
   | 'sessionSearch'
-  | 'media';
+  | 'media'
+  | 'writeFile';
 
 export interface FileRequestParams {
-  /** file/tree/docs/media: exactly one. find/grep: one per project root.
+  /** file/tree/docs/media/writeFile: exactly one. find/grep: one per project root.
    *  sessionDiffFile: the repo root the file lives in.
    *  sessionSearch: the project roots whose sessions are searched when
    *  `sessionIds` is absent. */
@@ -94,6 +95,11 @@ export interface FileRequestParams {
   offset?: number;
   /** media only: chunk length in bytes; the bridge clamps it to its chunk size. */
   length?: number;
+  /** writeFile only: the file's new contents, UTF-8. */
+  content?: string;
+  /** writeFile only: the `mtimeMs` the edit was based on. A file changed since
+   *  then answers 409 instead of being overwritten; absent = write unconditionally. */
+  expectedMtimeMs?: number;
 }
 
 export type FileChangeStatus = 'A' | 'M' | 'D';
@@ -1677,6 +1683,15 @@ export interface WorkflowMarkerData {
 /** Response body of the bridge's GET /file endpoint (clickable file-path preview). */
 export interface FileContentResponse {
   content: string;
+  /** The file's mtime when read — what a later `writeFile` passes back as
+   *  `expectedMtimeMs` so it cannot silently overwrite someone else's change. */
+  mtimeMs: number;
+}
+
+/** Response body of a successful `writeFile` — and of its 409, carrying the
+ *  on-disk mtime that made the save stale. */
+export interface FileWriteResponse {
+  mtimeMs: number;
 }
 
 /** One entry in a directory listing from the bridge's GET /tree endpoint. */
