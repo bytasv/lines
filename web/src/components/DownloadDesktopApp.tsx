@@ -2,17 +2,9 @@ import { Anchor, Button, Card, Stack, Text } from '@mantine/core';
 import { IconDownload } from '@tabler/icons-react';
 import {
   DESKTOP_DOWNLOAD_ENABLED,
-  DESKTOP_DOWNLOAD_URL,
+  DESKTOP_DOWNLOAD_HREF,
   DESKTOP_DOWNLOAD_VERSION,
 } from '../lib/storage';
-
-/**
- * Production builds link through the serving nginx's /download, which 302s to
- * the same DMG (deploy/docker/web-nginx.conf). Neither page carries analytics
- * JS, so that logged redirect is the only download count. The dev server has
- * no such route, so it links straight to the file.
- */
-const DOWNLOAD_HREF = import.meta.env.PROD ? '/download' : DESKTOP_DOWNLOAD_URL;
 
 const RUN_FROM_SOURCE_URL = 'https://github.com/bytasv/lines#readme';
 
@@ -46,7 +38,7 @@ export function DownloadDesktopApp() {
 
         <Button
           component="a"
-          href={DOWNLOAD_HREF}
+          href={DESKTOP_DOWNLOAD_HREF}
           target="_blank"
           rel="noreferrer noopener"
           leftSection={<IconDownload size={16} />}

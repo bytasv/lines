@@ -118,6 +118,130 @@
   background: var(--mantine-color-default);
 }
 
+/* Calls to action: stacked full width on a phone, where two large buttons side
+   by side would wrap unevenly, and one centred row from xs up. */
+.ctaRow {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  width: 100%;
+  max-width: 340px;
+}
+@media (min-width: 36em) {
+  .ctaRow {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    width: auto;
+    max-width: none;
+  }
+}
+
+/* The download is the one lit button on the page. The glow is drawn in the text
+   colour, so it inverts with the scheme like the rest of the chrome. */
+.glow {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--mantine-color-text) 12%, transparent),
+    0 14px 40px -14px color-mix(in srgb, var(--mantine-color-text) 60%, transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .glow {
+    transition:
+      transform 150ms ease,
+      box-shadow 150ms ease;
+  }
+  .glow:hover {
+    transform: translateY(-1px);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--mantine-color-text) 16%, transparent),
+      0 18px 48px -14px color-mix(in srgb, var(--mantine-color-text) 75%, transparent);
+  }
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 6px 12px;
+  color: var(--mantine-color-dimmed);
+  font-size: 13px;
+}
+.facts > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.factSep {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+/* The closing panels: a row of tiles, the pitch, the action, then a footnote
+   pinned to the bottom so the two panels' rules line up at any height. */
+.ctaPanel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--mantine-spacing-lg);
+  padding: var(--mantine-spacing-xl);
+  text-align: center;
+  /* Inherited, so no paragraph or footnote strands its last word on a line. */
+  text-wrap: balance;
+}
+@media (min-width: 48em) {
+  .ctaPanel {
+    padding: 48px;
+  }
+}
+
+.ctaFoot {
+  margin-top: auto;
+  align-self: stretch;
+  padding-top: var(--mantine-spacing-md);
+  border-top: 1px solid var(--mantine-color-default-border);
+}
+
+.tileRow {
+  height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+
+/* The app's own icon. The PNG carries macOS's icon grid (a rounded white plate
+   inside transparent margins), so the shadow is a drop-shadow that follows the
+   plate rather than a box-shadow around the margins. The faint outline keeps the
+   white plate from melting into the light scheme. */
+.appTile {
+  display: block;
+  width: 96px;
+  height: 96px;
+  filter: drop-shadow(0 0 0.5px color-mix(in srgb, var(--mantine-color-text) 45%, transparent))
+    drop-shadow(0 12px 18px rgba(0, 0, 0, 0.35))
+    drop-shadow(0 0 28px color-mix(in srgb, var(--mantine-color-text) 16%, transparent));
+}
+
+/* Squircle-ish tiles like the Dock's, with the same halo as the app icon. */
+.deviceTile {
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  border-radius: 22%;
+  color: var(--mantine-color-text);
+  background: var(--mantine-color-body);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--mantine-color-text) 14%, transparent),
+    0 16px 36px -18px rgba(0, 0, 0, 0.7),
+    0 0 56px -10px color-mix(in srgb, var(--mantine-color-text) 22%, transparent);
+}
+
 .stepNum {
   flex: 0 0 auto;
   width: 28px;

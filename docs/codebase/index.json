@@ -4214,7 +4214,7 @@
       "id": "landing-page",
       "name": "Landing page",
       "doc": "features/landing-page.md",
-      "purpose": "Provider-neutral marketing page (signed-out in the app, and a standalone static build on the apex): a hero cycling through the supported coding agents (Claude Code, Codex) with a self-hosted demo loop, then illustrated sections for how it works, features, security, where your data goes, ways to run it and getting started, in the app's monochrome theme.",
+      "purpose": "Provider-neutral marketing page (signed-out in the app, and a standalone static build on the apex): a hero cycling through the supported coding agents (Claude Code, Codex) that leads with the Mac download beside Get started, with a self-hosted demo loop, then illustrated sections for how it works, features, security, where your data goes, ways to run it and getting started, in the app's monochrome theme.",
       "entryPoints": [
         "web/src/components/LandingPage.tsx",
         "web/src/components/AgentRotator.tsx",
@@ -4224,7 +4224,8 @@
         "web/src/components/LandingPage.tsx",
         "web/src/components/AgentRotator.tsx",
         "web/src/index.css",
-        "web/src/components/DownloadDesktopApp.tsx",
+        "web/src/lib/storage.ts",
+        "web/public/icon-192.png",
         "web/src/components/PairingDiagram.tsx",
         "web/index.html",
         "web/src/lib/splash.ts",
@@ -4249,20 +4250,26 @@
         "AgentRotator",
         "DATA_FLOWS",
         "DemoVideo",
-        "DOWNLOAD_HREF"
+        "DESKTOP_DOWNLOAD_HREF",
+        "HeroActions",
+        "DownloadMacButton",
+        "DownloadFacts",
+        "GetStartedPanels"
       ],
       "tests": [],
       "businessRules": [
         "the landing page paints immediately, never behind the boot splash: index.html hides the splash before first paint for landing routes and signed-out visitors, and the root route renders LandingPage directly while Clerk is still loading for a guest, at the same tree position it keeps once signed out, so it does not remount",
         "generic claims say coding agent or list providers; strings that are truly provider-specific (Claude CLI status, Claude sign-in, SDK internals) stay provider-specific",
         "supporting another provider in the copy is one new AGENTS entry, kept local to LandingPage because shared/providers.ts is capability data, not marketing copy",
-        "the install card says at least one of Claude Code or Codex must be installed on the paired machine",
+        "the closing panels say at least one of Claude Code or Codex must be installed on the paired machine",
+        "download first: the hero leads with the Mac download, then Get started, with Sign in in the header; with no build published the hero falls back to Get started and Sign in and the account panel spans the closing row alone",
+        "Notarized by Apple holds only from desktop 0.2.43, so the configured download link must serve the stable Lines-latest.dmg alias or a signed versioned build; the version shows only when the link names one",
         "encryption copy says end-to-end encryption is on by default, that every browser enrols once with a code from the machine, and that the relay carries traffic it cannot read or forge; it never claims everything is encrypted or zero-knowledge",
         "privacy copy uses only the approved lines in the feature doc (agent runs on your machine; repos and full transcripts live on the machine and are never stored on Lines servers; live traffic between the user's own devices and the machine is end-to-end encrypted, guests not yet; session list, workflows and memory sync to storage; prompts go to the provider under the user's own account); 'your code never leaves your machine', 'transcripts and files never leave your machine', 'zero-knowledge' and 'we can't see anything' are banned",
         "the Where your data goes section mirrors PRIVACY.md and links to it; a change to what is stored or relayed updates both together",
         "shared links carry ?ref=<channel>, and the nginx access log is the only channel attribution",
         "copy says works with Claude Code and Codex and never implies an Anthropic or OpenAI partnership or endorsement",
-        "the install card points Windows and Linux users at running from source"
+        "the Mac panel points Windows and Linux users at running from source"
       ],
       "architecturalRules": [
         "the rotating word sits on its own line with every word stacked in one grid cell and centred independently, so a short word leaves no gap and a long one never re-wraps the heading; mid-sentence placement shifts the surrounding text on every swap",
@@ -4277,7 +4284,8 @@
         "the download button links to /download in production builds, which the serving nginx 302s to DESKTOP_DOWNLOAD_URL so every click is logged; dev builds link to the DMG directly",
         "DemoVideo plays muted, looping and inline from a same-origin file; under prefers-reduced-motion it shows the poster with controls and never autoplays; it renders nothing if the file fails to load",
         "og:image and og:url are absolute linesapp.cloud URLs, set identically in web/index.html and web/landing/index.html",
-        "the header action column holds a GitHub icon link beside Sign in / Open app, a plain link with no star-count fetch, since that would be a third-party request from the origin holding the encryption keys"
+        "the header action column holds a GitHub icon link beside Sign in / Open app, a plain link with no star-count fetch, since that would be a third-party request from the origin holding the encryption keys",
+        "the header Download button shows from md up only, since below that the row crowds and a phone cannot install it; the hero carries the download at every width"
       ],
       "relatedDecisions": [
         "openai-codex-sessions"

@@ -14,11 +14,25 @@ import {
 import { SignedIn, SignedOut, SignInButton, SignUpButton } from '@clerk/clerk-react';
 import { useState, type ComponentType, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { IconArrowRight, IconBrandGithub, IconCheck, IconStar } from '@tabler/icons-react';
+import {
+  IconArrowRight,
+  IconBrandAppleFilled,
+  IconBrandGithub,
+  IconCheck,
+  IconCpu,
+  IconDeviceLaptop,
+  IconDeviceMobile,
+  IconRosetteDiscountCheckFilled,
+  IconStar,
+} from '@tabler/icons-react';
 import { AgentRotator, type RotatorWord } from './AgentRotator';
 import { BrandMark } from './BrandMark';
-import { DownloadDesktopApp } from './DownloadDesktopApp';
 import { ANTHROPIC_CLAY } from './ProviderMark';
+import {
+  DESKTOP_DOWNLOAD_ENABLED,
+  DESKTOP_DOWNLOAD_HREF,
+  DESKTOP_DOWNLOAD_VERSION,
+} from '../lib/storage';
 import {
   AnywhereArt,
   AutomateArt,
@@ -308,32 +322,193 @@ function DemoVideo() {
  * which runs on the relay's apex with no Clerk and no router: every action is
  * then a plain link to the app's own host, which owns sign-in.
  */
-function GetStartedButtons({ appUrl }: { appUrl?: string }) {
+function GetStartedButton({ appUrl, variant }: { appUrl?: string; variant?: 'filled' | 'outline' }) {
   if (appUrl) {
     return (
-      <Group justify="center">
-        <Button component="a" href={`${appUrl}/sign-in`} size="lg" rightSection={<IconArrowRight size={18} />}>
-          Get started
-        </Button>
-        <Button component="a" href={`${appUrl}/sign-in`} size="lg" variant="outline">
-          Sign in
-        </Button>
-      </Group>
+      <Button
+        component="a"
+        href={`${appUrl}/sign-in`}
+        size="lg"
+        variant={variant}
+        rightSection={<IconArrowRight size={18} />}
+      >
+        Get started
+      </Button>
     );
   }
   return (
-    <Group justify="center">
-      <SignUpButton mode="modal">
-        <Button size="lg" rightSection={<IconArrowRight size={18} />}>
-          Get started
-        </Button>
-      </SignUpButton>
-      <SignInButton mode="modal">
-        <Button size="lg" variant="outline">
-          Sign in
-        </Button>
-      </SignInButton>
-    </Group>
+    <SignUpButton mode="modal">
+      <Button size="lg" variant={variant} rightSection={<IconArrowRight size={18} />}>
+        Get started
+      </Button>
+    </SignUpButton>
+  );
+}
+
+function SignInCta({ appUrl }: { appUrl?: string }) {
+  if (appUrl) {
+    return (
+      <Button component="a" href={`${appUrl}/sign-in`} size="lg" variant="outline">
+        Sign in
+      </Button>
+    );
+  }
+  return (
+    <SignInButton mode="modal">
+      <Button size="lg" variant="outline">
+        Sign in
+      </Button>
+    </SignInButton>
+  );
+}
+
+function GetStartedButtons({ appUrl }: { appUrl?: string }) {
+  return (
+    <div className={classes.ctaRow}>
+      <GetStartedButton appUrl={appUrl} />
+      <SignInCta appUrl={appUrl} />
+    </div>
+  );
+}
+
+/**
+ * The Mac download as every call to action on this page renders it. Callers gate
+ * on DESKTOP_DOWNLOAD_ENABLED: with no published build there is nothing to link to.
+ */
+function DownloadMacButton({
+  size = 'lg',
+  label = 'Download for Mac',
+  className,
+}: {
+  size?: 'sm' | 'lg';
+  label?: string;
+  className?: string;
+}) {
+  return (
+    <Button
+      component="a"
+      href={DESKTOP_DOWNLOAD_HREF}
+      target="_blank"
+      rel="noreferrer noopener"
+      size={size}
+      className={className}
+      leftSection={<IconBrandAppleFilled size={size === 'lg' ? 20 : 16} />}
+    >
+      {label}
+    </Button>
+  );
+}
+
+/**
+ * What a visitor checks before downloading. "Notarized by Apple" holds from
+ * 0.2.43, the first signed release, and the link always serves the newest build.
+ * The version shows only when the configured link names one; the stable
+ * Lines-latest.dmg alias does not.
+ */
+function DownloadFacts() {
+  return (
+    <div className={classes.facts}>
+      <span>
+        <IconCpu size={14} stroke={1.75} />
+        Apple silicon
+      </span>
+      <span className={classes.factSep} aria-hidden="true" />
+      <span>
+        <IconRosetteDiscountCheckFilled size={14} />
+        Notarized by Apple
+      </span>
+      {DESKTOP_DOWNLOAD_VERSION && (
+        <>
+          <span className={classes.factSep} aria-hidden="true" />
+          <span>v{DESKTOP_DOWNLOAD_VERSION}</span>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Download first, since installing the app is step one; the account second.
+ *  Sign in stays in the header. */
+function HeroActions({ appUrl }: { appUrl?: string }) {
+  if (!DESKTOP_DOWNLOAD_ENABLED) return <GetStartedButtons appUrl={appUrl} />;
+  return (
+    <Stack gap="sm" align="center" w="100%">
+      <div className={classes.ctaRow}>
+        <DownloadMacButton className={classes.glow} />
+        <GetStartedButton appUrl={appUrl} variant="outline" />
+      </div>
+      <DownloadFacts />
+    </Stack>
+  );
+}
+
+/** The closing pair: the Mac app on one side, the account on the other. The
+ *  account panel spans the row alone when no build is published. */
+function GetStartedPanels({ appUrl }: { appUrl?: string }) {
+  const panel = `${classes.panel} ${classes.hero} ${classes.ctaPanel}`;
+  return (
+    <SimpleGrid cols={{ base: 1, md: DESKTOP_DOWNLOAD_ENABLED ? 2 : 1 }} spacing="md">
+      {DESKTOP_DOWNLOAD_ENABLED && (
+        <div className={panel}>
+          <div className={classes.tileRow}>
+            {/* The app's own icon, the same art as the DMG's. */}
+            <img className={classes.appTile} src="/icon-192.png" alt="" width={96} height={96} />
+          </div>
+          <Stack gap={8} align="center">
+            <Title order={3} fz={{ base: 26, sm: 30 }} lts="-0.02em" lh={1.15}>
+              Lines for Mac
+            </Title>
+            <Text c="dimmed" maw={420}>
+              Drag it to Applications and open it. It sits in your menu bar, keeps this machine
+              reachable from your browser, and shows a pairing code.
+            </Text>
+          </Stack>
+          <Stack gap="sm" align="center">
+            <DownloadMacButton className={classes.glow} />
+            <DownloadFacts />
+          </Stack>
+          <Text size="sm" c="dimmed" className={classes.ctaFoot}>
+            Windows or Linux? There is no desktop app yet, so{' '}
+            <Anchor href={`${REPO_URL}#readme`} target="_blank" rel="noreferrer" inherit>
+              run Lines from source
+            </Anchor>{' '}
+            and pair that machine.
+          </Text>
+        </div>
+      )}
+      <div className={panel}>
+        <div className={classes.tileRow} aria-hidden="true">
+          <span className={classes.deviceTile}>
+            <IconDeviceLaptop size={30} stroke={1.5} />
+          </span>
+          <span className={classes.deviceTile}>
+            <IconDeviceMobile size={30} stroke={1.5} />
+          </span>
+        </div>
+        <Stack gap={8} align="center">
+          <Title order={3} fz={{ base: 26, sm: 30 }} lts="-0.02em" lh={1.15}>
+            Run your agents from anywhere.
+          </Title>
+          <Text c="dimmed" maw={420}>
+            Sign in, pair a machine and start a session, or run Lines entirely locally with nothing
+            hosted at all.
+          </Text>
+        </Stack>
+        <GetStartedButtons appUrl={appUrl} />
+        <Text size="sm" c="dimmed" className={classes.ctaFoot}>
+          Bring your own{' '}
+          {AGENTS.map((agent, i) => (
+            <span key={agent.name}>
+              {i > 0 && ' or '}
+              <Anchor href={agent.setupUrl} target="_blank" rel="noreferrer" inherit>
+                {agent.name}
+              </Anchor>
+            </span>
+          ))}
+          . The paired machine needs at least one.
+        </Text>
+      </div>
+    </SimpleGrid>
   );
 }
 
@@ -407,6 +582,13 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
               </SignedOut>
             </>
           )}
+          {/* From md only: below that the nav and three actions crowd the row, and
+              a phone cannot install it anyway. The hero carries it at every width. */}
+          {DESKTOP_DOWNLOAD_ENABLED && (
+            <Box visibleFrom="md">
+              <DownloadMacButton size="sm" label="Download" />
+            </Box>
+          )}
         </div>
       </Box>
 
@@ -436,7 +618,7 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
               workflows and a recipe library, while every agent turn runs on your own filesystem,
               your own git and your own agent login.
             </Text>
-            <GetStartedButtons appUrl={appUrl} />
+            <HeroActions appUrl={appUrl} />
             <Stack gap={6} align="center">
               <Text size="sm" c="dimmed">
                 Free and open source (AGPL). Bring your own Claude Code or Codex.
@@ -593,27 +775,13 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
             </SimpleGrid>
           </Stack>
 
-          {/* DownloadDesktopApp is env-gated and touches no authed API, so it is
-              safe before sign-in; it renders null when no build is published. */}
           <Stack gap="xl" id="get-started" className={classes.section}>
             <SectionHeading
               eyebrow="Get started"
               title="Up and running in minutes"
               blurb="Install the desktop app, sign in, and pair the machine it is running on. That machine is where every agent turn executes. Install the agent CLI separately."
             />
-            <DownloadDesktopApp />
-            <Box className={`${classes.panel} ${classes.hero}`} p={{ base: 'xl', sm: 64 }}>
-              <Stack align="center" gap="lg" ta="center">
-                <Title order={3} fz={{ base: 26, sm: 34 }} lts="-0.02em" lh={1.15}>
-                  Run your agents from anywhere.
-                </Title>
-                <Text c="dimmed" maw={520}>
-                  Sign in, pair a machine and start a session, or run Lines entirely locally with
-                  nothing hosted at all.
-                </Text>
-                <GetStartedButtons appUrl={appUrl} />
-              </Stack>
-            </Box>
+            <GetStartedPanels appUrl={appUrl} />
           </Stack>
         </Stack>
       </Container>

@@ -34,6 +34,16 @@ export const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DES
 export const DESKTOP_DOWNLOAD_ENABLED = Boolean(DESKTOP_DOWNLOAD_URL);
 
 /**
+ * What every download button links to. Production builds go through the serving
+ * nginx's /download, which 302s to the same DMG (deploy/docker/web-nginx.conf).
+ * Neither page carries analytics JS, so that logged redirect is the only download
+ * count. The dev server has no such route, so it links straight to the file.
+ */
+export const DESKTOP_DOWNLOAD_HREF: string | undefined = import.meta.env.PROD
+  ? '/download'
+  : DESKTOP_DOWNLOAD_URL;
+
+/**
  * Version out of the artifact name (`Lines-0.2.0-arm64.dmg`). Derived rather than
  * carried in a second env var, so a published build and the version shown next to
  * it cannot disagree. Null when the name does not follow that shape.

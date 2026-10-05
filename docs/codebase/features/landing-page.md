@@ -6,9 +6,11 @@ The marketing page: shown to signed-out visitors at `/` and to anyone at `/welco
 app, and served on its own as a static, keyless build on the apex of a hosted deployment. It sells
 Lines as a web GUI for **coding agents** — Claude Code and Codex today, more later — rather than
 for one provider. The hero cycles through the supported agent names so a visitor sees both at a
-glance. Under the hero sit the open-source line, a GitHub star link and a self-hosted demo loop.
-Below that the page walks through how it works, the feature groups, security, where your data goes,
-the ways to run it and getting started, most with an illustrated card. The app itself is monochrome (see
+glance. The hero's first action is the Mac download, beside Get started, with the facts a visitor
+checks before installing (Apple silicon, notarized by Apple); under it sit the open-source line, a
+GitHub star link and a self-hosted demo loop. Below that the page walks through how it works, the
+feature groups, security, where your data goes, the ways to run it and getting started, most with an
+illustrated card. Getting started closes on two panels: the Mac app and the account. The app itself is monochrome (see
 Architectural rules), and the page follows it.
 
 ## Entry points
@@ -29,14 +31,17 @@ Architectural rules), and the page follows it.
   keyframes, next to the other small animations
 - `web/src/theme.ts` — the app-wide monochrome theme the page inherits
 - `web/src/components/ProviderMark.tsx` — exports the Anthropic clay colour the hero gradient uses
-- `web/src/components/DownloadDesktopApp.tsx` — the install card; names both CLIs
+- `web/src/lib/storage.ts` — `DESKTOP_DOWNLOAD_URL`, `_ENABLED`, `_VERSION` and `_HREF`, the
+  build-time download link every download button reads. `DownloadDesktopApp.tsx` is the in-app
+  install card (connect gate, Settings → Devices) and is not used here
+- `web/public/icon-192.png` — the app icon shown on the Mac panel, same art as the DMG's
 - `web/src/components/PairingDiagram.tsx` — diagram text says "your agent runs here"
 - `web/index.html`, `web/landing/index.html` — `<title>`, `<meta name="description">` and the
   Open Graph / Twitter card tags (both pages carry the same set); `web/index.html` also holds the
   inline check that skips the boot splash for landing routes and signed-out visitors
 - `web/public/og.png` (1200×630 share image) and `web/public/demo.mp4` (hero loop) — static
   assets, served same-origin from both builds' `publicDir`
-- `deploy/docker/web-nginx.conf` — the `/download` 302 the install card links to
+- `deploy/docker/web-nginx.conf` — the `/download` 302 every download button links to
 - `web/src/lib/splash.ts` — `splashSkippedAtBoot`, read by the root route
 
 ## Important symbols
@@ -46,8 +51,10 @@ Architectural rules), and the page follows it.
 - `AgentRotator` — props `words` (`name` plus a three-colour `gradient`), `intervalMs`
 - `DATA_FLOWS` — the four "Where your data goes" rows in `LandingPage.tsx`
 - `DemoVideo` — the hero loop; `DEMO_VIDEO` and `DEMO_POSTER` name its files
-- `DOWNLOAD_HREF` — in `DownloadDesktopApp.tsx`: `/download` in production builds, the DMG URL in
+- `DESKTOP_DOWNLOAD_HREF` — in `lib/storage.ts`: `/download` in production builds, the DMG URL in
   dev
+- `HeroActions`, `DownloadMacButton`, `DownloadFacts`, `GetStartedPanels` — the download-first
+  hero actions, the shared Mac button, its facts line, and the closing Mac and account panels
 
 ## Data flow
 
@@ -79,8 +86,14 @@ None; the page is presentational.
   (Claude CLI status, Claude sign-in, SDK internals) stay provider-specific.
 - Supporting another provider in the copy is one new `AGENTS` entry. The list is local to the page
   on purpose: `shared/providers.ts` is capability data, not marketing copy.
-- The install card says at least one of Claude Code or Codex must be installed on the paired
-  machine, and points Windows and Linux users at running from source.
+- The closing panels' footnotes say at least one of Claude Code or Codex must be installed on the
+  paired machine, and point Windows and Linux users at running from source.
+- Download first: the hero leads with the Mac download, then Get started; Sign in lives in the
+  header. With no build published the hero falls back to Get started and Sign in, and the account
+  panel spans the closing row alone.
+- "Notarized by Apple" is true only from desktop 0.2.43, so the configured download link must serve
+  the stable `Lines-latest.dmg` alias (or a signed versioned build). The version shows only when
+  the link names one; the alias does not.
 - Privacy copy uses only these lines, or wording that says no more than they do:
   - "The agent runs on your machine, with your files, git and CLI login. Nothing is executed in
     the cloud."
@@ -133,6 +146,10 @@ None; the page is presentational.
   while Clerk resolves the signed-in/out action. That column also holds a GitHub icon link beside
   the action, in both builds. It is a plain link: a star-count badge would mean a request to
   GitHub's API from the origin that holds the encryption keys.
+- The header's Download button shows from `md` up only: below that the nav and three actions crowd
+  the row, and a phone cannot install it anyway. The hero carries the download at every width.
+- The download is the one lit button: a soft glow drawn in the text colour, so it inverts with the
+  scheme. Calls to action stack full width on a phone and form one centred row from `xs`.
 - No analytics or tracking script, and no third-party embed (YouTube and similar), on either
   build. The app's origin holds the end-to-end encryption keys, so any third-party script there
   is code next to them, and it would break the enforcing CSP. Measurement is server-side only: the
