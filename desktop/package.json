@@ -18,6 +18,8 @@
     "release": "node scripts/ship.mjs",
     "ship": "node scripts/ship.mjs",
     "upload": "node scripts/release.mjs",
+    "changelog:stamp": "node scripts/stamp-changelog.mjs",
+    "test": "node --test scripts/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,5 +1,6 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
+import { createPortal } from 'react-dom';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { MantineProvider } from '@mantine/core';
 import { ClerkProvider, SignIn, useAuth, useUser } from '@clerk/clerk-react';
@@ -45,11 +46,15 @@ import { ConnectingMachine } from './components/ConnectingMachine';
 import { GateShell } from './components/GateShell';
 import { JoinPage } from './components/JoinPage';
 import { LandingPage } from './components/LandingPage';
+import { WhatsNew } from './components/WhatsNew';
+import { markSeen, pendingWhatsNew, type WhatsNew as WhatsNewNotes } from './lib/whatsNew';
 import {
   appMounted,
   awaitApp,
+  holdApp,
   settleSplash,
   splashSkippedAtBoot,
+  splashSlot,
   SplashStep,
   useSplash,
   useSplashState,
@@ -283,6 +288,10 @@ const SPLASH_CAP_MS = 6000;
  *
  * Once per mount: every reconnect's `hello` clears the loaded transcripts, and
  * must not put the splash back over a running app.
+ *
+ * After an update, the "What's new" card holds the hand-over: it shows over the
+ * finished mark while the app mounts unseen beneath, and closing it starts the
+ * usual fade (lib/whatsNew.ts, lib/splash.ts `holdApp`).
  */
 function AppWhenReady() {
   const status = useStore((s) => s.connectionStatus);
@@ -322,12 +331,44 @@ function AppWhenReady() {
   );
 
   const splash = useSplashState();
+  // Decided once, at lift, against the first `hello`'s bridge version. In a ref
+  // so StrictMode's second run of the effect below reuses the answer. Never for
+  // a guest: the host's desktop app is not theirs.
+  const news = useRef<{ notes: WhatsNewNotes; bridgeVersion: string | null } | null | undefined>(undefined);
+  const releaseHold = useRef<(() => void) | null>(null);
+  const [card, setCard] = useState<WhatsNewNotes | null>(null);
   // In the commit that releases the claim above, so the splash's leave stops at
   // `finished` and waits for the app. Never re-run: `waiting` does not come back.
   useLayoutEffect(() => {
     if (waiting) return;
-    return awaitApp();
+    const withdraw = awaitApp();
+    if (news.current === undefined) {
+      const { access, bridge } = useStore.getState();
+      const bridgeVersion = bridge?.version ?? null;
+      const notes = access ? null : pendingWhatsNew(bridgeVersion);
+      news.current = notes && { notes, bridgeVersion };
+    }
+    const release = news.current ? holdApp() : null;
+    releaseHold.current = release;
+    setCard(release ? news.current!.notes : null);
+    return () => {
+      withdraw();
+      releaseHold.current = null;
+      release?.();
+    };
   }, [waiting]);
+  const closeCard = useCallback(() => {
+    const release = releaseHold.current;
+    if (!release) return;
+    releaseHold.current = null;
+    markSeen(news.current?.bridgeVersion ?? null);
+    release();
+  }, []);
+  // Gone once the splash is, so a later splash (a machine switch) never shows it again.
+  useEffect(() => {
+    if (splash === 'hidden') setCard(null);
+  }, [splash]);
+  const slot = splashSlot();
   // Latched: a later splash, for a machine switch, must not unmount a running app.
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -339,7 +380,12 @@ function AppWhenReady() {
   // One element for good, so following the splash through its fade never
   // re-renders the app under it.
   const app = useMemo(() => <App />, []);
-  return mounted ? app : null;
+  return (
+    <>
+      {mounted ? app : null}
+      {card && slot && createPortal(<WhatsNew news={card} onClose={closeCard} />, slot)}
+    </>
+  );
 }
 
 /**

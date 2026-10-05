@@ -1889,7 +1889,9 @@
         "appMounted",
         "settleSplash",
         "useSplashState",
-        "splashSkippedAtBoot"
+        "splashSkippedAtBoot",
+        "holdApp",
+        "splashSlot"
       ],
       "tests": [],
       "businessRules": [
@@ -1902,7 +1904,8 @@
         "the splash layer scrolls only while shown (connecting help panel); in finishing, finished and leaving it clips, so the hand-over scale and the app mounting beneath cannot produce scrollbars",
         "each boot step holds the splash with its own caption (Starting Lines, Signing you in, Finding your machines, Connecting to <machine>, Loading your sessions and projects, Opening your session); the splash has no header",
         "the app is not rendered until the mark has finished drawing onto the static logo; it then mounts hidden under the splash, the splash fades out, and the app fades in the moment the splash is gone, with a 4s fallback if an expected app never mounts",
-        "when the app opens on a session with no transcript loaded, the splash waits for it (capped at 6s) once per page load; a machine switch remounts the app and replays the sequence"
+        "when the app opens on a session with no transcript loaded, the splash waits for it (capped at 6s) once per page load; a machine switch remounts the app and replays the sequence",
+        "the What's new card can hold the hand-over: holdApp keeps the splash at the finished mark and suspends the 4s fallback while the card shows in the splash slot, the mark and card are centred as one group and glide when the card changes size, and the release runs the usual fade (see whats-new)"
       ],
       "architecturalRules": [
         "the white plate in ProjectTabs is load-bearing: logo-mark.png is transparent with no background of its own, so without the plate the art would sit directly on the dark header; the plate also supplies the header's corner rounding since that asset carries no baked mask",
@@ -2523,7 +2526,8 @@
         "desktop/scripts/ship.mjs",
         "desktop/scripts/check-unreleased.mjs",
         ".github/workflows/release-desktop.yml",
-        "desktop/package.json"
+        "desktop/package.json",
+        "desktop/scripts/stamp-changelog.mjs"
       ],
       "files": [
         "desktop/src/main.ts",
@@ -2536,7 +2540,8 @@
         "desktop/scripts/ship.mjs",
         "desktop/scripts/check-unreleased.mjs",
         ".github/workflows/release-desktop.yml",
-        "deploy/README.md"
+        "deploy/README.md",
+        "desktop/scripts/stamp-changelog.mjs"
       ],
       "symbols": [
         "spawnChild",
@@ -2593,7 +2598,8 @@
       "tests": [
         "server/src/updates.test.ts",
         "server/src/claudeCli.test.ts",
-        "server/src/sessions.claudeCli.test.ts"
+        "server/src/sessions.claudeCli.test.ts",
+        "desktop/scripts/stamp-changelog.test.mjs"
       ],
       "businessRules": [
         "right-click shows a native context menu in every shell window; link actions copy or open externally, never in-window",
@@ -2630,7 +2636,8 @@
         "desktop.log stamps every line with an ISO time, re-cuts child output into whole tagged lines, and rotates once to desktop.1.log past 5MB",
         "the shell logs power transitions ([power] suspend/resume/lock-screen/unlock-screen), relay link changes ([relay-status]), child spawn/exit with uptime, and device registration outcome (never the pairing code)",
         "the app window's console is mirrored to the log as [renderer] — only [diag]/[ws]/[e2ee] lines plus warnings/errors — along with did-finish-load (URL without fragment), render-process-gone and unresponsive; observed from the main process, so the window keeps its no-preload/no-IPC contract",
-        "the tray's Collect diagnostics… zips both log generations, run/*/*.json with token deleted, the bridge lock and a summary.json into ~/.lines-app/diagnostics via /usr/bin/ditto; device.json is never copied"
+        "the tray's Collect diagnostics… zips both log generations, run/*/*.json with token deleted, the bridge lock and a summary.json into ~/.lines-app/diagnostics via /usr/bin/ditto; device.json is never copied",
+        "ship.mjs stamps desktopPending in changelog.json into a new desktop release when it commits a version bump, in the same commit; the release workflow's guard job fails if desktopPending is non-empty because CI cannot commit the stamp (see whats-new)"
       ],
       "architecturalRules": [
         "context menu hooked inside attachNavigationGuards so every window, including popups, gets it without a preload",
@@ -3575,7 +3582,8 @@
         "server/src/workerProtocol.ts",
         "server/src/worker.ts",
         "server/src/workerClient.ts",
-        "server/src/codexCli.ts"
+        "server/src/codexCli.ts",
+        "web/src/components/WhatsNewSection.tsx"
       ],
       "symbols": [
         "publicClaudeCliStatus",
@@ -3614,7 +3622,8 @@
         "desktop-app",
         "hosted-machine-access",
         "cross-provider-model-switching",
-        "model-selector"
+        "model-selector",
+        "whats-new"
       ]
     },
     {
@@ -4372,6 +4381,83 @@
         "transcript-performance",
         "transcript-rendering",
         "session-change-tracking"
+      ]
+    },
+    {
+      "id": "whats-new",
+      "name": "What's new",
+      "doc": "features/whats-new.md",
+      "purpose": "Show a first-open-after-update card listing every user-facing web and desktop change since the versions this browser last saw, with the app loaded behind it, plus a permanent history in Settings.",
+      "entryPoints": [
+        "web/src/main.tsx",
+        "web/src/App.tsx",
+        "web/src/components/SettingsModal.tsx",
+        "desktop/scripts/stamp-changelog.mjs"
+      ],
+      "files": [
+        "changelog.json",
+        "shared/changelog.ts",
+        "shared/types.ts",
+        "server/src/claudeCli.ts",
+        "web/src/lib/whatsNew.ts",
+        "web/src/lib/splash.ts",
+        "web/src/components/WhatsNew.tsx",
+        "web/src/components/WhatsNewModal.tsx",
+        "web/src/components/WhatsNewSection.tsx",
+        "web/src/components/ChangelogList.tsx",
+        "web/src/components/UpdatesSection.tsx",
+        "web/src/index.css",
+        "web/src/loader.css",
+        "web/vite.config.ts",
+        "web/src/vite-env.d.ts",
+        "desktop/scripts/ship.mjs",
+        "desktop/scripts/stamp-changelog.mjs",
+        "desktop/package.json",
+        ".github/workflows/release-desktop.yml",
+        "deploy/docker/Dockerfile"
+      ],
+      "symbols": [
+        "Changelog",
+        "ChangelogRelease",
+        "releasesSince",
+        "nextSeen",
+        "compareVersions",
+        "pendingWhatsNew",
+        "desktopUpdateNews",
+        "markSeen",
+        "holdApp",
+        "splashSlot",
+        "WhatsNew",
+        "WhatsNewModal",
+        "DesktopUpdateWhatsNew",
+        "WhatsNewSection",
+        "ChangelogList",
+        "stampChangelog",
+        "stampFile"
+      ],
+      "tests": [
+        "server/src/changelog.test.ts",
+        "desktop/scripts/stamp-changelog.test.mjs",
+        "server/src/claudeCli.test.ts"
+      ],
+      "businessRules": [
+        "two tracks, web (__LINES_VERSION__) and desktop (bridge.version from the first hello), each with its own localStorage marker (lines.seenWeb, lines.seenDesktop); either one past its marker shows every release in between",
+        "a missing marker is written silently and shows nothing; markers only move forward",
+        "nextSeen caps at the newest release the bundle knows, so desktop notes stamped after a web deploy still show on a later load",
+        "decided once per page load, so a machine switch never reshows the card; guests never see it",
+        "desktop notes wait in desktopPending until ship.mjs stamps them with the version it bumps; the CI guard fails on a non-empty desktopPending",
+        "only user-facing feat or noticeable fix commits get an entry, one short user-worded line each; web/ paths go to the web track with a web/package.json patch bump, desktop/ server/ shared/ paths go to desktopPending"
+      ],
+      "architecturalRules": [
+        "the app mounts and loads behind the card; holdApp suspends the splash fallback timer so an open card is never faded away",
+        "the splash centres mark and card as one group while held and glides on size change; the layer clips outside shown, so the list scrolls inside the card",
+        "compareVersions lives in shared/changelog.ts and is re-exported from server/src/claudeCli.ts",
+        "changelog.json is read by web/vite.config.ts at config time and baked in, so the web image must copy it"
+      ],
+      "relatedDecisions": [
+        "brand-logo",
+        "settings-updates-pane",
+        "desktop-app"
       ]
     }
   ]

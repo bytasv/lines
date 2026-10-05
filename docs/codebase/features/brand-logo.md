@@ -65,6 +65,12 @@ transcript loaded, the splash also waits for that transcript, capped at 6s. This
 page load; switching machines remounts the app and replays the sequence. Reduced motion shows a
 static mark with a slow opacity pulse; the fades stay.
 
+After an update the hand-over can be held by the What's new card (see [whats-new](whats-new.md)).
+`holdApp()` keeps the splash at the finished mark and suspends the 4s fallback while the card shows
+in the splash slot (`splashSlot()`); the caption is blanked, the mark and card are centred as one
+group and glide when the card changes size, and releasing the hold runs the usual two-frame wait
+and fade.
+
 ## Business rules
 
 - The splash mark is a hand-built SVG in `index.html`, separate from the PNG assets; changing the

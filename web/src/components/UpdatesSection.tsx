@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { Badge, Button, CopyButton, Group, Text, Tooltip } from '@mantine/core';
-import { IconCheck, IconCopy, IconDownload, IconExternalLink } from '@tabler/icons-react';
+import { IconCheck, IconCopy, IconDownload, IconExternalLink, IconSparkles } from '@tabler/icons-react';
 import { CLAUDE_INSTALL_URL, CODEX_INSTALL_COMMAND } from '@lines/shared';
 import { useStore } from '../store';
 import {
@@ -28,7 +28,7 @@ import { SettingsGroup, SettingsRow } from './SettingsLayout';
  * Host-only by construction: SettingsModal's GUEST_SECTIONS filters to Machines,
  * and these rows describe the host's machine.
  */
-export function UpdatesSection() {
+export function UpdatesSection({ onOpenWhatsNew }: { onOpenWhatsNew: () => void }) {
   const bridge = useStore((s) => s.bridge);
   const worker = useStore((s) => s.workerStatus);
   const update = useStore((s) => s.updateStatus);
@@ -40,7 +40,16 @@ export function UpdatesSection() {
   return (
     <>
       <SettingsGroup title="Versions">
-        <VersionRow name="Lines (this tab)" version={__LINES_VERSION__} />
+        {/* The changelog is a sibling pane; only the parent can switch (see SessionsSection). */}
+        <VersionRow
+          name="Lines (this tab)"
+          version={__LINES_VERSION__}
+          action={
+            <Button size="xs" variant="default" leftSection={<IconSparkles size={14} />} onClick={onOpenWhatsNew}>
+              What's new
+            </Button>
+          }
+        />
 
         <VersionRow
           name="Bridge"

@@ -179,6 +179,147 @@
   }
 }
 
+/* The What's new timeline (ChangelogList.tsx): one release per entry on a
+   hairline rail, its track's icon as the node. The pending desktop release is
+   dashed: it has no version yet. Nodes are filled with `--changelog-surface` so
+   the rail stops at their edge; a surface other than the body sets it. */
+.lines-changelog {
+  --changelog-node: 22px;
+  --changelog-surface: var(--mantine-color-body);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lines-changelog-entry {
+  position: relative;
+  padding-left: calc(var(--changelog-node) + 12px);
+}
+
+.lines-changelog-entry + .lines-changelog-entry {
+  margin-top: 20px;
+}
+
+.lines-changelog-entry:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  top: var(--changelog-node);
+  bottom: -20px;
+  left: calc(var(--changelog-node) / 2 - 0.5px);
+  border-left: 1px solid var(--mantine-color-default-border);
+}
+
+.lines-changelog-entry[data-pending]::before {
+  border-left-style: dashed;
+}
+
+.lines-changelog-node {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: var(--changelog-node);
+  height: var(--changelog-node);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: 50%;
+  background: var(--changelog-surface);
+  color: var(--mantine-color-dimmed);
+}
+
+.lines-changelog-entry[data-pending] .lines-changelog-node {
+  border-style: dashed;
+}
+
+.lines-changelog-head {
+  min-height: var(--changelog-node);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 8px;
+}
+
+.lines-changelog-date {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.lines-changelog-items {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.lines-changelog-items li {
+  position: relative;
+  padding-left: 14px;
+  font-size: var(--mantine-font-size-sm);
+  line-height: 1.55;
+  text-wrap: pretty;
+}
+
+.lines-changelog-items li::before {
+  content: '';
+  position: absolute;
+  top: calc(1.55em / 2 - 2px);
+  left: 2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--mantine-color-dimmed);
+  opacity: 0.7;
+}
+
+.lines-changelog-entry[data-pending] .lines-changelog-items li {
+  color: var(--mantine-color-dimmed);
+}
+
+/* The What's new card and modal (WhatsNew.tsx). The dark-scheme card sits a
+   step above the splash's charcoal, as Mantine's cards do; the action sits
+   under a hairline of its own. */
+[data-mantine-color-scheme='dark'] .lines-whats-new-card {
+  background: var(--mantine-color-dark-6);
+}
+
+[data-mantine-color-scheme='dark'] .lines-whats-new-card .lines-changelog {
+  --changelog-surface: var(--mantine-color-dark-6);
+}
+
+.lines-whats-new-card:focus {
+  outline: none;
+}
+
+.lines-whats-new-footer {
+  border-top: 1px solid var(--mantine-color-default-border);
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+}
+
+/* A scroll area (WhatsNew.tsx FadeScroll) that fades out at an edge with more beyond it. */
+.lines-fade-scroll-viewport {
+  --fade-top: 0px;
+  --fade-bottom: 0px;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--fade-top),
+    #000 calc(100% - var(--fade-bottom)),
+    transparent 100%
+  );
+}
+
+.lines-fade-scroll[data-fade-top] .lines-fade-scroll-viewport {
+  --fade-top: 20px;
+}
+
+.lines-fade-scroll[data-fade-bottom] .lines-fade-scroll-viewport {
+  --fade-bottom: 32px;
+}
+
 /* Inline color swatch appended after detected color literals */
 .color-chip {
   display: inline-flex;

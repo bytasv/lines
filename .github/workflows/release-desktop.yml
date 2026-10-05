@@ -38,6 +38,12 @@ jobs:
       - run: npm run typecheck
       - run: npm run test -w server
       - run: npm run test -w relay
+      - run: npm run test -w desktop
+      # A CI release cannot commit, so unstamped desktop notes would ship with
+      # no version on them. Stamp locally first (the hint says how).
+      - name: Check the desktop notes are stamped
+        if: ${{ !inputs.dry_run }}
+        run: node desktop/scripts/stamp-changelog.mjs --check
       - name: Check the version is not already published
         if: ${{ !inputs.force }}
         env:

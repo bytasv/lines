@@ -270,6 +270,17 @@
   display: none;
 }
 
+/* Held for the What's new card (lib/splash.ts `holdApp`): the mark and the card
+   are centred as one group rather than the card hanging in the half below the
+   mark, and the caption, blank meanwhile, steps out of the way. */
+.lines-splash[data-held] .lines-splash-content {
+  grid-template-rows: 1fr auto auto 1fr;
+}
+
+.lines-splash[data-held] .lines-splash-caption {
+  display: none;
+}
+
 /* Fades in whenever its text changes (lib/splash.ts replays it), so a step
    change reads as progress rather than a flicker. */
 .lines-splash-caption {

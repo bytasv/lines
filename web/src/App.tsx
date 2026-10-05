@@ -14,6 +14,7 @@ import { SkewBanner } from './components/SkewBanner';
 import { StorageBanner } from './components/StorageBanner';
 import { WorkerBanner } from './components/WorkerBanner';
 import { UpdateBanner } from './components/UpdateBanner';
+import { DesktopUpdateWhatsNew } from './components/WhatsNewModal';
 import { ProjectPicker } from './components/ProjectPicker';
 import { WorkflowEditor } from './components/workflow/WorkflowEditor';
 import type { WorkflowEditorView } from './components/workflow/WorkflowEditor';
@@ -77,6 +78,8 @@ export function App() {
           AppShell parentage never mattered. The Cmd+P palette is here for the
           same reason — the shortcut works wherever you are. */}
       <FilePalette />
+      {/* A desktop update that arrived mid-session; one at boot shows on the splash (main.tsx). */}
+      <DesktopUpdateWhatsNew />
       {previewOpen && (
         <Suspense fallback={null}>
           <MonacoPreviewModal />

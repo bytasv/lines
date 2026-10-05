@@ -4207,6 +4207,12 @@ export * from './codex.ts';
 export * from './e2ee.ts';
 
 /**
+ * The "What's new" notes and the version compare they rest on. Safe above the
+ * cycle-sensitive block below: `./changelog.ts` imports nothing at all.
+ */
+export * from './changelog.ts';
+
+/**
  * The estimator that stands in for a provider-reported cost, re-exported beside
  * the price table it reads. `./estimateSpend.ts` imports back from here, so the
  * two form a cycle — safe for the same reason `./workflowValidation.ts` below is:

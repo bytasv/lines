@@ -92,6 +92,8 @@ FROM deps AS web-build
 WORKDIR /app
 COPY shared shared
 COPY web web
+# The "What's new" notes, which vite.config.ts bakes into the bundle.
+COPY changelog.json changelog.json
 
 # Baked into the bundle at build time, so changing either one needs a rebuilt
 # image rather than a restart.

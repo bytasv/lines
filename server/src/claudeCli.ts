@@ -19,7 +19,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CLAUDE_INSTALL_URL } from '@lines/shared';
+import { CLAUDE_INSTALL_URL, compareVersions } from '@lines/shared';
 import type { ClaudeCliState, ClaudeCliStatus } from '@lines/shared';
 
 // The shapes live in shared/types.ts because the browser renders them in
@@ -135,17 +135,11 @@ export function readVersion(binary: string): string | null {
   }
 }
 
-/** Numeric `x.y.z` compare: negative when `a` is older than `b`. */
-export function compareVersions(a: string, b: string): number {
-  const parse = (v: string) => v.split('.').map((part) => Number.parseInt(part, 10) || 0);
-  const left = parse(a);
-  const right = parse(b);
-  for (let i = 0; i < Math.max(left.length, right.length); i++) {
-    const diff = (left[i] ?? 0) - (right[i] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
+/**
+ * Lives in @lines/shared now (the web app's "What's new" compares versions too);
+ * re-exported so codexCli.ts and the tests keep importing it from here.
+ */
+export { compareVersions };
 
 /**
  * First candidate that both exists and answers `--version`. A path that exists

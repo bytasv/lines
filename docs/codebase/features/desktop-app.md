@@ -376,6 +376,14 @@ same `ship.mjs` on a GitHub-hosted `macos-latest` (arm64, standard) runner, behi
 `guard` job that runs `typecheck`, the server and relay tests, and `check-unreleased.mjs` first — a stale version fails there at
 1x billing rather than on the 10x mac runner.
 
+`ship.mjs` also stamps the repo-root `changelog.json`: when it commits a version bump (offered or
+hand-made) it moves `desktopPending` into a new `desktop` release for that version, via
+`desktop/scripts/stamp-changelog.mjs`, and includes `changelog.json` in the same commit. If the
+version already has a release the notes stay pending and the bump still commits. A CI release
+cannot commit, so the workflow's `guard` job runs `stamp-changelog.mjs --check` and fails on
+unstamped notes (not on a dry run); stamp locally with `npm run changelog:stamp -w desktop`, commit
+and push first. See [whats-new](whats-new.md).
+
 ## Dependencies
 
 - `UpdateManager` needs nothing from the shell to exist: `supervised` is false whenever

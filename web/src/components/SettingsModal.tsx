@@ -28,6 +28,7 @@ import {
   IconMicrophone,
   IconPlugConnected,
   IconShieldCheck,
+  IconSparkles,
   IconUserCircle,
   IconUsers,
   type TablerIcon,
@@ -47,6 +48,7 @@ import { SyncSection } from './SyncSection';
 import { TranscriptSection } from './TranscriptSection';
 import { UpdatesSection } from './UpdatesSection';
 import { VoiceSection } from './VoiceSection';
+import { WhatsNewSection } from './WhatsNewSection';
 import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
 import { SHARING_ENABLED } from '../lib/shares';
 import { useIsGuest } from '../lib/can';
@@ -64,7 +66,8 @@ export type SettingsSection =
   | 'connections'
   | 'diagnostics'
   | 'voice'
-  | 'updates';
+  | 'updates'
+  | 'whatsNew';
 
 interface SectionMeta {
   value: SettingsSection;
@@ -188,6 +191,13 @@ const SETTINGS_SECTIONS: SectionMeta[] = [
     group: 'System',
     icon: IconCircleArrowUp,
     description: "The version of every part you're running, and the latest desktop app.",
+  },
+  {
+    value: 'whatsNew',
+    label: "What's new",
+    group: 'System',
+    icon: IconSparkles,
+    description: 'Every update to Lines, newest first.',
   },
 ];
 
@@ -345,7 +355,8 @@ export function SettingsModal({
               {current.value === 'notifications' && <NotificationsSection />}
               {current.value === 'diagnostics' && <SyncSection />}
               {current.value === 'voice' && <VoiceSection />}
-              {current.value === 'updates' && <UpdatesSection />}
+              {current.value === 'updates' && <UpdatesSection onOpenWhatsNew={() => goTo('whatsNew')} />}
+              {current.value === 'whatsNew' && <WhatsNewSection />}
               {current.value === 'allowlist' && (
                 <GuardAllowlistSection
                   onOpenReview={() => {

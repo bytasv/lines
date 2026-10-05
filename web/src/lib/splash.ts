@@ -16,12 +16,18 @@ import { useLayoutEffect, useSyncExternalStore } from 'react';
  * still, kept out of sight; the splash fades once the app has painted, and the
  * app fades in the moment the splash is gone.
  *
+ * The hand-over can be held (`holdApp`): the "What's new" card shows in the
+ * splash's slot over the finished mark, with the app mounted unseen beneath it,
+ * and the fade waits until the card is closed.
+ *
  * A later claim (switching machines from inside the app) brings the splash back.
  */
 
 const root = document.getElementById('lines-splash');
 const caption = document.getElementById('lines-splash-caption');
 const slot = document.getElementById('lines-splash-slot');
+const content = root?.querySelector<HTMLElement>('.lines-splash-content') ?? null;
+const hero = root?.querySelector<HTMLElement>('.lines-splash-hero') ?? null;
 const appRoot = document.getElementById('root');
 
 /**
@@ -51,6 +57,13 @@ let appExpected = 0;
 let appTokens = 0;
 /** The fade under way ends by fading the app in. */
 let revealOnHide = false;
+/** Something is showing over the finished mark, and the app's hand-over waits for it. */
+let held = false;
+/** While held: the slot's last height, where the mark last rested, and the glide between the two. */
+let slotWatch: ResizeObserver | null = null;
+let slotHeight = 0;
+let heroTop = 0;
+let gliding: Animation | null = null;
 const listeners = new Set<() => void>();
 
 /** How long each part of the mark takes to settle, and the step between parts in reading order. */
@@ -64,6 +77,8 @@ const LEAVE_FALLBACK_MS = 1000;
 const APP_MOUNT_FALLBACK_MS = 4000;
 /** The app's own fade-in, once the splash has gone. */
 const APP_FADE_MS = 500;
+/** The mark and a held card gliding to their new places when the card changes size. */
+const GLIDE_MS = 650;
 
 function setState(state: SplashState) {
   if (!root || root.dataset.state === state) return;
@@ -79,6 +94,7 @@ function show(text: string) {
   if (!root || !caption) return;
   if (root.dataset.state !== 'shown') {
     leaveRun++;
+    unwatchSlot();
     restartMark();
     revealOnHide = false;
     appRoot?.style.removeProperty('opacity');
@@ -140,6 +156,7 @@ function fadeIn(el: HTMLElement) {
 
 function hide() {
   if (root?.dataset.state !== 'leaving') return;
+  unwatchSlot();
   setState('hidden');
   if (revealOnHide && appRoot) fadeIn(appRoot);
   revealOnHide = false;
@@ -167,7 +184,8 @@ function leave() {
         // has gone; appMounted() starts the fade.
         appRoot?.style.setProperty('opacity', '0');
         setState('finished');
-        appTimer = window.setTimeout(() => fadeOut(true), APP_MOUNT_FALLBACK_MS);
+        // Not while held: the fallback would fade an open card away.
+        if (!held) appTimer = window.setTimeout(() => fadeOut(true), APP_MOUNT_FALLBACK_MS);
         return;
       }
       setTimeout(() => {
@@ -264,13 +282,93 @@ export function appMounted() {
     if (appRoot) fadeIn(appRoot);
     return;
   }
-  if (root.dataset.state !== 'finished') return;
+  if (held || root.dataset.state !== 'finished') return;
+  handOver();
+}
+
+/** Two frames for the app's first paint, then the splash fades and the app fades in after it. */
+function handOver() {
   const run = leaveRun;
   requestAnimationFrame(() =>
     requestAnimationFrame(() => {
       if (run === leaveRun) fadeOut(true);
     }),
   );
+}
+
+/**
+ * Hold the app's hand-over at the finished mark while something shows in the
+ * splash's slot (`splashSlot`). Called in the same commit as `awaitApp`. The
+ * app still mounts beneath, out of sight; the release starts the usual fade
+ * once it has. The caption is blanked meanwhile: what the slot shows has its own
+ * heading.
+ *
+ * Null when there is no splash up to hold (skipped at boot, or already gone).
+ */
+export function holdApp(): (() => void) | null {
+  if (!root || root.dataset.state === 'hidden' || root.dataset.state === 'leaving') return null;
+  held = true;
+  clearTimeout(appTimer);
+  if (caption) caption.textContent = '';
+  watchSlot();
+  root.dataset.held = '';
+  return () => {
+    if (!held) return;
+    held = false;
+    // An app still to mount fades the splash itself, from appMounted().
+    if (appExpected || root.dataset.state !== 'finished') return;
+    handOver();
+  };
+}
+
+/**
+ * While held, the mark and the slot are centred as one group (`data-held`,
+ * loader.css), so a tall card is not squeezed into the half below the mark.
+ * When the slot changes height the group glides to its new place rather than
+ * jumping there: a ResizeObserver reports after layout and before paint, so the
+ * move can be played back from where the mark was.
+ */
+function watchSlot() {
+  if (!slot || !hero || typeof ResizeObserver === 'undefined') return;
+  slotWatch?.disconnect();
+  heroTop = hero.getBoundingClientRect().top;
+  slotHeight = slot.offsetHeight;
+  slotWatch = new ResizeObserver(() => {
+    if (slot.offsetHeight === slotHeight) return;
+    slotHeight = slot.offsetHeight;
+    glide();
+  });
+  slotWatch.observe(slot);
+}
+
+function glide() {
+  if (!hero || !content) return;
+  // Where the mark shows right now: where it last rested, plus a glide still under way.
+  const transform = getComputedStyle(content).transform;
+  const offset = transform && transform !== 'none' ? new DOMMatrixReadOnly(transform).m42 : 0;
+  gliding?.cancel();
+  gliding = null;
+  const top = hero.getBoundingClientRect().top;
+  const from = heroTop + offset - top;
+  heroTop = top;
+  if (Math.abs(from) < 1 || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  gliding = content.animate([{ transform: `translateY(${from}px)` }, { transform: 'none' }], {
+    duration: GLIDE_MS,
+    easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+  });
+}
+
+function unwatchSlot() {
+  slotWatch?.disconnect();
+  slotWatch = null;
+  gliding?.cancel();
+  gliding = null;
+  if (root) delete root.dataset.held;
+}
+
+/** The slot under the caption, for a portal that is not a claim (`useSplash(null)` returns none). */
+export function splashSlot(): HTMLElement | null {
+  return slot;
 }
 
 function subscribe(listener: () => void) {

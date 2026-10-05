@@ -1,0 +1,13 @@
+{
+  "web": [
+    {
+      "version": "0.1.1",
+      "date": "2026-10-05",
+      "items": [
+        "Lines now shows what changed after an update, and Settings → What's new lists every past update."
+      ]
+    }
+  ],
+  "desktop": [],
+  "desktopPending": []
+}

@@ -29,6 +29,8 @@ is picked up within seconds, with no restart and no manual "check again".
 - `web/src/components/SettingsModal.tsx` — the `updates` section (`Updates`, in the rail's System group);
   not in `GUEST_SECTIONS`, so a guest never sees it (it reports the host's machine)
 - `web/src/components/UpdatesSection.tsx` — the pane itself
+- `web/src/components/WhatsNewSection.tsx` — the sibling `whatsNew` section ("What's new", right
+  after `updates`): the full changelog; see [whats-new](whats-new.md)
 
 ## Files
 
@@ -163,6 +165,10 @@ gated for the scalar reads), and the model picker's `warn` option
   `define` reading `package.json` at build time, `declare const` in a `.d.ts`) rather than a
   `VITE_*` env var — this is the bundle's own identity, not deployment configuration.
 
+The web version row carries a "What's new" button that opens that section (`onOpenWhatsNew`,
+wired by `SettingsModal` the way `SessionsSection` gets `onOpenUpdates`). `web/package.json`'s
+version now bumps with each user-facing commit, so the web row moves with the changelog.
+
 ## Related decisions
 
 - [desktop-app](desktop-app.md) — `UpdateStatus`, `BRIDGE_VERSION`/`APP_VERSION`,
@@ -174,3 +180,4 @@ gated for the scalar reads), and the model picker's `warn` option
   the model picker's `warn` option needs the same status to explain itself before the click.
 - [model-selector](model-selector.md) — the picker's `warn` option and its click-through to
   this pane.
+- [whats-new](whats-new.md) — the changelog section beside this pane and the web version bump

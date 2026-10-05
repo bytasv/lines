@@ -35,6 +35,7 @@ import path from 'node:path';
 import readline from 'node:readline/promises';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { CHANGELOG, stampFile } from './stamp-changelog.mjs';
 
 const require = createRequire(import.meta.url);
 const DESKTOP = path.resolve(import.meta.dirname, '..');
@@ -233,12 +234,28 @@ run('npm', ['run', 'upload', '-w', 'desktop'], { env });
  * ship): if the manifest differs from HEAD's, the release just published a
  * version nobody recorded, so commit it the same way. Terminal only — CI has no
  * business committing to the branch it was dispatched from.
+ *
+ * The desktop notes committed since the last release are stamped with the
+ * version in the same commit (stamp-changelog.mjs). A failed stamp (that version
+ * already has notes) leaves them pending, to stamp by hand, rather than
+ * withholding the bump commit.
  */
 const toCommit = bumped ?? (process.stdin.isTTY && process.stdout.isTTY ? uncommittedVersion() : null);
 if (toCommit) {
   const git = (args) => execFileSync('git', args, { cwd: REPO, stdio: 'inherit' });
+  const paths = [MANIFEST];
   try {
-    git(['commit', MANIFEST, '-m', `chore(desktop): bump version to ${toCommit}`]);
+    if (stampFile(toCommit)) {
+      console.log(`Stamped pending desktop notes in ${CHANGELOG} as ${toCommit}.`);
+      paths.push(CHANGELOG);
+    }
+  } catch (error) {
+    console.error(`
+${error.message}
+The pending desktop notes are left unstamped.`);
+  }
+  try {
+    git(['commit', ...paths, '-m', `chore(desktop): bump version to ${toCommit}`]);
   } catch {
     console.error(`\npublished ${toCommit}; ${MANIFEST} is written but uncommitted — commit and push it.`);
     process.exit(0);

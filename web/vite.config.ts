@@ -138,6 +138,19 @@ const WEB_VERSION: string = (() => {
 })();
 
 /**
+ * The "What's new" notes (`changelog.json` at the repo root), read at config
+ * time like WEB_VERSION. A missing or unreadable file bakes in an empty one,
+ * which shows nothing rather than failing the build.
+ */
+const CHANGELOG: unknown = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '..', 'changelog.json'), 'utf8'));
+  } catch {
+    return { web: [], desktop: [], desktopPending: [] };
+  }
+})();
+
+/**
  * Optional TLS + a same-origin proxy for the dev server.
  *
  * Why it exists: WebCrypto only runs in a secure context. `localhost` counts,
@@ -183,7 +196,10 @@ function devTls(): { https?: { cert: Buffer; key: Buffer }; proxy?: Record<strin
 
 export default defineConfig({
   plugins: [react(), bridgeDiscovery(), subresourceIntegrity()],
-  define: { __LINES_VERSION__: JSON.stringify(WEB_VERSION) },
+  define: {
+    __LINES_VERSION__: JSON.stringify(WEB_VERSION),
+    __LINES_CHANGELOG__: JSON.stringify(CHANGELOG),
+  },
   // VITE_* vars load from the repo-root .env (shared with the bridge).
   envDir: '..',
   server: {
