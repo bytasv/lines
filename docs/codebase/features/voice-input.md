@@ -82,6 +82,10 @@ link only. The composer inserts `text` via `MentionInputHandle.insertText`, whic
 `insertAtCaret` (the same primitive mention-completion uses) so an @mention pill before the caret
 shifts rather than getting cut through.
 
+Pressing Send while recording or transcribing (button, Enter, ⌘/Enter) finishes the recording, then
+sends the prompt `insertText` returns — the value after the async wait, not the one captured when
+Send was pressed — as one message through the normal `prompt` path.
+
 **Model download.** `installWhisperModel { file }` (owner only) starts `whisperModel.ts` streaming
 that file into `<app root>/models/`; progress broadcasts as `whisperModelDownload` to every link,
 and success re-probes `whisperCli.ts` and re-broadcasts `cliStatus` immediately rather than waiting
@@ -108,6 +112,7 @@ approval staging when they press Send.
 - one transcription and one model download run at a time per bridge; the audio may be a guest's
   but the CPU is the host's
 - recordings longer than `VOICE_MAX_SECONDS` (90s) auto-stop and are transcribed as caught
+- Send while recording or transcribing finishes the recording and sends once the transcript is spliced in; a failed or empty transcription sends nothing and leaves the prompt as it was
 - a model download is refused while `LINES_WHISPER_MODEL` pins a single external model file
 - an iOS home-screen app asks for the mic on every recording: WebKit does not keep the grant once
   the tracks stop, and standalone apps have no per-site permission setting. In a Safari tab,

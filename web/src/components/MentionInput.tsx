@@ -63,8 +63,9 @@ export function insertAtCaret(
 
 /** What a parent may do to the prompt from outside — voice input, for one. */
 export interface MentionInputHandle {
-  /** Insert plain text at the caret (over the selection, if any), spaced from its neighbours. */
-  insertText: (text: string) => void;
+  /** Insert plain text at the caret (over the selection, if any), spaced from its neighbours.
+   *  Returns the prompt after the insertion, or null when there was nothing to insert. */
+  insertText: (text: string) => MentionValue | null;
 }
 
 /**
@@ -211,7 +212,7 @@ export function MentionInput({
   useImperativeHandle(handleRef, () => ({
     insertText: (raw: string) => {
       const words = raw.trim();
-      if (!words) return;
+      if (!words) return null;
       const ta = textareaRef.current;
       const start = ta ? snapCaretOut(ta.selectionStart, ranges, prevCaretRef.current) : text.length;
       const end = ta && ta.selectionEnd > start ? ta.selectionEnd : start;
@@ -221,6 +222,7 @@ export function MentionInput({
       onChange(next.value);
       setToken(null);
       focusCaret(next.caret);
+      return next.value;
     },
   }));
 

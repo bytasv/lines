@@ -74,7 +74,7 @@ import {
   PERMISSION_MODE_SEGMENTS,
   SEGMENT_MODES,
 } from '../lib/permissionModes';
-import { buildExpandedPrompt, uniqueMentions } from '../lib/mentions';
+import { buildExpandedPrompt, type MentionValue, uniqueMentions } from '../lib/mentions';
 import { linkedMachineHealth } from '../lib/machineHealth';
 import { useCan, useSessionMachine, useSessionMachineHealth } from '../lib/can';
 import { usePresence } from '../lib/presence';
@@ -356,6 +356,8 @@ export function Composer({ session }: { session: SessionMeta }) {
   const [voiceElapsed, setVoiceElapsed] = useState(0);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const recordingRef = useRef<VoiceRecording | null>(null);
+  /** Send was pressed while dictating: send once the transcript is spliced in. */
+  const sendAfterVoiceRef = useRef(false);
   /** The warning dot only shows on hover: a mic that is never set up would
    *  otherwise wear an orange badge in every composer, forever. */
   const [micHovered, setMicHovered] = useState(false);
@@ -418,7 +420,9 @@ export function Composer({ session }: { session: SessionMeta }) {
   // "I am looking at this session, and my composer has focus." Debounced inside.
   usePresence(session.id, composerFocused);
 
-  const nothingToSend = !prompt.text.trim() && attachments.length === 0;
+  // While dictating, Send finishes the recording and sends with the transcript,
+  // so there is always something on its way.
+  const nothingToSend = voice === 'idle' && !prompt.text.trim() && attachments.length === 0;
   const cannotSend = nothingToSend || machineBlock !== null || !canPrompt;
 
   // Focus the prompt on a session this tab just created. Keyed on the store's
@@ -503,12 +507,14 @@ export function Composer({ session }: { session: SessionMeta }) {
   const cancelVoice = () => {
     recordingRef.current?.cancel();
     recordingRef.current = null;
+    sendAfterVoiceRef.current = false;
     setVoiceLevel(null);
     setVoice('idle');
   };
 
   /** Stop, transcribe on the session's machine, and splice the text in at the
-   *  caret. A failure leaves the prompt exactly as it was. */
+   *  caret — then send it, if Send was pressed meanwhile. A failure leaves the
+   *  prompt exactly as it was and sends nothing. */
   const finishVoice = async () => {
     const recording = recordingRef.current;
     if (!recording) return;
@@ -522,11 +528,16 @@ export function Composer({ session }: { session: SessionMeta }) {
         { language: voiceLanguage, translate: voiceTranslate },
         remote.deviceId ?? undefined,
       );
-      if (text) mentionRef.current?.insertText(text);
-      else setVoiceError('Nothing was heard in that recording.');
+      // The handle is gone once the composer unmounts (a session switch), so a
+      // late transcript is neither inserted nor sent to the session left behind.
+      const next = text ? (mentionRef.current?.insertText(text) ?? null) : null;
+      if (!text) setVoiceError('Nothing was heard in that recording.');
+      // Sends the prompt `insertText` returned, not this closure's stale `prompt`.
+      else if (next && sendAfterVoiceRef.current) sendPrompt(next);
     } catch (err) {
       setVoiceError(err instanceof Error ? err.message : 'Transcription failed.');
     } finally {
+      sendAfterVoiceRef.current = false;
       setVoice('idle');
     }
   };
@@ -633,10 +644,21 @@ export function Composer({ session }: { session: SessionMeta }) {
     // Guards ⌘/Enter too, not just the buttons — the keyboard path is the one
     // that would otherwise send into a machine that cannot run it.
     if (cannotSend) return;
+    if (voice === 'idle') {
+      sendPrompt(prompt);
+      return;
+    }
+    // Dictating: finish first, and let `finishVoice` send once the transcript is
+    // in. Already transcribing (the check, or the length limit) needs only the flag.
+    sendAfterVoiceRef.current = true;
+    if (recordingRef.current) void finishVoice();
+  };
+
+  const sendPrompt = (value: MentionValue) => {
     // Bake the @mention expansions into the text (so workflow-first-prompt and
     // offline queueing see it too); `mentions` rides along display-only.
-    const expanded = buildExpandedPrompt(prompt.text.trim(), prompt.ranges);
-    const wireMentions = uniqueMentions(prompt.ranges).map(({ kind, id, label, detail }) => ({
+    const expanded = buildExpandedPrompt(value.text.trim(), value.ranges);
+    const wireMentions = uniqueMentions(value.ranges).map(({ kind, id, label, detail }) => ({
       kind,
       id,
       label,
@@ -650,7 +672,7 @@ export function Composer({ session }: { session: SessionMeta }) {
       mentions: wireMentions.length ? wireMentions : undefined,
       // Kept only if the server queues this prompt, so the queue row can be
       // re-opened in a composer with its pills instead of the expanded text.
-      draft: prompt.ranges.length ? prompt : undefined,
+      draft: value.ranges.length ? value : undefined,
     });
     setPrompt({ text: '', ranges: [] });
     setAttachments([]);

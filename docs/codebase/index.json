@@ -3993,6 +3993,7 @@
         "a named non-English language (or translate) with only the English-only model installed is refused rather than silently mistranscribed",
         "one transcription and one model download run at a time per bridge",
         "recordings longer than VOICE_MAX_SECONDS (90s) auto-stop and are transcribed as caught",
+        "Send while recording or transcribing finishes the recording and sends once the transcript is spliced in; a failed or empty transcription sends nothing and leaves the prompt as it was",
         "a model download is refused while LINES_WHISPER_MODEL pins a single external model file",
         "an iOS home-screen app re-prompts for the mic on every recording (WebKit drops the grant once tracks stop, no per-site setting); the stream is not held open between recordings because that keeps the mic indicator lit"
       ],
