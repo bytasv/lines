@@ -2,50 +2,14 @@
   "web": [
     {
       "version": "0.1.7",
-      "date": "2026-10-06",
-      "items": [
-        "On your phone, a small banner now tells you when the desktop app has an update ready, with a button to restart it."
-      ]
-    },
-    {
-      "version": "0.1.6",
-      "date": "2026-10-06",
-      "items": [
-        "When the desktop app has an update ready, you can restart into it from the update banner or Settings → Updates."
-      ]
-    },
-    {
-      "version": "0.1.5",
-      "date": "2026-10-06",
-      "items": [
-        "Typing in a file no longer drops your cursor after the first keystroke, and Save and Discard now sit in the file's header."
-      ]
-    },
-    {
-      "version": "0.1.4",
-      "date": "2026-10-06",
-      "items": [
-        "The desktop download card no longer shows the macOS \"damaged\" workaround, since the app is now signed and notarized."
-      ]
-    },
-    {
-      "version": "0.1.3",
-      "date": "2026-10-06",
-      "items": [
-        "You can now edit a file you open from the file tree, search results or Cmd+P, and save it with Cmd+S."
-      ]
-    },
-    {
-      "version": "0.1.2",
       "date": "2026-10-05",
       "items": [
-        "You can now dictate with your voice into the \"Other…\" answer of a question and into plan comments."
-      ]
-    },
-    {
-      "version": "0.1.1",
-      "date": "2026-10-05",
-      "items": [
+        "On your phone, a small banner now tells you when the desktop app has an update ready, with a button to restart it.",
+        "When the desktop app has an update ready, you can restart into it from the update banner or Settings → Updates.",
+        "Typing in a file no longer drops your cursor after the first keystroke, and Save and Discard now sit in the file's header.",
+        "The desktop download card no longer shows the macOS \"damaged\" workaround, since the app is now signed and notarized.",
+        "You can now edit a file you open from the file tree, search results or Cmd+P, and save it with Cmd+S.",
+        "You can now dictate with your voice into the \"Other…\" answer of a question and into plan comments.",
         "Lines now shows what changed after an update, and Settings → What's new lists every past update."
       ]
     }
@@ -53,15 +17,9 @@
   "desktop": [
     {
       "version": "0.2.44",
-      "date": "2026-10-06",
+      "date": "2026-10-05",
       "items": [
-        "Lines now updates itself: new versions download in the background, and a restart installs them."
-      ]
-    },
-    {
-      "version": "0.2.43",
-      "date": "2026-10-06",
-      "items": [
+        "Lines now updates itself: new versions download in the background, and a restart installs them.",
         "Saving edits to files from the file viewer now works on your own machine.",
         "The Mac app is now signed and notarized by Apple, so macOS no longer warns when you open a new download."
       ]
