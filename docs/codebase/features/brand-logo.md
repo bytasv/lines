@@ -46,9 +46,12 @@ never renders it; `lib/splash.ts` only swaps the caption and drives its state
 (`shown` → `finishing` → `finished` → `leaving` → `hidden`). There is no header on it. The
 account menu appears top-right only while the connecting help is showing.
 
-The splash is for the app only. An inline script right after the markup hides it before first
-paint when Clerk is configured and the route is `/welcome` or `/join/:code`, or the visitor has no
-signed-in Clerk cookie (`__client_uat*` missing or `0`), so the landing page appears immediately.
+The splash is for the app only. A small synchronous script right after the markup
+(`web/public/splash-guard.js` — a file rather than inline, because the deployed CSP allows no
+inline script, and it reads whether Clerk is configured from `#lines-splash`'s `data-clerk`
+attribute) hides it before first paint when Clerk is configured and the route is `/welcome` or
+`/join/:code`, or the visitor has no signed-in Clerk cookie (`__client_uat*` missing or `0`), so
+the landing page appears immediately.
 `lib/splash.ts` exports `splashSkippedAtBoot` so the root route knows. The cookie is a guess: if
 a signed-in user is taken for a guest, the app's first claim brings the splash back over the
 landing page. Builds without Clerk always keep the splash.

@@ -6,10 +6,16 @@
  * `onChange` hook the bridge hangs both the broadcast and the push off.
  *
  * The one thing it adds is a credential boundary. Header values are what an
- * HTTP MCP server authenticates with, so they live in a separate local-only
- * file: `blob()` (synced to storage) and the `mcpConnections` broadcast carry
- * header *names* only, and `serverConfigs()` — read on the bridge, on its way
- * into the worker — is the single place a value is ever attached.
+ * HTTP MCP server authenticates with, and env values what a stdio one does, so
+ * both live in local-only files of their own: `blob()` (synced to storage) and
+ * the `mcpConnections` broadcast carry header and env var *names* only, and
+ * `serverConfigs()` — read on the bridge, on its way into the worker — is the
+ * single place a value is ever attached (with `codexServerConfigs()`, its codex
+ * twin).
+ *
+ * Env values used to ride on the connection itself, and were synced to storage
+ * with it. The constructor moves any it still finds there into the env file —
+ * see the load migration — and nothing writes them back.
  */
 import {
   MCP_CONNECTIONS_MAX,
@@ -28,8 +34,16 @@ export type McpAddResult =
   | { ok: true; connection: McpConnection }
   | { ok: false; reason: 'duplicate-name' | 'too-many' | 'not-found' | McpConnectionError };
 
-/** Validate + dedupe an untrusted list (this disk, or a storage row) into canonical rows. */
-function sanitizeConnections(raw: unknown): McpConnection[] {
+/**
+ * Validate + dedupe an untrusted list (this disk, or a storage row) into
+ * canonical rows, which carry env var names and never a value.
+ *
+ * `inlineEnv`, when given, collects the values a row did carry, keyed by the id
+ * it ended up with: that is how the load migration keeps the keys an older
+ * build stored inline. Remote ingest passes nothing, so a value in a pulled row
+ * — one written before names-only sync, or a tampered one — goes nowhere.
+ */
+function sanitizeConnections(raw: unknown, inlineEnv?: McpConnectionSecrets): McpConnection[] {
   if (!Array.isArray(raw)) return [];
   const out: McpConnection[] = [];
   for (const item of raw) {
@@ -39,6 +53,10 @@ function sanitizeConnections(raw: unknown): McpConnection[] {
     // either would make two rows claim one thing.
     if (out.some((c) => c.name === norm.connection.name || c.id === norm.connection.id)) continue;
     out.push(norm.connection);
+    if (inlineEnv) {
+      const values = declaredValues((item as McpConnectionInput | null)?.env, norm.connection.envKeys);
+      if (values) inlineEnv[norm.connection.id] = values;
+    }
     if (out.length === MCP_CONNECTIONS_MAX) break;
   }
   return out;
@@ -50,18 +68,97 @@ function setEqual(a: McpConnection[], b: McpConnection[]): boolean {
   return added.length === 0 && removed.length === 0;
 }
 
+/**
+ * The sync file as loaded, re-run through the gate. A build that predates
+ * names-only sync staged pulled rows with their env values in them, and kept
+ * them on disk for as long as the review — or a rejection of it — lived;
+ * sanitizing reduces those to names. A pending list that differed from `local`
+ * only by such values is no divergence any more, so it is dropped rather than
+ * served as a review with nothing in it.
+ */
+function scrubbedSyncState(loaded: McpSyncState, local: McpConnection[]): McpSyncState {
+  const pending = loaded.pending && {
+    ...loaded.pending,
+    connections: sanitizeConnections(loaded.pending.connections),
+  };
+  const rejected = loaded.rejected && {
+    ...loaded.rejected,
+    connections: sanitizeConnections(loaded.rejected.connections),
+  };
+  return {
+    // No sync file yet. Stamp now, or the storage row would be written with a
+    // 1970 timestamp and always lose its LWW.
+    updatedAt: loaded.updatedAt || Date.now(),
+    pending: pending && !setEqual(pending.connections, local) ? pending : null,
+    rejected,
+  };
+}
+
+/** The string values `stored` holds for the names a connection declares; undefined when none. */
+function declaredValues(
+  stored: unknown,
+  declared: string[] | undefined,
+): Record<string, string> | undefined {
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return undefined;
+  const out: Record<string, string> = {};
+  for (const name of declared ?? []) {
+    const value = (stored as Record<string, unknown>)[name];
+    if (typeof value === 'string') out[name] = value;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * One connection's credential values after an edit: only `declared` names
+ * survive, and an incoming non-empty string replaces the stored one. Absent or
+ * empty means "leave it as it is" — the client never holds a stored value to
+ * send back, so an empty box in the form cannot mean "erase the token".
+ */
+function mergeCredentials(
+  stored: Record<string, string> | undefined,
+  declared: string[] | undefined,
+  incoming: unknown,
+): Record<string, string> {
+  const names = new Set(declared ?? []);
+  const merged: Record<string, string> = {};
+  for (const [name, value] of Object.entries(stored ?? {})) {
+    if (names.has(name)) merged[name] = value;
+  }
+  if (incoming && typeof incoming === 'object' && !Array.isArray(incoming)) {
+    for (const [name, value] of Object.entries(incoming as Record<string, unknown>)) {
+      if (!names.has(name) || typeof value !== 'string' || !value) continue;
+      merged[name] = value;
+    }
+  }
+  return merged;
+}
+
+/** `all` with one connection's values replaced — or its entry gone, once none are left. */
+function withValues(
+  all: McpConnectionSecrets,
+  id: string,
+  values: Record<string, string>,
+): McpConnectionSecrets {
+  const next = { ...all };
+  if (Object.keys(values).length) next[id] = values;
+  else delete next[id];
+  return next;
+}
+
 /** The serializable SDK config one connection describes, or null when it is off. */
 function serverConfig(
   connection: McpConnection,
   headers: Record<string, string> | undefined,
+  env: Record<string, string> | undefined,
 ): Record<string, unknown> | null {
   if (!connection.enabled) return null;
   if (connection.transport === 'stdio') {
+    const vars = declaredValues(env, connection.envKeys);
     return {
       type: 'stdio',
       command: connection.command,
       ...(connection.args ? { args: connection.args } : {}),
-      ...(connection.env ? { env: connection.env } : {}),
+      ...(vars ? { env: vars } : {}),
       ...(connection.timeout ? { timeout: connection.timeout } : {}),
     };
   }
@@ -114,13 +211,15 @@ export interface CodexMcpConfig {
 function codexServerConfig(
   connection: McpConnection,
   headers: Record<string, string> | undefined,
+  env: Record<string, string> | undefined,
 ): { config: Record<string, unknown> } | { skip: CodexMcpSkip } {
   if (connection.transport === 'stdio') {
+    const vars = declaredValues(env, connection.envKeys);
     return {
       config: {
         command: connection.command,
         ...(connection.args?.length ? { args: connection.args } : {}),
-        ...(connection.env && Object.keys(connection.env).length ? { env: connection.env } : {}),
+        ...(vars ? { env: vars } : {}),
       },
     };
   }
@@ -153,36 +252,67 @@ function codexServerConfig(
  */
 export class McpConnections {
   private connections: McpConnection[];
+  /** Header values, by connection id. */
   private secrets: McpConnectionSecrets;
+  /** Stdio env values, by connection id. */
+  private envSecrets: McpConnectionSecrets;
   private syncState: McpSyncState;
 
-  /** Fired on every local list change — a UI edit or an accepted review. */
+  /** Fired on every local list change — a UI edit or an accepted review — with `list()`. */
   onChange?: (connections: McpConnection[]) => void;
   /** Fired when a remote divergence is staged, recomputed, or cleared. */
   onReview?: (review: McpConnectionsReview | null) => void;
 
   constructor(private store: Store) {
+    // First, so a file an older build wrote 0644 is owner-only even when this
+    // run never has a reason to rewrite it.
+    store.secureMcpFiles();
     const raw = store.loadMcpConnections<unknown[]>([]);
-    this.connections = sanitizeConnections(raw);
+    const inlineEnv: McpConnectionSecrets = {};
+    this.connections = sanitizeConnections(raw, inlineEnv);
+    this.secrets = store.loadMcpSecrets();
+    this.envSecrets = store.loadMcpEnv();
+    // Env values an older build kept on the connection itself — which is how
+    // they reached storage — move to the env file (a value found inline wins: it
+    // is either the only copy, or a hand edit). Moved *before* the connections
+    // file is rewritten without them, and that rewrite skipped if the move did
+    // not land: a failed write may cost a retry next start, never the key.
+    let moved = true;
+    if (Object.keys(inlineEnv).length) {
+      const next = { ...this.envSecrets };
+      for (const [id, values] of Object.entries(inlineEnv)) next[id] = { ...next[id], ...values };
+      this.envSecrets = next;
+      moved = this.persistEnv();
+    }
     // Load-time migration, as GuardAllowlist does: rewrite once, and only when
     // the sanitized form actually differs, so a second construction leaves the
     // file's bytes alone.
-    if (JSON.stringify(raw) !== JSON.stringify(this.connections)) this.persistConnections();
-    this.secrets = store.loadMcpSecrets();
-    this.syncState = store.loadMcpSync();
-    if (!this.syncState.updatedAt) {
-      // No sync file yet. Stamp now, or the storage row would be written with a
-      // 1970 timestamp and always lose its LWW.
-      this.syncState = { ...this.syncState, updatedAt: Date.now() };
-      this.persistSync();
-    }
+    if (moved && JSON.stringify(raw) !== JSON.stringify(this.connections)) this.persistConnections();
+    // The sync file gets the same once-only rewrite, for the same reason.
+    const loaded = store.loadMcpSync();
+    this.syncState = scrubbedSyncState(loaded, this.connections);
+    if (JSON.stringify(this.syncState) !== JSON.stringify(loaded)) this.persistSync();
   }
 
+  /**
+   * The list as this machine's browsers get it (hello, and the broadcast via
+   * `onChange`): each stdio row carries `envValuesHeld`, the env names this
+   * machine has a value for, so the form can say "saved" about a value it is
+   * never sent. Names only, like everything else here.
+   */
   list(): McpConnection[] {
-    return this.connections;
+    return this.connections.map((connection) => {
+      const held = declaredValues(this.envSecrets[connection.id], connection.envKeys);
+      return held ? { ...connection, envValuesHeld: Object.keys(held) } : connection;
+    });
   }
 
-  /** The synced form: connections (header names only) plus the ordering timestamp. */
+  /**
+   * The synced form: connections (header and env var names only) plus the
+   * ordering timestamp. Built from the canonical rows, never from `list()`: which
+   * values a machine holds is that machine's business, and another one reading
+   * this machine's marks would say "saved" about a key it does not have.
+   */
   blob(): McpConnectionsBlob {
     return { connections: this.connections, updatedAt: this.syncState.updatedAt };
   }
@@ -193,14 +323,18 @@ export class McpConnections {
 
   /**
    * Every enabled connection as SDK query options, keyed by MCP namespace, with
-   * header values spliced in from the local-only secrets file. The only method
-   * whose output holds a credential — see `buildQueryOptions`, which is its one
-   * caller.
+   * header values and stdio env values spliced in from the local-only files. The
+   * only method whose output holds a credential — see `buildQueryOptions`, which
+   * is its one caller.
    */
   serverConfigs(): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     for (const connection of this.connections) {
-      const config = serverConfig(connection, this.secrets[connection.id]);
+      const config = serverConfig(
+        connection,
+        this.secrets[connection.id],
+        this.envSecrets[connection.id],
+      );
       if (config) out[connection.name] = config;
     }
     return out;
@@ -224,7 +358,7 @@ export class McpConnections {
     for (const connection of this.connections) {
       if (!connection.enabled) continue;
       const headers = this.secrets[connection.id];
-      const result = codexServerConfig(connection, headers);
+      const result = codexServerConfig(connection, headers, this.envSecrets[connection.id]);
       if ('skip' in result) {
         skipped.push({ name: connection.name, reason: result.skip });
         continue;
@@ -244,8 +378,9 @@ export class McpConnections {
   }
 
   /**
-   * Add a connection. `headers` are the secret values for its `headerKeys`;
-   * they are written to the local-only file and never enter the list.
+   * Add a connection. `headers` are the secret values for its `headerKeys`, and
+   * `input.env` the values for its env var names; both are written to local-only
+   * files and never enter the list.
    */
   add(input: McpConnectionInput, headers?: Record<string, string>): McpAddResult {
     const norm = normalizeConnection(input);
@@ -256,14 +391,17 @@ export class McpConnections {
     }
     this.connections = [...this.connections, norm.connection];
     this.writeSecrets(norm.connection, headers);
+    this.writeEnv(norm.connection, input.env);
     this.commit();
     return { ok: true, connection: norm.connection };
   }
 
   /**
    * Replace one connection wholesale, keeping its id. `headers` omitted keeps
-   * the stored values; a header name dropped from `headerKeys` drops its value
-   * with it, so a removed credential does not linger on disk.
+   * the stored values, and so does an `input.env` that leaves a name out — which
+   * is what the Settings toggle sends, holding names only; a name dropped from
+   * `headerKeys` or `envKeys` drops its value with it, so a removed credential
+   * does not linger on disk.
    */
   update(id: string, input: McpConnectionInput, headers?: Record<string, string>): McpAddResult {
     const existing = this.connections.find((c) => c.id === id);
@@ -275,20 +413,23 @@ export class McpConnections {
     }
     this.connections = this.connections.map((c) => (c.id === id ? norm.connection : c));
     this.writeSecrets(norm.connection, headers);
+    this.writeEnv(norm.connection, input.env);
     this.commit();
     return { ok: true, connection: norm.connection };
   }
 
-  /** Drop a connection and its stored header values; true when one matched. */
+  /** Drop a connection and its stored header and env values; true when one matched. */
   remove(id: string): boolean {
     const next = this.connections.filter((c) => c.id !== id);
     if (next.length === this.connections.length) return false;
     this.connections = next;
     if (this.secrets[id]) {
-      const rest = { ...this.secrets };
-      delete rest[id];
-      this.secrets = rest;
+      this.secrets = withValues(this.secrets, id, {});
       this.persistSecrets();
+    }
+    if (this.envSecrets[id]) {
+      this.envSecrets = withValues(this.envSecrets, id, {});
+      this.persistEnv();
     }
     this.commit();
     return true;
@@ -311,6 +452,8 @@ export class McpConnections {
     }
     // Security boundary: a tampered row must not smuggle an odd-shaped config —
     // or one named `lines` — as far as the UI, which is itself an attack surface.
+    // Nor a credential: env values in a row written before names-only sync are
+    // reduced to their names here, so they are neither staged nor compared.
     const connections = sanitizeConnections(remote.connections);
     if (setEqual(connections, this.connections)) {
       // Converged — also forget any rejection, so a later change prompts again.
@@ -362,12 +505,14 @@ export class McpConnections {
     // reviewRemote already sanitized what it staged, but the pending blob
     // round-trips through disk (loadMcpSync is unvalidated), so re-run the gate:
     // the invariant "no odd-shaped or reserved-name row ever reaches list()"
-    // holds locally.
+    // holds locally. No credential comes from the remote list — it holds names
+    // only — and this machine's own values stay in its files, keyed by id, so a
+    // connection both sides have keeps working here.
     this.connections = sanitizeConnections(pending.connections);
     this.syncState = { updatedAt: Date.now(), pending: null, rejected: null };
     this.persistConnections();
     this.persistSync();
-    this.onChange?.(this.connections);
+    this.onChange?.(this.list());
     this.onReview?.(null);
     return true;
   }
@@ -386,7 +531,7 @@ export class McpConnections {
       rejected: { connections: pending.connections, rejectedAt: now },
     };
     this.persistSync();
-    this.onChange?.(this.connections); // idempotent client-side; also unblocks the push
+    this.onChange?.(this.list()); // idempotent client-side; also unblocks the push
     this.onReview?.(null); // closes the modal in this user's other tabs
     return true;
   }
@@ -397,24 +542,22 @@ export class McpConnections {
    * what makes an edit that only renames a server keep working.
    */
   private writeSecrets(connection: McpConnection, headers?: Record<string, string>): void {
-    const declared = new Set(connection.headerKeys ?? []);
-    const merged: Record<string, string> = {};
-    for (const [name, value] of Object.entries(this.secrets[connection.id] ?? {})) {
-      if (declared.has(name)) merged[name] = value;
-    }
-    if (headers) {
-      for (const [name, value] of Object.entries(headers)) {
-        // Only declared names, and only non-empty values: an empty box in the
-        // form means "leave it as it is", not "erase the token".
-        if (!declared.has(name) || typeof value !== 'string' || !value) continue;
-        merged[name] = value;
-      }
-    }
-    const next = { ...this.secrets };
-    if (Object.keys(merged).length) next[connection.id] = merged;
-    else delete next[connection.id];
-    this.secrets = next;
+    const merged = mergeCredentials(this.secrets[connection.id], connection.headerKeys, headers);
+    this.secrets = withValues(this.secrets, connection.id, merged);
     this.persistSecrets();
+  }
+
+  /**
+   * The same for a stdio connection's env values, against its `envKeys`. Written
+   * only when something changed, so editing an HTTP connection does not create
+   * the env file.
+   */
+  private writeEnv(connection: McpConnection, env: unknown): void {
+    const stored = this.envSecrets[connection.id];
+    const merged = mergeCredentials(stored, connection.envKeys, env);
+    if (JSON.stringify(merged) === JSON.stringify(stored ?? {})) return;
+    this.envSecrets = withValues(this.envSecrets, connection.id, merged);
+    this.persistEnv();
   }
 
   /** Persist a local change, notify, and re-evaluate any review against the new list. */
@@ -427,12 +570,12 @@ export class McpConnections {
     if (pending && setEqual(this.connections, pending.connections)) {
       this.syncState = { ...this.syncState, pending: null, rejected: null };
       this.persistSync();
-      this.onChange?.(this.connections);
+      this.onChange?.(this.list());
       this.onReview?.(null);
       return;
     }
     this.persistSync();
-    this.onChange?.(this.connections);
+    this.onChange?.(this.list());
     if (pending) this.onReview?.(this.review());
   }
 
@@ -475,6 +618,18 @@ export class McpConnections {
       // The error is swallowed rather than logged with its cause: fs errors quote
       // the path, and nothing about this file belongs in a log line.
       console.warn('[mcp] could not persist connection headers');
+    }
+  }
+
+  /** True when the write landed — the load migration strips inline values only once it has. */
+  private persistEnv(): boolean {
+    try {
+      this.store.saveMcpEnv(this.envSecrets);
+      return true;
+    } catch {
+      // Swallowed without its cause, for the reason persistSecrets gives.
+      console.warn('[mcp] could not persist connection env values');
+      return false;
     }
   }
 }

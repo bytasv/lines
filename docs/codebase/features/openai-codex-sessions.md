@@ -13,7 +13,9 @@ plan mode (codex's own collaboration mode, with its clarifying questions routed 
 `AskUserQuestion` card), Send now, compaction, the context ring, rewind, the user's MCP connections and
 workflow steps all work on a codex session and go through the *same* bridge machinery a Claude
 session does — including Lines' own workflow tools, served to codex by a real stdio MCP server
-(see [workflow-mcp-tools](workflow-mcp-tools.md)) since codex cannot host one in-process. `cost`
+(see [workflow-mcp-tools](workflow-mcp-tools.md)) since codex cannot host one in-process. Those
+tools are the one deliberate gap: codex gets their reads only, because nothing on that path can
+raise the approval card a write needs. `cost`
 is the only capability still false, and permanently: codex reports tokens and never a price. That
 no longer means a codex session shows no dollar figure — one is computed from a static per-model
 price table and shown marked with a `~`, since `cost: false` is exactly the signal that decides
@@ -97,6 +99,13 @@ the transport was.
   [cross-provider-model-switching](cross-provider-model-switching.md).
 - Workflow steps run on Claude models only, refused on both the client (the pickers offer no
   OpenAI models) and the server (`validateStepContent`, and a pre-run park).
+- Lines' own workflow tools are read-only in a codex session. A codex call reaches the bridge as
+  a plain HTTP request on `POST /lines-mcp`, with no permission card anywhere on its path, so that
+  route serves `LINES_READ_ONLY_MANIFEST` and dispatches through
+  `createMcpDispatcher(ctx, undefined, { allowWrites: false })`, which refuses a write even when
+  one is called unlisted. A Claude session keeps the writes, each behind its card
+  (`allowWrites: true`). Codex's own approvals are unaffected: commands and file changes still
+  reach the card through `canUseTool`.
 - `output_tokens` means exactly what the provider called output. Reasoning tokens ride beside
   it in `reasoning_output_tokens` and the spend accumulator adds them explicitly.
 - A turn's usage is every model request it made. `thread/tokenUsage/updated` names the latest
@@ -161,6 +170,8 @@ the transport was.
   bearer-token boundary and the two connection kinds codex cannot express.
 - `server/src/workflows.providers.test.ts` — a step that changes provider.
 - `server/src/linesMcpStdio.test.ts` — the spawn recipe codex is given for Lines' own tools.
+- `server/src/mcpWorkflowTools.test.ts` — the read-only manifest and the no-writes dispatcher the
+  codex door uses: every write refused with nothing changed, every read still answered.
 - `server/src/codexExperimental.contract.test.ts` — asks the installed binary for a Plan
   collaboration mode, covering what `generate-ts` cannot: the experimental surface is absent
   from its output with or without `--enable collaboration_modes`.

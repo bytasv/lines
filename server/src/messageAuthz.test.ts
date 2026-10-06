@@ -11,6 +11,7 @@ import {
   type SharePreset,
   type SocketAccess,
 } from '@lines/shared';
+import { tokenRefreshAction } from './connectionPolicy.ts';
 
 /**
  * The default-deny gate every client message passes through.
@@ -243,5 +244,36 @@ describe('MESSAGE_AUTHZ', () => {
       const verdict = authorizeMessage(msg(type), access({}));
       if (!verdict.ok) assert.ok(verdict.reason.length > 10, `${type} needs a real reason`);
     }
+  });
+});
+
+/**
+ * `auth` is socket-level traffic, so the table lets every connection send it —
+ * a guest's browser relays its own token every 50s. That makes the handler the
+ * only thing standing between that token and the host's storage credential, and
+ * it asks tokenRefreshAction. Both halves are pinned here, side by side: if the
+ * classification ever tightens this stays true, and if the handler ever trusts
+ * the table instead, the second half fails.
+ */
+describe('a refreshed token on a guest link', () => {
+  test('passes the message gate — it is socket-level traffic', () => {
+    assert.equal(MESSAGE_AUTHZ.auth.needs, 'connection');
+    assert.equal(authorizeMessage(msg('auth'), guest('full')).ok, true);
+  });
+
+  test('never becomes the host context’s token, however it arrived', () => {
+    for (const relayed of [true, false]) {
+      for (const authEnabled of [true, false]) {
+        assert.equal(tokenRefreshAction({ owner: false, relayed }, authEnabled), 'ignore');
+      }
+    }
+  });
+
+  test('an owner’s refresh still lands: relayed on the relay’s word, direct only when re-verifiable', () => {
+    assert.equal(tokenRefreshAction({ owner: true, relayed: true }, false), 'accept');
+    assert.equal(tokenRefreshAction({ owner: true, relayed: false }, true), 'verify');
+    // A desktop install has no CLERK_SECRET_KEY: a direct socket's token cannot be
+    // checked, so it is not believed — this was the LAN peer's way in.
+    assert.equal(tokenRefreshAction({ owner: true, relayed: false }, false), 'ignore');
   });
 });

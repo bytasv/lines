@@ -11,6 +11,13 @@
  * added later by encrypting `payload` alone — no codec rewrite, no change to
  * the multiplexer. Nothing here may start parsing it.
  *
+ * The single exception is a guest's token refresh: a frame a guest sends toward
+ * the bridge is parsed for its `type`, and an `auth` one is dropped rather than
+ * handing the guest's Clerk token to the host's machine (DeviceHub.fromClient).
+ * It reads nothing the relay could not already see — a current client seals its
+ * guest frames end to end, so those read only as `e2ee*`, and an older client's
+ * plaintext was visible anyway — and an owner's frame is never looked at.
+ *
  * Kept dependency-free so both the relay and the bridge can import it.
  */
 
@@ -19,6 +26,11 @@ export const RELAY_PROTOCOL_VERSION = 1;
 
 /** Clerk token on `/client`, device secret on `/agent`. */
 export const RELAY_DEVICE_HEADER = 'x-lines-device';
+/**
+ * The device secret a bridge presents on `/agent`. A header, never the URL: a URL
+ * is what proxies and access logs record. The bridge mirrors this name in
+ * relayClient.ts, so renaming it unpairs every bridge already installed.
+ */
 export const RELAY_SECRET_HEADER = 'x-lines-device-secret';
 
 /**
@@ -65,6 +77,11 @@ export type RelayToAgent =
       t: 'open';
       ch: ChannelId;
       userId: string;
+      /**
+       * The owner's Clerk token, which storage sync runs on. Always null on a
+       * guest channel: the host's bridge has no use for a guest's, and it would be
+       * a live credential for the guest's account on someone else's machine.
+       */
       token: string | null;
       /** Absent for an owner connection — the unchanged, unshared fast path. */
       grant?: AttestedGrant;
@@ -73,7 +90,7 @@ export type RelayToAgent =
   | { t: 'data'; ch: ChannelId; payload: string }
   /** The browser went away, or the relay gave up on it. */
   | { t: 'close'; ch: ChannelId }
-  /** Freshest Clerk token for this user, re-pushed after a bridge reconnect. */
+  /** The owner's freshest Clerk token, re-pushed after a bridge reconnect. Never a guest's. */
   | { t: 'token'; userId: string; token: string }
   | { t: 'ping' };
 

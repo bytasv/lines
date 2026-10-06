@@ -28,14 +28,17 @@ import {
   IconLock,
   IconPlus,
   IconSettings,
+  IconShieldQuestion,
   IconTemplate,
   IconTrash,
 } from '@tabler/icons-react';
-import type { StepContent, StepDef } from '@lines/shared';
+import type { StepContent, StepDef, UntrustedMark, WorkflowDef } from '@lines/shared';
 import { formatTimestamp, isStepRef } from '@lines/shared';
 import { useStore } from '../../store';
+import { getOwnerId } from '../../lib/clerk';
 import { useIsPhone } from '../../lib/layout';
 import { MOD } from '../../lib/platform';
+import { useStepResolver } from '../../lib/useStepResolver';
 import { BestOnDesktop } from '../BestOnDesktop';
 import { ConfirmModal } from '../ConfirmModal';
 import { WORKFLOW_PRESETS } from '../../lib/workflowPresets';
@@ -46,6 +49,7 @@ import { StepLibrary } from './StepLibrary';
 import { StepCard } from './StepCard';
 import { StepOutline } from './StepOutline';
 import { StepBanner } from './StepPane';
+import { isHeld, needsReview, UntrustedBadge, UntrustedReviewModal, workflowReviewItems } from './UntrustedReview';
 import { RecipeLibrary } from '../recipe/RecipeLibrary';
 import styles from './workflow.module.css';
 
@@ -163,15 +167,23 @@ function WorkflowOverview({
   readOnly,
   nameError,
   updatesAvailable,
+  unverified,
+  blocking,
   onPatch,
   onUpdateAll,
+  onReview,
 }: {
   draft: DraftWorkflow;
   readOnly: boolean;
   nameError?: string;
   updatesAvailable: number;
+  /** How many parts of the saved workflow this machine has not verified. */
+  unverified: number;
+  /** Whether any of them is held back — false only when strict sync is off. */
+  blocking?: boolean;
   onPatch: (patch: Partial<DraftWorkflow>) => void;
   onUpdateAll: () => void;
+  onReview: () => void;
 }) {
   const n = draft.steps.length;
   return (
@@ -206,6 +218,22 @@ function WorkflowOverview({
           checked={draft.published ?? false}
           onChange={(e) => onPatch({ published: e.currentTarget.checked })}
         />
+      )}
+      {unverified > 0 && (
+        <StepBanner
+          icon={<IconShieldQuestion size={14} />}
+          actions={
+            <Button size="compact-xs" variant="light" color="orange" onClick={onReview}>
+              Review
+            </Button>
+          }
+        >
+          This workflow runs content this machine has not verified yet ({unverified}{' '}
+          {unverified === 1 ? 'part' : 'parts'}).{' '}
+          {blocking
+            ? 'It will not run until you review what it does and allow it.'
+            : 'It still runs, because strict sync is off on this machine, but is not signed as this machine’s own until you review it.'}
+        </StepBanner>
       )}
       {updatesAvailable > 0 && !readOnly && (
         <StepBanner
@@ -244,6 +272,20 @@ export function WorkflowEditor({
   const wf = useWorkflowDraft(opened, onClose);
   const { draft, readOnly, validation, submitAttempted, selectedStep } = wf;
   const [confirmUnpublished, setConfirmUnpublished] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const { lookup } = useStepResolver();
+
+  // Trust is read off the saved workflow the bridge sent, never the draft: the
+  // draft is what the user is typing, and what runs is the stored row and the
+  // exact versions it pins.
+  const reviewItemsOf = (w: WorkflowDef) => workflowReviewItems(w, lookup, getOwnerId() ?? '');
+  const firstMark = (w: WorkflowDef): UntrustedMark | undefined => reviewItemsOf(w).find((i) => needsReview(i.mark))?.mark;
+  const saved = wf.selectedId
+    ? (wf.workflows.find((w) => w.id === wf.selectedId) ?? wf.sharedWorkflows.find((w) => w.id === wf.selectedId))
+    : undefined;
+  const reviewItems = saved ? reviewItemsOf(saved) : [];
+  const unverified = reviewItems.filter((i) => needsReview(i.mark)).length;
+  const blocking = reviewItems.some((i) => isHeld(i.mark));
 
   // Each open honours the entry point (the sidebar has one icon per library);
   // the tab the user picked while it was open is not worth remembering.
@@ -348,6 +390,7 @@ export function WorkflowEditor({
             sharedWorkflows={wf.sharedWorkflows}
             selectedId={wf.selectedId}
             dirty={wf.dirty}
+            markOf={firstMark}
             onSelect={wf.select}
             onNew={wf.newFromPreset}
           />
@@ -376,6 +419,7 @@ export function WorkflowEditor({
                             }`}
                         </span>
                       </span>
+                      {saved && <UntrustedBadge mark={firstMark(saved)} ownerName={saved.ownerName} />}
                       {updatesAvailable > 0 && !readOnly && (
                         <Tooltip label={`${updatesAvailable} pinned step${updatesAvailable === 1 ? ' has' : 's have'} a newer version`} withArrow>
                           <span className={styles.updateDot} />
@@ -461,8 +505,11 @@ export function WorkflowEditor({
                     readOnly={readOnly}
                     nameError={submitAttempted ? validation?.name : undefined}
                     updatesAvailable={updatesAvailable}
+                    unverified={unverified}
+                    blocking={blocking}
                     onPatch={wf.patchDraft}
                     onUpdateAll={wf.updateAllToLatest}
+                    onReview={() => setReviewOpen(true)}
                   />
                 )}
               </Group>
@@ -573,6 +620,12 @@ export function WorkflowEditor({
         </Stack>
       </Modal>
 
+      <UntrustedReviewModal
+        opened={reviewOpen && unverified > 0}
+        title={`Review “${saved?.name ?? 'workflow'}”`}
+        items={reviewItems}
+        onClose={() => setReviewOpen(false)}
+      />
       <ConfirmModal
         opened={wf.confirmDelete}
         title="Delete workflow"

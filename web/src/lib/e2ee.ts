@@ -232,3 +232,115 @@ export async function learnHostDeviceIdFromDevServer(): Promise<void> {
 export function readHostDeviceId(): string | null {
   return localStorage.getItem(HOST_DEVICE_KEY);
 }
+
+/** deviceId -> the invite tokens this browser presents as a guest on that machine. */
+const GUEST_GRANTS_KEY = 'lines.guestGrants';
+/** An invite's grant, held between landing on `/join/…` and claiming it. */
+const PENDING_JOIN_GRANT_KEY = 'lines.joinGrant';
+
+/** Several, because a host can share more than one session with the same person. */
+type GuestGrants = Record<string, string[]>;
+
+function readGuestGrants(): GuestGrants {
+  try {
+    const raw = JSON.parse(localStorage.getItem(GUEST_GRANTS_KEY) ?? '{}') as unknown;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    const out: GuestGrants = {};
+    for (const [deviceId, tokens] of Object.entries(raw as Record<string, unknown>)) {
+      const list = (Array.isArray(tokens) ? tokens : [tokens]).filter((t): t is string => typeof t === 'string');
+      if (list.length) out[deviceId] = list;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+interface PendingJoinGrant {
+  /** The invite it came with, so a stash from one link is never spent on another. */
+  code: string;
+  /** The machine it is for, as the owner's link named it. */
+  device: string;
+  token: string;
+  bridgeKey: string;
+}
+
+function readPendingJoinGrant(): PendingJoinGrant | null {
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(PENDING_JOIN_GRANT_KEY) ?? 'null') as Partial<PendingJoinGrant> | null;
+    if (!raw || typeof raw !== 'object') return null;
+    const { code, device, token, bridgeKey } = raw;
+    if (typeof code !== 'string' || typeof device !== 'string' || typeof token !== 'string' || typeof bridgeKey !== 'string') {
+      return null;
+    }
+    return { code, device, token, bridgeKey };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The grant half of an invite link, consumed once from the URL fragment.
+ *
+ * The owner's machine minted the token (see `mintGuestGrant`) and put it in the
+ * fragment beside its own public key and its device id, so none of it ever
+ * reaches a server: storage holds the invite, the relay carries the channel, and
+ * only this browser and the owner's machine know the token. Stashed in
+ * sessionStorage rather than used at once, because the invitee may have to sign
+ * in first and the fragment does not survive that round trip — the same reason
+ * JoinPage stashes the code.
+ */
+export function takeJoinGrantFromUrl(code: string): void {
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const token = hash.get('grant');
+  const bridgeKey = hash.get('key');
+  const device = hash.get('device');
+  if (!token && !bridgeKey && !device) return;
+  if (token && bridgeKey && device) {
+    sessionStorage.setItem(PENDING_JOIN_GRANT_KEY, JSON.stringify({ code, device, token, bridgeKey } satisfies PendingJoinGrant));
+  }
+  hash.delete('grant');
+  hash.delete('key');
+  hash.delete('device');
+  const rest = hash.toString();
+  window.history.replaceState(
+    null,
+    '',
+    `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ''}`,
+  );
+}
+
+/** The machine a stashed invite grant is for, or null when there is none. */
+export function pendingJoinGrantDevice(): string | null {
+  return readPendingJoinGrant()?.device ?? null;
+}
+
+/**
+ * Bind a stashed invite grant to its machine: the token to present there, and
+ * the machine key to hold the channel to — a pin, exactly as an enrollment makes
+ * one, which is what keeps the relay out of the middle.
+ *
+ * Only for the machine the link itself named (`deviceId` comes from a claim or
+ * the device list, both storage's word, so it has to agree with the link), and
+ * never over a different key already pinned for it: a link is no way to repoint
+ * the key of a machine this browser already talks to — its own, least of all.
+ * False when nothing was adopted.
+ */
+export function adoptJoinGrant(deviceId: string, code?: string): boolean {
+  const pending = readPendingJoinGrant();
+  if (!pending || pending.device !== deviceId || (code !== undefined && pending.code !== code)) return false;
+  const pinned = pinnedKey(deviceId);
+  if (pinned && pinned !== pending.bridgeKey) return false;
+  sessionStorage.removeItem(PENDING_JOIN_GRANT_KEY);
+  const grants = readGuestGrants();
+  const tokens = grants[deviceId] ?? [];
+  if (!tokens.includes(pending.token)) grants[deviceId] = [...tokens, pending.token];
+  localStorage.setItem(GUEST_GRANTS_KEY, JSON.stringify(grants));
+  pinKey(deviceId, pending.bridgeKey);
+  return true;
+}
+
+/** The tokens this browser presents as a guest on a machine; empty when it is not one there. */
+export function guestGrantTokens(deviceId: string): string[] {
+  return readGuestGrants()[deviceId] ?? [];
+}

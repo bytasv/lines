@@ -205,16 +205,19 @@ export default defineConfig({
   server: {
     port: 5173,
     ...devTls(),
-    // Every interface, not just loopback: the point of the dev server now is to
-    // be opened from a phone on the same Wi-Fi. The bridge already binds this
-    // way, and `/__bridge` hands the browser its port, so a phone reaches both
-    // halves with no further configuration.
+    // Every interface, not just loopback, so the page can be opened from a phone
+    // on the same Wi-Fi. The page alone is harmless; the bridge behind it is
+    // what runs agent turns, and it binds loopback and refuses any page origin
+    // but this machine's own (server/src/connectionPolicy.ts). So a phone gets
+    // the UI and no machine until that is opened on purpose: start the bridge
+    // with LINES_BRIDGE_HOST=0.0.0.0 and this page's LAN origin in
+    // LINES_BRIDGE_ALLOWED_ORIGINS (e.g. http://192.168.1.20:5173).
     //
-    // Worth knowing what that exposes: anyone on the same network can open this
-    // dev server, and the bridge behind it runs agent turns. A LAN socket is not
-    // loopback, so `hello.local` is false there and the host-side folder picker
-    // is hidden — but everything else a session can do is reachable. Fine on a
-    // home or phone-hotspot network; not something to leave running on a café's.
+    // Worth knowing what that exposes: anyone on the same network who can load
+    // that origin can then drive the bridge. A LAN socket is not loopback, so
+    // `hello.local` is false there and the host-side folder picker is hidden —
+    // but everything else a session can do is reachable. Fine on a home or
+    // phone-hotspot network; not something to leave running on a café's.
     host: true,
     // Vite refuses a request whose Host header is a name it does not know, which
     // is what a tunnel (cloudflared, ngrok) sends. IPs are always allowed, so

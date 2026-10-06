@@ -298,6 +298,28 @@ export const LINES_TOOL_MANIFEST: McpToolManifest = {
 };
 
 /**
+ * The manifest for a caller with no approval card in front of it: the reads,
+ * and nothing else.
+ *
+ * That caller is a codex session, reaching us through `/lines-mcp`. The approval
+ * claim above is true of the Claude path only — there, every non-readOnly Lines
+ * tool raises a card the user answers. A codex call arrives as a plain HTTP
+ * request with no card anywhere, so serving it the writes would let a
+ * prompt-injected turn rewrite workflows (which later run as prompts) or add an
+ * MCP server (which runs on every session) without anyone saying yes.
+ */
+export const LINES_READ_ONLY_MANIFEST: McpToolManifest = {
+  serverName: LINES_MCP_SERVER,
+  instructions:
+    'Lines workflows: ordered lists of prompt steps a session runs one at a time, parking for approval between them. ' +
+    'Use these tools when the user wants to see their own workflows and reusable steps. They are read-only here: ' +
+    'to change a workflow, a step or a connection, tell the user what to change and they will do it in Lines. ' +
+    'list_mcp_connections covers the third-party MCP servers this user has added: when a task needs tools ' +
+    'you cannot see, check it before telling the user it cannot be done.',
+  tools: READ_TOOLS,
+};
+
+/**
  * The proposal tool by its full name, so `SessionManager` can vet its URL before
  * raising the card without restating the string.
  */
@@ -497,8 +519,16 @@ function connectionView(
  * The tool handlers for one user, closed over their context. Built per rpc: the
  * worker's MCP server is per session, and the bridge routes each call to the
  * context that owns that session.
+ *
+ * `allowWrites` is stated by every caller rather than defaulted: it is true only
+ * where an approval card gates each write (the Claude path), and a caller that
+ * forgot to think about it must not get the writes for free.
  */
-export function createMcpDispatcher(ctx: UserContext, session?: McpToolSession): McpToolDispatcher {
+export function createMcpDispatcher(
+  ctx: UserContext,
+  session: McpToolSession | undefined,
+  opts: { allowWrites: boolean },
+): McpToolDispatcher {
   /** Resolve a `workflow` argument to something writable, or the error to return. */
   const owned = (ref: string): { workflow: WorkflowDef } | { error: string } => {
     const result = commands.resolveWorkflowRef(ctx, ref);
@@ -506,6 +536,15 @@ export function createMcpDispatcher(ctx: UserContext, session?: McpToolSession):
   };
 
   return async (toolName, args) => {
+    // Refused here as well as left out of the read-only manifest: a client can
+    // call a tool it was never listed, and this is the side that decides.
+    const spec = SPECS.get(toolName);
+    if (spec && !spec.readOnly && !opts.allowWrites) {
+      return fail(
+        `${toolName} is not available from this session — Lines tools are read-only here. ` +
+          'Tell the user what to change and they can do it in Lines.',
+      );
+    }
     switch (toolName) {
       // ---- reads ----
       case 'list_workflows':
@@ -670,10 +709,11 @@ export function createMcpDispatcher(ctx: UserContext, session?: McpToolSession):
       }
 
       case 'authorize_mcp_connection': {
-        // Reachable from a codex session, where it is not that no session is
-        // running but that codex names one MCP server for the whole CODEX_HOME,
-        // so the call cannot say which thread made it. Either way the user has a
-        // working route, and the message names it.
+        // A caller that cannot name a session declines rather than guesses. Codex
+        // was that caller — it names one MCP server for the whole CODEX_HOME, so a
+        // call cannot say which thread made it — and no longer reaches this at
+        // all (a write, refused above). Either way the user has a working route,
+        // and the message names it.
         if (!session) {
           return fail(
             'This call did not arrive with a session to authorize from — ask the user to ' +

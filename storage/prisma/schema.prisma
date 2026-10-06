@@ -235,6 +235,10 @@ model DeviceMember {
   ownerId  String @map("owner_id")
   /// ShareCaps. Read through parseShareCaps(), which denies anything absent.
   caps     Json
+  /// The guest grant the host's machine minted for the invite this came from
+  /// (an opaque id, never the token). Lets that machine drop its grant once the
+  /// share is gone from here, even if the revoke happened while it was offline.
+  grantId  String? @map("grant_id")
 
   createdAt DateTime  @default(now()) @map("created_at")
   /// A tombstone, as Device.revokedAt: revocation must leave an audit trail.
@@ -254,6 +258,8 @@ model SessionShare {
   sessionId String @map("session_id") @db.Uuid
   ownerId   String @map("owner_id")
   caps      Json
+  /// As DeviceMember.grantId.
+  grantId   String? @map("grant_id")
 
   createdAt DateTime  @default(now()) @map("created_at")
   revokedAt DateTime? @map("revoked_at")
@@ -274,6 +280,9 @@ model ShareInvite {
   /// Lowercased. Null = anyone holding the link may claim it.
   inviteeEmail String? @map("invitee_email")
   caps         Json
+  /// The guest grant the host's machine minted for this invite; copied onto the
+  /// grant row on claim. See DeviceMember.grantId.
+  grantId      String? @map("grant_id")
 
   createdAt DateTime  @default(now()) @map("created_at")
   expiresAt DateTime  @map("expires_at")

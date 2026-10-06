@@ -317,6 +317,11 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     // Ephemeral by default; each child publishes its port under RUN_DIR.
     LINES_BRIDGE_PORT: '',
     LINES_WORKER_PORT: '',
+    // In relay mode this app's own window is the hosted page, which reaches the
+    // bridge through the relay, so nothing has a reason to open a socket on the
+    // bridge's port at all — and a socket there drives the agent. Local mode is
+    // the other way round: the window is our loopback page and dials it directly.
+    LINES_BRIDGE_DIRECT: RELAY_MODE ? '0' : '1',
     // autoGuard self-locates from `server/src` under tsx, which matches nothing
     // in a packaged build — so name the files that really back this worker.
     ...(app.isPackaged ? { LINES_WORKER_SOURCES: path.join(SERVER_DIR, 'worker.mjs') } : {}),
@@ -374,9 +379,12 @@ function appendLog(text: string) {
   if (!lines.length) return;
   const out = lines.map((l) => `${stamp} ${l}\n`).join('');
   try {
-    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true, mode: 0o700 });
     rotateLogIfFull(out.length);
-    fs.appendFileSync(LOG_FILE, out);
+    // Owner-only from the first byte: the log carries session names, paths and
+    // the bridge's own diagnostics. `mode` only applies on creation, which is
+    // why ensurePrivateAppRoot also tightens a log an older build left behind.
+    fs.appendFileSync(LOG_FILE, out, { mode: 0o600 });
     logBytes = (logBytes ?? 0) + out.length;
   } catch {
     /* logging is not worth crashing over */
@@ -438,9 +446,35 @@ function loadPrefs() {
   }
 }
 
+/**
+ * Keep `~/.lines-app` readable by this user only.
+ *
+ * Everything the app knows lives under it — transcripts, the device secret, the
+ * e2ee keys, MCP credentials, logs — and a 0755 directory hands all of that to
+ * every other account on the machine. Tightening the directory covers whatever
+ * an older build created with looser modes beneath it; the log files are
+ * tightened too, since "Open logs" is the one place a user is sent to share them
+ * from. Best-effort: a read-only or foreign-owned home must not stop the app.
+ */
+function ensurePrivateAppRoot() {
+  try {
+    fs.mkdirSync(APP_ROOT, { recursive: true, mode: 0o700 });
+    fs.chmodSync(APP_ROOT, 0o700);
+  } catch (err) {
+    shellLog(`[shell] could not make ${APP_ROOT} private: ${(err as Error).message}`);
+  }
+  for (const file of [LOG_FILE, LOG_FILE.replace(/\.log$/, '.1.log')]) {
+    try {
+      fs.chmodSync(file, 0o600);
+    } catch {
+      /* not there yet */
+    }
+  }
+}
+
 function savePrefs() {
   try {
-    fs.mkdirSync(APP_ROOT, { recursive: true });
+    fs.mkdirSync(APP_ROOT, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
       PREFS_FILE,
       `${JSON.stringify({ openIn, keepAwake, loginItemDefaulted, moveToApplicationsDeclined }, null, 2)}\n`,
@@ -967,6 +1001,43 @@ async function answerManualCheck(failure: string | null) {
   });
 }
 
+/**
+ * The local-mode page's Content-Security-Policy: the hosted policy
+ * (deploy/docker/web-nginx.conf), with this machine's loopback added to what
+ * the page may connect to — the bridge, and a storage server running beside it
+ * in dev. Images only from this origin, data:/blob: and Clerk's avatars, so an
+ * image a page somehow renders cannot carry data to a host of an agent's
+ * choosing; the markdown renderer already refuses to load any.
+ */
+function localModeCsp(): string {
+  const remote = [config.storageUrl, config.relayUrl]
+    .map((url) => {
+      try {
+        return new URL(url).origin;
+      } catch {
+        return '';
+      }
+    })
+    .filter(Boolean)
+    .join(' ');
+  const clerk = 'https://*.clerk.accounts.dev https://*.clerk.com';
+  return [
+    "default-src 'self'",
+    `script-src 'self' blob: ${clerk} https://challenges.cloudflare.com`,
+    "worker-src 'self' blob:",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https://img.clerk.com",
+    "media-src 'self' blob:",
+    "font-src 'self' data:",
+    `connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:* ws://localhost:* http://localhost:* ${remote} ${clerk}`,
+    `frame-src 'self' blob: ${clerk} https://challenges.cloudflare.com`,
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+}
+
 /** Serve the built web UI, plus the /__bridge discovery endpoint the client expects. */
 function startUiServer(): Promise<number> {
   const dist = path.join(ROOT, 'web', 'dist');
@@ -1006,7 +1077,14 @@ function startUiServer(): Promise<number> {
         res.writeHead(404).end();
         return;
       }
-      res.writeHead(200, { 'content-type': types[path.extname(file)] ?? 'application/octet-stream' });
+      res.writeHead(200, {
+        'content-type': types[path.extname(file)] ?? 'application/octet-stream',
+        // The same headers the hosted page gets from nginx.
+        'content-security-policy': localModeCsp(),
+        'x-content-type-options': 'nosniff',
+        'x-frame-options': 'DENY',
+        'referrer-policy': 'strict-origin-when-cross-origin',
+      });
       res.end(data);
     });
   });
@@ -1077,12 +1155,19 @@ function appOrigin(): string {
 }
 
 /**
+ * What the app's own pages may be granted besides the microphone: page alerts,
+ * copy buttons, a full-screen view, and handing a link to the OS. Anything not
+ * named here — geolocation, MIDI, screen capture, the file system, pointer lock
+ * — the app never asks for, so a request for it is not ours to grant.
+ */
+const APP_PERMISSIONS = new Set(['notifications', 'clipboard-sanitized-write', 'fullscreen', 'openExternal']);
+
+/**
  * Voice input records through `getUserMedia`, which reaches this handler as a
- * `media` request. Electron grants every request by default; for media that is
- * narrowed to the microphone, asked for by the app's own origin — a third-party
- * page the window wanders onto (an OAuth screen) gets no mic and no camera.
- * Every other permission keeps Electron's default, which the web app's alerts
- * rely on.
+ * `media` request. Electron grants every request by default; that is narrowed
+ * to the app's own origin for everything: the microphone (and only it) for
+ * media, and the short list above for the rest — a third-party page the window
+ * wanders onto (an OAuth screen) gets nothing at all.
  *
  * On macOS the OS has its own gate on top: `askForMediaAccess` shows the system
  * prompt the first time, carrying NSMicrophoneUsageDescription from Info.plist,
@@ -1090,13 +1175,13 @@ function appOrigin(): string {
  */
 function installMediaPermissions(): void {
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
-    if (permission !== 'media') return callback(true);
     let fromApp = false;
     try {
       fromApp = new URL(details.requestingUrl).origin === appOrigin();
     } catch {
       fromApp = false;
     }
+    if (permission !== 'media') return callback(fromApp && APP_PERMISSIONS.has(permission));
     const mediaTypes = 'mediaTypes' in details ? (details.mediaTypes ?? []) : [];
     if (!fromApp || mediaTypes.some((type) => type !== 'audio')) return callback(false);
     if (process.platform !== 'darwin') return callback(true);
@@ -2255,6 +2340,8 @@ async function start() {
   // app rather than per-webContents so OAuth popups carry the scrubbed UA too.
   app.userAgentFallback = app.userAgentFallback.replace(/ Electron\/\S+/, '');
   installMediaPermissions();
+  // Before anything writes beneath it — the log line below is the first write.
+  ensurePrivateAppRoot();
   loadPrefs();
   shellLog(`[shell] start v${APP_VERSION} instance=${INSTANCE} relayMode=${RELAY_MODE}`);
   // Before either child exists: a move relaunches the app from Applications.

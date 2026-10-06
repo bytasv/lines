@@ -9,6 +9,7 @@ import type {
   StepContent,
   StepDef,
   StepRef,
+  UntrustedMark,
   WorkflowDef,
   WorkflowMarkerData,
   WorkflowState,
@@ -26,6 +27,7 @@ import {
 } from '@lines/shared';
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
+import { isHeld, ItemTrust, markAfterSave, runnableDigest, settledHold, unmarked, vouchedFor } from './syncSignature.ts';
 import {
   captureBaselines,
   changedFiles,
@@ -306,6 +308,58 @@ export class ForeignWorkflowError extends Error {
   }
 }
 
+/**
+ * Thrown by {@link WorkflowEngine.assertRunnable} for a workflow that would run
+ * content this machine has not verified: its own row, or a step version it pins,
+ * arrived unsigned, forged or from a machine the account does not trust — or is
+ * another user's and not reviewed here yet.
+ */
+export class UntrustedWorkflowError extends Error {
+  constructor(name: string) {
+    super(
+      `“${name}” runs content this machine has not verified. Open it in Workflows, review what it runs, ` +
+        'and allow it before running it.',
+    );
+    this.name = 'UntrustedWorkflowError';
+  }
+}
+
+/** One piece of a workflow's run that is still held back (see `untrustedParts`). */
+export interface UntrustedPart {
+  kind: 'workflow' | 'step';
+  ownerId: string;
+  id: string;
+  version?: number;
+  name: string;
+  mark: UntrustedMark;
+}
+
+/**
+ * A mark loaded from disk, re-settled for this process and the account's trusted
+ * machines now (see `settledHold`) — which is what makes a revoked key's items
+ * held back again on the next load. Mutates in place, before anything reads it.
+ */
+function reheld<T extends { untrusted?: UntrustedMark }>(item: T, trustedSigners: ReadonlySet<string>): T {
+  if (item.untrusted) item.untrusted = settledHold(item.untrusted, trustedSigners);
+  return item;
+}
+
+/**
+ * `item` with its mark re-settled against `trustedSigners`, or the same object
+ * when nothing about whether it is held back changed.
+ */
+function resettled<T extends { untrusted?: UntrustedMark }>(item: T, trustedSigners: ReadonlySet<string>): T {
+  if (!item.untrusted) return item;
+  const mark = settledHold(item.untrusted, trustedSigners);
+  return mark.held === item.untrusted.held ? item : { ...item, untrusted: mark };
+}
+
+/** Lazily read trust state for one batch of items: each file read at most once, and only if needed. */
+interface TrustBatch {
+  approvals: () => Record<string, string>;
+  signers: () => ReadonlySet<string>;
+}
+
 export class WorkflowEngine {
   private workflows = new Map<string, WorkflowDef>();
   /** Other users' published workflows — read-only, never persisted or pushed. */
@@ -316,6 +370,8 @@ export class WorkflowEngine {
   private sharedSteps = new Map<string, StepDef>();
   /** Every resolved immutable version (own history + resolved foreign pins), keyed by stepKey. */
   private stepVersions = new Map<string, StepDef>();
+  /** Which machine keys and which reviewed foreign content this account trusts. */
+  private trust: ItemTrust;
   /** Grace period a force-advance gives the interrupted turn to settle on its own
    *  before the watchdog advances the step anyway. A field so tests can shrink it. */
   forceAdvanceSettleMs = 5_000;
@@ -334,14 +390,19 @@ export class WorkflowEngine {
     /** Owner's Clerk userId, stamped onto workflows this user saves. */
     private userId: string,
   ) {
-    for (const wf of this.store.loadWorkflows()) this.workflows.set(wf.id, wf);
+    this.trust = ItemTrust.forStore(store.rootDir);
+    // Marks are re-settled on the way in (`reheld`): whether one holds its item
+    // back depends on this process's strictness and the machines trusted now,
+    // not on whatever was true when the file was written.
+    const trusted = this.trust.trustedSigners();
+    for (const wf of this.store.loadWorkflows()) this.workflows.set(wf.id, reheld(wf, trusted));
     for (const s of this.store.loadSteps()) {
-      this.steps.set(s.id, s);
+      this.steps.set(s.id, reheld(s, trusted));
       this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
     }
     // Restore the full immutable history (heads are already in above; older versions add on).
     for (const s of this.store.loadStepVersions()) {
-      this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
+      this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), reheld(s, trusted));
     }
     // Heal refs whose ownerId drifted from this user's id before anything reads
     // them: a drifted ref resolves nowhere, so its step renders as owned yet is
@@ -583,8 +644,11 @@ export class WorkflowEngine {
 
   /** Replace the shared set from a storage pull; returns true if it changed. */
   setShared(list: WorkflowDef[]): boolean {
+    const approved = this.trust.approvals();
     const next = new Map(
-      list.filter((w) => w.id && !this.isOwnRow(w)).map((w) => [w.id, w] as const),
+      list
+        .filter((w) => w.id && !this.isOwnRow(w))
+        .map((w) => [w.id, this.markForeign('workflow', w, `workflow:${w.ownerId ?? ''}/${w.id}`, approved)] as const),
     );
     // Compared after filtering, so a delta made up only of dropped self-owned
     // rows doesn't rebroadcast an unchanged view.
@@ -596,6 +660,201 @@ export class WorkflowEngine {
     }
     this.shared = next;
     return true;
+  }
+
+  // ---- trust in synced content ----
+
+  /**
+   * Another user's workflow or step version, marked unless the owner already
+   * reviewed this exact content here. Its signature, if any, is beside the
+   * point: it is somebody else's prompt whoever's machine signed it, so it only
+   * runs on this machine once someone has looked at it — and again whenever its
+   * author changes it, a version row being immutable by convention only.
+   */
+  private markForeign<T extends WorkflowDef | StepDef>(
+    kind: 'workflow' | 'step',
+    item: T,
+    key: string,
+    approved: Record<string, string>,
+  ): T {
+    const digest = runnableDigest(kind, item);
+    const clean = unmarked(item);
+    return approved[key] === digest ? clean : { ...clean, untrusted: settledHold({ reason: 'foreign', digest }) };
+  }
+
+  /**
+   * The mark a pulled own item keeps. The sync client marked everything this
+   * machine did not sign; two things clear that here: content the owner already
+   * reviewed under this key (an approval is bound to the digest, never to the
+   * machine that signed it), and content identical to a trusted copy already
+   * held — the same row coming round again, or a rename from another machine:
+   * nothing that runs has changed. Anything else is re-settled against the
+   * account's trusted machines, which decides whether another machine's
+   * signature holds it back (`settledHold`) while keeping the record of it.
+   */
+  private settleMark<T extends WorkflowDef | StepDef>(item: T, key: string, sameAsTrusted: boolean, batch: TrustBatch): T {
+    const mark = item.untrusted;
+    if (!mark) return item;
+    if (sameAsTrusted || batch.approvals()[key] === mark.digest) return unmarked(item);
+    return { ...item, untrusted: settledHold(mark, batch.signers()) };
+  }
+
+  /** The approval record and trusted keys, each read at most once per batch and only if needed. */
+  private trustBatch(): TrustBatch {
+    let approved: Record<string, string> | undefined;
+    let signers: ReadonlySet<string> | undefined;
+    return {
+      approvals: () => (approved ??= this.trust.approvals()),
+      signers: () => (signers ??= this.trust.trustedSigners()),
+    };
+  }
+
+  /**
+   * Re-decide, after the account's trusted machines changed, whether each own
+   * workflow and step another machine signed is held back. Trusting a key
+   * releases what it signed; revoking one holds it back again — the mark kept
+   * the record of who signed it all along. One persist and broadcast per kind.
+   */
+  resettleMarks(): void {
+    const trusted = this.trust.trustedSigners();
+    let workflowsChanged = false;
+    let stepsChanged = false;
+    for (const [id, wf] of this.workflows) {
+      const next = resettled(wf, trusted);
+      if (next === wf) continue;
+      this.workflows.set(id, next);
+      workflowsChanged = true;
+    }
+    for (const [id, s] of this.steps) {
+      const next = resettled(s, trusted);
+      if (next === s) continue;
+      this.steps.set(id, next);
+      stepsChanged = true;
+    }
+    for (const [key, s] of this.stepVersions) {
+      if (s.ownerId !== this.userId) continue;
+      const next = resettled(s, trusted);
+      if (next === s) continue;
+      this.stepVersions.set(key, next);
+      stepsChanged = true;
+    }
+    if (workflowsChanged) {
+      this.persist();
+      this.broadcast({ type: 'workflows', workflows: this.list() });
+    }
+    if (stepsChanged) {
+      this.persistSteps();
+      this.broadcast({ type: 'steps', steps: this.listSteps() });
+      this.broadcast({
+        type: 'sharedSteps',
+        sharedSteps: this.listSharedSteps(),
+        pinnedSteps: this.listPinnedSteps(),
+      });
+    }
+  }
+
+  /**
+   * Everything a run of `wf` would execute that is held back on this machine:
+   * the workflow itself (its inline steps are its own content) and each pinned
+   * version whose mark holds it back. Empty means it may run. A mark that only
+   * records provenance (`held: false`, strict sync off) does not count.
+   */
+  untrustedParts(wf: WorkflowDef): UntrustedPart[] {
+    const parts: UntrustedPart[] = [];
+    if (isHeld(wf)) {
+      parts.push({ kind: 'workflow', ownerId: wf.ownerId ?? this.userId, id: wf.id, name: wf.name, mark: wf.untrusted! });
+    }
+    for (const step of wf.steps) {
+      if (!isStepRef(step)) continue;
+      const pinned = this.stepVersions.get(stepKey(step.ownerId, step.stepId, step.version));
+      if (!pinned || !isHeld(pinned)) continue;
+      parts.push({
+        kind: 'step',
+        ownerId: pinned.ownerId,
+        id: pinned.id,
+        version: pinned.version,
+        name: pinned.name,
+        mark: pinned.untrusted!,
+      });
+    }
+    return parts;
+  }
+
+  /**
+   * Refuse, before anything is created, a workflow whose run would execute
+   * unverified content. An unknown id passes: `attach` no-ops for it anyway.
+   */
+  assertRunnable(workflowId: string): void {
+    const wf = this.resolve(workflowId);
+    if (wf && this.untrustedParts(wf).length > 0) throw new UntrustedWorkflowError(wf.name);
+  }
+
+  /**
+   * The owner reviewed this workflow and allows exactly that content to run
+   * here. The digest is recorded and the mark cleared — for an own workflow the
+   * next push then signs it as this machine's. Nothing else is released: not
+   * the other items the same machine signed, nor a later change to this one.
+   * `digest` must be the one the review showed — anything else means the
+   * content moved underneath it.
+   */
+  trustWorkflow(ownerId: string, workflowId: string, digest: string): void {
+    const own = this.workflows.get(workflowId);
+    if (own) {
+      const mark = own.untrusted;
+      // Already runnable: a second click, or a second tab's review.
+      if (!mark) return;
+      if (mark.digest !== digest) throw new Error(`“${own.name}” changed after it was reviewed — review it again.`);
+      this.trust.approve(`workflow:${this.userId}/${workflowId}`, digest);
+      this.workflows.set(workflowId, unmarked(own));
+      this.persist();
+      this.broadcast({ type: 'workflows', workflows: this.list() });
+      return;
+    }
+    const shared = this.shared.get(workflowId);
+    if (!shared || (shared.ownerId ?? '') !== ownerId) throw new Error('That workflow is not available here.');
+    const mark = shared.untrusted;
+    if (!mark) return;
+    if (mark.digest !== digest) throw new Error(`“${shared.name}” changed after it was reviewed — review it again.`);
+    this.trust.approve(`workflow:${ownerId}/${workflowId}`, digest);
+    this.shared.set(workflowId, unmarked(shared));
+    this.broadcast({ type: 'sharedWorkflows', workflows: this.listShared() });
+  }
+
+  /**
+   * As {@link trustWorkflow}, for one exact step version — own, or another
+   * user's. The library head and the cached version can be separate objects
+   * holding different content; only a copy whose mark carries the reviewed
+   * digest is cleared, so approving one never releases the other unseen.
+   */
+  trustStep(ownerId: string, stepId: string, version: number, digest: string): void {
+    const own = ownerId === this.userId;
+    const key = stepKey(ownerId, stepId, version);
+    const cached = this.stepVersions.get(key);
+    const headNow = own ? this.steps.get(stepId) : this.sharedSteps.get(`${ownerId}/${stepId}`);
+    const head = headNow?.version === version ? headNow : undefined;
+    const copies = [cached, head].filter((c): c is StepDef => !!c);
+    if (copies.length === 0) throw new Error('That step version is not available here.');
+    const marked = copies.filter((c) => c.untrusted);
+    if (marked.length === 0) return;
+    const reviewed = marked.filter((c) => c.untrusted!.digest === digest);
+    if (reviewed.length === 0) {
+      throw new Error(`“${marked[0].name}” changed after it was reviewed — review it again.`);
+    }
+    this.trust.approve(`step:${ownerId}/${stepId}/${version}`, digest);
+    if (cached && reviewed.includes(cached)) this.stepVersions.set(key, unmarked(cached));
+    if (head && reviewed.includes(head)) {
+      if (own) this.steps.set(stepId, unmarked(head));
+      else this.sharedSteps.set(`${ownerId}/${stepId}`, unmarked(head));
+    }
+    if (own) {
+      this.persistSteps();
+      this.broadcast({ type: 'steps', steps: this.listSteps() });
+    }
+    this.broadcast({
+      type: 'sharedSteps',
+      sharedSteps: this.listSharedSteps(),
+      pinnedSteps: this.listPinnedSteps(),
+    });
   }
 
   // ---- steps (versioned, shareable) ----
@@ -661,11 +920,33 @@ export class WorkflowEngine {
    * A known `createdAt` is kept: `POST /steps/resolve` answers from the raw blob
    * with no column injection, so a pin resolved through it can arrive without the
    * field and must not wipe what is already cached.
+   *
+   * `requested` names what was asked for, and anything else in the answer is
+   * dropped: a version is filed under the owner it names, so a blob in another
+   * user's history claiming to be this user's would join this user's own history
+   * — and be pushed back to storage as theirs.
+   *
+   * Every version is checked on the way in: an own one settles the mark the sync
+   * client gave it, another user's is marked until reviewed. A version this
+   * machine already trusts is never displaced by an unverified copy claiming the
+   * same number with different content — the number is what a workflow pins.
    */
-  addStepVersions(list: StepDef[]): void {
-    for (const s of list) {
-      const key = stepKey(s.ownerId, s.id, s.version);
-      const createdAt = earliest(this.stepVersions.get(key)?.createdAt, s.createdAt);
+  addStepVersions(list: StepDef[], requested?: readonly { ownerId: string; id: string }[]): void {
+    const batch = this.trustBatch();
+    for (const raw of list) {
+      if (requested && !requested.some((r) => r.ownerId === raw.ownerId && r.id === raw.id)) continue;
+      const key = stepKey(raw.ownerId, raw.id, raw.version);
+      const approvalKey = `step:${raw.ownerId}/${raw.id}/${raw.version}`;
+      const cached = this.stepVersions.get(key);
+      const s =
+        raw.ownerId === this.userId
+          ? this.settleMark(raw, approvalKey, !!cached && vouchedFor(cached) && sameContent(cached, raw), batch)
+          : this.markForeign('step', raw, approvalKey, batch.approvals());
+      if (!vouchedFor(s) && cached && vouchedFor(cached) && !sameContent(cached, s)) {
+        console.warn(`[step ${s.id}] unverified v${s.version} differs from the trusted copy — kept ours`);
+        continue;
+      }
+      const createdAt = earliest(cached?.createdAt, s.createdAt);
       this.stepVersions.set(key, createdAt === undefined ? s : { ...s, createdAt });
     }
   }
@@ -687,26 +968,50 @@ export class WorkflowEngine {
    * as ours (easy to hit when both sides are stamped the literal `local`).
    */
   setSharedSteps(list: StepDef[]): boolean {
+    const approved = this.trust.approvals();
     const next = new Map(
       list
         .filter((s) => s.id && s.ownerId && s.ownerId !== this.userId)
-        .map((s) => [`${s.ownerId}/${s.id}`, s] as const),
+        .map((s) => [`${s.ownerId}/${s.id}`, this.markForeign('step', s, `step:${s.ownerId}/${s.id}/${s.version}`, approved)] as const),
     );
     const changed =
       next.size !== this.sharedSteps.size ||
       [...next].some(([k, s]) => (this.sharedSteps.get(k)?.version ?? -1) !== s.version);
     this.sharedSteps = next;
-    // Library heads are resolvable versions too.
-    for (const s of next.values()) this.stepVersions.set(stepKey(s.ownerId, s.id, s.version), s);
+    // Library heads are resolvable versions too — except that a version the
+    // owner reviewed keeps the content they reviewed: an author rewriting a
+    // published version in place is shown as a new, unreviewed head in the
+    // library, but cannot change what a workflow pinned to it runs.
+    for (const s of next.values()) {
+      const key = stepKey(s.ownerId, s.id, s.version);
+      const cached = this.stepVersions.get(key);
+      if (s.untrusted && cached && !cached.untrusted && !sameContent(cached, s)) continue;
+      this.stepVersions.set(key, s);
+    }
     return changed;
   }
 
   /** Adopt own steps pulled from storage (LWW on version). */
   applySyncedSteps(list: StepDef[]): void {
     let changed = false;
-    for (const s of list) {
-      const cur = this.steps.get(s.id);
-      if (!cur || s.version >= cur.version) {
+    const batch = this.trustBatch();
+    for (const pulled of list) {
+      // This user's own table only ever holds their own steps; a row naming
+      // another owner would be filed under that owner's version key while
+      // sitting in this library as one of theirs. Another account's row — one
+      // machine key signs for all of them — so it is refused outright.
+      if (pulled.ownerId !== this.userId) {
+        console.warn(`[step ${pulled.id}] pulled from this user's table but owned by ${pulled.ownerId} — ignored`);
+        continue;
+      }
+      const cur = this.steps.get(pulled.id);
+      if (!cur || pulled.version >= cur.version) {
+        // Trust before anything is stored (see settleMark). The trusted copy to
+        // compare with is this exact version, as the head or in the history.
+        const twin = [cur, this.stepVersions.get(stepKey(pulled.ownerId, pulled.id, pulled.version))].some(
+          (t) => !!t && vouchedFor(t) && t.version === pulled.version && sameContent(t, pulled),
+        );
+        const s = this.settleMark(pulled, `step:${pulled.ownerId}/${pulled.id}/${pulled.version}`, twin, batch);
         // Content is last-write-wins, but creation time only ever moves earlier —
         // a peer (or an older bridge) pushing a blob without it must not erase it.
         const createdAt = earliest(cur?.createdAt, s.createdAt, this.lineageCreatedAt(s.id));
@@ -748,6 +1053,12 @@ export class WorkflowEngine {
       // this version's mint time (that is `updatedAt` on this immutable row).
       createdAt: head?.createdAt ?? this.lineageCreatedAt(id) ?? Date.now(),
     };
+    // The content above was spread from the client, so its `untrusted` (if any)
+    // is the client's: the head's own verdict wins, and a client's only ever adds
+    // one — a copy of held-back content (see markAfterSave).
+    const mark = markAfterSave('step', step, head?.untrusted, step.untrusted);
+    if (mark) step.untrusted = mark;
+    else delete step.untrusted;
     this.steps.set(id, step);
     this.stepVersions.set(stepKey(step.ownerId, id, version), step);
     this.persistSteps();
@@ -805,6 +1116,12 @@ export class WorkflowEngine {
     if (workflow.id && this.isForeign(workflow.id)) {
       throw new ForeignWorkflowError(workflow.id);
     }
+    // The verdict is this bridge's, never the caller's: an existing workflow keeps
+    // its own whatever the client sent, and a client's mark only ever adds one —
+    // a copy of held-back content, or a pinned step it held back made inline
+    // (see markAfterSave). Read before the id is minted below.
+    const existingMark = workflow.id ? this.workflows.get(workflow.id)?.untrusted : undefined;
+    const requestedMark = workflow.untrusted;
     if (!workflow.id) {
       workflow.id = randomUUID();
       // A fresh id is always born now, whatever the caller sent: both `duplicate()`
@@ -820,6 +1137,9 @@ export class WorkflowEngine {
     this.normalizeRefs(workflow);
     workflow.updatedAt = Date.now(); // LWW key for cross-instance sync
     workflow.ownerId = this.userId; // authoritative — never trust a client-sent owner
+    const mark = markAfterSave('workflow', workflow, existingMark, requestedMark);
+    if (mark) workflow.untrusted = mark;
+    else delete workflow.untrusted;
     this.workflows.set(workflow.id, workflow);
     this.persist();
     this.broadcast({ type: 'workflows', workflows: this.list() });
@@ -834,9 +1154,23 @@ export class WorkflowEngine {
    */
   applySyncedAll(list: WorkflowDef[]) {
     let changed = false;
-    for (const workflow of list) {
-      const cur = this.workflows.get(workflow.id);
-      if (cur && (workflow.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) continue;
+    const batch = this.trustBatch();
+    for (const pulled of list) {
+      const cur = this.workflows.get(pulled.id);
+      if (cur && (pulled.updatedAt ?? 0) <= (cur.updatedAt ?? 0)) continue;
+      // Kept rather than dropped when it is still unverified: it is shown, and
+      // held back from running until reviewed (see settleMark, untrustedParts).
+      // A row in this user's own table naming another owner is another account's
+      // workflow, whatever signed it — one machine key signs for every account on
+      // that machine — so it is held back as someone else's would be.
+      // Compared by digest rather than `sameSteps`: storage hands rows back with
+      // their keys reordered (jsonb), which a plain JSON comparison reads as a
+      // change to every step.
+      const twin = !!cur && vouchedFor(cur) && runnableDigest('workflow', cur) === runnableDigest('workflow', pulled);
+      const workflow =
+        pulled.ownerId !== undefined && pulled.ownerId !== this.userId
+          ? { ...unmarked(pulled), untrusted: settledHold({ reason: 'foreign', digest: runnableDigest('workflow', pulled) }) }
+          : this.settleMark(pulled, `workflow:${this.userId}/${pulled.id}`, twin, batch);
       // A workflow a session is part-way through resolves its steps live, so
       // adopting a pulled body here rewrites the instructions of a run already
       // under way — including the step the user is about to approve. Whoever can
@@ -872,10 +1206,19 @@ export class WorkflowEngine {
     this.store.saveWorkflows(this.list());
   }
 
-  /** Attach a workflow to a session; it starts on the user's first prompt (the task description). */
+  /**
+   * Attach a workflow to a session; it starts on the user's first prompt (the
+   * task description).
+   *
+   * Throws for a workflow with unverified content, before anything is seeded:
+   * attaching already copies step 0's model and permission mode onto the session.
+   * Callers that create the session first should `assertRunnable` before that.
+   */
   attach(sessionId: string, workflowId: string, stepOverrides?: unknown) {
     const wf = this.resolve(workflowId);
-    if (wf) this.attachDef(sessionId, wf, undefined, stepOverrides);
+    if (!wf) return;
+    if (this.untrustedParts(wf).length > 0) throw new UntrustedWorkflowError(wf.name);
+    this.attachDef(sessionId, wf, undefined, stepOverrides);
   }
 
   /**
@@ -915,6 +1258,10 @@ export class WorkflowEngine {
   private seedStep0(meta: SessionMeta, wf: WorkflowDef) {
     const step0 = wf.steps[0] && this.stepContent(wf.steps[0]);
     if (!step0 || !meta.workflow) return;
+    // Seeding copies step 0's permission mode onto the session, so content held
+    // back here must not get to choose it — through a per-run override edit on a
+    // synced session carrying its own workflow, say (attach refuses before this).
+    if (this.untrustedParts(wf).length > 0 || (meta.workflow.def && wf.untrusted)) return;
     const effective = this.effectiveContent(meta.workflow, 0, step0);
     meta.permissionMode = step0.permissionMode;
     meta.model = effective.model;
@@ -1091,6 +1438,19 @@ export class WorkflowEngine {
         // reach the client.
         this.sessions.persistMeta(sessionId);
       }
+      return;
+    }
+
+    // The authoritative gate. `attach` refuses an unverified workflow up front, but
+    // every way into a step — advance, retry, start — arrives here, and a pull can
+    // mark content mid-run (a pinned version rewritten underneath it). Parked like
+    // an unresolved pin, so Approve can still skip past and Retry re-renders once
+    // the owner has reviewed it.
+    const refusal = this.unverifiedRefusal(meta.workflow, wf, step);
+    if (refusal) {
+      meta.workflow.stepStatuses[i] = 'waiting-approval';
+      meta.workflow.stepFailure = 'pre-run';
+      this.sessions.failTurn(sessionId, `Step ${i + 1} was not run: ${refusal}`);
       return;
     }
 
@@ -1285,6 +1645,31 @@ export class WorkflowEngine {
         `Step failed to start: ${err instanceof Error ? err.message : String(err)}`,
       );
     });
+  }
+
+  /** What, in running `step` of `wf`, is still unverified — for the refusal text — or undefined. */
+  private unverifiedRefusal(
+    state: WorkflowState,
+    wf: WorkflowDef,
+    step: WorkflowDef['steps'][number],
+  ): string | undefined {
+    // A session's own snapshot: a guest's workflow when this machine attached it,
+    // and otherwise whatever a synced row carried — `adoptSynced` marks one this
+    // machine did not already hold. Any mark refuses it, strict or not: a session
+    // row is never signed, so there is nothing a recovery switch could vouch for,
+    // and nothing in the library to review it from.
+    if (state.def) {
+      return state.def.untrusted
+        ? 'this session’s workflow came from another machine through cloud sync, and this machine has ' +
+            'not verified it. Start a new session with a workflow from your library instead.'
+        : undefined;
+    }
+    const label = isHeld(wf)
+      ? `“${wf.name}”`
+      : isStepRef(step) && isHeld(this.stepVersions.get(stepKey(step.ownerId, step.stepId, step.version)) ?? {})
+        ? `the pinned step “${this.stepName(step)}”`
+        : undefined;
+    return label && `${label} has not been verified on this machine. Review it in Workflows, then Retry.`;
   }
 
   /** Resolved step name for transcript markers ('' if a ref couldn't be resolved). */

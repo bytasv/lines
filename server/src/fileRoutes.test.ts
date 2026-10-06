@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -126,6 +127,28 @@ test('attachment: path traversal is refused', async () => {
   // must fail even though the target exists and is readable.
   assert.equal((await call('attachment', { rel: '../../etc/hosts' })).status, 403);
   assert.equal((await call('attachment', { rel: 'missing.png' })).status, 404);
+});
+
+test('attachment: a session-scope guest reads its own sessions’ attachments and no others’', async () => {
+  // Attachments sit under `<sessionId>/`; `readFiles` alone would hand a guest
+  // every session's uploads on the machine.
+  fs.mkdirSync(path.join(attachments, 'mine'));
+  fs.mkdirSync(path.join(attachments, 'theirs'));
+  fs.writeFileSync(path.join(attachments, 'mine', 'a.png'), PNG);
+  fs.writeFileSync(path.join(attachments, 'theirs', 'b.png'), PNG);
+  const attachment = (rel: string, access: Parameters<typeof handleFileRequest>[3]) =>
+    handleFileRequest(ctx(), 'attachment', { rel }, access);
+  const guest = { scope: 'session' as const, caps: OWNER_ACCESS.caps, sessionIds: ['mine'] };
+  assert.equal((await attachment('mine/a.png', guest)).status, 200);
+  assert.equal((await attachment('theirs/b.png', guest)).status, 403);
+  // Not by climbing out of its own folder, nor through a link planted in it.
+  assert.equal((await attachment('mine/../theirs/b.png', guest)).status, 403);
+  fs.symlinkSync(path.join(attachments, 'theirs', 'b.png'), path.join(attachments, 'mine', 'link.png'));
+  assert.equal((await attachment('mine/link.png', guest)).status, 403);
+  // A machine guest and the owner reach every session of this machine's.
+  const machine = { scope: 'machine' as const, caps: OWNER_ACCESS.caps };
+  assert.equal((await attachment('theirs/b.png', machine)).status, 200);
+  assert.equal((await attachment('theirs/b.png', OWNER_ACCESS)).status, 200);
 });
 
 type MediaBody = { data: string; mediaType: string; size: number };
@@ -403,4 +426,94 @@ test('writeFile: a failed write removes its temp file and leaves the original', 
   }
   assert.equal(fs.readFileSync(p, 'utf8'), 'before\n');
   assert.deepEqual(leftovers(), []);
+});
+
+// ---------------------------------------------------------------------------
+// Symlinks inside a granted root: every kind is served from where a path really
+// lands, not from where it appears to be.
+
+const links = path.join(root, 'sub', 'links');
+fs.mkdirSync(links);
+fs.writeFileSync(path.join(outside, 'leak.txt'), 'not yours');
+fs.writeFileSync(path.join(outside, 'leak.png'), PNG);
+fs.writeFileSync(path.join(root, 'sub', 'kept.txt'), 'inside');
+
+test('file and media: a symlink that leaves the root is refused, one that stays is served', async () => {
+  const leak = path.join(links, 'leak.txt');
+  fs.symlinkSync(path.join(outside, 'leak.txt'), leak);
+  assert.equal((await call('file', { paths: [leak] })).status, 403);
+  const leakPng = path.join(links, 'leak.png');
+  fs.symlinkSync(path.join(outside, 'leak.png'), leakPng);
+  assert.equal((await call('media', { paths: [leakPng] })).status, 403);
+  const kept = path.join(links, 'kept.txt');
+  fs.symlinkSync(path.join(root, 'sub', 'kept.txt'), kept);
+  assert.deepEqual((await call('file', { paths: [kept] })).body, {
+    content: 'inside',
+    mtimeMs: fs.statSync(kept).mtimeMs,
+  });
+});
+
+test('a linked directory that leaves the root exposes nothing: no listing, read or write', async () => {
+  const dir = path.join(links, 'outdir');
+  fs.symlinkSync(outside, dir);
+  assert.equal((await call('tree', { paths: [dir] })).status, 403);
+  assert.equal((await call('file', { paths: [path.join(dir, 'leak.txt')] })).status, 403);
+  assert.equal((await call('media', { paths: [path.join(dir, 'leak.png')] })).status, 403);
+  assert.equal((await call('writeFile', { paths: [path.join(dir, 'leak.txt')], content: 'x' })).status, 403);
+  assert.equal(fs.readFileSync(path.join(outside, 'leak.txt'), 'utf8'), 'not yours');
+});
+
+test('a read touches only the path it checked, never the link a second time', async () => {
+  // Following the link again after the check is what would let a link swapped in
+  // between redirect the read.
+  const target = path.join(root, 'sub', 'kept.txt');
+  const link = path.join(links, 'reread.txt');
+  fs.symlinkSync(target, link);
+  const touched: string[] = [];
+  const read = fs.readFileSync as (...args: unknown[]) => unknown;
+  const spy = mock.method(fs, 'readFileSync', (file: unknown, ...rest: unknown[]) => {
+    touched.push(String(file));
+    return read(file, ...rest);
+  });
+  try {
+    assert.equal((await call('file', { paths: [link] })).status, 200);
+  } finally {
+    spy.mock.restore();
+  }
+  assert.deepEqual(touched, [fs.realpathSync.native(target)]);
+});
+
+test('grep: a symlink git lists, or a tracked file whose directory became one, is not searched', async () => {
+  // The non-repo walk never lists a link; git does, by the link's own path — and
+  // its index can name a file under a directory since swapped for a link.
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-grep-links-'));
+  try {
+    execFileSync('git', ['-C', repo, 'init', '--quiet'], { stdio: 'ignore' });
+    fs.writeFileSync(path.join(repo, 'inside.txt'), 'needle inside');
+    fs.writeFileSync(path.join(outside, 'needle.txt'), 'needle outside');
+    fs.symlinkSync(path.join(outside, 'needle.txt'), path.join(repo, 'link.txt'));
+    fs.mkdirSync(path.join(repo, 'dir'));
+    fs.writeFileSync(path.join(repo, 'dir', 'needle.txt'), 'tracked');
+    execFileSync('git', ['-C', repo, 'add', 'dir/needle.txt'], { stdio: 'ignore' });
+    fs.rmSync(path.join(repo, 'dir'), { recursive: true });
+    fs.symlinkSync(outside, path.join(repo, 'dir'));
+    const repoCtx = {
+      store: { loadProjects: () => [{ path: repo }], attachmentsRoot: attachments },
+      sessions: { list: () => [] as SessionMeta[] },
+    } as unknown as UserContext;
+    const res = await handleFileRequest(repoCtx, 'grep', { paths: [repo], q: 'needle' }, OWNER_ACCESS);
+    assert.equal(res.status, 200);
+    assert.deepEqual((res.body as { files: { rel: string }[] }).files.map((f) => f.rel), ['inside.txt']);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('sessionDiffFile and attachment: a symlink that leaves its root is refused', async () => {
+  // `after` is read off disk, so a link in the repo would hand back any file.
+  fs.symlinkSync(path.join(outside, 'leak.txt'), path.join(links, 'diff-leak.txt'));
+  const diff = await call('sessionDiffFile', { sessionId: 'known', paths: [root], rel: 'sub/links/diff-leak.txt' });
+  assert.equal(diff.status, 403);
+  fs.symlinkSync(path.join(outside, 'leak.txt'), path.join(attachments, 'leak.txt'));
+  assert.equal((await call('attachment', { rel: 'leak.txt' })).status, 403);
 });

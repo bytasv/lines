@@ -26,6 +26,11 @@ const meta = (): SessionMeta =>
  * first either way.
  */
 function harness(toolName: string, input: Record<string, unknown>) {
+  return harnessWithCard({ requestId: 'r1', toolName, input });
+}
+
+/** The same, with the recorded card spelled out — for a card that carries `alwaysAllowEntry`. */
+function harnessWithCard(card: Record<string, unknown>) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-always-allow-'));
   // createStore first: it is what creates the transcripts/ directory seeded below.
   const store = createStore(root);
@@ -36,7 +41,7 @@ function harness(toolName: string, input: Record<string, unknown>) {
       seq: 0,
       ts: 0,
       kind: 'permission',
-      data: { requestId: 'r1', toolName, input },
+      data: card,
     }) + '\n',
   );
   let writes = 0;
@@ -53,16 +58,43 @@ function harness(toolName: string, input: Record<string, unknown>) {
   return { sessions, guard, changes, writes: () => writes };
 }
 
-test('always-allow on a chained command allowlists only the leading prefix', () => {
-  const h = harness('Bash', { command: 'npm run build && rm -rf dist' });
+test('always-allow on a chained command allowlists the command the guard flagged', () => {
+  // Not the leading `cd app`, which was never the reason for the card: the entry
+  // is the one that exempts the flagged command next time.
+  const h = harness('Bash', { command: 'cd app && git push --force origin main' });
   h.sessions.resolvePermission('s1', 'r1', true, undefined, undefined, undefined, true);
-  assert.deepEqual(h.guard.list(), [{ tool: 'Bash', prefix: 'npm run' }]);
+  assert.deepEqual(h.guard.list(), [{ tool: 'Bash', prefix: 'git push' }]);
   assert.equal(h.changes.length, 1);
   assert.equal(h.writes(), 1);
 });
 
+test('always-allow saves nothing for a command that cannot be allowlisted', () => {
+  // `rm -rf` is a rule match on its own: an entry for it would disarm the rule.
+  const h = harness('Bash', { command: 'npm run build && rm -rf dist' });
+  h.sessions.resolvePermission('s1', 'r1', true, undefined, undefined, undefined, true);
+  assert.deepEqual(h.guard.list(), []);
+  assert.equal(h.writes(), 0);
+});
+
+test('always-allow saves exactly what the card recorded, not a re-derivation', () => {
+  // A card that said "this cannot be allowlisted" stays that way at the click.
+  const refused = harnessWithCard({
+    requestId: 'r1',
+    toolName: 'Bash',
+    input: { command: 'git push --force' },
+    alwaysAllowEntry: null,
+  });
+  refused.sessions.resolvePermission('s1', 'r1', true, undefined, undefined, undefined, true);
+  assert.deepEqual(refused.guard.list(), []);
+
+  // A card from before the field existed is derived the same way, at the click.
+  const legacy = harness('Bash', { command: 'git push --force' });
+  legacy.sessions.resolvePermission('s1', 'r1', true, undefined, undefined, undefined, true);
+  assert.deepEqual(legacy.guard.list(), [{ tool: 'Bash', prefix: 'git push' }]);
+});
+
 test('a second always-allow for the same pattern does not rewrite the file', () => {
-  const h = harness('Bash', { command: 'npm run build' });
+  const h = harness('Bash', { command: 'git push --force' });
   h.sessions.resolvePermission('s1', 'r1', true, undefined, undefined, undefined, true);
   h.sessions.resolvePermission('s1', 'r1', true, undefined, undefined, undefined, true);
   assert.equal(h.guard.list().length, 1);
@@ -71,7 +103,7 @@ test('a second always-allow for the same pattern does not rewrite the file', () 
 });
 
 test('denying with always-allow set writes nothing', () => {
-  const h = harness('Bash', { command: 'npm run build' });
+  const h = harness('Bash', { command: 'git push --force' });
   h.sessions.resolvePermission('s1', 'r1', false, undefined, undefined, 'no', true);
   assert.deepEqual(h.guard.list(), []);
   assert.equal(h.writes(), 0);

@@ -90,6 +90,8 @@ export function createInvite(body: {
   sessionId?: string | null;
   inviteeEmail?: string | null;
   preset: SharePreset;
+  /** The machine's grant id for this invite (never the token), so the machine can drop it once the share is gone. */
+  grantId?: string;
 }): Promise<{ code: string; expiresAt: string }> {
   return storageCall('/v1/shares/invite', { method: 'POST', body: JSON.stringify(body) });
 }
@@ -170,6 +172,45 @@ export function clearContacts(): Promise<{ ok: true; count: number }> {
 
 /** The link an invite code turns into. Same origin as the app, so it just works. */
 export const joinUrl = (code: string): string => `${location.origin}/join/${code}`;
+
+/**
+ * The invite link with the machine's grant in its fragment — the token the
+ * invitee presents to that machine, the machine key they hold the channel to,
+ * and which machine that is. A fragment never reaches a server, so storage
+ * (which holds the invite) and the relay (which carries the channel) never see
+ * any of it.
+ */
+export const joinUrlWithGrant = (
+  code: string,
+  deviceId: string,
+  grant: { token: string; bridgeKey: string },
+): string =>
+  `${joinUrl(code)}#${new URLSearchParams({ grant: grant.token, key: grant.bridgeKey, device: deviceId }).toString()}`;
+
+/** invite code -> the machine grant minted for it, so cancelling the invite can end the grant too. */
+const INVITE_GRANTS_KEY = 'lines.inviteGrants';
+
+function readInviteGrants(): Record<string, string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(INVITE_GRANTS_KEY) ?? '{}') as unknown;
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function rememberInviteGrant(code: string, grantId: string): void {
+  localStorage.setItem(INVITE_GRANTS_KEY, JSON.stringify({ ...readInviteGrants(), [code]: grantId }));
+}
+
+/** The grant minted for an invite this browser created, forgotten as it is read. */
+export function takeInviteGrant(code: string): string | null {
+  const grants = readInviteGrants();
+  const grantId = grants[code] ?? null;
+  delete grants[code];
+  localStorage.setItem(INVITE_GRANTS_KEY, JSON.stringify(grants));
+  return grantId;
+}
 
 /** One line per preset, shown in the overlay. The warning is deliberately separate. */
 export const PRESET_COPY: Record<SharePreset, { label: string; detail: string }> = {

@@ -35,7 +35,8 @@
         "shared/codexProtocol/",
         "web/src/lib/capabilities.ts",
         "web/src/components/ProviderMark.tsx",
-        "web/src/components/UsageIndicator.tsx"
+        "web/src/components/UsageIndicator.tsx",
+        "server/src/mcpWorkflowTools.ts"
       ],
       "symbols": [
         "OpenaiAuthManager",
@@ -51,7 +52,8 @@
         "pushCodex",
         "forkCodex",
         "runHelperQuery",
-        "helperCwd"
+        "helperCwd",
+        "LINES_READ_ONLY_MANIFEST"
       ],
       "tests": [
         "server/src/openaiAuth.test.ts",
@@ -62,7 +64,8 @@
         "server/src/openaiUsage.test.ts",
         "server/src/helperQuery.test.ts",
         "server/src/sessions.autoName.test.ts",
-        "server/src/sessions.switchProvider.test.ts"
+        "server/src/sessions.switchProvider.test.ts",
+        "server/src/mcpWorkflowTools.test.ts"
       ],
       "businessRules": [
         "$CODEX_HOME/auth.json is the only store of OpenAI secrets; Lines writes it exactly once at login and never again, because OpenAI rotates the refresh token on every refresh",
@@ -70,6 +73,7 @@
         "CODEX_HOME shadows the user's own ~/.codex/config.toml, so their terminal codex configuration does not apply inside Lines",
         "a cross-provider setModel is refused once a session has run: nothing carries a conversation between a claudeSessionId and a codexThreadId; SessionManager.switchProvider is the deliberate way past that refusal (see cross-provider-model-switching)",
         "workflow steps run on Claude models only, refused on both the client pickers and the server validator",
+        "Lines' own workflow tools are read-only in a codex session: a codex call reaches the bridge as a plain HTTP request on POST /lines-mcp with no permission card on its path, so that route serves LINES_READ_ONLY_MANIFEST and dispatches with createMcpDispatcher(ctx, undefined, { allowWrites: false }); a Claude session keeps the writes, each behind its card (allowWrites: true)",
         "output_tokens means exactly what the provider called output; reasoning tokens ride beside it and the spend accumulator adds them explicitly",
         "codex reports tokens and never a price; a codex spend row now shows an estimated $ instead, computed from a static price table and always marked with a ~ so it can never look like a provider-reported figure (see usage-and-cost)",
         "a stopped codex turn settles as stopped, never as a failure with a Retry",
@@ -155,7 +159,7 @@
       "id": "permissions-and-plan-mode",
       "name": "Permissions and plan mode",
       "doc": "features/permissions-and-plan-mode.md",
-      "purpose": "What decides whether a tool call runs, who decided it, and how plan mode's deliverable is written and reviewed: mode pickers, resolution provenance, the synced auto-mode allowlist, plan-file auto-approval, the reopenable plan card, and a typed reply counting as \"keep planning\".",
+      "purpose": "What decides whether a tool call runs, who decided it, and how plan mode's deliverable is written and reviewed: mode pickers, resolution provenance, the synced auto-mode allowlist (what an entry covers, and the exact entry \"Always allow\" saves), symlink-aware path checks, files that run code later always asking, plan-file auto-approval, the reopenable plan card, and a typed reply counting as \"keep planning\".",
       "covers": [
         "permission-mode-selector",
         "permission-resolution-provenance",
@@ -199,7 +203,9 @@
         "server/src/workspacePaths.ts",
         "server/src/index.planFile.test.ts",
         "web/src/lib/files.ts",
-        "web/src/components/Transcript.tsx"
+        "web/src/components/Transcript.tsx",
+        "server/src/guestWorkflows.ts",
+        "web/src/lib/can.ts"
       ],
       "symbols": [
         "PermissionMode",
@@ -254,7 +260,26 @@
         "classifyPlanBash",
         "planModeVerdict",
         "PermissionRequestData.planRead",
-        "GuardAllowEntry.scope"
+        "GuardAllowEntry.scope",
+        "alwaysAllowEntryFor",
+        "PermissionRequestData.alwaysAllowEntry",
+        "AlwaysAllowButton",
+        "noAlwaysAllowNote",
+        "chainedCommands",
+        "ruleText",
+        "UNSAFE_SEGMENT",
+        "dangerousPrefix",
+        "COMMAND_RUNNERS",
+        "RUNNER_SUBCOMMANDS",
+        "segmentAllowed",
+        "realPathOf",
+        "isRealInside",
+        "PERSISTENT_FILES",
+        "persistentFileReason",
+        "persistentShellWrite",
+        "questionAnswers",
+        "permissionAnswerFor",
+        "useIsGuestOnSession"
       ],
       "tests": [
         "server/src/autoGuard.plan.test.ts",
@@ -264,12 +289,14 @@
         "server/src/autoGuard.sync.test.ts",
         "server/src/sessions.alwaysAllow.test.ts",
         "server/src/index.planFile.test.ts",
-        "server/src/sessions.queue.test.ts"
+        "server/src/sessions.queue.test.ts",
+        "server/src/autoGuard.paths.test.ts",
+        "server/src/guestAccess.test.ts"
       ],
       "businessRules": [
         "all five PermissionMode values stay in PERMISSION_MODES and selectable in the workflow step Selects, including acceptEdits, because preset workflows ship steps with permissionMode: 'acceptEdits'; the composer/settings segmented controls only show three (Plan, Assist, Full Auto) and default/acceptEdits have no pill",
         "'default' displays as Manual; the stored value is unchanged (used for the workflow step badge and any session outside the three pill values)",
-        "the shipped new-session default is 'auto' (Assist), and a session lands on 'auto' rather than 'default' after a plan is approved on every path that used to reset it, all routed through setPermissionMode so the worker is told rather than only the stored meta changing",
+        "the shipped new-session default is 'auto' (Assist), and a session lands on 'auto' rather than 'default' after a plan is approved on every path that used to reset it, all routed through setPermissionMode so the worker is told rather than only the stored meta changing; where 'auto' would be the target, a session carrying permissionCeiling (it runs someone else's recipe) resumes in 'default' instead",
         "ExitPlanMode and AskUserQuestion always resolve to an explicit 'ask' from the hook, in every permission mode, never a bare continue: true a mode or settings entry could pre-empt",
         "a second answer to an already-resolved permission request is dropped; it never re-emits a resolution event or re-triggers recoverOrphanedPermission's injected prompt",
         "a resend after a bridge restart replays a stored ALWAYS_ASK_TOOLS resolution only when it was produced by a human (resolvedBy is 'user', 'plan-reply', or absent/legacy); any server-synthesized resolution is re-asked instead",
@@ -280,13 +307,20 @@
         "pushing the local list to storage is suppressed while a review is pending",
         "rejecting a review keeps the local list, pushes it back over the remote row, and is remembered by the remote's content so the same proposal is never re-asked",
         "ALWAYS_ASK_TOOLS (AskUserQuestion, ExitPlanMode) can never be allowlisted",
-        "a hand-typed Bash prefix is whitespace-collapsed and may not contain &, &&, ||, ;, or |",
+        "a hand-typed Bash prefix is whitespace-collapsed and may not contain &, |, ; or a line break: a line is split on &&, ||, ; and line breaks, and a command still carrying | or & is never covered by an entry, so such a prefix could never match",
+        "an entry covers a chained command only when it is a plain simple command: one carrying a pipe, &, a redirect, a backtick, $( or a line break (UNSAFE_SEGMENT) meets every rule whatever its prefix; each command is read through ruleText (${IFS}, escaped spaces, quotes and backslashes) so no spelling slips past a rule written for the plain one",
+        "a prefix that is dangerous on its own (one a BASH_RULES rule already matches, a COMMAND_RUNNERS shell/interpreter/launcher or RUNNER_SUBCOMMANDS pair, or only NAME=value assignments) covers only that exact command, never what follows it, whoever saved the entry and whenever",
+        "\"Always allow\" saves exactly the entry the card showed (alwaysAllowEntry, decided when the card was raised) and nothing when it showed none: none for an always-ask tool, a file tool or Monitor, a line writing a persistent file, a flagged command that pipes/redirects/substitutes, flagged commands needing two entries, or a dangerous prefix; for Bash the entry is the first two words (after assignments) of the command a rule flagged, never of the line's first command",
+        "a write to a file that runs code later (PERSISTENT_FILES: Claude Code settings/hooks, MCP configs, git hooks/config, shell startup files, ssh) always reaches the user in every permission mode but bypassPermissions, wherever the file is; in auto mode no allowlist entry disarms it, and it covers Bash writes (redirects, tee, cp/mv/ln/install/rsync/scp, dd, sed -i, perl -i, curl -o, wget -O) plus git config writes and program-running one-off git -c/--config-env/GIT_CONFIG_* settings; reading those files is untouched",
+        "a file path auto-approves only when it is inside a root both as written and once every symlink is followed; a path that climbs with .. or runs through a link that can't be followed never does, and a blanket file-tool entry does not cover such a write either",
+        "an approval never changes the call it approves: resolvePermission ignores the client's updatedInput, except an AskUserQuestion card's answers, rebuilt against the recorded card (its own questions only, strings only, 10,000 characters each) and persisted as rebuilt",
+        "a guest's Always allow and Allow as read are dropped server-side (permissionAnswerFor) and never shown (useIsGuestOnSession): both write the host's allowlist, which is the owner's setting; a guest's click is the one-off approval",
         "non-Bash entries never carry a prefix; one given is silently dropped rather than rejected",
-        "plan-directory reads and writes (~/.claude/plans/** or <cwd>/.claude/plans/**) auto-approve in every permission mode",
+        "plan-directory reads and writes (~/.claude/plans/** or <cwd>/.claude/plans/**) auto-approve in every permission mode, judged as written and once symlinks are followed, with neither plans directory allowed to be a link elsewhere, and never for a persistent file inside one",
         "ExitPlanMode and AskUserQuestion always still prompt the user regardless of target path",
-        "credential paths (~/.ssh, ~/.aws, .env) always escalate even if nested under a plans directory",
-        "any other out-of-cwd file access is unaffected and still escalates",
-        "/file (and by extension /tree/find) can read any plan directory reachable from isPlanPath, not just the requesting session's own plan file — a deliberate widening of a route previously confined to project/session roots, scoped to plan directories only",
+        "credential paths (~/.ssh, ~/.aws, .env) always escalate even if nested under a plans directory, checked on the path as written and on where a link leads",
+        "any other out-of-root file access still escalates — out of root as written or once symlinks are followed, so a link inside the project is judged by the file it reaches",
+        "/file (and by extension /tree/find) can read any plan directory reachable from isPlanPath, not just the requesting session's own plan file — a deliberate widening of a route previously confined to project/session roots, scoped to plan directories only, and to the owner (a guest's resolve never takes the plans exception)",
         "a resolved plan card renders collapsed by default but is always reopenable via its header",
         "action buttons never render once a request is resolved, in the inline card or the fullscreen modal",
         "fullscreen focus mode opens read-only for a resolved plan",
@@ -321,9 +355,11 @@
         "the web store never caches the allowlist in localStorage; it is server-authoritative and arrives on every hello",
         "removing an entry has no confirmation modal since it only narrows the guard and fails safe",
         "the review modal is mounted at the app root, not inside Settings, so a divergence reaches the user without requiring a gear click",
-        "assessToolCall's self-worker-source check (isSelfWorkerSource) runs before the blanket tool allowlist short-circuit — the first guard verdict an allowlist entry cannot disarm; keep it ordered first in any refactor",
-        "isPlanPath resolves the path and anchors containment checks to real directories, not a substring match on the plan-dir marker, so path traversal cannot pass as a plan path",
-        "isInside does not resolve symlinks; a symlink planted inside a plan directory pointing elsewhere is accepted as a pre-existing limitation",
+        "assessToolCall's self-worker-source check (isSelfWorkerSource) runs before the blanket tool allowlist short-circuit — the first guard verdict an allowlist entry cannot disarm; keep it ordered first in any refactor; the persistent-file check (persistentFileReason) sits right after it on the same side, and the Bash branch runs persistentShellWrite ahead of segmentAllowed, so no entry disarms a write that outlives the turn",
+        "isPlanPath anchors containment to real directories via isRealInside (as written and once symlinks are followed, a climbing .. never counting), not a substring match on the plan-dir marker, so neither path traversal nor a link planted in a plans directory passes as a plan path",
+        "containment follows symlinks everywhere it gates something, through one implementation: realPathOf/isRealInside, exported from autoGuard.ts so resolveWorkspacePath, the file routes, find-in-files and guestCwdAllowed reuse it; a path whose real location can't be worked out counts as outside",
+        "the entry \"Always allow\" saves is decided by the bridge when the card is raised and recorded on it (alwaysAllowEntry), never re-derived after the click or computed by the client, which only renders it; allowEntryFor is deprecated and uncalled",
+        "resolvePermission treats its own record of the card as the source of truth for what was approved (its input, alwaysAllowEntry, planRead.prefix) and the wire only for the decision, plus question answers and plan comments, each narrowed server-side",
         "auto-approved plan writes remain visible as tool_use blocks in the transcript, but the auto-approval permission event is filtered from the UI like other auto-approved calls",
         "PLAN_DIR_MARKER/isPlanFilePath live in shared/types.ts, not autoGuard.ts, so the web client can reuse the same plan-path hint without importing server code",
         "resolveWorkspacePath/workspaceRoots/resolveWorkspaceParam live in server/src/workspacePaths.ts, not server/src/index.ts, so they're importable by their own test — index.ts starts listening as a side effect of being imported",
@@ -345,7 +381,8 @@
         "session-collaboration",
         "turn-recovery",
         "turn-interjection",
-        "reasoning-effort-selection"
+        "reasoning-effort-selection",
+        "file-routes-over-ws"
       ]
     },
     {
@@ -555,7 +592,11 @@
         "web/src/components/workflow/StepOutline.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
         "web/src/components/workflow/WorkflowEditor.tsx",
+        "web/src/components/workflow/WorkflowList.tsx",
+        "web/src/components/workflow/UntrustedReview.tsx",
         "server/src/workflows.ownership.test.ts",
+        "server/src/workflowCommands.ts",
+        "storage/src/stepRows.ts",
         "storage/prisma/schema.prisma"
       ],
       "symbols": [
@@ -582,15 +623,38 @@
         "lineageCreatedAt",
         "useWorkflowDraft.selectStep",
         "useWorkflowDraft.detachStep",
-        "contentOf"
+        "contentOf",
+        "WorkflowEngine.addStepVersions",
+        "StorageSyncClient.resolveSteps",
+        "resolveStepVersions",
+        "resolveWhere",
+        "RESOLVE_MAX_REFS",
+        "WorkflowEngine.untrustedParts",
+        "WorkflowEngine.assertRunnable",
+        "WorkflowEngine.trustWorkflow",
+        "WorkflowEngine.trustStep",
+        "WorkflowEngine.setSharedSteps",
+        "UntrustedWorkflowError",
+        "UntrustedReviewModal",
+        "UntrustedBadge",
+        "workflowReviewItems",
+        "stepReviewItem",
+        "DraftWorkflow.heldMark"
       ],
       "tests": [
-        "server/src/workflows.ownership.test.ts"
+        "server/src/workflows.ownership.test.ts",
+        "server/src/workflows.trust.test.ts",
+        "server/src/sync.items.test.ts",
+        "storage/src/steps.resolve.test.ts"
       ],
       "businessRules": [
         "newest-first, gap-tolerant version list",
-        "own steps show full history; foreign steps show published versions only, with the exact pinned version always unioned in",
-        "pin/restore is disabled for the currently active version",
+        "own steps show full history; foreign steps show published versions only, with the exact pinned version unioned in whenever the bridge holds it — for someone else's unpublished version, only a copy cached while it was still visible",
+        "POST /steps/resolve answers only the caller's own versions and anyone's published ones; another user's private version comes back exactly as a missing one does — a pin is not a grant, and unpublishing revokes other users' pins, which then park as unresolved",
+        "addStepVersions adopts only the requested step's history and resolveSteps only the requested ownerId/stepId/version triples, since a version is filed under the owner it names",
+        "pin/restore is disabled for the currently active version; restore is also disabled for a version that needs review, since the restored head is signed by this machine",
+        "a held-back workflow or step version is kept and badged but refused by assertRunnable, attach and runStep until reviewed; approving echoes the shown digest (a stale one is refused); edits and copies (Duplicate, Make an editable copy) never clear a mark",
+        "the review dialog (UntrustedReviewModal) freezes what it shows when it opens, so content that changes while it is open is refused by the bridge rather than confirmed unseen",
         "workflow re-pin changes only which immutable version a ref points to; step-library restore creates a brand-new head version with old content — history is never rewritten",
         "both popovers fetch history on open, not on mount, and re-fetch on every reopen",
         "diff list scrolls independently (ScrollArea.Autosize, mah 280) once it exceeds popover height, so the Update button stays reachable regardless of diff length",
@@ -603,7 +667,11 @@
       ],
       "architecturalRules": [
         "immutable step versions are never deleted or edited, on disk or in storage — only the head list and published flag change",
-        "the storage route enforces the foreign-publish filter server-side; client-side version union never bypasses it",
+        "storage enforces the foreign-publish filter server-side on both the version-history route and POST /steps/resolve; client-side version union never bypasses it",
+        "the resolve visibility rule lives in storage/src/stepRows.ts so it is testable without a Clerk token; refs are type-checked before the Prisma where (a filter object in place of a string would match every owner) and capped at RESOLVE_MAX_REFS",
+        "cross-user step rows are keyed by the row, never the blob: storage sets ownerId (and id on the history route) from the row, and the bridge also drops anything it did not ask for",
+        "trust is read off the saved workflow the bridge sent, never the draft; a copied mark rides DraftWorkflow.heldMark, sent once with the next save and then dropped",
+        "setSharedSteps keeps the reviewed content of a version its author rewrote in place, and an unverified copy never displaces a trusted version of the same number — the number is what a workflow pins",
         "init effect tracks the open transition via a prevOpened ref and skips its workflows[0] fallback whenever a draft already exists and this isn't the open transition, to avoid racing the id-reconciliation effect after a new-workflow save",
         "new-workflow id reconciliation matches by name plus deep step equality, not step count alone"
       ],
@@ -1171,7 +1239,7 @@
       "id": "transcript-rendering",
       "name": "Transcript rendering",
       "doc": "features/transcript-rendering.md",
-      "purpose": "How the transcript is drawn: one shared markdown renderer with a bubble only for user prompts, structured per-tool field lists instead of raw JSON, subagent runs nested under their spawning card, a backgrounded call's state living on its own launching card instead of a duplicate row, and an EPHEMERAL_SYSTEM_SUBTYPES filter that keeps roughly half of every transcript file's lines off disk.",
+      "purpose": "How the transcript is drawn: one shared markdown renderer with a bubble only for user prompts (whose images render as never-loaded placeholders), structured per-tool field lists instead of raw JSON, subagent runs nested under their spawning card, a backgrounded call's state living on its own launching card instead of a duplicate row, and an EPHEMERAL_SYSTEM_SUBTYPES filter that keeps roughly half of every transcript file's lines off disk.",
       "covers": [
         "transcript-markdown-rendering",
         "tool-call-structured-input",
@@ -1198,10 +1266,16 @@
         "web/src/components/TaskCall.tsx",
         "web/src/components/ActivityRow.tsx",
         "web/src/lib/workflowReveal.ts",
-        "web/src/lib/format.ts"
+        "web/src/lib/format.ts",
+        "web/src/components/MarkdownImage.tsx",
+        "web/src/lib/markdownImage.ts"
       ],
       "symbols": [
         "Markdown",
+        "MarkdownImage",
+        "MarkdownLinkContent",
+        "markdownImageTarget",
+        "MarkdownImageTarget",
         ".md-body",
         ".md-body pre code",
         ".md-table-wrap",
@@ -1232,10 +1306,13 @@
       ],
       "tests": [
         "server/src/sessions.turns.test.ts",
-        "server/src/sessions.context.test.ts"
+        "server/src/sessions.context.test.ts",
+        "server/src/markdownImage.test.ts"
       ],
       "businessRules": [
         "user and agent text render markdown instead of plain preformatted text; single newlines collapse and raw HTML tags are dropped",
+        "a markdown image is never fetched, not on render and not on click: it renders as a placeholder showing its alt text and where it points (a URL's host, a file's path); clicking opens an http(s) URL in a new tab (noopener noreferrer) or a file path in the file preview; no source is exempt, this app's own origin included",
+        "an image inside a link is that link's label: the link stays the one action and the image is an inert chip inside it, never a second nested anchor",
         "code blocks wrap long lines (white-space: pre-wrap, overflow-wrap: anywhere) instead of scrolling horizontally",
         "only the user prompt renders as a bubble (right-aligned, capped at 80% column width); agent output is unwrapped and flush-left with nesting shown by order/expand affordance, not indentation",
         "every tool's expanded body shows a structured field list, never raw JSON by default; raw JSON is one toggle away for every tool with no exceptions",
@@ -1288,7 +1365,9 @@
         "QuestionPrompt's keyboard cursor (activeIdx) trails real DOM focus via onFocus rather than driving it through an effect — an effect keyed on the cursor that called .focus() would re-assert focus on every unrelated transcript re-render",
         "Enter's handler calls preventDefault() unconditionally before branching, since UnstyledButton is a real <button> and Enter's default action already fires a click; Space is left un-intercepted on purpose so it inherits native click semantics instead of Enter's",
         "the set of requests that already auto-focused is a module-scope Set keyed by requestId, not a useRef, because Transcript windows/backfills its item list and this component can genuinely remount for a still-pending request",
-        "the mouse and keyboard paths both fold through one advance() function; the click path passes canSubmit: false so clicking the last unanswered option can move focus but never itself fires the WS send"
+        "the mouse and keyboard paths both fold through one advance() function; the click path passes canSubmit: false so clicking the last unanswered option can move focus but never itself fires the WS send",
+        "markdown images are placeholders because an image fetches on render with nobody clicking, so a prompt-injected agent could exfiltrate data just by writing an image URL; links wait for a click and are left alone; the deployed CSP is now enforcing and its img-src admits no arbitrary host, the same channel closed one layer down (see production-deployment)",
+        "markdownImageTarget is pure (web/src/lib, no React) so the server's test runner covers it; a protocol-relative //host URL is classed as remote via isExternalHref, never as a local path"
       ],
       "relatedDecisions": [
         "session-collaboration",
@@ -1297,7 +1376,8 @@
         "background-tasks",
         "turn-interjection",
         "turn-recovery",
-        "usage-and-cost"
+        "usage-and-cost",
+        "production-deployment"
       ]
     },
     {
@@ -1356,7 +1436,9 @@
         "server/src/userContext.ts",
         "storage/prisma/schema.prisma",
         "storage/src/index.ts",
-        "storage/src/sessionRows.ts"
+        "storage/src/sessionRows.ts",
+        "server/src/workflows.ts",
+        "server/src/syncSignature.ts"
       ],
       "symbols": [
         "StorageSyncClient.pushSessions",
@@ -1367,6 +1449,12 @@
         "StorageSyncClient.drainDeletes",
         "SyncWatermarks.sessionsPushed",
         "SessionManager.adoptSynced",
+        "SessionManager.adoptSyncedWorkflow",
+        "sessionForSync",
+        "SessionMeta.permissionCeiling",
+        "WorkflowState.def",
+        "WorkflowEngine.unverifiedRefusal",
+        "runnableDigest",
         "SessionManager.applyRemoteDelete",
         "Store.loadDeletedSessions",
         "Store.saveDeletedSessions",
@@ -1380,7 +1468,9 @@
         "server/src/sync.sessions.test.ts",
         "server/src/sync.credentials.test.ts",
         "server/src/sessions.delete.test.ts",
-        "storage/src/sessions.softDelete.test.ts"
+        "storage/src/sessions.softDelete.test.ts",
+        "server/src/workflows.trust.test.ts",
+        "server/src/recipes.run.test.ts"
       ],
       "businessRules": [
         "a bulk push filters out sessions whose updatedAt/createdAt is not newer than the last accepted push, since storage rows are LWW upserts and re-sending unchanged rows is pure waste",
@@ -1396,7 +1486,10 @@
         "adoptSynced returns early when a pulled session's stamp does not beat an existing local tombstone — the branch the ordinary LWW check never reached before, since that check only ran when a local copy of the session already existed",
         "applyRemoteDelete records a tombstone even for a session this machine never held, so a slower third machine's later push can't resurrect it here either",
         "a delete issued while pulled state is being applied, or before there is a token to send it with, is queued (pendingDeletes) rather than dropped, and rides the next flush/sync instead of being lost",
-        "a bulk push (reconnect) filters out any session whose delete is still unconfirmed, so the whole-list push can't undo a delete that raced it"
+        "a bulk push (reconnect) filters out any session whose delete is still unconfirmed, so the whole-list push can't undo a delete that raced it",
+        "a synced session is a display artifact plus resumable history, not a work order: adoptSynced never takes queued from a row and never lets one raise permissionMode (bypassPermissions is clamped to default for a session first seen here)",
+        "permissionCeiling is never synced: sessionForSync strips it from the copy a push sends (the live meta keeps it) and adoptSynced ignores it on pull, so a row can neither lift a foreign recipe run's ceiling nor bring one",
+        "an embedded workflow (workflow.def) from storage is display-only unless its runnableDigest matches the def this machine already holds for that session; otherwise it is marked unsigned and runStep refuses every step of it, strict sync or not; for a run this machine holds (same workflowId), its own task/outputs/lastStepOutput stand over the row's"
       ],
       "architecturalRules": [
         "SESSIONS_PUSH_MAX_BYTES (1.5MB) mirrors the same headroom-under-2mb constant style as TOTAL_MAX_BYTES in server/src/memory.ts",
@@ -1406,7 +1499,8 @@
         "the row-level rules (LWW upsert, soft delete, resurrect guard, wire shape) live in storage/src/sessionRows.ts rather than inline in the /sessions routes, so they're unit-testable without a Clerk token — /sessions itself stays Clerk-gated and just calls through",
         "flushSessions re-checks pendingDeletes per chunk, after the batch was drained but before each chunk's own await, so a delete issued while an earlier chunk is in flight is not undone by a later one",
         "SessionManager's sessions map and tombstone map are always written together (a single writeState), so they can never desync on disk",
-        "deleteSession and applyRemoteDelete share a private forget() that only tears down live state that actually exists, so a remote tombstone for a session this machine never ran costs nothing"
+        "deleteSession and applyRemoteDelete share a private forget() that only tears down live state that actually exists, so a remote tombstone for a session this machine never ran costs nothing",
+        "session rows carry no signature, so every field that would become an instruction here (queued, permissionMode, permissionCeiling, workflow.def, task/outputs/lastStepOutput) is held at this machine's own value or marked on adopt; a marked snapshot is refused at runStep, the gate every way into a step passes, and does not seed the session's model or permission mode"
       ],
       "relatedDecisions": [
         "agent-memory-sync",
@@ -1632,7 +1726,10 @@
         "storage/package.json",
         "server/scripts/dev-runtime.mjs",
         "server/scripts/dev-process.mjs",
-        "server/src/devRuntime.ts"
+        "server/src/devRuntime.ts",
+        "web/vite.config.ts",
+        "web/src/ws.ts",
+        "server/src/connectionPolicy.ts"
       ],
       "symbols": [
         "WorkerRunner",
@@ -1648,7 +1745,9 @@
         "buildGeneration",
         "DevRuntime",
         "Supervisor.forceReload",
-        "restartCommand"
+        "restartCommand",
+        "isLoopbackPage",
+        "SINGLE_TENANT_TOKENS"
       ],
       "tests": [
         "server/scripts/dev-runtime.test.mjs",
@@ -1669,7 +1768,10 @@
         "explicit shutdown ends active work and reaps only the resource-owned process tree",
         "restart-backend (a manual Tilt resource plus a button on worker/bridge) rebuilds and cycles the pair without waiting for idle, for the case the automatic path can be blocked on indefinitely (a workflow step parked at waiting-approval anywhere on the machine); the control route answers with a 'restarted: true' handshake so a supervisor predating the route cannot report false success on its plain 200",
         "enable-all (tilt enable --all, plus a button living on preflight specifically because that resource is never disabled) is the way back from a disabled Tilt resource, whose own buttons disappear along with it",
-        "a forced restart pauses the supervisor's crash recovery and retries a previously rejected build; a restart that rolls back fails with the rejection reason instead of reporting success"
+        "a forced restart pauses the supervisor's crash recovery and retries a previously rejected build; a restart that rolls back fails with the rejection reason instead of reporting success",
+        "the bridge binds 127.0.0.1 under Tilt as everywhere, so its readiness probe and status link name 127.0.0.1 rather than localhost (which may resolve to ::1 first), and web/src/ws.ts dials 127.0.0.1 from a page served on loopback",
+        "Vite listens on every interface (host: true), but a phone on the LAN gets the page and no machine: the bridge admits only this machine's own page origins; LAN testing is opt-in via LINES_BRIDGE_HOST=0.0.0.0 plus the page's LAN origin in LINES_BRIDGE_ALLOWED_ORIGINS, after which anyone on that network who can load the origin can drive the bridge",
+        "both runners set LINES_DEV_SUPERVISED=1 on their children, which is also the one switch that lets the bridge's single-tenant 'local' context accept a storage token — the dev relay with auth off (--with-relay without --relay-auth) binds every browser to 'local' and forwards its token; a desktop install never sets it"
       ],
       "architecturalRules": [
         "PORT is injected per resource via serve_env, never a shared env block",
@@ -1682,7 +1784,8 @@
       ],
       "relatedDecisions": [
         "session-collaboration",
-        "cross-provider-model-switching"
+        "cross-provider-model-switching",
+        "hosted-machine-access"
       ]
     },
     {
@@ -1782,7 +1885,7 @@
       "id": "workflow-mcp-tools",
       "name": "Conversational workflow/step editing (in-process MCP tools)",
       "doc": "features/workflow-mcp-tools.md",
-      "purpose": "Expose workflow/step list/read/create/update/delete as in-process MCP tools (mcp__lines__*) so a session can discuss and edit its own workflows in conversation instead of only via the WorkflowEditor modal; writes are permission-gated, reads are not.",
+      "purpose": "Expose workflow/step list/read/create/update/delete as in-process MCP tools (mcp__lines__*) so a session can discuss and edit its own workflows in conversation instead of only via the WorkflowEditor modal; writes are permission-gated, reads are not, and the codex door (/lines-mcp), which has no approval card, serves the reads only.",
       "entryPoints": [
         "web/src/components/PermissionPrompt.tsx"
       ],
@@ -1810,6 +1913,7 @@
         "jsonSchemaToZod",
         "jsonSchemaToZodShape",
         "LINES_TOOL_MANIFEST",
+        "LINES_READ_ONLY_MANIFEST",
         "createMcpDispatcher",
         "resolveWorkflowRef",
         "isLinesMcpTool",
@@ -1843,7 +1947,8 @@
         "every workflow/step read tool reports createdAt/updatedAt as YYYY-MM-DD HH:MM local-time strings, not raw ms epochs; stepVersionsView stays numeric because the browser's version popover needs ms for relTime",
         "a workflow's createdAt is stamped once on first save and never restamped; a fresh (empty) id always mints a new one, so duplicate()/create_workflow can never inherit the source's birthday",
         "a step's createdAt is the lineage's creation, not the mint time of the version being read; every version of one step reports the same createdAt, and that version's own mint time is its updatedAt",
-        "creation time only ever moves earlier, never later, everywhere it merges (earliest/LEAST) — idempotent and order-independent across peers, so a client or blob that omits createdAt can never erase a known one"
+        "creation time only ever moves earlier, never later, everywhere it merges (earliest/LEAST) — idempotent and order-independent across peers, so a client or blob that omits createdAt can never erase a known one",
+        "a write runs only where an approval card gated it: the codex door (POST /lines-mcp) has no card on its path, so it serves LINES_READ_ONLY_MANIFEST and dispatches with allowWrites: false, while the Claude door keeps every write behind its card (allowWrites: true)"
       ],
       "architecturalRules": [
         "tool names/descriptions/schemas live entirely on the bridge (mcpWorkflowTools.ts) and are hot-reloadable; only the workflow-agnostic conversion (workerMcp.ts) and protocol shape (workerProtocol.ts) sit in the worker's minimal import graph",
@@ -1851,7 +1956,8 @@
         "RPC_FALLBACK table excludes canUseTool on purpose - the SDK parks it with no deadline since a permission request must wait for a human",
         "workflowCommands.ts imports UserContext type-only to avoid a runtime cycle with userContext.ts",
         "shared/workflowValidation.ts is re-exported from shared/types.ts as that file's last statement, an intentional import cycle safe only while workflowValidation.ts never reads types.ts bindings at its own top level",
-        "the web WorkflowEditor draft (useWorkflowDraft.ts) was not migrated onto shared/workflowValidation.ts in this change; the two validators can drift"
+        "the web WorkflowEditor draft (useWorkflowDraft.ts) was not migrated onto shared/workflowValidation.ts in this change; the two validators can drift",
+        "createMcpDispatcher's allowWrites has no default — every caller states it, so a caller that forgot to think about it gets no writes — and a write is refused in the dispatcher as well as left out of the read-only manifest, since a client can call a tool it was never listed; LINES_READ_ONLY_MANIFEST is built from the same READ_TOOLS specs as LINES_TOOL_MANIFEST"
       ],
       "relatedDecisions": [
         "permissions-and-plan-mode",
@@ -1877,7 +1983,8 @@
         "web/src/assets/logo-mark-solid.png",
         "web/public/favicon.png",
         "web/src/index.css",
-        "web/src/loader.css"
+        "web/src/loader.css",
+        "web/public/splash-guard.js"
       ],
       "symbols": [
         "FAVICON_SRC",
@@ -1900,7 +2007,7 @@
         "the header <img> is height-driven (height 24, width auto) inside a plate with padding 4 and borderRadius 6",
         "alt=\"Lines\" on the header <img> is the only accessible name for the brand",
         "the boot splash is static HTML in index.html outside #root, one persistent element that React never renders or remounts, so its loop does not restart between boot steps or machine switches; lib/splash.ts only changes the caption and its state (shown, finishing, finished, leaving, hidden)",
-        "the splash is skipped before first paint (inline script in index.html) when Clerk is configured and the route is /welcome or /join/:code or there is no signed-in Clerk cookie; splashSkippedAtBoot exposes this; a wrong guess for a signed-in user is corrected when the app's first claim shows the splash again; builds without Clerk always keep it",
+        "the splash is skipped before first paint (web/public/splash-guard.js, loaded synchronously from index.html — a file, not an inline script, because the CSP allows no inline script) when Clerk is configured and the route is /welcome or /join/:code or there is no signed-in Clerk cookie; splashSkippedAtBoot exposes this; a wrong guess for a signed-in user is corrected when the app's first claim shows the splash again; builds without Clerk always keep it",
         "the splash layer scrolls only while shown (connecting help panel); in finishing, finished and leaving it clips, so the hand-over scale and the app mounting beneath cannot produce scrollbars",
         "each boot step holds the splash with its own caption (Starting Lines, Signing you in, Finding your machines, Connecting to <machine>, Loading your sessions and projects, Opening your session); the splash has no header",
         "the app is not rendered until the mark has finished drawing onto the static logo; it then mounts hidden under the splash, the splash fades out, and the app fades in the moment the splash is gone, with a 4s fallback if an expected app never mounts",
@@ -2205,7 +2312,8 @@
         "server/src/worker.ts",
         "server/src/workerClient.ts",
         "web/vite.config.ts",
-        "server/src/relayClient.ts"
+        "server/src/relayClient.ts",
+        "server/src/connectionPolicy.ts"
       ],
       "files": [
         "storage/prisma/schema.prisma",
@@ -2242,7 +2350,9 @@
         "web/src/components/SkewBanner.tsx",
         "web/src/lib/diag.ts",
         "storage/src/diagnostics.ts",
-        "web/src/lib/splash.ts"
+        "web/src/lib/splash.ts",
+        "server/src/connectionPolicy.ts",
+        "server/src/locality.ts"
       ],
       "symbols": [
         "Device",
@@ -2309,7 +2419,26 @@
         "DeviceEvents",
         "HubRegistry.events",
         "DeviceHub.lastDetachAt",
-        "TOKEN_TIMEOUT_MS"
+        "TOKEN_TIMEOUT_MS",
+        "listenHost",
+        "connectionPolicy",
+        "ConnectionPolicy",
+        "CONNECTION_POLICY",
+        "hostAllowed",
+        "upgradeVerdict",
+        "verifyClient",
+        "MAX_FRAME_BYTES",
+        "tokenRefreshAction",
+        "tokenFitsContext",
+        "jwtSubject",
+        "setClerkToken",
+        "SINGLE_TENANT_TOKENS",
+        "isValidStoreId",
+        "isLoopbackAddress",
+        "RELAY_SECRET_HEADER",
+        "presentedDeviceSecret",
+        "isTokenRefresh",
+        "COLLAB_MIN_PROTOCOL"
       ],
       "tests": [
         "storage/src/schema.credentials.test.ts",
@@ -2327,7 +2456,13 @@
         "server/src/relayClient.supersede.test.ts",
         "server/src/wakeRedial.test.ts",
         "server/src/diagBuffer.test.ts",
-        "storage/src/diagnostics.test.ts"
+        "storage/src/diagnostics.test.ts",
+        "server/src/connectionPolicy.test.ts",
+        "server/src/relayClient.dial.test.ts",
+        "server/src/locality.test.ts",
+        "relay/src/redaction.test.ts",
+        "server/src/guestAccess.test.ts",
+        "server/src/messageAuthz.test.ts"
       ],
       "businessRules": [
         "fromAgent only accepts a frame from the socket the hub currently calls its agent; a superseded (or half-dead) bridge that keeps writing cannot inject state into a live browser channel or close a channel now owned by the bridge that replaced it",
@@ -2371,11 +2506,11 @@
         "a discovery file naming a dead pid is removed on read, not merely ignored",
         "PORT belongs to the storage server alone now; bridge and worker no longer read it",
         "a browser connecting while no bridge is attached is told deviceOffline immediately rather than left on an indefinite spinner",
-        "a bridge attach (restart, re-dial or takeover) closes every channel on the device: owners with 1012 so the browser redials quickly and runs a fresh e2ee handshake (the old session died with the old bridge socket, so a replayed open is unusable), guests with 1008 so they re-run the /client gate; only tokens are replayed — see session-collaboration",
+        "a bridge attach (restart, re-dial or takeover) closes every channel on the device: owners with 1012 so the browser redials quickly and runs a fresh e2ee handshake (the old session died with the old bridge socket, so a replayed open is unusable), guests with 1008 so they re-run the /client gate; only the owner's token is replayed, and only to a bridge that proved that owner's claim — see session-collaboration",
         "newest bridge wins, so a reconnecting bridge can take over from a half-dead predecessor the relay has not noticed",
         "the relay persists nothing and logs no payload",
         "with RELAY_URL unset nothing dials and the local-only setup is unchanged",
-        "a browser may only reach a device it owns; if storage cannot verify a device's secret the relay refuses the connection rather than admitting it",
+        "a browser may only reach a device it owns or holds a grant on (see session-collaboration); if storage cannot verify a device's secret the relay refuses the connection rather than admitting it",
         "a browser socket carries a monotonic generation stamp; a frame arriving on a socket whose generation is no longer current is dropped rather than applied — switchDevice closes the old socket but does not detach its message handler, so a late frame from the previous machine could otherwise reach applyServerMessage after clearBootstrap()",
         "machineOffline is surfaced by ConnectionBanner after bootstrap too, not only by the pre-bootstrap ConnectingMachine screen — relay-up-but-machine-gone otherwise rendered as a healthy 'connected' UI in which every action silently went nowhere",
         "the gate never connects to a machine this browser was not shown: on a first visit (no remembered device id) it renders ChooseMachine — the whole list, with health, platform, last-seen and an owner badge — and connects only after an explicit pick, even when the account has exactly one machine",
@@ -2386,10 +2521,23 @@
         "a connect never waits on Clerk without a deadline: openSocket races getToken({skipCache:true}) against TOKEN_TIMEOUT_MS (10s), then the cached getToken() against 5s; if both fail it schedules the ordinary RECONNECT_DELAY_MS retry instead of dialling — a hung mint used to leave a link with no socket and no retry timer, an endless spinner",
         "one connect in flight per link (connectingSince); wake, online, retry and Reconnect now all funnel into openSocket",
         "browser storage calls carry a 10s token deadline and a 15s AbortSignal, so the device-list splash step cannot spin forever",
-        "every relay client refusal is logged and recorded with its reason (bad-token/no-token/not-owner-no-grant with ownerId/bridge-too-old), as are waitForAgent outcomes and agent refusals (unauthorized vs unreachable); a per-device event history (50 x 1000 devices, LRU, no payloads or tokens) survives the idle-hub sweep and is served only in the secret-gated GET / as events",
+        "every relay client refusal is logged and recorded with its reason (bad-token/no-token/not-owner-no-grant with ownerId/storage-unreachable/bridge-too-old), as are waitForAgent outcomes and agent refusals (unauthorized vs unreachable); a per-device event history (50 x 1000 devices, LRU, no payloads or tokens) survives the idle-hub sweep and is served only in the secret-gated GET / as events",
         "the browser keeps a localStorage diag ring (lines.diag) of connect-path events, echoed as [diag] console lines; ConnectingMachine's slow help (portalled into the boot splash) shows a plain hint, with the link phase and Send diagnostics/Copy (and Unpair) behind a collapsed Details toggle, and an unsent stall is uploaded once on the next hello",
         "POST /v1/diagnostics stores nothing: it sanitises the report (scalar fields only, bounded, token query params redacted) and writes one [diag] userId=… line to storage stdout",
-        "connect deadlines: an encrypted socket has HANDSHAKE_TIMEOUT_MS (20s) from open to a ready channel, then HELLO_TIMEOUT_MS (60s) to deliver hello with no pong check in that window, and the post-hello PONG_TIMEOUT_MS is 30s; expiry closes and redials (diag handshake-timeout / hello-timeout), and none of the timers run down while the relay says no bridge is attached (tracked per socket)"
+        "connect deadlines: an encrypted socket has HANDSHAKE_TIMEOUT_MS (20s) from open to a ready channel, then HELLO_TIMEOUT_MS (60s) to deliver hello with no pong check in that window, and the post-hello PONG_TIMEOUT_MS is 30s; expiry closes and redials (diag handshake-timeout / hello-timeout), and none of the timers run down while the relay says no bridge is attached (tracked per socket)",
+        "the bridge binds 127.0.0.1 unless LINES_BRIDGE_HOST names 0.0.0.0 or :: (127.0.0.1 and localhost mean the default; any other value is refused, logged, and loopback used) — every local caller (the page, the codex MCP child, the OAuth redirect) dials 127.0.0.1 by number",
+        "a direct socket is admitted only from this machine's own page (a loopback origin from a loopback peer), from an origin listed in LINES_BRIDGE_ALLOWED_ORIGINS, or as a non-browser client (no Origin) on loopback; Origin null (sandboxed frame, file://) is refused like any stranger; refusals are 403, decided in verifyClient before the socket exists, so a refused page never gets a hello",
+        "on a loopback bind a Host header that does not name this machine (localhost exactly, or a loopback IP literal) is a DNS-rebinding page and gets 421, on plain HTTP and the WebSocket upgrade alike; a missing Host fails closed; a wildcard bind skips the check",
+        "LINES_BRIDGE_DIRECT=0 refuses every direct WebSocket upgrade; the desktop app sets it in relay mode, where its window reaches the bridge through the relay; plain HTTP routes are unaffected",
+        "the bridge's WebSocketServer caps one inbound frame at MAX_FRAME_BYTES (64 MiB) rather than ws's 100 MiB default",
+        "the loopback port stays reachable by any local process, and a non-browser client there needs nothing more on a desktop install (no Clerk gate); Lines assumes a single-user machine",
+        "every path that installs a context's storage token (hello, in-channel auth refresh, the relay's token push) goes through setClerkToken, which refuses a token whose sub is not the context's user; the single-tenant 'local' context takes one only under LINES_DEV_SUPERVISED=1 (the dev relay with auth off), never on a desktop install",
+        "tokenRefreshAction: a guest's refresh is ignored, a relayed owner's accepted on the relay's word, a direct socket's re-verified through Clerk where CLERK_SECRET_KEY is set and ignored otherwise",
+        "a guest's Clerk token never reaches the host's bridge: the relay forwards token null on a guest open, keeps only the owner's token for a re-push (setToken ignores anyone but ownerId, the attach re-push is filtered to ownerId) and drops a guest's {type:'auth'} frame after a full JSON parse — stripped at the relay because the bridge is code the host runs",
+        "the bridge sends its device secret in the x-lines-device-secret header, never the URL; the relay still reads the deprecated secret query when the header is absent and logs neither form, so the relay must deploy before a desktop release whose bridge sends only the header",
+        "APP_PROTOCOL_VERSION is 6 (host-issued guest grants) and the relay's COLLAB_MIN_PROTOCOL defaults to 6, so a guest reaches only a bridge that admits guests on grants it minted; an older bridge keeps serving its owner",
+        "every id that becomes a path under ~/.lines-app passes isValidStoreId: a relay channel whose attested user id or grant host id is malformed is closed 1008 before any context exists, userStoreRoot and UserRegistry.get throw on one, a malformed session id has no transcript and deleting it is a no-op, and loadTranscript for a session the context does not know answers empty",
+        "the bridge makes ~/.lines-app 0700 at startup whoever started it (Tilt and a terminal start it without the desktop shell), and creates transcripts and rewind sidecars 0600"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
@@ -2411,14 +2559,17 @@
         "APP_ROOT is defined in workerProtocol.ts and re-exported by store.ts, so the worker can reach it without importing the bridge graph",
         "publishing is atomic (temp + rename) and 0600; watchRuntimeInfo watches the directory, not the file, because rename replaces the inode",
         "timers/watchers are released via WorkerClient.dispose() rather than unref(), which would make a timer invisible to node's mock timers",
-        "the bridge's token is published but not enforced on browser connections (a browser cannot set WebSocket headers); the Clerk gate guards that path and /__bridge exposes only the port",
+        "the bridge's token is published but not enforced on browser connections (a browser cannot set WebSocket headers); the upgrade check (verifyClient: this machine's own pages by default) and, where CLERK_SECRET_KEY is set, the Clerk gate guard that path, and /__bridge exposes only the port",
+        "connectionPolicy.ts is pure and dependency-free; verifyClient is its one piece of glue, shared by the bridge and its socket test so the test exercises the code that runs; the policy is decided before the socket exists rather than in handleConnection",
+        "the bind is IPv4 on purpose: every local caller dials 127.0.0.1 by number, so Tilt's probe and ws.ts name 127.0.0.1 rather than localhost, which may resolve to ::1 first",
+        "setClerkToken is the single writer of ctx.clerkToken, so the token-subject rule cannot be honoured on two installing paths and missed on the third",
         "a live ws socket and node's mock timers cannot be mixed; tests compress the client's intervals instead",
         "the relay client is a peripheral, never a supervisor: relay health must never restart the bridge and absolutely never the worker, which would turn a relay blip into a reconcile, an interruptedAt stamp and an auto-continued turn",
-        "the payload is opaque - the relay routes on the header and never parses the message, so end-to-end encryption can later encrypt payload alone with no codec rewrite",
+        "the payload is opaque - the relay routes on the header and never parses the message, so end-to-end encryption can encrypt payload alone with no codec rewrite; the one exception is a guest's frame toward the bridge, parsed for its type so an auth refresh can be dropped — it reads nothing the relay could not already see, and an owner's frame is never looked at",
         "frames are forwarded synchronously inside the message handler; an await per frame would let two race and reorder a stream",
         "a dropped relay socket must synthesize close for every open channel, else ctx.sockets keeps dead links and broadcast serialises into them forever",
         "RelayChannel is a plain object, not an EventEmitter, so it cannot inherit the throw-on-unhandled-error hazard",
-        "the relay is NOT the auth edge: the attested userId is a routing hint, and owner authority on a relay channel comes from a static key the machine pinned itself at enrollment (see end-to-end-encryption). The Clerk token still is not re-verified on a relayed channel — that part stands, and it is authorization for storage sync rather than for driving the machine",
+        "the relay is NOT the auth edge: the attested userId is a routing hint, and owner authority on a relay channel comes from a static key the machine pinned itself at enrollment (see end-to-end-encryption). The Clerk token still is not re-verified on a relayed channel — that part stands, and it is authorization for storage sync rather than for driving the machine; whose token it is, though, is checked on every path (setClerkToken). A guest channel is encrypted too, against the machine key from the invite link, and reaches handleConnection only on a grant the bridge minted (see session-collaboration)",
         "relay/ shares no types with the app and the bridge does not import the relay package; frame shapes are duplicated in relayClient.ts on purpose",
         "reconnect uses exponential backoff with jitter, since a flat retry turns one relay restart into a synchronised stampede",
         "terminate() on supersede is deliberately aggressive rather than a graceful close-and-drain: a superseded bridge has no readers left, so draining it only leaves a noisy half-open socket around longer — the trade-off is a louder log during a genuine flap, which is a feature during triage",
@@ -2428,7 +2579,7 @@
         "only instance:'desktop' is preemptible, and only after cross-checking the pid against readRuntimeInfo('bridge', 'desktop') — the lock file's word alone must never be enough to SIGTERM a pid, since pids are reused",
         "armLockRelease (process.on('exit', releaseBridgeLock)) is registered only after a successful claim, so a refused start never touches the incumbent's lock file",
         "the supersede circuit breaker lives entirely in RelayClient, never in index.ts or the lock — it only slows its own retry and never restarts or blocks anything else",
-        "hello.local is a property of the link, not the app: true only for a socket that is both unrelayed and on loopback, since the bridge binds every interface and a LAN socket is as remote as the relay for anything that opens a window on the host's screen. Absent means not local, so it fails closed",
+        "hello.local is a property of the link, not the app: true only for a socket that is both unrelayed and on loopback, since the bridge can be opened to every interface on purpose (LINES_BRIDGE_HOST, for LAN testing) and then a LAN socket is as remote as the relay for anything that opens a window on the host's screen. Absent means not local, so it fails closed",
         "waitForAgent's timeout is deliberately not unref()'d — unlike WorkerClient.dispose()'s timers, it is cleared the instant a bridge attaches and is bounded at a few seconds, so unref()ing it would let an idle event loop drain before the deadline and the promise would never settle",
         "HubRegistry.sweep() also skips a hub with a browser parked in waitForAgent (hasPendingClients), so the 60s idle sweep cannot drop a hub out from under a waiter before its bridge attaches"
       ],
@@ -2461,7 +2612,9 @@
         "web/src/components/Transcript.tsx",
         "web/src/components/FilesView.tsx",
         "web/src/lib/language.ts",
-        "shared/types.ts"
+        "shared/types.ts",
+        "server/src/autoGuard.ts",
+        "server/src/contentSearch.ts"
       ],
       "symbols": [
         "handleFileRequest",
@@ -2479,7 +2632,15 @@
         "media",
         "writeFile",
         "saveFile",
-        "FileWriteResponse"
+        "FileWriteResponse",
+        "resolveWorkspacePath",
+        "realPathOf",
+        "isRealInside",
+        "soleTarget",
+        "grantedReal",
+        "readAttachment",
+        "sessionInReach",
+        "linkedDirs"
       ],
       "tests": [
         "server/src/fileRoutes.test.ts",
@@ -2495,7 +2656,10 @@
         "media serves only browser-renderable extensions (415 otherwise), clamps each request to 1MB, returns 413 over 200MB and 400 for an offset outside the file",
         "media is pulled one chunk at a time so live frames interleave on the shared socket and relay instead of queuing behind one large frame",
         "writeFile is owner-only, enforced in handleFileRequest and the handler: every file kind rides the readFiles cap, so a View or Full guest would otherwise write to the host's disk",
-        "writeFile rechecks the realpath against the granted roots (a symlink inside the project must not reach outside), writes only existing regular text files, and answers 413 over 2MB, 415 on a NUL byte, 400 without content",
+        "every read, write and media request is served from where its path really lands: inside a granted root both as written and once symlinks are followed, then read or written at that resolved real path (grantedReal), gated again there — a symlink inside the project must not reach outside, and a link that can't be followed is 403",
+        "writeFile writes only existing regular text files, and answers 413 over 2MB, 415 on a NUL byte, 400 without content",
+        "an attachment is served only to a connection that reaches its session (sessionInReach): a session-scope guest reads its own sessions' attachments and no others'; the session is read off where the file really is, so a link planted in the attachments directory, or from one session's folder into another's, is refused",
+        "grep never searches through a symlink that leaves its root (git lists a symlink by its own path, and its index can name a file under a directory since swapped for a link)",
         "writeFile with a stale expectedMtimeMs answers 409 with the current mtime and writes nothing; absent expectedMtimeMs writes unconditionally",
         "a save made during a running turn in the session cwd is attributed to the agent by the session diff"
       ],
@@ -2508,7 +2672,10 @@
         "media is its own FileRequestKind rather than a new body on file, so version skew is safe: an old bridge answers 400, shown as 'update the bridge'",
         "media blob URLs are revoked on unmount and the chunk loop stops after the in-flight request; SVG renders via <img>, never inline",
         "writeFile is its own FileRequestKind, so an old bridge answers 400, shown as 'restart or update it'",
-        "writeFile writes a sibling temp file, chmods it to the original's mode, then renames over the realpath target, so a failure never truncates the file and a symlink stays a symlink"
+        "writeFile writes a sibling temp file, chmods it to the original's mode, then renames over the realpath target, so a failure never truncates the file and a symlink stays a symlink",
+        "containment is one implementation: realPathOf/isRealInside are exported from server/src/autoGuard.ts and used by resolveWorkspacePath, the attachment route and grep, so the routes follow links exactly the way the auto-mode guard does (the route-local realInsideGrant is gone)",
+        "a route touches the resolved real path it checked (grantedReal), never the path as named, which would follow its links a second time after the check and let a link swapped in between redirect the access",
+        "grep pays for a realpath only on candidates that are a symlink or sit below a linked directory (isLink, linkedDirs memoized per directory), since it walks thousands of files"
       ],
       "relatedDecisions": [
         "hosted-machine-access",
@@ -2606,7 +2773,11 @@
         "mirrorRendererLog",
         "collectDiagnostics",
         "relayChangedAt",
-        "lastPower"
+        "lastPower",
+        "ensurePrivateAppRoot",
+        "installMediaPermissions",
+        "APP_PERMISSIONS",
+        "localModeCsp"
       ],
       "tests": [
         "server/src/updates.test.ts",
@@ -2620,6 +2791,11 @@
         "closing the window does not quit the app, and must not kill an in-flight turn",
         "an update installs only from ready and only on a signed build (CAN_SELF_INSTALL); a browser restart is refused while a session is active, the tray and notification restart warns first, and nothing restarts the app on its own",
         "in hosted mode (the default; local mode needs LINES_LOCAL_MODE=1) the shell serves no local UI - it registers this machine's device identity, spawns the bridge with the relay/storage/device env, and shows a pairing code window only if the machine has not been claimed yet",
+        "childEnv sets LINES_BRIDGE_DIRECT=0 in relay mode, so the bridge accepts no direct socket at all (the window reaches it through the relay, and a socket on the bridge's port drives the agent), and LINES_BRIDGE_DIRECT=1 in local mode, whose window is a loopback page that dials the bridge directly",
+        "~/.lines-app is 0700 and both log generations 0600: ensurePrivateAppRoot runs at every start before anything writes beneath it (best-effort), and appendLog creates the log 0600 in a 0700 directory — transcripts, the device secret, e2ee keys, MCP credentials and logs all live there",
+        "the window's permission handler is an allowlist on the app's own origin: the microphone (and only it) for media, APP_PERMISSIONS (notifications, clipboard-sanitized-write, fullscreen, openExternal) for the rest; a third-party page the window wanders onto gets nothing, where Electron's default grants everything",
+        "the local-mode UI server sends the hosted page's headers (nosniff, X-Frame-Options DENY, Referrer-Policy) and localModeCsp(): the hosted policy with this machine's loopback and the configured storage/relay origins added to connect-src, images only from the page's own origin, data:/blob: and Clerk's avatars",
+        "an upload is refused unless R2_RELEASE_PUBLIC_BASE_URL is an absolute https URL: the update feed derived from it is what the shipped app trusts, so it must not be rewritable on the wire",
         "a relay open alone is not proof of pairing - the relay accepts the socket before asking storage whether the device is claimed, so Connected lags the raw socket by RELAY_SETTLE_MS and a 1008 close reads as Not paired rather than an indefinite Connecting",
         "a pairing code never requires an app restart to refresh, on a timer or on demand",
         "device registration failing at boot is not fatal - RelayClient retries the relay forever, so a machine that registers late still comes up once storage is reachable again",
@@ -2680,7 +2856,9 @@
         "will-redirect is deliberately unhandled — every OAuth 302 leg arrives that way, and guarding it would mean enumerating hosts no allowlist can enumerate; will-frame-navigate is likewise not added since web/src has no iframes and it would double-handle the main frame",
         "the 'Back to Lines' pill is injected via insertCSS/executeJavaScript rather than an inline style or IPC, so a page's CSP cannot strip it and the window keeps its zero-privilege, no-preload contract",
         "the dock tile is shown iff a BrowserWindow exists, in hosted mode; local mode keeps a permanent tile as before",
-        "shell-owned state under ~/.lines-app is named for the shell, never for its content — desktop.json follows that rather than server/src/store.ts's content-named convention (device.json, projects.json)"
+        "shell-owned state under ~/.lines-app is named for the shell, never for its content — desktop.json follows that rather than server/src/store.ts's content-named convention (device.json, projects.json)",
+        "localModeCsp() copies deploy/docker/web-nginx.conf's policy by hand, adding only loopback and the configured remote origins to connect-src; nothing checks the two agree, so a change to one belongs in the other",
+        "ensurePrivateAppRoot() runs in start() before loadPrefs() and the first shellLog, the first write beneath APP_ROOT, so the directory is 0700 before anything lands in it"
       ],
       "relatedDecisions": [
         "hosted-machine-access",
@@ -2717,7 +2895,10 @@
         "web/src/components/recipe/RecipeRunModal.tsx",
         "web/src/components/recipe/RecipeImages.tsx",
         "web/src/lib/recipeImage.ts",
-        "web/src/components/workflow/WorkflowEditor.tsx"
+        "web/src/components/workflow/WorkflowEditor.tsx",
+        "web/src/components/workflow/UntrustedReview.tsx",
+        "server/src/sessions.ts",
+        "server/src/syncSignature.ts"
       ],
       "symbols": [
         "RecipeEngine",
@@ -2732,7 +2913,17 @@
         "recipeCommands.runRecipe",
         "putRecipeImage",
         "r2PublicBaseWarning",
-        "StorageSyncClient.incrementRecipeRuns"
+        "StorageSyncClient.incrementRecipeRuns",
+        "FOREIGN_RECIPE_MODES",
+        "confirmedExactly",
+        "SessionMeta.permissionCeiling",
+        "RecipeEngine.trustRecipe",
+        "RecipeEngine.addRecipeVersions",
+        "RecipeEngine.setSharedRecipes",
+        "RecipeEngine.applySyncedRecipes",
+        "RecipeEngine.resettleMarks",
+        "isServedRecipeImage",
+        "recipeReviewItem"
       ],
       "tests": [
         "server/src/recipes.version.test.ts",
@@ -2740,7 +2931,8 @@
         "server/src/recipes.sync.test.ts",
         "server/src/recipes.run.test.ts",
         "server/src/recipes.bundle.test.ts",
-        "server/src/recipes.composite.test.ts"
+        "server/src/recipes.composite.test.ts",
+        "storage/src/recipeImages.test.ts"
       ],
       "businessRules": [
         "a RecipeContent carries exactly one of prompt or members; a bundle's members must all be leaves and publishing a bundle requires every member already published",
@@ -2748,13 +2940,24 @@
         "run counts increment once per recipe at trigger time, only after the first prompt is successfully injected; a bundle and each of its expanded members count separately",
         "tags are freeform, server-normalized and deduped on every save, capped at 6, and may be empty; tag filtering is client-side over the wholesale shared pull",
         "a run always spawns a new session; a multi-recipe run cannot also specify an existing workflowId",
-        "R2 is optional - unconfigured R2 answers 503 on upload and the recipe still saves without a screenshot; a public base pointed at the S3 API endpoint instead of a public r2.dev/custom domain uploads successfully but never renders, which the storage server warns about at boot"
+        "R2 is optional - unconfigured R2 answers 503 on upload and the recipe still saves without a screenshot; a public base pointed at the S3 API endpoint instead of a public r2.dev/custom domain uploads successfully but never renders, which the storage server warns about at boot",
+        "a run containing someone else's recipe (a leaf, a bundle member or the bundle itself) uses only FOREIGN_RECIPE_MODES (plan, default; anything else becomes default), stops after every step, cannot run inside one of the user's workflows, and sets the session's permissionCeiling so an approved plan resumes in default rather than auto",
+        "the run modal shows every prompt that will run and requires a confirmation; the bridge refuses a foreign run unless runRecipe.confirmedPrompts equals its own expansion's prompts in run order, so a recipe changed after the user read it does not run",
+        "someone else's recipes carry no trust mark and are confirmed per run, never trusted once (trustRecipe refuses them); an own recipe this machine has not verified is refused, directly or as a bundle member, until reviewed — under LINES_E2EE_STRICT=0 an unsigned or forged one still runs",
+        "Duplicate carries the original's mark (a copy of a stranger's recipe arrives foreign, held back until reviewed); restoring an unverified version is disabled because a restore is re-signed by this machine",
+        "setSharedRecipes drops any row claiming the current user, and storage takes ownerId from the row owner on /recipes/shared and ownerId/id from the row on /recipes/:ownerId/:id/versions — a row claiming the reader would otherwise be re-published under their name and run without the foreign confirmation",
+        "addRecipeVersions adopts only the requested recipe's history, and an unverified own version never displaces a trusted copy of the same number with different content",
+        "a recipe image URL must be under this deployment's bucket (R2_PUBLIC_BASE_URL/recipes/, no '..'); PUT /recipes skips any version with an off-bucket image, and with no bucket configured no image URL is accepted",
+        "the /recipes/stats ETag is computed over the rows the caller can see (own stats and published recipes'), as its answer is"
       ],
       "architecturalRules": [
         "RecipeEngine is a standalone class, not folded into WorkflowEngine, since a recipe has no step/handoff/pin semantics",
-        "all bundle/tag invariants are enforced only inside RecipeEngine.saveRecipe - storage treats data as an opaque JSON blob",
+        "all bundle/tag invariants are enforced only inside RecipeEngine.saveRecipe - storage treats data as an opaque JSON blob apart from the image-URL check on PUT /recipes",
         "a multi-recipe run's synthesized workflow is saved, never ephemeral, because every WorkflowEngine lifecycle method re-resolves the def by id and silently no-ops if it is missing",
-        "RecipeEngine.expandForRun is the only place bundle expansion happens; the client always sends refs, never a pre-flattened list"
+        "RecipeEngine.expandForRun is the only place bundle expansion happens; the client always sends refs, never a pre-flattened list",
+        "an off-bucket version is skipped, not rewritten (the blob carries its author's signature, and an edited copy would stop verifying for everyone) and not a 400 (a whole history is pushed at once)",
+        "the foreign- and unverified-recipe rules are decided in recipeCommands.runRecipe, never trusted from the modal; confirmedPrompts is compared with the bridge's expansion, never used in its place",
+        "the run cooldown is stamped only after every refusal, so a corrected retry is not swallowed as a double-click"
       ],
       "relatedDecisions": [
         "workflow-step-versioning",
@@ -2781,11 +2984,28 @@
         "deploy/docker/env.example",
         ".github/workflows/deploy.yml",
         "deploy/scripts/deploy-lines.sh",
-        "deploy/scripts/check-migration-safety.sh"
+        "deploy/scripts/check-migration-safety.sh",
+        "web/public/splash-guard.js",
+        "web/index.html",
+        "storage/src/index.ts",
+        "storage/src/r2.ts",
+        "storage/src/stepRows.ts",
+        "storage/prisma/migrations/20261006000000_row_level_security/migration.sql",
+        "storage/prisma/migrations/20261006010000_mcp_env_names_only/migration.sql",
+        "storage/prisma/migrations/20261006020000_share_grant_ids/migration.sql"
       ],
-      "symbols": [],
+      "symbols": [
+        "isServedRecipeImage",
+        "resolveWhere",
+        "resolveStepVersions",
+        "RESOLVE_MAX_REFS"
+      ],
       "tests": [
-        "server/src/oss-safety.test.ts"
+        "server/src/oss-safety.test.ts",
+        "storage/src/rls.test.ts",
+        "storage/src/recipeImages.test.ts",
+        "storage/src/steps.resolve.test.ts",
+        "storage/src/schema.credentials.test.ts"
       ],
       "businessRules": [
         "the web build stage also bakes VITE_DESKTOP_DOWNLOAD_URL; unlike the other three VITE_* args it may legitimately be empty (no desktop release yet), so its build-time assertion only fires when the value is set",
@@ -2800,17 +3020,29 @@
         "Monaco's four editor surfaces are React.lazy-loaded rather than statically imported from the entry chunk, so their chunks are never named in index.html and carry no SRI hash — same-origin script-src is what still gates them; deliberate, since bundling Monaco into the entry chunk delayed first paint on every screen, including ones with no editor on them",
         "the production database is hosted Supabase; any standalone Postgres is a drop-in alternative with DATABASE_URL and DIRECT_URL set to the same string and no pgbouncer param, including the optional bundled postgres service under the db compose profile",
         "web and landing answer /download with a 302 to the runtime DESKTOP_DOWNLOAD_URL (compose passes VITE_DESKTOP_DOWNLOAD_URL, defaulting to /), so download clicks are counted from the access log",
-        "neither origin serves analytics JS or third-party embeds; growth metrics are the nginx access log (?ref= tags, /download 302s) plus read-only SQL"
+        "neither origin serves analytics JS or third-party embeds; growth metrics are the nginx access log (?ref= tags, /download 302s) plus read-only SQL",
+        "the CSP enforces (Content-Security-Policy, no longer Report-Only): rendered agent markdown could otherwise exfiltrate through an image URL, so img-src allows only 'self', data:, blob:, img.clerk.com and ${CSP_IMG_SRC} (the recipe bucket, from R2_PUBLIC_BASE_URL via compose); trial a policy change as Content-Security-Policy-Report-Only first",
+        "R2_PUBLIC_BASE_URL must be a bare origin (no path) for the CSP, since a CSP source with a path matches only that path; storage refuses to store a recipe image anywhere but under it, so the policy and the data agree",
+        "script-src and frame-src include https://challenges.cloudflare.com (Clerk's sign-up captcha); media-src is 'self' blob:; frame-src also allows blob: for the PDF preview; Clerk telemetry is off since connect-src does not allow its collector",
+        "a pk_live Clerk instance loads clerk-js from clerk.<its domain>, which neither Clerk wildcard matches: add that host to script-src and CSP_CONNECT_SRC before switching, or sign-in stops loading",
+        "no 'unsafe-inline' for scripts, so index.html's pre-paint splash guard is web/public/splash-guard.js, reading the per-build Clerk key from a data-clerk attribute",
+        "every response carries HSTS (max-age=31536000; includeSubDomains, no preload), a Permissions-Policy granting only microphone=(self), and no nginx version (server_tokens off); storage disables Express's x-powered-by",
+        "every table has row level security enabled with no policies and never FORCEd (20261006000000_row_level_security): Supabase's anon/authenticated roles (which hold no grants on these tables today) see nothing, while storage, connecting as the owning role, is unaffected; a DATABASE_URL naming another role needs BYPASSRLS, and a new table enables RLS in the migration that creates it",
+        "PUT /recipes skips (never rewrites, never 400s) any version whose images are not under ${R2_PUBLIC_BASE_URL}/recipes/ (isServedRecipeImage) and reports how many it skipped; /recipes/stats's ETag covers only the rows the caller can see; /steps/resolve answers the caller's own versions and anyone's published ones, leaving out what they may not see exactly as a missing row, with refs type-checked and ownerId taken from the row",
+        "this release's migrations (row_level_security, mcp_env_names_only, share_grant_ids) run in the pipeline's migrate step before up -d; the env scrub is an UPDATE that discards stored values, which check-migration-safety.sh does not look for, so it passes the gate and cannot be rolled back",
+        "this project's Supabase migration history has gone missing before, so run prisma db pull --print (and migrate status) before migrate deploy — including before pushing a migration, since the pipeline runs migrate itself — and migrate resolve --applied any already-live migration first",
+        "deploy order for this release: storage with its migrations, then relay and web, then the desktop release — the released bridge sends its device secret only in a header the relay must already read, and guests reach a host only once its desktop bridge speaks protocol 6"
       ],
       "architecturalRules": [
         "npm ci is scoped by --workspace rather than --omit=optional, since --omit=optional also drops @rollup/rollup-linux-x64-gnu (an optional dependency on the same platform-binary mechanism as the Claude SDK's native binary) and breaks vite build",
         "the relay's Traefik router carries no StripPrefix middleware - relay/src/index.ts matches url.pathname exactly, so a rewritten path closes the socket with 1008",
-        "storage's public router excludes /v1/devices/verify by rule, on top of that route's own shared-secret gate - defense in depth: a network-level exclusion and an application-level check, either could fail without the other",
+        "storage's public router excludes /v1/devices/verify, /presence and /authorize by rule, on top of each route's own shared-secret gate - defense in depth: a network-level exclusion and an application-level check, either could fail without the other",
         "the deps layer's inputs are normalized by deploy/docker/normalize-manifests.mjs in a manifests stage: every version becomes 0.0.0 (manifests plus the lockfile's top level, root and workspace entries, by exact key), and scripts and desktop's build block are dropped, so version bumps and script edits no longer invalidate deps or force a new ~230 MB layer onto the registry and VPS; safe because npm ci runs --ignore-scripts and every @lines/* spec is \"*\" (the script exits 1 otherwise); any stage that runs a workspace script or reads its version must COPY that workspace first",
         "the build job's services leg builds relay and storage together so both images share one deps blob; in separate jobs each would rerun npm ci on a deps miss and the VPS would pull two ~230 MB layers",
         "the storage image installs openssl explicitly - node:22-slim ships without libssl and Prisma's query engine otherwise falls back to a guessed build and warns at every boot",
         "the four VITE_* build args exist in two places kept in sync by hand: GitHub Actions secrets (CI image build) and lines.env on the VPS (manual build only) — nothing checks the two agree",
-        "nginx's envsubst filter is ^(CSP_CONNECT_SRC|DESKTOP_DOWNLOAD_URL)$, and the image defaults DESKTOP_DOWNLOAD_URL to / because an unsubstituted ${DESKTOP_DOWNLOAD_URL} is an unknown nginx variable that fails the config at start",
+        "nginx's envsubst filter is ^(CSP_CONNECT_SRC|CSP_IMG_SRC|DESKTOP_DOWNLOAD_URL)$, and the image defaults DESKTOP_DOWNLOAD_URL to / and CSP_IMG_SRC to empty, because an unsubstituted ${...} is an unknown nginx variable that fails the config at start",
+        "every nginx location that sets its own add_header (/assets/, /index.html, /sw.js) repeats the whole security header set, since add_header is inherited only by a block that declares none; a header added at server level goes into each of those blocks too",
         "the optional postgres service publishes no port and sits only on the internal lines-db network shared with storage and migrate; their depends_on is required: false so Supabase deployments start without it, and POSTGRES_PASSWORD is not ${...:?} because compose interpolates profiled services too"
       ],
       "relatedDecisions": [
@@ -2823,7 +3055,7 @@
       "id": "session-collaboration",
       "name": "Session collaboration",
       "doc": "features/session-collaboration.md",
-      "purpose": "Invite another signed-in user into one session, or onto a whole machine, so they can prompt the same running agent, with live presence and attribution, without ever getting a copy of the host's data. Inverts the app's single-owner assumption: access becomes a capability set enforced by a compiler-checked default-deny table instead of a boolean owner check.",
+      "purpose": "Invite another signed-in user into one session, or onto a whole machine, so they can prompt the same running agent, with live presence and attribution, without ever getting a copy of the host's data. Inverts the app's single-owner assumption: access becomes a capability set enforced by a compiler-checked default-deny table instead of a boolean owner check. The host's machine admits each guest itself, on a grant it minted and handed over in the invite link, over a channel encrypted end to end; the relay can narrow that grant but never widen it.",
       "entryPoints": [
         "web/src/components/SessionView.tsx",
         "web/src/components/ShareModal.tsx",
@@ -2866,7 +3098,13 @@
         "web/src/components/PermissionPrompt.tsx",
         "web/src/components/CollaboratorsSection.tsx",
         "web/src/components/DevicesSection.tsx",
-        "web/src/ws.ts"
+        "web/src/ws.ts",
+        "server/src/guestGrants.ts",
+        "server/src/e2eeChannel.ts",
+        "server/src/sync.ts",
+        "web/src/lib/e2ee.ts",
+        "web/src/lib/plaintextFrames.ts",
+        "storage/prisma/migrations/20261006020000_share_grant_ids/migration.sql"
       ],
       "symbols": [
         "ShareCaps",
@@ -2891,7 +3129,35 @@
         "editQueued",
         "guestLibrary",
         "clampPermissionMode",
-        "prepareInlineWorkflow"
+        "prepareInlineWorkflow",
+        "GuestGrantRecord",
+        "mintGuestGrant",
+        "redeemGuestGrant",
+        "updateGuestGrants",
+        "revokeGuestGrants",
+        "reconcileGuestGrants",
+        "combineGrants",
+        "guestAccessFor",
+        "GRANT_CLAIM_TTL_MS",
+        "GRANT_RECONCILE_GRACE_MS",
+        "GRANT_RECONCILE_MS",
+        "GUEST_GRANTS_FILE",
+        "admitGuest",
+        "closeGuestSockets",
+        "StorageSyncClient.liveGrantIds",
+        "takeJoinGrantFromUrl",
+        "pendingJoinGrantDevice",
+        "adoptJoinGrant",
+        "guestGrantTokens",
+        "joinUrlWithGrant",
+        "rememberInviteGrant",
+        "takeInviteGrant",
+        "permissionAnswerFor",
+        "guestCwdAllowed",
+        "useIsGuestOnSession",
+        "reauthorizeGuests",
+        "ClientAuthorization",
+        "COLLAB_MIN_PROTOCOL"
       ],
       "tests": [
         "storage/src/shares.test.ts",
@@ -2905,33 +3171,56 @@
         "server/src/presence.test.ts",
         "server/src/attribution.test.ts",
         "server/src/attribution.identity.test.ts",
-        "server/src/sessions.queue.test.ts"
+        "server/src/sessions.queue.test.ts",
+        "server/src/guestGrants.test.ts",
+        "server/src/sync.grants.test.ts",
+        "server/src/e2eeChannel.test.ts",
+        "server/src/fileRoutes.test.ts",
+        "relay/src/mux.test.ts",
+        "relay/src/redaction.test.ts",
+        "server/src/plaintextFrames.test.ts"
       ],
       "businessRules": [
         "four presets (view, prompt, collaborator, full); only full grants setPermissionMode, manageSessions (archive/unarchive/complete) and deleteSessions; without setPermissionMode a guest's requested session and workflow-step permission modes are clamped to the host's new-session default",
-        "a machine-scope guest with createSessions sees the host's workflow library read-only; other guests see only the workflows their visible sessions use; a guest with manageWorkflow runs their own workflow by sending it inline with createSession (self-contained, validated, stored as a session snapshot, never added to the host's library)",
-        "never grantable at any preset: settings, guard allowlist, project/worktree management, login/logout, device unpair, workflow/step/recipe authoring, installUpdate, pickFolder",
+        "a machine-scope guest with createSessions sees the host's workflow library read-only; other guests see only the workflows their visible sessions use; a guest with manageWorkflow runs their own workflow by sending it inline with createSession (self-contained, validated, stored as a session snapshot, never added to the host's library); its refs resolve to their exact pinned versions only, the guest's browser refuses to send it while their own machine holds any of it back unverified, and the host refuses a definition still carrying an untrusted mark",
+        "never grantable at any preset: settings, guard allowlist, project/worktree management, login/logout, device unpair, workflow/step/recipe authoring, installUpdate, pickFolder, minting/moving/revoking guest grants, trusting synced content or a signing machine",
         "a machine-scope grant covers every session on the machine and outranks a session share on the same machine",
         "several session shares on one machine intersect to the narrowest capability set, never the union",
         "revoking a share, or unpairing/deleting the device, tombstones every grant on that device in one transaction",
         "DELETE /v1/shares/:kind/:id is otherwise always owner-scoped (a grantee can revoke nothing) with one exception: kind === 'self' lets a guest tombstone their own grants on a machine (deviceId in the URL, grantee taken from the caller's own auth, never a parameter) via revokeGrantsForGrantee, which is userId-scoped in every where clause so it can never widen past the caller's own access; it never touches the Device row or another guest's grant, 404s when nothing matched, and is reached from Settings → Machines' Leave action (DevicesSection) via web/src/lib/shares.ts's leaveShare",
-        "a guest never gets a UserContext of their own and never sets clerkToken or triggers syncNow",
-        "a guest's file access is clamped to the cwds of their granted sessions; the ~/.claude/plans auto-approve exception is owner-only",
+        "a guest never gets a UserContext of their own and never sets clerkToken or triggers syncNow; nor does their Clerk token reach the host's machine at all (the relay strips it from open, keeps none for a re-push and drops a guest's auth refresh; a guest link relays none)",
+        "a guest's file access is clamped to the cwds of their granted sessions; the ~/.claude/plans auto-approve exception is owner-only; an attachment is served only for a session in the grant's reach, judged from where the file really lands",
         "the relay's bridge-too-old check for a guest (guestNeedsNewerBridge) applies only while a bridge is attached, so a sleeping host reads as offline, not as a revoked grant",
         "a guest channel is dropped, not replayed, when its device's bridge re-attaches, since the new bridge's protocol is unknown until its hello arrives; the guest's browser reconnects and re-runs the /client gate",
-        "revocation of a live guest channel has a bound, up to GUEST_REAUTH_MS (60s)",
+        "revoking from the share modal ends the grant on the machine at once (revokeGuestGrant) and closes the guest's sockets there; failing that, the relay's sweep closes a live guest channel within GUEST_REAUTH_MS (60s) of storage's no, and the machine's reconciliation drops the grant within GRANT_RECONCILE_MS (60s) of being online with its owner's token",
         "a promptNeedsApproval guest's prompt lands queuePaused on the owner's existing queue, no new state machine",
         "presence and attribution identity always come from the connection's attested identity, never a client-supplied field",
         "a historical row or the owner's own prompt with no recorded actor is attributed to the session's host",
         "the collaborator address book (ShareContact) is decoupled from grant state on purpose — revoking a share or letting an invite expire never removes the remembered address; removing a contact is a hard delete, not a tombstone, and only clears the suggestion, never a grant",
         "a queued prompt may be edited in place by its author or the machine owner (prompt cap, not interrupt); editing never clears queuePaused, and an edit by someone other than the author is recorded (editedAt/editedBy) but still flushes attributed to the author",
-        "switchProvider sits at MESSAGE_AUTHZ cap 'interrupt' (the most destructive cap the table has), and also requires the setModel cap and refuses an actor with promptNeedsApproval -- both checked inside SessionManager.switchProvider itself, since one MESSAGE_AUTHZ row can only express one cap"
+        "switchProvider sits at MESSAGE_AUTHZ cap 'interrupt' (the most destructive cap the table has), and also requires the setModel cap and refuses an actor with promptNeedsApproval -- both checked inside SessionManager.switchProvider itself, since one MESSAGE_AUTHZ row can only express one cap",
+        "a guest is admitted only on a grant the host's own bridge minted (server/src/guestGrants.ts), presented as the first sealed frame {type:'guestGrant', tokens} of a channel encrypted against the machine key from the invite link; the relay's attestation only narrows it (guestAccessFor: a capability needs both sides, promptNeedsApproval holds if either asks, session scope on either side means the sessions both name and never createSessions, nothing left is 1008)",
+        "the grant token is 256 random bits, stored on the machine only as a sha256 hash (~/.lines-app/guest-grants.json, 0600), answered to the owner's socket alone (guestGrantMinted), and travels only in the invite link's fragment (#grant=…&key=…&device=…) and inside the encrypted channel; storage keeps only the grant id",
+        "an unredeemed grant expires with its invite (GRANT_CLAIM_TTL_MS, 7 days); the first account to redeem binds it, so a forwarded link stops there; a redeemed grant lasts until revoked",
+        "several grants for one guest on one machine combine to the widest (combineGrants; promptNeedsApproval only if every grant asks) and are then intersected with the relay's attestation, which storage computes as the narrowest, so a guest never gets more than storage currently allows",
+        "creating an invite needs the machine online, relaying and opened through the owner's account (the 'local' context cannot mint): ShareModal mints first, then createInvite with grantId, and revokes the grant if the invite fails; preset changes and revokes go to the machine too (updateGuestGrant/revokeGuestGrant, closing the sockets admitted on them), with a warning when its link is down",
+        "adoptJoinGrant binds a stashed grant only to the machine the link named and for that invite's code, never over a different key already pinned for that machine; tokens are kept per device, several each; JoinPage adopts after the claim, or after a failed claim when the device list already shows the machine as shared with them",
+        "a relaying bridge reconciles its grants every GRANT_RECONCILE_MS (60s) against the grant ids storage lists for the device (GET /v1/shares, grantTracking: true); it only removes, treats an error or a server without grantTracking as 'cannot say', and spares grants younger than GRANT_RECONCILE_GRACE_MS (10 min)",
+        "a guest starts sessions only inside one of the host's open project roots (guestCwdAllowed, symlinks resolved on both sides) and never in a new work tree; a guest's permission answer drops alwaysAllow and allowAsRead (permissionAnswerFor), and the card hides both buttons",
+        "the relay gate refuses a guest on storage's no and on no answer ('unreachable', logged storage-unreachable); the sweep closes a channel only on an answer, and runs one sweep at a time",
+        "COLLAB_MIN_PROTOCOL is 6: a bridge older than that admits guests on the relay's word, so the relay puts no guest through to it; a share made before host-issued grants has no token and is refused by a protocol-6 bridge until the owner sends a new invite link"
       ],
       "architecturalRules": [
         "MESSAGE_AUTHZ is an exhaustive Record keyed on ClientMessage['type'] so an unclassified message is a compile error, not a review gap",
         "SocketAccess lives on the sockets Map's value, never on BrowserLink, which stays a minimal structural contract",
         "the relay's owner fast path never touches storage",
-        "the relay holds no database credentials and forwards an opaque grant it never inspects",
+        "the relay holds no database credentials and forwards the attested grant without interpreting capabilities (the sweep only compares it with storage's fresh answer); the only app message it parses is a guest's frame type, to drop a token refresh",
+        "admission is the host bridge's: a guest channel reaches handleConnection only through the channel gate's admitGuest, and handleConnection checks the grants again (none, or grants for a different host than the relay names, is 1008); the relay's attestation stays in the path only to narrow",
+        "grants live in ~/.lines-app/guest-grants.json as token hashes behind an injectable GuestGrantStore, so the policy is tested from a temp directory",
+        "storage keeps grant ids, never tokens, and nothing it says can create or widen a grant; liveGrantIds reads GET /v1/shares unsigned and soft-failing, since an answer can only drop grants",
+        "guestGrantMinted is handled point to point in ws.ts, like fileResponse, and never reaches the store",
+        "a guest channel's refusal text avoids the phrase 'end-to-end encrypted channel', which arms the client's owner-enrollment gate; a guest needs the link, not an enrollment",
+        "SecureChannel handles inbound frames one at a time so a later frame cannot overtake the grant; one handshake per channel and no enrollment on a guest channel, since a guest channel accepts any client key",
         "parseShareCaps denies by default on anything not an explicit true",
         "presence is bridge-local and ephemeral, never rides SessionMeta, needs no relay or storage support",
         "resolvedActor sits alongside resolvedBy, never folded into it",
@@ -2946,7 +3235,8 @@
         "cloud-sync-sessions",
         "session-rewind",
         "turn-interjection",
-        "cross-provider-model-switching"
+        "cross-provider-model-switching",
+        "end-to-end-encryption"
       ]
     },
     {
@@ -3472,7 +3762,7 @@
       "id": "mcp-connections",
       "name": "MCP connections",
       "doc": "features/mcp-connections.md",
-      "purpose": "Add a third-party MCP server from Settings, see its live per-session connection status, and authorize it via OAuth without needing a running turn — synced across machines like the guard allowlist, with header/credential values that never leave the machine that holds them.",
+      "purpose": "Add a third-party MCP server from Settings, see its live per-session connection status, and authorize it via OAuth without needing a running turn — synced across machines like the guard allowlist, with credential values (HTTP header values, stdio env values) that never leave the machine that holds them: only their names travel.",
       "entryPoints": [
         "Settings modal → Connections pane",
         "web/src/components/McpConnectionsReviewModal.tsx",
@@ -3503,10 +3793,22 @@
         "web/src/components/McpConnectionsReviewModal.tsx",
         "web/src/components/SettingsModal.tsx",
         "web/src/components/PermissionPrompt.tsx",
-        "web/src/lib/transcript.ts"
+        "web/src/lib/transcript.ts",
+        "storage/prisma/migrations/20261006010000_mcp_env_names_only/migration.sql"
       ],
       "symbols": [
         "McpConnection",
+        "McpConnection.envKeys",
+        "McpConnection.envValuesHeld",
+        "isMcpEnvName",
+        "withoutMcpValues",
+        "servedMcpConnections",
+        "mcpEnvKeys",
+        "loadMcpEnv",
+        "saveMcpEnv",
+        "secureMcpFiles",
+        "scrubbedSyncState",
+        "EnvEditor",
         "normalizeConnection",
         "sameConnection",
         "describeConnection",
@@ -3543,10 +3845,18 @@
         "server/src/broadcastScope.test.ts",
         "server/src/sync.availability.test.ts",
         "server/src/sessions.mcpLive.test.ts",
-        "server/src/sessions.backgroundTasks.test.ts"
+        "server/src/sessions.backgroundTasks.test.ts",
+        "server/src/sync.credentials.test.ts",
+        "storage/src/schema.credentials.test.ts"
       ],
       "businessRules": [
-        "header/credential values never sync and never reach a browser; only headerKeys (names) travel on the wire, values stay in the local mcp-secrets.json (0600)",
+        "header and stdio env values never sync and never reach a browser; only headerKeys/envKeys (names) travel on the wire, values stay in the local mcp-secrets.json and mcp-env.json (0600); a synced connection arrives without them until entered on that machine",
+        "env values are write-only in the UI like header values: a saved one shows as an empty box that says it is saved, an empty box on save keeps the stored value, removing a variable drops its value, and a name normalizeConnection would skip is refused in the form (isMcpEnvName) rather than lost",
+        "envValuesHeld (which envKeys this machine holds a value for) is set only on what the bridge sends its own browsers, never in the synced blob, and never taken from a client or a remote row",
+        "accepting a remote list never takes a credential value from it, and a values-only difference is not a divergence (sameConnection compares env names)",
+        "storage keeps names only: PUT /mcp-connections drops header and env values whatever a bridge sends (answered as usual, not 400, so an older bridge keeps syncing) and GET serves a values-free copy of any row still holding them",
+        "every MCP file (connections, sync, secrets, env) is written 0600 and tightened to 0600 at startup",
+        "scrubbing storage is not un-leaking: an API key synced in a stdio connection's env before names-only sync should be rotated",
         "the Lines in-process server always wins a name collision in the worker's mcpServers merge; a connection named 'lines' is refused at validation (reserved-name)",
         "a remote connection list is never applied automatically; a divergence is always shown as an explicit added/removed diff",
         "divergence detection is a set difference over full connection content (ids included), never an updatedAt comparison",
@@ -3569,7 +3879,10 @@
         "MCP_AUTH_METHODS/mcpAuthSupport/McpAuthApi are defined once in workerProtocol.ts (the worker's one importable local module) and re-exported by mcpAuth.ts, so the canary test and the call site cannot disagree",
         "Query.mcpAuthenticate/mcpSubmitOAuthCallbackUrl exist in the SDK's runtime bundle but not in sdk.d.ts; every call goes through mcpAuthSupport(q), and mcpAuth.contract.test.ts fails in both directions on an SDK upgrade (methods gone from the runtime, or methods appearing in the typings)",
         "adding a params field to the ask BridgeToWorker message, and adding new AskMethod values, are not protocol bumps — an older worker that doesn't read/implement them falls through to its default case",
-        "McpConnections is a structural copy of GuardAllowlist (server/src/autoGuard.ts): same file split, same review lifecycle, same onChange/onReview wiring",
+        "McpConnections is a structural copy of GuardAllowlist (server/src/autoGuard.ts): same file split plus two local-only credential files (mcp-secrets.json for header values, mcp-env.json for stdio env values — its own file because an older build reads the secrets file's shape directly), same review lifecycle, same onChange/onReview wiring",
+        "names-only is enforced at the validator: normalizeConnection reduces any env map to envKeys, so every shape built from canonical rows is value-free by construction; blob() is built from those rows, never from list(), so one machine's envValuesHeld cannot reach another",
+        "withoutMcpValues runs on both sides of the storage boundary: outbound before req signs, so the signature verifies after storage's own filtering; inbound after verification, so a legacy row hands this machine names only; a row the migration scrubbed fails verification and is replaced by the bridge's own names-only push",
+        "the load migration moves inline env values into mcp-env.json before rewriting the connections file without them, and skips that rewrite if the move did not land, so a failed write costs a retry, never the key",
         "findPermissionRequest's request-vs-resolution predicate is toolName || elicitation, not toolName alone, since an elicitation request legitimately carries no tool name",
         "the OAuth callback route is added to the bridge's existing bare http.createServer via a path-prefix check, not a new server or port, since the redirect URI has to be a fixed, publishable value"
       ],
@@ -3794,7 +4107,7 @@
       "id": "end-to-end-encryption",
       "name": "End-to-end encryption",
       "doc": "features/end-to-end-encryption.md",
-      "purpose": "Make the hosted server untrusted: a browser and a machine agree on keys out of band and authenticate each other directly, so the relay carries ciphertext it can neither read nor forge, and storage holds blobs it cannot author. On by default: every relayed owner channel must authenticate from a machine's first launch, and sync refuses unsigned blobs.",
+      "purpose": "Make the hosted server untrusted: a browser and a machine agree on keys out of band and authenticate each other directly, so the relay carries ciphertext it can neither read nor forge, and storage holds blobs it cannot author. On by default: every relayed channel must authenticate from a machine's first launch — an owner's against a pinned key, a guest's against the key in their invite link plus a grant the machine minted — and sync refuses unsigned blobs or holds unsigned items back for review.",
       "covers": [],
       "entryPoints": [
         "web/src/components/EncryptionSection.tsx",
@@ -3804,13 +4117,22 @@
       ],
       "files": [
         "shared/e2ee.ts",
+        "shared/types.ts",
         "server/src/e2eeIdentity.ts",
         "server/src/e2eeChannel.ts",
+        "server/src/guestGrants.ts",
         "server/src/syncSignature.ts",
         "server/src/sync.ts",
+        "server/src/workflowCommands.ts",
+        "server/src/workflows.ts",
+        "server/src/recipes.ts",
+        "server/src/recipeCommands.ts",
         "server/src/index.ts",
         "web/src/lib/e2ee.ts",
+        "web/src/lib/plaintextFrames.ts",
         "web/src/ws.ts",
+        "web/src/components/SyncSection.tsx",
+        "web/src/components/workflow/UntrustedReview.tsx",
         "storage/src/index.ts",
         "desktop/src/main.ts"
       ],
@@ -3835,12 +4157,42 @@
         "takeEnrollCodeFromUrl",
         "dropEnrollParamFromUrl",
         "appUrlForOwnWindow",
-        "pinnedKey"
+        "pinnedKey",
+        "ChannelPolicy.redeemGuest",
+        "SecureChannel.admitGuest",
+        "redeemGuestGrant",
+        "MachineLink.pinned",
+        "plaintextFrameAllowed",
+        "adoptJoinGrant",
+        "guestGrantTokens",
+        "signItems",
+        "verifyItem",
+        "reserveCounters",
+        "UntrustedMark",
+        "UntrustedReason",
+        "settledHold",
+        "holdsBack",
+        "markAfterSave",
+        "runnableDigest",
+        "ItemTrust",
+        "syncKeyFingerprint",
+        "ownSigningKey",
+        "SyncSigningInfo",
+        "StorageSyncClient.checkItems",
+        "StorageSyncClient.signForPush",
+        "trustSyncedItem",
+        "trustSigner",
+        "untrustSigner",
+        "syncSigningInfo",
+        "UntrustedReviewModal"
       ],
       "tests": [
         "server/src/e2ee.test.ts",
         "server/src/e2eeChannel.test.ts",
+        "server/src/plaintextFrames.test.ts",
         "server/src/syncSignature.test.ts",
+        "server/src/sync.items.test.ts",
+        "server/src/workflows.trust.test.ts",
         "server/src/relayEndToEnd.test.ts",
         "server/src/sync.availability.test.ts"
       ],
@@ -3852,9 +4204,17 @@
         "the browser's private key is non-extractable in IndexedDB — a later XSS can use it but cannot carry it away",
         "no key material is ever uploaded, and the storage schema must not gain a public-key column: a key the server can rewrite is a key an attacker with the database can rewrite",
         "revocation works from the tray and the CLI with no browser, because key pinning plus a lost device would otherwise be unrecoverable",
-        "signed sync covers /settings, /guard-allowlist and /mcp-connections — the resources whose envelope storage keeps intact; maps merged in SQL and arrays cannot carry one without a per-row column",
-        "sync is strict by default: unsigned, forged, signer-changed and rolled-back blobs are all refused, and LINES_E2EE_STRICT=0 (recovery only) accepts unsigned ones with a warning; a refusal is re-pushed signed on the same sync pass",
-        "machine signing keys are trust-on-first-use then pinned; a changed signer is refused and surfaced, as SSH treats a changed host key",
+        "a relayed guest channel is end-to-end encrypted against the machine key its invite link carries and admitted only on a grant this machine minted, presented as the first sealed frame ({type:'guestGrant', tokens}) — never on the relay's word, which now only picks which check applies; a guest channel can never enrol a device",
+        "a guest gets the grant this machine issued, narrowed by the relay's attestation — the relay can take access away, never give it; a guest client older than APP_PROTOCOL_VERSION 6 sends plaintext and is refused, and the relay does not put a guest through to a bridge older than 6",
+        "signed sync covers the blobs /settings, /guard-allowlist and /mcp-connections, and every workflow, step and recipe per item (each row keeps its own JSON whole in a data column); /memory, /project-keys and sessions carry no signature yet",
+        "blob sync is strict by default: unsigned, forged, signer-changed and rolled-back blobs are all refused, and LINES_E2EE_STRICT=0 (recovery only) accepts unsigned ones with a warning; a refusal is re-pushed signed on the same sync pass",
+        "blob signing keys are trust-on-first-use then pinned; a changed signer is refused and surfaced, as SSH treats a changed host key",
+        "a workflow, step or recipe this machine did not sign is kept and shown, never dropped, and held back from running until reviewed (UntrustedMark: unsigned, forged, unknown-signer, foreign); under LINES_E2EE_STRICT=0 unsigned and forged items still run but keep their mark, so this machine never re-signs them as its own",
+        "items get no trust-on-first-use: only this machine's own key is trusted, and another machine only by an explicit trustSigner after the user compares its 64-bit SHA-256 fingerprint (xxxx-xxxx-xxxx-xxxx, rendered as an enrolled browser's) with the one that machine shows in Settings → Sync; a fingerprint that is not the key's is refused, and revoking holds back again what only that machine vouched for",
+        "approving a held-back item (trustSyncedItem) approves its reviewed digest only — not the machine that signed it, not a later change, not another copy of the same version; a stale digest is refused, and revoking a machine leaves item approvals standing",
+        "neither an edit nor a copy clears a mark: an edited held-back item stays held back and a copy carries its original's mark; an edit made here to a trusted machine's item becomes this machine's own",
+        "a mark is this bridge's verdict: never pushed, stripped from every pulled row, only ever added by a client message (a copy), and re-decided by settledHold on every load and pull so a decision made under LINES_E2EE_STRICT=0 or before a revoke cannot outlive it",
+        "this machine's sync-signing fingerprint and the account's trusted machines are owner-only (hello.syncSigning, the syncSigning broadcast); a guest's view has neither",
         "an enrollment code handed to a page travels in the URL fragment, never a query string, and is consumed and stripped on read — a query string reaches the server, which is the party the code exists to exclude; the query form is still accepted on read only because an older desktop build's QR emitted it",
         "a machine's own desktop window is handed a live code (appUrlForOwnWindow) rather than asked to type one: the shell and the bridge are already the same trust domain, so hand-enrolling the machine against itself was a step with no security value",
         "the connect-time EnrollGate states the exchange as numbered steps, because step one happens on a different device from the one the user is looking at, and it is not a dead end — it also lists the account's other machines and offers pairing a new one"
@@ -3865,7 +4225,16 @@
         "the construction follows Noise IK's shape, written longhand so it is auditable in one file — do not invent a variant; follow Noise IK precisely or get the change externally reviewed",
         "the crypto layer wraps a byte channel, not a WebSocket, so a WebRTC DataChannel can be slotted underneath with no protocol change",
         "guardRelayChannel sits between RelayClient and handleConnection: the bridge's message switch must not grow a crypto branch",
-        "a guest channel is handed over in the constructor while an owner channel only after the handshake — the bridge speaks first, so deferring a guest's handover until its first frame deadlocks every relayed guest connection",
+        "no relay channel is handed over in the constructor: an owner's after its handshake against a pinned key, a guest's after its sealed grant redeems; the deadlock that once forced a plaintext guest's handover there (the bridge speaks first) is gone because a guest's browser now opens with e2eeHello against the invite link's key",
+        "one handshake per channel and no enrolment once one has begun — a guest channel takes any client key, so a second e2eeHello would let the relay swap itself in as the admitted guest",
+        "SecureChannel serializes inbound frames through one promise chain, so a guest's later frame cannot overtake its grant and an owner's frames cannot reorder past the counter check",
+        "handleConnection re-checks the gate: a guest with no grants, or grants for a host other than the one the relay names, is closed 1008; the host a guest reaches is named by the grant",
+        "a guest refusal never contains 'end-to-end encrypted channel', the phrase the client keys its owner EnrollGate on",
+        "MachineLink.pinned is fixed when the socket opens with a pinned key and never cleared, unlike expectsSecure: a pinned link never sends or applies a plaintext app frame (only the relay's deviceOffline/deviceOnline), and e2eeReady before the link's own handshake finished closes it; the guest grant is written right after e2eeConfirm",
+        "plaintextFrameAllowed is a pure function in web/src/lib so the server's test runner can cover it",
+        "item signatures bind kind and account (one machine key signs for every account on it, and some items carry no ownerId), sign ownerId, and exclude createdAt (storage injects it) and the local mark",
+        "signForPush never signs a marked row (laundering); unsigned/forged rows travel unsigned, another machine's or another user's are not pushed; counters for a batch are reserved in one store write and an unchanged row re-sends its cached signature",
+        "ItemTrust (sync-trust.json, per account, 0600, never uploaded) is read on every call rather than cached, because both engines and the command layer hold one; fingerprints are computed on the bridge, never taken from disk or the wire",
         "a refused client reconnects silently (no heartbeat, no auth relay), which is the only window in which enrollment is possible",
         "enrollment re-dials the link by name (reconnectMachine), never the primary: on the connect-time gate the primary is a different machine or unset",
         "base64 inflates payloads ~33%, so broadcast backpressure thresholds were raised by a third; isDroppable still runs pre-serialization"
@@ -4249,7 +4618,8 @@
         "web/public/og.png",
         "web/public/demo.mp4",
         "deploy/docker/web-nginx.conf",
-        "PRIVACY.md"
+        "PRIVACY.md",
+        "web/public/splash-guard.js"
       ],
       "symbols": [
         "AGENTS",
@@ -4264,14 +4634,14 @@
       ],
       "tests": [],
       "businessRules": [
-        "the landing page paints immediately, never behind the boot splash: index.html hides the splash before first paint for landing routes and signed-out visitors, and the root route renders LandingPage directly while Clerk is still loading for a guest, at the same tree position it keeps once signed out, so it does not remount",
+        "the landing page paints immediately, never behind the boot splash: index.html loads web/public/splash-guard.js (a file, since the deployed CSP allows no inline script), which hides the splash before first paint for landing routes and signed-out visitors, and the root route renders LandingPage directly while Clerk is still loading for a guest, at the same tree position it keeps once signed out, so it does not remount",
         "generic claims say coding agent or list providers; strings that are truly provider-specific (Claude CLI status, Claude sign-in, SDK internals) stay provider-specific",
         "supporting another provider in the copy is one new AGENTS entry, kept local to LandingPage because shared/providers.ts is capability data, not marketing copy",
         "the closing panels say at least one of Claude Code or Codex must be installed on the paired machine",
         "download first: the hero leads with the Mac download, then Get started, with Sign in in the header; with no build published the hero falls back to Get started and Sign in and the account panel spans the closing row alone",
         "Notarized by Apple holds only from desktop 0.2.43, so the configured download link must serve the stable Lines-latest.dmg alias or a signed versioned build; the version shows only when the link names one",
-        "encryption copy says end-to-end encryption is on by default, that every browser enrols once with a code from the machine, and that the relay carries traffic it cannot read or forge; it never claims everything is encrypted or zero-knowledge",
-        "privacy copy uses only the approved lines in the feature doc (agent runs on your machine; repos and full transcripts live on the machine and are never stored on Lines servers; live traffic between the user's own devices and the machine is end-to-end encrypted, guests not yet; session list, workflows and memory sync to storage; prompts go to the provider under the user's own account); 'your code never leaves your machine', 'transcripts and files never leave your machine', 'zero-knowledge' and 'we can't see anything' are banned",
+        "encryption copy says end-to-end encryption is on by default, that every browser enrols once with a code from the machine, that a guest connects with the key in their invite link, and that the relay carries traffic it cannot read or forge; it never claims everything is encrypted or zero-knowledge",
+        "privacy copy uses only the approved lines in the feature doc (agent runs on your machine; repos and full transcripts live on the machine and are never stored on Lines servers; live traffic between the machine and every browser on it, the user's or a guest's, is end-to-end encrypted, with the relay still seeing which device connects, when and how much; session list, workflows and memory sync to storage in plaintext; the bridge dials out and listens on the machine alone, so no port is open to the network; prompts go to the provider under the user's own account); 'your code never leaves your machine', 'transcripts and files never leave your machine', 'zero-knowledge' and 'we can't see anything' are banned",
         "the Where your data goes section mirrors PRIVACY.md and links to it; a change to what is stored or relayed updates both together",
         "shared links carry ?ref=<channel>, and the nginx access log is the only channel attribution",
         "copy says works with Claude Code and Codex and never implies an Anthropic or OpenAI partnership or endorsement",

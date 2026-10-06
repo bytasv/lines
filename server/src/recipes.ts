@@ -2,9 +2,28 @@ import { randomUUID } from 'node:crypto';
 import type { RecipeContent, RecipeDef, RecipeRef, ServerMessage } from '@lines/shared';
 import { isBundle, normalizeRecipeTag, RECIPE_BUNDLE_MAX, RECIPE_TAG_MAX } from '@lines/shared';
 import type { Store } from './store.ts';
+import type { UntrustedMark } from '@lines/shared';
+import { ItemTrust, markAfterSave, settledHold, unmarked, vouchedFor } from './syncSignature.ts';
 
 const recipeKey = (ownerId: string, id: string) => `${ownerId}/${id}`;
 const versionKey = (ownerId: string, id: string, version: number) => `${ownerId}/${id}/${version}`;
+/** Where `ItemTrust` records a reviewed recipe version. */
+const approvalKey = (ownerId: string, id: string, version: number) => `recipe:${ownerId}/${id}/${version}`;
+
+/**
+ * A mark loaded from disk, re-settled for this process and the account's trusted
+ * machines now (see `settledHold`), as the workflow engine's `reheld`.
+ */
+function reheld<T extends { untrusted?: UntrustedMark }>(item: T, trustedSigners: ReadonlySet<string>): T {
+  if (item.untrusted) item.untrusted = settledHold(item.untrusted, trustedSigners);
+  return item;
+}
+
+/** Lazily read trust state for one batch of recipes: each file read at most once, and only if needed. */
+interface TrustBatch {
+  approvals: () => Record<string, string>;
+  signers: () => ReadonlySet<string>;
+}
 
 /** Swallows double-clicks on Run without needing UI state; per recipe identity. */
 const RUN_COOLDOWN_MS = 5_000;
@@ -85,6 +104,8 @@ export class RecipeEngine {
   private stats: Record<string, number>;
   /** Last run per recipe identity, for the cooldown. */
   private lastRunAt = new Map<string, number>();
+  /** Content this account has reviewed (shared with the workflow engine's). */
+  private trust: ItemTrust;
 
   constructor(
     private store: Store,
@@ -92,13 +113,18 @@ export class RecipeEngine {
     /** Owner's Clerk userId, stamped onto recipes this user saves. */
     private userId: string,
   ) {
+    this.trust = ItemTrust.forStore(store.rootDir);
+    // Marks re-settled on the way in, as the workflow engine does: whether one
+    // holds its recipe back depends on this process's strictness and the
+    // machines trusted now.
+    const trusted = this.trust.trustedSigners();
     for (const r of this.store.loadRecipes()) {
-      this.recipes.set(r.id, r);
+      this.recipes.set(r.id, reheld(r, trusted));
       this.recipeVersions.set(versionKey(r.ownerId, r.id, r.version), r);
     }
     // Heads are already in above; the history file adds the older versions back.
     for (const r of this.store.loadRecipeVersions()) {
-      this.recipeVersions.set(versionKey(r.ownerId, r.id, r.version), r);
+      this.recipeVersions.set(versionKey(r.ownerId, r.id, r.version), reheld(r, trusted));
     }
     this.stats = this.store.loadRecipeStats();
   }
@@ -123,12 +149,121 @@ export class RecipeEngine {
       .sort((a, b) => b.version - a.version);
   }
 
-  /** Adopt resolved immutable versions (own history from a pull, or a foreign history view). */
-  addRecipeVersions(list: RecipeDef[]): void {
-    for (const r of list) {
-      if (!r?.id || !r.ownerId || typeof r.version !== 'number') continue;
-      this.recipeVersions.set(versionKey(r.ownerId, r.id, r.version), r);
+  /**
+   * Adopt resolved immutable versions (own history from a pull, or a foreign
+   * history view).
+   *
+   * `requested` names what was asked for, and anything else is dropped: a
+   * version is filed under the owner it names, so a blob in someone else's
+   * history claiming to be this user's would join this user's own history — and
+   * `listOwnRecipeVersions` would push it back to storage as theirs.
+   *
+   * An own version settles its trust like a pulled head does, and never
+   * displaces a trusted copy of the same number with different content. Another
+   * user's carries no mark at all: running one is confirmed run by run instead
+   * (see `recipeCommands.runRecipe`).
+   */
+  addRecipeVersions(list: RecipeDef[], requested?: readonly { ownerId: string; id: string }[]): void {
+    const batch = this.trustBatch();
+    for (const raw of list) {
+      if (!raw?.id || !raw.ownerId || typeof raw.version !== 'number') continue;
+      if (requested && !requested.some((q) => q.ownerId === raw.ownerId && q.id === raw.id)) continue;
+      const key = versionKey(raw.ownerId, raw.id, raw.version);
+      const cached = this.recipeVersions.get(key);
+      const r =
+        raw.ownerId === this.userId
+          ? this.settleMark(raw, !!cached && vouchedFor(cached) && sameRecipeContent(cached, raw), batch)
+          : unmarked(raw);
+      if (!vouchedFor(r) && cached && vouchedFor(cached) && !sameRecipeContent(cached, r)) {
+        console.warn(`[recipe ${r.id}] unverified v${r.version} differs from the trusted copy — kept ours`);
+        continue;
+      }
+      this.recipeVersions.set(key, r);
     }
+  }
+
+  /**
+   * The mark a pulled own recipe keeps: cleared for content the owner already
+   * reviewed under this key, or identical to a trusted copy already held, and
+   * otherwise re-settled against the account's trusted machines (the workflow
+   * engine's `settleMark`, for recipes).
+   */
+  private settleMark(r: RecipeDef, sameAsTrusted: boolean, batch: TrustBatch): RecipeDef {
+    const mark = r.untrusted;
+    if (!mark) return r;
+    if (sameAsTrusted || batch.approvals()[approvalKey(r.ownerId, r.id, r.version)] === mark.digest) return unmarked(r);
+    return { ...r, untrusted: settledHold(mark, batch.signers()) };
+  }
+
+  /** The approval record and trusted keys, each read at most once per batch and only if needed. */
+  private trustBatch(): TrustBatch {
+    let approved: Record<string, string> | undefined;
+    let signers: ReadonlySet<string> | undefined;
+    return {
+      approvals: () => (approved ??= this.trust.approvals()),
+      signers: () => (signers ??= this.trust.trustedSigners()),
+    };
+  }
+
+  /**
+   * Re-decide, after the account's trusted machines changed, whether each own
+   * recipe another machine signed is held back — the workflow engine's
+   * `resettleMarks`, for recipes.
+   */
+  resettleMarks(): void {
+    const trusted = this.trust.trustedSigners();
+    let changed = false;
+    const resettle = (r: RecipeDef): RecipeDef | undefined => {
+      if (!r.untrusted) return undefined;
+      const mark = settledHold(r.untrusted, trusted);
+      return mark.held === r.untrusted.held ? undefined : { ...r, untrusted: mark };
+    };
+    for (const [id, r] of this.recipes) {
+      const next = resettle(r);
+      if (!next) continue;
+      this.recipes.set(id, next);
+      changed = true;
+    }
+    for (const [key, r] of this.recipeVersions) {
+      if (r.ownerId !== this.userId) continue;
+      const next = resettle(r);
+      if (!next) continue;
+      this.recipeVersions.set(key, next);
+      changed = true;
+    }
+    if (!changed) return;
+    this.persistRecipes();
+    this.broadcast({ type: 'recipes', recipes: this.listRecipes() });
+  }
+
+  /**
+   * The owner reviewed one of their own recipe versions and allows exactly that
+   * content to run here — nothing else the same machine signed, and not a later
+   * change. `digest` must be the one the review showed. Head and cached version
+   * can be separate objects with different content, so only a copy whose mark
+   * carries the reviewed digest is cleared.
+   */
+  trustRecipe(ownerId: string, recipeId: string, version: number, digest: string): void {
+    if (ownerId !== this.userId) {
+      throw new Error("Someone else's recipe is confirmed each time it runs, not trusted once.");
+    }
+    const key = versionKey(ownerId, recipeId, version);
+    const cached = this.recipeVersions.get(key);
+    const headNow = this.recipes.get(recipeId);
+    const head = headNow?.version === version ? headNow : undefined;
+    const copies = [cached, head].filter((c): c is RecipeDef => !!c);
+    if (copies.length === 0) throw new Error('That recipe version is not available here.');
+    const marked = copies.filter((c) => c.untrusted);
+    if (marked.length === 0) return;
+    const reviewed = marked.filter((c) => c.untrusted!.digest === digest);
+    if (reviewed.length === 0) {
+      throw new Error(`“${marked[0].title}” changed after it was reviewed — review it again.`);
+    }
+    this.trust.approve(approvalKey(ownerId, recipeId, version), digest);
+    if (cached && reviewed.includes(cached)) this.recipeVersions.set(key, unmarked(cached));
+    if (head && reviewed.includes(head)) this.recipes.set(recipeId, unmarked(head));
+    this.persistRecipes();
+    this.broadcast({ type: 'recipes', recipes: this.listRecipes() });
   }
 
   /**
@@ -207,6 +342,14 @@ export class RecipeEngine {
       published,
       updatedAt: Date.now(),
     };
+    // An unverified recipe stays unverified through its owner's edits — only a
+    // review clears a mark — and a copy says what it is a copy of: a stranger's
+    // recipe duplicated into this library arrives `foreign`, held back until
+    // reviewed, rather than becoming the user's own and escaping the run-time
+    // confirmation someone else's prompt needs (see markAfterSave).
+    const requested = (content as RecipeContent & { untrusted?: unknown }).untrusted;
+    const mark = markAfterSave('recipe', recipe, head?.untrusted, requested);
+    if (mark) recipe.untrusted = mark;
     this.recipes.set(id, recipe);
     this.recipeVersions.set(versionKey(recipe.ownerId, id, version), recipe);
     this.persistRecipes();
@@ -235,22 +378,50 @@ export class RecipeEngine {
    */
   applySyncedRecipes(list: RecipeDef[]): void {
     let changed = false;
-    for (const r of list) {
-      if (!r?.id) continue;
-      const cur = this.recipes.get(r.id);
-      if (!cur || r.version >= cur.version) {
+    const batch = this.trustBatch();
+    for (const pulled of list) {
+      if (!pulled?.id) continue;
+      // As `applySyncedSteps`: this user's own table holds only their recipes,
+      // and a row naming another owner is another account's, refused outright.
+      if (pulled.ownerId !== this.userId) {
+        console.warn(`[recipe ${pulled.id}] pulled from this user's table but owned by ${pulled.ownerId} — ignored`);
+        continue;
+      }
+      const cur = this.recipes.get(pulled.id);
+      if (!cur || pulled.version >= cur.version) {
+        // Kept when still unverified — shown, and refused at run time until the
+        // owner reviews it (see recipeCommands.runRecipe).
+        const twin = [cur, this.recipeVersions.get(versionKey(pulled.ownerId, pulled.id, pulled.version))].some(
+          (t) => !!t && vouchedFor(t) && t.version === pulled.version && sameRecipeContent(t, pulled),
+        );
+        const r = this.settleMark(pulled, twin, batch);
         this.recipes.set(r.id, r);
-        this.recipeVersions.set(versionKey(r.ownerId, r.id, r.version), r);
+        const key = versionKey(r.ownerId, r.id, r.version);
+        const cached = this.recipeVersions.get(key);
+        // The head moves, the trusted copy of that version number does not.
+        const displacesTrusted = !vouchedFor(r) && !!cached && vouchedFor(cached) && !sameRecipeContent(cached, r);
+        if (!displacesTrusted) this.recipeVersions.set(key, r);
         changed = true;
       }
     }
     if (changed) this.persistRecipes();
   }
 
-  /** Replace the shared corpus from a storage pull; returns true if it changed. */
+  /**
+   * Replace the shared corpus from a storage pull; returns true if it changed.
+   *
+   * A row claiming this user as its owner is dropped, as `setSharedSteps` drops
+   * one: the corpus is other people's by definition, and filing such a row under
+   * this user's id put it in `recipeVersions`, from where `listOwnRecipeVersions`
+   * pushed it back to storage as this user's own — re-publishing a stranger's
+   * prompt under their name, and making it look like their own at run time.
+   */
   setSharedRecipes(list: RecipeDef[]): boolean {
     const next = new Map(
-      list.filter((r) => r?.id && r.ownerId).map((r) => [recipeKey(r.ownerId, r.id), r] as const),
+      list
+        .filter((r) => r?.id && r.ownerId && r.ownerId !== this.userId)
+        // Foreign recipes are confirmed per run rather than marked.
+        .map((r) => [recipeKey(r.ownerId, r.id), unmarked(r)] as const),
     );
     const changed =
       next.size !== this.sharedRecipes.size ||

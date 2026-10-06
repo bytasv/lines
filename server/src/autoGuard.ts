@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {
@@ -330,7 +331,140 @@ export class GuardAllowlist {
   }
 }
 
-/** Derive the allowlist entry an approved request should create. */
+/**
+ * The commands a Bash line chains, each checked on its own: split on `&&`,
+ * `||`, `;` and line breaks, so an allowlisted prefix can't smuggle a follow-up
+ * past the rules. Pipes stay inside their command so pipe rules (curl | bash)
+ * still match — which is also why a line ending in a pipe is joined to the next
+ * one first. Quote-blind on purpose: a split inside a quoted string only adds
+ * pieces to check, and each of them still meets every rule.
+ */
+function chainedCommands(command: string): string[] {
+  return command
+    .replace(/\|\s*[\r\n]\s*/g, '| ')
+    .split(/&&|\|\||;|\r\n|\n|\r/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * One chained command as the rules read it. `${IFS}`, `$IFS` and an escaped
+ * space are all a space to the shell, and quotes and backslashes only group or
+ * escape — so `rm${IFS}-rf${IFS}/x` and `r''m "-rf" ~` must not slip past rules
+ * written for the plain spelling. Dropping characters can only add matches, the
+ * safe direction for a deny-list.
+ */
+function ruleText(command: string): string {
+  return command.replace(/\$\{IFS\}|\$IFS(?!\w)|\\ /g, ' ').replace(/["'\\]/g, '');
+}
+
+/**
+ * Shell syntax that feeds, redirects or runs something beyond the command an
+ * entry names: pipes, background jobs, redirects, substitutions, line breaks.
+ * A command carrying any of it meets the rules whatever its prefix — otherwise
+ * an allowlisted `npm test` would also pass `npm test | bash` and
+ * `npm test $(curl … | sh)`.
+ */
+const UNSAFE_SEGMENT = /[|&<>`\n\r]|\$\(/;
+
+/**
+ * Programs that run whatever their arguments say: shells, interpreters, and
+ * launchers whose arguments are themselves a command. A prefix starting with
+ * one covers anything at all — `bash -c` is every command, `timeout 60` every
+ * command given a minute — so the guard never extends one (dangerousPrefix).
+ * Matched on the program's basename with any version suffix dropped, so
+ * `/usr/bin/env` is env and `python3.12` is python.
+ */
+const COMMAND_RUNNERS = new Set([
+  // Shells
+  'sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'mksh', 'csh', 'tcsh', 'ash', 'busybox', 'pwsh',
+  // Interpreters
+  'python', 'pypy', 'node', 'nodejs', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'luajit', 'osascript',
+  'awk', 'gawk', 'mawk', 'nawk', 'Rscript', 'tclsh', 'expect',
+  // Launchers
+  'npx', 'pnpx', 'bunx', 'uvx', 'eval', 'exec', 'source', '.', 'command', 'builtin', 'xargs', 'env', 'sudo',
+  'doas', 'su', 'nohup', 'setsid', 'time', 'timeout', 'gtimeout', 'nice', 'ionice', 'taskset', 'stdbuf',
+  'unbuffer', 'watch', 'script', 'parallel', 'flock', 'chroot', 'caffeinate', 'find', 'ssh',
+]);
+
+/**
+ * Second words that make a command run its arguments the same way: `npm exec`,
+ * `docker run`, and `git -c`, whose config can define an alias that runs anything.
+ */
+const RUNNER_SUBCOMMANDS = new Map([
+  ['npm', ['exec', 'x']],
+  ['pnpm', ['exec', 'dlx']],
+  ['yarn', ['exec', 'dlx']],
+  ['uv', ['run']],
+  ['poetry', ['run']],
+  ['pipenv', ['run']],
+  ['conda', ['run']],
+  ['bundle', ['exec']],
+  ['go', ['run']],
+  ['docker', ['run', 'exec']],
+  ['podman', ['run', 'exec']],
+  ['kubectl', ['run', 'exec']],
+  ['git', ['-c']],
+]);
+
+/** A leading `NAME=value` word, which only sets the command's environment. */
+const ASSIGNMENT = /^[A-Za-z_]\w*=/;
+
+/** True when what follows `prefix` is handed to something else to run (COMMAND_RUNNERS). */
+function runsItsArguments(prefix: string): boolean {
+  const words = prefix.split(' ');
+  let i = 0;
+  while (i < words.length && ASSIGNMENT.test(words[i])) i++;
+  // Nothing but assignments: whatever command follows runs under them.
+  if (i === words.length) return true;
+  // `\bash`, `"python3"`, `/usr/bin/env`: the program, however it is spelled.
+  const name = path.basename(words[i].replace(/["'\\]/g, ''));
+  const base = name.replace(/[\d.]+$/, '') || name;
+  return (
+    COMMAND_RUNNERS.has(name) ||
+    COMMAND_RUNNERS.has(base) ||
+    (RUNNER_SUBCOMMANDS.get(base)?.includes(words[i + 1] ?? '') ?? false)
+  );
+}
+
+/**
+ * True for a prefix that is dangerous on its own: it already trips a rule (the
+ * trailing space lets `rm -rf` meet the rule written for `rm -rf <path>`), or it
+ * hands the rest of the line to something else to run. Extending either with
+ * arguments allowlists everything those arguments could say. Read the way the
+ * rules read a command, so `rm${IFS}-rf` is as dangerous as `rm -rf`.
+ */
+function dangerousPrefix(prefix: string): boolean {
+  const text = ruleText(prefix);
+  return runsItsArguments(text) || BASH_RULES.some((r) => r.pattern.test(text) || r.pattern.test(`${text} `));
+}
+
+/**
+ * Whether an allowlist entry covers one chained command. Only a plain simple
+ * command qualifies (UNSAFE_SEGMENT), and a dangerous prefix covers only
+ * itself, word for word — never what follows it. That last rule is what keeps an
+ * `rm -rf` or `bash -c` entry saved before either check existed from covering
+ * every deletion, or every command.
+ */
+function segmentAllowed(segment: string, allowlist: GuardAllowEntry[]): boolean {
+  if (UNSAFE_SEGMENT.test(segment)) return false;
+  return allowlist.some(
+    (e) =>
+      e.tool === 'Bash' &&
+      !!e.prefix &&
+      !e.scope && // a plan-mode read never widens the auto-mode guard
+      (segment === e.prefix || (segment.startsWith(e.prefix + ' ') && !dangerousPrefix(e.prefix))),
+  );
+}
+
+/**
+ * Derive the allowlist entry an approved request should create.
+ *
+ * @deprecated The first two words of the line's *first* command, whatever the
+ * guard flagged and however much they cover. Use alwaysAllowEntryFor, which is
+ * what the card shows. Nothing calls this any more; it can go once no branch
+ * still imports it.
+ */
 export function allowEntryFor(toolName: string, input: Record<string, unknown>): GuardAllowEntry {
   if (toolName === 'Bash') {
     const command = String(input.command ?? '').trim();
@@ -340,43 +474,171 @@ export function allowEntryFor(toolName: string, input: Record<string, unknown>):
   return { tool: toolName };
 }
 
-function segmentAllowed(segment: string, allowlist: GuardAllowEntry[]): boolean {
-  return allowlist.some(
-    (e) =>
-      e.tool === 'Bash' &&
-      e.prefix &&
-      !e.scope && // a plan-mode read never widens the auto-mode guard
-      (segment === e.prefix || segment.startsWith(e.prefix + ' ')),
-  );
+/** The prefix "Always allow" records for one command: any leading assignments, then two words. */
+function bashPrefix(command: string): string {
+  const words = command.split(/\s+/);
+  let i = 0;
+  while (i < words.length && ASSIGNMENT.test(words[i])) i++;
+  return words.slice(0, i + 2).join(' ');
 }
 
 const FILE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Read']);
 const PLAN_WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+
+/**
+ * Tools an entry can't name outright: a file tool is flagged for its path and
+ * an entry carries none, so it would cover every path, credentials included;
+ * Monitor runs shell commands the guard never checks.
+ */
+const UNNAMEABLE_TOOLS = new Set([...FILE_TOOLS, 'Monitor']);
+
+/**
+ * The exact entry "Always allow" saves for a call, or null when no entry could
+ * cover it without also covering calls the user never saw. The bridge computes
+ * it when the card is raised and the card shows it, so the click saves what was
+ * on screen — the button used to say only "Always allow" while the bridge kept
+ * the first two words of the line.
+ *
+ * For Bash it is the command the rules flagged — not the line's first command,
+ * which in `cd app && git push --force` is the harmless one — cut to its first
+ * two words (after any assignments). Null when the tool always asks or can't be
+ * named (UNNAMEABLE_TOOLS); when the line writes a file that runs code later,
+ * which asks whatever the allowlist says (persistentShellWrite); when no command
+ * was flagged, or the flagged ones need different entries; when a flagged
+ * command pipes, redirects or substitutes, which no entry covers
+ * (segmentAllowed); or when the prefix is dangerous on its own — a shell,
+ * interpreter or launcher, or a command a rule already names, like `rm -rf` or
+ * `git rebase`.
+ */
+export function alwaysAllowEntryFor(toolName: string, input: Record<string, unknown>): GuardAllowEntry | null {
+  if (ALWAYS_ASK_TOOLS.has(toolName) || UNNAMEABLE_TOOLS.has(toolName)) return null;
+  let raw: GuardAllowEntry = { tool: toolName };
+  if (toolName === 'Bash') {
+    const chain = chainedCommands(String(input.command ?? ''));
+    // The card's roots aren't known here, but every persistent-file pattern is
+    // anchored on names rather than on where the project is.
+    if (persistentShellWrite(chain, process.cwd())) return null;
+    const flagged = chain.filter((command) => BASH_RULES.some((rule) => rule.pattern.test(ruleText(command))));
+    const prefixes = new Set(flagged.map(bashPrefix));
+    if (prefixes.size !== 1 || flagged.some((command) => UNSAFE_SEGMENT.test(command))) return null;
+    const [prefix] = prefixes;
+    if (dangerousPrefix(prefix)) return null;
+    raw = { tool: 'Bash', prefix };
+  }
+  const norm = normalizeAllowEntry(raw);
+  return 'error' in norm ? null : norm.entry;
+}
 
 function isInside(dir: string, target: string): boolean {
   const rel = path.relative(dir, target);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-function isInsideAny(dirs: string[], target: string): boolean {
-  return dirs.some((dir) => isInside(dir, target));
+/** A path that climbs with `..` (see isRealInside). */
+const CLIMBS = /(?:^|[\\/])\.\.(?:[\\/]|$)/;
+
+/** Some segment of the path doesn't exist (yet). */
+function isMissing(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+/**
+ * Where a path really lands once every symlink is followed: the realpath of its
+ * nearest existing ancestor, plus the segments below it that don't exist yet —
+ * so a file about to be written resolves too. A dangling link is followed as
+ * well, since writing through one creates its target. Null when that can't be
+ * worked out (a loop, an unreadable directory, a dangling link whose text
+ * climbs with `..`), which every caller treats as outside.
+ *
+ * Exported so the file routes follow links exactly the way the guard does.
+ */
+export function realPathOf(target: string): string | null {
+  let probe = path.resolve(target);
+  let missing: string[] = [];
+  for (let hops = 0; hops <= 32; ) {
+    try {
+      return path.join(fs.realpathSync.native(probe), ...missing);
+    } catch (err) {
+      if (!isMissing(err)) return null;
+    }
+    let link: string | undefined;
+    try {
+      if (fs.lstatSync(probe).isSymbolicLink()) link = fs.readlinkSync(probe);
+    } catch (err) {
+      if (!isMissing(err)) return null;
+    }
+    if (link === undefined) {
+      const parent = path.dirname(probe);
+      if (parent === probe) return null;
+      missing = [path.basename(probe), ...missing];
+      probe = parent;
+      continue;
+    }
+    // Dangling. Relative link text is resolved against the link's own directory,
+    // which a plain join gets right unless the text climbs back out of it.
+    if (CLIMBS.test(link)) return null;
+    probe = path.resolve(path.dirname(probe), link);
+    hops++;
+  }
+  return null;
+}
+
+/**
+ * True when `target` is inside one of `dirs` both as written and once every
+ * symlink is followed — the check behind every auto-approved file path and
+ * every file route, since a prefix check alone lets a link inside a project
+ * reach anywhere. `realDirs` says where each dir really is (its realpath,
+ * unless the caller is stricter — see isPlanPath), so a root behind a link
+ * (macOS's `/var` → `/private/var`) still contains its files, written either way.
+ *
+ * A path that climbs with `..` never counts: to the kernel `link/..` is the
+ * parent of wherever the link points, to path.resolve it is nothing at all, and
+ * a tool may do either.
+ *
+ * Exported so the file routes share it rather than keep a second copy.
+ */
+export function isRealInside(
+  dirs: string[],
+  target: string,
+  realDirs: (string | null)[] = dirs.map((dir) => realPathOf(dir)),
+): boolean {
+  if (CLIMBS.test(target)) return false;
+  const known = realDirs.filter((dir): dir is string => dir !== null);
+  const written = path.resolve(target);
+  if (!dirs.some((dir) => isInside(dir, written)) && !known.some((dir) => isInside(dir, written))) return false;
+  const real = realPathOf(written);
+  return real !== null && known.some((dir) => isInside(dir, real));
+}
+
+/** `segments` below wherever `dir` really is; null when that can't be resolved. */
+function realBelow(dir: string, ...segments: string[]): string | null {
+  const real = realPathOf(dir);
+  return real === null ? null : path.join(real, ...segments);
 }
 
 /**
  * True when the target resolves inside a plan directory (~/.claude/plans or
- * `<root>/.claude/plans` for any of the session's roots). Anchored to real
- * directories rather than a substring match on the shared PLAN_DIR_MARKER, so
- * `.../plans/../../../.ssh/id_rsa` cannot pass.
+ * `<root>/.claude/plans` for any of the session's roots), as written and once
+ * symlinks are followed (isRealInside) — so neither
+ * `.../plans/../../../.ssh/id_rsa` nor a link planted in a plans directory
+ * passes. Plan-file writes auto-approve in every mode, so this is a permission
+ * gate, never the substring hint the shared PLAN_DIR_MARKER is.
  *
- * Exported because the `/file` HTTP route reuses it to let the plan review card
- * read a plan that lives outside every project root.
+ * Exported because the file route reuses it to let the plan review card read a
+ * plan that lives outside every project root.
  */
 export function isPlanPath(filePath: string, roots: string[]): boolean {
-  const resolved = path.resolve(filePath);
-  return (
-    isInside(path.join(os.homedir(), '.claude', 'plans'), resolved) ||
-    isInsideAny(roots.map((root) => path.join(root, '.claude', 'plans')), resolved)
-  );
+  const claudeHome = path.join(os.homedir(), '.claude');
+  const dirs = [path.join(claudeHome, 'plans'), ...roots.map((root) => path.join(root, '.claude', 'plans'))];
+  // Where each plans directory may really be. ~/.claude itself may be a link (a
+  // dotfiles manager's), but nothing below a project root may: git tracks
+  // symlinks, so a cloned repo — or an earlier auto-mode turn — could aim
+  // `.claude` or `.claude/plans` at the project's source and turn every edit
+  // there into a "plan write" that never asks, plan mode included. Neither
+  // plans directory counts as a link to somewhere else.
+  const realDirs = [realBelow(claudeHome, 'plans'), ...roots.map((root) => realBelow(root, '.claude', 'plans'))];
+  return isRealInside(dirs, filePath, realDirs);
 }
 
 /**
@@ -412,6 +674,271 @@ export function isSelfWorkerSource(filePath: string): boolean {
   return SELF_WORKER_SOURCES.has(path.resolve(filePath));
 }
 
+/** Writing a git hook or config file and writing config through `git config` are the same act. */
+const GIT_CONFIG_REASON = 'Changes git hooks or config, which run commands during later git operations';
+
+/**
+ * Files that run code later — after this turn, and under whatever permission
+ * mode the user picks next: Claude Code settings and hooks, MCP server configs,
+ * git hooks and config, shell startup files, ssh config. Auto mode asks before
+ * writing one wherever it is, a project root included, and no allowlist entry
+ * disarms that (see assessToolCall). Case-insensitive, as macOS's filesystem is.
+ */
+const PERSISTENT_FILES: { reason: string; patterns: RegExp[] }[] = [
+  {
+    reason: 'Changes Claude Code settings or hooks, which can run commands in every later session',
+    patterns: [/\/\.claude\/(?:settings[^/]*\.json|hooks(?:\/.*)?)$/i],
+  },
+  {
+    reason: 'Changes an MCP server config, which starts programs when a session opens',
+    patterns: [/\/\.(?:mcp|claude)\.json$/i],
+  },
+  {
+    reason: GIT_CONFIG_REASON,
+    patterns: [
+      // `.git` alone is the file a worktree uses to point at its git directory —
+      // repointed, the worktree runs someone else's hooks. `name.git` covers bare
+      // repos; the nested forms, submodules' and worktrees' own hooks and config.
+      /\/[^/]*\.git(?:\/(?:.+\/)?(?:hooks(?:\/.*)?|config(?:\.worktree)?))?$/i,
+      /\/\.gitconfig$|\/\.config\/git\/config$/i,
+      // Husky points core.hooksPath here, so these are the repo's git hooks.
+      /\/\.husky\//i,
+    ],
+  },
+  {
+    reason: 'Changes a shell startup file, which runs in every new terminal',
+    patterns: [
+      /\/\.(?:bashrc|bash_profile|bash_login|bash_logout|profile|zshrc|zprofile|zshenv|zlogin|zlogout|kshrc|mkshrc|cshrc|tcshrc)$/i,
+      /\/\.config\/fish\//i,
+    ],
+  },
+  {
+    reason: 'Changes ssh keys or config, which control remote access',
+    patterns: [/\/\.ssh\//i],
+  },
+];
+
+/**
+ * Why writing `filePath` would plant something that runs later
+ * (PERSISTENT_FILES), checked as written and where it really lands: `~/.zshrc`
+ * is often a link into a dotfiles repo, and an innocent name can link to a git
+ * hook.
+ *
+ * Exported so its test can assert directly, following `isPlanPath`.
+ */
+export function persistentFileReason(filePath: string): string | undefined {
+  if (!filePath) return undefined;
+  const written = path.resolve(filePath);
+  const real = realPathOf(written);
+  return PERSISTENT_FILES.find(({ patterns }) =>
+    patterns.some((pattern) => pattern.test(written) || (real !== null && pattern.test(real))),
+  )?.reason;
+}
+
+/**
+ * True when where a write really lands can't be confirmed — the path climbs
+ * with `..`, or a link on the way can't be followed — so it could be landing
+ * on any of PERSISTENT_FILES.
+ */
+function unconfirmedPath(filePath: string): boolean {
+  return CLIMBS.test(filePath) || realPathOf(filePath) === null;
+}
+
+/** An operator run in a command split by shellWords: `>`, `>>`, `2>&`, `|`, `(`… */
+const SHELL_OPERATOR = /^[<>&|;()`]+$/;
+
+/** A command (already through ruleText) as words and operator runs, `2>&1` as `2`, `>&`, `1`. */
+function shellWords(text: string): string[] {
+  return text.match(/[<>&|;()`]+|[^\s<>&|;()`]+/g) ?? [];
+}
+
+/** The values given to an option: `-o x`, `-ox`, `-sSo x`, `--output x`, `--output=x`. */
+function optionValues(args: string[], short: string, longs: string[]): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const long = longs.find((l) => a === l || a.startsWith(`${l}=`));
+    const at = !long && /^-[^-]/.test(a) ? a.indexOf(short, 1) : -1;
+    if (long) values.push(a === long ? (args[++i] ?? '') : a.slice(long.length + 1));
+    else if (at > 0) values.push(a.slice(at + 1) || (args[++i] ?? ''));
+  }
+  return values;
+}
+
+/**
+ * Where cp, install, ln and friends write: the destination (the last operand, or
+ * `-t dir`), and — since it may be a directory — each operand's name inside it,
+ * so `cp authorized_keys ~/.ssh/` is seen for what it creates. `ln -s target`
+ * alone creates the target's name where the command runs.
+ */
+function copyTargets(args: string[]): string[] {
+  const operands = positionals(args);
+  const names = operands.map((o) => path.basename(o));
+  const dests = [...optionValues(args, 't', ['--target-directory']), ...operands.slice(-1)];
+  return [...dests.flatMap((d) => [d, ...names.map((n) => path.join(d, n))]), ...(operands.length === 1 ? names : [])];
+}
+
+/**
+ * Commands that write files named among their arguments, and which arguments
+ * those are. mv counts its sources too: moving a hook away changes it as surely
+ * as moving one in.
+ */
+const FILE_WRITERS = new Map<string, (args: string[]) => string[]>([
+  ['tee', positionals],
+  ['cp', copyTargets],
+  ['install', copyTargets],
+  ['ln', copyTargets],
+  ['rsync', copyTargets],
+  ['scp', copyTargets],
+  ['mv', (args) => [...positionals(args), ...copyTargets(args)]],
+  ['dd', (args) => args.filter((a) => a.startsWith('of=')).map((a) => a.slice(3))],
+  ['sed', (args) => (hasFlag(args, 'i', ['--in-place']) ? positionals(args) : [])],
+  ['perl', (args) => (hasFlag(args, 'i') ? positionals(args) : [])],
+  ['curl', (args) => optionValues(args, 'o', ['--output'])],
+  ['wget', (args) => optionValues(args, 'O', ['--output-document'])],
+]);
+
+/**
+ * Every file a command names as somewhere it writes: the target of each output
+ * redirect (`>`, `>>`, `>|`, `&>`, `<>`, `2>` …) and the file operands of the
+ * FILE_WRITERS, wherever on the line they sit — in a pipeline, a substitution,
+ * or the quoted script of `bash -c`. Quote-blind like the rest of the Bash
+ * checks: a quoted string that merely mentions a write can only ask.
+ */
+function shellWriteTargets(text: string): string[] {
+  const words = shellWords(text);
+  const targets: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const next = words[i + 1];
+    if (SHELL_OPERATOR.test(word)) {
+      // `>&2` and `2>&-` only duplicate or close a descriptor; `>(…)` is a process
+      // substitution, whose command is read like any other.
+      const redirect = word.includes('>') && !word.includes('(');
+      const duplicate = word.endsWith('&') && /^(?:\d+|-)$/.test(next ?? '');
+      if (redirect && !duplicate && next !== undefined && !SHELL_OPERATOR.test(next)) targets.push(next);
+      continue;
+    }
+    const writer = FILE_WRITERS.get(path.basename(word));
+    if (writer) targets.push(...writer(commandArgs(words, i)));
+  }
+  return targets.filter(Boolean);
+}
+
+/** The arguments of the command named at `words[at]`: up to the next operator, less a redirect's fd (`2>`). */
+function commandArgs(words: string[], at: number): string[] {
+  let end = at + 1;
+  while (end < words.length && !SHELL_OPERATOR.test(words[end])) end++;
+  const args = words.slice(at + 1, end);
+  if (/^\d+$/.test(args.at(-1) ?? '') && /^[<>]/.test(words[end] ?? '')) args.pop();
+  return args;
+}
+
+/**
+ * Keys a one-off `git -c` may set without asking: they only change how git
+ * presents or names things. Any other could make git run a program — an
+ * `alias.x=!…`, `core.hooksPath`, a pager or editor, a diff, merge or filter
+ * driver, a credential helper, an `include.path` pulling in any of those — and
+ * that list is too long to deny key by key.
+ */
+const HARMLESS_GIT_CONFIG =
+  /^(?:user\.(?:name|email)|color\..+|advice\..+|core\.(?:quotepath|autocrlf|safecrlf|filemode|ignorecase|precomposeunicode|longpaths|abbrev)|init\.defaultbranch|(?:commit|tag)\.gpgsign|log\.\w+|pull\.(?:rebase|ff)|push\.(?:default|autosetupremote)|fetch\.prune|rebase\.(?:autostash|autosquash)|merge\.(?:ff|conflictstyle)|diff\.(?:noprefix|renames|algorithm)|status\.showuntrackedfiles)$/i;
+
+const GIT_ONE_OFF_REASON = 'Sets one-off git config, which can make this git command run another program';
+
+/** Global git options that take the next word as their value. */
+const GIT_VALUE_OPTIONS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix']);
+
+/** `git config` options that take the next word as their value. */
+const GIT_CONFIG_VALUE_OPTIONS = new Set(['-f', '--file', '--blob', '--type', '--default', '--comment', '--value', '--url']);
+const GIT_CONFIG_READS = new Set(['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--get-color', '--get-colorbool', '--list', '-l']);
+const GIT_CONFIG_WRITES = new Set(['--add', '--replace-all', '--unset', '--unset-all', '--rename-section', '--remove-section', '--edit', '-e']);
+
+/**
+ * True unless a `git config` (its arguments after `config`) only reads: a
+ * `--get`-style or `--list` action, `git config get|list`, or a lone key, which
+ * is a get. Everything else writes — any key, since the ones that run programs
+ * are too many to list.
+ */
+function gitConfigWrites(args: string[]): boolean {
+  const operands: string[] = [];
+  let reads = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (GIT_CONFIG_WRITES.has(a)) return true;
+    if (GIT_CONFIG_READS.has(a)) reads = true;
+    else if (GIT_CONFIG_VALUE_OPTIONS.has(a)) i++;
+    else if (!a.startsWith('-')) operands.push(a);
+  }
+  if (reads || operands[0] === 'get' || operands[0] === 'list') return false;
+  return ['set', 'unset', 'rename-section', 'remove-section', 'edit'].includes(operands[0]) || operands.length >= 2;
+}
+
+/**
+ * Why a command changes git config, if it does: a `git config` that writes, or
+ * a one-off `-c`, `--config-env` or `GIT_CONFIG_*` setting outside
+ * HARMLESS_GIT_CONFIG. Found wherever `git` sits on the line, like the writes in
+ * shellWriteTargets.
+ */
+function gitConfigChange(text: string): string | undefined {
+  const words = shellWords(text);
+  for (let i = 0; i < words.length; i++) {
+    if (/^GIT_CONFIG\w*=/.test(words[i])) return GIT_ONE_OFF_REASON;
+    if (path.basename(words[i]) !== 'git') continue;
+    const args = commandArgs(words, i);
+    let at = 0;
+    for (; at < args.length && args[at].startsWith('-'); at++) {
+      const eq = args[at].indexOf('=');
+      const name = eq < 0 ? args[at] : args[at].slice(0, eq);
+      const value = eq >= 0 ? args[at].slice(eq + 1) : GIT_VALUE_OPTIONS.has(name) ? args[++at] : undefined;
+      const key = (value ?? '').split('=')[0];
+      if ((name === '-c' || name === '--config-env') && !HARMLESS_GIT_CONFIG.test(key)) return GIT_ONE_OFF_REASON;
+    }
+    if (args[at] === 'config' && gitConfigWrites(args.slice(at + 1))) return GIT_CONFIG_REASON;
+  }
+  return undefined;
+}
+
+/** A shell word as a path: a leading `~`, `$HOME` or `${HOME}` is the home directory, the rest relative to `base`. */
+function shellPath(word: string, base: string): string {
+  const home = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/.exec(word);
+  return path.resolve(base, home ? os.homedir() + word.slice(home[0].length) : word);
+}
+
+/** Where a chained `cd <dir>` (or `pushd`) leaves the commands after it; undefined when it is neither. */
+function chainedCd(text: string, cwd: string): string | undefined {
+  const words = shellWords(text).filter((w) => !/^[()]+$/.test(w));
+  if (words[0] !== 'cd' && words[0] !== 'pushd') return undefined;
+  if (words.length === 1) return os.homedir();
+  return words.length === 2 && !SHELL_OPERATOR.test(words[1]) ? shellPath(words[1], cwd) : undefined;
+}
+
+/**
+ * Why a Bash line writes one of PERSISTENT_FILES, if any of its commands does —
+ * `echo … >> ~/.zshrc`, `cp hook .git/hooks/pre-commit` — or changes git config,
+ * which is the same thing done through git (gitConfigChange). Bash is otherwise
+ * a deny-list, and no rule names these. Relative targets are read from wherever
+ * the line has `cd`'d to by then, and from `primary` as well: a `cd` inside a
+ * subshell doesn't outlive it.
+ */
+function persistentShellWrite(chain: string[], primary: string): string | undefined {
+  let cwd = primary;
+  for (const command of chain) {
+    const text = ruleText(command);
+    const git = gitConfigChange(text);
+    if (git) return git;
+    const bases = cwd === primary ? [cwd] : [cwd, primary];
+    for (const target of shellWriteTargets(text)) {
+      for (const base of bases) {
+        const reason = persistentFileReason(shellPath(target, base));
+        if (reason) return reason;
+      }
+    }
+    cwd = chainedCd(text, cwd) ?? cwd;
+  }
+  return undefined;
+}
+
 /**
  * @param roots Every directory this session may work in — its project's roots,
  *   primary first (see `rootsForCwd`, which never returns empty). An empty list
@@ -425,41 +952,56 @@ export function assessToolCall(
   allowlist: GuardAllowEntry[],
 ): GuardVerdict {
   if (toolName === 'Bash') {
-    const command = String(input.command ?? '');
-    // Evaluate each chained command separately (&&, ||, ;) so an allowlisted
-    // prefix can't smuggle a dangerous follow-up past the rules. Pipes stay
-    // inside their segment so pipe-based rules (curl | bash) still match.
-    const segments = command.split(/&&|\|\||;/).map((s) => s.trim()).filter(Boolean);
-    for (const segment of segments) {
-      if (segmentAllowed(segment, allowlist)) continue;
-      for (const rule of BASH_RULES) {
-        if (rule.pattern.test(segment)) return { dangerous: true, reason: rule.reason };
-      }
+    const chain = chainedCommands(String(input.command ?? ''));
+    // Ahead of the allowlist, like the file-tool check below: an allowlisted
+    // `echo` or `cp` must not disarm a write to a file that runs code later.
+    const persistent = persistentShellWrite(chain, roots[0] ?? process.cwd());
+    if (persistent) return { dangerous: true, reason: persistent };
+    for (const command of chain) {
+      if (segmentAllowed(command, allowlist)) continue;
+      const text = ruleText(command);
+      const rule = BASH_RULES.find((r) => r.pattern.test(text));
+      if (rule) return { dangerous: true, reason: rule.reason };
     }
     return { dangerous: false };
   }
 
+  const filePath = String(input.file_path ?? input.notebook_path ?? '');
+  const writes = PLAN_WRITE_TOOLS.has(toolName);
+
   // Deliberately above the allowlist short-circuit: a blanket `{ tool: 'Edit' }`
-  // entry must not disarm the one write that kills the turn doing it. Writes
-  // only — reading these files is harmless.
-  if (PLAN_WRITE_TOOLS.has(toolName) && isSelfWorkerSource(String(input.file_path ?? input.notebook_path ?? ''))) {
+  // entry must not disarm the writes that outlive the turn — the one that kills
+  // it, or one that plants code to run later. Writes only: reading either runs
+  // nothing.
+  if (writes && isSelfWorkerSource(filePath)) {
     return {
       dangerous: true,
       reason: "Edits this bridge's worker source — the write restarts the worker and kills this turn",
     };
   }
+  const persistent = writes ? persistentFileReason(filePath) : undefined;
+  if (persistent) return { dangerous: true, reason: persistent };
 
-  if (allowlist.some((e) => !e.prefix && e.tool === toolName)) return { dangerous: false };
+  if (allowlist.some((e) => !e.prefix && e.tool === toolName)) {
+    // Nor does one cover a write that can't be placed: through a climbing `..`
+    // or a link that can't be followed, it could be landing on one of those.
+    // (Without an entry, the root check below already asks about these.)
+    if (writes && filePath && unconfirmedPath(filePath)) {
+      return { dangerous: true, reason: "Writes through a path whose real location can't be confirmed" };
+    }
+    return { dangerous: false };
+  }
 
   if (FILE_TOOLS.has(toolName)) {
-    const filePath = String(input.file_path ?? input.notebook_path ?? '');
-    if (filePath && !isInsideAny(roots, filePath)) {
-      // Home-directory dotfiles and credentials are the riskiest targets.
+    // Followed through symlinks: a link inside a project can point anywhere.
+    if (filePath && !isRealInside(roots, filePath)) {
+      // Home-directory dotfiles and credentials are the riskiest targets, as
+      // written or wherever a link leads.
       const home = os.homedir();
-      const sensitive =
-        isInside(path.join(home, '.ssh'), filePath) ||
-        isInside(path.join(home, '.aws'), filePath) ||
-        filePath.includes('.env');
+      const real = realPathOf(filePath);
+      const sensitive = [filePath, ...(real ? [real] : [])].some(
+        (p) => isInside(path.join(home, '.ssh'), p) || isInside(path.join(home, '.aws'), p) || p.includes('.env'),
+      );
       // Plan mode's deliverable lives outside cwd by design; reading or
       // authoring it shouldn't prompt.
       if (!sensitive && isPlanPath(filePath, roots)) return { dangerous: false };
@@ -522,7 +1064,9 @@ export function isSafePlanWrite(
 ): boolean {
   if (!PLAN_WRITE_TOOLS.has(toolName)) return false;
   const filePath = String(input.file_path ?? input.notebook_path ?? '');
-  return Boolean(filePath) && isPlanPath(filePath, roots);
+  // A plans directory is still no place for a git hook or a settings file (a
+  // user may keep their plans in a git repo): those run long after the plan.
+  return Boolean(filePath) && isPlanPath(filePath, roots) && !persistentFileReason(filePath);
 }
 
 /**

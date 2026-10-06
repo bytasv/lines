@@ -45,6 +45,41 @@ export interface McpSyncState {
 const EMPTY_MCP_SYNC: McpSyncState = { updatedAt: 0, pending: null, rejected: null };
 
 /**
+ * Write one of the MCP files owner-only, which all four are. The secrets and env
+ * files hold credentials outright; the connections and sync files hold the rest
+ * of a connection's setup (command lines, URLs) and, from a build that predates
+ * names-only sync, the env values it kept inline until the load migration moves
+ * them out. `mode` only applies when a file is created, so an existing one is
+ * chmod'd as well.
+ */
+function writeMcpFile(file: string, data: unknown) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {
+    // best-effort on platforms without POSIX perms
+  }
+}
+
+/** A credential file — connection id -> name -> value. Anything else is dropped
+ *  rather than handed to the SDK. */
+function readMcpCredentials(file: string): McpConnectionSecrets {
+  const raw = readJson<unknown>(file, {});
+  const out: McpConnectionSecrets = {};
+  // A file holding `null` must read as empty, not throw out of the constructor.
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [id, values] of Object.entries(raw)) {
+    if (!values || typeof values !== 'object' || Array.isArray(values)) continue;
+    const entry: Record<string, string> = {};
+    for (const [name, value] of Object.entries(values as Record<string, unknown>)) {
+      if (typeof value === 'string') entry[name] = value;
+    }
+    if (Object.keys(entry).length) out[id] = entry;
+  }
+  return out;
+}
+
+/**
  * Agent-memory review bookkeeping. No `updatedAt`: memory is merged per file on
  * the storage server, so there is no whole-blob row for a timestamp to order.
  * `rejectedHash` remembers the exact remote content a "keep mine" answer already
@@ -230,6 +265,22 @@ export interface StoredOpenaiAccount {
   connectedAt: number;
 }
 
+/** A plain token: letters, digits, `_` and `-`, starting with a letter or digit. */
+const STORE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+/**
+ * Whether an id may name a path under the app root.
+ *
+ * User ids become `users/<id>` and session ids become `transcripts/<id>.jsonl`
+ * and `attachments/<id>/` — and neither is always ours: a user id can be the
+ * relay's word, and a session row can arrive from storage. Anything that is not
+ * a plain token (a `../`, a slash, an empty string) would be a path out of the
+ * store, so it is refused here rather than trusted at every join.
+ */
+export function isValidStoreId(id: unknown): id is string {
+  return typeof id === 'string' && STORE_ID_RE.test(id);
+}
+
 /**
  * Flat-JSON persistence rooted at a single directory. One store per user
  * (`createStore(userStoreRoot(userId))`); the local disk is a cache/offline
@@ -276,6 +327,10 @@ export function createStore(root: string) {
   // A third file, never read by sync.ts and never broadcast, so a connection that
   // travels to another machine arrives without its credential.
   const MCP_SECRETS_FILE = path.join(root, 'mcp-secrets.json');
+  // The stdio counterpart: environment values — API keys, in practice — under
+  // the same rules. A file of its own rather than a second namespace inside
+  // MCP_SECRETS_FILE, whose shape an older build reads directly.
+  const MCP_ENV_FILE = path.join(root, 'mcp-env.json');
   // This user's TypeSafe API key for smart turn routing. Same posture as
   // MCP_SECRETS_FILE: 0600, never read by sync.ts, never broadcast.
   const TYPESAFE_KEY_FILE = path.join(root, 'typesafe-key.json');
@@ -306,7 +361,11 @@ export function createStore(root: string) {
   // revalidation below still covers the offline migrate script and hand-edits.
   const transcriptCache = new Map<string, TranscriptEntry>();
 
-  const transcriptFile = (sessionId: string) => path.join(TRANSCRIPTS, `${sessionId}.jsonl`);
+  /** Throws for an id that is not a plain token — see isValidStoreId. Readers check first and treat one as absent. */
+  const transcriptFile = (sessionId: string) => {
+    if (!isValidStoreId(sessionId)) throw new Error('invalid session id');
+    return path.join(TRANSCRIPTS, `${sessionId}.jsonl`);
+  };
 
   /** Insertion order is the LRU order: re-insert on hit, evict from the front. */
   function touchEntry(sessionId: string, entry: TranscriptEntry) {
@@ -327,6 +386,8 @@ export function createStore(root: string) {
 
   /** Cached entry for a session, revalidated against the file's mtime/size. */
   function transcriptEntry(sessionId: string): TranscriptEntry | null {
+    // A malformed id has no transcript, rather than a read somewhere else.
+    if (!isValidStoreId(sessionId)) return null;
     const file = transcriptFile(sessionId);
     let stat: fs.Stats;
     try {
@@ -494,7 +555,10 @@ export function createStore(root: string) {
     appendTranscript(sessionId: string, event: TranscriptEvent) {
       const line = JSON.stringify(event);
       const file = transcriptFile(sessionId);
-      fs.appendFileSync(file, line + '\n');
+      // Owner-only: a transcript is every prompt, reply and file read of the
+      // session. `mode` applies on creation; the app root's own 0700 covers files
+      // an older build created.
+      fs.appendFileSync(file, line + '\n', { mode: 0o600 });
       // Extend the cached entry rather than invalidating it — re-reading a
       // multi-MB transcript on every appended event is exactly the cost the
       // cache exists to remove.
@@ -573,6 +637,7 @@ export function createStore(root: string) {
       fs.appendFileSync(
         path.join(TRANSCRIPTS, `${sessionId}.rewind-${Date.now()}.jsonl`),
         dropped.join('\n') + '\n',
+        { mode: 0o600 },
       );
       fs.writeFileSync(transcriptFile(sessionId), kept.length ? kept.join('\n') + '\n' : '');
       transcriptCache.delete(sessionId);
@@ -581,6 +646,9 @@ export function createStore(root: string) {
 
     deleteTranscript(sessionId: string) {
       transcriptCache.delete(sessionId);
+      // Nothing was ever written under a malformed id, and the joins below must
+      // not delete whatever such an id would name.
+      if (!isValidStoreId(sessionId)) return;
       fs.rmSync(transcriptFile(sessionId), { force: true });
       fs.rmSync(path.join(ATTACHMENTS, sessionId), { recursive: true, force: true });
       // Rewind sidecars hold prompts and replies of this same session, so a delete
@@ -598,6 +666,7 @@ export function createStore(root: string) {
 
     /** Persist an attachment's base64 to disk; returns the stored file basename. */
     saveAttachment(sessionId: string, name: string, base64: string): string {
+      if (!isValidStoreId(sessionId)) throw new Error('invalid session id');
       const dir = path.join(ATTACHMENTS, sessionId);
       fs.mkdirSync(dir, { recursive: true });
       const safe = name.replace(/[^\w.-]/g, '_') || 'file';
@@ -608,6 +677,8 @@ export function createStore(root: string) {
 
     /** Read a previously staged attachment back to base64; null if the file is gone. */
     loadAttachmentBase64(sessionId: string, file: string): string | null {
+      // `file` is a basename this store minted; anything with a directory in it is not.
+      if (!isValidStoreId(sessionId) || path.basename(file) !== file) return null;
       try {
         return fs.readFileSync(path.join(ATTACHMENTS, sessionId, file)).toString('base64');
       } catch {
@@ -756,7 +827,7 @@ export function createStore(root: string) {
     },
 
     saveMcpConnections(connections: unknown) {
-      writeJson(MCP_FILE, connections);
+      writeMcpFile(MCP_FILE, connections);
     },
 
     loadMcpSync(): McpSyncState {
@@ -769,32 +840,40 @@ export function createStore(root: string) {
     },
 
     saveMcpSync(state: McpSyncState) {
-      writeJson(MCP_SYNC_FILE, state);
+      writeMcpFile(MCP_SYNC_FILE, state);
     },
 
     /** Header values, keyed connection id -> header name. Local only. */
     loadMcpSecrets(): McpConnectionSecrets {
-      const raw = readJson<Record<string, unknown>>(MCP_SECRETS_FILE, {});
-      const out: McpConnectionSecrets = {};
-      for (const [id, headers] of Object.entries(raw)) {
-        if (!headers || typeof headers !== 'object' || Array.isArray(headers)) continue;
-        const entry: Record<string, string> = {};
-        for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
-          if (typeof value === 'string') entry[name] = value;
-        }
-        if (Object.keys(entry).length) out[id] = entry;
-      }
-      return out;
+      return readMcpCredentials(MCP_SECRETS_FILE);
     },
 
     saveMcpSecrets(secrets: McpConnectionSecrets) {
-      // 0600 like AUTH_FILE, and chmod'd too in case the file already exists:
-      // these are bearer credentials for third-party services.
-      fs.writeFileSync(MCP_SECRETS_FILE, JSON.stringify(secrets, null, 2), { mode: 0o600 });
-      try {
-        fs.chmodSync(MCP_SECRETS_FILE, 0o600);
-      } catch {
-        // best-effort on platforms without POSIX perms
+      // Bearer credentials for third-party services — 0600, like AUTH_FILE.
+      writeMcpFile(MCP_SECRETS_FILE, secrets);
+    },
+
+    /** Stdio env values, keyed connection id -> variable name. Local only, like the header values. */
+    loadMcpEnv(): McpConnectionSecrets {
+      return readMcpCredentials(MCP_ENV_FILE);
+    },
+
+    saveMcpEnv(env: McpConnectionSecrets) {
+      writeMcpFile(MCP_ENV_FILE, env);
+    },
+
+    /**
+     * Tighten every MCP file that exists to 0600. Each write sets the mode, but
+     * a file an older build left 0644 keeps it for as long as nothing rewrites
+     * it — and an unchanged connections file never is. Run once at startup.
+     */
+    secureMcpFiles() {
+      for (const file of [MCP_FILE, MCP_SYNC_FILE, MCP_SECRETS_FILE, MCP_ENV_FILE]) {
+        try {
+          fs.chmodSync(file, 0o600);
+        } catch {
+          // absent, or a platform without POSIX perms — best-effort either way
+        }
       }
     },
 
@@ -915,8 +994,9 @@ export function createStore(root: string) {
 
 export type Store = ReturnType<typeof createStore>;
 
-/** Directory holding a single user's flat-JSON state. */
+/** Directory holding a single user's flat-JSON state. Throws for an id that could name a path outside it. */
 export function userStoreRoot(userId: string): string {
+  if (!isValidStoreId(userId)) throw new Error('invalid user id');
   return path.join(APP_ROOT, 'users', userId);
 }
 

@@ -5,8 +5,9 @@
  * and no firewall or NAT setup. The browser connects to `/client`, and the relay
  * pipes frames between them.
  *
- * It is deliberately dumb. It never parses an app message, never persists a
- * payload, and never logs one — see protocol.ts on why the payload stays opaque.
+ * It is deliberately dumb. It never persists a payload and never logs one, and
+ * the only app message it parses is a guest's, to keep that guest's token off
+ * the host — see protocol.ts on why the payload otherwise stays opaque.
  * Anything that needs to understand a Lines message belongs in the bridge.
  */
 import { timingSafeEqual } from 'node:crypto';
@@ -18,10 +19,11 @@ dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
 
 import { verifyToken } from '@clerk/backend';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { authorizeClient as authorizeClientAgainst } from './authorize.ts';
+import { authorizeClient as authorizeClientAgainst, reauthorizeGuests } from './authorize.ts';
 import { HubRegistry, type EventDetail, type Sink } from './mux.ts';
 import {
   RELAY_PROTOCOL_VERSION,
+  RELAY_SECRET_HEADER,
   decode,
   encode,
   type AgentToRelay,
@@ -69,12 +71,17 @@ const GUEST_REAUTH_MS = Number(process.env.RELAY_GUEST_REAUTH_MS ?? 60_000);
 /**
  * The lowest bridge app-protocol that may serve a guest.
  *
- * A bridge older than this ignores the `grant` field on the `open` frame — it
+ * A bridge older than 2 ignores the `grant` field on the `open` frame — it
  * would happily serve a guest as if they were the owner, since unknown fields
  * are dropped silently. Refusing the connection at the gate is what makes adding
  * those fields safe without a RELAY_PROTOCOL_VERSION bump.
+ *
+ * 6, because a bridge older than that admits a guest on this relay's word alone;
+ * from 6 on it admits one only on a grant it minted itself (see guestGrants.ts
+ * on the bridge). Older bridges keep working for their owners — only sharing
+ * waits for the update.
  */
-const COLLAB_MIN_PROTOCOL = Number(process.env.RELAY_COLLAB_MIN_PROTOCOL ?? 2);
+const COLLAB_MIN_PROTOCOL = Number(process.env.RELAY_COLLAB_MIN_PROTOCOL ?? 6);
 /**
  * How long a browser waits for a bridge to attach before the /client gate gives
  * up and classifies it against what the relay knows.
@@ -287,19 +294,35 @@ async function route(ws: WebSocket, req: http.IncomingMessage) {
     return;
   }
   const onFrames = deferFrames(ws);
-  if (url.pathname === '/agent') return handleAgent(ws, url, deviceId, onFrames);
+  if (url.pathname === '/agent') return handleAgent(ws, req, url, deviceId, onFrames);
   if (url.pathname === '/client') return handleClient(ws, url, deviceId, onFrames);
   note(deviceId, 'refused-endpoint', { path: url.pathname });
   ws.close(1008, 'unknown endpoint');
 }
 
+/**
+ * The device secret a bridge presents on /agent.
+ *
+ * A header, because a URL is what reverse proxies and access logs write down,
+ * and this is a long-lived credential for someone's machine. The `secret` query
+ * parameter is deprecated but still read: every bridge released before the
+ * header sends nothing else, and refusing them would look to their owners
+ * exactly like being unpaired. Neither form is ever logged.
+ */
+function presentedDeviceSecret(req: http.IncomingMessage, url: URL): string | null {
+  const header = req.headers[RELAY_SECRET_HEADER];
+  if (typeof header === 'string' && header) return header;
+  return url.searchParams.get('secret');
+}
+
 async function handleAgent(
   ws: WebSocket,
+  req: http.IncomingMessage,
   url: URL,
   deviceId: string,
   onFrames: (handler: (raw: unknown) => void) => void,
 ) {
-  const secret = url.searchParams.get('secret');
+  const secret = presentedDeviceSecret(req, url);
   const device = await verifyDevice(deviceId, secret);
   // Fail closed on a refusal *and* on an outage: an outage must never widen access.
   if (typeof device === 'string') {
@@ -482,11 +505,14 @@ async function handleClient(
       return;
     }
     const authorized = await authorizeClient(deviceId, userId);
-    if (!authorized || authorized.scope === 'owner') {
+    // Refused on both kinds of no — storage saying it, and storage not answering.
+    // A new connection has nothing to protect yet, so an outage blocking it is the
+    // correct trade; only the re-authorization sweep must keep the two apart.
+    if (authorized === null || authorized === 'unreachable' || authorized.scope === 'owner') {
       // ownerId null here means no bridge has proven this device since the relay
       // started — the machine's own user is refused as a stranger until it does.
       note(deviceId, 'client-refused', {
-        reason: 'not-owner-no-grant',
+        reason: authorized === 'unreachable' ? 'storage-unreachable' : 'not-owner-no-grant',
         userId,
         ownerId: hub.ownerId,
         agentOnline: hub.online,
@@ -512,53 +538,19 @@ async function handleClient(
 }
 
 /**
- * Re-authorize every live guest channel, and close the ones whose grant is gone
- * or has narrowed.
- *
- * Without this, revoking a share only takes effect at the guest's next reconnect
- * — which for an open tab is never. Owner channels are deliberately not swept:
- * they are covered by the device re-verify, which is the check that a *machine*
- * still belongs to an account.
- *
- * Only an explicit denial closes a channel. A storage outage returns null from
- * `authorizeClient` too, and treating that as a revoke would kick every guest off
- * during a blip — the same asymmetry `reverify` applies to devices, for the same
- * reason. A revoke landing late is recoverable; a mass disconnect is not.
+ * The guest re-authorization sweep (authorize.ts), one run at a time. Channels
+ * survive a storage outage rather than being dropped by it, so a sweep against a
+ * storage that hangs waits out a timeout per guest — and overlapping runs would
+ * pile requests onto exactly the service that is struggling.
  */
-async function reauthorizeGuests(): Promise<void> {
-  for (const { deviceId, hub } of hubs.withGuests()) {
-    for (const ch of hub.guestChannels()) {
-      const fresh = await authorizeClient(deviceId, ch.userId).catch(() => undefined);
-      if (fresh === undefined) continue; // could not ask — leave the channel alone
-      const narrowed =
-        !fresh ||
-        fresh.scope !== ch.grant.scope ||
-        fresh.hostUserId !== ch.grant.hostUserId ||
-        !sameCaps(fresh.caps, ch.grant.caps) ||
-        !coversSameSessions(fresh.sessionIds, ch.grant.sessionIds);
-      if (!narrowed) continue;
-      console.log(`[relay] grant for ${ch.userId} on ${deviceId} changed — closing channel ${ch.id}`);
-      // Closed rather than mutated in place: the bridge derived its whole view of
-      // this connection from the grant on the `open` frame, so a changed grant has
-      // to arrive as a new channel. The browser reconnects and gets the new one.
-      hub.dropChannel(ch.id, 'grant changed');
-    }
-  }
-}
-
-const sameCaps = (a?: Record<string, boolean>, b?: Record<string, boolean>): boolean => {
-  const keys = new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})]);
-  for (const key of keys) if ((a?.[key] === true) !== (b?.[key] === true)) return false;
-  return true;
-};
-
-const coversSameSessions = (a?: string[], b?: string[]): boolean => {
-  const left = new Set(a ?? []);
-  const right = new Set(b ?? []);
-  return left.size === right.size && [...left].every((id) => right.has(id));
-};
-
-setInterval(() => void reauthorizeGuests(), GUEST_REAUTH_MS).unref();
+let sweeping = false;
+setInterval(() => {
+  if (sweeping) return;
+  sweeping = true;
+  void reauthorizeGuests(hubs, authorizeClient).finally(() => {
+    sweeping = false;
+  });
+}, GUEST_REAUTH_MS).unref();
 
 server.listen(PORT, () => {
   // The bound port, not PORT: with RELAY_PORT=0 the OS picks one, and callers

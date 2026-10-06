@@ -53,6 +53,22 @@ export function r2PublicBaseWarning(): string | null {
   return null;
 }
 
+/**
+ * Whether a recipe image URL is one this deployment's bucket serves — under the
+ * public base, where putRecipeImage puts every upload.
+ *
+ * A recipe is someone's content shown to everyone else, and an image renders on
+ * sight: an arbitrary URL there is a request every viewer's browser makes to a
+ * host of the author's choosing. The web CSP blocks that too; this keeps such a
+ * URL from being stored in the first place. With no bucket configured nothing
+ * could have been uploaded, so no image URL is one of ours.
+ */
+export function isServedRecipeImage(url: unknown): boolean {
+  const base = process.env.R2_PUBLIC_BASE_URL?.replace(/\/+$/, '');
+  if (!base || typeof url !== 'string') return false;
+  return url.startsWith(`${base}/recipes/`) && !url.includes('..');
+}
+
 /** Built on first upload, not at boot — an install with no R2 never loads the SDK. */
 let clientPromise: Promise<S3Client> | null = null;
 

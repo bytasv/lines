@@ -17,6 +17,8 @@ import { StorageSyncClient, THROTTLED } from './sync.ts';
 import { ProjectKeyRegistry } from './projectKeys.ts';
 import { PresenceTracker } from './presence.ts';
 import * as worktreeCommands from './worktreeCommands.ts';
+import * as workflowCommands from './workflowCommands.ts';
+import { ownSigningKey } from './syncSignature.ts';
 import { MemorySyncer } from './memory.ts';
 import type { WorkerClient } from './workerClient.ts';
 
@@ -247,6 +249,9 @@ export function buildUserContext(
     // Why sync went down, on disk: the bridge console isn't reachable on a
     // desktop/VPS install, so the `syncLog` file request reads this back.
     (entry) => store.appendSyncLog(entry),
+    // Bound into every workflow, step and recipe it signs: one machine key signs
+    // for every account on this machine, so the signature has to say whose row it is.
+    { account: userId },
   );
   // Storage/Supabase reachability flips → tell this user's browsers so they can
   // show the "cloud sync unavailable" notice (local persistence still works).
@@ -523,7 +528,16 @@ export function buildUserContext(
     await refreshShared();
     await refreshSharedSteps();
     await refreshSharedRecipes();
+    // A fresh machine mints its signing key on its first sync, after the `hello`
+    // that would have shown it: announce it once, so the fingerprint the user
+    // compares between machines is on screen without a reconnect.
+    const own = ownSigningKey();
+    if (own !== announcedSigningKey) {
+      announcedSigningKey = own;
+      broadcast({ type: 'syncSigning', info: workflowCommands.syncSigningInfo(ctx, own) });
+    }
   };
+  let announcedSigningKey = ownSigningKey();
 
   const ctx: UserContext = {
     userId,

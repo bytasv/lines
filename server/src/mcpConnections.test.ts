@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { RESERVED_MCP_SERVER_NAMES, normalizeConnection } from '@lines/shared';
+import { RESERVED_MCP_SERVER_NAMES, normalizeConnection, type McpConnection } from '@lines/shared';
 import { McpConnections } from './mcpConnections.ts';
 import { LINES_MCP_SERVER } from './mcpWorkflowTools.ts';
 import { createStore } from './store.ts';
@@ -24,6 +24,10 @@ function harness(seed: unknown[] = []) {
 }
 
 const HTTP = { name: 'figma', transport: 'http', url: 'https://mcp.figma.com/mcp' };
+const STDIO = { name: 'local', transport: 'stdio', command: 'npx', args: ['-y', 'srv'] };
+
+const read = (root: string, file: string) => fs.readFileSync(path.join(root, file), 'utf8');
+const stdioEnv = (mcp: McpConnections) => (mcp.serverConfigs().local as { env?: unknown }).env;
 
 test('the reserved-name list matches the Lines server it exists to protect', () => {
   // The copy in shared/ cannot import the bridge module, so this is what stops
@@ -125,6 +129,145 @@ test('removing a connection removes its secrets', () => {
   assert.equal(h.mcp.remove(id), true);
   assert.deepEqual(h.mcp.secretKeys(id), []);
   assert.equal(fs.readFileSync(path.join(h.root, 'mcp-secrets.json'), 'utf8').includes('sk-5'), false);
+});
+
+/**
+ * Stdio env values: the same boundary as header values. They used to ride on
+ * the connection and were synced to storage with it, so each of these pins one
+ * way a value could get back onto a shape that travels.
+ */
+
+test('env values reach serverConfigs but never blob() or list()', () => {
+  const h = harness();
+  assert.equal(h.mcp.add({ ...STDIO, env: { API_KEY: 'sk-env-1' } }).ok, true);
+  // The synced/broadcast form: names only.
+  assert.deepEqual(h.mcp.blob().connections[0].envKeys, ['API_KEY']);
+  assert.equal(JSON.stringify(h.mcp.blob()).includes('sk-env-1'), false);
+  assert.equal(JSON.stringify(h.mcp.list()).includes('sk-env-1'), false);
+  // The SDK-facing form: the value is attached exactly here.
+  assert.deepEqual(stdioEnv(h.mcp), { API_KEY: 'sk-env-1' });
+});
+
+test('env values live in their own file, and every MCP file is 0600', () => {
+  const h = harness();
+  h.mcp.add({ ...HTTP, headerKeys: ['Authorization'] }, { Authorization: 'Bearer sk-6' });
+  h.mcp.add({ ...STDIO, env: { API_KEY: 'sk-env-2' } });
+  assert.equal(read(h.root, 'mcp-connections.json').includes('sk-env-2'), false);
+  assert.equal(read(h.root, 'mcp-env.json').includes('sk-env-2'), true);
+  for (const file of ['mcp-connections.json', 'mcp-connections-sync.json', 'mcp-secrets.json', 'mcp-env.json']) {
+    assert.equal(fs.statSync(path.join(h.root, file)).mode & 0o777, 0o600, file);
+  }
+});
+
+test('an update carrying names only keeps the stored env values', () => {
+  // What the Settings toggle sends: the connection as it was broadcast, which
+  // holds names and no values. It must not wipe the key it cannot see.
+  const h = harness();
+  const added = h.mcp.add({ ...STDIO, env: { API_KEY: 'sk-env-3' } });
+  assert.ok(added.ok);
+  h.mcp.update(added.connection.id, { ...added.connection, enabled: false });
+  h.mcp.update(added.connection.id, { ...added.connection, enabled: true });
+  assert.deepEqual(stdioEnv(h.mcp), { API_KEY: 'sk-env-3' });
+});
+
+test('dropping an env name drops its stored value, and its held mark', () => {
+  const h = harness();
+  const added = h.mcp.add({ ...STDIO, env: { API_KEY: 'sk-env-4', REGION: 'eu' } });
+  assert.ok(added.ok);
+  h.mcp.update(added.connection.id, { ...STDIO, envKeys: ['REGION'] });
+  assert.deepEqual(stdioEnv(h.mcp), { REGION: 'eu' });
+  assert.deepEqual(h.mcp.list()[0].envValuesHeld, ['REGION']);
+  assert.equal(read(h.root, 'mcp-env.json').includes('sk-env-4'), false);
+});
+
+test('which env names hold a value here rides list() and the broadcast — never blob(), never a value', () => {
+  const h = harness();
+  const broadcasts: McpConnection[][] = [];
+  h.mcp.onChange = (connections) => broadcasts.push(connections);
+  assert.ok(h.mcp.add({ ...STDIO, envKeys: ['API_KEY', 'REGION'], env: { API_KEY: 'sk-held-1' } }).ok);
+  // Enough for the form to say "saved" for one and "not set" for the other.
+  assert.deepEqual(h.mcp.list()[0].envKeys, ['API_KEY', 'REGION']);
+  assert.deepEqual(h.mcp.list()[0].envValuesHeld, ['API_KEY']);
+  assert.deepEqual(broadcasts.at(-1)?.[0].envValuesHeld, ['API_KEY']);
+  // About this machine only: another one holds its own values, or none.
+  assert.equal('envValuesHeld' in h.mcp.blob().connections[0], false);
+  assert.equal(JSON.stringify([h.mcp.list(), broadcasts, h.mcp.blob()]).includes('sk-held-1'), false);
+});
+
+test('an empty env value on save keeps the stored one', () => {
+  // The form never holds a stored value to send back, so a box left blank on
+  // save means "leave it", not "erase it".
+  const h = harness();
+  const added = h.mcp.add({ ...STDIO, env: { API_KEY: 'sk-held-2' } });
+  assert.ok(added.ok);
+  h.mcp.update(added.connection.id, { ...h.mcp.list()[0], env: { API_KEY: '' } });
+  assert.deepEqual(stdioEnv(h.mcp), { API_KEY: 'sk-held-2' });
+  assert.deepEqual(h.mcp.list()[0].envValuesHeld, ['API_KEY']);
+});
+
+test('a value entered for a name that arrived bare is held from then on', () => {
+  // A connection synced from another machine brings the name and not the key;
+  // this is how the key gets entered on this one.
+  const h = harness([{ id: 'synced', ...STDIO, envKeys: ['API_KEY'], enabled: true }]);
+  assert.equal('envValuesHeld' in h.mcp.list()[0], false);
+  assert.equal('env' in (h.mcp.serverConfigs().local as object), false);
+  h.mcp.update('synced', { ...h.mcp.list()[0], env: { API_KEY: 'sk-held-3' } });
+  assert.deepEqual(h.mcp.list()[0].envValuesHeld, ['API_KEY']);
+  assert.deepEqual(stdioEnv(h.mcp), { API_KEY: 'sk-held-3' });
+  // A client cannot claim one either: the mark is recomputed, never read back.
+  const claiming = { ...h.mcp.list()[0], envKeys: ['API_KEY', 'OTHER'], envValuesHeld: ['OTHER'] };
+  h.mcp.update('synced', claiming);
+  assert.deepEqual(h.mcp.list()[0].envValuesHeld, ['API_KEY']);
+});
+
+test('removing a connection removes its env values', () => {
+  const h = harness();
+  const added = h.mcp.add({ ...STDIO, env: { API_KEY: 'sk-env-5' } });
+  assert.ok(added.ok);
+  assert.equal(h.mcp.remove(added.connection.id), true);
+  assert.equal(read(h.root, 'mcp-env.json').includes('sk-env-5'), false);
+});
+
+test('env values an older build kept inline move to their own file on load', () => {
+  // Every stdio connection with an env looked like this on disk — and in the
+  // storage row it was synced to — before names-only sync.
+  const h = harness([{ id: 'legacy', ...STDIO, env: { API_KEY: 'sk-legacy' }, enabled: true }]);
+  assert.deepEqual(h.mcp.list()[0].envKeys, ['API_KEY']);
+  assert.equal(JSON.stringify(h.mcp.blob()).includes('sk-legacy'), false);
+  assert.equal(read(h.root, 'mcp-connections.json').includes('sk-legacy'), false);
+  assert.equal(read(h.root, 'mcp-env.json').includes('sk-legacy'), true);
+  // Moved, not lost: the server it belongs to still gets it.
+  assert.deepEqual(stdioEnv(h.mcp), { API_KEY: 'sk-legacy' });
+  // And the next start finds nothing left to move, so it rewrites nothing.
+  const connections = read(h.root, 'mcp-connections.json');
+  const env = read(h.root, 'mcp-env.json');
+  const reloaded = new McpConnections(createStore(h.root));
+  assert.deepEqual(stdioEnv(reloaded), { API_KEY: 'sk-legacy' });
+  assert.equal(read(h.root, 'mcp-connections.json'), connections);
+  assert.equal(read(h.root, 'mcp-env.json'), env);
+});
+
+test('MCP files an older build left world-readable are tightened at startup', () => {
+  // Canonical contents, so nothing here is rewritten on load — what is under
+  // test is the startup chmod, not the mode a fresh write happens to get.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-mcp-'));
+  const canonical = normalizeConnection({ ...HTTP, id: 'a' });
+  assert.ok('connection' in canonical);
+  const files: Record<string, unknown> = {
+    'mcp-connections.json': [canonical.connection],
+    'mcp-connections-sync.json': { updatedAt: 1, pending: null, rejected: null },
+    'mcp-secrets.json': {},
+  };
+  for (const [file, data] of Object.entries(files)) {
+    fs.writeFileSync(path.join(root, file), JSON.stringify(data));
+    fs.chmodSync(path.join(root, file), 0o644);
+  }
+  const before = read(root, 'mcp-connections.json');
+  new McpConnections(createStore(root));
+  assert.equal(read(root, 'mcp-connections.json'), before, 'the file must not have been rewritten');
+  for (const file of Object.keys(files)) {
+    assert.equal(fs.statSync(path.join(root, file)).mode & 0o777, 0o600, file);
+  }
 });
 
 test('a duplicate name is refused rather than shadowing the first row', () => {

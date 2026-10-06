@@ -2,6 +2,7 @@ import type { ServerMessage } from '@lines/shared';
 import type { LiveSessionInfo } from './workerProtocol.ts';
 import type { WorkerClient } from './workerClient.ts';
 import { buildUserContext, type UserContext } from './userContext.ts';
+import { isValidStoreId } from './store.ts';
 
 /**
  * Lazily-built map of userId → UserContext plus the server-built session
@@ -42,6 +43,10 @@ export class UserRegistry {
   get(userId: string): UserContext {
     let ctx = this.contexts.get(userId);
     if (!ctx) {
+      // Minting a context creates `users/<userId>` on disk, and some ids reach
+      // here from outside this process (a relay attestation, a session owner
+      // seeded from a directory name). Refused rather than joined into a path.
+      if (!isValidStoreId(userId)) throw new Error('invalid user id');
       ctx = buildUserContext(userId, this.storeRootFor(userId), this.worker, (msg) =>
         this.observe(userId, msg),
       );

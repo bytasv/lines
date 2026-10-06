@@ -30,13 +30,14 @@ import type {
   SocketAccess,
 } from '@lines/shared';
 import { buildMatcher } from '@lines/shared';
+import { isRealInside, realPathOf } from './autoGuard.ts';
 import { grepFilesAcross } from './contentSearch.ts';
 import { collectDocs } from './docsBundle.ts';
 import { searchFilesAcross } from './fileSearch.ts';
 import { showFile } from './git.ts';
 import { searchSession } from './sessionSearch.ts';
 import type { UserContext } from './userContext.ts';
-import { resolveWorkspacePath, workspaceRoots } from './workspacePaths.ts';
+import { resolveWorkspacePath } from './workspacePaths.ts';
 
 export interface FileRouteResult {
   status: number;
@@ -87,18 +88,45 @@ const MIME: Record<string, string> = {
   '.json': 'application/json',
 };
 
-/** The single `paths[0]` every route but `find` and `attachment` takes. */
+/**
+ * The single `paths[0]` every route but `find` and `attachment` takes, checked
+ * where it really lands (see resolveWorkspacePath): a symlink inside a granted
+ * root can't serve a read, a write or a media chunk from outside it.
+ */
 function soleRoot(ctx: UserContext, params: FileRequestParams, access: SocketAccess): string | null {
   return resolveWorkspacePath(ctx, params.paths?.[0] ?? '', access);
 }
 
+/**
+ * Where an already-granted path really lands, gated again there — the path a
+ * route then reads or writes. Touching the granted path itself would follow its
+ * links a second time, after the check, so a link swapped in between could
+ * redirect the access; this is the path that was checked. Null once it no
+ * longer resolves inside the grant.
+ */
+function grantedReal(ctx: UserContext, abs: string, access: SocketAccess): string | null {
+  const real = realPathOf(abs);
+  return real && resolveWorkspacePath(ctx, real, access) ? real : null;
+}
+
+/** soleRoot as named (`abs`, for anything echoed back) and as touched (`real`, see grantedReal). */
+function soleTarget(
+  ctx: UserContext,
+  params: FileRequestParams,
+  access: SocketAccess,
+): { abs: string; real: string } | null {
+  const abs = soleRoot(ctx, params, access);
+  const real = abs ? grantedReal(ctx, abs, access) : null;
+  return abs && real ? { abs, real } : null;
+}
+
 /** A workspace file, for the clickable-path preview. */
 function readFile(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
-  const abs = soleRoot(ctx, params, access);
-  if (!abs) return { status: 403 };
+  const target = soleTarget(ctx, params, access);
+  if (!target) return { status: 403 };
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(abs);
+    stat = fs.statSync(target.real);
   } catch {
     return { status: 404 };
   }
@@ -106,33 +134,13 @@ function readFile(ctx: UserContext, params: FileRequestParams, access: SocketAcc
   if (stat.size > MAX_FILE_BYTES) return { status: 413 };
   let buf: Buffer;
   try {
-    buf = fs.readFileSync(abs);
+    buf = fs.readFileSync(target.real);
   } catch {
     return { status: 404 };
   }
   // Reject binary files (NUL byte in the first 8KB).
   if (buf.subarray(0, 8192).includes(0)) return { status: 415 };
   return { status: 200, body: { content: buf.toString('utf8'), mtimeMs: stat.mtimeMs } };
-}
-
-/**
- * Is `real` (an already-resolved realpath) inside the connection's grant? The
- * prefix check in {@link resolveWorkspacePath} runs on the path as given, so a
- * symlink inside the project pointing outside it would pass; this reruns it on
- * where the link lands. Roots are realpath'd too, so a root that is itself
- * behind a symlink (macOS `/var` → `/private/var`) still contains its files.
- */
-function realInsideGrant(ctx: UserContext, real: string, access: SocketAccess): boolean {
-  if (resolveWorkspacePath(ctx, real, access)) return true;
-  return workspaceRoots(ctx, access).some((root) => {
-    let realRoot: string;
-    try {
-      realRoot = fs.realpathSync(root);
-    } catch {
-      return false;
-    }
-    return real === realRoot || real.startsWith(realRoot + path.sep);
-  });
 }
 
 /**
@@ -147,15 +155,9 @@ function realInsideGrant(ctx: UserContext, real: string, access: SocketAccess): 
  */
 function writeFile(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
   if (access.scope !== 'owner') return { status: 403 };
-  const abs = soleRoot(ctx, params, access);
-  if (!abs) return { status: 403 };
-  let real: string;
-  try {
-    real = fs.realpathSync(abs);
-  } catch {
-    return { status: 404 };
-  }
-  if (!realInsideGrant(ctx, real, access)) return { status: 403 };
+  // A write through a link lands on its target, so that is the path written.
+  const real = soleTarget(ctx, params, access)?.real;
+  if (!real) return { status: 403 };
   let stat: fs.Stats;
   try {
     stat = fs.statSync(real);
@@ -187,16 +189,16 @@ function writeFile(ctx: UserContext, params: FileRequestParams, access: SocketAc
 
 /** One directory listing for the sidebar file tree. */
 function readTree(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
-  const abs = soleRoot(ctx, params, access);
-  if (!abs) return { status: 403 };
+  const real = soleTarget(ctx, params, access)?.real;
+  if (!real) return { status: 403 };
   let dirents: fs.Dirent[];
   try {
-    dirents = fs.readdirSync(abs, { withFileTypes: true });
+    dirents = fs.readdirSync(real, { withFileTypes: true });
   } catch {
     return { status: 404 };
   }
   const kept = dirents.filter((d) => !TREE_IGNORE.has(d.name) && (d.isDirectory() || d.isFile()));
-  const ignored = ignoredNames(abs, kept);
+  const ignored = ignoredNames(real, kept);
   const entries = kept
     .map((d) => ({
       name: d.name,
@@ -235,16 +237,18 @@ function ignoredNames(dir: string, dirents: fs.Dirent[]): Set<string> {
  * for the life of the page.
  */
 function readDocs(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
-  const abs = soleRoot(ctx, params, access);
-  if (!abs) return { status: 403 };
+  const target = soleTarget(ctx, params, access);
+  if (!target) return { status: 403 };
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(abs);
+    stat = fs.statSync(target.real);
   } catch {
     return { status: 404 };
   }
   if (!stat.isDirectory()) return { status: 404 };
-  return { status: 200, body: { root: abs, ...collectDocs(abs) } };
+  // Doc paths are relative to the walk, so the client's own name for the root
+  // goes back unchanged.
+  return { status: 200, body: { root: target.abs, ...collectDocs(target.real) } };
 }
 
 /** Rank project files by name for the composer's `@mention` search. */
@@ -364,7 +368,9 @@ async function searchSessionsRoute(
 /**
  * A stored attachment as base64, guarding against path traversal. Only the
  * requesting user's own attachments root is searched, so another user's
- * sessionId simply 404s.
+ * sessionId simply 404s. Inside it, each session's attachments sit under its id,
+ * and that session is the grant (sessionInReach): a session-scope guest reads
+ * its own sessions' attachments and no others'.
  *
  * Base64 rather than raw bytes because this now travels as JSON on the socket;
  * the client turns it back into a blob URL. Symmetric with the upload path,
@@ -373,12 +379,19 @@ async function searchSessionsRoute(
 function readAttachment(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
   const attachmentsRoot = ctx.store.attachmentsRoot;
   const abs = path.resolve(attachmentsRoot, params.rel ?? '');
-  if (abs !== attachmentsRoot && !abs.startsWith(attachmentsRoot + path.sep)) {
-    return { status: 403 };
-  }
+  // Through symlinks too: a link planted in the attachments directory must not
+  // serve a file from anywhere else on the host. Read from where it lands, gated
+  // again there, for the same reason as grantedReal.
+  const real = isRealInside([attachmentsRoot], abs) ? realPathOf(abs) : null;
+  const realRoot = realPathOf(attachmentsRoot);
+  if (!real || !realRoot || !isRealInside([attachmentsRoot], real)) return { status: 403 };
+  // The session is read off where the file really is, so a link from one
+  // session's folder into another's doesn't carry the read across with it.
+  const sessionId = path.relative(realRoot, real).split(path.sep)[0];
+  if (!sessionId || !sessionInReach(sessionId, access)) return { status: 403 };
   let buf: Buffer;
   try {
-    buf = fs.readFileSync(abs);
+    buf = fs.readFileSync(real);
   } catch {
     return { status: 404 };
   }
@@ -399,13 +412,13 @@ function readAttachment(ctx: UserContext, params: FileRequestParams, access: Soc
  * until `offset` reaches `size`.
  */
 function readMedia(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
-  const abs = soleRoot(ctx, params, access);
-  if (!abs) return { status: 403 };
-  const mediaType = MEDIA_MIME[path.extname(abs).toLowerCase()];
+  const target = soleTarget(ctx, params, access);
+  if (!target) return { status: 403 };
+  const mediaType = MEDIA_MIME[path.extname(target.abs).toLowerCase()];
   if (!mediaType) return { status: 415 };
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(abs);
+    stat = fs.statSync(target.real);
   } catch {
     return { status: 404 };
   }
@@ -421,7 +434,7 @@ function readMedia(ctx: UserContext, params: FileRequestParams, access: SocketAc
   let read = 0;
   let fd: number;
   try {
-    fd = fs.openSync(abs, 'r');
+    fd = fs.openSync(target.real, 'r');
   } catch {
     return { status: 404 };
   }
@@ -489,9 +502,12 @@ async function readSessionDiffFile(
   const rel = params.rel ?? '';
   if (!repo || !rel) return { status: 403 };
   // Containment twice over: the repo root is inside the grant's workspace, and
-  // the file is inside the repo.
+  // the file is inside the repo — and still inside the grant once a symlink is
+  // followed, since `after` is read off disk (from where it lands, grantedReal).
   const abs = path.resolve(repo, rel);
   if (abs !== repo && !abs.startsWith(repo + path.sep)) return { status: 403 };
+  const real = grantedReal(ctx, abs, access);
+  if (!real) return { status: 403 };
   // Doubles as "is this repo one of the session's commit units?" — null if not.
   const ref = await ctx.sessions.baselineRefFor(sessionId, repo);
   if (!ref) return { status: 404 };
@@ -499,10 +515,10 @@ async function readSessionDiffFile(
   const before = await showFile(repo, ref, rel);
   let after = '';
   try {
-    const stat = fs.statSync(abs);
+    const stat = fs.statSync(real);
     if (!stat.isFile()) return { status: 404 };
     if (stat.size > MAX_FILE_BYTES) return { status: 413 };
-    const buf = fs.readFileSync(abs);
+    const buf = fs.readFileSync(real);
     if (buf.subarray(0, 8192).includes(0)) return { status: 415 };
     after = buf.toString('utf8');
   } catch {

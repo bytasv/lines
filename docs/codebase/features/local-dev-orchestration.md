@@ -130,6 +130,22 @@ stored in a mode-0600 control file. That token is not included in status output.
   and optional Prisma Studio 5555. Each runner passes its resource environment
   to its own service; `LINES_DEV_CHECKOUT` keeps dotenv resolution at the original
   checkout. No environment files are copied into generations.
+- The bridge binds `127.0.0.1` like every bridge (see
+  [hosted-machine-access](hosted-machine-access.md#direct-sockets)), so its readiness probe and
+  status link name `127.0.0.1`, not `localhost`, which may resolve to `::1` first, where nothing
+  listens. For the same reason `web/src/ws.ts` dials `127.0.0.1` from a page served on loopback.
+- Vite still listens on every interface (`host: true`), so a phone on the same Wi-Fi can load the
+  page, but it gets no machine: the bridge admits only this machine's own page origins. LAN phone
+  testing is opt-in: start the bridge with `LINES_BRIDGE_HOST=0.0.0.0` and the page's LAN origin
+  in `LINES_BRIDGE_ALLOWED_ORIGINS` (for example `http://192.168.1.20:5173`), from `.env` or the
+  shell. Anyone on that network who can load that origin can then drive the bridge — `hello.local`
+  stays false there, which hides only the Finder folder picker — so it suits a home or hotspot
+  network, not a café's.
+- Both runners set `LINES_DEV_SUPERVISED=1` on their children. Besides enabling the dev-runtime
+  IPC, it is the one switch that lets the bridge's single-tenant `'local'` context take a storage
+  token: the dev relay with auth off (`--with-relay` without `--relay-auth`, so
+  `RELAY_AUTH_DISABLED=1`) binds every browser to `'local'` and forwards its token. A desktop
+  install never sets it, so there that context takes none.
 - Preflight checks `.env` key names, not secret values. Missing storage settings
   can be bypassed with `--no-storage`; the backend and web remain independently useful.
 - `STORAGE_URL` defaults to local storage only when unset. `RELAY_URL` otherwise

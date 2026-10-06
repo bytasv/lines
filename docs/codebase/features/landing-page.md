@@ -37,8 +37,11 @@ Architectural rules), and the page follows it.
 - `web/public/icon-192.png` — the app icon shown on the Mac panel, same art as the DMG's
 - `web/src/components/PairingDiagram.tsx` — diagram text says "your agent runs here"
 - `web/index.html`, `web/landing/index.html` — `<title>`, `<meta name="description">` and the
-  Open Graph / Twitter card tags (both pages carry the same set); `web/index.html` also holds the
-  inline check that skips the boot splash for landing routes and signed-out visitors
+  Open Graph / Twitter card tags (both pages carry the same set); `web/index.html` also loads the
+  check that skips the boot splash for landing routes and signed-out visitors
+- `web/public/splash-guard.js` — that check: a classic, synchronous script that runs before first
+  paint and reads the Clerk key from `#lines-splash`'s `data-clerk`. A file rather than an inline
+  script, because the deployed CSP allows scripts from the page's origin only
 - `web/public/og.png` (1200×630 share image) and `web/public/demo.mp4` (hero loop) — static
   assets, served same-origin from both builds' `publicDir`
 - `deploy/docker/web-nginx.conf` — the `/download` 302 every download button links to
@@ -105,10 +108,16 @@ None; the page is presentational.
     servers." A claim about storage, not transit: the conversation and the code the agent reads
     go to the model provider, live views cross the relay, and summaries, workflow outputs and
     queued prompts (which can quote code) sit in storage, as `PRIVACY.md` says.
-  - "Live traffic between your devices and your machine is end-to-end encrypted." Keep "your
-    devices": guests invited into a session are not end-to-end encrypted yet.
-  - "Session list, workflows and memory sync to Lines storage so every device sees them.
-    Self-host it if you'd rather own that too."
+  - "Live traffic between your machine and every browser on it, yours or a guest's, is end-to-end
+    encrypted." Guests are included now that a guest's channel is encrypted against the key in
+    their invite link; where the line has room (the "Where your data goes" row) it keeps the
+    caveat that the relay still sees which device connects, when, and how much.
+  - "Session list, workflows and memory sync to Lines storage, in plaintext, so every device sees
+    them. Self-host it if you'd rather own that too." "In plaintext" stays: storage holds them
+    unencrypted today, and the copy names that rather than glossing over it.
+  - "The bridge on your machine dials out to the relay and listens on that machine alone. No port
+    open to your network, no forwarding, no dynamic DNS." Not "no open port": the bridge does
+    listen, on loopback; what it never opens is a port anything else on the network can reach.
   - "Prompts go to Anthropic or OpenAI under your own account, same as using the CLI directly."
 - Banned anywhere: "your code never leaves your machine" and "transcripts and files never leave
   your machine" (prompts carry code to the provider, and live views cross the relay),
@@ -168,8 +177,9 @@ None; the page is presentational.
 - `og:image` and `og:url` are absolute (`https://linesapp.cloud/…`), because crawlers resolve
   nothing; a self-hosted deployment has to edit them.
 - Encryption copy states that end-to-end encryption is on by default: every browser enrols once
-  with a code from the machine, and its traffic is carried by the relay but cannot be read or
-  forged. It never claims everything is encrypted or zero-knowledge.
+  with a code from the machine, a guest connects with the key in their invite link, and the
+  traffic is carried by the relay but cannot be read or forged. It never claims everything is
+  encrypted or zero-knowledge.
 - The app-wide theme is black, white and gray (`mono` primary as a light/dark virtual colour, a
   softened neutral dark scheme). Status colours keep their hues but are muted: `theme.ts` re-ramps
   Mantine's hues on one shared OKLCH lightness curve at lower chroma, with teal and cyan spread

@@ -4,6 +4,7 @@ import { setImmediate as yieldToLoop } from 'node:timers/promises';
 import type { GrepHit, GrepResponse, MatchOptions } from '@lines/shared';
 import { buildMatcher, clipAround } from '@lines/shared';
 import { candidates } from './fileSearch.ts';
+import { isRealInside, realPathOf } from './autoGuard.ts';
 
 /**
  * Find-in-files: content search across a project's roots, backing the sidebar's
@@ -54,11 +55,19 @@ export async function grepFilesAcross(
   let read = 0;
   for (const root of roots) {
     const { files: rels, ignored } = candidates(root);
+    // Resolved once per root rather than per file: it is the same answer each time.
+    const realRoot = [realPathOf(root)];
+    const linkedDir = linkedDirs(root);
     for (const rel of rels) {
       if (!opts.includeIgnored && ignored.has(rel)) continue;
       const abs = path.resolve(root, rel);
       if (seen.has(abs)) continue;
       seen.add(abs);
+      // git lists a symlink by its own path — and a tracked file whose directory
+      // has since been swapped for one — and reading either reads wherever the
+      // link points, which may be anywhere on the machine. Only those few pay for
+      // a realpath; only what really lives under this root is searched.
+      if ((linkedDir(path.posix.dirname(rel)) || isLink(abs)) && !isRealInside([root], abs, realRoot)) continue;
       if (++read % YIELD_EVERY === 0) {
         await yieldToLoop();
         if (Date.now() > deadline) return { files, truncated: true };
@@ -81,6 +90,36 @@ export async function grepFilesAcross(
     }
   }
   return { files };
+}
+
+/** True when `p` is itself a symlink — not whatever it points to. */
+function isLink(p: string): boolean {
+  try {
+    return fs.lstatSync(p).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a directory under `root` (POSIX-relative, as candidates lists it) is a
+ * symlink or sits below one. Memoized for the root's whole candidate list:
+ * files share their directories, so this costs one lstat per directory. The
+ * non-repo walk never descends through a link, but git's index can still name a
+ * file under a directory that has since become one.
+ */
+function linkedDirs(root: string): (dir: string) => boolean {
+  const memo = new Map<string, boolean>();
+  const linked = (dir: string): boolean => {
+    if (dir === '.' || dir === '' || dir === '/') return false;
+    let hit = memo.get(dir);
+    if (hit === undefined) {
+      hit = linked(path.posix.dirname(dir)) || isLink(path.join(root, dir));
+      memo.set(dir, hit);
+    }
+    return hit;
+  };
+  return linked;
 }
 
 /** A file's text, or null when it is missing, too large, or binary. */

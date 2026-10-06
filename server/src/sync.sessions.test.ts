@@ -197,3 +197,20 @@ test('a single over-budget session is skipped while its siblings still go out', 
   assert.ok(puts[0].bytes < BUDGET);
   assert.deepEqual(idsOf(puts), ['a', 'b'], 'the unchunkable session is dropped, not the whole batch');
 });
+
+test('a local-only field never leaves the machine, and the live meta keeps it', async (t) => {
+  const sent = captureFetch(t);
+  const sync = client();
+
+  // The limit a foreign recipe run puts on what an approved plan resumes in is
+  // this machine's own record (adoptSynced never takes it from a row either).
+  const live = { ...meta('a'), permissionCeiling: 'default' } as SessionMeta;
+  sync.pushSession(live);
+  await flush(DEBOUNCE_WAIT_MS);
+
+  const [put] = sessionPuts(sent);
+  const [row] = put.body as Record<string, unknown>[];
+  assert.equal(row.id, 'a');
+  assert.equal('permissionCeiling' in row, false);
+  assert.equal(live.permissionCeiling, 'default');
+});

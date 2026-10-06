@@ -11,6 +11,7 @@ import {
   createMcpDispatcher,
   isLinesMcpTool,
   isReadOnlyLinesTool,
+  LINES_READ_ONLY_MANIFEST,
   LINES_TOOL_MANIFEST,
   type McpAuthorizeOutcome,
 } from './mcpWorkflowTools.ts';
@@ -62,16 +63,24 @@ function harness(opts: { authorize?: (name: string) => Promise<McpAuthorizeOutco
     mcp,
     syncCalls,
     authorizeCalls,
-    call: createMcpDispatcher(ctx),
+    // Writes allowed, as on the Claude path: there the approval card is the
+    // gate, and these tests are about what happens after the user said yes.
+    call: createMcpDispatcher(ctx, undefined, { allowWrites: true }),
     // The two connection tools that are about *this* session; the bridge supplies
     // the OAuth plumbing, which is stubbed here.
-    callInSession: createMcpDispatcher(ctx, {
-      sessionId: 's1',
-      authorize: async (name) => {
-        authorizeCalls.push(name);
-        return opts.authorize ? await opts.authorize(name) : { authorized: true };
+    callInSession: createMcpDispatcher(
+      ctx,
+      {
+        sessionId: 's1',
+        authorize: async (name) => {
+          authorizeCalls.push(name);
+          return opts.authorize ? await opts.authorize(name) : { authorized: true };
+        },
       },
-    }),
+      { allowWrites: true },
+    ),
+    // What `/lines-mcp` builds for a codex session: no card in front of it.
+    callReadOnly: createMcpDispatcher(ctx, undefined, { allowWrites: false }),
   };
 }
 
@@ -582,4 +591,46 @@ test('authorize_mcp_connection reports the handshake outcome it was handed', asy
   const error = await failed.callInSession('authorize_mcp_connection', { name: 'linear' });
   assert.equal(error.isError, true);
   assert.match(text(error), /cancelled/);
+});
+
+// ---------------------------------------------------------------------------
+// The read-only surface `/lines-mcp` serves a codex session
+// ---------------------------------------------------------------------------
+
+test('the read-only manifest lists exactly the readOnly tools, and claims no approval card', () => {
+  assert.equal(LINES_READ_ONLY_MANIFEST.serverName, LINES_TOOL_MANIFEST.serverName);
+  assert.deepEqual(
+    LINES_READ_ONLY_MANIFEST.tools.map((t) => t.name),
+    LINES_TOOL_MANIFEST.tools.filter((t) => t.readOnly).map((t) => t.name),
+  );
+  assert.equal(LINES_READ_ONLY_MANIFEST.tools.every((t) => t.readOnly === true), true);
+  // There is no card on this path, so the instructions must not promise one.
+  assert.doesNotMatch(LINES_READ_ONLY_MANIFEST.instructions ?? '', /asks the user for approval/);
+});
+
+test('a dispatcher without writes refuses every write and changes nothing', async () => {
+  const h = harness();
+  const before = h.workflows.list().length;
+
+  const created = await h.callReadOnly('create_workflow', { name: 'Sneaky', steps: [{ name: 'a', promptTemplate: 'b' }] });
+  assert.equal(created.isError, true);
+  assert.match(text(created), /read-only/);
+  assert.equal(h.workflows.list().length, before, 'no workflow was created');
+
+  // The persistent-RCE case: an MCP server added from a prompt-injected turn.
+  const added = await h.callReadOnly('add_mcp_connection', LINEAR);
+  assert.equal(added.isError, true);
+  assert.deepEqual(h.mcp.list(), [], 'no connection was added');
+
+  for (const tool of ['update_workflow', 'delete_workflow', 'save_step', 'delete_step', 'authorize_mcp_connection']) {
+    assert.equal((await h.callReadOnly(tool, {})).isError, true, tool);
+  }
+  assert.deepEqual(h.syncCalls, [], 'nothing reached storage');
+});
+
+test('a dispatcher without writes still answers the reads', async () => {
+  const h = harness();
+  const rows = JSON.parse(text(await h.callReadOnly('list_workflows', {}))) as unknown[];
+  assert.ok(rows.length >= 1);
+  assert.equal((await h.callReadOnly('list_mcp_connections', {})).isError, undefined);
 });

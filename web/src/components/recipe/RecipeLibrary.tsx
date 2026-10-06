@@ -31,19 +31,21 @@ import {
   IconHistory,
   IconPlayerPlay,
   IconPlus,
+  IconShieldQuestion,
   IconStack2,
   IconTrash,
   IconX,
 } from '@tabler/icons-react';
 import { DragDropContext, Draggable, Droppable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
-import type { RecipeContent, RecipeDef, RecipeRef } from '@lines/shared';
+import type { RecipeContent, RecipeDef, RecipeRef, UntrustedMark } from '@lines/shared';
 import { RECIPE_BUNDLE_MAX, RECIPE_TAG_MAX, isBundle, normalizeRecipeTag } from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { send } from '../../ws';
 import { ConfirmModal } from '../ConfirmModal';
 import { relTime } from '../workflow/StepCard';
+import { isHeld, needsReview, recipeReviewItem, UntrustedBadge, UntrustedReviewModal } from '../workflow/UntrustedReview';
 import styles from '../workflow/workflow.module.css';
 import { RecipeImages } from './RecipeImages';
 import { RecipeRunModal } from './RecipeRunModal';
@@ -54,6 +56,13 @@ type Draft = RecipeContent & {
   ownerName?: string;
   version?: number;
   published?: boolean;
+  /**
+   * What this unsaved copy was copied from, sent with its first save: a copy of
+   * someone else's recipe (or of one held back here) stays held back until it is
+   * reviewed, so "Duplicate to my recipes" is not a way past the confirmation a
+   * stranger's prompt needs. Editor-only.
+   */
+  heldMark?: UntrustedMark;
 };
 
 type Kind = 'prompt' | 'bundle';
@@ -273,6 +282,7 @@ function RestoreHistoryPopover({
                     >
                       <Text size="sm" fw={600}>v{v.version}</Text>
                       <Text size="xs" c="dimmed" style={{ flex: 1, minWidth: 0 }} truncate>{relTime(v.updatedAt)}</Text>
+                      <UntrustedBadge mark={v.untrusted} ownerName={v.ownerName} />
                       {v.version === currentVersion && (
                         <Badge size="xs" variant="light">current</Badge>
                       )}
@@ -283,16 +293,20 @@ function RestoreHistoryPopover({
               {preview && (
                 <>
                   <RecipeDiffList from={current} to={preview} />
-                  <Button
-                    size="xs"
-                    disabled={preview.version === currentVersion}
-                    onClick={() => {
-                      onRestore(preview);
-                      setOpened(false);
-                    }}
-                  >
-                    Restore v{preview.version}
-                  </Button>
+                  {/* As in the step library: a restore is re-signed by this
+                      machine, so an unverified version cannot be its source. */}
+                  <Tooltip label="This version has not been verified on this machine" disabled={!needsReview(preview.untrusted)}>
+                    <Button
+                      size="xs"
+                      disabled={preview.version === currentVersion || needsReview(preview.untrusted)}
+                      onClick={() => {
+                        onRestore(preview);
+                        setOpened(false);
+                      }}
+                    >
+                      Restore v{preview.version}
+                    </Button>
+                  </Tooltip>
                 </>
               )}
             </>
@@ -329,6 +343,7 @@ export function RecipeLibrary({
   /** Ad-hoc run basket, keyed `ownerId/id` so it survives filtering and re-sorting. */
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [runList, setRunList] = useState<RecipeDef[] | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
 
   const corpus = useMemo(() => [...recipes, ...sharedRecipes], [recipes, sharedRecipes]);
 
@@ -471,15 +486,20 @@ export function RecipeLibrary({
     if (!draft || readOnly || !valid) return;
     const recipeId = draft.id ?? crypto.randomUUID();
     const published = draft.published ?? false;
-    send({ type: 'saveRecipe', recipe: content(draft), recipeId, published, ownerName: getOwnerName() ?? undefined });
+    const recipe = draft.heldMark ? { ...content(draft), untrusted: draft.heldMark } : content(draft);
+    send({ type: 'saveRecipe', recipe, recipeId, published, ownerName: getOwnerName() ?? undefined });
     // Select the (soon-updated) own recipe; the broadcast refreshes its version.
-    load({ ...draft, id: recipeId, published }, `own:${recipeId}`);
+    // The copy's mark has been sent once; the bridge's verdict stands from here.
+    load({ ...draft, id: recipeId, published, heldMark: undefined }, `own:${recipeId}`);
   };
 
   const duplicate = () => {
     if (!draft) return;
     setBackTo(null);
-    load({ ...content(draft), title: `${draft.title} (copy)` }, null);
+    // Someone else's recipe has no mark (each run of it is confirmed instead), so
+    // its copy is marked here; the bridge binds the digest to the copy.
+    const mark: UntrustedMark | undefined = needsReview(openDef?.untrusted) ? openDef?.untrusted : readOnly ? { reason: 'foreign', digest: '' } : undefined;
+    load({ ...content(draft), title: `${draft.title} (copy)`, ...(mark ? { heldMark: mark } : {}) }, null);
   };
 
   const doDelete = () => {
@@ -580,6 +600,7 @@ export function RecipeLibrary({
                     {runs}
                   </Badge>
                 )}
+                <UntrustedBadge mark={def.untrusted} ownerName={def.ownerName} />
                 {!shared && <Badge size="xs" variant="default">v{def.version}</Badge>}
               </Group>
             </Group>
@@ -697,6 +718,21 @@ export function RecipeLibrary({
               >
                 Back to {backTo.title}
               </Button>
+            )}
+            {openDef && needsReview(openDef.untrusted) && (
+              <Alert variant="light" color="orange" p="xs" icon={<IconShieldQuestion size={16} />}>
+                <Group justify="space-between" wrap="nowrap" gap="xs">
+                  <Text size="xs">
+                    This machine has not verified this recipe yet,{' '}
+                    {isHeld(openDef.untrusted)
+                      ? 'so it will not run until you review it.'
+                      : 'though it still runs because strict sync is off on this machine.'}
+                  </Text>
+                  <Button size="compact-xs" variant="light" color="orange" onClick={() => setReviewOpen(true)}>
+                    Review
+                  </Button>
+                </Group>
+              </Alert>
             )}
             <Group justify="space-between" align="flex-end" wrap="nowrap" gap="md">
               <TextInput
@@ -897,6 +933,12 @@ export function RecipeLibrary({
         </Stack>
       )}
 
+      <UntrustedReviewModal
+        opened={reviewOpen && needsReview(openDef?.untrusted)}
+        title={`Review “${openDef?.title ?? 'recipe'}”`}
+        items={openDef ? [recipeReviewItem(openDef, (ownerId, recipeId) => resolve({ ownerId, recipeId }))] : []}
+        onClose={() => setReviewOpen(false)}
+      />
       <ConfirmModal
         opened={confirmDelete}
         title="Delete recipe"

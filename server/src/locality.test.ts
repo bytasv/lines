@@ -3,9 +3,10 @@ import { describe, test } from 'node:test';
 import { isLoopbackAddress } from './locality.ts';
 
 /**
- * The predicate behind `hello.local`, and the whole reason "not relayed" was not
- * good enough: the bridge listens on every interface, so a direct socket can
- * come from another computer on the LAN.
+ * The predicate behind `hello.local` and the connection policy's peer check, and
+ * the whole reason "not relayed" was not good enough: a bridge opened to every
+ * interface (LINES_BRIDGE_HOST) takes direct sockets from other computers on
+ * the LAN.
  */
 describe('isLoopbackAddress', () => {
   test('accepts every shape the loopback actually arrives in', () => {

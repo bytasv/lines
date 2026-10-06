@@ -24,7 +24,12 @@ relay pipes frames between them, and the UI that gates all of it.
   `handleConnection` took a concrete `ws.WebSocket` so nothing else could be handed to it,
   `broadcast` sent unconditionally into an unbounded send buffer (invisible on loopback,
   unbounded memory growth over a network), and the two halves always deployed together so
-  neither could say which contract it spoke.
+  neither could say which contract it spoke. It also decides who may open a direct socket at all.
+  The bridge used to listen on every interface with no check on a desktop install
+  (`CLERK_SECRET_KEY` never ships there, so the Clerk gate is off): anyone on the same Wi-Fi could
+  dial it, and so could any website the user visited, since a browser lets a page open a
+  WebSocket to `127.0.0.1` and only the server can refuse. A direct socket runs agent turns, so
+  the bridge now binds loopback and admits only this machine's own pages by default.
 - **Remote relay bridge** — lets a hosted web app drive the agent on a user's own machine. The
   bridge dials **out** to a relay; the browser connects to the same relay; the relay pipes frames
   between them. Outbound-only is the whole point: the user's machine accepts no inbound
@@ -52,8 +57,12 @@ relay pipes frames between them, and the UI that gates all of it.
 ## Entry points
 
 - `server/src/worker.ts` — `listen()` publishes `worker.json` from the bound port
-- `server/src/index.ts` — `listen()` publishes `bridge.json`; `handleConnection`, the `hello`
-  payload; the `RELAY_URL` block wiring channels to `handleConnection`
+- `server/src/index.ts` — `listen()` binds `CONNECTION_POLICY.host` and publishes `bridge.json`;
+  the `WebSocketServer`'s `verifyClient`; `handleConnection`, the `hello` payload; the
+  `RELAY_URL` block wiring channels through `guardRelayChannel` to `handleConnection`
+- `server/src/connectionPolicy.ts` — who may open a direct socket (`listenHost`,
+  `upgradeVerdict`, `verifyClient`) and how far a connection's Clerk token is trusted
+  (`tokenRefreshAction`, `tokenFitsContext`)
 - `server/src/workerClient.ts` — reads and watches `worker.json` to dial the worker
 - `web/vite.config.ts` — dev-only `/__bridge` endpoint handing the port to the browser
 - `server/src/userContext.ts` — `broadcast`
@@ -75,7 +84,12 @@ relay pipes frames between them, and the UI that gates all of it.
 ## Files
 
 - `server/src/workerProtocol.ts` — every port-discovery helper, plus `APP_ROOT`
-- `server/src/store.ts` — re-exports `APP_ROOT`, owns every path *under* it
+- `server/src/store.ts` — re-exports `APP_ROOT`, owns every path *under* it; `isValidStoreId`,
+  the check an id passes before it may name one
+- `server/src/connectionPolicy.ts` — the direct-socket policy and the token-trust rules; pure,
+  so every combination is tested without standing the bridge up
+- `server/src/locality.ts` — `isLoopbackAddress`, behind `hello.local` and the policy's peer
+  check
 - `web/src/ws.ts` — `initBridgeOrigin()` and the `bridgeOrigin` the HTTP routes use;
   `setDeviceId`/`switchDevice`/`reconnectNow`, the device param on the socket URL, the 1008
   retry/re-check path, and the relay control frames
@@ -86,22 +100,27 @@ relay pipes frames between them, and the UI that gates all of it.
 - `server/src/userContext.ts` — `BrowserLink`, `linkSendAction`, `broadcast`
 - `server/src/index.ts` — `BRIDGE_VERSION`, per-socket handlers, `claimBridgeLock`/
   `releaseBridgeLock`/`resolveRelayIdentity`, the single-instance `bridge.lock`,
-  `EXIT_BRIDGE_LOCK_HELD`, `LINES_ALLOW_MULTIPLE_BRIDGES`
+  `EXIT_BRIDGE_LOCK_HELD`, `LINES_ALLOW_MULTIPLE_BRIDGES`; `CONNECTION_POLICY`,
+  `MAX_FRAME_BYTES`, `setClerkToken`/`SINGLE_TENANT_TOKENS`, `ConnState.relayed`; the startup
+  `chmod` of `APP_ROOT` to `0700`
 - `shared/types.ts` — `APP_PROTOCOL_VERSION`, `BridgeInfo`, `hello.bridge`
 - `web/src/store.ts` — `bridge`, `protocolSkew` (both primary-machine-scoped; see
   [multi-machine-client](multi-machine-client.md))
 - `web/src/components/SkewBanner.tsx` — the pill `protocolSkew` drives (see Data flow)
-- `relay/src/protocol.ts` — frames, shared by both ends
+- `relay/src/protocol.ts` — frames, shared by both ends; `RELAY_SECRET_HEADER`
 - `relay/src/mux.ts` — `DeviceHub`, `HubRegistry`: pairing and routing, transport-free;
-  `DeviceHub.ownerId`; `HubRegistry.drop`, whose caller is the re-verify tick
-- `server/src/relayClient.ts` — `RelayChannel` (a `BrowserLink`), reconnect, channel lifecycle,
+  `DeviceHub.ownerId`; `HubRegistry.drop`, whose caller is the re-verify tick; the owner-only
+  token map and `isTokenRefresh`, which keep a guest's Clerk token off the bridge
+- `server/src/relayClient.ts` — the dial (device secret in the `x-lines-device-secret` header),
+  `RelayChannel` (a `BrowserLink`), reconnect, channel lifecycle,
   the idle watchdog on its own socket, the duplicate-`open` guard, the supersede-count log, the
   supersede circuit breaker (`RELAY_STABLE_MS`/`SUPERSEDE_LIMIT`/`SUPERSEDE_CAP_MS`)
 - `storage/prisma/schema.prisma` — the `Device` model
 - `storage/src/index.ts` — the six device routes, plus CORS and the unauthenticated-path
   allowlist that fronts them
-- `relay/src/index.ts` — calls `verify`, sets `hub.ownerId`; the per-agent ping/reap interval and
-  the re-verify tick that rides it
+- `relay/src/index.ts` — `presentedDeviceSecret` (the header, else the deprecated `secret`
+  query), calls `verify`, sets `hub.ownerId`; the per-agent ping/reap interval and the re-verify
+  tick that rides it
 - `server/src/device.ts` — identity minting/registration, shared to avoid a second
   implementation drifting on the credential format
 - `web/src/lib/devices.ts` — `useDevices`, the shared machine-list store
@@ -211,6 +230,29 @@ relay pipes frames between them, and the UI that gates all of it.
   currently-chosen machine
 - `switchDevice(id)` — closes the current socket and clears `bootstrapped` before opening the
   new one
+- `listenHost(env)` — the interface the bridge binds: `127.0.0.1` unless `LINES_BRIDGE_HOST`
+  names `0.0.0.0` or `::`; `localhost` means the default, and any other value comes back as
+  `refused` (logged, loopback used)
+- `connectionPolicy(env)` / `ConnectionPolicy` — `{ host, loopbackOnly, direct, allowedOrigins }`,
+  read once at startup into `CONNECTION_POLICY`
+- `hostAllowed(host, policy)` — the DNS-rebinding check, enforced only on a loopback bind
+- `upgradeVerdict(req, policy)` — `{ ok: true }` or `{ ok: false, status: 403 | 421, reason }`;
+  `verifyClient(policy, onRefused)` is the `ws` glue the bridge and its socket test share
+- `tokenRefreshAction(conn, authEnabled)` — `'ignore' | 'verify' | 'accept'` for an in-channel
+  `auth` refresh
+- `tokenFitsContext(token, contextUserId, singleTenantUserId)` / `jwtSubject(token)` — a token
+  may become a context's storage credential only if its `sub` (read, not verified) is that
+  context's user
+- `setClerkToken(ctx, token)` (`server/src/index.ts`) — the one writer of `ctx.clerkToken`
+- `SINGLE_TENANT_TOKENS` — `'local'` under `LINES_DEV_SUPERVISED=1`, else `null`: the one
+  context exempt from the subject check, and only there
+- `isValidStoreId(id)` (`server/src/store.ts`) — a plain token (`[A-Za-z0-9][A-Za-z0-9_-]{0,127}`)
+- `MAX_FRAME_BYTES` — 64 MiB, the bridge `WebSocketServer`'s `maxPayload`
+- `isLoopbackAddress(addr)` (`server/src/locality.ts`) — `127.0.0.0/8`, `::1`, IPv4-mapped
+- `RELAY_SECRET_HEADER` (`x-lines-device-secret`) — mirrored in `relayClient.ts`; renaming it
+  unpairs every bridge already installed
+- `isTokenRefresh(payload)` (`relay/src/mux.ts`) — whether a guest's frame is `{type:'auth'}`,
+  by full JSON parse
 
 ## Data flow
 
@@ -222,18 +264,22 @@ Worker: bind `:0` → `listening` → publish `worker.json` with the bound port 
 Bridge: `WorkerClient` reads `worker.json`, dials `ws://127.0.0.1:<port>` with the token in a
 header, and `watchRuntimeInfo` re-dials the moment the worker republishes on a new port. No file,
 or a file naming a dead pid, means "worker down or still booting" — retry. The bridge publishes
-`bridge.json` the same way.
+`bridge.json` the same way, after binding `127.0.0.1` (see Direct sockets).
 
 Browser (dev): the Vite plugin reads `bridge.json` per request and serves `{ "port": … }` at
 `/__bridge`; `initBridgeOrigin()` resolves it once before render, and `connect()` re-resolves on
-every attempt so a restarted bridge is found again. A hosted build sets `VITE_BRIDGE_WS_URL` and
-never probes.
+every attempt so a restarted bridge is found again. A page served from loopback dials
+`ws://127.0.0.1:<port>` by number — `localhost` may resolve to `::1` first, where nothing
+listens — and a page opened from elsewhere (the LAN opt-in) dials the host it was served from. A
+hosted build sets `VITE_BRIDGE_WS_URL` and never probes.
 
 ### The browser–bridge contract
 
-A connection arrives, is gated on Clerk, is added to `ctx.sockets`, and receives `hello` — which
-carries `bridge: { version, appProtocol }` alongside the full state snapshot. Every later state
-change fans out through `broadcast`, which consults `linkSendAction` per link before sending.
+A connection arrives — a direct socket through the upgrade check below (and the Clerk gate, where
+`CLERK_SECRET_KEY` is set), a relay channel through the channel gate (see Relaying) — is added to
+`ctx.sockets`, and receives `hello`, which carries `bridge: { version, appProtocol }` alongside
+the full state snapshot. Every later state change fans out through `broadcast`, which consults
+`linkSendAction` per link before sending.
 
 The client compares `hello.bridge.appProtocol` against its own `APP_PROTOCOL_VERSION` and records
 `protocolSkew`, which `SkewBanner` renders as a pill naming which side is older and, when it is
@@ -243,17 +289,59 @@ this doesn't cover is a client old enough to still *render* a field a newer brid
 (a removed-field change, not an added one), which is why removing or renaming a rendered field is
 a protocol bump in its own right (see `architecture.md`).
 
+### Direct sockets
+
+A direct socket is the agent's whole command surface, so the bridge decides who may open one
+before the socket exists — `verifyClient` on the `WebSocketServer` — and a refused page never
+reaches `handleConnection`, nor therefore a `hello`. The policy, read once at startup:
+
+- **Bind** — `127.0.0.1` by default. `LINES_BRIDGE_HOST` accepts `127.0.0.1`/`localhost` (the
+  default) or `0.0.0.0`/`::` (every interface, the LAN-testing opt-in), and nothing else: a
+  specific LAN address buys nothing the wildcard does not, and another loopback address (`::1`,
+  `127.0.0.2`) would strand every local caller, all of which dial `127.0.0.1` by number (the
+  browser's page, the codex MCP child, the OAuth redirect). A refused value is logged and
+  loopback used.
+- **Host** — on a loopback bind, a `Host` header that does not name this machine (`localhost`
+  exactly, or a loopback IP literal — no `*.localhost`, no trailing dot, not `0.0.0.0`) is a
+  DNS-rebinding page and gets `421`, on plain HTTP requests and on the upgrade alike. A missing
+  header fails closed. A wildcard bind is reached by its LAN address, so the check stands aside.
+- **Origin** — a browser always sends `Origin` on a WebSocket and a page cannot forge it, so this
+  is the check that stops a website. Admitted: an origin listed in
+  `LINES_BRIDGE_ALLOWED_ORIGINS` (comma-separated, canonicalised), or a loopback origin *from a
+  loopback peer* — on a wildcard bind a LAN machine's own `http://localhost` page must not pass
+  for ours. `null` (a sandboxed frame, a `file://` page) is refused like any stranger. No
+  `Origin` at all is a non-browser client (tests, a CLI) and is admitted only from loopback.
+  Every refusal here is `403`.
+- **Direct off** — `LINES_BRIDGE_DIRECT=0` refuses every upgrade (`403`). The desktop app sets it
+  in relay mode, where its own window is the hosted page and reaches the bridge through the relay,
+  so nothing has a reason to open a socket on the bridge's port (see
+  [desktop-app](desktop-app.md)). Plain HTTP (the health route, `/lines-mcp`, the MCP OAuth
+  redirect) is unaffected.
+- **Size** — `maxPayload` is `MAX_FRAME_BYTES` (64 MiB) rather than `ws`'s 100 MiB default:
+  generous, since attachments and a dictation clip ride base64 inside one frame, but finite.
+
+A refusal is otherwise invisible from both ends, so each logs `[ws] refused a direct socket:
+<reason>`. Reaching the bridge from a phone on the LAN stays possible for development, on purpose
+only: `LINES_BRIDGE_HOST=0.0.0.0` plus that page's LAN origin in `LINES_BRIDGE_ALLOWED_ORIGINS`
+(see [local-dev-orchestration](local-dev-orchestration.md)).
+
 ### Relaying
 
-The bridge dials `/agent?device=…&secret=…` and sends `hello`. A browser connects to
-`/client?device=…&token=…`; the relay allocates a channel and sends
-`{t:'open', ch, userId, token}` to the bridge, which builds a `RelayChannel` and hands it to the
+The bridge dials `/agent?device=…` with its device secret in the `x-lines-device-secret` header
+(`RELAY_SECRET_HEADER`) and sends `hello`. The secret used to ride the query string, which is what
+reverse proxies and access logs write down. The relay still reads the deprecated `secret`
+parameter when the header is absent, because every bridge released before the header sends
+nothing else, and it logs neither form. A browser connects to `/client?device=…&token=…`; the
+relay allocates a channel and sends `{t:'open', ch, userId, token}` to the bridge (`token` is
+always `null` on a guest channel, below). The bridge builds a `RelayChannel`, passes it through
+the channel gate (`guardRelayChannel`, see Architectural rules), and only then hands it to the
 ordinary `handleConnection`. From there a relayed client *is* a client — same message handling,
 same `ctx.sockets`, same broadcast. App messages ride inside `{t:'data', ch, payload}` in both
 directions, verbatim.
 
 A browser's `/client` connection is refused unless its verified Clerk `userId` matches the
-device's owner (`DeviceHub.ownerId`, learned from the bridge's own `/agent` authentication).
+device's owner (`DeviceHub.ownerId`, learned from the bridge's own `/agent` authentication), or it
+holds a grant — see [session-collaboration](session-collaboration.md#the-relay-gate).
 
 On the browser side, `web/src/ws.ts` stamps each socket with a monotonic generation and has
 `onmessage` drop any frame whose generation is stale. `switchDevice` closes the previous socket but
@@ -265,6 +353,35 @@ A backgrounded tab that resumes probes its live links and redials a dead one dir
 waiting for the heartbeat to notice — see
 [multi-machine-client](multi-machine-client.md#waking-a-backgrounded-tab) for the mechanism; it is
 client-side only and changes nothing about this section's protocol.
+
+### Clerk tokens on the bridge
+
+A context's Clerk token (`ctx.clerkToken`) is its storage credential: whatever account it names
+is where this machine's sessions sync. Three paths install one — the hello-time token, an
+in-channel `auth` refresh, and the relay's `token` push — and all three go through
+`setClerkToken`, which refuses a token whose `sub` is not the context's own user
+(`tokenFitsContext`) and logs `[auth] refused a token that does not belong to …`. The
+single-tenant `'local'` context has no account id to compare, so it takes a token only where the
+exemption is passed in: under `LINES_DEV_SUPERVISED=1`, for the dev relay with auth off, which
+binds every browser to it (see [local-dev-orchestration](local-dev-orchestration.md)). On a
+desktop install it takes none — otherwise a relay could push its own account's token onto it and
+collect everything it syncs.
+
+Who may refresh is `tokenRefreshAction`'s call: a guest never (the context is the host's, so a
+guest's token there would push the host's sessions into the guest's account); a relayed owner on
+the relay's word, the same trust its hello-time token has; a direct socket only after
+re-verifying through Clerk, which on a desktop install (no `CLERK_SECRET_KEY`) means ignored
+rather than believed.
+
+The relay keeps a guest's token off the host altogether. It verifies the token at `/client`, which
+is all it was for: `openChannel` forwards `token: null` on a guest channel and keeps only the
+owner's for a re-push, `setToken` ignores anyone but `ownerId`, and the re-push on attach is
+filtered to `ownerId` — a token kept for a device id's earlier owner is not the new bridge's to
+have. `fromClient` also drops a guest's `{type:'auth'}` frame, the one app message the relay
+parses (a full JSON parse, since a reordered key, extra whitespace or a JSON unicode escape slips
+past a text match yet still reads as `auth` on the bridge). That covers every bridge already
+installed and every tab running an older client; a current client sends no refresh on a guest link
+at all, and seals its guest frames, so they read only as `e2ee*` at the relay.
 
 ### One bridge speaks at a time
 
@@ -368,7 +485,8 @@ protocol change.
 2. The signed-in user types that code into the web app, which calls `claim`. Storage looks the
    code up, checks it is unexpired and unrevoked, and sets `userId` — the step that actually
    binds machine to account. The code is cleared on use so it cannot be replayed.
-3. The bridge dials the relay's `/agent` with its id and the plaintext secret. The relay calls
+3. The bridge dials the relay's `/agent` with its id and the plaintext secret (in the
+   `x-lines-device-secret` header, never the URL). The relay calls
    storage's `verify` (authenticated by a shared secret, not a user token), which recomputes the
    hash and returns the owning `userId` on a match. The relay records it as `hub.ownerId`.
 4. A browser connecting to `/client?device=…` is refused unless its verified Clerk `userId`
@@ -501,7 +619,10 @@ refuse.
   satisfies the interface; a plain object does too.
 - `server/src/broadcastBackpressure.test.ts` — the full `linkSendAction` policy.
 - `relay/src/mux.test.ts` — routing, agent takeover, offline notification, per-channel isolation,
-  token replay, registry sweep and revoke; `ownerId` recording; cross-user channel isolation on
+  owner-only token replay (a guest's token never reaches the bridge, on open or re-attach; a token
+  kept for a device's earlier owner is not re-pushed to its next one; a guest's `auth` frame is
+  dropped while every other guest frame, and every owner frame, passes verbatim), registry sweep
+  and revoke; `ownerId` recording; cross-user channel isolation on
   one device; a superseded agent's `data`/`close` frames are refused and cannot touch the live
   agent's channel; `attachAgent` closes every channel (owners 1012, guests 1008), replays only
   tokens to the new sink, and reports who it superseded
@@ -513,7 +634,26 @@ refuse.
   by env: an agent answering `pong` survives, a silent one is reaped and a later browser gets
   `deviceOffline`, the re-verify asymmetry both ways against a stub storage (403 drops the
   device, 500 does not), and a second bridge claiming the same device supersedes (and hard-drops)
-  the first without the takeover looking like an outage to a browser arriving after it.
+  the first without the takeover looking like an outage to a browser arriving after it; the device
+  secret is read from its header and still from the deprecated query, and neither is ever printed.
+- `relay/src/redaction.test.ts` — routing in either direction logs nothing containing a payload or
+  token, and a guest's token reaches neither a log nor the bridge on any path (the `open` frame,
+  an in-channel refresh, `setToken`, the re-push to a reattaching bridge).
+- `server/src/connectionPolicy.test.ts` — `listenHost`'s accepted and refused values; the `Host`
+  matrix (rebinding names, `sub.localhost`, `localhost.`, `0.0.0.0`, missing); the
+  `upgradeVerdict` table (the dev page, desktop local mode, an IPv6 loopback page, a non-browser
+  client, a cross-site page, `null`/`file://`, a lookalike host, a rebinding page `421`, the LAN
+  phone with and without the opt-in origin, a LAN peer's localhost page, direct sockets off); and,
+  through a real listener on `127.0.0.1`, this machine's page admitted, a cross-site page refused
+  `403` before any `hello`, a rebinding `Host` refused `421`.
+- `server/src/relayClient.dial.test.ts` — the device secret rides the header, and neither the dial
+  URL nor the bridge's log carries it.
+- `server/src/locality.test.ts` — every shape a loopback `remoteAddress` arrives in, and that
+  anything unrecognised is not local.
+- `server/src/guestAccess.test.ts` / `server/src/messageAuthz.test.ts` (token rules) — a refresh
+  on a guest link is ignored, relayed or not; a token naming someone else does not fit a
+  context; the single-tenant context takes one only where the exemption is passed in; an owner's
+  refresh still lands, relayed on the relay's word, direct only when re-verifiable.
 - `server/src/relayEndToEnd.test.ts` — a real relay and a real bridge, with a browser reaching
   the bridge only through the tunnel; plus the bridge's idle watchdog, driven by `SIGSTOP`ping the
   relay so the socket goes silent without closing.
@@ -584,7 +724,8 @@ refuse.
   the same way, since its handshake frame was dropped with no bridge to receive it. Guests close
   with 1008 instead, so their browser re-runs the `/client` gate against the new bridge's
   now-known protocol version; see [session-collaboration](session-collaboration.md#the-relay-gate).
-  Tokens are still replayed, since storage sync needs one before any browser is back.
+  The owner's token is still replayed, since storage sync needs one before any browser is back —
+  only the owner's, and only to a bridge that has proved that owner's claim.
 - A `RelayChannel` holds frames that arrive before the bridge attaches its handler, and so does
   `SecureChannel`. The bridge loads its e2ee key asynchronously before it listens, and on an
   encrypted channel the browser speaks first, so dropping them there loses the handshake.
@@ -592,9 +733,10 @@ refuse.
   the relay has not yet noticed.
 - The relay persists nothing and logs no payload.
 - With `RELAY_URL` unset nothing dials, so the local-only setup is unchanged.
-- A browser may only reach a device it owns. If storage cannot be reached to verify a device's
-  secret, the relay refuses the connection rather than admitting it — an outage must never widen
-  access.
+- A browser may only reach a device it owns, or one it holds a grant on (see
+  [session-collaboration](session-collaboration.md)). If storage cannot be reached to verify a
+  device's secret, the relay refuses the connection rather than admitting it — an outage must
+  never widen access.
 - `register` is unauthenticated: the machine has no user yet, and a code is worthless until
   claimed. Re-registering an already-claimed **and unrevoked** device is refused (409) rather than
   silently re-bound. A **revoked** device is the exception: register clears the stale `userId` and
@@ -730,6 +872,37 @@ refuse.
   only behind the relay secret.
 - `POST /v1/diagnostics` stores nothing. It sanitises the report (known scalar fields only,
   bounded, token-shaped query params redacted) and writes one `[diag] userId=…` line to stdout.
+- The bridge binds `127.0.0.1` unless `LINES_BRIDGE_HOST` names `0.0.0.0` or `::`. A direct
+  socket is admitted only from this machine's own page (a loopback origin, from a loopback peer),
+  from an origin listed in `LINES_BRIDGE_ALLOWED_ORIGINS`, or as a non-browser client on loopback;
+  `null` is a stranger. On a loopback bind a `Host` naming anything but this machine is `421`, on
+  HTTP and the upgrade alike. In the desktop app's relay mode (`LINES_BRIDGE_DIRECT=0`) no direct
+  socket is accepted at all.
+- The loopback port is still reachable by every process on the machine, and a non-browser client
+  there needs nothing more on a desktop install, which has no Clerk gate. Lines assumes a
+  single-user machine; `SECURITY.md` scopes other local accounts out.
+- A token becomes a context's storage credential only if its subject is that context's user,
+  whichever path delivered it. The `'local'` context takes one only under `LINES_DEV_SUPERVISED=1`.
+- A guest's Clerk token never reaches the host's bridge through the relay or a current client —
+  not on `open`, not in a re-push, not as an in-channel refresh — and the bridge ignores one that
+  arrives anyway. The relay strips it rather than trusting the bridge to ignore it, since the
+  bridge is code the host runs and the guest has no say in what it does with what it is sent.
+- The device secret travels in the `x-lines-device-secret` header; the `secret` query is a
+  deprecated fallback the relay still reads for bridges released before the header. The relay
+  therefore deploys before a desktop release whose bridge sends only the header — in the other
+  order that bridge is refused as if unpaired.
+- `APP_PROTOCOL_VERSION` is 6 (host-issued guest grants), and the relay's `COLLAB_MIN_PROTOCOL`
+  defaults to 6: a guest is put through only to a bridge that admits guests on grants it minted
+  itself. An older bridge keeps serving its owner; sharing waits for the update.
+- Every id that becomes a path under `~/.lines-app` passes `isValidStoreId` first. A relay
+  channel whose attested user id, or whose grant's host id, is not a plain token is closed `1008`
+  before any context exists; `userStoreRoot` and `UserRegistry.get` throw on one; a malformed
+  session id has no transcript and deleting it is a no-op. `loadTranscript` for a session the
+  context does not know answers an empty transcript rather than reading whatever sits at that
+  name.
+- The bridge makes `~/.lines-app` `0700` at startup, whoever started it (Tilt and a terminal start
+  it directly, not only the desktop shell), and creates transcripts and rewind sidecars `0600`;
+  the directory's own mode covers files an older build left looser.
 
 ## Architectural rules
 
@@ -746,8 +919,18 @@ refuse.
   makes a timer invisible to node's mock timers, and the retry chain re-arms forever while the
   worker is down, so a short-lived consumer needs a real disposer.
 - The bridge's token is published but **not** enforced on browser connections: a browser cannot
-  set headers on a WebSocket, so the Clerk gate guards that path. The `/__bridge` endpoint exposes
-  only the port, never the token.
+  set headers on a WebSocket, so what guards that path is the upgrade check (`verifyClient` —
+  this machine's own pages, by default) and, where `CLERK_SECRET_KEY` is configured, the Clerk
+  gate. The `/__bridge` endpoint exposes only the port, never the token.
+- `connectionPolicy.ts` is pure and dependency-free, and `verifyClient` is the one piece of glue,
+  shared by the bridge and its socket test, so the test exercises the code that actually runs.
+  The policy is decided before the socket exists rather than in `handleConnection`, so a refused
+  page never receives a `hello`, which is a complete state snapshot.
+- The bind is IPv4 on purpose: every local caller dials `127.0.0.1` by number, so a bridge on
+  `::1` would be found by none of them. Tilt's probe and `ws.ts` name `127.0.0.1` rather than
+  `localhost` for the same reason.
+- `setClerkToken` is the one writer of a context's storage credential, so the subject rule cannot
+  be honoured on two of the three installing paths and missed on the third.
 - A live `ws` socket and node's mock timers cannot be mixed — `ws` schedules its own real timers,
   and faking the clock underneath corrupts node's timer list when the socket closes. Tests
   compress the client's intervals instead.
@@ -771,8 +954,11 @@ refuse.
   `interruptedAt` stamp, and an auto-continued turn. Its own reconnect is the only thing a relay
   failure drives.
 - The payload is opaque. The relay routes on the header and never parses the message, so
-  end-to-end encryption can later encrypt `payload` alone with no codec rewrite. Nothing in
-  `relay/` may start reading it.
+  end-to-end encryption could encrypt `payload` alone with no codec rewrite. Nothing in `relay/`
+  may start reading it, with one exception: a frame a *guest* sends toward the bridge is parsed
+  for its `type`, and an `auth` one is dropped (`DeviceHub.fromClient`). It reads nothing the
+  relay could not already see — a current client seals its guest frames, and an older client's
+  plaintext was visible anyway — and an owner's frame is never looked at.
 - Frames are forwarded **synchronously** inside the message handler. An `await` per frame would
   let two race and reorder a stream.
 - A dropped relay socket must synthesize `close` for every open channel. Otherwise `ctx.sockets`
@@ -789,16 +975,23 @@ refuse.
   - Encrypted by default: the requirement holds from a machine's first launch, machine-wide, with
     no plaintext owner path even when nothing is enrolled. Every browser must enrol once — the
     desktop's own window does it automatically, any other lands on the connect-time gate. Guest
-    channels are the exception and stay plaintext.
+    channels are encrypted too, but admitted differently: the guest's browser holds the channel to
+    the machine key from its invite link (the bridge accepts any client key there, since a guest
+    has nothing enrolled), and the channel reaches `handleConnection` only once its first sealed
+    frame presents a grant this machine minted — see
+    [session-collaboration](session-collaboration.md#host-issued-guest-grants). The relay's word
+    picks which check applies and can stand in for neither.
   - The bridge still does not re-verify the Clerk token on a relay channel, and that part of the
     original reasoning stands: a second verifier means two failure modes and would make every
     relayed connection depend on the user's machine reaching Clerk's JWKS. The token is
     authorization for *storage sync*, not for driving the machine. Direct sockets still verify
-    locally.
+    locally where `CLERK_SECRET_KEY` is set. What the bridge does check, on every path, is whose
+    token it is (`setClerkToken`, see Data flow).
 - A link's *locality* is a property of the link, not of the app: `hello.local` is true only for a
-  socket that is both unrelayed and on loopback. `!attested` alone is not enough — the bridge
-  binds every interface, so a direct socket may be a laptop on the same LAN, which is as remote
-  as the relay for anything that opens a window on the host's screen. It fails closed: absent
+  socket that is both unrelayed and on loopback. `!attested` alone is not enough — the bridge can
+  be opened to every interface on purpose (`LINES_BRIDGE_HOST`, for LAN testing), and then a
+  direct socket may be a laptop on the same LAN, which is as remote as the relay for anything that
+  opens a window on the host's screen. It fails closed: absent
   means not local, so an older bridge simply hides the affordance. Today that gates exactly one
   thing, the Finder folder picker (`pickFolder`).
   - The desktop shell's own window is relayed too (see [desktop-app](desktop-app.md)), so `local`
@@ -896,7 +1089,7 @@ record. Read them in order (browser → relay → bridge) and line them up by ti
      `docker compose --env-file lines.env logs -t storage | grep '\[diag\]'`.
 2. **The relay.** Every client refusal is logged with a reason:
    - `client-refused` with `bad-token` / `no-token` / `not-owner-no-grant` (including `ownerId`) /
-     `bridge-too-old`
+     `storage-unreachable` (a guest whose grant lookup got no answer) / `bridge-too-old`
    - `client-wait` (released or timed out), `client-left-waiting`
    - `agent-refused` (`unauthorized` vs `unreachable`)
    - attach/supersede/detach/silent
@@ -910,6 +1103,8 @@ record. Read them in order (browser → relay → bridge) and line them up by ti
    - `health tick Xms late` (dates a sleep)
    - channel open/close
    - `[ws] hello →` / `link … closed after`
+   - `[ws] refused a direct socket: <reason>` (the upgrade check), `[auth] refused a token that
+     does not belong to …`
 4. **The shell** (`desktop.log`). Covers:
    - `[power] suspend/resume/lock-screen/unlock-screen`
    - `[relay-status] connected/disconnected/verified`

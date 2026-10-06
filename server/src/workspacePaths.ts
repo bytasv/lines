@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { projectRoots, type SocketAccess } from '@lines/shared';
-import { isPlanPath } from './autoGuard.ts';
+import { isPlanPath, isRealInside } from './autoGuard.ts';
 import type { UserContext } from './userContext.ts';
 
 /** Every directory this user may read over HTTP: all roots of every open project, plus session cwds. */
@@ -31,6 +31,10 @@ export function workspaceRoots(ctx: UserContext, access?: SocketAccess): string[
  * live. `isPlanPath` anchors containment to real directories, so a traversal out
  * of a plans directory still resolves to null.
  *
+ * Both checks follow symlinks (`isRealInside`): every read, write and media
+ * request is served from where a path really lands, and a link inside a granted
+ * root can point anywhere on the host.
+ *
  * Lives outside index.ts only so it is importable by its test — index.ts starts
  * listening on import.
  */
@@ -43,7 +47,7 @@ export function resolveWorkspacePath(
   const abs = path.resolve(expanded);
   const guest = !!access && access.scope !== 'owner';
   const allowed =
-    workspaceRoots(ctx, access).some((root) => abs === root || abs.startsWith(root + path.sep)) ||
+    isRealInside(workspaceRoots(ctx, access), abs) ||
     // The plans exception is owner-only. `~/.claude/plans` sits outside every
     // project root and holds the host's plans for work a guest has nothing to do
     // with — as an exception it crossed OS users already, and extending it across

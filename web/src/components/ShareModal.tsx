@@ -24,16 +24,19 @@ import type { SharePreset } from '@lines/shared';
 import {
   PRESET_COPY,
   createInvite,
-  joinUrl,
+  joinUrlWithGrant,
   listContacts,
   listShares,
+  rememberInviteGrant,
   revokeGrant,
   revokeInvite,
   setGrantPreset,
+  takeInviteGrant,
   type ShareContact,
   type ShareGrant,
   type ShareInvite,
 } from '../lib/shares';
+import { mintGuestGrant, sendToMachine } from '../ws';
 import type { DescribedItem } from '../lib/modelSelect';
 
 /** One suggestion in the email field: the address, with a name under it if known. */
@@ -98,6 +101,13 @@ export function ShareModal({
   const [link, setLink] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when a change reached storage but not the machine itself — which is the
+  // side that admits guests now — so the owner knows it is not yet in force there.
+  const [machineBehind, setMachineBehind] = useState(false);
+  /** Tell the machine; note it when its link is down and the message could not go. */
+  const tellMachine = (msg: Parameters<typeof sendToMachine>[1]) => {
+    if (!sendToMachine(deviceId, msg)) setMachineBehind(true);
+  };
   const clipboard = useClipboard({ timeout: 1500 });
 
   const sessionId = scope === 'session' ? session?.id : undefined;
@@ -150,17 +160,32 @@ export function ShareModal({
     setBusy(true);
     setError(null);
     try {
-      const { code } = await createInvite({
-        deviceId,
-        sessionId: sessionId ?? null,
-        inviteeEmail: withEmail ? email.trim() : null,
-        preset,
-      });
+      // The machine first. It is what admits a guest now — on a grant it minted,
+      // never on the relay's word — so an invite it has not vouched for would be
+      // a link that opens nothing.
+      const grant = await mintGuestGrant(deviceId, { scope, ...(sessionId ? { sessionId } : {}), preset });
+      let code: string;
+      try {
+        ({ code } = await createInvite({
+          deviceId,
+          sessionId: sessionId ?? null,
+          inviteeEmail: withEmail ? email.trim() : null,
+          preset,
+          grantId: grant.grantId,
+        }));
+      } catch (err) {
+        // No invite, so nobody will ever be handed this token: end the grant
+        // rather than leave it redeemable until it expires.
+        sendToMachine(deviceId, { type: 'revokeGuestGrant', grantId: grant.grantId });
+        throw err;
+      }
+      rememberInviteGrant(code, grant.grantId);
       if (withEmail) setEmail('');
       // The link is shown either way. There is no email provider wired up yet, so
       // for an address-bound invite this is the *only* way to deliver it — saying
-      // "sent" would be a lie.
-      setLink(joinUrl(code));
+      // "sent" would be a lie. And it is the only way the grant travels: it rides
+      // in the fragment, which no server ever sees.
+      setLink(joinUrlWithGrant(code, deviceId, grant));
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -212,6 +237,12 @@ export function ShareModal({
         {error && (
           <Alert color="red" variant="light">
             {error}
+          </Alert>
+        )}
+        {machineBehind && (
+          <Alert color="yellow" variant="light">
+            {machineName ?? 'This machine'} isn’t connected, so the change has not reached it yet. Storage
+            already has it; once the machine is connected, make the change again so it applies there too.
           </Alert>
         )}
 
@@ -353,14 +384,38 @@ export function ShareModal({
                     placeholder="custom"
                     allowDeselect={false}
                     disabled={busy}
-                    onChange={(v) => v && void act(() => setGrantPreset(grant, v as SharePreset))}
+                    onChange={(v) =>
+                      v &&
+                      void act(async () => {
+                        await setGrantPreset(grant, v as SharePreset);
+                        // The machine's ceiling too: a narrower preset already applies
+                        // through the relay, but a wider one stops at what was minted.
+                        tellMachine({
+                          type: 'updateGuestGrant',
+                          guestUserId: grant.userId,
+                          sessionId: grant.sessionId ?? null,
+                          preset: v as SharePreset,
+                        });
+                      })
+                    }
                   />
                   <Tooltip label="Revoke access" withArrow>
                     <ActionIcon
                       variant="subtle"
                       color="red"
                       disabled={busy}
-                      onClick={() => void act(() => revokeGrant(grant))}
+                      onClick={() =>
+                        void act(() => {
+                          // The machine first, and whatever storage answers: it is the
+                          // side that admits the guest, and it ends the grant at once.
+                          tellMachine({
+                            type: 'revokeGuestGrant',
+                            guestUserId: grant.userId,
+                            sessionId: grant.sessionId ?? null,
+                          });
+                          return revokeGrant(grant);
+                        })
+                      }
                       aria-label="Revoke access"
                     >
                       <IconTrash size={14} />
@@ -385,7 +440,13 @@ export function ShareModal({
                       variant="subtle"
                       color="red"
                       disabled={busy}
-                      onClick={() => void act(() => revokeInvite(invite.code))}
+                      onClick={() =>
+                        void act(() => {
+                          const grantId = takeInviteGrant(invite.code);
+                          if (grantId) tellMachine({ type: 'revokeGuestGrant', grantId });
+                          return revokeInvite(invite.code);
+                        })
+                      }
                       aria-label="Cancel invite"
                     >
                       <IconTrash size={14} />

@@ -75,9 +75,17 @@ point a user at.
 
 - `spawnChild`, `childEnv`, `loginShellPath` — child process supervision and environment;
   packaged, `spawnChild` runs the esbuild bundles under Electron's own node, in a checkout it
-  runs `tsx` against `server/src` unchanged
+  runs `tsx` against `server/src` unchanged. `childEnv` sets `LINES_BRIDGE_DIRECT` to `'0'` in
+  relay mode and `'1'` in local mode
 - `RELAY_MODE` — `!isLocalMode()`; hosted unless `LINES_LOCAL_MODE=1`
-- `startUiServer` — local-mode only; not shipped in the DMG
+- `startUiServer` — local-mode only; not shipped in the DMG. Serves every file with the hosted
+  page's headers (`nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`) and `localModeCsp()`
+- `localModeCsp()` — the hosted CSP (`deploy/docker/web-nginx.conf`) with this machine's loopback
+  (`ws:`/`http:` on `127.0.0.1:*` and `localhost:*`) and the configured storage and relay origins
+  in `connect-src`; images only from the page's own origin, `data:`/`blob:` and Clerk's avatars
+- `ensurePrivateAppRoot()` — `~/.lines-app` to `0700` (created so, and `chmod`ed in case an older
+  build made it looser) and both log generations to `0600`; best-effort, run in `start()` before
+  the first write
 - `openWindow` — used in both modes now; loads `appUrl()`, which is local-mode's own server or,
   in hosted mode, `config.webUrl` directly
 - `applyRelayStatus` / `onRelayVerified` / `RELAY_SETTLE_MS` — turns the relay's raw open/close
@@ -135,7 +143,11 @@ point a user at.
 - `installMediaPermissions()` — grants Electron's `media` permission request only for a mic,
   requested by the app's own origin (never a third-party page the window navigated to), then on
   macOS gates it a second time behind `systemPreferences.askForMediaAccess('microphone')`; every
-  other permission keeps Electron's default
+  other permission is granted only to the app's own origin, and only if it is in
+  `APP_PERMISSIONS`
+- `APP_PERMISSIONS` — `notifications`, `clipboard-sanitized-write`, `fullscreen`, `openExternal`:
+  what the app's pages may be granted besides the microphone. Anything else (geolocation, MIDI,
+  screen capture, the file system, pointer lock) the app never asks for
 
 ## Data flow
 
@@ -147,11 +159,17 @@ On boot the shell resolves `desktop/src/config.ts` (defaults, then a shipped `co
 **Local mode** (dev only — set by the `dev` script): the shell spawns the worker, then the bridge
 (with an IPC channel), starts a local static server for `web/dist`, and opens a window against
 it. The `/__bridge` endpoint on that server answers the same shape as the Vite dev plugin, so the
-web client needs no change to run under either.
+web client needs no change to run under either. The window's page is served from
+`127.0.0.1:<uiPort>`, a loopback origin, which is what the bridge's upgrade check admits (see
+[hosted-machine-access](hosted-machine-access.md#direct-sockets)); every file goes out with the
+hosted page's security headers and `localModeCsp()`.
 
 **Hosted mode** (the default, and the only path in a packaged build): the shell loads or mints
 this machine's identity (`server/src/device.ts`), registers it with the hosted storage server, and
-spawns the bridge with the relay URL, storage URL, and device credential in its env. The bridge
+spawns the bridge with the relay URL, storage URL, and device credential in its env, plus
+`LINES_BRIDGE_DIRECT=0`: the window is the hosted page and reaches the bridge through the relay,
+so nothing has a reason to open a socket on the bridge's port, and the bridge refuses every
+direct one. The bridge
 itself takes this machine's single-instance lock (`~/.lines-app/bridge.lock`, `instance: 'desktop'`)
 unconditionally, before it ever dials the relay — see
 [hosted-machine-access](hosted-machine-access.md#one-bridge-speaks-at-a-time). A respawn racing a
@@ -409,7 +427,10 @@ rejection (remote ahead) is reported, not fatal — the release already succeede
 
 `release.mjs` uploads the versioned artifacts, then re-uploads the DMG a second time under a fixed
 key (`desktop/Lines-latest.dmg`, `Cache-Control: no-cache`) — the alias `VITE_DESKTOP_DOWNLOAD_URL`
-points at, so the web app never needs a per-release edit. It refuses outright if more than one
+points at, so the web app never needs a per-release edit. It refuses an
+`R2_RELEASE_PUBLIC_BASE_URL` that is not an absolute `https://` URL: that base is baked into the
+app as its update feed, and a plain-http feed would let anyone on the path between a user and the
+bucket rewrite the update manifest the app trusts. It refuses outright if more than one
 `.dmg` sits in `desktop/release/`, since a leftover would otherwise be published as *that* alias for
 every user. The alias upload is last, so a partial failure leaves it pointing at the previous good
 build rather than a release whose update feed never finished publishing.
@@ -453,7 +474,9 @@ and push first. See [whats-new](whats-new.md).
 
 - `~/.lines-app/logs/desktop.log` stamps every line with an ISO time. Child output is re-cut into
   whole lines, each tagged `[bridge]`/`[worker]`. Past 5 MB the file rotates once, to
-  `desktop.1.log`.
+  `desktop.1.log`. The log is created `0600` in a `0700` directory, since it carries session
+  names, paths and the bridge's diagnostics, and `ensurePrivateAppRoot` tightens a log an older
+  build left behind.
 - The shell logs:
   - power transitions (`[power] suspend|resume|lock-screen|unlock-screen`)
   - each relay link change (`[relay-status] …`)
@@ -513,6 +536,24 @@ and push first. See [whats-new](whats-new.md).
 - Revocation from the tray is the lockout escape hatch: key pinning plus a lost device would
   otherwise be unrecoverable, and the same actions exist as `npm run enroll -w server` for a
   bridge with no Electron around it.
+
+### Local exposure
+
+- In relay mode the bridge accepts no direct socket at all (`LINES_BRIDGE_DIRECT=0`): the window
+  reaches it through the relay like any other browser, so a socket on the bridge's port — which
+  drives the agent — has no legitimate caller. Local mode is the other way round: its window is a
+  loopback page and dials the bridge directly.
+- `~/.lines-app` is `0700`, set at every start by `ensurePrivateAppRoot` before anything writes
+  beneath it: transcripts, the device secret, the e2ee keys, MCP credentials and logs all live
+  there, and a `0755` directory hands them to every other account on the machine. The bridge
+  tightens it again itself, since Tilt and a terminal start it without the shell.
+- The window's permission handler is an allowlist on the app's own origin: the microphone (and
+  only it) for `media`, the short `APP_PERMISSIONS` list for the rest. A third-party page the
+  window wanders onto (an OAuth screen) gets nothing, where Electron's default grants every
+  request.
+- The local-mode page gets the hosted page's CSP and headers, with only this machine's loopback
+  added to `connect-src`, so an image an agent gets rendered there cannot carry data to a host of
+  its choosing either.
 
 ### Updates and lifecycle
 
@@ -574,6 +615,9 @@ and push first. See [whats-new](whats-new.md).
   caller explicitly passes `--force` (or the workflow's `force` input) — artifacts are immutable at
   the edge (one-year max-age), so a same-version re-upload can leave stale bytes cached rather than
   replacing them.
+- An upload is refused unless `R2_RELEASE_PUBLIC_BASE_URL` is an absolute `https://` URL: the
+  update feed derived from it is what the shipped app trusts, so it must not be rewritable on the
+  wire.
 - `npm run release -w desktop` is an alias of `ship`; the upload-only step is `upload`.
 - `npm run ship -w desktop` is destructive on purpose: it deletes `desktop/release/` before every
   build, since that directory is electron-builder output and nothing else is meant to live there.
@@ -703,6 +747,12 @@ and push first. See [whats-new](whats-new.md).
   no-preload contract.
 - `app.userAgentFallback` (not per-`webContents` `setUserAgent`) carries the Electron-token scrub,
   so an OAuth popup window inherits the same scrubbed UA as the main window.
+- `localModeCsp()` copies `deploy/docker/web-nginx.conf`'s policy by hand, adding only the
+  loopback and configured remote origins to `connect-src`; nothing checks the two agree, so a
+  change to one belongs in the other.
+- `ensurePrivateAppRoot()` runs in `start()` before `loadPrefs()` and the first `shellLog`: that
+  log line is the first write beneath `APP_ROOT`, so the directory is `0700` before anything lands
+  in it.
 - The dock tile is shown iff a `BrowserWindow` exists, in hosted mode; local mode keeps a permanent
   tile as before.
 - Shell-owned state under `~/.lines-app` is named for the shell, never for its content —

@@ -27,7 +27,11 @@ WebSocket multiplexer.
 ## Important files
 
 - `server/src/fileRoutes.ts` — every handler, as pure functions
-- `server/src/workspacePaths.ts` — the root containment check, unchanged
+- `server/src/workspacePaths.ts` — the root containment check (`resolveWorkspacePath`), following
+  symlinks through `isRealInside`
+- `server/src/autoGuard.ts` — `realPathOf`/`isRealInside`, the one symlink-following containment
+  implementation the routes share with the auto-mode guard
+- `server/src/contentSearch.ts` — `grep`'s symlink skip (`linkedDirs`, `isLink`)
 - `web/src/ws.ts` — `fileRequest`, the pending-request map
 - `shared/types.ts` — `FileRequestKind`, `FileRequestParams`, `AttachmentBody`,
   `MediaChunkBody`, `FileContentResponse`, `FileWriteResponse`
@@ -46,6 +50,11 @@ WebSocket multiplexer.
 - `useMediaUrl(path)` — pulls `media` chunks sequentially into one blob URL,
   reports progress, stops and revokes on unmount
 - `ClientMessage.fileRequest` / `ServerMessage.fileResponse`
+- `soleTarget` / `grantedReal` — a granted path as named (`abs`, for anything
+  echoed back) and as touched (`real`: its realpath, gated again there); every
+  single-path route reads or writes `real`
+- `readAttachment` — stored attachments, scoped to the session they sit under
+  through `sessionInReach`
 
 ## Data flow
 
@@ -58,6 +67,21 @@ store: it is a point-to-point reply, not application state.
 
 Attachments come back as base64 and become blob URLs client-side, symmetric with
 the upload path, which was already base64.
+
+Every path is checked where it really lands, because a symlink inside a granted
+root can point anywhere on the host. `resolveWorkspacePath` requires the path
+inside a root both as written and once links are followed (`isRealInside`, the
+auto-mode guard's own helper), and each single-path kind — `file`, `tree`,
+`docs`, `media`, `writeFile`, `sessionDiffFile` — then touches only the resolved
+real path (`grantedReal`), re-gated there. Touching the path as named would follow
+its links a second time, after the check, so a link swapped in between could
+redirect the access. `attachment` does the same against the attachments root, and
+then reads the session id off where the file really is: attachments sit under
+`<sessionId>/`, and that session is the grant (`sessionInReach`). `grep` cannot
+take the same route per file — it walks thousands — so it lets only the
+candidates that are a symlink, or sit below a linked directory (`isLink`,
+`linkedDirs`, memoized per directory), pay for a realpath, and skips any that
+lands outside its root.
 
 Media (`media` kind) is pulled in chunks, not one frame: the client requests
 `offset`/`length` slices one after another until it has the file's `size`, then
@@ -84,15 +108,22 @@ Two search kinds ride the same route table: `grep` (file contents, see
 ## Dependencies
 
 Reuses `resolveWorkspacePath`/`workspaceRoots` for containment (including the
-`isPlanPath` exception) and `searchFilesAcross`/`collectDocs` unchanged. Requires
-an open socket — there is no unauthenticated fallback.
+owner-only `isPlanPath` exception), `realPathOf`/`isRealInside` from
+`server/src/autoGuard.ts` for following symlinks, and `searchFilesAcross`/
+`collectDocs` unchanged. Requires an open socket — there is no unauthenticated
+fallback.
 
 ## Tests
 
 - `server/src/fileRoutes.test.ts` — every route: containment, size cap, binary
   rejection, all-or-nothing `find`, attachment traversal, unknown kind, and
   `media` chunking, clamping, 403/404/413/415 and bad-offset 400; `writeFile`
-  containment, symlink escape, 409, mode preservation and temp-file cleanup
+  containment, symlink escape, 409, mode preservation and temp-file cleanup; a
+  symlink that leaves its root refused for `file`, `media`, `tree`, `writeFile`,
+  `sessionDiffFile` and `attachment` (one that stays is served); a read touching
+  only the real path it checked; `grep` skipping a symlink git lists and a tracked
+  file under a since-linked directory; a session-scope guest reading its own
+  sessions' attachments and no others', not by `..` nor through a planted link
 - `server/src/guestAccess.test.ts` — a Full-share guest still gets 403 on `writeFile`
 - `server/src/index.planFile.test.ts` — the plan-directory exception, unchanged
 
@@ -116,11 +147,22 @@ an open socket — there is no unauthenticated fallback.
   socket gate for every file kind is the `readFiles` capability, so without this
   check a guest with View or Full access could write to the host's disk; there is
   no `ShareCaps` flag for it.
-- `writeFile` re-resolves the target's realpath and requires it to sit inside a
-  granted root: the prefix check alone lets a symlink inside the project point
-  outside it. Only existing regular text files are written (404 otherwise); no
+- Every read, write and media request is served from where its path really
+  lands: inside a granted root both as written and once symlinks are followed,
+  and then read or written at that resolved real path, gated again there — a
+  prefix check alone lets a symlink inside the project point outside it. A link
+  that cannot be followed (a loop, say) is 403 like one that leaves the root.
+- `writeFile` writes only existing regular text files (404 otherwise); no
   create, rename or delete. Content over 2 MB is 413, a NUL byte is 415, missing
   content is 400, a stale `expectedMtimeMs` is 409.
+- An attachment is served only to a connection that reaches its session
+  (`sessionInReach`): a session-scope guest reads its own sessions' attachments
+  and no others', a machine guest and the owner every session's. The session is
+  read off where the file really is, so a link planted in the attachments
+  directory, or from one session's folder into another's, is refused.
+- `grep` never searches through a symlink that leaves its root — git lists a
+  symlink by its own path, and its index can name a file under a directory since
+  swapped for a link.
 - mtime conflict detection misses same-millisecond writes on coarse-mtime
   filesystems; accepted for basic editing. Content is round-tripped as UTF-8, so a
   BOM or non-UTF-8 file can change on save.
@@ -137,6 +179,14 @@ an open socket — there is no unauthenticated fallback.
   socket (index.ts listens on import).
 - `fileResponse` is handled in `ws.ts` before `applyServerMessage` and returns
   early; the store never sees it.
+- Containment is one implementation: `realPathOf`/`isRealInside` are exported
+  from `server/src/autoGuard.ts` and used by `resolveWorkspacePath`, the
+  attachment route and `grep`, so the routes follow links exactly the way the
+  auto-mode guard does. The route-local `realInsideGrant`, which re-checked only
+  `writeFile`, is gone.
+- A route touches the path it checked (`grantedReal`), never the path as named,
+  so the window between the containment check and the read or write cannot be
+  used to swap a link in.
 - The bridge's only remaining HTTP surface is its status page, so `corsFor`,
   `httpUserId`, `WEB_ORIGIN` and `withAuthToken` are all deleted rather than
   retained "just in case" — each was a second auth path to keep in step.
@@ -150,7 +200,8 @@ an open socket — there is no unauthenticated fallback.
 
 - [hosted-machine-access](hosted-machine-access.md) — the connection these ride on
 - [permissions-and-plan-mode](permissions-and-plan-mode.md) — the plan-directory
-  exception in the containment check
+  exception in the containment check, and `realPathOf`/`isRealInside`, the
+  guard's symlink-following containment these routes reuse
 - [session-change-tracking](session-change-tracking.md) — `sessionDiff`/
   `sessionDiffFile`, the two kinds that made dispatch async and added the
   `sessionInReach` grant clamp on top of the `readFiles` capability

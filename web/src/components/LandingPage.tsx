@@ -155,7 +155,7 @@ const SECURITY = [
     art: OutboundArt,
     title: 'Outbound only',
     description:
-      'The bridge on your machine dials out to the relay. No open port, no forwarding, no dynamic DNS.',
+      'The bridge on your machine dials out to the relay and listens on that machine alone. No port open to your network, no forwarding, no dynamic DNS.',
   },
   {
     art: LocalOnlyArt,
@@ -167,7 +167,7 @@ const SECURITY = [
     art: EncryptionArt,
     title: 'End-to-end encrypted by default',
     description:
-      'Every browser enrols with a one-time code from your machine; the relay carries traffic it can’t read or forge.',
+      'Every browser enrols with a one-time code from your machine, and a guest connects with the key in their invite link; the relay carries traffic it can’t read or forge.',
   },
   {
     art: OpenSourceArt,
@@ -182,8 +182,8 @@ const SECURITY = [
 // "transcripts and files never leave your machine", "zero-knowledge" or "we can't
 // see anything". The conversation and the code the agent reads go to the model
 // provider, and live views cross the relay, so the claim is about where things
-// are stored. Storage holds session metadata in plaintext today, so it is named
-// here rather than glossed over.
+// are stored. Storage holds session metadata, workflows and memory in plaintext
+// today, so it is named here rather than glossed over.
 const DATA_FLOWS = [
   {
     where: 'Stays on your machine',
@@ -198,12 +198,12 @@ const DATA_FLOWS = [
   {
     where: 'Passes through our relay',
     description:
-      'Live traffic between your own devices and your machine is end-to-end encrypted. The relay still sees which device connects, when, and how much, and guests you invite into a session are not encrypted yet.',
+      'Live traffic between your machine and your own devices, or the guests you invite, is end-to-end encrypted. The relay still sees which device connects, when, and how much.',
   },
   {
     where: 'Stored on Lines storage',
     description:
-      'Session list, workflows and memory sync to Lines storage so every device sees them. Self-host it if you’d rather own that too.',
+      'Session list, workflows and memory sync to Lines storage, in plaintext, so every device sees them. Self-host it if you’d rather own that too.',
   },
 ];
 
@@ -702,7 +702,7 @@ export function LandingPage({ appUrl }: { appUrl?: string } = {}) {
             <SectionHeading
               eyebrow="Security"
               title="The agent runs on hardware you own"
-              blurb="Your repos and full transcripts live on your machine and are never stored on Lines servers. Live traffic between your devices and your machine is end-to-end encrypted."
+              blurb="Your repos and full transcripts live on your machine and are never stored on Lines servers. Live traffic between your machine and every browser on it, yours or a guest’s, is end-to-end encrypted."
             />
             {/* Two by two, not four across: at a quarter of the row the drawings'
                 labels would be too small to read. */}

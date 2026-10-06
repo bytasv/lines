@@ -39,6 +39,20 @@ export function useIsGuest(): boolean {
 }
 
 /**
+ * `useIsGuest`, judged by the machine that hosts this session — the same lookup
+ * as `useCanOnSession`. For what is the host's alone whatever the grant says,
+ * such as the allowlist a permission card's "Always allow" would widen.
+ */
+export function useIsGuestOnSession(sessionId: string): boolean {
+  return useStore((s) => {
+    const deviceId = s.sessionMachine[sessionId] ?? s.primaryDeviceId ?? '';
+    const slice = s.machines[deviceId];
+    const access = slice ? slice.view.access : s.access;
+    return !!access;
+  });
+}
+
+/**
  * Whether this session is one the connection may act on at all. A machine-scope
  * guest sees every session; a session-scoped one sees exactly their list.
  */

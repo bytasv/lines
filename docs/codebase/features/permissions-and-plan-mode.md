@@ -26,6 +26,14 @@ deliverable is written and reviewed.
   editable in Settings instead of an invisible, append-only local file, and sync the list across
   a user's machines through the storage server — without ever letting a remote change apply
   silently, since the list controls what Auto mode is allowed to run without asking.
+- **What the guard checks, and what an entry covers** — auto mode reads every chained command
+  (`&&`, `||`, `;`, line breaks) the way the shell would, judges a file path where it really lands
+  once symlinks are followed, and always asks before a write to a file that runs code later
+  (Claude Code settings and hooks, MCP configs, git hooks and config, shell startup files, ssh) —
+  which no allowlist entry disarms, and which the other gated modes now ask about too. "Always
+  allow" names on the card the exact entry it saves, and offers none when no entry could cover the
+  call without also covering calls the user never saw. An approval approves the call that was
+  asked about: the client can no longer rewrite its input.
 - **Plan-file auto-approve** — let plan mode's deliverable (a Markdown file under a
   `.claude/plans/` directory) get written, edited, and re-read without a permission card on
   every call, even though the file lives outside the session `cwd` (which the guard otherwise
@@ -68,13 +76,15 @@ deliverable is written and reviewed.
   `recoverOrphanedPermission`, `expireUnresolvedPermissions`, `flushPending`, `handleRpcCancel`,
   and the auto-approve branches of `handlePreToolUse` / `handleCanUseTool`
 - `server/src/sessions.ts` `handlePreToolUse` — the `ALWAYS_ASK_TOOLS` and `EnterPlanMode`
-  branches
+  branches, and the persistent-file `'ask'` outside auto mode
 - `web/src/components/PermissionPrompt.tsx` — the resolution badge tooltip; `PermissionPrompt`
   rendering an `ExitPlanMode` permission item (live or replayed from a persisted transcript)
 - Settings modal, "Auto-mode allowlist" pane (nav rail item, deep-linked when a review is
   pending) — list, remove, hand-add an entry
-- Permission card "Always allow" — the existing write path, going through the same
-  normalization and change notifications as the UI
+- Permission card "Always allow" — names the exact entry it saves (`alwaysAllowEntry`, decided by
+  the bridge when the card was raised), or a note in its place saying why none is offered; never
+  shown to a guest. The click goes through the same normalization and change notifications as the
+  UI
 - Allowlist-changed-elsewhere review modal, mounted at the app root (not inside Settings) so a
   divergence reaches the user even if they never open the gear
 - `Read`/`Write`/`Edit`/`MultiEdit`/`NotebookEdit` tool calls targeting a plan file, arriving
@@ -107,7 +117,7 @@ deliverable is written and reviewed.
   `PermissionResolutionSource` (`'plan-readonly'`); `PLAN_MODE_REJECT_MESSAGE`,
   `planModeRejectMessage`; `PermissionRequestData.planRead`; `GuardAllowEntry.scope`
   (`'plan-read'`); `ClientMessage.permissionResponse.allowAsRead`;
-  `UserUiSettings.planModeRejectWrites`
+  `UserUiSettings.planModeRejectWrites`; `PermissionRequestData.alwaysAllowEntry`
 - `web/src/lib/permissionModes.tsx` — shared mode list, segmented-control data, dropdown render
   helper
 - `web/src/lib/modelSelect.tsx` — `renderOptionWithDescription` (label + dimmed description
@@ -118,7 +128,10 @@ deliverable is written and reviewed.
 - `server/src/sessions.ts` — `'auto'` runs the SDK in `acceptEdits` while the bridge guard
   approves/prompts per tool call; all resolution sites, `hasUnresolvedAlwaysAsk`,
   `unresolvedPermissions`, `findPermissionResolution`; `handlePreToolUse`, `handleCanUseTool`,
-  `collectTurns`; `resolvePermission`'s "Always allow" branch; `planReplyDecision`, `userPrompt`,
+  `collectTurns`; `resolvePermission`'s "Always allow" branch (saves the card's recorded
+  `alwaysAllowEntry`) and its `updatedInput` rebuild (`questionAnswers`); `askPermission`
+  recording `alwaysAllowEntry` on the card; `handlePreToolUse`'s persistent-file `'ask'`
+  (`PERSISTENT_WRITE_TOOLS`); `planReplyDecision`, `userPrompt`,
   `recoverOrphanedPermission`; `pushIntoLiveTurn` (extracted from `interjectQueued`, see
   [turn-interjection](turn-interjection.md)); `resolvePermission`'s `planComments` handling
   (gate branch, allow+interject, deny wording, queue fallback); `takeQueuedPlanReply` (beside
@@ -127,16 +140,23 @@ deliverable is written and reviewed.
   lifecycle); re-exports `ALWAYS_ASK_TOOLS`/`GuardAllowEntry` from `shared/types.ts` for
   existing importers; `isPlanPath` (exported), `isSafeReadOnly`, `isSafePlanWrite`,
   `assessToolCall`; `classifyPlanBash`, `isReadOnlyBash`, `READ_ONLY_COMMANDS`,
-  `READ_ONLY_ARG_RULES`, `isSafePlanModeRead`, `PLAN_MODE_READ_TOOLS`, `planModeVerdict`
+  `READ_ONLY_ARG_RULES`, `isSafePlanModeRead`, `PLAN_MODE_READ_TOOLS`, `planModeVerdict`;
+  `alwaysAllowEntryFor` (and the deprecated, uncalled `allowEntryFor`); the Bash-line helpers
+  `chainedCommands`, `ruleText`, `UNSAFE_SEGMENT`, `dangerousPrefix` (`COMMAND_RUNNERS`,
+  `RUNNER_SUBCOMMANDS`), `segmentAllowed`; `realPathOf`/`isRealInside` (exported for the file
+  routes); `PERSISTENT_FILES`, `persistentFileReason`, `persistentShellWrite`
 - `server/src/store.ts` — `GuardSyncState`, `loadGuardSync`/`saveGuardSync`
   (`guard-allowlist-sync.json`, separate from the bare-array `guard-allowlist.json`)
 - `server/src/sync.ts` — `pushGuardAllowlist`, the isolated `/guard-allowlist` pull
 - `server/src/userContext.ts` — wires `guard.onChange`/`guard.onReview` to broadcast + push, and
   calls `reviewRemote` before the push block in `syncNow`
 - `server/src/index.ts` — `hello` fields, the three guard message cases; the `permissionResponse`
-  case's `prompt`-capability gate on `planComments`
+  case's `prompt`-capability gate on `planComments` and its `permissionAnswerFor` call
+- `server/src/guestWorkflows.ts` — `permissionAnswerFor` (a guest's `alwaysAllow`/`allowAsRead`
+  dropped)
 - `server/src/workspacePaths.ts` — `resolveWorkspacePath`, `workspaceRoots` (the
-  `file`/`tree`/`find` root gate; its plan-directory exception is `isPlanPath`)
+  `file`/`tree`/`find` root gate, symlink-aware through `isRealInside`; its plan-directory
+  exception is `isPlanPath`)
 - `storage/prisma/schema.prisma`, `storage/src/index.ts` — the `guard_allowlist` table and its
   `GET`/`PUT /guard-allowlist` endpoints
 - `web/src/store.ts` — `guardAllowlist`/`guardReview` state, actions, message cases;
@@ -148,10 +168,13 @@ deliverable is written and reviewed.
   transcript item; `buildTranscript` (`permission` case), `withPlanFileText`; the permission-card
   merge copies `denyMessage` onto the resolved card
 - `web/src/components/PermissionPrompt.tsx` — `ResolutionBadge`, `SOURCE_NOTE`, `PermissionCard`
-  (resolved-card summary and expand), `PlanApproval`, `PlanReply` (resolved-card reply attribution); `CommentablePlan` (selection-to-comment
+  (resolved-card summary and expand), `AlwaysAllowButton`/`noAlwaysAllowNote` (the recorded entry
+  on the button, or why there is none), `PlanApproval`, `PlanReply` (resolved-card reply attribution); `CommentablePlan` (selection-to-comment
   affordance, the hover bubble), `locateQuotes`/`flattenText` (quote-to-`Range` anchoring for the
   CSS Custom Highlight paint)
 - `web/src/lib/files.ts` — `useFileContent` (the plan card's live re-read)
+- `web/src/lib/can.ts` — `useIsGuestOnSession` (hides the card's allowlist-writing buttons from a
+  guest)
 - `web/src/store.ts` — `planModeRejectWrites` state, `setPlanModeRejectWrites`, the
   `lines.planModeRejectWrites` `localStorage` cache and the settings save/hello-merge sync sites
 
@@ -188,10 +211,11 @@ deliverable is written and reviewed.
   staging it and the user accepting
 - `GuardAllowlist.blob()` — entries plus the `updatedAt` that orders the storage row; distinct
   from the set-difference comparison used to detect divergence
-- `isPlanPath(filePath, roots)` — true when the resolved path is inside `~/.claude/plans` or
-  `<root>/.claude/plans` for any of `roots`; the actual permission-escalation guard, anchored to
-  real directories. Exported so both the guard and `resolveWorkspacePath` share one containment
-  check
+- `isPlanPath(filePath, roots)` — true when the path is inside `~/.claude/plans` or
+  `<root>/.claude/plans` for any of `roots`, both as written and once symlinks are followed
+  (`isRealInside`, with neither plans directory allowed to be a link elsewhere); the actual
+  permission-escalation guard. Exported so both the guard and `resolveWorkspacePath` share one
+  containment check
 - `isPlanFilePath(filePath)` — shared, cheap substring check (`.claude/plans/` in the normalized
   path); a hint only, used where a resolved path isn't available (transcript scans on both
   server and web)
@@ -202,8 +226,30 @@ deliverable is written and reviewed.
 - `assessToolCall(toolName, input, roots, allowlist)` — the shared guard verdict function; plan
   paths short-circuit to non-dangerous inside its out-of-root branch. Takes every root a session
   may work in (see [multi-root-projects](multi-root-projects.md)), not a single `cwd`
-- `resolveWorkspacePath(ctx, raw)` — the `file`/`tree`/`find` path resolver; falls back to
-  `isPlanPath(abs, ctx.sessions.list().map(cwd))` when the project/session root check fails
+- `alwaysAllowEntryFor(toolName, input)` — the exact entry "Always allow" saves for a call, or
+  `null` when no entry could cover it without also covering calls the user never saw (see
+  [Data flow](#what-an-allowlist-entry-covers-and-what-always-allow-saves)). Replaces
+  `allowEntryFor`, kept only as a deprecated, uncalled export
+- `PermissionRequestData.alwaysAllowEntry` — that entry, recorded on the card when it is raised;
+  `null` = this call cannot be allowlisted, absent = a card from before the field existed
+- `chainedCommands` / `ruleText` / `UNSAFE_SEGMENT` / `dangerousPrefix` (over `COMMAND_RUNNERS`
+  and `RUNNER_SUBCOMMANDS`) / `segmentAllowed` — how a Bash line is split into commands, read the
+  way the shell reads it, and matched against the allowlist
+- `realPathOf(target)` / `isRealInside(dirs, target, realDirs?)` — where a path really lands once
+  every symlink is followed (a file not written yet included), and containment checked both as
+  written and there; exported so the file routes, find-in-files and `guestCwdAllowed` follow links
+  exactly the way the guard does
+- `PERSISTENT_FILES` / `persistentFileReason(filePath)` / `persistentShellWrite(chain, primary)` —
+  the files that run code later, matched as written and where a link lands, and the same writes
+  made from the shell
+- `questionAnswers(input, raw)` — an `AskUserQuestion` answer narrowed to the recorded card's own
+  questions; the one part of a call an approval may change
+- `permissionAnswerFor(access, msg)` — a guest's `alwaysAllow`/`allowAsRead` dropped server-side
+- `useIsGuestOnSession(sessionId)` — `useIsGuest` judged by the machine hosting the session; hides
+  "Always allow" and "Allow as read" from a guest
+- `resolveWorkspacePath(ctx, raw, access?)` — the `file`/`tree`/`find` path resolver; requires the
+  path inside a granted root as written and once symlinks are followed (`isRealInside`), and falls
+  back — for the owner only — to `isPlanPath(abs, ctx.sessions.list().map(cwd))` when that fails
 - `classifyPlanBash(command, allowlist)` — three-way, fail-closed classifier for a `Bash` (or
   `Monitor`) command: `read`; `write` (a credential path anywhere, an output redirect into the
   project, or — per command, and only for a command that isn't itself a read — a `BASH_RULES`
@@ -351,6 +397,113 @@ The user resolves the review by accepting (installs the remote list verbatim) or
 (keeps the local list, but bumps its `updatedAt` so it now wins the storage row's
 last-write-wins and gets pushed back over the remote one).
 
+### What an allowlist entry covers, and what "Always allow" saves
+
+`assessToolCall` splits a Bash line into its chained commands (`chainedCommands`: on `&&`, `||`,
+`;` and line breaks — a line ending in a pipe is joined to the next first, so `curl … |` broken
+onto a second line before `bash` still meets the pipe rule) and checks each on its own, read the
+way the shell reads it: `ruleText` turns `${IFS}`, `$IFS` and an escaped space into a space and
+drops quotes and backslashes, so `rm${IFS}-rf` and `r''m "-rf"` meet the rules written for
+`rm -rf`. Dropping characters only ever adds matches — the safe direction for a deny-list — and
+both steps are quote-blind for the same reason: a split inside a quoted string only adds a piece
+to check.
+
+A command skips the rules only when an entry covers it (`segmentAllowed`), and only a plain simple
+command can be covered: one carrying `|`, `&`, `<`, `>`, a backtick, `$(` or a line break
+(`UNSAFE_SEGMENT`) meets every rule whatever its prefix — otherwise an allowlisted `npm test` would
+also pass `npm test | bash` and `npm test $(curl … | sh)`. A prefix that is dangerous on its own
+(`dangerousPrefix`) covers only the identical command, word for word, never what follows it: one
+that already trips a `BASH_RULES` rule (`rm -rf`, `git rebase`), or one that hands the rest of the
+line to something else to run — a `COMMAND_RUNNERS` shell, interpreter or launcher (`bash`,
+`python`, `npx`, `env`, `sudo`, `timeout`, `xargs`, `find`, `ssh`, …, matched on the basename with
+any version suffix dropped, so `/usr/bin/env` is `env` and `python3.12` is `python`), a
+`RUNNER_SUBCOMMANDS` pair (`npm exec`, `docker run`, `kubectl exec`, `git -c`, …), or nothing but
+`NAME=value` assignments. That rule is what defuses an `rm -rf` or `bash -c` entry saved before
+these checks existed, or typed into Settings, where `normalizeAllowEntry` still accepts it.
+
+`alwaysAllowEntryFor` decides the entry when the card is raised: `askPermission` records it on
+every tool-call card as `PermissionRequestData.alwaysAllowEntry`, `AlwaysAllowButton` prints it on
+the button itself (`git push …`, or the tool name — not only in the tooltip, since a phone never
+hovers), and `resolvePermission` saves that recorded value verbatim. For Bash it is the first two
+words (after any assignments) of the command a rule *flagged* — `git push` in
+`cd app && git push --force`, where the old `allowEntryFor` kept the line's harmless first two
+words. It is `null` — no button, and `noAlwaysAllowNote` where it would be — for
+`ALWAYS_ASK_TOOLS`; for a file tool (flagged for a path an entry cannot carry, so an entry would
+cover every path, credentials included) or `Monitor` (whose commands the guard never reads); for a
+line that writes a persistent file (below); when no command was flagged, or the flagged ones would
+need different entries; when a flagged command pipes, redirects or substitutes; and when the
+prefix is dangerous on its own. Any other tool flagged for being itself (an MCP write) is named
+outright, `{ tool }`. A card from before the field existed keeps the old unlabelled button and is
+derived the same way at the click.
+
+### Paths are judged where they really land
+
+Every file-path check in the guard follows symlinks. `realPathOf` takes the realpath of the
+nearest existing ancestor plus the segments below it that don't exist yet — so a file about to be
+written resolves too — and follows a dangling link, since writing through one creates its target.
+It returns `null` for a loop, an unreadable directory, or a dangling link whose text climbs with
+`..`, and every caller treats `null` as outside. `isRealInside(dirs, target)` requires the target
+inside a dir both as written and at its real location, measured against each dir's own realpath so
+a root behind a link (macOS's `/var` → `/private/var`) still contains its files; a path that climbs
+with `..` never counts. `assessToolCall`'s out-of-root branch runs on it (and its credential check
+on both the written and the real path), so a link inside the project that points out escalates
+like the file it reaches. A blanket file-tool entry no longer covers a write it can't place
+either: through a climbing `..` or a link that can't be followed, it asks ("Writes through a path
+whose real location can't be confirmed").
+
+`isPlanPath` is stricter about where a plans directory may really be. `~/.claude` itself may be a
+link (a dotfiles manager's), but neither `plans` directory counts if it is a link to somewhere
+else, and nothing below a project root may be one: git tracks symlinks, so a cloned repo — or an
+earlier auto-mode turn — could aim `.claude` or `.claude/plans` at the project's source and turn
+every edit there into a plan write that never asks, plan mode included. A link planted inside a
+plans directory is not a plan either.
+
+### Files that run code later
+
+`PERSISTENT_FILES` names the files whose contents run after this turn, under whatever mode comes
+next: Claude Code settings and hooks (`.claude/settings*.json`, `.claude/hooks/`), MCP configs
+(`.mcp.json`, `.claude.json`), git hooks and config (a worktree's `.git` pointer file, `hooks/` and
+`config` under any `.git` — submodules and worktrees included — `.gitconfig`,
+`.config/git/config`, `.husky/`), shell startup files, and `.ssh/`. `persistentFileReason` matches
+them case-insensitively, as written and where a link lands (`~/.zshrc` is often a link into a
+dotfiles repo; an innocent name can link to a git hook).
+
+- **Auto mode.** `assessToolCall` checks an `Edit`/`Write`/`MultiEdit`/`NotebookEdit` right after
+  `isSelfWorkerSource`, ahead of the blanket-entry short-circuit, wherever the file is — a project
+  root included. A Bash line gets the same ahead of `segmentAllowed`: `persistentShellWrite`
+  collects every write target on the line — output redirects (`>`, `>>`, `>|`, `&>`, `2>` …, but
+  not a descriptor duplication like `>&2`) and the file operands of `FILE_WRITERS` (`tee`;
+  `cp`/`install`/`ln`/`rsync`/`scp`, including each source's name inside a destination directory;
+  `mv` sources and destination; `dd of=`; `sed -i`; `perl -i`; `curl -o`; `wget -O`) wherever they
+  sit, the quoted script of `bash -c` included — resolving relative targets from wherever a chained
+  `cd` left the line and from the primary root, and `~`/`$HOME` to the home directory.
+  `gitConfigChange` counts a `git config` that writes (anything but a `--get`-style, `--list`,
+  `get`/`list` or lone-key read) and a one-off `git -c`, `--config-env` or `GIT_CONFIG_*` setting
+  outside `HARMLESS_GIT_CONFIG` as the same act, since config can define an alias, hook path,
+  pager or helper that runs a program. An allowlisted `echo`, `cp` or `git` never disarms any of
+  it.
+- **Every other gated mode.** `handlePreToolUse` returns `permissionDecision: 'ask'` with the
+  reason for a file-tool write to one of them, after the plan-mode checks: the CLI's own
+  `acceptEdits` (or a `settings.json` allow rule) would otherwise accept an in-project edit with
+  nobody asked. `bypassPermissions` returns before this branch and is unaffected.
+- **Plan files.** `isSafePlanWrite` never covers one, so a git hook or settings file inside a plans
+  directory (a user may keep plans in a repo) reaches a card instead of auto-approving.
+
+### An answer approves the call that was asked about
+
+`resolvePermission` rebuilds what an answer may change from the bridge's own record of the card
+(`findPermissionRequest`) rather than taking it off the wire: nothing, except an allowed
+`AskUserQuestion`'s answers — narrowed by `questionAnswers` to the recorded questions' own text,
+string values only, each capped at 10,000 characters — re-attached to the recorded input. Every
+other client `updatedInput` is dropped, so the SDK runs the input the card showed (an approval of
+`ls` cannot come back as `curl … | sh`), and the rebuilt input is what the resolution event
+persists, so a replay after a bridge restart cannot reintroduce what the live answer refused.
+
+"Always allow" and "Allow as read" are not answers but writes to the owner's allowlist, for every
+future session. `permissionAnswerFor` drops both from a guest's `permissionResponse`, leaving the
+one-off approval, and `PermissionCard` hides both buttons from a guest (`useIsGuestOnSession`)
+rather than offer what the click cannot do.
+
 ### Plan-file auto-approve
 
 `handlePreToolUse`/`handleCanUseTool` check, outside `auto` and `bypassPermissions` mode:
@@ -363,9 +516,10 @@ sandbox, so anything reaching these handlers there is an escalation the sandbox 
 and should stay the user's call rather than being auto-approved as if it were an ordinary read.
 
 Separately, `resolveWorkspacePath` (used by the `file`, `tree`, and `find` request routes) first
-checks the requested path against every project root and session cwd; if that fails, it
-additionally allows the path when `isPlanPath` holds for any of the user's session cwds (which
-also covers the cwd-independent `~/.claude/plans`). Everything downstream of that resolve — the
+checks the requested path against every project root and session cwd, as written and once
+symlinks are followed (`isRealInside`); if that fails, it additionally allows the path — for the
+owner, never a guest — when `isPlanPath` holds for any of the user's session cwds (which also
+covers the cwd-independent `~/.claude/plans`). Everything downstream of that resolve — the
 `MAX_FILE_BYTES` cap, binary rejection, auth — is unchanged; `tree` and `find` inherit the same
 widening since they share the same resolver.
 
@@ -549,9 +703,9 @@ is open, otherwise the inline one.
 - Storage server `guard_allowlist` table, one JSON blob per user (see
   [agent-memory-sync](agent-memory-sync.md) for the precedent this follows and the row-per-item
   alternative it explicitly does not need at this scale).
-- The plan-path guard builds entirely on the pre-existing `isInside` path-containment helper and
-  the out-of-cwd branch in `assessToolCall`; no new state or message type. The `file` route's use
-  is a second caller of the same exported `isPlanPath`, not a parallel check.
+- The plan-path guard builds on the symlink-following `isRealInside` containment helper and the
+  out-of-root branch in `assessToolCall`; no new state or message type. The `file` route's use is
+  a second caller of the same exported `isPlanPath`, not a parallel check.
 - The plan card reuses `computeDiff` (Monaco diff support), the `.tx-row` click-target pattern
   already used by `ToolCallCard`/`ToolGroup`, and the bridge's existing `/file` route
   (`useFileContent`, shared with `MonacoPreviewModal`/`FilesView`). No new transcript event or
@@ -615,7 +769,12 @@ is open, otherwise the inline one.
   message compose into one `keepPlanningReason` body; an empty queue leaves `denyMessage`
   byte-identical to before this fold existed; a `'plan-reply'` deny does not also eat the queue;
   a paused queue is never released by the button; the folded text is persisted on the resolution
-  event so Retry re-sends it.
+  event so Retry re-sends it; an approval cannot rewrite the call it approves (the SDK runs the
+  card's own input and nothing client-supplied is recorded), a question card keeps only answers
+  to the questions it asked, string-only and capped at 10,000 characters, and a restart replay
+  uses the rebuilt input; `acceptEdits` still answers `'ask'` for an edit to
+  `.claude/settings.json`, a git hook or `.mcp.json`, and leaves an ordinary project edit to the
+  CLI.
 - `server/src/sessions.queue.test.ts` — `takeQueuedPlanReply` mechanics: a single text-only item
   folded and its row removed; several items folded in order; a paused queue yields `[]` and is
   left untouched; a foreign-authored item stops the walk and the FIFO order past it is preserved;
@@ -625,10 +784,34 @@ is open, otherwise the inline one.
 - `server/src/sessions.reconcile.test.ts` — an unresolved `ExitPlanMode` card blocks
   auto-continue and survives `continueTurn`'s expiry; an ordinary tool's card still expires.
 - `server/src/autoGuard.allowlist.test.ts` — validator rules (through `assessToolCall`, not just
-  string comparison), CRUD, and the load-time migration.
+  string comparison), CRUD, and the load-time migration; what an entry covers (no payload past a
+  prefix through `$(…)`, backticks, line breaks, `&` or a redirect; nothing piped, redirected or
+  substituted is ever covered; a line ending in a pipe continues onto the next; `${IFS}`,
+  escaped-space and stray-quote spellings still meet the rules; a dangerous prefix covers only
+  itself, a harmless one what follows it); and what `alwaysAllowEntryFor` saves (the flagged
+  command's prefix, assignments kept; an MCP tool by name) or refuses (rule-named prefixes,
+  persistent-file writes, shells/interpreters/launchers, pipes and substitutions, two flagged
+  commands, nothing flagged, always-ask/file tools/`Monitor`).
+- `server/src/autoGuard.paths.test.ts` — symlink containment, with fixtures under the OS temp dir
+  so every root is itself behind a link on macOS: a link out of the project escalates for read and
+  write, as do a new file under a linked directory and a dangling link; in-project links and new
+  files pass; a root behind a link contains its files either way; a climbing `..` or an
+  unfollowable link asks even past a blanket entry. Plan directories: a planted link, or a linked
+  `.claude`/`.claude/plans`, is not a plan, and a git hook inside one is not a safe plan write.
+  Persistent files: every pattern asks for every write tool, inside the project and past a blanket
+  entry, while reads and near misses (`.gitignore`, `.github/workflows`, `.claude/agents`) pass;
+  shell writes (redirects, `tee`, `cp` into a directory, `cd`-relative targets, `bash -c` scripts,
+  `curl -o`, `sed -i`, `${IFS}`) ask and an allowlisted `echo`/`cat`/`cp` does not disarm them;
+  `git config` writes and program-running one-off `git -c`/`--config-env`/`GIT_CONFIG_*` ask while
+  config reads and cosmetic keys pass; a link to a persistent file is caught.
+- `server/src/guestAccess.test.ts` — `permissionAnswerFor`: a guest's `alwaysAllow`/`allowAsRead`
+  are dropped at every preset, the owner's pass through only when set.
 - `server/src/autoGuard.sync.test.ts` — the review lifecycle: staging, set-equal clearing,
   invalid-entry filtering, accept/reject, reject-remembered-by-content, and restart persistence.
-- `server/src/sessions.alwaysAllow.test.ts` — the permission-card write path.
+- `server/src/sessions.alwaysAllow.test.ts` — the permission-card write path: the flagged
+  command's prefix is saved, not the line's first; a command that cannot be allowlisted saves
+  nothing; a card's recorded `alwaysAllowEntry` (`null` included) is saved verbatim, and a legacy
+  card without the field is derived at the click.
 - `server/src/store.test.ts` — `loadGuardSync`/`saveGuardSync` round-trip.
 - `server/src/index.planFile.test.ts` — `resolveWorkspacePath` accepting a home-plans path and a
   project-local plans path, and still rejecting an arbitrary out-of-root path and plan-dir
@@ -650,7 +833,9 @@ is open, otherwise the inline one.
   `'default'`) after a plan is approved, on every path that used to reset it to `'default'`: the
   normal `ExitPlanMode` approval, the interrupted-approval workflow-step resume, and the
   loop-guard exit path. All three go through `setPermissionMode` rather than a bare meta write, so
-  the worker is told (`worker.setPermissionMode`) instead of only the stored meta changing.
+  the worker is told (`worker.setPermissionMode`) instead of only the stored meta changing. Where
+  `'auto'` would be the target, a session carrying `permissionCeiling` (set when it runs someone
+  else's recipe) resumes in `'default'` instead — see [recipes](recipes.md).
 - `ExitPlanMode` and `AskUserQuestion` always resolve to an explicit `'ask'` from the hook, in
   every permission mode — never a bare `continue: true` that a mode or settings entry could
   pre-empt. This holds regardless of the target path.
@@ -678,12 +863,47 @@ is open, otherwise the inline one.
   checks that set before consulting the allowlist at all, so such an entry would be a UI lie
   about what it does.
 - A hand-typed Bash prefix is whitespace-collapsed the same way a permission card's prefix is,
-  and may not contain `&`, `&&`, `||`, `;`, or `|` — those are exactly the operators
-  `assessToolCall` splits a command on.
+  and may not contain `&`, `|`, `;` or a line break: `assessToolCall` splits a line on `&&`,
+  `||`, `;` and line breaks, and a command still carrying `|` or `&` is never covered by an entry
+  (`UNSAFE_SEGMENT`), so a prefix holding any of them could never match.
 - Non-Bash entries never carry a `prefix`; one is silently dropped rather than rejected, matching
   the shape the guard's tool-name match actually compares.
+- An entry covers a chained command only when it is a plain simple command: one carrying a pipe,
+  `&`, a redirect, a backtick, `$(` or a line break meets every rule whatever its prefix. Each
+  command of a line is checked on its own, read through `ruleText` (`${IFS}`, escaped spaces,
+  quotes and backslashes), so no spelling of a command slips past a rule written for the plain
+  one.
+- A prefix that is dangerous on its own — one a `BASH_RULES` rule already matches, a shell,
+  interpreter or launcher (`COMMAND_RUNNERS`, `RUNNER_SUBCOMMANDS`), or nothing but `NAME=value`
+  assignments — covers only that exact command, never what follows it, whoever saved the entry
+  and whenever.
+- "Always allow" saves exactly the entry the card showed (`alwaysAllowEntry`, decided when the
+  card was raised) and nothing when it showed none. It offers none for an always-ask tool, a file
+  tool or `Monitor`, a line that writes a persistent file, a flagged command that pipes, redirects
+  or substitutes, flagged commands that would need two entries, or a dangerous prefix. For Bash
+  the entry is the first two words (after any assignments) of the command a rule flagged, never
+  of the line's first command.
+- A write to a file that runs code later (`PERSISTENT_FILES`: Claude Code settings and hooks, MCP
+  configs, git hooks and config, shell startup files, ssh) always reaches the user, in every
+  permission mode but `bypassPermissions` and wherever the file is. In auto mode no allowlist
+  entry disarms it, and it covers `Bash` writes too — redirects, `tee`, `cp`/`mv`/`ln`/`install`/
+  `rsync`/`scp`, `dd`, `sed -i`, `perl -i`, `curl -o`, `wget -O` — plus `git config` writes and
+  one-off `git -c`/`--config-env`/`GIT_CONFIG_*` settings outside a cosmetic allowlist. Reading
+  those files is untouched.
+- A file path auto-approves only when it is inside a root both as written and once every symlink
+  is followed. A path that climbs with `..`, or runs through a link that can't be followed, never
+  does — and a blanket file-tool entry does not cover such a write either.
+- An approval never changes the call it approves: `resolvePermission` ignores the client's
+  `updatedInput`, except an `AskUserQuestion` card's answers, which are rebuilt against the
+  recorded card (its own questions only, strings only, 10,000 characters each) and persisted as
+  rebuilt.
+- A guest's "Always allow" and "Allow as read" are dropped server-side (`permissionAnswerFor`)
+  and never shown (`useIsGuestOnSession`): both write the host's allowlist, which is the owner's
+  setting. A guest's click is the one-off approval and nothing more.
 - Plan-directory reads and writes (`~/.claude/plans/**` or `<cwd>/.claude/plans/**`)
-  auto-approve in every permission mode.
+  auto-approve in every permission mode — judged as written and once symlinks are followed, with
+  neither plans directory allowed to be a link elsewhere, and never for a persistent file inside
+  one.
 - `BASH_RULES` are matched per command in plan mode, and only against a command that isn't a read:
   matched over the whole line they fired on pattern text (`grep -E "deploy|launchctl"`). A rule
   that needs a pipe (`curl … | sh`) therefore no longer matches, so that command goes to the user
@@ -722,11 +942,14 @@ is open, otherwise the inline one.
   guests included; only a *pending* body is withheld, and only because the approve buttons would
   be useless to them. Transcript tool cards already expose the same input.
 - Credential paths (`~/.ssh`, `~/.aws`, `.env`) always escalate even if nested under a `plans`
-  directory — the sensitive check runs before the plan check.
-- Any other out-of-root file access is unaffected and still escalates.
+  directory — the sensitive check runs before the plan check, on the path as written and on where
+  a link leads.
+- Any other out-of-root file access still escalates — out of root as written or once symlinks are
+  followed, so a link inside the project is judged by the file it reaches.
 - A `file` request (and by extension `tree`/`find`) can read any plan directory reachable from
   `isPlanPath`, not just the requesting session's own plan file — a deliberate widening of a
-  route previously confined to project/session roots, scoped to plan directories only.
+  route previously confined to project/session roots, scoped to plan directories only, and to the
+  owner (a guest's resolve never takes the plans exception).
 - A resolved plan card renders collapsed by default but is always reopenable — the plan markdown
   and Focus mode are never permanently hidden.
 - Action buttons (`Approve plan & start`, `Keep planning`) never render once a request is
@@ -848,17 +1071,31 @@ is open, otherwise the inline one.
   [turn-recovery](turn-recovery.md)) runs *before* the blanket `{ tool: 'Edit' }`/
   `{ tool: 'Write' }` allowlist short-circuit — the first guard verdict an allowlist entry cannot
   disarm. Keep it ordered first if this function is refactored; moving it below the short-circuit
-  would let a standing allowlist entry silently re-enable edits that kill the running worker.
-- `isPlanPath` resolves the path (`path.resolve`) and anchors containment checks to real
-  directories via `isInside`; it does not use the substring-based `isPlanFilePath`, so a crafted
-  path like `.../plans/../../.ssh/id_rsa` cannot pass as a plan path. `isPlanFilePath` is only
-  safe for transcript text scans, never for permission decisions.
+  would let a standing allowlist entry silently re-enable edits that kill the running worker. The
+  persistent-file check (`persistentFileReason`) sits right after it on the same side of the
+  short-circuit, and the Bash branch runs `persistentShellWrite` ahead of `segmentAllowed`, for
+  the same reason: no entry may disarm a write that outlives the turn.
+- `isPlanPath` anchors containment to real directories via `isRealInside` — as written and once
+  symlinks are followed, a climbing `..` never counting — and never uses the substring-based
+  `isPlanFilePath`, so neither `.../plans/../../.ssh/id_rsa` nor a link planted in a plans
+  directory passes as a plan path. Plan writes auto-approve in every mode, so this is a permission
+  gate; `isPlanFilePath` is only safe for transcript text scans, never for permission decisions.
 - `PLAN_DIR_MARKER`/`isPlanFilePath` live in `shared/types.ts`, not `server/src/autoGuard.ts`,
   because the web client needs the same plan-path hint and cannot import from `server/`.
-- `isInside` does not resolve symlinks — a symlink planted inside a plan directory pointing
-  elsewhere would still be treated as safe. Accepted risk: the plan directory is
-  agent-and-user-owned. The `file` handler inherits this same limitation since it reuses
-  `isPlanPath` unchanged.
+- Containment follows symlinks everywhere it gates something, through one implementation:
+  `realPathOf`/`isRealInside`, exported from `autoGuard.ts` so `resolveWorkspacePath`, the file
+  routes, find-in-files and `guestCwdAllowed` reuse it rather than keep a second copy (see
+  [file-routes-over-ws](file-routes-over-ws.md)). A path whose real location can't be worked out
+  counts as outside, and one that climbs with `..` never counts at all — to the kernel `link/..`
+  is the parent of wherever the link points, to `path.resolve` it is nothing, and a tool may do
+  either.
+- The entry "Always allow" saves is decided by the bridge when the card is raised and recorded on
+  it (`alwaysAllowEntry`), never re-derived after the click or computed by the client, which only
+  renders the recorded value — the button used to say only "Always allow" while the bridge
+  quietly kept the line's first two words.
+- `resolvePermission` treats its own record of the card as the source of truth for what was
+  approved — its input, its `alwaysAllowEntry`, its `planRead.prefix` — and the wire only for the
+  decision itself, plus question answers and plan comments, each narrowed server-side.
 - Auto-approved plan writes stop producing a permission card but remain visible as `tool_use`
   blocks in the transcript; the auto-approval event itself is filtered from the UI, consistent
   with other auto-approved calls.
@@ -934,6 +1171,8 @@ is open, otherwise the inline one.
 - [mcp-connections](mcp-connections.md) — a second producer of `PermissionRequestData`
   (`elicitation` instead of a tool call), reusing this page's resolution machinery rather than
   building its own.
+- [file-routes-over-ws](file-routes-over-ws.md) — the file routes check paths with the guard's own
+  `realPathOf`/`isRealInside`, so a symlink means the same thing to both.
 
 ## On a codex session
 

@@ -146,6 +146,9 @@ services:
       # Where /download 302s (web-nginx.conf). Runtime, not baked in: the button
       # links to /download so each click lands in this container's access log.
       DESKTOP_DOWNLOAD_URL: ${VITE_DESKTOP_DOWNLOAD_URL:-/}
+      # The recipe-image bucket, allowed by the enforcing CSP's img-src. Must be
+      # a bare origin (no path): a CSP source with a path matches only that path.
+      CSP_IMG_SRC: ${R2_PUBLIC_BASE_URL:-}
     networks: [lines]
     security_opt: [no-new-privileges:true]
     labels:

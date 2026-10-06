@@ -697,8 +697,12 @@ export function Sidebar({
   const foreignWorkflows = sharedWorkflows.filter(
     (s) => !workflows.some((w) => w.id === s.id) && !(ownView?.workflows ?? []).some((w) => w.id === s.id),
   );
-  /** One of the user's own workflows made self-contained for the host, or null. */
-  const ownInline = (workflowId: string): WorkflowDef | null => {
+  /**
+   * One of the user's own workflows made self-contained for the host, or why it
+   * cannot be — null when it is not one of theirs. Refused when their own machine
+   * holds any of it back: the host has no way to tell, so it must not travel.
+   */
+  const ownInline = (workflowId: string): ReturnType<typeof inlineWorkflow> | null => {
     const own = ownWorkflows.find((w) => w.id === workflowId);
     return own && ownView ? inlineWorkflow(own, ownView.steps, ownView.pinnedSteps, ownView.sharedSteps) : null;
   };
@@ -802,11 +806,16 @@ export function Sidebar({
     // The user's own workflow, on a machine whose library does not have it: it
     // travels inline, every step resolved here, since the host cannot.
     const isOwn = !!workflowId && ownWorkflows.some((w) => w.id === workflowId);
-    const workflowDef = isOwn ? ownInline(workflowId!) : null;
-    if (isOwn && !workflowDef) {
-      setSidebarActionError('One of this workflow’s shared steps is not available here.');
+    const inlined = isOwn ? ownInline(workflowId!) : null;
+    if (isOwn && !inlined?.ok) {
+      setSidebarActionError(
+        inlined?.reason === 'unverified'
+          ? 'Your machine has not verified everything this workflow runs. Review it there in Workflows first.'
+          : 'One of this workflow’s shared steps is not available here.',
+      );
       return;
     }
+    const workflowDef = inlined?.ok ? inlined.def : null;
     if (isPhone) {
       // A stale error would blur the primer on the spot.
       setSidebarActionError(null);
@@ -849,9 +858,9 @@ export function Sidebar({
   const createFromClick = (e: ReactMouseEvent, workflowId?: string) => {
     // An own workflow on a shared machine is tuned in its inlined form: its refs
     // do not resolve against the host's step library.
+    const inlined = workflowId && ownWorkflows.some((w) => w.id === workflowId) ? ownInline(workflowId) : null;
     const wf = workflowId
-      ? ((ownWorkflows.some((w) => w.id === workflowId) ? ownInline(workflowId) : null) ??
-        [...workflows, ...sharedWorkflows].find((w) => w.id === workflowId))
+      ? ((inlined?.ok ? inlined.def : null) ?? [...workflows, ...sharedWorkflows].find((w) => w.id === workflowId))
       : undefined;
     if (wf && (e.metaKey || e.ctrlKey)) {
       setTuneWorkflow(wf);

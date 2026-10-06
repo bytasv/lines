@@ -11,7 +11,9 @@ import type { Sink } from './mux.ts';
  * what make it a property.
  *
  * They are also why `payload` is an opaque string in the protocol: if nothing
- * here parses it, nothing here can accidentally print it.
+ * here parses it, nothing here can accidentally print it. The one thing that
+ * does — the check on a guest's frames for a token refresh — runs under the same
+ * canary below.
  */
 
 /** Something no innocent log line would ever contain. */
@@ -42,6 +44,9 @@ function fakeSink(): { sink: Sink; sent: string[] } {
 test('routing a payload in either direction logs nothing containing it', (t) => {
   const lines = captureConsole(t);
   const hub = new DeviceHub('d1');
+  // `setToken` takes the owner's token only, so the owner has to be known for it
+  // to run at all below.
+  hub.ownerId = 'u1';
   const agent = fakeSink();
   hub.attachAgent(agent.sink);
   const client = fakeSink();
@@ -54,6 +59,30 @@ test('routing a payload in either direction logs nothing containing it', (t) => 
 
   const leaked = lines.filter((l) => l.includes(CANARY));
   assert.deepEqual(leaked, [], `payload or token reached a log sink: ${leaked.join(' | ')}`);
+});
+
+test("a guest's token reaches neither a log nor the bridge, on any path", (t) => {
+  // The relay verifies a guest's Clerk token and has no further use for it; the
+  // host's bridge has none at all. Every way one could travel on is driven here
+  // — the `open` frame, the browser's in-channel refresh, `setToken`, and the
+  // re-push to a reattaching bridge.
+  const lines = captureConsole(t);
+  const hub = new DeviceHub('d1');
+  hub.ownerId = 'host';
+  const first = fakeSink();
+  hub.attachAgent(first.sink);
+  const ch = hub.openChannel('guest', 'ctrl', fakeSink().sink, `token-${CANARY}`, {
+    hostUserId: 'host',
+    scope: 'machine',
+    caps: { prompt: true },
+  });
+  hub.fromClient(ch, JSON.stringify({ type: 'auth', token: `token-${CANARY}` }));
+  hub.setToken('guest', `token-${CANARY}`);
+  const second = fakeSink();
+  hub.attachAgent(second.sink);
+
+  const leaked = [...lines, ...first.sent, ...second.sent].filter((l) => l.includes(CANARY));
+  assert.deepEqual(leaked, [], `a guest's token left the relay: ${leaked.join(' | ')}`);
 });
 
 test('the payload still arrives intact — redaction is not silent dropping', (t) => {

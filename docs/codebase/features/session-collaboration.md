@@ -8,7 +8,7 @@ prompt is whose) — without ever getting their own copy of the host's data.
 
 This inverts the app's original single-owner assumption: a browser reached a machine only when
 `hub.ownerId === userId`, and the bridge resolved every connection to its own isolated
-`UserContext`. Three things had to hold for that inversion to be safe:
+`UserContext`. Four things had to hold for that inversion to be safe:
 
 - **A guest reaches the host's running session, not a copy.** Transcripts and turns are
   host-local; only `SessionMeta` syncs to Postgres. A guest connection resolves to the *host's*
@@ -19,12 +19,21 @@ This inverts the app's original single-owner assumption: a browser reached a mac
 - **A denial is enforced by the compiler, not by review.** `MESSAGE_AUTHZ` classifies every
   `ClientMessage['type']` in an exhaustive `Record`; a message type added later without a
   classification fails to compile.
+- **The host's machine admits a guest, not the relay.** Admission used to rest on the relay's
+  attestation alone, so whoever controlled the relay could attest a machine-wide, full-access
+  grant for anyone, against any machine it brokered — remote code execution everywhere. The
+  host's bridge now mints every grant itself and admits a guest only on one, over a channel
+  encrypted end to end against the machine key in the invite link; the relay can narrow a grant,
+  never give one (see Host-issued guest grants).
 
 Four share presets cover the UI (`view`, `prompt`, `collaborator`, `full`); the capability flags exist
 underneath so a finer grant can ship later with no migration. Invites work by email (claimable
 only by that address's *verified* Clerk email, so it works before the invitee even has an
-account) or by a single-use link. No email is sent: an email invite reaches the invitee only when
-they sign in and the pairing screen finds it, or when the owner passes the link on themselves.
+account) or by a single-use link. Either way the link carries the machine's grant in its fragment,
+so creating an invite needs that machine online. No email is sent: an email invite reaches the
+invitee only when they sign in and the pairing screen finds it, or when the owner passes the link
+on themselves — and since the grant travels only in the link, the invitee needs the link itself
+to get in.
 Delivery is proposed, not built — see
 [invite-email-delivery](../../proposals/invite-email-delivery.md).
 
@@ -38,11 +47,18 @@ Delivery is proposed, not built — see
   session-header button is easy to miss for someone who wants to hand over a whole machine rather
   than one conversation.
 - `web/src/components/ShareModal.tsx` — presets, invite by email/link, member list, revoke; scope
-  toggle only renders when a `session` was passed in
-- `web/src/components/JoinPage.tsx` — `/join/:code`, the redeem flow including sign-up
+  toggle only renders when a `session` was passed in. Asks the machine to mint a grant before it
+  creates the invite, and tells the machine about every preset change and revoke
+- `web/src/components/JoinPage.tsx` — `/join/:code`, the redeem flow including sign-up; takes the
+  machine's grant out of the link's fragment
 - The pairing screen's "You've been invited" card (`web/src/components/ConnectMachine.tsx`) —
   discovers a pending invite by the caller's verified email, for someone who signs in without
-  the link
+  the link; it can claim the invite, but the machine admits them only if this tab opened the
+  link first
+- `mintGuestGrant` / `updateGuestGrant` / `revokeGuestGrant` — owner-only client messages, handled
+  in `server/src/index.ts`
+- `{ type: 'guestGrant', tokens }` — a guest channel's first sealed frame, consumed by the channel
+  gate (`server/src/e2eeChannel.ts`) before anything reaches `handleConnection`
 - `POST /v1/shares/invite`, `GET /v1/shares`, `GET /v1/shares/pending`,
   `GET /v1/shares/invite/:code`, `POST /v1/shares/claim`, `PATCH`/`DELETE /v1/shares/:kind/:id`,
   `GET /v1/contacts`, `DELETE /v1/contacts/:email`, `DELETE /v1/contacts`
@@ -58,40 +74,56 @@ Delivery is proposed, not built — see
 
 ## Files
 
+- `server/src/guestGrants.ts` — the grants this machine minted (`~/.lines-app/guest-grants.json`,
+  `0600`, token hashes only): mint, redeem, update, revoke, reconcile, `combineGrants`,
+  `guestAccessFor`
+- `server/src/e2eeChannel.ts` — the guest path of `SecureChannel`: handshake with any client
+  key, then `admitGuest` on the first sealed frame (the owner path belongs to
+  [end-to-end-encryption](end-to-end-encryption.md))
 - `server/src/guestWorkflows.ts` — `guestLibrary` (which workflows a guest's `hello` carries),
-  `clampPermissionMode`, `prepareInlineWorkflow` (validates a guest's own workflow before it runs)
+  `clampPermissionMode`, `prepareInlineWorkflow` (validates a guest's own workflow before it runs),
+  `permissionAnswerFor`, `guestCwdAllowed`
 - `shared/types.ts` — `ShareCaps`, `NO_SHARE_CAPS`, `SharePreset`, `ShareScope`,
   `SHARE_PRESETS`/`capsForPreset`/`parseShareCaps`/`presetOfCaps`, `ShareProfile`, `Actor`,
   `SocketAccess`/`OWNER_ACCESS`, `MessageAuthz`/`MESSAGE_AUTHZ`/`authorizeMessage`,
   `PresenceViewer`, the `hello.access` block, `SessionMeta.turnActor`, `QueuedPrompt.actor`,
   `QueuedPrompt.editedAt`/`editedBy`, `PermissionRequestData.resolvedActor`, the `presence`
-  client/server messages, `ClientMessage.interjectQueued`, `InterjectData`
+  client/server messages, `ClientMessage.interjectQueued`, `InterjectData`; the `guestGrant`,
+  `mintGuestGrant`/`updateGuestGrant`/`revokeGuestGrant` client messages and the
+  `guestGrantMinted` answer; `APP_PROTOCOL_VERSION` 6
 - `storage/prisma/schema.prisma` — `DeviceMember`, `SessionShare`, `ShareInvite`, `UserProfile`,
-  `ShareContact` (the collaborator address book), `Device.online`
+  `ShareContact` (the collaborator address book), `Device.online`; `grantId` on the first three
+  (migration `20261006020000_share_grant_ids`)
 - `storage/src/shares.ts` — `authorizeDevice` (the relay's oracle body), `profileOf`,
   `revokeGrantsForDevice`, `revokeGrantsForGrantee`, `capsJson`, `normalizeEmail`,
   `recordShareContact`, `forgetShareContact`
 - `storage/src/presence.ts` — `presenceOf` (the `Device.online` freshness gate)
 - `storage/src/index.ts` — the `/v1/shares/*` and `/v1/devices/authorize`/`presence` routes;
   `cacheProfile`/`verifiedEmails` (Clerk lookups); the unpair/revoke grant cascade; the
-  `/v1/contacts` routes and the contact upsert on invite-mint and on claim
-- `relay/src/authorize.ts` — `authorizeClient`, extracted for testing without a socket
+  `/v1/contacts` routes and the contact upsert on invite-mint and on claim; the invite's
+  `grantId`, copied onto the grant row on claim, and `GET /v1/shares`'s `grantTracking`
+- `relay/src/authorize.ts` — `authorizeClient` (a grant, `null`, or `'unreachable'`) and
+  `reauthorizeGuests` (the sweep), both testable without a socket
 - `relay/src/index.ts` — `handleClient`'s owner-fast-path/guest-grant branch,
-  `reauthorizeGuests` (the `GUEST_REAUTH_MS` sweep), `reportPresence`
-- `relay/src/mux.ts` — `Channel.grant`, `openChannel`'s grant param, `guestChannels`,
-  `dropChannel`
+  `COLLAB_MIN_PROTOCOL`, the single-flight `GUEST_REAUTH_MS` sweep, `reportPresence`
+- `relay/src/mux.ts` — `Channel.grant`, `openChannel`'s grant param (and its stripping of a
+  guest's token), `guestChannels`, `dropChannel`, the guest `auth`-frame drop in `fromClient`
 - `relay/src/protocol.ts` — `AttestedGrant` on the `open` frame
 - `server/src/relayClient.ts` — the bridge-side `AttestedGrant`/`AttestedIdentity` duplicate
   (deliberately not shared with `relay/`)
 - `server/src/index.ts` — `handleConnection`'s guest-vs-owner resolution, `buildHello`, the
-  `handleMessage` authz gate, `conns` (now carries `access`+`connId`), the `presence` case
+  `handleMessage` authz gate, `conns` (carries `access`+`connId`, and a guest's `grantIds`), the
+  `presence` case; the `mintGuestGrant`/`updateGuestGrant`/`revokeGuestGrant` cases,
+  `closeGuestSockets`, the `reconcileGrants` interval
+- `server/src/sync.ts` — `liveGrantIds`, the grant ids storage still lists for this device
 - `server/src/userContext.ts` — `sockets: Map<BrowserLink, SocketAccess>`, `sessionIdOf`,
   `mayReceive` (the scoped broadcast fan-out), `PresenceTracker`
 - `server/src/presence.ts` — `PresenceTracker`
 - `server/src/userRegistry.ts` — `UserRegistry.peek` (never mints a context)
 - `server/src/workspacePaths.ts` — `workspaceRoots`/`resolveWorkspacePath` clamped to a guest's
   granted session cwds; the `~/.claude/plans` auto-approve exception narrowed to owner-only
-- `server/src/fileRoutes.ts` — every route takes `access`; `syncLog` is owner-only
+- `server/src/fileRoutes.ts` — every route takes `access`; `syncLog` is owner-only; an
+  attachment is served only from a session in the connection's reach
 - `server/src/sessions.ts` — `userPrompt`/`prompt` take an `actor`; `QueuedPrompt.actor`;
   `resolvePermission`/`logResolution` take an actor for `resolvedActor`; `editQueued` (rewrite a
   queued prompt in place — author or owner only, never clears `queuePaused`); `interjectQueued`
@@ -101,9 +133,18 @@ Delivery is proposed, not built — see
   an actor (a workflow-attached session intercepts a prompt *before* `userPrompt` ever runs)
 - `web/src/lib/shares.ts` — the HTTP client for every `/v1/shares/*` route, `PRESET_COPY`,
   `ShareContact`, `listContacts`/`forgetContact`/`clearContacts` (the `/v1/contacts` routes),
-  `leaveShare` (a guest giving up a machine shared with them)
-- `web/src/lib/can.ts` — `useCan`, `useIsGuest`, `useInScope`, `useClaudeLoginNeeded`,
-  `useCanBrowseFolders` (guest UI narrowing, all reading the same `access` the bridge enforces;
+  `leaveShare` (a guest giving up a machine shared with them); `joinUrlWithGrant`,
+  `rememberInviteGrant`/`takeInviteGrant` (invite code → grant id, so cancelling an invite can end
+  its grant)
+- `web/src/lib/e2ee.ts` — the guest half of an invite link: `takeJoinGrantFromUrl`,
+  `pendingJoinGrantDevice`, `adoptJoinGrant`, `guestGrantTokens`
+- `web/src/ws.ts` — `mintGuestGrant` (request and point-to-point answer), the grant sent as the
+  first sealed frame after `e2eeConfirm`, `MachineLink.guest` (no auth relay on a guest link)
+- `web/src/lib/plaintextFrames.ts` — drops a plaintext app frame on a pinned link, which a guest
+  link is (see [end-to-end-encryption](end-to-end-encryption.md))
+- `web/src/lib/can.ts` — `useCan`, `useIsGuest`, `useIsGuestOnSession`, `useInScope`,
+  `useClaudeLoginNeeded`, `useCanBrowseFolders` (guest UI narrowing, all reading the same `access`
+  the bridge enforces;
   `useCanBrowseFolders` also folds in `useIsLocalMachine` and the desktop shell's own-window case —
   see [hosted-machine-access](hosted-machine-access.md) and [desktop-app](desktop-app.md))
 - `web/src/lib/identityRule.ts` — `resolveIdentity` (pure), `personMeta`, the person palette
@@ -112,7 +153,8 @@ Delivery is proposed, not built — see
 - `web/src/components/PresenceStack.tsx`, `PromptAuthor.tsx` — the avatar surfaces
 - `web/src/components/QueuedMessages.tsx` — per-item author, "waiting for X" framing, the edit
   affordance (`QueuedEditor`, a `MentionInput` mount) and its "edited" badge
-- `web/src/components/PermissionPrompt.tsx` — the resolved-card "approved by X" badge
+- `web/src/components/PermissionPrompt.tsx` — the resolved-card "approved by X" badge; no
+  "Always allow" or "Allow as read" for a guest (`useIsGuestOnSession`)
 - `web/src/components/CollaboratorsSection.tsx` — Settings pane over the same
   `/v1/contacts` client; list, forget one, clear all
 - `web/src/components/DevicesSection.tsx` — the Share action on an owned machine row, second
@@ -154,10 +196,14 @@ Delivery is proposed, not built — see
   touches the `Device` row or an unclaimed invite (those are the owner's to withdraw)
 - `leaveShare(deviceId)` (`web/src/lib/shares.ts`) — the client call behind `revokeGrantsForGrantee`,
   via `DELETE /v1/shares/self/:id`
-- `authorizeClient` (relay) — deliberately stricter than the device `verifyDevice`: every
-  non-answer (timeout, non-200, malformed body, an owner-shaped answer for a non-owner, a
-  session grant with no sessions) denies, because this is an initial grant rather than
-  protecting an already-established link
+- `authorizeClient` (relay) → `ClientAuthorization`: a grant; `null`, storage's no or an answer
+  that grants nothing (no `allowed: true`, an owner-shaped answer for a non-owner, a session grant
+  with no sessions); or `'unreachable'`, no answer at all (network error, timeout, any non-200, an
+  unreadable body). The gate refuses on both of the last two — deliberately stricter than the
+  device `verifyDevice`, because an initial grant has no link to protect — and the sweep keeps
+  them apart
+- `reauthorizeGuests(hubs, authorize)` (relay) — re-asks for every live guest channel and closes
+  one whose grant is gone or changed; `'unreachable'` leaves a channel exactly as it is
 - `PresenceTracker` — keyed by connection, not user, so two tabs of one person are two viewers;
   never touches `SessionMeta`
 - `resolveIdentity(ctx, userId, profile)` — pure attribution rule: resolves what "no actor"
@@ -167,6 +213,40 @@ Delivery is proposed, not built — see
   one colour)
 - `Actor` — `{ userId, name, imageUrl }`, taken from the connection's attested identity, never a
   message body
+- `GuestGrantRecord` — `{ id, tokenHash, hostUserId, scope, sessionIds?, caps, guestUserId,
+  createdAt, claimBy }`: `caps` is the ceiling the owner minted it with (or last moved it to),
+  `guestUserId` is null until the first redeem binds it
+- `mintGuestGrant(input)` → `{ id, token }` — a 256-bit random token, returned once; only its
+  sha256 is stored
+- `redeemGuestGrant(token, guestUserId)` — the grant a token redeems for this caller, binding an
+  unbound one to them; a grant bound to someone else redeems nothing
+- `updateGuestGrants` / `revokeGuestGrants(hostUserId, match)` — move the ceiling of, or end, the
+  host's grants matching a `GrantMatch` (`grantId`, `guestUserId`, `sessionId`: `null` = the
+  machine grant); a match naming neither a grant nor a guest matches nothing. Both return what
+  changed, so the sockets admitted on it can be closed
+- `reconcileGuestGrants(hostUserId, liveGrantIds)` — drops the host's grants storage no longer
+  lists, sparing any younger than `GRANT_RECONCILE_GRACE_MS` (10 minutes); only ever removes
+- `combineGrants(grants)` — what several grants for one guest add up to: the widest
+- `guestAccessFor(grant, attested)` — the grant intersected with the relay's attestation, or null
+  when nothing is left
+- `GRANT_CLAIM_TTL_MS` — 7 days, an unredeemed grant's lifetime (the invite's own); a redeemed one
+  lasts until revoked
+- `closeGuestSockets(ctx, grantIds, reason)` (`server/src/index.ts`) — closes `1008` every guest
+  socket admitted on any of those grants
+- `StorageSyncClient.liveGrantIds(deviceId)` — the grant ids behind this device's live shares and
+  invites, or null for "cannot say" (no token, an error, or a storage server without
+  `grantTracking`)
+- `takeJoinGrantFromUrl(code)` / `pendingJoinGrantDevice()` / `adoptJoinGrant(deviceId, code?)` /
+  `guestGrantTokens(deviceId)` (`web/src/lib/e2ee.ts`) — stash the link's grant, name its machine,
+  bind it once the claim names the same machine, and read the tokens a link presents
+- `mintGuestGrant(deviceId, share)` (`web/src/ws.ts`) — asks one of the user's machines for a
+  grant, dialling it and waiting up to 10s for its `hello` if it is not connected; 15s for the
+  answer
+- `joinUrlWithGrant(code, deviceId, grant)` — `/join/<code>#grant=…&key=…&device=…`
+- `permissionAnswerFor(access, msg)` — the `alwaysAllow`/`allowAsRead` extras a permission answer
+  may carry: the owner's only
+- `guestCwdAllowed(ctx, access, cwd)` — whether a guest may start a session in `cwd`: inside one
+  of the host's open project roots, symlinks resolved; the owner anywhere
 
 ## Data flow
 
@@ -177,7 +257,77 @@ session) before minting a code. `POST /v1/shares/claim` is a compare-and-set on
 `claimedBy: null` in the same transaction that writes the `DeviceMember`/`SessionShare` row, so a
 replayed code 409s rather than minting a second grant. An email-bound invite is checked against
 the claimer's *verified* Clerk emails — unverified never matches, or anyone could add the
-invitee's address to their own account and claim in their place.
+invitee's address to their own account and claim in their place. The invite also stores the
+machine's `grantId` when the client sends one (shape-checked, an opaque id, never the token), and
+the claim copies it onto the `DeviceMember`/`SessionShare` row; re-claiming a revoked grant points
+the row at the newer grant, the one the guest now holds a token for.
+
+### Host-issued guest grants
+
+Storage's grant decides whether the relay lets a guest through; it no longer decides whether the
+host's machine lets them in. That takes the machine's own grant, which it mints, keeps and redeems
+itself, so a relay that merely *says* someone is a guest gets nowhere.
+
+1. **Minting.** `ShareModal` asks the machine first — `mintGuestGrant(deviceId, { scope,
+   sessionId?, preset })` over the owner's own encrypted link (`web/src/ws.ts`; a machine that is
+   not connected is dialled and given 10s to say `hello`). The bridge's handler is owner-only in
+   `MESSAGE_AUTHZ` and refuses when the bridge has no relay identity (nobody else could ever reach
+   it), when the socket's context is the single-tenant `'local'` one (the relay names a host by
+   account), on a malformed preset or scope, and for a session that is not on this machine.
+   Otherwise it records `capsForPreset(preset, scope)` as the grant's ceiling and answers
+   `guestGrantMinted { grantId, token, bridgeKey }` to that socket alone — point to point, like
+   `fileResponse`, so the token never goes near the store.
+2. **The invite.** Only then does `createInvite` run, carrying `grantId`. If it fails, the modal
+   sends `revokeGuestGrant { grantId }` rather than leave a redeemable grant nobody was handed. The
+   link is `joinUrlWithGrant`: `/join/<code>#grant=<token>&key=<machine key>&device=<deviceId>`.
+   A fragment never reaches a server, so storage (which holds the invite) and the relay (which
+   carries the channel) see none of it. The modal remembers code → grant id
+   (`rememberInviteGrant`) so cancelling the invite from this browser ends the grant too.
+3. **Joining.** `JoinPage` stashes the fragment in sessionStorage beside the code
+   (`takeJoinGrantFromUrl`) and strips it from the address bar at once, since the sign-in round
+   trip drops it. Once `claimInvite` names the machine, `adoptJoinGrant(deviceId, code)` takes it
+   up — only for the machine the link itself named (the claim and the device list are storage's
+   word, so they must agree with the link), only for that invite's code, and never over a
+   *different* key already pinned for that machine: a link is no way to repoint the key of a
+   machine this browser already talks to, its own least of all. Adopting appends the token to that
+   device's list (`lines.guestGrants`; several per device, since a host may share two sessions
+   with one person) and pins the key exactly as an enrollment would. An invite this account
+   already claimed — from another browser, or before site data was cleared — fails the claim;
+   `JoinPage` then adopts the grant anyway when the device list shows that machine as shared with
+   them. The pairing screen's invitation card adopts after its own claim, which works only if this
+   tab opened the link first.
+4. **Connecting.** A link holding tokens is a guest link from the moment it opens (and, once
+   `hello` arrives, a link whose `hello` carries `access`), and a guest link never relays the
+   user's Clerk token. The browser runs the ordinary handshake against the pinned machine key; the
+   bridge accepts any client key on a channel the relay labelled a guest's, since the guest checks
+   *its* key against the link, which is what keeps the relay out of the middle. Right after
+   `e2eeConfirm` — the moment there is a session to seal with, so nothing written in between can
+   overtake it — the browser sends `{type:'guestGrant', tokens}` as its first sealed frame. The
+   channel gate redeems each token (at most 32) for the user the relay names. One that no longer
+   redeems is skipped; with none left, grants for two hosts, or any other first frame, the channel
+   is refused before the bridge sees it. So is a plaintext frame, a second handshake, or an
+   enrollment attempt on a guest channel.
+5. **Admitting.** `handleConnection` refuses (`1008`) a guest channel with no grants, or with
+   grants for a different host than the relay's attestation names. The host's context is the
+   grant's `hostUserId`, and the guest's access is `guestAccessFor(combineGrants(grants),
+   attestation)`: everything the grants allow, narrowed by what the relay says storage holds
+   today. Nothing left is `1008` too. The connection remembers its `grantIds`.
+6. **Changing and ending.** A preset change in `ShareModal` updates storage and sends
+   `updateGuestGrant`: narrowing already applies through the relay's attestation, but a *wider*
+   preset stops at the minted ceiling until the machine moves it. A revoke sends
+   `revokeGuestGrant` first, whatever storage then answers, since the machine is the side that
+   admits the guest and it ends the grant at once. Either way `closeGuestSockets` closes every
+   socket admitted on a moved or ended grant; a moved one comes straight back under the new
+   ceiling. When the machine's link is down the modal says so — storage has the change, the
+   machine not yet.
+7. **Reconciling.** Every 60s (`GRANT_RECONCILE_MS`) a relaying bridge asks storage, for each
+   account context holding a token, which grant ids still back a live share or invite on this
+   device (`liveGrantIds`, from `GET /v1/shares`), drops the rest (`reconcileGuestGrants`) and
+   closes their sockets. That catches a share revoked from a phone while this machine slept, and
+   an invite cancelled from another browser. It only ever removes. A storage server that does not
+   say `grantTracking: true`, or any error, means "cannot say" and touches nothing, and a grant
+   younger than 10 minutes is spared, because the browser mints it before the invite exists in
+   storage.
 
 ### Leaving a shared machine
 
@@ -219,15 +369,26 @@ consults storage. Anyone else calls `authorizeClient`, which POSTs
 `{ deviceId, userId }` to `/v1/devices/authorize` and gets back `{ allowed, ownerId, scope, caps,
 sessionIds?, profile, viewer }` — `profile` is the host's identity for the guest's UI, `viewer` is
 the *caller's own* identity, resolved server-side so presence/attribution can't be spoofed. A
-grant additionally requires the bridge to speak `COLLAB_MIN_PROTOCOL`: an older bridge silently
-drops the unknown `grant` field and would serve the guest as the owner, so the version check runs
-before the grant lookup. That check (`DeviceHub.guestNeedsNewerBridge`) applies only while a
+`null` answer and an `'unreachable'` one are both refused (logged `not-owner-no-grant` and
+`storage-unreachable`): a new connection has nothing to protect yet, so an outage blocking it is
+the correct trade. A grant additionally requires the bridge to speak `COLLAB_MIN_PROTOCOL`, now
+6 (`RELAY_COLLAB_MIN_PROTOCOL`): a bridge older than 2 silently drops the unknown `grant` field and
+would serve the guest as the owner, and one older than 6 admits a guest on the relay's word alone,
+so the version check runs before the grant lookup. An older bridge keeps serving its owner; only
+sharing waits for the update. That check (`DeviceHub.guestNeedsNewerBridge`) applies only while a
 bridge is attached — with none, there is nothing to be too old, and refusing a guest for it would
 be indistinguishable from a revoked grant instead of the offline state `openChannel` already
 sends. The grant rides the `open` frame's optional fields, which is what lets this ship without a
-`RELAY_PROTOCOL_VERSION` bump. `reauthorizeGuests` re-checks every live guest channel on
-`GUEST_REAUTH_MS` (60s) and closes one whose grant narrowed or vanished; owner channels keep the
-existing 300s device re-verify.
+`RELAY_PROTOCOL_VERSION` bump; the `open` frame's `token` is `null` on a guest channel, and a
+guest's in-channel `auth` refresh is dropped (see
+[hosted-machine-access](hosted-machine-access.md#clerk-tokens-on-the-bridge)).
+
+`reauthorizeGuests` re-checks every live guest channel on `GUEST_REAUTH_MS` (60s) and closes one
+whose grant narrowed or vanished — but only on an answer. `'unreachable'` leaves the channel
+exactly as it is, the same asymmetry the device re-verify applies: a revoke landing late is
+recoverable, a mass disconnect during a storage blip is not. One sweep runs at a time, since a
+hanging storage costs a timeout per guest and overlapping runs would pile onto the service that is
+struggling. Owner channels keep the existing 300s device re-verify.
 
 A guest channel is dropped, not replayed, when its device's bridge re-attaches
 (`DeviceHub.attachAgent`). The new bridge's `hello` — and with it its app protocol — has not
@@ -238,11 +399,14 @@ protocol is known. Owner channels are unaffected — they carry no grant to lose
 
 ### The bridge resolves a guest to the host's context
 
-`handleConnection` reads `attested.grant.hostUserId` and calls `registry.get(hostUserId)` — never
-`registry.get(guestUserId)`. Two guards close the leak that would otherwise follow: a guest
-connection never sets `ctx.clerkToken` and never calls `syncNow()`, and the relay's `onToken`
-handler uses `registry.peek()` (never mints) instead of `registry.get()` for the same reason — a
-guest's token arrives there too, every ~50s, from their browser's own auth relay.
+`handleConnection` takes the host from the grant this machine minted — the relay's
+`grant.hostUserId` must agree with it, and can no longer pick a context on its own — and calls
+`registry.get(hostUserId)`, never `registry.get(guestUserId)`. A guest connection never sets
+`ctx.clerkToken` and never calls `syncNow()`, or the host's sessions would sync into the guest's
+account. Its token no longer reaches the bridge in the first place (the relay strips it and a
+guest link relays none), and `setClerkToken` would refuse one whose subject is not the host anyway.
+The relay's `onToken` handler still uses `registry.peek()` (never mints) instead of
+`registry.get()`, so a push for anyone without a context here creates nothing.
 
 `buildHello` gives a guest their sessions (scope-filtered), the machine's health, and
 `access: { scope, caps, sessionIds?, ownerProfile, deviceId }` — and nothing account-wide:
@@ -263,6 +427,14 @@ and still gets none; the client derives its tabs from the shared sessions' own `
 see Attribution below) and calls `authorizeMessage(msg, access)` before its switch. A denial
 replies `{type:'error', sessionId, message}` on the originating socket and logs one
 `[share] denied …` line.
+
+Three guest checks sit inside handlers, because one table row cannot carry them. `createSession`
+refuses, before anything is created, a `cwd` outside the host's open project roots
+(`guestCwdAllowed`, symlinks resolved on both sides — otherwise `/` or the host's home would do
+just as well) and any new work tree (cutting one runs git and writes a checkout on the host's
+disk, which is the owner's call). `permissionResponse` keeps a guest's click to the one-off
+answer: `permissionAnswerFor` drops `alwaysAllow` and `allowAsRead`, which write the host's
+allowlist rather than answer the card, and the card hides both buttons from a guest.
 
 `UserContext.sockets` is `Map<BrowserLink, SocketAccess>`, not a `Set`. `broadcast` derives
 `sessionIdOf(msg)` and calls `mayReceive(msg, sessionId, access)` per socket: a session-bearing
@@ -338,15 +510,43 @@ resolves a person through — so they can never disagree about who somebody is.
   and `forgetShareContact` scoped by owner
 - `storage/src/devices.presence.test.ts` — `presenceOf`'s freshness gate (the relay-crash case);
   the `/v1/devices/presence` route (opt-in)
-- `relay/src/clientAuthorize.test.ts` — `authorizeClient` against every shape of non-answer; the
-  `/client` socket gate with a junk/absent token
+- `relay/src/clientAuthorize.test.ts` — `authorizeClient`: every shape of non-answer (an outage, a
+  401 from a wrong relay secret, a storage that never answers, a non-JSON body) is
+  `'unreachable'`, never a grant; the `/client` socket gate with a junk/absent token; the sweep: an
+  outage, or a lookup that throws, leaves every guest connected, storage's no closes the channel,
+  a narrowed grant closes it and an unchanged one is left alone
+- `server/src/guestGrants.test.ts` — only the token's hash is stored; the first account to redeem
+  owns the grant and a forwarded link stops there; a token nobody minted redeems nothing; an
+  unredeemed link expires with its invite, a redeemed one does not; revoking ends exactly the
+  matching grants of that host, a match naming nobody revokes nothing, an unredeemed grant is
+  revoked by id; a preset change moves the ceiling; `guestAccessFor` (a relay attesting a
+  machine-wide full grant still gets only the view-only session minted, a narrowed share narrows,
+  approval holds when either side asks, sessions named by one side only are unreachable, an
+  owner-shaped attestation is no access); `combineGrants`; reconciliation drops a grant storage no
+  longer lists once past the grace period, spares a fresh one, and never touches another host's
+- `server/src/e2eeChannel.test.ts` (guest path) — a guest channel is never handed over on the
+  relay's word alone; it handshakes with a key this machine never enrolled and must then present
+  the grant; a token this machine did not mint, the right token for someone else, or any sealed
+  frame before the grant ends the channel; a guest channel cannot enrol; frames after the grant
+  that arrive before the bridge listens are kept, in order; a token that no longer redeems is
+  skipped when another still does; a second handshake cannot take over an admitted guest channel
+- `server/src/sync.grants.test.ts` — `liveGrantIds` returns the ids of live shares and invites on
+  this device only; an older storage server that records no grant ids, an error, or no token is
+  "cannot say", not "no shares"
+- `server/src/fileRoutes.test.ts` (attachment) — a session-scope guest reads its own sessions'
+  attachments and no others'
+- `relay/src/mux.test.ts` / `relay/src/redaction.test.ts` — a guest's token never reaches the
+  bridge, on open, refresh or re-attach, nor a log
+- `server/src/plaintextFrames.test.ts` — a plaintext app frame on a pinned link (a guest link is
+  one) is refused whatever the handshake state
 - `relay/src/agentHeartbeat.test.ts` — presence reports on attach/detach; a takeover never reports
   the live bridge offline
 - `server/src/messageAuthz.test.ts` — the owner passes every message; a capability-less guest
   passes only `connection` and `cap: null` session reads; every never-grantable message stays
   owner-only at every preset/scope; a session-scoped guest cannot reach a sibling session;
   `editQueued` is allowed at the `prompt` preset and denied at `view`, the deliberate divergence
-  from `cancelQueued`'s `interrupt`
+  from `cancelQueued`'s `interrupt`; a refreshed token on a guest link passes the gate (it is
+  socket-level traffic) but never becomes the host context's token
 - `server/src/sessions.queue.test.ts` — `editQueued`: text/mentions/draft replaced without moving
   the item or its `ts`; a mention-less draft is not persisted; editing never clears `queuePaused`;
   an edit by someone other than the author stamps `editedAt`/`editedBy`; attachment add/remove
@@ -356,7 +556,10 @@ resolves a person through — so they can never disagree about who somebody is.
   `cancelQueued`'s attachment cleanup, previously untested
 - `server/src/guestAccess.test.ts` — file-read clamp to granted session cwds, `~/.claude/plans`
   denied to a guest, traversal refused, `find` refuses a whole request rather than a partial
-  result, `syncLog` owner-only
+  result, `syncLog` owner-only; a guest's "Always allow" and "Allow as read" are dropped; a guest
+  session starts inside an open project at any depth, never in the host's home, the filesystem
+  root, a project's sibling or through a symlink out of a project; a guest's token never becomes
+  the host's storage credential
 - `server/src/broadcastScope.test.ts` — `sessionIdOf` (including the `sessionUpsert` nested-id
   case), `mayReceive` for every message shape at every scope
 - `server/src/presence.test.ts` — ghost-free session switching, two-tab independence, an
@@ -381,11 +584,15 @@ resolves a person through — so they can never disagree about who somebody is.
 - A guest holding `manageWorkflow` runs their own workflow on the host's machine by sending it
   inline with `createSession` (`workflowDef`): it must be self-contained (no step refs), passes
   the editor's validation, and is stored on the session as a snapshot; it never enters the host's
-  library, and authoring the host's library stays owner-only.
+  library, and authoring the host's library stays owner-only. Its refs are resolved to their exact
+  pinned versions only, and the guest's browser refuses to send it while their own machine holds
+  any of it back as unverified; the host refuses a definition still carrying an `untrusted` mark
+  as a backstop, since it cannot vouch for content another machine has not.
 - Never grantable at any preset: settings, the guard allowlist, project/worktree management,
   login/logout, device unpair, workflow/step/recipe authoring, `installUpdate`,
-  `pickFolder`. Seeing the project list (below) is not management — opening, closing, widening a
-  root, or creating/removing a worktree all still need `owner` regardless of preset.
+  `pickFolder`, minting, moving or revoking guest grants, and trusting synced content or a
+  signing machine. Seeing the project list (below) is not management — opening, closing, widening
+  a root, or creating/removing a worktree all still need `owner` regardless of preset.
 - A machine-scope grant's `hello` carries the host's real `projects`/`projectKeys`, and later
   `projects`/`projectKeys` broadcasts reach it too, so the guest's project tabs track the host's
   live. A session share still gets neither — it has no folder of its own to browse.
@@ -405,10 +612,52 @@ resolves a person through — so they can never disagree about who somebody is.
   Leave action.
 - A guest never gets a `UserContext` of their own on the host's machine, and never sets
   `clerkToken` or triggers `syncNow` — the host's sessions must never be pushed to Postgres under
-  the guest's identity.
+  the guest's identity. Nor does the guest's Clerk token reach the host's machine at all: the
+  relay strips it from `open`, keeps none for a re-push and drops a guest's in-channel refresh,
+  and a guest link sends none.
 - A guest's file access is clamped to the cwds of the sessions their grant covers, never the
-  host's whole project list; the `~/.claude/plans` auto-approve exception is owner-only.
-- Revocation has a bound, up to `GUEST_REAUTH_MS` (60s), on an already-open guest socket.
+  host's whole project list; the `~/.claude/plans` auto-approve exception is owner-only. An
+  attachment is served only for a session in the grant's reach, judged from where the file really
+  lands, so a link from one session's folder into another's carries no read across.
+- A guest starts sessions only inside one of the host's open project roots (symlinks resolved on
+  both sides) and never in a new work tree. A guest's permission answer is the one-off approval:
+  `alwaysAllow` and `allowAsRead` are the host's settings and are dropped.
+- Revoking from the share modal ends the grant on the machine at once and closes the guest's
+  sockets there. Failing that, the relay's sweep closes an open guest channel within
+  `GUEST_REAUTH_MS` (60s) of storage's no, and the machine's reconciliation drops the grant within
+  `GRANT_RECONCILE_MS` (60s) of being online with its owner's token — which is what covers a revoke
+  made while the machine slept, or an unredeemed invite cancelled from another browser.
+- A guest is admitted only on a grant the host's own bridge minted, presented as the first sealed
+  frame of a channel encrypted against the machine key in the invite link. The relay's
+  attestation only narrows it (`guestAccessFor`): every capability must be allowed by both,
+  approval-before-prompting holds if either side asks, session scope on either side means session
+  scope over the sessions both name (and never `createSessions`), and nothing left means no
+  channel. The relay can take access away; it can no longer give it.
+- The grant token is 256 random bits, stored on the machine only as a hash, and travels only in
+  the invite link's fragment and inside the encrypted channel — never through storage, which keeps
+  only the grant id, and never through the relay in the clear.
+- An unredeemed grant expires with its invite (`GRANT_CLAIM_TTL_MS`, 7 days). The first account to
+  redeem it binds it, so a forwarded link stops there, as the invite claim in storage does; a
+  redeemed grant lasts until it is revoked.
+- Several grants for one guest on one machine (two session shares, or a session and then the
+  machine) combine to the widest — machine scope if any has it, every session any names, a
+  capability if any gives it, approval-before-prompting only if every grant asks. That union is
+  then intersected with the relay's attestation, which storage computes as the narrowest, so a
+  guest never gets more than storage currently allows.
+- Creating an invite needs the machine online, relaying, and opened through the owner's account
+  (the single-tenant `'local'` context cannot share). The machine mints first; an invite whose
+  creation then fails has its grant revoked. A preset change or revoke is sent to the machine as
+  well as storage, and when the machine's link is down the modal says the change has not reached
+  it yet.
+- `adoptJoinGrant` binds a grant only to the machine the link named and only for that invite's
+  code, and never replaces a different key already pinned for that machine.
+- Reconciliation only ever removes grants: it acts only on a storage answer carrying
+  `grantTracking: true`, treats any failure as "cannot say", and spares grants younger than
+  `GRANT_RECONCILE_GRACE_MS` (10 minutes), since an invite reaches storage only after its grant is
+  minted.
+- A share made before host-issued grants has no token behind it, so once the host's bridge speaks
+  protocol 6 that guest is refused — told to open the invite link again — until the owner sends a
+  new invite. A guest client older than protocol 6 sends plaintext and is refused the same way.
 - A `promptNeedsApproval` guest's prompt lands `queuePaused: true` on the owner's existing queue
   — no new state machine; the owner's own next send resumes it.
 - A queued prompt may be edited in place before it flushes: the author may edit their own, and the
@@ -450,8 +699,33 @@ resolves a person through — so they can never disagree about who somebody is.
   deliberately minimal structural contract (see `browserLink.test.ts`).
 - The relay's owner fast path never touches storage; latency and failure surface for the
   overwhelmingly common case are unchanged by this feature.
-- The relay holds no database credentials and no notion of capabilities — it forwards an opaque
-  grant it never inspects, matching its existing "never parse an app message" rule.
+- The relay holds no database credentials and no notion of capabilities — it forwards the grant
+  storage attested without interpreting it (the sweep only compares it with storage's fresh
+  answer). The one app message it parses is a guest's frame type, to drop a token refresh (see
+  [hosted-machine-access](hosted-machine-access.md)).
+- Admission is the host bridge's decision, not the relay's: a guest channel reaches
+  `handleConnection` only through the channel gate's `admitGuest`, and `handleConnection` checks
+  the grants again (the second lock on the guest door, as the pinned-key check is on the owner's).
+  The relay's attestation stays in the path only to narrow, which is what keeps a revoke or a
+  narrowed preset in storage effective without the machine being told.
+- Grants live in `~/.lines-app/guest-grants.json` (`0600`) as token hashes, so the file holds
+  nothing anyone could present. The store is injectable (`GuestGrantStore`), like the signer
+  store, so the policy is tested from a temp directory rather than `~/.lines-app`.
+- Storage keeps grant ids, never tokens, and nothing it says can create or widen a grant.
+  `liveGrantIds` reads `GET /v1/shares` unsigned and soft-failing for exactly that reason: an
+  answer can only drop grants, and a failure must not raise the storage-outage banner.
+- `guestGrantMinted` is handled point to point in `ws.ts`, like `fileResponse`, and never reaches
+  the store; besides the machine's hash, the token rests only in the invite link and in the
+  guest's `lines.guestGrants`.
+- A guest channel's refusal text deliberately avoids the phrase "end-to-end encrypted channel":
+  the client arms its owner-enrollment gate on that phrase, and a guest has nothing to enrol —
+  they need the link.
+- `SecureChannel` handles inbound frames one at a time. Opening a sealed frame is asynchronous,
+  and two in flight could finish out of order, letting a guest's later frame overtake the grant
+  it must lead with.
+- One handshake per channel, and no enrollment on a guest channel: a guest channel accepts any
+  client key, so a second `e2eeHello` would let the relay swap itself in as the admitted guest,
+  holding the guest's grant and none of their keys.
 - `parseShareCaps` denies by default on anything not an explicit `true`; a permissive default
   (spreading the stored blob over `NO_SHARE_CAPS`) would let a capability added later be
   silently inherited by every existing grant.
@@ -467,11 +741,28 @@ resolves a person through — so they can never disagree about who somebody is.
 - `personMeta`'s palette is deliberately disjoint from `agentMeta`'s, so a human can never be
   mistaken for an agent at a glance.
 
+## Residual risks
+
+- **Which account a guest is stays the relay's word.** The token proves the caller holds the link,
+  not which account they signed in with: the bridge binds an unredeemed grant to the user id the
+  relay names, and presence and attribution show the relay-attested profile. A relay could
+  mislabel who is speaking — but not admit anyone, nor widen what a grant allows.
+- **An unredeemed link is the credential.** Whoever opens it first gets the grant; binding stops a
+  forwarded link only at the second account.
+- **Revocation the machine was not told about** — a share revoked from a phone while the machine
+  slept, an invite cancelled from another browser — used to leave its grant redeemable for as long
+  as it lived. It is now reconciled from storage's grant ids within a minute of the machine being
+  back with its owner's token, and the relay refuses the guest on storage's word in the meantime.
+  Against a storage server that records no grant ids, such a grant lives until it expires
+  unredeemed or the owner revokes it with the machine connected.
+
 ## Related decisions
 
 - [hosted-machine-access](hosted-machine-access.md) — the `/client` gate this feature makes
   membership-based instead of ownership-only, and the device-verify machinery the grant oracle
   sits beside.
+- [end-to-end-encryption](end-to-end-encryption.md) — the handshake a guest channel now runs too,
+  against the machine key from the invite link rather than an enrolled one.
 - [multi-machine-client](multi-machine-client.md) — holding a shared machine's link, and the
   session-row/composer visual differentiation for a session that is not on the primary machine.
 - [transcript-rendering](transcript-rendering.md) — the bubble convention attribution builds on.

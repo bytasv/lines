@@ -10,8 +10,9 @@
  * `UserContext` is imported type-only: userContext.ts builds the engine and the
  * sync client this module drives, so a value import would be a cycle.
  */
-import type { StepContent, StepDef, WorkflowDef, WorkflowStep } from '@lines/shared';
+import type { ClientMessage, StepContent, StepDef, SyncSigningInfo, WorkflowDef, WorkflowStep } from '@lines/shared';
 import { formatTimestamp, isStepRef } from '@lines/shared';
+import { ItemTrust, ownSigningKey, syncKeyFingerprint } from './syncSignature.ts';
 import type { UserContext } from './userContext.ts';
 
 // ---- mutations ----
@@ -53,6 +54,115 @@ export function saveStep(
 export function deleteStep(ctx: UserContext, stepId: string): void {
   ctx.workflows.deleteStep(stepId);
   ctx.sync.deleteStep(stepId);
+}
+
+// ---- trust in synced content ----
+
+/**
+ * The owner has seen a synced item's full content and allows it to run on this
+ * machine. One entry point for all three kinds, so the WebSocket case stays one
+ * line and the two engines cannot disagree about what a confirmation means.
+ *
+ * It approves that item's reviewed digest and nothing more: not the machine
+ * that signed it — nothing here proves that key is one of the user's own, and
+ * trusting it would release everything else it signed unseen — and not a later
+ * change to the same item. Trusting a machine outright belongs to an explicit
+ * step that shows a comparable key fingerprint, which this is not.
+ */
+export function trustSyncedItem(ctx: UserContext, msg: Extract<ClientMessage, { type: 'trustSyncedItem' }>): void {
+  if (typeof msg.ownerId !== 'string' || typeof msg.id !== 'string' || typeof msg.digest !== 'string' || !msg.digest) {
+    throw new Error('That trust request is malformed.');
+  }
+  const version = (): number => {
+    if (!Number.isInteger(msg.version)) throw new Error('That trust request names no version.');
+    return msg.version!;
+  };
+  switch (msg.kind) {
+    case 'workflow':
+      ctx.workflows.trustWorkflow(msg.ownerId, msg.id, msg.digest);
+      break;
+    case 'step':
+      ctx.workflows.trustStep(msg.ownerId, msg.id, version(), msg.digest);
+      break;
+    case 'recipe':
+      ctx.recipes.trustRecipe(msg.ownerId, msg.id, version(), msg.digest);
+      break;
+    default:
+      throw new Error('That trust request is malformed.');
+  }
+}
+
+/**
+ * Refuse a workflow with unverified content before the session it would run in
+ * is created — `attach` refuses too, but only once that session exists.
+ */
+export function assertWorkflowRunnable(ctx: UserContext, workflowId: string): void {
+  ctx.workflows.assertRunnable(workflowId);
+}
+
+// ---- trusted machines ----
+
+/** Longest base64 a P-256 public key could be (raw, uncompressed: 65 bytes). */
+const MAX_KEY_CHARS = 128;
+
+/**
+ * This machine's signing-key fingerprint and the machines the account trusts —
+ * the owner's `hello` field and the `syncSigning` broadcast. Owner-only: it is
+ * what a user compares between their machines, and names the keys they trust.
+ */
+export function syncSigningInfo(ctx: UserContext, ownKey = ownSigningKey()): SyncSigningInfo {
+  return {
+    fingerprint: ownKey ? syncKeyFingerprint(ownKey) : null,
+    trusted: ItemTrust.forStore(ctx.store.rootDir)
+      .signers()
+      .map((s) => ({ key: s.key, fingerprint: syncKeyFingerprint(s.key), trustedAt: s.trustedAt })),
+  };
+}
+
+/**
+ * Trust another machine's signing key for this account, after the owner compared
+ * its fingerprint with the one that machine shows in its own Settings → Sync.
+ * Everything it signed is released, and so is everything it signs from now on.
+ *
+ * The echoed fingerprint has to be this key's: it is the thing the user looked
+ * at, so a key it does not belong to — a stale dialog, a client bug, a crafted
+ * message — trusts nothing. Unlike approving an item, this is a statement about
+ * a machine, which is why it is its own deliberate action and never a side
+ * effect of a review.
+ */
+export function trustSigner(ctx: UserContext, msg: Extract<ClientMessage, { type: 'trustSigner' }>): void {
+  if (typeof msg.key !== 'string' || !msg.key || msg.key.length > MAX_KEY_CHARS || typeof msg.fingerprint !== 'string') {
+    throw new Error('That trust request is malformed.');
+  }
+  let fingerprint: string;
+  try {
+    fingerprint = syncKeyFingerprint(msg.key);
+  } catch {
+    throw new Error('That trust request is malformed.');
+  }
+  if (fingerprint !== msg.fingerprint) {
+    throw new Error('That fingerprint does not belong to this key — nothing was trusted.');
+  }
+  // This machine's own key needs no record: what it signs is trusted already.
+  if (msg.key === ownSigningKey()) return;
+  ItemTrust.forStore(ctx.store.rootDir).trustSigner(msg.key);
+  ctx.workflows.resettleMarks();
+  ctx.recipes.resettleMarks();
+  ctx.broadcast({ type: 'syncSigning', info: syncSigningInfo(ctx) });
+}
+
+/**
+ * Stop trusting a machine key. What only it vouched for is held back again at
+ * once — the marks kept the record of who signed what — and on every later load
+ * and pull. Content the owner approved item by item stays approved: that was a
+ * decision about the content, not the machine.
+ */
+export function untrustSigner(ctx: UserContext, msg: Extract<ClientMessage, { type: 'untrustSigner' }>): void {
+  if (typeof msg.key !== 'string' || !msg.key) throw new Error('That request is malformed.');
+  if (!ItemTrust.forStore(ctx.store.rootDir).untrustSigner(msg.key)) return;
+  ctx.workflows.resettleMarks();
+  ctx.recipes.resettleMarks();
+  ctx.broadcast({ type: 'syncSigning', info: syncSigningInfo(ctx) });
 }
 
 // ---- resolution / policy ----
@@ -364,6 +474,7 @@ export async function stepVersionsView(
   stepId: string,
 ): Promise<StepDef[]> {
   const remote = await ctx.sync.pullStepVersions(ownerId, stepId);
-  if (remote) ctx.workflows.addStepVersions(remote);
+  // Only the history that was asked for (see addStepVersions).
+  if (remote) ctx.workflows.addStepVersions(remote, [{ ownerId, id: stepId }]);
   return ctx.workflows.listStepVersions(ownerId, stepId);
 }

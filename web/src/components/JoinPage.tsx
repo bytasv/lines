@@ -5,6 +5,7 @@ import { Alert, Avatar, Button, Group, Loader, Stack, Text, Title } from '@manti
 import { PRESET_COPY, claimInvite, invitePreview, type InvitePreview } from '../lib/shares';
 import { useDevices } from '../lib/devices';
 import { rememberDeviceId, setStorageTokenProvider } from '../lib/storage';
+import { adoptJoinGrant, pendingJoinGrantDevice, takeJoinGrantFromUrl } from '../lib/e2ee';
 import { setTokenProvider, switchDevice } from '../ws';
 import { GateHint, GateShell } from './GateShell';
 
@@ -25,6 +26,10 @@ export function JoinPage() {
   // during sign-up is unrecoverable for the invitee.
   useEffect(() => {
     if (code) sessionStorage.setItem('lines.joinCode', code);
+    // The machine's grant rides in the fragment, which the sign-in round trip
+    // drops just as it may drop the path — so it is stashed beside the code and
+    // stripped from the address bar at once.
+    if (code) takeJoinGrantFromUrl(code);
   }, [code]);
 
   return (
@@ -91,6 +96,9 @@ function JoinPreview({ code }: { code: string }) {
     try {
       const { deviceId } = await claimInvite(code);
       sessionStorage.removeItem('lines.joinCode');
+      // Now that the claim has named the machine: the token to present there and
+      // the key to hold the channel to. Without them that machine admits nobody.
+      adoptJoinGrant(deviceId, code);
       // Point this browser at the machine we were just given, then let the device
       // gate do the connecting — the same path "Use this" in Settings takes.
       // Awaited, so the gate sees the new machine in the list before we select it.
@@ -99,6 +107,22 @@ function JoinPreview({ code }: { code: string }) {
       switchDevice(deviceId);
       navigate('/');
     } catch (err) {
+      // Already claimed — by this account, from another browser, or before site
+      // data was cleared — is a share this account already holds, and what this
+      // browser lacks is only the link's grant. Taken up here rather than leaving
+      // the guest with a machine that refuses them and an invite that is spent.
+      const device = pendingJoinGrantDevice();
+      if (device) {
+        await useDevices.getState().refresh();
+        const held = (useDevices.getState().devices ?? []).some((d) => d.id === device && d.shared);
+        if (held && adoptJoinGrant(device, code)) {
+          sessionStorage.removeItem('lines.joinCode');
+          rememberDeviceId(device);
+          switchDevice(device);
+          navigate('/');
+          return;
+        }
+      }
       // Includes the email-mismatch case, which storage answers with the invited
       // address named — the likeliest real failure, and unexplainable as a bare
       // "unauthorized".

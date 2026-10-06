@@ -6,12 +6,14 @@ import type {
   HandshakeConfirm,
   SecureSession,
   ServerMessage,
+  SharePreset,
 } from '@lines/shared';
 import { APP_PROTOCOL_VERSION, enrollProof, startHandshake } from '@lines/shared';
 import { useStore } from './store';
 import { refreshDevices } from './lib/devices';
-import { cryptoUnavailable, deviceIdentity, pinKey, pinnedKey } from './lib/e2ee';
+import { cryptoUnavailable, deviceIdentity, guestGrantTokens, pinKey, pinnedKey } from './lib/e2ee';
 import { WAKE_PROBE_TIMEOUT_MS, probeExpired, shouldReviveIdle, wakeAction, wakeDebounced } from './lib/wake';
+import { plaintextFrameAllowed } from './lib/plaintextFrames';
 import {
   diag,
   diagEntries,
@@ -57,6 +59,12 @@ type RelayControlMessage = { type: 'deviceOffline' } | { type: 'deviceOnline' };
 
 let WS_URL = ENV_WS_URL ?? '';
 
+/** Whether this page was served from this machine's own loopback interface. */
+function isLoopbackPage(): boolean {
+  const host = location.hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  return host === 'localhost' || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
 /**
  * Resolve where the bridge is listening. A failure leaves WS_URL empty, which
  * surfaces as an ordinary failed connection and retry rather than a boot error.
@@ -67,7 +75,11 @@ async function resolveBridgeUrl(): Promise<void> {
     const res = await fetch('/__bridge', { cache: 'no-store' });
     const { port } = (await res.json()) as { port: number | null };
     if (!port) return;
-    WS_URL = `ws://${location.hostname}:${port}`;
+    // The bridge binds 127.0.0.1 by default, and `localhost` may resolve to ::1
+    // first, where nothing listens. A page on this machine therefore dials the
+    // IPv4 loopback by number; a page opened from elsewhere (the LAN-testing
+    // opt-in) dials the host it was served from, as before.
+    WS_URL = `ws://${isLoopbackPage() ? '127.0.0.1' : location.hostname}:${port}`;
   } catch {
     console.warn('[ws] bridge discovery failed — is the bridge running?');
   }
@@ -153,6 +165,13 @@ interface MachineLink {
    * a handshake in flight and go out in the clear.
    */
   expectsSecure: boolean;
+  /**
+   * This socket opened with a pinned machine key, so every app frame on it must
+   * be sealed, both ways, for its whole life. Unlike `expectsSecure` it is never
+   * cleared: nothing a frame says — a forged `e2eeReady` least of all — turns an
+   * encrypted link back into a plaintext one.
+   */
+  pinned: boolean;
   /** Second half of the handshake, held between our offer and the bridge's accept. */
   finishHandshake:
     | ((accept: HandshakeAccept) => Promise<{ session: SecureSession; confirm: HandshakeConfirm }>)
@@ -171,6 +190,12 @@ interface MachineLink {
   sending: Promise<void>;
   /** This socket has delivered its `hello`. Reset on every open. */
   greeted: boolean;
+  /**
+   * The machine's `hello` said this browser is a guest there. A guest link never
+   * relays its Clerk token: the host's bridge has no use for it, and it is a
+   * credential for the guest's own account. Reset on every open.
+   */
+  guest: boolean;
   /**
    * The relay told this socket that no bridge is attached. Per socket, not the
    * store's `machineOffline`: that one lasts until a `hello` clears it, so it
@@ -323,10 +348,12 @@ function linkFor(deviceId: string): MachineLink {
       closing: false,
       secure: null,
       expectsSecure: false,
+      pinned: false,
       finishHandshake: null,
       outbox: [],
       sending: Promise.resolve(),
       greeted: false,
+      guest: false,
       away: false,
       enrollWaiter: null,
       connectingSince: null,
@@ -487,6 +514,55 @@ function rejectPending(link: MachineLink) {
   link.transcriptions.clear();
 }
 
+/** In-flight `mintGuestGrant` requests, keyed by requestId. Answered on whichever link asked. */
+const grantRequests = new Map<
+  string,
+  {
+    resolve: (grant: { grantId: string; token: string; bridgeKey: string }) => void;
+    reject: (e: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }
+>();
+
+/**
+ * Ask one of this user's machines to mint a guest grant for an invite.
+ *
+ * The machine is the only thing that can admit a guest now, so it is the one
+ * that issues the ticket: the answer carries the token and the machine's key,
+ * which go into the invite link's fragment. Needs that machine online — an
+ * invite to a machine that cannot vouch for it would never let anyone in.
+ */
+export async function mintGuestGrant(
+  deviceId: string,
+  share: { scope: 'machine' | 'session'; sessionId?: string; preset: SharePreset },
+): Promise<{ grantId: string; token: string; bridgeKey: string }> {
+  // Sharing one of your machines that is not the one in front of you: dial it
+  // and wait for its hello rather than calling it offline.
+  let link = links.get(deviceId);
+  if (!link?.greeted || link.socket?.readyState !== WebSocket.OPEN) {
+    await connectMachine(deviceId);
+    const deadline = Date.now() + 10_000;
+    link = links.get(deviceId);
+    while (!(link?.greeted && link.socket?.readyState === WebSocket.OPEN) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      link = links.get(deviceId);
+    }
+  }
+  if (!link?.greeted || link.socket?.readyState !== WebSocket.OPEN) {
+    throw new Error('That machine is not connected — it has to be online to create an invite.');
+  }
+  const requestId = crypto.randomUUID();
+  const ready = link;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      grantRequests.delete(requestId);
+      reject(new Error('That machine did not answer. Try again.'));
+    }, 15_000);
+    grantRequests.set(requestId, { resolve, reject, timer });
+    writeToLink(ready, JSON.stringify({ type: 'mintGuestGrant', requestId, ...share } satisfies ClientMessage));
+  });
+}
+
 /** Longer than the bridge's own whisper timeout plus a full queue ahead of it,
  *  so the bridge's answer — which says *why* — normally arrives first. */
 const TRANSCRIBE_DEADLINE_MS = 180_000;
@@ -556,6 +632,9 @@ function startAuthRelay(link: MachineLink) {
  */
 async function relayAuth(link: MachineLink) {
   if (link.socket?.readyState !== WebSocket.OPEN) return;
+  // Not to a machine we are a guest on: its bridge has no use for our token, and
+  // there it would only be a credential for our account in someone else's hands.
+  if (link.guest) return;
   const token = await tokenProvider?.().catch(() => null);
   if (token) writeToLink(link, JSON.stringify({ type: 'auth', token } satisfies ClientMessage));
 }
@@ -668,7 +747,10 @@ function writeToLink(link: MachineLink, payload: string): boolean {
       .catch((err) => console.warn('[e2ee] send failed', err));
     return true;
   }
-  if (link.expectsSecure) {
+  // Held, never sent in the clear, while a pinned link has no session: that is
+  // the downgrade the handshake exists to prevent, whatever state a frame from
+  // the middle may have talked this link into.
+  if (link.expectsSecure || link.pinned) {
     link.outbox.push(payload);
     return true;
   }
@@ -839,6 +921,8 @@ async function openSocket(link: MachineLink) {
     useStore.getState().setConnectionStatus('connected', link.deviceId);
     link.awaitingProbeSince = null;
     link.greeted = false;
+    // Known before any hello: a machine this browser holds an invite grant for.
+    link.guest = guestGrantTokens(link.deviceId).length > 0;
     link.away = false;
     link.secure = null;
     link.finishHandshake = null;
@@ -848,6 +932,7 @@ async function openSocket(link: MachineLink) {
     link.sending = Promise.resolve();
     const bridgeKey = pinnedKey(link.deviceId);
     link.expectsSecure = !!bridgeKey;
+    link.pinned = !!bridgeKey;
     if (!bridgeKey && needsEnrollment.has(link.deviceId)) {
       // Deliberately silent: no heartbeat, no auth relay, no app traffic. This
       // machine refuses the first plaintext frame it sees, and the heartbeat is
@@ -889,6 +974,14 @@ async function openSocket(link: MachineLink) {
         msg.type === 'e2eeData'
       ) {
         void handleE2eeFrame(link, generation, msg);
+        return;
+      }
+      // On a link that is (or is becoming) end-to-end encrypted, a plaintext app
+      // frame can only have been written by the relay, so it is dropped rather
+      // than rendered — see plaintextFrameAllowed.
+      if (!plaintextFrameAllowed(link.pinned, msg.type)) {
+        console.warn(`[e2ee] dropped a plaintext '${msg.type}' frame on an encrypted link`);
+        diag('plaintext-dropped', { device: link.deviceId, type: msg.type });
         return;
       }
       handleServerMessage(link, msg);
@@ -972,6 +1065,20 @@ function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayContro
     pending?.resolve({ status: msg.status, body: msg.body });
     return;
   }
+  if (msg.type === 'guestGrantMinted') {
+    // Point-to-point, like fileResponse: the token is for this browser's invite
+    // link and nothing else, so it never goes near the store.
+    const pending = grantRequests.get(msg.requestId);
+    grantRequests.delete(msg.requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    if (msg.token && msg.bridgeKey && msg.grantId) {
+      pending.resolve({ grantId: msg.grantId, token: msg.token, bridgeKey: msg.bridgeKey });
+    } else {
+      pending.reject(new Error(msg.error ?? 'That machine could not create the invite.'));
+    }
+    return;
+  }
   if (msg.type === 'transcription') {
     // Point-to-point, like fileResponse: settled against this link only.
     const pending = link.transcriptions.get(msg.requestId);
@@ -997,6 +1104,8 @@ function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayContro
     });
     link.attempts = 0;
     link.greeted = true;
+    // `access` is on a guest's hello only; the owner's carries none.
+    link.guest = !!msg.access;
     uploadStallIfAny(link.deviceId);
     if (useStore.getState().protocolSkew) {
       console.warn(
@@ -1068,9 +1177,25 @@ async function handleE2eeFrame(
       link.finishHandshake = null;
       link.secure = session;
       link.socket?.send(JSON.stringify({ type: 'e2eeConfirm', confirm } satisfies ClientMessage));
+      // A guest's first sealed frame is the grant from their invite link: the
+      // machine admits the channel on nothing else, and refuses any other frame
+      // first. Sent now, the moment there is a session to seal it with — sealed
+      // writes go out as soon as `secure` is set, so waiting for `e2eeReady`
+      // would let anything written in between overtake it.
+      const tokens = guestGrantTokens(link.deviceId);
+      if (tokens.length) writeToLink(link, JSON.stringify({ type: 'guestGrant', tokens } satisfies ClientMessage));
       return;
     }
     if (msg.type === 'e2eeReady') {
+      // Only after our own handshake finished: `e2eeReady` travels in the clear
+      // and carries nothing secret (the machine's key is public), so on its own it
+      // proves nothing. One arriving before there is a session was written by
+      // something in the middle, to talk this link out of encrypting.
+      if (!link.secure) {
+        console.warn('[e2ee] the machine said ready before the handshake finished — closing');
+        link.socket?.close();
+        return;
+      }
       // Belt and braces: the handshake already failed if the peer held a
       // different key, so a mismatch here means something rewrote this frame.
       if (msg.bridgeKey !== pinnedKey(link.deviceId)) {

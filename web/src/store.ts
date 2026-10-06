@@ -30,6 +30,7 @@ import type {
   ShareScope,
   StepDef,
   StorageStatus,
+  SyncSigningInfo,
   TranscriptEvent,
   ClaudeCliStatus,
   CodexCliStatus,
@@ -900,6 +901,10 @@ interface UiState {
   /** Desktop update the primary machine is offering; null until the first `hello`.
    *  `state: 'available'` shows the update banner. */
   updateStatus: UpdateStatus | null;
+  /** The primary machine's signing-key fingerprint and the machines its account
+   *  trusts (Settings → Sync); null until an owner `hello`, and from a bridge
+   *  too old to send it. */
+  syncSigning: SyncSigningInfo | null;
   /** Which bridge we're talking to; null until the first hello, and on a bridge
    *  too old to send it. */
   bridge: BridgeInfo | null;
@@ -1395,6 +1400,7 @@ export const useStore = create<UiState>((set, get) => {
   storageStatus: null,
   workerStatus: null,
   updateStatus: null,
+  syncSigning: null,
   bridge: null,
   claudeCli: null,
   smartRoutingAvailable: null,
@@ -2090,6 +2096,9 @@ export const useStore = create<UiState>((set, get) => {
           codexCli: fromPrimary ? msg.codexCli ?? null : state.codexCli,
           whisper: fromPrimary ? msg.whisper ?? null : state.whisper,
           whisperModelDownload: fromPrimary ? msg.whisperModelDownload ?? null : state.whisperModelDownload,
+          // Gated like `update`: it describes the machine in front of the user —
+          // its key, and whom its account trusts — and a guest hello has none.
+          syncSigning: fromPrimary ? msg.syncSigning ?? null : state.syncSigning,
           // `access` rides the view spread above, gated with the rest of the
           // owner state: it says whose machine the UI is describing, and a shared
           // machine's hello setting it globally is what flipped the sidebar into
@@ -2228,6 +2237,9 @@ export const useStore = create<UiState>((set, get) => {
         // sends it null) must not put `undefined` where the settings list maps
         // over rows and reads `.enabled` off each one.
         set({ mcpConnections: msg.connections ?? [] });
+        break;
+      case 'syncSigning':
+        if (fromPrimary) set({ syncSigning: msg.info });
         break;
       case 'mcpConnectionsReview':
         set((state) => ({

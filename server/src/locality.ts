@@ -1,11 +1,13 @@
 /**
  * Is this link coming from the machine the bridge runs on?
  *
- * The bridge listens on every interface, so "not relayed" is not the same as
- * "loopback": a direct socket can come from another computer on the LAN. Only a
- * loopback socket may drive something that happens *at* this machine — today
- * that is the Finder folder picker, which opens a window on the host's screen
- * and is useless to anybody else.
+ * The bridge listens on loopback by default, but it can be opened to every
+ * interface on purpose (`LINES_BRIDGE_HOST`, for testing from a phone), and then
+ * "not relayed" is not the same as "loopback": a direct socket can come from
+ * another computer on the LAN. Only a loopback socket may drive something that
+ * happens *at* this machine — today that is the Finder folder picker, which
+ * opens a window on the host's screen and is useless to anybody else. The
+ * connection policy (connectionPolicy.ts) asks the same question of a peer.
  *
  * Pure and dependency-free so it can be tested without standing a server up.
  */

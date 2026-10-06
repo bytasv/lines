@@ -350,9 +350,11 @@ local_resource(
     'bridge', cmd='',
     serve_cmd=['node', 'server/scripts/dev-runtime.mjs', 'bridge'],
     serve_env=BRIDGE_ENV, resource_deps=['install'],
+    # 127.0.0.1, not localhost: the bridge binds the IPv4 loopback only, and
+    # `localhost` may resolve to ::1 first, where nothing listens.
     readiness_probe=probe(initial_delay_secs=2, period_secs=5,
-                          http_get=http_get_action(port=BRIDGE_PORT, host='localhost', path='/')),
-    links=[link('http://localhost:%d/' % BRIDGE_PORT, 'bridge status')],
+                          http_get=http_get_action(port=BRIDGE_PORT, host='127.0.0.1', path='/')),
+    links=[link('http://127.0.0.1:%d/' % BRIDGE_PORT, 'bridge status')],
     labels=['services'], allow_parallel=True,
 )
 

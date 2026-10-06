@@ -1,6 +1,18 @@
 {
   "web": [
     {
+      "version": "0.1.8",
+      "date": "2026-10-06",
+      "items": [
+        "Images in agent replies no longer load on their own. Each shows as a placeholder you can click to open, so a reply cannot send your data anywhere just by including an image.",
+        "Guests you invite are now end-to-end encrypted too. An invite link carries your machine’s key, and your machine admits the guest itself, so creating an invite needs that machine online and sharing needs the latest desktop app.",
+        "Workflows, steps and recipes that arrive from another machine or another person now need a review before they first run. Settings shows each machine’s sync key so you can trust your own machines once.",
+        "Running someone else’s recipe now shows every prompt first, asks you to confirm, runs only in Plan or Ask mode, and pauses between the recipes of a bundle.",
+        "“Always allow” now shows exactly what it will allow, and is not offered for commands no allowlist entry could cover safely.",
+        "You can set an MCP server’s environment values in Settings → Connections. They stay on that machine and are never synced."
+      ]
+    },
+    {
       "version": "0.1.7",
       "date": "2026-10-05",
       "items": [
@@ -25,5 +37,11 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "The bridge now listens on this computer only and refuses other web pages, so a website you visit or someone on your Wi-Fi cannot reach it.",
+    "Agent edits to Claude Code settings and hooks, git hooks and config, MCP configs and shell startup files now always ask first, including through symlinks and shell commands.",
+    "Codex sessions can still read your Lines workflows, steps and connections but can no longer change them; make those changes in Lines.",
+    "MCP environment values stay on this machine. Earlier versions synced them to Lines storage, so rotate any API key you set there before this update.",
+    "Your Lines data folder, transcripts and logs are now readable by your user account only."
+  ]
 }

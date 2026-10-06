@@ -26,9 +26,10 @@ what it reads to your model provider (the section after).
 | Source files, git, terminal, the agent process | Every agent turn runs on the paired machine. |
 | Full transcripts | Kept in `~/.lines-app`. Storage holds session *metadata* only (below). |
 | Claude Code and Codex logins | The Claude login and `$CODEX_HOME/auth.json` stay local. |
-| MCP header values | The synced MCP list carries header *names* only. |
+| MCP header and environment values | The synced MCP list carries header and environment variable *names* only. The values are kept in owner-only files in `~/.lines-app`. (Releases before 2026-10-06 synced stdio environment values; they have been removed from storage, but a key that was ever synced should be rotated.) |
 | Device pairing secret | Generated on the machine. Storage keeps a SHA-256 hash, never the secret. |
 | End-to-end encryption keys | The machine's key and the enrolled-browser list stay in `~/.lines-app`. A browser's private key stays in that browser. |
+| Guest grants | When you share, your machine mints the grant and keeps it in `~/.lines-app`. The token that redeems it travels only in the invite link's fragment, which no server receives. |
 | Voice dictation audio | Transcribed by whisper on your machine. From a phone, the audio reaches the machine through the relay. |
 | Web Push subscriptions | Held by the bridge on each machine, not synced. |
 
@@ -36,14 +37,14 @@ what it reads to your model provider (the section after).
 
 | Data | Notes |
 |---|---|
-| Prompts, and the code context the agent reads | Sent to Anthropic or OpenAI under your own account and their terms, the same as using the CLI directly. Lines adds nothing to this path and sees none of it. |
+| Prompts, and the code context the agent reads | Sent to Anthropic or OpenAI under your own account and their terms, the same as using the CLI directly. Lines adds nothing to this path. What the agent produces can still reach Lines storage as session metadata: compaction summaries, workflow step outputs and queued prompts (below) can quote code. |
 
 ## Passes through the Lines relay
 
 | Data | Notes |
 |---|---|
 | Live traffic between your own enrolled browsers and your machine | End-to-end encrypted. The relay forwards ciphertext it cannot read or forge. |
-| Live traffic for guests you invite into a session | **Not end-to-end encrypted yet.** Guest connections cross the relay in plaintext (TLS to the relay only), so the relay could read them. |
+| Live traffic for guests you invite into a session | End-to-end encrypted too: the guest's browser holds its channel to your machine's key, which reaches it in the invite link, and is admitted only on the grant your machine minted. The relay still asserts *which account* a guest signed in with, which is what the session shows as their name. |
 | Connection metadata | The relay sees which device connects, when, and how much traffic flows. It can also drop or delay traffic. |
 
 ## Stored on Lines storage (Postgres)
@@ -58,11 +59,11 @@ current one.
 | Account identity | Clerk user id; email, display name and avatar URL cached for sharing. |
 | Session list metadata | Names, absolute `cwd` paths, model, cost and token counts, error messages, **queued prompts**, **context compaction summaries**, **workflow step outputs**, background task descriptions, and file names (attachments, @-mentioned files, untracked files). Summaries, outputs and queued prompts can quote code. |
 | Workflows, steps and recipes | Your own, including every saved version. **Anything you publish is readable by every signed-in user**, as is its run count. |
-| Settings | UI settings, the auto-mode guard allowlist, and the MCP server list (no header values). |
+| Settings | UI settings, the auto-mode guard allowlist, and the MCP server list (header and environment variable names, never their values). |
 | Agent memory | Allowlisted `~/.claude` files, such as `CLAUDE.md` and per-project memory. |
 | Project path keys | A map from absolute `cwd` paths to project keys. |
 | Paired devices | Device name, platform, last seen, online state, and the pairing secret's hash. |
-| Sharing | Invites (including the invitee's email), grants, and your share contacts list. |
+| Sharing | Invites (including the invitee's email), grants, the id of the grant your machine minted for each (never the token that redeems it), and your share contacts list. |
 
 ## Stored on Cloudflare R2
 
@@ -75,7 +76,7 @@ current one.
 
 | Service | What it sees |
 |---|---|
-| Clerk (sign-in) | Your account identity (user id, email, profile) and sign-in sessions. Required by the hosted service, and still required when you self-host storage. |
+| Clerk (sign-in) | Your account identity (user id, email, profile) and sign-in sessions. Required by the hosted service, and still required when you self-host storage. The web app turns Clerk's telemetry off. |
 | Supabase (database hosting) | Hosts the Lines storage database, so it holds everything listed under "Stored on Lines storage". |
 | The VPS provider hosting linesapp.cloud | Runs the relay, the storage server and the web servers, and holds their logs. Like any host, it has access to the machine. |
 | Your browser's push service (Apple, Google, Mozilla or Microsoft) | Only if you turn on push alerts. Each alert carries the session name and a short status ("Task complete", "Needs approval"). The payload is encrypted to your browser; the push service sees when alerts are sent. |

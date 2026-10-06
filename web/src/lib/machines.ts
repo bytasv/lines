@@ -444,20 +444,29 @@ function contentOf(step: StepContent): StepContent {
   };
 }
 
+/** Held back on the machine that holds it — a mark that only records provenance does not count. */
+const heldBack = (item: { untrusted?: { held?: false } }) => !!item.untrusted && item.untrusted.held !== false;
+
 /**
  * A self-contained copy of one of the user's own workflows, every `StepRef`
  * swapped for its content, so it can run on a machine that has none of their
- * step library (a shared machine). Refs resolve the way `useStepResolver` does —
- * the exact pin first, else that step's latest version known here. Null when a
- * ref cannot be resolved: running a workflow with a step missing is worse than
- * not starting it.
+ * step library (a shared machine).
+ *
+ * Refs resolve to their exact pinned version and nothing else: a different
+ * version is not what the workflow pins, and "the latest one known here" is
+ * exactly where an unreviewed change would come from. Fails `unavailable` when
+ * a pin cannot be resolved — running a workflow with a step missing is worse
+ * than not starting it — and `unverified` when the workflow or a version it
+ * pins is held back on the user's own machine: the host cannot check that for
+ * itself, so it is decided here, before anything travels.
  */
 export function inlineWorkflow(
   def: WorkflowDef,
   steps: StepDef[],
   pinned: StepDef[],
   shared: StepDef[] = [],
-): WorkflowDef | null {
+): { ok: true; def: WorkflowDef } | { ok: false; reason: 'unavailable' | 'unverified' } {
+  if (heldBack(def)) return { ok: false, reason: 'unverified' };
   const all = [...pinned, ...steps, ...shared];
   const out: InlineStep[] = [];
   for (const step of def.steps) {
@@ -465,11 +474,13 @@ export function inlineWorkflow(
       out.push(step);
       continue;
     }
-    const found =
-      all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId && d.version === step.version) ??
-      all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId);
-    if (!found) return null;
+    const found = all.find((d) => d.ownerId === step.ownerId && d.id === step.stepId && d.version === step.version);
+    if (!found) return { ok: false, reason: 'unavailable' };
+    if (heldBack(found)) return { ok: false, reason: 'unverified' };
     out.push(contentOf(found));
   }
-  return { ...def, steps: out };
+  // The mark is this machine's verdict and means nothing on the host.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { untrusted: _verdict, ...rest } = def;
+  return { ok: true, def: { ...rest, steps: out } };
 }

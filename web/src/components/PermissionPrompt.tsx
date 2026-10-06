@@ -45,7 +45,7 @@ import { KEEP_PLANNING_MESSAGE, PLAN_REPLY_MARKER, normalizePlanComments } from 
 import { send } from '../ws';
 import { readPlanComments, useStore, writePlanComments } from '../store';
 import { agentLabel } from '../lib/capabilities';
-import { useCan } from '../lib/can';
+import { useCan, useIsGuestOnSession } from '../lib/can';
 import { appendTranscript, useVoiceDictation } from '../lib/useVoiceDictation';
 import { DictateButton, DictationError, dictateSectionWidth } from './DictateButton';
 import { useIsPhone } from '../lib/layout';
@@ -1675,6 +1675,70 @@ export function PermissionPrompt({
 }
 
 /**
+ * The card's "Always allow", naming the exact entry it saves. The bridge
+ * computes that entry when it raises the card and records it there, so the label
+ * is what the click saves rather than a guess here at the bridge's rule — the
+ * button used to say only "Always allow" while the bridge quietly kept the
+ * line's first two words. A card from before the field existed keeps the old
+ * unlabelled button; one whose entry is `null` shows noAlwaysAllowNote instead.
+ */
+function AlwaysAllowButton({ sessionId, data }: { sessionId: string; data: PermissionRequestData }) {
+  const entry = data.alwaysAllowEntry;
+  // On the button itself, not only in the tooltip: a phone never hovers.
+  const covers = entry ? (entry.prefix ? `${entry.prefix} …` : entry.tool) : null;
+  const tooltip = !entry
+    ? 'Allow now and add this pattern to the auto-mode allowlist'
+    : entry.prefix
+      ? `Allow now, and stop asking in auto mode about every command starting “${entry.prefix}”`
+      : `Allow now, and stop asking in auto mode about every ${entry.tool} call`;
+  return (
+    <Tooltip label={tooltip} multiline maw={320}>
+      <Button
+        size="xs"
+        variant="light"
+        onClick={() =>
+          send({
+            type: 'permissionResponse',
+            sessionId,
+            requestId: data.requestId,
+            allow: true,
+            alwaysAllow: true,
+          })
+        }
+      >
+        Always allow
+        {covers && (
+          <Code
+            ml={6}
+            fz={11}
+            style={{
+              display: 'inline-block',
+              maxWidth: 220,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {covers}
+          </Code>
+        )}
+      </Button>
+    </Tooltip>
+  );
+}
+
+/**
+ * Why a card has no "Always allow" (`alwaysAllowEntry: null`), shown where the
+ * button would be. The bridge only says that no entry is safe, not which rule
+ * said so, so this names the cases rather than guessing at one.
+ */
+function noAlwaysAllowNote(toolName: string): string {
+  return toolName === 'Bash'
+    ? 'Always allow isn’t offered for this command: pipes, redirects, several risky commands at once, shells and interpreters, and commands like rm -rf or sudo can’t be allowlisted.'
+    : `Always allow isn’t offered here: an entry for ${toolName} would cover every ${toolName} call, not just this one.`;
+}
+
+/**
  * The card body, split out so the guest branch is a single early return rather
  * than a conditional threaded through every button.
  */
@@ -1693,6 +1757,10 @@ function PermissionCard({
   // runs a command on the host's machine, as them, so no preset below
   // Collaborator reaches it — and a button that always errors is worse than none.
   const canApprove = useCan('approvePermissions');
+  // "Always allow" and "Allow as read" write the host's allowlist rather than
+  // answer the card, so they are the host's alone; the bridge drops them from a
+  // guest's answer, and offering them would promise what the click cannot do.
+  const guest = useIsGuestOnSession(sessionId);
   const owner = useStore((s) => s.access?.ownerProfile ?? null);
   const isPhone = useIsPhone();
   // A resolved card starts collapsed to its header; expanding shows what was
@@ -1785,26 +1853,10 @@ function PermissionCard({
             >
               {p.allowLabel}
             </Button>
-            {data.guardReason && (
-              <Tooltip label="Allow now and add this pattern to the auto-mode allowlist">
-                <Button
-                  size="xs"
-                  variant="light"
-                  onClick={() =>
-                    send({
-                      type: 'permissionResponse',
-                      sessionId,
-                      requestId: data.requestId,
-                      allow: true,
-                      alwaysAllow: true,
-                    })
-                  }
-                >
-                  Always allow
-                </Button>
-              </Tooltip>
+            {!guest && data.guardReason && data.alwaysAllowEntry !== null && (
+              <AlwaysAllowButton sessionId={sessionId} data={data} />
             )}
-            {data.planRead?.prefix && (
+            {!guest && data.planRead?.prefix && (
               <Tooltip
                 label={`Allow now, and treat every "${data.planRead.prefix} …" command as read-only in plan mode`}
                 multiline
@@ -1836,6 +1888,11 @@ function PermissionCard({
               {p.denyLabel}
             </Button>
           </Group>
+          {!guest && data.guardReason && data.alwaysAllowEntry === null && (
+            <Text size="xs" c="dimmed" mt={6}>
+              {noAlwaysAllowNote(data.toolName)}
+            </Text>
+          )}
         </>
       )}
     </>

@@ -8,6 +8,7 @@ import { isExternalHref } from '@lines/shared';
 import { rehypeFilePaths } from '../lib/rehypeFilePaths';
 import { rehypeColorSwatches } from '../lib/rehypeColorSwatches';
 import { InlineColorSwatch } from './InlineColorSwatch';
+import { MarkdownImage, MarkdownLinkContent } from './MarkdownImage';
 import { useStore } from '../store';
 
 const remarkPlugins: PluggableList = [remarkGfm];
@@ -49,6 +50,10 @@ function hasCodeBlock(text: string): boolean {
  * instead of opening the source preview. Omitted — as every transcript call site
  * does — behaviour is exactly the store's `openFilePreview`. Keep it referentially
  * stable: this component is memo'd.
+ *
+ * Images are never loaded: each one renders as a `MarkdownImage` placeholder,
+ * because an image fetches on render and this text is written by agents and
+ * other people (see lib/markdownImage).
  */
 export const Markdown = memo(function Markdown({
   text,
@@ -105,7 +110,7 @@ export const Markdown = memo(function Markdown({
                     onLinkClick(href);
                   }}
                 >
-                  {children}
+                  <MarkdownLinkContent>{children}</MarkdownLinkContent>
                 </a>
               );
             }
@@ -120,8 +125,17 @@ export const Markdown = memo(function Markdown({
                 {...(external ? { target: '_blank', rel: 'noreferrer noopener' } : {})}
                 {...props}
               >
-                {children}
+                <MarkdownLinkContent>{children}</MarkdownLinkContent>
               </a>
+            );
+          },
+          img({ src, alt }) {
+            return (
+              <MarkdownImage
+                src={typeof src === 'string' ? src : undefined}
+                alt={alt}
+                onLinkClick={onLinkClick}
+              />
             );
           },
           span({ className, children, node, ...props }) {

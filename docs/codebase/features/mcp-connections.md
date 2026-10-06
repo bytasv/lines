@@ -6,8 +6,8 @@ Covers: `mcp-connections`, `mcp-connection-oauth`.
 
 Let a user add a third-party MCP server (Figma, Linear, a local stdio server, …) from Settings,
 see whether it connected in a given session, and authorize it — with the connection list synced
-across machines like the guard allowlist, and header/credential values never leaving the machine
-that holds them.
+across machines like the guard allowlist, and credential values (HTTP header values, a stdio
+server's environment values) never leaving the machine that holds them.
 
 Before this feature, adding an MCP server meant hand-editing `.mcp.json` or `~/.claude/settings.json`
 on disk and running the interactive `claude` CLI once to complete any OAuth handshake. That path
@@ -40,7 +40,8 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
 - `shared/types.ts` — `McpConnection`, `McpTransport`, `McpConnectionsBlob`,
   `McpConnectionsReview`, `McpConnectionError`, `McpConnectionInput`, `McpConnectionSecrets`,
   `RESERVED_MCP_SERVER_NAMES`, `MCP_CONNECTIONS_MAX`; `normalizeConnection`, `sameConnection`,
-  `describeConnection`, `diffConnections`; the `addMcpConnection`/`updateMcpConnection`/
+  `describeConnection`, `diffConnections`, `isMcpEnvName`; `McpConnection.envKeys`/
+  `envValuesHeld`; the `addMcpConnection`/`updateMcpConnection`/
   `removeMcpConnection`/`reviewMcpConnections`/`mcpServerStatus`/`authorizeMcpConnection` client
   messages and their `MESSAGE_AUTHZ` entries (all owner-only); the `mcpConnections`/
   `mcpConnectionsReview`/`mcpServerStatus`/`mcpAuthStarted`/`mcpAuthCompleted` server messages
@@ -48,7 +49,9 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
   plus the account-wide `mcpStatuses`;
   `McpServerStatusInfo`, `McpElicitation`, and `PermissionRequestData.elicitation`.
 - `server/src/mcpConnections.ts` — `McpConnections`, the store-backed list + review lifecycle
-  class, structurally a copy of `GuardAllowlist` (`server/src/autoGuard.ts`).
+  class, structurally a copy of `GuardAllowlist` (`server/src/autoGuard.ts`); the env-value split
+  (`envSecrets`, `writeEnv`, `mergeCredentials`, `declaredValues`), the load migration that moves
+  inline env values out, and `scrubbedSyncState`.
 - `server/src/mcpAuth.ts` — the OAuth shim: `normalizeAuthStart`, `unsupportedReason`,
   `McpAuthPending` (the pending-handshake map keyed by OAuth `state`), `PENDING_TTL_MS` (exported,
   because `SessionManager` bounds its query hold on the same clock), `inspectInstalledSdk`; also
@@ -74,11 +77,12 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
   parameter.
 - `server/src/store.ts` — `loadMcpConnections`/`saveMcpConnections` (`mcp-connections.json`, a
   bare array), `loadMcpSync`/`saveMcpSync` (`mcp-connections-sync.json`, mirroring
-  `GuardSyncState`), `loadMcpSecrets`/`saveMcpSecrets` (`mcp-secrets.json`, mode `0600`, **never**
-  read by `sync.ts`).
+  `GuardSyncState`), `loadMcpSecrets`/`saveMcpSecrets` (`mcp-secrets.json`) and
+  `loadMcpEnv`/`saveMcpEnv` (`mcp-env.json`) — both **never** read by `sync.ts` —
+  `writeMcpFile` (every MCP file written `0600`), `secureMcpFiles` (the startup chmod).
 - `server/src/sync.ts` — `PulledState.mcpConnections`, the `/mcp-connections` pull (caught on its
   own like `/guard-allowlist`, so an unmigrated storage server 500s only that one resource),
-  `pushMcpConnections`.
+  `pushMcpConnections`; `withoutMcpValues`, applied to both.
 - `server/src/userContext.ts` — wires `mcp.onChange`/`mcp.onReview` to broadcast + push, and calls
   `mcp.reviewRemote` before the push block in `syncNow`, mirroring the guard wiring — plus one line
   the guard has no equivalent of, `sessions.applyMcpServers()` (see Data flow → Reaching a
@@ -89,8 +93,12 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
   settle path), `oauthPage`; `onEnded`'s `mcpAuthPending.forgetSession` and `releaseAuthHold`
   calls.
 - `storage/prisma/schema.prisma`, `storage/src/index.ts` — the `mcp_connections` table and its
-  `GET`/`PUT /mcp-connections` routes (the `PUT` handler strips any `headers` field defensively,
-  independent of the bridge already never sending one).
+  `GET`/`PUT /mcp-connections` routes: `PUT` drops any `headers` field and reduces a stdio `env`
+  to its names (`mcpEnvKeys`), independent of the bridge already never sending either, and `GET`
+  serves a values-free copy of any row still holding them (`servedMcpConnections`).
+- `storage/prisma/migrations/20261006010000_mcp_env_names_only/migration.sql` — scrubs the rows
+  written before names-only sync: a non-empty `env` map becomes its names (sorted) as `envKeys`,
+  an empty or malformed one is dropped, and a row with no `env` is not touched.
 - `web/src/store.ts` — `mcpConnections`/`mcpReview`/`mcpStatus`/`mcpAuth` state, their actions
   (`requestMcpStatus` takes a `warm` flag), and the matching `ServerMessage` cases; deliberately
   absent from `pushSettings()`.
@@ -98,7 +106,9 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
   `MCP_STATUS_UNKNOWN`.
 - `web/src/components/McpConnectionsSection.tsx` — the Settings pane: connection list, add form
   (client-side `normalizeConnection` before send), status dot, Authorize button (offered on status
-  alone no longer — see Business rules), Refresh (the one warming caller).
+  alone no longer — see Business rules), Refresh (the one warming caller); write-only stdio env
+  editing (`EnvFields` in the add form, `EnvSummary`/`EnvEditor` on a row, `envDraftIssue`,
+  `withoutHeldMarks`).
 - `web/src/components/McpConnectionsReviewModal.tsx` — accept/reject a divergent remote list.
 - `web/src/components/SettingsModal.tsx` — the `'connections'` section, registered like
   `'allowlist'`.
@@ -109,8 +119,11 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
 
 ## Symbols
 
-- `McpConnection` — `{ id, name, transport, url?, command?, args?, env?, headerKeys?, timeout?,
-  enabled }`. `headerKeys` is names only; values never appear on this type.
+- `McpConnection` — `{ id, name, transport, url?, command?, args?, envKeys?, envValuesHeld?,
+  headerKeys?, timeout?, enabled }`. `headerKeys` and `envKeys` are names only; values never
+  appear on this type. `envValuesHeld` names which `envKeys` *this* machine holds a value for —
+  set by the bridge on what it sends its own browsers, never synced, dropped on the way in.
+  `McpConnectionInput.env` is the one place a value may ride, on its way *into* the bridge.
 - `normalizeConnection(raw)` — the single validation gate every writer runs through (Settings
   form, wire handler, load migration, remote ingest): canonicalizes or returns an
   `McpConnectionError`. Mints an id when the input has none. `review()` also re-runs it (via
@@ -121,10 +134,17 @@ had to stop *overwriting* `mcpServers` with it and start *merging* — see Archi
 - `RESERVED_MCP_SERVER_NAMES` — `['lines']`; duplicated (not imported) from
   `server/src/mcpWorkflowTools.ts`'s `LINES_MCP_SERVER` because that module pulls in the whole
   bridge graph — `mcpConnections.test.ts` asserts the two agree.
-- `McpConnections` (class) — `list()`, `blob()` (synced form, header names only), `serverConfigs()`
-  (SDK-facing form, header **values** spliced in from the secrets file — the one place a
-  credential value exists in a served object), `add`/`update`/`remove`, `reviewRemote`/`review`/
-  `acceptReview`/`rejectReview`.
+- `McpConnections` (class) — `list()` (the canonical rows plus each stdio row's `envValuesHeld`,
+  for this machine's browsers), `blob()` (synced form, header and env names only, built from the
+  canonical rows and never from `list()`), `serverConfigs()` (SDK-facing form, header and stdio
+  env **values** spliced in from the two local files — with its codex twin `codexServerConfigs()`,
+  the one place a credential value exists in a served object), `add`/`update`/`remove`,
+  `reviewRemote`/`review`/`acceptReview`/`rejectReview`.
+- `withoutMcpValues(blob)` (`sync.ts`) — a connection list with every credential value taken out:
+  `headers` dropped, an `env` map reduced to its names in `envKeys`; a row with nothing to take
+  out keeps its exact shape.
+- `isMcpEnvName(name)` — whether `normalizeConnection` keeps an env var name (anything but `=` and
+  NUL, up to 128 characters); it skips any other silently, so the form checks first and says why.
 - `mergeMcpServers(fromOptions, linesServerName, linesServer)` — combines the user's connections
   with the Lines server, Lines spread **last** so it always wins a name collision. Lives in
   `workerProtocol.ts` (not `worker.ts`) so it is testable without a live query. Used twice: at
@@ -171,10 +191,42 @@ list (re-validated) differs from the local one by content, a review is staged an
 again on every read (see Business rules), so a review reported to the client is sanitized twice
 over: once when it was staged, once when it is served.
 
+### Credential values stay on their machine
+
+A connection carries header and env var *names* (`headerKeys`, `envKeys`); the values live in
+this machine's `mcp-secrets.json` and `mcp-env.json`, keyed by connection id, and only
+`serverConfigs()`/`codexServerConfigs()` attach them. `normalizeConnection` keeps only the names
+of whatever `env` map arrives, so every shape built from canonical rows — `blob()`, the
+`mcpConnections` broadcast, a staged review — is value-free however a row got in; `add`/`update`
+read a client's typed values off the raw input first and file them locally (`writeEnv`, through
+the same `mergeCredentials` rule header values follow). `sync.ts` strips again with
+`withoutMcpValues` on both sides of the storage boundary — before `req` signs a push, so the
+signature covers exactly the bytes storage keeps, and after a pull verifies — and storage itself
+drops values on `PUT` and serves a values-free copy on `GET`. Migration
+`20261006010000_mcp_env_names_only` scrubbed the rows already written; a scrubbed row's signature
+no longer verifies, so the bridge refuses it as forged, treats the resource as empty, and pushes
+its own names-only copy on the same sync.
+
+Because values are per machine, accepting a remote list takes no value from it — this machine's
+own stay in its files, keyed by id, so a connection both sides have keeps working — and
+`sameConnection` compares env names, so a pull from a machine without the values is no divergence.
+What a form can learn is `envValuesHeld`: `list()` adds it to what this bridge sends its own
+browsers (hello and the broadcast), and `normalizeConnection` never keeps it, so no client or
+remote row can claim a value this machine does not hold.
+
+The constructor runs the migrations an older build makes necessary, each a one-time rewrite:
+`secureMcpFiles` chmods every MCP file to `0600` first (a file an older build left `0644` keeps
+that mode until rewritten, and an unchanged connections file never is); env values kept inline on
+a connection move to `mcp-env.json` *before* the connections file is rewritten without them, and
+that rewrite is skipped if the move did not land, so a failed write costs a retry, never the key;
+and `scrubbedSyncState` reduces a staged or rejected review to names, dropping a pending one that
+differed from the local list only by values.
+
 ### Reaching a session
 
 `buildQueryOptions` calls `mcp.serverConfigs()` — enabled connections only, each with its header
-values attached from the local secrets file — and includes the result as `mcpServers` in the
+values or stdio env values attached from the local secrets and env files — and includes the
+result as `mcpServers` in the
 serialized options sent to the worker. `ensureSession` merges that map with the Lines in-process
 server via `mergeMcpServers`, Lines last, and passes the combined map to `query()`.
 
@@ -284,11 +336,27 @@ on `PENDING_TTL_MS` regardless, so an abandoned sign-in cannot pin a CLI child o
   shape, not string comparison); reserved-name refusal, matched against
   `mcpWorkflowTools.LINES_MCP_SERVER`; CRUD + duplicate-name refusal; secret round-trip through a
   dedicated file, absent from `blob()`/`list()`; dropping a header name drops its stored value; an
-  edit with no `headers` argument keeps the stored value; load-time migration.
+  edit with no `headers` argument keeps the stored value; load-time migration. Env values: they
+  reach `serverConfigs()` but never `blob()`/`list()`; they live in their own file and every MCP
+  file is `0600`; an update carrying names only, or an empty value, keeps the stored one; dropping
+  a name drops its value and its held mark; `envValuesHeld` rides `list()` and the broadcast, never
+  `blob()`; a value entered for a name that arrived bare is held from then on; removing a
+  connection removes its values; values an older build kept inline move to their own file on load;
+  world-readable MCP files are tightened at startup.
 - `server/src/mcpConnections.sync.test.ts` — the review lifecycle, case-for-case with
   `autoGuard.sync.test.ts`: staging, a changed field on the same id counting as a divergence,
   set-equal reorder not counting, accept/reject, reject-remembered-by-content, restart
-  persistence, and that an accepted remote connection has no secret until one is entered locally.
+  persistence, and that an accepted remote connection has no secret until one is entered locally;
+  a connection differing only by env values is no divergence; accepting takes no env value from
+  the remote and keeps this machine's own; held marks stay local (a remote row cannot claim one, a
+  review carries none); a review an older build staged loses its env values on load, and one that
+  differed only by them is dropped.
+- `server/src/sync.credentials.test.ts` — MCP connections leave with credential names only, signed
+  over exactly what was sent; a verified row still carrying env values hands this machine names
+  only; a legacy row whose values storage scrubbed is refused as forged, so the push replaces it.
+- `storage/src/schema.credentials.test.ts` — opt-in on a scratch Postgres
+  (`STORAGE_TEST_DATABASE_URL`, migrations applied): the env-scrub migration's own SQL turns env
+  values into names and changes nothing else in the row, and leaves a row with no `env` untouched.
 - `server/src/workerMcpMerge.test.ts` — `mergeMcpServers`: neighbours survive, Lines wins a name
   collision, malformed/absent input still yields the Lines server alone. Plus
   `staleDynamicServers`: an omitted dynamic server is named, a settings-file or `claudeai` server
@@ -324,10 +392,31 @@ on `PENDING_TTL_MS` regardless, so an abandoned sign-in cannot pin a CLI child o
 
 ## Business rules
 
-- Header/credential **values** never sync and never reach a browser: `blob()`, the storage row,
-  and every broadcast carry `headerKeys` (names) only; values live solely in the local
-  `mcp-secrets.json` (mode `0600`). A connection synced to another machine arrives with its secret
-  missing and shows `needs-auth` until re-entered there.
+- Header and stdio env **values** never sync and never reach a browser: `blob()`, the storage
+  row, and every broadcast carry `headerKeys`/`envKeys` (names) only; values live solely in the
+  local `mcp-secrets.json` and `mcp-env.json` (mode `0600`). A connection synced to another
+  machine arrives without them — an http one shows `needs-auth`, a stdio one lists the env values
+  "not set on this machine" — until they are entered there.
+- Env values are write-only in the UI, like header values and a password field: a saved one shows
+  as an empty box that says it is saved, an empty box on save keeps the stored value (the client
+  never holds one to send back), and removing a variable's row drops its value on the bridge. A
+  name `normalizeConnection` would silently skip is refused in the form (`isMcpEnvName`) rather
+  than lost on save with the value typed beside it.
+- `envValuesHeld` is about one machine: set only on what the bridge sends its own browsers, never
+  in the synced blob, and never taken from a client or a remote row — the Settings toggle sends a
+  connection back without it (`withoutHeldMarks`).
+- Accepting a remote list never takes a credential value from it, and a difference only in values
+  is not a divergence (`sameConnection` compares env names).
+- Storage keeps names only: `PUT /mcp-connections` drops header and env values whatever a bridge
+  sends — a bridge predating names-only sync is answered as usual, not with a 400, which would
+  only stop its whole list syncing — and logs that it did, never what; `GET` serves a values-free
+  copy of any row still holding them.
+- Every MCP file (`mcp-connections.json`, `mcp-connections-sync.json`, `mcp-secrets.json`,
+  `mcp-env.json`) is written `0600` and tightened to `0600` at startup: beyond the two credential
+  files, the connections and sync files hold command lines and URLs, and an older build's inline
+  env values until the load migration moves them out.
+- Scrubbing storage is not un-leaking: an API key synced inside a stdio connection's `env` before
+  names-only sync should be rotated.
 - The Lines server always wins a name collision in the worker's `mcpServers` merge — a user
   connection named `lines` is refused by `normalizeConnection` (`reserved-name`) before it can
   even reach that point.
@@ -351,7 +440,7 @@ on `PENDING_TTL_MS` regardless, so an abandoned sign-in cannot pin a CLI child o
   reverse — a session picking up an edit made while it was mid-turn — is the same mechanism and is
   equally intended.
 - Authorizing is offered for any enabled `http`/`sse` connection, whatever its status reading says,
-  and is absent for `stdio` (which takes its credentials from its own `env`). It used to appear
+  and is absent for `stdio` (which takes its credentials from its env values). It used to appear
   only on a `needs-auth` reading, which made it unreachable in the one case that matters: a
   connection the user has just added is in no live query, so it reports no status at all. A wasted
   click on an already-working server is the cheaper failure.
@@ -439,9 +528,18 @@ on `PENDING_TTL_MS` regardless, so an abandoned sign-in cannot pin a CLI child o
   `AskMethod` comment: an older worker that doesn't read a field or doesn't implement a method
   simply falls through to its default case.
 - `McpConnections` is a structural copy of `GuardAllowlist` (`server/src/autoGuard.ts`): same
-  three-file split (bare-array list, separate sync-state envelope, plus a third local-only secrets
-  file this feature adds), same review lifecycle shape, same `onChange`/`onReview` wiring in
+  split (bare-array list, separate sync-state envelope) plus the two local-only credential files
+  this feature adds — header values in `mcp-secrets.json`, stdio env values in `mcp-env.json`, a
+  file of its own rather than a second namespace inside the secrets file, whose shape an older
+  build reads directly — same review lifecycle shape, same `onChange`/`onReview` wiring in
   `userContext.ts`. Any bug found in one is worth checking in the other.
+- Names-only starts at the validator: `normalizeConnection` reduces any
+  `env` to `envKeys`, so every shape built from canonical rows is value-free by construction, and
+  `blob()` is built from those rows, never from `list()`, so one machine's `envValuesHeld` cannot
+  tell another it holds a key it does not.
+- `withoutMcpValues` runs on both sides of the storage boundary because that boundary is what the
+  guarantee is about: outbound before `req` signs, so the signature still verifies after storage's
+  own filtering; inbound after verification, so a legacy row hands this machine names only.
 - `findPermissionRequest`'s "is this a request, not a resolution" predicate is
   `toolName || elicitation`, not `toolName` alone — an elicitation request legitimately carries no
   tool name, and without the widened predicate it would look like an already-resolved event to

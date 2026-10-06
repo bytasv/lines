@@ -1,8 +1,9 @@
 import { Box, Button, Menu, ScrollArea, Text, UnstyledButton } from '@mantine/core';
 import { IconChevronDown, IconPlus } from '@tabler/icons-react';
-import type { WorkflowDef } from '@lines/shared';
+import type { UntrustedMark, WorkflowDef } from '@lines/shared';
 import { WORKFLOW_PRESETS } from '../../lib/workflowPresets';
 import type { WorkflowPreset } from '../../lib/workflowPresets';
+import { UntrustedBadge } from './UntrustedReview';
 import styles from './workflow.module.css';
 
 const cn = (...xs: (string | false | undefined)[]) => xs.filter(Boolean).join(' ');
@@ -28,6 +29,7 @@ export function WorkflowList({
   sharedWorkflows,
   selectedId,
   dirty,
+  markOf,
   onSelect,
   onNew,
 }: {
@@ -35,6 +37,8 @@ export function WorkflowList({
   sharedWorkflows: WorkflowDef[];
   selectedId: string | null;
   dirty: boolean;
+  /** Why this machine will not run a workflow yet — its own mark or a pinned step's. */
+  markOf?: (w: WorkflowDef) => UntrustedMark | undefined;
   onSelect: (w: WorkflowDef) => void;
   onNew: (preset: WorkflowPreset | null) => void;
 }) {
@@ -59,6 +63,7 @@ export function WorkflowList({
                   {w.published ? ' · shared' : ''}
                 </span>
               </span>
+              <UntrustedBadge mark={markOf?.(w)} ownerName={w.ownerName} />
               {w.id === selectedId && dirty && <DirtyDot />}
             </UnstyledButton>
           ))}
@@ -82,6 +87,7 @@ export function WorkflowList({
                       {w.ownerName ?? 'Unknown'} · {stepCount(w)}
                     </span>
                   </span>
+                  <UntrustedBadge mark={markOf?.(w)} ownerName={w.ownerName} />
                 </UnstyledButton>
               ))}
             </>

@@ -75,7 +75,7 @@
   </head>
   <body>
     <div id="root"></div>
-    <div id="lines-splash" class="lines-splash" data-state="shown">
+    <div id="lines-splash" class="lines-splash" data-state="shown" data-clerk="%VITE_CLERK_PUBLISHABLE_KEY%">
       <div class="lines-splash-content">
         <div class="lines-splash-hero">
           <div class="lines-loader-stage">
@@ -124,18 +124,14 @@
          Clerk cookie (__client_uat is 0 once signed out, a timestamp once signed
          in) never see it. A wrong guess is harmless: the app's first claim brings
          the splash back (lib/splash.ts). Vite leaves the literal %…% in place
-         when the key is unset, so a build without Clerk keeps the splash. -->
-    <script>
-      (function () {
-        var clerkKey = '%VITE_CLERK_PUBLISHABLE_KEY%';
-        if (!clerkKey || clerkKey.charAt(0) === '%') return;
-        var path = location.pathname;
-        var landing =
-          path === '/welcome' || path.indexOf('/join/') === 0 || path.indexOf('/sign-in') === 0;
-        var signedIn = /(?:^|; )__client_uat(?:_[^=]*)?=[1-9]/.test(document.cookie);
-        if (landing || !signedIn) document.getElementById('lines-splash').dataset.state = 'hidden';
-      })();
-    </script>
+         when the key is unset, so a build without Clerk keeps the splash.
+
+         A file rather than an inline script: the deployed CSP allows scripts
+         from this origin only, with no 'unsafe-inline', and the key it reads
+         (from #lines-splash's data-clerk) varies per build, so a hash could not
+         be pinned in the policy either. Classic and synchronous on purpose, so
+         it still runs before first paint. -->
+    <script src="/splash-guard.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

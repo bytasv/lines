@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { StorageSyncClient } from './sync.ts';
+import type { SyncLogEntry } from '@lines/shared';
+import { StorageSyncClient, THROTTLED } from './sync.ts';
+import { signBlob, verifyBlob, type SignerStore, type SigningIdentity } from './syncSignature.ts';
 
 /**
  * Storage sync is the bridge's *second* outbound cloud path, independent of the
@@ -136,6 +138,149 @@ test('a credential planted in session metadata would be caught', async (t) => {
 
   const offenders = sent.flatMap((r) => allKeys(r.body)).filter((k) => SUSPICIOUS.test(k));
   assert.ok(offenders.length > 0, 'the key detector must fire on a planted credential');
+});
+
+/**
+ * MCP connections are the one synced shape whose *purpose* involves a
+ * credential: a stdio server's env and an HTTP server's headers are where its
+ * API key goes. Names may travel; values never do. Env values used to — the
+ * whole connection, `env` included, went to Postgres — so these pin the
+ * boundary itself rather than trusting `McpConnections.blob()` to stay clean.
+ */
+
+const ENV_CANARY = 'sk-env-CANARY';
+const HEADER_CANARY = 'sk-header-CANARY';
+
+/** In-memory signer pins, so these checks never write a counter under `~/.lines-app`. */
+function memorySigners(): SignerStore {
+  const map = new Map<string, { key: string; counter: number }>();
+  return {
+    get: (resource) => map.get(resource),
+    set: (resource, record) => void map.set(resource, record),
+  };
+}
+
+async function signingKey(): Promise<SigningIdentity> {
+  const pair = (await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, [
+    'sign',
+    'verify',
+  ])) as { privateKey: unknown; publicKey: Parameters<typeof crypto.subtle.exportKey>[1] };
+  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+  return { publicKey: Buffer.from(raw).toString('base64'), privateKey: pair.privateKey };
+}
+
+/** Answer every request with `bodyFor(url)`, as a storage server would per route. */
+function serveFetch(t: { after: (fn: () => void) => void }, bodyFor: (url: string) => unknown): void {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string) =>
+    new Response(JSON.stringify(bodyFor(String(url)) ?? null), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+}
+
+/** A stdio row the way a bridge that predates names-only sync wrote it: value inline. */
+const LEGACY_MCP_ROW = {
+  connections: [
+    { id: 'c1', name: 'local', transport: 'stdio', command: 'npx', env: { API_KEY: ENV_CANARY }, enabled: true },
+  ],
+  updatedAt: 1,
+};
+
+test('MCP connections leave with credential names only, signed as sent', async (t) => {
+  const sent = captureFetch(t);
+  const sync = new StorageSyncClient('https://storage.test', () => CLERK_TOKEN, undefined, undefined, undefined, {
+    signers: memorySigners(),
+  });
+
+  // Planted rather than produced — blob() carries names only, so this proves the
+  // push strips whatever a caller hands it.
+  sync.pushMcpConnections({
+    connections: [
+      {
+        id: 'c1',
+        name: 'local',
+        transport: 'stdio',
+        command: 'npx',
+        envKeys: ['REGION'],
+        env: { API_KEY: ENV_CANARY },
+        enabled: true,
+      },
+      {
+        id: 'c2',
+        name: 'figma',
+        transport: 'http',
+        url: 'https://mcp.figma.com/mcp',
+        headerKeys: ['Authorization'],
+        headers: { Authorization: `Bearer ${HEADER_CANARY}` },
+        enabled: true,
+      },
+    ],
+    updatedAt: 1,
+  } as never);
+  await until(() => sent.some((r) => r.url.endsWith('/mcp-connections')), 5_000);
+
+  const req = sent.find((r) => r.url.endsWith('/mcp-connections'));
+  assert.ok(req, 'the push must have landed, or this test proves nothing');
+  const leaked = allStrings(req.body).filter((s) => s.includes(ENV_CANARY) || s.includes(HEADER_CANARY));
+  assert.deepEqual(leaked, [], 'a credential value left the bridge');
+  assert.deepEqual(allKeys(req.body).filter((k) => k === 'env' || k === 'headers'), []);
+  // Names survive, so the other side still knows what each server needs.
+  const body = req.body as { connections: { envKeys?: string[]; headerKeys?: string[] }[] };
+  assert.deepEqual(body.connections[0].envKeys, ['REGION', 'API_KEY']);
+  assert.deepEqual(body.connections[1].headerKeys, ['Authorization']);
+  // Stripped *before* signing: the signature covers exactly these bytes, so a
+  // storage server that keeps them as sent keeps them verifiable.
+  assert.equal((await verifyBlob('/mcp-connections', req.body, memorySigners())).ok, true);
+});
+
+test('a verified MCP row still carrying env values hands this machine names only', async (t) => {
+  // Validly signed with the value inside: a bridge that predates names-only sync,
+  // read back through a storage server that predates the route filter.
+  const signed = await signBlob(LEGACY_MCP_ROW, await signingKey(), memorySigners());
+  serveFetch(t, (url) => (url.endsWith('/mcp-connections') ? signed : []));
+  const sync = new StorageSyncClient('https://storage.test', () => CLERK_TOKEN, undefined, undefined, undefined, {
+    signers: memorySigners(),
+  });
+
+  const pulled = await sync.pullAll();
+
+  assert.ok(pulled && pulled !== THROTTLED);
+  assert.ok(pulled.mcpConnections, 'a row that verifies still applies');
+  assert.equal(JSON.stringify(pulled.mcpConnections).includes(ENV_CANARY), false);
+  assert.deepEqual(pulled.mcpConnections.connections[0].envKeys, ['API_KEY']);
+});
+
+test('a legacy MCP row with its values scrubbed is refused, so the push replaces it', async (t) => {
+  // The migration and storage's read filter take the value out from under the
+  // signature that covered it. That has to read as a refusal — null, the same as
+  // an empty cloud — which `syncNow` answers by pushing this machine's own
+  // names-only copy, signed, over the row.
+  const signed = await signBlob(LEGACY_MCP_ROW, await signingKey(), memorySigners());
+  const { env: _env, ...scrubbed } = signed.connections[0];
+  const served = { ...signed, connections: [{ ...scrubbed, envKeys: ['API_KEY'] }] };
+  serveFetch(t, (url) => (url.endsWith('/mcp-connections') ? served : []));
+  const rows: SyncLogEntry[] = [];
+  const sync = new StorageSyncClient(
+    'https://storage.test',
+    () => CLERK_TOKEN,
+    undefined,
+    undefined,
+    (row) => rows.push(row),
+    { signers: memorySigners() },
+  );
+
+  const pulled = await sync.pullAll();
+
+  assert.ok(pulled && pulled !== THROTTLED, 'one refused resource must not abort the pull');
+  assert.equal(pulled.mcpConnections, null);
+  assert.ok(
+    rows.some((r) => r.path === '/mcp-connections' && /signature forged — refused/.test(String(r.reason))),
+    'the refusal is logged where a user can see why the row stopped applying',
+  );
 });
 
 test('sync is inert without a token, so nothing leaves on a logged-out bridge', async (t) => {

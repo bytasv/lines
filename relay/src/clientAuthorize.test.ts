@@ -4,15 +4,20 @@ import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { after, describe, test } from 'node:test';
 import { WebSocket } from 'ws';
-import { authorizeClient } from './authorize.ts';
+import { authorizeClient, reauthorizeGuests, type ClientAuthorization } from './authorize.ts';
+import { HubRegistry, type Sink } from './mux.ts';
+import type { AttestedGrant } from './protocol.ts';
 
 /**
- * The /client gate for a browser that does not own the machine.
+ * The /client gate for a browser that does not own the machine, and the sweep
+ * that keeps re-asking while it stays connected.
  *
  * A regression here is one signed-in user reaching another's computer, so the
- * cases that matter are the ones where storage does *not* say a clean yes. Every
- * shape of non-answer must deny — an outage, a proxy's HTML error page, a body
- * that claims `allowed` without saying by whom.
+ * cases that matter are the ones where storage does *not* say a clean yes. None
+ * of them may come back as a grant — an outage, a proxy's HTML error page, a body
+ * that claims `allowed` without saying by whom. Which kind of not-a-yes each one
+ * is matters too: the gate refuses both, but the sweep closes a live guest's
+ * channel only on storage's no, never on its silence.
  *
  * The socket half below runs a real relay with auth ON to prove the gate refuses
  * an unauthenticated or junk-token client. It cannot prove the *allow* path: that
@@ -66,9 +71,10 @@ describe('authorizeClient', () => {
       }),
     );
     const grant = await ask(url);
-    assert.equal(grant?.hostUserId, 'host-user');
-    assert.equal(grant?.scope, 'machine');
-    assert.equal(grant?.caps?.prompt, true);
+    assert.ok(grant && grant !== 'unreachable', 'a grant');
+    assert.equal(grant.hostUserId, 'host-user');
+    assert.equal(grant.scope, 'machine');
+    assert.equal(grant.caps?.prompt, true);
   });
 
   test('a session grant carries exactly its session ids', async () => {
@@ -76,7 +82,8 @@ describe('authorizeClient', () => {
       json(200, { allowed: true, ownerId: 'host-user', scope: 'session', sessionIds: ['s1', 's2'] }),
     );
     const grant = await ask(url);
-    assert.deepEqual(grant?.sessionIds, ['s1', 's2']);
+    assert.ok(grant && grant !== 'unreachable', 'a grant');
+    assert.deepEqual(grant.sessionIds, ['s1', 's2']);
   });
 
   test('an explicit denial denies', async () => {
@@ -84,17 +91,22 @@ describe('authorizeClient', () => {
     assert.equal(await ask(url), null);
   });
 
-  test('a storage outage denies — an initial grant is not a link worth protecting', async () => {
+  // The next five are no answer at all, not a no. The gate refuses them just the
+  // same — an initial grant is not a link worth protecting — but the sweep must
+  // not read one as a revoke.
+  test('a storage outage is no answer', async () => {
     const { url } = await stubStorage(json(500, { error: 'boom' }));
-    assert.equal(await ask(url), null);
+    assert.equal(await ask(url), 'unreachable');
   });
 
-  test('a 401 from a wrong relay secret denies', async () => {
+  test('a 401 from a wrong relay secret is no answer either', async () => {
+    // The relay and storage disagree about the shared secret: a misconfiguration,
+    // which says nothing about this user.
     const { url } = await stubStorage(json(401, { error: 'unauthenticated' }));
-    assert.equal(await ask(url), null);
+    assert.equal(await ask(url), 'unreachable');
   });
 
-  test('an unreachable storage denies', async () => {
+  test('an unreachable storage is no answer', async () => {
     // Nothing is listening on this port; the fetch rejects.
     assert.equal(
       await authorizeClient(
@@ -102,17 +114,26 @@ describe('authorizeClient', () => {
         'd1',
         'guest-user',
       ),
-      null,
+      'unreachable',
     );
   });
 
-  test('a non-JSON body denies rather than throwing', async () => {
+  test('a storage that never answers is no answer', async () => {
+    // Holds the request open past the timeout: the hang, not the refusal.
+    const { url } = await stubStorage(() => {});
+    assert.equal(
+      await authorizeClient({ storageUrl: url, sharedSecret: 'shared', timeoutMs: 200 }, 'd1', 'guest-user'),
+      'unreachable',
+    );
+  });
+
+  test('a non-JSON body is no answer, and does not throw', async () => {
     // What a proxy in front of storage returns on a bad day.
     const { url } = await stubStorage((_req, res) => {
       res.writeHead(200, { 'content-type': 'text/html' });
       res.end('<html>502 Bad Gateway</html>');
     });
-    assert.equal(await ask(url), null);
+    assert.equal(await ask(url), 'unreachable');
   });
 
   test('allowed without an owner denies', async () => {
@@ -149,6 +170,77 @@ describe('authorizeClient', () => {
     );
     assert.equal(grant, null);
     assert.equal(stub.calls(), 0, 'storage must not even be asked');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The re-authorization sweep
+// ---------------------------------------------------------------------------
+
+const HELD: AttestedGrant = { hostUserId: 'host-user', scope: 'machine', caps: { prompt: true } };
+
+/** A hub with one live guest channel opened under HELD, and how its browser was closed. */
+function guestOnline() {
+  const hubs = new HubRegistry();
+  const hub = hubs.get('d1');
+  hub.ownerId = 'host-user';
+  hub.attachAgent({ send: () => {}, close: () => {} });
+  let closed: { code?: number; reason?: string } | null = null;
+  const browser: Sink = {
+    send: () => {},
+    close: (code, reason) => {
+      closed = { code, reason };
+    },
+  };
+  hub.openChannel('guest-user', 'ctrl', browser, null, HELD);
+  return { hubs, hub, closed: () => closed as { code?: number; reason?: string } | null };
+}
+
+/** One sweep, asking `url` the way the relay asks storage. */
+const sweepAgainst = (url: string, hubs: HubRegistry) =>
+  reauthorizeGuests(hubs, (deviceId, userId) =>
+    authorizeClient({ storageUrl: url, sharedSecret: 'shared', timeoutMs: 2000 }, deviceId, userId),
+  );
+
+describe('the re-authorization sweep', () => {
+  test('a storage outage leaves every guest connected', async () => {
+    // The bug this guards: an outage used to come back exactly like a denial, so
+    // a single blip closed every guest channel on the relay.
+    const down = await stubStorage(json(503, { error: 'unavailable' }));
+    const guest = guestOnline();
+    await sweepAgainst(down.url, guest.hubs);
+    await sweepAgainst('http://127.0.0.1:1', guest.hubs);
+    assert.equal(guest.hub.guestChannels().length, 1);
+    assert.equal(guest.closed(), null);
+  });
+
+  test('a lookup that throws counts as no answer too', async () => {
+    const guest = guestOnline();
+    const failing = (): Promise<ClientAuthorization> => Promise.reject(new Error('boom'));
+    await reauthorizeGuests(guest.hubs, failing);
+    assert.equal(guest.hub.guestChannels().length, 1);
+  });
+
+  test("storage's no closes the channel", async () => {
+    const { url } = await stubStorage(json(200, { allowed: false }));
+    const guest = guestOnline();
+    await sweepAgainst(url, guest.hubs);
+    assert.equal(guest.hub.guestChannels().length, 0);
+    // 1008, so the browser goes back through the gate instead of redialling into
+    // a channel the bridge would build from a grant that no longer exists.
+    assert.deepEqual(guest.closed(), { code: 1008, reason: 'grant changed' });
+  });
+
+  test('a narrowed grant closes the channel, and an unchanged one is left alone', async () => {
+    const same = await stubStorage(
+      json(200, { allowed: true, ownerId: 'host-user', scope: 'machine', caps: { prompt: true } }),
+    );
+    const narrowed = await stubStorage(json(200, { allowed: true, ownerId: 'host-user', scope: 'machine', caps: {} }));
+    const guest = guestOnline();
+    await sweepAgainst(same.url, guest.hubs);
+    assert.equal(guest.closed(), null, 'the same grant again changes nothing');
+    await sweepAgainst(narrowed.url, guest.hubs);
+    assert.equal(guest.closed()?.code, 1008);
   });
 });
 

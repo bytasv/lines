@@ -72,8 +72,11 @@ if (missing.length) {
  * has no business depending on the storage server, and this is six lines.
  */
 const publicBase = process.env.R2_RELEASE_PUBLIC_BASE_URL;
-if (!/^https?:\/\//.test(publicBase)) {
-  console.error('R2_PUBLIC_BASE_URL must be an absolute http(s) URL');
+// https only: this base is baked into the app as its update feed, and a plain
+// http feed lets anyone on the path between a user and the bucket rewrite the
+// update manifest the app trusts.
+if (!/^https:\/\//.test(publicBase)) {
+  console.error('R2_RELEASE_PUBLIC_BASE_URL must be an absolute https URL');
   process.exit(1);
 }
 if (/\.r2\.cloudflarestorage\.com/.test(publicBase)) {

@@ -36,8 +36,14 @@
  * agent-memory review gate. A client older than this cannot enroll a device key,
  * so a bridge in strict mode refuses it — which is the intended behaviour, and
  * the reason strict mode is off until every client has been updated.
+ *
+ * 6: host-issued guest grants (`mintGuestGrant`, `guestGrant`). A guest channel
+ * is end-to-end encrypted and admitted only on a token this bridge minted; a
+ * relay's word that someone is a guest is no longer enough. A guest client older
+ * than this sends plaintext and is refused, and the relay refuses to put a guest
+ * through to a bridge older than this, which would still take the relay's word.
  */
-export const APP_PROTOCOL_VERSION = 5;
+export const APP_PROTOCOL_VERSION = 6;
 
 /**
  * The handshake shapes the `e2ee*` messages below carry. Imported rather than
@@ -751,6 +757,72 @@ export interface StepDef extends StepContent {
    * particular version is that immutable row's `updatedAt`.
    */
   createdAt?: number;
+  /** Held back from running on this machine until reviewed; see {@link UntrustedMark}. */
+  untrusted?: UntrustedMark;
+}
+
+/**
+ * Why this machine will not run a synced workflow, step or recipe yet.
+ *
+ * - `unsigned` — pulled from cloud sync with no signature from any machine.
+ * - `forged` — signed, but the content no longer matches the signature.
+ * - `unknown-signer` — signed by a machine this one does not trust yet.
+ * - `foreign` — another user's published content, not reviewed here yet.
+ */
+export type UntrustedReason = 'unsigned' | 'forged' | 'unknown-signer' | 'foreign';
+
+/**
+ * A synced item held back from running until the owner has seen what it runs.
+ *
+ * Local to one bridge: stamped there after checking a pulled item's signature
+ * (or its owner), never pushed to storage, and never taken from the wire — a
+ * value arriving in a pull or a client message cannot clear one. Only a
+ * `trustSyncedItem` echoing `digest` does.
+ */
+export interface UntrustedMark {
+  reason: UntrustedReason;
+  /**
+   * Digest of the runnable content the mark is about. A confirmation has to echo
+   * it, so what becomes runnable is exactly what the user reviewed: content that
+   * changes in between carries a new digest and is reviewed again.
+   */
+  digest: string;
+  /** `unknown-signer` only: the key of the machine that signed it. */
+  signer?: string;
+  /**
+   * `signer`'s fingerprint, computed by the bridge from the key — never stored or
+   * taken from the wire — and rendered exactly as every machine renders its own
+   * (see {@link SyncSigningInfo}), so the two can be compared by eye.
+   */
+  signerFingerprint?: string;
+  /**
+   * `false` when the mark records where the item came from without holding it
+   * back: an `unknown-signer` item whose machine this account trusts, or — under
+   * `LINES_E2EE_STRICT=0` — an unsigned or forged one, which still runs but is
+   * never signed as this machine's own. Absent = held back. Recomputed by the
+   * bridge on every load and pull, never taken from a client.
+   */
+  held?: false;
+}
+
+/** Another machine whose key this account trusts to sign its workflows, steps and recipes. */
+export interface TrustedMachine {
+  key: string;
+  /** The fingerprint the user compared before trusting it — see {@link SyncSigningInfo}. */
+  fingerprint: string;
+  trustedAt: number;
+}
+
+/**
+ * The machine-trust side of signed sync, for Settings → Sync. `fingerprint` is
+ * this machine's own signing key, shown so the owner can compare it with the
+ * fingerprint another machine of theirs asks them to trust: matching
+ * fingerprints are what make a key safe to trust, nothing else. Null until this
+ * machine has signed or checked anything.
+ */
+export interface SyncSigningInfo {
+  fingerprint: string | null;
+  trusted: TrustedMachine[];
 }
 
 /** A consumer's pinned reference to another author's published step version. */
@@ -804,6 +876,8 @@ export interface WorkflowDef {
   ownerId?: string;
   /** Display label for the owner (name→email), cosmetic, supplied by the client. */
   ownerName?: string;
+  /** Held back from running on this machine until reviewed; see {@link UntrustedMark}. */
+  untrusted?: UntrustedMark;
 }
 
 // ---------------------------------------------------------------------------
@@ -853,6 +927,8 @@ export interface RecipeDef extends RecipeContent {
   version: number;
   published: boolean;
   updatedAt?: number;
+  /** Own recipes only — held back until reviewed; see {@link UntrustedMark}. */
+  untrusted?: UntrustedMark;
 }
 
 export const RECIPE_IMAGE_MAX_COUNT = 4;
@@ -863,6 +939,13 @@ export const RECIPE_TAG_MAX = 6;
 export const RECIPE_TAG_MAX_LEN = 24;
 /** Recipes combinable into one run — also the post-expansion ceiling on a bundle. */
 export const RECIPE_BUNDLE_MAX = 8;
+/**
+ * The only modes a run containing someone else's recipe may use. Its prompt was
+ * written by a stranger, so every tool call it leads to is still asked about
+ * (or, in plan mode, nothing is written at all) — never `auto`, `acceptEdits` or
+ * `bypassPermissions`, whatever the runner's own default is.
+ */
+export const FOREIGN_RECIPE_MODES: readonly PermissionMode[] = ['plan', 'default'];
 
 /**
  * Canonical tag form: lowercase, trimmed, inner whitespace to '-', anything
@@ -1217,6 +1300,13 @@ export interface SessionMeta {
    *  resumed from the composer or the next workflow step starts. */
   routingPaused?: boolean;
   permissionMode: PermissionMode;
+  /**
+   * The most an approved plan may resume this session in. Set when the session
+   * runs someone else's recipe, whose modes are only {@link FOREIGN_RECIPE_MODES}:
+   * approving its plan then resumes in `default` rather than `auto`. Written by
+   * the bridge that started the run and never taken from a synced row.
+   */
+  permissionCeiling?: 'default';
   status: SessionStatus;
   createdAt: number;
   /** True until the name is either auto-generated from the first prompt or renamed by the user. */
@@ -1508,6 +1598,15 @@ export interface PermissionRequestData {
    * `plan-readonly` rejection: what made the call count as a write.
    */
   guardReason?: string;
+  /**
+   * The exact allowlist entry "Always allow" saves for this call, computed by
+   * the bridge when the card is raised and shown on the button, so the user
+   * approves the entry itself rather than whatever a rule derives after the
+   * click. `null`: this call can't be allowlisted — no entry would cover it
+   * without also covering calls the user never saw. Absent: a card written
+   * before this field existed.
+   */
+  alwaysAllowEntry?: GuardAllowEntry | null;
   /**
    * Plan mode only: a Bash call the read-only classifier could not confirm as a
    * read (and did not recognise as a write), so it reached the user instead of
@@ -2275,6 +2374,9 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   e2eeConfirm: { needs: 'connection' },
   e2eeEnroll: { needs: 'connection' },
   e2eeData: { needs: 'connection' },
+  // The same kind: it is the proof a guest channel is admitted on, consumed by
+  // the channel gate before anything is authorized.
+  guestGrant: { needs: 'connection' },
 
   // --- running a session
   prompt: { needs: 'session', cap: 'prompt' },
@@ -2382,6 +2484,13 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // Creates sessions *and* workflows from the owner's library — wider than
   // createSession, so no preset reaches it.
   runRecipe: { needs: 'owner' },
+  // Makes synced content runnable on this machine — and, for a signed item,
+  // trusts every later change from the machine that signed it. The owner's call.
+  trustSyncedItem: { needs: 'owner' },
+  // Trusting a machine key runs everything it signs, now and later, without a
+  // review — and revoking one is the owner's decision just the same.
+  trustSigner: { needs: 'owner' },
+  untrustSigner: { needs: 'owner' },
   pickFolder: { needs: 'owner' },
   openProject: { needs: 'owner' },
   closeProject: { needs: 'owner' },
@@ -2420,6 +2529,11 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // machine. Owner only, permanently.
   authorizeMcpConnection: { needs: 'owner' },
   installUpdate: { needs: 'owner' },
+  // Who may reach this machine at all. Owner only, permanently: a guest who
+  // could mint or widen a grant could hand out the host's computer.
+  mintGuestGrant: { needs: 'owner' },
+  updateGuestGrant: { needs: 'owner' },
+  revokeGuestGrant: { needs: 'owner' },
 };
 
 /**
@@ -2613,13 +2727,29 @@ export type ClientMessage =
   | { type: 'saveWorkflow'; workflow: WorkflowDef; ownerName?: string }
   | { type: 'deleteWorkflow'; workflowId: string }
   /** Save or update a step. Content changes bump the version; `published` shares it instance-wide. Server stamps ownerId. */
-  | { type: 'saveStep'; step: StepContent; stepId?: string; published: boolean; ownerName?: string }
-  /** Remove a step from the library (existing pins keep resolving the immutable versions). */
+  /**
+   * `step.untrusted` is honoured in one direction only: a copy of content this
+   * machine holds back says so, and stays held back until it is reviewed. It can
+   * never clear a mark.
+   */
+  | { type: 'saveStep'; step: StepContent & { untrusted?: UntrustedMark }; stepId?: string; published: boolean; ownerName?: string }
+  /** Remove a step from the library. The owner's own pins keep resolving the immutable versions; another user's stop, as unpublished versions are not served to them. */
   | { type: 'deleteStep'; stepId: string }
   /** Request the full version history of a step (for preview + re-pin). Keys are echoed back. */
   | { type: 'stepVersions'; ownerId: string; stepId: string }
   /** Save or update a recipe. Content changes bump the version; server stamps ownerId and normalizes tags. */
-  | { type: 'saveRecipe'; recipe: RecipeContent; recipeId?: string; published: boolean; ownerName?: string }
+  /**
+   * `recipe.untrusted` as for `saveStep`: a copy of someone else's recipe, or of
+   * one held back here, arrives held back until reviewed — "Duplicate to my
+   * recipes" is not a way past the confirmation their runs require.
+   */
+  | {
+      type: 'saveRecipe';
+      recipe: RecipeContent & { untrusted?: UntrustedMark };
+      recipeId?: string;
+      published: boolean;
+      ownerName?: string;
+    }
   /** Remove a recipe from the library — an unpublish, mirroring deleteStep; rows stay. */
   | { type: 'deleteRecipe'; recipeId: string }
   /** Request the full version history of a recipe. Keys are echoed back. */
@@ -2665,7 +2795,37 @@ export type ClientMessage =
       autoAdvance?: boolean;
       /** Single-leaf only — mutually exclusive with a bundle, which already is a workflow. */
       workflowId?: string;
+      /**
+       * Required when the run includes someone else's recipe: the prompt of every
+       * recipe that will run, in run order, exactly as the run modal showed it.
+       * The bridge compares it with its own expansion and refuses on any
+       * difference, so a recipe that changed after the user read it does not run.
+       */
+      confirmedPrompts?: string[];
     }
+  /**
+   * The owner has seen this synced item's full content and allows it to run
+   * here. `digest` echoes the item's `untrusted.digest`; a stale one is refused,
+   * so content that changed after the review is not what gets trusted.
+   */
+  | {
+      type: 'trustSyncedItem';
+      kind: 'workflow' | 'step' | 'recipe';
+      ownerId: string;
+      id: string;
+      /** Steps and recipes: the version that was reviewed. */
+      version?: number;
+      digest: string;
+    }
+  /**
+   * Trust another machine's signing key for this account: everything it signs
+   * runs here without a review, from now on. `fingerprint` is the one the user
+   * compared with that machine's own Settings → Sync; the bridge refuses unless
+   * it is this key's, so what gets trusted is what was compared.
+   */
+  | { type: 'trustSigner'; key: string; fingerprint: string }
+  /** Stop trusting a machine key; whatever only it vouched for is held back again. */
+  | { type: 'untrustSigner'; key: string }
   /** Live `/context` breakdown for one session (hover-triggered). Echoed back. */
   | { type: 'contextBreakdown'; sessionId: string }
   /** Compact this session's context now (manual compaction). */
@@ -2755,6 +2915,32 @@ export type ClientMessage =
   | { type: 'e2eeConfirm'; confirm: HandshakeConfirm }
   | { type: 'e2eeEnroll'; clientKey: string; proof: string }
   | { type: 'e2eeData'; n: number; d: string }
+  /**
+   * A guest's admission ticket: the tokens from their invite links' fragments —
+   * one per share the host gave them on this machine — sent as the first sealed
+   * frame of a guest channel. The bridge minted them (see `mintGuestGrant`) and
+   * is the only thing that can redeem them, so a relay that merely *says*
+   * someone is a guest gets nowhere. Consumed by the channel gate; it never
+   * reaches the message switch as an ordinary message.
+   */
+  | { type: 'guestGrant'; tokens: string[] }
+  /**
+   * Host-issued guest grants, minted and managed over the owner's own
+   * (encrypted) link. `mintGuestGrant` answers `guestGrantMinted` to this socket
+   * only — the token is the invitee's credential and travels in the invite
+   * link's fragment, never through storage. `updateGuestGrant` moves a grant's
+   * capability ceiling when the owner changes its preset; `revokeGuestGrant`
+   * ends it here, whatever the relay or storage later say.
+   */
+  | {
+      type: 'mintGuestGrant';
+      requestId: string;
+      scope: 'machine' | 'session';
+      sessionId?: string;
+      preset: SharePreset;
+    }
+  | { type: 'updateGuestGrant'; guestUserId: string; sessionId?: string | null; preset: SharePreset }
+  | { type: 'revokeGuestGrant'; guestUserId?: string; sessionId?: string | null; grantId?: string }
   /**
    * MCP connection edits. Intent messages for the same reason the guard's are:
    * the bridge holds header values the client has never seen, so a whole-list
@@ -3237,10 +3423,11 @@ export type McpTransport = 'http' | 'sse' | 'stdio';
  * A third-party MCP server the user added from Settings, spliced into every
  * session's query options.
  *
- * `headerKeys` carries header *names* only. Values are credentials (a personal
- * access token is exactly what a header on an HTTP MCP server is for), so they
- * live in a local-only file on the bridge and never reach this shape — which is
- * the shape that is synced to storage and broadcast to browsers. The UI writes a
+ * `headerKeys` and `envKeys` carry *names* only. Values are credentials (a
+ * personal access token is exactly what a header on an HTTP MCP server is for,
+ * and an API key exactly what a stdio server's environment is for), so they live
+ * in local-only files on the bridge and never reach this shape — which is the
+ * shape that is synced to storage and broadcast to browsers. The UI writes a
  * value and never reads one back, like a password field.
  */
 export interface McpConnection {
@@ -3253,7 +3440,16 @@ export interface McpConnection {
   /** stdio only. */
   command?: string;
   args?: string[];
-  env?: Record<string, string>;
+  /** Names of environment variables whose values are held locally; stdio only. */
+  envKeys?: string[];
+  /**
+   * Which `envKeys` *this* machine holds a value for — names, so a form can say
+   * "saved" without ever being sent the value. Set by the bridge only on what it
+   * sends its own browsers (hello, the `mcpConnections` broadcast). It is about
+   * one machine, so it is never in the synced blob, and it is dropped on the way
+   * in: no client or remote row can claim a value this machine does not hold.
+   */
+  envValuesHeld?: string[];
   /** Names of headers whose values are held locally; http/sse only. */
   headerKeys?: string[];
   /** Per-server tool-call timeout in ms. */
@@ -3262,11 +3458,15 @@ export interface McpConnection {
   enabled: boolean;
 }
 
-/** Header values for one connection, keyed by header name. Never synced, never broadcast. */
+/**
+ * Credential values per connection id, keyed by name: header values in one
+ * local file, stdio env values in another. Never synced, never broadcast.
+ */
 export type McpConnectionSecrets = Record<string, Record<string, string>>;
 
-/** The synced form. `updatedAt` only orders writes at the storage row —
- *  divergence detection is a set difference, never a timestamp comparison. */
+/** The synced form — names only, like every other place a connection travels.
+ *  `updatedAt` only orders writes at the storage row; divergence detection is a
+ *  set difference, never a timestamp comparison. */
 export interface McpConnectionsBlob {
   connections: McpConnection[];
   updatedAt: number;
@@ -3310,13 +3510,31 @@ const MCP_NAME_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 const MCP_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MCP_HEADER_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MCP_HEADERS_MAX = 10;
+/** Anything but `=` and NUL, which no platform allows in a variable name. */
+const MCP_ENV_NAME_RE = /^[^=\0]{1,128}$/;
 const MCP_TIMEOUT_MIN = 1000;
 const MCP_TIMEOUT_MAX = 600_000;
 
 /** Cap on the stored list, shared by the add gate and the storage route. */
 export const MCP_CONNECTIONS_MAX = 50;
 
-/** Unvalidated connection as it arrives from a form, disk, or a storage row. */
+/**
+ * Whether a stdio env var name is one `normalizeConnection` keeps. It skips any
+ * other silently (a row an older build accepted must not be dropped for one), so
+ * a form checks first and says why, instead of losing the name on save.
+ */
+export function isMcpEnvName(name: string): boolean {
+  return MCP_ENV_NAME_RE.test(name);
+}
+
+/**
+ * Unvalidated connection as it arrives from a form, disk, or a storage row.
+ *
+ * `env` is the one field that may carry values: a stdio connection's
+ * environment, on its way *into* the bridge from a client, or from a file or row
+ * written before values stopped travelling. `normalizeConnection` keeps only its
+ * names; the bridge reads the values off the raw input and stores them locally.
+ */
 export type McpConnectionInput = {
   id?: string;
   name?: unknown;
@@ -3325,6 +3543,7 @@ export type McpConnectionInput = {
   command?: unknown;
   args?: unknown;
   env?: unknown;
+  envKeys?: unknown;
   headerKeys?: unknown;
   timeout?: unknown;
   enabled?: unknown;
@@ -3384,8 +3603,19 @@ export function normalizeConnection(
       const args = src.args.filter((a): a is string => typeof a === 'string');
       if (args.length) connection.args = args;
     }
-    const env = stringMap(src.env);
-    if (env) connection.env = env;
+    // Names only, whatever arrived: declared `envKeys`, then the keys of an
+    // `env` map. Dropping the values *here* is what keeps them off every shape
+    // that travels — the synced blob, a broadcast, a staged review — however the
+    // row got in. An odd name is skipped rather than refused, so a row an older
+    // build accepted is never dropped wholesale for it.
+    const envKeys = new Set<string>();
+    if (Array.isArray(src.envKeys)) {
+      for (const raw of src.envKeys) {
+        if (typeof raw === 'string' && MCP_ENV_NAME_RE.test(raw)) envKeys.add(raw);
+      }
+    }
+    for (const name of Object.keys(stringMap(src.env, MCP_ENV_NAME_RE) ?? {})) envKeys.add(name);
+    if (envKeys.size) connection.envKeys = [...envKeys];
     return { connection };
   }
 
@@ -3421,6 +3651,11 @@ export function normalizeConnection(
  * detection uses. Ids are minted once and travel with the row, so an edited
  * connection is a remove plus an add in the diff, exactly as a re-typed guard
  * entry is.
+ *
+ * Credentials compare by name, which is all this shape holds: the values stay in
+ * each machine's own files, so a connection that has them here and the same row
+ * pulled from a machine without them are one connection, not an edit — anything
+ * else would re-open the review on every pull.
  */
 export function sameConnection(a: McpConnection, b: McpConnection): boolean {
   const key = (c: McpConnection) =>
@@ -3431,7 +3666,7 @@ export function sameConnection(a: McpConnection, b: McpConnection): boolean {
       c.url ?? '',
       c.command ?? '',
       c.args ?? [],
-      Object.entries(c.env ?? {}).sort(),
+      [...(c.envKeys ?? [])].sort(),
       [...(c.headerKeys ?? [])].sort(),
       c.timeout ?? 0,
       c.enabled,
@@ -3575,6 +3810,8 @@ export type ServerMessage =
       memoryReview?: MemoryReview | null;
       mcpConnections?: McpConnection[];
       mcpConnectionsReview?: McpConnectionsReview | null;
+      /** Owner only: this machine's signing key fingerprint and the machines it trusts. */
+      syncSigning?: SyncSigningInfo;
       /**
        * Whether this particular link reaches the bridge from the machine the
        * bridge runs on. Only such a link may drive a host-side native dialog
@@ -3625,10 +3862,25 @@ export type ServerMessage =
   | { type: 'e2eeError'; reason: string }
   /** An encrypted `ServerMessage`. Same envelope as the client's `e2eeData`. */
   | { type: 'e2eeData'; n: number; d: string }
+  /**
+   * Answer to `mintGuestGrant`, to the asking socket only. `token` goes into the
+   * invite link's fragment with `bridgeKey`, which is how the invitee's browser
+   * knows which machine key to hold the channel to.
+   */
+  | {
+      type: 'guestGrantMinted';
+      requestId: string;
+      grantId?: string;
+      token?: string;
+      bridgeKey?: string;
+      error?: string;
+    }
   /** The whole MCP connection list after any change. Header *values* are never in it. */
   | { type: 'mcpConnections'; connections: McpConnection[] }
   /** A remote connection list awaiting the user's accept/reject; null once resolved. */
   | { type: 'mcpConnectionsReview'; review: McpConnectionsReview | null }
+  /** The machine-trust state changed (or this machine's signing key came into being). */
+  | { type: 'syncSigning'; info: SyncSigningInfo }
   /**
    * How each MCP server is doing in one session. Session-bearing so the scoped
    * fan-out delivers it to that session's viewers; `servers` is last-known when

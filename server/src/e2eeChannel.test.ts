@@ -8,7 +8,9 @@ import {
   type Identity,
   type ServerMessage,
 } from '@lines/shared';
+import { capsForPreset } from '@lines/shared';
 import { guardRelayChannel, type ChannelPolicy } from './e2eeChannel.ts';
+import type { GuestGrantRecord } from './guestGrants.ts';
 import type { BrowserLink } from './userContext.ts';
 
 /**
@@ -59,12 +61,27 @@ class FakeChannel implements BrowserLink {
   }
 }
 
-/** A machine with exactly these devices enrolled, and nothing on disk. */
+/** The one grant the test machine minted, redeemable with `GOOD_TOKEN` by `u-guest`. */
+const GOOD_TOKEN = 'the-token-from-the-invite-link';
+const GRANT: GuestGrantRecord = {
+  id: 'g1',
+  tokenHash: 'not-under-test',
+  hostUserId: 'u-host',
+  scope: 'session',
+  sessionIds: ['s1'],
+  caps: capsForPreset('collaborator', 'session'),
+  guestUserId: 'u-guest',
+  createdAt: 0,
+  claimBy: 0,
+};
+
+/** A machine with exactly these devices enrolled, one guest grant, and nothing on disk. */
 function policyFor(enrolled: string[]): ChannelPolicy {
   return {
     isEnrolled: (key) => enrolled.includes(key),
     enroll: async () => ({ error: 'not under test' }),
     touch: () => {},
+    redeemGuest: (token, userId) => (token === GOOD_TOKEN && userId === 'u-guest' ? GRANT : null),
   };
 }
 
@@ -94,12 +111,25 @@ async function bridgeAndClient(): Promise<{ bridge: Identity; client: Identity }
   return { bridge: await generateIdentity(true), client: await generateIdentity(true) };
 }
 
+/** Run the browser's half of a handshake against the machine's real key; returns the session. */
+async function handshake(raw: FakeChannel, bridge: Identity, client: Identity) {
+  const initiator = await startHandshake(client, bridge.publicKey);
+  raw.deliver({ type: 'e2eeHello', offer: initiator.offer });
+  const accept = (await until(() => raw.last('e2eeAccept'), 'e2eeAccept')) as {
+    accept: Parameters<typeof initiator.finish>[0];
+  };
+  const { session, confirm } = await initiator.finish(accept.accept);
+  raw.deliver({ type: 'e2eeConfirm', confirm });
+  await until(() => raw.last('e2eeReady'), 'e2eeReady');
+  return session;
+}
+
 describe('an adversarial relay', () => {
   test('cannot open an owner channel without a key', async () => {
     const { bridge, client } = await bridgeAndClient();
     const raw = new FakeChannel();
     let ready = false;
-    guardRelayChannel(raw, bridge, false, () => { ready = true; }, policyFor([client.publicKey]));
+    guardRelayChannel(raw, bridge, null, () => { ready = true; }, policyFor([client.publicKey]));
 
     // The forged `open` already happened at the relay: this is the first app
     // frame arriving on a channel the relay claims belongs to the owner.
@@ -116,7 +146,7 @@ describe('an adversarial relay', () => {
     const stranger = await generateIdentity(true);
     const raw = new FakeChannel();
     let ready = false;
-    guardRelayChannel(raw, bridge, false, () => { ready = true; }, policyFor([]));
+    guardRelayChannel(raw, bridge, null, () => { ready = true; }, policyFor([]));
 
     const { offer } = await startHandshake(stranger, bridge.publicKey);
     raw.deliver({ type: 'e2eeHello', offer });
@@ -146,7 +176,7 @@ describe('an adversarial relay', () => {
     guardRelayChannel(
       raw,
       bridge,
-      false,
+      null,
       (secured, key) => {
         link = secured;
         peerKey = key;
@@ -188,7 +218,7 @@ describe('an adversarial relay', () => {
     const { bridge, client } = await bridgeAndClient();
     const raw = new FakeChannel();
     let link: BrowserLink | null = null;
-    guardRelayChannel(raw, bridge, false, (secured) => { link = secured; }, policyFor([client.publicKey]));
+    guardRelayChannel(raw, bridge, null, (secured) => { link = secured; }, policyFor([client.publicKey]));
 
     const initiator = await startHandshake(client, bridge.publicKey);
     raw.deliver({ type: 'e2eeHello', offer: initiator.offer });
@@ -219,7 +249,7 @@ describe('an adversarial relay', () => {
     const { bridge } = await bridgeAndClient();
     const raw = new FakeChannel();
     let ready = false;
-    guardRelayChannel(raw, bridge, false, () => { ready = true; }, policyFor([]));
+    guardRelayChannel(raw, bridge, null, () => { ready = true; }, policyFor([]));
     await settle();
     assert.equal(ready, false, 'an owner channel is never handed over before the handshake');
 
@@ -234,31 +264,149 @@ describe('an adversarial relay', () => {
     );
   });
 
-  test('a guest channel is handed over at once, with no key', async () => {
-    // The bridge speaks first: `handleConnection` sends `hello` as soon as it
-    // has a channel, and the browser waits for it. A guest has no key to offer,
-    // so anything but a handover in the constructor deadlocks both sides.
+  test('a guest channel is never handed over on the relay’s word alone', async () => {
+    // The relay labelled this channel a guest's. Before host-issued grants that
+    // label was the whole admission: the bridge handed the channel over at once
+    // and served whatever grant the relay attached.
     const { bridge } = await bridgeAndClient();
     const raw = new FakeChannel();
-    let peerKey: string | null | undefined;
-    guardRelayChannel(raw, bridge, true, (_link, key) => { peerKey = key; }, policyFor([]));
-    assert.equal(peerKey, null, 'handed over synchronously, with no key to claim');
-
-    raw.deliver({ type: 'ping' });
+    let ready = false;
+    guardRelayChannel(raw, bridge, { userId: 'u-guest' }, () => { ready = true; }, policyFor([]));
     await settle();
-    assert.equal(raw.closedWith, null, 'plaintext is still how a guest talks');
+    assert.equal(ready, false, 'nothing is handed over before the guest authenticates');
+
+    raw.deliver({ type: 'prompt', sessionId: 's1', text: 'rm -rf ~' } as ClientMessage);
+    await until(() => raw.closedWith ?? undefined, 'the channel to be closed');
+    assert.equal(ready, false);
+    assert.equal(raw.closedWith?.code, 1008);
+    const reason = (raw.last('e2eeError') as { reason: string }).reason;
+    assert.match(reason, /invite link/, 'a guest is told to use the link');
+    assert.doesNotMatch(reason, /end-to-end encrypted channel/, 'not the owner enrollment gate');
   });
 
-  test('a frame that arrives before the bridge listens is kept, not dropped', async () => {
-    const { bridge } = await bridgeAndClient();
+  test('a guest handshakes with a key this machine never enrolled, then must present the grant', async () => {
+    const { bridge, client } = await bridgeAndClient();
+    const raw = new FakeChannel();
+    let admitted: { link: BrowserLink; peerKey: string; grants: GuestGrantRecord[] } | null = null;
+    guardRelayChannel(
+      raw,
+      bridge,
+      { userId: 'u-guest' },
+      (link, peerKey, grants) => { admitted = { link, peerKey, grants }; },
+      policyFor([]),
+    );
+
+    const session = await handshake(raw, bridge, client);
+    assert.equal(admitted, null, 'a handshake alone opens nothing for a guest');
+
+    raw.deliver({ type: 'e2eeData', ...(await session.seal(JSON.stringify({ type: 'guestGrant', tokens: [GOOD_TOKEN] }))) });
+    const got = await until(() => admitted ?? undefined, 'the guest to be admitted');
+    assert.deepEqual(got.grants, [GRANT], 'admitted on the grant this machine minted');
+    assert.equal(got.peerKey, client.publicKey);
+
+    // The grant frame itself is consumed; what follows reaches the bridge.
+    const received: string[] = [];
+    got.link.on('message', ((frame: unknown) => received.push(String(frame))) as never);
+    raw.deliver({ type: 'e2eeData', ...(await session.seal(JSON.stringify({ type: 'ping' }))) });
+    await until(() => (received.length ? received : undefined), 'the next frame');
+    assert.deepEqual(received, [JSON.stringify({ type: 'ping' })]);
+  });
+
+  test('a token this machine did not mint ends the channel', async () => {
+    const { bridge, client } = await bridgeAndClient();
+    const raw = new FakeChannel();
+    let ready = false;
+    guardRelayChannel(raw, bridge, { userId: 'u-guest' }, () => { ready = true; }, policyFor([]));
+    const session = await handshake(raw, bridge, client);
+    raw.deliver({ type: 'e2eeData', ...(await session.seal(JSON.stringify({ type: 'guestGrant', tokens: ['forged'] }))) });
+    await until(() => raw.closedWith ?? undefined, 'the channel to be closed');
+    assert.equal(ready, false);
+    assert.match((raw.last('e2eeError') as { reason: string }).reason, /not valid on this machine/);
+  });
+
+  test('the right token for someone else is refused too', async () => {
+    const { bridge, client } = await bridgeAndClient();
+    const raw = new FakeChannel();
+    let ready = false;
+    guardRelayChannel(raw, bridge, { userId: 'u-someone-else' }, () => { ready = true; }, policyFor([]));
+    const session = await handshake(raw, bridge, client);
+    raw.deliver({ type: 'e2eeData', ...(await session.seal(JSON.stringify({ type: 'guestGrant', tokens: [GOOD_TOKEN] }))) });
+    await until(() => raw.closedWith ?? undefined, 'the channel to be closed');
+    assert.equal(ready, false);
+  });
+
+  test('any sealed frame before the grant ends the channel', async () => {
+    const { bridge, client } = await bridgeAndClient();
+    const raw = new FakeChannel();
+    let ready = false;
+    guardRelayChannel(raw, bridge, { userId: 'u-guest' }, () => { ready = true; }, policyFor([]));
+    const session = await handshake(raw, bridge, client);
+    raw.deliver({ type: 'e2eeData', ...(await session.seal(JSON.stringify({ type: 'ping' }))) });
+    await until(() => raw.closedWith ?? undefined, 'the channel to be closed');
+    assert.equal(ready, false);
+  });
+
+  test('a guest channel cannot enrol a device', async () => {
+    const { bridge, client } = await bridgeAndClient();
+    const raw = new FakeChannel();
+    let enrolCalls = 0;
+    const policy = { ...policyFor([]), enroll: async () => (enrolCalls++, { proof: 'x' }) };
+    guardRelayChannel(raw, bridge, { userId: 'u-guest' }, () => {}, policy);
+    raw.deliver({ type: 'e2eeEnroll', clientKey: client.publicKey, proof: 'whatever' });
+    await until(() => raw.closedWith ?? undefined, 'the channel to be closed');
+    assert.equal(enrolCalls, 0, 'never even asked');
+  });
+
+  test('frames after the grant that arrive before the bridge listens are kept, in order', async () => {
+    const { bridge, client } = await bridgeAndClient();
     const raw = new FakeChannel();
     let link: BrowserLink | undefined;
-    guardRelayChannel(raw, bridge, true, (secured) => { link = secured; }, policyFor([]));
-
-    raw.deliver({ type: 'ping' });
+    guardRelayChannel(raw, bridge, { userId: 'u-guest' }, (secured) => { link = secured; }, policyFor([]));
+    const session = await handshake(raw, bridge, client);
+    // Sealed back to back, as the browser writes them: the grant, then traffic.
+    const frames = await Promise.all([
+      session.seal(JSON.stringify({ type: 'guestGrant', tokens: [GOOD_TOKEN] })),
+      session.seal(JSON.stringify({ type: 'ping' })),
+      session.seal(JSON.stringify({ type: 'presence', sessionId: 's1', viewing: true, focused: true })),
+    ]);
+    for (const f of frames) raw.deliver({ type: 'e2eeData', ...f });
+    await until(() => link, 'the guest to be admitted');
     await settle();
     const received: string[] = [];
     link!.on('message', (frame) => received.push(String(frame)));
-    assert.deepEqual(received.map((f) => JSON.parse(f).type), ['ping']);
+    assert.deepEqual(received.map((f) => JSON.parse(f).type), ['ping', 'presence']);
+  });
+
+  test('a token that no longer redeems is skipped, not fatal, when another still does', async () => {
+    const { bridge, client } = await bridgeAndClient();
+    const raw = new FakeChannel();
+    let grants: GuestGrantRecord[] | null = null;
+    guardRelayChannel(raw, bridge, { userId: 'u-guest' }, (_l, _k, g) => { grants = g; }, policyFor([]));
+    const session = await handshake(raw, bridge, client);
+    raw.deliver({
+      type: 'e2eeData',
+      ...(await session.seal(JSON.stringify({ type: 'guestGrant', tokens: ['revoked-share', GOOD_TOKEN] }))),
+    });
+    assert.deepEqual(await until(() => grants ?? undefined, 'the guest to be admitted'), [GRANT]);
+  });
+
+  test('a second handshake cannot take over an admitted guest channel', async () => {
+    // A guest channel takes any client key, so without this the relay could run
+    // its own handshake under the channel the bridge already holds and speak as
+    // the admitted guest, with the guest's grant and none of their keys.
+    const { bridge, client } = await bridgeAndClient();
+    const relay = await generateIdentity(true);
+    const raw = new FakeChannel();
+    let link: BrowserLink | undefined;
+    guardRelayChannel(raw, bridge, { userId: 'u-guest' }, (secured) => { link = secured; }, policyFor([]));
+    const session = await handshake(raw, bridge, client);
+    raw.deliver({ type: 'e2eeData', ...(await session.seal(JSON.stringify({ type: 'guestGrant', tokens: [GOOD_TOKEN] }))) });
+    await until(() => link, 'the guest to be admitted');
+
+    const hijack = await startHandshake(relay, bridge.publicKey);
+    raw.deliver({ type: 'e2eeHello', offer: hijack.offer });
+    await until(() => raw.closedWith ?? undefined, 'the channel to be closed');
+    assert.equal(raw.closedWith?.code, 1008);
+    assert.match((raw.last('e2eeError') as { reason: string }).reason, /second handshake/);
   });
 });

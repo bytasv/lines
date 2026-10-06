@@ -94,6 +94,25 @@ interface Channel {
   grant?: AttestedGrant;
 }
 
+/**
+ * Whether a frame is the browser's token refresh, `{type:'auth', token}` — the
+ * one app message that carries a Clerk token.
+ *
+ * Parsed in full rather than matched as text, because the bridge parses it in
+ * full: a reordered key, a space or a `\u0061uth` escape slips past a text match
+ * yet still reads as `auth` on the other side. Anything unparseable is not one
+ * and is forwarded exactly as before — the relay is not a validator.
+ */
+function isTokenRefresh(payload: string): boolean {
+  let msg: unknown;
+  try {
+    msg = JSON.parse(payload);
+  } catch {
+    return false;
+  }
+  return typeof msg === 'object' && msg !== null && (msg as { type?: unknown }).type === 'auth';
+}
+
 export class DeviceHub {
   /**
    * Clerk userId this device belongs to, learned when its bridge authenticates.
@@ -122,7 +141,14 @@ export class DeviceHub {
   private agentWaiters = new Set<() => void>();
   private channels = new Map<ChannelId, Channel>();
   private nextId = 0;
-  /** Last Clerk token seen per user, re-pushed when a bridge (re)attaches. */
+  /**
+   * Last Clerk token seen per user, re-pushed when a bridge (re)attaches.
+   *
+   * The owner's only. A bridge needs its owner's token for storage sync; a
+   * guest's would be a live credential for the guest's own account, handed to a
+   * machine someone else controls and which has no use for it. A browser's
+   * refresh mid-connection rides inside its channel, so it never lands here.
+   */
   private tokens = new Map<string, string>();
 
   constructor(
@@ -253,10 +279,13 @@ export class DeviceHub {
       previous.terminate?.();
     }
 
-    // Re-push tokens, which the new bridge needs for storage sync before any
-    // browser has redialled.
+    // Re-push the owner's token, which the new bridge needs for storage sync
+    // before any browser has redialled. Filtered even though a guest's is never
+    // kept: `ownerId` is the claim this bridge has just proved, and a token held
+    // for anyone else — whoever owned this device id before it was re-registered,
+    // and may be a guest on it now — is not this bridge's to have.
     for (const [userId, token] of this.tokens) {
-      sink.send(encode({ t: 'token', userId, token }));
+      if (userId === this.ownerId) sink.send(encode({ t: 'token', userId, token }));
     }
     this.broadcastToClients({ type: 'deviceOnline' });
     // Last, so anyone released here sees a hub that is fully attached. The
@@ -288,9 +317,16 @@ export class DeviceHub {
     const id = `c${++this.nextId}`;
     this.channels.set(id, { id, userId, cls, sink, grant });
     this.record('channel-open', { ch: id, userId, guest: !!grant, agentOnline: this.agent !== null });
-    if (token) this.tokens.set(userId, token);
+    // A guest's token stops here, neither forwarded nor kept for a re-push. The
+    // relay has verified it, which is all it was ever for: the bridge serves a
+    // guest from the host's context and never syncs as them, so on the host's
+    // machine it is only a live credential for someone else's account. Stripped
+    // here rather than left to the bridge to ignore, because the bridge is code
+    // the host runs — the guest has no say in what it does with what it is sent.
+    const ownerToken = grant ? null : token;
+    if (ownerToken) this.tokens.set(userId, ownerToken);
     if (this.agent) {
-      this.agent.send(encode({ t: 'open', ch: id, userId, token, ...(grant ? { grant } : {}) }));
+      this.agent.send(encode({ t: 'open', ch: id, userId, token: ownerToken, ...(grant ? { grant } : {}) }));
     } else {
       // Told immediately rather than left hanging: the client renders a
       // "device offline" state instead of an indefinite spinner.
@@ -322,9 +358,27 @@ export class DeviceHub {
     ch.sink.close(code, reason);
   }
 
-  /** Browser -> bridge. Dropped silently when no bridge is attached. */
+  /**
+   * Browser -> bridge. Dropped silently when no bridge is attached.
+   *
+   * One frame is never forwarded: a guest's token refresh. The browser relays a
+   * fresh Clerk token over its links on a timer, and on a guest link that is the
+   * very credential `openChannel` strips, minted afresh every ~50s. Dropping it
+   * here covers every bridge already installed and every tab still running an
+   * older client, whatever either does with it — and an older bridge even
+   * installs it as the *host's* storage credential. Nothing waits on the frame:
+   * the bridge never answers one.
+   *
+   * Only a guest's frame is looked at, and only its `type`. An owner channel is
+   * end-to-end encrypted and passes through untouched, as it always has. A
+   * current client's guest channel is end-to-end encrypted too — its frames read
+   * as `e2ee*` here and pass straight through — so what this still catches is an
+   * older client's plaintext refresh, which the relay could already read.
+   */
   fromClient(id: ChannelId, payload: string): void {
-    if (!this.channels.has(id)) return;
+    const ch = this.channels.get(id);
+    if (!ch) return;
+    if (ch.grant && isTokenRefresh(payload)) return;
     this.agent?.send(encode({ t: 'data', ch: id, payload }));
   }
 
@@ -351,8 +405,13 @@ export class DeviceHub {
     }
   }
 
-  /** Record a freshly verified token so a reconnecting bridge gets it. */
+  /**
+   * Record a freshly verified token so a reconnecting bridge gets it. The owner's
+   * only, for the reason on `tokens`: there is no channel here to read a grant
+   * off, and the device's owner is the one user whose token a bridge needs.
+   */
   setToken(userId: string, token: string): void {
+    if (userId !== this.ownerId) return;
     this.tokens.set(userId, token);
     this.agent?.send(encode({ t: 'token', userId, token }));
   }

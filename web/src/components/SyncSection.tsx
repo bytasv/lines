@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Alert, Badge, Box, Button, Group, Loader, Text } from '@mantine/core';
+import { Alert, Badge, Box, Button, Code, Group, Loader, Text } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import { IconAlertCircle, IconCopy } from '@tabler/icons-react';
-import type { SyncLogEntry } from '@lines/shared';
+import type { SyncLogEntry, SyncSigningInfo } from '@lines/shared';
+import { formatTimestamp } from '@lines/shared';
 import { useStore } from '../store';
-import { fileRequest } from '../ws';
+import { fileRequest, send } from '../ws';
 import { SettingsGroup, SettingsRow } from './SettingsLayout';
 
 /**
@@ -17,6 +18,7 @@ export function SyncSection() {
   // The live status, not the one the route returns beside the rows: it is
   // broadcast on every flip, so this pane can't go stale while it is open.
   const status = useStore((s) => s.storageStatus);
+  const signing = useStore((s) => s.syncSigning);
   const [entries, setEntries] = useState<SyncLogEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const clipboard = useClipboard({ timeout: 1500 });
@@ -56,6 +58,8 @@ export function SyncSection() {
           }
         />
       </SettingsGroup>
+
+      <SigningGroup info={signing} />
 
       {error && (
         <Alert color="red" icon={<IconAlertCircle size={16} />} variant="light">
@@ -109,6 +113,64 @@ export function SyncSection() {
         </SettingsGroup>
       )}
     </>
+  );
+}
+
+/**
+ * Which machines may write what runs here. Every workflow, step and recipe a
+ * machine syncs carries its signature; another machine's is held back until
+ * the user reviews it, or trusts that machine — and the only thing that makes a
+ * key safe to trust is that its fingerprint matches the one shown here on a
+ * machine of theirs. Hence this machine's own fingerprint, for the user to
+ * carry the other way, and the list of trusted ones, each revocable.
+ */
+function SigningGroup({ info }: { info: SyncSigningInfo | null }) {
+  // An older bridge, or a guest's view: nothing to show, and nothing to revoke.
+  if (!info) return null;
+  return (
+    <SettingsGroup
+      title="Signing"
+      footer="Trust another machine only after checking that the fingerprint it asks you to trust is the one shown here, on that machine. A fingerprint you have not seen on a machine of your own could belong to anyone."
+    >
+      <SettingsRow
+        label="This machine’s fingerprint"
+        description="What this machine syncs is signed with this key. Compare it when another of your machines asks you to trust this one."
+        control={
+          info.fingerprint ? (
+            <Code>{info.fingerprint}</Code>
+          ) : (
+            <Text size="xs" c="dimmed">
+              Created on the first sync
+            </Text>
+          )
+        }
+      />
+      {info.trusted.length === 0 ? (
+        <SettingsRow
+          label="Trusted machines"
+          description="None. What another machine signs is held back here until you review it, or trust that machine."
+        />
+      ) : (
+        info.trusted.map((machine) => (
+          <SettingsRow
+            key={machine.key}
+            label={<Code>{machine.fingerprint}</Code>}
+            description={`Trusted ${formatTimestamp(machine.trustedAt)}. What it signs runs here without a review.`}
+            control={
+              <Button
+                size="xs"
+                variant="subtle"
+                color="red"
+                // Revoking only ever holds things back again, so it needs no confirmation.
+                onClick={() => send({ type: 'untrustSigner', key: machine.key })}
+              >
+                Remove
+              </Button>
+            }
+          />
+        ))
+      )}
+    </SettingsGroup>
   );
 }
 

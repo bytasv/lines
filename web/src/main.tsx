@@ -426,7 +426,10 @@ function SignInPage() {
 function Root() {
   if (!CLERK_ENABLED) return <AppWhenReady />;
   return (
-    <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY!}>
+    // No telemetry: Clerk would post to its own collector, which the deployed CSP
+    // does not allow (connect-src names only the relay, storage and Clerk's
+    // frontend API), and the page has no business reporting to a third party.
+    <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY!} telemetry={false}>
       <Routes>
         {/* /welcome must render the landing page for BOTH SignedIn and SignedOut —
             it is the only way a signed-in user can re-read it, since every other

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, before, describe, test } from 'node:test';
+import dotenv from 'dotenv';
+import type { PrismaClient } from '@prisma/client';
 
 /**
  * The product promise is that a database compromise cannot leak an agent
@@ -93,4 +96,141 @@ test('the allowlist has no stale entries', () => {
       assert.fail(`ALLOWED lists ${id}, which no longer exists — drop it`);
     }
   }
+});
+
+/**
+ * Columns are not the only place a credential can sit: most tables keep their
+ * payload in a jsonb `data` blob, which the field check above cannot see into.
+ * `mcp_connections` did hold one there — each stdio connection's `env`, values
+ * and all — until bridges started syncing names only and
+ * `20261006010000_mcp_env_names_only` scrubbed the rows already written. This
+ * runs that migration's own SQL, read from the file rather than copied, so what
+ * is tested is what shipped.
+ *
+ * Opt-in on a scratch Postgres with the migrations applied, as `shares.test.ts`:
+ *
+ *   STORAGE_TEST_DATABASE_URL=postgres://… npm test -w storage
+ *
+ * The statement is the migration verbatim, so it runs over every
+ * `mcp_connections` row in that database, not only the ones written here — one
+ * more reason it must never point at `DATABASE_URL`.
+ */
+
+dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
+
+const DB_URL = process.env.STORAGE_TEST_DATABASE_URL;
+const skip = DB_URL
+  ? false
+  : 'set STORAGE_TEST_DATABASE_URL to a scratch Postgres to run the MCP env scrub test';
+
+const ENV_SCRUB_SQL = path.resolve(
+  import.meta.dirname,
+  '../prisma/migrations/20261006010000_mcp_env_names_only/migration.sql',
+);
+
+describe('the MCP env scrub migration', { skip }, () => {
+  let prisma: PrismaClient | null = null;
+  /** Every user this block writes under, so a scratch database is left as found. */
+  const users: string[] = [];
+  const newUser = () => {
+    const id = `test-mcp-env-${randomUUID()}`;
+    users.push(id);
+    return id;
+  };
+  const scrub = () => prisma!.$executeRawUnsafe(fs.readFileSync(ENV_SCRUB_SQL, 'utf8'));
+  const dataOf = async (userId: string) =>
+    (await prisma!.mcpConnections.findUnique({ where: { userId } }))?.data;
+
+  before(async () => {
+    // Imported here rather than at the top: the schema checks above need no
+    // client, and must keep running where none has been generated.
+    const { PrismaClient } = await import('@prisma/client');
+    prisma = new PrismaClient({ datasources: { db: { url: DB_URL } } });
+  });
+
+  after(async () => {
+    if (!prisma) return;
+    await prisma.mcpConnections.deleteMany({ where: { userId: { in: users } } });
+    await prisma.$disconnect();
+  });
+
+  test('env values become names, and nothing else in the row changes', async () => {
+    const user = newUser();
+    const http = {
+      id: 'h',
+      name: 'figma',
+      transport: 'http',
+      url: 'https://mcp.figma.com/mcp',
+      headerKeys: ['Authorization'],
+      enabled: true,
+    };
+    const signature = { alg: 'ecdsa-p256-sha256', key: 'k', counter: 3, sig: 's' };
+    await prisma!.mcpConnections.create({
+      data: {
+        userId: user,
+        data: {
+          connections: [
+            {
+              id: 's',
+              name: 'local',
+              transport: 'stdio',
+              command: 'npx',
+              args: ['-y', 'srv'],
+              env: { REGION: 'eu', API_KEY: 'sk-CANARY' },
+              enabled: true,
+            },
+            { id: 'e', name: 'bare', transport: 'stdio', command: 'uvx', env: {}, enabled: true },
+            http,
+          ],
+          updatedAt: 1,
+          _linesSig: signature,
+        },
+      },
+    });
+
+    await scrub();
+    const scrubbed = await dataOf(user);
+    // Idempotent: a second run (a replayed migration, a shadow database) finds
+    // nothing left to do.
+    await scrub();
+
+    assert.deepEqual(await dataOf(user), scrubbed);
+    assert.equal(JSON.stringify(scrubbed).includes('sk-CANARY'), false);
+    assert.deepEqual(scrubbed, {
+      connections: [
+        {
+          id: 's',
+          name: 'local',
+          transport: 'stdio',
+          command: 'npx',
+          args: ['-y', 'srv'],
+          envKeys: ['API_KEY', 'REGION'],
+          enabled: true,
+        },
+        { id: 'e', name: 'bare', transport: 'stdio', command: 'uvx', enabled: true },
+        http,
+      ],
+      updatedAt: 1,
+      // Kept, and no longer verifying: the bridge refuses the row and pushes its
+      // own signed copy over it (see sync.credentials.test.ts).
+      _linesSig: signature,
+    });
+  });
+
+  test('a row with no env in it is not touched', async () => {
+    const user = newUser();
+    const data = {
+      connections: [{ id: 'h', name: 'figma', transport: 'http', url: 'https://x.example/mcp', enabled: true }],
+      updatedAt: 2,
+      _linesSig: { alg: 'ecdsa-p256-sha256', key: 'k', counter: 1, sig: 's' },
+    };
+    await prisma!.mcpConnections.create({ data: { userId: user, data } });
+    const stamp = (await prisma!.mcpConnections.findUnique({ where: { userId: user } }))!.updatedAt;
+
+    await scrub();
+
+    const row = await prisma!.mcpConnections.findUnique({ where: { userId: user } });
+    assert.deepEqual(row!.data, data);
+    assert.equal(row!.updatedAt.getTime(), stamp.getTime());
+  });
 });

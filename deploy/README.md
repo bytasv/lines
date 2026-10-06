@@ -148,6 +148,27 @@ sits on the internal `lines-db` network that only `storage` and `migrate` join.
   UI.
 - **`RELAY_AUTH_DISABLED` must never be set.** It accepts any device secret and
   binds every client to one user.
+- **The CSP is enforcing.** `web-nginx.conf` sends `Content-Security-Policy`,
+  not the Report-Only form, so a source it does not list is blocked outright. To
+  trial a change, ship it as `Content-Security-Policy-Report-Only` first and read
+  the browser console. Two settings feed it: `CSP_CONNECT_SRC` (from the
+  `VITE_*` URLs, at build time) and `CSP_IMG_SRC` (compose passes
+  `R2_PUBLIC_BASE_URL`, which must therefore be a bare origin with no path — a
+  CSP source with a path matches only that path).
+- **Moving to a production (`pk_live`) Clerk instance needs a CSP change
+  first.** Its frontend API is `clerk.<your domain>`, which neither Clerk
+  wildcard in the policy matches: add it to `script-src` and `frame-src` in
+  `web-nginx.conf` and to `CSP_CONNECT_SRC` in the Dockerfile, or sign-in stops
+  loading.
+- **Look before you migrate.** This project's migration history has been lost
+  before (see `prisma migrate status`); run `prisma db pull --print` and compare
+  before `migrate deploy`, so a migration that would collide with a table that
+  already exists is marked applied instead of failing and blocking every later
+  one.
+- **The storage role must own the tables or have `BYPASSRLS`.** Every table has
+  row level security with no policies (so Supabase's `anon` and `authenticated`
+  roles reach nothing through its Data API); the table owner and a `BYPASSRLS`
+  role are exempt. Supabase's `postgres` role is both. Never `FORCE` it.
 
 ## Verification
 
@@ -168,6 +189,11 @@ curl -s -o /dev/null -w '%{http_code}\n' https://<domain>/some/deep/route   # 20
 - [ ] Storage is **not** reachable from outside: it has no published port and no
       Traefik labels.
 - [ ] `docker compose logs relay` shows no `[relay] device verification failed`.
+- [ ] Sign-in, a new sign-up (Clerk's captcha), a Monaco diff, a PDF preview and
+      a recipe image all load with **no CSP violation** in the browser console —
+      the policy is enforcing, so a violation is a broken feature.
+- [ ] `curl -sI https://<domain>/` shows `strict-transport-security` and
+      `content-security-policy` (not `-report-only`).
 
 Triaging "stuck connecting to my machine": the relay and storage write no timestamps of their own,
 so always pass `-t`. Run these from `deploy/docker`:
@@ -215,6 +241,14 @@ Rollback is `git checkout <tag>` plus the same three commands, or re-tagging a
 previously built image. Migrations do **not** roll back: `migrate deploy` is
 forward-only and the schema is additive, so roll the code back and leave the
 schema forward.
+
+**Order across the server and the desktop app.** A change that spans both ships
+server side first: storage with its migrations, then the relay and web, and only
+then the desktop release. The October 2026 security release depends on it — the
+relay must accept the device secret as a header before any bridge sends it only
+that way, storage must record guest grant ids before bridges reconcile against
+them, and storage must stop returning MCP environment values before the scrub
+migration matters to anyone.
 
 ## Growth metrics
 
@@ -432,7 +466,10 @@ holds releases. Public-read is a bucket-level setting, so sharing one would make
 every user-uploaded screenshot world-readable in order to publish an installer.
 Both `R2_PUBLIC_BASE_URL` and `R2_RELEASE_PUBLIC_BASE_URL` must be the bucket's
 public `r2.dev` (or custom) domain — never the S3 API endpoint, which only serves
-signed requests. The API token needs access to both buckets.
+signed requests. Both must be `https`: the release base is the app's update feed,
+and `release.mjs` refuses anything else. `R2_PUBLIC_BASE_URL` must also be a bare
+origin, since it goes into the CSP, and storage stores only recipe images under
+it. The API token needs access to both buckets.
 
 **Bump the version rather than re-uploading one.** Artifacts are stored
 `immutable` with a one-year max-age, so overwriting a filename can leave the edge

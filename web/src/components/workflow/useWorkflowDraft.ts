@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { StepContent, StepDef, WorkflowDef, WorkflowStep } from '@lines/shared';
+import type { StepContent, StepDef, UntrustedMark, WorkflowDef, WorkflowStep } from '@lines/shared';
 import {
   DEFAULT_MODEL,
   isStepRef,
@@ -10,6 +10,7 @@ import {
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
 import { send } from '../../ws';
+import { needsReview } from './UntrustedReview';
 import type { WorkflowPreset } from '../../lib/workflowPresets';
 
 /** A pinned reference to a published step (present ⇒ this entry is read-only content). */
@@ -36,6 +37,14 @@ export type DraftStep = StepContent & {
 
 export interface DraftWorkflow extends Omit<WorkflowDef, 'steps'> {
   steps: DraftStep[];
+  /**
+   * A mark this draft picked up from content it copied — a whole held-back
+   * workflow (Duplicate), or a held-back pinned step made inline (Make an
+   * editable copy). Sent with the next save so the result stays held back until
+   * reviewed, then dropped: from there the bridge's own verdict stands.
+   * Editor-only, never part of the wire shape or the dirty check.
+   */
+  heldMark?: UntrustedMark;
 }
 
 export interface StepErrors {
@@ -449,22 +458,27 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
    * In place rather than added below: a copy beside its original ran both.
    */
   const detachStep = (u: string) =>
-    setDraft((d) =>
-      d
-        ? {
-            ...d,
-            steps: d.steps.map((s) =>
-              s._uid === u && s.ref
-                ? {
-                    ...contentOf(s),
-                    _uid: u,
-                    copiedFrom: { name: s.name, version: s.ref.version, ownerName: s.ref.ownerName },
-                  }
-                : s,
-            ),
-          }
-        : d,
-    );
+    setDraft((d) => {
+      if (!d) return d;
+      // A pinned version held back here keeps holding the workflow back once it
+      // is inline — otherwise "Make an editable copy" would run it unreviewed.
+      const pinned = d.steps.find((s) => s._uid === u)?.ref;
+      const pinnedMark = pinned && versionMap.get(`${pinned.ownerId}/${pinned.stepId}/${pinned.version}`)?.untrusted;
+      const mark = needsReview(pinnedMark) ? pinnedMark : undefined;
+      return {
+        ...d,
+        ...(mark && !d.heldMark ? { heldMark: mark } : {}),
+        steps: d.steps.map((s) =>
+          s._uid === u && s.ref
+            ? {
+                ...contentOf(s),
+                _uid: u,
+                copiedFrom: { name: s.name, version: s.ref.version, ownerName: s.ref.ownerName },
+              }
+            : s,
+        ),
+      };
+    });
 
   /** Open a step in the pane, or the workflow itself with `null`. */
   const selectStep = (u: string | null) => setSelectedStep(u);
@@ -511,7 +525,12 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
     const v = validate(draft, resolveRef);
     if (!v.ok) return false;
     const wire = toWire(draft);
-    send({ type: 'saveWorkflow', workflow: wire, ownerName: getOwnerName() ?? undefined });
+    // Content copied from something held back says so (see `heldMark`), outside
+    // `wire`, which is also the key the save is matched back on. Sent once: a
+    // later save after a review must not re-mark what the review cleared.
+    const sent = draft.heldMark ? { ...wire, untrusted: draft.heldMark } : wire;
+    send({ type: 'saveWorkflow', workflow: sent, ownerName: getOwnerName() ?? undefined });
+    if (draft.heldMark) setDraft((d) => (d ? { ...d, heldMark: undefined } : d));
     // Baseline is NOT advanced here: the bridge can refuse the write (and says so
     // via `actionError`), and an optimistic baseline reported that as saved.
     setSavePending(JSON.stringify(wire));
@@ -560,7 +579,20 @@ export function useWorkflowDraft(opened: boolean, onClose: () => void) {
 
   const duplicate = () => {
     if (!draft) return;
-    const copy: WorkflowDef = { ...toWire(draft), id: '', name: `${draft.name} (copy)`, published: false };
+    // A copy of a workflow this machine has not verified is not verified either:
+    // the bridge keeps a copy's mark, so copying cannot be how it gets to run.
+    // Read off the live row rather than the draft, which may predate a review.
+    const live = [...workflows, ...sharedWorkflows].find((w) => w.id === draft.id);
+    // A trusted machine's content is the user's own: a copy of it is too.
+    const mark = needsReview(live?.untrusted) ? live?.untrusted : draft.heldMark;
+    // `toDraft` spreads the def it loads, so the mark rides into the new draft.
+    const copy: WorkflowDef & Pick<DraftWorkflow, 'heldMark'> = {
+      ...toWire(draft),
+      id: '',
+      name: `${draft.name} (copy)`,
+      published: false,
+      ...(mark ? { heldMark: mark } : {}),
+    };
     loadFrom(copy, null);
   };
 
@@ -674,8 +706,11 @@ function toWire(d: DraftWorkflow): WorkflowDef {
           freshStart: s.freshStart || crossesProviderAt(d.steps, i),
         },
   );
+  // `untrusted` is the bridge's verdict on the stored row, never echoed back —
+  // sending a stale one after a review would hold the workflow back again — and
+  // `heldMark` is editor-only (`save` sends it on purpose, once).
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { steps: _drop, ...rest } = d;
+  const { steps: _drop, untrusted: _verdict, heldMark: _copied, ...rest } = d;
   return { ...rest, steps };
 }
 

@@ -6,7 +6,14 @@ import { after, describe, test } from 'node:test';
 import type { InlineStep, SessionMeta, SocketAccess, StepDef, WorkflowDef } from '@lines/shared';
 import { OWNER_ACCESS, capsForPreset } from '@lines/shared';
 import { handleFileRequest } from './fileRoutes.ts';
-import { clampPermissionMode, guestLibrary, prepareInlineWorkflow } from './guestWorkflows.ts';
+import {
+  clampPermissionMode,
+  guestCwdAllowed,
+  guestLibrary,
+  permissionAnswerFor,
+  prepareInlineWorkflow,
+} from './guestWorkflows.ts';
+import { jwtSubject, tokenFitsContext, tokenRefreshAction } from './connectionPolicy.ts';
 import type { UserContext } from './userContext.ts';
 import { resolveWorkspacePath, workspaceRoots } from './workspacePaths.ts';
 
@@ -254,5 +261,82 @@ describe('a guest’s own workflow', () => {
   test('a grant without manageWorkflow cannot run one', () => {
     const prompter: SocketAccess = { scope: 'machine', caps: { ...capsForPreset('prompt', 'machine'), createSessions: true } };
     assert.equal(prepareInlineWorkflow(libraryCtx(), prompter, own).ok, false);
+  });
+});
+
+describe('what a guest’s permission answer may also write', () => {
+  test('a guest’s Always allow and Allow as read are dropped: they are the host’s settings', () => {
+    for (const guest of [sessionGuest, machineGuest, fullMachine]) {
+      assert.deepEqual(permissionAnswerFor(guest, { alwaysAllow: true, allowAsRead: true }), {
+        alwaysAllow: false,
+        allowAsRead: false,
+      });
+    }
+  });
+
+  test('the owner’s pass through, and only when actually set', () => {
+    assert.deepEqual(permissionAnswerFor(OWNER_ACCESS, { alwaysAllow: true, allowAsRead: true }), {
+      alwaysAllow: true,
+      allowAsRead: true,
+    });
+    assert.deepEqual(permissionAnswerFor(OWNER_ACCESS, {}), { alwaysAllow: false, allowAsRead: false });
+  });
+});
+
+describe('where a guest may start a session', () => {
+  test('inside one of the host’s open projects, at any depth', () => {
+    assert.equal(guestCwdAllowed(ctx(), fullMachine, shared), true);
+    assert.equal(guestCwdAllowed(ctx(), fullMachine, path.join(shared, 'not', 'yet', 'there')), true);
+  });
+
+  test('not the host’s home, the filesystem root, or a sibling of a project', () => {
+    assert.equal(guestCwdAllowed(ctx(), fullMachine, os.homedir()), false);
+    assert.equal(guestCwdAllowed(ctx(), fullMachine, '/'), false);
+    assert.equal(guestCwdAllowed(ctx(), fullMachine, tmp), false);
+    assert.equal(guestCwdAllowed(ctx(), fullMachine, `${shared}-evil`), false);
+    assert.equal(guestCwdAllowed(ctx(), fullMachine, path.join(shared, '..', 'elsewhere')), false);
+    assert.equal(guestCwdAllowed(ctx(), fullMachine, 'relative/path'), false);
+  });
+
+  test('a symlink inside a project cannot carry the session out of it', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-guest-outside-'));
+    const link = path.join(shared, 'escape');
+    fs.symlinkSync(outside, link);
+    try {
+      assert.equal(guestCwdAllowed(ctx(), fullMachine, link), false);
+    } finally {
+      fs.rmSync(link, { force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('the owner may open anything', () => {
+    assert.equal(guestCwdAllowed(ctx(), OWNER_ACCESS, os.homedir()), true);
+  });
+});
+
+/** An unsigned JWT-shaped token with the given subject: the bridge reads, never verifies, the claim. */
+const tokenFor = (sub: string) =>
+  ['e30', Buffer.from(JSON.stringify({ sub })).toString('base64url'), 'sig'].join('.');
+
+describe('a guest’s token never becomes the host’s storage credential', () => {
+  test('a refresh on a guest link is ignored, relayed or not', () => {
+    assert.equal(tokenRefreshAction({ owner: false, relayed: true }, false), 'ignore');
+    assert.equal(tokenRefreshAction({ owner: false, relayed: true }, true), 'ignore');
+  });
+
+  test('a token naming someone else does not fit the host’s context', () => {
+    assert.equal(jwtSubject(tokenFor('user_guest')), 'user_guest');
+    assert.equal(tokenFitsContext(tokenFor('user_guest'), 'user_host', 'local'), false);
+    assert.equal(tokenFitsContext(tokenFor('user_host'), 'user_host', 'local'), true);
+    // Not a JWT at all names nobody, so it fits no account context either.
+    assert.equal(tokenFitsContext('opaque', 'user_host', 'local'), false);
+  });
+
+  test('the single-tenant context takes a token only where the exemption is passed in (the dev relay)', () => {
+    assert.equal(tokenFitsContext(tokenFor('user_anyone'), 'local', 'local'), true);
+    // Everywhere else it takes none: a relay pushing its own account's token onto
+    // it would otherwise collect everything that context syncs.
+    assert.equal(tokenFitsContext(tokenFor('user_anyone'), 'local', null), false);
   });
 });

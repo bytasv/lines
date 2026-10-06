@@ -25,6 +25,7 @@ import {
 } from '../lib/shares';
 import { rememberDeviceId } from '../lib/storage';
 import { switchDevice } from '../ws';
+import { adoptJoinGrant } from '../lib/e2ee';
 import { DownloadDesktopApp } from './DownloadDesktopApp';
 import { GateShell } from './GateShell';
 import { PairingDiagram } from './PairingDiagram';
@@ -154,6 +155,10 @@ function PendingInvitations() {
     setError(null);
     try {
       const { deviceId } = await claimInvite(invite.code);
+      // The machine admits a guest only on the grant from the invite link. If this
+      // tab opened that link before signing in, its grant is waiting to be taken
+      // up; without it the machine will say to open the link again.
+      adoptJoinGrant(deviceId, invite.code);
       rememberDeviceId(deviceId);
       switchDevice(deviceId);
       // The gate re-renders off the device list, so this is what takes them in.

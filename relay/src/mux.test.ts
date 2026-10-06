@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DeviceEvents, DeviceHub, HubRegistry, type Sink } from './mux.ts';
-import { decode, type RelayToAgent } from './protocol.ts';
+import { decode, type AttestedGrant, type RelayToAgent } from './protocol.ts';
 
 /** A Sink that records, so routing is testable with no sockets involved. */
 function fakeSink() {
@@ -55,6 +55,7 @@ test('frames route between the browser and the bridge', () => {
 
 test('a reattaching agent gets the tokens, and every browser is sent to redial it', () => {
   const hub = new DeviceHub('d1');
+  hub.ownerId = 'u1';
   const first = fakeSink();
   hub.attachAgent(first.sink);
   const client = fakeSink();
@@ -107,6 +108,84 @@ test('a guest channel is dropped on re-attach rather than replayed', () => {
   assert.equal(owner.closed()?.code, 1012, 'an owner redials quickly instead');
   assert.equal(hub.channelCount, 0);
   assert.equal(hub.guestChannels().length, 0);
+});
+
+test("a guest's token never reaches the bridge, on open or on re-attach", () => {
+  const hub = new DeviceHub('d1');
+  hub.ownerId = 'owner';
+  const first = fakeSink();
+  hub.attachAgent(first.sink);
+  const grant: AttestedGrant = { hostUserId: 'owner', scope: 'machine', caps: { prompt: true } };
+  const ownerCh = hub.openChannel('owner', 'ctrl', fakeSink().sink, 'otok');
+  const guestCh = hub.openChannel('guest', 'ctrl', fakeSink().sink, 'gtok', grant);
+
+  const opens = first.frames().filter((f) => f.t === 'open');
+  // The owner's still rides `open`: the bridge's storage sync runs on it.
+  assert.deepEqual(opens[0], { t: 'open', ch: ownerCh, userId: 'owner', token: 'otok' });
+  // A guest's does not. The relay has verified it, and the host's bridge serves a
+  // guest from the host's own context — there it is only a live credential for
+  // the guest's own account, on a machine the guest does not control.
+  assert.deepEqual(opens[1], { t: 'open', ch: guestCh, userId: 'guest', token: null, grant });
+
+  // Nor is it kept for the next bridge: the re-push carries the owner's alone.
+  const second = fakeSink();
+  hub.attachAgent(second.sink);
+  assert.deepEqual(second.frames(), [{ t: 'token', userId: 'owner', token: 'otok' }]);
+  // Checked on the raw text as well, so no field anywhere carries it.
+  assert.equal([...first.sent, ...second.sent].some((s) => s.includes('gtok')), false);
+});
+
+test("a token kept for a device's earlier owner is not re-pushed to its next one", () => {
+  // A device id is re-registerable, and the hub can outlive the claim changing
+  // hands. The new owner's bridge must not be handed the old owner's token —
+  // least of all once that user comes back as a guest on the machine.
+  const hub = new DeviceHub('d1');
+  hub.ownerId = 'a';
+  hub.attachAgent(fakeSink().sink);
+  hub.openChannel('a', 'ctrl', fakeSink().sink, 'atok');
+
+  hub.ownerId = 'b';
+  const next = fakeSink();
+  hub.attachAgent(next.sink);
+  assert.deepEqual(next.frames(), []);
+});
+
+test("a guest's token refresh is dropped, and every other guest frame goes through verbatim", () => {
+  const hub = new DeviceHub('d1');
+  const agent = fakeSink();
+  hub.attachAgent(agent.sink);
+  const ch = hub.openChannel('guest', 'ctrl', fakeSink().sink, null, { hostUserId: 'owner', scope: 'machine' });
+  const before = agent.sent.length;
+
+  // The browser's own shape, and two more the bridge reads exactly the same way.
+  // A text match would miss both, and an older bridge installs whatever it reads
+  // as the host's storage credential.
+  hub.fromClient(ch, JSON.stringify({ type: 'auth', token: 'fresh' }));
+  hub.fromClient(ch, '{ "token": "fresh", "type": "auth" }');
+  hub.fromClient(ch, '{"type":"\\u0061uth","token":"fresh"}');
+  assert.equal(agent.sent.length, before, 'no refresh reaches the bridge');
+
+  // Exact on `type`, not a filter on anything that mentions it; and junk is the
+  // bridge's to ignore, not the relay's to drop.
+  const others = ['{"type":"ping"}', JSON.stringify({ type: 'prompt', text: '{"type":"auth"}' }), 'not json'];
+  for (const payload of others) {
+    hub.fromClient(ch, payload);
+    assert.deepEqual(agent.frames().at(-1), { t: 'data', ch, payload });
+  }
+});
+
+test("an owner's frames are never inspected, a token refresh included", () => {
+  const hub = new DeviceHub('d1');
+  const agent = fakeSink();
+  hub.attachAgent(agent.sink);
+  const ch = hub.openChannel('owner', 'ctrl', fakeSink().sink, 'otok');
+
+  // A real owner channel is sealed end to end, so the relay could not read this
+  // if it tried. Sent in the clear here to show that it does not try: the owner's
+  // refresh is the bridge's storage credential, and must arrive.
+  const payload = JSON.stringify({ type: 'auth', token: 'fresh' });
+  hub.fromClient(ch, payload);
+  assert.deepEqual(agent.frames().at(-1), { t: 'data', ch, payload });
 });
 
 test('a guest is refused for a stale bridge only while one is attached', () => {
@@ -302,16 +381,22 @@ test('data for an unknown channel is dropped, not broadcast', () => {
   assert.equal(client.sent.length, before, 'a stray channel id must not leak to other clients');
 });
 
-test('a token is pushed to the agent and remembered for the next one', () => {
+test("the owner's token is pushed to the agent and remembered for the next one", () => {
   const hub = new DeviceHub('d1');
+  hub.ownerId = 'u1';
   const agent = fakeSink();
   hub.attachAgent(agent.sink);
   hub.setToken('u1', 'fresh');
   assert.deepEqual(agent.frames().at(-1), { t: 'token', userId: 'u1', token: 'fresh' });
 
+  // Anyone else's is refused outright, neither pushed nor kept: a bridge syncs
+  // for its owner, and a guest's token is a credential for another account.
+  hub.setToken('guest', 'gtok');
+  assert.equal(agent.sent.some((s) => s.includes('gtok')), false);
+
   const next = fakeSink();
   hub.attachAgent(next.sink);
-  assert.deepEqual(next.frames()[0], { t: 'token', userId: 'u1', token: 'fresh' });
+  assert.deepEqual(next.frames(), [{ t: 'token', userId: 'u1', token: 'fresh' }]);
 });
 
 test('registry sweeps only hubs with no agent and no channels', () => {

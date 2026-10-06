@@ -41,6 +41,11 @@ lookup by `stepId` alone, and every `WorkflowEngine.save()` (plus a one-time pas
 rewrites such a ref's `ownerId` back to the owner once the exact pinned version is confirmed in
 that user's own step history.
 
+Synced workflows and step versions this machine has not verified carry an `UntrustedMark` (see
+[end-to-end-encryption](end-to-end-encryption.md)): they are listed with a badge and kept, but
+refused by every path that would run them until the owner reviews exactly what they run — the
+review gate lives here, beside the version UI it shares a pane with.
+
 ## Entry points
 
 - `web/src/components/workflow/StepCard.tsx` (`UpdatePopover`; `VersionHistoryPopover`, opened
@@ -53,6 +58,9 @@ that user's own step history.
   drag/Move up/Move down reorder, gate and start-mode links between steps)
 - `web/src/components/workflow/StepLibrary.tsx` (the detail-header `Created`/`Updated` lines,
   read from the live store row rather than the draft)
+- `web/src/components/workflow/UntrustedReview.tsx` (`UntrustedReviewModal`, opened from the
+  **Review** banner in the workflow overview pane or the step library's detail pane; the
+  `UntrustedBadge` on list rows and version rows)
 
 ## Files
 
@@ -64,18 +72,25 @@ that user's own step history.
 - `web/src/components/workflow/useWorkflowDraft.ts` (`contentOf`, `selectStep`, `detachStep`,
   `updateFor`, `updateStepToLatest`,
   `updateAllToLatest`, `requestStepVersions`, `versionsFor`, `pinStepToVersion`, `versionMap`;
-  init effect, id-reconciliation effect, `loadFrom`, `doNew`, `save`)
+  init effect, id-reconciliation effect, `loadFrom`, `doNew`, `save`, `duplicate`;
+  `DraftWorkflow.heldMark`)
 - `web/src/components/workflow/WorkflowEditor.tsx` (wires `updateDef` prop and the overview banner's
-  bulk-update button)
+  bulk-update button; the overview's unverified banner and review modal)
 - `web/src/components/workflow/WorkflowList.tsx`, `web/src/components/Sidebar.tsx` (filter
-  "Shared by others" against the owned list)
-- `shared/types.ts` (`stepVersions` client/server message pair)
-- `storage/src/index.ts` (`GET /steps/:ownerId/:id/versions`)
-- `server/src/sync.ts` (`StorageSyncClient.pullStepVersions`)
+  "Shared by others" against the owned list; `WorkflowList`'s per-row badge via `markOf`)
+- `web/src/components/workflow/UntrustedReview.tsx` (`UntrustedBadge`, `UntrustedReviewModal`,
+  `workflowReviewItems`, `stepReviewItem`, `isHeld`, `needsReview`)
+- `shared/types.ts` (`stepVersions` client/server message pair; `UntrustedMark`, `trustSyncedItem`)
+- `storage/src/index.ts` (`GET /steps/:ownerId/:id/versions`, `POST /steps/resolve`)
+- `storage/src/stepRows.ts` (`resolveWhere`, `resolveStepVersions` — the visibility rule
+  `POST /steps/resolve` calls through to)
+- `server/src/sync.ts` (`StorageSyncClient.pullStepVersions`, `resolveSteps`)
 - `server/src/store.ts` (`step-versions.json`, `loadStepVersions`/`saveStepVersions`)
 - `server/src/workflows.ts` (`WorkflowEngine.listStepVersions`, `listOwnStepVersions`,
-  `addStepVersions`, `persistSteps`)
-- `server/src/index.ts` (`stepVersions` message handler)
+  `addStepVersions`, `persistSteps`; `untrustedParts`, `assertRunnable`, `trustWorkflow`,
+  `trustStep`, `resettleMarks`, `UntrustedWorkflowError`)
+- `server/src/workflowCommands.ts` (`stepVersionsView`, `trustSyncedItem`)
+- `server/src/index.ts` (`stepVersions` and `trustSyncedItem` message handlers)
 - `web/src/store.ts` (`stepVersions` slice, `Record<"ownerId/stepId", StepDef[]>`)
 - `server/src/workflows.ts` (`ForeignWorkflowError`, `isOwnRow`, `isForeign`, `normalizeRefs` —
   the own-beats-shared classification and ref-healing this feature's "own vs. shared" UI reflects;
@@ -103,6 +118,12 @@ that user's own step history.
 - `WorkflowEngine.listStepVersions`
 - `WorkflowEngine.listOwnStepVersions`
 - `StorageSyncClient.pullStepVersions`
+- `WorkflowEngine.addStepVersions(list, requested)` — adopts only the step history asked for
+- `StorageSyncClient.resolveSteps` / `resolveStepVersions` / `resolveWhere`
+  (`storage/src/stepRows.ts`)
+- `WorkflowEngine.untrustedParts` / `assertRunnable` / `trustWorkflow` / `trustStep`;
+  `UntrustedWorkflowError`
+- `UntrustedReviewModal`, `UntrustedBadge`, `workflowReviewItems`, `stepReviewItem`
 
 ## Data flow
 
@@ -120,11 +141,14 @@ newer than its pinned version in one pass.
 
 Opening either the `VersionHistoryPopover` or `RestoreHistoryPopover` fires a `stepVersions`
 client message (`{ ownerId, stepId }`); no correlation id — the reply echoes the same keys so the
-store slots it by `${ownerId}/${stepId}`. The bridge (`server/src/index.ts`) pulls remote history
-via `sync.pullStepVersions` (storage route, own steps get every row, foreign steps get published
-rows only, capped at 200, newest first), merges it into the in-memory `stepVersions` map via
-`addStepVersions`, and replies with `listStepVersions` (best-effort local view — works even when
-storage is offline, since the map is also restored from `step-versions.json` on boot).
+store slots it by `${ownerId}/${stepId}`. The bridge (`server/src/index.ts` →
+`stepVersionsView`) pulls remote history via `sync.pullStepVersions` (storage route, own steps get
+every row, foreign steps get published rows only, capped at 200, newest first, each row's
+`ownerId`/`id` set from the route rather than the blob; every row signature-checked like any
+pulled item), merges only that step's rows into the in-memory `stepVersions` map via
+`addStepVersions(list, [{ ownerId, id }])`, and replies with `listStepVersions` (best-effort local
+view — works even when storage is offline, since the map is also restored from
+`step-versions.json` on boot).
 
 On the web side, `useWorkflowDraft.versionsFor` (workflow editor) and `StepLibrary`'s local
 `versionsFor` both union the fetched reply with whatever's already resolvable locally
@@ -139,7 +163,62 @@ version. Confirming:
   draft-only, takes effect on workflow Save.
 - Step library → `restore` loads that version's `StepContent` into the draft — draft-only,
   `saveStep` on Save bumps a **new** head version with that content; the restored version's row
-  itself is untouched.
+  itself is untouched. A version that needs review shows its badge in the list and cannot be
+  restored: the new head would be saved — and signed — by this machine, so unverified content
+  would come out the other side trusted without anyone allowing it.
+
+### Pin resolution
+
+Pinned versions the bridge has not cached (another user's, or older own ones) are fetched on every
+shared-steps refresh: `refreshSharedSteps` sends `workflows.unresolvedRefs()` to
+`POST /steps/resolve`, which calls `resolveStepVersions` (`storage/src/stepRows.ts`). A ref for the
+caller's own step matches the row whatever its flag; anyone else's matches a **published** row
+only — a ref they may not see is left out exactly as a missing one is, so the answer never confirms
+that a private version exists. Refs are type-checked before they reach the Prisma `where` (an
+object in place of a string, `{ not: '' }`, would match every owner), capped at 500 per batch,
+and each answer's `ownerId` comes from the row's `user_id`, not the blob. On the bridge,
+`resolveSteps` checks every row and keeps only the exact `ownerId/stepId/version` triples it asked
+for before `addStepVersions` files them.
+
+The consequence for someone else's unpublished version: a pin to one — never published, or
+unpublished since (`deleteStep` flips every version's flag off, which is now a revocation for other
+users' pins) — resolves only from what this bridge already holds in memory. Foreign pins are not
+persisted (`step-versions.json` holds own history only), so after a restart, or on another
+machine, it is an unresolved pin: `runStep` parks the step with "the shared step version it pins
+is not available on this bridge", Approve can still skip past it, and the version-history union
+cannot show it either. The owner's own pins are unaffected.
+
+### Held-back workflows and steps
+
+A workflow or step version arrives marked when this machine did not sign it, or — another user's
+— has not reviewed it (see [end-to-end-encryption](end-to-end-encryption.md)). The engine keeps
+and lists it; `untrustedParts(wf)` collects what a run would execute that is still held back (the
+workflow's own mark, which covers its inline steps, plus each pinned version's) and every way into
+a run refuses on it: `assertRunnable` before a session is created (`createSession`, a recipe run's
+`workflowId`), `attach` before anything is seeded, and `runStep` — the authoritative gate, since a
+pull can mark content mid-run — which parks the step `pre-run` like an unresolved pin, with Retry
+re-rendering it once reviewed.
+
+The web reads trust off the *saved* row the bridge sent, never the draft. `WorkflowList` badges a
+workflow by its first mark (its own or a pinned step's), the overview pane shows a Review banner
+counting the parts that need review, and the step library shows one for a held-back version.
+Review opens `UntrustedReviewModal` with the full text that would run — inline prompts, each
+exact pinned version (never the resolver's latest-version fallback), and their permission mode,
+model and gate. "Allow on this machine" sends one `trustSyncedItem` per held-back item, each
+echoing the digest that was on screen; the bridge (`trustWorkflow`/`trustStep`) records it and
+clears only the copy whose mark carries that digest. Where another machine's signature is the only
+thing holding something back, the modal also offers "Trust this machine…" behind a confirmation
+that says to compare the fingerprint first.
+
+Copies keep marks: Duplicate (reading the mark off the live row, since the draft may predate a
+review) and "Make an editable copy" of a held-back pinned step (`detachStep`) set
+`DraftWorkflow.heldMark`, which the
+next save sends once as `untrusted`; `StepLibrary`'s Duplicate does the same with its own
+`heldMark`. `toWire` never echoes a loaded row's `untrusted` back. On the bridge, `setSharedSteps`
+keeps the reviewed content of a version an author rewrote in place (the library shows the new head
+as unreviewed, but a pin to that number keeps running what was reviewed), an unverified copy never
+displaces a trusted version with the same number, and an own-table row naming another owner is
+refused (`applySyncedSteps`) or, for a workflow, held back as someone else's (`applySyncedAll`).
 
 ### Creation time
 
@@ -217,9 +296,25 @@ in both must render once, under Owned.
 
 - `server/src/workflows.ownership.test.ts` — the own-beats-shared classification and ref-healing
   this feature's ownership rules build on (`WorkflowEngine` side only).
+- `server/src/workflows.trust.test.ts` — held-back workflows and steps: listed but refused before
+  any session state is touched; a review must echo the digest it showed; a workflow attached
+  before a pull marked it does not run its first step; a re-pull of the same content (keys
+  reordered by jsonb, or renamed) stays trusted; approving one item approves that content only,
+  and a step version only the copy carrying it; an edit is not a review and a client cannot clear
+  a mark; a copy of an unverified workflow is unverified; another user's workflow or pinned step
+  runs only once reviewed, and again only after its author changes it; an author rewriting a
+  reviewed version in place cannot change what a pin runs; a version history adopts only the step
+  it asked for; an unverified copy never displaces a trusted version.
+- `server/src/sync.items.test.ts` — `resolveSteps` keeps only the versions it asked for.
+- `storage/src/steps.resolve.test.ts` — `resolveWhere`'s query shape (always runs): another
+  user's ref matches a published row only, the caller's own whatever its flag, malformed refs
+  (including Prisma filter objects) never reach the query, a batch is capped; and against a
+  scratch Postgres (**opt-in**, `STORAGE_TEST_DATABASE_URL`): another user's private version comes
+  back exactly as a missing one does, unpublishing hides a version from everyone but its owner,
+  and `ownerId` is the row's whatever the blob claims.
 
 The web draft/editor side (`useWorkflowDraft.ts`, `WorkflowEditor.tsx`, `StepCard.tsx`,
-`StepLibrary.tsx`) has no test runner — unchanged from before.
+`StepLibrary.tsx`, `UntrustedReview.tsx`) has no test runner — unchanged from before.
 
 ## Business rules
 
@@ -231,9 +326,24 @@ The web draft/editor side (`useWorkflowDraft.ts`, `WorkflowEditor.tsx`, `StepCar
 - Newest-first, gap-tolerant version list: version numbers can skip (e.g. debounced pushes),
   rendered as-is.
 - Own steps show full history; foreign (shared) steps show published versions only, with the
-  exact pinned version always unioned in client-side even if unpublished.
+  exact pinned version unioned in client-side whenever the bridge holds it — which, for someone
+  else's version that is not published, is only a copy cached while it was still visible.
+- `POST /steps/resolve` answers only the caller's own versions and anyone's **published** ones; a
+  ref to another user's private version comes back exactly as a missing one does. A pin is not a
+  grant, and unpublishing is a revocation: a pin to another user's version that is not published
+  stops resolving for everyone but its owner and is treated as any other unresolved pin.
+- A version history or resolve answer is adopted only for what was asked: `addStepVersions` takes
+  only the requested step's rows and `resolveSteps` only the requested `ownerId/stepId/version`
+  triples, because a version is filed under the owner it names — a row claiming the caller would
+  join their own history and be pushed back to storage as theirs.
 - Pin/restore is disabled for the currently active version — re-selecting what's already active
-  is a no-op the UI blocks rather than sends.
+  is a no-op the UI blocks rather than sends. Restore is also disabled for a version that needs
+  review, since the restored head is saved and signed by this machine.
+- A held-back workflow or step version is kept and listed with a badge but refused by every path
+  that would run it until reviewed; approving sends the digest that was shown, and a stale one is
+  refused. Edits and copies (Duplicate, "Make an editable copy") never clear a mark. The review
+  dialog freezes what it shows when it opens: content that changes while it is open is refused by
+  the bridge rather than re-rendered and confirmed unseen.
 - Workflow re-pin changes only which immutable version a ref points to (metadata only, same
   immutable content, different pointer); step-library restore creates a brand-new head version
   with old content — it is not a rewrite of history, and history is never rewritten.
@@ -254,9 +364,20 @@ The web draft/editor side (`useWorkflowDraft.ts`, `WorkflowEditor.tsx`, `StepCar
 
 - Immutable step versions are never deleted or edited, on disk or in storage — only the head list
   and the `published` flag change identity.
-- The storage route enforces the foreign-publish filter server-side (`storage/src/index.ts`); the
-  client-side version union in `versionsFor` never bypasses it — it only guarantees visibility of
-  a version the caller already has another right to see (their own pin).
+- Storage enforces the foreign-publish filter server-side, on `GET /steps/:ownerId/:id/versions`
+  and on `POST /steps/resolve` (`storage/src/stepRows.ts`), which used to answer any
+  `{ ownerId, id, version }` to any signed-in user — a private version was one counted-up number
+  away from anyone who had seen its step's id. The client-side version union in `versionsFor`
+  never bypasses it: it only adds a version the bridge already holds.
+- The resolve visibility rule lives in `storage/src/stepRows.ts` rather than inline in the route
+  so it is testable without a Clerk token; the route is a thin wrapper.
+- Cross-user step rows are keyed by the row, never the blob: storage sets `ownerId` (and on the
+  history route `id`) from the row, and the bridge additionally drops anything it did not ask for
+  — two independent halves of the same guard.
+- Trust is read off the saved workflow the bridge sent, never the draft: the draft is what the
+  user is typing, and what runs is the stored row and the exact versions it pins. A held-back
+  pin's mark survives "Make an editable copy" through `heldMark`, sent once and then dropped so a
+  later save after a review does not re-mark what the review cleared.
 - Nothing beyond existing Mantine popover/scroll-area usage for the popovers themselves (see
   `PermissionPrompt.tsx` for the same `ScrollArea.Autosize` + `mah` pattern).
 - The init effect tracks `opened` via a `prevOpened` ref and skips its `workflows[0]` fallback
@@ -269,4 +390,6 @@ The web draft/editor side (`useWorkflowDraft.ts`, `WorkflowEditor.tsx`, `StepCar
 
 ## Related decisions
 
-None.
+- [end-to-end-encryption](end-to-end-encryption.md) — the per-item signing and trust model a
+  held-back workflow or step comes from.
+- [workflow-mcp-tools](workflow-mcp-tools.md) — shares the own-vs-shared classification above.

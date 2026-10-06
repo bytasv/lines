@@ -30,8 +30,9 @@ import {
   revokeGrantsForDevice,
   revokeGrantsForGrantee,
 } from './shares.ts';
-import { putRecipeImage, r2Configured, r2PublicBaseWarning } from './r2.ts';
+import { isServedRecipeImage, putRecipeImage, r2Configured, r2PublicBaseWarning } from './r2.ts';
 import { listSessions, putSession, putSessions, softDeleteSession, toWire } from './sessionRows.ts';
+import { resolveStepVersions } from './stepRows.ts';
 
 dotenv.config({ path: path.resolve(import.meta.dirname, '../../.env') });
 
@@ -64,6 +65,8 @@ try {
 const PORT = Number(process.env.PORT ?? 8790);
 
 const app = express();
+// No framework banner on every response: it says what to look up exploits for.
+app.disable('x-powered-by');
 // Express's automatic ETag hashes the response body, so the rows have already
 // been read out of Postgres by the time it can answer 304 — no egress saved,
 // and the sync client would have to treat a 304 as valid on every endpoint.
@@ -355,9 +358,6 @@ app.delete('/workflows/:id', async (req, res) => {
 
 // --- steps (versioned, shareable) ------------------------------------------
 
-/** Ceiling on one /steps/resolve batch, so a malformed client can't ask for everything. */
-const RESOLVE_MAX_REFS = 500;
-
 /**
  * Head selection happens in Postgres, not JS. Version rows are immutable and
  * append-only, so a `findMany` + reduce-in-JS transferred the entire edit
@@ -454,20 +454,13 @@ app.put('/steps', async (req, res) => {
   res.json({ ok: true, count: valid.length });
 });
 
-/** Resolve specific immutable versions a workflow pins (any author). */
+/**
+ * Resolve specific immutable versions a workflow pins: the caller's own, or anyone's
+ * published. Anything else is left out exactly as a missing row is (see stepRows.ts).
+ */
 app.post('/steps/resolve', async (req, res) => {
-  userIdOf(req); // auth only
-  const refs = Array.isArray(req.body) ? (req.body as { ownerId?: string; id?: string; version?: number }[]) : [];
-  const valid = refs.filter((r) => r?.ownerId && r?.id && typeof r.version === 'number');
-  if (valid.length === 0) {
-    res.json([]);
-    return;
-  }
-  const rows = await prisma.stepVersion.findMany({
-    where: { OR: valid.slice(0, RESOLVE_MAX_REFS).map((r) => ({ userId: r.ownerId!, id: r.id!, version: r.version! })) },
-    select: { data: true },
-  });
-  res.json(rows.map((r) => r.data));
+  const refs = Array.isArray(req.body) ? (req.body as unknown[]) : [];
+  res.json(await resolveStepVersions(prisma, userIdOf(req), refs));
 });
 
 /** Full version history for one step, newest first. Own steps: all versions; foreign: published only. */
@@ -480,10 +473,17 @@ app.get('/steps/:ownerId/:id/versions', async (req, res) => {
     take: 200,
     select: { data: true },
   });
-  res.json(rows.map((r) => r.data));
+  // Keyed by the row, not the blob: the bridge files each version under the
+  // blob's own `ownerId`/`id`, so a blob naming the reader would be adopted into
+  // their history and pushed back as theirs.
+  res.json(rows.map((r) => ({ ...(r.data as object), ownerId, id })));
 });
 
-/** Drop a step from the library — flip every version's published flag off; rows stay so pins resolve. */
+/**
+ * Drop a step from the library — flip every version's published flag off. Rows
+ * stay, so the owner's own pins still resolve; anyone else's stop resolving, since
+ * /steps/resolve serves another user only published versions.
+ */
 app.delete('/steps/:id', async (req, res) => {
   await prisma.stepVersion
     .updateMany({ where: { userId: userIdOf(req), id: req.params.id }, data: { published: false } })
@@ -525,11 +525,14 @@ app.get('/recipes/shared', async (req, res) => {
     SELECT count(*) AS count, max(updated_at) AS max FROM recipe_versions
     WHERE published AND user_id <> ${userId}`;
   if (servedFromEtag(req, res, tag)) return;
-  const rows = await prisma.$queryRaw<{ data: unknown }[]>`
-    SELECT DISTINCT ON (user_id, id) data FROM recipe_versions
+  const rows = await prisma.$queryRaw<{ data: unknown; userId: string }[]>`
+    SELECT DISTINCT ON (user_id, id) data, user_id AS "userId" FROM recipe_versions
     WHERE published AND user_id <> ${userId}
     ORDER BY user_id, id, version DESC`;
-  res.json(rows.map((r) => r.data));
+  // `ownerId` from the row's `user_id`, as /steps/shared: the blob is
+  // client-written, and a recipe claiming to be the *reader's* would otherwise be
+  // adopted by their bridge as their own and re-published under their name.
+  res.json(rows.map((r) => ({ ...(r.data as object), ownerId: r.userId })));
 });
 
 /**
@@ -539,8 +542,14 @@ app.get('/recipes/shared', async (req, res) => {
  */
 app.get('/recipes/stats', async (req, res) => {
   const userId = userIdOf(req);
+  // Over the rows this caller can see, as the answer below is: a tag summed over
+  // every user's stats would tell anyone polling it when strangers run their
+  // private recipes.
   const [tag] = await prisma.$queryRaw<{ count: bigint; max: Date | null }[]>`
-    SELECT coalesce(sum(run_count), 0)::bigint AS count, max(last_run_at) AS max FROM recipe_stats`;
+    SELECT coalesce(sum(s.run_count), 0)::bigint AS count, max(s.last_run_at) AS max FROM recipe_stats s
+    WHERE s.user_id = ${userId}
+       OR EXISTS (SELECT 1 FROM recipe_versions v
+                  WHERE v.user_id = s.user_id AND v.id = s.id AND v.published)`;
   if (servedFromEtag(req, res, tag)) return;
   const rows = await prisma.$queryRaw<{ ownerId: string; id: string; runCount: number }[]>`
     SELECT s.user_id AS "ownerId", s.id, s.run_count AS "runCount" FROM recipe_stats s
@@ -629,10 +638,20 @@ app.post('/recipes/images', async (req, res) => {
  */
 app.put('/recipes', async (req, res) => {
   const userId = userIdOf(req);
-  const list = Array.isArray(req.body) ? (req.body as { id?: string; version?: number; published?: boolean }[]) : [];
-  const valid = list.filter((r) => r?.id && typeof r.version === 'number');
+  const list = Array.isArray(req.body)
+    ? (req.body as { id?: string; version?: number; published?: boolean; images?: unknown }[])
+    : [];
+  const shaped = list.filter((r) => r?.id && typeof r.version === 'number');
+  // A version whose images point anywhere but this deployment's bucket is left
+  // out rather than rewritten: the blob carries its author's signature, and an
+  // edited copy would stop verifying for everyone. Skipped, not a 400 — the
+  // bridge pushes a whole history at once, and one bad version must not stop it.
+  const valid = shaped.filter((r) => r.images === undefined || (Array.isArray(r.images) && r.images.every(isServedRecipeImage)));
+  if (valid.length < shaped.length) {
+    console.warn(`[storage] PUT /recipes: skipped ${shaped.length - valid.length} version(s) with off-bucket images`);
+  }
   if (valid.length === 0) {
-    res.json({ ok: true, count: 0 });
+    res.json({ ok: true, count: 0, skipped: shaped.length });
     return;
   }
   await prisma.$executeRaw`
@@ -647,7 +666,7 @@ app.put('/recipes', async (req, res) => {
     ) AS u(id, version, data, published, updated_at)
     ON CONFLICT (user_id, id, version) DO UPDATE
       SET data = EXCLUDED.data, published = EXCLUDED.published, updated_at = EXCLUDED.updated_at`;
-  res.json({ ok: true, count: valid.length });
+  res.json({ ok: true, count: valid.length, skipped: shaped.length - valid.length });
 });
 
 /** Full version history for one recipe, newest first. Own: all; foreign: published only. */
@@ -660,7 +679,8 @@ app.get('/recipes/:ownerId/:id/versions', async (req, res) => {
     take: 200,
     select: { data: true },
   });
-  res.json(rows.map((r) => r.data));
+  // Keyed by the row, as the step history is: see /steps/:ownerId/:id/versions.
+  res.json(rows.map((r) => ({ ...(r.data as object), ownerId, id })));
 });
 
 /** Unpublish a recipe — every version's flag flips off; rows stay, as with steps. */
@@ -820,9 +840,53 @@ app.put('/guard-allowlist', async (req, res) => {
 /** Hard cap on a stored list. Authoritative validation is the bridge's (normalizeConnection). */
 const MCP_MAX_CONNECTIONS = 50;
 
+/**
+ * The env var names one connection row declares: its `envKeys`, then the keys
+ * of an `env` map. Only a bridge that predates names-only sync still sends
+ * `env`, and only rows written before it (and before the migration that
+ * scrubbed them) still hold one; its values never get past here, its names are
+ * kept. A row without `env` gets its `envKeys` back exactly as sent, so the
+ * signature the bridge put over them still verifies.
+ */
+function mcpEnvKeys(c: Record<string, unknown>): string[] | undefined {
+  const declared = Array.isArray(c.envKeys)
+    ? c.envKeys.filter((k): k is string => typeof k === 'string')
+    : undefined;
+  const env = c.env && typeof c.env === 'object' && !Array.isArray(c.env) ? Object.keys(c.env) : [];
+  if (!env.length) return declared;
+  const names = [...(declared ?? [])];
+  for (const name of env) if (!names.includes(name)) names.push(name);
+  return names;
+}
+
+/**
+ * A stored blob as it may be served: header and env *values* taken out of any
+ * row that still holds them, env names kept as `envKeys`. Such a row predates
+ * names-only sync, and the signature it carries stops verifying here — which the
+ * bridge answers by refusing the row and pushing its own copy. A blob with
+ * nothing to take out, which is every blob a current bridge wrote, is served
+ * exactly as stored.
+ */
+function servedMcpConnections(data: unknown): unknown {
+  const blob = data as { connections?: unknown } | null;
+  if (!blob || typeof blob !== 'object' || !Array.isArray(blob.connections)) return data;
+  const holdsValues = (c: unknown): c is Record<string, unknown> =>
+    !!c && typeof c === 'object' && ('env' in c || 'headers' in c);
+  if (!blob.connections.some(holdsValues)) return data;
+  return {
+    ...blob,
+    connections: blob.connections.map((c) => {
+      if (!holdsValues(c)) return c;
+      const { env: _env, headers: _headers, ...rest } = c;
+      const envKeys = mcpEnvKeys(c);
+      return envKeys ? { ...rest, envKeys } : rest;
+    }),
+  };
+}
+
 app.get('/mcp-connections', async (req, res) => {
   const row = await prisma.mcpConnections.findUnique({ where: { userId: userIdOf(req) } });
-  res.json(row?.data ?? null);
+  res.json(servedMcpConnections(row?.data ?? null));
 });
 
 app.put('/mcp-connections', async (req, res) => {
@@ -834,8 +898,11 @@ app.put('/mcp-connections', async (req, res) => {
   }
   // Light shape filter only, as PUT /guard-allowlist does: the bridge re-validates
   // every row on ingest before it can reach a UI, and that is where the real rules
-  // live. `headers` is stripped rather than trusted — header values are
-  // credentials and must never be stored here, whatever a client sends.
+  // live. Credential values are stripped rather than trusted, whatever a client
+  // sends — `headers` outright, a stdio `env` down to its names. A bridge that
+  // predates names-only sync still sends `env` values, and is answered as usual
+  // rather than with a 400: that would stop its whole list syncing, and dropping
+  // the values is all a refusal could achieve.
   // A type alias, not an interface: Prisma's Json input type needs an implicit
   // index signature, which only object type literals get.
   type StoredConnection = {
@@ -846,11 +913,12 @@ app.put('/mcp-connections', async (req, res) => {
     url?: string;
     command?: string;
     args?: string[];
-    env?: Record<string, string>;
+    envKeys?: string[];
     headerKeys?: string[];
     timeout?: number;
   };
   const connections: StoredConnection[] = [];
+  let droppedEnv = false;
   for (const raw of body.connections.slice(0, MCP_MAX_CONNECTIONS)) {
     const c = raw as Record<string, unknown> | null;
     if (!c || typeof c.id !== 'string' || typeof c.name !== 'string' || !c.name) continue;
@@ -864,18 +932,18 @@ app.put('/mcp-connections', async (req, res) => {
     if (typeof c.url === 'string') row.url = c.url;
     if (typeof c.command === 'string') row.command = c.command;
     if (Array.isArray(c.args)) row.args = c.args.filter((a): a is string => typeof a === 'string');
-    if (c.env && typeof c.env === 'object' && !Array.isArray(c.env)) {
-      const env: Record<string, string> = {};
-      for (const [k, v] of Object.entries(c.env as Record<string, unknown>)) {
-        if (typeof v === 'string') env[k] = v;
-      }
-      row.env = env;
-    }
+    const envKeys = mcpEnvKeys(c);
+    if (envKeys) row.envKeys = envKeys;
+    if (c.env !== undefined) droppedEnv = true;
     if (Array.isArray(c.headerKeys)) {
       row.headerKeys = c.headerKeys.filter((k): k is string => typeof k === 'string');
     }
     if (typeof c.timeout === 'number') row.timeout = c.timeout;
     connections.push(row);
+  }
+  if (droppedEnv) {
+    // That it happened, never what was in it.
+    console.warn('[storage] PUT /mcp-connections: dropped env values from a bridge that predates names-only sync');
   }
   const data = {
     connections,
@@ -1341,6 +1409,8 @@ app.post('/v1/devices/authorize', async (req, res) => {
 
 /** Invite codes ride in a URL, so: URL-safe, and long enough not to be guessable. */
 const inviteCode = () => randomBytes(24).toString('base64url');
+/** A bridge grant id: a UUID in practice, opaque here. */
+const GRANT_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
 const SHARE_INVITE_TTL_MIN = Number(process.env.SHARE_INVITE_TTL_MIN ?? 7 * 24 * 60);
 
 /** Cache a Clerk identity so a shared session can name people without a Clerk key. */
@@ -1379,8 +1449,13 @@ app.post('/v1/shares/invite', async (req, res) => {
     sessionId?: string | null;
     inviteeEmail?: string | null;
     preset?: SharePreset;
+    grantId?: unknown;
   };
   const preset = body.preset ?? 'view';
+  // The id of the grant the host's machine minted for this invite (never the
+  // token): kept so that machine can drop the grant once the share is gone.
+  // Optional — an older client sends none — and shape-checked, not trusted.
+  const grantId = typeof body.grantId === 'string' && GRANT_ID_RE.test(body.grantId) ? body.grantId : null;
   if (!body.deviceId || !SHARE_PRESETS[preset]) {
     res.status(400).json({ error: 'deviceId and a valid preset are required' });
     return;
@@ -1416,6 +1491,7 @@ app.post('/v1/shares/invite', async (req, res) => {
       sessionId: body.sessionId ?? null,
       inviteeEmail,
       caps: capsJson(capsForPreset(preset, body.sessionId ? 'session' : 'machine')),
+      grantId,
       expiresAt,
     },
   });
@@ -1454,10 +1530,15 @@ app.get('/v1/shares', async (req, res) => {
   );
 
   res.json({
+    // Says this server records bridge grant ids, so a bridge may reconcile its
+    // grants against the lists below (server/src/guestGrants.ts). An older server
+    // sends neither the flag nor the ids, and a bridge then leaves its grants be.
+    grantTracking: true,
     granted: [
       ...grantedMembers.map((m) => ({
         kind: 'machine' as const,
         deviceId: m.deviceId,
+        grantId: m.grantId,
         userId: m.userId,
         caps: parseShareCaps(m.caps),
         preset: presetOfCaps(parseShareCaps(m.caps), 'machine'),
@@ -1467,6 +1548,7 @@ app.get('/v1/shares', async (req, res) => {
       ...grantedShares.map((s) => ({
         kind: 'session' as const,
         deviceId: s.deviceId,
+        grantId: s.grantId,
         sessionId: s.sessionId,
         userId: s.userId,
         caps: parseShareCaps(s.caps),
@@ -1480,6 +1562,7 @@ app.get('/v1/shares', async (req, res) => {
     invites: invites.map((i) => ({
       code: i.code,
       deviceId: i.deviceId,
+      grantId: i.grantId,
       sessionId: i.sessionId,
       inviteeEmail: i.inviteeEmail,
       preset: presetOfCaps(parseShareCaps(i.caps), i.sessionId ? 'session' : 'machine'),
@@ -1669,16 +1752,18 @@ app.post('/v1/shares/claim', async (req, res) => {
           sessionId: invite.sessionId,
           ownerId: invite.ownerId,
           caps,
+          grantId: invite.grantId,
         },
         // Re-claiming a previously revoked grant clears the tombstone rather than
-        // failing on the primary key.
-        update: { caps, ownerId: invite.ownerId, revokedAt: null },
+        // failing on the primary key — and points the row at the newer grant, which
+        // is the one the guest now holds a token for.
+        update: { caps, ownerId: invite.ownerId, revokedAt: null, grantId: invite.grantId },
       });
     } else {
       await tx.deviceMember.upsert({
         where: { deviceId_userId: { deviceId: invite.deviceId, userId } },
-        create: { deviceId: invite.deviceId, userId, ownerId: invite.ownerId, caps },
-        update: { caps, ownerId: invite.ownerId, revokedAt: null },
+        create: { deviceId: invite.deviceId, userId, ownerId: invite.ownerId, caps, grantId: invite.grantId },
+        update: { caps, ownerId: invite.ownerId, revokedAt: null, grantId: invite.grantId },
       });
     }
     return true;

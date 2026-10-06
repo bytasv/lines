@@ -35,9 +35,10 @@ instead.
 
 The agent runs on your machine. Your repos, full transcripts and CLI logins live
 there and are never stored on Lines servers. Prompts go to Anthropic or OpenAI
-under your own account. Live traffic between your own devices and your machine is
-end-to-end encrypted through the relay. Session metadata, workflows and agent
-memory sync to Lines storage in plaintext so every device sees them.
+under your own account. Live traffic between your machine and your own devices,
+or the guests you invite, is end-to-end encrypted through the relay. Session
+metadata, workflows and agent memory sync to Lines storage in plaintext so every
+device sees them.
 [PRIVACY.md](PRIVACY.md) lists every field, and the server side can be
 [self-hosted](deploy/README.md#self-hosting).
 
@@ -122,7 +123,11 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173. The bridge listens on `:8787`, the worker on `:8788`.
+Open http://localhost:5173. The bridge listens on `127.0.0.1:8787`, the worker on
+`127.0.0.1:8788`, and the bridge accepts a browser socket only from a page this
+machine serves. To try it from a phone on the same Wi-Fi, opt in: start it with
+`LINES_BRIDGE_HOST=0.0.0.0` and the page's LAN origin in
+`LINES_BRIDGE_ALLOWED_ORIGINS` (for example `http://192.168.1.20:5173`).
 (`tilt up` shows separate worker and bridge resources with readiness probes.
 Source reloads wait for active turns to finish; stopping Tilt shuts both down
 and cleans up their child processes — see `Tiltfile`.)

@@ -14,10 +14,12 @@ None UI-facing — sync only. Fires on `syncNow` (websocket connect/reconnect) v
 
 ## Files
 
-- `shared/types.ts` — `SessionMeta.updatedAt`/`createdAt`
+- `shared/types.ts` — `SessionMeta.updatedAt`/`createdAt`, `SessionMeta.permissionCeiling` (local-only)
 - `server/src/store.ts` — `SyncWatermarks.sessionsPushed`, `loadDeletedSessions`/`saveDeletedSessions`
-- `server/src/sync.ts` — `StorageSyncClient.pushSessions`/`pushSession`/`flushSessions`/`chunkSessions`/`deleteSession`/`drainDeletes`
-- `server/src/sessions.ts` — `SessionManager.adoptSynced`/`applyRemoteDelete`, the tombstone map
+- `server/src/sync.ts` — `StorageSyncClient.pushSessions`/`pushSession`/`flushSessions`/`chunkSessions`/`deleteSession`/`drainDeletes`; `sessionForSync` (strips local-only fields from what is sent)
+- `server/src/sessions.ts` — `SessionManager.adoptSynced`/`adoptSyncedWorkflow`/`applyRemoteDelete`, the tombstone map
+- `server/src/workflows.ts` — `runStep`'s refusal of a session whose own workflow snapshot is marked (`unverifiedRefusal`)
+- `server/src/syncSignature.ts` — `runnableDigest`, which `adoptSyncedWorkflow` compares an embedded workflow by
 - `server/src/userContext.ts` — `syncNow` call site: routes a pulled tombstoned row to `applyRemoteDelete` instead of `adoptSynced`
 - `storage/prisma/schema.prisma` — `Session.deletedAt`
 - `storage/src/index.ts` — the three `/sessions` routes (now thin wrappers), body-parser `entity.too.large` handling in `onError`
@@ -32,7 +34,9 @@ None UI-facing — sync only. Fires on `syncNow` (websocket connect/reconnect) v
 - `StorageSyncClient.deleteSession` — queues the id in `pendingDeletes` immediately, then sends the `DELETE` right away if the client is enabled and not mid-`applying`; otherwise the id waits for the next `pushSessions`/`pushSession` call to retry it
 - `StorageSyncClient.drainDeletes` — retries every unconfirmed delete; storage's soft delete is idempotent, so a retry is free
 - `SyncWatermarks.sessionsPushed` — newest pushed `SessionMeta.updatedAt`/`createdAt` accepted by storage
-- `SessionManager.adoptSynced` — LWW-adopts a pulled session, now returning early when a local tombstone's timestamp is not beaten by the pulled row (the branch the plain "no local copy" case never reached before)
+- `SessionManager.adoptSynced` — LWW-adopts a pulled session, now returning early when a local tombstone's timestamp is not beaten by the pulled row (the branch the plain "no local copy" case never reached before); keeps `queued`, `permissionMode` and `permissionCeiling` at what this machine already had
+- `SessionManager.adoptSyncedWorkflow` — the part of a pulled `workflow` state that becomes prompt text here: keeps an embedded `def` only if it is the exact workflow this machine already holds for the session, otherwise keeps it for display with an `unsigned` mark; for the run this machine already holds, keeps its own `task`/`outputs`/`lastStepOutput`
+- `sessionForSync` (`server/src/sync.ts`) — the copy of a meta a push sends, without `permissionCeiling`; the live meta keeps it
 - `SessionManager.applyRemoteDelete(id, deletedAt)` — records a tombstone (keeping the newer of any existing one), tears down local state if present, and broadcasts `sessionDeleted` — even for a session this machine never held
 - `Store.loadDeletedSessions` / `saveDeletedSessions` — the bridge's own tombstone map, persisted beside `sessions.json` and pruned past ~30 days on load
 - `listSessions` / `putSessions` / `putSession` / `softDeleteSession` / `toWire` (`storage/src/sessionRows.ts`) — the row-level implementation the `/sessions` routes call through to
@@ -61,10 +65,18 @@ A row with no `deletedAt` goes through `adoptSynced` as before, except it now ch
 
 `GET /sessions` serves tombstoned rows inside the ordinary delta window — the field that was previously filtered out (`toWire` maps a `deletedAt` row to `{...data, deletedAt: ms}`) is what lets a peer learn about a delete at all. Both `PUT /sessions` (batch, raw SQL with a `WHERE` guard) and `PUT /sessions/:id` (single, a `findUnique` read before the upsert) refuse to clear or overwrite a tombstone unless the incoming `updatedAt` is strictly newer than `deletedAt`. `DELETE /sessions/:id` only ever stamps a *null* `deletedAt` (`WHERE deleted_at IS NULL`), so a retried delete — the bridge retries until storage confirms — keeps the original stamp instead of advancing it and re-notifying every peer on every retry.
 
+### Adopt: what a pulled row cannot carry
+
+A session row is never signed (see [end-to-end-encryption](end-to-end-encryption.md)), so `adoptSynced` keeps every field that would become an instruction to this machine at this machine's own value. Beyond `queued`/`permissionMode` (see Business rules), `permissionCeiling` — the limit a foreign recipe run puts on what an approved plan resumes in (see [recipes](recipes.md)) — is always the local one, and `sessionForSync` keeps it off the wire in the first place.
+
+`adoptSyncedWorkflow` handles the workflow state. An embedded `workflow.def` (the snapshot a session runs from instead of a library workflow — a guest's inline workflow, for one) is kept as-is only when its `runnableDigest` matches the def this machine already holds for that session; otherwise it is kept for display with an `unsigned` mark. `runStep` refuses every step of a marked snapshot — strict sync or not, since there is no signature a recovery switch could vouch for and no library copy to review it from — parking the step `pre-run` with a failure that says to start a new session from the library; nor does such a snapshot get to seed the session's model or permission mode. For the run this machine already holds (same `workflowId`), its own `task`, `outputs` and `lastStepOutput` — the values substituted into later steps' prompts — stand over the row's, and a row without a `def` for that run keeps the local one rather than falling through to whichever library workflow shares its id.
+
 ## Tests
 
-- `server/src/sync.sessions.test.ts` — chunking under budget, no re-push of unchanged metas, only-the-changed-meta re-push, requeue-and-no-watermark-advance on a rejected chunk, single over-budget meta skipped without blocking siblings, a delete issued mid-flight is not undone by that push, a delete queued while `applying`/disabled rides the next sync, a bulk push never carries a session whose delete is still unconfirmed
+- `server/src/sync.sessions.test.ts` — chunking under budget, no re-push of unchanged metas, only-the-changed-meta re-push, requeue-and-no-watermark-advance on a rejected chunk, single over-budget meta skipped without blocking siblings, a delete issued mid-flight is not undone by that push, a delete queued while `applying`/disabled rides the next sync, a bulk push never carries a session whose delete is still unconfirmed, a local-only field (`permissionCeiling`) never leaves the machine while the live meta keeps it
 - `server/src/sync.credentials.test.ts` — unaffected by chunking for small batches (still asserts one `/sessions` request)
+- `server/src/workflows.trust.test.ts` — a synced session carrying its own workflow keeps it marked, parks the first step `pre-run` and sends nothing to the worker; a synced row cannot rewrite the `task`/`outputs`/`lastStepOutput` a run already here substitutes into its prompts
+- `server/src/recipes.run.test.ts` — a pulled row neither lifts nor brings `permissionCeiling`
 - `server/src/sessions.delete.test.ts` — a tombstone blocks `adoptSynced` from resurrecting a session; a write genuinely newer than the delete still brings it back; a remote delete for a session never held here is recorded anyway; tombstones survive a reload; a session left in `sessions.json` despite a tombstone (an older build's leftover) does not resurrect on load; pruning drops tombstones past the retention window
 - `storage/src/sessions.softDelete.test.ts` — drives `sessionRows.ts` directly (not over HTTP, since `/sessions` is Clerk-gated and a test cannot mint a token): `DELETE` stamps `deletedAt` rather than removing the row; the tombstone rides the delta window; a stale push (both batch and single-row routes) does not resurrect; a write newer than the delete does; a repeated delete keeps its original stamp; deleting one session leaves a sibling untouched. **Opt-in**, same as `devices.unpair.test.ts`: needs `STORAGE_TEST_DATABASE_URL`.
 
@@ -82,6 +94,8 @@ A row with no `deletedAt` goes through `adoptSynced` as before, except it now ch
 - `adoptSynced` now has the tombstone branch the plain LWW check never reached: a pulled session that doesn't beat an existing local tombstone is dropped, even with no local copy of the session itself.
 - `applyRemoteDelete` records a tombstone even for a session this machine never held, so a slower third machine's later push can't resurrect it here either.
 - **A synced session is a display artifact plus resumable history — not a work order.** `adoptSynced` never takes `queued` from a pulled row, and never lets one raise `permissionMode`; a session first seen here arrives with `bypassPermissions` clamped to `default`. The local queue survives a pull rather than being replaced by whatever the row carried.
+- `permissionCeiling` is never synced: stripped from every push (on the copy sent — the live meta keeps it) and ignored on pull, so a row can neither lift a ceiling a foreign recipe run set here nor bring one.
+- An embedded workflow (`workflow.def`) pulled from storage is display-only unless it is exactly the def this machine already holds for that session: otherwise it is marked and `runStep` refuses every step of it, whatever `LINES_E2EE_STRICT` says. For a run this machine holds, its own `task`/`outputs`/`lastStepOutput` stand over the row's.
 - The queue flush that follows `reconcileWithWorker` is scoped by the same `ranHere` rule as the demotion loop above it. Without that scope it ran over *every* session, adopted ones included — and a synced row supplies everything `maybeFlush` asks for (non-empty `queued`, unpaused queue, idle status), so a row written into Postgres started a turn on this machine, unattended, at the next worker hello. That was a live path, not a theoretical one; `sessions.reconcile.test.ts` covers it and the test was written before the fix.
 - A delete issued while pulled state is being applied, or before there's a token to send it with, is queued (`pendingDeletes`) rather than dropped, and rides the next flush/sync instead of being lost.
 - A bulk push (reconnect) filters out any session whose delete is still unconfirmed, so the whole-list push can't undo a delete that raced it.
@@ -104,8 +118,9 @@ A row with no `deletedAt` goes through `adoptSynced` as before, except it now ch
 ## Related decisions
 
 - [end-to-end-encryption](end-to-end-encryption.md) — why session rows cannot yet carry a
-  signature (they travel as an array, with nowhere to put one short of a per-row column), and why
-  the field stripping above is what stands in for it
+  signature (they travel as an array, with nowhere to put one short of a per-row column — unlike
+  workflows, steps and recipes, which are now signed per item), and why the field stripping and
+  workflow marking above are what stand in for it
 
 - [agent-memory-sync](agent-memory-sync.md)
 - [hosted-machine-access](hosted-machine-access.md) — the relay/bridge-supersede half of the same

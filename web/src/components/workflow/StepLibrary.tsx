@@ -15,8 +15,17 @@ import {
   UnstyledButton,
 } from '@mantine/core';
 import { useHotkeys } from '@mantine/hooks';
-import { IconCopy, IconHistory, IconLock, IconPlus, IconSearch, IconTrash, IconWorld } from '@tabler/icons-react';
-import type { StepContent, StepDef } from '@lines/shared';
+import {
+  IconCopy,
+  IconHistory,
+  IconLock,
+  IconPlus,
+  IconSearch,
+  IconShieldQuestion,
+  IconTrash,
+  IconWorld,
+} from '@tabler/icons-react';
+import type { StepContent, StepDef, UntrustedMark } from '@lines/shared';
 import { DEFAULT_MODEL, formatTimestamp, isStepRef, providerForModel, validateRoutingRule } from '@lines/shared';
 import { useStore } from '../../store';
 import { getOwnerId, getOwnerName } from '../../lib/clerk';
@@ -28,6 +37,7 @@ import { FieldDiffList, relTime } from './StepCard';
 import { PromptEditor } from './PromptEditor';
 import { modelLabel, StepSettings } from './StepSettings';
 import { StepBanner, StepPane } from './StepPane';
+import { isHeld, needsReview, stepReviewItem, UntrustedBadge, UntrustedReviewModal } from './UntrustedReview';
 import styles from './workflow.module.css';
 
 const cn = (...xs: (string | false | undefined)[]) => xs.filter(Boolean).join(' ');
@@ -40,6 +50,12 @@ type Draft = StepContent & {
   published?: boolean;
   createdAt?: number;
   updatedAt?: number;
+  /**
+   * The mark of what this unsaved copy was copied from, sent with its first save
+   * so the copy stays held back until reviewed — copying is not a way past it.
+   * Editor-only; a loaded step's own `untrusted` is never sent back.
+   */
+  heldMark?: UntrustedMark;
 };
 
 const BLANK: Draft = {
@@ -139,6 +155,7 @@ function RestoreHistoryPopover({
                     >
                       <Text size="sm" fw={600}>v{v.version}</Text>
                       <Text size="xs" c="dimmed" style={{ flex: 1, minWidth: 0 }} truncate>{relTime(v.updatedAt)}</Text>
+                      <UntrustedBadge mark={v.untrusted} ownerName={v.ownerName} />
                       {v.version === currentVersion && (
                         <Badge size="xs" variant="light" tt="none">current</Badge>
                       )}
@@ -149,16 +166,21 @@ function RestoreHistoryPopover({
               {preview && (
                 <>
                   <FieldDiffList from={current} to={preview} />
-                  <Button
-                    size="xs"
-                    disabled={preview.version === currentVersion}
-                    onClick={() => {
-                      onRestore(preview);
-                      setOpened(false);
-                    }}
-                  >
-                    Restore v{preview.version}
-                  </Button>
+                  {/* Restoring saves the old content as a new version this machine
+                      signs, so an unverified one would come out the other side
+                      trusted without anyone having allowed it. */}
+                  <Tooltip label="This version has not been verified on this machine" disabled={!needsReview(preview.untrusted)} withArrow>
+                    <Button
+                      size="xs"
+                      disabled={preview.version === currentVersion || needsReview(preview.untrusted)}
+                      onClick={() => {
+                        onRestore(preview);
+                        setOpened(false);
+                      }}
+                    >
+                      Restore v{preview.version}
+                    </Button>
+                  </Tooltip>
                 </>
               )}
             </>
@@ -181,6 +203,7 @@ export function StepLibrary() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [baseline, setBaseline] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [query, setQuery] = useState('');
 
   const load = (d: Draft | null, key: string | null) => {
@@ -292,9 +315,11 @@ export function StepLibrary() {
     if (!draft || readOnly || !valid) return;
     const stepId = draft.id ?? crypto.randomUUID();
     const published = draft.published ?? false;
-    send({ type: 'saveStep', step: contentOf(draft), stepId, published, ownerName: getOwnerName() ?? undefined });
+    const step = draft.heldMark ? { ...contentOf(draft), untrusted: draft.heldMark } : contentOf(draft);
+    send({ type: 'saveStep', step, stepId, published, ownerName: getOwnerName() ?? undefined });
     // Select the (soon-updated) own step; the broadcast refreshes its version.
-    load({ ...draft, id: stepId, published }, `own:${stepId}`);
+    // The copy's mark has been sent once; the bridge's verdict stands from here.
+    load({ ...draft, id: stepId, published, heldMark: undefined }, `own:${stepId}`);
   };
 
   const saveHotkey = canSave && !confirmDelete;
@@ -306,7 +331,9 @@ export function StepLibrary() {
 
   const duplicate = () => {
     if (!draft) return;
-    load({ ...contentOf(draft), name: `${draft.name} (copy)` }, null);
+    // The live row's mark, not the draft's: the draft may predate a review.
+    const mark = needsReview(stepRow?.untrusted) ? stepRow?.untrusted : undefined;
+    load({ ...contentOf(draft), name: `${draft.name} (copy)`, ...(mark ? { heldMark: mark } : {}) }, null);
   };
 
   const doDelete = () => {
@@ -367,6 +394,7 @@ export function StepLibrary() {
                         .join(' · ')}
                     </span>
                   </span>
+                  <UntrustedBadge mark={s.untrusted} ownerName={s.ownerName} />
                   {selected === k && dirty && <DirtyDot />}
                   {s.published && (
                     <Tooltip label="Shared with everyone" withArrow>
@@ -406,6 +434,7 @@ export function StepLibrary() {
                           {s.ownerName ?? 'Unknown'} · v{s.version} · {modelLabel(models, s.model)}
                         </span>
                       </span>
+                      <UntrustedBadge mark={s.untrusted} ownerName={s.ownerName} />
                     </UnstyledButton>
                   );
                 })}
@@ -469,19 +498,36 @@ export function StepLibrary() {
             </>
           }
           banner={
-            readOnly ? (
-              <StepBanner
-                icon={<IconLock size={14} />}
-                actions={
-                  <Button size="compact-xs" variant="default" leftSection={<IconCopy size={12} />} onClick={duplicate}>
-                    Make an editable copy
-                  </Button>
-                }
-              >
-                From <b>{draft.ownerName ?? 'another user'}</b>, read-only. Pin it from a workflow's Add step menu,
-                or make an editable copy in your library to change it.
-              </StepBanner>
-            ) : undefined
+            <>
+              {stepRow && needsReview(stepRow.untrusted) && (
+                <StepBanner
+                  icon={<IconShieldQuestion size={14} />}
+                  actions={
+                    <Button size="compact-xs" variant="light" color="orange" onClick={() => setReviewOpen(true)}>
+                      Review
+                    </Button>
+                  }
+                >
+                  This machine has not verified v{stepRow.version} of this step yet,{' '}
+                  {isHeld(stepRow.untrusted)
+                    ? 'so no workflow pinning it will run that version until you review it.'
+                    : 'though it still runs because strict sync is off on this machine.'}
+                </StepBanner>
+              )}
+              {readOnly && (
+                <StepBanner
+                  icon={<IconLock size={14} />}
+                  actions={
+                    <Button size="compact-xs" variant="default" leftSection={<IconCopy size={12} />} onClick={duplicate}>
+                      Make an editable copy
+                    </Button>
+                  }
+                >
+                  From <b>{draft.ownerName ?? 'another user'}</b>, read-only. Pin it from a workflow's Add step menu,
+                  or make an editable copy in your library to change it.
+                </StepBanner>
+              )}
+            </>
           }
           prompt={
             <PromptEditor
@@ -550,6 +596,12 @@ export function StepLibrary() {
         </Stack>
       )}
 
+      <UntrustedReviewModal
+        opened={reviewOpen && needsReview(stepRow?.untrusted)}
+        title={`Review “${stepRow?.name ?? 'step'}”`}
+        items={stepRow ? [stepReviewItem(stepRow, `${stepRow.name} · v${stepRow.version}`)] : []}
+        onClose={() => setReviewOpen(false)}
+      />
       <ConfirmModal
         opened={confirmDelete}
         title="Delete step"

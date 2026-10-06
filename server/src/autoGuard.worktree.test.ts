@@ -39,8 +39,11 @@ test('a harmless first segment does not smuggle a removal past the rules', () =>
 });
 
 test('an allowlist entry still wins over the new rules', () => {
-  assert.equal(
-    verdict('git worktree remove ../wt/x', [{ tool: 'Bash', prefix: 'git worktree remove' }]).dangerous,
-    false,
-  );
+  // `git worktree` doesn't name the dangerous part, so it extends to removal…
+  assert.equal(verdict('git worktree remove ../wt/x', [{ tool: 'Bash', prefix: 'git worktree' }]).dangerous, false);
+  // …while a prefix the rule itself names covers only that exact command, never
+  // every worktree it could be pointed at.
+  const exact = [{ tool: 'Bash', prefix: 'git worktree remove ../wt/x' }];
+  assert.equal(verdict('git worktree remove ../wt/x', exact).dangerous, false);
+  assert.equal(verdict('git worktree remove ../wt/y', [{ tool: 'Bash', prefix: 'git worktree remove' }]).dangerous, true);
 });

@@ -83,6 +83,7 @@ import { decideTurn } from './jev.ts';
 import { acceptPick, resolveRule } from './turnRouting.ts';
 import { linesMcpServerConfig } from './linesMcpStdio.ts';
 import { mergeMcpServers } from './workerProtocol.ts';
+import { runnableDigest } from './syncSignature.ts';
 import type { Store } from './store.ts';
 import type { SpendHistory } from './spendHistory.ts';
 import {
@@ -99,7 +100,7 @@ import { COMPRESS_RESPONSES_PROMPT } from './caveman.ts';
 import { codexCollaborationMode } from './codexPlanMode.ts';
 import {
   ALWAYS_ASK_TOOLS,
-  allowEntryFor,
+  alwaysAllowEntryFor,
   assessToolCall,
   isPlanPath,
   isSafePlanModeRead,
@@ -107,6 +108,7 @@ import {
   type PlanModeVerdict,
   isSafePlanWrite,
   isSafeReadOnly,
+  persistentFileReason,
   type GuardAllowlist,
 } from './autoGuard.ts';
 import {
@@ -568,8 +570,36 @@ interface PermissionAnswer {
   answers?: Record<string, string>;
 }
 
+/** Cap on one answer to a question card. "Other…" is free text, so it is generous. */
+const MAX_QUESTION_ANSWER_CHARS = 10_000;
+
+/**
+ * The answers a client sent for an `AskUserQuestion` card, narrowed to what the
+ * card actually asked: keyed only by the recorded questions' own text, string
+ * values only, each capped. Undefined when nothing survives — the same shape a
+ * card answered with nothing already has.
+ */
+export function questionAnswers(
+  input: Record<string, unknown>,
+  raw: Record<string, unknown> | undefined,
+): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const questions = Array.isArray(input.questions) ? (input.questions as unknown[]) : [];
+  const out: Record<string, string> = {};
+  for (const q of questions) {
+    const question = q && typeof q === 'object' ? (q as { question?: unknown }).question : undefined;
+    if (typeof question !== 'string' || !Object.hasOwn(raw, question)) continue;
+    const value = raw[question];
+    if (typeof value === 'string') out[question] = value.slice(0, MAX_QUESTION_ANSWER_CHARS);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 /** Tools whose write to a plan file can carry a plan-mode deliverable. */
 const PLAN_WRITE_TOOLS = new Set(['Write', 'Edit']);
+
+/** Every tool that writes a file by path — what the persistent-file rule in handlePreToolUse checks. */
+const PERSISTENT_WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
 /** Cap on a plan file read back from disk, matching the /file route's limit. */
 const MAX_PLAN_FILE_BYTES = 2 * 1024 * 1024;
@@ -1598,6 +1628,10 @@ export class SessionManager {
     // to skip every permission prompt. The user can still set it, here, once.
     if (cur) meta.permissionMode = cur.permissionMode;
     else if (meta.permissionMode === 'bypassPermissions') meta.permissionMode = 'default';
+    // The ceiling a foreign recipe run set is this machine's own record; a row
+    // can neither lift it nor bring one (see SessionMeta.permissionCeiling).
+    meta.permissionCeiling = cur?.permissionCeiling;
+    if (meta.workflow) this.adoptSyncedWorkflow(meta.workflow, cur?.workflow);
     // In-flight statuses were just reset, so no pause is owned by this instance.
     meta.pendingPermissionTool = undefined;
     // Same reasoning: only the instance actually consolidating is advancing.
@@ -1608,6 +1642,42 @@ export class SessionManager {
     this.sessions.set(meta.id, meta);
     this.persist();
     this.broadcast({ type: 'sessionUpsert', session: meta });
+  }
+
+  /**
+   * The part of a pulled session's workflow state that becomes prompt text here.
+   *
+   * A session row is never signed, so whoever can write it could otherwise
+   * author instructions for this machine two ways. An embedded workflow (`def`)
+   * is the steps a run follows, and the trust gate in front of a step cannot
+   * vouch for one it has never seen: it is kept only when this machine already
+   * holds that exact workflow for this session, and otherwise kept for display
+   * but marked, which refuses every step of it. And `task`, `outputs` and
+   * `lastStepOutput` are substituted into later steps' prompts: for a run this
+   * machine already has, its own copies stand.
+   */
+  private adoptSyncedWorkflow(
+    incoming: NonNullable<SessionMeta['workflow']>,
+    local: SessionMeta['workflow'],
+  ) {
+    const sameRun = !!local && local.workflowId === incoming.workflowId;
+    if (sameRun) {
+      incoming.task = local!.task;
+      incoming.outputs = local!.outputs;
+      incoming.lastStepOutput = local!.lastStepOutput;
+    }
+    const held = local?.def;
+    if (incoming.def) {
+      const digest = runnableDigest('workflow', incoming.def);
+      incoming.def =
+        held && runnableDigest('workflow', held) === digest
+          ? held
+          : { ...incoming.def, untrusted: { reason: 'unsigned', digest } };
+    } else if (sameRun && held) {
+      // Dropping the snapshot would send the run to whichever library workflow
+      // shares its id — not what this session was started with.
+      incoming.def = held;
+    }
   }
 
   setStatus(id: string, status: SessionStatus, errorMessage?: string, errorKind?: SessionErrorKind) {
@@ -4606,13 +4676,14 @@ export class SessionManager {
           'I approved your plan (the session was interrupted before the approval reached you). ' +
           'Do not implement anything now — end your turn. The workflow will proceed to the next step.';
       } else {
-        // Resume outside plan mode so the approved plan gets implemented in place.
+        // Resume outside plan mode so the approved plan gets implemented in place —
+        // no higher than the ceiling a foreign recipe run set, as resolvePermission.
         if (meta.permissionMode === 'plan') {
           this.setPermissionMode(
             sessionId,
             stepRunning && wf!.stepPermissionMode && wf!.stepPermissionMode !== 'plan'
               ? wf!.stepPermissionMode // manual override: resume in the step's configured mode
-              : 'auto',
+              : (meta.permissionCeiling ?? 'auto'),
           );
         }
         text =
@@ -5041,14 +5112,30 @@ export class SessionManager {
     /** Plan-mode Bash: also record the card's `planRead.prefix` as a plan-mode read. */
     allowAsRead?: boolean,
   ) {
-    // Persist the exception first so it also covers the recovery path.
-    if (allow && alwaysAllow) {
-      const original = this.findPermissionRequest(sessionId, requestId);
-      if (original) {
-        const entry = allowEntryFor(original.toolName, original.input);
-        if (this.guard.add(entry).ok) {
-          console.log('[guard] allowlisted:', entry.tool, entry.prefix ?? '');
-        }
+    // What the client may change about the call it approves: nothing, except the
+    // answers to a question card. Rebuilt from the bridge's own record of the
+    // card rather than taken from the wire, so an approval of `ls` cannot come
+    // back as `rm -rf ~` — whoever holds `approvePermissions` approves the call
+    // that was asked about, not one of their choosing.
+    const asked = this.findPermissionRequest(sessionId, requestId);
+    const answered =
+      allow && asked?.toolName === 'AskUserQuestion'
+        ? questionAnswers(asked.input, answers ?? (updatedInput?.answers as Record<string, unknown> | undefined))
+        : undefined;
+    answers = answered;
+    updatedInput = answered && asked ? { ...asked.input, answers: answered } : undefined;
+
+    // Persist the exception first so it also covers the recovery path. What is
+    // saved is exactly what the card showed (`alwaysAllowEntry`, recorded when it
+    // was raised) — and nothing when the card said the call cannot be allowlisted.
+    // A card from before that field existed is derived the same way now.
+    if (allow && alwaysAllow && asked) {
+      const entry =
+        asked.alwaysAllowEntry !== undefined
+          ? asked.alwaysAllowEntry
+          : alwaysAllowEntryFor(asked.toolName, asked.input);
+      if (entry && this.guard.add(entry).ok) {
+        console.log('[guard] allowlisted:', entry.tool, entry.prefix ?? '');
       }
     }
     if (allow && allowAsRead) {
@@ -5113,7 +5200,9 @@ export class SessionManager {
       if (body) denyMessage = keepPlanningReason(body);
     }
     // updatedInput is recorded so a worker rpc re-send after a bridge restart
-    // can be answered from the transcript with the exact approved input.
+    // can be answered from the transcript with the exact approved input — the
+    // rebuilt one from the top of this method, so a replay cannot reintroduce
+    // what the live answer refused.
     this.emitEvent(sessionId, 'permission', {
       requestId,
       toolName: '',
@@ -5168,8 +5257,9 @@ export class SessionManager {
           // 'auto' is a Lines-level mode the CLI knows nothing about — it maps to
           // SDK acceptEdits underneath — so this goes through setPermissionMode to
           // push it to the worker. A bare meta write was only ever right for
-          // 'default', which is where the CLI had already put itself.
-          this.setPermissionMode(sessionId, 'auto');
+          // 'default', which is where the CLI had already put itself. A session
+          // running someone else's recipe resumes no higher than its ceiling.
+          this.setPermissionMode(sessionId, meta.permissionCeiling ?? 'auto');
         }
       }
     }
@@ -6163,9 +6253,12 @@ export class SessionManager {
       // next turn would plan again and raise another card. Idempotent: if
       // `resolvePermission` already switched it, this is a no-op.
       if (meta.permissionMode === 'plan') {
+        // Never past a foreign recipe's ceiling, as in resolvePermission.
         this.setPermissionMode(
           sessionId,
-          stepRunning ? (wf!.stepPermissionMode ?? 'auto') : 'auto',
+          stepRunning
+            ? (wf!.stepPermissionMode ?? meta.permissionCeiling ?? 'auto')
+            : (meta.permissionCeiling ?? 'auto'),
         );
       }
       this.prompt(sessionId, 'I approved your plan. Proceed with the implementation now.', 'user');
@@ -6907,6 +7000,24 @@ export class SessionManager {
         },
       };
     }
+    // A write that plants something to run later — Claude Code settings or
+    // hooks, git hooks, an MCP config, a shell startup file — always reaches the
+    // user. Auto mode gets this from assessToolCall above; this covers the other
+    // modes, where the CLI's own acceptEdits (or a settings.json allow rule)
+    // would accept an in-project edit without anyone being asked.
+    const persistent = PERSISTENT_WRITE_TOOLS.has(toolName)
+      ? persistentFileReason(String(toolInput.file_path ?? toolInput.notebook_path ?? ''))
+      : undefined;
+    if (persistent) {
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'ask',
+          permissionDecisionReason: persistent,
+        },
+      };
+    }
     return { continue: true };
   }
 
@@ -7074,6 +7185,10 @@ export class SessionManager {
         ...(elicitation ? { elicitation } : {}),
         ...(vetting ? { vetting } : {}),
         ...(planRead ? { planRead } : {}),
+        // What "Always allow" would save, decided here and recorded with the card,
+        // so the user sees the exact entry before clicking and resolvePermission
+        // saves that entry and no other. An elicitation is not a tool call.
+        ...(elicitation ? {} : { alwaysAllowEntry: alwaysAllowEntryFor(toolName, input) }),
       } satisfies PermissionRequestData);
     }
     const pendingMeta = this.sessions.get(sessionId);

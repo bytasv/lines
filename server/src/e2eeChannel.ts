@@ -6,7 +6,8 @@
  * `attested.userId` and granted owner access, so anyone who controlled the relay
  * process could open a channel as any user and drive an agent. That is the hole
  * this closes: a channel that carries no key the machine has pinned locally does
- * not become an owner connection, whatever the relay says about it.
+ * not become an owner connection, whatever the relay says about it — and one the
+ * relay calls a guest's is admitted only on a grant this machine minted itself.
  *
  * Sits between `RelayClient` and `handleConnection` rather than inside either:
  * the bridge's message switch should not grow a crypto branch, and the relay
@@ -22,6 +23,7 @@ import {
   type ServerMessage,
 } from '@lines/shared';
 import { enrollPeer, isEnrolled, touchPeer } from './e2eeIdentity.ts';
+import { redeemGuestGrant, type GuestGrantRecord } from './guestGrants.ts';
 import type { BrowserLink } from './userContext.ts';
 
 /**
@@ -39,15 +41,30 @@ export interface ChannelPolicy {
   enroll(identity: Identity, clientKey: PublicKeyB64, proof: string): Promise<{ proof: string } | { error: string }>;
   /** Note that a pinned device connected. Best-effort bookkeeping. */
   touch(key: PublicKeyB64): void;
+  /** The grant a guest's admission token redeems for this caller, or null. See guestGrants.ts. */
+  redeemGuest(token: string, guestUserId: string): GuestGrantRecord | null;
 }
 
-/** The real policy: the three 0600 files under `~/.lines-app`. Injectable so the
+/** The real policy: the 0600 files under `~/.lines-app`. Injectable so the
  *  adversarial harness can drive this without a home directory. */
 export const filePolicy: ChannelPolicy = {
   isEnrolled: (key) => isEnrolled(key),
   enroll: (identity, clientKey, proof) => enrollPeer(identity, clientKey, proof, 'browser'),
   touch: (key) => touchPeer(key),
+  redeemGuest: (token, guestUserId) => redeemGuestGrant(token, guestUserId),
 };
+
+/**
+ * What a guest channel is refused with when it skips the grant. Worded for the
+ * person, and deliberately not containing "end-to-end encrypted channel": the
+ * client keys its owner enrollment gate on that phrase, and a guest has nothing
+ * to enrol — they need the link.
+ */
+const GUEST_NEEDS_LINK =
+  'this machine admits a guest only through the invite link its owner shared — open that link again to connect';
+
+/** More than any real guest holds for one machine; the rest are ignored rather than redeemed. */
+const MAX_GRANT_TOKENS = 32;
 
 class SecureChannel implements BrowserLink {
   private onMessage: ((raw: unknown) => void) | null = null;
@@ -66,19 +83,29 @@ class SecureChannel implements BrowserLink {
   private closed = false;
   /** Whether the bridge already holds this channel. See `handOver`. */
   private handedOver = false;
+  /**
+   * Inbound frames, one at a time. Opening a sealed frame is asynchronous, and
+   * two of them in flight at once could finish out of order — which would let a
+   * guest's later `ping` overtake the grant it must lead with, or reorder an
+   * owner's two prompts past the counter check.
+   */
+  private inbound: Promise<void> = Promise.resolve();
 
   constructor(
     private raw: BrowserLink,
     private identity: Identity,
-    private required: boolean,
+    /** Set for a channel the relay says is a guest's: who it says is calling. */
+    private guest: { userId: string } | null,
     private policy: ChannelPolicy,
-    /** Called once the channel may carry app traffic. */
-    private onReady: (link: BrowserLink, peerKey: PublicKeyB64 | null) => void,
+    /** Called once the channel may carry app traffic; the grants a guest was admitted on, none for the owner. */
+    private onReady: (link: BrowserLink, peerKey: PublicKeyB64, grants: GuestGrantRecord[]) => void,
   ) {
     this.raw.on('message', (frame) => {
-      void this.handleFrame(frame).catch((err) => {
-        this.refuse(err instanceof Error ? err.message : String(err));
-      });
+      this.inbound = this.inbound
+        .then(() => (this.closed ? undefined : this.handleFrame(frame)))
+        .catch((err) => {
+          this.refuse(err instanceof Error ? err.message : String(err));
+        });
     });
     this.raw.on('close', () => {
       this.closed = true;
@@ -87,20 +114,17 @@ class SecureChannel implements BrowserLink {
     this.raw.on('error', () => {
       /* the relay owns socket failure; it surfaces as a close */
     });
-    // The bridge speaks first: `handleConnection` sends `hello` the moment it is
-    // given a channel, and the browser waits for it. So a channel that does not
-    // have to authenticate — only a guest's, which has no key to offer — is
-    // handed over straight away; anything else deadlocks, each side waiting for
-    // the other's first frame. An owner channel is always required, so it
-    // reaches the bridge only after the handshake below.
-    if (!this.required) this.handOver(null);
+    // Nothing is handed over here. Every relay channel authenticates first — an
+    // owner's against a key this machine pinned, a guest's with a grant this
+    // machine minted — and only then reaches the bridge, which speaks first
+    // (`hello`) the moment it is given one.
   }
 
   /** Give the bridge this channel, exactly once. */
-  private handOver(peerKey: PublicKeyB64 | null): void {
+  private handOver(peerKey: PublicKeyB64, grants: GuestGrantRecord[]): void {
     if (this.handedOver) return;
     this.handedOver = true;
-    this.onReady(this, peerKey);
+    this.onReady(this, peerKey, grants);
   }
 
   // --- BrowserLink -------------------------------------------------------
@@ -179,33 +203,55 @@ class SecureChannel implements BrowserLink {
       return;
     }
 
+    // One handshake per channel, and no enrolment once one has begun. A second
+    // hello would replace the session under a channel the bridge already holds:
+    // on a guest channel, which takes any client key, that is the relay swapping
+    // itself in as the admitted guest, with the guest's grant and none of their
+    // keys. Refused like any other attempt to author traffic.
+    if (
+      (msg.type === 'e2eeHello' || msg.type === 'e2eeConfirm' || msg.type === 'e2eeEnroll') &&
+      (this.session || (this.handshake && msg.type !== 'e2eeConfirm'))
+    ) {
+      return this.refuse('a second handshake on one channel');
+    }
+
     switch (msg.type) {
       case 'e2eeHello': {
         // The pin check lives inside `acceptHandshake`, which refuses a key this
-        // machine has not enrolled before deriving anything from it.
-        this.handshake = await acceptHandshake(this.identity, msg.offer, (key) => this.policy.isEnrolled(key));
+        // machine has not enrolled before deriving anything from it. A guest's
+        // browser key is never on that list and is not meant to be: the guest
+        // checks *our* key against the one in their invite link, which is what
+        // keeps the relay out of the middle, and what admits them is the grant
+        // they must present next, sealed. Their key alone opens nothing.
+        this.handshake = await acceptHandshake(this.identity, msg.offer, (key) =>
+          this.guest ? true : this.policy.isEnrolled(key),
+        );
         this.sendPlain({ type: 'e2eeAccept', accept: this.handshake.accept });
         return;
       }
       case 'e2eeConfirm': {
         if (!this.handshake) return this.refuse('confirm without an offer');
-        // Opening this proves the peer holds the private half of the pinned key.
-        // Until it does, an offer is just a public key anyone could copy.
+        // Opening this proves the peer holds the private half of the key it
+        // offered. Until it does, an offer is just a public key anyone could copy.
         this.session = await this.handshake.finish(msg.confirm);
         this.handshake = null;
-        this.policy.touch(this.session.peerPublicKey);
-        console.log(`[e2ee] channel authenticated as ${this.session.peerPublicKey.slice(0, 12)}…`);
+        if (!this.guest) this.policy.touch(this.session.peerPublicKey);
+        console.log(
+          `[e2ee] channel authenticated as ${this.session.peerPublicKey.slice(0, 12)}…${this.guest ? ' (guest, awaiting grant)' : ''}`,
+        );
         // Sent in the clear on purpose: it carries only our public key, which is
         // public, and it is what lets the client notice a bridge that answered
         // with a key other than the one it pinned.
         this.sendPlain({ type: 'e2eeReady', bridgeKey: this.identity.publicKey });
-        // The first handover for an owner channel. Were this ever a channel the
-        // bridge already held, it would only upgrade it in place — every later
-        // frame is sealed either way.
-        this.handOver(this.session.peerPublicKey);
+        // The first handover for an owner channel. A guest's waits for the grant,
+        // which must be the first sealed frame (see e2eeData).
+        if (!this.guest) this.handOver(this.session.peerPublicKey, []);
         return;
       }
       case 'e2eeEnroll': {
+        // Enrolling adds an *owner* device. Whatever code a guest holds, a channel
+        // the relay labelled a guest's is not where that happens.
+        if (this.guest) return this.refuse('a guest cannot enrol a device on this machine');
         const result = await this.policy.enroll(this.identity, msg.clientKey, msg.proof);
         if ('error' in result) {
           // Not `refuse`: a mistyped code is a retry, not a hostile channel, and
@@ -223,24 +269,57 @@ class SecureChannel implements BrowserLink {
         // trying to author traffic. It is not recoverable and must not be
         // ignored: the counter check is only protection if a violation ends the
         // channel rather than skipping one message.
-        this.forward(await this.session.open({ n: msg.n, d: msg.d }));
+        const plaintext = await this.session.open({ n: msg.n, d: msg.d });
+        if (this.guest && !this.handedOver) return this.admitGuest(this.session.peerPublicKey, plaintext);
+        this.forward(plaintext);
         return;
       }
       default: {
-        // Plaintext app traffic. Permitted only on a guest channel, which has no
-        // key to present; an owner channel is always end-to-end encrypted, and a
-        // plaintext frame on one is refused, whether or not anything is enrolled.
-        // The frame type is named on purpose: a bare "requires encryption" says
-        // nothing about which client, or which of its writers, skipped the seal,
-        // and that is the one thing you need to fix it.
-        if (this.required) {
-          return this.refuse(
-            `this machine requires an end-to-end encrypted channel (got a plaintext '${msg.type}' frame)`,
-          );
-        }
-        this.forward(String(frame));
+        // Plaintext app traffic, refused on every relay channel: an owner's is
+        // end-to-end encrypted whether or not anything is enrolled, and a guest's
+        // is too, against the key in their invite link. The frame type is named on
+        // purpose: a bare "requires encryption" says nothing about which client,
+        // or which of its writers, skipped the seal, and that is the one thing you
+        // need to fix it.
+        if (this.guest) return this.refuse(`${GUEST_NEEDS_LINK} (got a plaintext '${msg.type}' frame)`);
+        return this.refuse(
+          `this machine requires an end-to-end encrypted channel (got a plaintext '${msg.type}' frame)`,
+        );
       }
     }
+  }
+
+  /**
+   * A guest's first sealed frame: their grants, and nothing else. Each token is
+   * redeemed against what this machine minted for the user the relay says is
+   * calling; one that does not redeem is skipped (a share since revoked), but
+   * with none left — or another frame first — the channel ends before the
+   * bridge ever sees it.
+   */
+  private admitGuest(peerKey: PublicKeyB64, plaintext: string): void {
+    let first: { type?: unknown; tokens?: unknown };
+    try {
+      first = JSON.parse(plaintext) as typeof first;
+    } catch {
+      return this.refuse(GUEST_NEEDS_LINK);
+    }
+    if (first?.type !== 'guestGrant' || !Array.isArray(first.tokens)) return this.refuse(GUEST_NEEDS_LINK);
+    const grants = first.tokens
+      .slice(0, MAX_GRANT_TOKENS)
+      .filter((t): t is string => typeof t === 'string')
+      .map((token) => this.policy.redeemGuest(token, this.guest!.userId))
+      .filter((g): g is GuestGrantRecord => g !== null);
+    // One machine has one host, so grants for two are not something this bridge
+    // ever minted for one channel.
+    if (!grants.length || grants.some((g) => g.hostUserId !== grants[0].hostUserId)) {
+      return this.refuse(
+        'this invite link is not valid on this machine any more — ask its owner for a new one',
+      );
+    }
+    console.log(
+      `[e2ee] guest ${this.guest!.userId} admitted on ${grants.length} grant(s): ${grants.map((g) => g.id.slice(0, 8)).join(', ')}`,
+    );
+    this.handOver(peerKey, grants);
   }
 
 }
@@ -249,19 +328,24 @@ class SecureChannel implements BrowserLink {
  * Wrap a relay channel, and call `onReady` when — and only when — it may carry
  * app traffic.
  *
- * Owner channels must always authenticate first, from the machine's first
- * launch: with nothing enrolled, the only thing an owner channel can do is
- * enrol. Guest channels are unchanged: v1 enrolls owner devices only, so a guest has no
- * key to present, and their identity stays as relay-forgeable as it is today.
- * That gap is real and is written down rather than papered over.
+ * Every channel authenticates first, from the machine's first launch. An
+ * owner's against a key this machine pinned: with nothing enrolled, the only
+ * thing an owner channel can do is enrol. A guest's (`guest` set — the relay's
+ * word that this is one, and who) against the machine key from their invite
+ * link, and then with a grant this machine minted, presented sealed: the relay's
+ * word picks which check applies and can no longer stand in for either.
+ *
+ * What remains relay-attested for a guest is narrowing only — their access is
+ * the grant intersected with what the relay says storage holds today (see
+ * guestGrants.ts) — and their identity for attribution: the token proves they
+ * hold the link, not which account they signed in with.
  */
 export function guardRelayChannel(
   raw: BrowserLink,
   identity: Identity,
-  isGuest: boolean,
-  onReady: (link: BrowserLink, peerKey: PublicKeyB64 | null) => void,
+  guest: { userId: string } | null,
+  onReady: (link: BrowserLink, peerKey: PublicKeyB64, grants: GuestGrantRecord[]) => void,
   policy: ChannelPolicy = filePolicy,
 ): void {
-  const required = !isGuest;
-  new SecureChannel(raw, identity, required, policy, onReady);
+  new SecureChannel(raw, identity, guest, policy, onReady);
 }

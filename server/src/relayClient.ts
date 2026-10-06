@@ -15,6 +15,8 @@ import type { RelayLinkStatus } from './updates.ts';
 /** Mirrors relay/src/protocol.ts. Duplicated rather than imported: the bridge
  *  ships to users' machines and must not depend on the relay package. */
 export const RELAY_PROTOCOL_VERSION = 1;
+/** Mirrors RELAY_SECRET_HEADER in relay/src/protocol.ts, for the same reason. */
+const RELAY_SECRET_HEADER = 'x-lines-device-secret';
 
 /**
  * A grant the relay attested, riding the `open` frame. Optional: an owner
@@ -326,8 +328,12 @@ export class RelayClient {
       stale.close();
       this.dropAllChannels();
     }
-    const url = `${this.url}/agent?device=${encodeURIComponent(this.deviceId)}&secret=${encodeURIComponent(this.secret)}`;
-    const ws = new WebSocket(url);
+    // The secret rides a header, never the URL: a URL is what reverse proxies and
+    // access logs write down, and this one is the machine's long-lived credential.
+    // The relay still reads the old `secret` query parameter, for bridges released
+    // before this — so it has to be deployed before a bridge that sends only this.
+    const url = `${this.url}/agent?device=${encodeURIComponent(this.deviceId)}`;
+    const ws = new WebSocket(url, { headers: { [RELAY_SECRET_HEADER]: this.secret } });
     this.ws = ws;
     this.dials++;
     this.dialedAt = Date.now();

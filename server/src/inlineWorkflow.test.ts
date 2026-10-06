@@ -37,9 +37,13 @@ const def: WorkflowDef = {
 };
 
 describe('inlineWorkflow', () => {
+  const ok = (out: ReturnType<typeof inlineWorkflow>): WorkflowDef => {
+    assert.ok(out.ok, `expected an inlined workflow, got ${out.ok ? '' : out.reason}`);
+    return out.def;
+  };
+
   test('every ref becomes its pinned content, inline steps pass through', () => {
-    const out = inlineWorkflow(def, [], [version('st-1', 1, 'pinned'), version('st-1', 2, 'latest')]);
-    assert.ok(out);
+    const out = ok(inlineWorkflow(def, [], [version('st-1', 1, 'pinned'), version('st-1', 2, 'latest')]));
     assert.equal(out.id, 'wf-1');
     assert.equal(out.steps.some(isStepRef), false);
     assert.deepEqual(
@@ -49,24 +53,39 @@ describe('inlineWorkflow', () => {
   });
 
   test('the library identity stays behind', () => {
-    const out = inlineWorkflow(def, [], [version('st-1', 1, 'pinned')]);
-    const step = out!.steps[1] as unknown as Record<string, unknown>;
-    for (const key of ['id', 'ownerId', 'ownerName', 'version', 'published', 'kind']) {
+    const out = ok(inlineWorkflow(def, [], [version('st-1', 1, 'pinned')]));
+    const step = out.steps[1] as unknown as Record<string, unknown>;
+    for (const key of ['id', 'ownerId', 'ownerName', 'version', 'published', 'kind', 'untrusted']) {
       assert.equal(key in step, false, `${key} must not travel`);
     }
   });
 
-  test('a missing exact pin falls back to the latest version known', () => {
-    const out = inlineWorkflow(def, [version('st-1', 3, 'library')], []);
-    assert.equal((out!.steps[1] as InlineStep).name, 'library');
+  test('only the exact pin resolves — a newer version known here is not what the workflow pins', () => {
+    assert.deepEqual(inlineWorkflow(def, [version('st-1', 3, 'library')], []), { ok: false, reason: 'unavailable' });
   });
 
   test('shared steps resolve too', () => {
-    const out = inlineWorkflow(def, [], [], [version('st-1', 1, 'shared')]);
-    assert.equal((out!.steps[1] as InlineStep).name, 'shared');
+    const out = ok(inlineWorkflow(def, [], [], [version('st-1', 1, 'shared')]));
+    assert.equal((out.steps[1] as InlineStep).name, 'shared');
   });
 
-  test('an unresolvable ref returns null', () => {
-    assert.equal(inlineWorkflow(def, [], []), null);
+  test('an unresolvable ref fails rather than running a workflow with a step missing', () => {
+    assert.deepEqual(inlineWorkflow(def, [], []), { ok: false, reason: 'unavailable' });
+  });
+
+  test('content held back on the user’s own machine does not travel to the host', () => {
+    const held = { reason: 'unsigned', digest: 'd' } as const;
+    assert.deepEqual(inlineWorkflow({ ...def, untrusted: held }, [], [version('st-1', 1, 'pinned')]), {
+      ok: false,
+      reason: 'unverified',
+    });
+    assert.deepEqual(inlineWorkflow(def, [], [{ ...version('st-1', 1, 'pinned'), untrusted: held }]), {
+      ok: false,
+      reason: 'unverified',
+    });
+    // A mark that only records provenance (strict sync off there) is no refusal,
+    // and does not travel either.
+    const recorded = ok(inlineWorkflow({ ...def, untrusted: { ...held, held: false } }, [], [version('st-1', 1, 'pinned')]));
+    assert.equal('untrusted' in recorded, false);
   });
 });

@@ -7,8 +7,9 @@
  * reason as workflowCommands.ts).
  */
 import { randomUUID } from 'node:crypto';
-import type { ClientMessage, RecipeDef, ServerMessage } from '@lines/shared';
-import { findProject, RECIPE_BUNDLE_MAX } from '@lines/shared';
+import type { ClientMessage, PermissionMode, RecipeDef, ServerMessage } from '@lines/shared';
+import { FOREIGN_RECIPE_MODES, findProject, RECIPE_BUNDLE_MAX } from '@lines/shared';
+import { isHeld } from './syncSignature.ts';
 import type { UserContext } from './userContext.ts';
 
 type RunRecipeMsg = Extract<ClientMessage, { type: 'runRecipe' }>;
@@ -20,8 +21,22 @@ export async function recipeVersionsView(
   recipeId: string,
 ): Promise<RecipeDef[]> {
   const remote = await ctx.sync.pullRecipeVersions(ownerId, recipeId);
-  if (remote) ctx.recipes.addRecipeVersions(remote);
+  // Only the history that was asked for (see addRecipeVersions).
+  if (remote) ctx.recipes.addRecipeVersions(remote, [{ ownerId, id: recipeId }]);
   return ctx.recipes.listRecipeVersions(ownerId, recipeId);
+}
+
+/**
+ * Did the user confirm exactly the prompts about to run, in run order? Compared
+ * against the bridge's own expansion, never used in its place: the client
+ * cannot choose what runs, only prove it saw it.
+ */
+function confirmedExactly(confirmed: unknown, leaves: RecipeDef[]): boolean {
+  return (
+    Array.isArray(confirmed) &&
+    confirmed.length === leaves.length &&
+    leaves.every((r, i) => confirmed[i] === r.prompt)
+  );
 }
 
 /**
@@ -48,8 +63,43 @@ export function runRecipe(ctx: UserContext, msg: RunRecipeMsg): string | null {
   // Post-expansion too, since a bundle can expand past the cap the client saw.
   if (leaves.length > RECIPE_BUNDLE_MAX) throw new Error(`A run holds at most ${RECIPE_BUNDLE_MAX} recipes`);
 
+  // An own recipe this machine has not verified — pulled unsigned, forged, or
+  // signed by a machine the account does not trust — does not run, however it
+  // was reached: directly, or as a member of a bundle.
+  const unverified = [...bundles, ...leaves].find(isHeld);
+  if (unverified) {
+    throw new Error(`“${unverified.title}” has not been verified on this machine — review it in Recipes before running it.`);
+  }
+  // Someone else's prompt runs with less authority, and only once seen. Each of
+  // these is decided here rather than trusted from the modal, which applies the
+  // same rules only so the user is never surprised by this.
+  const foreign = [...leaves, ...bundles].some((r) => r.ownerId !== ctx.userId);
+  if (foreign) {
+    // A chosen workflow brings its own permission mode per step, and its first
+    // step would carry this prompt as the task.
+    if (msg.workflowId) {
+      throw new Error("Someone else's recipe runs in a session of its own, not inside one of your workflows.");
+    }
+    if (!confirmedExactly(msg.confirmedPrompts, leaves)) {
+      throw new Error("Read the full prompt of someone else's recipe and confirm it before running it.");
+    }
+  }
+  // A chosen workflow is checked before the session it would be attached to
+  // exists, so a refusal leaves nothing behind (attach would throw too, later).
+  if (msg.workflowId) workflows.assertRunnable(msg.workflowId);
+  // Never more than plan or ask-every-time for a stranger's prompt, whatever the
+  // runner's default mode is.
+  const permissionMode: PermissionMode =
+    foreign && !FOREIGN_RECIPE_MODES.includes(msg.permissionMode) ? 'default' : msg.permissionMode;
+  // A run with someone else's recipe in it parks after every step, so each next
+  // prompt runs only when the user has seen what the last one did. One made only
+  // of the user's own (verified) recipes keeps the choice the modal offers: those
+  // are their own instructions.
+  const autoAdvance = foreign ? false : (msg.autoAdvance ?? true);
+
   // Keyed on the expanded set, so re-running the same effective recipes is
-  // debounced whether they arrived ad-hoc or via a bundle.
+  // debounced whether they arrived ad-hoc or via a bundle. Stamped only after
+  // every refusal above, so a corrected retry is not swallowed as a double-click.
   const keys = leaves.map((r) => `${r.ownerId}/${r.id}`);
   if (!recipes.runAllowed(keys.join('|'))) return null;
   // No open project means no usable cwd, so no session is created at all — the
@@ -76,8 +126,8 @@ export function runRecipe(ctx: UserContext, msg: RunRecipeMsg): string | null {
           promptTemplate: r.prompt,
           // Recipes carry neither, so both come from the run modal.
           model: msg.model,
-          permissionMode: msg.permissionMode,
-          autoAdvance: msg.autoAdvance ?? true,
+          permissionMode,
+          autoAdvance,
           // Cumulative by definition: step N has to see what step N-1 built,
           // which is also why no hand-off tokens are needed.
           freshStart: false,
@@ -89,10 +139,13 @@ export function runRecipe(ctx: UserContext, msg: RunRecipeMsg): string | null {
     name: (multi ? runName : leaves[0].title).slice(0, 60),
     cwd: msg.cwd,
     model: msg.model,
-    permissionMode: msg.permissionMode,
+    permissionMode,
   });
   // The name is deliberate, so the auto-titler must not overwrite it.
   meta.nameAuto = false;
+  // Approving a plan normally resumes in `auto`, which a stranger's prompt may
+  // not reach: the ceiling makes that approval resume in `default` instead.
+  if (foreign) meta.permissionCeiling = 'default';
   sessions.persistMeta(meta.id);
 
   if (wf) {

@@ -1,13 +1,25 @@
 import type { GuardAllowlistBlob, McpConnectionsBlob, MemoryFileMap, ProjectKeyMap, RecipeDef, SessionMeta, StepDef, StepRef, StorageErrorKind, StorageStatus, SyncLogEntry, WorkflowDef } from '@lines/shared';
+import type { UntrustedMark } from '@lines/shared';
 import type { SyncWatermarks } from './store.ts';
 import {
+  canonicalize,
   fileSignerStore,
+  itemPayload,
+  runnableDigest,
   signBlob,
+  settledHold,
+  signItems,
   signingIdentity,
+  SIGNATURE_KEY,
   stripSignature,
   strictSync,
   verifyBlob,
+  verifyItem,
+  type BlobSignature,
+  type ItemVerdict,
   type SignerStore,
+  type SigningIdentity,
+  type TrustKind,
 } from './syncSignature.ts';
 
 const PUSH_DEBOUNCE_MS = 2_000;
@@ -41,11 +53,15 @@ const NOT_MODIFIED = Symbol('not-modified');
  * The rest are deliberately absent rather than forgotten. `/memory` and
  * `/project-keys` are *maps*, merged per key in SQL — a reserved signature key
  * would be filtered out on the way in, and there is nowhere else to put one
- * without a storage column. `/sessions`, `/workflows`, `/steps` and `/recipes`
- * are arrays, for the same reason. Those resources are covered today by the
- * review gate in front of pulled memory and by the field stripping in
- * `adoptSynced`; carrying signatures for them needs a per-row column, which is a
- * migration on a running deployment and is the next step here, not this one.
+ * without a storage column. `/sessions` is an array, for the same reason. Those
+ * resources are covered today by the review gate in front of pulled memory and
+ * by the field stripping in `adoptSynced`; carrying signatures for them needs a
+ * per-row column, which is a migration on a running deployment and is the next
+ * step here, not this one.
+ *
+ * `/workflows`, `/steps` and `/recipes` are arrays too, but each of their rows
+ * keeps its own JSON whole in a `data` column, so every item carries its own
+ * signature instead (`signForPush` / `checkItems`) — those prompts are run.
  */
 const SIGNED_PATHS = new Set(['/settings', '/guard-allowlist', '/mcp-connections']);
 
@@ -69,6 +85,66 @@ function statsMap(rows: unknown): Record<string, number> {
   return out;
 }
 
+/** A library item without its signature or a wire-supplied verdict, neither of which an engine may keep. */
+function cleanItem<T extends object>(item: T): T {
+  const { [SIGNATURE_KEY]: _sig, untrusted: _verdict, ...rest } = item as T & {
+    [SIGNATURE_KEY]?: unknown;
+    untrusted?: unknown;
+  };
+  return rest as T;
+}
+
+/** The object rows of a pulled list body, as they arrived. A non-array body is no rows rather than a cast. */
+function objectRows<T extends object>(raw: unknown): T[] {
+  return Array.isArray(raw) ? raw.filter((i): i is T => !!i && typeof i === 'object') : [];
+}
+
+/**
+ * Other users' items, cleaned but not checked: whose machine signed someone
+ * else's workflow says nothing this machine can use, so the engines mark them
+ * foreign on owner alone.
+ */
+function cleanItems<T extends object>(raw: unknown): T[] {
+  return objectRows<T>(raw).map((i) => cleanItem(i));
+}
+
+/**
+ * The verdict a pulled item carries into the engine, from the crypto alone:
+ * nothing for this machine's own signature, a mark for anything else. Whether
+ * the owner already approved that exact content is the engine's to settle
+ * (`ItemTrust`), as is everything about items that are not the user's own.
+ *
+ * Unsigned and forged items are marked even under `LINES_E2EE_STRICT=0`, where
+ * the mark does not hold them back (`settledHold`): what it still does there is
+ * keep this machine from ever signing them as its own on the next push.
+ */
+function provisionalMark(
+  kind: TrustKind,
+  item: object,
+  verdict: ItemVerdict,
+  ownKey: string | null,
+): UntrustedMark | undefined {
+  if (verdict.ok && verdict.signer === ownKey) return undefined;
+  const digest = runnableDigest(kind, item);
+  return settledHold(
+    verdict.ok ? { reason: 'unknown-signer', digest, signer: verdict.signer } : { reason: verdict.reason, digest },
+  );
+}
+
+/** The kind of item a library route carries. */
+const KIND_OF_PATH: Record<string, TrustKind> = { '/workflows': 'workflow', '/steps': 'step', '/recipes': 'recipe' };
+
+/**
+ * The account a row from a cross-user route (version history, pin resolution)
+ * was signed for: the owner it names — storage fills that from the row's
+ * `user_id` there. Only an own row's verdict is used anyway (the engines mark
+ * anyone else's on owner alone), and for it this is the user's own id.
+ */
+const rowOwner = (item: object): string => {
+  const owner = (item as { ownerId?: unknown }).ownerId;
+  return typeof owner === 'string' ? owner : '';
+};
+
 /** Failure class for an HTTP status the storage server actually answered with. */
 export function classifyStatus(status: number): StorageErrorKind {
   if (status === 401 || status === 403) return 'auth';
@@ -84,6 +160,19 @@ export function classifyError(err: unknown): StorageErrorKind {
 
 function truncate(reason: string): string {
   return reason.length > REASON_MAX_CHARS ? `${reason.slice(0, REASON_MAX_CHARS)}…` : reason;
+}
+
+/**
+ * A session as storage receives it: without the fields that are this machine's
+ * own record. `permissionCeiling` is one — a foreign recipe run's limit on what
+ * an approved plan resumes in, which `adoptSynced` never takes from a row — so
+ * it does not leave the machine either. Stripped on the copy that is sent, never
+ * on the live meta, which keeps it.
+ */
+function sessionForSync(meta: SessionMeta): SessionMeta {
+  if (meta.permissionCeiling === undefined) return meta;
+  const { permissionCeiling: _local, ...rest } = meta;
+  return rest;
 }
 
 /** LWW stamp for a meta; undefined when it carries neither timestamp (legacy rows). */
@@ -112,8 +201,38 @@ export interface PulledState {
   memory: MemoryFileMap | null;
   /** null = no row yet (or this one request failed); never applied without a review. */
   guardAllowlist: GuardAllowlistBlob | null;
-  /** Same contract as `guardAllowlist`. Header *values* are never in this blob. */
+  /** Same contract as `guardAllowlist`. Header and env *values* are never in this blob. */
   mcpConnections: McpConnectionsBlob | null;
+}
+
+/**
+ * An MCP connection list with every credential *value* taken out: header values
+ * dropped outright (only `headerKeys` names may travel), stdio env values reduced
+ * to their names in `envKeys`, as `normalizeConnection` reduces them.
+ *
+ * Applied on both sides of the storage boundary, because that boundary is what
+ * the guarantee is about. Outbound it runs before `req` signs the blob, so the
+ * signature covers exactly the bytes storage keeps; inbound it runs after
+ * verification, so a row written before names-only sync — or by a bridge that
+ * predates it — hands this machine no value either. A row with nothing to take
+ * out keeps its exact shape.
+ */
+function withoutMcpValues(blob: McpConnectionsBlob | null): McpConnectionsBlob | null {
+  if (!blob || typeof blob !== 'object' || !Array.isArray(blob.connections)) return blob;
+  return {
+    ...blob,
+    connections: blob.connections.map((raw) => {
+      if (!raw || typeof raw !== 'object') return raw;
+      const { env, headers: _headers, ...rest } = raw as McpConnectionsBlob['connections'][number] & {
+        env?: unknown;
+        headers?: unknown;
+      };
+      if (!env || typeof env !== 'object' || Array.isArray(env)) return rest;
+      const names = Array.isArray(rest.envKeys) ? rest.envKeys.filter((k) => typeof k === 'string') : [];
+      for (const name of Object.keys(env)) if (!names.includes(name)) names.push(name);
+      return names.length ? { ...rest, envKeys: names } : rest;
+    }),
+  };
 }
 
 /**
@@ -179,6 +298,15 @@ export class StorageSyncClient {
    * signature policy without a home directory, exactly as `appendLog` is.
    */
   private signers: SignerStore;
+  private identity: () => Promise<SigningIdentity>;
+  /** The account this client syncs, bound into every library item it signs (see `ItemScope`). */
+  private account: string;
+  /**
+   * The signature last pushed per library row, with the payload it covers, so a
+   * row that has not changed is re-sent with the signature it already has rather
+   * than re-signed (and re-counted) on every push of the list it belongs to.
+   */
+  private itemSignatures = new Map<string, { payload: string; sig: BlobSignature }>();
 
   constructor(
     private base: string,
@@ -186,9 +314,19 @@ export class StorageSyncClient {
     private persistMarks: (marks: SyncWatermarks) => void = () => {},
     marks: SyncWatermarks = {},
     appendLog: (entry: SyncLogEntry) => void = () => {},
-    opts?: { authGraceMs?: number; probeMs?: number; signers?: SignerStore },
+    opts?: {
+      authGraceMs?: number;
+      probeMs?: number;
+      signers?: SignerStore;
+      /** This machine's signing key; injected so a test never touches `~/.lines-app`. */
+      identity?: () => Promise<SigningIdentity>;
+      /** The user id this client syncs for — the bridge's `ctx.userId`. */
+      account?: string;
+    },
   ) {
     this.signers = opts?.signers ?? fileSignerStore;
+    this.identity = opts?.identity ?? (() => signingIdentity());
+    this.account = opts?.account ?? '';
     this.marks = { ...marks };
     this.appendLog = appendLog;
     this.authGraceMs = opts?.authGraceMs ?? AUTH_GRACE_MS;
@@ -232,16 +370,18 @@ export class StorageSyncClient {
       // would be an iteration crash rather than a no-op.
       const body = (v: unknown) => (v === NOT_MODIFIED ? null : v);
       return {
-        workflows: (body(workflows) ?? []) as WorkflowDef[],
-        steps: (body(steps) ?? []) as StepDef[],
-        recipes: (body(recipes) ?? []) as RecipeDef[],
+        // Each item's signature checked here, before anything adopts it; one
+        // that did not come from this machine arrives marked (see checkItems).
+        workflows: await this.checkItems<WorkflowDef>('workflow', '/workflows', body(workflows), this.ownTable),
+        steps: await this.checkItems<StepDef>('step', '/steps', body(steps), this.ownTable),
+        recipes: await this.checkItems<RecipeDef>('recipe', '/recipes', body(recipes), this.ownTable),
         recipeStats: statsMap(body(recipeStats)),
         sessions: (body(sessions) ?? []) as PulledSession[],
         settings: body(settings),
         projectKeys: (body(projectKeys) ?? {}) as ProjectKeyMap,
         memory: (body(memory) ?? null) as MemoryFileMap | null,
         guardAllowlist: (body(guardAllowlist) ?? null) as GuardAllowlistBlob | null,
-        mcpConnections: (body(mcpConnections) ?? null) as McpConnectionsBlob | null,
+        mcpConnections: withoutMcpValues((body(mcpConnections) ?? null) as McpConnectionsBlob | null),
       };
     } catch (err) {
       this.warnOnce('pull', err);
@@ -261,7 +401,7 @@ export class StorageSyncClient {
     try {
       const shared = await this.req('GET', '/workflows/shared');
       if (shared === NOT_MODIFIED) return null;
-      return (shared ?? []) as WorkflowDef[];
+      return cleanItems<WorkflowDef>(shared);
     } catch (err) {
       this.warnOnce('pull shared', err);
       return null;
@@ -275,7 +415,9 @@ export class StorageSyncClient {
       this.wfTimer = null;
       const body = this.pendingWorkflows;
       this.pendingWorkflows = null;
-      void this.req('PUT', '/workflows', body).catch((err) => this.warnOnce('push workflows', err));
+      void this.signForPush('/workflows', body)
+        .then((signed) => this.req('PUT', '/workflows', signed))
+        .catch((err) => this.warnOnce('push workflows', err));
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
   }
 
@@ -285,7 +427,7 @@ export class StorageSyncClient {
     try {
       const shared = await this.req('GET', '/steps/shared');
       if (shared === NOT_MODIFIED) return null;
-      return (shared ?? []) as StepDef[];
+      return cleanItems<StepDef>(shared);
     } catch (err) {
       this.warnOnce('pull shared steps', err);
       return null;
@@ -324,12 +466,25 @@ export class StorageSyncClient {
     return false;
   }
 
-  /** Resolve the immutable versions a set of refs pin (any author). */
+  /**
+   * Resolve the immutable versions a set of refs pin (any author). Rows are
+   * checked like any pulled item, and only the versions that were asked for come
+   * back: the engine files a version under the owner it names, so a row naming
+   * anyone else would land in their slot — this user's own history included,
+   * from where it is pushed back to storage as theirs.
+   */
   async resolveSteps(refs: Pick<StepRef, 'ownerId' | 'stepId' | 'version'>[]): Promise<StepDef[] | null> {
     if (!this.enabled || refs.length === 0) return refs.length === 0 ? [] : null;
     try {
       const body = refs.map((r) => ({ ownerId: r.ownerId, id: r.stepId, version: r.version }));
-      return ((await this.req('POST', '/steps/resolve', body)) ?? []) as StepDef[];
+      const rows = await this.checkItems<StepDef>(
+        'step',
+        '/steps/resolve',
+        await this.req('POST', '/steps/resolve', body),
+        rowOwner,
+      );
+      const wanted = new Set(refs.map((r) => `${r.ownerId}/${r.stepId}/${r.version}`));
+      return rows.filter((s) => wanted.has(`${s.ownerId}/${s.id}/${s.version}`));
     } catch (err) {
       this.warnOnce('resolve steps', err);
       return null;
@@ -341,7 +496,9 @@ export class StorageSyncClient {
     if (!this.enabled) return null;
     try {
       const path = `/steps/${encodeURIComponent(ownerId)}/${encodeURIComponent(stepId)}/versions`;
-      return ((await this.req('GET', path)) ?? []) as StepDef[];
+      // Checked here, because a pinned older version is exactly what a workflow
+      // runs; which rows to keep is the engine's call (`addStepVersions`).
+      return await this.checkItems<StepDef>('step', path, await this.req('GET', path), rowOwner);
     } catch (err) {
       this.warnOnce('pull step versions', err);
       return null;
@@ -355,7 +512,9 @@ export class StorageSyncClient {
       this.stepTimer = null;
       const body = this.pendingSteps;
       this.pendingSteps = null;
-      void this.req('PUT', '/steps', body).catch((err) => this.warnOnce('push steps', err));
+      void this.signForPush('/steps', body)
+        .then((signed) => this.req('PUT', '/steps', signed))
+        .catch((err) => this.warnOnce('push steps', err));
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
   }
 
@@ -372,7 +531,7 @@ export class StorageSyncClient {
     try {
       const shared = await this.req('GET', '/recipes/shared');
       if (shared === NOT_MODIFIED) return null;
-      return (shared ?? []) as RecipeDef[];
+      return cleanItems<RecipeDef>(shared);
     } catch (err) {
       this.warnOnce('pull shared recipes', err);
       return null;
@@ -384,7 +543,7 @@ export class StorageSyncClient {
     if (!this.enabled) return null;
     try {
       const path = `/recipes/${encodeURIComponent(ownerId)}/${encodeURIComponent(recipeId)}/versions`;
-      return ((await this.req('GET', path)) ?? []) as RecipeDef[];
+      return await this.checkItems<RecipeDef>('recipe', path, await this.req('GET', path), rowOwner);
     } catch (err) {
       this.warnOnce('pull recipe versions', err);
       return null;
@@ -398,7 +557,9 @@ export class StorageSyncClient {
       this.recipeTimer = null;
       const body = this.pendingRecipes;
       this.pendingRecipes = null;
-      void this.req('PUT', '/recipes', body).catch((err) => this.warnOnce('push recipes', err));
+      void this.signForPush('/recipes', body)
+        .then((signed) => this.req('PUT', '/recipes', signed))
+        .catch((err) => this.warnOnce('push recipes', err));
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
   }
 
@@ -439,6 +600,97 @@ export class StorageSyncClient {
     } | null;
     if (!res?.url) throw new Error('image upload returned no url');
     return res.url;
+  }
+
+  // ---- library item signatures ----
+
+  /**
+   * A pulled list of workflows, steps or recipes as an engine may adopt it:
+   * every item's signature checked and stripped, and a provisional mark on each
+   * one this machine did not sign (see `provisionalMark`). Nothing is dropped —
+   * an unverified item is kept and shown, held back from running until the
+   * owner has looked at it — and nothing a row says about its own trust is kept.
+   */
+  private async checkItems<T extends object>(
+    kind: TrustKind,
+    path: string,
+    raw: unknown,
+    /** Whose account each row's signature has to be bound to (see `ItemScope`). */
+    accountOf: (item: T) => string,
+  ): Promise<T[]> {
+    const items = objectRows<T>(raw);
+    if (items.length === 0) return [];
+    // A key that cannot be loaded leaves every signature looking foreign, which
+    // holds items back rather than letting them through.
+    const ownKey = await this.identity().then((i) => i.publicKey, () => null);
+    const marked = new Map<string, number>();
+    const out = await Promise.all(
+      items.map(async (item) => {
+        const clean = cleanItem(item) as T;
+        const verdict = await verifyItem(item, { kind, account: accountOf(item) });
+        const mark = provisionalMark(kind, clean, verdict, ownKey);
+        if (!mark) return clean;
+        marked.set(mark.reason, (marked.get(mark.reason) ?? 0) + 1);
+        return { ...clean, untrusted: mark } as T;
+      }),
+    );
+    if (marked.size > 0) {
+      const counts = [...marked].map(([reason, n]) => `${reason} ×${n}`).join(', ');
+      const outcome = strictSync() ? 'held for review' : 'marked (unsigned and forged still run: LINES_E2EE_STRICT=0)';
+      // The sync log is where a user (or support) can see why an item stopped
+      // running; `fail`/`client` as for a refused blob — the request was fine,
+      // the content was not.
+      this.log({ event: 'fail', kind: 'client', method: 'GET', path, reason: `signature ${counts} — ${outcome}` });
+      console.warn(`[sync] ${path}: ${counts} ${outcome}`);
+    }
+    return out;
+  }
+
+  /** The account of a row from this user's own table: this user's, whatever the row says. */
+  private ownTable = (): string => this.account;
+
+  /**
+   * This machine's library rows as `PUT` sends them: signed when this machine
+   * vouches for them, reusing the signature a row already carries when its
+   * payload has not changed.
+   *
+   * A marked row is never signed. Doing so would launder it — content this
+   * machine never vouched for, turned into a row that runs on every peer as this
+   * machine's own. What happens instead depends on what the row has to lose:
+   *
+   * - **unsigned or forged** — no valid signature to keep, so it travels without
+   *   one, and a local edit still reaches the other machines (where it is held
+   *   back exactly as here). This is what keeps a `LINES_E2EE_STRICT=0` fleet
+   *   syncing without promoting anything an old bridge wrote.
+   * - **another machine's signature, or someone else's content** — not pushed:
+   *   an unsigned copy would strip the signature of the machine that wrote it,
+   *   or re-publish another user's prompt from this account.
+   */
+  private async signForPush<T extends object & { id?: string; version?: number; untrusted?: UntrustedMark }>(
+    path: string,
+    list: T[] | null,
+  ): Promise<T[]> {
+    const travels = (item: T) =>
+      !item.untrusted || item.untrusted.reason === 'unsigned' || item.untrusted.reason === 'forged';
+    const items = (list ?? []).filter(travels);
+    const rows = items.map((item) => cleanItem(item));
+    if (rows.length === 0) return [];
+    const scope = { kind: KIND_OF_PATH[path]!, account: this.account };
+    const vouched = items.map((item) => !item.untrusted);
+    const keyOf = (item: T) => `${path}\0${item.id ?? ''}\0${item.version ?? ''}`;
+    const payloads = rows.map((item) => canonicalize({ account: scope.account, item: itemPayload(item) }));
+    const misses = rows.flatMap((item, i) =>
+      vouched[i] && this.itemSignatures.get(keyOf(item))?.payload !== payloads[i] ? [i] : [],
+    );
+    if (misses.length > 0) {
+      const signed = await signItems(misses.map((i) => rows[i]), scope, await this.identity(), this.signers);
+      misses.forEach((i, n) => {
+        this.itemSignatures.set(keyOf(rows[i]), { payload: payloads[i], sig: signed[n][SIGNATURE_KEY] });
+      });
+    }
+    return rows.map((item, i) =>
+      vouched[i] ? { ...item, [SIGNATURE_KEY]: this.itemSignatures.get(keyOf(item))!.sig } : item,
+    );
   }
 
   pushSession(meta: SessionMeta): void {
@@ -488,7 +740,7 @@ export class StorageSyncClient {
       const live = chunk.filter((meta) => !this.pendingDeletes.has(meta.id));
       if (live.length === 0) continue;
       try {
-        await this.req('PUT', '/sessions', live);
+        await this.req('PUT', '/sessions', live.map(sessionForSync));
       } catch (err) {
         allOk = false;
         for (const meta of live) if (!this.pendingSessions.has(meta.id)) this.pendingSessions.set(meta.id, meta);
@@ -576,12 +828,15 @@ export class StorageSyncClient {
   /**
    * Undebounced like the allowlist: connection edits are human-paced and few.
    *
-   * `blob` must be `McpConnections.blob()`, which carries header names only —
-   * nothing here strips values, because nothing upstream may produce one.
+   * `blob` is `McpConnections.blob()`, which carries header and env var names
+   * only. Values are stripped here regardless (see `withoutMcpValues`): this is
+   * the last point before storage, so it is where "no credential leaves this
+   * machine" has to hold whatever a caller hands in — and it runs before `req`
+   * signs, so the signature still verifies after storage's own filtering.
    */
   pushMcpConnections(blob: McpConnectionsBlob): void {
     if (!this.enabled || this.applying) return;
-    void this.req('PUT', '/mcp-connections', blob).catch((err) => this.warnOnce('push mcp connections', err));
+    void this.req('PUT', '/mcp-connections', withoutMcpValues(blob)).catch((err) => this.warnOnce('push mcp connections', err));
   }
 
   /**
@@ -599,6 +854,35 @@ export class StorageSyncClient {
       this.pendingMemory = null;
       void this.req('PUT', '/memory', body).catch((err) => this.warnOnce('push memory', err));
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
+  }
+
+  /**
+   * The ids of every bridge grant behind a live share or invite on `deviceId`,
+   * as storage records them — or null when storage cannot say (no token, an
+   * error, or a server too old to record grant ids). Null is never "none": the
+   * caller reconciles only against an answer.
+   */
+  async liveGrantIds(deviceId: string): Promise<Set<string> | null> {
+    if (!this.enabled) return null;
+    let body: {
+      grantTracking?: unknown;
+      granted?: { deviceId?: unknown; grantId?: unknown }[];
+      invites?: { deviceId?: unknown; grantId?: unknown }[];
+    };
+    try {
+      // Soft: a failure here is this request's alone and must not raise the
+      // storage-outage banner. Not signed — it is a list of who has access, read to
+      // take access away, and an unsigned answer can only drop grants.
+      body = (await this.req('GET', '/v1/shares', undefined, { softErrors: true })) as typeof body;
+    } catch {
+      return null;
+    }
+    if (!body || typeof body !== 'object' || body.grantTracking !== true) return null;
+    const ids = new Set<string>();
+    for (const row of [...(body.granted ?? []), ...(body.invites ?? [])]) {
+      if (row?.deviceId === deviceId && typeof row.grantId === 'string') ids.add(row.grantId);
+    }
+    return ids;
   }
 
   /** Whole-map push; the server unions it into the stored map rather than replacing. */

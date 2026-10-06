@@ -37,23 +37,43 @@ async function until<T>(fn: () => T | null | undefined, label: string, timeoutMs
   }
 }
 
-/** A relay on an ephemeral port, with whatever intervals the test needs. */
-async function startRelay(env: Record<string, string>): Promise<number> {
+/**
+ * A relay on an ephemeral port, with whatever intervals the test needs. Pass `log`
+ * to collect everything it prints, stderr included — where its warnings go.
+ */
+async function startRelay(env: Record<string, string>, log?: string[]): Promise<number> {
   const relay = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
     cwd: RELAY_DIR,
     env: { ...process.env, RELAY_PORT: '0', ...env },
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stdio: ['ignore', 'pipe', log ? 'pipe' : 'ignore'],
   });
   spawned.push(relay);
   let out = '';
-  relay.stdout!.on('data', (c) => (out += String(c)));
+  relay.stdout!.on('data', (c) => {
+    out += String(c);
+    log?.push(String(c));
+  });
+  relay.stderr?.on('data', (c) => log?.push(String(c)));
   const match = await until(() => /listening on http:\/\/localhost:(\d+)/.exec(out), 'relay to listen');
   return Number(match[1]);
 }
 
-/** A bridge, as the relay sees one: a socket that may or may not keep answering. */
-function openAgent(port: number, device: string, opts: { answerPings: boolean }) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/agent?device=${device}&secret=dev-secret`);
+/**
+ * A bridge, as the relay sees one: a socket that may or may not keep answering.
+ * Its secret rides the header a current bridge sends, or with `legacyQuery` the
+ * URL that every bridge released before the header put it in.
+ */
+function openAgent(
+  port: number,
+  device: string,
+  opts: { answerPings: boolean; secret?: string; legacyQuery?: boolean },
+) {
+  const secret = opts.secret ?? 'dev-secret';
+  const ws = opts.legacyQuery
+    ? new WebSocket(`ws://127.0.0.1:${port}/agent?device=${device}&secret=${secret}`)
+    : new WebSocket(`ws://127.0.0.1:${port}/agent?device=${device}`, {
+        headers: { 'x-lines-device-secret': secret },
+      });
   const frames: { t: string }[] = [];
   let closed: { code: number; reason: string } | null = null;
   ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', version: 1, appProtocol: 1 })));
@@ -146,6 +166,8 @@ test('a second bridge for one device supersedes the first, hard', async () => {
 
 /** Every presence report the stub storage received, in order. */
 const presenceReports: { deviceId: string; online: boolean }[] = [];
+/** Every /v1/devices/verify body it received: which secret each bridge presented. */
+const verifyBodies: { id: string; secret: string }[] = [];
 
 /**
  * Storage, stubbed, answering /v1/devices/verify from a scripted sequence.
@@ -168,9 +190,16 @@ async function startStubStorage(replies: { status: number; body?: unknown }[]): 
       });
       return;
     }
+    // Picked on arrival, before the body is read, so the script still runs in the
+    // order calls reach storage.
     const reply = replies[Math.min(n++, replies.length - 1)];
-    res.writeHead(reply.status, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(reply.body ?? { error: 'unauthorized' }));
+    let body = '';
+    req.on('data', (c) => (body += String(c)));
+    req.on('end', () => {
+      if (req.url === '/v1/devices/verify') verifyBodies.push(JSON.parse(body) as { id: string; secret: string });
+      res.writeHead(reply.status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(reply.body ?? { error: 'unauthorized' }));
+    });
   });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -250,6 +279,51 @@ test('an attach refusal lands in the device history with its reason', async () =
     body.events['d-refused'].filter((e) => e.kind === 'agent-refused').map((e) => e.detail?.reason),
     ['unauthorized', 'unreachable'],
   );
+});
+
+test('the device secret is read from its header, still from the deprecated query, and never printed', async () => {
+  // In a URL, a machine's long-lived credential lands in every proxy and access
+  // log in front of the relay. The header is the fix; the query form stays
+  // readable for the bridges already installed, which send nothing else.
+  const log: string[] = [];
+  const storagePort = await startStubStorage([{ status: 200, body: { userId: 'u1' } }]);
+  const port = await startRelay(
+    {
+      RELAY_AUTH_DISABLED: '',
+      CLERK_SECRET_KEY: 'sk_test_not_used_on_the_agent_path',
+      RELAY_SHARED_SECRET: 'shared',
+      STORAGE_URL: `http://127.0.0.1:${storagePort}`,
+      RELAY_AGENT_PING_MS: '100',
+      RELAY_AGENT_DEAD_MS: '10000',
+      // Short, so the re-verify — the other place the secret is used — runs too.
+      RELAY_REVERIFY_MS: '200',
+    },
+    log,
+  );
+  const current = openAgent(port, 'd-secret-header', { answerPings: true, secret: 'header-SECRET-canary' });
+  const legacy = openAgent(port, 'd-secret-query', {
+    answerPings: true,
+    secret: 'query-SECRET-canary',
+    legacyQuery: true,
+  });
+
+  // Attach and at least one re-verify each, every one carrying what was presented.
+  const presented = (id: string) => verifyBodies.filter((b) => b.id === id).map((b) => b.secret);
+  await until(
+    () => (presented('d-secret-header').length >= 2 && presented('d-secret-query').length >= 2) || null,
+    'an attach and a re-verify for both',
+  );
+  assert.deepEqual([...new Set(presented('d-secret-header'))], ['header-SECRET-canary']);
+  assert.deepEqual([...new Set(presented('d-secret-query'))], ['query-SECRET-canary']);
+  assert.equal(current.closed(), null);
+  assert.equal(legacy.closed(), null);
+
+  current.ws.close();
+  legacy.ws.close();
+  await sleep(200);
+  const printed = log.join('');
+  assert.ok(printed.includes('agent attached for device d-secret-header'), 'the output was captured at all');
+  assert.equal(printed.includes('SECRET-canary'), false, 'neither form of the secret is ever printed');
 });
 
 const reportsFor = (device: string) => presenceReports.filter((r) => r.deviceId === device);

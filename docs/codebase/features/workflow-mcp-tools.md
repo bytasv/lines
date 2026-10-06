@@ -9,8 +9,9 @@ an MCP server (`mcp__lines__*`) exposed to every session; writes are
 permission-gated through the existing card, reads are not.
 
 The server is hosted **two different ways**, one per engine, because the engines
-offer different hooks — see "Two front doors" below. The tool manifest and every
-handler are shared; only the hosting differs.
+offer different hooks — see "Two front doors" below. The tool specs and every
+handler are shared; only the hosting differs — and what is served: the codex door
+has no approval card in front of it, so it gets the reads only.
 
 ## Entry points
 
@@ -30,8 +31,8 @@ handler are shared; only the hosting differs.
 - `server/src/workerClient.ts` — `push(sessionId, message, options, tools?)`
 - `server/src/workflowCommands.ts` — the mutation/read/resolution layer shared by
   the WebSocket path and the MCP path
-- `server/src/mcpWorkflowTools.ts` — `LINES_TOOL_MANIFEST`, `createMcpDispatcher`
-  (bridge-side, hot-reloadable tool names/descriptions/schemas)
+- `server/src/mcpWorkflowTools.ts` — `LINES_TOOL_MANIFEST`, `LINES_READ_ONLY_MANIFEST`,
+  `createMcpDispatcher` (bridge-side, hot-reloadable tool names/descriptions/schemas)
 - `shared/workflowValidation.ts` — `validateWorkflow`, `validateStepContent`,
   `formatWorkflowIssues` (re-exported from `shared/types.ts`)
 - `shared/formatTime.ts` — `formatTimestamp` (also re-exported from
@@ -41,8 +42,10 @@ handler are shared; only the hosting differs.
   the Postgres-side half of workflow/step creation-time durability
 - `server/src/sessions.ts` — `handlePreToolUse`/`handleCanUseTool` gating on the
   `mcp__lines__*` namespace
-- `server/src/index.ts` — `handleMcpToolRpc`, and the four `saveWorkflow`/
-  `deleteWorkflow`/`saveStep`/`deleteStep` WS cases now call `workflowCommands.ts`
+- `server/src/index.ts` — `handleMcpToolRpc` (the Claude door, `allowWrites: true`),
+  `handleLinesMcp` (the codex door's `POST /lines-mcp`, `allowWrites: false`), and
+  the four `saveWorkflow`/`deleteWorkflow`/`saveStep`/`deleteStep` WS cases now call
+  `workflowCommands.ts`
 - `web/src/components/PermissionPrompt.tsx` — `workflowToolPresentation`
 
 ## Important symbols
@@ -55,7 +58,16 @@ handler are shared; only the hosting differs.
   `mcp__lines__list_workflows`, `..._get_workflow`, `..._list_steps`,
   `..._get_step`, `..._list_step_versions` (reads), and `..._create_workflow`,
   `..._update_workflow`, `..._delete_workflow`, `..._save_step`,
-  `..._delete_step` (writes)
+  `..._delete_step` (writes), plus the connection tools (`list_mcp_connections`, a
+  read; `add_mcp_connection` and `authorize_mcp_connection`, writes — see
+  [mcp-connections](mcp-connections.md))
+- `LINES_READ_ONLY_MANIFEST` — the same server name with the read tools only, and
+  instructions that claim no approval card: what a caller with no card in front of
+  it (codex) is served
+- `createMcpDispatcher(ctx, session, { allowWrites })` — the handlers for one user.
+  `allowWrites` has no default: every caller states it, true only where an
+  approval card gates each write, and a write reaching a dispatcher built without
+  it is refused before any handler runs
 - `resolveWorkflowRef(ctx, ref)` — id or unique case-insensitive name match among
   **owned** workflows only; returns `{ok:false, reason:'not-found'|'ambiguous'|
   'foreign', candidates}` instead of guessing
@@ -84,7 +96,9 @@ handler are shared; only the hosting differs.
 3. A tool call becomes `rpcCall(sessionId, 'mcpTool', {tool, args})`; `index.ts`'s
    `onRpc` callback routes `kind === 'mcpTool'` to `handleMcpToolRpc` (not
    `sessions.handleWorkerRpc`, which stays for `canUseTool`/`preToolUse`), which
-   calls `createMcpDispatcher(ctx)(tool, args)` and answers via `worker.rpcResult`.
+   calls `createMcpDispatcher(ctx, session, { allowWrites: true })(tool, args)` —
+   writes allowed because step 4 put every one in front of the user first — and
+   answers via `worker.rpcResult`.
 4. `PreToolUse`/`canUseTool` gate on the tool name first: `mcp__lines__*` reads
    auto-allow in **every** permission mode (including `auto`, bypassing the
    normal guard entirely); writes always escalate to the permission card,
@@ -115,7 +129,9 @@ handler are shared; only the hosting differs.
 - `server/src/workerMcp.test.ts`
 - `server/src/workflowCommands.test.ts`
 - `server/src/workflowValidation.test.ts`
-- `server/src/mcpWorkflowTools.test.ts`
+- `server/src/mcpWorkflowTools.test.ts` — includes the read-only manifest (exactly
+  the `readOnly` tools, no approval-card claim) and a dispatcher without writes
+  (every write refused with nothing changed, every read still answered)
 - `server/src/sessions.mcpGating.test.ts`
 - `server/src/workflows.timestamps.test.ts` — `createdAt` stamping, the
   earliest-wins merge, and boot-time healing of rows written before it existed
@@ -168,6 +184,13 @@ handler are shared; only the hosting differs.
 - Creation time only ever moves earlier, never later (`earliest`/`LEAST`
   everywhere it merges) — idempotent and order-independent across peers, and it
   means a client or blob that omits `createdAt` can never erase a known one.
+- A write runs only where an approval card gated it. The codex door has no card
+  anywhere on its path — a call arrives as a plain HTTP request from codex's
+  child — so it is read-only: `/lines-mcp` serves `LINES_READ_ONLY_MANIFEST` and
+  dispatches with `allowWrites: false`. Served the writes, a prompt-injected codex
+  turn could rewrite a workflow (which later runs as prompts) or add an MCP
+  server (which runs in every session) with nobody saying yes. The Claude door
+  keeps every write behind its card (`allowWrites: true`).
 
 ## Architectural rules
 
@@ -196,6 +219,11 @@ handler are shared; only the hosting differs.
   separately-encoded `validate()` — it was **not** migrated onto
   `shared/workflowValidation.ts` in this change. Drift between the two is a
   known, currently-accepted risk.
+- Read-only is enforced twice, and the dispatcher is the side that decides: the
+  read-only manifest leaves the writes out, but a client can call a tool it was
+  never listed, so `createMcpDispatcher` refuses any non-`readOnly` spec when
+  `allowWrites` is false. `LINES_READ_ONLY_MANIFEST` is built from the same
+  `READ_TOOLS` specs as `LINES_TOOL_MANIFEST`, so the two cannot drift.
 
 ## Two front doors
 
@@ -207,12 +235,14 @@ in its `config.toml`. The same tool surface therefore needs a second front door.
 `server/src/linesMcpStdio.ts` is that door — a real stdio MCP server, spawned by
 codex, that is a **proxy and not a second implementation**. It asks the bridge for
 the manifest and forwards each call to it over `POST /lines-mcp`. That is what keeps
-the two doors from drifting: one description of the surface
-(`LINES_TOOL_MANIFEST`), one implementation behind it (`createMcpDispatcher`), and
-rewording a tool still restarts nothing.
+the two doors from drifting: one set of tool specs (the codex door's
+`LINES_READ_ONLY_MANIFEST` is `LINES_TOOL_MANIFEST`'s read tools), one
+implementation behind it (`createMcpDispatcher`), and rewording a tool still
+restarts nothing.
 
 | | Claude | codex |
 | --- | --- | --- |
+| served | `LINES_TOOL_MANIFEST`, `allowWrites: true` | `LINES_READ_ONLY_MANIFEST`, `allowWrites: false` |
 | hosting | in-process, built in the worker | child process, spawned by codex |
 | built by | `workerMcp.ts` (`buildMcpServer`) | `linesMcpStdio.ts` |
 | schema form | manifest → Zod (`tool()` wants Zod) | manifest → JSON Schema (MCP wants JSON Schema) |
@@ -238,11 +268,21 @@ context, and a store directory, for any string handed to it.
 
 ### What the codex door cannot do
 
-Codex names one MCP server for the whole `CODEX_HOME`, so a tool call arriving at
-the bridge cannot say which *thread* made it. The two session-scoped tools therefore
-decline rather than guess: `authorize_mcp_connection` refuses and names Settings →
-Connections instead, and `list_mcp_connections` omits per-session status. The other
-eleven are unaffected — they are about stored data, not about the calling session.
+**Write.** On the Claude door every write reaches the user as a permission card
+before it runs (`handlePreToolUse`/`handleCanUseTool`). Nothing on the codex door
+can raise one — the call is a plain HTTP request from codex's child — so it serves
+the six reads and nothing else, and the dispatcher refuses a write even when one is
+called unlisted, answering that Lines tools are read-only here and the user can
+make the change in Lines. Changing a workflow, a step or a connection from a codex
+session means asking the user to do it.
+
+**Name its thread.** Codex names one MCP server for the whole `CODEX_HOME`, so a
+tool call arriving at the bridge cannot say which *thread* made it.
+`list_mcp_connections` therefore omits per-session status. `authorize_mcp_connection`,
+the other session-scoped tool, is a write and no longer reaches its handler from
+this door at all; its decline for a call with no session (naming Settings →
+Connections instead) stays as the fallback. The other reads are unaffected — they
+are about stored data, not about the calling session.
 
 ## Related decisions
 

@@ -33,8 +33,9 @@ import {
   isSessionActive,
   normalizePlanComments,
   normalizeRootPath,
-  parseShareCaps,
+  capsForPreset,
   projectRoots,
+  SHARE_PRESETS,
 } from '@lines/shared';
 import { verifyToken } from '@clerk/backend';
 import { WORKER_LOST_MS, WorkerClient, type WorkerRpc } from './workerClient.ts';
@@ -42,15 +43,38 @@ import { RelayClient, type AttestedGrant, type AttestedIdentity } from './relayC
 import { deviceIdentity } from './device.ts';
 import { bridgeIdentity } from './e2eeIdentity.ts';
 import { guardRelayChannel } from './e2eeChannel.ts';
+import {
+  combineGrants,
+  guestAccessFor,
+  mintGuestGrant,
+  reconcileGuestGrants,
+  revokeGuestGrants,
+  updateGuestGrants,
+  type GuestGrantRecord,
+} from './guestGrants.ts';
 import { isLoopbackAddress } from './locality.ts';
-import { APP_ROOT, userStoreRoot } from './store.ts';
+import {
+  connectionPolicy,
+  hostAllowed,
+  listenHost,
+  tokenFitsContext,
+  tokenRefreshAction,
+  verifyClient,
+} from './connectionPolicy.ts';
+import { APP_ROOT, isValidStoreId, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
 import type { BrowserLink, UserContext } from './userContext.ts';
 import { handleFileRequest } from './fileRoutes.ts';
-import { clampPermissionMode, guestLibrary, prepareInlineWorkflow } from './guestWorkflows.ts';
+import {
+  clampPermissionMode,
+  guestCwdAllowed,
+  guestLibrary,
+  permissionAnswerFor,
+  prepareInlineWorkflow,
+} from './guestWorkflows.ts';
 import { reportActivity, reportRelayStatus, UpdateManager } from './updates.ts';
 import {
-  LINES_TOOL_MANIFEST,
+  LINES_READ_ONLY_MANIFEST,
   createMcpDispatcher,
   type McpAuthorizeOutcome,
 } from './mcpWorkflowTools.ts';
@@ -77,10 +101,35 @@ import { pageTranscript } from './transcriptPage.ts';
  *  target); unset means bind :0 and publish the result to bridge.json. */
 const PORT = Number(process.env.LINES_BRIDGE_PORT ?? 0);
 
+/**
+ * Where the listener binds and which direct sockets it accepts — loopback and
+ * this machine's own pages by default. See connectionPolicy.ts for why, and for
+ * the env vars that open it to a LAN on purpose.
+ */
+const CONNECTION_POLICY = connectionPolicy();
+{
+  const { refused } = listenHost();
+  if (refused) {
+    console.warn(
+      `[bridge] LINES_BRIDGE_HOST=${refused} ignored — only a loopback address, 0.0.0.0 or :: may be named; ` +
+        `listening on ${CONNECTION_POLICY.host}`,
+    );
+  }
+}
+
+/**
+ * Upper bound on one inbound frame from a direct socket. Generous — a prompt's
+ * attachments and a dictation clip are both base64 inside one frame — but finite,
+ * where the library default would let a socket hand us 100 MiB at a time.
+ */
+const MAX_FRAME_BYTES = 64 * 1024 * 1024;
+
 /** Published in bridge.json for the tray app's future control channel. It is
  *  deliberately *not* enforced on browser connections: a browser cannot set
- *  headers on a WebSocket, and the Clerk gate in handleConnection is what
- *  guards that path. The dev-server discovery endpoint never exposes it. */
+ *  headers on a WebSocket, so what guards that path is the upgrade check
+ *  (`verifyClient` below: loopback origins only, by default) and, where it is
+ *  configured, the Clerk gate in handleConnection. The dev-server discovery
+ *  endpoint never exposes it. */
 const bridgeToken = newRuntimeToken();
 
 /**
@@ -170,6 +219,14 @@ interface ConnState {
    * client decides whether it is sitting at the host.
    */
   owner: boolean;
+  /**
+   * Whether this link came through the relay rather than straight to our
+   * listener. Decides how far a refreshed Clerk token is trusted — see
+   * tokenRefreshAction.
+   */
+  relayed: boolean;
+  /** For a guest: the grants this machine minted that admitted them, so changing one closes them. */
+  grantIds?: string[];
 }
 // Keyed on the link object; relayClient will hold a strong ref per channel,
 // so a WeakMap entry lives exactly as long as its connection.
@@ -183,6 +240,32 @@ const conns = new WeakMap<BrowserLink, ConnState>();
  * user ids get `~/.lines-app/users/{id}` (migration ships with the auth gate).
  */
 const LOCAL_USER = 'local';
+
+/**
+ * Whether the single-tenant context may take a storage token at all. Only under
+ * the dev supervisor, for the dev relay with auth off, which binds every browser
+ * to that context — a desktop install never legitimately gives it one (its owner
+ * channels are their own account's context, and its direct sockets cannot vouch
+ * for a token), so there it takes none. See tokenFitsContext.
+ */
+const SINGLE_TENANT_TOKENS = process.env.LINES_DEV_SUPERVISED === '1' ? LOCAL_USER : null;
+
+/**
+ * The one writer of a context's storage credential.
+ *
+ * Every path that installs a token — the hello, the in-channel refresh, the
+ * relay's push — goes through here, so the rule cannot be honoured on two paths
+ * and missed on the third: the token must name the context's own user. A token
+ * for anyone else would push this user's sessions into that person's account.
+ */
+function setClerkToken(ctx: UserContext, token: string): boolean {
+  if (!tokenFitsContext(token, ctx.userId, SINGLE_TENANT_TOKENS)) {
+    console.warn(`[auth] refused a token that does not belong to ${ctx.userId}`);
+    return false;
+  }
+  ctx.clerkToken = token;
+  return true;
+}
 
 // The worker owns the Claude CLI children so this process can restart freely
 // (tsx watch, dogfooding edits) without killing in-flight agent turns.
@@ -509,9 +592,20 @@ function resolveRelayIdentity(): { id: string; secret: string } {
 }
 
 const RELAY_URL = process.env.RELAY_URL;
+/** How often guest grants are checked against the shares storage still lists. */
+const GRANT_RECONCILE_MS = 60_000;
 // Resolved only when relaying: deviceIdentity() *mints* on read, and a local-only
 // install must not grow a credential file it never uses.
 const relayIdentity = RELAY_URL ? resolveRelayIdentity() : null;
+// The app root is owner-only, whoever started us. The desktop shell tightens it
+// too, but Tilt and a terminal start the bridge directly, and everything under it
+// — transcripts, keys, credentials — is this user's alone.
+try {
+  fs.mkdirSync(APP_ROOT, { recursive: true, mode: 0o700 });
+  fs.chmodSync(APP_ROOT, 0o700);
+} catch (err) {
+  console.warn(`[bridge] could not make ${APP_ROOT} private:`, (err as Error).message);
+}
 // Unconditional, unlike the relay link: the sole-writer rule on ~/.lines-app
 // applies to every bridge.
 claimBridgeLock(relayIdentity?.id ?? null);
@@ -520,13 +614,14 @@ if (RELAY_URL) {
     onChannel: (link, identity) => {
       // Never straight to handleConnection any more. A relay channel passes
       // through the e2ee gate first: an owner channel only reaches the bridge
-      // once it has authenticated with a key this machine pinned itself, rather
-      // than on the relay's say-so — from first launch, enrolled device or not.
+      // once it has authenticated with a key this machine pinned itself, and a
+      // guest channel once it has presented a grant this machine minted — never
+      // on the relay's say-so, from first launch, enrolled device or not.
       void bridgeIdentity()
         .then((self) => {
           const isGuest = !!identity.grant && identity.grant.scope !== 'owner';
-          guardRelayChannel(link, self, isGuest, (secured, peerKey) => {
-            void handleConnection(secured, {}, identity, peerKey);
+          guardRelayChannel(link, self, isGuest ? { userId: identity.userId } : null, (secured, peerKey, grants) => {
+            void handleConnection(secured, {}, identity, peerKey, grants);
           });
         })
         .catch((err) => {
@@ -542,12 +637,14 @@ if (RELAY_URL) {
       // ~/.lines-app/users/{guest} on someone else's machine and set a token that
       // pushes this machine's sessions into the guest's Postgres rows.
       //
-      // The non-obvious half of the same guard in handleConnection — a guest's
-      // token arrives here every ~50s from their browser's auth relay, so getting
-      // handleConnection right and missing this would leak anyway.
+      // The relay no longer stores or re-pushes a guest's token at all (and the
+      // guest's browser no longer relays one on a guest link), but this end does
+      // not depend on that: a push for anyone without a context here is dropped,
+      // and setClerkToken refuses one that names someone other than the context.
       const ctx = registry.peek(userId);
       if (!ctx) return;
-      ctx.clerkToken = token;
+      // And even for a context that exists, only a token that is that user's.
+      if (!setClerkToken(ctx, token)) return;
       // Same as the in-channel `auth` handler: a fresh token while storage is
       // down is the likely cure, so probe now. A no-op while the link is up.
       void ctx.sync.retryNow();
@@ -557,6 +654,26 @@ if (RELAY_URL) {
     onStatus: (status) => { devRelayConnected = status.connected; reportRelayStatus(status); },
   });
   console.log(`[relay] dialling ${RELAY_URL} as device ${relayIdentity!.id}`);
+  setInterval(() => void reconcileGrants(relayIdentity!.id), GRANT_RECONCILE_MS).unref();
+}
+
+/**
+ * Drop guest grants whose share is gone from storage: revoked from a phone while
+ * this machine slept, or an invite cancelled from another browser. The owner's
+ * browser tells this machine directly when it can (revokeGuestGrant); this is
+ * what catches the times it could not. Only ever takes access away, and any
+ * socket admitted on a dropped grant is closed.
+ */
+async function reconcileGrants(deviceId: string): Promise<void> {
+  for (const ctx of registry.all()) {
+    if (ctx.userId === LOCAL_USER || !ctx.clerkToken) continue;
+    const live = await ctx.sync.liveGrantIds(deviceId).catch(() => null);
+    if (!live) continue;
+    const removed = reconcileGuestGrants(ctx.userId, live);
+    if (!removed.length) continue;
+    console.log(`[share] dropped ${removed.length} guest grant(s) storage no longer lists`);
+    closeGuestSockets(ctx, new Set(removed.map((g) => g.id)), 'share revoked');
+  }
 }
 
 // If the worker never shows up, in-flight statuses loaded from disk are stale.
@@ -582,15 +699,26 @@ let boundPort = 0;
 /** Path the MCP OAuth redirect comes back to. Also embedded in the auth URL. */
 const MCP_OAUTH_CALLBACK_PATH = '/mcp-oauth/callback';
 
-/** Bare page for the redirect landing — no app shell, and never echoes the code. */
+/** HTML-escape text for the redirect landing page. */
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+}
+
+/**
+ * Bare page for the redirect landing — no app shell, and never echoes the code.
+ * Both strings are escaped here, once: a heading names the MCP server, which is
+ * configuration, and nothing on this page should be able to become markup.
+ */
 function oauthPage(res: http.ServerResponse, status: number, heading: string, detail: string) {
+  const h = escapeHtml(heading);
+  const d = escapeHtml(detail);
   res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
   res.end(
-    `<!doctype html><meta charset="utf-8"><title>${heading}</title>` +
+    `<!doctype html><meta charset="utf-8"><title>${h}</title>` +
       `<body style="font:15px/1.5 system-ui;margin:0;display:grid;place-items:center;height:100vh">` +
       `<div style="max-width:32rem;padding:2rem;text-align:center">` +
-      `<h1 style="font-size:1.1rem;margin:0 0 .5rem">${heading}</h1>` +
-      `<p style="color:#555;margin:0">${detail}</p></div></body>`,
+      `<h1 style="font-size:1.1rem;margin:0 0 .5rem">${h}</h1>` +
+      `<p style="color:#555;margin:0">${d}</p></div></body>`,
   );
 }
 
@@ -729,22 +857,34 @@ async function handleLinesMcp(req: http.IncomingMessage, res: http.ServerRespons
   const ctx = registry.peek(body.userId ?? LOCAL_USER);
   if (!ctx) return deny(404, 'no such user');
 
+  // Reads only, in the manifest and in the dispatcher both. Nothing on this path
+  // raises an approval card — it is a plain HTTP call from codex's child — so a
+  // write here would land with nobody having said yes: a prompt-injected turn
+  // could rewrite a workflow or add an MCP server that runs in every session.
   if (body.op === 'manifest') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(LINES_TOOL_MANIFEST));
+    res.end(JSON.stringify(LINES_READ_ONLY_MANIFEST));
     return;
   }
   if (body.op !== 'call' || !body.tool) return deny(400, 'unknown op');
 
   // No session: codex names one MCP server for the whole CODEX_HOME, so a call
-  // arriving here cannot say which thread made it. The two session-scoped tools
-  // decline rather than guess — see McpToolSession.
-  const result = await createMcpDispatcher(ctx)(body.tool, body.args ?? {});
+  // arriving here cannot say which thread made it. The session-scoped reads
+  // answer without it — see McpToolSession.
+  const result = await createMcpDispatcher(ctx, undefined, { allowWrites: false })(body.tool, body.args ?? {});
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify(result));
 }
 
 const server = http.createServer((req, res) => {
+  // The same rebinding check the socket upgrade gets: on a loopback bind, a
+  // request naming any other host is a page that pointed its own domain at
+  // 127.0.0.1 so the browser would let it read our answers.
+  if (!hostAllowed(req.headers.host, CONNECTION_POLICY)) {
+    res.writeHead(421, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'misdirected request' }));
+    return;
+  }
   if ((req.url ?? '').startsWith(LINES_MCP_PATH) && devRuntime.held) {
     res.writeHead(503, { 'content-type': 'application/json', 'retry-after': '1' });
     res.end(JSON.stringify({ error: DEV_UPDATING }));
@@ -771,7 +911,13 @@ const server = http.createServer((req, res) => {
   res.end(JSON.stringify({ ok: true, sessions: registry.get(LOCAL_USER).sessions.list().length, devRuntime: devRuntime.publicStatus }));
 });
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({
+  server,
+  maxPayload: MAX_FRAME_BYTES,
+  // Refused before the socket exists, so a stranger's page never gets a `hello`:
+  // a direct socket is the agent's whole command surface.
+  verifyClient: verifyClient(CONNECTION_POLICY, (reason) => console.warn(`[ws] refused a direct socket: ${reason}`)),
+});
 // The ws library re-emits http server errors here; without a listener they crash the process.
 wss.on('error', (err) => console.warn('[wss]', (err as Error).message));
 
@@ -783,18 +929,24 @@ wss.on('connection', (ws, req) => {
  * `attested` is supplied for relay channels. It used to be the authorization
  * decision — the relay said who this was and the bridge granted owner access on
  * that word alone, so whoever ran the relay could drive any machine it brokered.
- * It is now a *routing hint*: which user's context to open, nothing more.
+ * It is now a *routing hint*: which user's context to open, nothing more — and
+ * for a guest, a narrowing of what this machine already granted.
  *
  * What actually grants owner authority on a relay channel is `peerKey`: the
  * static key the channel authenticated against this machine's own enrolled list
- * (see e2eeChannel.ts). Direct sockets are unaffected — there is no relay in the
- * middle of one, and a loopback socket is the machine's own browser.
+ * (see e2eeChannel.ts). What admits a guest is `guestGrant`: a grant this machine
+ * minted, which the guest presented inside the encrypted channel (see
+ * guestGrants.ts). Direct sockets are unaffected — there is no relay in the
+ * middle of one, and the upgrade check only lets this machine's own pages open
+ * one (see connectionPolicy.ts).
  */
 async function handleConnection(
   ws: BrowserLink,
   req: { url?: string; socket?: { remoteAddress?: string } },
   attested?: AttestedIdentity,
   peerKey?: string | null,
+  /** The grants a relayed guest channel was admitted on (see guestGrants.ts). */
+  guestGrants: GuestGrantRecord[] = [],
 ) {
   let userId = LOCAL_USER;
   let clerkToken: string | null = null;
@@ -818,25 +970,50 @@ async function handleConnection(
    *
    * A guest reaches the *host's running session*, not a copy of it: transcripts
    * and turns are host-local, so resolving a guest to their own context would
-   * hand them an empty machine. `hostUserId` is the relay's attestation, and the
-   * only thing that may pick a context other than the caller's own.
+   * hand them an empty machine. For a guest the host is named by the grant this
+   * machine minted — the relay's attestation must agree with it, and can no
+   * longer pick a context on its own.
    */
   const grant = attested?.grant;
   const isGuest = !!grant && grant.scope !== 'owner';
-  const hostUserId = isGuest ? grant.hostUserId : userId;
+  // The second lock on the guest door, as the E3 check below is on the owner's:
+  // the channel gate admits a guest only on grants this machine minted, so a
+  // guest connection without one, or with ones for a different host than the
+  // relay names, is not one this bridge issued.
+  if (isGuest && (!guestGrants.length || guestGrants.some((g) => g.hostUserId !== grant.hostUserId))) {
+    console.warn('[share] refused a guest channel with no grant from this machine');
+    ws.close(1008, 'unauthorized');
+    return;
+  }
+  const hostUserId = isGuest ? guestGrants[0].hostUserId : userId;
+  // Both ids become directory names under ~/.lines-app (`users/<id>`), and on a
+  // relayed channel both are the relay's word. Anything that is not a plain id —
+  // a `../`, a slash — is refused before it can name a path.
+  if (!isValidStoreId(userId) || !isValidStoreId(hostUserId)) {
+    console.warn('[ws] refused a connection with a malformed user id');
+    ws.close(1008, 'unauthorized');
+    return;
+  }
   // `get` on the host (their context is the point), never on the guest — see
   // registry.peek's comment. A guest that somehow arrives for a host with no
   // context yet gets one built for the *host*, which is correct: it is the host's
   // own data root either way.
   const ctx = registry.get(hostUserId);
 
+  // A guest gets what this machine granted, narrowed by what the relay says
+  // storage holds today: a share narrowed or revoked there narrows here too, but
+  // nothing the relay says can widen past the grant. Nothing left, no channel.
+  const combined = isGuest ? combineGrants(guestGrants) : null;
+  const narrowed = combined ? guestAccessFor(combined, grant!) : null;
+  if (isGuest && !narrowed) {
+    console.warn('[share] refused a guest channel: nothing is left of the grant');
+    ws.close(1008, 'unauthorized');
+    return;
+  }
   const access: SocketAccess = isGuest
     ? {
-        scope: grant.scope,
-        // Re-parsed rather than trusted as-is: the wire type is a loose record,
-        // and parseShareCaps denies anything not explicitly true.
-        caps: parseShareCaps(grant.caps),
-        ...(grant.scope === 'session' ? { sessionIds: grant.sessionIds ?? [] } : {}),
+        ...narrowed!,
+        // Display only: who shared this, and who the guest is, for attribution.
         ownerProfile: grant.profile ?? null,
         viewerProfile: grant.viewerProfile ?? null,
       }
@@ -854,16 +1031,25 @@ async function handleConnection(
 
   const connId = randomUUID();
   // Only a loopback socket is this machine's own browser. `!attested` alone is
-  // not enough — the listener binds every interface, so a direct socket may be
-  // a laptop on the same LAN, which is as remote as the relay for anything that
+  // not enough: the listener can be opened to every interface on purpose
+  // (LINES_BRIDGE_HOST, for LAN testing), and then a direct socket may be a
+  // laptop on the same LAN, which is as remote as the relay for anything that
   // opens a window here.
   const local = !attested && isLoopbackAddress(req.socket?.remoteAddress);
-  conns.set(ws, { userId, connId, clerkToken, access, local, owner: !isGuest });
+  conns.set(ws, {
+    userId,
+    connId,
+    clerkToken: isGuest ? null : clerkToken,
+    access,
+    local,
+    owner: !isGuest,
+    relayed: !!attested,
+    ...(isGuest ? { grantIds: guestGrants.map((g) => g.id) } : {}),
+  });
   // A guest's token is never installed on the host's context, and a guest never
   // triggers a sync: either would push this machine's sessions up under the
   // guest's Clerk identity, which is the worst outcome in this whole feature.
-  if (clerkToken && !isGuest) {
-    ctx.clerkToken = clerkToken;
+  if (clerkToken && !isGuest && setClerkToken(ctx, clerkToken)) {
     // Pull remote state (rate-limited inside) and push local state up.
     void ctx.syncNow();
   }
@@ -1062,6 +1248,9 @@ function buildHello(
     // Same reasoning, and the same persisted source: a staged memory write is a
     // decision the user still owes, not a transient notification.
     memoryReview: ctx.memory.review(),
+    // This machine's sync-signing fingerprint and the machines this user trusts,
+    // for Settings → Sync. Owner-only: a guest has no say in what this account trusts.
+    syncSigning: workflowCommands.syncSigningInfo(ctx),
     // Header names only — `blob()`'s list is what the client ever sees, never a value.
     mcpConnections: ctx.mcp.list(),
     mcpConnectionsReview: ctx.mcp.review(),
@@ -1156,10 +1345,16 @@ async function handleMcpToolRpcImpl(ctx: UserContext, rpc: WorkerRpc): Promise<v
   const args = (rpc.payload.args ?? {}) as Record<string, unknown>;
   let result: McpToolResult;
   try {
-    result = await createMcpDispatcher(ctx, {
-      sessionId: rpc.sessionId,
-      authorize: (serverName) => authorizeConnectionForAgent(ctx, rpc.sessionId, serverName),
-    })(toolName, args);
+    // Writes allowed: on this path every non-readOnly Lines tool reached the user
+    // as an approval card first (handlePreToolUse/handleCanUseTool).
+    result = await createMcpDispatcher(
+      ctx,
+      {
+        sessionId: rpc.sessionId,
+        authorize: (serverName) => authorizeConnectionForAgent(ctx, rpc.sessionId, serverName),
+      },
+      { allowWrites: true },
+    )(toolName, args);
   } catch (err) {
     console.error('[mcp]', toolName, err);
     result = {
@@ -1168,6 +1363,14 @@ async function handleMcpToolRpcImpl(ctx: UserContext, rpc: WorkerRpc): Promise<v
     };
   }
   worker.rpcResult(rpc.id, result);
+}
+
+/** Close every guest socket of this context admitted on any of these grants. */
+function closeGuestSockets(ctx: UserContext, grantIds: Set<string>, reason: string): void {
+  if (!grantIds.size) return;
+  for (const link of ctx.sockets.keys()) {
+    if (conns.get(link)?.grantIds?.some((id) => grantIds.has(id))) link.close(1008, reason);
+  }
 }
 
 /** One wording for every refusal `McpConnections` can return. */
@@ -1274,36 +1477,55 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       // Fresh-token relay — the only thing that keeps storage sync alive between
       // reconnects, since a hello-time token is good for only ~60s.
       //
-      // A relayed connection already trusts its hello-time token unconditionally
-      // (attested.clerkToken above, no AUTH_ENABLED check at all — the relay is
-      // who verified it). This reuses that exact trust boundary: nothing about
-      // holding this already-open, already-authorized socket changes on a
-      // refresh, and every other message on it is already trusted the same way.
-      // A local connection has no relay standing behind it, so it re-verifies
-      // through Clerk directly — gated on AUTH_ENABLED like the hello was —
-      // which is what actually catches a revoked session within one relay cycle.
-      // CLERK_SECRET_KEY is a server secret and never ships to a user's
-      // machine, so AUTH_ENABLED is false on every real desktop install; before
-      // this, that silently dropped every relayed refresh, not just the local
-      // recheck it was meant to gate.
+      // Who may refresh, and how far it is trusted, is tokenRefreshAction's call.
+      // In short: a guest never (the context is the host's, so a guest token here
+      // would push the host's sessions into the guest's account); a relayed owner
+      // on the relay's word, exactly as its hello-time token was; a direct socket
+      // only after re-verifying through Clerk, which is what catches a revoked
+      // session within one relay cycle. CLERK_SECRET_KEY is a server secret and
+      // never ships to a user's machine, so on a desktop install a direct
+      // socket's refresh is ignored rather than believed.
       const conn = conns.get(ws);
       if (!conn) break;
-      if (conn.local) {
-        if (!AUTH_ENABLED) break;
+      const action = tokenRefreshAction(conn, AUTH_ENABLED);
+      if (action === 'ignore') break;
+      if (action === 'verify') {
         const verified = await verifyClerkUserId(msg.token);
         if (verified !== conn.userId) {
           ws.close(1008, 'unauthorized');
           break;
         }
       }
+      if (!setClerkToken(ctx, msg.token)) break;
       conn.clerkToken = msg.token;
-      ctx.clerkToken = msg.token;
       // A new token while storage is down is the likely cure: probe now rather
-      // than on the next tick. Owner only, a guest never drives host sync.
-      if (conn.owner) void ctx.sync.retryNow();
+      // than on the next tick.
+      void ctx.sync.retryNow();
       break;
     }
     case 'createSession': {
+      // Where a guest's session may live, checked before anything is created so a
+      // refusal leaves no half state: inside one of the host's open projects, and
+      // never a new work tree — cutting one runs git and writes a checkout on the
+      // host's disk, which is the owner's call.
+      if (!guestCwdAllowed(ctx, access, msg.cwd)) {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            message: 'A shared session can only be started inside one of the host’s open projects.',
+          } satisfies ServerMessage),
+        );
+        break;
+      }
+      if (msg.worktree && access.scope !== 'owner') {
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            message: 'Only the host can start a session in a new work tree.',
+          } satisfies ServerMessage),
+        );
+        break;
+      }
       // A guest's own workflow, checked before anything is created so a refusal
       // leaves no half state.
       const inline = msg.workflowDef ? prepareInlineWorkflow(ctx, access, msg.workflowDef) : null;
@@ -1311,6 +1533,10 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
         ws.send(JSON.stringify({ type: 'error', message: inline.reason } satisfies ServerMessage));
         break;
       }
+      // Synced content not verified yet is refused before anything exists.
+      // attach() refuses it too, but only after the session has been created,
+      // which would leave an empty session behind.
+      if (!inline && msg.workflowId) workflowCommands.assertWorkflowRunnable(ctx, msg.workflowId);
       // The work tree is cut first and awaited: cwd is identity (project-key
       // anchor, recentDirs, roots, attribution) and is never rewritten, so it has
       // to be the work tree from the very first upsert. A failed add therefore
@@ -1491,6 +1717,10 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       const mayPrompt =
         authorizeMessage({ type: 'prompt', sessionId: msg.sessionId, text: '' }, access).ok &&
         !access.caps.promptNeedsApproval;
+      // The allowlist-widening extras are the owner's alone; a guest's click is
+      // the one-off answer. `updatedInput` is narrowed inside resolvePermission,
+      // against the card's own record, for every caller.
+      const extras = permissionAnswerFor(access, msg);
       sessions.resolvePermission(
         msg.sessionId,
         msg.requestId,
@@ -1498,11 +1728,11 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
         msg.updatedInput,
         msg.answers,
         msg.denyMessage,
-        msg.alwaysAllow,
+        extras.alwaysAllow,
         'user',
         actor,
         mayPrompt ? normalizePlanComments(msg.planComments) : [],
-        msg.allowAsRead,
+        extras.allowAsRead,
       );
       break;
     }
@@ -1744,6 +1974,100 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       }
       const path = await pickFolderNative();
       ws.send(JSON.stringify({ type: 'folderPicked', path } satisfies ServerMessage));
+      break;
+    }
+    case 'trustSyncedItem':
+      // The owner reviewed synced content held back from running — unsigned, or
+      // signed by a machine this one does not trust (see workflowCommands).
+      workflowCommands.trustSyncedItem(ctx, msg);
+      break;
+    case 'trustSigner':
+      // The owner compared another of their machines' fingerprint and trusts it;
+      // refused unless the fingerprint is that key's (see workflowCommands).
+      workflowCommands.trustSigner(ctx, msg);
+      break;
+    case 'untrustSigner':
+      workflowCommands.untrustSigner(ctx, msg);
+      break;
+    case 'guestGrant':
+      // Consumed by the channel gate as a guest channel's first sealed frame
+      // (e2eeChannel.ts). Another copy later, or one on any other link, admits
+      // nothing and means nothing.
+      break;
+    case 'mintGuestGrant': {
+      // Owner only (MESSAGE_AUTHZ). Answered to this socket alone: the token is
+      // the invitee's credential, and it reaches them in the invite link's
+      // fragment — never through storage, and never through the relay in the
+      // clear (this link is the owner's encrypted one, or a loopback socket).
+      const fail = (error: string) =>
+        ws.send(JSON.stringify({ type: 'guestGrantMinted', requestId: msg.requestId, error } satisfies ServerMessage));
+      // A guest only ever arrives through the relay, so without one a grant
+      // could never be redeemed — and the relay names the host by their account,
+      // which the single-tenant context does not have.
+      if (!relayIdentity) {
+        fail('This machine is not connected to the relay, so nobody else can reach it.');
+        break;
+      }
+      if (ctx.userId === LOCAL_USER) {
+        fail('Open this machine through your Lines account to share it.');
+        break;
+      }
+      if (!Object.hasOwn(SHARE_PRESETS, msg.preset) || (msg.scope !== 'machine' && msg.scope !== 'session')) {
+        fail('That share is malformed.');
+        break;
+      }
+      if (msg.scope === 'session' && !(msg.sessionId && sessions.get(msg.sessionId))) {
+        fail('That session is not on this machine.');
+        break;
+      }
+      const { id, token } = mintGuestGrant({
+        hostUserId: ctx.userId,
+        scope: msg.scope,
+        sessionIds: msg.scope === 'session' ? [msg.sessionId!] : undefined,
+        caps: capsForPreset(msg.preset, msg.scope),
+      });
+      ws.send(
+        JSON.stringify({
+          type: 'guestGrantMinted',
+          requestId: msg.requestId,
+          grantId: id,
+          token,
+          // The invitee holds their channel to this key, so the relay cannot sit in
+          // the middle of it. Public by nature; it travels with the token.
+          bridgeKey: (await bridgeIdentity()).publicKey,
+        } satisfies ServerMessage),
+      );
+      break;
+    }
+    case 'updateGuestGrant': {
+      // The owner moved a share's preset. Narrowing already applies through the
+      // relay's attestation; this is what lets a *wider* preset take effect, as
+      // a grant never reaches past the ceiling recorded here.
+      if (!Object.hasOwn(SHARE_PRESETS, msg.preset)) break;
+      const scope = msg.sessionId ? 'session' : 'machine';
+      const moved = new Set(
+        updateGuestGrants(
+          ctx.userId,
+          { guestUserId: msg.guestUserId, sessionId: msg.sessionId ?? null },
+          capsForPreset(msg.preset, scope),
+        ),
+      );
+      // A socket admitted under the old ceiling keeps it until it reconnects, so
+      // close it now: it comes straight back under the new one.
+      closeGuestSockets(ctx, moved, 'share changed');
+      break;
+    }
+    case 'revokeGuestGrant': {
+      // Ended here whatever the relay or storage later say, and every socket
+      // admitted on it is closed now rather than at the relay's next sweep.
+      const removed = new Set(
+        revokeGuestGrants(ctx.userId, {
+          ...(msg.grantId ? { grantId: msg.grantId } : {}),
+          ...(msg.guestUserId ? { guestUserId: msg.guestUserId } : {}),
+          ...(msg.sessionId !== undefined ? { sessionId: msg.sessionId } : {}),
+        }).map((g) => g.id),
+      );
+      closeGuestSockets(ctx, removed, 'share revoked');
       break;
     }
     case 'authStartLogin': {
@@ -2027,6 +2351,14 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       break;
     }
     case 'loadTranscript': {
+      // Only a session this context knows. The id names a file on disk, and a
+      // made-up one must not read whatever happens to sit at that name. Answered
+      // empty rather than with an error: a tab still showing a session another
+      // tab just deleted asks for it, and that is not worth a banner.
+      if (!sessions.get(msg.sessionId)) {
+        ws.send(transcriptFrame(msg.sessionId, []));
+        break;
+      }
       const started = PERF ? performance.now() : 0;
       const raw = store.loadTranscriptRaw(msg.sessionId);
       // No `page` = an older client: the whole file in one frame, as always.
@@ -2107,7 +2439,11 @@ function pickFolderNative(): Promise<string | null> {
 // tsx-watch restarts race the dying process for the port; retry instead of crashing.
 let listenAttempts = 0;
 function listen() {
-  server.listen(PORT, () => {
+  // Loopback unless LINES_BRIDGE_HOST opens it up. Everything that reaches this
+  // listener legitimately is on this machine: the browser's own page, the
+  // codex MCP child (`/lines-mcp` over 127.0.0.1), and the OAuth redirect, which
+  // already lands on 127.0.0.1 by design.
+  server.listen(PORT, CONNECTION_POLICY.host, () => {
     // The bound port, not PORT: the default is 0, so the OS picked one.
     // Publishing is what lets the dev server (and later the tray app) find us.
     const { port } = server.address() as { port: number };
@@ -2121,7 +2457,8 @@ function listen() {
       protocolVersion: APP_PROTOCOL_VERSION,
       token: bridgeToken,
     });
-    console.log(`lines bridge listening on http://localhost:${port}`);
+    const host = CONNECTION_POLICY.host.includes(':') ? `[${CONNECTION_POLICY.host}]` : CONNECTION_POLICY.host;
+    console.log(`lines bridge listening on http://${host}:${port}`);
   });
 }
 server.on('error', (err: NodeJS.ErrnoException) => {
