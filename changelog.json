@@ -28,6 +28,17 @@
   ],
   "desktop": [
     {
+      "version": "0.2.45",
+      "date": "2026-10-07",
+      "items": [
+        "The bridge now listens on this computer only and refuses other web pages, so a website you visit or someone on your Wi-Fi cannot reach it.",
+        "Agent edits to Claude Code settings and hooks, git hooks and config, MCP configs and shell startup files now always ask first, including through symlinks and shell commands.",
+        "Codex sessions can still read your Lines workflows, steps and connections but can no longer change them; make those changes in Lines.",
+        "MCP environment values stay on this machine. Earlier versions synced them to Lines storage, so rotate any API key you set there before this update.",
+        "Your Lines data folder, transcripts and logs are now readable by your user account only."
+      ]
+    },
+    {
       "version": "0.2.44",
       "date": "2026-10-05",
       "items": [
@@ -37,11 +48,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "The bridge now listens on this computer only and refuses other web pages, so a website you visit or someone on your Wi-Fi cannot reach it.",
-    "Agent edits to Claude Code settings and hooks, git hooks and config, MCP configs and shell startup files now always ask first, including through symlinks and shell commands.",
-    "Codex sessions can still read your Lines workflows, steps and connections but can no longer change them; make those changes in Lines.",
-    "MCP environment values stay on this machine. Earlier versions synced them to Lines storage, so rotate any API key you set there before this update.",
-    "Your Lines data folder, transcripts and logs are now readable by your user account only."
-  ]
+  "desktopPending": []
 }
