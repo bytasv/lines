@@ -71,6 +71,14 @@
   ],
   "desktop": [
     {
+      "version": "0.2.47",
+      "date": "2026-10-07",
+      "items": [
+        "HTML files open as a rendered page in the file preview, with a Preview/Raw toggle.",
+        "Haiku 5.5 replaces Haiku 4.5 in the model list; steps and sessions still set to 4.5 keep working on 5.5."
+      ]
+    },
+    {
       "version": "0.2.46",
       "date": "2026-10-07",
       "items": [
@@ -99,8 +107,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "HTML files open as a rendered page in the file preview, with a Preview/Raw toggle.",
-    "Haiku 5.5 replaces Haiku 4.5 in the model list; steps and sessions still set to 4.5 keep working on 5.5."
-  ]
+  "desktopPending": []
 }
