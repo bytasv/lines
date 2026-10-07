@@ -71,19 +71,53 @@ test('a running turn blocks the restart', () => {
   });
 });
 
-test('a session waiting on the user also blocks it', () => {
+test('only a running turn or a live background task blocks it', () => {
   withSend(() => {
-    // waiting-permission and waiting-approval are live turns parked on a human;
-    // restarting would throw away work the user is about to unblock.
-    for (const status of ['running', 'waiting-permission', 'waiting-approval'] as const) {
-      const { mgr } = manager([session(status)]);
-      assert.equal(mgr.requestRestart(), false, `${status} must block a restart`);
+    // A parked waiting-approval step has no live turn and is persisted on the
+    // meta, so it survives the restart; waiting-permission is recovered as an
+    // interrupted turn. Neither is CLI work a restart would silently kill.
+    {
+      const { mgr } = manager([session('running')]);
+      assert.equal(mgr.requestRestart(), false, 'running must block a restart');
     }
-    for (const status of ['idle', 'done', 'error'] as const) {
+    for (const status of ['waiting-permission', 'waiting-approval', 'idle', 'done', 'error'] as const) {
       const { mgr } = manager([session(status)]);
       assert.equal(mgr.requestRestart(), true, `${status} must not block a restart`);
     }
   });
+});
+
+test('an idle session with a live background task blocks it', () => {
+  withSend((calls) => {
+    const idle = {
+      ...session('idle'),
+      backgroundTasks: [{ id: 't1', type: 'bash', description: 'npm run watch' }],
+    } as SessionMeta;
+    const { mgr } = manager([idle]);
+    assert.equal(mgr.busy, true);
+    assert.equal(mgr.requestRestart(), false);
+    assert.deepEqual(calls, []);
+  });
+});
+
+test('current() names the blocking sessions only', () => {
+  const { mgr } = manager([
+    { id: 'a', name: 'Alpha', status: 'running' } as SessionMeta,
+    { id: 'b', name: 'Beta', status: 'waiting-approval' } as SessionMeta,
+    {
+      id: 'c',
+      name: 'Gamma',
+      status: 'idle',
+      backgroundTasks: [{ id: 't', type: 'subagent', description: 'x' }],
+    } as SessionMeta,
+    { id: 'd', name: 'Delta', status: 'idle' } as SessionMeta,
+  ]);
+  const status = mgr.current();
+  assert.equal(status.restartBlocked, true);
+  assert.deepEqual(status.restartBlockers, [
+    { id: 'a', title: 'Alpha' },
+    { id: 'c', title: 'Gamma' },
+  ]);
 });
 
 test('without the desktop shell it is completely inert', () => {
@@ -134,6 +168,25 @@ test('a ready update is re-sent when a session starts or finishes', () => {
   mgr.syncBlocked();
   assert.equal(sent.length, 3);
   assert.equal((sent[2] as { status: { restartBlocked: boolean } }).status.restartBlocked, false);
+});
+
+test('a ready update is re-sent when the blocker set changes but stays blocked', () => {
+  // The banner counts blockers, so one session becoming two must reach the
+  // browser even though `restartBlocked` reads true both times.
+  const sessions: SessionMeta[] = [{ id: 'a', name: 'A', status: 'running' } as SessionMeta];
+  const { mgr, sent } = manager(sessions);
+  process.emit('message', { type: 'updateStatus', status: { state: 'ready', version: '1.2.3' } } as never, undefined);
+  const before = sent.length;
+
+  sessions.push({ id: 'b', name: 'B', status: 'running' } as SessionMeta);
+  mgr.syncBlocked();
+  assert.equal(sent.length, before + 1);
+  const status = (sent.at(-1) as { status: { restartBlocked: boolean; restartBlockers: unknown[] } }).status;
+  assert.equal(status.restartBlocked, true);
+  assert.equal(status.restartBlockers.length, 2);
+
+  mgr.syncBlocked();
+  assert.equal(sent.length, before + 1, 'an unchanged set sends nothing');
 });
 
 test('only a ready update is re-sent on a busy change', () => {

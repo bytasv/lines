@@ -10,7 +10,7 @@
  * into a closed channel throws synchronously and would take the bridge down with
  * a shell that went away first.
  */
-import { isSessionActive, type ServerMessage, type SessionMeta, type UpdateStatus } from '@lines/shared';
+import { blocksRestart, type ServerMessage, type SessionMeta, type UpdateStatus } from '@lines/shared';
 
 /** Messages exchanged with the desktop shell over the Node IPC channel. */
 type ToShell =
@@ -76,11 +76,11 @@ export function resetActivityForTests(): void {
 
 export class UpdateManager {
   private status: UpdateStatus = { state: 'idle' };
-  /** `restartBlocked` as last broadcast, so {@link syncBlocked} sends only on a change. */
-  private sentBlocked: boolean | null = null;
+  /** Blocker ids as last broadcast, joined, so {@link syncBlocked} sends only on a change. */
+  private sentBlockers: string | null = null;
 
   /**
-   * @param listSessions every session, so a restart can be refused while any is active
+   * @param listSessions every session, so a restart can be refused while any blocks it
    * @param broadcast    fan-out to this user's browsers
    */
   constructor(
@@ -96,20 +96,20 @@ export class UpdateManager {
 
   private publish(): void {
     const status = this.current();
-    this.sentBlocked = status.restartBlocked ?? null;
+    this.sentBlockers = blockerKey(status.restartBlockers ?? []);
     this.broadcast({ type: 'updateStatus', status });
   }
 
   /**
-   * Re-send the status when `restartBlocked` would now read differently, so a
-   * browser's Restart button follows sessions starting and finishing rather than
+   * Re-send the status when the blocker set would now read differently, so a
+   * browser's Restart button and blocker count follow sessions starting and finishing rather than
    * whatever was true at the shell's last message, which can be hours old. Only
    * while a restart is on offer: no other state acts on the flag. Called on every
    * session upsert, so an unchanged answer costs one comparison.
    */
   syncBlocked(): void {
     if (this.status.state !== 'ready') return;
-    if (this.busy === this.sentBlocked) return;
+    if (blockerKey(this.blockers()) === this.sentBlockers) return;
     this.publish();
   }
 
@@ -118,18 +118,26 @@ export class UpdateManager {
     return typeof process.send === 'function' && process.env.LINES_DEV_SUPERVISED !== '1';
   }
 
-  /** A turn dies on restart, so an active session blocks it. */
+  /** A running turn or background task dies on restart, so such a session blocks it. */
   get busy(): boolean {
-    return this.listSessions().some((s) => isSessionActive(s.status));
+    return this.listSessions().some(blocksRestart);
   }
 
-  /** Status as the client should see it, with the live busy flag folded in. */
+  /** The sessions currently refusing a restart, for the banner to name. */
+  blockers(): { id: string; title: string }[] {
+    return this.listSessions()
+      .filter(blocksRestart)
+      .map((s) => ({ id: s.id, title: s.name }));
+  }
+
+  /** Status as the client should see it, with the live blockers folded in. */
   current(): UpdateStatus {
-    return { ...this.status, restartBlocked: this.busy };
+    const blockers = this.blockers();
+    return { ...this.status, restartBlocked: blockers.length > 0, restartBlockers: blockers };
   }
 
   /**
-   * Ask the shell to restart. Refused while any session is active — the caller
+   * Ask the shell to restart. Refused while any session blocks it — the caller
    * gets `false` and the UI keeps saying "will apply when idle".
    */
   requestRestart(): boolean {
@@ -137,4 +145,12 @@ export class UpdateManager {
     if (process.connected) process.send?.({ type: 'updateRestartRequest' } satisfies ToShell, () => {});
     return true;
   }
+}
+
+/** Order-insensitive id key, so a re-sort of the session list is not a change. */
+function blockerKey(blockers: { id: string }[]): string {
+  return blockers
+    .map((b) => b.id)
+    .sort()
+    .join('\n');
 }

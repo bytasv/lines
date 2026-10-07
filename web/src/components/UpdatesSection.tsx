@@ -194,8 +194,9 @@ export function UpdatesSection({ onOpenWhatsNew }: { onOpenWhatsNew: () => void 
 
 /**
  * Restart the desktop app on this machine into the staged update. The bridge
- * refuses while a session is running (`restartBlocked`), and re-sends the flag as
- * sessions start and finish, so the button follows it.
+ * refuses while a session has a running turn or background task
+ * (`restartBlocked` / `restartBlockers`), and re-sends both as sessions start and
+ * finish, so the button follows them.
  */
 function RestartButton({ status }: { status: UpdateStatus }) {
   const [asked, setAsked] = useState(false);
@@ -217,11 +218,17 @@ function RestartButton({ status }: { status: UpdateStatus }) {
   );
   if (!blocked) return button;
   return (
-    <Tooltip label="A session is running. Restarting would stop it mid-turn." withArrow>
+    <Tooltip label={blockedLabel(status.restartBlockers?.length)} withArrow>
       {/* A disabled button fires no pointer events, so the tooltip needs a wrapper. */}
       <span>{button}</span>
     </Tooltip>
   );
+}
+
+/** Why Restart is disabled; the count is absent from a bridge older than `restartBlockers`. */
+function blockedLabel(count: number | undefined): string {
+  if (!count) return 'A session is running. Restarting would stop it mid-turn.';
+  return `${count} ${count === 1 ? 'session' : 'sessions'} still working. Restarting would stop ${count === 1 ? 'it' : 'them'}.`;
 }
 
 /** "not found" / "older than x.y.z" for either CLI, or nothing when it is fine. */

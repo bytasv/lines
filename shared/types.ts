@@ -176,8 +176,9 @@ export interface MediaChunkBody {
 
 /**
  * Desktop auto-update, surfaced in the browser because that is where the user is
- * looking — not the tray. `restartBlocked` is the bridge's contribution: a
- * restart kills in-flight turns, so it is refused while any session is active.
+ * looking — not the tray. `restartBlocked` and `restartBlockers` are the bridge's
+ * contribution: a restart kills in-flight CLI work, so it is refused while any
+ * session {@link blocksRestart}.
  */
 export interface UpdateStatus {
   state: 'idle' | 'available' | 'downloading' | 'ready' | 'error';
@@ -186,7 +187,10 @@ export interface UpdateStatus {
   /** 0..100 while downloading. */
   progress?: number;
   message?: string;
+  /** Kept for clients older than `restartBlockers`: true when that list is non-empty. */
   restartBlocked?: boolean;
+  /** The sessions refusing the restart, so the banner can name them and jump there. */
+  restartBlockers?: { id: string; title: string }[];
 }
 
 /** Who the client is actually talking to, sent on `hello`. */
@@ -574,6 +578,15 @@ export interface PushPayload {
  */
 export const isSessionActive = (s: SessionStatus) =>
   isSessionInterruptible(s) || s === 'waiting-approval';
+
+/**
+ * Would restarting the bridge kill CLI work this session is doing: a running turn
+ * or a live background task. Narrower than {@link isSessionActive} on purpose —
+ * `waiting-approval` has no live turn and its park is persisted on the meta, so it
+ * survives the restart; `waiting-permission` is recovered as an interrupted turn.
+ */
+export const blocksRestart = (meta: SessionMeta) =>
+  meta.status === 'running' || !!meta.backgroundTasks?.length;
 
 /**
  * The error text of an SDK `result` message. A success result carries the assistant's
@@ -2636,9 +2649,10 @@ export type ClientMessage =
       draft?: MentionValue;
     }
   | { type: 'interrupt'; sessionId: string }
-  /** Stop every background task the session's CLI process still owns. Separate
-   *  from `interrupt`, which only kills the foreground turn. */
-  | { type: 'stopBackgroundTasks'; sessionId: string }
+  /** Stop one background task (`taskId`) or, without it, every one the session's
+   *  CLI process still owns. Separate from `interrupt`, which only kills the
+   *  foreground turn. */
+  | { type: 'stopBackgroundTasks'; sessionId: string; taskId?: string }
   | { type: 'retryTurn'; sessionId: string }
   | { type: 'continueTurn'; sessionId: string }
   | { type: 'cancelQueued'; sessionId: string; queuedId: string }

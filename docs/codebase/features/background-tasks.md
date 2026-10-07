@@ -58,7 +58,7 @@ while its subagent was still streaming into it. A standalone row survives only f
 - `web/src/components/Transcript.tsx` — the `case 'task'` row (orphan fallback only)
 - `web/src/components/ToolCallCard.tsx` — the `pending`/badge treatment of `tool.background`
 - `web/src/components/TaskCall.tsx` — `TaskHeader` feeding `taskFlags` from `tool.background`
-- `web/src/components/SessionView.tsx` — the background-work strip
+- `web/src/components/SessionView.tsx` — the background-work strip, with a per-task Stop
 - `web/src/components/Composer.tsx` — `bgTasks`, the Stop-button gating and its
   `stopBackgroundTasks` send
 - `web/src/lib/alerts.ts` `maybeAlert` — the early return while tasks are live
@@ -73,8 +73,8 @@ while its subagent was still streaming into it. A standalone row survives only f
 - `SessionManager.setBackgroundTasks(sessionId, list)` (private) — the single writer: replaces
   `LiveState.backgroundTasks` wholesale, and mirrors + `upsert`s onto the meta only when the id
   set actually changed
-- `SessionManager.stopBackgroundTasks(sessionId)` (public) — calls `WorkerClient.stopTask` once
-  per live id; does not clear the set itself
+- `SessionManager.stopBackgroundTasks(sessionId, taskId?)` (public) — calls `WorkerClient.stopTask`
+  for the one id, or once per live id when none is given, then takes the stopped ids out of the set
 - `isBackgroundTaskSignal(msg)` / `BACKGROUND_TASK_SYSTEM_SUBTYPES` (`sessions.ts`) — true for a
   `system` event a background task emits on its own schedule
   (`background_tasks_changed`/`task_notification`/`task_progress`/`task_updated`); excluded from
@@ -127,11 +127,14 @@ owns a task.
 ### Stopping
 
 `stopBackgroundTasks` is a second stop path, separate from `interrupt` (which only aborts the
-foreground turn): `Composer` sends `{ type: 'stopBackgroundTasks', sessionId }` when the session
-isn't `interruptible` but has live tasks; `index.ts` routes it to
-`SessionManager.stopBackgroundTasks`, which calls `WorkerClient.stopTask(sessionId, taskId)` for
-every id currently in the set. That message reaches `worker.ts`'s `case 'stopTask'`, which calls
-the SDK `Query.stopTask(taskId)`. `stopBackgroundTasks` then clears the local set itself,
+foreground turn), with two triggers. `Composer` sends `{ type: 'stopBackgroundTasks', sessionId }`
+when the session isn't `interruptible` but has live tasks; the `SessionView` strip sends the same
+message with a `taskId` from the Stop icon beside each task (hidden for a guest without the
+`interrupt` cap). `index.ts` routes it to `SessionManager.stopBackgroundTasks`, which calls
+`WorkerClient.stopTask(sessionId, taskId)` for the one id, or for every id currently in the set
+when none is given. A `taskId` not in the set is still forwarded (a harmless no-op) and removes
+nothing. That message reaches `worker.ts`'s `case 'stopTask'`, which calls
+the SDK `Query.stopTask(taskId)`. `stopBackgroundTasks` then removes the stopped ids from the local set itself,
 optimistically — this is the user's manual escape hatch: a task the CLI has already forgotten
 makes `stopTask` a no-op, so no level signal ever arrives and without this clear the strip, sidebar
 badge and chime suppression would stay on with nothing the user could do about it. At worst this
@@ -179,7 +182,7 @@ background agent's progress is now visible only in its own card and the strip.
 sends `stopBackgroundTasks` instead of `interrupt` and its tooltip reads "Stop background work".
 Send stays enabled and unblocked either way — the CLI runs a new turn concurrently with a
 background task. `SessionView` renders a strip above the composer whenever
-`session.backgroundTasks?.length` — the live truth, since a page reload rebuilds it from the meta
+`session.backgroundTasks?.length`, one item per task with its own Stop icon — the live truth, since a page reload rebuilds it from the meta
 rather than from transcript rows. `sessionRowMeta` (`format.ts`) adds a "background work" row
 below the `waiting-permission` and interrupted checks (both outrank it — they need the user;
 background work does not) and marks it `actionable: false`, so it never lights up a project tab.

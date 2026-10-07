@@ -219,6 +219,23 @@ test('stopBackgroundTasks stops each live task and clears the set', () => {
   assert.deepEqual(h.s1().backgroundTasks?.map((t) => t.id), ['a']);
 });
 
+test('stopBackgroundTasks with a taskId stops only that task and keeps the rest', () => {
+  const h = harness('done');
+  h.sessions.handleWorkerEvent('s1', changed(task('a'), task('b')));
+  h.sessions.stopBackgroundTasks('s1', 'a');
+  assert.deepEqual(h.stopped, [['s1', 'a']]);
+  assert.deepEqual(h.s1().backgroundTasks?.map((t) => t.id), ['b']);
+});
+
+test('stopBackgroundTasks with an unknown taskId still forwards it and keeps the set', () => {
+  const h = harness('done');
+  h.sessions.handleWorkerEvent('s1', changed(task('a'), task('b')));
+  h.sessions.stopBackgroundTasks('s1', 'zzz');
+  // Harmless to the CLI, and the strip may know an id the bridge has already dropped.
+  assert.deepEqual(h.stopped, [['s1', 'zzz']]);
+  assert.deepEqual(h.s1().backgroundTasks?.map((t) => t.id), ['a', 'b']);
+});
+
 test('a task_notification removes its own id and leaves the others', () => {
   const h = harness('done');
   h.sessions.handleWorkerEvent('s1', changed(task('a'), task('b')));

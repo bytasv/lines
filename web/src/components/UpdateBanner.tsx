@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Box, CloseButton, Text, UnstyledButton } from '@mantine/core';
+import { Box, CloseButton, Menu, Text, UnstyledButton } from '@mantine/core';
 import { useStore } from '../store';
 import { send } from '../ws';
 import { DESKTOP_DOWNLOAD_URL } from '../lib/storage';
@@ -19,7 +19,8 @@ const DISMISSED_KEY = 'lines.updateDismissed';
  * Two shapes. A self-installing shell downloads in the background and reports
  * 'ready': the action restarts the app on that machine into the new version,
  * through the owner-gated `installUpdate`, which the bridge refuses while a
- * session is running. 'available' comes from a shell that cannot install it (one
+ * session has a running turn or background task. Refused, the pill counts those
+ * sessions and jumps to one (a menu when there are several). 'available' comes from a shell that cannot install it (one
  * from before self-install, or a download that failed): the action is the
  * download page.
  *
@@ -101,9 +102,7 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
           ) : blocked ? (
             // Refused, not queued: the bridge will not restart under a running
             // turn, and nothing restarts it later on its own.
-            <Text span size="sm" style={{ marginLeft: 6, opacity: 0.85 }}>
-              {isPhone ? 'Finish sessions first' : 'Restart once no session is running'}
-            </Text>
+            <Blockers blockers={status.restartBlockers} isPhone={isPhone} />
           ) : (
             <UnstyledButton
               onClick={restart}
@@ -143,5 +142,51 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
         }}
       />
     </Box>
+  );
+}
+
+/**
+ * The sessions refusing the restart, as a count that takes you there: straight to
+ * the one, or a menu when there are several. A bridge older than
+ * `restartBlockers` sends none, so this keeps the old static text for it.
+ */
+function Blockers({
+  blockers,
+  isPhone,
+}: {
+  blockers: { id: string; title: string }[] | undefined;
+  isPhone: boolean;
+}) {
+  if (!blockers?.length) {
+    return (
+      <Text span size="sm" style={{ marginLeft: 6, opacity: 0.85 }}>
+        {isPhone ? 'Finish sessions first' : 'Restart once no session is running'}
+      </Text>
+    );
+  }
+  const open = (id: string) => useStore.getState().openSessionFromAlert(id);
+  const n = blockers.length;
+  const label = isPhone ? `${n} running` : `${n} ${n === 1 ? 'session' : 'sessions'} running`;
+  const style = { color: 'inherit', font: 'inherit', textDecoration: 'underline', marginLeft: 6 };
+  if (n === 1) {
+    return (
+      <UnstyledButton onClick={() => open(blockers[0].id)} style={style}>
+        {label}
+      </UnstyledButton>
+    );
+  }
+  return (
+    <Menu position="bottom" withinPortal>
+      <Menu.Target>
+        <UnstyledButton style={style}>{label}</UnstyledButton>
+      </Menu.Target>
+      <Menu.Dropdown>
+        {blockers.map((b) => (
+          <Menu.Item key={b.id} onClick={() => open(b.id)}>
+            {b.title || 'Untitled session'}
+          </Menu.Item>
+        ))}
+      </Menu.Dropdown>
+    </Menu>
   );
 }

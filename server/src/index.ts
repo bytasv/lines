@@ -336,8 +336,9 @@ const registry = new UserRegistry(
 /**
  * Is any session on this machine mid-turn, for any user?
  *
- * The same predicate `UpdateManager.busy` uses, widened past the local user:
- * the shell holds the Mac awake for a turn whoever started it.
+ * Wider than `UpdateManager.busy` (`blocksRestart`): parked and waiting states
+ * count here too, and every user's sessions do — the shell holds the Mac awake
+ * for a turn whoever started it.
  */
 function anyTurnActive(): boolean {
   for (const ctx of registry.all()) {
@@ -1582,7 +1583,7 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       sessions.interrupt(msg.sessionId);
       break;
     case 'stopBackgroundTasks':
-      sessions.stopBackgroundTasks(msg.sessionId);
+      sessions.stopBackgroundTasks(msg.sessionId, msg.taskId);
       break;
     case 'retryTurn':
       // A failed workflow step re-runs through the engine, which knows whether to

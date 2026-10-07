@@ -123,8 +123,9 @@ gated for the scalar reads), and the model picker's `warn` option
   already on the latest version does not hide it — a user who wants the installer, or wants it on a
   second machine, should always be able to get it from here.
 - **"Restart to update"** sends the owner-gated `installUpdate` once the shell reports `'ready'`.
-  It is disabled, with a tooltip, while `restartBlocked` (a session is active); the bridge re-sends
-  a `'ready'` status as sessions start and finish, so the button follows them. The row's version
+  It is disabled, with a tooltip, while `restartBlocked` (a session has a running turn or background task); the tooltip counts
+  `restartBlockers` when present. The bridge re-sends a `'ready'` status as sessions start and
+  finish, so the button follows them. The row's version
   is the one on offer (available, downloading or staged), else the published DMG's.
 - The desktop row itself is hidden when `DESKTOP_DOWNLOAD_ENABLED` is false and no update is
   downloading or staged — a button pointing at nothing is worse than no row (same rule

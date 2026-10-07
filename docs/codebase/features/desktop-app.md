@@ -131,7 +131,7 @@ point a user at.
 - `notifyUpdate(version, kind)` — the once-per-version notification, `'ready'` or `'available'`
 - `offerMoveToApplications()` — the once-only offer to move a packaged app into Applications
 - `openPairingWindow` — the data-URL window showing a pairing code
-- `UpdateManager.requestRestart` / `.busy` / `.current`
+- `UpdateManager.requestRestart` / `.busy` / `.blockers` / `.current`
 - `loadConfig()` / `isLocalMode()` (`desktop/src/config.ts`)
 - `foreignBridgeLock()` — reads `~/.lines-app/bridge.lock`; null unless it names a different,
   still-live pid (absent, corrupt, dead, or naming our own bridge are all "no collision")
@@ -291,9 +291,13 @@ starts) is verified manually.
 ### Updates
 
 Update state flows bridge → shell → bridge: the shell pushes `updateStatus` over `process.send`;
-`UpdateManager` folds in the live `busy` flag and broadcasts it to the browser. A client's
-`installUpdate` calls `UpdateManager.requestRestart()`, which asks the shell over the same channel
-— or refuses outright if any session is active. Every send in both directions is guarded on
+`UpdateManager` folds in the live blockers (`restartBlocked` plus `UpdateStatus.restartBlockers`,
+`{ id, title }` per session) and broadcasts them to the browser. A session blocks a restart per
+`blocksRestart` (`shared/types.ts`): a `running` turn or a live background task. This is narrower
+than the power-save predicate (`isSessionActive`): `waiting-approval` (a parked step, persisted on
+the meta) and `waiting-permission` do not block. A client's `installUpdate` calls
+`UpdateManager.requestRestart()`, which asks the shell over the same channel — or refuses outright
+while any session blocks. Every send in both directions is guarded on
 `connected` with a no-op error callback rather than sent bare: a respawned-after-crash or
 killed-on-quit child leaves a non-null handle whose channel is already closed, and `send` into a
 closed channel throws synchronously — uncaught, that took the whole shell down.
@@ -322,7 +326,10 @@ for `'available'` and `'ready'`), and, for a browser, the blue `UpdateBanner` pi
 [turn-recovery](turn-recovery.md#multi-machine) for its place in the banner-precedence stack). The
 pill reads "Restart to update" for `'ready'` and "Download" for `'available'`; the bridge re-sends
 a `'ready'` status whenever a session starts or finishes (`UpdateManager.syncBlocked`), so its
-`restartBlocked` flag follows the sessions rather than the moment the shell last spoke. `buildHello`'s owner branch carries `update: updates.current()` so a browser opened *after*
+`restartBlocked` flag and blocker list follow the sessions rather than the moment the shell last
+spoke (it re-sends when the blocker set changes, not only the boolean). While blocked, the pill reads
+"N sessions running": one blocker jumps to it, several open a menu of sessions; a bridge without
+`restartBlockers` keeps the static text. `buildHello`'s owner branch carries `update: updates.current()` so a browser opened *after*
 detection still learns about it — the guest branch omits the field, since `installUpdate` is
 owner-gated and a guest has no business updating somebody else's machine.
 

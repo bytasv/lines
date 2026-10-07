@@ -2315,8 +2315,10 @@ export class SessionManager {
   }
 
   /**
-   * Stop every background task this session's CLI process still owns, then clear
-   * the set optimistically — this is the user's manual escape hatch.
+   * Stop one background task (`taskId`) or, without it, every one this session's
+   * CLI process still owns, then take the stopped ids out of the set
+   * optimistically — this is the user's manual escape hatch. An id not in the
+   * live set is still forwarded (a harmless no-op) and removes nothing.
    *
    * A task the CLI has already forgotten makes `stopTask` a no-op, so no level
    * signal ever comes and the strip, sidebar badge, Stop button and chime
@@ -2325,8 +2327,15 @@ export class SessionManager {
    * is the level signal correctly reporting a task that really is still alive.
    * A recoverable flicker beats an unrecoverable wedge.
    */
-  stopBackgroundTasks(sessionId: string) {
-    for (const task of this.live.get(sessionId)?.backgroundTasks ?? []) {
+  stopBackgroundTasks(sessionId: string, taskId?: string) {
+    const tasks = this.live.get(sessionId)?.backgroundTasks ?? [];
+    if (taskId !== undefined) {
+      this.worker.stopTask(sessionId, taskId);
+      const rest = tasks.filter((t) => t.id !== taskId);
+      if (rest.length !== tasks.length) this.setBackgroundTasks(sessionId, rest);
+      return;
+    }
+    for (const task of tasks) {
       this.worker.stopTask(sessionId, task.id);
     }
     this.setBackgroundTasks(sessionId, []);

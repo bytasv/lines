@@ -22,11 +22,17 @@ import {
   IconGitBranch,
   IconLogin,
   IconPlayerPlay,
+  IconPlayerStopFilled,
   IconShare,
   IconPlayerSkipForward,
   IconRefresh,
 } from '@tabler/icons-react';
-import { findWorktree, hasEstimatedSpend, isSessionActive } from '@lines/shared';
+import {
+  findWorktree,
+  hasEstimatedSpend,
+  isSessionActive,
+  type BackgroundTaskInfo,
+} from '@lines/shared';
 import { useStore } from '../store';
 import { formatSpendUsd, skippableFailedStep } from '../lib/format';
 import { useIsPhone } from '../lib/layout';
@@ -43,7 +49,12 @@ import { MachineDot } from './MachineDot';
 import { PresenceStack } from './PresenceStack';
 import { linkedMachineHealth } from '../lib/machineHealth';
 import { PRESET_COPY } from '../lib/shares';
-import { useClaudeLoginNeeded, useSessionMachine, useSessionMachineHealth } from '../lib/can';
+import {
+  useCanOnSession,
+  useClaudeLoginNeeded,
+  useSessionMachine,
+  useSessionMachineHealth,
+} from '../lib/can';
 import { SHARING_ENABLED } from '../lib/shares';
 import { rememberedDeviceId } from '../lib/storage';
 import { useDevices } from '../lib/devices';
@@ -428,16 +439,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
           A background agent can sit running for minutes before its first nested
           message lands, so the description is the only thing to show. */}
       {!!session.backgroundTasks?.length && (
-        <Group px="md" py={6} gap={6} wrap="nowrap" bg="var(--mantine-color-default-hover)">
-          <Loader size={12} />
-          <Text size="xs" c="dimmed" truncate>
-            {session.backgroundTasks.length === 1
-              ? '1 background task'
-              : `${session.backgroundTasks.length} background tasks`}
-            {' · '}
-            {session.backgroundTasks.map((t) => t.description).join(', ')}
-          </Text>
-        </Group>
+        <BackgroundTasksStrip sessionId={sessionId} tasks={session.backgroundTasks} />
       )}
       <QueuedMessages session={session} />
       <OfflineQueuedMessages session={session} />
@@ -457,5 +459,42 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         />
       )}
     </Stack>
+  );
+}
+
+/**
+ * One item per live background task, each with its own Stop — the escape hatch
+ * for a single task (or one the CLI has forgotten) without the Composer's
+ * stop-everything. Wraps rather than truncating the list, so every Stop stays
+ * reachable on a phone. Stop is hidden from a guest without `interrupt`.
+ */
+function BackgroundTasksStrip({ sessionId, tasks }: { sessionId: string; tasks: BackgroundTaskInfo[] }) {
+  const canStop = useCanOnSession(sessionId, 'interrupt');
+  return (
+    <Group px="md" py={6} gap={6} wrap="wrap" bg="var(--mantine-color-default-hover)">
+      <Loader size={12} />
+      <Text size="xs" c="dimmed">
+        {tasks.length === 1 ? '1 background task' : `${tasks.length} background tasks`}
+        {' · '}
+      </Text>
+      {tasks.map((t) => (
+        <Group key={t.id} gap={2} wrap="nowrap" maw="100%" style={{ minWidth: 0 }}>
+          <Text size="xs" c="dimmed" truncate maw={240}>
+            {t.description}
+          </Text>
+          {canStop && (
+            <ActionIcon
+              size="xs"
+              variant="subtle"
+              color="gray"
+              aria-label={`Stop ${t.description}`}
+              onClick={() => send({ type: 'stopBackgroundTasks', sessionId, taskId: t.id })}
+            >
+              <IconPlayerStopFilled size={10} />
+            </ActionIcon>
+          )}
+        </Group>
+      ))}
+    </Group>
   );
 }
