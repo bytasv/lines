@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.12",
+      "date": "2026-10-07",
+      "items": [
+        "Plan usage rings no longer disappear while Claude or ChatGPT is connected. When there is no reading yet, the ring shows empty and its hover card says so."
+      ]
+    },
+    {
       "version": "0.1.11",
       "date": "2026-10-07",
       "items": [

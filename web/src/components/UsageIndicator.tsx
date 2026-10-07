@@ -279,7 +279,9 @@ function SpendSection({
 
 interface PlanUsageChipProps {
   provider: ModelProvider;
-  usage: UsageSnapshot;
+  /** Null while the provider is connected but no reading has arrived (or the last
+   *  one was dropped) — the chip still renders, empty, rather than vanishing. */
+  usage: UsageSnapshot | null;
   /** Dropdown heading, e.g. "Claude plan usage". */
   title: string;
   /** Account line at the foot of the dropdown; absent renders no footer. */
@@ -329,8 +331,10 @@ function PlanUsageChip(props: PlanUsageChipProps) {
   );
 }
 
-/** Primary window (the ring's value) and worst window (its colour) of a snapshot. */
-function ringWindows(usage: UsageSnapshot) {
+/** Primary window (the ring's value) and worst window (its colour) of a snapshot;
+ *  null when there is no snapshot or it carries no windows. */
+function ringWindows(usage: UsageSnapshot | null) {
+  if (!usage || usage.windows.length === 0) return null;
   const worst = usage.windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), usage.windows[0]);
   // Anthropic's session window by name where it exists, else simply the first —
   // OpenAI's primary window is already first (see parseOpenaiUsage).
@@ -344,26 +348,30 @@ function ringWindows(usage: UsageSnapshot) {
  */
 const UsageRing = forwardRef<
   HTMLButtonElement,
-  { provider: ModelProvider; usage: UsageSnapshot; title: string } & ComponentPropsWithoutRef<'button'>
+  { provider: ModelProvider; usage: UsageSnapshot | null; title: string } & ComponentPropsWithoutRef<'button'>
 >(function UsageRing({ provider, usage, title, ...button }, ref) {
-  const { primary, worst } = ringWindows(usage);
+  const ring = ringWindows(usage);
   return (
     <UnstyledButton
       {...button}
       ref={ref}
-      aria-label={title}
+      aria-label={ring ? title : `${title} — no data yet`}
       style={{ display: 'flex', alignItems: 'center' }}
     >
       {/* Relative, so the badge can sit on the ring's corner without widening
           the button — both chips stay the same size either way. */}
       <Box style={{ position: 'relative', display: 'flex' }}>
+        {/* No reading: same ring, empty, labelled with a dash — never `0`, which
+            would read as "0% used". Same size, so nothing jumps when data lands. */}
         <RingProgress
           size={38}
           thickness={4}
-          sections={[{ value: primary.utilization, color: usageColor(worst.utilization) }]}
+          sections={
+            ring ? [{ value: ring.primary.utilization, color: usageColor(ring.worst.utilization) }] : []
+          }
           label={
-            <Text size="8px" ta="center" fw={700}>
-              {Math.round(primary.utilization)}
+            <Text size="8px" ta="center" fw={700} c={ring ? undefined : 'dimmed'}>
+              {ring ? Math.round(ring.primary.utilization) : '–'}
             </Text>
           }
         />
@@ -409,7 +417,15 @@ function PlanUsageDetails({
           {title}
         </Text>
       )}
-      {usage.windows.map((w) => {
+      {/* One generic line, not per-cause copy: the client cannot tell "first fetch
+          pending" from "token rejected". The footer below stays — Disconnect and
+          reconnect is the fix for a stale token. */}
+      {!usage && (
+        <Text size="xs" c="dimmed">
+          Usage not available yet. Lines checks every 5 minutes.
+        </Text>
+      )}
+      {usage?.windows.map((w) => {
         const resets = formatResetIn(w.resetsAt);
         return (
           <div key={w.id}>
@@ -449,9 +465,11 @@ function PlanUsageDetails({
           )}
         </>
       )}
-      <Text size="xs" c="dimmed">
-        {formatAgo(usage.fetchedAt)}
-      </Text>
+      {usage && (
+        <Text size="xs" c="dimmed">
+          {formatAgo(usage.fetchedAt)}
+        </Text>
+      )}
       {accountLabel && (
         <>
           <Divider />
@@ -483,10 +501,10 @@ function rowsFor(spend: Record<string, ModelSpend>, provider: ModelProvider): [s
 /**
  * The plan-usage chips in the header — one per connected provider.
  *
- * Each renders only what its provider actually reports, and neither appears
- * without a reading: a chip with no windows would be a ring that could never
- * fill. That is also why there is no "connect OpenAI" affordance here — Settings
- * → Account owns that, and an empty ring is not an invitation.
+ * Each renders only what its provider actually reports. A chip with no reading
+ * yet (first fetch pending, failed, or a rejected token) shows an empty ring and
+ * says so, rather than vanishing. A logged-out provider still gets no chip: this
+ * is not a "connect OpenAI" affordance — Settings → Account owns that.
  */
 export function UsageIndicator() {
   const usage = useStore((s) => s.usage);
@@ -502,10 +520,13 @@ export function UsageIndicator() {
   const [period, setPeriod] = useState<Period>({ g: 'all', anchor: dayKey(Date.now()) });
   const isPhone = useIsPhone();
 
-  // No login → no chip, independent of usage-message timing (also covers API-key users).
-  const showClaude = Boolean(auth?.loggedIn && usage && usage.windows.length > 0);
-  const showOpenai = Boolean(openaiAuth?.loggedIn && openaiUsage && openaiUsage.windows.length > 0);
+  // Login alone decides the chip, independent of usage-message timing (no login
+  // also covers API-key users). A missing or windowless snapshot renders empty.
+  const showClaude = Boolean(auth?.loggedIn);
+  const showOpenai = Boolean(openaiAuth?.loggedIn);
   if (!showClaude && !showOpenai) return null;
+  const claudeData = usage && usage.windows.length > 0 ? usage : null;
+  const openaiData = openaiUsage && openaiUsage.windows.length > 0 ? openaiUsage : null;
 
   // Rollup over the sessions the store already holds — deleting a session drops
   // its spend, and a session that hasn't had a turn since `costByModel` existed
@@ -524,10 +545,10 @@ export function UsageIndicator() {
 
   const shared = { period, onPeriod: setPeriod, tzNote, models };
   const chips: PlanUsageChipProps[] = [];
-  if (showClaude && usage) {
+  if (showClaude) {
     chips.push({
       provider: 'anthropic',
-      usage,
+      usage: claudeData,
       title: 'Claude plan usage',
       accountLabel: auth?.account?.email ?? 'Connected to Claude',
       signOut: { label: 'Disconnect', message: { type: 'authLogout' } },
@@ -537,10 +558,10 @@ export function UsageIndicator() {
       ...shared,
     });
   }
-  if (showOpenai && openaiUsage) {
+  if (showOpenai) {
     chips.push({
       provider: 'openai',
-      usage: openaiUsage,
+      usage: openaiData,
       title: 'ChatGPT plan usage',
       accountLabel: openaiAuth?.account?.email ?? 'Connected to OpenAI',
       signOut: { label: 'Disconnect', message: { type: 'openaiLogout' } },
@@ -570,7 +591,9 @@ export function UsageIndicator() {
  * HoverCard, since a touchscreen has no hover.
  */
 function GroupedUsageChip({ chips }: { chips: PlanUsageChipProps[] }) {
-  const worstOf = (chip: PlanUsageChipProps) => ringWindows(chip.usage).worst.utilization;
+  // -1 for an empty chip, so any chip with a reading wins the ring; when all are
+  // empty, the ring renders empty.
+  const worstOf = (chip: PlanUsageChipProps) => ringWindows(chip.usage)?.worst.utilization ?? -1;
   const tightest = chips.reduce((a, b) => (worstOf(b) > worstOf(a) ? b : a));
   return (
     <Popover width="min(340px, calc(100vw - 2rem))" position="bottom-end" withArrow shadow="md">
@@ -586,9 +609,15 @@ function GroupedUsageChip({ chips }: { chips: PlanUsageChipProps[] }) {
                   <Text size="xs" fw={700} tt="uppercase" c="dimmed">
                     {chip.title}
                   </Text>
-                  <Text size="xs" fw={600} c={usageColor(worstOf(chip))}>
-                    {Math.round(worstOf(chip))}%
-                  </Text>
+                  {chip.usage ? (
+                    <Text size="xs" fw={600} c={usageColor(worstOf(chip))}>
+                      {Math.round(worstOf(chip))}%
+                    </Text>
+                  ) : (
+                    <Text size="xs" fw={600} c="dimmed">
+                      –
+                    </Text>
+                  )}
                 </Group>
               </Accordion.Control>
               <Accordion.Panel>

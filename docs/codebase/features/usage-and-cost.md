@@ -435,12 +435,18 @@ session-level `hasEstimatedSpend` reading.
   results left is skipped, not zeroed.
 - No login → no usage chip. Enforced both server-side (poller never fetches without a session,
   logout nulls the snapshot) and client-side (`UsageIndicator` gates on `auth.loggedIn`).
+  Logged in with no reading → an empty chip with an explanation, never hidden.
+- The client renders `usage: null` (or a snapshot with zero windows) while logged in as the empty
+  state: an empty ring with a dash, and a hover card saying usage is not available yet, with spend
+  and Disconnect still shown. The wire meaning of `usage: null` is unchanged. On a phone, the
+  grouped ring picks a provider with data over an empty one.
 - `{type: 'usage', usage: null}` means auth is gone (logout or a revoked/expired OAuth session) —
   nothing else. The poller is not the only discoverer of a dead session: a turn rejected for a
   bad token recovers or logs out on the spot (see [turn-recovery](turn-recovery.md)).
 - A stale snapshot survives transient fetch failures (network blips, non-2xx responses);
   staleness is communicated to the user via "Updated Xm ago" in the hover card, never by hiding
-  the chip.
+  the chip. The same holds when there is no snapshot at all (first fetch pending or failed,
+  rejected token): the chip stays, empty.
 - `hello` may arrive with `usage: null` before the poller's first fetch completes (e.g. right
   after a server restart); if the client is still logged in, the previously held snapshot is
   kept rather than cleared, so the chip does not flicker away on reconnect.

@@ -86,8 +86,8 @@ the transport was.
   login and never again — OpenAI rotates the refresh token on every refresh, so a second writer
   would clobber tokens fresher than its own. Logout deletes it.
 - Reading that file is allowed; writing it twice is not. The usage poller reads the access
-  token per request and never caches it. Only codex can refresh it, so a stale token hides the
-  usage chip rather than being refreshed here.
+  token per request and never caches it. Only codex can refresh it, so a stale token empties the
+  usage chip (it shows no data until codex refreshes the token) rather than being refreshed here.
 - A codex turn carries no credential. It carries a `CODEX_HOME`.
 - `CODEX_HOME` is `~/.lines-app/users/<id>/codex/`, which **shadows the user's own
   `~/.codex/config.toml`**: their terminal codex configuration does not apply inside Lines.
