@@ -122,7 +122,8 @@ Delivery is proposed, not built — see
 - `server/src/userRegistry.ts` — `UserRegistry.peek` (never mints a context)
 - `server/src/workspacePaths.ts` — `workspaceRoots`/`resolveWorkspacePath` clamped to a guest's
   granted session cwds; the `~/.claude/plans` auto-approve exception narrowed to owner-only
-- `server/src/fileRoutes.ts` — every route takes `access`; `syncLog` is owner-only; an
+- `server/src/fileRoutes.ts` — every route takes `access` (a guest's `file`/`media` reads stay clamped
+  to their session cwds; only the owner reaches other paths); `syncLog` is owner-only; an
   attachment is served only from a session in the connection's reach
 - `server/src/sessions.ts` — `userPrompt`/`prompt` take an `actor`; `QueuedPrompt.actor`;
   `resolvePermission`/`logResolution` take an actor for `resolvedActor`; `editQueued` (rewrite a

@@ -37,7 +37,7 @@ import { searchFilesAcross } from './fileSearch.ts';
 import { showFile } from './git.ts';
 import { searchSession } from './sessionSearch.ts';
 import type { UserContext } from './userContext.ts';
-import { resolveWorkspacePath } from './workspacePaths.ts';
+import { resolveFilePath, resolveWorkspacePath } from './workspacePaths.ts';
 
 export interface FileRouteResult {
   status: number;
@@ -88,13 +88,22 @@ const MIME: Record<string, string> = {
   '.json': 'application/json',
 };
 
+type PathResolver = typeof resolveWorkspacePath;
+
 /**
  * The single `paths[0]` every route but `find` and `attachment` takes, checked
  * where it really lands (see resolveWorkspacePath): a symlink inside a granted
- * root can't serve a read, a write or a media chunk from outside it.
+ * root can't serve a read, a write or a media chunk from outside it. The
+ * single-file routes pass {@link resolveFilePath}, under which the owner reaches
+ * any path and guests stay clamped; listing and search keep the root check.
  */
-function soleRoot(ctx: UserContext, params: FileRequestParams, access: SocketAccess): string | null {
-  return resolveWorkspacePath(ctx, params.paths?.[0] ?? '', access);
+function soleRoot(
+  ctx: UserContext,
+  params: FileRequestParams,
+  access: SocketAccess,
+  resolve: PathResolver = resolveWorkspacePath,
+): string | null {
+  return resolve(ctx, params.paths?.[0] ?? '', access);
 }
 
 /**
@@ -104,9 +113,14 @@ function soleRoot(ctx: UserContext, params: FileRequestParams, access: SocketAcc
  * redirect the access; this is the path that was checked. Null once it no
  * longer resolves inside the grant.
  */
-function grantedReal(ctx: UserContext, abs: string, access: SocketAccess): string | null {
+function grantedReal(
+  ctx: UserContext,
+  abs: string,
+  access: SocketAccess,
+  resolve: PathResolver = resolveWorkspacePath,
+): string | null {
   const real = realPathOf(abs);
-  return real && resolveWorkspacePath(ctx, real, access) ? real : null;
+  return real && resolve(ctx, real, access) ? real : null;
 }
 
 /** soleRoot as named (`abs`, for anything echoed back) and as touched (`real`, see grantedReal). */
@@ -114,15 +128,19 @@ function soleTarget(
   ctx: UserContext,
   params: FileRequestParams,
   access: SocketAccess,
+  resolve: PathResolver = resolveWorkspacePath,
 ): { abs: string; real: string } | null {
-  const abs = soleRoot(ctx, params, access);
-  const real = abs ? grantedReal(ctx, abs, access) : null;
+  const abs = soleRoot(ctx, params, access, resolve);
+  const real = abs ? grantedReal(ctx, abs, access, resolve) : null;
   return abs && real ? { abs, real } : null;
 }
 
-/** A workspace file, for the clickable-path preview. */
+/**
+ * A file, for the clickable-path preview. The owner may open any path on the
+ * host; a guest only inside their session cwds (see resolveFilePath).
+ */
 function readFile(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
-  const target = soleTarget(ctx, params, access);
+  const target = soleTarget(ctx, params, access, resolveFilePath);
   if (!target) return { status: 403 };
   let stat: fs.Stats;
   try {
@@ -147,6 +165,7 @@ function readFile(ctx: UserContext, params: FileRequestParams, access: SocketAcc
  * Save an edit to an existing text file. Owner-only (also gated in
  * {@link handleFileRequest}): every file kind rides the `readFiles` cap, so this
  * check is what keeps a guest — even at Full — from writing to the host's disk.
+ * The owner may save to any path on the host (see resolveFilePath).
  *
  * `expectedMtimeMs` is the mtime the editor loaded; a file changed since then
  * (the agent edited it) answers 409 with the current mtime rather than being
@@ -156,7 +175,7 @@ function readFile(ctx: UserContext, params: FileRequestParams, access: SocketAcc
 function writeFile(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
   if (access.scope !== 'owner') return { status: 403 };
   // A write through a link lands on its target, so that is the path written.
-  const real = soleTarget(ctx, params, access)?.real;
+  const real = soleTarget(ctx, params, access, resolveFilePath)?.real;
   if (!real) return { status: 403 };
   let stat: fs.Stats;
   try {
@@ -412,7 +431,7 @@ function readAttachment(ctx: UserContext, params: FileRequestParams, access: Soc
  * until `offset` reaches `size`.
  */
 function readMedia(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
-  const target = soleTarget(ctx, params, access);
+  const target = soleTarget(ctx, params, access, resolveFilePath);
   if (!target) return { status: 403 };
   const mediaType = MEDIA_MIME[path.extname(target.abs).toLowerCase()];
   if (!mediaType) return { status: 415 };

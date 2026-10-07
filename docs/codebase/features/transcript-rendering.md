@@ -60,7 +60,8 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 - `web/src/components/MarkdownImage.tsx` — `MarkdownImage` (the never-loaded placeholder chip),
   `MarkdownLinkContent`
 - `web/src/lib/markdownImage.ts` — `markdownImageTarget`, `MarkdownImageTarget`: what a click on
-  the placeholder may open, decided without loading anything
+  the placeholder may open, decided without loading anything; `markdownLinkPath` — a link's
+  file target (with `#L` line fragment), or null for URLs and in-page anchors
 - `web/src/index.css` — `.md-body` compact spacing vars, `.md-body pre code` wrap rules,
   `.md-table-wrap` horizontal-scroll wrapper for GFM tables, `.tx-row`/`.tx-streaming`
   borderless-row and caret styling, `.tx-static` (cursor-only change for a non-expandable row),
@@ -529,6 +530,11 @@ the separate durable `context-compact` event this doc's compaction handling alre
   [docs-reader](docs-reader.md) so it can route links inside its own page instead of the
   source-file preview. Every transcript call site passes nothing, so its rendering is unchanged
   (falls back to `openFilePreview`).
+- A markdown link whose target is a file path (`/abs/x.html`, `~/x.md`, `src/x.ts#L12`) opens the
+  file preview through `markdownLinkPath` instead of navigating: left as an `<a href>` it resolved
+  against the page origin and reloaded the desktop window. `#L12`/`#L12C3` becomes the preview's
+  line/column. The owner may open any path on their machine; a guest still gets 403 outside their
+  session cwds. Not applied when a host passes `onLinkClick` (docs reader).
 - External markdown links (per `isExternalHref`) render with `target="_blank" rel="noreferrer
   noopener"`; relative hrefs and `remark-gfm` footnote anchors (`#user-content-fn-1`) are untouched
   so a blanket target would not open an empty tab per footnote click. In the desktop window an

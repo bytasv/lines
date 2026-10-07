@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { markdownImageTarget } from '../../web/src/lib/markdownImage.ts';
+import { markdownImageTarget, markdownLinkPath } from '../../web/src/lib/markdownImage.ts';
 
 /**
  * The markdown image rule, tested from the server's runner because that is the
@@ -66,5 +66,31 @@ describe('markdownImageTarget', () => {
     assert.deepEqual(markdownImageTarget(undefined, PAGE), { kind: 'none' });
     assert.deepEqual(markdownImageTarget('mailto:a@example.com', PAGE), { kind: 'none' });
     assert.deepEqual(markdownImageTarget('#top', PAGE), { kind: 'none' });
+  });
+});
+
+describe('markdownLinkPath', () => {
+  test('a rooted, home or relative href is a file for the preview', () => {
+    assert.equal(
+      markdownLinkPath('/Users/me/Desktop/lines-composer-preview.html'),
+      '/Users/me/Desktop/lines-composer-preview.html',
+    );
+    assert.equal(markdownLinkPath('~/notes/a.md'), '~/notes/a.md');
+    assert.equal(markdownLinkPath('web/src/App.tsx'), 'web/src/App.tsx');
+    assert.equal(markdownLinkPath('/tmp/my%20file.md'), '/tmp/my file.md');
+  });
+
+  test('a GitHub-style line fragment becomes the preview line, any other is dropped', () => {
+    assert.equal(markdownLinkPath('src/x.ts#L12'), 'src/x.ts:12');
+    assert.equal(markdownLinkPath('src/x.ts#L12C3'), 'src/x.ts:12:3');
+    assert.equal(markdownLinkPath('src/x.ts#L12-L20'), 'src/x.ts:12');
+    assert.equal(markdownLinkPath('/a/b.ts:40'), '/a/b.ts:40');
+    assert.equal(markdownLinkPath('docs/a.md#usage'), 'docs/a.md');
+  });
+
+  test('URLs and in-page anchors are not files', () => {
+    for (const href of ['https://example.com/a.md', '//evil.example/a', 'mailto:x@y.z', '#user-content-fn-1', '', undefined]) {
+      assert.equal(markdownLinkPath(href), null, String(href));
+    }
   });
 });

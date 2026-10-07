@@ -28,7 +28,8 @@ WebSocket multiplexer.
 
 - `server/src/fileRoutes.ts` — every handler, as pure functions
 - `server/src/workspacePaths.ts` — the root containment check (`resolveWorkspacePath`), following
-  symlinks through `isRealInside`
+  symlinks through `isRealInside`; `resolveFilePath`, the single-file routes' resolver (owner
+  reaches any path, everyone else falls through to the root check)
 - `server/src/autoGuard.ts` — `realPathOf`/`isRealInside`, the one symlink-following containment
   implementation the routes share with the auto-mode guard
 - `server/src/contentSearch.ts` — `grep`'s symlink skip (`linkedDirs`, `isLink`)
@@ -50,6 +51,8 @@ WebSocket multiplexer.
 - `useMediaUrl(path)` — pulls `media` chunks sequentially into one blob URL,
   reports progress, stops and revokes on unmount
 - `ClientMessage.fileRequest` / `ServerMessage.fileResponse`
+- `resolveFilePath(ctx, raw, access)` — used only by `file`, `media` and `writeFile`; never by
+  listing or search routes
 - `soleTarget` / `grantedReal` — a granted path as named (`abs`, for anything
   echoed back) and as touched (`real`: its realpath, gated again there); every
   single-path route reads or writes `real`
@@ -68,8 +71,10 @@ store: it is a point-to-point reply, not application state.
 Attachments come back as base64 and become blob URLs client-side, symmetric with
 the upload path, which was already base64.
 
-Every path is checked where it really lands, because a symlink inside a granted
-root can point anywhere on the host. `resolveWorkspacePath` requires the path
+Every path is checked where it really lands. For a guest that means a symlink inside a granted
+root cannot point anywhere on the host; the owner's single-file routes (`file`, `media`,
+`writeFile`) go through `resolveFilePath` and reach any path, but still touch only the real path
+they checked. `resolveWorkspacePath` requires the path
 inside a root both as written and once links are followed (`isRealInside`, the
 auto-mode guard's own helper), and each single-path kind — `file`, `tree`,
 `docs`, `media`, `writeFile`, `sessionDiffFile` — then touches only the resolved
@@ -108,7 +113,7 @@ Two search kinds ride the same route table: `grep` (file contents, see
 ## Dependencies
 
 Reuses `resolveWorkspacePath`/`workspaceRoots` for containment (including the
-owner-only `isPlanPath` exception), `realPathOf`/`isRealInside` from
+owner-only `isPlanPath` exception) and `resolveFilePath` for the owner's single-file reach, `realPathOf`/`isRealInside` from
 `server/src/autoGuard.ts` for following symlinks, and `searchFilesAcross`/
 `collectDocs` unchanged. Requires an open socket — there is no unauthenticated
 fallback.
@@ -124,7 +129,9 @@ fallback.
   only the real path it checked; `grep` skipping a symlink git lists and a tracked
   file under a since-linked directory; a session-scope guest reading its own
   sessions' attachments and no others', not by `..` nor through a planted link
-- `server/src/guestAccess.test.ts` — a Full-share guest still gets 403 on `writeFile`
+- `server/src/guestAccess.test.ts` — a Full-share guest still gets 403 on `writeFile`; session and
+  machine guests get 403 on `file`, `media` and `writeFile` outside their session cwds (`/tmp`, `~`,
+  a host project that is not theirs)
 - `server/src/index.planFile.test.ts` — the plan-directory exception, unchanged
 
 ## Business rules
@@ -143,15 +150,22 @@ fallback.
   is clamped to 1 MB, files over 200 MB are 413, and an offset outside the file
   is 400. Chunks go one at a time so live transcript frames interleave on the
   shared socket and relay instead of waiting behind one large frame.
+- The owner's `file`, `media` and `writeFile` reach any path on the host (`/tmp`, `~/…`, another
+  project), through `resolveFilePath`: it is their own disk over their own authenticated socket,
+  the same reach the agent has. A guest, machine or session scope, stays clamped to their session
+  cwds. `tree`, `docs`, `find`, `grep`, `sessionSearch`, `sessionDiffFile` and `attachment` stay
+  root-scoped for everyone, so the sidebar never walks `/`.
 - `writeFile` is owner-only, enforced in `handleFileRequest` and the handler. The
   socket gate for every file kind is the `readFiles` capability, so without this
   check a guest with View or Full access could write to the host's disk; there is
   no `ShareCaps` flag for it.
-- Every read, write and media request is served from where its path really
+- For a guest, every read, write and media request is served from where its path really
   lands: inside a granted root both as written and once symlinks are followed,
   and then read or written at that resolved real path, gated again there — a
   prefix check alone lets a symlink inside the project point outside it. A link
-  that cannot be followed (a loop, say) is 403 like one that leaves the root.
+  that cannot be followed is 403 like one that leaves the root. The owner's single-file routes skip
+  the root check but still read and write the real path they checked; listing and search stay
+  root-scoped for everyone.
 - `writeFile` writes only existing regular text files (404 otherwise); no
   create, rename or delete. Content over 2 MB is 413, a NUL byte is 415, missing
   content is 400, a stale `expectedMtimeMs` is 409.
@@ -184,6 +198,8 @@ fallback.
   attachment route and `grep`, so the routes follow links exactly the way the
   auto-mode guard does. The route-local `realInsideGrant`, which re-checked only
   `writeFile`, is gone.
+- `resolveFilePath` is for single-file routes only. Pointing `tree`, `find` or `grep` at it would
+  let the sidebar and search walk the whole disk.
 - A route touches the path it checked (`grantedReal`), never the path as named,
   so the window between the containment check and the read or write cannot be
   used to swap a link in.

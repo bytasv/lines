@@ -1302,7 +1302,8 @@
         "buildTranscript",
         "foldAgentTurns",
         "TaskItem",
-        "ToolBlock.background"
+        "ToolBlock.background",
+        "markdownLinkPath"
       ],
       "tests": [
         "server/src/sessions.turns.test.ts",
@@ -2634,6 +2635,7 @@
         "saveFile",
         "FileWriteResponse",
         "resolveWorkspacePath",
+        "resolveFilePath",
         "realPathOf",
         "isRealInside",
         "soleTarget",
@@ -2655,8 +2657,9 @@
         "grep is all-or-nothing across roots like find; sessionSearch clamps every session id through sessionInReach",
         "media serves only browser-renderable extensions (415 otherwise), clamps each request to 1MB, returns 413 over 200MB and 400 for an offset outside the file",
         "media is pulled one chunk at a time so live frames interleave on the shared socket and relay instead of queuing behind one large frame",
+        "the owner's file, media and writeFile reach any path on the host (resolveFilePath: their own disk over their own authenticated socket, the agent's reach); a guest of either scope stays clamped to their session cwds; tree, docs, find, grep, sessionSearch, sessionDiffFile and attachment stay root-scoped for everyone",
         "writeFile is owner-only, enforced in handleFileRequest and the handler: every file kind rides the readFiles cap, so a View or Full guest would otherwise write to the host's disk",
-        "every read, write and media request is served from where its path really lands: inside a granted root both as written and once symlinks are followed, then read or written at that resolved real path (grantedReal), gated again there — a symlink inside the project must not reach outside, and a link that can't be followed is 403",
+        "for a guest, every read, write and media request is served from where its path really lands: inside a granted root both as written and once symlinks are followed, then read or written at that resolved real path (grantedReal), gated again there; a link that can't be followed is 403. The owner's single-file routes skip the root check but still touch only the real path they checked",
         "writeFile writes only existing regular text files, and answers 413 over 2MB, 415 on a NUL byte, 400 without content",
         "an attachment is served only to a connection that reaches its session (sessionInReach): a session-scope guest reads its own sessions' attachments and no others'; the session is read off where the file really is, so a link planted in the attachments directory, or from one session's folder into another's, is refused",
         "grep never searches through a symlink that leaves its root (git lists a symlink by its own path, and its index can name a file under a directory since swapped for a link)",
@@ -2675,7 +2678,8 @@
         "writeFile writes a sibling temp file, chmods it to the original's mode, then renames over the realpath target, so a failure never truncates the file and a symlink stays a symlink",
         "containment is one implementation: realPathOf/isRealInside are exported from server/src/autoGuard.ts and used by resolveWorkspacePath, the attachment route and grep, so the routes follow links exactly the way the auto-mode guard does (the route-local realInsideGrant is gone)",
         "a route touches the resolved real path it checked (grantedReal), never the path as named, which would follow its links a second time after the check and let a link swapped in between redirect the access",
-        "grep pays for a realpath only on candidates that are a symlink or sit below a linked directory (isLink, linkedDirs memoized per directory), since it walks thousands of files"
+        "grep pays for a realpath only on candidates that are a symlink or sit below a linked directory (isLink, linkedDirs memoized per directory), since it walks thousands of files",
+        "resolveFilePath is for single-file routes only; pointing tree, find or grep at it would let the sidebar and search walk the whole disk"
       ],
       "relatedDecisions": [
         "hosted-machine-access",

@@ -51,3 +51,23 @@ export function markdownImageTarget(src: string | undefined, base: string): Mark
     return { kind: 'path', path };
   }
 }
+
+/**
+ * The file a markdown link points at, or null for anything that is not a path
+ * (a URL, an in-page `#anchor`, an empty href).
+ *
+ * Agents link files as `[name](/abs/path.html)` or `[name](src/x.ts#L12)`. Left
+ * as a plain `<a>`, that href resolves against the page — the desktop window
+ * navigated to `https://run.linesapp.cloud/Users/…/file.html` and reloaded the
+ * whole app on the click. These open the file preview instead, with a GitHub
+ * style `#L12` / `#L12C3` fragment carried over as the preview's `:line:col`.
+ */
+export function markdownLinkPath(href: string | undefined): string | null {
+  const value = href?.trim() ?? '';
+  if (!value || value.startsWith('#') || isExternalHref(value)) return null;
+  const target = markdownImageTarget(value, 'about:blank');
+  if (target.kind !== 'path') return null;
+  const at = value.match(/#L(\d+)(?:C(\d+))?(?:-L?\d+)?$/);
+  if (!at) return target.path;
+  return at[2] ? `${target.path}:${at[1]}:${at[2]}` : `${target.path}:${at[1]}`;
+}

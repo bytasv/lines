@@ -43,8 +43,7 @@ export function resolveWorkspacePath(
   raw: string,
   access?: SocketAccess,
 ): string | null {
-  const expanded = raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw;
-  const abs = path.resolve(expanded);
+  const abs = absolutePath(raw);
   const guest = !!access && access.scope !== 'owner';
   const allowed =
     isRealInside(workspaceRoots(ctx, access), abs) ||
@@ -54,6 +53,30 @@ export function resolveWorkspacePath(
     // *people* is a different thing entirely.
     (!guest && isPlanPath(abs, ctx.sessions.list().map((s) => s.cwd)));
   return allowed ? abs : null;
+}
+
+/**
+ * Resolve the one path a single-file route (`file`, `media`, `writeFile`) takes.
+ * The owner reaches any path on the host: it is their own disk, asked for over
+ * their own authenticated socket — the same reach the agent they run already
+ * has. Everyone else stays clamped by {@link resolveWorkspacePath}.
+ *
+ * Single-file routes only. Listing and search (`tree`, `docs`, `find`, `grep`)
+ * stay on resolveWorkspacePath for everyone, so the sidebar never walks `/`.
+ */
+export function resolveFilePath(
+  ctx: UserContext,
+  raw: string,
+  access?: SocketAccess,
+): string | null {
+  if (access?.scope !== 'owner') return resolveWorkspacePath(ctx, raw, access);
+  // No path is no file — not the server's cwd.
+  return raw ? absolutePath(raw) : null;
+}
+
+/** `~` expanded to the home directory, then made absolute. */
+function absolutePath(raw: string): string {
+  return path.resolve(raw.startsWith('~') ? path.join(os.homedir(), raw.slice(1)) : raw);
 }
 
 /** Resolve the single `?path=` query param the file and tree endpoints take. */

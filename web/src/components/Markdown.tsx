@@ -8,6 +8,7 @@ import { isExternalHref } from '@lines/shared';
 import { rehypeFilePaths } from '../lib/rehypeFilePaths';
 import { rehypeColorSwatches } from '../lib/rehypeColorSwatches';
 import { InlineColorSwatch } from './InlineColorSwatch';
+import { markdownLinkPath } from '../lib/markdownImage';
 import { MarkdownImage, MarkdownLinkContent } from './MarkdownImage';
 import { useStore } from '../store';
 
@@ -108,6 +109,23 @@ export const Markdown = memo(function Markdown({
                   onClick={(e) => {
                     e.preventDefault();
                     onLinkClick(href);
+                  }}
+                >
+                  <MarkdownLinkContent>{children}</MarkdownLinkContent>
+                </a>
+              );
+            }
+            // A link to a file opens the preview, like a bare path does. Followed
+            // as an href it would load that path off this origin and reload the app.
+            const linkedFile = onLinkClick ? null : markdownLinkPath(href);
+            if (linkedFile) {
+              return (
+                <a
+                  href="#"
+                  style={{ cursor: 'pointer' }}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    useStore.getState().openFilePreview(linkedFile);
                   }}
                 >
                   <MarkdownLinkContent>{children}</MarkdownLinkContent>

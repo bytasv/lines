@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, mock, test } from 'node:test';
-import type { SessionDiffResponse, SessionMeta } from '@lines/shared';
-import { OWNER_ACCESS } from '@lines/shared';
+import type { SessionDiffResponse, SessionMeta, SocketAccess } from '@lines/shared';
+import { OWNER_ACCESS, capsForPreset } from '@lines/shared';
 import { handleFileRequest, MAX_MEDIA_BYTES, MEDIA_CHUNK_BYTES } from './fileRoutes.ts';
 import type { UserContext } from './userContext.ts';
 
@@ -57,6 +57,22 @@ function ctx(sessions: Partial<UserContext['sessions']> = {}): UserContext {
 const call = (kind: Parameters<typeof handleFileRequest>[1], params = {}) =>
   handleFileRequest(ctx(), kind, params, OWNER_ACCESS);
 
+/** Guests holding a session whose cwd is `root`: the clamp, from inside a root. */
+const guestCtx = () => ctx({ list: () => [{ id: 's-root', cwd: root }] as SessionMeta[] });
+const GUESTS: SocketAccess[] = [
+  { scope: 'session', caps: capsForPreset('full', 'session'), sessionIds: ['s-root'] },
+  { scope: 'machine', caps: capsForPreset('full', 'machine') },
+];
+const guestCalls = (kind: Parameters<typeof handleFileRequest>[1], params = {}) =>
+  Promise.all(GUESTS.map(async (access) => (await handleFileRequest(guestCtx(), kind, params, access)).status));
+
+/** A directory outside every root, for the owner's reach beyond the project. */
+function outsideDir(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-beyond-'));
+  after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
 test('file: reads a file inside a project root', async () => {
   const res = await call('file', { paths: [path.join(root, 'hello.txt')] });
   assert.equal(res.status, 200);
@@ -66,8 +82,15 @@ test('file: reads a file inside a project root', async () => {
   });
 });
 
-test('file: 403 outside every root, 404 when missing', async () => {
-  assert.equal((await call('file', { paths: ['/etc/hosts'] })).status, 403);
+test('file: the owner reads outside every root, a guest gets 403; 404 when missing', async () => {
+  const beyond = outsideDir();
+  const p = path.join(beyond, 'out.csv');
+  fs.writeFileSync(p, 'a,b\n');
+  const res = await call('file', { paths: [p] });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { content: 'a,b\n', mtimeMs: fs.statSync(p).mtimeMs });
+  assert.deepEqual(await guestCalls('file', { paths: [p] }), [403, 403]);
+  assert.equal((await call('file', { paths: [path.join(beyond, 'nope.txt')] })).status, 404);
   assert.equal((await call('file', { paths: [path.join(root, 'nope.txt')] })).status, 404);
   // A directory is not a file.
   assert.equal((await call('file', { paths: [path.join(root, 'sub')] })).status, 404);
@@ -80,6 +103,19 @@ test('file: 415 on binary content', async () => {
 
 test('file: a missing path is 403, not a crash', async () => {
   assert.equal((await call('file', {})).status, 403);
+});
+
+test('file: the owner opens a `~/` path outside every root', async () => {
+  const home = outsideDir();
+  fs.writeFileSync(path.join(home, 'report.md'), '# report');
+  const homedir = mock.method(os, 'homedir', () => home);
+  try {
+    const res = await call('file', { paths: ['~/report.md'] });
+    assert.equal(res.status, 200);
+    assert.equal((res.body as { content: string }).content, '# report');
+  } finally {
+    homedir.mock.restore();
+  }
 });
 
 test('tree: lists entries including dotfiles, hiding node_modules', async () => {
@@ -185,8 +221,13 @@ test('media: chunks are clamped, the last is the remainder, and they rebuild the
   assert.ok(Buffer.concat(parts).equals(CLIP));
 });
 
-test('media: 403 outside every root, 404 when missing or a directory', async () => {
-  assert.equal((await call('media', { paths: ['/etc/hosts.png'] })).status, 403);
+test('media: the owner reads outside every root, a guest gets 403; 404 when missing or a directory', async () => {
+  const beyond = outsideDir();
+  const p = path.join(beyond, 'shot.png');
+  fs.writeFileSync(p, PNG);
+  assert.equal((await call('media', { paths: [p] })).status, 200);
+  assert.deepEqual(await guestCalls('media', { paths: [p] }), [403, 403]);
+  assert.equal((await call('media', { paths: [path.join(beyond, 'nope.png')] })).status, 404);
   assert.equal((await call('media', { paths: [path.join(root, 'nope.png')] })).status, 404);
   fs.mkdirSync(path.join(root, 'dir.png'));
   try {
@@ -359,15 +400,22 @@ test('writeFile: writes inside a root, returns the new mtime, and a later read s
   assert.deepEqual(leftovers(), []);
 });
 
-test('writeFile: 403 outside every root and through a symlink that leaves it', async () => {
+test('writeFile: the owner writes outside every root and through a link that leaves it; a guest gets 403', async () => {
   const target = path.join(outside, 'secret.txt');
   fs.writeFileSync(target, 'untouched');
-  assert.equal((await call('writeFile', { paths: [target], content: 'x' })).status, 403);
-  // The link sits inside the project, so the prefix check alone would pass it.
   const link = path.join(editDir, 'escape.txt');
   fs.symlinkSync(target, link);
-  assert.equal((await call('writeFile', { paths: [link], content: 'x' })).status, 403);
+  assert.deepEqual(await guestCalls('writeFile', { paths: [target], content: 'x' }), [403, 403]);
+  assert.deepEqual(await guestCalls('writeFile', { paths: [link], content: 'x' }), [403, 403]);
   assert.equal(fs.readFileSync(target, 'utf8'), 'untouched');
+
+  assert.equal((await call('writeFile', { paths: [target], content: 'direct' })).status, 200);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'direct');
+  // The write lands on the link's real target, and the link stays a link.
+  assert.equal((await call('writeFile', { paths: [link], content: 'via link' })).status, 200);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'via link');
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.deepEqual(fs.readdirSync(outside).filter((n) => n.includes('.lines-')), []);
 });
 
 test('writeFile: a symlink inside the root is written through and stays a symlink', async () => {
@@ -430,7 +478,9 @@ test('writeFile: a failed write removes its temp file and leaves the original', 
 
 // ---------------------------------------------------------------------------
 // Symlinks inside a granted root: every kind is served from where a path really
-// lands, not from where it appears to be.
+// lands, not from where it appears to be. For a guest that keeps a link from
+// leaving the root; the owner's single-file kinds reach anywhere, but listing
+// and search stay root-scoped for everyone.
 
 const links = path.join(root, 'sub', 'links');
 fs.mkdirSync(links);
@@ -438,29 +488,45 @@ fs.writeFileSync(path.join(outside, 'leak.txt'), 'not yours');
 fs.writeFileSync(path.join(outside, 'leak.png'), PNG);
 fs.writeFileSync(path.join(root, 'sub', 'kept.txt'), 'inside');
 
-test('file and media: a symlink that leaves the root is refused, one that stays is served', async () => {
+test('file and media: a symlink that leaves the root is refused to a guest, served to the owner', async () => {
   const leak = path.join(links, 'leak.txt');
   fs.symlinkSync(path.join(outside, 'leak.txt'), leak);
-  assert.equal((await call('file', { paths: [leak] })).status, 403);
+  assert.deepEqual(await guestCalls('file', { paths: [leak] }), [403, 403]);
+  assert.deepEqual((await call('file', { paths: [leak] })).body, {
+    content: 'not yours',
+    mtimeMs: fs.statSync(path.join(outside, 'leak.txt')).mtimeMs,
+  });
   const leakPng = path.join(links, 'leak.png');
   fs.symlinkSync(path.join(outside, 'leak.png'), leakPng);
-  assert.equal((await call('media', { paths: [leakPng] })).status, 403);
+  assert.deepEqual(await guestCalls('media', { paths: [leakPng] }), [403, 403]);
+  assert.equal((await call('media', { paths: [leakPng] })).status, 200);
   const kept = path.join(links, 'kept.txt');
   fs.symlinkSync(path.join(root, 'sub', 'kept.txt'), kept);
+  assert.deepEqual(await guestCalls('file', { paths: [kept] }), [200, 200]);
   assert.deepEqual((await call('file', { paths: [kept] })).body, {
     content: 'inside',
     mtimeMs: fs.statSync(kept).mtimeMs,
   });
 });
 
-test('a linked directory that leaves the root exposes nothing: no listing, read or write', async () => {
+test('a linked directory that leaves the root: no listing for anyone, no read or write for a guest', async () => {
   const dir = path.join(links, 'outdir');
   fs.symlinkSync(outside, dir);
+  const leak = path.join(dir, 'leak.txt');
   assert.equal((await call('tree', { paths: [dir] })).status, 403);
-  assert.equal((await call('file', { paths: [path.join(dir, 'leak.txt')] })).status, 403);
-  assert.equal((await call('media', { paths: [path.join(dir, 'leak.png')] })).status, 403);
-  assert.equal((await call('writeFile', { paths: [path.join(dir, 'leak.txt')], content: 'x' })).status, 403);
+  assert.deepEqual(await guestCalls('tree', { paths: [dir] }), [403, 403]);
+  assert.deepEqual(await guestCalls('file', { paths: [leak] }), [403, 403]);
+  assert.deepEqual(await guestCalls('media', { paths: [path.join(dir, 'leak.png')] }), [403, 403]);
+  assert.deepEqual(await guestCalls('writeFile', { paths: [leak], content: 'x' }), [403, 403]);
   assert.equal(fs.readFileSync(path.join(outside, 'leak.txt'), 'utf8'), 'not yours');
+
+  // The owner's single-file kinds are served through it.
+  assert.equal((await call('file', { paths: [leak] })).status, 200);
+  assert.equal((await call('media', { paths: [path.join(dir, 'leak.png')] })).status, 200);
+  const scratch = path.join(outside, 'scratch.txt');
+  fs.writeFileSync(scratch, 'before');
+  assert.equal((await call('writeFile', { paths: [path.join(dir, 'scratch.txt')], content: 'owner' })).status, 200);
+  assert.equal(fs.readFileSync(scratch, 'utf8'), 'owner');
 });
 
 test('a read touches only the path it checked, never the link a second time', async () => {

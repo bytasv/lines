@@ -3,7 +3,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
-import type { InlineStep, SessionMeta, SocketAccess, StepDef, WorkflowDef } from '@lines/shared';
+import type {
+  FileRequestKind,
+  FileRequestParams,
+  InlineStep,
+  SessionMeta,
+  SocketAccess,
+  StepDef,
+  WorkflowDef,
+} from '@lines/shared';
 import { OWNER_ACCESS, capsForPreset } from '@lines/shared';
 import { handleFileRequest } from './fileRoutes.ts';
 import {
@@ -139,6 +147,38 @@ describe('guest file scope', () => {
     assert.equal((await write(fullSession)).status, 403);
     assert.equal((await write(fullMachineGuest)).status, 403);
     assert.equal(fs.readFileSync(target, 'utf8'), 'readable');
+  });
+
+  test('the owner’s reach beyond every root does not extend to a guest', async () => {
+    // The owner may open, preview and save any path on the host; a guest's
+    // single-file kinds stay inside their session cwds.
+    const beyond = path.join(tmp, 'beyond');
+    fs.mkdirSync(beyond, { recursive: true });
+    fs.writeFileSync(path.join(beyond, 'out.md'), 'host only');
+    fs.writeFileSync(path.join(beyond, 'shot.png'), 'png');
+    fs.writeFileSync(path.join(private_, 'shot.png'), 'png');
+    const kinds = (dir: string, file: string): [FileRequestKind, FileRequestParams][] => [
+      ['file', { paths: [path.join(dir, file)] }],
+      ['media', { paths: [path.join(dir, 'shot.png')] }],
+      ['writeFile', { paths: [path.join(dir, file)], content: 'guest was here' }],
+    ];
+
+    for (const [kind, params] of kinds(beyond, 'out.md')) {
+      assert.equal((await handleFileRequest(ctx(), kind, params, sessionGuest)).status, 403, `session ${kind}`);
+      assert.equal((await handleFileRequest(ctx(), kind, params, machineGuest)).status, 403, `machine ${kind}`);
+    }
+    // The host's project, but not one of the session guest's sessions.
+    for (const [kind, params] of kinds(private_, 'secret.txt')) {
+      assert.equal((await handleFileRequest(ctx(), kind, params, sessionGuest)).status, 403, `session ${kind}`);
+    }
+    for (const attempt of ['/etc/hosts', path.join(os.homedir(), '.ssh', 'id_rsa'), '~/.ssh/id_rsa']) {
+      assert.equal((await handleFileRequest(ctx(), 'file', { paths: [attempt] }, sessionGuest)).status, 403);
+      assert.equal((await handleFileRequest(ctx(), 'file', { paths: [attempt] }, machineGuest)).status, 403);
+    }
+    assert.equal(fs.readFileSync(path.join(beyond, 'out.md'), 'utf8'), 'host only');
+    assert.equal(fs.readFileSync(path.join(private_, 'secret.txt'), 'utf8'), 'not for the guest');
+
+    assert.equal((await handleFileRequest(ctx(), 'file', { paths: [path.join(beyond, 'out.md')] }, OWNER_ACCESS)).status, 200);
   });
 });
 

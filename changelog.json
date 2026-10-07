@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.9",
+      "date": "2026-10-07",
+      "items": [
+        "Clicking a link to a file in an agent reply now opens the file preview instead of reloading the app."
+      ]
+    },
+    {
       "version": "0.1.8",
       "date": "2026-10-06",
       "items": [
@@ -48,5 +55,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "You can now open, preview and edit any file on your computer from a file link, such as one the agent saved to /tmp or Documents. People you share a session with still only see that session's files."
+  ]
 }
