@@ -4432,7 +4432,7 @@ export class SessionManager {
           'You are a title generator. You receive a task description and ' +
           'reply with a single short title. You never ask questions, never ' +
           'refuse, and never add commentary — you only output the title.',
-        claudeModel: 'claude-haiku-4-5-20251001',
+        claudeModel: 'claude-haiku-5-5',
       });
       if (answer) {
         this.nameRetry.delete(sessionId);
@@ -4493,7 +4493,7 @@ export class SessionManager {
         systemPrompt:
           'You summarize a coding agent\'s completed turn in 1-2 plain sentences. ' +
           'You never ask questions, never refuse, and never add commentary or preamble.',
-        claudeModel: 'claude-haiku-4-5-20251001',
+        claudeModel: 'claude-haiku-5-5',
       });
       const summary = answer?.slice(0, 400);
       if (!summary) return;

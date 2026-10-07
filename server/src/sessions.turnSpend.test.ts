@@ -275,8 +275,8 @@ test('a subagent on another model is priced at its own rates', (t) => {
   h.sessions.handleWorkerEvent('s1', assistant('sub', A, 'toolu_task', 'claude-haiku-4-5-20251001'));
   t.mock.timers.tick(1_000);
 
-  // 1,000 × $1 + 100 × $5, per 1M — Haiku's, not the session's Opus rates.
-  assert.equal(h.turnSpends().at(-1)!.spend?.costUsd, 0.0015);
+  // 1,000 × $0.10 + 100 × $0.50, per 1M — Haiku's, not the session's Opus rates.
+  assert.equal(h.turnSpends().at(-1)!.spend?.costUsd, (1_000 * 0.1 + 100 * 0.5) / 1_000_000);
 });
 
 test('a synthetic message that spent nothing neither counts nor hides the figure', (t) => {

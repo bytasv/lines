@@ -91,6 +91,6 @@ test('contextWindowFor resolves known, legacy and unknown ids', () => {
   assert.equal(contextWindowFor('claude-sonnet-5', DEFAULT_MODELS), 1_000_000);
   assert.equal(contextWindowFor('claude-opus-4-8', DEFAULT_MODELS), 1_000_000);
   assert.equal(contextWindowFor('claude-fable-5', DEFAULT_MODELS), 1_000_000);
-  assert.equal(contextWindowFor('claude-haiku-4-5', DEFAULT_MODELS), 200_000);
+  assert.equal(contextWindowFor('claude-haiku-5-5', DEFAULT_MODELS), 200_000);
   assert.equal(contextWindowFor('some-future-model', DEFAULT_MODELS), undefined);
 });

@@ -238,7 +238,7 @@ test('summary wins over the assistant-usage fallback unless the fallback is newe
 
 test('the SDK window beats the hardcoded model table', () => {
   const summary = { maxTokens: 1_000_000 } as ContextSummary;
-  assert.equal(contextDenominator(summary, 'claude-haiku-4-5', DEFAULT_MODELS), 1_000_000);
-  assert.equal(contextDenominator(undefined, 'claude-haiku-4-5', DEFAULT_MODELS), 200_000);
+  assert.equal(contextDenominator(summary, 'claude-haiku-5-5', DEFAULT_MODELS), 1_000_000);
+  assert.equal(contextDenominator(undefined, 'claude-haiku-5-5', DEFAULT_MODELS), 200_000);
   assert.equal(contextDenominator(undefined, 'some-future-model', DEFAULT_MODELS), undefined);
 });

@@ -131,21 +131,29 @@ test('a Claude call’s input is never reduced by its cache reads', () => {
 });
 
 test('a 5-minute cache write costs 1.25x input and an unsplit one is taken as 1-hour', () => {
-  const split = estimateClaudeCallUsd('claude-haiku-4-5', {
+  const split = estimateClaudeCallUsd('claude-haiku-5-5', {
     cache_creation_input_tokens: 3_000,
     cache_creation: { ephemeral_5m_input_tokens: 1_000, ephemeral_1h_input_tokens: 2_000 },
   });
-  assert.equal(split, (1_000 * 1.25 + 2_000 * 2) / 1_000_000);
+  assert.equal(split, (1_000 * 0.1 * 1.25 + 2_000 * 0.1 * 2) / 1_000_000);
   assert.equal(
-    estimateClaudeCallUsd('claude-haiku-4-5', { cache_creation_input_tokens: 3_000 }),
-    (3_000 * 2) / 1_000_000,
+    estimateClaudeCallUsd('claude-haiku-5-5', { cache_creation_input_tokens: 3_000 }),
+    (3_000 * 0.1 * 2) / 1_000_000,
   );
 });
 
 test('a dated snapshot id is priced as its model, and an unknown one not at all', () => {
   assert.equal(
-    estimateClaudeCallUsd('claude-haiku-4-5-20251001', { input_tokens: 1_000_000 }),
-    estimateClaudeCallUsd('claude-haiku-4-5', { input_tokens: 1_000_000 }),
+    estimateClaudeCallUsd('claude-sonnet-5-5-20260901', { input_tokens: 1_000_000 }),
+    estimateClaudeCallUsd('claude-sonnet-5-5', { input_tokens: 1_000_000 }),
   );
   assert.equal(estimateClaudeCallUsd('claude-unlisted-0', { input_tokens: 1 }), undefined);
+});
+
+test('retired Haiku 4.5, alias or dated, is priced at Haiku 5.5 rates', () => {
+  const usage = { input_tokens: 1_000, output_tokens: 100 };
+  const current = estimateClaudeCallUsd('claude-haiku-5-5', usage);
+  assert.equal(current, (1_000 * 0.1 + 100 * 0.5) / 1_000_000);
+  assert.equal(estimateClaudeCallUsd('claude-haiku-4-5', usage), current);
+  assert.equal(estimateClaudeCallUsd('claude-haiku-4-5-20251001', usage), current);
 });

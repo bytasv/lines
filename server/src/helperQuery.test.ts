@@ -12,7 +12,7 @@ import { DEFAULT_MODELS, providerForModel } from '@lines/shared';
 const request = {
   prompt: 'p',
   systemPrompt: 's',
-  claudeModel: 'claude-haiku-4-5-20251001',
+  claudeModel: 'claude-haiku-5-5',
 };
 
 test('neither provider connected answers null rather than throwing', async () => {

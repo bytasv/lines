@@ -173,7 +173,8 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 - `ModelOption.price` / `ModelPrice` — vendor list price in USD per 1M tokens (`input`,
   `cachedInput`, `output`), a static constant on the model list exactly like `contextWindow`
 - `priceFor(modelId)` — resolves a (possibly retired) model id to its `ModelPrice`, or `undefined`
-  when the model carries none
+  when the model carries none. A price is flat: Haiku 5.5's list price is tiered by call size, and
+  the row carries only the ≤100k-token rates, so estimates for larger Haiku calls run low
 - `estimateSpendUsd(modelId, usage)` — this turn's cost computed from `priceFor`, or `undefined`
   when the model has no price (never `0`, which would read as "this turn was free"). Bills
   `input − cacheRead` at `input`, `cacheRead` at `cachedInput`, `cacheCreation` at `input` (no

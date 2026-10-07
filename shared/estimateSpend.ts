@@ -113,7 +113,7 @@ export interface ClaudeCallUsage {
 }
 
 /** The price of an API model id, which may name a dated snapshot of a listed
- *  model (`claude-haiku-4-5-20251001`). */
+ *  or legacy-mapped model (`claude-haiku-4-5-20251001`). */
 function priceForApiModel(modelId: string) {
   return priceFor(modelId) ?? priceFor(modelId.replace(/-\d{8}$/, ''));
 }

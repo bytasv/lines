@@ -100,6 +100,7 @@
     }
   ],
   "desktopPending": [
-    "HTML files open as a rendered page in the file preview, with a Preview/Raw toggle."
+    "HTML files open as a rendered page in the file preview, with a Preview/Raw toggle.",
+    "Haiku 5.5 replaces Haiku 4.5 in the model list; steps and sessions still set to 4.5 keep working on 5.5."
   ]
 }
