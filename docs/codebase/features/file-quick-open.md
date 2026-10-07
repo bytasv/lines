@@ -29,7 +29,11 @@ in a floating palette.
 - `web/src/components/FilesView.tsx`, `web/src/components/MonacoPreviewModal.tsx`
   — `FileContentView`, the viewer (and editor) a hit opens in; `useMarkdownMode`
   and `MarkdownModeToggle` for the Preview/Raw header toggle
-- `web/src/lib/language.ts` — `isMarkdownPath`
+- `web/src/lib/language.ts` — `isMarkdownPath`, `isHtmlPath`, `hasRenderedPreview`
+- `web/public/html-preview.html`, `web/public/html-preview.js` — the sandboxed shell
+  `HtmlPreview` frames
+- `deploy/docker/web-nginx.conf`, `desktop/src/main.ts` — the shell's response policy
+  (hosted and desktop local mode)
 - `web/src/components/Markdown.tsx` — renders the Preview body
 - `web/src/components/FileTree.tsx`, `web/src/components/Sidebar.tsx` — the
   same toggle and dimming applied to the sidebar's file tree
@@ -42,7 +46,8 @@ in a floating palette.
 - `includeIgnored` — `FileRequestParams`, threaded through
   `searchFiles`/`searchFilesAcross`
 - `TreeEntry.ignored`
-- `isMarkdownPath`, `FileContentView`, `useMarkdownMode`
+- `isMarkdownPath`, `isHtmlPath`, `hasRenderedPreview`, `FileContentView`, `useMarkdownMode`,
+  `HtmlPreview`
 - `FileActionsSlot` — the header spot a host gives the open file's save
   controls
 
@@ -95,6 +100,12 @@ listing) so the toggle never needs a round trip.
 - A `.md`/`.markdown` hit (and a tree open) opens rendered in Preview, with a
   Preview/Raw toggle in the header; other files, and `.mdx`, open in Monaco
   with no toggle. The mode is not persisted: every open starts in its default.
+- A `.html`/`.htm` file opens the same way, rendered in Preview with a Preview/Raw toggle
+  (`.xhtml` and `.html.bak` stay source). The preview runs the page's scripts in an opaque-origin
+  sandbox and can load network assets (CDN scripts, fonts). Relative assets and links
+  (`./style.css`, `other.html`) do not resolve. A `file.html:12` link or Open source opens Raw.
+  Preview shows unsaved edits. If the shell does not answer within ~3s (old desktop build or web
+  image), a hint says to update or use Raw.
 - Relative links in the rendered file resolve against the file's own directory
   and open in the same preview; relative images are not resolved and do not
   load.
@@ -129,6 +140,14 @@ listing) so the toggle never needs a round trip.
   not they show; wrapping it when the first edit lands remounts Monaco, which
   drops focus mid-keystroke and resets the scroll. Monaco is uncontrolled after
   mount, and Discard edits it in place rather than remounting it.
+
+- The HTML is delivered to the preview frame by `postMessage` from the web app, which read it over
+  the existing `file` route; it is never uploaded to a Lines server. The frame is
+  `/html-preview.html`, the only route with a permissive CSP (see
+  [production-deployment](production-deployment.md)). The iframe's `sandbox` never includes
+  `allow-same-origin`, `allow-top-navigation` or `allow-popups-to-escape-sandbox`: with
+  `allow-scripts`, `allow-same-origin` would let the page lift its own sandbox and reach the app.
+  The handshake accepts messages only from the expected window, once.
 
 ## Related decisions
 

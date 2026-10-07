@@ -1038,6 +1038,18 @@ function localModeCsp(): string {
   ].join('; ');
 }
 
+/** The file viewer's HTML preview shell (web/public/html-preview.html) and its script. */
+const HTML_PREVIEW_FILES = new Set(['/html-preview.html', '/html-preview.js']);
+
+/**
+ * The shell's policy, the same as deploy/docker/web-nginx.conf's. Permissive so
+ * an agent-written page can run its scripts and load CDN assets; safe because
+ * `sandbox` gives the document an opaque origin, even opened top-level, so it
+ * cannot reach the app's storage, cookies or DOM. Framable by the app only.
+ */
+const HTML_PREVIEW_CSP =
+  "sandbox allow-scripts allow-popups allow-forms allow-modals; default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; frame-ancestors 'self'";
+
 /** Serve the built web UI, plus the /__bridge discovery endpoint the client expects. */
 function startUiServer(): Promise<number> {
   const dist = path.join(ROOT, 'web', 'dist');
@@ -1077,13 +1089,16 @@ function startUiServer(): Promise<number> {
         res.writeHead(404).end();
         return;
       }
+      // The same headers the hosted page gets from nginx, including the HTML
+      // preview shell's sandboxed policy (see HTML_PREVIEW_CSP).
+      const preview = HTML_PREVIEW_FILES.has(rel);
       res.writeHead(200, {
         'content-type': types[path.extname(file)] ?? 'application/octet-stream',
-        // The same headers the hosted page gets from nginx.
-        'content-security-policy': localModeCsp(),
+        'content-security-policy': preview ? HTML_PREVIEW_CSP : localModeCsp(),
         'x-content-type-options': 'nosniff',
-        'x-frame-options': 'DENY',
+        ...(preview ? {} : { 'x-frame-options': 'DENY' }),
         'referrer-policy': 'strict-origin-when-cross-origin',
+        ...(preview ? { 'cache-control': 'no-cache' } : {}),
       });
       res.end(data);
     });
@@ -1317,8 +1332,11 @@ function isOffApp(currentUrl: string): boolean {
  * elsewhere — is what the "Back to Lines" pill and the tray reload cover.
  *
  * `will-frame-navigate` is likewise not added: it fires for the main frame too
- * and would double-handle everything, and `web/src` has no iframes. If an embed
- * ever lands, the hook is that event filtered on `!details.isMainFrame`.
+ * and would double-handle everything. The one embed, the file viewer's HTML
+ * preview, is left unguarded on purpose: its frame is sandboxed without top
+ * navigation, so it can only navigate itself, and its popups reach
+ * `setWindowOpenHandler` below, which sends non-app URLs to the browser. A guard,
+ * if ever needed, is that event filtered on `!details.isMainFrame`.
  */
 function attachNavigationGuards(w: BrowserWindow, role: WindowRole) {
   const contents = w.webContents;

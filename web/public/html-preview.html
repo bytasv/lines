@@ -1,0 +1,15 @@
+<!doctype html>
+<!--
+  Shell for the file viewer's HTML preview (HtmlPreview in
+  web/src/components/FilesView.tsx). Served with its own CSP, whose `sandbox`
+  directive gives it an opaque origin: the agent-written page it is replaced
+  with can run scripts and load assets, but cannot reach the app's storage,
+  DOM, cookies or connection. The page arrives by postMessage, never from a server.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <script src="/html-preview.js"></script>
+  </head>
+  <body></body>
+</html>

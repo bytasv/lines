@@ -37,9 +37,11 @@ host, and the images ship without `server/`'s Claude Agent SDK dependency.
 - `deploy/docker/compose.yml` — service definitions and Traefik labels
 - `deploy/docker/web-nginx.conf` — the static-file server for `web` and `landing`; Traefik
   cannot serve files, so each ships one. Also the security headers: the enforcing CSP, HSTS,
-  `Permissions-Policy`, `server_tokens off`
+  `Permissions-Policy`, `server_tokens off`; plus the one permissive route, `/html-preview.html`
 - `web/public/splash-guard.js` — the pre-paint splash check, a file rather than an inline script
   so the CSP needs no `'unsafe-inline'` for scripts
+- `web/public/html-preview.html`, `web/public/html-preview.js` — the shell the file viewer renders
+  an agent-written HTML file in; see [file-quick-open](file-quick-open.md)
 - `storage/prisma/migrations/20261006000000_row_level_security/`,
   `20261006010000_mcp_env_names_only/`, `20261006020000_share_grant_ids/` — the migrations this
   release must apply (see Deploy mechanics)
@@ -222,6 +224,15 @@ are tagged with the pushed commit SHA).
   `?worker` import, and without it every editor silently fails to load. `style-src` allows
   `'unsafe-inline'` because Mantine sets inline styles throughout — style injection is not script
   execution.
+- `/html-preview.html` and `/html-preview.js` are the one exception to the policy above: they carry
+  `sandbox allow-scripts allow-popups allow-forms allow-modals; default-src * data: blob:
+  'unsafe-inline' 'unsafe-eval'; frame-ancestors 'self'`, with no `X-Frame-Options` (the app must
+  frame it). Permissive because the page is an agent-written HTML file that runs its own scripts
+  and loads CDN assets; safe because the CSP `sandbox` directive gives the document an opaque
+  origin even when opened top-level, so it cannot read the app origin's storage, cookies, DOM or
+  connection. Every other security header stays. The desktop's local-mode server applies the same
+  policy to the same two files. An image or desktop build without the route serves the SPA
+  fallback, which is refused as a frame, so the viewer shows a hint instead.
 - Neither origin serves an analytics script or a third-party embed. Growth numbers come from the
   nginx access log (`?ref=<channel>` tags on shared links, `/download` 302s) and read-only SQL —
   `deploy/README.md`, Growth metrics. A tracker would be third-party code beside the encryption
@@ -378,7 +389,7 @@ are tagged with the pushed commit SHA).
   is a network-level exclusion, the other an application-level credential
   check, and either alone would leave the route reachable if the other broke.
 - Every nginx `location` that sets an `add_header` of its own (`/assets/`, `/index.html`,
-  `/sw.js`) repeats the whole security set — CSP, `nosniff`, `X-Frame-Options`,
+  `/sw.js`, `/html-preview.html`, `/html-preview.js`) repeats the whole security set — CSP, `nosniff`, `X-Frame-Options`,
   `Referrer-Policy`, HSTS, `Permissions-Policy` — because `add_header` is inherited only by a block
   that declares none, so a lone `Cache-Control` would silently drop them all. A header added at the
   server level goes into each of those blocks too.

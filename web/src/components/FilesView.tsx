@@ -28,7 +28,7 @@ import { BestOnDesktop } from './BestOnDesktop';
 import { useIsGuest } from '../lib/can';
 import { MOD } from '../lib/platform';
 import { saveFile, useFileContent, useMediaUrl } from '../lib/files';
-import { isMarkdownPath, languageFor, mediaKindFor, type MediaKind } from '../lib/language';
+import { hasRenderedPreview, isHtmlPath, languageFor, mediaKindFor, type MediaKind } from '../lib/language';
 import { Markdown } from './Markdown';
 
 function FileTab({ path, project, active }: { path: string; project: string; active: boolean }) {
@@ -155,8 +155,9 @@ function MonacoView({
 export type MarkdownMode = 'preview' | 'raw';
 
 /**
- * Preview/Raw state for the file a header shows, or `null` for a non-markdown
- * file (no toggle). Markdown opens rendered unless the caller asks for source
+ * Preview/Raw state for the file a header shows, or `null` for a file that is
+ * neither markdown nor HTML (no toggle). Markdown or HTML opens rendered unless
+ * the caller asks for source
  * (`forceRaw`) or points at a line — a line only means something in the source.
  * The choice is not persisted: it resets whenever `openKey` changes, so every
  * open starts in its default mode.
@@ -167,7 +168,7 @@ export function useMarkdownMode(
 ): [MarkdownMode, (mode: MarkdownMode) => void] | null {
   const [chosen, setChosen] = useState<{ key: unknown; mode: MarkdownMode } | null>(null);
   if (chosen && chosen.key !== openKey) setChosen(null);
-  if (!path || !isMarkdownPath(path)) return null;
+  if (!path || !hasRenderedPreview(path)) return null;
   const mode = chosen && chosen.key === openKey ? chosen.mode : !line && !forceRaw ? 'preview' : 'raw';
   return [mode, (next) => setChosen({ key: openKey, mode: next })];
 }
@@ -181,7 +182,7 @@ function ModeLabel({ icon: Icon, label }: { icon: typeof IconEye; label: string 
   );
 }
 
-/** The header control for `useMarkdownMode`; renders nothing for non-markdown files. */
+/** The header control for `useMarkdownMode`; renders nothing for files that are neither markdown nor HTML. */
 export function MarkdownModeToggle({ state }: { state: ReturnType<typeof useMarkdownMode> }) {
   if (!state) return null;
   const [mode, setMode] = state;
@@ -237,9 +238,72 @@ function MediaView({ path, kind }: { path: string; kind: MediaKind }) {
   );
 }
 
+/** Sandbox flags for the HTML preview frame. Never add `allow-same-origin`: with
+ * `allow-scripts` it lets the page lift its own sandbox and reach the app. */
+const HTML_PREVIEW_SANDBOX = 'allow-scripts allow-popups allow-forms allow-modals';
+
+/** How long the shell gets to say it is ready before the frame counts as blank. */
+const HTML_PREVIEW_READY_MS = 3000;
+
+/**
+ * An HTML file, rendered with its scripts running. The frame loads the static
+ * `/html-preview.html` shell, whose own CSP puts it in an opaque-origin sandbox
+ * (deploy/docker/web-nginx.conf, desktop/src/main.ts), and the page is handed to
+ * it by postMessage, so it never goes through a server. Only the shell's ready
+ * message from this frame is answered, and only once. Relative assets and links
+ * do not resolve: there is no file URL behind the page.
+ */
+function HtmlPreview({ path, html }: { path: string; html: string }) {
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const [ready, setReady] = useState(false);
+  const [stalled, setStalled] = useState(false);
+
+  useEffect(() => {
+    let sent = false;
+    const onMessage = (event: MessageEvent) => {
+      const frame = frameRef.current?.contentWindow;
+      if (sent || !frame || event.source !== frame) return;
+      if ((event.data as { type?: unknown } | null)?.type !== 'lines-html-preview-ready') return;
+      sent = true;
+      setReady(true);
+      // '*': the shell's origin is opaque, so there is no name to target. The
+      // source check above is what pins the message to this frame.
+      frame.postMessage({ type: 'lines-html-preview', html }, '*');
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [html]);
+
+  // An old desktop build or web image has no shell route: the SPA fallback is
+  // refused as a frame, and nothing ever says it is ready.
+  useEffect(() => {
+    if (ready) return;
+    const timer = setTimeout(() => setStalled(true), HTML_PREVIEW_READY_MS);
+    return () => clearTimeout(timer);
+  }, [ready]);
+
+  return (
+    <Box pos="relative" h="100%">
+      <iframe
+        ref={frameRef}
+        src="/html-preview.html"
+        title={path}
+        sandbox={HTML_PREVIEW_SANDBOX}
+        referrerPolicy="no-referrer"
+        style={MEDIA_FILL}
+      />
+      {stalled && !ready && (
+        <Alert color="yellow" m="xs" pos="absolute" top={0} left={0} right={0}>
+          Preview unavailable — update Lines or use Raw.
+        </Alert>
+      )}
+    </Box>
+  );
+}
+
 /**
  * A workspace file: the browser's own rendering for media (read-only), rendered
- * markdown when `mode` is `'preview'`, Monaco otherwise — editable on your own
+ * markdown or HTML when `mode` is `'preview'`, Monaco otherwise — editable on your own
  * machine. The mode comes from the host's header (`useMarkdownMode`), and the
  * save controls go back into it, through `actionsSlot` (see `FileActionsSlot`).
  */
@@ -388,7 +452,9 @@ function TextContentView({
   }
   const text = draft ?? base;
   const body =
-    mode === 'preview' ? (
+    mode === 'preview' && isHtmlPath(path) ? (
+      <HtmlPreview path={path} html={text} />
+    ) : mode === 'preview' ? (
       <ScrollArea h="100%" type="hover">
         <Box className="docs-body" px="lg" pb="xl">
           <Markdown text={text} onLinkClick={onLink} />

@@ -113,6 +113,16 @@ export function isMarkdownPath(filePath: string): boolean {
   return /\.(md|markdown)$/i.test(filePath);
 }
 
+/** HTML the viewer renders in a sandboxed frame (see `HtmlPreview`). `.xhtml` stays source. */
+export function isHtmlPath(filePath: string): boolean {
+  return /\.html?$/i.test(filePath);
+}
+
+/** Files that open rendered, with a Preview/Raw toggle: markdown or HTML. */
+export function hasRenderedPreview(filePath: string): boolean {
+  return isMarkdownPath(filePath) || isHtmlPath(filePath);
+}
+
 export type MediaKind = 'image' | 'video' | 'audio' | 'pdf';
 
 /** Extensions the viewer renders natively instead of as text — mirrors the bridge's `media` MIME map. */

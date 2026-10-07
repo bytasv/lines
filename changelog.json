@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.13",
+      "date": "2026-10-07",
+      "items": [
+        "HTML files an agent writes now open as a rendered page in the file preview instead of as code, with a Preview/Raw toggle. Scripts and online libraries work; links and images that point to other local files do not."
+      ]
+    },
+    {
       "version": "0.1.12",
       "date": "2026-10-07",
       "items": [
@@ -85,5 +92,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "HTML files open as a rendered page in the file preview, with a Preview/Raw toggle."
+  ]
 }

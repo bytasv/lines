@@ -3000,7 +3000,9 @@
         "storage/src/stepRows.ts",
         "storage/prisma/migrations/20261006000000_row_level_security/migration.sql",
         "storage/prisma/migrations/20261006010000_mcp_env_names_only/migration.sql",
-        "storage/prisma/migrations/20261006020000_share_grant_ids/migration.sql"
+        "storage/prisma/migrations/20261006020000_share_grant_ids/migration.sql",
+        "web/public/html-preview.html",
+        "web/public/html-preview.js"
       ],
       "symbols": [
         "isServedRecipeImage",
@@ -3034,6 +3036,7 @@
         "script-src and frame-src include https://challenges.cloudflare.com (Clerk's sign-up captcha); media-src is 'self' blob:; frame-src also allows blob: for the PDF preview; Clerk telemetry is off since connect-src does not allow its collector",
         "a pk_live Clerk instance loads clerk-js from clerk.<its domain>, which neither Clerk wildcard matches: add that host to script-src and CSP_CONNECT_SRC before switching, or sign-in stops loading",
         "no 'unsafe-inline' for scripts, so index.html's pre-paint splash guard is web/public/splash-guard.js, reading the per-build Clerk key from a data-clerk attribute",
+        "/html-preview.html and /html-preview.js are the one permissive route (sandbox directive, default-src *, unsafe-inline/eval, frame-ancestors 'self', no X-Frame-Options): the file viewer renders agent-written HTML there, safe because the sandbox directive forces an opaque origin; every other header stays and desktop local mode serves the same policy",
         "every response carries HSTS (max-age=31536000; includeSubDomains, no preload), a Permissions-Policy granting only microphone=(self), and no nginx version (server_tokens off); storage disables Express's x-powered-by",
         "every table has row level security enabled with no policies and never FORCEd (20261006000000_row_level_security): Supabase's anon/authenticated roles (which hold no grants on these tables today) see nothing, while storage, connecting as the owning role, is unaffected; a DATABASE_URL naming another role needs BYPASSRLS, and a new table enables RLS in the migration that creates it",
         "PUT /recipes skips (never rewrites, never 400s) any version whose images are not under ${R2_PUBLIC_BASE_URL}/recipes/ (isServedRecipeImage) and reports how many it skipped; /recipes/stats's ETag covers only the rows the caller can see; /steps/resolve answers the caller's own versions and anyone's published ones, leaving out what they may not see exactly as a missing row, with refs type-checked and ownerId taken from the row",
@@ -3050,7 +3053,7 @@
         "the storage image installs openssl explicitly - node:22-slim ships without libssl and Prisma's query engine otherwise falls back to a guessed build and warns at every boot",
         "the four VITE_* build args exist in two places kept in sync by hand: GitHub Actions secrets (CI image build) and lines.env on the VPS (manual build only) — nothing checks the two agree",
         "nginx's envsubst filter is ^(CSP_CONNECT_SRC|CSP_IMG_SRC|DESKTOP_DOWNLOAD_URL)$, and the image defaults DESKTOP_DOWNLOAD_URL to / and CSP_IMG_SRC to empty, because an unsubstituted ${...} is an unknown nginx variable that fails the config at start",
-        "every nginx location that sets its own add_header (/assets/, /index.html, /sw.js) repeats the whole security header set, since add_header is inherited only by a block that declares none; a header added at server level goes into each of those blocks too",
+        "every nginx location that sets its own add_header (/assets/, /index.html, /sw.js, /html-preview.html, /html-preview.js) repeats the whole security header set, since add_header is inherited only by a block that declares none; a header added at server level goes into each of those blocks too",
         "the optional postgres service publishes no port and sits only on the internal lines-db network shared with storage and migrate; their depends_on is required: false so Supabase deployments start without it, and POSTGRES_PASSWORD is not ${...:?} because compose interpolates profiled services too"
       ],
       "relatedDecisions": [
@@ -3725,7 +3728,11 @@
         "web/src/components/FilesView.tsx",
         "web/src/components/MonacoPreviewModal.tsx",
         "web/src/lib/language.ts",
-        "web/src/components/Markdown.tsx"
+        "web/src/components/Markdown.tsx",
+        "web/public/html-preview.html",
+        "web/public/html-preview.js",
+        "deploy/docker/web-nginx.conf",
+        "desktop/src/main.ts"
       ],
       "symbols": [
         "FilePalette",
@@ -3738,16 +3745,21 @@
         "useMarkdownMode",
         "confirmDiscard",
         "dirtyFiles",
-        "FileActionsSlot"
+        "FileActionsSlot",
+        "isHtmlPath",
+        "hasRenderedPreview",
+        "HtmlPreview"
       ],
       "tests": [
         "server/src/fileSearch.test.ts",
-        "server/src/fileRoutes.test.ts"
+        "server/src/fileRoutes.test.ts",
+        "server/src/language.test.ts"
       ],
       "businessRules": [
         "Cmd+P searches only the active project's roots (rootsForCwd), not every open project tab",
         "a hit always opens in the preview overlay, never a files-mode tab, regardless of which sidebar mode is active when the palette opens",
         "a .md/.markdown hit or tree open renders in Preview with a Preview/Raw header toggle; other files and .mdx open in Monaco with no toggle, and the mode is not persisted",
+        "a .html/.htm file opens in Preview with the same toggle (.xhtml stays source); the preview runs scripts in an opaque-origin sandbox and can load network assets, relative assets and links do not resolve, and if the shell does not answer within ~3s a hint says to update or use Raw",
         "relative links in the rendered file resolve against its own directory and open in the same preview; relative images are not resolved",
         "the preview is editable on your own machine (Raw/Monaco only, guests read-only): Cmd/Ctrl+S or Save, no autosave; closing the preview or opening another file asks before discarding, and the tab warns on close or reload while any edit is unsaved",
         "save state shows in the host's header beside its own buttons (dot + 'Unsaved changes', Discard, Save; on a conflict 'Changed on disk', Reload, Overwrite) and a dirty files-mode tab shows a dot; Discard reverts in place so it is one undo away",
@@ -3757,7 +3769,8 @@
       "architecturalRules": [
         "the palette is a global overlay mounted in App.tsx alongside MonacoPreviewModal/LoginModal, not scoped under any route, so the shortcut works from the docs reader too",
         "hideIgnored is a single store field read by both surfaces (palette, sidebar tree) rather than two independent toggles",
-        "save controls are portalled into the host's header via FileActionsSlot, never stacked over the editor: the editor subtree keeps one shape, since wrapping it on the first edit remounts Monaco and drops focus mid-keystroke; Monaco stays uncontrolled after mount and Discard edits it in place"
+        "save controls are portalled into the host's header via FileActionsSlot, never stacked over the editor: the editor subtree keeps one shape, since wrapping it on the first edit remounts Monaco and drops focus mid-keystroke; Monaco stays uncontrolled after mount and Discard edits it in place",
+        "the HTML reaches the preview frame by postMessage from the web app (read via the file route), never uploaded; /html-preview.html is the only route with a permissive CSP, safe because the CSP sandbox directive gives an opaque origin, and the iframe sandbox must never gain allow-same-origin, allow-top-navigation or allow-popups-to-escape-sandbox"
       ],
       "relatedDecisions": [
         "prompt-mentions",
