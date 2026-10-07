@@ -50,6 +50,14 @@
   ],
   "desktop": [
     {
+      "version": "0.2.46",
+      "date": "2026-10-07",
+      "items": [
+        "Restarting to update is no longer blocked by a session that is only waiting for your approval or answer. Only a running turn or a live background task blocks it, and the banner shows which sessions.",
+        "You can now open, preview and edit any file on your computer from a file link, such as one the agent saved to /tmp or Documents. People you share a session with still only see that session's files."
+      ]
+    },
+    {
       "version": "0.2.45",
       "date": "2026-10-07",
       "items": [
@@ -70,8 +78,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Restarting to update is no longer blocked by a session that is only waiting for your approval or answer. Only a running turn or a live background task blocks it, and the banner shows which sessions.",
-    "You can now open, preview and edit any file on your computer from a file link, such as one the agent saved to /tmp or Documents. People you share a session with still only see that session's files."
-  ]
+  "desktopPending": []
 }
