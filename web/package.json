@@ -1,0 +1,45 @@
+{
+  "name": "@lines/web",
+  "version": "0.1.14",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bytasv/lines.git",
+    "directory": "web"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:landing": "vite build --config vite.landing.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@clerk/clerk-react": "^5.61.9",
+    "@hello-pangea/dnd": "^18.0.1",
+    "@lines/shared": "*",
+    "@mantine/core": "^9.4.1",
+    "@mantine/hooks": "^9.4.1",
+    "@monaco-editor/react": "^4.7.0",
+    "@tabler/icons-react": "^3.26.0",
+    "monaco-editor": "^0.56.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.0.0",
+    "react-router-dom": "^7.18.1",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "postcss": "^8.4.49",
+    "postcss-preset-mantine": "^1.17.0",
+    "postcss-simple-vars": "^7.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  }
+}
