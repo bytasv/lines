@@ -1122,6 +1122,7 @@
         "web/src/lib/alerts.ts"
       ],
       "files": [
+        "web/src/components/QueuedMessages.tsx",
         "web/src/store.ts",
         "web/src/ws.ts",
         "web/src/components/Composer.tsx",
@@ -1134,6 +1135,9 @@
         "web/src/lib/alerts.ts"
       ],
       "symbols": [
+        "OfflineQueuedMessages",
+        "removeQueuedPrompt",
+        "queuedPrompts",
         "readDraft",
         "writeDraft",
         "pruneDrafts",

@@ -271,6 +271,19 @@ calling `setStatus(id, 'waiting-permission')` → persisted/broadcast via the ex
 `sessionUpsert` path → `Sidebar` and `alerts.ts` both call `waitingPermissionMeta` to derive the
 label/color or notification body from it.
 
+### Offline prompt queue
+
+`send()` in `ws.ts` puts a `prompt` message into the browser-local `queuedPrompts` store (via
+`enqueuePrompt`) when the link is down or mid-handshake; `flushQueue()` drains and re-sends it
+after `hello`. Held in memory only — lost on reload. `OfflineQueuedMessages` (in
+`QueuedMessages.tsx`, mounted by `SessionView` right after the server queue strip) shows the
+current session's unsent prompts as dashed rows under a `Not sent · N` header with a yellow
+warning ("You're offline" when `connectionStatus` is `offline`, otherwise "Waiting for
+connection"). Each row has an X that calls `removeQueuedPrompt`, discarding the prompt before it
+is sent; there is no edit or send-now. If `flushQueue()` finds a queued prompt whose session no
+longer exists, it sets `actionError` once per flush instead of dropping it silently. The header
+`ConnectionBanner` keeps its count, since it also covers sessions not on screen.
+
 ### Deleting a session
 
 `Sidebar.tsx`'s `SessionRow` no longer removes its own row optimistically. Clicking delete calls

@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.10",
+      "date": "2026-10-07",
+      "items": [
+        "A message you send while disconnected now shows in the session as not sent yet, and goes out automatically when you reconnect. You can discard it before then."
+      ]
+    },
+    {
       "version": "0.1.9",
       "date": "2026-10-07",
       "items": [

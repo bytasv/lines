@@ -707,12 +707,20 @@ function startHeartbeat(link: MachineLink) {
 /** Re-send prompts queued while offline, dropping any whose session vanished. Runs after `hello`. */
 function flushQueue() {
   const queued = useStore.getState().drainQueuedPrompts();
+  let dropped = false;
   for (const p of queued) {
     if (useStore.getState().sessions[p.sessionId]) {
       send({ type: 'prompt', sessionId: p.sessionId, text: p.text, attachments: p.attachments, mentions: p.mentions });
     } else {
       console.warn('dropped queued prompt, session gone', p.sessionId);
+      dropped = true;
     }
+  }
+  // Said once per flush: otherwise the user's message disappears without a trace.
+  if (dropped) {
+    useStore
+      .getState()
+      .setActionError('A message queued while offline was not sent — its session no longer exists.');
   }
 }
 

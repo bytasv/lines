@@ -1070,6 +1070,8 @@ interface UiState {
   enqueuePrompt: (p: QueuedPrompt) => void;
   /** Return and clear the queue atomically; caller re-sends the drained prompts. */
   drainQueuedPrompts: () => QueuedPrompt[];
+  /** Discard one locally queued prompt before it is sent. */
+  removeQueuedPrompt: (id: string) => void;
   selectSession: (id: string | null) => void;
   /**
    * Land on a session from a notification click: its machine, then its project
@@ -1566,6 +1568,8 @@ export const useStore = create<UiState>((set, get) => {
       worktreePending: false,
     }),
   enqueuePrompt: (p) => set((state) => ({ queuedPrompts: [...state.queuedPrompts, p] })),
+  removeQueuedPrompt: (id) =>
+    set((state) => ({ queuedPrompts: state.queuedPrompts.filter((q) => q.id !== id) })),
   drainQueuedPrompts: () => {
     const queued = get().queuedPrompts;
     if (queued.length) set({ queuedPrompts: [] });

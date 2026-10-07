@@ -194,9 +194,6 @@ export function Composer({ session }: { session: SessionMeta }) {
   const smartRoutingMode = useStore((s) => s.smartRouting?.mode ?? 'off');
   const projects = useStore((s) => s.projects);
   const connectionStatus = useStore((s) => s.connectionStatus);
-  const queuedCount = useStore(
-    (s) => s.queuedPrompts.filter((q) => q.sessionId === session.id).length,
-  );
   // A guest's grant decides which of these controls exist. All true on your own
   // machine; the bridge refuses anything that slips through regardless.
   const canPrompt = useCan('prompt');
@@ -747,7 +744,6 @@ export function Composer({ session }: { session: SessionMeta }) {
       {connectionStatus !== 'connected' && (
         <Text size="xs" c="dimmed" px={6} pb={6}>
           Offline — messages are queued and sent on reconnect
-          {queuedCount > 0 ? ` · ${queuedCount} queued` : ''}
         </Text>
       )}
       {!canPrompt && (

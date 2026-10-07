@@ -36,7 +36,7 @@ import { Transcript } from './Transcript';
 import { transcriptHasMore } from '../lib/transcriptPage';
 import { clearTranscriptPageInFlight, requestTranscriptPage } from '../lib/transcriptBackfill';
 import { Composer } from './Composer';
-import { QueuedMessages } from './QueuedMessages';
+import { OfflineQueuedMessages, QueuedMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
 import { ShareModal } from './ShareModal';
 import { MachineDot } from './MachineDot';
@@ -440,6 +440,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         </Group>
       )}
       <QueuedMessages session={session} />
+      <OfflineQueuedMessages session={session} />
       <Composer session={session} />
       {reviewing && (
         <Suspense fallback={null}>

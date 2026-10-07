@@ -10,7 +10,14 @@ import {
   Text,
   Tooltip,
 } from '@mantine/core';
-import { IconBolt, IconPaperclip, IconPencil, IconX } from '@tabler/icons-react';
+import {
+  IconBolt,
+  IconCloudOff,
+  IconPaperclip,
+  IconPencil,
+  IconWifiOff,
+  IconX,
+} from '@tabler/icons-react';
 import type {
   Attachment,
   MentionValue,
@@ -24,6 +31,7 @@ import { buildExpandedPrompt, mentionKindMeta, uniqueMentions } from '../lib/men
 import { useCan } from '../lib/can';
 import { useIdentityResolver } from '../lib/identity';
 import { useStore } from '../store';
+import type { QueuedPrompt as LocalQueuedPrompt } from '../store';
 import { send } from '../ws';
 import { fileToAttachment } from './Composer';
 import { MentionInput } from './MentionInput';
@@ -450,6 +458,82 @@ export function QueuedMessages({ session }: { session: SessionMeta }) {
           </Paper>
         );
       })}
+    </Stack>
+  );
+}
+
+/**
+ * Prompts sent while the bridge link was down, held in this browser until the
+ * next `hello` flushes them. Shown in the session so the message does not look
+ * like it vanished when the composer cleared.
+ */
+export function OfflineQueuedMessages({ session }: { session: SessionMeta }) {
+  // Filtered outside the selector: an inline filter returns a new array every
+  // render and would re-render forever.
+  const allQueued = useStore((s) => s.queuedPrompts);
+  const offline = useStore((s) => s.connectionStatus === 'offline');
+  const removeQueuedPrompt = useStore((s) => s.removeQueuedPrompt);
+  const rows: LocalQueuedPrompt[] = allQueued.filter((q) => q.sessionId === session.id);
+  if (!rows.length) return null;
+  const StatusIcon = offline ? IconWifiOff : IconCloudOff;
+
+  return (
+    <Stack gap={6} maw={920} mx="auto" w="100%" px="md" pb={4}>
+      <Group gap="xs">
+        <Text size="xs" c="dimmed" fw={600}>
+          Not sent · {rows.length}
+        </Text>
+        <Badge
+          size="xs"
+          color="yellow"
+          variant="light"
+          leftSection={<StatusIcon size={10} />}
+          style={{ textTransform: 'none' }}
+        >
+          {offline
+            ? "You're offline — sends when you're back online"
+            : 'Waiting for connection — sends automatically when reconnected'}
+        </Badge>
+      </Group>
+      {rows.map((item) => (
+        <Paper
+          key={item.id}
+          p="xs"
+          radius="md"
+          style={{ border: '1px dashed var(--mantine-color-default-border)' }}
+        >
+          <Group justify="space-between" wrap="nowrap" gap="xs">
+            <Stack gap={4} style={{ minWidth: 0 }}>
+              <Text size="sm" c="dimmed" lineClamp={2}>
+                {item.text}
+              </Text>
+              <MentionBadges mentions={item.mentions} />
+              {!!item.attachments?.length && (
+                <Group gap={4}>
+                  {item.attachments.map((att, i) => (
+                    <Badge key={`${att.name}:${i}`} size="xs" variant="light" color="gray">
+                      {att.name}
+                    </Badge>
+                  ))}
+                </Group>
+              )}
+            </Stack>
+            {/* No edit or send-now: there is nothing to interject into while the
+                link is down, only the choice to not send it at all. */}
+            <Tooltip label="Discard — it will not be sent" withArrow openDelay={300}>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                aria-label="Discard unsent message"
+                onClick={() => removeQueuedPrompt(item.id)}
+              >
+                <IconX size={14} />
+              </ActionIcon>
+            </Tooltip>
+          </Group>
+        </Paper>
+      ))}
     </Stack>
   );
 }
