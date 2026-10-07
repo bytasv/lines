@@ -1014,7 +1014,7 @@ test('spend splits by the models that spent it, subagents and helpers included',
   assert.deepEqual(meta.costByModel, {
     'claude-opus-5-5': { costUsd: 0.4, tokens: 1_100, turns: 1 },
     'claude-sonnet-5-5': { costUsd: 0.1, tokens: 2_200, turns: 1 },
-    'claude-haiku-4-5': { costUsd: 0.005, tokens: 910, turns: 1 },
+    'claude-haiku-5-5': { costUsd: 0.005, tokens: 910, turns: 1 },
   });
   // Tokens are every model's, not just the main thread's `usage`.
   assert.equal(meta.totalTokens, 1_100 + 2_200 + 910);
@@ -1068,7 +1068,7 @@ test('switching model mid-session opens a second row instead of moving the first
   const meta = h.sessions.get('s1')!;
   assert.deepEqual(meta.costByModel, {
     'claude-opus-5-5': { costUsd: 0.5, tokens: 1_000, turns: 1 },
-    'claude-haiku-4-5': { costUsd: 0.25, tokens: 200, turns: 1 },
+    'claude-haiku-5-5': { costUsd: 0.25, tokens: 200, turns: 1 },
   });
 });
 
