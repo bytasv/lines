@@ -106,6 +106,9 @@ listing) so the toggle never needs a round trip.
   (`./style.css`, `other.html`) do not resolve. A `file.html:12` link or Open source opens Raw.
   Preview shows unsaved edits. If the shell does not answer within ~3s (old desktop build or web
   image), a hint says to update or use Raw.
+- The preview shows the file tree beside the file only when the file is inside one of the open
+  projects' roots and is not HTML. A file outside every root, or any `.html`/`.htm` file, fills
+  the whole preview with no tree.
 - Relative links in the rendered file resolve against the file's own directory
   and open in the same preview; relative images are not resolved and do not
   load.

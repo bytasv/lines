@@ -5,6 +5,7 @@ import { useStore } from '../store';
 import { useIsPhone } from '../lib/layout';
 import { BestOnDesktop } from './BestOnDesktop';
 import { FileTree } from './FileTree';
+import { isHtmlPath } from '../lib/language';
 // The editor (and its monacoSetup import) lives in FilesView; this module is
 // only reached through React.lazy, which keeps both out of the entry chunk.
 import { FileActionsSlot, FileContentView, MarkdownModeToggle, useMarkdownMode } from './FilesView';
@@ -14,7 +15,6 @@ export function MonacoPreviewModal() {
   const closeFilePreview = useStore((s) => s.closeFilePreview);
   const openFilePreview = useStore((s) => s.openFilePreview);
   const projects = useStore((s) => s.projects);
-  const activeProject = useStore((s) => s.activeProject);
 
   const path = filePreview?.path;
   const line = filePreview?.line;
@@ -25,10 +25,13 @@ export function MonacoPreviewModal() {
   const [actionsSlot, setActionsSlot] = useState<HTMLDivElement | null>(null);
 
   // Root the tree at the root that contains the previewed file — any root of any
-  // open project, since a project spans several — else the active project.
+  // open project, since a project spans several. A file outside every root, or
+  // an HTML page, gets the full width instead: the tree would show a folder the
+  // file is not in, and a rendered page wants the room.
   const treeRoot =
-    (path && projects.flatMap(projectRoots).find((r) => path === r || path.startsWith(r + '/'))) ??
-    activeProject;
+    path && !isHtmlPath(path)
+      ? projects.flatMap(projectRoots).find((r) => path === r || path.startsWith(r + '/'))
+      : undefined;
 
   if (isPhone) {
     return (

@@ -3760,6 +3760,7 @@
         "a hit always opens in the preview overlay, never a files-mode tab, regardless of which sidebar mode is active when the palette opens",
         "a .md/.markdown hit or tree open renders in Preview with a Preview/Raw header toggle; other files and .mdx open in Monaco with no toggle, and the mode is not persisted",
         "a .html/.htm file opens in Preview with the same toggle (.xhtml stays source); the preview runs scripts in an opaque-origin sandbox and can load network assets, relative assets and links do not resolve, and if the shell does not answer within ~3s a hint says to update or use Raw",
+        "the preview shows the file tree only for a file inside an open project's root that is not HTML; a file outside every root, or any .html/.htm file, fills the whole preview",
         "relative links in the rendered file resolve against its own directory and open in the same preview; relative images are not resolved",
         "the preview is editable on your own machine (Raw/Monaco only, guests read-only): Cmd/Ctrl+S or Save, no autosave; closing the preview or opening another file asks before discarding, and the tab warns on close or reload while any edit is unsaved",
         "save state shows in the host's header beside its own buttons (dot + 'Unsaved changes', Discard, Save; on a conflict 'Changed on disk', Reload, Overwrite) and a dirty files-mode tab shows a dot; Discard reverts in place so it is one undo away",

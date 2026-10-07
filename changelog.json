@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.14",
+      "date": "2026-10-07",
+      "items": [
+        "HTML pages and files from outside your projects now open in a full-size preview, without the file tree beside them."
+      ]
+    },
+    {
       "version": "0.1.13",
       "date": "2026-10-07",
       "items": [
