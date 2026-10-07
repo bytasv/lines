@@ -36,8 +36,8 @@ import {
 import {
   AnywhereArt,
   AutomateArt,
-  ControlArt,
   ParallelSessionsArt,
+  PlanArt,
   ReviewArt,
 } from './landing/FeatureArt';
 import { DesktopAppArt, HostedArt, LocalDevArt } from './landing/RunModeArt';
@@ -82,8 +82,9 @@ type FeatureGroup = {
 };
 
 // Each group summarises a set of shipped features (docs/codebase/features),
-// ordered by what a visitor gets nowhere else: the phone remote leads and takes
-// the first wide tile, because it is the hook every post and video opens on.
+// ordered by what a visitor gets nowhere else: the phone remote leads and plan
+// review follows, so the two take the wide tiles; the phone remote is the hook
+// every post and video opens on.
 // Keep the caveats: model switching hands over a summary, not the full context;
 // the phone app is a web app, not a native one; one machine is active at a time.
 const GROUPS: FeatureGroup[] = [
@@ -98,6 +99,20 @@ const GROUPS: FeatureGroup[] = [
       'Reply by voice, with whisper running on your own machine',
       'Invite others into a live session to view, prompt or collaborate',
       'Switch between paired machines, one at a time',
+      'Claude memory syncs across machines, and you approve incoming changes',
+    ],
+  },
+  {
+    art: PlanArt,
+    eyebrow: 'Plan & control',
+    title: 'Shape the plan before it runs',
+    blurb:
+      'Plans open full screen in focus mode. Select any passage and comment on it, typed or dictated, then hand every comment back at once.',
+    items: [
+      'Approve with comments, or Refine with comments to keep planning',
+      'Or simply reply, and the agent keeps planning',
+      'Tool calls pause for Allow or Deny, with a synced allowlist for the safe stuff',
+      'Model, reasoning effort, cost and a context ring on every session',
     ],
   },
   {
@@ -134,18 +149,6 @@ const GROUPS: FeatureGroup[] = [
       'MCP connections with OAuth in Settings → Connections',
       'Ask the agent to edit your workflows, with approval for every edit',
       '@ mentions, an in-app docs reader and Cmd/Ctrl+P',
-    ],
-  },
-  {
-    art: ControlArt,
-    eyebrow: 'Control',
-    title: 'You decide what runs',
-    blurb: 'Tool calls pause for Allow or Deny, and plans wait for your review.',
-    items: [
-      'A synced allowlist for the safe stuff',
-      'Model picker and reasoning effort per session',
-      'Cost, usage and a context ring with compaction',
-      'Claude memory syncs across machines, and you approve incoming changes',
     ],
   },
 ];

@@ -3,6 +3,8 @@ import {
   IconFileCode,
   IconGitBranch,
   IconListCheck,
+  IconMaximize,
+  IconMessage,
   IconMicrophone,
   IconPlug,
 } from '@tabler/icons-react';
@@ -27,6 +29,55 @@ import {
   warn,
 } from './art';
 import classes from './art.module.css';
+
+/** Plan: a plan open in focus mode with one passage selected and commented,
+ *  the card's actions turned into their "with comments" pair, and the mic for
+ *  dictating the next note. */
+export function PlanArt() {
+  return (
+    <Art>
+      <Shadow id="pa-shadow" />
+      <Window x={14} y={10} width={176} height={130} title="plan · focus">
+        <Glyph icon={IconMaximize} x={174} y={12} size={10} color={dim} weight={1.2} />
+      </Window>
+      <text x="24" y="40" fill={text} fontSize="9" fontWeight="600">
+        Plan
+      </text>
+      <Bars x={24} y={48} widths={[140, 118]} gap={8} />
+      {/* The selected, commented passage. */}
+      <rect x="21" y="62" width="154" height="10" rx="2" fill={warn} opacity="0.18" />
+      <rect x="24" y="65.5" width="130" height="3" rx="1.5" fill={text} opacity="0.55" />
+      <Bars x={24} y={80} widths={[132, 96]} gap={8} />
+      <rect x="24" y="106" width="64" height="17" rx="4" fill="none" stroke={border} strokeWidth="1.2" />
+      <text x="56" y="117.5" textAnchor="middle" fill={text} fontSize="7.5">
+        Refine (1)
+      </text>
+      <rect x="94" y="106" width="84" height="17" rx="4" fill={text} />
+      <text x="136" y="117.5" textAnchor="middle" fill={surface} fontSize="7.5" fontWeight="600">
+        Approve (1)
+      </text>
+
+      {/* The comment, tied to its passage. */}
+      <line x1="175" y1="67" x2="198" y2="62" stroke={warn} strokeWidth="1.2" strokeDasharray="2 2" />
+      <rect
+        x="198" y="44" width="72" height="40" rx="7"
+        fill={raised} stroke={warn} strokeWidth="1.2" filter="url(#pa-shadow)"
+      />
+      <Glyph icon={IconMessage} x={205} y={50} size={9} color={dim} weight={1.1} />
+      <text x="217" y="57.5" fill={dim} fontSize="7.5">
+        comment
+      </text>
+      <text x="205" y="74" fill={text} fontSize="8">
+        retry on 429?
+      </text>
+      <circle cx="234" cy="110" r="9" fill={text} />
+      <Glyph icon={IconMicrophone} x={230} y={106} size={8} color={surface} weight={1.1} />
+      <text x="234" y="131" textAnchor="middle" fill={dim} fontSize="7.5">
+        dictate
+      </text>
+    </Art>
+  );
+}
 
 /** Run agents: a Claude Code session still streaming, with a background
  *  command it can stop and a "Send now" into the live turn, beside a Codex

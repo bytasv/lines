@@ -93,8 +93,8 @@ None; the page is presentational.
   paired machine, and point Windows and Linux users at running from source.
 - The phone remote leads: it is the hook every post and the demo video open on, so the hero
   subtitle names the push to your phone, and the "From anywhere" group is the first feature group,
-  in the first wide tile. The groups after it follow the growth plan's value ranking: Run agents,
-  Review, Automate, Control. The recipe library stays out of the hero until it has public content.
+  in the first wide tile. Plan & control takes the second wide tile: focus mode, inline plan
+  comments (typed or dictated), Approve or Refine with comments. Then Run agents, Review, Automate. The recipe library stays out of the hero until it has public content.
 - Download first: the hero leads with the Mac download, then Get started; Sign in lives in the
   header. With no build published the hero falls back to Get started and Sign in, and the account
   panel spans the closing row alone.
