@@ -3019,6 +3019,13 @@ export interface UsageWindow {
    * length, so the label is derived server-side and carried here.
    */
   label?: string;
+  /**
+   * The provider reports this window but it does not block: the bridge once saw
+   * it at or past 100% while usage was still allowed (OpenAI's 5-hour window on
+   * plans that only enforce the weekly one, or work carried on by credits). The
+   * ring skips it, so the window that can actually stop work drives the chip.
+   */
+  soft?: boolean;
 }
 
 /**
@@ -3039,6 +3046,8 @@ export interface UsageCredits {
   balance?: number;
   approxLocalMessages?: number;
   approxCloudMessages?: number;
+  /** OpenAI: the credits are used up too (`overage_limit_reached`). */
+  exhausted?: boolean;
   disabledReason?: string;
 }
 
@@ -3055,8 +3064,11 @@ export interface UsageSnapshot {
   credits?: UsageCredits;
   /** Provider says the plan limit is hit right now (OpenAI `limit_reached`/`allowed:false`). */
   limitReached?: boolean;
-  /** OpenAI rate-limit reset credits the user can spend; absent/0 = none. */
+  /** OpenAI rate-limit reset credits the user holds; absent/0 = none. */
   resetCreditsAvailable?: number;
+  /** How many of those can be spent right now — 0 while no limit needs resetting.
+   *  Absent from a backend that does not report it. */
+  resetCreditsApplicable?: number;
 }
 
 /** What redeeming an OpenAI rate-limit reset credit did. The first four are codex's

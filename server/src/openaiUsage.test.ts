@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { CodexCliStatus, ServerMessage } from '@lines/shared';
 import {
   OpenaiUsagePoller,
+  nextSoftPrimary,
   openaiPlanLabel,
   parseOpenaiUsage,
   type OpenaiUsageDeps,
@@ -165,6 +166,11 @@ test('limitReached follows either limit_reached or allowed:false', () => {
 
 test('reset credits are counted only when positive', () => {
   assert.equal(parseOpenaiUsage(body()).resetCreditsAvailable, 2);
+  assert.equal(parseOpenaiUsage(body()).resetCreditsApplicable, undefined);
+  const held = parseOpenaiUsage(body({ rate_limit_reset_credits: { available_count: 3, applicable_available_count: 0 } }));
+  assert.equal(held.resetCreditsAvailable, 3);
+  // Held but not spendable while no limit needs resetting.
+  assert.equal(held.resetCreditsApplicable, 0);
   for (const rate_limit_reset_credits of [undefined, null, {}, { available_count: 0 }, { available_count: 'x' }]) {
     assert.equal(parseOpenaiUsage(body({ rate_limit_reset_credits })).resetCreditsAvailable, undefined);
   }
@@ -295,4 +301,77 @@ test('a hung app-server times out, is closed, and releases the lock', async () =
   assert.equal(calls.closed, 2);
   // Not stuck "in progress" afterwards.
   assert.doesNotMatch((await poller.consumeResetCredit()).message ?? '', /already in progress/);
+});
+
+test('credits with no balance and overage_limit_reached parse as exhausted, not as a number', () => {
+  const credits = parseOpenaiUsage(
+    body({ credits: { has_credits: true, unlimited: false, overage_limit_reached: true, balance: null } }),
+  ).credits;
+  assert.deepEqual(credits, { enabled: true, exhausted: true });
+});
+
+test('nextSoftPrimary learns the 5-hour window is soft only from what happens at 100%', () => {
+  const snap = (primary: number, secondary: number, limitReached?: boolean) => ({
+    fetchedAt: 0,
+    windows: [
+      { id: 'openai_primary', utilization: primary, resetsAt: null },
+      { id: 'openai_secondary', utilization: secondary, resetsAt: null },
+    ],
+    ...(limitReached ? { limitReached } : {}),
+  });
+  // Below 100% says nothing either way.
+  assert.equal(nextSoftPrimary(false, snap(80, 10)), false);
+  assert.equal(nextSoftPrimary(true, snap(80, 10)), true);
+  // Full and still allowed: it does not block.
+  assert.equal(nextSoftPrimary(false, snap(100, 10)), true);
+  // Full and blocked while the weekly one has room: the 5-hour window kicked in.
+  assert.equal(nextSoftPrimary(true, snap(100, 10, true)), false);
+  // Both full and blocked: cannot tell which one did it, so keep the verdict.
+  assert.equal(nextSoftPrimary(true, snap(100, 100, true)), true);
+  assert.equal(nextSoftPrimary(false, snap(100, 100, true)), false);
+});
+
+test('the poller remembers a soft 5-hour window in the account file and marks it on the snapshot', async (t) => {
+  let account: Record<string, unknown> | null = { version: 1, plan: 'team', connectedAt: 1 };
+  const store = {
+    readCodexAuthRaw: () => ({ tokens: { access_token: 'tok' } }),
+    loadOpenaiAccount: () => account,
+    saveOpenaiAccount: (a: Record<string, unknown>) => {
+      account = a;
+    },
+  } as unknown as Store;
+  let primaryUsed = 100;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify(
+        body({
+          additional_rate_limits: null,
+          rate_limit: {
+            allowed: true,
+            limit_reached: false,
+            primary_window: { used_percent: primaryUsed, limit_window_seconds: 18000, reset_at: 0 },
+            secondary_window: { used_percent: 40, limit_window_seconds: 604800, reset_at: 0 },
+          },
+        }),
+      ),
+      { status: 200 },
+    )) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  const poller = new OpenaiUsagePoller(() => {}, store) as unknown as {
+    fetch(): Promise<void>;
+    readonly snapshot: import('@lines/shared').UsageSnapshot | null;
+  };
+
+  await poller.fetch();
+  assert.equal(account?.softPrimaryWindow, true);
+  assert.equal(poller.snapshot?.windows[0].soft, true);
+
+  // Remembered after the window resets.
+  primaryUsed = 3;
+  await poller.fetch();
+  assert.equal(poller.snapshot?.windows[0].soft, true);
+  assert.equal(poller.snapshot?.windows[1].soft, undefined);
 });

@@ -451,6 +451,14 @@ session-level `hasEstimatedSpend` reading.
 - The plan badge and every extra field on `UsageSnapshot` are optional: absent means the provider
   did not say, and an older client or bridge simply shows windows only. A profile failure never
   fails the usage poll.
+- OpenAI's 5-hour window is enforced on some plans and not others (Pro, Premium Business seats, or
+  work carried on by workspace credits), and the payload does not say which. The bridge learns it:
+  seen at or past 100% while usage is still allowed, the window is marked `soft` and remembered in
+  the OpenAI account file until the next login; seen at 100% while blocked with the weekly window
+  not full, it is enforced again. A soft window is shown dimmed with a note and never drives the
+  ring, so the weekly limit does.
+- The reset button appears only when a reset is spendable now (`applicable_available_count`);
+  resets held while no limit needs one are shown as saved.
 - OpenAI's live `plan_type` wins over the plan stored at login. Window labels are derived from the
   window length ("5-hour limit", "Weekly limit"); per-model caps are named after their `limit_name`.
 - Spending a reset credit is owner-only, needs an explicit in-card confirmation, uses one

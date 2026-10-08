@@ -263,6 +263,9 @@ export interface StoredOpenaiAccount {
   plan?: string;
   accountId?: string;
   connectedAt: number;
+  /** The 5-hour window was seen past 100% without blocking, so it is shown as
+   *  informational — see `nextSoftPrimary` in openaiUsage.ts. Reset by a new login. */
+  softPrimaryWindow?: boolean;
 }
 
 /** A plain token: letters, digits, `_` and `-`, starting with a letter or digit. */

@@ -138,6 +138,7 @@ function parseCredits(raw: unknown): UsageCredits | undefined {
   if (local !== undefined) credits.approxLocalMessages = local;
   const cloud = finiteNumber(c.approx_cloud_messages);
   if (cloud !== undefined) credits.approxCloudMessages = cloud;
+  if (c.overage_limit_reached === true) credits.exhausted = true;
   return credits;
 }
 
@@ -188,10 +189,40 @@ export function parseOpenaiUsage(body: unknown): UsageSnapshot {
   const credits = parseCredits(payload.credits);
   if (credits) snapshot.credits = credits;
   if (limit?.limit_reached === true || limit?.allowed === false) snapshot.limitReached = true;
-  const resets = payload.rate_limit_reset_credits as { available_count?: unknown } | null | undefined;
+  const resets = payload.rate_limit_reset_credits as
+    | { available_count?: unknown; applicable_available_count?: unknown }
+    | null
+    | undefined;
   const available = finiteNumber(resets?.available_count);
-  if (available !== undefined && available > 0) snapshot.resetCreditsAvailable = available;
+  if (available !== undefined && available > 0) {
+    snapshot.resetCreditsAvailable = available;
+    const applicable = finiteNumber(resets?.applicable_available_count);
+    if (applicable !== undefined && applicable >= 0) snapshot.resetCreditsApplicable = applicable;
+  }
   return snapshot;
+}
+
+/**
+ * Whether the 5-hour (primary) window should be treated as informational.
+ *
+ * Neither the payload nor the plan says whether that window is enforced: Pro and
+ * Premium Business seats have none, Plus and Standard Business do, and a
+ * workspace with credits keeps working past it. The only evidence is what
+ * happens at 100%, so the verdict is learnt and remembered:
+ *
+ * - at or past 100% while usage is still allowed: it does not block → soft;
+ * - at or past 100% while blocked, and the weekly window is not also full: the
+ *   5-hour window is what blocked → enforced again.
+ *
+ * Anything else keeps the previous verdict.
+ */
+export function nextSoftPrimary(previous: boolean, snapshot: UsageSnapshot): boolean {
+  const primary = snapshot.windows.find((w) => w.id === 'openai_primary');
+  if (!primary || primary.utilization < 100) return previous;
+  if (!snapshot.limitReached) return true;
+  const secondary = snapshot.windows.find((w) => w.id === 'openai_secondary');
+  if (!secondary || secondary.utilization < 100) return false;
+  return previous;
 }
 
 /** The slice of `CodexAppServer` a reset-credit redeem needs — the test seam. */
@@ -237,6 +268,8 @@ export class OpenaiUsagePoller {
   private debounceTimer: NodeJS.Timeout | null = null;
   /** One redeem at a time — a double click must not spend two credits. */
   private consuming = false;
+  /** Last soft-primary verdict, for when there is no account file to keep it in. */
+  private softPrimary = false;
 
   constructor(
     private broadcast: (msg: ServerMessage) => void,
@@ -284,6 +317,7 @@ export class OpenaiUsagePoller {
     const creds = this.credentials();
     if (!creds) {
       // Disconnected: drop any stale snapshot so the chip disappears.
+      this.softPrimary = false;
       if (this.snapshotValue) {
         this.snapshotValue = null;
         this.broadcast({ type: 'openaiUsage', usage: null });
@@ -315,10 +349,23 @@ export class OpenaiUsagePoller {
       }
       if (!res.ok) throw new Error(`usage endpoint ${res.status}`);
       const snapshot = parseOpenaiUsage(await res.json());
+      const account = this.store.loadOpenaiAccount();
       // The live plan_type wins; the plan stored at login is only the fallback.
       if (!snapshot.plan) {
-        const stored = openaiPlanLabel(this.store.loadOpenaiAccount()?.plan);
+        const stored = openaiPlanLabel(account?.plan);
         if (stored) snapshot.plan = stored;
+      }
+      // Remembered across restarts in the account file, so a new login (maybe a
+      // different plan) starts from "enforced" again.
+      const previous = account ? account.softPrimaryWindow === true : this.softPrimary;
+      const soft = nextSoftPrimary(previous, snapshot);
+      this.softPrimary = soft;
+      if (account && soft !== previous) {
+        this.store.saveOpenaiAccount({ ...account, softPrimaryWindow: soft || undefined });
+      }
+      if (soft) {
+        const primary = snapshot.windows.find((w) => w.id === 'openai_primary');
+        if (primary) primary.soft = true;
       }
       this.snapshotValue = snapshot;
       this.setAvailable(true);

@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.18",
+      "date": "2026-10-08",
+      "items": [
+        "If Codex lets you keep working past its 5-hour limit, the usage ring switches to the weekly limit, the one that can actually stop you. The reset button now only appears when a reset can be used, and both usage cards link to \"Manage usage\"."
+      ]
+    },
+    {
       "version": "0.1.17",
       "date": "2026-10-08",
       "items": [
@@ -152,5 +159,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "Lines now learns when Codex's 5-hour limit doesn't block your account and tracks the weekly limit instead."
+  ]
 }

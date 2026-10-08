@@ -76,7 +76,7 @@ function formatResetIn(iso: string | null): string | null {
  */
 function LimitReachedLine({ usage }: { usage: UsageSnapshot }) {
   let detail: string | null = null;
-  if (usage.credits?.enabled) {
+  if (usage.credits?.enabled && !usage.credits.exhausted) {
     detail = 'using credits';
   } else {
     const full = usage.windows
@@ -84,6 +84,7 @@ function LimitReachedLine({ usage }: { usage: UsageSnapshot }) {
       .sort((a, b) => new Date(a.resetsAt!).getTime() - new Date(b.resetsAt!).getTime());
     const resets = formatResetIn(full[0]?.resetsAt ?? null);
     if (resets) detail = resets.charAt(0).toLowerCase() + resets.slice(1);
+    if (usage.credits?.exhausted) detail = detail ? `credits used up · ${detail}` : 'credits used up';
   }
   return (
     <Text size="xs" fw={600} c="red">
@@ -132,11 +133,17 @@ function CreditsRow({ provider, credits }: { provider: ModelProvider; credits: U
     credits.approxLocalMessages !== undefined || credits.approxCloudMessages !== undefined
       ? `≈ ${credits.approxLocalMessages ?? 0} local / ${credits.approxCloudMessages ?? 0} cloud messages`
       : null;
+  // A workspace's credits can arrive with no balance at all; say what is known
+  // rather than print a bare heading.
+  const state = credits.exhausted
+    ? 'Used up'
+    : credits.balance !== undefined
+      ? `${credits.balance.toLocaleString()} remaining`
+      : 'Available';
   return (
     <div>
-      <Text size="xs">
-        {name}
-        {credits.balance !== undefined ? ` · ${credits.balance.toLocaleString()} remaining` : ''}
+      <Text size="xs" c={credits.exhausted ? 'red' : undefined}>
+        {name} · {state}
       </Text>
       {messages && (
         <Text size="xs" c="dimmed">
@@ -162,7 +169,17 @@ const RESET_RESULT_COPY: Record<ResetCreditOutcome, string> = {
  * renders outside the hover card, which dismisses the card (see the Menu's
  * `withinPortal={false}` note). The result is shown in place for the same reason.
  */
-function ResetCreditsRow({ available, limitReached }: { available: number; limitReached: boolean }) {
+function ResetCreditsRow({
+  available,
+  applicable,
+  limitReached,
+}: {
+  available: number;
+  /** Spendable now; undefined from a backend that does not say, which falls back to `available`. */
+  applicable: number | undefined;
+  limitReached: boolean;
+}) {
+  const usable = applicable ?? available;
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -186,9 +203,10 @@ function ResetCreditsRow({ available, limitReached }: { available: number; limit
     <Stack gap={4}>
       <Group justify="space-between" gap="xs" wrap="nowrap">
         <Text size="xs" c="dimmed">
-          {available} limit reset{available === 1 ? '' : 's'} available
+          {available} limit reset{available === 1 ? '' : 's'}{' '}
+          {usable > 0 ? 'available' : 'saved — usable once you hit a limit'}
         </Text>
-        {!confirming && (
+        {!confirming && usable > 0 && (
           <Button
             size="compact-xs"
             variant={limitReached ? 'filled' : 'subtle'}
@@ -202,7 +220,7 @@ function ResetCreditsRow({ available, limitReached }: { available: number; limit
       {confirming && (
         <>
           <Text size="xs">
-            Use 1 of {available} reset credits to reset your Codex usage limit now? This can't be undone.
+            Use 1 of {usable} reset credits to reset your Codex usage limit now? This can't be undone.
           </Text>
           <Group justify="flex-end" gap="xs">
             <Button size="compact-xs" variant="default" onClick={() => setConfirming(false)}>
@@ -496,10 +514,14 @@ function PlanUsageChip(props: PlanUsageChipProps) {
  *  null when there is no snapshot or it carries no windows. */
 function ringWindows(usage: UsageSnapshot | null) {
   if (!usage || usage.windows.length === 0) return null;
-  const worst = usage.windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), usage.windows[0]);
+  // A soft window has been seen past 100% without stopping anything, so it never
+  // drives the ring — with OpenAI's 5-hour window soft, the weekly one does.
+  const binding = usage.windows.filter((w) => !w.soft);
+  const windows = binding.length > 0 ? binding : usage.windows;
+  const worst = windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), windows[0]);
   // Anthropic's session window by name where it exists, else simply the first —
   // OpenAI's primary window is already first (see parseOpenaiUsage).
-  const primary = usage.windows.find((w) => w.id === 'five_hour') ?? usage.windows[0];
+  const primary = windows.find((w) => w.id === 'five_hour') ?? windows[0];
   return { primary, worst };
 }
 
@@ -607,15 +629,35 @@ function PlanUsageDetails({
       {usage?.limitReached && <LimitReachedLine usage={usage} />}
       {usage?.windows.map((w) => {
         const resets = formatResetIn(w.resetsAt);
+        // Past 100% and not blocked: the window is not what limits this account.
+        // OpenAI only — Claude's payload never says whether it is blocked, so an
+        // absent `limitReached` there means "not told", not "allowed".
+        const overButAllowed = provider === 'openai' && w.utilization >= 100 && !usage.limitReached;
+        const note = w.soft
+          ? 'Not enforced on this account — the weekly limit applies'
+          : overButAllowed && usage.credits?.enabled && !usage.credits.exhausted
+            ? 'Over the limit — continuing on credits'
+            : null;
         return (
           <div key={w.id}>
             <Group justify="space-between" gap="xs" mb={2}>
-              <Text size="xs">{windowLabel(w.id, w.label)}</Text>
-              <Text size="xs" fw={600}>
+              <Text size="xs" c={w.soft ? 'dimmed' : undefined}>
+                {windowLabel(w.id, w.label)}
+              </Text>
+              <Text size="xs" fw={600} c={w.soft ? 'dimmed' : undefined}>
                 {Math.round(w.utilization)}%
               </Text>
             </Group>
-            <Progress value={w.utilization} color={usageColor(w.utilization)} size="sm" />
+            <Progress
+              value={w.utilization}
+              color={w.soft || overButAllowed ? 'gray' : usageColor(w.utilization)}
+              size="sm"
+            />
+            {note && (
+              <Text size="xs" c="dimmed" mt={2}>
+                {note}
+              </Text>
+            )}
             {resets && (
               <Text size="xs" c="dimmed" mt={2}>
                 {resets}
@@ -626,7 +668,11 @@ function PlanUsageDetails({
       })}
       {usage?.credits && <CreditsRow provider={provider} credits={usage.credits} />}
       {canResetLimit && usage?.resetCreditsAvailable ? (
-        <ResetCreditsRow available={usage.resetCreditsAvailable} limitReached={Boolean(usage.limitReached)} />
+        <ResetCreditsRow
+          available={usage.resetCreditsAvailable}
+          applicable={usage.resetCreditsApplicable}
+          limitReached={Boolean(usage.limitReached)}
+        />
       ) : null}
       {hasSpend && (
         <>
@@ -757,7 +803,7 @@ export function UsageIndicator() {
       title: 'ChatGPT plan usage',
       accountLabel: openaiAuth?.account?.email ?? 'Connected to OpenAI',
       signOut: { label: 'Disconnect', message: { type: 'openaiLogout' } },
-      manageUrl: { label: 'Buy credits', href: 'https://chatgpt.com/codex/settings/usage' },
+      manageUrl: { label: 'Manage usage', href: 'https://chatgpt.com/codex/settings/usage' },
       canResetLimit: true,
       allTimeRows: rowsFor(globalSpend, 'openai'),
       periodRows: rowsFor(periodSpend, 'openai'),
