@@ -43,7 +43,7 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 
 ## Files
 
-- `server/src/usage.ts` — `UsagePoller`
+- `server/src/usage.ts` — `UsagePoller`, extra-usage and plan parsing
 - `web/src/store.ts` — `hello`, `usage`, and `spendDay` message handling
 - `web/src/components/UsageIndicator.tsx` — the chip, the global rollup, the period picker/pager,
   and the current session's rows
@@ -104,7 +104,9 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 ## Symbols
 
 - `UsagePoller` — polls `api.anthropic.com/api/oauth/usage`, broadcasts `{type: 'usage', ...}`
-- `UsageSnapshot`, `UsageWindow` (`shared/types.ts`)
+- `UsageSnapshot`, `UsageWindow`, `UsageCredits`, `ResetCreditOutcome` (`shared/types.ts`)
+- `planLabelFromProfile` (`server/src/usage.ts`) — pure mapping of the OAuth profile to a plan label
+- `OpenaiUsagePoller.consumeResetCredit` (`server/src/openaiUsage.ts`) — redeems an OpenAI reset credit
 - `UsageIndicator` — renders the chip, gated on `auth.loggedIn`
 - `ModelSpend` — `{ costUsd, tokens, turns }` for one model id
 - `ModelSpendMap` — `Record<modelId, ModelSpend>`
@@ -199,6 +201,14 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 `refreshSoon`), broadcasting snapshots to all clients. `hello` also carries the current snapshot
 for newly connecting clients. The store merges both into `state.usage`; `UsageIndicator` renders
 from it.
+
+Beyond the windows, a snapshot optionally carries the plan name, a pay-as-you-go block
+(`UsageCredits`), whether the limit is reached, and the number of OpenAI reset credits available.
+Claude's plan comes from a separate `/api/oauth/profile` read, cached about an hour and
+independent of the usage poll. Redeeming a reset credit is the one write: the browser sends
+`openaiConsumeResetCredit`, the bridge runs it through a short-lived `codex app-server`, and the
+answer returns as `openaiResetCreditResult` to the asking connection only; on `reset` the bridge
+re-fetches immediately so every tab sees the cleared window.
 
 ### Spend by model
 
@@ -434,6 +444,19 @@ session-level `hasEstimatedSpend` reading.
   never self-correct. `server/scripts/repair-spend.ts` is a one-time, per-machine,
   dry-run-by-default rebuild from each session's transcript and rewind sidecars; a session with no
   results left is skipped, not zeroed.
+- `extra_usage` (and the `limits` array) in Claude's usage response is never a window, even when it
+  carries a numeric `utilization`; it is parsed into `UsageSnapshot.credits`. Money in it is in
+  minor units of its currency (zero-decimal currencies excepted) and `monthly_limit: null` while
+  enabled means unlimited. Extra usage is shown read-only — Lines never changes the cap.
+- The plan badge and every extra field on `UsageSnapshot` are optional: absent means the provider
+  did not say, and an older client or bridge simply shows windows only. A profile failure never
+  fails the usage poll.
+- OpenAI's live `plan_type` wins over the plan stored at login. Window labels are derived from the
+  window length ("5-hour limit", "Weekly limit"); per-model caps are named after their `limit_name`.
+- Spending a reset credit is owner-only, needs an explicit in-card confirmation, uses one
+  idempotency key per attempt (reused only for a transport retry), and allows one redeem at a
+  time. The backend answering `nothingToReset` means no credit was spent. The confirmation is
+  inline in the hover card because a portaled modal would dismiss it.
 - No login → no usage chip. Enforced both server-side (poller never fetches without a session,
   logout nulls the snapshot) and client-side (`UsageIndicator` gates on `auth.loggedIn`).
   Logged in with no reading → an empty chip with an explanation, never hidden.
@@ -638,7 +661,9 @@ one closer to blocking is the one already visible — that opens an accordion li
 connected provider's full chip body on tap; on any wider viewport, or with only one account
 connected, the two chips (or the one) still render side by side as before. The ChatGPT numbers come from
 `GET https://chatgpt.com/backend-api/wham/usage` — the same endpoint the Codex CLI's own status
-card reads — polled on the same cadence as the Claude one.
+card reads — polled on the same cadence as the Claude one. Both chips show a plan badge when the
+provider names the plan, a "Limit reached" line, an extra-usage / credits row, and a link to the
+provider's usage page; only the OpenAI chip offers the reset-credit button.
 
 A codex turn does carry a `$` figure now — estimated from `ModelOption.price` and marked with a
 `~` (see Estimated spend above) — but the `$` half of a spend row is still dropped outright when a

@@ -54,7 +54,10 @@ scattered `=== 'openai'` checks.
 ## Files
 
 - `server/src/openaiAuth.ts` — device-code login, account metadata, logout.
-- `server/src/openaiUsage.ts` — ChatGPT plan-usage poller.
+- `server/src/openaiUsage.ts` — ChatGPT plan-usage poller. Reads from `/wham/usage`: both windows,
+  per-model caps (`additional_rate_limits[].rate_limit`), live `plan_type` (wins over the plan
+  stored at login), `credits`, limit-reached, and the reset-credit count. Redeems a reset credit
+  through a short-lived codex app-server, so codex stays the only writer of `auth.json`.
 - `server/src/codexCli.ts` — `codex` binary discovery and the version floor.
 - `server/src/codexAppServer.ts` — spawn, handshake, request/notification demux.
 - `server/src/workerCodex.ts` — thread binding, turns, steering, compaction, forking.

@@ -9,6 +9,16 @@
  * from documentation — none of this is a published contract, so every read here
  * is defensive and a failure only ever hides the chip.
  *
+ * Read from the payload: both main windows (`rate_limit.primary_window` /
+ * `secondary_window`), per-model caps (`additional_rate_limits[].rate_limit`),
+ * the live `plan_type` (which beats the plan stored at login — that one goes
+ * stale on an upgrade), `credits`, whether the limit is hit right now
+ * (`rate_limit.limit_reached` / `allowed`), and how many rate-limit reset
+ * credits the account holds (`rate_limit_reset_credits.available_count`).
+ *
+ * Redeeming a reset credit is the one write, and it goes through
+ * `codex app-server` rather than raw HTTP — see `consumeResetCredit`.
+ *
  * ## The credential, and the rule it bends
  *
  * `openaiAuth.ts` establishes that `$CODEX_HOME/auth.json` is the only store of
@@ -23,7 +33,17 @@
  * works. Until then the endpoint answers 401 and the chip simply hides, which is
  * the correct outcome for "we cannot read your usage right now".
  */
-import type { ServerMessage, UsageSnapshot, UsageWindow } from '@lines/shared';
+import { randomUUID } from 'node:crypto';
+import type {
+  CodexCliStatus,
+  ResetCreditOutcome,
+  ServerMessage,
+  UsageCredits,
+  UsageSnapshot,
+  UsageWindow,
+} from '@lines/shared';
+import { CodexAppServer, CodexRpcError } from './codexAppServer.ts';
+import { codexCliStatus } from './codexCli.ts';
 import type { Store } from './store.ts';
 
 /** `chatgpt.com` normalizes to `/backend-api`, and the ChatGPT path style puts the
@@ -34,31 +54,91 @@ const POLL_INTERVAL_MS = 5 * 60_000;
 const REFRESH_DEBOUNCE_MS = 5_000;
 const REFRESH_MIN_SPACING_MS = 30_000;
 const FETCH_TIMEOUT_MS = 10_000;
+/** One redeem attempt, app-server spawn and handshake included. */
+const CONSUME_TIMEOUT_MS = 20_000;
 
 /** Human label for a window the API describes only by its length. */
 function windowLabel(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return 'Plan limit';
   const hours = Math.round(seconds / 3600);
-  if (hours >= 24 * 7) return 'Weekly';
-  if (hours >= 24) return `${Math.round(hours / 24)}-day`;
-  return `Session (${hours}h)`;
+  if (hours >= 24 * 7 && hours < 24 * 8) return 'Weekly limit';
+  if (hours >= 24) return `${Math.round(hours / 24)}-day limit`;
+  return `${hours}-hour limit`;
 }
 
 /** One `RateLimitWindowSnapshot` → the shape the chip already renders. */
-function toWindow(id: string, raw: unknown): UsageWindow | null {
+function toWindow(id: string, raw: unknown, fetchedAt: number, prefix?: string): UsageWindow | null {
   if (!raw || typeof raw !== 'object') return null;
-  const w = raw as { used_percent?: unknown; reset_at?: unknown; limit_window_seconds?: unknown };
+  const w = raw as {
+    used_percent?: unknown;
+    reset_at?: unknown;
+    reset_after_seconds?: unknown;
+    limit_window_seconds?: unknown;
+  };
   if (typeof w.used_percent !== 'number') return null;
   // `reset_at` is unix seconds; the chip wants an ISO string, as Anthropic's sends.
-  const resetAt = typeof w.reset_at === 'number' && w.reset_at > 0
-    ? new Date(w.reset_at * 1000).toISOString()
-    : null;
+  // Without it, `reset_after_seconds` is relative to this fetch.
+  let resetAt: string | null = null;
+  if (typeof w.reset_at === 'number' && w.reset_at > 0) {
+    resetAt = new Date(w.reset_at * 1000).toISOString();
+  } else if (typeof w.reset_after_seconds === 'number' && w.reset_after_seconds > 0) {
+    resetAt = new Date(fetchedAt + w.reset_after_seconds * 1000).toISOString();
+  }
+  const label = windowLabel(Number(w.limit_window_seconds));
   return {
     id,
     utilization: w.used_percent,
     resetsAt: resetAt,
-    label: windowLabel(Number(w.limit_window_seconds)),
+    label: prefix ? `${prefix} · ${label}` : label,
   };
+}
+
+/** `PlanType` values (shared/codexProtocol/PlanType.ts) → display names. */
+const PLAN_LABELS: Record<string, string> = {
+  free: 'Free',
+  go: 'Go',
+  plus: 'Plus',
+  pro: 'Pro',
+  prolite: 'Pro Lite',
+  team: 'Team',
+  business: 'Business',
+};
+
+/** Display name for a ChatGPT plan id; unknown ids are title-cased rather than dropped. */
+export function openaiPlanLabel(plan: unknown): string | undefined {
+  if (typeof plan !== 'string' || !plan) return undefined;
+  const key = plan.toLowerCase();
+  if (PLAN_LABELS[key]) return PLAN_LABELS[key];
+  if (key.startsWith('enterprise')) return 'Enterprise';
+  if (key.startsWith('edu')) return 'Edu';
+  return key
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+const finiteNumber = (v: unknown): number | undefined => {
+  if (typeof v !== 'number' && typeof v !== 'string') return undefined;
+  if (typeof v === 'string' && !v.trim()) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
+};
+
+/** The `credits` block → `UsageCredits`; undefined when absent or not an object. */
+function parseCredits(raw: unknown): UsageCredits | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const c = raw as Record<string, unknown>;
+  const credits: UsageCredits = { enabled: c.has_credits === true };
+  if (c.unlimited === true) credits.unlimited = true;
+  // A string in the API, sometimes with decimals.
+  const balance = finiteNumber(c.balance);
+  if (balance !== undefined) credits.balance = balance;
+  const local = finiteNumber(c.approx_local_messages);
+  if (local !== undefined) credits.approxLocalMessages = local;
+  const cloud = finiteNumber(c.approx_cloud_messages);
+  if (cloud !== undefined) credits.approxCloudMessages = cloud;
+  return credits;
 }
 
 /**
@@ -72,28 +152,81 @@ function toWindow(id: string, raw: unknown): UsageWindow | null {
  */
 export function parseOpenaiUsage(body: unknown): UsageSnapshot {
   if (!body || typeof body !== 'object') throw new Error('usage response not an object');
-  const payload = body as { rate_limit?: unknown; additional_rate_limits?: unknown };
+  const payload = body as {
+    plan_type?: unknown;
+    rate_limit?: unknown;
+    additional_rate_limits?: unknown;
+    credits?: unknown;
+    rate_limit_reset_credits?: unknown;
+  };
+  const fetchedAt = Date.now();
   const limit = payload.rate_limit as
-    | { primary_window?: unknown; secondary_window?: unknown }
+    | { allowed?: unknown; limit_reached?: unknown; primary_window?: unknown; secondary_window?: unknown }
     | null
     | undefined;
   const windows: UsageWindow[] = [];
-  const primary = toWindow('openai_primary', limit?.primary_window);
+  const primary = toWindow('openai_primary', limit?.primary_window, fetchedAt);
   if (primary) windows.push(primary);
-  const secondary = toWindow('openai_secondary', limit?.secondary_window);
+  const secondary = toWindow('openai_secondary', limit?.secondary_window, fetchedAt);
   if (secondary) windows.push(secondary);
   if (Array.isArray(payload.additional_rate_limits)) {
     payload.additional_rate_limits.forEach((entry, i) => {
-      const details = (entry as { details?: unknown } | null)?.details as
-        | { primary_window?: unknown }
-        | null
-        | undefined;
-      const extra = toWindow(`openai_additional_${i}`, details?.primary_window);
+      const e = entry as { limit_name?: unknown; rate_limit?: unknown; details?: unknown } | null;
+      // `rate_limit` is the field; `details` is what an earlier reading assumed,
+      // kept as a fallback in case a backend still sends it.
+      const inner = (e?.rate_limit ?? e?.details) as { primary_window?: unknown } | null | undefined;
+      const name = typeof e?.limit_name === 'string' && e.limit_name ? e.limit_name : undefined;
+      const extra = toWindow(`openai_additional_${i}`, inner?.primary_window, fetchedAt, name);
       if (extra) windows.push(extra);
     });
   }
   if (windows.length === 0) throw new Error('no usage windows in response');
-  return { windows, fetchedAt: Date.now() };
+
+  const snapshot: UsageSnapshot = { windows, fetchedAt };
+  const plan = openaiPlanLabel(payload.plan_type);
+  if (plan) snapshot.plan = plan;
+  const credits = parseCredits(payload.credits);
+  if (credits) snapshot.credits = credits;
+  if (limit?.limit_reached === true || limit?.allowed === false) snapshot.limitReached = true;
+  const resets = payload.rate_limit_reset_credits as { available_count?: unknown } | null | undefined;
+  const available = finiteNumber(resets?.available_count);
+  if (available !== undefined && available > 0) snapshot.resetCreditsAvailable = available;
+  return snapshot;
+}
+
+/** The slice of `CodexAppServer` a reset-credit redeem needs — the test seam. */
+export interface ResetCreditRpc {
+  request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  close(): void;
+}
+
+export interface OpenaiUsageDeps {
+  codexStatus?: () => CodexCliStatus;
+  createAppServer?: (options: { codexPath: string; codexHome: string }) => ResetCreditRpc;
+  consumeTimeoutMs?: number;
+}
+
+const CODEX_OUTCOMES = new Set<ResetCreditOutcome>(['reset', 'nothingToReset', 'noCredit', 'alreadyRedeemed']);
+
+/** A throwaway app-server for one request; nothing it does should ask anything of us. */
+function spawnAppServer(options: { codexPath: string; codexHome: string }): ResetCreditRpc {
+  const app: CodexAppServer = new CodexAppServer({
+    ...options,
+    onNotification: () => {},
+    onServerRequest: (id) => app.respondError(id, 'not supported'),
+    onExit: () => {},
+  });
+  return app;
+}
+
+/** Rejects after `ms`, so a hung app-server cannot hold the consume lock forever. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('timed out waiting for codex')), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 export class OpenaiUsagePoller {
@@ -103,10 +236,13 @@ export class OpenaiUsagePoller {
   /** For logging state transitions only, so a machine with no account stays quiet. */
   private available: boolean | null = null;
   private debounceTimer: NodeJS.Timeout | null = null;
+  /** One redeem at a time — a double click must not spend two credits. */
+  private consuming = false;
 
   constructor(
     private broadcast: (msg: ServerMessage) => void,
     private store: Store,
+    private deps: OpenaiUsageDeps = {},
   ) {}
 
   get snapshot(): UsageSnapshot | null {
@@ -180,6 +316,11 @@ export class OpenaiUsagePoller {
       }
       if (!res.ok) throw new Error(`usage endpoint ${res.status}`);
       const snapshot = parseOpenaiUsage(await res.json());
+      // The live plan_type wins; the plan stored at login is only the fallback.
+      if (!snapshot.plan) {
+        const stored = openaiPlanLabel(this.store.loadOpenaiAccount()?.plan);
+        if (stored) snapshot.plan = stored;
+      }
       this.snapshotValue = snapshot;
       this.setAvailable(true);
       this.broadcast({ type: 'openaiUsage', usage: snapshot });
@@ -190,6 +331,65 @@ export class OpenaiUsagePoller {
       this.setAvailable(false, err);
     } finally {
       this.inFlight = false;
+    }
+  }
+
+  /**
+   * Redeem one rate-limit reset credit on the connected account.
+   *
+   * Goes through a short-lived `codex app-server` rather than POSTing to
+   * `/wham/rate-limit-reset-credits/consume` directly: codex refreshes an expired
+   * token itself, which keeps it the only writer of `auth.json`, and its typed
+   * request saves guessing the endpoint's body. One idempotency key per click,
+   * reused only for a transport retry — a fresh key could spend a second credit.
+   */
+  async consumeResetCredit(): Promise<{ outcome: ResetCreditOutcome; message?: string }> {
+    if (this.consuming) return { outcome: 'error', message: 'A reset is already in progress.' };
+    const status = (this.deps.codexStatus ?? codexCliStatus)();
+    if (status.state !== 'ok' || !status.path) {
+      return { outcome: 'error', message: 'Codex CLI not installed.' };
+    }
+    const codexPath = status.path;
+    this.consuming = true;
+    const idempotencyKey = randomUUID();
+    try {
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const result = await this.consumeOnce(codexPath, idempotencyKey);
+          if (result === 'reset') {
+            // Straight away, not debounced: every tab should see the cleared window.
+            this.lastFetchAt = 0;
+            await this.fetch();
+          }
+          return { outcome: result };
+        } catch (err) {
+          lastErr = err;
+          // The server answered and said no: retrying cannot change that.
+          if (err instanceof CodexRpcError) break;
+        }
+      }
+      return { outcome: 'error', message: lastErr instanceof Error ? lastErr.message : String(lastErr) };
+    } finally {
+      this.consuming = false;
+    }
+  }
+
+  private async consumeOnce(codexPath: string, idempotencyKey: string): Promise<ResetCreditOutcome> {
+    const options = { codexPath, codexHome: this.store.codexHome() };
+    const server = this.deps.createAppServer?.(options) ?? spawnAppServer(options);
+    try {
+      const res = (await withTimeout(
+        server.request('account/rateLimitResetCredit/consume', { idempotencyKey }),
+        this.deps.consumeTimeoutMs ?? CONSUME_TIMEOUT_MS,
+      )) as { outcome?: unknown } | null;
+      const outcome = res?.outcome;
+      if (typeof outcome === 'string' && CODEX_OUTCOMES.has(outcome as ResetCreditOutcome)) {
+        return outcome as ResetCreditOutcome;
+      }
+      throw new CodexRpcError(`unexpected outcome: ${String(outcome)}`, -32603);
+    } finally {
+      server.close();
     }
   }
 

@@ -88,6 +88,8 @@ describe('MESSAGE_AUTHZ', () => {
     assert.ok(ownerOnly.includes('authorizeMcpConnection'));
     assert.ok(ownerOnly.includes('mcpServerStatus'));
     assert.ok(ownerOnly.includes('authLogout'));
+    // Spends a scarce reset credit on the host's OpenAI account.
+    assert.ok(ownerOnly.includes('openaiConsumeResetCredit'));
     assert.ok(ownerOnly.includes('installUpdate'));
     assert.ok(ownerOnly.includes('pickFolder'));
     // Push covers every session on the machine, and the bridge POSTs to the

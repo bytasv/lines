@@ -285,6 +285,25 @@ export function formatSpendUsd(usd: number, estimated: boolean): string {
   return `${estimated ? '~' : ''}$${usd.toFixed(2)}`;
 }
 
+/** ISO 4217 currencies with no minor unit — the set Claude Code divides by 1, not 100. */
+const ZERO_DECIMAL_CURRENCIES = new Set([
+  'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF', 'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF',
+]);
+
+/**
+ * Money the API sends in minor units (cents for USD), e.g. Claude's extra usage.
+ * `currency` defaults to USD; an unknown code falls back to a bare number.
+ */
+export function formatMinorCurrency(minor: number, currency = 'USD'): string {
+  const code = currency.toUpperCase();
+  const major = ZERO_DECIMAL_CURRENCIES.has(code) ? minor : minor / 100;
+  try {
+    return new Intl.NumberFormat(undefined, { style: 'currency', currency: code }).format(major);
+  } catch {
+    return `${major.toFixed(ZERO_DECIMAL_CURRENCIES.has(code) ? 0 : 2)} ${code}`;
+  }
+}
+
 /**
  * A spend figure with the in-flight turn's live estimate (`turnSpend`) added on.
  * Anything that includes the estimate is an estimate, so `estimated` follows the

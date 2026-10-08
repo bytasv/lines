@@ -2123,6 +2123,15 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       // and the broadcast that follows is what updates every tab.
       await ctx.openaiAuth.logout();
       break;
+    case 'openaiConsumeResetCredit': {
+      // Answered on the asking link only; the usage broadcast after a reset is
+      // what updates every tab.
+      const result = await ctx.openaiUsage.consumeResetCredit();
+      ws.send(
+        JSON.stringify({ type: 'openaiResetCreditResult', reqId: msg.reqId, ...result } satisfies ServerMessage),
+      );
+      break;
+    }
     case 'saveSettings': {
       // LWW: an out-of-order save from a stale tab must not clobber newer state.
       const local = store.loadSettings();

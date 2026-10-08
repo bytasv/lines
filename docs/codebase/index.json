@@ -405,6 +405,7 @@
       "files": [
         "shared/types.ts",
         "server/src/usage.ts",
+        "server/src/openaiUsage.ts",
         "web/src/store.ts",
         "web/src/components/UsageIndicator.tsx",
         "shared/usageByModel.ts",
@@ -431,6 +432,10 @@
       "symbols": [
         "UsagePoller",
         "UsageSnapshot",
+        "UsageCredits",
+        "ResetCreditOutcome",
+        "planLabelFromProfile",
+        "OpenaiUsagePoller.consumeResetCredit",
         "UsageIndicator",
         "ModelSpend",
         "ModelSpendMap",
@@ -483,6 +488,8 @@
         "replaySpend"
       ],
       "tests": [
+        "server/src/usage.test.ts",
+        "server/src/openaiUsage.test.ts",
         "server/src/usageByModel.test.ts",
         "server/src/resultSpend.test.ts",
         "server/src/sessions.ended.test.ts",
@@ -494,6 +501,9 @@
         "server/src/workflows.advance.test.ts"
       ],
       "businessRules": [
+        "extra_usage and limits in Claude's usage response are never windows, even with a numeric utilization; extra_usage is parsed into UsageSnapshot.credits, money in minor units, monthly_limit null while enabled means unlimited, shown read-only",
+        "plan, credits, limitReached and resetCreditsAvailable on UsageSnapshot are optional (absent = provider did not say); a Claude profile failure never fails the usage poll; OpenAI's live plan_type wins over the plan stored at login",
+        "redeeming an OpenAI reset credit is owner-only, confirmed inline in the hover card, one idempotency key per attempt, one redeem at a time, and goes through a short-lived codex app-server; nothingToReset spends no credit",
         "settled cost is always Claude Code's own reported cost (total_cost_usd/modelUsage); a computed figure only stands in mid-turn and for a provider that reports none",
         "total_cost_usd is Claude Code's running total: a result is billed as its reading less the reading it continues from, chosen by the counters alone (CostLineage) — a closed or restarted query usually carries the total on, a new session_id starts from zero however high it climbs, and a resume can continue an older save; nothing about the bridge's view of the process is trusted",
         "historical totals billed by the earlier rules are wrong in both directions and never self-correct; server/scripts/repair-spend.ts is a one-time, per-machine, dry-run-by-default rebuild of totals, costByModel and workflow step costs from transcripts and rewind sidecars",

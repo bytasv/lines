@@ -3,7 +3,9 @@ import {
   Accordion,
   ActionIcon,
   Anchor,
+  Badge,
   Box,
+  Button,
   Divider,
   Group,
   HoverCard,
@@ -33,11 +35,13 @@ import type {
   ModelOption,
   ModelProvider,
   ModelSpend,
+  ResetCreditOutcome,
+  UsageCredits,
   UsageSnapshot,
 } from '@lines/shared';
 import { useStore } from '../store';
-import { send } from '../ws';
-import { formatSpendUsd, formatTokens, usageColor } from '../lib/format';
+import { consumeOpenaiResetCredit, send } from '../ws';
+import { formatMinorCurrency, formatSpendUsd, formatTokens, usageColor } from '../lib/format';
 import { useIsPhone } from '../lib/layout';
 import { ProviderBadge } from './ProviderMark';
 
@@ -45,7 +49,7 @@ import { ProviderBadge } from './ProviderMark';
  *  reports only primary/secondary plus a duration, so its labels ride on the
  *  window itself (see UsageWindow.label). */
 const WINDOW_LABELS: Record<string, string> = {
-  five_hour: 'Session (5h)',
+  five_hour: '5-hour limit',
   seven_day: 'Weekly (all models)',
   seven_day_sonnet: 'Weekly (Sonnet)',
   seven_day_opus: 'Weekly (Opus)',
@@ -64,6 +68,159 @@ function formatResetIn(iso: string | null): string | null {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
   return `Resets in ${h > 0 ? `${h}h ${m}m` : `${m}m`}`;
+}
+
+/**
+ * "Limit reached", and what happens next: credits take over, or the earliest
+ * reset among the windows that are full.
+ */
+function LimitReachedLine({ usage }: { usage: UsageSnapshot }) {
+  let detail: string | null = null;
+  if (usage.credits?.enabled) {
+    detail = 'using credits';
+  } else {
+    const full = usage.windows
+      .filter((w) => w.utilization >= 100 && w.resetsAt)
+      .sort((a, b) => new Date(a.resetsAt!).getTime() - new Date(b.resetsAt!).getTime());
+    const resets = formatResetIn(full[0]?.resetsAt ?? null);
+    if (resets) detail = resets.charAt(0).toLowerCase() + resets.slice(1);
+  }
+  return (
+    <Text size="xs" fw={600} c="red">
+      Limit reached{detail ? ` — ${detail}` : ''}
+    </Text>
+  );
+}
+
+/**
+ * Pay-as-you-go headroom past the windows. One component for both providers:
+ * Claude's extra usage carries a monthly cap in minor units, OpenAI's credits a
+ * balance — whichever fields are present decide what renders.
+ */
+function CreditsRow({ provider, credits }: { provider: ModelProvider; credits: UsageCredits }) {
+  const name = provider === 'anthropic' ? 'Extra usage' : 'Credits';
+  if (!credits.enabled) {
+    return (
+      <Text size="xs" c="dimmed">
+        {name} · Off
+      </Text>
+    );
+  }
+  if (credits.unlimited) {
+    return <Text size="xs">{name} · Unlimited</Text>;
+  }
+  if (credits.limitMinor !== undefined) {
+    const used = credits.usedMinor ?? 0;
+    const util = credits.utilization ?? (credits.limitMinor > 0 ? (used / credits.limitMinor) * 100 : 0);
+    return (
+      <div>
+        <Group justify="space-between" gap="xs" mb={2}>
+          <Text size="xs">{name}</Text>
+          <Text size="xs" fw={600}>
+            {Math.round(util)}%
+          </Text>
+        </Group>
+        <Progress value={util} color={usageColor(util)} size="sm" />
+        <Text size="xs" c="dimmed" mt={2}>
+          {formatMinorCurrency(used, credits.currency)} of {formatMinorCurrency(credits.limitMinor, credits.currency)}{' '}
+          this month
+        </Text>
+      </div>
+    );
+  }
+  const messages =
+    credits.approxLocalMessages !== undefined || credits.approxCloudMessages !== undefined
+      ? `≈ ${credits.approxLocalMessages ?? 0} local / ${credits.approxCloudMessages ?? 0} cloud messages`
+      : null;
+  return (
+    <div>
+      <Text size="xs">
+        {name}
+        {credits.balance !== undefined ? ` · ${credits.balance.toLocaleString()} remaining` : ''}
+      </Text>
+      {messages && (
+        <Text size="xs" c="dimmed">
+          {messages}
+        </Text>
+      )}
+    </div>
+  );
+}
+
+const RESET_RESULT_COPY: Record<ResetCreditOutcome, string> = {
+  reset: 'Limit reset.',
+  nothingToReset: "Nothing to reset — you're under the limit. No credit was used.",
+  noCredit: 'No reset credit is available on this account.',
+  alreadyRedeemed: 'That reset credit was already redeemed.',
+  error: 'The reset failed.',
+};
+
+/**
+ * "N limit resets available", and the button that spends one.
+ *
+ * The confirmation is inline rather than a modal on purpose: a portaled modal
+ * renders outside the hover card, which dismisses the card (see the Menu's
+ * `withinPortal={false}` note). The result is shown in place for the same reason.
+ */
+function ResetCreditsRow({ available, limitReached }: { available: number; limitReached: boolean }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const consume = async () => {
+    setConfirming(false);
+    setBusy(true);
+    setResult(null);
+    try {
+      const { outcome, message } = await consumeOpenaiResetCredit();
+      const text = outcome === 'error' && message ? message : RESET_RESULT_COPY[outcome];
+      setResult({ ok: outcome === 'reset' || outcome === 'nothingToReset', text });
+    } catch (err) {
+      setResult({ ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Stack gap={4}>
+      <Group justify="space-between" gap="xs" wrap="nowrap">
+        <Text size="xs" c="dimmed">
+          {available} limit reset{available === 1 ? '' : 's'} available
+        </Text>
+        {!confirming && (
+          <Button
+            size="compact-xs"
+            variant={limitReached ? 'filled' : 'subtle'}
+            loading={busy}
+            onClick={() => setConfirming(true)}
+          >
+            Reset limit
+          </Button>
+        )}
+      </Group>
+      {confirming && (
+        <>
+          <Text size="xs">
+            Use 1 of {available} reset credits to reset your Codex usage limit now? This can't be undone.
+          </Text>
+          <Group justify="flex-end" gap="xs">
+            <Button size="compact-xs" variant="default" onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+            <Button size="compact-xs" color="red" onClick={() => void consume()}>
+              Use a reset
+            </Button>
+          </Group>
+        </>
+      )}
+      {result && (
+        <Text size="xs" c={result.ok ? 'dimmed' : 'red'}>
+          {result.text}
+        </Text>
+      )}
+    </Stack>
+  );
 }
 
 function formatAgo(ts: number): string {
@@ -288,6 +445,10 @@ interface PlanUsageChipProps {
   accountLabel?: string;
   /** Copy and message for the footer's disconnect action. */
   signOut: { label: string; message: ClientMessage };
+  /** The provider's own usage page, linked from the footer. */
+  manageUrl?: { label: string; href: string };
+  /** This provider's reset credits can be redeemed from the chip (OpenAI only). */
+  canResetLimit?: boolean;
   /** All-time rollup for this provider's models only — each chip accounts for
    *  its own. Derived from the synced sessions, so it spans machines. */
   allTimeRows: [string, ModelSpend][];
@@ -367,7 +528,14 @@ const UsageRing = forwardRef<
           size={38}
           thickness={4}
           sections={
-            ring ? [{ value: ring.primary.utilization, color: usageColor(ring.worst.utilization) }] : []
+            ring
+              ? [
+                  {
+                    value: ring.primary.utilization,
+                    color: usage?.limitReached ? 'red' : usageColor(ring.worst.utilization),
+                  },
+                ]
+              : []
           }
           label={
             <Text size="8px" ta="center" fw={700} c={ring ? undefined : 'dimmed'}>
@@ -393,6 +561,8 @@ function PlanUsageDetails({
   hideTitle,
   accountLabel,
   signOut,
+  manageUrl,
+  canResetLimit,
   allTimeRows,
   periodRows,
   sessionRows,
@@ -412,10 +582,19 @@ function PlanUsageDetails({
 
   return (
     <Stack gap="xs">
-      {!hideTitle && (
-        <Text size="xs" fw={700} tt="uppercase" c="dimmed">
-          {title}
-        </Text>
+      {(!hideTitle || usage?.plan) && (
+        <Group justify="space-between" gap="xs" wrap="nowrap">
+          {!hideTitle && (
+            <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+              {title}
+            </Text>
+          )}
+          {usage?.plan && (
+            <Badge size="sm" variant="light" ml={hideTitle ? 'auto' : undefined}>
+              {usage.plan}
+            </Badge>
+          )}
+        </Group>
       )}
       {/* One generic line, not per-cause copy: the client cannot tell "first fetch
           pending" from "token rejected". The footer below stays — Disconnect and
@@ -425,6 +604,7 @@ function PlanUsageDetails({
           Usage not available yet. Lines checks every 5 minutes.
         </Text>
       )}
+      {usage?.limitReached && <LimitReachedLine usage={usage} />}
       {usage?.windows.map((w) => {
         const resets = formatResetIn(w.resetsAt);
         return (
@@ -444,6 +624,10 @@ function PlanUsageDetails({
           </div>
         );
       })}
+      {usage?.credits && <CreditsRow provider={provider} credits={usage.credits} />}
+      {canResetLimit && usage?.resetCreditsAvailable ? (
+        <ResetCreditsRow available={usage.resetCreditsAvailable} limitReached={Boolean(usage.limitReached)} />
+      ) : null}
       {hasSpend && (
         <>
           <SpendSection
@@ -477,15 +661,22 @@ function PlanUsageDetails({
             <Text size="xs" c="dimmed" truncate>
               {accountLabel}
             </Text>
-            <Anchor
-              component="button"
-              type="button"
-              size="xs"
-              c="red"
-              onClick={() => send(signOut.message)}
-            >
-              {signOut.label}
-            </Anchor>
+            <Group gap="sm" wrap="nowrap">
+              {manageUrl && (
+                <Anchor href={manageUrl.href} target="_blank" rel="noopener noreferrer" size="xs">
+                  {manageUrl.label}
+                </Anchor>
+              )}
+              <Anchor
+                component="button"
+                type="button"
+                size="xs"
+                c="red"
+                onClick={() => send(signOut.message)}
+              >
+                {signOut.label}
+              </Anchor>
+            </Group>
           </Group>
         </>
       )}
@@ -552,6 +743,7 @@ export function UsageIndicator() {
       title: 'Claude plan usage',
       accountLabel: auth?.account?.email ?? 'Connected to Claude',
       signOut: { label: 'Disconnect', message: { type: 'authLogout' } },
+      manageUrl: { label: 'Manage usage', href: 'https://claude.ai/settings/usage' },
       allTimeRows: rowsFor(globalSpend, 'anthropic'),
       periodRows: rowsFor(periodSpend, 'anthropic'),
       sessionRows: rowsFor(sessionSpend, 'anthropic'),
@@ -565,6 +757,8 @@ export function UsageIndicator() {
       title: 'ChatGPT plan usage',
       accountLabel: openaiAuth?.account?.email ?? 'Connected to OpenAI',
       signOut: { label: 'Disconnect', message: { type: 'openaiLogout' } },
+      manageUrl: { label: 'Buy credits', href: 'https://chatgpt.com/codex/settings/usage' },
+      canResetLimit: true,
       allTimeRows: rowsFor(globalSpend, 'openai'),
       periodRows: rowsFor(periodSpend, 'openai'),
       sessionRows: rowsFor(sessionSpend, 'openai'),

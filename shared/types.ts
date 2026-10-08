@@ -2521,6 +2521,8 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   openaiStartLogin: { needs: 'owner' },
   openaiCancelLogin: { needs: 'owner' },
   openaiLogout: { needs: 'owner' },
+  // Spends a scarce credit on the host's OpenAI account.
+  openaiConsumeResetCredit: { needs: 'owner' },
   saveSettings: { needs: 'owner' },
   // The host's own TypeSafe key, billed to them — owner only.
   setTypesafeKey: { needs: 'owner' },
@@ -2900,6 +2902,9 @@ export type ClientMessage =
   | { type: 'openaiStartLogin' }
   | { type: 'openaiCancelLogin' }
   | { type: 'openaiLogout' }
+  /** Spend one of the host's OpenAI rate-limit reset credits. Answered with
+   *  `openaiResetCreditResult` on the asking connection only. */
+  | { type: 'openaiConsumeResetCredit'; reqId: string }
   /** Fresh Clerk token relay (~50s cadence) so the bridge's per-connection token never expires. */
   | { type: 'auth'; token: string }
   | { type: 'saveSettings'; settings: UserUiSettings }
@@ -2998,7 +3003,8 @@ export type ClientMessage =
   | { type: 'installUpdate' }
   | { type: 'ping' };
 
-/** One Claude-plan rate-limit window (5-hour session, weekly, ...) from the OAuth usage endpoint. */
+/** One plan rate-limit window (5-hour, weekly, per-model, ...), from Claude's OAuth usage
+ *  endpoint or ChatGPT's `/wham/usage`. */
 export interface UsageWindow {
   /** Raw key from the API, e.g. 'five_hour' | 'seven_day' | 'seven_day_opus'. */
   id: string;
@@ -3015,12 +3021,47 @@ export interface UsageWindow {
   label?: string;
 }
 
-/** Snapshot of Claude-plan usage, polled by the bridge and mirrored to browsers. */
+/**
+ * Pay-as-you-go headroom beyond a plan's windows: Claude's "extra usage" or
+ * OpenAI's credits. Structured numbers only — the client formats them.
+ */
+export interface UsageCredits {
+  enabled: boolean;
+  unlimited?: boolean;
+  /** Claude extra usage: spent / cap this month, minor units of `currency`. */
+  usedMinor?: number;
+  limitMinor?: number;
+  currency?: string;
+  /** Claude extra usage: percent of the monthly cap spent, 0-100. */
+  utilization?: number;
+  /** OpenAI credits: remaining balance (a string in the API, parsed to a number) and
+   *  the backend's rough "messages left" estimates. */
+  balance?: number;
+  approxLocalMessages?: number;
+  approxCloudMessages?: number;
+  disabledReason?: string;
+}
+
+/** Snapshot of one provider's plan usage (Claude or ChatGPT), polled by the bridge
+ *  and mirrored to browsers. Every field past `fetchedAt` is optional, so older
+ *  bridges and clients keep working. */
 export interface UsageSnapshot {
   windows: UsageWindow[];
   /** ms epoch of the successful fetch (drives the staleness footer). */
   fetchedAt: number;
+  /** Plan display name, e.g. "Max 20x", "Pro". Absent when the provider didn't say. */
+  plan?: string;
+  /** Pay-as-you-go headroom beyond the plan windows. Absent = provider reported none. */
+  credits?: UsageCredits;
+  /** Provider says the plan limit is hit right now (OpenAI `limit_reached`/`allowed:false`). */
+  limitReached?: boolean;
+  /** OpenAI rate-limit reset credits the user can spend; absent/0 = none. */
+  resetCreditsAvailable?: number;
 }
+
+/** What redeeming an OpenAI rate-limit reset credit did. The first four are codex's
+ *  own `account/rateLimitResetCredit/consume` outcomes; `error` is ours. */
+export type ResetCreditOutcome = 'reset' | 'nothingToReset' | 'noCredit' | 'alreadyRedeemed' | 'error';
 
 /** Whether the app is logged in to Claude, plus the account it's using (from the OAuth token response). */
 export interface AuthStatus {
@@ -4042,6 +4083,8 @@ export type ServerMessage =
   /** Reply to one fileRequest. `status` mirrors the HTTP codes the client already
    *  maps to messages (403/404/413/415); `body` is absent on failure. */
   | { type: 'fileResponse'; reqId: string; status: number; body?: unknown }
+  /** Reply to one `openaiConsumeResetCredit`, point-to-point. */
+  | { type: 'openaiResetCreditResult'; reqId: string; outcome: ResetCreditOutcome; message?: string }
   | { type: 'updateStatus'; status: UpdateStatus }
   /** The machine's CLIs, re-sent when the answer changes — an install taken in
    *  response to "not found" has to reach the UI without a reconnect. Same

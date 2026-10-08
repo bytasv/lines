@@ -4,6 +4,7 @@ import type {
   FileRequestParams,
   HandshakeAccept,
   HandshakeConfirm,
+  ResetCreditOutcome,
   SecureSession,
   ServerMessage,
   SharePreset,
@@ -147,6 +148,11 @@ interface MachineLink {
   pending: Map<string, { resolve: (r: { status: number; body?: unknown }) => void; reject: (e: Error) => void }>;
   /** In-flight voice transcriptions for this machine, keyed by requestId. */
   transcriptions: Map<string, { resolve: (text: string) => void; reject: (e: Error) => void }>;
+  /** In-flight OpenAI reset-credit redeems for this machine, keyed by reqId. */
+  resetCredits: Map<
+    string,
+    { resolve: (r: { outcome: ResetCreditOutcome; message?: string }) => void; reject: (e: Error) => void }
+  >;
   reqCounter: number;
   /** Set while an intentional close is in flight, so it does not schedule a retry. */
   closing: boolean;
@@ -344,6 +350,7 @@ function linkFor(deviceId: string): MachineLink {
       awaitingProbeSince: null,
       pending: new Map(),
       transcriptions: new Map(),
+      resetCredits: new Map(),
       reqCounter: 0,
       closing: false,
       secure: null,
@@ -512,6 +519,8 @@ function rejectPending(link: MachineLink) {
   link.pending.clear();
   for (const [, p] of link.transcriptions) p.reject(new Error('Connection lost.'));
   link.transcriptions.clear();
+  for (const [, p] of link.resetCredits) p.reject(new Error('Connection lost.'));
+  link.resetCredits.clear();
 }
 
 /** In-flight `mintGuestGrant` requests, keyed by requestId. Answered on whichever link asked. */
@@ -602,6 +611,23 @@ export function transcribeAudio(
       },
     });
     writeToLink(link, JSON.stringify({ type: 'transcribe', requestId, audio, ...options } satisfies ClientMessage));
+  });
+}
+
+/**
+ * Spend one of the host's OpenAI rate-limit reset credits, on the primary
+ * machine — the one whose plan usage the header shows. Resolves with codex's
+ * outcome; the refreshed usage arrives separately, as a broadcast.
+ */
+export function consumeOpenaiResetCredit(): Promise<{ outcome: ResetCreditOutcome; message?: string }> {
+  const link = links.get(primaryDeviceId ?? '');
+  if (link?.socket?.readyState !== WebSocket.OPEN) {
+    return Promise.reject(new Error('Not connected to the bridge.'));
+  }
+  const reqId = `r${++link.reqCounter}`;
+  return new Promise((resolve, reject) => {
+    link.resetCredits.set(reqId, { resolve, reject });
+    writeToLink(link, JSON.stringify({ type: 'openaiConsumeResetCredit', reqId } satisfies ClientMessage));
   });
 }
 
@@ -1085,6 +1111,13 @@ function handleServerMessage(link: MachineLink, msg: ServerMessage | RelayContro
     } else {
       pending.reject(new Error(msg.error ?? 'That machine could not create the invite.'));
     }
+    return;
+  }
+  if (msg.type === 'openaiResetCreditResult') {
+    // Point-to-point, like fileResponse: settled against this link only.
+    const pending = link.resetCredits.get(msg.reqId);
+    link.resetCredits.delete(msg.reqId);
+    pending?.resolve({ outcome: msg.outcome, ...(msg.message ? { message: msg.message } : {}) });
     return;
   }
   if (msg.type === 'transcription') {
