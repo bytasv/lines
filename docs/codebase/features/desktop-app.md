@@ -131,6 +131,7 @@ point a user at.
 - `notifyUpdate(version, kind)` — the once-per-version notification, `'ready'` or `'available'`
 - `offerMoveToApplications()` — the once-only offer to move a packaged app into Applications
 - `openPairingWindow` — the data-URL window showing a pairing code
+- `openLinesForPairing` — first-launch/relaunch while unpaired: opens Lines with the code handed over in the fragment
 - `UpdateManager.requestRestart` / `.busy` / `.blockers` / `.current`
 - `loadConfig()` / `isLocalMode()` (`desktop/src/config.ts`)
 - `foreignBridgeLock()` — reads `~/.lines-app/bridge.lock`; null unless it names a different,
@@ -208,7 +209,7 @@ no Cmd-Tab and — the sharper problem — no application menu, so Cmd-C/Cmd-V w
 The shell's own window opens `appUrlForOwnWindow()`
 (see [end-to-end-encryption](end-to-end-encryption.md)), not `appUrl()` directly: in hosted mode
 its socket goes out over the relay like any other browser's, so the bridge cannot tell it apart
-from a phone by locality alone. Two things ride the URL **fragment** — never the query string,
+from a phone by locality alone. Up to three things ride the URL **fragment** — never the query string,
 which the server would see:
 
 - `enroll=<code>`, always present in relay mode (every relayed owner channel must be encrypted),
@@ -223,10 +224,19 @@ which the server would see:
   [hosted-machine-access](hosted-machine-access.md)'s Architectural rules for the server-side
   half. An older desktop build sends no `host`, so that window's "Browse…" simply stays hidden,
   same as before this existed.
+- `pair=<code>`, present only while the machine is unpaired (`pairingCode` set, relay mode). The
+  web client stashes it in `sessionStorage` before any sign-in redirect and offers it on its
+  connect screen for one explicit click — see [hosted-machine-access](hosted-machine-access.md).
+  An older web build ignores it, leaving manual entry.
 
 If registration
-returns a pairing code, a small `BrowserWindow` shows it as a data URL, independent of `web/dist`
-even existing. This window navigates nowhere at all — not even to the app's own origin — so
+returns a pairing code, the shell opens Lines itself via `openLinesForPairing()` (the app window
+with `pair=<code>` in its fragment; with `openIn=browser`, the system browser at
+`<webUrl>#pair=<code>`). A relaunch while unpaired (`second-instance`) does the same. The small
+`BrowserWindow` showing the code as a data URL (independent of `web/dist` even existing) stays
+reachable from the tray's `Pairing code: …` item, is shown on a re-register after an unpair or
+`1008`, and also opens when the app window fails to load, so pairing never depends on the hosted
+web app being reachable. This window navigates nowhere at all — not even to the app's own origin — so
 clicking the web URL printed on the card opens the real browser and leaves the code on screen. The
 code auto-refreshes every ~14 minutes while unpaired, and "Get a new code" in
 the tray does the same on demand — both rely on `registerDevice` re-issuing a code for an

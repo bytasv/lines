@@ -141,6 +141,39 @@ export function pinnedDeviceIds(): string[] {
 }
 
 /**
+ * The fragment's enrollment code, kept across sign-in: Clerk's redirect drops
+ * the fragment, and the code is read lazily — by the connecting screen, after
+ * sign-in — so without this a first launch that signs in first loses it.
+ * sessionStorage (this tab only), with the pairing code's 15-minute lifetime.
+ */
+const PENDING_ENROLL_KEY = 'lines.enrollCode';
+const PENDING_ENROLL_TTL_MS = 15 * 60_000;
+
+/**
+ * Copy `#enroll` into the stash at module load, before anything can redirect.
+ * The URL is left alone: {@link takeEnrollCodeFromUrl} and
+ * {@link dropEnrollParamFromUrl} still consume it from there when it survives.
+ */
+export function stashEnrollCodeFromUrl(): void {
+  const code = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('enroll');
+  if (!code) return;
+  sessionStorage.setItem(PENDING_ENROLL_KEY, JSON.stringify({ code: code.toUpperCase(), at: Date.now() }));
+}
+
+/** The stashed enrollment code, consumed: read once, then gone. */
+function takePendingEnrollCode(): string | null {
+  const raw = sessionStorage.getItem(PENDING_ENROLL_KEY);
+  sessionStorage.removeItem(PENDING_ENROLL_KEY);
+  try {
+    const stash = JSON.parse(raw ?? 'null') as { code?: unknown; at?: unknown } | null;
+    if (typeof stash?.code !== 'string' || typeof stash.at !== 'number') return null;
+    return Date.now() - stash.at < PENDING_ENROLL_TTL_MS ? stash.code : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * An enrollment code handed to this page by the machine itself, consumed once.
  *
  * Read from the URL **fragment**: a query string is sent to the server on the
@@ -155,7 +188,11 @@ export function takeEnrollCodeFromUrl(): { code: string; viaQuery: boolean } | n
   const fromHash = hash.get('enroll');
   const fromQuery = query.get('enroll');
   const code = fromHash ?? fromQuery;
-  if (!code) return null;
+  if (!code) {
+    // The fragment did not survive sign-in; the stash did.
+    const stashed = takePendingEnrollCode();
+    return stashed ? { code: stashed, viaQuery: false } : null;
+  }
 
   dropEnrollParamFromUrl();
   return { code: code.toUpperCase(), viaQuery: !fromHash };
@@ -167,6 +204,7 @@ export function takeEnrollCodeFromUrl(): { code: string; viaQuery: boolean } | n
  * already pinned this machine — so a reload cannot act on it again.
  */
 export function dropEnrollParamFromUrl(): void {
+  sessionStorage.removeItem(PENDING_ENROLL_KEY);
   const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
   const query = new URLSearchParams(window.location.search);
   if (!hash.has('enroll') && !query.has('enroll')) return;

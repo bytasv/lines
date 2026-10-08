@@ -1138,10 +1138,15 @@ function appUrl(): string {
  * reason: the bridge sees a relayed socket and cannot tell this window from a
  * phone, so it would hide "Browse…" — a Finder dialog is only useless on a
  * screen nobody is at, and this window is on the host's screen.
+ *
+ * While this machine is unpaired the fragment also carries its pairing code
+ * (`pair=<code>`), so after sign-in the connect screen can offer it for one
+ * explicit click instead of making the user copy it off the tray.
  */
 function appUrlForOwnWindow(): string {
   const params = new URLSearchParams();
   if (device) params.set('host', device.id);
+  if (RELAY_MODE && pairingCode) params.set('pair', pairingCode);
   if (!LOCAL_MODE) {
     try {
       params.set('enroll', currentEnrollment()?.code ?? mintEnrollmentCode().code);
@@ -1543,8 +1548,11 @@ function openWindow() {
   w.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     // -3 is ERR_ABORTED, which every cancelled navigation reports.
     if (!isMainFrame || code === -3) return;
-    shellLog(`[window] load failed ${code} ${description} ${url}`);
+    shellLog(`[window] load failed ${code} ${description} ${redactQuery(url)}`);
     void w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadErrorHtml(description))}`);
+    // Pairing must not depend on the hosted app: if it is unreachable, the code
+    // still has to reach the user.
+    if (pairingCode) openPairingWindow(pairingCode);
   });
   mirrorRendererLog(w);
   w.on('closed', () => {
@@ -1649,6 +1657,16 @@ function syncDock() {
 /** "Open Lines", per the user's choice. Local mode has only the one route. */
 function openLinesDefault() {
   if (RELAY_MODE && openIn === 'browser') void shell.openExternal(config.webUrl);
+  else openWindow();
+}
+
+/**
+ * First launch (or a relaunch) while unpaired: open Lines itself, with the
+ * pairing code in the fragment for the connect screen to offer. The small
+ * pairing window stays one tray click away.
+ */
+function openLinesForPairing(code: string) {
+  if (openIn === 'browser') void shell.openExternal(`${config.webUrl}#pair=${encodeURIComponent(code)}`);
   else openWindow();
 }
 
@@ -2304,7 +2322,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => {
     // Relaunching from Finder or Spotlight used to do nothing at all in hosted
     // mode, which reads as a broken app.
-    if (pairingCode) openPairingWindow(pairingCode);
+    if (pairingCode) openLinesForPairing(pairingCode);
     else openLinesDefault();
   });
   // Clicking the dock tile with the window closed. Only reachable while a tile
@@ -2430,9 +2448,10 @@ async function start() {
   startUpdateChecks();
 
   // Hosted mode is a background app: the only reason to put a window on screen
-  // is a pairing code the user has to read.
+  // is a machine still waiting to be paired, and then it is Lines itself, with
+  // the code handed over for the user to confirm.
   if (LOCAL_MODE) openWindow();
-  else if (pairingCode) openPairingWindow(pairingCode);
+  else if (pairingCode) openLinesForPairing(pairingCode);
 }
 
 // The tray app keeps running with no windows open — that is the point of a

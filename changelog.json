@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.15",
+      "date": "2026-10-08",
+      "items": [
+        "When the Lines desktop app opens for the first time, signing in now shows its pairing code ready to confirm, so one click connects the machine."
+      ]
+    },
+    {
       "version": "0.1.14",
       "date": "2026-10-07",
       "items": [
@@ -107,5 +114,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "A new, unpaired Lines desktop app now opens Lines itself with the pairing code ready to confirm, instead of only a small code window."
+  ]
 }

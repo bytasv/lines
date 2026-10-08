@@ -2357,7 +2357,8 @@
         "storage/src/diagnostics.ts",
         "web/src/lib/splash.ts",
         "server/src/connectionPolicy.ts",
-        "server/src/locality.ts"
+        "server/src/locality.ts",
+        "web/src/lib/deviceMemory.ts"
       ],
       "symbols": [
         "Device",
@@ -2443,7 +2444,9 @@
         "RELAY_SECRET_HEADER",
         "presentedDeviceSecret",
         "isTokenRefresh",
-        "COLLAB_MIN_PROTOCOL"
+        "COLLAB_MIN_PROTOCOL",
+        "pendingPairCode",
+        "takePairCodeFromUrl"
       ],
       "tests": [
         "storage/src/schema.credentials.test.ts",
@@ -2542,7 +2545,9 @@
         "the bridge sends its device secret in the x-lines-device-secret header, never the URL; the relay still reads the deprecated secret query when the header is absent and logs neither form, so the relay must deploy before a desktop release whose bridge sends only the header",
         "APP_PROTOCOL_VERSION is 6 (host-issued guest grants) and the relay's COLLAB_MIN_PROTOCOL defaults to 6, so a guest reaches only a bridge that admits guests on grants it minted; an older bridge keeps serving its owner",
         "every id that becomes a path under ~/.lines-app passes isValidStoreId: a relay channel whose attested user id or grant host id is malformed is closed 1008 before any context exists, userStoreRoot and UserRegistry.get throw on one, a malformed session id has no transcript and deleting it is a no-op, and loadTranscript for a session the context does not know answers empty",
-        "the bridge makes ~/.lines-app 0700 at startup whoever started it (Tilt and a terminal start it without the desktop shell), and creates transcripts and rewind sidecars 0600"
+        "the bridge makes ~/.lines-app 0700 at startup whoever started it (Tilt and a terminal start it without the desktop shell), and creates transcripts and rewind sidecars 0600",
+        "the pairing code reaches the web app only in a fragment and is stashed in sessionStorage across sign-in",
+        "claiming a handed-over pairing code always needs one explicit click"
       ],
       "architecturalRules": [
         "only the secret's hash is stored, never the plaintext, so a database compromise cannot yield anything that impersonates a device",
@@ -2785,7 +2790,8 @@
         "ensurePrivateAppRoot",
         "installMediaPermissions",
         "APP_PERMISSIONS",
-        "localModeCsp"
+        "localModeCsp",
+        "openLinesForPairing"
       ],
       "tests": [
         "server/src/updates.test.ts",
@@ -2834,7 +2840,8 @@
         "the shell logs power transitions ([power] suspend/resume/lock-screen/unlock-screen), relay link changes ([relay-status]), child spawn/exit with uptime, and device registration outcome (never the pairing code)",
         "the app window's console is mirrored to the log as [renderer] — only [diag]/[ws]/[e2ee] lines plus warnings/errors — along with did-finish-load (URL without fragment), render-process-gone and unresponsive; observed from the main process, so the window keeps its no-preload/no-IPC contract",
         "the tray's Collect diagnostics… zips both log generations, run/*/*.json with token deleted, the bridge lock and a summary.json into ~/.lines-app/diagnostics via /usr/bin/ditto; device.json is never copied",
-        "ship.mjs stamps desktopPending in changelog.json into a new desktop release when it commits a version bump, in the same commit; the release workflow's guard job fails if desktopPending is non-empty because CI cannot commit the stamp (see whats-new)"
+        "ship.mjs stamps desktopPending in changelog.json into a new desktop release when it commits a version bump, in the same commit; the release workflow's guard job fails if desktopPending is non-empty because CI cannot commit the stamp (see whats-new)",
+        "while unpaired, first launch and relaunch open Lines itself with the pairing code in the URL fragment (pair=<code>, or #pair= in the system browser when openIn=browser); the data-URL pairing window stays in the tray and opens if the app window fails to load"
       ],
       "architecturalRules": [
         "context menu hooked inside attachNavigationGuards so every window, including popups, gets it without a preload",

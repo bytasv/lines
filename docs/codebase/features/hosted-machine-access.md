@@ -129,7 +129,7 @@ relay pipes frames between them, and the UI that gates all of it.
 - `web/src/lib/wake.ts` — `bootDial`, the optimistic pre-list dial decision the gate makes at boot
   (see Data flow); `wakeAction`/`probeExpired`/`wakeDebounced` live in the same file but belong to
   [multi-machine-client](multi-machine-client.md)
-- `web/src/components/ConnectMachine.tsx` — pairing screen and its error siblings
+- `web/src/components/ConnectMachine.tsx` — pairing screen (manual form or handed-over-code confirm) and its error siblings
 - `web/src/components/ChooseMachine.tsx` — the first-visit machine list, shown before anything
   connects
 - `web/src/components/ConnectingMachine.tsx` — shown between "device chosen" and the bridge's
@@ -482,7 +482,12 @@ protocol change.
    it calls `register` again on a timer (and on demand, from "Get a new code") to keep a valid
    code on screen, which only works because re-registering an *unclaimed* device is a repeat, not
    a conflict — see [desktop-app](desktop-app.md).
-2. The signed-in user types that code into the web app, which calls `claim`. Storage looks the
+2. The signed-in user enters that code in the web app — typed by hand, or handed over: the
+   desktop app opens its own window (or the system browser) with `#pair=<code>`, which
+   `takePairCodeFromUrl` stashes in `sessionStorage` (15-minute TTL) at module load because the
+   fragment does not survive Clerk sign-in. `ConnectMachine` then shows "Pair this machine to
+   <email>" with the code read-only and one button; claiming always needs that click. The web
+   app calls `claim`. Storage looks the
    code up, checks it is unexpired and unrevoked, and sets `userId` — the step that actually
    binds machine to account. The code is cleared on use so it cannot be replayed.
 3. The bridge dials the relay's `/agent` with its id and the plaintext secret (in the
@@ -536,7 +541,9 @@ used because these responses carry Clerk-authenticated user data.
 
 1. `DeviceGate` mounts, calls `useDevices().refresh()` (`GET /v1/devices`), and renders
    the boot splash ("Finding your machines…") until it resolves.
-2. Zero devices → `ConnectMachine` (the pairing form + diagram). Claiming a code refreshes the
+2. Zero devices, or a handed-over pairing code pending (`pairingNew` seeded from
+   `pendingPairCode()`, so a user with other machines still gets it) → `ConnectMachine` (the
+   pairing form + diagram, or the confirm variant). Claiming a code refreshes the
    list, which re-renders the gate off the new result — no navigation involved.
 3. One or more devices, and this browser has no remembered choice → `ChooseMachine`: the whole
    list, with each machine's health dot, platform, last-seen, and an owner badge when it is
@@ -778,6 +785,9 @@ refuse.
   flag derived from the relay's presence report — see
   [session-collaboration](session-collaboration.md) and
   [multi-machine-client](multi-machine-client.md).
+- A pairing code reaches the web app only in the URL fragment and is stashed in `sessionStorage`
+  across sign-in (15-minute TTL); claiming a handed-over code always needs one explicit click, and
+  an expired one falls back to manual entry. The `#enroll` code is stashed the same way.
 - Pairing a new machine only becomes the active one automatically if there was no machine active
   before; otherwise silently switching a working session to a different computer would be worse
   than an extra "Use this" click.

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
+import { useUser } from '@clerk/clerk-react';
 import {
   Alert,
+  Anchor,
   Avatar,
   Button,
   Card,
@@ -23,7 +25,8 @@ import {
   pendingInvites,
   type PendingInvite,
 } from '../lib/shares';
-import { rememberDeviceId } from '../lib/storage';
+import { rememberDeviceId, rememberedDeviceId } from '../lib/storage';
+import { clearPendingPairCode, pendingPairCode } from '../lib/deviceMemory';
 import { switchDevice } from '../ws';
 import { adoptJoinGrant } from '../lib/e2ee';
 import { DownloadDesktopApp } from './DownloadDesktopApp';
@@ -39,27 +42,93 @@ import { PairingDiagram } from './PairingDiagram';
  * Pairing is code-based rather than a link because the machine registers itself
  * before any user is involved — it cannot know who is signing in — so the code is
  * what carries the user's intent across to it.
+ *
+ * When the desktop app opened this page itself, it handed its code over (see
+ * `takePairCodeFromUrl`), and the form becomes a confirmation: the code is
+ * filled in and the account it will join is named, but claiming it still takes
+ * an explicit click — the window may be signed in to an account the user did
+ * not mean.
  */
 export function ConnectMachine() {
   const refresh = useDevices((s) => s.refresh);
-  const [code, setCode] = useState('');
+  const { user } = useUser();
+  const [handed, setHanded] = useState(() => pendingPairCode() !== null);
+  const [code, setCode] = useState(() => pendingPairCode() ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const enterDifferentCode = () => {
+    clearPendingPairCode();
+    setHanded(false);
+    setCode('');
+    setError(null);
+  };
 
   const submit = async () => {
     if (!code.trim() || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await claimDevice(code);
+      const device = await claimDevice(code);
+      clearPendingPairCode();
+      // Straight to connecting rather than the machine picker — but only when no
+      // machine was active before: silently moving a working session to a
+      // different computer would be worse than an extra click.
+      if (!rememberedDeviceId()) rememberDeviceId(device.id);
       // The gate re-renders off this list, so a successful claim is what takes
       // the user into the app — no navigation involved.
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      if (handed && message === 'unknown or expired code') {
+        // The desktop app refreshes its code every 15 minutes, so a window left
+        // open that long holds a dead one. Fall back to typing the current one.
+        enterDifferentCode();
+        setError('That code has expired. Use the current code from the Lines menu-bar icon.');
+      } else {
+        setError(message);
+      }
       setBusy(false);
     }
   };
+
+  if (handed) {
+    const email = user?.primaryEmailAddress?.emailAddress;
+    return (
+      <GateShell>
+        <Stack gap="lg" maw={520} w="100%">
+          <PendingInvitations />
+          <Card withBorder radius="md" p="lg">
+            <Stack gap="md">
+              <Stack gap={4}>
+                <Title order={3}>{email ? `Pair this machine to ${email}` : 'Pair this machine'}</Title>
+                <Text size="sm" c="dimmed">
+                  The Lines desktop app on this computer is waiting to be paired with your
+                  account, so it can run the agent on your files.
+                </Text>
+              </Stack>
+
+              <TextInput label="Pairing code" value={code} readOnly />
+
+              {error && (
+                <Alert color="red" icon={<IconAlertCircle size={16} />} variant="light">
+                  {error}
+                </Alert>
+              )}
+
+              <Button onClick={() => void submit()} disabled={busy} loading={busy} autoFocus>
+                Pair this machine
+              </Button>
+
+              <Anchor component="button" type="button" size="sm" onClick={enterDifferentCode} disabled={busy}>
+                Enter a different code
+              </Anchor>
+            </Stack>
+          </Card>
+        </Stack>
+      </GateShell>
+    );
+  }
 
   return (
     <GateShell>

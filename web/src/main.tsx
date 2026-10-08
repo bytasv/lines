@@ -35,10 +35,11 @@ import {
   revokeDevice,
   setStorageTokenProvider,
 } from './lib/storage';
+import { pendingPairCode, takePairCodeFromUrl } from './lib/deviceMemory';
 import { useDevices } from './lib/devices';
 import { bootDial } from './lib/wake';
 import { trackKeyboardInset } from './lib/viewport';
-import { learnHostDeviceIdFromDevServer, takeHostDeviceIdFromUrl } from './lib/e2ee';
+import { learnHostDeviceIdFromDevServer, stashEnrollCodeFromUrl, takeHostDeviceIdFromUrl } from './lib/e2ee';
 import { registerServiceWorker } from './lib/push';
 import { ConnectMachine, ConnectMachineError } from './components/ConnectMachine';
 import { ChooseMachine } from './components/ChooseMachine';
@@ -90,8 +91,14 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
   const bootstrapped = useStore((s) => s.bootstrapped);
   /** Set from the connecting screen when the automatic choice is unreachable. */
   const [pickedId, setPickedId] = useState<string | null>(null);
-  /** Show the pairing form even though a machine is already chosen. */
-  const [pairingNew, setPairingNew] = useState(false);
+  /**
+   * Show the pairing form even though a machine is already chosen. Starts true
+   * when the desktop shell handed over a pairing code, so a user who already
+   * has machines is still offered the one in front of them.
+   */
+  const [pairingNew, setPairingNew] = useState(() => pendingPairCode() !== null);
+  /** The device count last seen loaded, so the list arriving is not mistaken for a claim. */
+  const seenCountRef = useRef<number | null>(null);
   /** The machine dialled before the list landed, if any. A ref: nothing renders from it. */
   const dialedRef = useRef<string | null>(null);
 
@@ -116,7 +123,9 @@ function DeviceGate({ children }: { children: React.ReactNode }) {
   // Leave the pairing form as soon as the account gains a machine, so a
   // successful claim lands in the app instead of sitting on a stale form.
   useEffect(() => {
-    setPairingNew(false);
+    const count = devices?.length ?? null;
+    if (seenCountRef.current !== null && count !== seenCountRef.current) setPairingNew(false);
+    if (count !== null) seenCountRef.current = count;
   }, [devices?.length]);
 
   /**
@@ -469,6 +478,10 @@ trackKeyboardInset();
 // Before the first render too, so the "+" menu's Browse gate reads the value the
 // desktop shell handed this window rather than last session's.
 takeHostDeviceIdFromUrl();
+// Likewise before any Clerk redirect, which drops the fragment: a pairing code
+// and an enrollment code the desktop shell handed over have to outlive sign-in.
+takePairCodeFromUrl();
+stashEnrollCodeFromUrl();
 // Dev only: the same answer for a plain browser tab on the dev machine, which a
 // relayed bridge would otherwise treat like a phone.
 void learnHostDeviceIdFromDevServer();
