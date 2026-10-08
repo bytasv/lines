@@ -131,7 +131,7 @@ point a user at.
 - `notifyUpdate(version, kind)` — the once-per-version notification, `'ready'` or `'available'`
 - `offerMoveToApplications()` — the once-only offer to move a packaged app into Applications
 - `openPairingWindow` — the data-URL window showing a pairing code
-- `openLinesForPairing` — first-launch/relaunch while unpaired: opens Lines with the code handed over in the fragment
+- `openLinesForPairing` — launch/relaunch while unpaired: opens Lines with the code handed over in the fragment
 - `UpdateManager.requestRestart` / `.busy` / `.blockers` / `.current`
 - `loadConfig()` / `isLocalMode()` (`desktop/src/config.ts`)
 - `foreignBridgeLock()` — reads `~/.lines-app/bridge.lock`; null unless it names a different,
@@ -232,7 +232,9 @@ which the server would see:
 If registration
 returns a pairing code, the shell opens Lines itself via `openLinesForPairing()` (the app window
 with `pair=<code>` in its fragment; with `openIn=browser`, the system browser at
-`<webUrl>#pair=<code>`). A relaunch while unpaired (`second-instance`) does the same. The small
+`<webUrl>#pair=<code>`). A relaunch while unpaired (`second-instance`) does the same. A paired
+launch of any kind (manual start, login item, update restart) opens Lines too, via
+`openLinesDefault()`, so it follows `openIn` instead of coming up as a bare tray icon. The small
 `BrowserWindow` showing the code as a data URL (independent of `web/dist` even existing) stays
 reachable from the tray's `Pairing code: …` item, is shown on a re-register after an unpair or
 `1008`, and also opens when the app window fails to load, so pairing never depends on the hosted

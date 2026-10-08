@@ -2851,7 +2851,7 @@
         "the app window's console is mirrored to the log as [renderer] — only [diag]/[ws]/[e2ee] lines plus warnings/errors — along with did-finish-load (URL without fragment), render-process-gone and unresponsive; observed from the main process, so the window keeps its no-preload/no-IPC contract",
         "the tray's Collect diagnostics… zips both log generations, run/*/*.json with token deleted, the bridge lock and a summary.json into ~/.lines-app/diagnostics via /usr/bin/ditto; device.json is never copied",
         "ship.mjs stamps desktopPending in changelog.json into a new desktop release when it commits a version bump, in the same commit; the release workflow's guard job fails if desktopPending is non-empty because CI cannot commit the stamp (see whats-new)",
-        "while unpaired, first launch and relaunch open Lines itself with the pairing code in the URL fragment (pair=<code>, or #pair= in the system browser when openIn=browser); the data-URL pairing window stays in the tray and opens if the app window fails to load"
+        "every launch (manual start, login item, update restart, relaunch) opens Lines per openIn: the app window, or the system browser when openIn=browser; while unpaired it carries the pairing code in the URL fragment (pair=<code>, or #pair= in the browser); the data-URL pairing window stays in the tray and opens if the app window fails to load"
       ],
       "architecturalRules": [
         "context menu hooked inside attachNavigationGuards so every window, including popups, gets it without a preload",

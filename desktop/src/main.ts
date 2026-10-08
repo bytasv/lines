@@ -2400,7 +2400,8 @@ async function start() {
     savePrefs();
   }
   // Hosted mode starts as a background app: no dock tile, no app switcher entry.
-  // `syncDock` puts one up for as long as a window is open. Local mode has a real
+  // `syncDock` puts one up for as long as a window is open, which on launch is
+  // straight away unless Lines opens in the browser. Local mode has a real
   // window throughout, so it gets a tile with our own art — `show()` because the
   // packaged Info.plist carries LSUIElement, which would otherwise suppress it
   // even here.
@@ -2447,11 +2448,12 @@ async function start() {
 
   startUpdateChecks();
 
-  // Hosted mode is a background app: the only reason to put a window on screen
-  // is a machine still waiting to be paired, and then it is Lines itself, with
-  // the code handed over for the user to confirm.
-  if (LOCAL_MODE) openWindow();
-  else if (pairingCode) openLinesForPairing(pairingCode);
+  // Every launch opens Lines, per the user's openIn choice, the same as a
+  // relaunch from Finder: a login item or an update restart that comes back as a
+  // bare tray icon reads as an app that failed to open. While unpaired it is
+  // Lines with the code handed over for the user to confirm.
+  if (pairingCode) openLinesForPairing(pairingCode);
+  else openLinesDefault();
 }
 
 // The tray app keeps running with no windows open — that is the point of a
