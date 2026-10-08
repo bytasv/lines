@@ -40,19 +40,9 @@ const PAIR_CODE_STORAGE_KEY = 'lines.pairCode';
 /** Codes expire 15 minutes after the desktop app shows one; a stash older than that is useless. */
 const PAIR_CODE_TTL_MS = 15 * 60_000;
 
-export function takePairCodeFromUrl(): void {
-  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-  const code = hash.get('pair');
-  if (!code) return;
+/** Keep a handed-over code. The URL half lives in `takePairCodeFromUrl` (e2ee.ts), which this file's server-side test cannot typecheck. */
+export function stashPairCode(code: string): void {
   sessionStorage.setItem(PAIR_CODE_STORAGE_KEY, JSON.stringify({ code: code.toUpperCase(), at: Date.now() }));
-
-  hash.delete('pair');
-  const rest = hash.toString();
-  window.history.replaceState(
-    null,
-    '',
-    `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ''}`,
-  );
 }
 
 /** The handed-over pairing code, or null when there is none or it is too old to work. */

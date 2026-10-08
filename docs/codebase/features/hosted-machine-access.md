@@ -484,7 +484,7 @@ protocol change.
    a conflict — see [desktop-app](desktop-app.md).
 2. The signed-in user enters that code in the web app — typed by hand, or handed over: the
    desktop app opens its own window (or the system browser) with `#pair=<code>`, which
-   `takePairCodeFromUrl` stashes in `sessionStorage` (15-minute TTL) at module load because the
+   `takePairCodeFromUrl` (`e2ee.ts`) stashes in `sessionStorage` (15-minute TTL) at module load because the
    fragment does not survive Clerk sign-in. `ConnectMachine` then shows "Pair this machine to
    <email>" with the code read-only and one button; claiming always needs that click. The web
    app calls `claim`. Storage looks the

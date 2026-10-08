@@ -15,6 +15,7 @@
  * See docs — origin separation narrows that, nothing in the browser closes it.
  */
 import { generateIdentity, type CryptoKeyLike, type Identity, type PublicKeyB64 } from '@lines/shared';
+import { stashPairCode } from './deviceMemory';
 
 /**
  * Why this browser cannot do cryptography at all, or null when it can.
@@ -217,6 +218,26 @@ export function dropEnrollParamFromUrl(): void {
     null,
     '',
     `${window.location.pathname}${search ? `?${search}` : ''}${rest ? `#${rest}` : ''}`,
+  );
+}
+
+/**
+ * Take the pairing code the desktop shell handed this page in `#pair=<code>`,
+ * stash it across sign-in (Clerk's redirect drops the fragment) and strip it
+ * from the URL at once, leaving the other fragment params where they were.
+ */
+export function takePairCodeFromUrl(): void {
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const code = hash.get('pair');
+  if (!code) return;
+  stashPairCode(code);
+
+  hash.delete('pair');
+  const rest = hash.toString();
+  window.history.replaceState(
+    null,
+    '',
+    `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ''}`,
   );
 }
 

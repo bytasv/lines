@@ -35,11 +35,16 @@ import {
   revokeDevice,
   setStorageTokenProvider,
 } from './lib/storage';
-import { pendingPairCode, takePairCodeFromUrl } from './lib/deviceMemory';
+import { pendingPairCode } from './lib/deviceMemory';
 import { useDevices } from './lib/devices';
 import { bootDial } from './lib/wake';
 import { trackKeyboardInset } from './lib/viewport';
-import { learnHostDeviceIdFromDevServer, stashEnrollCodeFromUrl, takeHostDeviceIdFromUrl } from './lib/e2ee';
+import {
+  learnHostDeviceIdFromDevServer,
+  stashEnrollCodeFromUrl,
+  takeHostDeviceIdFromUrl,
+  takePairCodeFromUrl,
+} from './lib/e2ee';
 import { registerServiceWorker } from './lib/push';
 import { ConnectMachine, ConnectMachineError } from './components/ConnectMachine';
 import { ChooseMachine } from './components/ChooseMachine';
