@@ -86,6 +86,14 @@
   ],
   "desktop": [
     {
+      "version": "0.2.48",
+      "date": "2026-10-08",
+      "items": [
+        "Workflow steps created through Lines tools now default to Assist, and recipes from other people run in Assist or Plan instead of asking about every tool call.",
+        "A new, unpaired Lines desktop app now opens Lines itself with the pairing code ready to confirm, instead of only a small code window."
+      ]
+    },
+    {
       "version": "0.2.47",
       "date": "2026-10-07",
       "items": [
@@ -122,8 +130,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Workflow steps created through Lines tools now default to Assist, and recipes from other people run in Assist or Plan instead of asking about every tool call.",
-    "A new, unpaired Lines desktop app now opens Lines itself with the pairing code ready to confirm, instead of only a small code window."
-  ]
+  "desktopPending": []
 }
