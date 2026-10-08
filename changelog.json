@@ -93,6 +93,13 @@
   ],
   "desktop": [
     {
+      "version": "0.2.50",
+      "date": "2026-10-08",
+      "items": [
+        "Lines now opens its window when it starts or restarts after an update, instead of waiting in the menu bar."
+      ]
+    },
+    {
       "version": "0.2.49",
       "date": "2026-10-08",
       "items": [
@@ -145,7 +152,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Lines now opens its window when it starts or restarts after an update, instead of waiting in the menu bar."
-  ]
+  "desktopPending": []
 }
