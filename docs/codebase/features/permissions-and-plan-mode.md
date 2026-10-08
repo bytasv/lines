@@ -11,8 +11,9 @@ deliverable is written and reviewed.
 
 - **Mode selector** — pick how much a session or workflow step's tool calls are gated by the
   permission guard. The shared list holds five modes and their descriptions; the composer/settings
-  segmented controls show three of them (Plan, Assist, Full Auto) as an escalating scale, while the
-  workflow step editor/library `Select`s still offer all five.
+  segmented controls and every `Select` (workflow step editor, recipe run modal, MCP `save_step`)
+  offer the same three (Plan, Assist, Full Auto) as an escalating scale. A step already holding a
+  legacy value (`default`, `acceptEdits`) shows it as an extra option so the field is not blank.
 - **Resolution provenance** — close every path by which an `ALWAYS_ASK_TOOLS` request
   (`ExitPlanMode`, `AskUserQuestion`) could be resolved without a human clicking a card, and
   record *how* every permission resolution happened so a report like "I never approved that
@@ -180,8 +181,11 @@ deliverable is written and reviewed.
 
 ## Symbols
 
-- `PERMISSION_MODES` — `{ value, label, description }[]`, single source of truth for all five
-  pickers; all five entries stay in it even though only three appear as pills
+- `PERMISSION_MODES` — `{ value, label, description }[]`, single source of truth for mode
+  copy; all five entries stay in it so legacy stored values still get a label, even though pickers
+  offer only three
+- `permissionModeSelectData(current)` — the three picker modes plus `current` when it is a legacy
+  value outside them
 - `PERMISSION_MODE_SEGMENTS` — a subset of `PERMISSION_MODES` (`plan`, `auto`, `bypassPermissions`,
   in that order — an escalating scale, not `PERMISSION_MODES`' own order) mapped to Mantine
   `SegmentedControl` data, each label wrapped in a `Tooltip` showing the description
@@ -339,8 +343,8 @@ deliverable is written and reviewed.
 `PERMISSION_MODES` (`web/src/lib/permissionModes.tsx`) feeds every picker directly — there is no
 server round-trip for the mode list, unlike the model selector. The composer/settings segmented
 controls use `PERMISSION_MODE_SEGMENTS`, a three-item subset (Plan, Assist, Full Auto) in its own
-order; the workflow Selects use the full `PERMISSION_MODES` (all five, its own order) +
-`renderPermissionModeOption`.
+order; the workflow Selects use `permissionModeSelectData` (the same three, plus the step's current value
+when it is legacy) + `renderPermissionModeOption`.
 
 The chosen value is UI/storage-level only. `'auto'` is a client-and-guard concept: the SDK
 session actually runs in `acceptEdits`, and the bridge guard decides per tool call whether to
@@ -822,11 +826,16 @@ is open, otherwise the inline one.
 
 ## Business rules
 
-- All five `PermissionMode` values stay in `PERMISSION_MODES` and selectable in the workflow step
-  `Select`s, including `acceptEdits` — preset workflows (`web/src/lib/workflowPresets.ts`,
-  `server/src/workflows.ts`) ship steps with `permissionMode: 'acceptEdits'`, so dropping it from
-  the option list would blank those Selects. `default` and `acceptEdits` have no pill in the
-  composer/settings segmented controls, which only show Plan, Assist, and Full Auto.
+- Pickers offer only Plan, Assist and Full Auto. The `PermissionMode` union,
+  `PERMISSION_MODE_SET` validation, the runtime mapping and the codex sandbox mapping keep all five
+  values, so existing and synced steps/sessions with `default` or `acceptEdits` still validate and
+  run in their stored mode; stored data is never rewritten (that would silently raise a step's
+  permission level). A step holding a legacy value shows it as an extra Select option until the
+  user changes it; it cannot be selected again afterwards. The MCP `save_step` enum is the same
+  three.
+- New steps (editor, step library, MCP default) and shipped presets default to `auto`.
+- Intentionally still using `default`: the guest workflow safety cap, and the synced-session clamp
+  from `bypassPermissions` to `default`.
 - `default` displays as **Manual** — the stored value is unchanged, only the label differs — for
   the workflow step badge (`permissionModeLabel`) and any session outside the three pill values.
 - The shipped new-session default is `'auto'` ("Assist"), and a session lands on `'auto'` (not
@@ -834,8 +843,9 @@ is open, otherwise the inline one.
   normal `ExitPlanMode` approval, the interrupted-approval workflow-step resume, and the
   loop-guard exit path. All three go through `setPermissionMode` rather than a bare meta write, so
   the worker is told (`worker.setPermissionMode`) instead of only the stored meta changing. Where
-  `'auto'` would be the target, a session carrying `permissionCeiling` (set when it runs someone
-  else's recipe) resumes in `'default'` instead — see [recipes](recipes.md).
+  `'auto'` would be the target, a session carrying a legacy `permissionCeiling` (older foreign
+  recipe runs set `default`; new runs set none) resumes in `'default'` instead — see
+  [recipes](recipes.md).
 - `ExitPlanMode` and `AskUserQuestion` always resolve to an explicit `'ask'` from the hook, in
   every permission mode — never a bare `continue: true` that a mode or settings entry could
   pre-empt. This holds regardless of the target path.

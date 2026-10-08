@@ -65,8 +65,8 @@ const STEP: JsonSchemaNode = {
     model: { type: 'string', description: `Model id, e.g. ${DEFAULT_MODEL}. Defaults to ${DEFAULT_MODEL}.` },
     permissionMode: {
       type: 'string',
-      enum: ['default', 'auto', 'plan', 'acceptEdits', 'bypassPermissions'],
-      description: "Defaults to 'default'. 'plan' makes the step read-only until its plan is approved.",
+      enum: ['plan', 'auto', 'bypassPermissions'],
+      description: "Defaults to 'auto'. 'plan' makes the step read-only until its plan is approved.",
     },
     reasoningEffort: {
       type: 'string',
@@ -418,7 +418,7 @@ function toStepContent(s: Record<string, unknown>): StepContent {
     name: str(s.name).trim(),
     promptTemplate: str(s.promptTemplate),
     model: str(s.model).trim() || DEFAULT_MODEL,
-    permissionMode: (str(s.permissionMode).trim() || 'default') as StepContent['permissionMode'],
+    permissionMode: (str(s.permissionMode).trim() || 'auto') as StepContent['permissionMode'],
     ...(effort ? { reasoningEffort: effort as StepContent['reasoningEffort'] } : {}),
     ...(routing ? { routing } : {}),
     autoAdvance: bool(s.autoAdvance, false),

@@ -206,7 +206,7 @@ test('someone else’s recipe does not run until its exact prompt is confirmed',
   assert.deepEqual(h.calls, ['prompt', 'increment']);
 });
 
-test('a confirmed stranger’s recipe runs asking for every tool, whatever the runner’s default', () => {
+test('a confirmed stranger’s recipe runs in Assist at most, whatever the runner’s default', () => {
   const bypass = harness();
   bypass.recipes.setSharedRecipes([theirs()]);
   const ran = commands.runRecipe(
@@ -216,7 +216,7 @@ test('a confirmed stranger’s recipe runs asking for every tool, whatever the r
       confirmedPrompts: ['Install their tooling.'],
     }),
   )!;
-  assert.equal(bypass.sessions.get(ran)!.permissionMode, 'default');
+  assert.equal(bypass.sessions.get(ran)!.permissionMode, 'auto');
 
   const plan = harness();
   plan.recipes.setSharedRecipes([theirs()]);
@@ -245,7 +245,7 @@ test('a run with a stranger’s recipe in it parks after every step and never es
   for (const step of wf.steps) {
     assert.ok(!('kind' in step && step.kind === 'ref'));
     assert.equal((step as { autoAdvance: boolean }).autoAdvance, false, 'each next prompt waits for the user');
-    assert.equal((step as { permissionMode: string }).permissionMode, 'default');
+    assert.equal((step as { permissionMode: string }).permissionMode, 'auto');
   }
 });
 
@@ -282,15 +282,18 @@ test('an own recipe this machine has not verified is refused until it is reviewe
   assert.ok(commands.runRecipe(h.ctx, runMsg(h, ref)), 'runs straight after the review');
 });
 
-test('a stranger’s recipe session resumes in Manual, not Assist, once its plan is approved', () => {
+test('a stranger’s recipe run sets no ceiling, but a legacy one still holds', () => {
   const h = harness();
   h.recipes.setSharedRecipes([theirs()]);
   const ran = commands.runRecipe(
     h.ctx,
     runMsg(h, [{ ownerId: 'u2', recipeId: 'r9' }], { permissionMode: 'plan', confirmedPrompts: ['Install their tooling.'] }),
   )!;
-  // The ceiling is what the plan-approval switch reads (sessions.resolvePermission).
-  assert.equal(h.sessions.get(ran)!.permissionCeiling, 'default');
+  // Approving its plan resumes in `auto`, which foreign runs may now use.
+  assert.equal(h.sessions.get(ran)!.permissionCeiling, undefined);
+  // A session an older bridge started still carries the `default` ceiling the
+  // plan-approval switch reads (sessions.resolvePermission).
+  h.sessions.get(ran)!.permissionCeiling = 'default';
 
   const mine = h.recipes.saveRecipe(content({ prompt: 'Mine.' }), undefined, false, undefined);
   const own = commands.runRecipe(h.ctx, runMsg(h, [{ ownerId: USER, recipeId: mine.id }], { permissionMode: 'plan' }))!;

@@ -953,12 +953,13 @@ export const RECIPE_TAG_MAX_LEN = 24;
 /** Recipes combinable into one run — also the post-expansion ceiling on a bundle. */
 export const RECIPE_BUNDLE_MAX = 8;
 /**
- * The only modes a run containing someone else's recipe may use. Its prompt was
- * written by a stranger, so every tool call it leads to is still asked about
- * (or, in plan mode, nothing is written at all) — never `auto`, `acceptEdits` or
- * `bypassPermissions`, whatever the runner's own default is.
+ * The only modes a run containing someone else's recipe may use: plan (nothing
+ * is written at all) or Assist (`auto`). Never `bypassPermissions`, whatever the
+ * runner's own default is. Note that in Assist a stranger's prompt can run tools
+ * the guard — or the user's synced auto-allowlist — clears without asking; only
+ * risky ones are still asked about.
  */
-export const FOREIGN_RECIPE_MODES: readonly PermissionMode[] = ['plan', 'default'];
+export const FOREIGN_RECIPE_MODES: readonly PermissionMode[] = ['plan', 'auto'];
 
 /**
  * Canonical tag form: lowercase, trimmed, inner whitespace to '-', anything
@@ -1314,10 +1315,11 @@ export interface SessionMeta {
   routingPaused?: boolean;
   permissionMode: PermissionMode;
   /**
-   * The most an approved plan may resume this session in. Set when the session
-   * runs someone else's recipe, whose modes are only {@link FOREIGN_RECIPE_MODES}:
-   * approving its plan then resumes in `default` rather than `auto`. Written by
-   * the bridge that started the run and never taken from a synced row.
+   * The most an approved plan may resume this session in. Legacy: older foreign
+   * recipe runs set it to `default` when {@link FOREIGN_RECIPE_MODES} excluded
+   * `auto`; new runs no longer write it, since plan approval resumes in `auto`,
+   * which is now allowed. Still honoured for sessions that carry it. Written only
+   * by the bridge that started the run and never taken from a synced row.
    */
   permissionCeiling?: 'default';
   status: SessionStatus;

@@ -121,7 +121,7 @@ test('create_workflow saves and returns the resolved workflow', async () => {
   assert.equal(body.workflow.name, 'Tiny');
   // Omitted fields take the editor's defaults rather than failing the call.
   assert.deepEqual(body.workflow.steps[0]!.model, 'claude-opus-5-5');
-  assert.deepEqual(body.workflow.steps[0]!.permissionMode, 'default');
+  assert.deepEqual(body.workflow.steps[0]!.permissionMode, 'auto');
   assert.deepEqual(body.workflow.steps[0]!.autoAdvance, false);
   assert.ok(h.workflows.list().some((w) => w.name === 'Tiny'));
 });

@@ -30,7 +30,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         promptTemplate:
           'Implement the MVP of the planned feature now. Follow the approved plan. Keep the change minimal — no extras beyond the plan.{feedback}',
         model: 'claude-opus-5-5',
-        permissionMode: 'acceptEdits',
+        permissionMode: 'auto',
         autoAdvance: false,
         freshStart: true,
       },
@@ -39,7 +39,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         promptTemplate:
           'Add tests covering the feature just implemented. Run them and make sure they pass.{feedback}',
         model: 'claude-sonnet-5-5',
-        permissionMode: 'acceptEdits',
+        permissionMode: 'auto',
         autoAdvance: false,
         freshStart: true,
       },
@@ -48,7 +48,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         promptTemplate:
           'Refactor the new code for clarity and consistency with the rest of the codebase. Keep tests green.{feedback}',
         model: 'claude-sonnet-5-5',
-        permissionMode: 'acceptEdits',
+        permissionMode: 'auto',
         autoAdvance: false,
         freshStart: true,
       },
@@ -82,7 +82,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         promptTemplate:
           'Apply the smallest fix that addresses the root cause identified above.{feedback}',
         model: DEFAULT_MODEL,
-        permissionMode: 'acceptEdits',
+        permissionMode: 'auto',
         autoAdvance: false,
         freshStart: true,
       },
@@ -91,7 +91,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         promptTemplate:
           'Add a regression test that fails without the fix and passes with it. Run it.{feedback}',
         model: 'claude-sonnet-5-5',
-        permissionMode: 'acceptEdits',
+        permissionMode: 'auto',
         autoAdvance: false,
         freshStart: true,
       },
@@ -125,7 +125,7 @@ export const WORKFLOW_PRESETS: WorkflowPreset[] = [
         promptTemplate:
           'Write clear documentation for what you explored above. Match the style of existing docs in the repo.{feedback}',
         model: 'claude-sonnet-5-5',
-        permissionMode: 'acceptEdits',
+        permissionMode: 'auto',
         autoAdvance: false,
         freshStart: true,
       },

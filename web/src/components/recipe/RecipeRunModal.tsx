@@ -23,7 +23,7 @@ import type { PermissionMode, RecipeDef, RecipeRef } from '@lines/shared';
 import { FOREIGN_RECIPE_MODES, isBundle } from '@lines/shared';
 import { useStore } from '../../store';
 import { modelComboboxProps, modelSelectData, renderModelOption } from '../../lib/modelSelect';
-import { PERMISSION_MODES, renderPermissionModeOption } from '../../lib/permissionModes';
+import { PERMISSION_MODES, permissionModeSelectData, renderPermissionModeOption } from '../../lib/permissionModes';
 import { send } from '../../ws';
 import { isHeld, recipeReviewItem, UntrustedReviewModal } from '../workflow/UntrustedReview';
 
@@ -49,7 +49,7 @@ const keyOf = (r: { ownerId: string; id: string }) => `${r.ownerId}/${r.id}`;
  *
  * A run with someone else's recipe in it is different in four ways, each also
  * enforced by the bridge (recipeCommands.runRecipe): every prompt that will run
- * is shown in full and has to be confirmed, the mode is Plan or Manual, it
+ * is shown in full and has to be confirmed, the mode is Plan or Assist, it
  * cannot run inside one of the user's workflows, and a run of several stops
  * after each recipe. An own recipe this machine has not verified does not run
  * at all until it is reviewed.
@@ -126,7 +126,7 @@ export function RecipeRunModal({
   const promptsKey = JSON.stringify(leaves.map((r) => r.prompt));
   const confirmed = confirmedFor === promptsKey;
   const effectiveMode: PermissionMode =
-    foreign && !FOREIGN_RECIPE_MODES.includes(permissionMode) ? 'default' : permissionMode;
+    foreign && !FOREIGN_RECIPE_MODES.includes(permissionMode) ? 'auto' : permissionMode;
 
   const multi = order.length > 1;
   // A single saved bundle expands server-side, so it becomes a workflow too —
@@ -264,7 +264,7 @@ export function RecipeRunModal({
             <Alert variant="light" color="orange" p="xs" icon={<IconShieldQuestion size={16} />}>
               <Text size="xs">
                 Someone else wrote {leaves.length === 1 ? 'this prompt' : 'some of these prompts'}. It runs in a
-                session of its own that asks before every tool call (or only plans), and a run of several stops after
+                session of its own that asks before risky tool calls (or only plans), and a run of several stops after
                 each recipe so you can look before the next one starts.
               </Text>
             </Alert>
@@ -357,7 +357,7 @@ export function RecipeRunModal({
             <Select
               label="Permission mode"
               comboboxProps={modelComboboxProps}
-              data={foreign ? PERMISSION_MODES.filter((m) => FOREIGN_RECIPE_MODES.includes(m.value)) : PERMISSION_MODES}
+              data={foreign ? PERMISSION_MODES.filter((m) => FOREIGN_RECIPE_MODES.includes(m.value)) : permissionModeSelectData(permissionMode)}
               renderOption={renderPermissionModeOption}
               value={effectiveMode}
               allowDeselect={false}

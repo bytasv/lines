@@ -1,6 +1,14 @@
 {
   "web": [
     {
+      "version": "0.1.16",
+      "date": "2026-10-08",
+      "items": [
+        "Workflow steps and recipe runs now offer the same three permission modes as the composer: Plan, Assist and Full Auto. Steps already set to Manual or Edits keep working.",
+        "Recipes written by someone else can now run in Assist as well as Plan."
+      ]
+    },
+    {
       "version": "0.1.15",
       "date": "2026-10-08",
       "items": [
@@ -115,6 +123,7 @@
     }
   ],
   "desktopPending": [
+    "Workflow steps created through Lines tools now default to Assist, and recipes from other people run in Assist or Plan instead of asking about every tool call.",
     "A new, unpaired Lines desktop app now opens Lines itself with the pairing code ready to confirm, instead of only a small code window."
   ]
 }

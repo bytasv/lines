@@ -87,10 +87,10 @@ export function runRecipe(ctx: UserContext, msg: RunRecipeMsg): string | null {
   // A chosen workflow is checked before the session it would be attached to
   // exists, so a refusal leaves nothing behind (attach would throw too, later).
   if (msg.workflowId) workflows.assertRunnable(msg.workflowId);
-  // Never more than plan or ask-every-time for a stranger's prompt, whatever the
-  // runner's default mode is.
+  // Never more than plan or Assist for a stranger's prompt, whatever the runner's
+  // default mode is. In Assist the guard still asks before risky tools.
   const permissionMode: PermissionMode =
-    foreign && !FOREIGN_RECIPE_MODES.includes(msg.permissionMode) ? 'default' : msg.permissionMode;
+    foreign && !FOREIGN_RECIPE_MODES.includes(msg.permissionMode) ? 'auto' : msg.permissionMode;
   // A run with someone else's recipe in it parks after every step, so each next
   // prompt runs only when the user has seen what the last one did. One made only
   // of the user's own (verified) recipes keeps the choice the modal offers: those
@@ -143,9 +143,6 @@ export function runRecipe(ctx: UserContext, msg: RunRecipeMsg): string | null {
   });
   // The name is deliberate, so the auto-titler must not overwrite it.
   meta.nameAuto = false;
-  // Approving a plan normally resumes in `auto`, which a stranger's prompt may
-  // not reach: the ceiling makes that approval resume in `default` instead.
-  if (foreign) meta.permissionCeiling = 'default';
   sessions.persistMeta(meta.id);
 
   if (wf) {

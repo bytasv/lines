@@ -261,7 +261,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       promptTemplate:
         'Implement the MVP of the planned feature now. Follow the approved plan as supplied in this prompt — that text is the whole plan; never go looking for plan files under ~/.claude/plans/ (they belong to other sessions). Keep the change minimal — no extras beyond the plan.{feedback}',
       model: 'claude-opus-5-5',
-      permissionMode: 'acceptEdits',
+      permissionMode: 'auto',
       autoAdvance: false,
       freshStart: true,
     },
@@ -270,7 +270,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       promptTemplate:
         'Add tests covering the feature just implemented. Run them and make sure they pass.{feedback}',
       model: 'claude-sonnet-5-5',
-      permissionMode: 'acceptEdits',
+      permissionMode: 'auto',
       autoAdvance: false,
       freshStart: true,
     },
@@ -279,7 +279,7 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       promptTemplate:
         'Refactor the new code for clarity and consistency with the rest of the codebase. Keep tests green.{feedback}',
       model: 'claude-sonnet-5-5',
-      permissionMode: 'acceptEdits',
+      permissionMode: 'auto',
       autoAdvance: false,
       freshStart: true,
     },

@@ -96,8 +96,9 @@ database + payments), runnable and browsable exactly like a leaf recipe.
   storage. Returns the new session id, or `null` if the cooldown swallowed it.
 - `confirmedExactly(confirmed, leaves)` — whether `runRecipe.confirmedPrompts`
   equals the bridge's own expansion's prompts, in run order.
-- `FOREIGN_RECIPE_MODES` (`shared/types.ts`) — `['plan', 'default']`, the only
-  modes a run containing someone else's recipe may use.
+- `FOREIGN_RECIPE_MODES` (`shared/types.ts`) — `['plan', 'auto']`, the only
+  modes a run containing someone else's recipe may use. In Assist the guard (or the user's synced
+  auto-allowlist) can clear a stranger's tool calls without asking; only risky ones still ask.
 - `RecipeEngine.trustRecipe(ownerId, recipeId, version, digest)` — approves one
   reviewed version of an *own* recipe; throws for another user's ("confirmed
   each time it runs, not trusted once") and for a stale digest.
@@ -138,9 +139,9 @@ session:
    else's recipe in it (a leaf, a member, or the bundle itself) refuses a
    `workflowId`, and refuses unless `confirmedPrompts` equals the prompts the
    bridge's own expansion will run, in order; it then runs in the requested
-   mode only if that is in `FOREIGN_RECIPE_MODES` (otherwise `default`), with
-   `autoAdvance` forced off and the new session's `permissionCeiling` set to
-   `default`. A chosen `workflowId` is checked with `assertRunnable` (see
+   mode only if that is in `FOREIGN_RECIPE_MODES` (otherwise `auto`), with
+   `autoAdvance` forced off. No `permissionCeiling` is set: plan approval
+   resumes in `auto`, which is allowed. A chosen `workflowId` is checked with `assertRunnable` (see
    [workflow-step-versioning](workflow-step-versioning.md)). The cooldown is
    stamped only after every refusal.
 3. A single leaf runs as a plain prompt (optionally inside a chosen existing
@@ -154,7 +155,7 @@ session:
 
 `RecipeRunModal` applies the same rules from the live store rows and the same
 expansion, so the user is never surprised by a refusal: for a foreign run it
-shows every prompt that will run in full, offers only Plan and Manual, hides the
+shows every prompt that will run in full, offers only Plan and Assist, hides the
 workflow picker, locks "Review between recipes" on, and enables Run only once a
 confirmation checkbox is ticked for exactly the prompts on screen (a prompt that
 changes afterwards un-confirms it). An own recipe held back shows a Review
@@ -194,10 +195,9 @@ version is skipped and counted in the response's `skipped`.
 - `server/src/recipes.run.test.ts` — `resolveForRun` matrix; single-recipe run
   ordering (prompt before count); rejected-cwd and unknown-recipe short
   circuits; cooldown; someone else's recipe does not run until its exact prompt
-  is confirmed, then runs in Plan or Manual whatever the default, parks after
-  every step, cannot run inside one of the user's workflows, and resumes in
-  Manual rather than Assist once its plan is approved (a pulled row neither
-  lifts nor brings that ceiling); an unverified own recipe is refused until
+  is confirmed, then runs in Plan or Assist whatever the default, parks after
+  every step, cannot run inside one of the user's workflows, sets no new
+  ceiling (a pulled row neither lifts nor brings a legacy one); an unverified own recipe is refused until
   reviewed.
 - `storage/src/recipeImages.test.ts` — `isServedRecipeImage`: an upload's own
   URL is accepted under any author's prefix; another host, a look-alike host,
@@ -235,15 +235,16 @@ version is skipped and counted in the response's `skipped`.
   already *is* a workflow); rejected server-side rather than silently resolved.
 - **Someone else's recipe runs with less authority, and only once read.** A run
   containing one — a leaf, a bundle member, or the bundle itself — uses only
-  `FOREIGN_RECIPE_MODES` (`plan`, `default`; anything else becomes `default`),
+  `FOREIGN_RECIPE_MODES` (`plan`, `auto`; anything else becomes `auto`),
   whatever the runner's own default. The modal shows every prompt that will run
   and requires a confirmation; the bridge refuses unless `confirmedPrompts`
   matches its own expansion exactly, so a recipe that changed after the user
   read it does not run. A run of several stops after every step. It cannot run
   inside one of the user's workflows — those steps bring their own permission
   modes, and the first would carry the stranger's prompt as its task. Its
-  session's `permissionCeiling` keeps an approved plan from switching to `auto`:
-  it resumes in `default`.
+  session carries no `permissionCeiling` any more (older sessions that do keep
+  theirs): an approved plan resumes in `auto`, where the guard still asks about
+  risky tools. This is a deliberate loosening from asking about every call.
 - Someone else's recipes carry no trust mark — each run is confirmed instead,
   and `trustRecipe` refuses one. An **own** recipe this machine has not verified
   (pulled unsigned, forged, or signed by a machine the account does not trust)

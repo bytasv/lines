@@ -22,7 +22,7 @@ import {
   renderOptionWithDescription,
   STEP_EFFORTS,
 } from '../../lib/modelSelect';
-import { PERMISSION_MODES, renderPermissionModeOption } from '../../lib/permissionModes';
+import { permissionModeSelectData, renderPermissionModeOption } from '../../lib/permissionModes';
 import { emptyRoutingRule, RoutingRuleFields } from '../RoutingRuleFields';
 import type { StepErrors } from './useWorkflowDraft';
 import styles from './workflow.module.css';
@@ -153,7 +153,7 @@ export function StepSettings({
               size="xs"
               w={130}
               comboboxProps={modelComboboxProps}
-              data={PERMISSION_MODES}
+              data={permissionModeSelectData(value.permissionMode)}
               renderOption={renderPermissionModeOption}
               value={value.permissionMode}
               readOnly={readOnly}

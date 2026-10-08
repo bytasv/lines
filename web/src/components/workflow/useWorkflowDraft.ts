@@ -75,7 +75,7 @@ const EMPTY_CONTENT: StepContent = {
   name: 'New step',
   promptTemplate: '',
   model: DEFAULT_MODEL,
-  permissionMode: 'default',
+  permissionMode: 'auto',
   autoAdvance: false,
   freshStart: false,
   outputName: '',
