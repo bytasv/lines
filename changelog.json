@@ -100,6 +100,13 @@
   ],
   "desktop": [
     {
+      "version": "0.2.51",
+      "date": "2026-10-08",
+      "items": [
+        "Lines now learns when Codex's 5-hour limit doesn't block your account and tracks the weekly limit instead."
+      ]
+    },
+    {
       "version": "0.2.50",
       "date": "2026-10-08",
       "items": [
@@ -159,7 +166,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Lines now learns when Codex's 5-hour limit doesn't block your account and tracks the weekly limit instead."
-  ]
+  "desktopPending": []
 }
