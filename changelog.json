@@ -93,6 +93,14 @@
   ],
   "desktop": [
     {
+      "version": "0.2.49",
+      "date": "2026-10-08",
+      "items": [
+        "Plan usage now reads your Claude plan and extra usage and ChatGPT's plan, credits and per-model limits, and can redeem a ChatGPT limit reset.",
+        "Searching files from your home folder no longer triggers macOS prompts about accessing data from other apps; Library, Desktop, Documents and Downloads are skipped unless you open them as the project."
+      ]
+    },
+    {
       "version": "0.2.48",
       "date": "2026-10-08",
       "items": [
@@ -137,8 +145,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Plan usage now reads your Claude plan and extra usage and ChatGPT's plan, credits and per-model limits, and can redeem a ChatGPT limit reset.",
-    "Searching files from your home folder no longer triggers macOS prompts about accessing data from other apps; Library, Desktop, Documents and Downloads are skipped unless you open them as the project."
-  ]
+  "desktopPending": []
 }
