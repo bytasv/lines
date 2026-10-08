@@ -3,8 +3,8 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { after, test } from 'node:test';
-import { searchFilesAcross } from './fileSearch.ts';
+import { after, test, type TestContext } from 'node:test';
+import { protectedSubdirs, searchFilesAcross } from './fileSearch.ts';
 
 /**
  * Ranking is what the composer's `@mention` menu and `/find` both show, so these
@@ -129,4 +129,70 @@ test('an equally good match in the primary root wins', () => {
 
   assert.equal(hits[0].root, root);
   assert.equal(hits[1].root, other);
+});
+
+/**
+ * Lines' children are attributed to Lines for macOS privacy (TCC), so a search
+ * rooted at or above home must never list the guarded folders. A fake home per
+ * case keeps the candidate cache, which is keyed by root, from leaking between them.
+ */
+const homeLayout = [
+  'Library/Containers/app/x.txt',
+  'Documents/d.txt',
+  'Desktop/k.txt',
+  'Downloads/dl.txt',
+  'src/keep.txt',
+];
+
+function fakeHome(t: TestContext, git: boolean): string {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-filesearch-home-'));
+  after(() => fs.rmSync(home, { recursive: true, force: true }));
+  write(home, homeLayout);
+  if (git) execFileSync('git', ['-C', home, 'init', '--quiet'], { stdio: 'ignore' });
+  t.mock.method(os, 'homedir', () => home);
+  return home;
+}
+
+const darwinOnly = { skip: process.platform !== 'darwin' };
+
+test('a walk from home skips the macOS-protected folders', darwinOnly, (t) => {
+  const home = fakeHome(t, false);
+  assert.deepEqual(searchFilesAcross([home], 'txt', 20).map((h) => h.rel), ['src/keep.txt']);
+});
+
+test('a git listing from home skips the macOS-protected folders', darwinOnly, (t) => {
+  const home = fakeHome(t, true);
+  assert.deepEqual(searchFilesAcross([home], 'txt', 20).map((h) => h.rel), ['src/keep.txt']);
+});
+
+test('a root inside a protected folder is searched normally', darwinOnly, (t) => {
+  const home = fakeHome(t, false);
+  const proj = path.join(home, 'Documents', 'proj');
+  write(proj, ['a.txt', 'Library/b.txt']);
+  assert.deepEqual(searchFilesAcross([proj], 'txt', 20).map((h) => h.rel).sort(), [
+    'Library/b.txt',
+    'a.txt',
+  ]);
+});
+
+test('protectedSubdirs lists only folders strictly inside the root', () => {
+  assert.deepEqual(protectedSubdirs('/Users/me', '/Users/me', 'darwin'), [
+    'Library',
+    'Desktop',
+    'Documents',
+    'Downloads',
+  ]);
+  assert.deepEqual(protectedSubdirs('/Users', '/Users/me', 'darwin'), [
+    'me/Library',
+    'me/Desktop',
+    'me/Documents',
+    'me/Downloads',
+  ]);
+  assert.deepEqual(protectedSubdirs('/tmp/proj', '/Users/me', 'darwin'), []);
+  assert.deepEqual(protectedSubdirs('/Users/me/Documents', '/Users/me', 'darwin'), []);
+  assert.deepEqual(protectedSubdirs('/Users/me/Documents/proj', '/Users/me', 'darwin'), []);
+});
+
+test('protectedSubdirs is empty off macOS', () => {
+  assert.deepEqual(protectedSubdirs('/home/me', '/home/me', 'linux'), []);
 });

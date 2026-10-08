@@ -130,5 +130,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "Searching files from your home folder no longer triggers macOS prompts about accessing data from other apps; Library, Desktop, Documents and Downloads are skipped unless you open them as the project."
+  ]
 }

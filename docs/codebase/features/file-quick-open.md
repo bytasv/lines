@@ -126,6 +126,10 @@ listing) so the toggle never needs a round trip.
 - `hideIgnored` defaults to on and is local-only (not part of synced
   settings) — a per-browser view choice, not a project setting.
 
+- On macOS, a search whose root is home or above it skips `~/Library`, `~/Desktop`,
+  `~/Documents` and `~/Downloads`, because every process Lines.app spawns counts as Lines for
+  macOS privacy (TCC) and listing them raises "access data from other apps" prompts. A root
+  inside one of them is searched normally. The file tree still browses them.
 - The candidate list is capped; non-ignored files fill the cap before ignored
   ones, so a large gitignored tree cannot starve the palette (or
   [find-in-files](find-in-files.md), which reuses the list).

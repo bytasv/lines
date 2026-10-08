@@ -72,6 +72,10 @@ or switching to a session scope clears it.
 - The eye toggle is the same `hideIgnored` as Cmd+P and the file tree; on by
   default, so gitignored files are excluded.
 - Files over 1 MB and binary files are skipped.
+- On macOS, a search whose root is home or above it skips `~/Library`, `~/Desktop`,
+  `~/Documents` and `~/Downloads`, because every process Lines.app spawns counts as Lines for
+  macOS privacy (TCC) and listing them raises "access data from other apps" prompts. A root
+  inside one of them is searched normally. The file tree still browses them.
 - Results are capped by files with hits, total matches and wall-clock time; a
   capped response is marked `truncated` and the UI says so.
 - Like `find`, `grep` is all-or-nothing across roots: one root outside the

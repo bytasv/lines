@@ -520,6 +520,17 @@ and push first. See [whats-new](whats-new.md).
   logged nothing for ~100s after a real wake, until the user reloaded by hand, while the bridge had
   already reconnected. This substitutes the signal the web app cannot generate for itself.
 
+### macOS privacy prompts
+
+- Every child of Lines.app (bridge, worker, git, agent CLIs and the shell commands they run)
+  is attributed to Lines for TCC. "Lines would like to access data from other apps" or a
+  Documents/Desktop/Downloads prompt therefore appears when an agent runs something like
+  `find ~` or `grep -r ~`. This is expected and cannot be suppressed from Lines. macOS
+  remembers the answer under System Settings → Privacy & Security.
+- Lines' own file search skips those home folders when its root is home or above (see
+  [file-quick-open](file-quick-open.md)), so a prompt from a plain search is a bug.
+- To diagnose, filter Console for `tccd` and `cloud.linesapp.desktop`.
+
 ### Staying awake
 
 - The shell holds a `powerSaveBlocker('prevent-app-suspension')` for exactly as long as a turn is

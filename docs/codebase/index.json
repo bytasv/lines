@@ -3772,6 +3772,7 @@
         "the preview is editable on your own machine (Raw/Monaco only, guests read-only): Cmd/Ctrl+S or Save, no autosave; closing the preview or opening another file asks before discarding, and the tab warns on close or reload while any edit is unsaved",
         "save state shows in the host's header beside its own buttons (dot + 'Unsaved changes', Discard, Save; on a conflict 'Changed on disk', Reload, Overwrite) and a dirty files-mode tab shows a dot; Discard reverts in place so it is one undo away",
         "hideIgnored defaults to on and is local-only (not part of synced settings)",
+        "on macOS, walks from a root at or above home skip ~/Library, ~/Desktop, ~/Documents and ~/Downloads to avoid TCC prompts attributed to Lines; a root inside them is searched normally and the file tree still browses them",
         "non-ignored files fill the capped candidate list before ignored ones, so a large gitignored tree cannot starve the palette or find-in-files"
       ],
       "architecturalRules": [
@@ -4743,6 +4744,7 @@
       "businessRules": [
         "searches only the active project's roots, sharing hideIgnored with Cmd+P and the file tree",
         "files over 1 MB and binary files are skipped; results are capped by files, matches and time and marked truncated",
+        "on macOS, walks from a root at or above home skip ~/Library, ~/Desktop, ~/Documents and ~/Downloads to avoid TCC prompts attributed to Lines; a root inside them is searched normally and the file tree still browses them",
         "grep is all-or-nothing across roots: one root out of reach is a 403",
         "an invalid regex is a 400 with an invalidRegex body; a bare 400 means an older bridge",
         "results are shown only while they match the current query, roots and flags",

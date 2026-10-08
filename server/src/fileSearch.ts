@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 /**
@@ -19,6 +20,33 @@ const IGNORE_DIRS = new Set([
   '.turbo',
   '.venv',
 ]);
+
+/**
+ * Home folders macOS guards with TCC. Every process Lines.app spawns (this
+ * bridge included) is attributed to Lines, so merely listing
+ * `~/Library/Containers` or `~/Documents` pops "Lines would like to access…"
+ * prompts — and the search re-walks on every keystroke. Only a walk that starts
+ * at or above home skips them; a root inside one (`~/Documents/proj`) is a
+ * folder the user opened deliberately, so it is searched normally.
+ */
+const PROTECTED_HOME_DIRS = ['Library', 'Desktop', 'Documents', 'Downloads'];
+
+/**
+ * The {@link PROTECTED_HOME_DIRS} lying strictly inside `root`, as posix paths
+ * relative to it; empty off macOS. `path.resolve`, not `realpath`: resolving
+ * would mean touching the very folders this exists to avoid.
+ */
+export function protectedSubdirs(
+  root: string,
+  home: string = os.homedir(),
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform !== 'darwin') return [];
+  const base = path.resolve(root);
+  return PROTECTED_HOME_DIRS.map((name) => path.relative(base, path.join(home, name)))
+    .filter((rel) => rel && !rel.startsWith('..') && !path.isAbsolute(rel))
+    .map((rel) => rel.split(path.sep).join('/'));
+}
 
 /** Hard ceiling on the candidate list, so a huge tree can't stall the bridge. */
 const MAX_FILES = 20_000;
@@ -60,7 +88,12 @@ function run(root: string, args: string[]): string[] {
  * set. Two cheap spawns beat one `check-ignore` round trip per candidate.
  */
 function gitFiles(root: string): Candidates | null {
-  const excludes = [...IGNORE_DIRS].map((dir) => `:(exclude,glob)**/${dir}/**`);
+  const excludes = [
+    ...[...IGNORE_DIRS].map((dir) => `:(exclude,glob)**/${dir}/**`),
+    // Literal, since these names may hold spaces or glob characters; a literal
+    // directory pathspec already covers everything beneath it.
+    ...protectedSubdirs(root).map((rel) => `:(exclude,literal)${rel}`),
+  ];
   try {
     const files = run(root, ['ls-files', '--cached', '--others', '--', ...excludes]);
     const kept = new Set(
@@ -78,9 +111,11 @@ function gitFiles(root: string): Candidates | null {
  * Dot-files and dot-directories are candidates like any other — an editor shows
  * `.github/` and `.env.example`, and the git path here has always listed them,
  * so hiding them only outside a repo was an inconsistency, not a policy.
- * {@link IGNORE_DIRS} (which covers `.git`) is the whole exclusion list.
+ * {@link IGNORE_DIRS} (which covers `.git`) is the whole name-based exclusion
+ * list; {@link protectedSubdirs} are skipped by position and never read.
  */
 function walkFiles(root: string): Candidates {
+  const skip = new Set(protectedSubdirs(root));
   const out: string[] = [];
   const stack = [''];
   while (stack.length && out.length < MAX_FILES) {
@@ -94,8 +129,9 @@ function walkFiles(root: string): Candidates {
     for (const d of dirents) {
       if (IGNORE_DIRS.has(d.name)) continue;
       const child = rel ? `${rel}/${d.name}` : d.name;
-      if (d.isDirectory()) stack.push(child);
-      else if (d.isFile()) out.push(child);
+      if (d.isDirectory()) {
+        if (!skip.has(child)) stack.push(child);
+      } else if (d.isFile()) out.push(child);
       if (out.length >= MAX_FILES) break;
     }
   }
