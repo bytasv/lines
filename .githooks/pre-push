@@ -1,0 +1,47 @@
+#!/bin/sh
+# What the Deploy workflow (and the desktop release guard) would fail on, before a
+# push to main reaches them. Left to CI: test:dev-runtime, which spawns the whole
+# runtime and is slow, and the Docker image builds — `vite build` below covers
+# the part of the web image that most often breaks.
+#
+# Skip once with `git push --no-verify`, or LINES_SKIP_HOOKS=1.
+[ -n "$LINES_SKIP_HOOKS" ] && exit 0
+
+zero=0000000000000000000000000000000000000000
+ranges=""
+while read -r _local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = "refs/heads/main" ] || continue
+  [ "$local_sha" = "$zero" ] && continue
+  base=$remote_sha
+  [ "$base" = "$zero" ] && base=$(git merge-base "$local_sha" origin/main 2>/dev/null || echo "$local_sha^")
+  ranges="$ranges $base..$local_sha"
+done
+[ -z "$ranges" ] && exit 0
+
+changed=""
+for range in $ranges; do
+  changed="$changed
+$(git diff --name-only "${range%..*}" "${range#*..}")"
+done
+# Only docs and release notes: nothing a test could catch.
+echo "$changed" | grep -Ev '^$|\.md$|^docs/|^changelog\.json$' >/dev/null || exit 0
+
+run() {
+  echo "pre-push: $*"
+  "$@" || {
+    echo "pre-push: '$*' failed (bypass: git push --no-verify)" >&2
+    exit 1
+  }
+}
+for range in $ranges; do
+  run deploy/scripts/check-migration-safety.sh "${range%..*}" "${range#*..}"
+done
+run npm run typecheck --silent
+run npm run test:unit -w server --silent
+run npm run test -w relay --silent
+run npm run test -w storage --silent
+run npm run test -w desktop --silent
+# Into a scratch directory: web/dist is what a local-mode desktop app serves.
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
+run npm run build -w web --silent -- --outDir "$out" --emptyOutDir

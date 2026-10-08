@@ -1,0 +1,25 @@
+#!/bin/sh
+# Catch locally what the Deploy workflow's `typecheck` leg would fail on.
+#
+# The root typecheck, not just the workspace you touched: workspaces import each
+# other's files (server tests import web/src/lib), so a web change can break the
+# server leg. Runs against the working tree, not the staged snapshot.
+#
+# Skip once with `git commit --no-verify`, or LINES_SKIP_HOOKS=1.
+[ -n "$LINES_SKIP_HOOKS" ] && exit 0
+
+staged=$(git diff --cached --name-only --diff-filter=ACMRD)
+[ -z "$staged" ] && exit 0
+
+if echo "$staged" | grep -Eq '\.(ts|tsx|mts|cts|mjs|js)$|(^|/)(package\.json|tsconfig[^/]*\.json)$'; then
+  echo "pre-commit: npm run typecheck"
+  npm run typecheck --silent || {
+    echo "pre-commit: typecheck failed (bypass: git commit --no-verify)" >&2
+    exit 1
+  }
+fi
+
+if echo "$staged" | grep -q '^docs/codebase/'; then
+  echo "pre-commit: npm run docs:validate"
+  npm run docs:validate --silent || exit 1
+fi

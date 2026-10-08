@@ -60,6 +60,14 @@ npm test
 Both must pass. Tests are `node:test` via `tsx`, colocated as `*.test.ts` next to
 the code they cover.
 
+Git hooks in `.githooks/` run the same checks CI does: `pre-commit` runs the root
+typecheck (and `docs:validate` when `docs/codebase/` is staged), `pre-push` to
+`main` adds the migration-safety check, the server, relay, storage and desktop
+unit tests, and a scratch `vite build` of the web app. `npm install` enables them
+via `prepare`; with `ignore-scripts` set, run
+`git config core.hooksPath .githooks` once yourself. Skip a run with
+`--no-verify` or `LINES_SKIP_HOOKS=1`.
+
 **Update `docs/codebase/` when behaviour changes.** Per `.ai/CONVENTIONS.md`, the
 documentation corpus is a navigation aid for areas touched by completed work: if
 your change adds or alters an entry point, a symbol, or a test that an existing
