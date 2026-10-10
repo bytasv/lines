@@ -114,6 +114,13 @@
   ],
   "desktop": [
     {
+      "version": "0.2.53",
+      "date": "2026-10-10",
+      "items": [
+        "When a development copy of Lines takes over this machine, the menu bar now shows whether your phone can still reach it, and Lines switches back on its own once that copy stops."
+      ]
+    },
+    {
       "version": "0.2.52",
       "date": "2026-10-10",
       "items": [
@@ -187,7 +194,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "When a development copy of Lines takes over this machine, the menu bar now shows whether your phone can still reach it, and Lines switches back on its own once that copy stops."
-  ]
+  "desktopPending": []
 }
