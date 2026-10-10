@@ -2651,6 +2651,11 @@ export type ClientMessage =
       mentions?: PromptMention[];
       /** Pre-expansion draft, kept only if the prompt is queued (see {@link QueuedPrompt.draft}). */
       draft?: MentionValue;
+      /**
+       * Hold until the running turn settles instead of steering into it. Absent =
+       * steer when the bridge can deliver into the live turn, else queue.
+       */
+      queue?: boolean;
     }
   | { type: 'interrupt'; sessionId: string }
   /** Stop one background task (`taskId`) or, without it, every one the session's

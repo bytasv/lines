@@ -359,6 +359,120 @@ describe('userPrompt queueing', () => {
   });
 });
 
+/**
+ * Steer-on-send: a plain composer send while a turn runs goes into that turn,
+ * the same delivery "Send now" makes. Every case that cannot steer safely must
+ * fall back to the queue, so the worst outcome stays the old behaviour.
+ */
+describe('userPrompt steering', () => {
+  /** Reach the private in-flight sets the gate reads. */
+  const flags = (h: ReturnType<typeof harness>) =>
+    h.sessions as unknown as {
+      compacting: Set<string>;
+      interrupting: Set<string>;
+      rewinding: Set<string>;
+    };
+
+  test('a send into a running turn is pushed, not queued', () => {
+    const h = harness();
+    const before = h.live();
+    const turn = structuredClone(h.sessions.get(SID)!);
+
+    h.sessions.userPrompt(SID, 'also check the tests', [], [], { actor: ALICE });
+
+    assert.equal(h.queue().length, 0);
+    assert.deepEqual(h.pushes, [
+      {
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text: 'also check the tests' }] },
+        parent_tool_use_id: null,
+        priority: 'next',
+      },
+    ]);
+    const added = h.events().slice(before);
+    // 'interject', never 'user': a 'user' event would split collectTurns.
+    assert.deepEqual(
+      added.map((e) => e.kind),
+      ['interject'],
+    );
+    assert.equal((added[0].data as { text: string }).text, 'also check the tests');
+    assert.deepEqual((added[0].data as { actor?: Actor }).actor, ALICE);
+    // Never recycles the query — a rotated token would kill the live turn.
+    assert.deepEqual(h.closes, []);
+    const after = h.sessions.get(SID)!;
+    for (const key of ['turnSource', 'turnStartedAt', 'turnActor', 'status', 'interruptedAt'] as const) {
+      assert.deepEqual(after[key], turn[key], `steering moved ${key}`);
+    }
+  });
+
+  const queues = (name: string, setup: (h: ReturnType<typeof harness>) => void, opts = {}) =>
+    test(name, () => {
+      const h = harness();
+      const before = h.live();
+      setup(h);
+      h.sessions.userPrompt(SID, 'later', [], [], opts);
+      assert.equal(h.queue().at(-1)?.text, 'later');
+      assert.equal(h.pushes.length, 0);
+      assert.ok(!h.events().slice(before).some((e) => e.kind === 'interject'));
+    });
+
+  queues('an explicit queue send waits for the turn', () => {}, { queue: true });
+  queues('a prompt that needs approval is held, paused', () => {}, { needsApproval: true });
+  queues('an existing queue keeps FIFO — the send goes behind it', (h) => seed(h.sessions, [item()]));
+  queues('a compacting turn is never steered', (h) => flags(h).compacting.add(SID));
+  queues('a Stop in flight is never steered', (h) => flags(h).interrupting.add(SID));
+  queues('a rewind in flight is never steered', (h) => flags(h).rewinding.add(SID));
+  queues('a session waiting on permission is not steered', (h) => {
+    h.sessions.get(SID)!.status = 'waiting-permission';
+  });
+  queues('a workflow mid-advance is not steered', (h) => {
+    h.sessions.get(SID)!.workflow = { advancing: true } as SessionMeta['workflow'];
+  });
+
+  test('needsApproval pauses the queue', () => {
+    const h = harness();
+    h.live();
+    h.sessions.userPrompt(SID, 'later', [], [], { needsApproval: true });
+    assert.equal(h.sessions.get(SID)!.queuePaused, true);
+  });
+
+  test('an existing queue is queued behind, in order', () => {
+    const h = harness();
+    h.live();
+    seed(h.sessions, [item({ id: 'q1' })]);
+    h.sessions.userPrompt(SID, 'later');
+    assert.deepEqual(
+      h.queue().map((q) => q.text),
+      ['original', 'later'],
+    );
+  });
+
+  test('a send with attachments queues and stages them', () => {
+    const h = harness();
+    h.live();
+    h.sessions.userPrompt(SID, 'look', [{ name: 'a.txt', mediaType: 'text/plain', data: 'YQ==' }]);
+    assert.equal(h.queue().length, 1);
+    assert.equal(h.queue()[0].attachments?.length, 1);
+    assert.equal(h.pushes.length, 0);
+  });
+
+  test('a closed worker link queues rather than buffering into a future query', () => {
+    const h = harness({}, { linkOpen: false });
+    h.live();
+    h.sessions.userPrompt(SID, 'later');
+    assert.equal(h.queue().length, 1);
+    assert.equal(h.pushes.length, 0);
+  });
+
+  test('an idle session opens a turn as before', () => {
+    const h = harness({ status: 'idle' });
+    const before = h.events().length;
+    h.sessions.userPrompt(SID, 'hello');
+    assert.equal(h.queue().length, 0);
+    assert.ok(h.events().slice(before).some((e) => e.kind === 'user'));
+  });
+});
+
 describe('cancelQueued', () => {
   test('dropping an item unlinks its attachments and leaves the others alone', () => {
     const h = harness();

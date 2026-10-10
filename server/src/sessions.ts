@@ -3106,7 +3106,13 @@ export class SessionManager {
      * the queue UI they already have. No new state machine: this is the same
      * `queued` + `queuePaused` + `maybeFlush` path an interrupt leaves behind.
      */
-    opts: { needsApproval?: boolean; actor?: Actor; draft?: MentionValue } = {},
+    opts: {
+      needsApproval?: boolean;
+      actor?: Actor;
+      draft?: MentionValue;
+      /** "Hold until the turn settles": skip steering and always queue while busy. */
+      queue?: boolean;
+    } = {},
   ) {
     const meta = this.sessions.get(sessionId);
     if (!meta) throw new Error(`unknown session ${sessionId}`);
@@ -3138,6 +3144,22 @@ export class SessionManager {
       // queue branch stages text + attachments and maybeFlush delivers them as
       // a real user turn once the denied turn settles.
       if (!planReply.alsoQueue) return;
+    }
+
+    // Steer by default: a plain send while a turn runs goes into that turn, the
+    // same delivery "Send now" makes for a queued row. Every case canInterject
+    // refuses falls through to the queue below, which is the safe fallback.
+    if (
+      !opts.queue &&
+      !opts.needsApproval &&
+      // FIFO: never jump ahead of prompts already held (e.g. paused after an interrupt).
+      !meta.queued?.length &&
+      // Same v1 refusal as interjectQueued: attachments only ride a real user turn.
+      attachments.length === 0 &&
+      this.canInterject(sessionId)
+    ) {
+      this.deliverIntoLiveTurn(meta, { text, mentions, actor: opts.actor });
+      return;
     }
 
     if (opts.needsApproval || meta.queued?.length || this.isBusy(meta)) {
@@ -3366,15 +3388,29 @@ export class SessionManager {
     if (meta.queued.length === 0) meta.queuePaused = undefined;
     // item.actor, not whoever pressed the button: the same attribution rule
     // maybeFlush follows when the owner releases a guest's prompt.
-    this.emitEvent(sessionId, 'interject', {
-      text: item.text,
-      ...(item.mentions?.length ? { mentions: item.mentions } : {}),
-      ...(item.actor ? { actor: item.actor } : {}),
+    this.deliverIntoLiveTurn(meta, { text: item.text, mentions: item.mentions, actor: item.actor });
+    return { ok: true };
+  }
+
+  /**
+   * Record and push a user message into the running turn: the `'interject'`
+   * event (never `'user'`, so collectTurns does not split the turn), the meta
+   * upsert, then the push. Shared by "Send now" and a steered composer send;
+   * both callers have already checked `canInterject` and done their own queue
+   * bookkeeping.
+   */
+  private deliverIntoLiveTurn(
+    meta: SessionMeta,
+    msg: { text: string; mentions?: PromptMention[]; actor?: Actor },
+  ) {
+    this.emitEvent(meta.id, 'interject', {
+      text: msg.text,
+      ...(msg.mentions?.length ? { mentions: msg.mentions } : {}),
+      ...(msg.actor ? { actor: msg.actor } : {}),
     } satisfies InterjectData);
     this.upsert(meta);
 
-    this.pushIntoLiveTurn(meta, item.text);
-    return { ok: true };
+    this.pushIntoLiveTurn(meta, msg.text);
   }
 
   /**

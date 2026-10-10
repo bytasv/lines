@@ -128,8 +128,9 @@ Delivery is proposed, not built — see
 - `server/src/sessions.ts` — `userPrompt`/`prompt` take an `actor`; `QueuedPrompt.actor`;
   `resolvePermission`/`logResolution` take an actor for `resolvedActor`; `editQueued` (rewrite a
   queued prompt in place — author or owner only, never clears `queuePaused`); `interjectQueued`
-  (release one queued item into the running turn — see
-  [turn-interjection](turn-interjection.md))
+  (release one queued item into the running turn); `userPrompt` steers a send into the running
+  turn by default and queues only on request (`queue: true`) or when it cannot steer safely — see
+  [turn-interjection](turn-interjection.md)
 - `server/src/workflows.ts` — `startIfPending`/`iterateIfWaiting`/`runStep`/`runStepSafely` take
   an actor (a workflow-attached session intercepts a prompt *before* `userPrompt` ever runs)
 - `web/src/lib/shares.ts` — the HTTP client for every `/v1/shares/*` route, `PRESET_COPY`,

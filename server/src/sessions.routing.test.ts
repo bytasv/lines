@@ -213,7 +213,7 @@ test('an interjection into the live turn skips JEV', async () => {
   await settle();
   const before = h.calls();
   // Queue a prompt while running, then release it into the live turn.
-  h.sessions.userPrompt('s1', 'meanwhile');
+  h.sessions.userPrompt('s1', 'meanwhile', [], [], { queue: true });
   const queued = h.s1().queued?.[0];
   assert.ok(queued, 'queued behind the running turn');
   h.sessions.interjectQueued('s1', queued.id, { needsApproval: false });

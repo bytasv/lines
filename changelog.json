@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.19",
+      "date": "2026-10-10",
+      "items": [
+        "A message you send while Claude or Codex is working now reaches it right away, inside the turn it's already running. To have it wait until the turn finishes instead, press Alt/Option+Enter or click the clock button."
+      ]
+    },
+    {
       "version": "0.1.18",
       "date": "2026-10-08",
       "items": [
@@ -166,5 +173,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "Messages sent while a turn is running are delivered into that turn instead of waiting in the queue, unless you ask for them to queue."
+  ]
 }

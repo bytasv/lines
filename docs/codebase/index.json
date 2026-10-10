@@ -3237,7 +3237,8 @@
         "a relaying bridge reconciles its grants every GRANT_RECONCILE_MS (60s) against the grant ids storage lists for the device (GET /v1/shares, grantTracking: true); it only removes, treats an error or a server without grantTracking as 'cannot say', and spares grants younger than GRANT_RECONCILE_GRACE_MS (10 min)",
         "a guest starts sessions only inside one of the host's open project roots (guestCwdAllowed, symlinks resolved on both sides) and never in a new work tree; a guest's permission answer drops alwaysAllow and allowAsRead (permissionAnswerFor), and the card hides both buttons",
         "the relay gate refuses a guest on storage's no and on no answer ('unreachable', logged storage-unreachable); the sweep closes a channel only on an answer, and runs one sweep at a time",
-        "COLLAB_MIN_PROTOCOL is 6: a bridge older than that admits guests on the relay's word, so the relay puts no guest through to it; a share made before host-issued grants has no token and is refused by a protocol-6 bridge until the owner sends a new invite link"
+        "COLLAB_MIN_PROTOCOL is 6: a bridge older than that admits guests on the relay's word, so the relay puts no guest through to it; a share made before host-issued grants has no token and is refused by a protocol-6 bridge until the owner sends a new invite link",
+        "a prompt sent while a turn runs steers into it by default; the queue is the explicit opt-in (queue: true) and the fallback when steering is unsafe"
       ],
       "architecturalRules": [
         "MESSAGE_AUTHZ is an exhaustive Record keyed on ClientMessage['type'] so an unclassified message is a compile error, not a review gap",
@@ -3664,8 +3665,10 @@
       "id": "turn-interjection",
       "name": "Turn interjection",
       "doc": "features/turn-interjection.md",
-      "purpose": "Release a queued prompt into the turn that is already running (\"Send now\") instead of waiting for it to settle, using the SDK's undocumented priority steering knob.",
+      "purpose": "Deliver a user message into the turn that is already running: a composer send steers by default (queueing only on request or when unsafe), and \"Send now\" releases a queued prompt, using the SDK's undocumented priority steering knob.",
       "entryPoints": [
+        "web/src/components/MentionInput.tsx",
+        "web/src/components/Composer.tsx",
         "web/src/components/QueuedMessages.tsx",
         "server/src/sessions.ts",
         "server/src/index.ts",
@@ -3679,7 +3682,9 @@
         "web/src/lib/transcript.ts",
         "web/src/components/Transcript.tsx",
         "web/src/components/QueuedMessages.tsx",
-        "server/scripts/spike-interject.ts"
+        "server/scripts/spike-interject.ts",
+        "web/src/components/Composer.tsx",
+        "web/src/components/MentionInput.tsx"
       ],
       "symbols": [
         "SessionManager.interjectQueued",
@@ -3688,17 +3693,22 @@
         "InterjectData",
         "TranscriptEvent.kind",
         "WorkerClient.linkOpen",
-        "SessionManager.pushIntoLiveTurn"
+        "SessionManager.pushIntoLiveTurn",
+        "SessionManager.userPrompt",
+        "SessionManager.deliverIntoLiveTurn"
       ],
       "dependencies": [],
       "tests": [
         "server/src/sessions.queue.test.ts",
         "server/src/sessions.compact.test.ts",
         "server/src/sessions.turns.test.ts",
-        "server/src/messageAuthz.test.ts"
+        "server/src/messageAuthz.test.ts",
+        "server/src/sessions.codex.test.ts"
       ],
       "businessRules": [
-        "sending happens from the queue row, never from the composer — typing while busy still queues",
+        "a composer send while a turn runs steers into it by default; it queues on Alt/Opt+Enter or the queue button (queue: true), or when steering is unsafe: attachments, a promptNeedsApproval guest, an existing queue (FIFO), or any canInterject refusal",
+        "a steered message has no queue row, so it cannot be edited or cancelled",
+        "a provider with interject: false keeps queue-only behaviour",
         "an interjection never opens a turn and is never a rewind anchor",
         "it runs attributed to the item's author, not whoever pressed the button",
         "a promptNeedsApproval guest cannot release their own item",

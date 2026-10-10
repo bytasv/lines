@@ -92,7 +92,8 @@ export function MentionInput({
 }: {
   value: MentionValue;
   onChange: (next: MentionValue) => void;
-  onSubmit: () => void;
+  /** `queue`: Alt/Opt+Enter, "hold until the running turn settles" instead of steering into it. */
+  onSubmit: (opts?: { queue?: boolean }) => void;
   cwd: string;
   /** Every root the session's project spans, primary first — what `@` searches. */
   roots: string[];
@@ -484,6 +485,16 @@ export function MentionInput({
               ) {
                 e.preventDefault();
                 onSubmit();
+              } else if (
+                e.key === 'Enter' &&
+                e.altKey &&
+                !e.shiftKey &&
+                !e.metaKey &&
+                !e.ctrlKey &&
+                !e.nativeEvent.isComposing
+              ) {
+                e.preventDefault();
+                onSubmit({ queue: true });
               }
             }}
             onPaste={(e) => {

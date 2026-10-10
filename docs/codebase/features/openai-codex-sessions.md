@@ -162,7 +162,7 @@ the transport was.
 - `server/src/codexEvents.test.ts` — the normalizer, including the streaming envelope.
 - `server/src/codexCli.test.ts` — discovery order and refusal copy.
 - `server/src/sessions.codex.test.ts` — routing, the permission-mode mapping, settle and
-  interjection.
+  interjection (Send now, and a composer send steered into the running turn via `turn/steer`).
 - `server/src/codexAppServer.contract.test.ts` — the protocol canary.
 - `server/src/openaiUsage.test.ts` — the `/wham/usage` parser.
 - `server/src/helperQuery.test.ts` — provider selection for the bridge's own queries, including

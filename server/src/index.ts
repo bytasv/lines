@@ -1576,6 +1576,7 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
         needsApproval: access.caps.promptNeedsApproval,
         actor,
         draft: msg.draft,
+        queue: msg.queue,
       });
       break;
     }

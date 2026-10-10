@@ -20,6 +20,7 @@ import {
   IconAdjustmentsHorizontal,
   IconCheck,
   IconChevronDown,
+  IconClock,
   IconFile,
   IconPaperclip,
   IconPlayerStop,
@@ -335,6 +336,16 @@ export function Composer({ session }: { session: SessionMeta }) {
     if (voice === 'idle') sendAfterVoiceRef.current = false;
   }, [voice]);
   const interruptible = isSessionInterruptible(session.status);
+  // A plain send goes into the running turn rather than the queue. A hint for the
+  // labels only — the server makes the real call and queues whenever it cannot
+  // steer (compaction, a Stop in flight, a closed worker link, …).
+  const steers =
+    interruptible &&
+    session.status === 'running' &&
+    caps.interject &&
+    !needsApproval &&
+    attachments.length === 0 &&
+    !session.queued?.length;
   // Background tasks (backgrounded subagents / Bash) outlive the turn, so a
   // settled session can still have work to stop. Deliberately does not gate Send:
   // the CLI runs a new turn concurrently with a background task.
@@ -439,12 +450,12 @@ export function Composer({ session }: { session: SessionMeta }) {
     setAttachments((a) => [...a, ...encoded]);
   };
 
-  const submit = () => {
+  const submit = (opts?: { queue?: boolean }) => {
     // Guards ⌘/Enter too, not just the buttons — the keyboard path is the one
     // that would otherwise send into a machine that cannot run it.
     if (cannotSend) return;
     if (voice === 'idle') {
-      sendPrompt(prompt);
+      sendPrompt(prompt, opts);
       return;
     }
     // Dictating: finish first, and let the transcript handler send once the text
@@ -453,7 +464,7 @@ export function Composer({ session }: { session: SessionMeta }) {
     if (voice === 'recording') void dictation.finish();
   };
 
-  const sendPrompt = (value: MentionValue) => {
+  const sendPrompt = (value: MentionValue, opts?: { queue?: boolean }) => {
     // Bake the @mention expansions into the text (so workflow-first-prompt and
     // offline queueing see it too); `mentions` rides along display-only.
     const expanded = buildExpandedPrompt(value.text.trim(), value.ranges);
@@ -472,6 +483,8 @@ export function Composer({ session }: { session: SessionMeta }) {
       // Kept only if the server queues this prompt, so the queue row can be
       // re-opened in a composer with its pills instead of the expanded text.
       draft: value.ranges.length ? value : undefined,
+      // "Do this after": hold until the turn settles instead of steering into it.
+      queue: opts?.queue || undefined,
     });
     setPrompt({ text: '', ranges: [] });
     setAttachments([]);
@@ -797,7 +810,9 @@ export function Composer({ session }: { session: SessionMeta }) {
           placeholder={
             session.workflow && !session.workflow.started
               ? 'Describe the task — this kicks off the workflow…'
-              : `Message ${provider === 'openai' ? 'Codex' : 'Claude'}…${isPhone ? '' : ' (↵ to send, ⇧↵ for newline)'}`
+              : `Message ${provider === 'openai' ? 'Codex' : 'Claude'}…${
+                  isPhone ? '' : ` (↵ to send, ⇧↵ for newline${steers ? ', ⌥↵ to queue' : ''})`
+                }`
           }
           textareaRef={textareaRef}
           handleRef={mentionRef}
@@ -858,8 +873,19 @@ export function Composer({ session }: { session: SessionMeta }) {
                 Stop
               </Button>
             )}
-            <Button px={10} disabled={cannotSend} onClick={submit}>
-              {interruptible ? 'Queue' : 'Send'}
+            {steers && (
+              <ActionIcon
+                variant="default"
+                size="lg"
+                disabled={cannotSend}
+                aria-label="Queue message"
+                onClick={() => submit({ queue: true })}
+              >
+                <IconClock size={18} />
+              </ActionIcon>
+            )}
+            <Button px={10} disabled={cannotSend} onClick={() => submit()}>
+              {interruptible && !steers ? 'Queue' : 'Send'}
             </Button>
           </Group>
         </Group>
@@ -926,18 +952,33 @@ export function Composer({ session }: { session: SessionMeta }) {
               )}
               {interruptible || bgTasks > 0 ? (
                 <>
+                  {steers && (
+                    <Tooltip label="Queue message — sends after the current turn (⌥↵)">
+                      <ActionIcon
+                        variant="subtle"
+                        size="lg"
+                        aria-label="Queue message"
+                        onClick={() => submit({ queue: true })}
+                        disabled={cannotSend}
+                      >
+                        <IconClock size={16} />
+                      </ActionIcon>
+                    </Tooltip>
+                  )}
                   <Tooltip
                     label={
-                      interruptible
-                        ? 'Queue message — sends after the current turn'
-                        : 'Send — the background task keeps running'
+                      steers
+                        ? 'Send into the current turn — ⌥↵ to queue for after'
+                        : interruptible
+                          ? 'Queue message — sends after the current turn'
+                          : 'Send — the background task keeps running'
                     }
                   >
                     <ActionIcon
-                      variant={interruptible ? 'subtle' : 'filled'}
+                      variant={interruptible && !steers ? 'subtle' : 'filled'}
                       size="lg"
-                      aria-label={interruptible ? 'Queue message' : 'Send message'}
-                      onClick={submit}
+                      aria-label={interruptible && !steers ? 'Queue message' : 'Send message'}
+                      onClick={() => submit()}
                       disabled={cannotSend}
                     >
                       <IconSend size={16} />
@@ -971,7 +1012,7 @@ export function Composer({ session }: { session: SessionMeta }) {
                     variant="filled"
                     size="lg"
                     aria-label={interruptible ? 'Queue message' : 'Send message'}
-                    onClick={submit}
+                    onClick={() => submit()}
                     disabled={cannotSend}
                   >
                     <IconSend size={16} />
@@ -982,7 +1023,7 @@ export function Composer({ session }: { session: SessionMeta }) {
                   variant="filled"
                   size="lg"
                   aria-label={interruptible ? 'Queue message' : 'Send message'}
-                  onClick={submit}
+                  onClick={() => submit()}
                   disabled={cannotSend}
                 >
                   <IconSend size={16} />

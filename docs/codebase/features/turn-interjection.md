@@ -2,13 +2,19 @@
 
 ## Purpose
 
-"Send now" on a queued prompt: deliver it into the turn that is already running instead of
-waiting for that turn to settle — the Lines analog of typing "btw ..." into Claude Code mid-turn.
+Deliver a user message into the turn that is already running instead of waiting for that turn
+to settle — the Lines analog of typing "btw ..." into Claude Code mid-turn.
 
-The send path itself is untouched. A prompt typed while the session is busy still lands in the
-ordinary queue (`SessionManager.userPrompt`), renders as a row in `QueuedMessages.tsx`, and can
-still be edited or cancelled. Each row gains one more action: a lightning icon that lifts that
-one item out of the queue and pushes it into the live turn.
+Two ways in, one delivery:
+
+- **Steer on send (default).** A plain composer send while a turn runs goes straight into that
+  turn whenever it is safe to (`SessionManager.userPrompt`). When it is not safe, the prompt
+  falls back to the ordinary queue exactly as before.
+- **Queue on request.** Alt/Opt+Enter, or the clock button beside Send, sets `queue: true` on the
+  `prompt` message: "do this after". The prompt lands in the queue, renders as a row in
+  `QueuedMessages.tsx`, and can still be edited or cancelled.
+- **Send now.** Each queued row keeps its lightning icon, which lifts that one item out of the
+  queue and pushes it into the live turn.
 
 The design rests on an empirically established CLI behaviour, not a documented SDK contract —
 see [Data flow](#data-flow) for the measurement and its result. `SDKUserMessage.priority?: 'now'
@@ -16,6 +22,10 @@ see [Data flow](#data-flow) for the measurement and its result. `SDKUserMessage.
 
 ## Entry points
 
+- The composer's Send (Enter) while a turn runs, and its queue gesture — Alt/Opt+Enter in
+  `web/src/components/MentionInput.tsx`, the clock button in `web/src/components/Composer.tsx`
+- `{ type: 'prompt', …, queue? }` client message (`server/src/index.ts` `handleMessage`), into
+  `SessionManager.userPrompt`
 - The lightning `ActionIcon` on a queued-prompt row, before Edit and the cancel X
   (`web/src/components/QueuedMessages.tsx`)
 - `{ type: 'interjectQueued', sessionId, queuedId }` client message
@@ -24,13 +34,16 @@ see [Data flow](#data-flow) for the measurement and its result. `SDKUserMessage.
 
 ## Important files
 
-- `shared/types.ts` — `ClientMessage.interjectQueued`, its `MESSAGE_AUTHZ` row, `InterjectData`,
+- `shared/types.ts` — `ClientMessage.prompt.queue`, `ClientMessage.interjectQueued`, its `MESSAGE_AUTHZ` row, `InterjectData`,
   `TranscriptEvent.kind` gains `'interject'`
 - `server/src/sessions.ts` — `canInterject`, `interjectQueued`, `pushIntoLiveTurn` (the shared
   `intoLiveTurn` push both `interjectQueued` and the plan-comments approval path in
   [permissions-and-plan-mode](permissions-and-plan-mode.md) call), the `intoLiveTurn` branch
   through `pushTurn`/`pushTurnSafely`/`pushWithToken`
-- `server/src/index.ts` — the `interjectQueued` case
+- `server/src/index.ts` — the `interjectQueued` case, and the `prompt` case passing `queue`
+- `web/src/components/Composer.tsx` — the steer-aware Send label/tooltip, the queue button, the
+  "⌥↵ to queue" placeholder hint
+- `web/src/components/MentionInput.tsx` — Alt/Opt+Enter submits with `{ queue: true }`
 - `server/src/workerClient.ts` — `linkOpen` getter
 - `web/src/lib/transcript.ts` — the `'interject'` `TranscriptItem` case in `buildTranscript`,
   `reuseItem`, `foldAgentTurns`'s boundary list
@@ -50,6 +63,12 @@ see [Data flow](#data-flow) for the measurement and its result. `SDKUserMessage.
   attachments refusal, then `canInterject`; on success: remove the item, clear `queuePaused` only
   if the queue is now empty, emit an `'interject'` transcript event attributed to `item.actor`,
   push with `priority: 'next'` into the live query
+- `SessionManager.userPrompt(…, { queue, needsApproval, actor, draft })` — after the plan-reply
+  check, steers when there is no `queue` flag, no `needsApproval`, nothing already queued, no
+  attachments, and `canInterject` holds; otherwise the existing queue branch
+- `SessionManager.deliverIntoLiveTurn(meta, { text, mentions, actor })` — the delivery both
+  `userPrompt`'s steer branch and `interjectQueued` share: emit the `'interject'` event, upsert,
+  `pushIntoLiveTurn`. Queue bookkeeping stays with the caller
 - `pushTurn`/`pushTurnSafely(meta, message, { intoLiveTurn })` — `intoLiveTurn` skips token
   resolution and reuses `queryTokens.get(meta.id)` as-is; a normal push that saw a rotated token
   would `closeQuery` first, which would kill the very turn the interjection is joining
@@ -104,7 +123,20 @@ auto-approved the tool before `settingSources: []` was added to the spike), so
 `canInterject` refuses whenever the session is not `'running'` — including
 `waiting-permission` — until this is actually measured.
 
-### The release itself
+### Steer on send
+
+1. The composer sends `prompt`, with `queue: true` only for the explicit queue gesture. The
+   composer's "Send" vs "Queue" wording is a hint computed from the session status, the
+   `interject` capability, attachments, the existing queue and `promptNeedsApproval`; the server
+   makes the real decision.
+2. `userPrompt` runs the plan-reply check first, so a typed reply to a pending plan still means
+   "keep planning".
+3. If the steer conditions hold, `deliverIntoLiveTurn` writes an `'interject'` event attributed
+   to the sender and pushes with `priority: 'next'`. No queue row ever exists for it, so it
+   cannot be edited or cancelled afterwards.
+4. Otherwise the prompt is queued and flushes once the turn settles, as before.
+
+### The release itself (Send now)
 
 1. Client sends `interjectQueued`; `MESSAGE_AUTHZ` requires the `prompt` cap (same as
    `editQueued`), gated before any handler runs.
@@ -136,6 +168,14 @@ auto-approved the tool before `settingSources: []` was added to the spike), so
 
 ## Tests
 
+- `server/src/sessions.queue.test.ts` `describe('userPrompt steering')` — a send into a running
+  turn is pushed with `priority: 'next'`, emits `'interject'` (not `'user'`), leaves the queue
+  empty and the turn fields alone, and never closes the query; it queues instead for
+  `queue: true`, `needsApproval` (paused), an existing queue (FIFO), compaction, an interrupt or
+  rewind in flight, `waiting-permission`, a workflow mid-advance, attachments, and a closed link;
+  an idle session still opens a turn
+- `server/src/sessions.codex.test.ts` — a composer send into a running codex turn becomes a
+  `steer: true` push with no queue row
 - `server/src/sessions.queue.test.ts` `describe('interjectQueued')` — delivers into the live turn
   with `priority: 'next'` and no new `'user'` event; runs as the item's author, not the clicker;
   leaves `turnSource`/`turnStartedAt`/`turnActor`/`status`/`interruptedAt`/`workflow` untouched;
@@ -154,8 +194,13 @@ auto-approved the tool before `settingSources: []` was added to the spike), so
 
 ## Business rules
 
-- Sending only ever happens from the queue row, never from the composer — typing while the
-  session is busy still queues exactly as before.
+- A plain composer send while a turn runs steers into it by default. It queues instead when the
+  user asks to (Alt/Opt+Enter or the queue button), or when steering is not safe: attachments, a
+  `promptNeedsApproval` guest, an existing queue (FIFO — a send never jumps ahead of held
+  prompts), or any `canInterject` refusal.
+- A steered message has no queue row, so it cannot be edited or cancelled; queueing is the way
+  to keep that option.
+- A provider whose `interject` capability is false keeps queue-only behaviour.
 - An interjection never opens a turn and is never a rewind anchor.
 - It runs attributed to the item's author, not whoever pressed Send now.
 - A `promptNeedsApproval` guest cannot release their own held item — the owner still must.
@@ -213,7 +258,7 @@ auto-approved the tool before `settingSources: []` was added to the spike), so
 
 ## On a codex session
 
-Send now maps to `turn/steer`, which delivers into the turn already running. The protocol
+Send now and a steered composer send both map to `turn/steer`, which delivers into the turn already running. The protocol
 carries an `expectedTurnId` precondition, so steering a turn that has already moved on fails in
 the worker rather than landing in the wrong one — which is also why `canInterject` does not
 demand a `queryTokens` entry for codex. That map is the Claude token store and a codex session

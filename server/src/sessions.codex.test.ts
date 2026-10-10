@@ -438,6 +438,22 @@ test('an interjection steers the live turn instead of starting a new one', async
   assert.equal(h.sessions.get('s1')?.status, 'running');
 });
 
+test('a composer send while the turn runs steers it, with no queue row', async () => {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  const h = harness();
+  h.sessions.prompt('s1', 'count to twenty');
+  await settle();
+
+  h.sessions.userPrompt('s1', 'stop counting');
+  await settle();
+
+  assert.equal(h.sessions.get('s1')!.queued?.length ?? 0, 0);
+  assert.equal(h.pushes.length, 2);
+  assert.deepEqual(h.pushes[1]!.message, { text: 'stop counting', steer: true });
+  assert.equal(h.sessions.get('s1')?.status, 'running');
+});
+
 test('a cross-provider setModel is refused once the session has run', async () => {
   const h = harness();
   // A switch before the first turn is free — that is what makes the picker useful.
