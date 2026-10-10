@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { after, test } from 'node:test';
+import { APP_PROTOCOL_VERSION } from '@lines/shared';
 
 /**
  * `~/.lines-app/bridge.lock`, driven with real bridge processes.
@@ -199,4 +200,24 @@ test("a dev bridge preempts the desktop app's bridge", async () => {
   }, 'the lock to name the newcomer');
   assert.equal(held.instance, 'default');
   assert.equal(dev.child.exitCode, null, 'the preempting bridge did not survive its own takeover');
+});
+
+test('GET / reports the instance, protocol and relay link a stood-down tray labels', async () => {
+  // The tray has no IPC to a bridge it did not spawn, so this route is how it
+  // tells "Dev bridge · Connected" from "Local only". No RELAY_URL means relay: null.
+  const home = newHome('status');
+  startBridge(home, 'status');
+  const { port } = await until(() => {
+    try {
+      return JSON.parse(fs.readFileSync(bridgeJson(home, 'status'), 'utf8')) as { port: number };
+    } catch {
+      return null;
+    }
+  }, 'the bridge to publish');
+
+  const body = (await (await fetch(`http://127.0.0.1:${port}/`)).json()) as Record<string, unknown>;
+  assert.equal(body.ok, true);
+  assert.equal(body.instance, 'status');
+  assert.equal(body.appProtocol, APP_PROTOCOL_VERSION);
+  assert.equal(body.relay, null);
 });

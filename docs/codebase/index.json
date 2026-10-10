@@ -1763,7 +1763,11 @@
         "Supervisor.forceReload",
         "restartCommand",
         "isLoopbackPage",
-        "SINGLE_TENANT_TOKENS"
+        "SINGLE_TENANT_TOKENS",
+        "HOSTED",
+        "HOSTED_RELAY_URL",
+        "HOSTED_STORAGE_URL",
+        "DEVICE_FILE"
       ],
       "tests": [
         "server/scripts/dev-runtime.test.mjs",
@@ -2457,7 +2461,8 @@
         "isTokenRefresh",
         "COLLAB_MIN_PROTOCOL",
         "pendingPairCode",
-        "takePairCodeFromUrl"
+        "takePairCodeFromUrl",
+        "relayLink"
       ],
       "tests": [
         "storage/src/schema.credentials.test.ts",
@@ -2802,7 +2807,11 @@
         "installMediaPermissions",
         "APP_PERMISSIONS",
         "localModeCsp",
-        "openLinesForPairing"
+        "openLinesForPairing",
+        "pollForeignBridge",
+        "foreignRelay",
+        "lockFreeTicks",
+        "ForeignBridge"
       ],
       "tests": [
         "server/src/updates.test.ts",

@@ -97,6 +97,12 @@ const BRIDGE_LOCK_FILE = path.join(APP_ROOT, 'bridge.lock');
 /** `EX_CONFIG` from server/src/index.ts: the bridge refused to start because
  *  another one owns this machine. Distinct from a crash on purpose. */
 const EXIT_BRIDGE_LOCK_HELD = 78;
+/** Another live process's bridge lock. `deviceId` is non-null when it relays. */
+interface ForeignBridge {
+  pid: number;
+  instance: string;
+  deviceId: string | null;
+}
 /** Child stdout/stderr, so "Open logs" has something to reveal on a machine with no terminal. */
 const LOG_FILE = path.join(APP_ROOT, 'logs', `${INSTANCE}.log`);
 /**
@@ -197,8 +203,15 @@ let relaySettleTimer: NodeJS.Timeout | null = null;
 let lastRegisterAt = 0;
 /** Set while another bridge (a dev checkout under Tilt, normally) owns this
  *  machine, so ours is deliberately not running. */
-let standDown: { pid: number; instance: string } | null = null;
+let standDown: ForeignBridge | null = null;
 let standDownTimer: NodeJS.Timeout | null = null;
+/** The foreign bridge's relay link, read from its `GET /`. Kept apart from
+ *  `relay`: that one drives verification and pairing for our own bridge only. */
+let foreignRelay: RelayLinkStatus | null = null;
+/** Consecutive stand-down ticks that found the lock free. A dev-runtime reload
+ *  stops the old bridge before starting the new one, so a single free tick is
+ *  not proof the dev bridge is gone. */
+let lockFreeTicks = 0;
 let cli: ClaudeCliStatus = claudeCliStatus();
 let update: UpdateStatus = { state: 'idle' };
 /** Version we have already posted a notification for, so a re-check stays quiet. */
@@ -500,19 +513,78 @@ function pidAlive(pid: number): boolean {
  * Null for absent, corrupt, dead, or a lock naming our own bridge — none of those
  * is a collision, and treating one as such would park the tray for nothing.
  */
-function foreignBridgeLock(): { pid: number; instance: string } | null {
+function foreignBridgeLock(): ForeignBridge | null {
   try {
     const held = JSON.parse(fs.readFileSync(BRIDGE_LOCK_FILE, 'utf8')) as {
       pid?: number;
       instance?: string;
+      deviceId?: string | null;
     };
     if (typeof held.pid !== 'number') return null;
     if (held.pid === bridge?.pid) return null;
     if (!pidAlive(held.pid)) return null;
-    return { pid: held.pid, instance: held.instance ?? 'unknown' };
+    return {
+      pid: held.pid,
+      instance: held.instance ?? 'unknown',
+      deviceId: typeof held.deviceId === 'string' ? held.deviceId : null,
+    };
   } catch {
     return null;
   }
+}
+
+/**
+ * Ask the bridge that owns this machine how its relay link is doing, so the tray
+ * can say "Dev bridge · Connected" instead of "Paused". There is no IPC to a
+ * process we did not spawn; its loopback `GET /` is the only channel.
+ *
+ * The port comes from that instance's bridge.json, and only counts when its pid
+ * is the lock holder's — a stale file from an earlier run would point at nothing,
+ * or at someone else.
+ */
+function pollForeignBridge(holder: ForeignBridge) {
+  // A local-only bridge has no relay to report, and pid 0 is "refused, holder
+  // unreadable" — nothing to ask. The instance is a path segment, so it must be one.
+  if (!holder.pid || !holder.deviceId || !/^[\w.-]+$/.test(holder.instance) || holder.instance.startsWith('.')) {
+    foreignRelay = null;
+    return;
+  }
+  let port: number | null = null;
+  try {
+    const info = JSON.parse(
+      fs.readFileSync(path.join(APP_ROOT, 'run', holder.instance, 'bridge.json'), 'utf8'),
+    ) as { port?: number; pid?: number };
+    if (info.pid === holder.pid && typeof info.port === 'number') port = info.port;
+  } catch {
+    port = null; // still booting
+  }
+  const settle = (next: RelayLinkStatus | null) => {
+    // Answers can land after the holder changed or the lock cleared.
+    if (standDown?.pid !== holder.pid) return;
+    if (next?.connected === foreignRelay?.connected && next?.code === foreignRelay?.code) return;
+    foreignRelay = next;
+    updateTray();
+  };
+  if (port === null) return settle(null);
+  const req = http.get({ host: '127.0.0.1', port, path: '/', timeout: 2_000 }, (res) => {
+    let body = '';
+    res.setEncoding('utf8');
+    res.on('data', (chunk: string) => (body += chunk));
+    res.on('end', () => {
+      try {
+        const relayState = (JSON.parse(body) as { relay?: { connected?: unknown; code?: unknown } | null }).relay;
+        settle(
+          relayState && typeof relayState.connected === 'boolean'
+            ? { connected: relayState.connected, ...(typeof relayState.code === 'number' ? { code: relayState.code } : {}) }
+            : null,
+        );
+      } catch {
+        settle(null);
+      }
+    });
+  });
+  req.on('timeout', () => req.destroy());
+  req.on('error', () => settle(null));
 }
 
 /**
@@ -522,8 +594,10 @@ function foreignBridgeLock(): { pid: number; instance: string } | null {
  * and it is the bridge — not the worker — that collides on the lock and on this
  * machine's device identity. Same argument as the restart asymmetry in spawnChild.
  */
-function enterStandDown(holder: { pid: number; instance: string }) {
+function enterStandDown(holder: ForeignBridge) {
   standDown = holder;
+  foreignRelay = null;
+  lockFreeTicks = 0;
   bridge = null;
   // Nothing of ours is dialling out, so the tray must not claim a link.
   applyRelayStatus({ connected: false });
@@ -535,12 +609,20 @@ function enterStandDown(holder: { pid: number; instance: string }) {
         // Ownership can pass from one process to another (a tsx watch restart)
         // without ever being free; report whoever holds it now.
         standDown = still;
+        lockFreeTicks = 0;
+        pollForeignBridge(still);
         updateTray();
         return;
       }
+      // A dev-runtime reload frees the lock between stopping the old bridge and
+      // starting the new one. Re-arming into that gap would spawn a bridge the
+      // next dev bridge SIGTERMs at once, so a dev holder needs two free ticks.
+      if (standDown?.instance !== 'desktop' && ++lockFreeTicks < 2) return;
       clearInterval(standDownTimer!);
       standDownTimer = null;
       standDown = null;
+      foreignRelay = null;
+      lockFreeTicks = 0;
       shellLog('[bridge] machine lock is free — re-arming');
       // The worker was never stood down, so only replace one that is actually gone.
       if (!worker || worker.exitCode !== null || worker.killed) worker = spawnChild('worker', false);
@@ -550,6 +632,7 @@ function enterStandDown(holder: { pid: number; instance: string }) {
     }, STAND_DOWN_RECHECK_MS);
     standDownTimer.unref();
   }
+  pollForeignBridge(holder);
   updateTray();
 }
 
@@ -596,7 +679,7 @@ function spawnChild(name: 'worker' | 'bridge', ipc: boolean): ChildProcess {
       // crash loop against a machine we do not own.
       const holder = foreignBridgeLock();
       if (holder || code === EXIT_BRIDGE_LOCK_HELD) {
-        enterStandDown(holder ?? { pid: 0, instance: 'unknown' });
+        enterStandDown(holder ?? { pid: 0, instance: 'unknown', deviceId: null });
         return;
       }
       setTimeout(() => {
@@ -1968,8 +2051,15 @@ async function unpairThisMachine(): Promise<void> {
 /** One line for the tray: what the relay link is actually doing. */
 function relayLabel(): string {
   if (!RELAY_MODE) return 'Local mode';
-  // No bridge of ours is running, so "Connecting…" would be a lie.
-  if (standDown) return 'Paused — another bridge owns this machine';
+  // No bridge of ours is running; report the one that took over instead.
+  if (standDown) {
+    // Refused with the holder unreadable: nothing more to say about it.
+    if (!standDown.pid) return 'Paused — another bridge owns this machine';
+    if (!standDown.deviceId) return 'Dev bridge · Local only — not reachable from phone';
+    if (foreignRelay?.connected) return `Dev bridge (${standDown.instance}) · Connected · ${hostLabel(config.webUrl)}`;
+    if (foreignRelay?.code === 1008) return 'Dev bridge · Not paired';
+    return 'Dev bridge · Connecting…';
+  }
   if (relayVerified) return `Connected · ${hostLabel(config.webUrl)}`;
   if (relay?.connected) return 'Connecting…';
   // 1008 is the relay refusing this device: unclaimed, or revoked in the web app.
@@ -2138,7 +2228,9 @@ function updateTray() {
     { type: 'separator' as const },
     {
       label: standDown
-        ? `Bridge: paused — another bridge owns this machine${standDown.pid ? ` (pid ${standDown.pid})` : ''}`
+        ? standDown.pid
+          ? `Bridge: dev (pid ${standDown.pid}, ${standDown.instance})`
+          : 'Bridge: paused — another bridge owns this machine'
         : `Bridge: ${alive(bridge) ? 'running' : 'stopped'}`,
       enabled: false,
     },
@@ -2280,6 +2372,7 @@ async function collectDiagnostics(): Promise<void> {
       paired: !pairingCode,
       relay: { ...relay, verified: relayVerified, changed: ago(relayChangedAt) },
       standDown,
+      foreignRelay,
       children: {
         bridge: { pid: bridge?.pid ?? null, alive: !!bridge && bridge.exitCode === null, started: ago(childStartedAt.bridge) },
         worker: { pid: worker?.pid ?? null, alive: !!worker && worker.exitCode === null, started: ago(childStartedAt.worker) },

@@ -154,6 +154,29 @@ stored in a mode-0600 control file. That token is not included in status output.
   local device credential is only used without relay authentication.
 - Existing bridge-lock takeover/refusal rules remain in force. A deployed relay
   must use storage from the same deployment.
+- `--hosted` points the bridge at the deployment as this machine's paired device,
+  so a phone on the hosted web app reaches the dev bridge. It sets the bridge's
+  `RELAY_URL` and `STORAGE_URL` from `LINES_RELAY_URL` / `LINES_STORAGE_URL` (shell
+  env), defaulting to production — the same names and defaults as the desktop
+  config's `DEFAULT_CONFIG`, duplicated deliberately and to be kept in step. Tilt's
+  serve env beats `.env`, so local relay/storage values there cannot mask them.
+  It never sets `LINES_DEVICE_ID`/`LINES_DEVICE_SECRET`: the bridge resolves the
+  real `~/.lines-app/device.json`, shares the tray's store and e2ee keys, and so
+  appears to the phone as the same machine with the same sessions. Tilt warns when
+  `device.json` is missing (pair from the tray or web app first).
+- Phone workflow: leave the tray running and `tilt up -- --hosted`. The dev bridge
+  preempts the tray's bridge, the tray stands down and labels the dev bridge's relay
+  state (see [desktop-app](desktop-app.md#standing-down)), and after `tilt down` the
+  tray re-arms its own bridge. Plain `tilt up` still takes the lock, but the tray
+  then reports the machine as local only, not reachable from a phone.
+- `--hosted` with `--with-relay` fails fast: the two name contradictory relay
+  targets. The local `storage` resource keeps running under `--hosted`; disable it
+  from the Tilt UI if it is not needed.
+- Risk: under `--hosted` the dev bridge syncs to production storage as the real
+  device, so a buggy local sync change can damage this user's production rows. The
+  phone also keeps the hosted web bundle, so protocol skew with the dev bridge only
+  shows the informational skew banner; protocol-breaking local changes misbehave
+  there. Web changes on a phone need the LAN setup above instead.
 - Source files are not Tilt service dependencies. The supervisor owns backend
   watching, Vite owns web HMR, and tsx owns storage/relay watching. `.cache` is excluded
   from Tilt watching to avoid generation build loops.

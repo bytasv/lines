@@ -449,6 +449,15 @@ own bridge exiting `EXIT_BRIDGE_LOCK_HELD` or a re-read showing a live foreign h
 preempt case, where its bridge dies by `SIGTERM` with `code === null`), it stands its bridge down
 instead of respawning it — see [desktop-app](desktop-app.md#boot-and-modes).
 
+Because the tray has no IPC to a bridge it did not spawn, the bridge's own fallthrough `GET /`
+reports what a stood-down tray needs, alongside `ok`, `sessions` and `devRuntime`: `instance`,
+`appProtocol`, and `relay` — `null` when `RELAY_URL` is unset, otherwise `{connected, code?}` from
+the last `RelayClient` status (`relayLink`, set in the same `onStatus` that reports to the shell).
+The route stays unauthenticated on loopback behind `hostAllowed`, so it carries no device id,
+secret or token and must not grow one. Tilt's `--hosted` flag is the intended producer: a dev
+bridge dialling the deployment as the real device, which the phone sees as the same machine (see
+[local-dev-orchestration](local-dev-orchestration.md)).
+
 The relay's health endpoint (`GET /`) keeps its exact unauthenticated shape — `{ok, version,
 devices}` — for anyone; a request presenting the correct `x-relay-secret` (constant-time compared)
 additionally gets `hubs: HubRegistry.list()`, a per-device `{online, channels, agentAttaches,

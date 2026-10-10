@@ -136,9 +136,15 @@ point a user at.
 - `loadConfig()` / `isLocalMode()` (`desktop/src/config.ts`)
 - `foreignBridgeLock()` — reads `~/.lines-app/bridge.lock`; null unless it names a different,
   still-live pid (absent, corrupt, dead, or naming our own bridge are all "no collision")
-- `enterStandDown(holder)` — kills the tray's own bridge reference, flips the tray to "Paused",
-  and arms the ~5s recheck that re-spawns both children once the lock clears
-- `standDown` — `{ pid, instance } | null`; set exactly while another bridge owns this machine
+- `enterStandDown(holder)` — kills the tray's own bridge reference, flips the tray to the
+  dev-bridge labels, and arms the ~5s recheck that re-spawns both children once the lock clears
+- `standDown` — `ForeignBridge | null` (`{ pid, instance, deviceId }`, `deviceId` non-null when the
+  holder relays); set exactly while another bridge owns this machine
+- `pollForeignBridge(holder)` — finds the holder's port in `run/<instance>/bridge.json` (only when
+  its pid matches the lock), asks that bridge's loopback `GET /` for its relay link, and stores it
+  in `foreignRelay`
+- `foreignRelay` — the foreign bridge's relay link as last read; separate from `relay`
+- `lockFreeTicks` — consecutive rechecks that found the lock free (the re-arm guard)
 - `EXIT_BRIDGE_LOCK_HELD` (`78`) — duplicated from `server/src/index.ts` rather than imported,
   the same precedent as `APP_ROOT` above it
 - `installMediaPermissions()` — grants Electron's `media` permission request only for a mic,
@@ -284,11 +290,29 @@ Three entry points reach `enterStandDown`, all landing in the same `standDown` s
   `code === null` with no matching lock-held exit code — the tell here is a re-read of the lock
   file showing a live foreign holder.
 
-While standing down: `bridge` is cleared, `applyRelayStatus({connected: false})` runs so the tray
-never claims a link that does not exist, and the tray's status line and its `Bridge:` menu item
-both read "Paused — another bridge owns this machine (pid N)". A ~5s recheck
-(`STAND_DOWN_RECHECK_MS`) polls `foreignBridgeLock()`; once it clears, both children spawn again
-(the worker only if it isn't already alive — see the note on the restart asymmetry below).
+While standing down: `bridge` is cleared and `applyRelayStatus({connected: false})` runs so the
+tray never claims a link of its own that does not exist. The tray then follows the bridge that took
+over instead of just reading "Paused": `pollForeignBridge` runs on entry and on every ~5s recheck
+(`STAND_DOWN_RECHECK_MS`), reading the holder's port from its instance's `bridge.json` (pid
+cross-checked against the lock) and its relay state from that bridge's `GET /` (see
+[hosted-machine-access](hosted-machine-access.md#one-bridge-speaks-at-a-time)). The status line
+reads:
+
+- "Dev bridge (<instance>) · Connected · <web host>" while its relay link is up
+- "Dev bridge · Not paired" on a 1008 close
+- "Dev bridge · Connecting…" otherwise
+- "Dev bridge · Local only — not reachable from phone" when the lock has no `deviceId`
+- "Paused — another bridge owns this machine" only when the holder could not be read at all
+
+The `Bridge:` menu row reads "dev (pid N, <instance>)". The result lives in `foreignRelay`, never in
+`relay`: `applyRelayStatus` drives `relayVerified`, `onRelayVerified` and the pairing window, which
+describe the tray's own bridge only.
+
+Once the lock clears, both children spawn again (the worker only if it isn't already alive — see
+the note on the restart asymmetry below). A dev-runtime reload stops the old bridge before starting
+the new one, so the lock is briefly free mid-reload; when the last holder was not `desktop`, the
+lock must be free on two consecutive rechecks before the tray re-arms, so it does not spawn a bridge
+the next dev bridge immediately preempts.
 
 **The worker is never touched by any of this.** Only the bridge collides on the lock and on the
 relay device identity; a worker holding a live turn must not be treated as part of the collision.
@@ -636,8 +660,9 @@ and push first. See [whats-new](whats-new.md).
 - When a *different* installation (a dev checkout, most commonly Tilt) holds the lock instead, the
   tray's own bridge stands down rather than fighting for it: no bridge or worker spawns at startup,
   or the running bridge exits/gets preempted and is not respawned, until the lock clears. The tray
-  reports this plainly ("Paused — another bridge owns this machine") rather than showing
-  "Connecting…" or silently retrying forever.
+  reports the other bridge's state ("Dev bridge · …") rather than showing its own "Connecting…" or
+  silently retrying forever; a foreign bridge's link never feeds the tray's own relay verification
+  or pairing.
 - The worker is never part of a stand-down: only the bridge collides on the machine lock and the
   relay device identity, and a worker mid-turn must not be torn down because a sibling process
   collided on a resource the worker doesn't touch.

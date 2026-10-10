@@ -27,6 +27,14 @@ config.define_bool(
           'default: the bridge only dials when RELAY_URL is set.',
 )
 config.define_bool(
+    'hosted',
+    usage='Point the bridge at the deployed relay and storage as this machine\'s ' +
+          'paired device (~/.lines-app/device.json), so the phone reaches the dev ' +
+          'bridge. The tray stands down and shows "Dev bridge" while it runs. ' +
+          'Writes to prod storage as the real device. Override the targets with ' +
+          'LINES_RELAY_URL / LINES_STORAGE_URL.',
+)
+config.define_bool(
     'relay-auth',
     usage='Run the relay with real Clerk verification instead of the dev escape ' +
           'hatch. Required to exercise session sharing: with auth off every ' +
@@ -52,6 +60,15 @@ if config.tilt_subcommand == 'down':
 WITH_STORAGE = not cfg.get('no-storage', False)
 WITH_STUDIO = cfg.get('with-studio', False)
 WITH_RELAY = cfg.get('with-relay', False)
+HOSTED = cfg.get('hosted', False)
+if HOSTED and WITH_RELAY:
+    fail('--hosted and --with-relay name contradictory relay targets (the deployment ' +
+         'vs a local relay on :8791). Pick one.')
+# Same env names and defaults as DEFAULT_CONFIG in desktop/src/config.ts, so one
+# override serves the tray and Tilt alike. Duplicated rather than read from there,
+# exactly as APP_ROOT is: keep the two in step.
+HOSTED_RELAY_URL = os.getenv('LINES_RELAY_URL', '') or 'wss://linesapp.cloud'
+HOSTED_STORAGE_URL = os.getenv('LINES_STORAGE_URL', '') or 'https://api.linesapp.cloud'
 # Only meaningful with --with-relay; harmless otherwise.
 RELAY_AUTH = cfg.get('relay-auth', False)
 WITH_BUTTONS = not cfg.get('no-ui-buttons', False)
@@ -180,6 +197,7 @@ if not have('VITE_CLERK_PUBLISHABLE_KEY'):
 # storage server splits one machine's data across two databases.
 # Sharing needs three things agreeing, and each one fails as an unexplained
 # "connecting to your machine…" spinner rather than as an error. Say so up front.
+DEVICE_FILE = os.path.join(os.getenv('HOME', ''), '.lines-app', 'device.json')
 if RELAY_AUTH:
     if not have('CLERK_SECRET_KEY'):
         warn('--relay-auth needs CLERK_SECRET_KEY: with it unset the relay exits ' +
@@ -197,7 +215,7 @@ if RELAY_AUTH:
     # bridge resource): the relay verifies it against storage, so it has to be a
     # real registered device. Unpaired, the bridge is refused 1008 on every dial
     # and the browser spins on "connecting to your machine".
-    if not os.path.exists(os.path.join(os.getenv('HOME', ''), '.lines-app', 'device.json')):
+    if not os.path.exists(DEVICE_FILE):
         warn('--relay-auth needs a paired machine: ~/.lines-app/device.json is ' +
              'missing, so the bridge has no device id storage will verify. Pair ' +
              'this machine from the web app first.')
@@ -206,8 +224,17 @@ elif WITH_RELAY and have('VITE_BRIDGE_WS_URL'):
          'as the machine owner and session sharing cannot engage. Add --relay-auth ' +
          'to exercise a guest connection.')
 
-RELAYED = have('RELAY_URL')
-if RELAYED and not have('STORAGE_URL'):
+# --hosted never sets LINES_DEVICE_ID/SECRET: the bridge must take over as the
+# real paired device, or the phone would be looking for a machine that is not there.
+if HOSTED and not os.path.exists(DEVICE_FILE):
+    warn('--hosted needs a paired machine: ~/.lines-app/device.json is missing, so ' +
+         'the bridge would mint an unregistered device and be refused 1008. Pair ' +
+         'via the tray app or the web app first.')
+
+# --hosted sets RELAY_URL and STORAGE_URL together, so the split warning below
+# cannot apply to it.
+RELAYED = HOSTED or have('RELAY_URL')
+if RELAYED and not HOSTED and not have('STORAGE_URL'):
     warn('RELAY_URL is set but STORAGE_URL is not — the bridge will dial the ' +
          'hosted relay while syncing to localhost. Set STORAGE_URL to the same ' +
          'deployment (https://api.<domain>), or unset RELAY_URL for local-only.')
@@ -232,7 +259,7 @@ def dotenv_value(path, key):
             return parts[1].strip()
     return ''
 
-RELAY_TARGET = os.getenv('RELAY_URL', '') or dotenv_value(ENV_FILE, 'RELAY_URL')
+RELAY_TARGET = HOSTED_RELAY_URL if HOSTED else (os.getenv('RELAY_URL', '') or dotenv_value(ENV_FILE, 'RELAY_URL'))
 LOOPBACK_RELAY = ('127.0.0.1' in RELAY_TARGET or 'localhost' in RELAY_TARGET or
                   '[::1]' in RELAY_TARGET)
 BRIDGE_LOCK_FILE = os.path.join(os.getenv('HOME', ''), '.lines-app', 'bridge.lock')
@@ -256,8 +283,9 @@ if RELAYED and not LOOPBACK_RELAY and not WITH_RELAY and os.path.exists(BRIDGE_L
     if len(HOLDER) == 3:
         if HOLDER[1] == 'desktop':
             warn('the Lines tray app holds ~/.lines-app/bridge.lock (bridge pid %s, %s) — ' % (HOLDER[0], HOLDER[2]) +
-                 "Tilt's bridge will take this machine over (SIGTERM) and the tray will show " +
-                 '"Paused" until `tilt down`. Nothing to do; quit the tray app to avoid it.')
+                 "Tilt's bridge will take this machine over (SIGTERM). The tray shows " +
+                 '"Dev bridge (Tilt)" meanwhile and re-arms its own bridge after `tilt down`. ' +
+                 'Nothing to do.')
         else:
             warn('another bridge holds ~/.lines-app/bridge.lock (pid %s, instance "%s", %s) — ' % (HOLDER[0], HOLDER[1], HOLDER[2]) +
                  "Tilt's bridge will refuse to start (exit 78). Stop that process, or set " +
@@ -331,7 +359,12 @@ local_resource(
 # Built up before the resource: Starlark allows only one ** per call, and this
 # needs three conditional groups.
 BRIDGE_ENV = {'LINES_BRIDGE_PORT': str(BRIDGE_PORT)}
-if not have('STORAGE_URL'):
+if HOSTED:
+    # Serve env wins over .env (the bridge's dotenv only fills unset keys), so a
+    # local RELAY_URL/STORAGE_URL in .env cannot mask these.
+    BRIDGE_ENV['RELAY_URL'] = HOSTED_RELAY_URL
+    BRIDGE_ENV['STORAGE_URL'] = HOSTED_STORAGE_URL
+elif not have('STORAGE_URL'):
     BRIDGE_ENV['STORAGE_URL'] = 'http://localhost:%d' % STORAGE_PORT
 if WITH_RELAY:
     BRIDGE_ENV['RELAY_URL'] = 'ws://127.0.0.1:%d' % RELAY_PORT
@@ -543,5 +576,5 @@ if WITH_STORAGE:
 print('lines: web :%d  bridge :%d  worker :%d  storage :%s%s%s' % (
     WEB_PORT, BRIDGE_PORT, WORKER_PORT,
     str(STORAGE_PORT) if WITH_STORAGE else 'disabled',
-    '  [relayed: %s]' % os.getenv('RELAY_URL', 'via .env') if RELAYED else '',
+    '  [relayed: %s]' % (HOSTED_RELAY_URL if HOSTED else os.getenv('RELAY_URL', 'via .env')) if RELAYED else '',
     '  [reload frozen: %s]' % ','.join(FROZEN) if FROZEN else ''))

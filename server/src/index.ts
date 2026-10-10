@@ -72,7 +72,7 @@ import {
   permissionAnswerFor,
   prepareInlineWorkflow,
 } from './guestWorkflows.ts';
-import { reportActivity, reportRelayStatus, UpdateManager } from './updates.ts';
+import { reportActivity, reportRelayStatus, UpdateManager, type RelayLinkStatus } from './updates.ts';
 import {
   LINES_READ_ONLY_MANIFEST,
   createMcpDispatcher,
@@ -272,6 +272,9 @@ function setClerkToken(ctx: UserContext, token: string): boolean {
 // Callbacks close over `registry` (created right after) and only fire once the
 // worker socket connects.
 let devRelayConnected = false;
+/** Last relay link status, served on `GET /` so the tray can follow a dev bridge
+ *  that took this machine over — it has no IPC channel to that process. */
+let relayLink: RelayLinkStatus | null = null;
 const worker = new WorkerClient({
   onHello: (live) => devRuntime.whenActive(() => registry.onWorkerLive(live)),
   onEvent: (sessionId, message) =>
@@ -652,7 +655,11 @@ if (RELAY_URL) {
     },
     // Straight through to the desktop shell: it is the only consumer, and the
     // tray is the only place a user can see that this machine is reachable.
-    onStatus: (status) => { devRelayConnected = status.connected; reportRelayStatus(status); },
+    onStatus: (status) => {
+      devRelayConnected = status.connected;
+      relayLink = status;
+      reportRelayStatus(status);
+    },
   });
   console.log(`[relay] dialling ${RELAY_URL} as device ${relayIdentity!.id}`);
   setInterval(() => void reconcileGrants(relayIdentity!.id), GRANT_RECONCILE_MS).unref();
@@ -909,7 +916,18 @@ const server = http.createServer((req, res) => {
     return;
   }
   res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ ok: true, sessions: registry.get(LOCAL_USER).sessions.list().length, devRuntime: devRuntime.publicStatus }));
+  // instance/appProtocol/relay are what a stood-down tray reads to label the
+  // bridge that took over. No device id or secret: this answers anyone on loopback.
+  res.end(JSON.stringify({
+    ok: true,
+    sessions: registry.get(LOCAL_USER).sessions.list().length,
+    devRuntime: devRuntime.publicStatus,
+    instance: INSTANCE,
+    appProtocol: APP_PROTOCOL_VERSION,
+    relay: RELAY_URL
+      ? { connected: relayLink?.connected ?? false, ...(relayLink?.code !== undefined ? { code: relayLink.code } : {}) }
+      : null,
+  }));
 });
 
 const wss = new WebSocketServer({
