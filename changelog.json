@@ -107,6 +107,13 @@
   ],
   "desktop": [
     {
+      "version": "0.2.52",
+      "date": "2026-10-10",
+      "items": [
+        "Messages sent while a turn is running are delivered into that turn instead of waiting in the queue, unless you ask for them to queue."
+      ]
+    },
+    {
       "version": "0.2.51",
       "date": "2026-10-08",
       "items": [
@@ -173,7 +180,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Messages sent while a turn is running are delivered into that turn instead of waiting in the queue, unless you ask for them to queue."
-  ]
+  "desktopPending": []
 }
