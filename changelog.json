@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.20",
+      "date": "2026-10-10",
+      "items": [
+        "Background tasks now sit in one tidy line above the message box. Click it to see each task, stop them one at a time or all at once, and open a task to see what it runs, why it started, and jump to where it began in the conversation."
+      ]
+    },
+    {
       "version": "0.1.19",
       "date": "2026-10-10",
       "items": [

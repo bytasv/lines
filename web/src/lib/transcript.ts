@@ -1071,6 +1071,133 @@ export function findItemIndexForSeq(items: TranscriptItem[], seq: number, toolUs
   return items.findIndex(contains);
 }
 
+/** Where a live background task came from, as far as the loaded events say. */
+export interface BackgroundTaskOrigin {
+  /** `task_started` ts. */
+  startedAt?: number;
+  /** 'Explore agent' | 'Bash' | the task type when nothing better is known. */
+  kind: string;
+  /** Bash command or agent prompt. */
+  runs?: string;
+  /** Assistant text before the launch. */
+  reason?: string;
+  /** Event seq of the launching `tool_use`, for the jump. */
+  seq?: number;
+  toolUseId?: string;
+}
+
+const REASON_MAX = 300;
+
+function clip(text: string, max: number): string {
+  const t = text.trim();
+  return t.length > max ? t.slice(0, max) + '…' : t;
+}
+
+/** Label for a bare SDK `task_type` ('subagent', 'local_bash', ...). */
+function taskTypeLabel(type: string | undefined): string {
+  if (!type) return 'Task';
+  if (type.includes('bash')) return 'Bash';
+  if (type.includes('agent')) return 'Agent';
+  return type;
+}
+
+/**
+ * Details for the background-tasks strip, derived from events already in the
+ * store: the task's `system/task_started`, the assistant `tool_use` that
+ * launched it, and the narration just before that launch. One backward scan,
+ * stopping once every task is resolved. Display only — which tasks exist is
+ * the session's `backgroundTasks` level set, never this. A task whose start
+ * event isn't loaded (history still paging in) gets just its kind.
+ */
+export function backgroundTaskOrigins(
+  events: TranscriptEvent[],
+  tasks: { id: string; type: string }[],
+): Map<string, BackgroundTaskOrigin> {
+  const out = new Map<string, BackgroundTaskOrigin>();
+  for (const t of tasks) out.set(t.id, { kind: taskTypeLabel(t.type) });
+  const unstarted = new Set(tasks.map((t) => t.id));
+  // Launching tool_use id → origin still missing its tool card.
+  const unlaunched = new Map<string, BackgroundTaskOrigin>();
+  // Launched with no narration in the same message: take the nearest earlier
+  // main-thread text in the same turn.
+  let unreasoned: BackgroundTaskOrigin[] = [];
+
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (!unstarted.size && !unlaunched.size && !unreasoned.length) break;
+    const event = events[i];
+    if (event.kind === 'user') {
+      // Turn boundary: narration before this belongs to another turn.
+      unreasoned = [];
+      continue;
+    }
+    if (event.kind !== 'sdk') continue;
+    const msg = event.data as Record<string, unknown> & { type?: string };
+    if (msg.type === 'system' && (msg as { subtype?: string }).subtype === 'task_started') {
+      if ((msg as { skip_transcript?: boolean }).skip_transcript) continue;
+      const t = msg as {
+        task_id?: string;
+        task_type?: string;
+        subagent_type?: string;
+        prompt?: string;
+        tool_use_id?: string;
+      };
+      const taskId = String(t.task_id ?? '');
+      const origin = out.get(taskId);
+      if (!origin || !unstarted.has(taskId)) continue;
+      unstarted.delete(taskId);
+      origin.startedAt = event.ts;
+      if (t.subagent_type) origin.kind = `${t.subagent_type} agent`;
+      else if (t.task_type) origin.kind = taskTypeLabel(t.task_type);
+      if (t.prompt) origin.runs = t.prompt;
+      if (t.tool_use_id) {
+        origin.toolUseId = t.tool_use_id;
+        unlaunched.set(t.tool_use_id, origin);
+      }
+      continue;
+    }
+    if (msg.type !== 'assistant') continue;
+    const content = (msg as { message?: { content?: SdkContentBlock[] } }).message?.content ?? [];
+    // Narration for launches in later messages of this turn that had none of
+    // their own — resolved before this message's own launches join the list.
+    if (unreasoned.length && subagentParentId(msg) === null) {
+      const text = content
+        .filter((x) => x.type === 'text' && x.text)
+        .map((x) => x.text)
+        .join('\n');
+      if (text.trim()) {
+        for (const origin of unreasoned) origin.reason = clip(text, REASON_MAX);
+        unreasoned = [];
+      }
+    }
+    for (let b = 0; b < content.length; b++) {
+      const block = content[b];
+      if (block.type !== 'tool_use' || !block.id) continue;
+      const origin = unlaunched.get(block.id);
+      if (!origin) continue;
+      unlaunched.delete(block.id);
+      origin.seq = event.seq;
+      const input = block.input ?? {};
+      if (block.name === 'Bash') {
+        origin.kind = 'Bash';
+        if (typeof input.command === 'string') origin.runs = input.command;
+      } else {
+        if (typeof input.prompt === 'string') origin.runs ??= input.prompt;
+        if (typeof input.subagent_type === 'string' && !origin.kind.endsWith(' agent')) {
+          origin.kind = `${input.subagent_type} agent`;
+        }
+      }
+      const before = content
+        .slice(0, b)
+        .filter((x) => x.type === 'text' && x.text)
+        .map((x) => x.text)
+        .join('\n');
+      if (before.trim()) origin.reason = clip(before, REASON_MAX);
+      else unreasoned.push(origin);
+    }
+  }
+  return out;
+}
+
 /** True when an assistant item carries a non-empty text block (not thinking-only). */
 function hasText(item: Extract<TranscriptItem, { kind: 'assistant' }>): boolean {
   return item.blocks.some((b) => b.type === 'text' && b.text.trim().length > 0);

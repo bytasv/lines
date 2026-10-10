@@ -3626,7 +3626,9 @@
         "isBackgroundTaskSignal",
         "BACKGROUND_TASK_SYSTEM_SUBTYPES",
         "provesMainThreadTurn",
-        "SessionManager.queryInUse"
+        "SessionManager.queryInUse",
+        "backgroundTaskOrigins",
+        "BackgroundTaskOrigin"
       ],
       "tests": [
         "server/src/sessions.backgroundTasks.test.ts"
@@ -3643,7 +3645,8 @@
         "the sidebar's background-work row is not actionable and is checked after waiting-permission and the interrupted-turn state, both of which do need the user",
         "the finish chime/notification is suppressed while backgroundTasks is non-empty; it fires normally for the eventual notification turn once the set has emptied",
         "a task that vanishes silently (no task_notification, no further background_tasks_changed naming it) is not self-healing under this invariant — the user still needs to click Stop; fully self-healing that needs per-task timestamps plus a timer, out of scope here",
-        "an event proving a main-thread turn (assistant, stream_event, non-replay user, no subagent parent) on a settled session with no bridge-started turn does heal the status to running and re-opens a parked workflow step — unlike the background-task-only system events above"
+        "an event proving a main-thread turn (assistant, stream_event, non-replay user, no subagent parent) on a settled session with no bridge-started turn does heal the status to running and re-opens a parked workflow step — unlike the background-task-only system events above",
+        "the strip's per-task details (kind, start time, what it runs, the model's stated reason, the jump to the launching card) are derived client-side from loaded transcript events and degrade to the description when the task's start event isn't loaded; they are display-only — which rows exist always comes from SessionMeta.backgroundTasks, which stays {id, type, description}"
       ],
       "architecturalRules": [
         "SessionStatus is deliberately not overloaded to represent background work — a separate SessionMeta field keeps the turn lifecycle (workflow advance, queue flush, turn-complete accounting) byte-identical",

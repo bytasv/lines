@@ -1,25 +1,33 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import {
   ActionIcon,
   Alert,
   Badge,
   Button,
+  Code,
+  Collapse,
   Divider,
   Group,
   Loader,
   Menu,
+  Paper,
+  Popover,
   Stack,
   Text,
   Tooltip,
+  UnstyledButton,
 } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import {
   IconAlertTriangle,
   IconCheck,
+  IconChevronDown,
+  IconChevronRight,
   IconDots,
   IconFileDiff,
   IconFolder,
   IconGitBranch,
+  IconInfoCircle,
   IconLogin,
   IconPlayerPlay,
   IconPlayerStopFilled,
@@ -34,7 +42,8 @@ import {
   type BackgroundTaskInfo,
 } from '@lines/shared';
 import { useStore } from '../store';
-import { formatSpendUsd, skippableFailedStep } from '../lib/format';
+import { formatDuration, formatSpendUsd, skippableFailedStep } from '../lib/format';
+import { backgroundTaskOrigins, type BackgroundTaskOrigin } from '../lib/transcript';
 import { useIsPhone } from '../lib/layout';
 import { useStepResolver } from '../lib/useStepResolver';
 import { send } from '../ws';
@@ -463,38 +472,240 @@ export function SessionView({ sessionId }: { sessionId: string }) {
 }
 
 /**
- * One item per live background task, each with its own Stop — the escape hatch
- * for a single task (or one the CLI has forgotten) without the Composer's
- * stop-everything. Wraps rather than truncating the list, so every Stop stays
- * reachable on a phone. Stop is hidden from a guest without `interrupt`.
+ * Live background tasks as one collapsed line in the composer column: the lone
+ * task's description (or "N background tasks") plus Stop all. Expands into a
+ * row per task — kind, elapsed time, its own Stop — and each row opens a
+ * details popover: what the task runs, the model's stated reason, and a jump to
+ * the launching tool card. The details are derived from loaded transcript
+ * events (see backgroundTaskOrigins) and degrade to the description while the
+ * task's start is still paging in. Every Stop is hidden from a guest without
+ * `interrupt`.
  */
 function BackgroundTasksStrip({ sessionId, tasks }: { sessionId: string; tasks: BackgroundTaskInfo[] }) {
   const canStop = useCanOnSession(sessionId, 'interrupt');
+  const events = useStore((s) => s.transcripts[sessionId]);
+  const [expanded, setExpanded] = useState(false);
+  const [openId, setOpenId] = useState<string | null>(null);
+  // Minute granularity is all the rows show.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  const idsKey = tasks.map((t) => t.id).join();
+  const origins = useMemo(
+    () => backgroundTaskOrigins(events ?? [], tasks),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on ids; type is fixed per id
+    [events, idsKey],
+  );
+  const stopAll = () => send({ type: 'stopBackgroundTasks', sessionId });
+
   return (
-    <Group px="md" py={6} gap={6} wrap="wrap" bg="var(--mantine-color-default-hover)">
-      <Loader size={12} />
-      <Text size="xs" c="dimmed">
-        {tasks.length === 1 ? '1 background task' : `${tasks.length} background tasks`}
-        {' · '}
-      </Text>
-      {tasks.map((t) => (
-        <Group key={t.id} gap={2} wrap="nowrap" maw="100%" style={{ minWidth: 0 }}>
-          <Text size="xs" c="dimmed" truncate maw={240}>
-            {t.description}
-          </Text>
+    <Stack gap={0} maw={920} mx="auto" w="100%" px="md" pb={4}>
+      <Paper withBorder radius="md">
+        <Group justify="space-between" wrap="nowrap" px="xs" py={4} gap="xs">
+          <UnstyledButton
+            aria-expanded={expanded}
+            onClick={() => setExpanded((e) => !e)}
+            style={{ minWidth: 0, flex: 1 }}
+          >
+            <Group gap={6} wrap="nowrap">
+              <Loader size={12} />
+              <Text size="xs" c="dimmed" truncate style={{ minWidth: 0 }}>
+                {tasks.length === 1 ? tasks[0].description : `${tasks.length} background tasks`}
+              </Text>
+              {expanded ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
+            </Group>
+          </UnstyledButton>
+          {canStop && (
+            <Button
+              size="compact-xs"
+              variant="subtle"
+              color="gray"
+              leftSection={<IconPlayerStopFilled size={10} />}
+              onClick={stopAll}
+            >
+              {tasks.length > 1 ? 'Stop all' : 'Stop'}
+            </Button>
+          )}
+        </Group>
+        <Collapse expanded={expanded}>
+          <Stack gap={2} px="xs" py={4} style={{ borderTop: '1px solid var(--mantine-color-default-border)' }}>
+            {tasks.map((t) => (
+              <BackgroundTaskRow
+                key={t.id}
+                sessionId={sessionId}
+                task={t}
+                origin={origins.get(t.id) ?? { kind: t.type }}
+                now={now}
+                canStop={canStop}
+                opened={openId === t.id}
+                onOpenChange={(o) => setOpenId(o ? t.id : null)}
+              />
+            ))}
+          </Stack>
+        </Collapse>
+      </Paper>
+    </Stack>
+  );
+}
+
+/** "<1m" / "3m" / "1h 5m" — the strip ticks every 30s, so seconds would lie. */
+function elapsedLabel(ms: number): string {
+  return ms < 60_000 ? '<1m' : formatDuration(ms).replace(/ \d+s$/, '');
+}
+
+/** One task in the expanded strip, with its details popover. */
+function BackgroundTaskRow({
+  sessionId,
+  task,
+  origin,
+  now,
+  canStop,
+  opened,
+  onOpenChange,
+}: {
+  sessionId: string;
+  task: BackgroundTaskInfo;
+  origin: BackgroundTaskOrigin;
+  now: number;
+  canStop: boolean;
+  opened: boolean;
+  onOpenChange: (opened: boolean) => void;
+}) {
+  const elapsed = origin.startedAt != null ? elapsedLabel(Math.max(0, now - origin.startedAt)) : null;
+  const stop = () => send({ type: 'stopBackgroundTasks', sessionId, taskId: task.id });
+  const known = origin.runs != null || origin.reason != null || origin.seq != null;
+  const isBash = origin.kind === 'Bash';
+  return (
+    <Popover
+      opened={opened}
+      onChange={onOpenChange}
+      width="min(360px, calc(100vw - 2rem))"
+      position="top"
+      withArrow
+      shadow="md"
+    >
+      <Popover.Target>
+        <Group wrap="nowrap" gap={6}>
+          <UnstyledButton
+            onClick={() => onOpenChange(!opened)}
+            style={{ flex: 1, minWidth: 0 }}
+            aria-label={`Details for ${task.description}`}
+          >
+            <Group wrap="nowrap" gap={6}>
+              <Badge size="xs" variant="light" style={{ flexShrink: 0 }}>
+                {origin.kind}
+              </Badge>
+              <Text size="xs" truncate style={{ flex: 1, minWidth: 0 }}>
+                {task.description}
+              </Text>
+              {elapsed && (
+                <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
+                  {elapsed}
+                </Text>
+              )}
+            </Group>
+          </UnstyledButton>
+          <ActionIcon
+            size="xs"
+            variant="subtle"
+            color="gray"
+            aria-label={`About ${task.description}`}
+            onClick={() => onOpenChange(!opened)}
+          >
+            <IconInfoCircle size={12} />
+          </ActionIcon>
           {canStop && (
             <ActionIcon
               size="xs"
               variant="subtle"
               color="gray"
-              aria-label={`Stop ${t.description}`}
-              onClick={() => send({ type: 'stopBackgroundTasks', sessionId, taskId: t.id })}
+              aria-label={`Stop ${task.description}`}
+              onClick={stop}
             >
               <IconPlayerStopFilled size={10} />
             </ActionIcon>
           )}
         </Group>
-      ))}
-    </Group>
+      </Popover.Target>
+      <Popover.Dropdown>
+        <Stack gap={6}>
+          <Group gap={6} wrap="nowrap" align="flex-start">
+            <Badge size="xs" variant="light" style={{ flexShrink: 0 }}>
+              {origin.kind}
+            </Badge>
+            <Text size="xs" fw={600} lineClamp={2} style={{ flex: 1, minWidth: 0 }}>
+              {task.description}
+            </Text>
+          </Group>
+          {elapsed && (
+            <Text size="xs" c="dimmed">
+              started {elapsed} ago
+            </Text>
+          )}
+          {!known && (
+            <Text size="xs" c="dimmed">
+              Details unavailable — start of this task isn&apos;t loaded yet
+            </Text>
+          )}
+          {origin.runs != null && (
+            <Stack gap={2}>
+              <Text size="xs" c="dimmed">
+                Runs
+              </Text>
+              {isBash ? (
+                <Code block fz="xs" style={{ maxHeight: 120, overflow: 'auto' }}>
+                  {origin.runs}
+                </Code>
+              ) : (
+                <Text size="xs" lineClamp={4}>
+                  {origin.runs}
+                </Text>
+              )}
+            </Stack>
+          )}
+          {origin.reason != null && (
+            <Stack gap={2}>
+              <Text size="xs" c="dimmed">
+                Why
+              </Text>
+              <Text size="xs" fs="italic" c="dimmed" lineClamp={4}>
+                {origin.reason}
+              </Text>
+            </Stack>
+          )}
+          {(origin.seq != null || canStop) && (
+            <Group justify="space-between" wrap="nowrap">
+              {origin.seq != null ? (
+                <Button
+                  size="compact-xs"
+                  variant="subtle"
+                  onClick={() => {
+                    useStore.getState().jumpToTranscript(sessionId, origin.seq!, origin.toolUseId);
+                    onOpenChange(false);
+                  }}
+                >
+                  Show in transcript
+                </Button>
+              ) : (
+                <span />
+              )}
+              {canStop && (
+                <Button
+                  size="compact-xs"
+                  variant="subtle"
+                  color="gray"
+                  leftSection={<IconPlayerStopFilled size={10} />}
+                  onClick={stop}
+                >
+                  Stop
+                </Button>
+              )}
+            </Group>
+          )}
+        </Stack>
+      </Popover.Dropdown>
+    </Popover>
   );
 }

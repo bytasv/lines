@@ -32,7 +32,7 @@ while its subagent was still streaming into it. A standalone row survives only f
 - `server/src/sessions.ts` `handleWorkerEvent` (the `system` branch) and `reconcileWithWorker`
 - `web/src/components/WorkflowStepper.tsx` — background-agent hint on a parked step
 - `web/src/components/Composer.tsx` — Stop button, gated on `interruptible || bgTasks > 0`
-- `web/src/components/SessionView.tsx` — the live strip above the composer
+- `web/src/components/SessionView.tsx` — the collapsible live strip above the composer
 - `web/src/lib/format.ts` `sessionRowMeta` — the sidebar's "background work" row
 
 ## Files
@@ -58,7 +58,10 @@ while its subagent was still streaming into it. A standalone row survives only f
 - `web/src/components/Transcript.tsx` — the `case 'task'` row (orphan fallback only)
 - `web/src/components/ToolCallCard.tsx` — the `pending`/badge treatment of `tool.background`
 - `web/src/components/TaskCall.tsx` — `TaskHeader` feeding `taskFlags` from `tool.background`
-- `web/src/components/SessionView.tsx` — the background-work strip, with a per-task Stop
+- `web/src/components/SessionView.tsx` — `BackgroundTasksStrip` (collapsed line, Stop all,
+  expandable per-task list) and `BackgroundTaskRow` (per-task Stop and details popover)
+- `web/src/lib/transcript.ts` `backgroundTaskOrigins` — the strip's per-task details, derived
+  from loaded transcript events
 - `web/src/components/Composer.tsx` — `bgTasks`, the Stop-button gating and its
   `stopBackgroundTasks` send
 - `web/src/lib/alerts.ts` `maybeAlert` — the early return while tasks are live
@@ -93,6 +96,11 @@ while its subagent was still streaming into it. A standalone row survives only f
 - `TaskItem` (`web/src/lib/transcript.ts`) — orphan-only transcript row kind (no `task_started`,
   or no tool card to match): `taskId`, `description`, `subagentType?`, and an
   `outcome?: { status, summary }` filled in by the matching `task_notification`
+- `backgroundTaskOrigins(events, tasks)` / `BackgroundTaskOrigin` (`web/src/lib/transcript.ts`) —
+  display-only details for each live task: start time, kind label, what it runs (Bash command or
+  agent prompt), the assistant narration before its launch, and the launching `tool_use`'s seq and
+  id for the jump. One backward scan over the loaded events; a task whose `task_started` isn't
+  loaded gets only a kind label from its `type`
 
 ## Data flow
 
@@ -129,8 +137,9 @@ owns a task.
 `stopBackgroundTasks` is a second stop path, separate from `interrupt` (which only aborts the
 foreground turn), with two triggers. `Composer` sends `{ type: 'stopBackgroundTasks', sessionId }`
 when the session isn't `interruptible` but has live tasks; the `SessionView` strip sends the same
-message with a `taskId` from the Stop icon beside each task (hidden for a guest without the
-`interrupt` cap). `index.ts` routes it to `SessionManager.stopBackgroundTasks`, which calls
+message without a `taskId` from its header Stop all ("Stop" for a single task), and with a
+`taskId` from the per-task Stop on each expanded row and in its details popover (all hidden for a
+guest without the `interrupt` cap). `index.ts` routes it to `SessionManager.stopBackgroundTasks`, which calls
 `WorkerClient.stopTask(sessionId, taskId)` for the one id, or for every id currently in the set
 when none is given. A `taskId` not in the set is still forwarded (a harmless no-op) and removes
 nothing. That message reaches `worker.ts`'s `case 'stopTask'`, which calls
@@ -182,8 +191,16 @@ background agent's progress is now visible only in its own card and the strip.
 sends `stopBackgroundTasks` instead of `interrupt` and its tooltip reads "Stop background work".
 Send stays enabled and unblocked either way — the CLI runs a new turn concurrently with a
 background task. `SessionView` renders a strip above the composer whenever
-`session.backgroundTasks?.length`, one item per task with its own Stop icon — the live truth, since a page reload rebuilds it from the meta
-rather than from transcript rows. `sessionRowMeta` (`format.ts`) adds a "background work" row
+`session.backgroundTasks?.length` — the live truth, since a page reload rebuilds it from the meta
+rather than from transcript rows. The strip sits in the composer column (same max width, centered)
+as one collapsed line: the lone task's description or "N background tasks", plus Stop all. Clicking
+it expands a row per task (kind badge, description, elapsed time, info and Stop icons); a row opens
+a details popover with what the task runs, the model's stated reason (omitted when there is none),
+and "Show in transcript", which calls `jumpToTranscript` with the launching `tool_use`'s seq and id
+to scroll to and pulse its card. Those details come from `backgroundTaskOrigins` over the events
+already in the store, matched by `task_started` and its `tool_use_id`; when the start event isn't
+loaded yet the popover says so and shows only the description. Which rows exist always comes from
+the meta, never from that correlation. `sessionRowMeta` (`format.ts`) adds a "background work" row
 below the `waiting-permission` and interrupted checks (both outrank it — they need the user;
 background work does not) and marks it `actionable: false`, so it never lights up a project tab.
 `maybeAlert` (`alerts.ts`) returns early while `next.backgroundTasks?.length` is non-zero, so the
