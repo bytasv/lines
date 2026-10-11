@@ -47,10 +47,11 @@ export const WORKER_TOKEN_HEADER = 'x-lines-worker-token';
  * worker's tsx-watch restart trigger for no benefit.
  * ------------------------------------------------------------------ */
 
-/** Machine-global app root. Re-exported by store.ts, which owns everything else
- *  under it; defined here so the worker can reach it without importing store.ts
- *  (and dragging the whole bridge graph into the worker). */
-export const APP_ROOT = path.join(os.homedir(), '.lines-app');
+/** App root. Re-exported by store.ts, which owns everything else under it; defined
+ *  here so the worker can reach it without importing store.ts (and dragging the
+ *  whole bridge graph into the worker). `LINES_APP_ROOT` names a separate install's
+ *  root, which is how a dev checkout runs beside the installed app. */
+export const APP_ROOT = process.env.LINES_APP_ROOT || path.join(os.homedir(), '.lines-app');
 
 /** Separates concurrent Lines installs on one machine — the desktop shell sets
  *  `desktop`, so an installed app and a dev checkout (which leaves this unset, and

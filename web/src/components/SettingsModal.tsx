@@ -27,6 +27,7 @@ import {
   IconMessages,
   IconMicrophone,
   IconPlugConnected,
+  IconRefresh,
   IconShieldCheck,
   IconSparkles,
   IconUserCircle,
@@ -47,6 +48,7 @@ import { SessionsSection } from './SessionsSection';
 import { SyncSection } from './SyncSection';
 import { TranscriptSection } from './TranscriptSection';
 import { UpdatesSection } from './UpdatesSection';
+import { DevRuntimeSection } from './DevRuntimeSection';
 import { VoiceSection } from './VoiceSection';
 import { WhatsNewSection } from './WhatsNewSection';
 import { DEVICE_PAIRING_ENABLED } from '../lib/storage';
@@ -67,6 +69,7 @@ export type SettingsSection =
   | 'diagnostics'
   | 'voice'
   | 'updates'
+  | 'devRuntime'
   | 'whatsNew';
 
 interface SectionMeta {
@@ -192,6 +195,18 @@ const SETTINGS_SECTIONS: SectionMeta[] = [
     icon: IconCircleArrowUp,
     description: "The version of every part you're running, and the latest desktop app.",
   },
+  // Dev server only: a production bundle has no endpoint behind this pane.
+  ...(import.meta.env.DEV
+    ? [
+        {
+          value: 'devRuntime' as SettingsSection,
+          label: 'Local runtime',
+          group: 'System' as const,
+          icon: IconRefresh,
+          description: 'Dev only. Restart the worker and bridge on the latest source.',
+        },
+      ]
+    : []),
   {
     value: 'whatsNew',
     label: "What's new",
@@ -356,6 +371,7 @@ export function SettingsModal({
               {current.value === 'diagnostics' && <SyncSection />}
               {current.value === 'voice' && <VoiceSection />}
               {current.value === 'updates' && <UpdatesSection onOpenWhatsNew={() => goTo('whatsNew')} />}
+              {current.value === 'devRuntime' && <DevRuntimeSection />}
               {current.value === 'whatsNew' && <WhatsNewSection />}
               {current.value === 'allowlist' && (
                 <GuardAllowlistSection

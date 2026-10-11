@@ -22,7 +22,8 @@ import { rememberedDeviceId } from './deviceMemory';
 const TOKEN_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 
-export const STORAGE_URL: string | undefined = import.meta.env.VITE_STORAGE_URL;
+// The dev page sits on localhost beside its bridge, so it connects directly and never pairs.
+export const STORAGE_URL: string | undefined = import.meta.env.DEV ? undefined : import.meta.env.VITE_STORAGE_URL;
 export const DEVICE_PAIRING_ENABLED = Boolean(STORAGE_URL);
 
 /**

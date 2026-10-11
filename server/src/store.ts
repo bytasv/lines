@@ -359,9 +359,9 @@ export function createStore(root: string) {
   fs.mkdirSync(ATTACHMENTS, { recursive: true });
 
   // Per-session transcript cache. Lives inside createStore so it is per-user,
-  // matching the isolation model. This process is the only writer of
-  // transcripts/*.jsonl, so appends update the entry in place; the stat
-  // revalidation below still covers the offline migrate script and hand-edits.
+  // matching the isolation model. Appends update the entry in place unless the
+  // file grew from another writer (a dev bridge sharing this folder); the stat
+  // revalidation below covers that, the offline migrate script and hand-edits.
   const transcriptCache = new Map<string, TranscriptEntry>();
 
   /** Throws for an id that is not a plain token — see isValidStoreId. Readers check first and treat one as absent. */
@@ -558,6 +558,16 @@ export function createStore(root: string) {
     appendTranscript(sessionId: string, event: TranscriptEvent) {
       const line = JSON.stringify(event);
       const file = transcriptFile(sessionId);
+      // A dev and a prod bridge can share this folder. If the file grew under us,
+      // extending the cache below would hide the other writer's lines for good.
+      const before = transcriptCache.get(sessionId);
+      if (before) {
+        try {
+          if (fs.statSync(file).size !== before.size) transcriptCache.delete(sessionId);
+        } catch {
+          transcriptCache.delete(sessionId);
+        }
+      }
       // Owner-only: a transcript is every prompt, reply and file read of the
       // session. `mode` applies on creation; the app root's own 0700 covers files
       // an older build created.

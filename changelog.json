@@ -117,7 +117,7 @@
       "version": "0.2.53",
       "date": "2026-10-10",
       "items": [
-        "When a development copy of Lines takes over this machine, the menu bar now shows whether your phone can still reach it, and Lines switches back on its own once that copy stops."
+        "A development copy of Lines now runs beside the installed app instead of taking over this machine. It keeps its own data, ports and a muted menu bar and Dock icon, so the installed app stays connected to your phone the whole time."
       ]
     },
     {

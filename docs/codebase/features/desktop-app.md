@@ -57,7 +57,8 @@ point a user at.
 - `server/src/claudeCli.ts` — finds the machine's `claude`, with a version floor
 - `server/src/whisperCli.ts` — finds `whisper-cli`; `LINES_WHISPER_BUNDLED_BIN` (set from
   `desktop/whisper/whisper-cli` in the packaged resources) is checked before Homebrew
-- `desktop/assets/` — `trayTemplate.png` (+`@2x`), `icon.icns`, `icon.png`
+- `desktop/assets/` — `trayTemplate.png` (+`@2x`), `icon.icns`, `icon.png`; muted
+  `trayTemplate-dev.png` (+`@2x`) and `icon-dev.png` for the dev instance
 - `~/.lines-app/desktop.json` — the shell's own preferences (window vs. browser for "Open Lines",
   keep-awake, whether the login item has been defaulted once); read at boot, written on toggle,
   best-effort like the log
@@ -77,7 +78,12 @@ point a user at.
   packaged, `spawnChild` runs the esbuild bundles under Electron's own node, in a checkout it
   runs `tsx` against `server/src` unchanged. `childEnv` sets `LINES_BRIDGE_DIRECT` to `'0'` in
   relay mode and `'1'` in local mode
-- `RELAY_MODE` — `!isLocalMode()`; hosted unless `LINES_LOCAL_MODE=1`
+- `RELAY_MODE` — `!LOCAL_MODE`; hosted unless `LINES_LOCAL_MODE=1` or the dev instance
+- `DEV_INSTANCE` — `LINES_APP_ROOT` is set (`npm run dev -w desktop` sets
+  `~/.lines-app-dev`): own data root, own Electron `userData` (so its own
+  single-instance lock and cookie jar), app name `Lines (dev)`, muted tray and dock
+  icons, always local mode, window on the dev stack's Vite URL (`dev-ports.json`'s
+  `web`, or `LINES_DEV_WEB_URL`), no UI server of its own
 - `startUiServer` — local-mode only; not shipped in the DMG. Serves every file with the hosted
   page's headers (`nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`) and `localModeCsp()`
 - `localModeCsp()` — the hosted CSP (`deploy/docker/web-nginx.conf`) with this machine's loopback
@@ -657,7 +663,8 @@ and push first. See [whats-new](whats-new.md).
   bridge run by hand alongside the packaged app. Without it, two bridge processes can share one
   `device.json`, and the relay resolves that by superseding one of them — visible in every
   connected browser as a flicker until it does.
-- When a *different* installation (a dev checkout, most commonly Tilt) holds the lock instead, the
+- When a *different* installation on the same data root (the dev desktop app and Tilt; a dev
+  checkout on its default root never shares the installed app's) holds the lock instead, the
   tray's own bridge stands down rather than fighting for it: no bridge or worker spawns at startup,
   or the running bridge exits/gets preempted and is not respawned, until the lock clears. The tray
   reports the other bridge's state ("Dev bridge · …") rather than showing its own "Connecting…" or
@@ -700,7 +707,8 @@ and push first. See [whats-new](whats-new.md).
   between that and the browser persists in `~/.lines-app/desktop.json`, and "Open in Browser" /
   "Open Desktop Window" is always the other row, one click away.
 - The desktop window has its own cookie jar, separate from Safari or Chrome — signing in in a
-  browser does not sign in the window and vice versa; a dev run and the packaged app share one jar.
+  browser does not sign in the window and vice versa. The dev instance has its own `userData`, so
+  its own jar too.
 
 ## Architectural rules
 
@@ -843,9 +851,9 @@ and push first. See [whats-new](whats-new.md).
   and the fix is adding that prefix — or, for a host that turns out to be pure identity
   infrastructure with no content of its own, promoting it into the host-wide identity list instead
   of a scoped entry.
-- A dev checkout and the installed app share `~/.lines-app/device.json`, so the same device
-  identity can be claimed by whichever registers last — and, since the bridge lock, also share
-  `~/.lines-app/bridge.lock`, so only one bridge from either can be running against it at once.
+- A dev checkout uses its own data root (`~/.lines-app-dev`), so it has its own `device.json` and
+  `bridge.lock` and never collides with the installed app. Two processes on the same root (the dev
+  desktop app and Tilt) still share both, so only one bridge runs against that root at once.
 - [app-data-root](app-data-root.md) — the `~/.lines-app` root the bridge lock lives under.
 - [hosted-machine-access](hosted-machine-access.md) — how the shell's children find and announce
   their ports, the identity and registration it performs in hosted mode, what `RELAY_URL`

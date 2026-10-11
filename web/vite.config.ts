@@ -1,9 +1,19 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+
+/**
+ * The dev server only ever talks to a dev bridge, so it defaults to the dev data
+ * root rather than the installed app's. Tilt sets LINES_APP_ROOT explicitly.
+ */
+function devAppRoot(): string {
+  return process.env.LINES_APP_ROOT || path.join(os.homedir(), '.lines-app-dev');
+}
 
 /**
  * Dev-only bridge discovery.
@@ -19,8 +29,9 @@ import react from '@vitejs/plugin-react';
  */
 function bridgeDiscovery(): Plugin {
   const instance = process.env.LINES_INSTANCE ?? 'default';
-  const file = path.join(os.homedir(), '.lines-app', 'run', instance, 'bridge.json');
-  const lockFile = path.join(os.homedir(), '.lines-app', 'bridge.lock');
+  const appRoot = devAppRoot();
+  const file = path.join(appRoot, 'run', instance, 'bridge.json');
+  const lockFile = path.join(appRoot, 'bridge.lock');
   return {
     name: 'lines-bridge-discovery',
     configureServer(server) {
@@ -64,6 +75,65 @@ function bridgeDiscovery(): Plugin {
         res.setHeader('content-type', 'application/json');
         res.setHeader('cache-control', 'no-store');
         res.end(JSON.stringify({ port }));
+      });
+    },
+  };
+}
+
+/**
+ * Dev-only "restart worker + bridge on the latest code" button's endpoint.
+ *
+ * Forwards to the dev supervisor's `/restart`. It lives in this dev server, not
+ * the bridge, because the restart stops the bridge — a request answered by the
+ * bridge would die with it. The custom header makes a cross-site POST fail its
+ * preflight, so an unrelated page cannot restart the runtime.
+ */
+function devRuntimeRestart(): Plugin {
+  const control = fileURLToPath(new URL('../.cache/dev-runtime/control.json', import.meta.url));
+  return {
+    name: 'lines-dev-runtime-restart',
+    configureServer(server) {
+      server.middlewares.use('/__dev/restart', (req, res) => {
+        const send = (status: number, body: unknown) => {
+          res.statusCode = status;
+          res.setHeader('content-type', 'application/json');
+          res.setHeader('cache-control', 'no-store');
+          res.end(JSON.stringify(body));
+        };
+        const proxied = !!(req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip']);
+        if (req.method !== 'POST' || proxied || req.headers['x-lines-dev'] !== 'restart') {
+          return send(403, { error: 'Forbidden' });
+        }
+        let target: { port?: number; token?: string } | null = null;
+        try {
+          target = JSON.parse(fs.readFileSync(control, 'utf8'));
+        } catch {
+          target = null;
+        }
+        if (!target?.port || !target.token) return send(503, { error: 'The dev supervisor is not running.' });
+        const upstream = http.request(
+          {
+            host: '127.0.0.1',
+            port: target.port,
+            path: '/restart',
+            method: 'POST',
+            headers: { authorization: `Bearer ${target.token}` },
+            timeout: 120_000,
+          },
+          (up) => {
+            let body = '';
+            up.setEncoding('utf8');
+            up.on('data', (chunk) => { body += chunk; });
+            up.on('end', () => {
+              res.statusCode = up.statusCode ?? 502;
+              res.setHeader('content-type', 'application/json');
+              res.end(body);
+            });
+          },
+        );
+        upstream.on('timeout', () => upstream.destroy(new Error('Restart timed out')));
+        upstream.on('error', (error) => send(503, { error: error.message }));
+        upstream.end();
       });
     },
   };
@@ -183,6 +253,7 @@ function devTls(): { https?: { cert: Buffer; key: Buffer }; proxy?: Record<strin
   }
   const relayPort = process.env.LINES_DEV_RELAY_PORT ?? '8791';
   const storagePort = process.env.LINES_DEV_STORAGE_PORT ?? '8790';
+  // Tilt sets both from dev-ports.json; these defaults are only for a hand-started dev server.
   return {
     https: { cert: fs.readFileSync(cert), key: fs.readFileSync(key) },
     proxy: {
@@ -195,7 +266,7 @@ function devTls(): { https?: { cert: Buffer; key: Buffer }; proxy?: Record<strin
 }
 
 export default defineConfig({
-  plugins: [react(), bridgeDiscovery(), subresourceIntegrity()],
+  plugins: [react(), bridgeDiscovery(), devRuntimeRestart(), subresourceIntegrity()],
   define: {
     __LINES_VERSION__: JSON.stringify(WEB_VERSION),
     __LINES_CHANGELOG__: JSON.stringify(CHANGELOG),
@@ -203,7 +274,8 @@ export default defineConfig({
   // VITE_* vars load from the repo-root .env (shared with the bridge).
   envDir: '..',
   server: {
-    port: 5173,
+    port: Number(process.env.LINES_DEV_WEB_PORT ?? 5173),
+    strictPort: true,
     ...devTls(),
     // Every interface, not just loopback, so the page can be opened from a phone
     // on the same Wi-Fi. The page alone is harmless; the bridge behind it is

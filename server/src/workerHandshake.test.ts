@@ -27,7 +27,8 @@ before(async () => {
     cwd: path.resolve(import.meta.dirname, '..'),
     // No LINES_WORKER_PORT: this also covers the ephemeral bind, which Tilt's
     // pinned port hides in normal dev.
-    env: { ...process.env, LINES_INSTANCE: INSTANCE, LINES_WORKER_PORT: '' },
+    // LINES_APP_ROOT blanked: from a dev shell it would move worker.json out of RUN_DIR.
+    env: { ...process.env, LINES_INSTANCE: INSTANCE, LINES_WORKER_PORT: '', LINES_APP_ROOT: '' },
     stdio: 'ignore',
   });
 

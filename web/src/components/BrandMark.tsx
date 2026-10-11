@@ -1,4 +1,4 @@
-import { Box } from '@mantine/core';
+import { Box, Tooltip } from '@mantine/core';
 import logoUrl from '../assets/logo-mark.png';
 
 /**
@@ -13,7 +13,7 @@ import logoUrl from '../assets/logo-mark.png';
  * There is no sibling wordmark, so `alt` carries the accessible name.
  */
 export function BrandMark({ height = 24 }: { height?: number }) {
-  return (
+  const mark = (
     <Box
       style={{
         background: '#ffffff',
@@ -21,9 +21,21 @@ export function BrandMark({ height = 24 }: { height?: number }) {
         padding: 4,
         display: 'flex',
         boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
+        ...(import.meta.env.DEV ? { outline: '2px solid var(--mantine-color-orange-6)', outlineOffset: 2 } : {}),
       }}
     >
       <img src={logoUrl} alt="Lines" height={height} style={{ display: 'block', width: 'auto' }} />
     </Box>
+  );
+  if (!import.meta.env.DEV) return mark;
+  return (
+    <Tooltip
+      label="Local build: this page is served by your dev server on this machine, not the hosted app."
+      withArrow
+      multiline
+      w={240}
+    >
+      {mark}
+    </Tooltip>
   );
 }

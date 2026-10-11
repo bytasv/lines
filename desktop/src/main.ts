@@ -84,7 +84,10 @@ const BUNDLED_WHISPER = path.join(ROOT, 'whisper', 'whisper-cli');
 const ASSETS = app.isPackaged ? path.join(ROOT, 'assets') : path.resolve(__dirname, '..', 'assets');
 
 const INSTANCE = process.env.LINES_INSTANCE ?? 'desktop';
-const APP_ROOT = path.join(os.homedir(), '.lines-app');
+/** A dev checkout's app (`npm run dev`), beside the installed one: own data root, own window, no relay. */
+const DEV_INSTANCE = Boolean(process.env.LINES_APP_ROOT);
+const APP_ROOT = process.env.LINES_APP_ROOT || path.join(os.homedir(), '.lines-app');
+if (DEV_INSTANCE) app.setPath('userData', path.join(APP_ROOT, 'electron'));
 const RUN_DIR = path.join(APP_ROOT, 'run', INSTANCE);
 /**
  * The bridge's single-instance lock. Read here, never written: the bridge owns it.
@@ -115,7 +118,7 @@ const LOG_FILE = path.join(APP_ROOT, 'logs', `${INSTANCE}.log`);
  */
 const PREFS_FILE = path.join(APP_ROOT, 'desktop.json');
 
-const LOCAL_MODE = isLocalMode();
+const LOCAL_MODE = isLocalMode() || DEV_INSTANCE;
 const RELAY_MODE = !LOCAL_MODE;
 const config = loadConfig(ROOT);
 
@@ -248,6 +251,16 @@ const FAKE_UPDATE_STATE: 'available' | 'downloading' | 'ready' =
   (['downloading', 'ready'] as const).find((s) => s === process.env.LINES_FAKE_UPDATE_STATE) ?? 'available';
 /** Where "Open Lines" goes. Read once at boot from {@link PREFS_FILE}. */
 let openIn: 'desktop' | 'browser' = 'desktop';
+/** The dev stack's web UI. Tilt picks the port and records it in the dev root. */
+const DEV_WEB_URL = process.env.LINES_DEV_WEB_URL || `http://localhost:${devWebPort()}`;
+function devWebPort(): number {
+  try {
+    const { web } = JSON.parse(fs.readFileSync(path.join(APP_ROOT, 'dev-ports.json'), 'utf8')) as { web?: unknown };
+    return typeof web === 'number' ? web : 5173;
+  } catch {
+    return 5173;
+  }
+}
 /**
  * Whether to hold the Mac awake while a turn is running. On by default: the
  * whole point of leaving this app running is that a session driven from a phone
@@ -1196,6 +1209,7 @@ function startUiServer(): Promise<number> {
  * One function so both modes go through the same window code.
  */
 function appUrl(): string {
+  if (DEV_INSTANCE) return DEV_WEB_URL;
   return LOCAL_MODE ? `http://127.0.0.1:${uiPort}/` : config.webUrl;
 }
 
@@ -1227,6 +1241,7 @@ function appUrl(): string {
  * explicit click instead of making the user copy it off the tray.
  */
 function appUrlForOwnWindow(): string {
+  if (DEV_INSTANCE) return DEV_WEB_URL;
   const params = new URLSearchParams();
   if (device) params.set('host', device.id);
   if (RELAY_MODE && pairingCode) params.set('pair', pairingCode);
@@ -2089,7 +2104,7 @@ function claudeLabel(): string {
  * missing asset cannot stop the app booting — invisible, but running.
  */
 function trayImage() {
-  const icon = nativeImage.createFromPath(path.join(ASSETS, 'trayTemplate.png'));
+  const icon = nativeImage.createFromPath(path.join(ASSETS, DEV_INSTANCE ? 'trayTemplate-dev.png' : 'trayTemplate.png'));
   if (icon.isEmpty()) return nativeImage.createEmpty();
   icon.setTemplateImage(true);
   return icon;
@@ -2111,7 +2126,7 @@ function trayImage() {
  */
 function applyDockIcon() {
   if (process.platform !== 'darwin') return;
-  const icon = nativeImage.createFromPath(path.join(ASSETS, 'icon.png'));
+  const icon = nativeImage.createFromPath(path.join(ASSETS, DEV_INSTANCE ? 'icon-dev.png' : 'icon.png'));
   if (!icon.isEmpty()) app.dock?.setIcon(icon);
 }
 
@@ -2407,7 +2422,7 @@ function readJsonSafe(file: string): unknown {
  */
 // Packaged, this comes from `productName`; unpackaged it would otherwise be
 // "Electron" in the dock tooltip, the app menu and any notification we post.
-app.setName('Lines');
+app.setName(DEV_INSTANCE ? 'Lines (dev)' : 'Lines');
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -2525,7 +2540,7 @@ async function start() {
     wireBridgeIpc();
   }
 
-  if (LOCAL_MODE) {
+  if (LOCAL_MODE && !DEV_INSTANCE) {
     uiPort = await startUiServer();
     // Logged because it is ephemeral: without this there is no way to reach the
     // UI except through the window we happen to open.

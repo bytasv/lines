@@ -29,9 +29,9 @@ config.define_bool(
 config.define_bool(
     'hosted',
     usage='Point the bridge at the deployed relay and storage as this machine\'s ' +
-          'paired device (~/.lines-app/device.json), so the phone reaches the dev ' +
-          'bridge. The tray stands down and shows "Dev bridge" while it runs. ' +
-          'Writes to prod storage as the real device. Override the targets with ' +
+          'paired device (the dev data root\'s device.json), so the phone reaches the dev ' +
+          'bridge. The installed app keeps its own data root and keeps running. ' +
+          'Writes to prod storage as that device. Override the targets with ' +
           'LINES_RELAY_URL / LINES_STORAGE_URL.',
 )
 config.define_bool(
@@ -114,11 +114,15 @@ if FROZEN:
 # Ports: single source of truth, injected per-process via serve_env. NOT read
 # from .env, because server/src/index.ts:21 and storage/src/index.ts:43 both
 # read the same `PORT` key out of the same root .env file.
-BRIDGE_PORT = 8787
-RELAY_PORT = 8791
-WORKER_PORT = 8788
-STORAGE_PORT = 8790
-WEB_PORT = 5173
+# The dev data root is separate from the installed app's ~/.lines-app, so the two run
+# side by side. Ports are picked from whatever is free, then kept (server/scripts/dev-ports.mjs).
+DEV_APP_ROOT = os.getenv('LINES_APP_ROOT', '') or os.path.join(os.getenv('HOME', ''), '.lines-app-dev')
+PORTS = decode_json(str(local(['env', 'LINES_APP_ROOT=' + DEV_APP_ROOT, 'node', 'server/scripts/dev-ports.mjs'], quiet=True)))
+BRIDGE_PORT = PORTS['bridge']
+RELAY_PORT = PORTS['relay']
+WORKER_PORT = PORTS['worker']
+STORAGE_PORT = PORTS['storage']
+WEB_PORT = PORTS['web']
 STUDIO_PORT = 5555
 ENV_FILE = '.env'
 
@@ -197,7 +201,7 @@ if not have('VITE_CLERK_PUBLISHABLE_KEY'):
 # storage server splits one machine's data across two databases.
 # Sharing needs three things agreeing, and each one fails as an unexplained
 # "connecting to your machine…" spinner rather than as an error. Say so up front.
-DEVICE_FILE = os.path.join(os.getenv('HOME', ''), '.lines-app', 'device.json')
+DEVICE_FILE = os.path.join(DEV_APP_ROOT, 'device.json')
 if RELAY_AUTH:
     if not have('CLERK_SECRET_KEY'):
         warn('--relay-auth needs CLERK_SECRET_KEY: with it unset the relay exits ' +
@@ -216,9 +220,9 @@ if RELAY_AUTH:
     # real registered device. Unpaired, the bridge is refused 1008 on every dial
     # and the browser spins on "connecting to your machine".
     if not os.path.exists(DEVICE_FILE):
-        warn('--relay-auth needs a paired machine: ~/.lines-app/device.json is ' +
+        warn('--relay-auth needs a paired machine: ' + DEVICE_FILE + ' is ' +
              'missing, so the bridge has no device id storage will verify. Pair ' +
-             'this machine from the web app first.')
+             'this machine from the dev app (npm run dev) first.')
 elif WITH_RELAY and have('VITE_BRIDGE_WS_URL'):
     warn('The relay is running with auth OFF, so every client binds to one user ' +
          'as the machine owner and session sharing cannot engage. Add --relay-auth ' +
@@ -227,9 +231,9 @@ elif WITH_RELAY and have('VITE_BRIDGE_WS_URL'):
 # --hosted never sets LINES_DEVICE_ID/SECRET: the bridge must take over as the
 # real paired device, or the phone would be looking for a machine that is not there.
 if HOSTED and not os.path.exists(DEVICE_FILE):
-    warn('--hosted needs a paired machine: ~/.lines-app/device.json is missing, so ' +
+    warn('--hosted needs a paired machine: ' + DEVICE_FILE + ' is missing, so ' +
          'the bridge would mint an unregistered device and be refused 1008. Pair ' +
-         'via the tray app or the web app first.')
+         'it from the dev app (npm run dev) first.')
 
 # --hosted sets RELAY_URL and STORAGE_URL together, so the split warning below
 # cannot apply to it.
@@ -239,10 +243,10 @@ if RELAYED and not HOSTED and not have('STORAGE_URL'):
          'hosted relay while syncing to localhost. Set STORAGE_URL to the same ' +
          'deployment (https://api.<domain>), or unset RELAY_URL for local-only.')
 
-# One machine, one relay identity. Tilt's bridge and the packaged tray app share
-# ~/.lines-app/device.json, so both dialling a *deployed* relay makes each dial
+# One machine, one relay identity. Tilt's bridge and the dev app share the dev data
+# root's device.json, so both dialling a *deployed* relay makes each dial
 # supersede the other. server/src/index.ts enforces one holder via
-# ~/.lines-app/bridge.lock; this only says out loud what that is about to do.
+# bridge.lock in that root; this only says out loud what that is about to do.
 #
 # Values, not just key names: the loopback test below needs the host to tell a
 # deployment from `--with-relay`'s local relay. Never printed, and RELAY_URL is
@@ -262,7 +266,7 @@ def dotenv_value(path, key):
 RELAY_TARGET = HOSTED_RELAY_URL if HOSTED else (os.getenv('RELAY_URL', '') or dotenv_value(ENV_FILE, 'RELAY_URL'))
 LOOPBACK_RELAY = ('127.0.0.1' in RELAY_TARGET or 'localhost' in RELAY_TARGET or
                   '[::1]' in RELAY_TARGET)
-BRIDGE_LOCK_FILE = os.path.join(os.getenv('HOME', ''), '.lines-app', 'bridge.lock')
+BRIDGE_LOCK_FILE = os.path.join(DEV_APP_ROOT, 'bridge.lock')
 
 # node rather than read_file + decode_json: decode_json fails the whole build on a
 # truncated lock, and an unparseable or stale lock must be silent — a leftover file
@@ -282,14 +286,13 @@ if RELAYED and not LOOPBACK_RELAY and not WITH_RELAY and os.path.exists(BRIDGE_L
     HOLDER = str(local(LOCK_PROBE, quiet=True, echo_off=True)).strip().split(' ')
     if len(HOLDER) == 3:
         if HOLDER[1] == 'desktop':
-            warn('the Lines tray app holds ~/.lines-app/bridge.lock (bridge pid %s, %s) — ' % (HOLDER[0], HOLDER[2]) +
-                 "Tilt's bridge will take this machine over (SIGTERM). The tray shows " +
-                 '"Dev bridge (Tilt)" meanwhile and re-arms its own bridge after `tilt down`. ' +
-                 'Nothing to do.')
+            warn('the dev app holds ' + BRIDGE_LOCK_FILE + ' (bridge pid %s, %s) — ' % (HOLDER[0], HOLDER[2]) +
+                 "Tilt's bridge will take this data root over (SIGTERM). The dev app " +
+                 'stands down and re-arms its own bridge after `tilt down`. Nothing to do.')
         else:
-            warn('another bridge holds ~/.lines-app/bridge.lock (pid %s, instance "%s", %s) — ' % (HOLDER[0], HOLDER[1], HOLDER[2]) +
+            warn('another bridge holds ' + BRIDGE_LOCK_FILE + ' (pid %s, instance "%s", %s) — ' % (HOLDER[0], HOLDER[1], HOLDER[2]) +
                  "Tilt's bridge will refuse to start (exit 78). Stop that process, or set " +
-                 'LINES_ALLOW_MULTIPLE_BRIDGES=1 to share one ~/.lines-app anyway.')
+                 'LINES_ALLOW_MULTIPLE_BRIDGES=1 to share one data root anyway.')
 # PORT used to be read by BOTH the bridge and storage out of this one .env file,
 # so a single value collided. The bridge now reads LINES_BRIDGE_PORT, leaving
 # PORT to storage alone — nothing to warn about.
@@ -349,7 +352,7 @@ if WITH_STORAGE:
 local_resource(
     'worker', cmd='',
     serve_cmd=['node', 'server/scripts/dev-runtime.mjs', 'worker'],
-    serve_env={'LINES_WORKER_PORT': str(WORKER_PORT)},
+    serve_env={'LINES_WORKER_PORT': str(WORKER_PORT), 'LINES_APP_ROOT': DEV_APP_ROOT},
     resource_deps=['install'],
     readiness_probe=probe(initial_delay_secs=2, period_secs=5,
                           tcp_socket=tcp_socket_action(port=WORKER_PORT, host='127.0.0.1')),
@@ -358,13 +361,13 @@ local_resource(
 
 # Built up before the resource: Starlark allows only one ** per call, and this
 # needs three conditional groups.
-BRIDGE_ENV = {'LINES_BRIDGE_PORT': str(BRIDGE_PORT)}
+BRIDGE_ENV = {'LINES_BRIDGE_PORT': str(BRIDGE_PORT), 'LINES_APP_ROOT': DEV_APP_ROOT}
 if HOSTED:
     # Serve env wins over .env (the bridge's dotenv only fills unset keys), so a
     # local RELAY_URL/STORAGE_URL in .env cannot mask these.
     BRIDGE_ENV['RELAY_URL'] = HOSTED_RELAY_URL
     BRIDGE_ENV['STORAGE_URL'] = HOSTED_STORAGE_URL
-elif not have('STORAGE_URL'):
+elif WITH_STORAGE or not have('STORAGE_URL'):
     BRIDGE_ENV['STORAGE_URL'] = 'http://localhost:%d' % STORAGE_PORT
 if WITH_RELAY:
     BRIDGE_ENV['RELAY_URL'] = 'ws://127.0.0.1:%d' % RELAY_PORT
@@ -373,16 +376,21 @@ if WITH_RELAY:
     # the relay asks storage to verify it, storage answers 403 for an unregistered
     # id, and the bridge is refused 1008 on every dial while every other resource
     # looks healthy. So under --relay-auth the bridge keeps its real, paired
-    # identity from ~/.lines-app/device.json — which is also the device the browser
+    # identity from the dev root's device.json — which is also the device the browser
     # targets, and the only id whose hub.ownerId can match the signed-in user.
     if not RELAY_AUTH:
         BRIDGE_ENV['LINES_DEVICE_ID'] = 'tilt-dev'
         BRIDGE_ENV['LINES_DEVICE_SECRET'] = 'tilt-dev'
 
+# Shares the prod root's transcripts and attachments so dev shows the same history (server/scripts/dev-transcripts.mjs).
+local_resource('link-transcripts',
+               cmd=['env', 'LINES_APP_ROOT=' + DEV_APP_ROOT, 'node', 'server/scripts/dev-transcripts.mjs'],
+               labels=['setup'], allow_parallel=True)
+
 local_resource(
     'bridge', cmd='',
     serve_cmd=['node', 'server/scripts/dev-runtime.mjs', 'bridge'],
-    serve_env=BRIDGE_ENV, resource_deps=['install'],
+    serve_env=BRIDGE_ENV, resource_deps=['install', 'link-transcripts'],
     # 127.0.0.1, not localhost: the bridge binds the IPv4 loopback only, and
     # `localhost` may resolve to ::1 first, where nothing listens.
     readiness_probe=probe(initial_delay_secs=2, period_secs=5,
@@ -463,12 +471,24 @@ if WITH_STORAGE:
         allow_parallel=True,
     )
 
+WEB_SERVE_ENV = {
+    'LINES_APP_ROOT': DEV_APP_ROOT,
+    'LINES_DEV_WEB_PORT': str(WEB_PORT),
+    'LINES_DEV_RELAY_PORT': str(RELAY_PORT),
+    'LINES_DEV_STORAGE_PORT': str(STORAGE_PORT),
+}
+# A .env VITE_BRIDGE_WS_URL aimed at a LAN or relay address would beat /__bridge
+# (Vite gives process env precedence), leaving the page dialling nothing local.
+if not WITH_RELAY:
+    WEB_SERVE_ENV['VITE_BRIDGE_WS_URL'] = ''
+
 local_resource(
     'web',
     cmd='',
-    # --strictPort: without it vite drifts to 5174 when a stale `npm run dev`
-    # holds 5173, and the probe goes green against the STALE server.
+    # --strictPort: without it vite drifts to another port, and the probe goes green
+    # against whatever else holds the original one.
     serve_cmd='npm run dev -w web -- --strictPort',
+    serve_env=WEB_SERVE_ENV,
     resource_deps=['install'],
     readiness_probe=probe(initial_delay_secs=2, period_secs=10,
                           http_get=http_get_action(port=WEB_PORT, host='localhost', path='/')),

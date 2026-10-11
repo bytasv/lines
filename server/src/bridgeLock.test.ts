@@ -71,6 +71,8 @@ function startBridge(home: string, instance: string, extra: Record<string, strin
     env: {
       ...process.env,
       HOME: home,
+      // Set from a dev shell, it would beat HOME and point this bridge at the dev root.
+      LINES_APP_ROOT: '',
       BRIDGE_AUTH_DISABLED: '1',
       LINES_BRIDGE_PORT: '',
       LINES_INSTANCE: instance,

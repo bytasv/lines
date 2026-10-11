@@ -1726,7 +1726,7 @@
       "id": "local-dev-orchestration",
       "name": "Local dev orchestration (Tilt)",
       "doc": "features/local-dev-orchestration.md",
-      "purpose": "Run local development with independently owned worker and bridge runners, coordinated idle-boundary reload, startup rollback, and bounded process-tree shutdown.",
+      "purpose": "Run local development with independently owned worker and bridge runners, coordinated idle-boundary reload, startup rollback, and bounded process-tree shutdown, side by side with the installed app on its own data root, auto-assigned ports and shared prod transcripts.",
       "entryPoints": [
         "Tiltfile",
         "package.json",
@@ -1745,7 +1745,11 @@
         "server/src/devRuntime.ts",
         "web/vite.config.ts",
         "web/src/ws.ts",
-        "server/src/connectionPolicy.ts"
+        "server/src/connectionPolicy.ts",
+        "server/scripts/dev-ports.mjs",
+        "server/scripts/dev-transcripts.mjs",
+        "server/src/transcriptWatch.ts",
+        "web/src/components/DevRuntimeSection.tsx"
       ],
       "symbols": [
         "WorkerRunner",
@@ -1767,7 +1771,10 @@
         "HOSTED",
         "HOSTED_RELAY_URL",
         "HOSTED_STORAGE_URL",
-        "DEVICE_FILE"
+        "DEVICE_FILE",
+        "watchSharedTranscripts",
+        "DEV_INSTANCE",
+        "WEB_SERVE_ENV"
       ],
       "tests": [
         "server/scripts/dev-runtime.test.mjs",

@@ -421,7 +421,8 @@ export class Supervisor {
   }
   async start() {
     if (!this.options.command) {
-      const runtime = readJson(path.join(os.homedir(), '.lines-app/run', process.env.LINES_INSTANCE ?? 'default', 'worker.json'));
+      const appRoot = process.env.LINES_APP_ROOT || path.join(os.homedir(), '.lines-app-dev');
+      const runtime = readJson(path.join(appRoot, 'run', process.env.LINES_INSTANCE ?? 'default', 'worker.json'));
       if (legacyRuntimeRunning(this.root) || (runtime?.pid && alive(runtime.pid))) {
         throw new Error('A worker is already running. Stop its stack once sessions are idle before starting the safe runtime.');
       }

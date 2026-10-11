@@ -15,7 +15,9 @@ Defines the machine-global directory that holds all server-side app state — pe
 
 ## Important symbols
 
-- `APP_ROOT` — `~/.lines-app`, the machine-global app root
+- `APP_ROOT` — `LINES_APP_ROOT` if set, else `~/.lines-app`, the machine-global app root
+  (`server/src/workerProtocol.ts`; a dev stack sets `~/.lines-app-dev`, see
+  [local-dev-orchestration](local-dev-orchestration.md#dev-and-prod-side-by-side))
 - `userStoreRoot(userId)` — `~/.lines-app/users/{userId}`, one flat-JSON store per user
 - `createStore(root)` — flat-JSON persistence rooted at the given directory
 - `loadTranscriptRaw(sessionId)` — cached, unparsed JSONL lines for a transcript; used to build the wire frame without a parse/stringify round-trip
@@ -35,11 +37,12 @@ None.
 
 ## Tests
 
-- `server/src/store.test.ts` — transcript cache hit/miss on mtime+size, cache extension on append, LRU eviction, torn-trailing-line tolerance, compact `sessions.json` write.
+- `server/src/store.test.ts` — transcript cache hit/miss on mtime+size, cache extension on append, a second writer's lines kept, LRU eviction, torn-trailing-line tolerance, compact `sessions.json` write.
 
 ## Business rules
 
-- The app data root is `~/.lines-app`.
+- The app data root is `~/.lines-app`, or `LINES_APP_ROOT` when set. Separate roots are separate
+  installs: own bridge lock, device identity, run files and per-user stores.
 - The `local` user uses the flat root directly (legacy single-tenant layout); real user ids live under `~/.lines-app/users/{id}`.
 - No machine-wide asset lives under the root any more: response compression (see
   [turn-recovery](turn-recovery.md)) is a vendored constant in `server/src/caveman.ts`,
@@ -53,7 +56,7 @@ None.
 ## Architectural rules
 
 - All persistent paths must derive from `APP_ROOT` / `userStoreRoot`; never hardcode the home-directory path elsewhere.
-- `createStore` keeps an in-memory, per-user transcript cache (raw lines + lazily-parsed events), revalidated by `statSync` mtime/size and bounded by count and byte size (LRU eviction). It assumes this process is the sole writer of `transcripts/*.jsonl`; a second writer would go stale silently between stat checks.
+- `createStore` keeps an in-memory, per-user transcript cache (raw lines + lazily-parsed events), revalidated by `statSync` mtime/size and bounded by count and byte size (LRU eviction). An append drops the cache entry when the file's size no longer matches it, so lines another writer appended (a dev bridge whose `transcripts/` is symlinked to this root's) are re-read rather than hidden.
 - The sole-writer assumption is enforced, not just assumed: `~/.lines-app/bridge.lock` (`server/src/index.ts`) is claimed by every bridge unconditionally — relaying or not — so a second bridge process refuses to start rather than becoming that second writer. See [hosted-machine-access](hosted-machine-access.md#one-bridge-speaks-at-a-time) for the claim/preempt/refuse rules; `LINES_ALLOW_MULTIPLE_BRIDGES=1` is the documented way to run two anyway.
 - `sessions.json` writes are not pretty-printed and are debounced (see `SessionManager.persist`/`flushPersist` in `server/src/sessions.ts`) — a status-transition burst coalesces into one write instead of one synchronous whole-file rewrite per transition. Broadcasts still fire immediately; only the disk write is delayed.
 - `projects.json` migrates once at store construction, mirroring `GuardAllowlist`'s

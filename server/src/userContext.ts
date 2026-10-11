@@ -21,6 +21,8 @@ import * as workflowCommands from './workflowCommands.ts';
 import { ownSigningKey } from './syncSignature.ts';
 import { MemorySyncer } from './memory.ts';
 import type { WorkerClient } from './workerClient.ts';
+import { watchSharedTranscripts } from './transcriptWatch.ts';
+import path from 'node:path';
 
 const STORAGE_URL = process.env.STORAGE_URL ?? 'http://localhost:8790';
 
@@ -258,6 +260,17 @@ export function buildUserContext(
   sync.onStatusChange = (storage) => broadcast({ type: 'storageStatus', storage });
   const pushNotifier = new PushNotifier(store);
 
+  // Turns another bridge is running in a shared transcripts folder (see
+  // transcriptWatch): shown as running here, never pushed to storage.
+  const remoteTurns = new Map<string, number>();
+  const remoteAnnounced = new Map<string, number>();
+  const withRemoteTurn = (msg: ServerMessage): ServerMessage => {
+    if (msg.type !== 'sessionUpsert') return msg;
+    const startedAt = remoteTurns.get(msg.session.id);
+    if (startedAt === undefined || msg.session.status !== 'idle') return msg;
+    return { ...msg, session: { ...msg.session, status: 'running', turnStartedAt: startedAt } };
+  };
+
   const broadcast = (msg: ServerMessage) => {
     observe?.(msg);
     // Push-on-persist: every state change surfaces as a broadcast, so this one
@@ -278,6 +291,10 @@ export function buildUserContext(
     // Same reason as steps: heads alone would let the debounce coalesce
     // intermediate versions away before they ever reach Postgres.
     else if (msg.type === 'recipes') sync.pushRecipes(recipes.listOwnRecipeVersions());
+    fanOut(withRemoteTurn(msg));
+  };
+
+  const fanOut = (msg: ServerMessage) => {
     const payload = JSON.stringify(msg);
     const sessionId = sessionIdOf(msg);
     for (const [ws, access] of sockets) {
@@ -351,10 +368,15 @@ export function buildUserContext(
   // Before the SessionManager, which is its only writer.
   const spendHistory = new SpendHistory(store, broadcast);
 
+  const ownSeq = new Map<string, number>();
   const sessions = new SessionManager(
     store,
     guard,
     (msg) => {
+      if (msg.type === 'event') {
+        ownSeq.set(msg.sessionId, Math.max(ownSeq.get(msg.sessionId) ?? -1, msg.event.seq));
+        remoteTurns.delete(msg.sessionId); // this bridge is driving it now
+      }
       broadcast(msg);
       // A result message means plan usage just changed — refresh the poller soon.
       if (
@@ -381,6 +403,21 @@ export function buildUserContext(
     spendHistory,
   );
   sessions.attachWorker(worker);
+  // Only when transcripts/ is a symlink into another root (the dev bridge sharing prod's).
+  watchSharedTranscripts(path.join(storeRoot, 'transcripts'), ownSeq, (sessionId, event) => {
+    broadcast({ type: 'event', sessionId, event });
+    const was = remoteTurns.has(sessionId);
+    const data = event.data as { type?: string; recovering?: boolean } | null;
+    if (event.kind === 'user' && !was) remoteTurns.set(sessionId, event.ts);
+    else if (event.kind === 'sdk' && data?.type === 'result' && !data.recovering) remoteTurns.delete(sessionId);
+    const now = Date.now();
+    // Re-announced every few seconds mid-turn, so a reloaded page (whose hello
+    // snapshot shows this bridge's own idle row) picks the turn back up.
+    if (was === remoteTurns.has(sessionId) && (!was || now - (remoteAnnounced.get(sessionId) ?? 0) < 5000)) return;
+    remoteAnnounced.set(sessionId, now);
+    const session = sessions.get(sessionId);
+    if (session) fanOut(withRemoteTurn({ type: 'sessionUpsert', session }));
+  });
 
   const workflows = new WorkflowEngine(store, sessions, broadcast, userId);
   // Codex only: a plan step's turn is already settled when its card is answered,

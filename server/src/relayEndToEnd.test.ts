@@ -96,6 +96,8 @@ before(async () => {
     env: {
       ...process.env,
       HOME,
+      // Set from a dev shell, it would beat HOME and point this bridge at the dev root.
+      LINES_APP_ROOT: '',
       BRIDGE_AUTH_DISABLED: '1',
       LINES_BRIDGE_PORT: '',
       LINES_INSTANCE: 'relay-e2e',

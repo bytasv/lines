@@ -13,7 +13,7 @@
   "main": "dist/main.cjs",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "dev": "node scripts/build.mjs --shell-only && LINES_LOCAL_MODE=1 electron dist/main.cjs",
+    "dev": "node scripts/build.mjs --shell-only && LINES_APP_ROOT=\"$HOME/.lines-app-dev\" electron dist/main.cjs",
     "package": "npm run build && electron-builder --mac --arm64",
     "release": "node scripts/ship.mjs",
     "ship": "node scripts/ship.mjs",

@@ -124,10 +124,50 @@ response expose the running generation, pending generation, freeze state, blocke
 and build/recovery errors. The controller binds loopback and requires a random token
 stored in a mode-0600 control file. That token is not included in status output.
 
+## Dev and prod side by side
+
+A dev stack and the installed app run on one machine without touching each other.
+
+- Data root: Tilt, the Vite dev server and `npm run dev -w desktop` all use
+  `LINES_APP_ROOT`, defaulting to `~/.lines-app-dev`. The installed app keeps
+  `~/.lines-app`. Bridge lock, `device.json`, run files, per-user stores and the
+  dev supervisor's worker check all follow the root, so a Tilt bridge never
+  preempts the tray and the tray never stands down for it.
+- Ports: `server/scripts/dev-ports.mjs` picks bridge, worker, storage, relay and
+  web ports at Tiltfile load and keeps them in `<dev root>/dev-ports.json`. A saved
+  port is reused while it is free (or while the dev supervisor that holds it is
+  alive); otherwise the default (8787, 8788, 8790, 8791, 5173) if free, else any
+  free port. Vite runs on `LINES_DEV_WEB_PORT` with `strictPort`.
+- Bridge discovery: with relay off, the `web` resource sets `VITE_BRIDGE_WS_URL` to
+  empty, so a LAN or relay URL left in `.env` cannot beat `/__bridge`. The bridge's
+  `STORAGE_URL` points at the Tilt storage port whenever that resource runs, for the
+  same reason.
+- Storage: the dev web page never pairs and never calls `VITE_STORAGE_URL`
+  (`web/src/lib/storage.ts`); it talks to its bridge directly. Tilt's storage uses
+  `.env`'s `DATABASE_URL`, which is the shared production database, so the same
+  Clerk user sees the same synced sessions in dev and prod.
+- Projects are per root and are not synced; add them in the dev UI.
+- Transcripts and attachments are shared: the `link-transcripts` resource runs
+  `server/scripts/dev-transcripts.mjs`, which symlinks each
+  `<dev root>/users/<id>/{transcripts,attachments}` to the prod root's. It only
+  replaces a missing or empty folder and never touches one with content.
+- Live view of prod turns: when a store's `transcripts/` is a symlink,
+  `server/src/transcriptWatch.ts` streams lines another process appends as ordinary
+  `event` broadcasts, skipping seqs this bridge emitted itself. `userContext.ts`
+  infers a running remote turn (a `user` event with no `result` yet) and shows the
+  session as running to this bridge's browsers only; that status is never pushed
+  to storage. Stream deltas (thinking text, partial replies) are not persisted, so
+  dev sees finished messages, not the live stream.
+- Concurrency: running the same session in dev and prod at once makes both append
+  to one file with overlapping seqs. Keep a session on one side.
+- Identity: the dev desktop app is its own Electron instance (`Lines (dev)`, own
+  `userData`, so own single-instance lock and cookie jar), always in local mode, with
+  a muted tray glyph and dock icon. The dev web badge has an orange outline.
+
 ## Other Tilt behavior
 
-- Ports remain worker 8788, bridge 8787, storage 8790, relay 8791, web 5173,
-  and optional Prisma Studio 5555. Each runner passes its resource environment
+- Ports are chosen by `dev-ports.mjs` (see above); optional Prisma Studio is 5555.
+  Each runner passes its resource environment
   to its own service; `LINES_DEV_CHECKOUT` keeps dotenv resolution at the original
   checkout. No environment files are copied into generations.
 - The bridge binds `127.0.0.1` like every bridge (see
@@ -148,7 +188,8 @@ stored in a mode-0600 control file. That token is not included in status output.
   install never sets it, so there that context takes none.
 - Preflight checks `.env` key names, not secret values. Missing storage settings
   can be bypassed with `--no-storage`; the backend and web remain independently useful.
-- `STORAGE_URL` defaults to local storage only when unset. `RELAY_URL` otherwise
+- `STORAGE_URL` is the Tilt storage port while that resource runs, else `.env`'s
+  value, else local storage. `RELAY_URL` otherwise
   follows `.env`; `--with-relay` overrides it with the local relay. Session sharing
   requires `--relay-auth`, Clerk configuration, and a paired device. The synthetic
   local device credential is only used without relay authentication.
@@ -161,14 +202,13 @@ stored in a mode-0600 control file. That token is not included in status output.
   config's `DEFAULT_CONFIG`, duplicated deliberately and to be kept in step. Tilt's
   serve env beats `.env`, so local relay/storage values there cannot mask them.
   It never sets `LINES_DEVICE_ID`/`LINES_DEVICE_SECRET`: the bridge resolves the
-  real `~/.lines-app/device.json`, shares the tray's store and e2ee keys, and so
-  appears to the phone as the same machine with the same sessions. Tilt warns when
-  `device.json` is missing (pair from the tray or web app first).
-- Phone workflow: leave the tray running and `tilt up -- --hosted`. The dev bridge
-  preempts the tray's bridge, the tray stands down and labels the dev bridge's relay
-  state (see [desktop-app](desktop-app.md#standing-down)), and after `tilt down` the
-  tray re-arms its own bridge. Plain `tilt up` still takes the lock, but the tray
-  then reports the machine as local only, not reachable from a phone.
+  dev root's `device.json`, which is its own paired device, separate from the
+  installed app's. Tilt warns when that file is missing (pair the dev root with the
+  `pair-device` resource first).
+- The installed app keeps running and keeps its own bridge: dev and prod no longer
+  share a lock, so neither stands down for the other. The stand-down rules in
+  [desktop-app](desktop-app.md#standing-down) now apply only between two processes
+  on the same root, such as the dev desktop app and Tilt.
 - `--hosted` with `--with-relay` fails fast: the two name contradictory relay
   targets. The local `storage` resource keeps running under `--hosted`; disable it
   from the Tilt UI if it is not needed.

@@ -54,6 +54,19 @@ test('appendTranscript extends the cached entry instead of invalidating it', () 
   assert.deepEqual(store.loadTranscriptRaw('s1').length, 2);
 });
 
+test('appendTranscript keeps lines another writer appended to the same file', () => {
+  const { root, store } = tmpStore();
+  const other = createStore(root);
+  store.appendTranscript('s1', ev(0));
+  assert.equal(store.loadTranscript('s1').length, 1);
+  other.appendTranscript('s1', ev(1));
+  store.appendTranscript('s1', ev(2));
+  assert.deepEqual(
+    store.loadTranscript('s1').map((e) => e.seq),
+    [0, 1, 2],
+  );
+});
+
 test('deleteTranscript drops the cache entry', () => {
   const { store } = tmpStore();
   store.appendTranscript('s1', ev(0));
