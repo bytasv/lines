@@ -114,6 +114,13 @@
   ],
   "desktop": [
     {
+      "version": "0.2.55",
+      "date": "2026-10-11",
+      "items": [
+        "A finished background task no longer stays listed above the message box, and Stop now clears one that is left over."
+      ]
+    },
+    {
       "version": "0.2.53",
       "date": "2026-10-10",
       "items": [
@@ -194,7 +201,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "A finished background task no longer stays listed above the message box, and Stop now clears one that is left over."
-  ]
+  "desktopPending": []
 }
