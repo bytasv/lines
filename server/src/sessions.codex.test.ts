@@ -431,8 +431,11 @@ test('an interjection steers the live turn instead of starting a new one', async
   await settle();
 
   assert.equal(h.pushes.length, 2);
-  // The second push joins the running turn rather than opening one.
-  assert.deepEqual(h.pushes[1]!.message, { text: 'stop counting', steer: true });
+  // The second push joins the running turn rather than opening one, carrying the
+  // pending steer's id for codex to echo back on its `userMessage` item.
+  const steer = h.sessions.get('s1')!.steering?.[0];
+  assert.ok(steer, 'held as a pending steer until codex picks it up');
+  assert.deepEqual(h.pushes[1]!.message, { text: 'stop counting', steer: true, clientId: steer.id });
   assert.equal(h.pushes[1]!.engine, 'codex');
   // And the turn it joined is still the live one — an interjection settles nothing.
   assert.equal(h.sessions.get('s1')?.status, 'running');
@@ -450,8 +453,118 @@ test('a composer send while the turn runs steers it, with no queue row', async (
 
   assert.equal(h.sessions.get('s1')!.queued?.length ?? 0, 0);
   assert.equal(h.pushes.length, 2);
-  assert.deepEqual(h.pushes[1]!.message, { text: 'stop counting', steer: true });
+  const steer = h.sessions.get('s1')!.steering?.[0];
+  assert.deepEqual(h.pushes[1]!.message, { text: 'stop counting', steer: true, clientId: steer?.id });
   assert.equal(h.sessions.get('s1')?.status, 'running');
+});
+
+/** Steer into a running codex turn and return the pending steer's id. */
+async function steered(h: ReturnType<typeof harness>, text = 'stop counting') {
+  process.env.LINES_CODEX_PATH = FAKE_CODEX;
+  await refreshCodex();
+  h.sessions.prompt('s1', 'count to twenty');
+  await settle();
+  h.sessions.handleWorkerEvent('s1', notify('turn/started', { turn: { id: 't1' } }));
+  h.sessions.userPrompt('s1', text);
+  await settle();
+  return h.sessions.get('s1')!.steering![0]!.id;
+}
+
+const kinds = (h: ReturnType<typeof harness>) => h.store.loadTranscript('s1').map((e) => e.kind);
+
+test('a steer reaches the transcript only when codex picks it up', async () => {
+  const h = harness();
+  const id = await steered(h);
+  assert.ok(!kinds(h).includes('interject'), 'nothing written at send time');
+
+  // The turn's own opening prompt is a userMessage too, and must not ack it.
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('item/started', {
+      item: { type: 'userMessage', id: 'u0', clientId: null, content: [{ type: 'text', text: 'count to twenty' }] },
+    }),
+  );
+  assert.equal(h.sessions.get('s1')!.steering?.length, 1);
+
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('item/started', {
+      item: { type: 'userMessage', id: 'u1', clientId: id, content: [{ type: 'text', text: 'stop counting' }] },
+    }),
+  );
+  assert.equal(h.sessions.get('s1')!.steering, undefined);
+  assert.equal(kinds(h).filter((k) => k === 'interject').length, 1);
+  assert.equal(h.sessions.get('s1')!.status, 'running');
+});
+
+test('a codex without clientId is matched on the text', async () => {
+  const h = harness();
+  await steered(h);
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('item/started', {
+      item: { type: 'userMessage', id: 'u1', clientId: null, content: [{ type: 'text', text: 'stop counting' }] },
+    }),
+  );
+  assert.equal(h.sessions.get('s1')!.steering, undefined);
+  assert.ok(kinds(h).includes('interject'));
+});
+
+test('a response a steer preempted keeps its streamed text, ahead of the steer', async () => {
+  // codex with `instant_interrupt` abandons the item it was writing: started,
+  // deltas, then the steer's userMessage — and never an item/completed for it.
+  const h = harness();
+  const id = await steered(h);
+  h.sessions.handleWorkerEvent('s1', notify('item/started', { item: { type: 'agentMessage', id: 'a1', text: '' } }));
+  h.sessions.handleWorkerEvent('s1', notify('item/agentMessage/delta', { itemId: 'a1', delta: 'Once upon ' }));
+  h.sessions.handleWorkerEvent('s1', notify('item/agentMessage/delta', { itemId: 'a1', delta: 'a time' }));
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('item/started', {
+      item: { type: 'userMessage', id: 'u1', clientId: id, content: [{ type: 'text', text: 'stop counting' }] },
+    }),
+  );
+  h.sessions.handleWorkerEvent(
+    's1',
+    notify('item/completed', { item: { type: 'agentMessage', id: 'a2', text: 'Codex.' } }),
+  );
+
+  const events = h.store.loadTranscript('s1');
+  const texts = events
+    .filter((e) => e.kind === 'interject' || (e.kind === 'sdk' && (e.data as { type?: string }).type === 'assistant'))
+    .map((e) =>
+      e.kind === 'interject'
+        ? `> ${(e.data as { text: string }).text}`
+        : ((e.data as { message: { content: { text?: string }[] } }).message.content[0]?.text ?? ''),
+    );
+  assert.deepEqual(texts, ['Once upon a time', '> stop counting', 'Codex.']);
+});
+
+test('a response completed normally is not written twice', async () => {
+  const h = harness();
+  await steered(h);
+  h.sessions.handleWorkerEvent('s1', notify('item/started', { item: { type: 'agentMessage', id: 'a1', text: '' } }));
+  h.sessions.handleWorkerEvent('s1', notify('item/agentMessage/delta', { itemId: 'a1', delta: 'Done.' }));
+  h.sessions.handleWorkerEvent('s1', notify('item/completed', { item: { type: 'agentMessage', id: 'a1', text: 'Done.' } }));
+  h.sessions.handleWorkerEvent('s1', notify('turn/completed', { turn: { id: 't1', status: 'completed' } }));
+  const assistants = h.store
+    .loadTranscript('s1')
+    .filter((e) => e.kind === 'sdk' && (e.data as { type?: string }).type === 'assistant');
+  assert.equal(assistants.length, 1);
+});
+
+test('a steer codex never picked up runs as the next turn instead of being lost', async () => {
+  const h = harness();
+  await steered(h);
+  h.sessions.handleWorkerEvent('s1', notify('turn/completed', { turn: { id: 't1', status: 'completed' } }));
+  await settle();
+
+  assert.equal(h.sessions.get('s1')!.steering, undefined);
+  assert.ok(!kinds(h).includes('interject'));
+  // Handed back to the queue and flushed: a third push, an ordinary turn this time.
+  assert.equal(h.pushes.length, 3);
+  assert.deepEqual(h.pushes[2]!.message, { text: 'stop counting' });
+  assert.equal(h.sessions.get('s1')!.status, 'running');
 });
 
 test('a cross-provider setModel is refused once the session has run', async () => {

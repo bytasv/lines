@@ -181,6 +181,39 @@ export function resolveCodexCliStatus(deps: CodexDiscoveryDeps = {}): CodexCliSt
 let cached: CodexCliStatus | null = null;
 /** When {@link cached} was resolved, for the failed-answer retry below. */
 let probedAt = 0;
+/** Resolved target and inode/ctime of the cached binary, so an upgrade in place is
+ *  noticed (see {@link installChanged}). */
+let probedInstall = '';
+
+/** The install a binary path points at right now; empty when unreadable. */
+function installIdentity(binary: string | undefined): string {
+  if (!binary) return '';
+  try {
+    const real = fs.realpathSync(binary);
+    // inode + ctime, not mtime: package managers may stamp a fixed mtime on
+    // what they unpack, but a replaced file always gets a new inode or ctime.
+    // Nanoseconds: a file replaced within the same millisecond can reuse its
+    // predecessor's inode, and only the finer clock still tells them apart.
+    const st = fs.statSync(real, { bigint: true });
+    return `${real}@${st.ino}@${st.birthtimeNs}@${st.ctimeNs}`;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Has the cached working CLI been upgraded (or replaced) since it was probed?
+ * Two syscalls, so cheap enough for the per-push path — unlike `--version`.
+ * Without it a working answer was cached for the life of the bridge, so an
+ * upgrade kept reporting the old version until a restart.
+ */
+function installChanged(): boolean {
+  if (cached?.state !== 'ok') return false;
+  // Unreadable proves nothing about an upgrade (a reinstall mid-flight, a
+  // transient permission error), so it keeps the working answer.
+  const now = installIdentity(cached.path);
+  return now !== '' && now !== probedInstall;
+}
 
 /** How long a "missing" or "outdated" verdict is trusted before the machine is
  *  asked again. Short enough that installing the CLI takes effect on the next
@@ -200,15 +233,15 @@ const RETRY_FAILED_AFTER_MS = 10_000;
  * per-turn cost is on.
  */
 export function codexCliStatus(): CodexCliStatus {
-  if (cached && (cached.state === 'ok' || Date.now() - probedAt < RETRY_FAILED_AFTER_MS)) {
-    return cached;
-  }
+  if (cached?.state === 'ok' && !installChanged()) return cached;
+  if (cached && cached.state !== 'ok' && Date.now() - probedAt < RETRY_FAILED_AFTER_MS) return cached;
   return refreshCodexCli();
 }
 
 export function refreshCodexCli(): CodexCliStatus {
   cached = resolveCodexCliStatus();
   probedAt = Date.now();
+  probedInstall = installIdentity(cached.path);
   return cached;
 }
 

@@ -79,7 +79,8 @@
         "a stopped codex turn settles as stopped, never as a failure with a Retry",
         "a session-scoped helper query (autoName, summarizeTurn, consolidateStepOutput) prefers that session's own provider and falls back to the other when the preferred one is absent or answers null; a helper with no session (the MCP judge) stays Claude-first",
         "auto-naming never strands a session on 'New session': a null or thrown helper answer still writes a localSessionName(prompt) fallback title, and the session retries on its next prompt until a real summary lands",
-        "every helper query (auto-name, turn summary, step consolidation, provider-switch hand-off) runs in an empty scratch directory (helperCwd()), never the session's own cwd, so a project's auto-memory or AGENTS.md cannot leak into an answer meant to describe one narrow thing"
+        "every helper query (auto-name, turn summary, step consolidation, provider-switch hand-off) runs in an empty scratch directory (helperCwd()), never the session's own cwd, so a project's auto-memory or AGENTS.md cannot leak into an answer meant to describe one narrow thing",
+        "a changed codex binary on disk replaces the app-server child once no codex turn is running, and the bridge re-probes its version"
       ],
       "architecturalRules": [
         "codex notifications are normalized into Claude SDK message shapes on the bridge, not given a transcript kind of their own — the settle pass and every turn scan are keyed to those shapes",
@@ -3704,7 +3705,9 @@
         "web/src/components/QueuedMessages.tsx",
         "server/scripts/spike-interject.ts",
         "web/src/components/Composer.tsx",
-        "web/src/components/MentionInput.tsx"
+        "web/src/components/MentionInput.tsx",
+        "server/src/workerCodex.ts",
+        "server/scripts/spike-interject-ack.ts"
       ],
       "symbols": [
         "SessionManager.interjectQueued",
@@ -3715,7 +3718,12 @@
         "WorkerClient.linkOpen",
         "SessionManager.pushIntoLiveTurn",
         "SessionManager.userPrompt",
-        "SessionManager.deliverIntoLiveTurn"
+        "SessionManager.deliverIntoLiveTurn",
+        "SessionManager.ackSteer",
+        "SessionManager.openTurn",
+        "SessionMeta.steering",
+        "PendingSteer",
+        "CODEX_LIVE_STEER_MIN_VERSION"
       ],
       "dependencies": [],
       "tests": [
@@ -3736,7 +3744,10 @@
         "refused during compaction, interrupt, rewind, workflow advance, or a closed link, leaving the item queued to flush normally",
         "releasing one item never releases the rest of the queue, and never clears queuePaused unless the queue empties",
         "interjected work bills to the original turn's result, so a step's cost includes it",
-        "no MIN_INTERJECT_VERSION: priority 'next' and an absent priority measured identically"
+        "no MIN_INTERJECT_VERSION: priority 'next' and an absent priority measured identically",
+        "a steered message is pending until the engine acks it (Claude replay echo, codex userMessage item) and lands in the transcript at the ack",
+        "a steer Claude runs after its answer ends opens a turn of its own; one never acked goes back to the queue (codex at turn end, Claude after a 30s grace, any engine on failure or restart)",
+        "a codex answer abandoned for a steer keeps its streamed text, persisted before the steer"
       ],
       "architecturalRules": [
         "separate TranscriptEvent kind ('interject') rather than a flag on 'user', so every turn-boundary scan keyed on kind === 'user' stays correct untouched",

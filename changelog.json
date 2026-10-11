@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.21",
+      "date": "2026-10-11",
+      "items": [
+        "A message you send while the agent is working now shows as \"Sending\" until the agent actually reads it, then appears in the conversation at that point. If you're on an older Codex, the row suggests updating so Codex can read it mid-answer."
+      ]
+    },
+    {
       "version": "0.1.20",
       "date": "2026-10-10",
       "items": [
@@ -201,5 +208,9 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "Messages sent while the agent is working land in the conversation where the agent read them, and are never lost: one the agent didn't pick up runs next instead.",
+    "When Codex stops an answer to read your message, the part it had already written stays in the conversation.",
+    "Updating the Codex CLI now takes effect without restarting Lines."
+  ]
 }

@@ -25,6 +25,7 @@ import type {
   McpVetting,
   MentionValue,
   ModelProvider,
+  PendingSteer,
   PermissionMode,
   PermissionRequestData,
   PermissionResolutionSource,
@@ -33,6 +34,7 @@ import type {
   PromptMention,
   ProviderSwitchBlockInfo,
   ProviderSwitchData,
+  QueuedPrompt,
   ReasoningEffort,
   ResultSpendPayload,
   RoutingRule,
@@ -327,6 +329,12 @@ const OVERLOADED_BACKOFF_MS = [2_000, 8_000, 30_000];
  *  turn is held open meanwhile, so an unbounded wait is an unbounded hang. */
 const RECOVERY_REFRESH_TIMEOUT_MS = 20_000;
 
+/** How long a Claude steer left unacked by its turn's `result` may take to show
+ *  up as a turn of its own before it is handed back to the queue. The spike
+ *  measured the ack within ~1.3s of the result; this is generous on purpose,
+ *  since falling back early could run the message twice. */
+const STEER_ACK_GRACE_MS = 30_000;
+
 /** Connectivity hold: first probe delay, its ceiling, and the total budget after
  *  which the turn fails for real with the refusal banner. */
 /** Trailing throttle on the live in-flight spend broadcast (`turnSpend`). */
@@ -555,6 +563,28 @@ function isBackgroundTaskSignal(msg: { type: string }): boolean {
  * replay (the CLI echoing a pushed prompt back), and everything that can arrive
  * between turns — `system/*`, `rate_limit_event`, hook noise — prove nothing.
  */
+/** The text of a codex `userMessage` item's content, as Lines sent it. */
+function codexUserMessageText(content: unknown): string {
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => {
+      const p = part as { type?: unknown; text?: unknown };
+      return p.type === 'text' && typeof p.text === 'string' ? p.text : '';
+    })
+    .join('');
+}
+
+/** A pending steer handed back to the queue: same text, author and pills. */
+function steerToQueued(steer: PendingSteer): QueuedPrompt {
+  return {
+    id: steer.id,
+    ts: steer.ts,
+    text: steer.text,
+    ...(steer.mentions?.length ? { mentions: steer.mentions } : {}),
+    ...(steer.actor ? { actor: steer.actor } : {}),
+  };
+}
+
 function provesMainThreadTurn(msg: Record<string, unknown> & { type: string }): boolean {
   if (msg.type !== 'assistant' && msg.type !== 'stream_event' && msg.type !== 'user') return false;
   if (msg.type === 'user' && msg.isReplay === true) return false;
@@ -1242,6 +1272,14 @@ interface LiveState {
    */
   codexLastText?: string;
   /**
+   * The codex `agentMessage` streaming right now: its item id and the text its
+   * deltas carried so far. A codex with `instant_interrupt` abandons this item
+   * when a steer preempts it — `item/started`, deltas, and never an
+   * `item/completed` — so without this the text the user watched stream in
+   * vanished from the transcript (see flushAbandonedCodexMessage).
+   */
+  codexOpenMessage?: { id: string; text: string };
+  /**
    * The `plan` item's text, when codex emitted one.
    *
    * Real plan mode emits a dedicated `plan` item — measured, one per plan turn.
@@ -1368,6 +1406,8 @@ export class SessionManager {
    * prompt sent in the meantime would race the conversation being dropped.
    */
   private switchingProvider = new Set<string>();
+  /** Per-session grace timer for Claude steers left unacked at a `result`. */
+  private steerFallbacks = new Map<string, NodeJS.Timeout>();
   /**
    * Sessions whose auto-name got nothing out of the helper and are owed another
    * attempt on their next prompt (see maybeAutoName).
@@ -1482,6 +1522,14 @@ export class SessionManager {
       // describes children of a process this one has no handle on; the worker's
       // `hello` repopulates it for the ones that really are still running.
       meta.backgroundTasks = undefined;
+      // A steered message the previous process never saw acked may or may not
+      // have reached the model. Held at the head of the queue, paused, so the
+      // user decides — re-sending it blind could run it twice.
+      if (meta.steering?.length) {
+        meta.queued = [...meta.steering.map(steerToQueued), ...(meta.queued ?? [])];
+        meta.queuePaused = true;
+      }
+      meta.steering = undefined;
       this.sessions.set(meta.id, meta);
     }
     // Pruned by the store on load, so an old tombstone doesn't suppress a session
@@ -1623,6 +1671,8 @@ export class SessionManager {
      */
     meta.queued = cur?.queued;
     meta.queuePaused = cur?.queuePaused;
+    // Pending steers are this process's own live state, like the queue.
+    meta.steering = cur?.steering;
     // With no local copy there is no baseline to hold, so only the unbounded
     // mode is clamped: a session first seen here must not arrive pre-authorized
     // to skip every permission prompt. The user can still set it, here, once.
@@ -2140,6 +2190,11 @@ export class SessionManager {
       // warns), which is what made a mid-session switch to Bypass do nothing.
       allowDangerouslySkipPermissions: true,
       includePartialMessages: true,
+      // The CLI echoes every stdin user message back (`isReplay: true`) at the
+      // moment it takes it in. That echo is how a steered message learns where it
+      // landed — inside the turn, or (during a text-only answer) as a turn of its
+      // own after the `result`. Measured: server/scripts/spike-interject-ack.ts.
+      extraArgs: { 'replay-user-messages': null },
       resume: meta.claudeSessionId,
       systemPrompt: {
         type: 'preset',
@@ -2377,6 +2432,8 @@ export class SessionManager {
     this.staleQueries.delete(sessionId);
     // The CLI child that owned them is gone.
     this.setBackgroundTasks(sessionId, []);
+    // So is whatever it had not read yet from stdin.
+    this.returnSteersToQueue(sessionId);
     // Nothing about billed cost is reset here. A resumed query usually carries
     // Claude Code's running total on, and a closing one can still report a last
     // result on it; the lineage tells which from the counters alone.
@@ -2514,7 +2571,12 @@ export class SessionManager {
       // `steer: true` delivers into the turn already running rather than starting
       // one — the codex equivalent of joining a live query, and what makes Send
       // now work here.
-      { text: promptTextOf(message), ...(intoLiveTurn ? { steer: true } : {}) },
+      {
+        text: promptTextOf(message),
+        ...(intoLiveTurn ? { steer: true } : {}),
+        // The pending steer's id, echoed back on codex's `userMessage` item.
+        ...(intoLiveTurn && typeof message.uuid === 'string' ? { clientId: message.uuid } : {}),
+      },
       this.buildCodexOptions(meta),
       undefined,
       'codex',
@@ -2693,6 +2755,8 @@ export class SessionManager {
     });
     this.setStatus(sessionId, 'error', error);
     this.classifyFailure(sessionId, error);
+    // A turn that failed outside the SDK never acks anything pushed into it.
+    this.returnSteersToQueue(sessionId);
   }
 
   /**
@@ -3092,6 +3156,9 @@ export class SessionManager {
     // the step's output consolidates would open a turn on a conversation the next
     // step may drop — and dropping it now kills that turn with it.
     if (meta.workflow?.advancing) return true;
+    // A steer the engine has not taken in yet: on Claude it may still open a turn
+    // of its own after this one settles, so a send now would race it.
+    if (meta.steering?.length) return true;
     return isSessionActive(meta.status);
   }
 
@@ -3212,6 +3279,9 @@ export class SessionManager {
     // Likewise mid-advance (see isBusy). The next step's settle drains the item
     // into that step, and a finished workflow's 'idle' calls back here.
     if (meta.workflow?.advancing) return;
+    // Waiting on a steer's ack (see isBusy). Its turn's settle, or the fallback
+    // that hands it back to the queue, calls back here.
+    if (meta.steering?.length) return;
     if (meta.status !== 'idle' && meta.status !== 'done' && meta.status !== 'error') return;
 
     const item = meta.queued.shift()!;
@@ -3328,6 +3398,9 @@ export class SessionManager {
     if (this.rewinding.has(sessionId)) return false; // the transcript is moving under us
     if (this.switchingProvider.has(sessionId)) return false; // the conversation is being dropped
     if (meta.workflow?.advancing) return false; // mid-consolidateStepOutput; the turn is over
+    // The turn it would join has already settled under an unacked steer, which
+    // Claude is about to run as a turn of its own (see ackSteer).
+    if (meta.steering?.some((s) => s.afterTurn)) return false;
     // The engine has to be able to take a message mid-turn at all.
     if (!capabilitiesFor(providerForModel(meta.model)).interject) return false;
     // Only interject into a query this bridge knows it spawned. Claude-only:
@@ -3399,24 +3472,105 @@ export class SessionManager {
   }
 
   /**
-   * Record and push a user message into the running turn: the `'interject'`
-   * event (never `'user'`, so collectTurns does not split the turn), the meta
-   * upsert, then the push. Shared by "Send now" and a steered composer send;
-   * both callers have already checked `canInterject` and done their own queue
-   * bookkeeping.
+   * Push a user message into the running turn and hold it as a pending steer.
+   * Nothing is written to the transcript yet: the row lands where the engine
+   * acks it (see ackSteer), which is where the agent actually read it — after
+   * the step in flight, or after a whole text-only answer. Shared by "Send now"
+   * and a steered composer send; both callers have already checked
+   * `canInterject` and done their own queue bookkeeping.
    */
   private deliverIntoLiveTurn(
     meta: SessionMeta,
     msg: { text: string; mentions?: PromptMention[]; actor?: Actor },
   ) {
-    this.emitEvent(meta.id, 'interject', {
+    const steer: PendingSteer = {
+      id: randomUUID(),
+      ts: Date.now(),
       text: msg.text,
       ...(msg.mentions?.length ? { mentions: msg.mentions } : {}),
       ...(msg.actor ? { actor: msg.actor } : {}),
-    } satisfies InterjectData);
+    };
+    (meta.steering ??= []).push(steer);
     this.upsert(meta);
 
-    this.pushIntoLiveTurn(meta, msg.text);
+    this.pushIntoLiveTurn(meta, msg.text, steer.id);
+  }
+
+  /**
+   * The engine took a pending steer in. Inside the turn it was steered into,
+   * that is an `'interject'` row at this point of the transcript. After that
+   * turn settled (Claude, mid text-only answer), the CLI is running it as a turn
+   * of its own, so it opens a real one — a `'user'` boundary, turn fields,
+   * status — without pushing anything.
+   */
+  private ackSteer(meta: SessionMeta, steer: PendingSteer) {
+    meta.steering = meta.steering?.filter((s) => s.id !== steer.id);
+    if (!meta.steering?.length) meta.steering = undefined;
+    this.clearSteerFallback(meta.id);
+    if (steer.afterTurn) {
+      this.openTurn(meta, {
+        text: steer.text,
+        source: 'user',
+        mentions: steer.mentions,
+        actor: steer.actor,
+      });
+      return;
+    }
+    this.emitEvent(meta.id, 'interject', {
+      text: steer.text,
+      ...(steer.mentions?.length ? { mentions: steer.mentions } : {}),
+      ...(steer.actor ? { actor: steer.actor } : {}),
+    } satisfies InterjectData);
+    this.upsert(meta);
+  }
+
+  /**
+   * Hand every pending steer back to the head of the queue, in order, so a
+   * message the engine never took in runs as the next turn instead of being
+   * lost. `pause` follows the queue's own rule: after an interrupt the next
+   * user send is what resumes it.
+   */
+  private returnSteersToQueue(sessionId: string, opts: { pause?: boolean } = {}) {
+    this.clearSteerFallback(sessionId);
+    const meta = this.sessions.get(sessionId);
+    if (!meta?.steering?.length) return;
+    console.warn(`[session ${sessionId}] ${meta.steering.length} steered message(s) never acked — queued`);
+    meta.queued = [...meta.steering.map(steerToQueued), ...(meta.queued ?? [])];
+    meta.steering = undefined;
+    if (opts.pause) meta.queuePaused = true;
+    this.upsert(meta);
+    this.maybeFlush(sessionId);
+  }
+
+  /**
+   * The turn a steer was pushed into settled before the engine acked it.
+   * Codex acks inside the turn or not at all, so its leftovers go back to the
+   * queue now. Claude acks after the `result` and runs the message as a turn of
+   * its own (measured), so its leftovers are marked `afterTurn` and given a
+   * grace window to show up before falling back.
+   */
+  private settleSteers(meta: SessionMeta, opts: { interrupted?: boolean } = {}) {
+    if (!meta.steering?.length) return;
+    if (isCodexSession(meta)) {
+      this.returnSteersToQueue(meta.id, { pause: opts.interrupted });
+      return;
+    }
+    for (const steer of meta.steering) steer.afterTurn = true;
+    this.upsert(meta);
+    this.clearSteerFallback(meta.id);
+    this.steerFallbacks.set(
+      meta.id,
+      setTimeout(() => {
+        this.steerFallbacks.delete(meta.id);
+        this.returnSteersToQueue(meta.id, { pause: opts.interrupted });
+      }, STEER_ACK_GRACE_MS),
+    );
+  }
+
+  private clearSteerFallback(sessionId: string) {
+    const timer = this.steerFallbacks.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.steerFallbacks.delete(sessionId);
   }
 
   /**
@@ -3427,13 +3581,15 @@ export class SessionManager {
    * approved plan carrying comments. Both have already established that
    * `canInterject` holds — this does the push and nothing else.
    */
-  private pushIntoLiveTurn(meta: SessionMeta, text: string) {
+  private pushIntoLiveTurn(meta: SessionMeta, text: string, id?: string) {
     this.pushTurnSafely(
       meta,
       {
         type: 'user',
         message: { role: 'user', content: [{ type: 'text', text }] },
         parent_tool_use_id: null,
+        // Echoed back on the CLI's replay ack, which is how ackSteer finds it.
+        ...(id ? { uuid: id } : {}),
         // The SDK's streaming-input steering knob, undocumented outside sdk.d.ts.
         // Measured against CLI 2.1.260, 3 runs per arm (server/scripts/spike-interject.ts):
         //
@@ -3885,6 +4041,68 @@ export class SessionManager {
     }
   }
 
+
+  /**
+   * The bookkeeping that makes a message the start of a turn: the `'user'`
+   * transcript event (the turn boundary every scan keys on), attribution, turn
+   * fields, the file-attribution window, and status. Nothing is pushed — the
+   * caller either pushes next (prompt) or the engine already has the message
+   * (a steer Claude ran as a turn of its own, see ackSteer).
+   */
+  private openTurn(
+    meta: SessionMeta,
+    turn: {
+      text: string;
+      source: 'user' | 'workflow';
+      attachments?: Attachment[];
+      mentions?: PromptMention[];
+      actor?: Actor;
+    },
+  ) {
+    const { text, source, actor } = turn;
+    const mentions = turn.mentions ?? [];
+    this.emitEvent(meta.id, 'user', {
+      text,
+      source,
+      ...(turn.attachments?.length ? { attachments: turn.attachments } : {}),
+      ...(mentions.length ? { mentions } : {}),
+      // Persisted in the append-only JSONL, so attribution survives a restart.
+      ...(actor ? { actor } : {}),
+    });
+    // One field on the synced blob, so the sidebar can say who is running the
+    // turn. Cleared when nobody in particular sent it, rather than left stale.
+    if (actor) meta.turnActor = actor;
+    else delete meta.turnActor;
+
+    // First real user prompt names the session from its topic. Guard flips
+    // immediately so a slow title query can't fire twice or clobber a manual rename.
+    if (source === 'user') this.maybeAutoName(meta.id, text);
+
+    // Persisted (not just in-memory) so a bridge restart mid-turn still
+    // attributes the eventual result to the right initiator, and the activity
+    // row's elapsed time survives reloads.
+    meta.turnSource = source;
+    meta.turnStartedAt = Date.now();
+    // Opens this turn's attribution window (see recordFilesChanged). Never
+    // awaited — a slow `git stash create` must not delay the prompt reaching the
+    // worker; a window that loses the race just isn't recorded.
+    void this.openTurnWindow(meta.id);
+    meta.interruptedAt = undefined; // any prompt clears the crash-interrupted flag
+    this.interrupting.delete(meta.id); // a new turn supersedes any in-flight interrupt
+    // …and supersedes any recovery of the turn before it, attempt budget included.
+    this.cancelRecovery(meta.id);
+    // A user prompt after a force-advance (before the interrupted turn settled)
+    // means they want to keep working here — don't let the stale flag advance a
+    // later turn. Only for 'user': continueTurn and recoverOrphanedPermission
+    // deliberately re-prompt as 'workflow' and must keep a pending advance.
+    if (source === 'user' && meta.workflow?.advanceOnComplete === 'interrupted') {
+      meta.workflow.advanceOnComplete = undefined;
+      meta.workflow.advanceOnCompleteStep = undefined;
+    }
+    this.resetTurnFigures(meta);
+    this.setStatus(meta.id, 'running'); // upserts, persisting turnSource too
+  }
+
   /** Send a prompt into the session; the worker starts the SDK query if needed. */
   prompt(
     sessionId: string,
@@ -3913,46 +4131,7 @@ export class SessionManager {
     // and the SDK content blocks are built from the raw attachments at push time.
     const stored = this.stageAttachments(sessionId, attachments);
 
-    this.emitEvent(sessionId, 'user', {
-      text,
-      source,
-      ...(stored.length ? { attachments: stored } : {}),
-      ...(mentions.length ? { mentions } : {}),
-      // Persisted in the append-only JSONL, so attribution survives a restart.
-      ...(actor ? { actor } : {}),
-    });
-    // One field on the synced blob, so the sidebar can say who is running the
-    // turn. Cleared when nobody in particular sent it, rather than left stale.
-    if (actor) meta.turnActor = actor;
-    else delete meta.turnActor;
-
-    // First real user prompt names the session from its topic. Guard flips
-    // immediately so a slow title query can't fire twice or clobber a manual rename.
-    if (source === 'user') this.maybeAutoName(sessionId, text);
-
-    // Persisted (not just in-memory) so a bridge restart mid-turn still
-    // attributes the eventual result to the right initiator, and the activity
-    // row's elapsed time survives reloads.
-    meta.turnSource = source;
-    meta.turnStartedAt = Date.now();
-    // Opens this turn's attribution window (see recordFilesChanged). Never
-    // awaited — a slow `git stash create` must not delay the prompt reaching the
-    // worker; a window that loses the race just isn't recorded.
-    void this.openTurnWindow(sessionId);
-    meta.interruptedAt = undefined; // any prompt clears the crash-interrupted flag
-    this.interrupting.delete(sessionId); // a new turn supersedes any in-flight interrupt
-    // …and supersedes any recovery of the turn before it, attempt budget included.
-    this.cancelRecovery(sessionId);
-    // A user prompt after a force-advance (before the interrupted turn settled)
-    // means they want to keep working here — don't let the stale flag advance a
-    // later turn. Only for 'user': continueTurn and recoverOrphanedPermission
-    // deliberately re-prompt as 'workflow' and must keep a pending advance.
-    if (source === 'user' && meta.workflow?.advanceOnComplete === 'interrupted') {
-      meta.workflow.advanceOnComplete = undefined;
-      meta.workflow.advanceOnCompleteStep = undefined;
-    }
-    this.resetTurnFigures(meta);
-    this.setStatus(sessionId, 'running'); // upserts, persisting turnSource too
+    this.openTurn(meta, { text, source, attachments: stored, mentions, actor });
 
     const content = this.promptContent(text, attachments);
     this.pushTurnSafely(
@@ -5870,6 +6049,16 @@ export class SessionManager {
       this.handleCodexNotification(sessionId, msg.method, msg.params);
       return;
     }
+    // The CLI echoing a stdin user message back (`--replay-user-messages`, see
+    // buildQueryOptions) at the moment it takes it in. Every prompt is echoed, so
+    // these are never persisted and never heal a status; the only one that means
+    // anything is the echo of a pending steer, which is where it lands.
+    if (msg.type === 'user' && msg.isReplay === true) {
+      const meta = this.sessions.get(sessionId);
+      const steer = meta?.steering?.find((s) => s.id === msg.uuid);
+      if (meta && steer) this.ackSteer(meta, steer);
+      return;
+    }
     // Capture the CLI session id for resume-after-restart.
     const claudeSessionId = msg.session_id as string | undefined;
     const meta = this.sessions.get(sessionId);
@@ -6167,6 +6356,9 @@ export class SessionManager {
       // status just restored with a banner about the compaction, not about the work.
       if (failed && !compactionTurn) this.classifyFailure(sessionId, resultText);
       const interrupted = this.interrupting.delete(sessionId); // turn settled normally
+      // A steer the engine never took in during this turn. Before the flush below,
+      // which a pending steer holds back.
+      if (metaNow) this.settleSteers(metaNow, { interrupted });
       this.onTurnComplete?.(sessionId, source, interrupted, failed);
       this.maybeFlush(sessionId);
       void this.summarizeTurn(sessionId, resultSeq);
@@ -6187,6 +6379,47 @@ export class SessionManager {
    * synthetic error result, so they get the same classification, banner and Retry
    * as every other failure the SDK never reported itself.
    */
+  /** Follow the codex `agentMessage` in flight (see LiveSessionState.codexOpenMessage). */
+  private trackCodexOpenMessage(sessionId: string, method: string, params: Record<string, unknown>) {
+    const live = this.liveState(sessionId);
+    const item = params.item as { type?: unknown; id?: unknown } | undefined;
+    if (method === 'item/started' && item?.type === 'agentMessage' && typeof item.id === 'string') {
+      // A new message while one is still open: the old one was abandoned.
+      this.flushAbandonedCodexMessage(sessionId);
+      live.codexOpenMessage = { id: item.id, text: '' };
+    } else if (method === 'item/agentMessage/delta' && live.codexOpenMessage) {
+      if (params.itemId === live.codexOpenMessage.id && typeof params.delta === 'string') {
+        live.codexOpenMessage.text += params.delta;
+      }
+    } else if (method === 'item/completed' && item?.type === 'agentMessage') {
+      // Completed normally: the normalizer persists codex's own final text.
+      if (item.id === live.codexOpenMessage?.id) live.codexOpenMessage = undefined;
+    }
+  }
+
+  /**
+   * Persist the text of a codex message that was abandoned mid-stream, as if it
+   * had completed — through the same normalizer, so it is an ordinary assistant
+   * message on disk and in the renderer. Codex keeps a preempted response in its
+   * own thread; this keeps it in ours.
+   */
+  private flushAbandonedCodexMessage(sessionId: string) {
+    const live = this.liveState(sessionId);
+    const open = live.codexOpenMessage;
+    live.codexOpenMessage = undefined;
+    if (!open?.text.trim()) return;
+    const meta = this.sessions.get(sessionId);
+    const { messages } = normalizeCodexNotification(
+      'item/completed',
+      { item: { type: 'agentMessage', id: open.id, text: open.text } },
+      { newId: () => randomUUID(), model: meta ? resolveModelId(meta.model) : '' },
+    );
+    for (const message of messages) {
+      live.codexLastText = assistantTextOf(message) || live.codexLastText;
+      this.handleWorkerEvent(sessionId, message as SdkShapedMessage);
+    }
+  }
+
   private handleCodexNotification(
     sessionId: string,
     method: string,
@@ -6228,6 +6461,8 @@ export class SessionManager {
       this.upsert(meta);
     }
     if (failure !== undefined) {
+      // Kept like any other turn end, before the failure settles it.
+      this.flushAbandonedCodexMessage(sessionId);
       this.failTurn(sessionId, failure);
       return;
     }
@@ -6235,6 +6470,26 @@ export class SessionManager {
     // the interrupt set here is what makes the settling result below render as
     // stopped instead of as a completed turn nobody asked to end.
     if (interrupted) this.interrupting.add(sessionId);
+    this.trackCodexOpenMessage(sessionId, method, params);
+    // A steered message entering the turn: codex's ack, read off the raw
+    // notification because the normalizer drops `userMessage` items. Matched on
+    // the `clientId` the steer carried, falling back to its text for a codex that
+    // does not echo one — never taken in order: the turn's own opening prompt is
+    // a `userMessage` too, and arrives a second or two after `turn/started`, so a
+    // steer sent in that window must not be acked by it.
+    if (method === 'item/started' && meta?.steering?.length) {
+      const item = params.item as { type?: unknown; clientId?: unknown; content?: unknown } | undefined;
+      if (item?.type === 'userMessage') {
+        const text = codexUserMessageText(item.content);
+        const steer =
+          meta.steering.find((s) => s.id === item.clientId) ??
+          meta.steering.find((s) => s.text === text);
+        // The response it preempted first, so the steer lands after the text it
+        // interrupted — the order the user watched it happen in.
+        this.flushAbandonedCodexMessage(sessionId);
+        if (steer) this.ackSteer(meta, steer);
+      }
+    }
     // Codex's own plan item, read off the raw notification: the normalizer maps it
     // to an assistant message so it renders, which loses the fact that codex
     // marked this text as *the plan*.
@@ -6244,6 +6499,9 @@ export class SessionManager {
         live.codexPlanText = item.text;
       }
     }
+    // Whatever ends the turn ends the open message too: keep what streamed before
+    // the settling `result` is handled below.
+    if (method === 'turn/completed') this.flushAbandonedCodexMessage(sessionId);
     for (const message of messages) {
       // Remembered before the event is handled, so a settle in the same batch
       // still sees the text that arrived with it.

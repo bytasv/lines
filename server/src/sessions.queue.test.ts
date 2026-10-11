@@ -91,6 +91,20 @@ function seed(sessions: SessionManager, items: QueuedPrompt[]) {
   sessions.get(SID)!.queued = items;
 }
 
+/**
+ * The CLI's replay echo for the steer in `pushes[i]` — what it sends the moment
+ * it takes the message in (`--replay-user-messages`).
+ */
+function ack(h: ReturnType<typeof harness>, i = h.pushes.length - 1) {
+  h.sessions.handleWorkerEvent(SID, {
+    type: 'user',
+    isReplay: true,
+    uuid: h.pushes[i]!.uuid,
+    message: h.pushes[i]!.message,
+    parent_tool_use_id: null,
+  });
+}
+
 const item = (over: Partial<QueuedPrompt> = {}): QueuedPrompt => ({
   id: 'q1',
   ts: 1000,
@@ -381,14 +395,18 @@ describe('userPrompt steering', () => {
     h.sessions.userPrompt(SID, 'also check the tests', [], [], { actor: ALICE });
 
     assert.equal(h.queue().length, 0);
+    const steer = h.sessions.get(SID)!.steering?.[0];
     assert.deepEqual(h.pushes, [
       {
         type: 'user',
         message: { role: 'user', content: [{ type: 'text', text: 'also check the tests' }] },
         parent_tool_use_id: null,
+        uuid: steer?.id,
         priority: 'next',
       },
     ]);
+    ack(h);
+    assert.equal(h.sessions.get(SID)!.steering, undefined);
     const added = h.events().slice(before);
     // 'interject', never 'user': a 'user' event would split collectTurns.
     assert.deepEqual(
@@ -464,6 +482,93 @@ describe('userPrompt steering', () => {
     assert.equal(h.pushes.length, 0);
   });
 
+  const result = (h: ReturnType<typeof harness>) =>
+    h.sessions.handleWorkerEvent(SID, { type: 'result', subtype: 'success' });
+
+  test('a steer acked after the turn settled opens a turn of its own', () => {
+    // Measured on Claude: during a text-only answer the CLI only takes the message
+    // in after the `result`, then runs it as a second turn.
+    const h = harness();
+    h.live();
+    h.sessions.userPrompt(SID, 'make it shorter', [], [], { actor: ALICE });
+    result(h);
+    assert.equal(h.sessions.get(SID)!.status, 'done');
+    assert.equal(h.sessions.get(SID)!.steering?.[0]?.afterTurn, true);
+
+    const before = h.events().length;
+    ack(h);
+    const added = h.events().slice(before);
+    assert.deepEqual(
+      added.map((e) => e.kind),
+      ['user'],
+    );
+    assert.equal((added[0].data as { text: string }).text, 'make it shorter');
+    assert.deepEqual((added[0].data as { actor?: Actor }).actor, ALICE);
+    const after = h.sessions.get(SID)!;
+    assert.equal(after.status, 'running');
+    assert.equal(after.turnSource, 'user');
+    assert.equal(after.steering, undefined);
+    // Nothing pushed: the CLI already has the message.
+    assert.equal(h.pushes.length, 1);
+  });
+
+  test('a pending steer holds the queue back until it lands', () => {
+    const h = harness();
+    h.live();
+    h.sessions.userPrompt(SID, 'make it shorter');
+    result(h);
+    // Sent while the CLI is about to run the steer as its own turn: queued, and
+    // not flushed into that turn's way.
+    h.sessions.userPrompt(SID, 'then add tests');
+    assert.deepEqual(
+      h.queue().map((q) => q.text),
+      ['then add tests'],
+    );
+    assert.equal(h.pushes.length, 1);
+  });
+
+  test('a second steer in the same live turn steers too', () => {
+    const h = harness();
+    h.live();
+    h.sessions.userPrompt(SID, 'one');
+    h.sessions.userPrompt(SID, 'two');
+    assert.equal(h.queue().length, 0);
+    assert.equal(h.sessions.get(SID)!.steering?.length, 2);
+    assert.equal(h.pushes.length, 2);
+  });
+
+  test('a steer never acked after the turn falls back to the queue', (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const h = harness();
+    h.live();
+    h.sessions.userPrompt(SID, 'make it shorter');
+    result(h);
+    t.mock.timers.tick(30_000);
+    assert.equal(h.sessions.get(SID)!.steering, undefined);
+    // Back at the head of the queue and flushed as the next turn.
+    assert.equal(h.pushes.length, 2);
+    assert.equal(h.sessions.get(SID)!.status, 'running');
+    assert.ok(h.events().some((e) => e.kind === 'user' && (e.data as { text: string }).text === 'make it shorter'));
+  });
+
+  test('a failed turn hands its unacked steers back to the queue', () => {
+    const h = harness();
+    h.live();
+    h.sessions.userPrompt(SID, 'make it shorter');
+    h.sessions.failTurn(SID, 'boom');
+    assert.equal(h.sessions.get(SID)!.steering, undefined);
+    assert.ok(h.events().some((e) => e.kind === 'user' && (e.data as { text: string }).text === 'make it shorter'));
+  });
+
+  test('replay echoes are never persisted, and a foreign one acks nothing', () => {
+    const h = harness();
+    const before = h.live();
+    h.sessions.userPrompt(SID, 'make it shorter');
+    h.sessions.handleWorkerEvent(SID, { type: 'user', isReplay: true, uuid: 'not-ours', message: {} });
+    assert.equal(h.sessions.get(SID)!.steering?.length, 1);
+    assert.equal(h.events().length, before);
+  });
+
   test('an idle session opens a turn as before', () => {
     const h = harness({ status: 'idle' });
     const before = h.events().length;
@@ -523,15 +628,20 @@ describe('interjectQueued', () => {
     assert.equal(h.queue().length, 0);
 
     assert.equal(h.pushes.length, 1);
+    const steer = h.sessions.get(SID)!.steering?.[0];
+    assert.ok(steer, 'held as a pending steer until the CLI acks it');
     assert.deepEqual(h.pushes[0], {
       type: 'user',
       message: { role: 'user', content: [{ type: 'text', text: 'also check the tests' }] },
       parent_tool_use_id: null,
+      uuid: steer.id,
       // Measured, not chosen: 'now' makes the CLI end the running turn and start
       // a new one (two results). See the comment in interjectQueued.
       priority: 'next',
     });
+    assert.equal(h.events().length, before, 'nothing in the transcript until the ack');
 
+    ack(h);
     const added = h.events().slice(before);
     assert.deepEqual(
       added.map((e) => e.kind),
@@ -547,6 +657,7 @@ describe('interjectQueued', () => {
 
     // The owner releases Bob's prompt; the transcript must still credit Bob.
     assert.deepEqual(send(h), { ok: true });
+    ack(h);
     const added = h.events().slice(before);
     assert.deepEqual((added[0].data as { actor?: Actor }).actor, BOB);
   });

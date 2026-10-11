@@ -67,8 +67,16 @@ see [Data flow](#data-flow) for the measurement and its result. `SDKUserMessage.
   check, steers when there is no `queue` flag, no `needsApproval`, nothing already queued, no
   attachments, and `canInterject` holds; otherwise the existing queue branch
 - `SessionManager.deliverIntoLiveTurn(meta, { text, mentions, actor })` — the delivery both
-  `userPrompt`'s steer branch and `interjectQueued` share: emit the `'interject'` event, upsert,
-  `pushIntoLiveTurn`. Queue bookkeeping stays with the caller
+  `userPrompt`'s steer branch and `interjectQueued` share: add a `PendingSteer` to
+  `meta.steering`, upsert, `pushIntoLiveTurn` with the steer's id. Nothing is written to the
+  transcript here. Queue bookkeeping stays with the caller
+- `SessionManager.ackSteer(meta, steer)` — the engine took the steer in: an `'interject'` event at
+  this point of the transcript, or, for a steer marked `afterTurn`, a real turn opened through
+  `openTurn` (the `'user'` event and turn bookkeeping `prompt()` uses, without a push)
+- `settleSteers` / `returnSteersToQueue` — what happens to steers still pending when the turn
+  settles or dies (see Data flow)
+- `SessionMeta.steering` / `PendingSteer` (`shared/types.ts`) — live-only pending steers, rendered
+  by `SteeringMessages` in `web/src/components/QueuedMessages.tsx`
 - `pushTurn`/`pushTurnSafely(meta, message, { intoLiveTurn })` — `intoLiveTurn` skips token
   resolution and reuses `queryTokens.get(meta.id)` as-is; a normal push that saw a rotated token
   would `closeQuery` first, which would kill the very turn the interjection is joining
@@ -131,10 +139,44 @@ auto-approved the tool before `settingSources: []` was added to the spike), so
    makes the real decision.
 2. `userPrompt` runs the plan-reply check first, so a typed reply to a pending plan still means
    "keep planning".
-3. If the steer conditions hold, `deliverIntoLiveTurn` writes an `'interject'` event attributed
-   to the sender and pushes with `priority: 'next'`. No queue row ever exists for it, so it
-   cannot be edited or cancelled afterwards.
+3. If the steer conditions hold, `deliverIntoLiveTurn` holds it as a pending steer (shown as
+   "Sending" above the composer) and pushes it with `priority: 'next'`. No queue row ever exists
+   for it, so it cannot be edited or cancelled afterwards.
 4. Otherwise the prompt is queued and flushes once the turn settles, as before.
+
+### Where a steer lands: the engine's ack
+
+A steered message reaches the transcript only when the engine reports taking it in, so it sits
+where the agent actually read it. Measured with `server/scripts/spike-interject-ack.ts`:
+
+| engine | ack | during tool calls | during a text-only answer |
+|---|---|---|---|
+| Claude (CLI 2.1.288) | replay echo (`--replay-user-messages`, `isReplay: true`, matched by the pushed `uuid`) | after the tool call in flight, 1 turn | never mid-answer: the turn ends, then the CLI runs the message as a second turn |
+| codex 0.156.1 | `item/started` `userMessage`, matched by `clientId` (sent as `turn/steer`'s `clientUserMessageId`), falling back to the text | next step, 1 turn | only after the whole answer, same turn |
+| codex 0.162.1 (`instant_interrupt`) | same | next step | within ~0.1s: the answer in progress is abandoned |
+
+- Ack inside the turn: an `'interject'` row at that point.
+- A Claude turn that settles with steers still pending marks them `afterTurn`; the ack then opens
+  a real turn (`'user'` event, status, turn fields) with nothing pushed. If no ack arrives within
+  `STEER_ACK_GRACE_MS` (30s), they go back to the head of the queue.
+- A codex turn that settles with steers pending hands them straight back to the queue: codex acks
+  inside the turn or not at all.
+- A failed turn, a closed query, or a bridge restart (queued paused, since the CLI may already
+  have read it) also hands pending steers back to the queue. A steered message is never lost.
+- While any steer is pending, `maybeFlush` and new sends wait (`isBusy`), so a queued prompt
+  cannot race the turn Claude is about to open. A second steer into the same live turn is still
+  allowed until a steer is marked `afterTurn`.
+
+### A codex answer abandoned mid-stream
+
+A codex with `instant_interrupt` abandons the `agentMessage` it was writing when a steer preempts
+it: `item/started`, deltas, and never an `item/completed`. The normalizer only persists completed
+items, so the bridge follows the open message (`codexOpenMessage`) and persists its streamed text
+through the same normalizer when a steer is acked, a new message starts, or the turn ends or
+fails (`flushAbandonedCodexMessage`). The partial answer therefore lands before the steer, in the
+order the user watched it, and the live streaming tail is reset before the reply streams.
+Claude needs none of this: a stopped Claude answer is still delivered as a complete `assistant`
+message with the streamed text.
 
 ### The release itself (Send now)
 
@@ -200,6 +242,10 @@ auto-approved the tool before `settingSources: []` was added to the spike), so
   prompts), or any `canInterject` refusal.
 - A steered message has no queue row, so it cannot be edited or cancelled; queueing is the way
   to keep that option.
+- A steered message is pending until the engine acks it, and lands in the transcript at the ack;
+  one the engine never takes in goes back to the queue rather than being lost.
+- A steer Claude runs after its answer ends is recorded as a turn of its own, not an interjection.
+- An answer codex abandoned for a steer keeps its streamed text in the transcript.
 - A provider whose `interject` capability is false keeps queue-only behaviour.
 - An interjection never opens a turn and is never a rewind anchor.
 - It runs attributed to the item's author, not whoever pressed Send now.
@@ -263,6 +309,12 @@ carries an `expectedTurnId` precondition, so steering a turn that has already mo
 the worker rather than landing in the wrong one — which is also why `canInterject` does not
 demand a `queryTokens` entry for codex. That map is the Claude token store and a codex session
 never fills it, so the check would have refused every Send now here.
+
+Codex picks a steer up mid-answer only from 0.159 (`instant_interrupt`); older ones wait for the
+answer to finish. `CODEX_LIVE_STEER_MIN_VERSION` drives the update hint on the "Sending" row.
+The worker replaces its long-lived app-server when the `codex` binary on disk changes and no codex
+turn is running, and the bridge re-probes the CLI version on the same signal, so an upgrade takes
+effect without a restart.
 
 The capability is `interject` in `shared/providers.ts`; a provider that cannot be steered hides
 the button rather than disabling it, because there is no state the user could reach that would

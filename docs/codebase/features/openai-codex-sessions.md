@@ -60,7 +60,10 @@ scattered `=== 'openai'` checks.
   through a short-lived codex app-server, so codex stays the only writer of `auth.json`.
 - `server/src/codexCli.ts` — `codex` binary discovery and the version floor.
 - `server/src/codexAppServer.ts` — spawn, handshake, request/notification demux.
-- `server/src/workerCodex.ts` — thread binding, turns, steering, compaction, forking.
+- `server/src/workerCodex.ts` — thread binding, turns, steering, compaction, forking. Replaces
+  the app-server child when the `codex` binary on disk changes and no turn is running, so a CLI
+  upgrade takes effect without a restart. A steer carries `clientUserMessageId`, echoed back on
+  the `userMessage` item the bridge treats as its ack (see [turn-interjection](turn-interjection.md)).
 - `server/src/codexPlanMode.ts` — the `collaborationMode` a turn runs with; a chosen
   effort rides it verbatim, and `applyModePreset` fills it from codex's own preset only
   when the user chose none. See [reasoning-effort-selection](reasoning-effort-selection.md).

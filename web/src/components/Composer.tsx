@@ -345,7 +345,10 @@ export function Composer({ session }: { session: SessionMeta }) {
     caps.interject &&
     !needsApproval &&
     attachments.length === 0 &&
-    !session.queued?.length;
+    !session.queued?.length &&
+    // A steer the turn settled under: Claude is about to run it as its own turn,
+    // so the server queues anything sent now (see canInterject).
+    !session.steering?.some((s) => s.afterTurn);
   // Background tasks (backgrounded subagents / Bash) outlive the turn, so a
   // settled session can still have work to stop. Deliberately does not gate Send:
   // the CLI runs a new turn concurrently with a background task.

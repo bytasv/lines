@@ -257,6 +257,14 @@ export interface CodexCliStatus {
 export const CLAUDE_INSTALL_URL = 'https://docs.claude.com/en/docs/claude-code/setup';
 export const CODEX_INSTALL_URL = 'https://developers.openai.com/codex/cli';
 export const CODEX_INSTALL_COMMAND = 'npm i -g @openai/codex';
+/**
+ * The codex that can take a steered message *while it is writing a response*
+ * (`instant_interrupt`, on by default in later releases). Older ones only read
+ * it once the response is done — measured: a mid-story steer waited ~2 minutes
+ * on 0.156.1 and ~0.1s on 0.162.1 (server/scripts/spike-interject-ack.ts).
+ * Below it everything still works; the browser only suggests the update.
+ */
+export const CODEX_LIVE_STEER_MIN_VERSION = '0.159.0';
 
 export type WhisperState = 'ready' | 'missing-binary' | 'missing-model' | 'outdated';
 
@@ -1407,6 +1415,14 @@ export interface SessionMeta {
   queued?: QueuedPrompt[];
   /** Interrupt/error/crash suspended auto-flush; the next user send resumes it. */
   queuePaused?: boolean;
+  /**
+   * Messages steered into the running turn that the engine has not picked up
+   * yet. Each lands in the transcript only when the engine acks it (Claude's
+   * replay echo, codex's `userMessage` item), so it shows where the agent read
+   * it rather than where it was sent. Live-only, like `backgroundTasks`: on a
+   * restart any leftovers move to the queue, paused.
+   */
+  steering?: PendingSteer[];
   /** ms epoch when a crash/restart killed an in-flight turn; cleared by the next prompt. */
   interruptedAt?: number;
   /**
@@ -1524,6 +1540,20 @@ export interface TranscriptEvent {
  * No `source` field, unlike a 'user' event: an interjection is always
  * human-authored. Workflows and recovery re-prompt, they never interject.
  */
+/** A steered message waiting for the engine's ack (see {@link SessionMeta.steering}). */
+export interface PendingSteer {
+  id: string;
+  ts: number;
+  text: string;
+  mentions?: PromptMention[];
+  actor?: Actor;
+  /**
+   * The turn it was steered into settled before the ack. Claude then runs it as
+   * a turn of its own, so the ack opens a real turn instead of an interjection.
+   */
+  afterTurn?: boolean;
+}
+
 export interface InterjectData {
   text: string;
   /** Display-only @mention badges; the expansion is already baked into `text`. */

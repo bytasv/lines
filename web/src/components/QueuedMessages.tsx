@@ -5,6 +5,7 @@ import {
   Badge,
   Button,
   Group,
+  Loader,
   Paper,
   Stack,
   Text,
@@ -21,11 +22,17 @@ import {
 import type {
   Attachment,
   MentionValue,
+  PendingSteer,
   PromptAttachment,
   QueuedPrompt,
   SessionMeta,
 } from '@lines/shared';
-import { rootsForCwd } from '@lines/shared';
+import {
+  CODEX_LIVE_STEER_MIN_VERSION,
+  compareVersions,
+  providerForModel,
+  rootsForCwd,
+} from '@lines/shared';
 import { agentLabel, sessionCaps } from '../lib/capabilities';
 import { buildExpandedPrompt, mentionKindMeta, uniqueMentions } from '../lib/mentions';
 import { useCan } from '../lib/can';
@@ -258,6 +265,72 @@ function QueuedEditor({
           {gone ? 'Close' : 'Cancel'}
         </Button>
       </Group>
+    </Stack>
+  );
+}
+
+/**
+ * Messages steered into the running turn that the agent has not read yet. They
+ * move into the transcript where the agent picks them up — after the step in
+ * flight, or after a whole text-only answer — so until then they wait here.
+ * No actions: the message is already with the engine, so there is nothing left
+ * to edit, cancel or send.
+ */
+export function SteeringMessages({ session }: { session: SessionMeta }) {
+  const identify = useIdentityResolver();
+  const agent = agentLabel(session);
+  const codexVersion = useStore((s) => s.codexCli?.version);
+  const steering = session.steering;
+  if (!steering?.length) return null;
+  // An older codex can only read it after the whole response, which is the wait
+  // this row is showing — so say what makes it shorter.
+  const oldCodex =
+    providerForModel(session.model) === 'openai' &&
+    !!codexVersion &&
+    compareVersions(codexVersion, CODEX_LIVE_STEER_MIN_VERSION) < 0;
+  return (
+    <Stack gap={6} maw={920} mx="auto" w="100%" px="md" pb={4}>
+      <Group gap="xs">
+        <Text size="xs" c="dimmed" fw={600}>
+          Sending · {steering.length}
+        </Text>
+        {oldCodex && (
+          <Text size="xs" c="dimmed">
+            Codex {codexVersion} reads it after its current response — update the Codex CLI to{' '}
+            {CODEX_LIVE_STEER_MIN_VERSION} or newer to have it read mid-response.
+          </Text>
+        )}
+      </Group>
+      {steering.map((item: PendingSteer) => {
+        const who = identify(item.actor?.userId, item.actor);
+        return (
+          <Paper
+            key={item.id}
+            p="xs"
+            radius="md"
+            style={{ border: '1px dashed var(--mantine-color-default-border)' }}
+          >
+            <Group gap={6} wrap="nowrap">
+              <Tooltip
+                label={`${agent} reads it once its current step finishes`}
+                withArrow
+                openDelay={200}
+              >
+                <Loader size={12} style={{ flexShrink: 0 }} />
+              </Tooltip>
+              {!who.self && (
+                <Text size="xs" fw={600} style={{ flexShrink: 0 }}>
+                  {who.name}
+                </Text>
+              )}
+              <Text size="sm" c="dimmed" lineClamp={2}>
+                {item.text}
+              </Text>
+            </Group>
+            <MentionBadges mentions={item.mentions} />
+          </Paper>
+        );
+      })}
     </Stack>
   );
 }

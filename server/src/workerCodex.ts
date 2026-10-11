@@ -21,6 +21,7 @@
  * codex session reaching one of those would throw a synchronous TypeError past
  * the attached `.catch()`, in the one process whose job is to survive.
  */
+import fs from 'node:fs';
 import { z } from 'zod';
 import { CodexAppServer } from './codexAppServer.ts';
 import { CODEX_PLAN_FALLBACK_EFFORT, type CodexCollaborationMode } from './codexPlanMode.ts';
@@ -73,6 +74,10 @@ const CodexPushMessage = z.object({
   /** Deliver into the turn already running (`turn/steer`) instead of starting a
    *  new one. The bridge sets it for an interjection. */
   steer: z.boolean().optional(),
+  /** The bridge's id for a steered message, sent as `clientUserMessageId` and
+   *  echoed back as the `userMessage` item's `clientId` — how the bridge knows
+   *  which pending steer the engine just took in. */
+  clientId: z.string().optional(),
   /** Compact the thread instead of prompting it. Codex has a real RPC for this,
    *  unlike the Claude path's `/compact` prompt. */
   compact: z.boolean().optional(),
@@ -95,6 +100,9 @@ let server: CodexAppServer | null = null;
 let serverHome: string | null = null;
 /** Bearer-token env the live child was spawned with; see `ensureServer`. */
 let serverEnv: string | null = null;
+/** Identity of the `codex` binary the live child was spawned from; see
+ *  `binaryFingerprint`. */
+let serverBinary: string | null = null;
 /** The `mcp_servers` table the live child has already been given, so a push
  *  that changes nothing does not rewrite its config. Cleared with the child. */
 let appliedMcpServers: string | null = null;
@@ -215,6 +223,27 @@ function envFingerprint(env: Record<string, string> | undefined): string {
 }
 
 /**
+ * Which `codex` install a path points at right now: the resolved target and its
+ * inode/ctime. An upgrade changes one or the other — brew links a new versioned
+ * Caskroom path, npm rewrites the package files in place — so a change here
+ * means the running child is an older codex than the one on disk. Empty when the
+ * path cannot be read; that never forces a respawn on its own.
+ */
+function binaryFingerprint(binary: string): string {
+  try {
+    const real = fs.realpathSync(binary);
+    // inode + ctime, not mtime: package managers may stamp a fixed mtime on
+    // what they unpack, but a replaced file always gets a new inode or ctime.
+    // Nanoseconds: a file replaced within the same millisecond can reuse its
+    // predecessor's inode, and only the finer clock still tells them apart.
+    const st = fs.statSync(real, { bigint: true });
+    return `${real}@${st.ino}@${st.birthtimeNs}@${st.ctimeNs}`;
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Bring up the app-server if it is not running. One child serves every codex
  * session, so this is idempotent and cheap after the first call.
  */
@@ -229,11 +258,16 @@ function ensureServer(options: CodexPushOptions): CodexAppServer {
   // that (the old child holds the wrong credentials outright); a changed bearer
   // token is not, so it waits for the first push that finds the child idle.
   const busy = [...codexSessions.values()].some((state) => state.busy);
+  // An upgraded CLI waits for an idle push the same way: without it the child
+  // spawned before the upgrade keeps serving the old version until the worker
+  // restarts, and a user who updated codex for a fix sees nothing change.
+  const binary = binaryFingerprint(options.codexPath);
   const stale =
     server &&
     (!server.running ||
       serverHome !== options.codexHome ||
-      (serverEnv !== fingerprint && !busy));
+      (serverEnv !== fingerprint && !busy) ||
+      (binary !== '' && serverBinary !== binary && !busy));
   if (stale) {
     server!.close();
     server = null;
@@ -244,6 +278,7 @@ function ensureServer(options: CodexPushOptions): CodexAppServer {
   if (server) return server;
   serverHome = options.codexHome;
   serverEnv = fingerprint;
+  serverBinary = binary;
   server = new CodexAppServer({
     codexPath: options.codexPath,
     codexHome: options.codexHome,
@@ -601,7 +636,7 @@ export function pushCodex(
     void runCompaction(sessionId, options, turnSink);
     return;
   }
-  void runTurn(sessionId, options, message.text, turnSink, message.steer === true);
+  void runTurn(sessionId, options, message.text, turnSink, message.steer === true, message.clientId);
 }
 
 /**
@@ -643,6 +678,7 @@ async function runTurn(
   input: string,
   turnSink: CodexSink,
   steer: boolean,
+  clientId?: string,
 ) {
   try {
     const app = ensureServer(options);
@@ -664,6 +700,7 @@ async function runTurn(
       await app.request('turn/steer', {
         threadId: state.threadId,
         expectedTurnId: state.turnId,
+        ...(clientId ? { clientUserMessageId: clientId } : {}),
         input: [{ type: 'text', text: input, text_elements: [] }],
       });
       return;

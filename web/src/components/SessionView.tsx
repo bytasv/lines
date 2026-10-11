@@ -52,7 +52,7 @@ import { transcriptHasMore } from '../lib/transcriptPage';
 import { clearTranscriptPageInFlight, requestTranscriptPage } from '../lib/transcriptBackfill';
 import { Composer } from './Composer';
 import { ReadOnlySessionNotice } from './ReadOnlySessionNotice';
-import { OfflineQueuedMessages, QueuedMessages } from './QueuedMessages';
+import { OfflineQueuedMessages, QueuedMessages, SteeringMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
 import { ShareModal } from './ShareModal';
 import { MachineDot } from './MachineDot';
@@ -451,6 +451,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       {!!session.backgroundTasks?.length && (
         <BackgroundTasksStrip sessionId={sessionId} tasks={session.backgroundTasks} />
       )}
+      <SteeringMessages session={session} />
       <QueuedMessages session={session} />
       <OfflineQueuedMessages session={session} />
       {session.readOnly ? <ReadOnlySessionNotice /> : <Composer session={session} />}

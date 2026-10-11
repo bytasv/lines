@@ -94,6 +94,26 @@ test('--version output is parsed down to x.y.z', () => {
   }
 });
 
+test('an upgraded CLI is re-probed, so its new version shows without a restart', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-codex-upgrade-'));
+  const binary = path.join(dir, 'codex');
+  const previous = process.env.LINES_CODEX_PATH;
+  process.env.LINES_CODEX_PATH = binary;
+  try {
+    fs.writeFileSync(binary, '#!/bin/sh\necho "codex-cli 0.156.1"\n', { mode: 0o755 });
+    assert.equal(refreshCodexCli().version, '0.156.1');
+    // Replaced, the way a package manager does: a new file at the same path.
+    fs.rmSync(binary);
+    fs.writeFileSync(binary, '#!/bin/sh\necho "codex-cli 0.162.1"\n', { mode: 0o755 });
+    assert.equal(codexCliStatus().version, '0.162.1');
+  } finally {
+    if (previous === undefined) delete process.env.LINES_CODEX_PATH;
+    else process.env.LINES_CODEX_PATH = previous;
+    refreshCodexCli();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a missing CLI is re-probed, so installing one lands without a restart', (t) => {
   // The bug this closes: the verdict was cached for the life of the bridge, so
   // the obvious response to "not installed" — installing it — changed nothing.
