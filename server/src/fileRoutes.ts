@@ -396,7 +396,15 @@ async function searchSessionsRoute(
  * which is already base64.
  */
 function readAttachment(ctx: UserContext, params: FileRequestParams, access: SocketAccess): FileRouteResult {
-  const attachmentsRoot = ctx.store.attachmentsRoot;
+  const own = readAttachmentUnder(ctx.store.attachmentsRoot, params, access);
+  // A dev store reads the installed app's attachments for sessions it only displays.
+  const shared = ctx.store.sharedAttachmentsRoot;
+  if (own.status === 200 || !shared) return own;
+  const fallback = readAttachmentUnder(shared, params, access);
+  return fallback.status === 200 ? fallback : own;
+}
+
+function readAttachmentUnder(attachmentsRoot: string, params: FileRequestParams, access: SocketAccess): FileRouteResult {
   const abs = path.resolve(attachmentsRoot, params.rel ?? '');
   // Through symlinks too: a link planted in the attachments directory must not
   // serve a file from anywhere else on the host. Read from where it lands, gated

@@ -4,9 +4,9 @@ import type { TranscriptEvent } from '@lines/shared';
 const TRANSCRIPT_NAME = /^([A-Za-z0-9_-]+)\.jsonl$/;
 
 /**
- * Streams lines another process appends to a shared transcripts folder (a dev
- * root symlinked to the prod root's). `lastSeq` is this process's own high-water
- * mark per session, so lines it wrote itself are never echoed back.
+ * Streams lines another install appends to its transcripts folder (a dev bridge
+ * watching the installed app's, which it reads but never writes). `lastSeq` is
+ * the high-water mark per session already shown, so nothing is sent twice.
  */
 export function watchSharedTranscripts(
   dir: string,
@@ -15,8 +15,8 @@ export function watchSharedTranscripts(
 ): fs.FSWatcher | null {
   let real: string;
   try {
-    if (!fs.lstatSync(dir).isSymbolicLink()) return null;
     real = fs.realpathSync(dir);
+    if (!fs.statSync(real).isDirectory()) return null;
   } catch {
     return null;
   }

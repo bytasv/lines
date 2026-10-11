@@ -31,8 +31,8 @@ function collect(n: number, events: [string, TranscriptEvent][]): Promise<void> 
 
 const settle = () => new Promise((r) => setTimeout(r, 200));
 
-test('a plain folder is not watched', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-twatch-'));
+test('a missing folder is not watched', () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lines-twatch-')), 'absent');
   assert.equal(watchSharedTranscripts(dir, new Map(), () => {}), null);
 });
 

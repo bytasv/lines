@@ -51,6 +51,7 @@ import { Transcript } from './Transcript';
 import { transcriptHasMore } from '../lib/transcriptPage';
 import { clearTranscriptPageInFlight, requestTranscriptPage } from '../lib/transcriptBackfill';
 import { Composer } from './Composer';
+import { ReadOnlySessionNotice } from './ReadOnlySessionNotice';
 import { OfflineQueuedMessages, QueuedMessages } from './QueuedMessages';
 import { WorkflowStepper } from './WorkflowStepper';
 import { ShareModal } from './ShareModal';
@@ -452,7 +453,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       )}
       <QueuedMessages session={session} />
       <OfflineQueuedMessages session={session} />
-      <Composer session={session} />
+      {session.readOnly ? <ReadOnlySessionNotice /> : <Composer session={session} />}
       {reviewing && (
         <Suspense fallback={null}>
           <SessionDiffModal opened={reviewing} onClose={() => setReviewing(false)} sessionId={sessionId} />

@@ -117,7 +117,7 @@
       "version": "0.2.53",
       "date": "2026-10-10",
       "items": [
-        "A development copy of Lines now runs beside the installed app instead of taking over this machine. It keeps its own data, ports and a muted menu bar and Dock icon, so the installed app stays connected to your phone the whole time."
+        "A development copy of Lines now runs beside the installed app instead of taking over this machine. It keeps its own data, ports and a muted menu bar and Dock icon, so the installed app stays connected to your phone the whole time. It shows the installed app’s sessions read-only, with their history and new messages as they finish, and keeps sessions you start in it to itself."
       ]
     },
     {
@@ -194,5 +194,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "A finished background task no longer stays listed above the message box, and Stop now clears one that is left over."
+  ]
 }

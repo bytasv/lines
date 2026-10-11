@@ -63,7 +63,7 @@ import {
 } from './connectionPolicy.ts';
 import { APP_ROOT, isValidStoreId, userStoreRoot } from './store.ts';
 import { UserRegistry } from './userRegistry.ts';
-import type { BrowserLink, UserContext } from './userContext.ts';
+import { READ_ONLY_SESSION, type BrowserLink, type UserContext } from './userContext.ts';
 import { handleFileRequest } from './fileRoutes.ts';
 import {
   clampPermissionMode,
@@ -1118,7 +1118,11 @@ async function handleConnection(
           type: 'error',
           sessionId,
           message: err instanceof Error ? err.message : String(err),
-          ...(err instanceof Error && err.message === DEV_UPDATING && msg.type === 'prompt' ? { rejectedPrompt: msg } : {}),
+          ...(err instanceof Error &&
+          (err.message === DEV_UPDATING || err.message === READ_ONLY_SESSION) &&
+          msg.type === 'prompt'
+            ? { rejectedPrompt: msg }
+            : {}),
         } satisfies ServerMessage),
       );
     });
@@ -1142,10 +1146,11 @@ function buildHello(
   grant?: AttestedGrant,
 ): ServerMessage {
   const { local, encrypted } = link;
-  const sessions =
+  const sessions = (
     access.scope === 'session'
       ? ctx.sessions.list().filter((s) => access.sessionIds?.includes(s.id))
-      : ctx.sessions.list();
+      : ctx.sessions.list()
+  ).map(ctx.presentSession);
 
   if (access.scope !== 'owner') {
     return {
@@ -1402,7 +1407,17 @@ function sendMcpError(ws: BrowserLink, reason: string): void {
   );
 }
 
+/** What a read-only session (see `UserContext.lockReason`) still answers: reads only. */
+const READ_ONLY_MESSAGES = new Set<ClientMessage['type']>(['loadTranscript', 'presence', 'contextBreakdown', 'fileRequest']);
+
 async function handleMessage(ctx: UserContext, ws: BrowserLink, msg: ClientMessage): Promise<void> {
+  const target = 'sessionId' in msg ? (msg as { sessionId?: unknown }).sessionId : undefined;
+  const locked = typeof target === 'string' ? ctx.lockReason(target) : null;
+  if (locked && !READ_ONLY_MESSAGES.has(msg.type)) {
+    // Opening a session marks it read; here that would rewrite the installed app's row.
+    if (msg.type === 'ackSession') return;
+    throw new Error(locked);
+  }
   // Heartbeats and presence cannot start work and must not prevent an idle window.
   if (msg.type === 'ping' || msg.type === 'presence') return handleMessageImpl(ctx, ws, msg);
   return devRuntime.run(() => handleMessageImpl(ctx, ws, msg));

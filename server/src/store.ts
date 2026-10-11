@@ -289,9 +289,13 @@ export function isValidStoreId(id: unknown): id is string {
  * (`createStore(userStoreRoot(userId))`); the local disk is a cache/offline
  * fallback for the cloud storage server. Whole-file overwrites, no locking.
  */
-export function createStore(root: string) {
+export function createStore(root: string, options: { sharedRoot?: string } = {}) {
   const TRANSCRIPTS = path.join(root, 'transcripts');
   const ATTACHMENTS = path.join(root, 'attachments');
+  // Another install's store for the same user, read only: transcripts and
+  // attachments this one has no copy of are read from there, never written.
+  const SHARED_TRANSCRIPTS = options.sharedRoot ? path.join(options.sharedRoot, 'transcripts') : null;
+  const SHARED_ATTACHMENTS = options.sharedRoot ? path.join(options.sharedRoot, 'attachments') : null;
   const SESSIONS_FILE = path.join(root, 'sessions.json');
   // Separate file from SESSIONS_FILE, which stays a bare SessionMeta[]: an older
   // build's loader would call .map() on an envelope and throw on startup.
@@ -391,13 +395,20 @@ export function createStore(root: string) {
   function transcriptEntry(sessionId: string): TranscriptEntry | null {
     // A malformed id has no transcript, rather than a read somewhere else.
     if (!isValidStoreId(sessionId)) return null;
-    const file = transcriptFile(sessionId);
+    let file = transcriptFile(sessionId);
     let stat: fs.Stats;
     try {
       stat = fs.statSync(file);
     } catch {
-      transcriptCache.delete(sessionId);
-      return null;
+      // Not ours: the shared root's copy, read only (a dev store reading the installed app's).
+      try {
+        if (!SHARED_TRANSCRIPTS) throw new Error('no shared root');
+        file = path.join(SHARED_TRANSCRIPTS, `${sessionId}.jsonl`);
+        stat = fs.statSync(file);
+      } catch {
+        transcriptCache.delete(sessionId);
+        return null;
+      }
     }
     const cached = transcriptCache.get(sessionId);
     if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
@@ -692,11 +703,14 @@ export function createStore(root: string) {
     loadAttachmentBase64(sessionId: string, file: string): string | null {
       // `file` is a basename this store minted; anything with a directory in it is not.
       if (!isValidStoreId(sessionId) || path.basename(file) !== file) return null;
-      try {
-        return fs.readFileSync(path.join(ATTACHMENTS, sessionId, file)).toString('base64');
-      } catch {
-        return null;
+      for (const root of SHARED_ATTACHMENTS ? [ATTACHMENTS, SHARED_ATTACHMENTS] : [ATTACHMENTS]) {
+        try {
+          return fs.readFileSync(path.join(root, sessionId, file)).toString('base64');
+        } catch {
+          // try the next root
+        }
       }
+      return null;
     },
 
     loadAuth(): StoredAuth | null {
@@ -981,6 +995,8 @@ export function createStore(root: string) {
 
     rootDir: root,
     attachmentsRoot: ATTACHMENTS,
+    sharedTranscriptsRoot: SHARED_TRANSCRIPTS,
+    sharedAttachmentsRoot: SHARED_ATTACHMENTS,
   };
 
   // One-shot migration of projects.json from the pre-multi-root `string[]` form

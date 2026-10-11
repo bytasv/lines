@@ -67,6 +67,23 @@ test('appendTranscript keeps lines another writer appended to the same file', ()
   );
 });
 
+test('a shared root is read for what this store lacks, and never written', () => {
+  const shared = tmpStore();
+  shared.store.appendTranscript('s1', ev(0));
+  const name = shared.store.saveAttachment('s1', 'a.png', Buffer.from('img').toString('base64'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-store-'));
+  const store = createStore(root, { sharedRoot: shared.root });
+
+  assert.deepEqual(store.loadTranscript('s1').map((e) => e.seq), [0]);
+  assert.equal(Buffer.from(store.loadAttachmentBase64('s1', name)!, 'base64').toString(), 'img');
+
+  store.appendTranscript('s2', ev(0));
+  assert.ok(fs.existsSync(path.join(root, 'transcripts', 's2.jsonl')));
+  assert.ok(!fs.existsSync(path.join(shared.root, 'transcripts', 's2.jsonl')));
+  store.deleteTranscript('s1');
+  assert.ok(fs.existsSync(shared.file('s1')));
+});
+
 test('deleteTranscript drops the cache entry', () => {
   const { store } = tmpStore();
   store.appendTranscript('s1', ev(0));

@@ -1747,8 +1747,9 @@
         "web/src/ws.ts",
         "server/src/connectionPolicy.ts",
         "server/scripts/dev-ports.mjs",
-        "server/scripts/dev-transcripts.mjs",
         "server/src/transcriptWatch.ts",
+        "server/src/userContext.ts",
+        "web/src/components/ReadOnlySessionNotice.tsx",
         "web/src/components/DevRuntimeSection.tsx"
       ],
       "symbols": [

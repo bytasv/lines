@@ -151,6 +151,11 @@ flickers a still-genuinely-alive entry back in on the next `background_tasks_cha
 recoverable flicker, traded for an unrecoverable wedge. See Business rules for the invariant this
 now upholds.
 
+The ids it stops are the live set's, or, when this process has no live set for the session, the ones
+the meta still shows. `setBackgroundTasks` treats a change as real when either the live set or the
+meta differs from the new list. Before that, a meta carrying tasks the live set never had (a row
+adopted from another machine) made Stop a silent no-op and the strip stayed for good.
+
 ### Transcript rendering
 
 `task_started` (skipped entirely when the SDK marks it `skip_transcript: true`, e.g. ambient
@@ -255,6 +260,9 @@ transcript card.
   restart in `sessions.json` describes a process nothing here has a handle on any more. The
   worker's `hello` (via `reconcileWithWorker`) or the next `background_tasks_changed` repopulate
   it for whichever tasks are genuinely still running.
+- Never adopted from storage either: `adoptSynced` keeps this machine's own `backgroundTasks` and
+  ignores the pulled row's, which describes another machine's CLI process and would never receive
+  a completion signal here.
 - **Strengthened invariant** (renegotiates the previous rule below): `background_tasks_changed` is
   the only thing that may put an id **into** the live set. Everything else — `closeQuery`,
   `handleWorkerEnded`, `resetClaudeSession`, and now `task_notification` and

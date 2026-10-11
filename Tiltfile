@@ -382,15 +382,16 @@ if WITH_RELAY:
         BRIDGE_ENV['LINES_DEVICE_ID'] = 'tilt-dev'
         BRIDGE_ENV['LINES_DEVICE_SECRET'] = 'tilt-dev'
 
-# Shares the prod root's transcripts and attachments so dev shows the same history (server/scripts/dev-transcripts.mjs).
-local_resource('link-transcripts',
-               cmd=['env', 'LINES_APP_ROOT=' + DEV_APP_ROOT, 'node', 'server/scripts/dev-transcripts.mjs'],
-               labels=['setup'], allow_parallel=True)
+# The installed app's root: its sessions show here read only, with their transcripts
+# and attachments read from it and never written (server/src/userContext.ts).
+INSTALLED_APP_ROOT = os.path.join(os.getenv('HOME', ''), '.lines-app')
+if os.path.realpath(INSTALLED_APP_ROOT) != os.path.realpath(DEV_APP_ROOT):
+    BRIDGE_ENV['LINES_SHARED_ROOT'] = INSTALLED_APP_ROOT
 
 local_resource(
     'bridge', cmd='',
     serve_cmd=['node', 'server/scripts/dev-runtime.mjs', 'bridge'],
-    serve_env=BRIDGE_ENV, resource_deps=['install', 'link-transcripts'],
+    serve_env=BRIDGE_ENV, resource_deps=['install'],
     # 127.0.0.1, not localhost: the bridge binds the IPv4 loopback only, and
     # `localhost` may resolve to ::1 first, where nothing listens.
     readiness_probe=probe(initial_delay_secs=2, period_secs=5,

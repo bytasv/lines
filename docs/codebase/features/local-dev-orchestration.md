@@ -145,21 +145,34 @@ A dev stack and the installed app run on one machine without touching each other
 - Storage: the dev web page never pairs and never calls `VITE_STORAGE_URL`
   (`web/src/lib/storage.ts`); it talks to its bridge directly. Tilt's storage uses
   `.env`'s `DATABASE_URL`, which is the shared production database, so the same
-  Clerk user sees the same synced sessions in dev and prod.
+  Clerk user sees prod's synced sessions in dev.
 - Projects are per root and are not synced; add them in the dev UI.
-- Transcripts and attachments are shared: the `link-transcripts` resource runs
-  `server/scripts/dev-transcripts.mjs`, which symlinks each
-  `<dev root>/users/<id>/{transcripts,attachments}` to the prod root's. It only
-  replaces a missing or empty folder and never touches one with content.
-- Live view of prod turns: when a store's `transcripts/` is a symlink,
-  `server/src/transcriptWatch.ts` streams lines another process appends as ordinary
-  `event` broadcasts, skipping seqs this bridge emitted itself. `userContext.ts`
-  infers a running remote turn (a `user` event with no `result` yet) and shows the
-  session as running to this bridge's browsers only; that status is never pushed
-  to storage. Stream deltas (thinking text, partial replies) are not persisted, so
-  dev sees finished messages, not the live stream.
-- Concurrency: running the same session in dev and prod at once makes both append
-  to one file with overlapping seqs. Keep a session on one side.
+- Prod's sessions are read-only in dev; dev's sessions stay in dev. Tilt sets
+  `LINES_SHARED_ROOT` to `~/.lines-app` on the bridge. `userContext.ts` then sorts
+  sessions by where they first appeared: one first seen while a storage pull is applied
+  (`sync.applying`) is prod's, one first seen otherwise was created here and is
+  recorded in `<dev root>/users/<id>/dev-sessions.json`. Dev's own sessions are never
+  pushed to storage (single, bulk or delete), so the installed app never lists them.
+  Prod's are sent to the browser with `SessionMeta.readOnly` (never stored or synced),
+  `SessionView` replaces the composer with `ReadOnlySessionNotice` (an orange lock and
+  a line saying the installed app runs it), the sidebar row shows an orange lock icon and
+  hides archive, complete and delete, and `handleMessage` in `server/src/index.ts` refuses every
+  session-scoped message for them except reads (`loadTranscript`, `presence`,
+  `contextBreakdown`, `fileRequest`). A prompt from a page opened before the lock goes
+  back to its composer.
+  `ackSession` is dropped silently, because acking would rewrite prod's row.
+  Sessions that already existed in a dev root before this split count as prod's.
+- Transcripts and attachments: a store created with `sharedRoot`
+  (`<shared root>/users/<id>`) reads a transcript or attachment from there when it
+  has no copy of its own, and only ever writes its own folders. Dev never writes
+  into the installed app's data, so the two never append to one file.
+- Live view of prod turns: `server/src/transcriptWatch.ts` watches the shared
+  transcripts folder and streams lines prod appends as ordinary `event` broadcasts
+  for read-only sessions. `userContext.ts` infers a running remote turn (a `user`
+  event with no `result` yet) and shows the session as running to this bridge's
+  browsers only. Stream deltas (thinking text, partial replies) are not persisted,
+  so dev sees finished messages, not the live stream. Dev's own sessions stream
+  live as usual.
 - Identity: the dev desktop app is its own Electron instance (`Lines (dev)`, own
   `userData`, so own single-instance lock and cookie jar), always in local mode, with
   a muted tray glyph and dock icon. The dev web badge has an orange outline.

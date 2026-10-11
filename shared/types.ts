@@ -1292,6 +1292,11 @@ export interface SessionMeta {
   id: string;
   name: string;
   cwd: string;
+  /**
+   * Set by a dev bridge on sessions the installed app runs: shown, never driven
+   * from here. Added on the way to the browser only, never stored or synced.
+   */
+  readOnly?: boolean;
   model: string;
   /**
    * How hard this session's ordinary turns think. Absent = the provider's own

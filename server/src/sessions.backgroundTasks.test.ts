@@ -358,3 +358,25 @@ test('task_started and task_notification are still persisted', () => {
   h.sessions.handleWorkerEvent('s1', notification('a'));
   assert.equal(h.store.loadTranscript('s1').length, before + 2);
 });
+
+test('a pulled row does not bring another machine’s background tasks', () => {
+  const { sessions, get } = managerOver([]);
+  sessions.adoptSynced(
+    meta('idle', { updatedAt: 5, backgroundTasks: [{ id: 'remote', type: 'local_bash', description: 'elsewhere' }] }),
+  );
+  assert.equal(get('s1').backgroundTasks, undefined);
+});
+
+test('Stop clears tasks the meta still shows when there is no live set', () => {
+  const { sessions, s1, stopped, upserts } = harness('idle');
+  s1().backgroundTasks = [
+    { id: 'a', type: 'local_bash', description: 'left over' },
+    { id: 'b', type: 'local_bash', description: 'also left over' },
+  ];
+  sessions.stopBackgroundTasks('s1', 'a');
+  assert.deepEqual(s1().backgroundTasks?.map((t) => t.id), ['b']);
+  sessions.stopBackgroundTasks('s1');
+  assert.equal(s1().backgroundTasks, undefined);
+  assert.deepEqual(stopped, [['s1', 'a'], ['s1', 'b']]);
+  assert.equal(upserts.at(-1)?.backgroundTasks, undefined);
+});

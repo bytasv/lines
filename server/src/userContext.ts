@@ -1,5 +1,5 @@
 import { devRuntime } from './devRuntime.ts';
-import type { ServerMessage, SocketAccess, UserUiSettings } from '@lines/shared';
+import type { ServerMessage, SessionMeta, SocketAccess, UserUiSettings } from '@lines/shared';
 import { findWorktree, projectRoots } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
 import { AuthManager } from './auth.ts';
@@ -22,9 +22,27 @@ import { ownSigningKey } from './syncSignature.ts';
 import { MemorySyncer } from './memory.ts';
 import type { WorkerClient } from './workerClient.ts';
 import { watchSharedTranscripts } from './transcriptWatch.ts';
+import fs from 'node:fs';
 import path from 'node:path';
 
 const STORAGE_URL = process.env.STORAGE_URL ?? 'http://localhost:8790';
+
+/**
+ * The installed app's data root, set on a dev bridge (Tilt) that runs beside it.
+ * Its sessions are shown here read only; sessions this bridge creates stay local.
+ */
+const SHARED_ROOT = process.env.LINES_SHARED_ROOT || null;
+
+export const READ_ONLY_SESSION = 'This session runs in the installed Lines app, so it is read-only here.';
+
+function loadIdSet(file: string): Set<string> {
+  try {
+    const ids = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+    return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
 
 /**
  * The whole surface the bridge uses on a browser connection — structural, not
@@ -222,6 +240,10 @@ export interface UserContext {
   /** Re-pull other users' published recipes and broadcast if they changed. */
   refreshSharedRecipes: () => Promise<void>;
   touchedAt: number;
+  /** A session as this user's browsers are shown it (read-only marking on a dev bridge). */
+  presentSession: (session: SessionMeta) => SessionMeta;
+  /** Why this session may not be driven from here, or null when it may. */
+  lockReason: (sessionId: string) => string | null;
 }
 
 /**
@@ -238,7 +260,24 @@ export function buildUserContext(
   worker: WorkerClient,
   observe?: (msg: ServerMessage) => void,
 ): UserContext {
-  const store = createStore(storeRoot);
+  const sharedRoot = SHARED_ROOT && userId !== 'local' ? path.join(SHARED_ROOT, 'users', userId) : null;
+  const store = createStore(storeRoot, sharedRoot ? { sharedRoot } : {});
+  // Sessions this bridge created, beside a shared root. Everything else came from
+  // the installed app through storage and is read only here.
+  const devSessionsFile = path.join(storeRoot, 'dev-sessions.json');
+  const devOwned = sharedRoot ? loadIdSet(devSessionsFile) : null;
+  /** Ids seen so far; set once the SessionManager has loaded, so a new id is a new session. */
+  let knownSessions: Set<string> | null = null;
+  const classify = (id: string, pulled: boolean) => {
+    if (!devOwned || !knownSessions || knownSessions.has(id)) return;
+    knownSessions.add(id);
+    if (pulled) return;
+    devOwned.add(id);
+    fs.writeFileSync(devSessionsFile, JSON.stringify([...devOwned]), { mode: 0o600 });
+  };
+  const isLocalOnly = (id: string) => !!devOwned?.has(id);
+  const lockReason = (id: string): string | null =>
+    devOwned && knownSessions && sessions.get(id) && !devOwned.has(id) ? READ_ONLY_SESSION : null;
   const guard = new GuardAllowlist(store);
   const mcp = new McpConnections(store);
   const sockets = new Map<BrowserLink, SocketAccess>();
@@ -264,24 +303,30 @@ export function buildUserContext(
   // transcriptWatch): shown as running here, never pushed to storage.
   const remoteTurns = new Map<string, number>();
   const remoteAnnounced = new Map<string, number>();
-  const withRemoteTurn = (msg: ServerMessage): ServerMessage => {
-    if (msg.type !== 'sessionUpsert') return msg;
-    const startedAt = remoteTurns.get(msg.session.id);
-    if (startedAt === undefined || msg.session.status !== 'idle') return msg;
-    return { ...msg, session: { ...msg.session, status: 'running', turnStartedAt: startedAt } };
+  /** A session as this bridge's browsers see it: read only and, mid remote turn, running. */
+  const presentSession = (session: SessionMeta): SessionMeta => {
+    if (!lockReason(session.id)) return session;
+    const startedAt = remoteTurns.get(session.id);
+    return startedAt !== undefined && session.status === 'idle'
+      ? { ...session, readOnly: true, status: 'running', turnStartedAt: startedAt }
+      : { ...session, readOnly: true };
   };
+  const withRemoteTurn = (msg: ServerMessage): ServerMessage =>
+    msg.type === 'sessionUpsert' ? { ...msg, session: presentSession(msg.session) } : msg;
 
   const broadcast = (msg: ServerMessage) => {
     observe?.(msg);
     // Push-on-persist: every state change surfaces as a broadcast, so this one
     // hook covers all persist paths. No-ops while pulled state is applied.
     if (msg.type === 'sessionUpsert') {
-      sync.pushSession(msg.session);
+      classify(msg.session.id, sync.applying);
+      // A dev bridge's own sessions never reach storage, so the installed app never lists them.
+      if (!isLocalOnly(msg.session.id)) sync.pushSession(msg.session);
       // Not while pulled state is applied: `adoptSynced` upserts sessions that ran
       // on another machine, reset to idle here — that machine pushes for them.
       if (!sync.applying) pushNotifier.onSessionUpsert(msg.session);
     } else if (msg.type === 'sessionDeleted') {
-      sync.deleteSession(msg.sessionId);
+      if (!isLocalOnly(msg.sessionId)) sync.deleteSession(msg.sessionId);
       pushNotifier.forget(msg.sessionId);
     }
     else if (msg.type === 'workflows') sync.pushWorkflows(msg.workflows);
@@ -403,8 +448,11 @@ export function buildUserContext(
     spendHistory,
   );
   sessions.attachWorker(worker);
-  // Only when transcripts/ is a symlink into another root (the dev bridge sharing prod's).
-  watchSharedTranscripts(path.join(storeRoot, 'transcripts'), ownSeq, (sessionId, event) => {
+  knownSessions = new Set(sessions.list().map((s) => s.id));
+  // Live view of the installed app's turns, from its transcripts folder.
+  const sharedTranscripts = store.sharedTranscriptsRoot;
+  if (sharedTranscripts) watchSharedTranscripts(sharedTranscripts, ownSeq, (sessionId, event) => {
+    if (!lockReason(sessionId)) return; // only sessions the installed app runs
     broadcast({ type: 'event', sessionId, event });
     const was = remoteTurns.has(sessionId);
     const data = event.data as { type?: string; recovering?: boolean } | null;
@@ -553,7 +601,7 @@ export function buildUserContext(
       sync.pushWorkflows(workflows.list());
       sync.pushSteps(workflows.listOwnStepVersions());
       sync.pushRecipes(recipes.listOwnRecipeVersions());
-      sync.pushSessions(sessions.list());
+      sync.pushSessions(sessions.list().filter((s) => !isLocalOnly(s.id)));
       sync.pushProjectKeys(projectKeys.all());
       sync.pushMemory(memory.collectAll());
       const local = store.loadSettings();
@@ -602,6 +650,8 @@ export function buildUserContext(
     refreshSharedSteps,
     refreshSharedRecipes,
     touchedAt: Date.now(),
+    presentSession,
+    lockReason,
   };
   // Wired after ctx exists, since the command layer takes the whole context. A
   // work tree cut for a session starts detached on purpose — this is where it gets

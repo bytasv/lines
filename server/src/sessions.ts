@@ -1639,6 +1639,9 @@ export class SessionManager {
     // A failure verdict belongs to the CLI conversation that produced it, on
     // whichever device that was — it must not disable the button here.
     if (meta.contextCompact?.ok === false) meta.contextCompact = undefined;
+    // Children of the other machine's CLI process: no signal about them ever
+    // reaches this one, so adopting them would show a task Stop cannot clear.
+    meta.backgroundTasks = cur?.backgroundTasks;
     this.sessions.set(meta.id, meta);
     this.persist();
     this.broadcast({ type: 'sessionUpsert', session: meta });
@@ -2301,14 +2304,16 @@ export class SessionManager {
     // Clearing a session that has no live state at all is a no-op — and materializing
     // one costs a transcript read per session, which recycleIdleQueries would pay
     // for the whole list on every token refresh.
-    if (!list.length && !this.live.has(sessionId)) return;
+    const meta = this.sessions.get(sessionId);
+    // ...unless the shown meta still lists tasks, which a clear must take off
+    // whatever the live set says, or Stop leaves them on screen for good.
+    if (!list.length && !this.live.has(sessionId) && !meta?.backgroundTasks?.length) return;
     const state = this.liveState(sessionId);
-    const before = state.backgroundTasks ?? [];
-    const same =
-      before.length === list.length && before.every((t, i) => t.id === list[i].id);
+    const sameIds = (a: BackgroundTaskInfo[]) =>
+      a.length === list.length && a.every((t, i) => t.id === list[i].id);
+    const same = sameIds(state.backgroundTasks ?? []) && sameIds(meta?.backgroundTasks ?? []);
     state.backgroundTasks = list.length ? list : undefined;
     if (same) return;
-    const meta = this.sessions.get(sessionId);
     if (!meta) return;
     meta.backgroundTasks = list.length ? list : undefined;
     this.upsert(meta);
@@ -2328,7 +2333,8 @@ export class SessionManager {
    * A recoverable flicker beats an unrecoverable wedge.
    */
   stopBackgroundTasks(sessionId: string, taskId?: string) {
-    const tasks = this.live.get(sessionId)?.backgroundTasks ?? [];
+    // The shown list when there is no live one, so a task left on the meta can still be stopped.
+    const tasks = this.live.get(sessionId)?.backgroundTasks ?? this.sessions.get(sessionId)?.backgroundTasks ?? [];
     if (taskId !== undefined) {
       this.worker.stopTask(sessionId, taskId);
       const rest = tasks.filter((t) => t.id !== taskId);

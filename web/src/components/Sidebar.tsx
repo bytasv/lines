@@ -33,6 +33,7 @@ import {
   IconEyeOff,
   IconGitBranch,
   IconLink,
+  IconLock,
   IconPlus,
   IconRoute,
   IconSearch,
@@ -145,8 +146,9 @@ const SessionRow = memo(function SessionRow({
   const cost = withLiveSpend(session.totalCostUsd, liveSpend, hasEstimatedSpend(session.costByModel));
   // Archive/complete and delete need Full access on a shared machine: a guest
   // without them never gets the controls, rather than ones that answer with an error.
-  const canManage = useCanOnSession(session.id, 'manageSessions');
-  const canDelete = useCanOnSession(session.id, 'deleteSessions');
+  // A dev bridge's read-only session (the installed app runs it) takes no actions either.
+  const canManage = useCanOnSession(session.id, 'manageSessions') && !session.readOnly;
+  const canDelete = useCanOnSession(session.id, 'deleteSessions') && !session.readOnly;
   const identify = useIdentityResolver();
   // Whose machine this session runs on. A left accent in a colour reserved for
   // "somebody else's machine", plus their avatar — so a shared session is never
@@ -279,6 +281,13 @@ const SessionRow = memo(function SessionRow({
                 />
               )}
             </Center>
+            {session.readOnly && (
+              <Tooltip label="Read-only: runs in the installed Lines app" openDelay={300} withArrow>
+                <Center w={13} h={13} c="orange.6" style={{ flex: '0 0 13px' }}>
+                  <IconLock size={12} />
+                </Center>
+              </Tooltip>
+            )}
             {worktree && (
               // Left of the name, in its own fixed slot so the names of worktree and
               // non-worktree rows still line up. Center handles both axes.
