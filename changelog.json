@@ -121,6 +121,15 @@
   ],
   "desktop": [
     {
+      "version": "0.2.56",
+      "date": "2026-10-11",
+      "items": [
+        "Messages sent while the agent is working land in the conversation where the agent read them, and are never lost: one the agent didn't pick up runs next instead.",
+        "When Codex stops an answer to read your message, the part it had already written stays in the conversation.",
+        "Updating the Codex CLI now takes effect without restarting Lines."
+      ]
+    },
+    {
       "version": "0.2.55",
       "date": "2026-10-11",
       "items": [
@@ -208,9 +217,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Messages sent while the agent is working land in the conversation where the agent read them, and are never lost: one the agent didn't pick up runs next instead.",
-    "When Codex stops an answer to read your message, the part it had already written stays in the conversation.",
-    "Updating the Codex CLI now takes effect without restarting Lines."
-  ]
+  "desktopPending": []
 }
