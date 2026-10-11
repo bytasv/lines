@@ -61,6 +61,25 @@ export function insertAtCaret(
   };
 }
 
+/**
+ * A dictated transcript spliced over `[start, end)`, padded with a space on
+ * either side where it would otherwise run into a word. Null when there are no
+ * words to insert.
+ */
+export function spliceTranscript(
+  value: MentionValue,
+  start: number,
+  end: number,
+  raw: string,
+): { value: MentionValue; caret: number } | null {
+  const words = raw.trim();
+  if (!words) return null;
+  const { text } = value;
+  const lead = start > 0 && !/\s/.test(text.charAt(start - 1)) ? ' ' : '';
+  const trail = end < text.length && !/\s/.test(text.charAt(end)) ? ' ' : '';
+  return insertAtCaret(value, start, end - start, lead + words + trail);
+}
+
 /** What a parent may do to the prompt from outside — voice input, for one. */
 export interface MentionInputHandle {
   /** Insert plain text at the caret (over the selection, if any), spaced from its neighbours.
@@ -212,14 +231,11 @@ export function MentionInput({
   // transcription) splices into the prompt as it is now, not as it was.
   useImperativeHandle(handleRef, () => ({
     insertText: (raw: string) => {
-      const words = raw.trim();
-      if (!words) return null;
       const ta = textareaRef.current;
       const start = ta ? snapCaretOut(ta.selectionStart, ranges, prevCaretRef.current) : text.length;
       const end = ta && ta.selectionEnd > start ? ta.selectionEnd : start;
-      const lead = start > 0 && !/\s/.test(text.charAt(start - 1)) ? ' ' : '';
-      const trail = end < text.length && !/\s/.test(text.charAt(end)) ? ' ' : '';
-      const next = insertAtCaret(value, start, end - start, lead + words + trail);
+      const next = spliceTranscript(value, start, end, raw);
+      if (!next) return null;
       onChange(next.value);
       setToken(null);
       focusCaret(next.caret);

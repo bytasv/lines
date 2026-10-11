@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.22",
+      "date": "2026-10-11",
+      "items": [
+        "A message you dictated and sent is no longer lost if you switch to another session or project while it is still transcribing. It goes to the session you sent it from."
+      ]
+    },
+    {
       "version": "0.1.21",
       "date": "2026-10-11",
       "items": [

@@ -39,9 +39,9 @@ are auto-discovered and self-healing, on the same pattern as the Claude/Codex CL
   from a blocked mic into Settings → Voice input
 - `web/src/components/QuestionPrompt.tsx`, `web/src/components/PermissionPrompt.tsx` — mic inside
   the "Other…" answer and the plan-comment notes
-- `web/src/components/MentionInput.tsx` — `insertAtCaret`, `MentionInputHandle.insertText`: splices
-  dictated text at the caret (or over a selection) through the same range-remap mention insertion
-  uses, so an @mention pill before the caret shifts correctly
+- `web/src/components/MentionInput.tsx` — `insertAtCaret`, `spliceTranscript`,
+  `MentionInputHandle.insertText`: splices dictated text at the caret (or over a selection) through
+  the same range-remap mention insertion uses, so an @mention pill before the caret shifts correctly
 - `web/src/components/VoiceSection.tsx` — the settings pane described above
 - `web/src/ws.ts` — `transcribeAudio()`; per-link `transcriptions` map, point-to-point like
   `fileRequest`
@@ -76,9 +76,13 @@ are auto-discovered and self-healing, on the same pattern as the Claude/Codex CL
   magic-check download; one at a time, refused while `LINES_WHISPER_MODEL` pins a single file
 - `insertAtCaret(value, at, removed, inserted, added?)` — shared splice+remap primitive behind
   both mention insertion and dictated-text insertion
+- `spliceTranscript(value, start, end, raw)` — trims a transcript and pads it with spaces where it
+  would touch a word, then calls `insertAtCaret`; used at the caret and, after the composer has
+  unmounted, at the end of the prompt as it stood at Send
 
-- `useVoiceDictation(sessionId, onText)` — returns the voice state, `start`/`finish`/`cancel`
-  and `voiceBlock`; `cancel` also drops a transcript still in flight
+- `useVoiceDictation(sessionId, onText)` — returns the voice state, `start`/`finish`/`cancel`/`commit`
+  and `voiceBlock`; `cancel` also drops a transcript still in flight, and `commit` (a Send pressed
+  while dictating) makes the transcript survive the composer unmounting
 
 ## Data flow
 
@@ -96,6 +100,14 @@ shifts rather than getting cut through.
 Pressing Send while recording or transcribing (button, Enter, ⌘/Enter) finishes the recording, then
 sends the prompt `insertText` returns — the value after the async wait, not the one captured when
 Send was pressed — as one message through the normal `prompt` path.
+
+If the user leaves the session before the transcript lands, the Send is not lost. Send also commits
+the in-flight transcript to a handler that captured the session, the prompt as it stood at Send and
+its attachments. Unmounting the composer hands the transcript to that handler instead of dropping
+it; the handler appends the text to the captured prompt, sends it to the original session through
+the same `prompt` path, and clears that session's saved draft. A composer that has remounted on the
+same session before then clears its restored draft through the `lines:draft-sent` window event,
+unless its text has been edited since.
 
 **Model download.** `installWhisperModel { file }` (owner only) starts `whisperModel.ts` streaming
 that file into `<app root>/models/`; progress broadcasts as `whisperModelDownload` to every link,
@@ -124,6 +136,7 @@ approval staging when they press Send.
   but the CPU is the host's
 - recordings longer than `VOICE_MAX_SECONDS` (90s) auto-stop and are transcribed as caught
 - Send while recording or transcribing finishes the recording and sends once the transcript is spliced in; a failed or empty transcription sends nothing and leaves the prompt as it was
+- a Send pressed while dictating survives leaving the session: the transcript is appended to the prompt as it stood at Send and sent to that session, and its draft is cleared. Dictation that was not sent is still dropped when the composer unmounts, and the mic is released either way
 - dictation in a card field (an "Other…" answer, a plan-comment note) only fills or appends text;
   it never picks an option, advances, saves or submits. Those fields show the mic only with the
   `prompt` capability, and a recording ends when its field closes

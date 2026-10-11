@@ -76,7 +76,7 @@ import { usePresence } from '../lib/presence';
 import { ConfirmModal } from './ConfirmModal';
 import { ContextWindowIndicator } from './ContextWindowIndicator';
 import { SettingsModal, type SettingsSection } from './SettingsModal';
-import { MentionInput, type MentionInputHandle } from './MentionInput';
+import { MentionInput, spliceTranscript, type MentionInputHandle } from './MentionInput';
 import { VoiceWaveform } from './VoiceWaveform';
 import { send } from '../ws';
 import { formatElapsed, useVoiceDictation } from '../lib/useVoiceDictation';
@@ -97,6 +97,39 @@ export function fileToAttachment(file: File): Promise<PromptAttachment> {
     };
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Send a composed prompt to `sessionId`. Module-level so a dictated Send can
+ * still go out after its composer has unmounted.
+ */
+function sendPromptMessage(
+  sessionId: string,
+  value: MentionValue,
+  attachments: PromptAttachment[],
+  opts?: { queue?: boolean },
+): void {
+  // Bake the @mention expansions into the text (so workflow-first-prompt and
+  // offline queueing see it too); `mentions` rides along display-only.
+  const expanded = buildExpandedPrompt(value.text.trim(), value.ranges);
+  const wireMentions = uniqueMentions(value.ranges).map(({ kind, id, label, detail }) => ({
+    kind,
+    id,
+    label,
+    detail,
+  }));
+  send({
+    type: 'prompt',
+    sessionId,
+    text: expanded,
+    attachments,
+    mentions: wireMentions.length ? wireMentions : undefined,
+    // Kept only if the server queues this prompt, so the queue row can be
+    // re-opened in a composer with its pills instead of the expanded text.
+    draft: value.ranges.length ? value : undefined,
+    // "Do this after": hold until the turn settles instead of steering into it.
+    queue: opts?.queue || undefined,
   });
 }
 
@@ -323,12 +356,14 @@ export function Composer({ session }: { session: SessionMeta }) {
   const mentionRef = useRef<MentionInputHandle>(null);
   /** Send was pressed while dictating: send once the transcript is spliced in. */
   const sendAfterVoiceRef = useRef(false);
+  /** The options that pending Send was pressed with (`queue`). */
+  const sendAfterVoiceOptsRef = useRef<{ queue?: boolean } | undefined>(undefined);
   // Splice the transcript in at the caret — then send it, if Send was pressed
   // meanwhile. A failure leaves the prompt exactly as it was and sends nothing.
   const dictation = useVoiceDictation(session.id, (text) => {
     const next = mentionRef.current?.insertText(text) ?? null;
     // Sends the prompt `insertText` returned, not this closure's stale `prompt`.
-    if (next && sendAfterVoiceRef.current) sendPrompt(next);
+    if (next && sendAfterVoiceRef.current) sendPrompt(next, sendAfterVoiceOptsRef.current);
   });
   const { voice, voiceError, setVoiceError, voiceLevel } = dictation;
   // However the dictation ended — sent, failed, discarded — a pending Send is spent.
@@ -446,6 +481,20 @@ export function Composer({ session }: { session: SessionMeta }) {
     return () => window.removeEventListener('lines:prompt-restored', restore);
   }, [session.id]);
 
+  // A Send pressed while dictating went out after its composer unmounted. If this
+  // composer remounted on the same session before then, it restored the draft
+  // that Send consumed: drop it, unless it has been edited since.
+  useEffect(() => {
+    const sent = (event: Event) => {
+      const { sessionId, text } = (event as CustomEvent<{ sessionId: string; text: string }>).detail;
+      if (sessionId !== session.id) return;
+      setPrompt((current) => (current.text === text ? { text: '', ranges: [] } : current));
+      setAttachments([]);
+    };
+    window.addEventListener('lines:draft-sent', sent);
+    return () => window.removeEventListener('lines:draft-sent', sent);
+  }, [session.id]);
+
   const addFiles = async (files: FileList | File[]) => {
     const list = Array.from(files);
     if (!list.length) return;
@@ -464,31 +513,28 @@ export function Composer({ session }: { session: SessionMeta }) {
     // Dictating: finish first, and let the transcript handler send once the text
     // is in. Already transcribing (the check, or the length limit) needs only the flag.
     sendAfterVoiceRef.current = true;
+    sendAfterVoiceOptsRef.current = opts;
+    // Leaving the session before the transcript lands must not lose the Send: it
+    // goes to this session with the prompt as it stood now, the transcript
+    // appended (the caret is gone by then).
+    const sessionId = session.id;
+    const snapshot = prompt;
+    const staged = attachments;
+    dictation.commit((text) => {
+      const next = spliceTranscript(snapshot, snapshot.text.length, snapshot.text.length, text);
+      if (!next) return;
+      sendPromptMessage(sessionId, next.value, staged, opts);
+      writeDraft(sessionId, { text: '', ranges: [] });
+      void writeDraftAttachments(sessionId, []);
+      window.dispatchEvent(
+        new CustomEvent('lines:draft-sent', { detail: { sessionId, text: snapshot.text } }),
+      );
+    });
     if (voice === 'recording') void dictation.finish();
   };
 
   const sendPrompt = (value: MentionValue, opts?: { queue?: boolean }) => {
-    // Bake the @mention expansions into the text (so workflow-first-prompt and
-    // offline queueing see it too); `mentions` rides along display-only.
-    const expanded = buildExpandedPrompt(value.text.trim(), value.ranges);
-    const wireMentions = uniqueMentions(value.ranges).map(({ kind, id, label, detail }) => ({
-      kind,
-      id,
-      label,
-      detail,
-    }));
-    send({
-      type: 'prompt',
-      sessionId: session.id,
-      text: expanded,
-      attachments,
-      mentions: wireMentions.length ? wireMentions : undefined,
-      // Kept only if the server queues this prompt, so the queue row can be
-      // re-opened in a composer with its pills instead of the expanded text.
-      draft: value.ranges.length ? value : undefined,
-      // "Do this after": hold until the turn settles instead of steering into it.
-      queue: opts?.queue || undefined,
-    });
+    sendPromptMessage(session.id, value, attachments, opts);
     setPrompt({ text: '', ranges: [] });
     setAttachments([]);
   };

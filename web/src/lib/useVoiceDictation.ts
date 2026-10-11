@@ -41,6 +41,12 @@ export interface VoiceDictation {
   start: () => Promise<void>;
   finish: () => Promise<void>;
   cancel: () => void;
+  /**
+   * The transcript in flight has somewhere to go even if the owner unmounts: a
+   * Send pressed while dictating. Unmounting then hands it to `onDetachedText`
+   * instead of dropping it. Spent when the dictation ends or is cancelled.
+   */
+  commit: (onDetachedText: (text: string) => void) => void;
 }
 
 /**
@@ -71,6 +77,8 @@ export function useVoiceDictation(sessionId: string, onText: (text: string) => v
   const generationRef = useRef(0);
   const onTextRef = useRef(onText);
   onTextRef.current = onText;
+  /** Set by `commit`: where the transcript goes if the owner unmounts first. */
+  const detachedRef = useRef<((text: string) => void) | null>(null);
   const ownMachine = useStore((s) => (s.access?.scope ?? 'owner') === 'owner') && !remote.isRemote;
   const where = ownMachine ? 'this machine' : 'the host’s machine';
   // The user's own choice, even on somebody else's machine: it is their speech.
@@ -111,13 +119,20 @@ export function useVoiceDictation(sessionId: string, onText: (text: string) => v
     const timer = setInterval(() => setElapsed(Date.now() - voiceStartedAt), 250);
     return () => clearInterval(timer);
   }, [voice, voiceStartedAt]);
+  // A committed transcript is redirected rather than dropped: no more renders will
+  // reassign `onTextRef`, so the in-flight `finish` reaches the detached handler.
   useEffect(
     () => () => {
-      generationRef.current += 1;
+      if (detachedRef.current) onTextRef.current = detachedRef.current;
+      else generationRef.current += 1;
       recordingRef.current?.cancel();
     },
     [],
   );
+  // However the dictation ended, a commit is spent with it.
+  useEffect(() => {
+    if (voice === 'idle') detachedRef.current = null;
+  }, [voice]);
   /** In state rather than read off the ref so a waveform re-renders when a
    *  recording starts. */
   const [voiceLevel, setVoiceLevel] = useState<(() => number) | null>(null);
@@ -125,6 +140,7 @@ export function useVoiceDictation(sessionId: string, onText: (text: string) => v
   /** Throw the recording away, and any transcript still on its way. */
   const cancel = () => {
     generationRef.current += 1;
+    detachedRef.current = null;
     recordingRef.current?.cancel();
     recordingRef.current = null;
     setVoiceLevel(null);
@@ -189,5 +205,8 @@ export function useVoiceDictation(sessionId: string, onText: (text: string) => v
     start,
     finish,
     cancel,
+    commit: (onDetachedText) => {
+      detachedRef.current = onDetachedText;
+    },
   };
 }

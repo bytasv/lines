@@ -4464,6 +4464,7 @@
         "startWhisperModelDownload",
         "downloadWhisperModel",
         "insertAtCaret",
+        "spliceTranscript",
         "useVoiceDictation",
         "DictateButton"
       ],
@@ -4480,6 +4481,7 @@
         "one transcription and one model download run at a time per bridge",
         "recordings longer than VOICE_MAX_SECONDS (90s) auto-stop and are transcribed as caught",
         "Send while recording or transcribing finishes the recording and sends once the transcript is spliced in; a failed or empty transcription sends nothing and leaves the prompt as it was",
+        "a Send pressed while dictating survives leaving the session: the transcript is appended to the prompt as it stood at Send and sent to that session, and its draft is cleared; dictation that was not sent is still dropped on unmount",
         "dictation in a card field (an Other… answer, a plan-comment note) only fills or appends text; it never picks, advances, saves or submits, shows only with the prompt capability, and ends when its field closes",
         "only one Other… answer records at a time; the other questions' mics are disabled",
         "a model download is refused while LINES_WHISPER_MODEL pins a single external model file",
