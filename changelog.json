@@ -135,6 +135,13 @@
   ],
   "desktop": [
     {
+      "version": "0.2.57",
+      "date": "2026-10-12",
+      "items": [
+        "Workflows notify you once when a step finishes (\"Step 2 of 4 finished\") and stay quiet while you keep iterating on that step."
+      ]
+    },
+    {
       "version": "0.2.56",
       "date": "2026-10-11",
       "items": [
@@ -231,7 +238,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Workflows notify you once when a step finishes (\"Step 2 of 4 finished\") and stay quiet while you keep iterating on that step."
-  ]
+  "desktopPending": []
 }
