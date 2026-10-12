@@ -11,7 +11,7 @@ import type {
   WorkflowMarkerData,
   WorkflowState,
 } from '@lines/shared';
-import { formatPlanComments } from '@lines/shared';
+import { formatPlanComments, isAlertTransition } from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
 import { SessionManager } from './sessions.ts';
 import { createStore } from './store.ts';
@@ -760,6 +760,48 @@ test('a parked compaction with nothing queued settles straight back to the park'
   // Approve works again the moment it settles.
   h.workflows.approve('s1', 0);
   assert.equal(h.s1().workflow?.advancing, true);
+});
+
+// ---------------------------------------------------------------------------
+// Only a step's first clean park alerts. A reply into the park marks the step as
+// iterated, so the parks that follow stay quiet until the workflow moves on.
+// ---------------------------------------------------------------------------
+
+test('iterating a clean park marks the step, and its next park does not alert', () => {
+  const h = harness(2);
+  assert.equal(h.workflows.iterateIfWaiting('s1', 'also do X'), true);
+  assert.equal(h.s1().workflow?.iteratedStep, 0);
+
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  assert.equal(h.s1().status, 'waiting-approval');
+  assert.equal(isAlertTransition('running', h.s1()), false, 'an iteration park is silent');
+});
+
+test('a Retry of a failed turn does not mark the step as iterated', () => {
+  const h = running(2);
+  h.sessions.emitEvent('s1', 'user', { text: 'do step 1', source: 'workflow' });
+  h.sessions.handleWorkerEvent('s1', interruptResult());
+  assert.equal(h.s1().workflow?.stepFailure, 'turn');
+
+  assert.equal(h.workflows.retryIfFailed('s1'), true);
+  assert.equal(h.s1().workflow?.iteratedStep, undefined);
+
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  assert.equal(h.s1().status, 'waiting-approval');
+  assert.equal(isAlertTransition('running', h.s1()), true, "the retried step's first good park alerts");
+});
+
+test("after an advance, the next step's first park alerts again", async () => {
+  const h = harness(2, { iteratedStep: 0 });
+  h.workflows.approve('s1', 0);
+  await settle();
+  assert.equal(h.s1().workflow?.stepIndex, 1);
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'running');
+
+  h.sessions.handleWorkerEvent('s1', { type: 'result', subtype: 'success' });
+  assert.equal(h.s1().workflow?.stepStatuses[1], 'waiting-approval');
+  assert.equal(h.s1().workflow?.iteratedStep, 0, 'stale, and ignored by index');
+  assert.equal(isAlertTransition('running', h.s1()), true);
 });
 
 // ---------------------------------------------------------------------------

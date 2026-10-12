@@ -125,8 +125,8 @@ and how status is surfaced in the sidebar row and the project tab.
   `lastActivityAt` descending; `created` sorts by `createdAt` descending (today's pre-existing
   order)
 - `SESSION_SORT_ORDER`/`SESSION_SORT_RANK` — the `status`-mode urgency table: running, then
-  `PROJECT_STATUS_ORDER` (the same table the tab dot uses), then background work, done, archived,
-  idle
+  `PROJECT_STATUS_ORDER` (the same table the tab dot uses), then background work, step finished,
+  done, archived, idle
 - `sessionRowMeta(session)` — maps a full session to `{ color, label, actionable }` for the
   sidebar row: an archived session short-circuits first to a non-actionable green "completed"
   (`ARCHIVED_META`), whatever its stored status; then `waitingPermissionMeta`, then the [turn-recovery](turn-recovery.md) yellow
@@ -369,7 +369,8 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 - The sidebar session list order is user-selectable via `lines.sessionSort` (persisted
   `localStorage`), applied to all three groups (Sessions, Shared-with-me, Archived): **Status**
   (default) — running first, then the tab-dot urgency order (plan ready > needs answer > needs
-  approval > needs permission > interrupted > error), then background work, then done, then idle,
+  permission > interrupted > error), then background work, then step finished (a clean workflow
+  park), then done, then idle,
   tie-broken by `lastActivityAt` descending; **Last active** — `lastActivityAt` descending;
   **Created** — `createdAt` descending (the sidebar's pre-existing, and still default-for-archived,
   behavior).
@@ -380,8 +381,9 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   session first (archiving is an upsert, so it bumps `updatedAt`), but Created mode now means
   creation order, not archive order.
 - Project tab dot priority, highest first: plan ready (violet) > needs answer (teal) > needs
-  approval (cyan) > needs permission (yellow) > interrupted (yellow) > error (red).
-- `running` / `done` / `idle` never show a dot (not actionable) — folder icon.
+  permission (yellow) > interrupted (yellow) > error (red).
+- `running` / `done` / `idle` and a clean workflow park ("step finished", green) never show a dot
+  (not actionable) — folder icon. See [workflow-step-lifecycle](workflow-step-lifecycle.md).
 - A finished workflow never surfaces on a project tab: it is not actionable, so it never reaches
   `projectStatusMeta`. Only the sidebar row shows the filled checkmark — see
   [workflow-step-lifecycle](workflow-step-lifecycle.md).
@@ -427,7 +429,7 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   is preserved. `compareSessions` follows the same rule: it takes plain `SessionMeta` and returns
   a comparator, so `Sidebar.tsx` is the only place `.sort()` is actually called.
 - `SESSION_SORT_ORDER` is built from `STATUS_META.running`, `PROJECT_STATUS_ORDER`,
-  `BACKGROUND_WORK_META`, `STATUS_META.done`, `ARCHIVED_META`, `STATUS_META.idle` rather than a second, hand-written urgency
+  `BACKGROUND_WORK_META`, `STATUS_META['waiting-approval']`, `STATUS_META.done`, `ARCHIVED_META`, `STATUS_META.idle` rather than a second, hand-written urgency
   table — the sidebar list order can never drift from the tab dot it points at.
 - Archived rows read as completed client-side only: the server keeps the session's last `status`
   and `pendingPermissionTool`, so unarchiving restores the real state. `ARCHIVED_META` is not in

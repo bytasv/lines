@@ -1894,6 +1894,9 @@ export class WorkflowEngine {
     if (!meta || !meta.workflow || !wf) return;
     const i = meta.workflow.stepIndex;
     meta.workflow.stepStatuses[i] = 'running';
+    // A reply into a clean park makes this step an iteration: its later parks stay
+    // silent. A Retry of a failed turn doesn't count — its first good park alerts.
+    if (!meta.workflow.stepFailure) meta.workflow.iteratedStep = i;
     meta.workflow.stepFailure = undefined; // this attempt is judged on its own
     this.sessions.setStatus(sessionId, 'running');
     this.marker(sessionId, {

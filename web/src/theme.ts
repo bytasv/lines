@@ -68,8 +68,8 @@ const dark: MantineColorsTuple = [
 // thirds of Mantine's chroma, so no status shouts louder than another. Yellow and
 // orange keep more chroma (desaturated, they turn brown) and yellow sits lighter
 // so filled yellow keeps black text. Teal and cyan sit at 180° / 218°, not
-// Mantine's 165° / 210°: muted, those let done, needs answer and needs approval
-// blur together. Retune the set together, not one hue.
+// Mantine's 165° / 210°: muted, those let green, teal and cyan blur together.
+// Retune the set together, not one hue.
 const hues: Record<string, MantineColorsTuple> = {
   red: ['#fff4f3', '#ffe9e6', '#ffd4d0', '#fbb7b1', '#ec9790', '#d77a74', '#bf5f5a', '#a8504c', '#90423f', '#763734'],
   pink: ['#fff3f6', '#ffe8ed', '#fcd4dc', '#f3b8c6', '#e299ab', '#cd7d92', '#b5637a', '#9f5469', '#884658', '#703a49'],

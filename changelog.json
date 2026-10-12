@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.23",
+      "date": "2026-10-12",
+      "items": [
+        "A workflow step that finished now shows a calm green \"step finished\" mark instead of a pulsing \"needs approval\" badge, and no longer lights up the project tab."
+      ]
+    },
+    {
       "version": "0.1.22",
       "date": "2026-10-11",
       "items": [
@@ -224,5 +231,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "Workflows notify you once when a step finishes (\"Step 2 of 4 finished\") and stay quiet while you keep iterating on that step."
+  ]
 }

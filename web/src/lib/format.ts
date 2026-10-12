@@ -6,7 +6,9 @@ const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
   running: { color: 'blue', label: 'running' },
   done: { color: 'green', label: 'done' },
   'waiting-permission': { color: 'yellow', label: 'needs permission' },
-  'waiting-approval': { color: 'cyan', label: 'needs approval' },
+  // A workflow step's clean park reads like done: it doesn't need the user. Label
+  // stays distinct from 'done' — the rank maps below key on it.
+  'waiting-approval': { color: 'green', label: 'step finished' },
   error: { color: 'red', label: 'error' },
 };
 
@@ -56,7 +58,8 @@ export function sessionRowMeta(session: SessionMeta): {
   const { status } = session;
   return {
     ...meta,
-    actionable: status !== 'idle' && status !== 'running' && status !== 'done',
+    actionable:
+      status !== 'idle' && status !== 'running' && status !== 'done' && status !== 'waiting-approval',
   };
 }
 
@@ -142,13 +145,12 @@ export function waitingPermissionMeta(tool?: string): { label: string; color: st
 const PROJECT_STATUS_ORDER = [
   waitingPermissionMeta('ExitPlanMode'), // plan ready       — violet
   waitingPermissionMeta('AskUserQuestion'), // needs answer     — teal
-  STATUS_META['waiting-approval'], // needs approval   — cyan
   waitingPermissionMeta(undefined), // needs permission — yellow
   INTERRUPTED_META, // interrupted      — yellow
   STATUS_META.error, // error            — red
 ];
 
-/** Keyed on label — all six are distinct, so a rename propagates for free. */
+/** Keyed on label — all five are distinct, so a rename propagates for free. */
 const PROJECT_STATUS_RANK = new Map(PROJECT_STATUS_ORDER.map((m, i) => [m.label, i]));
 
 /** How the sidebar orders a session list — persisted per browser. */
@@ -167,6 +169,7 @@ const SESSION_SORT_ORDER = [
   STATUS_META.running,
   ...PROJECT_STATUS_ORDER,
   BACKGROUND_WORK_META,
+  STATUS_META['waiting-approval'],
   STATUS_META.done,
   ARCHIVED_META,
   STATUS_META.idle,

@@ -778,7 +778,8 @@
         "SessionManager.setTurnResumedListener",
         "SessionManager.TurnResumedListener",
         "provesMainThreadTurn",
-        "SessionManager.settleStoppedTurn"
+        "SessionManager.settleStoppedTurn",
+        "WorkflowState.iteratedStep"
       ],
       "tests": [
         "server/src/workflows.advance.test.ts",
@@ -788,7 +789,8 @@
         "server/src/sessions.reconcile.test.ts",
         "server/src/workflows.providers.test.ts",
         "server/src/messageAuthz.test.ts",
-        "server/src/sessions.ended.test.ts"
+        "server/src/sessions.ended.test.ts",
+        "server/src/statusMeta.test.ts"
       ],
       "businessRules": [
         "plain Stop during a running workflow step always parks it at waiting-approval; it never advances",
@@ -820,7 +822,7 @@
         "prompt tokens are honoured only where the step author wrote them: a token occurring inside substituted content (a step output, the diff, the task text) stays literal instead of being re-expanded",
         "the working-tree diff handed to a fresh-start step is capped with a truncation marker (MAX_DIFF_CHARS) so a large dirty tree degrades the hand-off rather than failing the turn",
         "a plan revised by Edit after the deliverable-producing Write still contributes its current on-disk text to the hand-off, via collectTurns reading the plan file (gated by isPlanPath) instead of the last captured Write content",
-        "icon precedence: session.completed -> outline check, status running -> Loader, status.actionable -> pulsing dot, isWorkflowFinished -> filled check, otherwise plain dot",
+        "icon precedence: session.completed -> outline check, status running -> Loader, status.actionable (needs permission/answer, interrupted, error) -> pulsing dot, isWorkflowFinished -> filled check, otherwise plain dot (a clean park lands here)",
         "actionable states always win over the finished checkmark so a session needing the user is never masked as done",
         "force-advance (mark last running step completed) also sets the last step done, so a force-finished workflow shows the filled check too",
         "clicking a step in the stepper still jumps the transcript to that step's start marker, but the marker may not be mounted (Transcript.tsx windows a long transcript to its tail): the click asks revealWorkflowStep() to scroll directly if the marker exists, otherwise it fires an event the transcript handles by dropping its window and scrolling once the marker mounts",
@@ -830,12 +832,14 @@
         "the chevron opens the other steps as a bottom sheet rather than an in-place expansion — the stepper sits above the transcript, so expanding in place pushes the conversation down every time the user checks where they are",
         "that sheet renders no [data-progress-fill] elements, because Transcript counts them to learn the workflow's length and a second set would double it; per-step progress stays on the row behind the sheet",
         "tapping a step in the sheet reveals it in the transcript and closes the sheet; a pending step has nothing to jump to and is inert",
-        "a non-last step's settle (done while its step still reads running) raises no Task complete alert or push — isAlertTransition suppresses it because an advance follows and a park re-alerts as waiting-approval; only the last step's done alerts; see web-push-notifications",
+        "a non-last step's settle (done while its step still reads running) raises no Task complete alert or push — isAlertTransition suppresses it because an advance follows and a park alerts as 'Step i of n finished' on the step's first park only; only the last step's done alerts; see web-push-notifications",
         "Per-run overrides never mutate stored steps; runStep merges WorkflowState.stepOverrides over the step's model and effort.",
         "Only pending steps accept override edits; running and done steps keep what they ran on.",
         "Overrides are Claude-only: a non-Anthropic model or unknown effort is dropped by sanitizeStepOverrides.",
         "a parked step re-opens to running when a main-thread event proves a turn is live on it that the bridge did not start (a background-task notification turn) and parks again on that turn's result; a pre-run failure, an in-flight advance, a Stop in progress and any bridge-started turn never re-open it",
-        "a closed query is final: nothing it emits afterwards reaches the session, and a workflow advance holds prompts and queue flushes until it finishes"
+        "a closed query is final: nothing it emits afterwards reaches the session, and a workflow advance holds prompts and queue flushes until it finishes",
+        "a clean park (waiting-approval, no stepFailure) presents like done: green, non-pulsing 'step finished', actionable false — no project tab dot, not in the machine 'needs you' count, sorted above done and below anything needing the user; the stored status stays waiting-approval and approval lives on the stepper; a failed park stays a red actionable error",
+        "WorkflowState.iteratedStep is set when iterateStep re-runs a clean park (free-text iterate, a queued/held follow-up drained into the step); never by a Retry of a failed turn or a background-task reopen; keyed by index so it self-invalidates once stepIndex moves on; its only effect is that later parks of that step do not alert"
       ],
       "architecturalRules": [
         "interrupt() stays intent-free — no caller may infer \"advance\" from \"stop\"",
@@ -1202,10 +1206,10 @@
         "a project switch prefers the project's remembered last-selected session (lines.lastSessionByProject) over latestSessionIn; latestSessionIn (top non-archived session under the user's sidebar sort) remains the fallback when nothing is remembered or the remembered session is gone/archived; the same pick also runs after the primary machine's hello when a cold launch left nothing selected and no create is pending",
         "the three sidebar groups (Sessions, Shared-with-me, Archived) and the project tab dot describe one machine's sessions only (sessionsOnMachine, see multi-machine-client) — the store still holds every linked machine's sessions, but the list is a display scope switched by the header's MachineSwitcher, not a merge",
         "Shared-with-me holds a session only when no project tab covers it — sessionsInProject checked against every tab, not just the active one — so a session belonging to another open tab never appears here just because a different tab is active",
-        "the sidebar session list order is user-selectable via lines.sessionSort (persisted localStorage), applied to all three groups (Sessions, Shared-with-me, Archived): Status (default) ranks running first, then the tab-dot urgency order (plan ready > needs answer > needs approval > needs permission > interrupted > error), then background work, then done, then idle, tie-broken by lastActivityAt descending; Last active sorts by lastActivityAt descending; Created sorts by createdAt descending (the sidebar's pre-existing behavior)",
+        "the sidebar session list order is user-selectable via lines.sessionSort (persisted localStorage), applied to all three groups (Sessions, Shared-with-me, Archived): Status (default) ranks running first, then the tab-dot urgency order (plan ready > needs answer > needs permission > interrupted > error), then background work, then step finished (a clean workflow park), then done, then idle, tie-broken by lastActivityAt descending; Last active sorts by lastActivityAt descending; Created sorts by createdAt descending (the sidebar's pre-existing behavior)",
         "a session status label missing from SESSION_SORT_RANK sorts last rather than being guessed at, same rule projectStatusMeta applies by skipping",
         "the archived group's sort key changed from archivedAt ?? createdAt to the same compareSessions comparator the other two groups use: Status/Last-active mode still puts the most-recently-archived session first since archiving is an upsert that bumps updatedAt, but Created mode now means creation order, not archive order",
-        "priority highest first: plan ready (violet) > needs answer (teal) > needs approval (cyan) > needs permission (yellow) > interrupted (yellow) > error (red)",
+        "priority highest first: plan ready (violet) > needs answer (teal) > needs permission (yellow) > interrupted (yellow) > error (red); a clean workflow park (green 'step finished') is not actionable and never shows a tab dot",
         "running/done/idle sessions never show a dot",
         "archived sessions are excluded; completed sessions are always archived too, so no separate guard is needed",
         "the active project's tab always shows the plain folder icon, suppressed at render time",
@@ -4634,7 +4638,8 @@
         "registerServiceWorker",
         "alertTarget",
         "openSessionFromAlert",
-        "sendToMachine"
+        "sendToMachine",
+        "WorkflowState.iteratedStep"
       ],
       "tests": [
         "server/src/pushNotifier.test.ts",
@@ -4648,12 +4653,13 @@
         "the bridge accepts only https: endpoints on fcm.googleapis.com or hosts ending in .push.apple.com, .push.services.mozilla.com, or .notify.windows.com — an SSRF guard on that POST",
         "not scoped to the primary machine, like maybeAlert: a device registers with every owned machine, and each bridge pushes for the sessions it hosts",
         "no push for a session adopted from sync (adoptSynced), since that broadcast means the session ran elsewhere and was just reset to idle here",
-        "no alert between workflow steps: isAlertTransition is false for a done whose workflow is started, whose current step still reads running, and which is not the last step — an advance follows silently and a park re-alerts as waiting-approval; see workflow-step-lifecycle",
+        "no alert between workflow steps: isAlertTransition is false for a done whose workflow is started, whose current step still reads running, and which is not the last step — an advance follows silently and a park alerts as waiting-approval with body \"Step i of n finished\"; see workflow-step-lifecycle",
         "a push and an in-page alert for the same session share tag: sessionId, so they collapse into one notification on a device that would otherwise get both",
         "the owner hello carries pushAvailable: true; the client only sends registerPush to a machine that said so, so an older bridge is never asked to handle an unknown message type",
         "push only reaches iOS/iPadOS from the home-screen app (display-mode: standalone), iOS 16.4+, with the permission prompt triggered by a tap; Settings shows an Add to Home Screen hint otherwise",
         "sw.js's push handler always calls showNotification, even on unparseable payload data, because iOS may revoke a subscription that receives a push with no visible notification",
-        "a bridge restart's in-memory last-seen-status map starts empty, so a session that settles immediately after restart does not push — accepted, to avoid a duplicate push on the next real transition"
+        "a bridge restart's in-memory last-seen-status map starts empty, so a session that settles immediately after restart does not push — accepted, to avoid a duplicate push on the next real transition",
+        "only a workflow step's first clean park alerts: once iteratedStep equals stepIndex (the user replied into the park) later parks of that step are silent; a Retry of a failed turn does not set it, the next step's first park alerts again, and failed parks, waiting-permission and the final done alert as before; a Stop on a not-yet-iterated step still alerts since Stop does not set interruptedAt"
       ],
       "architecturalRules": [
         "sw.js handles only push and notificationclick — no fetch handler, no cache — which is what keeps the pre-existing no-service-worker reasoning intact: with no fetch handler a worker can never serve a stale bundle against a newer bridge",

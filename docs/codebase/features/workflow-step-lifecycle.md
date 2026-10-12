@@ -100,6 +100,8 @@ reads as "done" without opening the session.
 - `WorkflowState.advanceOnCompleteStep`
 - `WorkflowState.advancing`
 - `WorkflowState.lastStepOutput`
+- `WorkflowState.iteratedStep` — index of the step the user has replied into after a clean park;
+  later parks of that step do not alert
 - `WorkflowEngine.forceAdvance`
 - `WorkflowEngine.approve`
 - `WorkflowEngine.startStep`
@@ -210,7 +212,7 @@ provider-switch hand-off, recovery, held turns) and a Stop still settling.
 hides a pending permission card or leaves a stale failure kind behind.
 
 Not undone by the re-open: side effects of the premature park that already fired (an
-`autoAdvance` advance, the "Needs approval" push, an Approve clicked in the gap).
+`autoAdvance` advance, the "Step i of n finished" push, an Approve clicked in the gap).
 
 ### A closed query is dead
 
@@ -491,7 +493,12 @@ installed icon, no new package). No other new dependencies.
   accumulates); quiet events (subagent, system task events, replay, rate limit) re-open nothing;
   a Stop, a compaction, a pre-run failure and an in-flight advance each leave the park alone; a
   failed `autoAdvance` step still advances; a plan approved during the re-open still advances;
-  a prompt sent mid-advance waits for the next step.
+  a prompt sent mid-advance waits for the next step; iterating a clean park sets `iteratedStep`
+  and its re-park does not alert; a Retry of a failed turn does not set it; after an advance the
+  next step's first park alerts again.
+- `server/src/statusMeta.test.ts` — a clean park's sidebar meta (imports `web/src/lib/format.ts`):
+  non-actionable "step finished", no project tab dot, not counted by `machineActivity`, sorted
+  after needs-permission and before done.
 - `server/src/sessions.compact.test.ts` — status restore around a compaction over a parked or
   failed step: settles back to the same status (not `done`), a stopped or dead-query compaction
   restores it too, and a compaction that itself fails does not overwrite it.
@@ -507,8 +514,8 @@ installed icon, no new package). No other new dependencies.
   substituted text are left literal, and that `{roots}` fills but is not itself a hand-off
   token).
 - Run via `npm test` (root) or `npm run test -w server`; `tsx --test`, no new dependencies.
-- No test infrastructure covers `Sidebar.tsx`/`format.ts`; web has no test infra beyond
-  typecheck, so the button/card/icon behavior is manual-verified via the `verify` skill.
+- No test infrastructure covers `Sidebar.tsx`; the button/card/icon behavior is manual-verified
+  via the `verify` skill. `format.ts` status rules are covered from the server suite (above).
 
 ## Business rules
 
@@ -625,11 +632,23 @@ installed icon, no new package). No other new dependencies.
 - Sidebar row icon precedence, first match wins:
   1. `session.completed` → green **outline** `IconCircleCheck`, 14px (manual "Mark completed")
   2. `session.status === 'running'` → `Loader`
-  3. `status.actionable` (needs permission / needs answer / needs approval / interrupted /
-     error) → pulsing `.status-dot` — always wins over the checkmark, so a session needing the
+  3. `status.actionable` (needs permission / needs answer / interrupted / error) → pulsing
+     `.status-dot` — always wins over the checkmark, so a session needing the
      user is never masked as "done"
   4. `isWorkflowFinished(session)` → green **filled** `IconCircleCheckFilled`, 14px
-  5. otherwise → plain `.status-dot`
+  5. otherwise → plain `.status-dot` (a clean park lands here: green "step finished")
+- A clean park (`waiting-approval`, no `stepFailure`) presents like `done`: green, non-pulsing,
+  labelled "step finished", `actionable: false` — so it lights neither the project tab dot nor
+  the machine "needs you" count, and its badge shows only on hover/phone. Status sort puts it
+  above done, below anything that needs the user. The title/dock badge (`countAttention`) still
+  counts it, like done. The stored status stays `waiting-approval`; approval lives on the
+  `WorkflowStepper` strip and Approve button. A failed park keeps the red, actionable `error`.
+- `WorkflowState.iteratedStep` is set by `iterateStep` when it re-runs a clean park (free-text
+  iterate, a queued/held follow-up drained into the step). It is not set by a Retry of a failed
+  turn (`stepFailure` set) nor by a background-task reopen (`reopenParkedStep`). Keyed by index,
+  it self-invalidates once `stepIndex` moves on — advance, rewind and fresh start never clear it.
+  Only effect: later parks of that step do not alert (see
+  [web-push-notifications](web-push-notifications.md)).
 - The transcript renders only three workflow-marker events: `started`, a failure park
   (`waiting-approval` with `failed` or `missingOutputs`), and `workflow-done`. Every
   other event this engine emits (`waiting-approval` with neither flag, `approved`,

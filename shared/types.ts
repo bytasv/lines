@@ -497,7 +497,7 @@ export const ALERT_STATUSES: readonly SessionStatus[] = ['done', 'waiting-permis
  * bridge restart must not replay alerts for sessions that settled long ago.
  *
  * Intermediate workflow steps don't alert on settle: only the last step's
- * `done`, or a park's `waiting-approval`, reaches the user.
+ * `done`, or a step's first clean park (`waiting-approval`), reaches the user.
  */
 export function isAlertTransition(prev: SessionStatus | undefined, next: SessionMeta): boolean {
   if (!prev || prev === next.status) return false;
@@ -510,8 +510,9 @@ export function isAlertTransition(prev: SessionStatus | undefined, next: Session
   // A non-last workflow step's turn just settled and the engine hasn't decided
   // yet: its step is still 'running'. An advance broadcasts the next step
   // running, so "Task complete" between steps is noise; a park follows with
-  // 'waiting-approval', which re-alerts as "Needs approval". The last step is
-  // not guarded, so the workflow's end still alerts.
+  // 'waiting-approval', which alerts as "Step i of n finished" on the step's
+  // first park only. The last step is not guarded, so the workflow's end still
+  // alerts.
   const wf = next.workflow;
   if (
     next.status === 'done' &&
@@ -519,6 +520,12 @@ export function isAlertTransition(prev: SessionStatus | undefined, next: Session
     wf.stepStatuses[wf.stepIndex] === 'running' &&
     wf.stepIndex < wf.stepStatuses.length - 1
   ) {
+    return false;
+  }
+  // The user already replied into this parked step: every later park of it is an
+  // iteration they are driving, not news. Keyed by index, so a stale value from
+  // an earlier step never matches.
+  if (next.status === 'waiting-approval' && wf && wf.iteratedStep === wf.stepIndex) {
     return false;
   }
   return true;
@@ -529,12 +536,18 @@ export function isAlertTransition(prev: SessionStatus | undefined, next: Session
  * Labels match web `waitingPermissionMeta`, capitalised; shared so a push and the
  * in-page alert it collapses with (same `tag`) read the same.
  */
-export function alertBody(session: Pick<SessionMeta, 'status' | 'pendingPermissionTool'>): string | null {
+export function alertBody(
+  session: Pick<SessionMeta, 'status' | 'pendingPermissionTool' | 'workflow'>,
+): string | null {
   switch (session.status) {
     case 'done':
       return 'Task complete';
-    case 'waiting-approval':
-      return 'Needs approval';
+    case 'waiting-approval': {
+      const wf = session.workflow;
+      return wf
+        ? `Step ${wf.stepIndex + 1} of ${wf.stepStatuses.length} finished`
+        : 'Step finished';
+    }
     case 'waiting-permission':
       switch (session.pendingPermissionTool) {
         case 'ExitPlanMode':
@@ -1079,6 +1092,11 @@ export interface WorkflowState {
    *  (unresolved ref, missing `{outputs.*}`), so Retry re-renders it from scratch.
    *  Cleared the moment the step runs again or the workflow moves on. */
   stepFailure?: 'pre-run' | 'turn';
+  /** Index of the step the user has already replied into after a clean park;
+   *  later parks of that step are iterations and do not alert. Self-invalidating:
+   *  once `stepIndex` moves on it no longer matches. Not set by a Retry of a
+   *  failed turn, nor by a background-task reopen. */
+  iteratedStep?: number;
   /** Per-run model/effort overrides, indexed by step position (`null` = none).
    *  Chosen at launch or edited mid-run for still-pending steps; applied by
    *  runStep over the step's own values. Never written back to the stored step. */

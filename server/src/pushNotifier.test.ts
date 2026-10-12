@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { isAlertTransition } from '@lines/shared';
+import { alertBody, isAlertTransition } from '@lines/shared';
 import type { PushRegistration, SessionMeta, WorkflowState, WorkflowStepStatus } from '@lines/shared';
 import { PushNotifier, isAllowedPushEndpoint, parseRegistration, pushPayload } from './pushNotifier.ts';
 
@@ -105,6 +105,38 @@ describe('isAlertTransition', () => {
     assert.equal(isAlertTransition('done', next), true);
   });
 
+  test('no push when a step the user already iterated on parks again', () => {
+    const next = session({
+      status: 'waiting-approval',
+      workflow: { ...wf(0, ['waiting-approval', 'pending']), iteratedStep: 0 },
+    });
+    assert.equal(isAlertTransition('running', next), false);
+  });
+
+  test("a stale iteratedStep from an earlier step does not silence the next step's first park", () => {
+    const next = session({
+      status: 'waiting-approval',
+      workflow: { ...wf(1, ['done', 'waiting-approval']), iteratedStep: 0 },
+    });
+    assert.equal(isAlertTransition('running', next), true);
+  });
+
+  test('a failed step park stays out of the alert statuses, iterated or not', () => {
+    const failed = session({
+      status: 'error',
+      workflow: { ...wf(0, ['waiting-approval', 'pending']), stepFailure: 'turn' },
+    });
+    assert.equal(isAlertTransition('running', failed), false);
+  });
+
+  test('a permission prompt inside an iterated step still pushes', () => {
+    const next = session({
+      status: 'waiting-permission',
+      workflow: { ...wf(0, ['running', 'pending']), iteratedStep: 0 },
+    });
+    assert.equal(isAlertTransition('running', next), true);
+  });
+
   test('pushes on a follow-up chat after the workflow finished', () => {
     const next = session({ status: 'done', workflow: wf(2, ['done', 'done', 'done']) });
     assert.equal(isAlertTransition('running', next), true);
@@ -113,6 +145,17 @@ describe('isAlertTransition', () => {
   test('pushes in a workflow that has not started', () => {
     const next = session({ status: 'done', workflow: wf(0, ['running', 'pending', 'pending'], false) });
     assert.equal(isAlertTransition('running', next), true);
+  });
+});
+
+describe('alertBody', () => {
+  test('a workflow park reads as the step it finished', () => {
+    const park = session({ status: 'waiting-approval', workflow: wf(1, ['done', 'waiting-approval', 'pending']) });
+    assert.equal(alertBody(park), 'Step 2 of 3 finished');
+  });
+
+  test('a park with no workflow falls back to a plain label', () => {
+    assert.equal(alertBody(session({ status: 'waiting-approval' })), 'Step finished');
   });
 });
 
@@ -240,7 +283,7 @@ describe('PushNotifier', () => {
     n.onSessionUpsert(session({ status: 'waiting-approval', workflow: wf(0, ['waiting-approval', 'pending']) }));
     await settle();
     assert.equal(rec.calls.length, 1);
-    assert.equal((rec.calls[0].payload as { body: string }).body, 'Needs approval');
+    assert.equal((rec.calls[0].payload as { body: string }).body, 'Step 1 of 2 finished');
   });
 
   test('a 410 from the push service deletes the subscription', async () => {

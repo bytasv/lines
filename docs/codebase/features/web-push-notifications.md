@@ -2,7 +2,8 @@
 
 ## Purpose
 
-Alert the user about a session (`done`, `waiting-permission`, `waiting-approval`) while the
+Alert the user about a session (`done`, `waiting-permission`, a workflow step's first clean park
+at `waiting-approval`) while the
 [mobile client](mobile-client.md) is backgrounded or closed. iOS suspends a home-screen app's page
 and its WebSocket the moment it leaves the foreground, so nothing running in the page can raise an
 alert there — but the bridge is always on, on the user's own machine, and Web Push doesn't need the
@@ -47,10 +48,12 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
 
 - `isAlertTransition(prev, next)` (shared) — the one rule behind both the in-page chime and a
   push: fires only on a transition *into* `done`/`waiting-permission`/`waiting-approval`, never on
-  a repeat, an archived session, or one with running `backgroundTasks`. No previous status (a
+  a repeat, an archived session, one with running `backgroundTasks`, or a park of a step the user
+  is already iterating on (`WorkflowState.iteratedStep === stepIndex`). No previous status (a
   bridge restart, a session never seen before) is not a transition
 - `alertBody(session)` (shared) — the notification text; same labels the sidebar badge uses
-  (`waitingPermissionMeta`)
+  (`waitingPermissionMeta`). A workflow park reads "Step i of n finished" ("Step finished" with no
+  workflow), never "Needs approval"
 - `PushNotifier` — one per user. `register`/`unregister` upsert/remove by subscription endpoint;
   `onSessionUpsert(meta)` keeps its own `Map<sessionId, lastStatus>` (the bridge mutates `meta` in
   place, so the previous status is gone by broadcast time) and calls the injected sender on a
@@ -104,7 +107,8 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
   upsert/remove semantics, including an identical re-register costing no write; a malformed row on
   disk is dropped rather than crashing the load; a 410 from the injected sender deletes the
   subscription while any other failure keeps it; `pushPayload` names the permission kind the same
-  way the sidebar badge does
+  way the sidebar badge does; an iteration park is silent while a stale `iteratedStep` from an
+  earlier step is not; `alertBody`'s "Step i of n finished" text
 - `server/src/machineMerge.test.ts` — `alertTarget` (imports `web/src/lib/machines.ts`; see
   [multi-machine-client](multi-machine-client.md))
 - `server/src/messageAuthz.test.ts` — `registerPush`/`unregisterPush` are in the owner-only,
@@ -135,9 +139,18 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
 - **No alert between workflow steps.** `isAlertTransition` is false for a `done` whose workflow
   is started, whose current step still reads `running` (the engine hasn't decided yet), and which
   is not the last step. An advance then broadcasts the next step running; a park broadcasts
-  `waiting-approval`, which still alerts as "Needs approval". The last step's `done` alerts.
+  `waiting-approval`, which alerts as "Step i of n finished" — neutral, since approval only
+  matters for moving on. The last step's `done` alerts.
   Relies on the settle upsert going out before `onWorkflowTurnComplete` updates step statuses.
   See [workflow-step-lifecycle](workflow-step-lifecycle.md).
+- **Only a step's first clean park alerts.** Once the user replies into a parked step
+  (`iteratedStep` set), every later park of that step is an iteration they are driving and stays
+  silent. A Retry of a failed turn does not count as iterating, so its first good park alerts. The
+  next step's first park alerts again (the index no longer matches). A failed park (`error`),
+  `waiting-permission`, and the workflow's final `done` alert as before. A Stop on a step not yet
+  iterated still alerts on that park: Stop does not set `interruptedAt` (crash-only), so there is
+  nothing to tell it apart.
+- An older bridge never sets `iteratedStep`, so its iteration parks still alert, with the new text.
 - **Tag-based dedupe.** A push and an in-page alert for the same session both use
   `tag: sessionId`, so on one device they collapse into a single notification instead of stacking.
 - **Version skew.** The owner `hello` carries `pushAvailable: true`; the client only sends
