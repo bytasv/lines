@@ -65,6 +65,8 @@ import {
   capabilitiesFor,
   isCodexNotification,
   isSessionInterruptible,
+  DECLINE_PLAN_MESSAGE,
+  declinePlanReason,
   KEEP_PLANNING_MESSAGE,
   keepPlanningReason,
   planModeRejectMessage,
@@ -146,6 +148,17 @@ import {
 /** 'auto' is our guard layer on top of the SDK's acceptEdits mode. */
 function sdkPermissionMode(mode: PermissionMode): string {
   return mode === 'auto' ? 'acceptEdits' : mode;
+}
+
+/**
+ * The mode an approved plan is implemented in: the one the user picked while
+ * the card was pending (setPermissionMode defers that switch), else 'auto'.
+ * Never above a foreign recipe run's ceiling — which is only ever 'default',
+ * the lowest mode an approval can land on, so a set ceiling always wins.
+ */
+function approvedPlanMode(meta: Pick<SessionMeta, 'permissionMode' | 'permissionCeiling'>): PermissionMode {
+  if (meta.permissionCeiling) return meta.permissionCeiling;
+  return meta.permissionMode === 'plan' ? 'auto' : meta.permissionMode;
 }
 
 /**
@@ -897,10 +910,16 @@ export function hasUnresolvedAlwaysAsk(events: TranscriptEvent[]): boolean {
  * Pure: the caller supplies live pending ids and the transcript. The status gate
  * matters — flushPending deliberately leaves stale cards open, so an ancient
  * unresolved ExitPlanMode must not hijack an ordinary prompt.
+ *
+ * `permissionMode` is the session's mode as the user last picked it. A switch
+ * while the card is pending is deferred (see setPermissionMode), so anything
+ * but 'plan' here means the user left plan mode: the reply declines the plan
+ * and is the task, rather than refining it.
  */
 export function planReplyDecision(input: {
   status: SessionStatus;
   pendingPermissionTool?: string;
+  permissionMode?: PermissionMode;
   text: string;
   hasAttachments: boolean;
   livePendingIds: string[];
@@ -908,28 +927,41 @@ export function planReplyDecision(input: {
 }): { requestId: string; denyMessage: string; alsoQueue: boolean } | null {
   const text = input.text.trim();
   if (!text) return null;
-  if (input.status !== 'waiting-permission') return null;
-  if (input.pendingPermissionTool !== 'ExitPlanMode') return null;
-
-  const requestId = exitPlanRequestId(input.events, input.livePendingIds);
+  const requestId = pendingExitPlanRequestId(input);
   if (!requestId) return null;
 
+  const decline = input.permissionMode !== undefined && input.permissionMode !== 'plan';
   // Attachments can't ride a tool_result (plain string), so the deny only
   // unblocks the query and the real payload follows through the queue — the
   // reason must not repeat the text the queued turn will carry.
   return input.hasAttachments
     ? {
         requestId,
-        denyMessage: `${KEEP_PLANNING_MESSAGE}\n\nTheir message and its attachments follow as the next turn.`,
+        denyMessage: `${decline ? DECLINE_PLAN_MESSAGE : KEEP_PLANNING_MESSAGE}\n\nTheir message and its attachments follow as the next turn.`,
         alsoQueue: true,
       }
     : {
         requestId,
         // Raw user text alone reads to the model as a rejection reason, not as
         // "stay in plan mode" — hence the wrapper.
-        denyMessage: keepPlanningReason(text),
+        denyMessage: decline ? declinePlanReason(text) : keepPlanningReason(text),
         alsoQueue: false,
       };
+}
+
+/**
+ * The ExitPlanMode request a plan card is currently parked on, or undefined.
+ * The gate planReplyDecision and setPermissionMode's deferral share.
+ */
+function pendingExitPlanRequestId(input: {
+  status: SessionStatus;
+  pendingPermissionTool?: string;
+  livePendingIds: string[];
+  events: TranscriptEvent[];
+}): string | undefined {
+  if (input.status !== 'waiting-permission') return undefined;
+  if (input.pendingPermissionTool !== 'ExitPlanMode') return undefined;
+  return exitPlanRequestId(input.events, input.livePendingIds);
 }
 
 /**
@@ -3194,12 +3226,14 @@ export class SessionManager {
     // button: treat it as "keep planning" — deny ExitPlanMode through the same
     // per-request path the button uses, rather than silently queuing behind a
     // permission promise nothing will resolve.
+    const livePendingIds = [...(this.live.get(sessionId)?.pendingPermissions.keys() ?? [])];
     const planReply = planReplyDecision({
       status: meta.status,
       pendingPermissionTool: meta.pendingPermissionTool,
+      permissionMode: meta.permissionMode,
       text,
       hasAttachments: attachments.length > 0,
-      livePendingIds: [...(this.live.get(sessionId)?.pendingPermissions.keys() ?? [])],
+      livePendingIds,
       events: this.store.loadTranscript(sessionId),
     });
     if (planReply) {
@@ -3213,6 +3247,17 @@ export class SessionManager {
         undefined,
         'plan-reply',
       );
+      // A decline: the user switched mode while the card was up, and that switch
+      // was held back from the CLI (see setPermissionMode). Push it now — after
+      // the deny, so the CLI has its tool result before the mode changes and no
+      // permission request is pending when it does.
+      if (
+        meta.permissionMode !== 'plan' &&
+        !isCodexSession(meta) &&
+        livePendingIds.includes(planReply.requestId)
+      ) {
+        this.worker.setPermissionMode(sessionId, sdkPermissionMode(meta.permissionMode));
+      }
       // With attachments the deny only unblocks the query; fall through so the
       // queue branch stages text + attachments and maybeFlush delivers them as
       // a real user turn once the denied turn settles.
@@ -4907,15 +4952,17 @@ export class SessionManager {
           'Do not implement anything now — end your turn. The workflow will proceed to the next step.';
       } else {
         // Resume outside plan mode so the approved plan gets implemented in place —
-        // no higher than the ceiling a foreign recipe run set, as resolvePermission.
-        if (meta.permissionMode === 'plan') {
-          this.setPermissionMode(
-            sessionId,
-            stepRunning && wf!.stepPermissionMode && wf!.stepPermissionMode !== 'plan'
-              ? wf!.stepPermissionMode // manual override: resume in the step's configured mode
-              : (meta.permissionCeiling ?? 'auto'),
-          );
-        }
+        // in the mode picked while the card was up, else 'auto', and no higher
+        // than the ceiling a foreign recipe run set, as resolvePermission.
+        this.setPermissionMode(
+          sessionId,
+          meta.permissionMode === 'plan' &&
+            stepRunning &&
+            wf!.stepPermissionMode &&
+            wf!.stepPermissionMode !== 'plan'
+            ? wf!.stepPermissionMode // manual override: resume in the step's configured mode
+            : approvedPlanMode(meta),
+        );
         text =
           'I approved your plan (the session was interrupted before the approval reached you). ' +
           'Proceed with the implementation now.';
@@ -5312,7 +5359,29 @@ export class SessionManager {
     // tell — the next push carries the new mode in its thread options. Same
     // reasoning as setModel, and the worker drops the message either way.
     if (isCodexSession(meta)) return;
+    // A plan card is waiting on the user: record the pick only. Pushing a mode to
+    // the CLI while its ExitPlanMode permission request is pending left the turn
+    // spinning; the CLI stays in plan mode and the answer to the card — approve,
+    // typed reply, Keep planning — decides what the pick becomes.
+    if (this.pendingPlanRequestId(sessionId)) return;
     this.worker.setPermissionMode(sessionId, sdkPermissionMode(mode));
+  }
+
+  /**
+   * The live ExitPlanMode request a plan card is parked on, or undefined. Live
+   * only: a stale card left open by flushPending has no query to defer for.
+   */
+  private pendingPlanRequestId(sessionId: string): string | undefined {
+    const meta = this.sessions.get(sessionId);
+    const live = [...(this.live.get(sessionId)?.pendingPermissions.keys() ?? [])];
+    if (!meta || !live.length) return undefined;
+    const requestId = pendingExitPlanRequestId({
+      status: meta.status,
+      pendingPermissionTool: meta.pendingPermissionTool,
+      livePendingIds: live,
+      events: this.store.loadTranscript(sessionId),
+    });
+    return requestId && live.includes(requestId) ? requestId : undefined;
   }
 
   /**
@@ -5374,6 +5443,21 @@ export class SessionManager {
       const prefix = this.findPermissionRequest(sessionId, requestId)?.planRead?.prefix;
       if (prefix && this.guard.add({ tool: 'Bash', prefix, scope: 'plan-read' }).ok) {
         console.log('[guard] plan-mode read allowlisted:', prefix);
+      }
+    }
+    // "Keep planning" after the pill was moved off plan while the card was up:
+    // the button means stay in plan, so the pill follows it. Meta only — the
+    // switch was deferred, so the CLI never left plan mode.
+    if (!allow && source === 'user' && asked?.toolName === 'ExitPlanMode') {
+      const meta = this.sessions.get(sessionId);
+      if (
+        meta &&
+        meta.permissionMode !== 'plan' &&
+        !isCodexSession(meta) &&
+        !this.findPermissionResolution(sessionId, requestId)
+      ) {
+        meta.permissionMode = 'plan';
+        this.upsert(meta);
       }
     }
     const state = this.live.get(sessionId);
@@ -5475,11 +5559,11 @@ export class SessionManager {
     // session meta so the composer's mode control stays truthful.
     if (allow) {
       const meta = this.sessions.get(sessionId);
-      if (meta && original?.toolName === 'ExitPlanMode' && meta.permissionMode === 'plan') {
+      if (meta && original?.toolName === 'ExitPlanMode') {
         const wf = meta.workflow;
         const stepMode =
           wf && wf.stepStatuses[wf.stepIndex] === 'running' ? wf.stepPermissionMode : undefined;
-        if (stepMode && stepMode !== 'plan') {
+        if (meta.permissionMode === 'plan' && stepMode && stepMode !== 'plan') {
           // Manual plan override mid-workflow-step: the CLI reverts to 'default' on
           // approval, so push the step's configured mode back to the worker too.
           this.setPermissionMode(sessionId, stepMode);
@@ -5487,9 +5571,11 @@ export class SessionManager {
           // 'auto' is a Lines-level mode the CLI knows nothing about — it maps to
           // SDK acceptEdits underneath — so this goes through setPermissionMode to
           // push it to the worker. A bare meta write was only ever right for
-          // 'default', which is where the CLI had already put itself. A session
-          // running someone else's recipe resumes no higher than its ceiling.
-          this.setPermissionMode(sessionId, meta.permissionCeiling ?? 'auto');
+          // 'default', which is where the CLI had already put itself. A mode the
+          // user picked while the card was up was deferred, so it is pushed here
+          // too. A session running someone else's recipe resumes no higher than
+          // its ceiling.
+          this.setPermissionMode(sessionId, approvedPlanMode(meta));
         }
       }
     }
@@ -6565,10 +6651,11 @@ export class SessionManager {
         // Never past a foreign recipe's ceiling, as in resolvePermission.
         this.setPermissionMode(
           sessionId,
-          stepRunning
-            ? (wf!.stepPermissionMode ?? meta.permissionCeiling ?? 'auto')
-            : (meta.permissionCeiling ?? 'auto'),
+          stepRunning ? (wf!.stepPermissionMode ?? approvedPlanMode(meta)) : approvedPlanMode(meta),
         );
+      } else if (meta.permissionCeiling && meta.permissionMode !== meta.permissionCeiling) {
+        // Picked while the card was up: kept, but capped like any approval.
+        this.setPermissionMode(sessionId, approvedPlanMode(meta));
       }
       this.prompt(sessionId, 'I approved your plan. Proceed with the implementation now.', 'user');
       return;
@@ -6977,6 +7064,18 @@ export class SessionManager {
       } satisfies PermissionRequestData);
       this.logResolution(sessionId, '', 'expired', 'cancel');
       resolve({ allow: false });
+      // A mode picked while this plan card was up was held back from the CLI
+      // (see setPermissionMode). The card is gone but the query lives on, so
+      // push the pick now and the CLI agrees with the pill.
+      const meta = this.sessions.get(sessionId);
+      if (
+        meta &&
+        meta.permissionMode !== 'plan' &&
+        !isCodexSession(meta) &&
+        this.findPermissionRequest(sessionId, id)?.toolName === 'ExitPlanMode'
+      ) {
+        this.worker.setPermissionMode(sessionId, sdkPermissionMode(meta.permissionMode));
+      }
     }
   }
 

@@ -160,7 +160,7 @@
       "id": "permissions-and-plan-mode",
       "name": "Permissions and plan mode",
       "doc": "features/permissions-and-plan-mode.md",
-      "purpose": "What decides whether a tool call runs, who decided it, and how plan mode's deliverable is written and reviewed: mode pickers, resolution provenance, the synced auto-mode allowlist (what an entry covers, and the exact entry \"Always allow\" saves), symlink-aware path checks, files that run code later always asking, plan-file auto-approval, the reopenable plan card, and a typed reply counting as \"keep planning\".",
+      "purpose": "What decides whether a tool call runs, who decided it, and how plan mode's deliverable is written and reviewed: mode pickers, resolution provenance, the synced auto-mode allowlist (what an entry covers, and the exact entry \"Always allow\" saves), symlink-aware path checks, files that run code later always asking, plan-file auto-approval, the reopenable plan card, a typed reply counting as \"keep planning\" (or a decline after leaving plan mode), and a mode switch deferred while a plan is pending.",
       "covers": [
         "permission-mode-selector",
         "permission-resolution-provenance",
@@ -280,7 +280,10 @@
         "persistentShellWrite",
         "questionAnswers",
         "permissionAnswerFor",
-        "useIsGuestOnSession"
+        "useIsGuestOnSession",
+        "DECLINE_PLAN_MESSAGE",
+        "declinePlanReason",
+        "planReplyDecision"
       ],
       "tests": [
         "server/src/autoGuard.plan.test.ts",
@@ -297,7 +300,7 @@
       "businessRules": [
         "every picker (composer/settings pills, workflow step Select, recipe run modal, MCP save_step) offers only Plan, Assist and Full Auto; all five PermissionMode values stay valid and in PERMISSION_MODES for labels, and a step holding legacy default/acceptEdits shows it as an extra Select option via permissionModeSelectData; new steps and presets default to auto",
         "'default' displays as Manual; the stored value is unchanged (used for the workflow step badge and any session outside the three pill values)",
-        "the shipped new-session default is 'auto' (Assist), and a session lands on 'auto' rather than 'default' after a plan is approved on every path that used to reset it, all routed through setPermissionMode so the worker is told rather than only the stored meta changing; where 'auto' would be the target, a session carrying permissionCeiling (it runs someone else's recipe) resumes in 'default' instead",
+        "the shipped new-session default is 'auto' (Assist), and a session lands on the mode picked while the plan card was pending, else 'auto' rather than 'default', after a plan is approved on every path that used to reset it, all routed through setPermissionMode so the worker is told rather than only the stored meta changing; where 'auto' would be the target, a session carrying permissionCeiling (it runs someone else's recipe) resumes in 'default' instead",
         "ExitPlanMode and AskUserQuestion always resolve to an explicit 'ask' from the hook, in every permission mode, never a bare continue: true a mode or settings entry could pre-empt",
         "a second answer to an already-resolved permission request is dropped; it never re-emits a resolution event or re-triggers recoverOrphanedPermission's injected prompt",
         "a resend after a bridge restart replays a stored ALWAYS_ASK_TOOLS resolution only when it was produced by a human (resolvedBy is 'user', 'plan-reply', or absent/legacy); any server-synthesized resolution is re-asked instead",
@@ -343,7 +346,11 @@
         "plan mode auto-approves read-only Bash, web reads, subagent/skill calls and read-shaped MCP tools (isSafePlanModeRead), fail-closed and skipped for codex sessions; BASH_RULES still wins over the allowlist",
         "plan mode matches BASH_RULES per command and only on commands that aren't reads, so grep pattern text can't trigger a rejection; scratch writes under a temp dir ask instead of being rejected; Monitor commands are classified like Bash",
         "'Allow as read' on a plan-mode card records a Bash prefix with scope 'plan-read' (prefix taken from the bridge's record of the card); plan-read entries only extend the plan-mode classifier, never the auto-mode guard, and BASH_RULES, credential paths and recognised writes still win over them",
-        "the 'Auto-reject writes in plan mode' setting (planModeRejectWrites) denies only a plan-mode call planModeVerdict recognises as a write, with the reason in the deny message; an unrecognised call (node -e, a heredoc, an unknown tool) still reaches a card ('ask' from the hook); checked in both handlePreToolUse (so a settings.json permissions.allow can't pre-empt it) and handleCanUseTool (fail-closed backstop); codex sessions reject every non-read call; off by default, never touches ALWAYS_ASK_TOOLS, and rejects Lines MCP writes too; auto-denies are recorded with resolvedBy: 'plan-readonly' and stay visible in the transcript"
+        "the 'Auto-reject writes in plan mode' setting (planModeRejectWrites) denies only a plan-mode call planModeVerdict recognises as a write, with the reason in the deny message; an unrecognised call (node -e, a heredoc, an unknown tool) still reaches a card ('ask' from the hook); checked in both handlePreToolUse (so a settings.json permissions.allow can't pre-empt it) and handleCanUseTool (fail-closed backstop); codex sessions reject every non-read call; off by default, never touches ALWAYS_ASK_TOOLS, and rejects Lines MCP writes too; auto-denies are recorded with resolvedBy: 'plan-readonly' and stay visible in the transcript",
+        "a mode switch while an ExitPlanMode card is live is recorded in meta only and never pushed to the CLI; the card stays pending and the session stays waiting-permission",
+        "approving a plan after such a switch implements in the picked mode, capped by permissionCeiling; a configured workflow plan step still gates and advances",
+        "a typed reply to a pending plan in a non-plan mode declines the plan (declinePlanReason) and becomes the task; the picked mode is pushed to the worker only after that deny resolves",
+        "the Keep planning button after such a switch sets meta back to 'plan' and pushes nothing"
       ],
       "architecturalRules": [
         "single shared PERMISSION_MODES list — no component defines its own label/description array; PERMISSION_MODE_SEGMENTS is a three-item, independently-ordered subset (plan, auto, bypassPermissions) built by mapping over that subset, not by filtering PERMISSION_MODES",

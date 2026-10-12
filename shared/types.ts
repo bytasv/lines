@@ -1796,6 +1796,21 @@ export function keepPlanningReason(body: string): string {
   return `${KEEP_PLANNING_MESSAGE}\n\n${PLAN_REPLY_MARKER}${body}`;
 }
 
+/**
+ * Deny reason for a typed reply to a pending plan after the user switched the
+ * session out of plan mode: the plan is declined and their message is the task.
+ */
+export const DECLINE_PLAN_MESSAGE =
+  'The user declined this plan and left plan mode. Do not implement the plan — do what their message asks instead.';
+
+/**
+ * `keepPlanningReason`'s counterpart for a decline. Same marker, so the resolved
+ * card renders the user's words back the same way.
+ */
+export function declinePlanReason(body: string): string {
+  return `${DECLINE_PLAN_MESSAGE}\n\n${PLAN_REPLY_MARKER}${body}`;
+}
+
 /** The numbered list of plan comments, without any surrounding wording. */
 export function planCommentsBody(comments: PlanComment[]): string {
   return comments

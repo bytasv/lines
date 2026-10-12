@@ -15,6 +15,8 @@ import type {
   WorkflowState,
 } from '@lines/shared';
 import {
+  DECLINE_PLAN_MESSAGE,
+  declinePlanReason,
   KEEP_PLANNING_MESSAGE,
   PLAN_REPLY_MARKER,
   planModeRejectMessage,
@@ -95,6 +97,25 @@ test('no attachments: the reason wraps the keep-planning prefix around the typed
     `${KEEP_PLANNING_MESSAGE}\n\nThe user's message:\nadd a rollback step`,
   );
   assert.equal(got?.alsoQueue, false);
+});
+
+test('a reply after leaving plan mode declines the plan and carries the text', () => {
+  const got = decide({ permissionMode: 'auto', text: '  do X instead ' });
+  assert.equal(got?.denyMessage, declinePlanReason('do X instead'));
+  assert.ok(got!.denyMessage.startsWith(DECLINE_PLAN_MESSAGE));
+  assert.equal(got?.alsoQueue, false);
+});
+
+test('a reply while still in plan mode keeps planning', () => {
+  const got = decide({ permissionMode: 'plan' });
+  assert.equal(got?.denyMessage, keepPlanningReason('add a rollback step'));
+});
+
+test('attachments after leaving plan mode: decline note only, payload queued', () => {
+  const got = decide({ permissionMode: 'bypassPermissions', text: 'look at this', hasAttachments: true });
+  assert.ok(got?.denyMessage.startsWith(DECLINE_PLAN_MESSAGE));
+  assert.ok(!got!.denyMessage.includes('look at this'));
+  assert.equal(got?.alsoQueue, true);
 });
 
 test('attachments: the reason never repeats the text the queued turn will carry', () => {
@@ -209,15 +230,23 @@ function harness(
   const pushes: string[] = [];
   const pushed: Record<string, unknown>[] = [];
   const modePushes: string[] = [];
+  /** Mode pushes and rpc answers interleaved, for tests that care about order. */
+  const wire: string[] = [];
   sessions.attachWorker({
     push: (id: string, message: Record<string, unknown>) => {
       pushes.push(id);
       pushed.push(message);
     },
-    setPermissionMode: (_id: string, mode: string) => modePushes.push(mode),
+    setPermissionMode: (_id: string, mode: string) => {
+      modePushes.push(mode);
+      wire.push(`mode:${mode}`);
+    },
     close: () => {},
     interrupt: () => {},
-    rpcResult: (_id: string, result: unknown) => answered.push(result),
+    rpcResult: (_id: string, result: unknown) => {
+      answered.push(result);
+      wire.push('rpc');
+    },
     // canInterject refuses a closed link outright, so an interjection test needs
     // this open. Everything else ignores it.
     linkOpen: true,
@@ -228,6 +257,7 @@ function harness(
     pushes,
     pushed,
     modePushes,
+    wire,
     s1: () => sessions.get('s1')!,
     /**
      * Pretend this bridge spawned the running query. `canInterject` only steers a
@@ -548,6 +578,125 @@ test('leaving plan mode on approval is pushed to the worker, not only written to
 
   // 'auto' is not an SDK mode — the worker has to be told, or the CLI keeps
   // enforcing plan mode while the pill says otherwise.
+  assert.deepEqual(h.modePushes, ['acceptEdits']);
+});
+
+// ---------------------------------------------------------------------------
+// Switching mode while a plan card is pending
+// ---------------------------------------------------------------------------
+
+/** A plan-mode session parked on ExitPlanMode p1, pill then moved to `mode`. */
+async function switchedWhilePlanPending(mode: PermissionMode) {
+  const h = harness({ mode: 'plan' });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  h.goLive();
+  h.sessions.setPermissionMode('s1', mode);
+  return h;
+}
+
+test('a mode switch while a plan card is pending is recorded, not pushed', async () => {
+  const h = await switchedWhilePlanPending('auto');
+
+  assert.deepEqual(h.modePushes, [], 'the CLI is left in plan mode');
+  assert.equal(h.s1().permissionMode, 'auto', 'the pill moves');
+  assert.equal(h.s1().status, 'waiting-permission');
+  assert.equal(h.cards().at(-1)?.resolution, undefined, 'the card is still pending');
+  assert.deepEqual(h.answered, []);
+});
+
+test('approving after a switch implements in the picked mode', async () => {
+  const h = await switchedWhilePlanPending('auto');
+  answerPlan(h, true, []);
+  await settle();
+
+  assert.equal(h.cards().at(-1)?.resolution, 'allow');
+  assert.deepEqual(h.modePushes, ['acceptEdits']);
+  assert.equal(h.s1().permissionMode, 'auto');
+});
+
+test('approving after a switch to Full Auto pushes bypassPermissions', async () => {
+  const h = await switchedWhilePlanPending('bypassPermissions');
+  answerPlan(h, true, []);
+  await settle();
+
+  assert.deepEqual(h.modePushes, ['bypassPermissions']);
+  assert.equal(h.s1().permissionMode, 'bypassPermissions');
+});
+
+test('approving after a switch never lands above the ceiling', async () => {
+  const h = await switchedWhilePlanPending('bypassPermissions');
+  h.s1().permissionCeiling = 'default';
+  answerPlan(h, true, []);
+  await settle();
+
+  assert.deepEqual(h.modePushes, ['default']);
+  assert.equal(h.s1().permissionMode, 'default');
+});
+
+test('a typed reply after a switch declines the plan, then pushes the mode', async () => {
+  const h = await switchedWhilePlanPending('auto');
+  h.sessions.userPrompt('s1', 'do X instead');
+  await settle();
+
+  const last = h.cards().at(-1)!;
+  assert.equal(last.resolution, 'deny');
+  assert.equal(last.resolvedBy, 'plan-reply');
+  assert.equal(last.denyMessage, declinePlanReason('do X instead'));
+  assert.deepEqual(h.answered.at(-1), { behavior: 'deny', message: declinePlanReason('do X instead') });
+  assert.deepEqual(h.wire, ['rpc', 'mode:acceptEdits'], 'the tool result reaches the CLI first');
+  assert.deepEqual(h.s1().queued ?? [], [], 'the text rode the deny, nothing queued');
+});
+
+test('a reply with attachments after a switch declines and queues the message', async () => {
+  const h = await switchedWhilePlanPending('auto');
+  h.sessions.userPrompt('s1', 'look at this', [{ name: 'a.png', mediaType: 'image/png', data: 'aGk=' }]);
+  await settle();
+
+  const last = h.cards().at(-1)!;
+  assert.ok(last.denyMessage?.startsWith(DECLINE_PLAN_MESSAGE));
+  assert.ok(!last.denyMessage!.includes('look at this'));
+  assert.deepEqual(h.wire, ['rpc', 'mode:acceptEdits']);
+  assert.equal(h.s1().queued?.[0]?.text, 'look at this');
+});
+
+test('Keep planning after a switch puts the pill back on plan and pushes nothing', async () => {
+  const h = await switchedWhilePlanPending('auto');
+  keepPlanning(h);
+  await settle();
+
+  assert.equal(h.cards().at(-1)?.resolution, 'deny');
+  assert.equal(h.s1().permissionMode, 'plan');
+  assert.deepEqual(h.modePushes, []);
+});
+
+test('a configured plan step still advances when the pill was moved before approving', async () => {
+  const h = harness({
+    mode: 'plan',
+    workflow: {
+      workflowId: 'wf1',
+      started: true,
+      stepIndex: 0,
+      stepStatuses: ['running'],
+      stepPermissionMode: 'plan',
+    },
+  });
+  void h.sessions.handleWorkerRpc(canUseTool('p1', 'ExitPlanMode'));
+  await settle();
+  h.goLive();
+  h.sessions.setPermissionMode('s1', 'auto');
+  answerPlan(h, true, []);
+  await settle();
+
+  assert.equal(h.cards().at(-1)?.resolvedBy, 'workflow-advance');
+  assert.equal(h.s1().workflow?.advanceOnComplete, true);
+  assert.deepEqual(h.modePushes, [], 'the step gate denies, so nothing leaves plan mode');
+});
+
+test('with no plan card pending a mode switch is pushed at once', async () => {
+  const h = harness({ mode: 'plan' });
+  h.sessions.setPermissionMode('s1', 'auto');
+
   assert.deepEqual(h.modePushes, ['acceptEdits']);
 });
 

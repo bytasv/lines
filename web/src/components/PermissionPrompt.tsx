@@ -41,10 +41,16 @@ import type {
   PermissionResolutionSource,
   PlanComment,
 } from '@lines/shared';
-import { KEEP_PLANNING_MESSAGE, PLAN_REPLY_MARKER, normalizePlanComments } from '@lines/shared';
+import {
+  DECLINE_PLAN_MESSAGE,
+  KEEP_PLANNING_MESSAGE,
+  PLAN_REPLY_MARKER,
+  normalizePlanComments,
+} from '@lines/shared';
 import { send } from '../ws';
 import { readPlanComments, useStore, writePlanComments } from '../store';
 import { agentLabel } from '../lib/capabilities';
+import { permissionModeLabel } from '../lib/permissionModes';
 import { useCan, useIsGuestOnSession } from '../lib/can';
 import { appendTranscript, useVoiceDictation } from '../lib/useVoiceDictation';
 import { DictateButton, DictationError, dictateSectionWidth } from './DictateButton';
@@ -472,7 +478,7 @@ function EditPreview({ data }: { data: PermissionRequestData }) {
  */
 function planReplyText(data: PermissionRequestData): string | undefined {
   const msg = data.denyMessage;
-  if (!msg || !msg.startsWith(KEEP_PLANNING_MESSAGE)) return undefined;
+  if (!msg || !(msg.startsWith(KEEP_PLANNING_MESSAGE) || msg.startsWith(DECLINE_PLAN_MESSAGE))) return undefined;
   const at = msg.indexOf(PLAN_REPLY_MARKER);
   return at === -1 ? undefined : msg.slice(at + PLAN_REPLY_MARKER.length).trim() || undefined;
 }
@@ -1183,6 +1189,12 @@ function PlanApproval({
     const meta = s.sessions[sessionId];
     return meta ? agentLabel(meta) : 'The agent';
   });
+  // A mode picked while the card is up is held until the card is answered, so
+  // say where approving lands.
+  const pickedMode = useStore((s) => {
+    const mode = s.sessions[sessionId]?.permissionMode;
+    return mode && mode !== 'plan' ? mode : undefined;
+  });
   // Auto-open fullscreen only if this tab is focused now; a background tab must not steal focus
   // when the user later switches to it (precedent: alerts.ts document.hasFocus() guard).
   const [focus, setFocus] = useState(() => document.hasFocus());
@@ -1337,6 +1349,11 @@ function PlanApproval({
       <Button size={size} variant="default" onClick={keepPlanning}>
         {commented ? `Refine with comments (${comments.length})` : 'Keep planning'}
       </Button>
+      {pickedMode && (
+        <Text size="xs" c="dimmed">
+          Approving continues in {permissionModeLabel(pickedMode)}.
+        </Text>
+      )}
     </Group>
   );
 
@@ -1517,8 +1534,13 @@ function PlanApproval({
                 color={resolution === 'deny' ? 'gray' : RESOLUTION_BADGE[resolution].color}
               >
                 {resolution === 'allow' ? 'plan approved' : null}
-                {/* A denied plan is not a rejection — the session stayed in plan mode. */}
-                {resolution === 'deny' ? 'kept planning' : null}
+                {/* A denied plan is not a rejection — the session stayed in plan mode,
+                    unless the user left plan mode and typed what to do instead. */}
+                {resolution === 'deny'
+                  ? data.denyMessage?.startsWith(DECLINE_PLAN_MESSAGE)
+                    ? 'declined'
+                    : 'kept planning'
+                  : null}
                 {resolution === 'expired' ? RESOLUTION_BADGE[resolution].label : null}
               </ResolutionBadge>
             )}

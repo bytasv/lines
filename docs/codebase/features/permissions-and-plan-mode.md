@@ -292,7 +292,11 @@ deliverable is written and reviewed.
 - `useFileContent(path, reloadKey?)` — fetches `planPath` over the `/file` route whenever the
   card is open; `reloadKey` forces a refetch on each reopen
 - `planReplyDecision(input)` — pure helper; decides whether a typed prompt should be treated as
-  a plan-mode deny, which pending request to answer, and the wrapped reason text
+  a plan-mode deny, which pending request to answer, and the wrapped reason text — keep-planning
+  when `permissionMode` is `'plan'`, a decline otherwise
+- `DECLINE_PLAN_MESSAGE` / `declinePlanReason(body)` — the decline counterpart of
+  `KEEP_PLANNING_MESSAGE` / `keepPlanningReason`, same `PLAN_REPLY_MARKER`, used when the user
+  left plan mode while the card was pending
 - `KEEP_PLANNING_MESSAGE` — shared reason prefix used by both the button and the typed-reply path
 - `PLAN_REPLY_MARKER` — the `"The user's message:\n"` marker separating that prefix from the
   user's own words; exported so `planReplyText` slices on it instead of re-declaring the literal
@@ -606,6 +610,30 @@ single body-formatter every keep-planning deny goes through — the typed-compos
 and the button's queue fold (`takeQueuedPlanReply`, next section) all call them rather than each
 assembling the wording inline.
 
+### Switching mode while a plan is pending
+
+While an `ExitPlanMode` card is live (`waiting-permission`, `pendingPermissionTool ===
+'ExitPlanMode'`, and the request is in the live pending map), `setPermissionMode` records the pick
+in meta (the pill moves, synced as usual) but sends nothing to the CLI. Pushing a mode into the CLI
+while its `canUseTool` request was pending left the turn spinning until Stop. The CLI stays in
+plan mode; "meta mode is not `plan` while a plan card is live" is the whole deferred state, with
+no extra field. How the card is then answered decides what happens to the pick:
+
+- **Approve** — implements in the picked mode (`'auto'` only when the meta mode is still
+  `'plan'`), capped by `permissionCeiling`; the same rule applies on the orphaned-approval
+  recovery path and the codex plan review. A configured workflow plan step still gates and
+  advances as before.
+- **Typed reply** — declines rather than refines: the deny reason is `declinePlanReason(text)`
+  (with attachments, `DECLINE_PLAN_MESSAGE` plus a note, the message queued as today). Only after
+  the deny is resolved is the picked mode pushed to the worker, so the CLI has its tool result
+  before the mode changes. The same turn continues in the picked mode.
+- **Keep planning** button (`source: 'user'` deny) — meta goes back to `'plan'`; nothing is
+  pushed, since the CLI never left plan mode.
+- **CLI cancels the card** (`handleRpcCancel`) with the query still alive — the pick is pushed
+  then. A closed query needs nothing: the next spawn reads `meta.permissionMode`.
+
+Codex sessions are unaffected (their mode binds at thread start and nothing is pushed live).
+
 ### Keep planning (button) folds the queue
 
 The button's deny (`source: 'user'`) reaches the *same* stranding the typed-reply's attachments
@@ -772,7 +800,11 @@ is open, otherwise the inline one.
   same text typed at the card; several queued messages fold in order; comments and a queued
   message compose into one `keepPlanningReason` body; an empty queue leaves `denyMessage`
   byte-identical to before this fold existed; a `'plan-reply'` deny does not also eat the queue;
-  a paused queue is never released by the button; the folded text is persisted on the resolution
+  a paused queue is never released by the button; a mode switch while a plan card is pending is
+  not pushed and leaves the card pending, approve then pushes the pick (Full Auto, ceiling-capped),
+  a typed reply declines and pushes the mode after the rpc result, attachments decline and queue,
+  Keep planning reverts to `'plan'` with no push, a configured plan step still advances, and with
+  no card pending the switch is pushed at once; the folded text is persisted on the resolution
   event so Retry re-sends it; an approval cannot rewrite the call it approves (the SDK runs the
   card's own input and nothing client-supplied is recorded), a question card keeps only answers
   to the questions it asked, string-only and capped at 10,000 characters, and a restart replay
@@ -838,8 +870,8 @@ is open, otherwise the inline one.
   from `bypassPermissions` to `default`.
 - `default` displays as **Manual** — the stored value is unchanged, only the label differs — for
   the workflow step badge (`permissionModeLabel`) and any session outside the three pill values.
-- The shipped new-session default is `'auto'` ("Assist"), and a session lands on `'auto'` (not
-  `'default'`) after a plan is approved, on every path that used to reset it to `'default'`: the
+- The shipped new-session default is `'auto'` ("Assist"), and a session lands on the mode picked
+  while the card was pending, else `'auto'` (not `'default'`), after a plan is approved, on every path that used to reset it to `'default'`: the
   normal `ExitPlanMode` approval, the interrupted-approval workflow-step resume, and the
   loop-guard exit path. All three go through `setPermissionMode` rather than a bare meta write, so
   the worker is told (`worker.setPermissionMode`) instead of only the stored meta changing. Where
@@ -1010,7 +1042,15 @@ is open, otherwise the inline one.
   resolution event, so `PlanReply` and Retry read the same combined text. Only a `source: 'user'`
   deny on `ExitPlanMode` folds the queue — `'plan-reply'` already carries its own text, and the
   workflow plan-step gate only fires on an allow.
-- The plan card's badge shows `kept planning` (not `denied`) for a denied `ExitPlanMode` request.
+- The plan card's badge shows `kept planning` (not `denied`) for a denied `ExitPlanMode` request,
+  or `declined` when the deny reason starts with `DECLINE_PLAN_MESSAGE`.
+- A mode switch while an `ExitPlanMode` card is live is recorded in meta only, never pushed to the
+  CLI; the card stays pending and the session stays `waiting-permission`. While it is pending
+  with a non-plan pick, the card says which mode approving continues in.
+- A typed reply to a pending plan in a non-plan mode declines the plan and becomes the task
+  (`declinePlanReason`); the picked mode is pushed only after that deny resolves.
+- The Keep planning button after such a switch puts the session back on `'plan'` without pushing
+  anything.
 - A shared session's resolution badge additionally names *who* answered, when it was not the
   viewer: `resolvedActor` (see [session-collaboration](session-collaboration.md)) rides alongside
   `resolvedBy` on the same event, and a guest without `approvePermissions` sees the card

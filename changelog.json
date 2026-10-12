@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.24",
+      "date": "2026-10-12",
+      "items": [
+        "While a plan waits for your approval, switching to Assist or Full Auto no longer leaves the session spinning. A reply you type after switching is treated as a new instruction instead of plan feedback."
+      ]
+    },
+    {
       "version": "0.1.23",
       "date": "2026-10-12",
       "items": [
@@ -238,5 +245,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "Switching mode while a plan waits for approval no longer hangs the session; approving then carries on in the mode you picked."
+  ]
 }
