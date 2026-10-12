@@ -142,6 +142,13 @@
   ],
   "desktop": [
     {
+      "version": "0.2.58",
+      "date": "2026-10-12",
+      "items": [
+        "Switching mode while a plan waits for approval no longer hangs the session; approving then carries on in the mode you picked."
+      ]
+    },
+    {
       "version": "0.2.57",
       "date": "2026-10-12",
       "items": [
@@ -245,7 +252,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "Switching mode while a plan waits for approval no longer hangs the session; approving then carries on in the mode you picked."
-  ]
+  "desktopPending": []
 }
