@@ -1459,6 +1459,13 @@ export class SessionManager {
    */
   private staleQueries = new Set<string>();
   /**
+   * A permission mode to push once the answer to this canUseTool rpc (keyed by
+   * rpc id) has gone to the worker. Resolving a card only settles a promise, so
+   * the rpc result goes out a few microtasks later; a mode pushed inline would
+   * reach the CLI while its request is still pending.
+   */
+  private modeAfterAnswer = new Map<string, { sessionId: string; mode: string }>();
+  /**
    * Sessions whose query must survive idle recycling, and when the hold started.
    *
    * Held for the length of an MCP OAuth handshake: the PKCE verifier lives in
@@ -3249,14 +3256,17 @@ export class SessionManager {
       );
       // A decline: the user switched mode while the card was up, and that switch
       // was held back from the CLI (see setPermissionMode). Push it now — after
-      // the deny, so the CLI has its tool result before the mode changes and no
-      // permission request is pending when it does.
+      // the deny reaches the worker, so the CLI has its tool result before the
+      // mode changes and no permission request is pending when it does.
       if (
         meta.permissionMode !== 'plan' &&
         !isCodexSession(meta) &&
         livePendingIds.includes(planReply.requestId)
       ) {
-        this.worker.setPermissionMode(sessionId, sdkPermissionMode(meta.permissionMode));
+        this.modeAfterAnswer.set(planReply.requestId, {
+          sessionId,
+          mode: sdkPermissionMode(meta.permissionMode),
+        });
       }
       // With attachments the deny only unblocks the query; fall through so the
       // queue branch stages text + attachments and maybeFlush delivers them as
@@ -7088,6 +7098,7 @@ export class SessionManager {
             ? await this.handleElicitation(rpc.sessionId, rpc.id, rpc.payload, rpc.resend)
             : await this.handleCanUseTool(rpc.sessionId, rpc.id, rpc.payload, rpc.resend);
       this.worker.rpcResult(rpc.id, result);
+      this.flushModeAfterAnswer(rpc.id);
     } catch (err) {
       console.error('[rpc]', err);
       this.worker.rpcResult(
@@ -7098,7 +7109,16 @@ export class SessionManager {
             ? { action: 'cancel' }
             : { continue: true },
       );
+      this.flushModeAfterAnswer(rpc.id);
     }
+  }
+
+  /** Push a mode held for this rpc's answer (see modeAfterAnswer), now that it went out. */
+  private flushModeAfterAnswer(rpcId: string) {
+    const pending = this.modeAfterAnswer.get(rpcId);
+    if (!pending) return;
+    this.modeAfterAnswer.delete(rpcId);
+    this.worker.setPermissionMode(pending.sessionId, pending.mode);
   }
 
   /**
