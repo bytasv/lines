@@ -30,8 +30,8 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   This nests a subagent's transcript under its spawning card instead of flattening it into the
   main agent's stream, excludes subagent messages from every piece of main-agent state (context
   usage, workflow step output, turn summaries), and gives the spawning card its own header,
-  container, and agent-identity badge — shared with the live `ActivityRow` via one lookup so a
-  running agent and the card that replaces it always match.
+  container, and agent-identity badge — its glyph shared with the live `ActivityRow` via one lookup
+  so a running agent and the card that replaces it always match.
 
 ## Entry points
 
@@ -86,8 +86,8 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
 - `web/src/components/TaskCall.tsx` — `TaskHeader` (badge + description + flags), `TaskBody`
   (prompt disclosure)
 - `web/src/components/ToolGroup.tsx` — forwards `renderNested` to `ToolCallCard`
-- `web/src/components/ActivityRow.tsx` — renders the same `agentMeta`/`MAIN_AGENT_META` icon the
-  settled card will use
+- `web/src/components/ActivityRow.tsx` — renders the same `agentMeta`/`MAIN_AGENT_META` glyph the
+  settled card will use (dimmed, no spinner; the phase label shimmers via `.lines-shimmer-text`)
 
 ## Symbols
 
@@ -149,7 +149,9 @@ How everything in the transcript is drawn: text, tool calls, and subagent runs.
   subagentType, model, background, name, mode, isolation}`; every field is `typeof`-guarded and a
   missing `description` falls back to the prompt's first line, never throws
 - `agentMeta(subagentType)` / `MAIN_AGENT_META` — the single source of truth for an agent's badge
-  icon and colour, read by both `TaskHeader` and `ActivityRow`
+  icon and colour; `TaskHeader` reads both, `ActivityRow` reads only the icon
+- `.lines-shimmer-text` (`web/src/index.css`) — the highlight sweep over `ActivityRow`'s phase
+  label; disabled under `prefers-reduced-motion`
 - `taskFlags(call)` — the non-default options on a spawn call (`background`, `isolation`,
   non-default `mode`) as tooltipped icons; empty when the call has none. `call.background` is
   fed at the `TaskHeader` call site from `tool.background != null` (the matched
@@ -250,9 +252,11 @@ cluster of tooltipped flag icons from `taskFlags`, and the nested `groupSummary`
 itself gets the `.tx-task` container class (an inset violet accent + tint) so a subagent run reads
 as one unit rather than an ordinary row. Expanding the card renders the subagent's own transcript
 (via the `renderNested` callback threaded down from `Transcript.Item`), then `TaskBody`'s prompt
-disclosure. `ActivityRow` renders the identical `agentMeta`/`MAIN_AGENT_META` icon (in the same
-colour) while the turn is still running, so the live row and the card that replaces it always
-match; the main agent's row is icon-only (no label prefix) since the session is already known to
+disclosure. `ActivityRow` renders the identical `agentMeta`/`MAIN_AGENT_META` glyph while the turn
+is still running, so the live row and the card that replaces it always match; on the live row the
+icon is dimmed like other transcript icons (subagents included, no agent colour) and there is no
+spinner — liveness is shown by a shimmer sweeping the phase label ("Thinking…", "Responding…", …),
+while the elapsed counter and the no-output warning stay outside the shimmer. The main agent's row is icon-only (no label prefix) since the session is already known to
 be talking to it.
 
 ### Background tasks
@@ -674,8 +678,9 @@ the separate durable `context-compact` event this doc's compaction handling alre
   `AgentInput` type and docs call it `'Task'`, and both appear in persisted transcripts. Every
   consumer checks `isAgentTool(name)` instead of a single string comparison.
 - `agentMeta`/`MAIN_AGENT_META` in `web/src/lib/agents.ts` is the single source of truth for agent
-  icon/colour, read by both the settled `TaskHeader` and the live `ActivityRow` — a running agent
-  and the card that replaces it cannot drift apart.
+  icon/colour. The settled `TaskHeader` uses icon and colour; the live `ActivityRow` uses only the
+  icon (always dimmed) — a running agent and the card that replaces it share a glyph and cannot
+  drift apart.
 - `parseTaskInput` never throws and never assumes a field is present: `AgentInput` gains fields
   the map won't know about (`effort` is the live example — used in practice, absent from the SDK's
   own type at time of writing), so the raw-input toggle stays reachable behind every spawn card
