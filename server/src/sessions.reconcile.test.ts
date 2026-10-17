@@ -12,7 +12,7 @@ import type {
   UserUiSettings,
 } from '@lines/shared';
 import { GuardAllowlist } from './autoGuard.ts';
-import { SessionManager } from './sessions.ts';
+import { SessionManager, lastTurnSettled } from './sessions.ts';
 import { createStore } from './store.ts';
 import { withQueuedPushes } from './workerClient.ts';
 
@@ -227,10 +227,33 @@ test('an old worker (no busy field) demotes only, never promotes', () => {
 });
 
 test('an SDK event on an idle session heals the status', () => {
-  for (const type of ['assistant', 'user', 'stream_event', 'system']) {
+  const events: Array<{ type: string; subtype?: string }> = [
+    { type: 'assistant' },
+    { type: 'user' },
+    { type: 'stream_event' },
+    { type: 'system', subtype: 'init' },
+  ];
+  for (const event of events) {
     const h = harness('idle');
-    h.sessions.handleWorkerEvent('s1', { type });
-    assert.equal(h.s1().status, 'running', `${type} should heal`);
+    h.sessions.handleWorkerEvent('s1', event);
+    assert.equal(h.s1().status, 'running', `${JSON.stringify(event)} should heal`);
+  }
+});
+
+test('between-turns noise on a settled session does not heal the status', () => {
+  const events: Array<Record<string, unknown> & { type: string }> = [
+    { type: 'system', subtype: 'commands_changed' },
+    { type: 'rate_limit_event' },
+    { type: 'system', subtype: 'hook_started' },
+    { type: 'assistant', message: {}, parent_tool_use_id: 'toolu_1' },
+  ];
+  for (const status of ['idle', 'done'] as const) {
+    for (const event of events) {
+      const h = harness(status);
+      h.sessions.handleWorkerEvent('s1', event);
+      assert.equal(h.s1().status, status, `${JSON.stringify(event)} must not heal ${status}`);
+      assert.equal(h.s1().turnSource, undefined);
+    }
   }
 });
 
@@ -544,4 +567,94 @@ test('a compaction that died with the worker is closed by the reconcile', () => 
     { phase: 'done', ok: false, error: 'worker-lost' },
   );
   assert.equal(h.sessions.compactContext('s1').ok, true, 'and a retry is allowed');
+});
+
+const sdk = (seq: number, data: Record<string, unknown>): TranscriptEvent =>
+  ({ seq, ts: seq, kind: 'sdk', data }) as TranscriptEvent;
+const prompt = (seq: number): TranscriptEvent =>
+  ({ seq, ts: seq, kind: 'user', data: { text: 'go' } }) as TranscriptEvent;
+
+test('lastTurnSettled reads the last turn from the tail', () => {
+  const result = { type: 'result', subtype: 'success' };
+  assert.equal(lastTurnSettled([]), false, 'nothing ran');
+  assert.equal(lastTurnSettled([prompt(0), sdk(1, { type: 'assistant' }), sdk(2, result)]), true);
+  assert.equal(
+    lastTurnSettled([
+      prompt(0),
+      sdk(1, result),
+      sdk(2, { type: 'system', subtype: 'commands_changed' }),
+      sdk(3, { type: 'rate_limit_event' }),
+      sdk(4, { type: 'system', subtype: 'hook_started' }),
+      sdk(5, { type: 'assistant', parent_tool_use_id: 'toolu_1' }),
+    ]),
+    true,
+    'idle-query noise and subagent streams do not reopen the turn',
+  );
+  assert.equal(lastTurnSettled([prompt(0), sdk(1, { type: 'assistant' })]), false, 'no result yet');
+  assert.equal(lastTurnSettled([sdk(0, result), prompt(1)]), false, 'a new prompt started a turn');
+  assert.equal(
+    lastTurnSettled([sdk(0, result), sdk(1, { type: 'assistant' })]),
+    false,
+    'the main thread kept working after the result',
+  );
+  assert.equal(lastTurnSettled([sdk(0, result), sdk(1, { type: 'user' })]), false);
+});
+
+test('a finished session healed by commands_changed is not nudged after a restart', () => {
+  const h = harness(
+    'done',
+    {
+      claudeSessionId: 'c1',
+      workflow: { workflowId: 'wf1', started: true, stepIndex: 1, stepStatuses: ['done', 'done'] },
+    } as Partial<SessionMeta>,
+    autoContinue,
+    [prompt(0), sdk(1, { type: 'assistant' }), sdk(2, { type: 'result', subtype: 'success' })],
+  );
+  h.sessions.handleWorkerEvent('s1', { type: 'system', subtype: 'commands_changed' });
+  h.sessions.reconcileWithWorker([]);
+
+  const m = h.s1();
+  assert.deepEqual(h.pushed, [], 'no auto-continue nudge');
+  assert.equal(m.interruptedAt, undefined, 'no Continue banner');
+  assert.ok(m.status === 'idle' || m.status === 'done', `settled, got ${m.status}`);
+});
+
+test('a stale running status over a settled turn is demoted without a banner', () => {
+  const h = harness('running', { claudeSessionId: 'c1', turnSource: 'user' }, autoContinue, [
+    prompt(0),
+    sdk(1, { type: 'result', subtype: 'success' }),
+    sdk(2, { type: 'system', subtype: 'commands_changed' }),
+  ]);
+  h.sessions.reconcileWithWorker([]);
+
+  const m = h.s1();
+  assert.equal(m.status, 'idle');
+  assert.equal(m.turnSource, undefined);
+  assert.equal(m.interruptedAt, undefined, 'no Continue banner');
+  assert.deepEqual(h.pushed, [], 'and no nudge');
+});
+
+test('a turn with no result yet is still flagged and auto-continued', () => {
+  const h = harness('running', { claudeSessionId: 'c1' }, autoContinue, [
+    prompt(0),
+    sdk(1, { type: 'assistant' }),
+  ]);
+  h.sessions.reconcileWithWorker([]);
+  assert.deepEqual(h.pushed, ['s1']);
+});
+
+test('a running workflow step over a settled turn keeps the Continue path', () => {
+  const h = harness(
+    'running',
+    {
+      claudeSessionId: 'c1',
+      turnSource: 'workflow',
+      workflow: { workflowId: 'wf1', started: true, stepIndex: 1, stepStatuses: ['done', 'running'] },
+    } as Partial<SessionMeta>,
+    autoContinue,
+    [prompt(0), sdk(1, { type: 'result', subtype: 'success' })],
+  );
+  h.sessions.reconcileWithWorker([]);
+  assert.deepEqual(h.pushed, ['s1'], 'resumed as before');
+  assert.equal(h.s1().turnSource, 'workflow');
 });

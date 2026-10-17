@@ -259,5 +259,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "A finished session no longer restarts its last turn when the app is reopened after it was closed."
+  ]
 }

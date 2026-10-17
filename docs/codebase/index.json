@@ -936,6 +936,8 @@
         "LiveSessionInfo.busy",
         "SessionManager.reconcileWithWorker",
         "SessionManager.markTurnLive",
+        "provesTurnLive",
+        "lastTurnSettled",
         "SessionManager.continueTurn",
         "SessionMeta.interruptedAt",
         "withQueuedPushes",
@@ -1071,7 +1073,9 @@
         "a failed attempt inside a transparent recovery still bills its spend (totalCostUsd/totalTokens/costByModel), and never appends a second 'user' transcript event",
         "a transparent recovery holds no query for the length of its backoff/refresh; reconcileWithWorker must not read that absence as a dead turn",
         "a closed query never reaches the session again: its events, ended and pending RPC results are dropped, close kills the CLI child, and a Stop settling under it is settled by the bridge (skipped while the session is already in a newer turn, and for a deleted session)",
-        "warmQuery and recycleIdleQueries never close a query that is mid-turn, owns a background task or is held for auth (queryInUse)"
+        "warmQuery and recycleIdleQueries never close a query that is mid-turn, owns a background task or is held for auth (queryInUse)",
+        "a live event heals an idle or done session to running only on positive turn evidence (main-thread assistant/stream_event/user, or system/init); between-turn system/*, rate-limit, hook and background subagent events never do",
+        "reconcile never flags a session whose transcript already ends in the turn's result (only between-turn noise after it): it is demoted to idle with no interruptedAt and no auto-continue, while a workflow step still reading running keeps the Continue path"
       ],
       "architecturalRules": [
         "SessionManager.interrupting is the only authoritative Stop signal; the SDK's terminal_reason is unpublished and never consulted",

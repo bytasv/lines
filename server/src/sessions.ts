@@ -543,30 +543,6 @@ const EPHEMERAL_SYSTEM_SUBTYPES = new Set([
 ]);
 
 /**
- * system subtypes a background task emits on its own schedule. A background task
- * outlives the turn that started it, so — unlike every other worker event — one of
- * these arriving on a settled session is *not* proof that a turn is live, and
- * healing the status on it (see handleWorkerEvent) wedged the session at 'running'
- * forever: the turn's `result` had already been and gone, and nothing else was
- * coming to settle it a second time. That also made such a session read as
- * interruptible, so recycleIdleQueries skipped it long after its task was done.
- */
-const BACKGROUND_TASK_SYSTEM_SUBTYPES = new Set([
-  'background_tasks_changed',
-  'task_notification',
-  'task_progress',
-  'task_updated',
-]);
-
-/** True for an event that proves a *background task* is alive, not a turn. */
-function isBackgroundTaskSignal(msg: { type: string }): boolean {
-  return (
-    msg.type === 'system' &&
-    BACKGROUND_TASK_SYSTEM_SUBTYPES.has(String((msg as { subtype?: unknown }).subtype))
-  );
-}
-
-/**
  * True only for an event the main agent emits while it is mid-turn: its own
  * output (`assistant`, `stream_event`) or a tool result fed back to it (`user`).
  *
@@ -602,6 +578,19 @@ function provesMainThreadTurn(msg: Record<string, unknown> & { type: string }): 
   if (msg.type !== 'assistant' && msg.type !== 'stream_event' && msg.type !== 'user') return false;
   if (msg.type === 'user' && msg.isReplay === true) return false;
   return !subagentParentId(msg);
+}
+
+/**
+ * True for an event only a running turn emits — the evidence the status heal in
+ * handleWorkerEvent needs. The main thread's own output (provesMainThreadTurn), or
+ * the CLI's turn-start announcement: a push that raced the hello snapshot shows
+ * `system/init` first. The idle query outlives its turn, so everything else it can
+ * emit between turns — `system/commands_changed` and friends, `rate_limit_event`,
+ * hook noise, a background subagent's stream — proves nothing.
+ */
+function provesTurnLive(msg: Record<string, unknown> & { type: string }): boolean {
+  if (provesMainThreadTurn(msg)) return true;
+  return msg.type === 'system' && (msg as { subtype?: unknown }).subtype === 'init';
 }
 
 interface PermissionAnswer {
@@ -899,6 +888,26 @@ export function unresolvedPermissionIds(events: TranscriptEvent[]): string[] {
  */
 export function hasUnresolvedAlwaysAsk(events: TranscriptEvent[]): boolean {
   return unresolvedPermissions(events).some((p) => ALWAYS_ASK_TOOLS.has(p.toolName));
+}
+
+/**
+ * The transcript's last turn already produced its `result`: nothing the main
+ * thread emits (a tool result, its own output) and no new prompt follows it. What
+ * an idle query emits after a result — `system/*`, rate limits, hook noise — does
+ * not reopen the turn. Reconcile uses it to tell a status the heal left stale from
+ * a turn that really died with the worker.
+ */
+export function lastTurnSettled(events: TranscriptEvent[]): boolean {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.kind === 'user') return false;
+    if (event.kind !== 'sdk') continue;
+    const data = event.data as (Record<string, unknown> & { type: string }) | undefined;
+    if (!data) continue;
+    if (data.type === 'result') return true;
+    if (provesMainThreadTurn(data)) return false;
+  }
+  return false;
 }
 
 /**
@@ -5759,7 +5768,18 @@ export class SessionManager {
         live.compactResume = undefined;
         // The turn died with the worker; don't auto-fire followups.
         if (meta.queued?.length) meta.queuePaused = true;
-        if (!reparked) {
+        const events = reparked ? [] : this.store.loadTranscript(meta.id);
+        // A turn that already produced its result did not die with the worker:
+        // the 'running' status is a stale heal (see provesTurnLive). Demote with
+        // no banner and no nudge. A workflow step still reading 'running' is left
+        // to the Continue path — its settle never landed, and Continue resumes it.
+        const settled =
+          !reparked &&
+          meta.workflow?.stepStatuses[meta.workflow.stepIndex] !== 'running' &&
+          lastTurnSettled(events);
+        if (settled) {
+          console.log(`[session ${meta.id}] reconcile: last turn already settled, no Continue`);
+        } else if (!reparked) {
           // Flag for the Continue banner. A workflow step left 'running' here is
           // kept 'running' (not false-parked at waiting-approval as if it had
           // finished) — Continue resumes it as a workflow turn, and its eventual
@@ -5769,7 +5789,7 @@ export class SessionManager {
           // auto-continue's nudge ("continue the task from there") would read as an
           // approval nobody gave. Keep the banner and the clickable card; park the
           // session instead — `flagged` is exactly the auto-continue list below.
-          if (hasUnresolvedAlwaysAsk(this.store.loadTranscript(meta.id))) {
+          if (hasUnresolvedAlwaysAsk(events)) {
             console.log(
               `[permission] [session ${meta.id}] auto-continue skipped: an always-ask card is unanswered`,
             );
@@ -6172,13 +6192,16 @@ export class SessionManager {
     // while a park whose status a background subagent's card flipped to 'running'
     // still is. Ahead of the heal below, which skips every parked session.
     //
-    // Otherwise: any message but the turn's own result proves a turn is live, so
-    // a status that says otherwise is stale (see markTurnLive) — heal it. A
+    // Otherwise: an event only a running turn emits (provesTurnLive) proves a
+    // turn is live, so a status that says otherwise is stale (see markTurnLive) —
+    // heal it. The heal needs that positive evidence: the idle query outlives its
+    // turn, and what it emits between turns — `system/*` other than `init`
+    // (`commands_changed`, background-task signals), `rate_limit_event`, hook
+    // noise, a background subagent's stream — would otherwise flip a settled
+    // session to 'running' and earn it a Continue nudge on the next restart. A
     // `result` on an inactive session means the turn is over; let it settle below
-    // instead. `interrupting` is read live, not snapshotted: an event racing a Stop
-    // must not resurrect the turn the user just killed. A background-task signal
-    // is excluded outright: it proves a task is alive, not a turn, and those keep
-    // arriving after the turn that spawned them has settled.
+    // instead. `interrupting` is read live, not snapshotted: an event racing a
+    // Stop must not resurrect the turn the user just killed.
     if (
       meta &&
       !meta.turnSource &&
@@ -6191,8 +6214,7 @@ export class SessionManager {
     } else if (
       meta &&
       !isSessionActive(meta.status) &&
-      msg.type !== 'result' &&
-      !isBackgroundTaskSignal(msg) &&
+      provesTurnLive(msg) &&
       !this.interrupting.has(sessionId)
     ) {
       this.markTurnLive(meta);

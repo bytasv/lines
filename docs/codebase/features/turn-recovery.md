@@ -345,14 +345,20 @@ instance is the one running it now.
 
 Reconcile then moves in both directions for every session that passes that check. `busy: true` on
 a session we believe is idle calls `markTurnLive` (status back to `running`, keep a known
-`turnStartedAt`, clear `interruptedAt` and `errorKind`). Absent from the list, or `busy: false`, on a session we
+`turnStartedAt`, clear `interruptedAt` and `errorKind`). Live events heal the same way, but only
+on positive turn evidence: the main thread's own output or tool results, or the CLI's `system/init`.
+The idle query outlives its turn and emits `system/*` events (such as `commands_changed`), rate-limit
+events, hook noise and background subagent output between turns; none of those flip a settled
+session to `running`. Absent from the list, or `busy: false`, on a session we
 believe is `running`/`waiting-permission` demotes it — to `idle`, pausing any queue and stamping
 `interruptedAt`, *unless* its current workflow step already reads `waiting-approval`: the only
 turn that runs on an already-parked step is a manual context compaction (see
 [context-window](context-window.md#compaction)), so that case re-parks at `waiting-approval`
 instead and stamps no `interruptedAt` — no Continue banner, and nothing added to `flagged`,
-since auto-continue's nudge would read as an approval nobody gave. `busy: undefined` demotes
-only.
+since auto-continue's nudge would read as an approval nobody gave. A demotion whose transcript
+already ends in the turn's `result` (with only between-turn noise after it) is not an interrupted
+turn: it goes to `idle` with no `interruptedAt` and no auto-continue, so a stale `running` status
+left by an earlier heal cannot resurrect a finished turn. `busy: undefined` demotes only.
 
 `continueTurn` expires the dead turn's orphaned permission cards, releases `queuePaused`, and
 re-prompts with a synthetic nudge, resuming through `claudeSessionId`. A turn interrupted
@@ -881,6 +887,14 @@ message type, no new modal, no new client state, no DB migration.
   dropped, `close` kills the CLI child, and a Stop settling under it is settled by the bridge.
 - `warmQuery` and `recycleIdleQueries` never close a query that is mid-turn, owns a background
   task or is held for auth (`queryInUse`).
+- A session is healed to `running` by a live event only when that event proves a turn is live (the
+  main thread's `assistant`, `stream_event` or `user`, or `system/init`). Between-turn noise on an
+  idle or done session (`system/*` other than `init`, `rate_limit_event`, hook events, a background
+  subagent's stream) never changes its status or earns a Continue nudge.
+- Reconcile never flags a session whose transcript already ends in the turn's `result`, with only
+  between-turn noise after it. Such a session is demoted to `idle` quietly, so a restart cannot
+  nudge a finished or approved flow to retry its last turn. A workflow step still reading `running`
+  is the exception and keeps the Continue path.
 - `interruptedAt` is cleared by a new prompt, by a `result` (the turn had in fact finished), by
   `markTurnLive`, and by archive/complete. It is deliberately **not** cleared by `ackSession` —
   viewing a session must not hide the banner before it can be read.
