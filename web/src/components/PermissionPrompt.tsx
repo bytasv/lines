@@ -84,6 +84,7 @@ const SOURCE_NOTE: Partial<Record<PermissionResolutionSource, string>> = {
   'plan-reply': 'resolved by your reply in the composer',
   auto: 'approved automatically by the auto-mode guard',
   'plan-readonly': 'rejected automatically — plan mode is read-only',
+  'plan-ai-read': 'approved automatically — Claude Haiku judged it read-only',
   recovery: 'resolved by recovery after an interrupted turn',
   'workflow-advance': 'you approved this; the workflow advanced instead of implementing here',
   'interrupt-expire': 'closed when the interrupted session was resumed',
@@ -1840,6 +1841,14 @@ function PermissionCard({
               {data.guardReason ? `: ${data.guardReason}` : ''}. Turn off{' '}
               <em>Auto-reject writes in plan mode</em> in Settings → Sessions to review these
               yourself.
+            </Text>
+          )}
+          {data.resolvedBy === 'plan-ai-read' && (
+            <Text size="xs" c="dimmed" mt={6}>
+              Approved automatically because Claude Haiku judged this command read-only
+              {data.guardReason ? `: ${data.guardReason}` : ''}. Turn off{' '}
+              <em>Verify unrecognised commands with Claude Haiku</em> in Settings → Sessions to
+              review these yourself.
             </Text>
           )}
         </Collapse>

@@ -1627,6 +1627,7 @@ export type PermissionResolutionSource =
   | 'plan-reply'
   | 'auto'
   | 'plan-readonly'
+  | 'plan-ai-read'
   | 'recovery'
   | 'workflow-advance'
   | 'interrupt-expire'
@@ -1663,7 +1664,8 @@ export interface PermissionRequestData {
   auto?: boolean;
   /**
    * Why the auto-mode guard flagged this call for manual review. On a
-   * `plan-readonly` rejection: what made the call count as a write.
+   * `plan-readonly` rejection: what made the call count as a write. On a
+   * `plan-ai-read` approval: why Claude Haiku judged the command read-only.
    */
   guardReason?: string;
   /**
@@ -3246,6 +3248,10 @@ export interface UserUiSettings {
   /** In plan mode, deny any call not auto-approved as a read instead of asking.
    *  Off unless explicitly `true`. Global, read fresh on every call. */
   planModeRejectWrites?: boolean;
+  /** In plan mode, ask Claude Haiku whether a shell command the read-only
+   *  classifier can't place only reads, and approve it without a card if so.
+   *  Off unless explicitly `true`. Global, read fresh on every call. */
+  planModeAiReadCheck?: boolean;
   /** Append the response-compression ruleset to every session's system prompt.
    *  On unless explicitly `false` — absent means enabled. Global: sessions no
    *  longer carry their own toggle, so changing it applies the next time each

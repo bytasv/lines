@@ -170,7 +170,8 @@
         "plan-reply-keeps-planning",
         "plan-comments",
         "plan-mode-reads",
-        "plan-mode-write-rejection"
+        "plan-mode-write-rejection",
+        "plan-mode-ai-read-check"
       ],
       "entryPoints": [
         "web/src/components/Composer.tsx",
@@ -260,6 +261,8 @@
         "planModeRejectMessage",
         "classifyPlanBash",
         "planModeVerdict",
+        "planReadJudge",
+        "planModeAiReadCheck",
         "PermissionRequestData.planRead",
         "GuardAllowEntry.scope",
         "alwaysAllowEntryFor",
@@ -320,6 +323,9 @@
         "an approval never changes the call it approves: resolvePermission ignores the client's updatedInput, except an AskUserQuestion card's answers, rebuilt against the recorded card (its own questions only, strings only, 10,000 characters each) and persisted as rebuilt",
         "a guest's Always allow and Allow as read are dropped server-side (permissionAnswerFor) and never shown (useIsGuestOnSession): both write the host's allowlist, which is the owner's setting; a guest's click is the one-off approval",
         "non-Bash entries never carry a prefix; one given is silently dropped rather than rejected",
+        "the plan-mode AI read check (planModeAiReadCheck, off unless true) only upgrades an unrecognised Bash/Monitor call to allow: never a recognised write or always-ask tool, never a codex session, never a card already on screen; only an explicit readOnly:true verdict approves, anything else raises the card, and the approval is recorded as resolvedBy 'plan-ai-read' with the judge's reason",
+        "auto-mode rules match quoted and heredoc text as data only after a raw match, and only on lines whose commands don't run their arguments; argument-running commands, pipes or redirects into them, write-then-run lines and unparseable lines keep the raw verdict",
+        "harness tools that only observe or delegate are not dangerous in auto mode; Monitor is assessed exactly like Bash",
         "plan-directory reads and writes (~/.claude/plans/** or <cwd>/.claude/plans/**) auto-approve in every permission mode, judged as written and once symlinks are followed, with neither plans directory allowed to be a link elsewhere, and never for a persistent file inside one",
         "ExitPlanMode and AskUserQuestion always still prompt the user regardless of target path",
         "credential paths (~/.ssh, ~/.aws, .env) always escalate even if nested under a plans directory, checked on the path as written and on where a link leads",

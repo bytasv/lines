@@ -36,6 +36,8 @@ export interface GuardVerdict {
 interface BashRule {
   pattern: RegExp;
   reason: string;
+  /** Matches across a pipe (`curl … | sh`), so the guard's quote-aware recheck reads the commands joined. */
+  spansPipe?: boolean;
 }
 
 const BASH_RULES: BashRule[] = [
@@ -45,7 +47,7 @@ const BASH_RULES: BashRule[] = [
   { pattern: /\b(rmdir|shred|srm)\b/, reason: 'Directory/file destruction' },
   { pattern: /\bfind\b.*-delete\b/, reason: 'Bulk deletion via find -delete' },
   { pattern: /\b(mkfs|diskutil\s+erase|fdisk|dd\s+.*of=)/i, reason: 'Disk-level operation' },
-  { pattern: />\s*\/dev\/(sd|disk|null\b.*<)/, reason: 'Raw device write' },
+  { pattern: />\s*\/dev\/(sd|disk)/, reason: 'Raw device write' },
 
   // Privilege / system state
   { pattern: /\bsudo\b/, reason: 'Privilege escalation (sudo)' },
@@ -74,7 +76,7 @@ const BASH_RULES: BashRule[] = [
   { pattern: /\bgit\s+(rebase|filter-branch|reflog\s+expire)\b/, reason: 'History rewrite' },
 
   // Remote code execution
-  { pattern: /\b(curl|wget)\b[^|;&]*\|\s*(ba|z|fi|da)?sh\b/, reason: 'Piping a download into a shell (curl | bash)' },
+  { pattern: /\b(curl|wget)\b[^|;&]*\|\s*(ba|z|fi|da)?sh\b/, reason: 'Piping a download into a shell (curl | bash)', spansPipe: true },
   // Plain `npx <bin>` runs project-local binaries and is routine; only
   // auto-installing remote packages is flagged.
   { pattern: /\b(npx|uvx|bunx)\s+(-y\b|--yes\b|[a-z0-9@-]*(github:|https?:))/i, reason: 'Auto-installing and executing a remote package' },
@@ -91,7 +93,7 @@ const BASH_RULES: BashRule[] = [
   // Secrets / exfiltration
   { pattern: /~\/\.(ssh|aws|gnupg|netrc|npmrc|pypirc)\b/, reason: 'Access to credential files' },
   { pattern: /\b(security\s+find-generic-password|keychain)\b/i, reason: 'Keychain access' },
-  { pattern: /\b(printenv|env)\b.*\|\s*(curl|nc|wget)/, reason: 'Environment exfiltration' },
+  { pattern: /\b(printenv|env)\b.*\|\s*(curl|nc|wget)/, reason: 'Environment exfiltration', spansPipe: true },
   { pattern: /\bcurl\b.*(-T|--upload-file|-d\s*@|--data-binary\s*@)/, reason: 'Uploading local files to a remote host' },
   { pattern: /\b(scp|rsync)\b.*@/, reason: 'Copying files to a remote host' },
   { pattern: /\b(nc|ncat|netcat)\b/, reason: 'Raw network socket' },
@@ -385,6 +387,10 @@ const COMMAND_RUNNERS = new Set([
   'npx', 'pnpx', 'bunx', 'uvx', 'eval', 'exec', 'source', '.', 'command', 'builtin', 'xargs', 'env', 'sudo',
   'doas', 'su', 'nohup', 'setsid', 'time', 'timeout', 'gtimeout', 'nice', 'ionice', 'taskset', 'stdbuf',
   'unbuffer', 'watch', 'script', 'parallel', 'flock', 'chroot', 'caffeinate', 'find', 'ssh',
+  'tsx', 'ts-node', 'julia', 'R', 'elixir', 'erl', 'racket', 'guile', 'bb', 'nu', 'xonsh', 'elvish', 'powershell',
+  'runuser', 'pkexec', 'sg', 'nsenter', 'unshare', 'systemd-run', 'xvfb-run', 'firejail', 'sandbox-exec',
+  'strace', 'ltrace', 'valgrind', 'gdb', 'lldb', 'tmux', 'screen', 'entr', 'watchexec', 'nodemon',
+  'concurrently', 'hyperfine', 'chronic', 'retry', 'trap', 'fd', 'arch',
 ]);
 
 /**
@@ -404,7 +410,7 @@ const RUNNER_SUBCOMMANDS = new Map([
   ['docker', ['run', 'exec']],
   ['podman', ['run', 'exec']],
   ['kubectl', ['run', 'exec']],
-  ['git', ['-c']],
+  ['git', ['-c', 'submodule', 'bisect']],
 ]);
 
 /** A leading `NAME=value` word, which only sets the command's environment. */
@@ -488,7 +494,7 @@ const PLAN_WRITE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 /**
  * Tools an entry can't name outright: a file tool is flagged for its path and
  * an entry carries none, so it would cover every path, credentials included;
- * Monitor runs shell commands the guard never checks.
+ * Monitor runs any shell command, so a blanket entry would cover all of them.
  */
 const UNNAMEABLE_TOOLS = new Set([...FILE_TOOLS, 'Monitor']);
 
@@ -940,6 +946,45 @@ function persistentShellWrite(chain: string[], primary: string): string | undefi
 }
 
 /**
+ * A Bash line's simple commands as the rules should read them, with every word
+ * whose quoting is load-bearing (LITERAL_CHAR) masked: a commit message, a grep
+ * pattern or a sed script is data, and naming `kill` or `keychain` in one runs
+ * neither. Heredoc bodies are skipped the same way (splitShell). A command that
+ * runs its arguments (runsItsArguments) keeps its quoted words, since there they
+ * are code. Null — read the line raw — when splitShell can't take it apart;
+ * when a runner reads a pipe, heredoc, herestring or redirect, whose text is
+ * code; or when the line both writes a file and runs something, which may be
+ * the file just written.
+ */
+function maskedCommands(line: string): string[] | null {
+  const split = splitShell(line, 0, true);
+  if (!('segments' in split) || !split.quoted || !split.fed) return null;
+  const { segments, quoted, fed } = split;
+  const texts: string[] = [];
+  let runner = false;
+  let writesFile = false;
+  for (let s = 0; s < segments.length; s++) {
+    const words = segments[s];
+    let k = 0;
+    while (k < words.length && SHELL_KEYWORDS.has(words[k])) k++;
+    const runs = runsItsArguments(words.slice(k).map((w) => w.replace(/\s/g, '_')).join(' '));
+    if (runs && fed[s]) return null;
+    runner ||= runs;
+    // An unquoted `>` word is only ever the redirect splitShell kept (a quoted one is load-bearing).
+    writesFile ||= words.some((w, i) => w === '>' && !quoted[s][i] && !REDIRECT_SINKS.has(words[i + 1]));
+    // The program itself is never data: `rm\ -rf\ /x` is still read as `rm -rf /x`.
+    while (k < words.length && ASSIGNMENT.test(words[k])) k++;
+    texts.push(ruleText((runs ? words : words.map((w, i) => (quoted[s][i] && i !== k ? '_' : w))).join(' ')));
+  }
+  return runner && writesFile ? null : texts;
+}
+
+/** Whether a rule that matched the raw line still matches its masked commands (maskedCommands). */
+function ruleHitsMasked(rule: BashRule, masked: string[]): boolean {
+  return masked.some((t) => rule.pattern.test(t)) || (!!rule.spansPipe && rule.pattern.test(masked.join(' | ')));
+}
+
+/**
  * @param roots Every directory this session may work in — its project's roots,
  *   primary first (see `rootsForCwd`, which never returns empty). An empty list
  *   escalates every file tool, which is the safe direction: the guard fails
@@ -951,17 +996,24 @@ export function assessToolCall(
   roots: string[],
   allowlist: GuardAllowEntry[],
 ): GuardVerdict {
-  if (toolName === 'Bash') {
-    const chain = chainedCommands(String(input.command ?? ''));
+  // Monitor runs a shell command too, so it meets the same rules.
+  if (toolName === 'Bash' || toolName === 'Monitor') {
+    const line = String(input.command ?? '');
+    const chain = chainedCommands(line);
     // Ahead of the allowlist, like the file-tool check below: an allowlisted
     // `echo` or `cp` must not disarm a write to a file that runs code later.
     const persistent = persistentShellWrite(chain, roots[0] ?? process.cwd());
     if (persistent) return { dangerous: true, reason: persistent };
+    let masked: string[] | null | undefined;
     for (const command of chain) {
       if (segmentAllowed(command, allowlist)) continue;
       const text = ruleText(command);
-      const rule = BASH_RULES.find((r) => r.pattern.test(text));
-      if (rule) return { dangerous: true, reason: rule.reason };
+      for (const rule of BASH_RULES) {
+        if (!rule.pattern.test(text)) continue;
+        // A raw hit stands unless the quote-aware reading puts it inside data.
+        masked ??= maskedCommands(line);
+        if (!masked || ruleHitsMasked(rule, masked)) return { dangerous: true, reason: rule.reason };
+      }
     }
     return { dangerous: false };
   }
@@ -1015,8 +1067,11 @@ export function assessToolCall(
     return { dangerous: false };
   }
 
-  // Read-only / harness tools: allow.
-  if (['Glob', 'Grep', 'WebFetch', 'WebSearch', 'TodoWrite', 'Task', 'KillShell', 'TaskOutput'].includes(toolName)) {
+  // Read-only / harness tools: allow. Subagents and skills meet this guard on their own calls.
+  if (
+    PLAN_MODE_READ_TOOLS.has(toolName) ||
+    ['Glob', 'Grep', 'TodoWrite', 'KillShell'].includes(toolName)
+  ) {
     return { dangerous: false };
   }
 
@@ -1079,7 +1134,7 @@ export const READ_ONLY_COMMANDS = new Set([
   'tree', 'diff', 'cmp', 'comm', 'column', 'nl', 'less', 'more', 'date', 'whoami', 'hostname', 'uname',
   'env', 'lsof', 'ps', 'seq', 'strings', 'od', 'paste', 'rev', 'tac', 'fold', 'id', 'sw_vers', 'arch',
   'nproc', 'shasum', 'sha256sum', 'md5sum', 'md5', 'pgrep', 'host', 'dig', 'nslookup', 'mdfind', 'mdls',
-  'locale', 'getconf',
+  'locale', 'getconf', 'zcat', 'gzcat', 'bzcat', 'xzcat',
   // Shell builtins with no side effect once redirects are ruled out.
   'cd', 'pwd', 'echo', 'printf', 'test', '[', 'true', 'false', ':', 'read', 'sleep', 'continue', 'break',
   'return', 'exit', 'shift',
@@ -1097,8 +1152,20 @@ const SUBSTITUTION = '$(…)';
 /** Why a command is not a plain read: a recognised write, or something the classifier can't place. */
 type NotRead = { kind: 'write' | 'unknown'; reason: string; prefix?: string };
 
-/** `note`: something short of a write (a scratch file under a temp dir) that still needs the user. */
-type ShellSplit = { segments: string[][]; note?: NotRead } | NotRead;
+/**
+ * `note`: something short of a write (a scratch file under a temp dir) that still needs the user.
+ * `quoted` and `fed` are filled only for the guard (splitShell's `guard`): per word, whether
+ * its quoting was load-bearing (LITERAL_CHAR); per segment, whether it reads a pipe, redirect,
+ * heredoc or herestring.
+ */
+type ShellSplit = { segments: string[][]; note?: NotRead; quoted?: boolean[][]; fed?: boolean[] } | NotRead;
+
+/**
+ * Characters a word can carry unquoted with the same meaning. Quoting anything
+ * else — a space, a pipe, a glob — is what turns the word into data; quoting a
+ * word of only these (`"-rf"`, `r''m`) changes nothing the shell runs.
+ */
+const LITERAL_CHAR = /[^\w@%+,./:=^-]/;
 
 /** Scratch locations: writing here changes nothing the plan is about, but it is still not a read. */
 const TEMP_PATH = /^(?:\/tmp\/|\/private\/tmp\/|\/var\/folders\/|\$TMPDIR\/|\$\{TMPDIR\}\/)/;
@@ -1141,13 +1208,24 @@ function closingBacktick(s: string, from: number): number {
  * jobs stay unrecognised, and an output redirect to anything but a sink is a
  * write. Quote-aware, so `grep "a|b"` stays one command.
  */
-function splitShell(command: string, depth = 0): ShellSplit {
+function splitShell(command: string, depth = 0, guard = false): ShellSplit {
   if (depth > 8) return { kind: 'unknown', reason: 'its command substitutions nest too deeply to check' };
   const segments: string[][] = [];
   const nested: string[][] = [];
+  const segQuoted: boolean[][] = [];
+  const nestedQuoted: boolean[][] = [];
+  const segFed: boolean[] = [];
+  const nestedFed: boolean[] = [];
   let words: string[] = [];
+  let quoted: boolean[] = [];
+  let fed = false;
   let word = '';
   let inWord = false;
+  // The current word holds a quoted or escaped character outside LITERAL_CHAR.
+  let wordQuoted = false;
+  const quote = (text: string) => {
+    if (LITERAL_CHAR.test(text)) wordQuoted = true;
+  };
   // Set after a redirect operator: the next word is its target, not an argument.
   let target: 'sink' | 'data' | null = null;
   let failure: NotRead | null = null;
@@ -1164,27 +1242,46 @@ function splitShell(command: string, depth = 0): ShellSplit {
 
   const endWord = (): boolean => {
     if (!inWord) return true;
-    if (target === 'sink' && !REDIRECT_SINKS.has(word)) {
-      if (!TEMP_PATH.test(word) || word.split('/').includes('..')) return fail('write', `it redirects output into ${word}`);
-      note ??= { kind: 'unknown', reason: `it writes the scratch file ${word}` };
+    if (target === 'sink') {
+      // The guard reads any redirect: it keeps the target, where a device write shows.
+      if (guard) {
+        words.push('>', word);
+        quoted.push(false, wordQuoted);
+      } else if (!REDIRECT_SINKS.has(word)) {
+        if (!TEMP_PATH.test(word) || word.split('/').includes('..')) return fail('write', `it redirects output into ${word}`);
+        note ??= { kind: 'unknown', reason: `it writes the scratch file ${word}` };
+      }
     }
     if (target) target = null;
-    else words.push(word);
+    else {
+      words.push(word);
+      quoted.push(wordQuoted);
+    }
     word = '';
     inWord = false;
+    wordQuoted = false;
     return true;
   };
   const endSegment = (): boolean => {
     if (!endWord()) return false;
     if (target) return unparsable();
-    if (words.length) segments.push(words);
+    // An empty segment keeps `fed`: in `… | (bash)` the pipe feeds what follows the `(`.
+    if (words.length) {
+      segments.push(words);
+      segQuoted.push(quoted);
+      segFed.push(fed);
+      fed = false;
+    }
     words = [];
+    quoted = [];
     return true;
   };
   const substitute = (inner: string): boolean => {
-    const sub = splitShell(inner, depth + 1);
+    const sub = splitShell(inner, depth + 1, guard);
     if (!('segments' in sub)) return fail(sub.kind, sub.reason);
     nested.push(...sub.segments);
+    nestedQuoted.push(...(sub.quoted ?? []));
+    nestedFed.push(...(sub.fed ?? []));
     note ??= sub.note;
     return true;
   };
@@ -1211,6 +1308,7 @@ function splitShell(command: string, depth = 0): ShellSplit {
       if (next === undefined) return failed();
       if (next !== '\n') {
         word += next;
+        quote(next);
         inWord = true;
       }
       i++;
@@ -1220,6 +1318,7 @@ function splitShell(command: string, depth = 0): ShellSplit {
       const end = command.indexOf("'", i + 1);
       if (end < 0) return failed();
       word += command.slice(i + 1, end);
+      quote(command.slice(i + 1, end));
       inWord = true;
       i = end;
       continue;
@@ -1238,9 +1337,11 @@ function splitShell(command: string, depth = 0): ShellSplit {
         if (d === '\\' && j + 1 < command.length) {
           j++;
           word += command[j];
+          quote(command[j]);
           continue;
         }
         word += d;
+        quote(d);
       }
       if (j >= command.length) return failed();
       inWord = true;
@@ -1305,6 +1406,8 @@ function splitShell(command: string, depth = 0): ShellSplit {
     }
     if (c === '|') {
       if (!endSegment()) return failed();
+      // Piped into, the next command reads its input like a redirect.
+      if (next !== '|') fed = true;
       if (next === '|' || next === '&') i++;
       continue;
     }
@@ -1325,6 +1428,7 @@ function splitShell(command: string, depth = 0): ShellSplit {
       return failed();
     }
     if (c === '>' || c === '<') {
+      if (c === '<') fed = true;
       if (next === '(' && !inWord && !target) {
         // Process substitution: its command is checked like any other.
         const end = closingParen(command, i + 2);
@@ -1392,7 +1496,11 @@ function splitShell(command: string, depth = 0): ShellSplit {
     inWord = true;
   }
   if (!endSegment()) return failed();
-  return { segments: [...segments, ...nested], ...(note ? { note } : {}) };
+  return {
+    segments: [...segments, ...nested],
+    ...(note ? { note } : {}),
+    ...(guard ? { quoted: [...segQuoted, ...nestedQuoted], fed: [...segFed, ...nestedFed] } : {}),
+  };
 }
 
 /** Positional (non-flag) arguments. */
@@ -1680,8 +1788,20 @@ const READ_ONLY_ARG_RULES: Record<string, (args: string[]) => boolean> = {
   npx: (args) => args[0] === 'tsc' && tscReadOnly(args.slice(1)),
   xargs: (args) => {
     const inner = xargsCommand(args);
-    return inner !== null && commandReadOnly(inner);
+    if (inner === null) return false;
+    // `-I{}` pastes each input line into the arguments: inside a `-c` script
+    // that turns file names into code, whatever the script reads like.
+    const lead = args.slice(0, args.length - inner.length);
+    if (shellScript(inner) !== null && lead.some((a) => /^(?:-[Ii]|--replace\b)/.test(a))) return false;
+    return commandReadOnly(inner);
   },
+  sh: shellReadOnly,
+  bash: shellReadOnly,
+  zsh: shellReadOnly,
+  gzip: compressorReadOnly,
+  gunzip: compressorReadOnly,
+  bzip2: compressorReadOnly,
+  xz: compressorReadOnly,
   curl: curlReadOnly,
   gh: ghReadOnly,
   dd: (args) => !args.some((a) => a.startsWith('of=')), // no of= writes to stdout
@@ -1704,6 +1824,39 @@ const READ_ONLY_ARG_RULES: Record<string, (args: string[]) => boolean> = {
   hostname: (args) => positionals(args).length === 0,
   date: (args) => !hasFlag(args, 's', ['--set']) && positionals(args).every((a) => a.startsWith('+')),
 };
+
+/** A compressor that only prints: to stdout (`-c`, with or without `-d`), or listing/testing an archive. */
+function compressorReadOnly(args: string[]): boolean {
+  return hasFlag(args, 'clt', ['--stdout', '--to-stdout', '--list', '--test']);
+}
+
+const SCRIPT_SHELLS = new Set(['sh', 'bash', 'zsh']);
+
+/** The script of a `sh`/`bash`/`zsh -c '<script>'` call (whole words, program first), or null. */
+function shellScript(words: string[]): string | null {
+  if (!SCRIPT_SHELLS.has(commandName(words[0] ?? ''))) return null;
+  return /^-[efuxl]*c[efuxl]*$/.test(words[1] ?? '') && words[2] !== undefined ? words[2] : null;
+}
+
+/** How deep `sh -c` scripts are being classified right now; a script nested deeper is never a read. */
+let shellNesting = 0;
+
+/** A `-c` script classified on its own, the way the whole line is (classifyPlanBash). */
+function shellScriptVerdict(script: string): PlanModeVerdict {
+  if (shellNesting >= 4) return { kind: 'unknown', reason: 'its `sh -c` scripts nest too deeply to check' };
+  shellNesting++;
+  try {
+    return classifyPlanBash(script);
+  } finally {
+    shellNesting--;
+  }
+}
+
+/** `sh -c '<script>'` reads exactly when its script does. */
+function shellReadOnly(args: string[]): boolean {
+  const script = shellScript(['sh', ...args]);
+  return script !== null && shellScriptVerdict(script).kind === 'read';
+}
 
 /** True when one simple command (keywords and assignments already stripped) only reads. */
 function commandReadOnly(words: string[]): boolean {
@@ -1786,6 +1939,11 @@ function commandWrites(words: string[]): string | null {
   if (cmd === 'xargs') {
     const inner = xargsCommand(args);
     return inner && commandWrites(inner);
+  }
+  const script = shellScript(words);
+  if (script !== null) {
+    const verdict = shellScriptVerdict(script);
+    return verdict.kind === 'write' ? verdict.reason : null;
   }
   return null;
 }

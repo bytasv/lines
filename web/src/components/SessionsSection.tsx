@@ -37,6 +37,8 @@ export function SessionsSection({ onOpenUpdates }: { onOpenUpdates: () => void }
   const setPlanReasoningEffort = useStore((s) => s.setPlanReasoningEffort);
   const planModeRejectWrites = useStore((s) => s.planModeRejectWrites);
   const setPlanModeRejectWrites = useStore((s) => s.setPlanModeRejectWrites);
+  const planModeAiReadCheck = useStore((s) => s.planModeAiReadCheck);
+  const setPlanModeAiReadCheck = useStore((s) => s.setPlanModeAiReadCheck);
 
   return (
     <>
@@ -151,6 +153,12 @@ export function SessionsSection({ onOpenUpdates }: { onOpenUpdates: () => void }
           description="Deny edits and recognised writes instead of asking. Commands that can't be checked still ask. The agent keeps planning."
           checked={planModeRejectWrites}
           onChange={setPlanModeRejectWrites}
+        />
+        <SettingsSwitchRow
+          label="Verify unrecognised commands with Claude Haiku"
+          description="Shell commands the plan-mode check can't place are judged by Claude Haiku first, and run without a card if it calls them read-only. Recognised writes still follow the setting above. The command text comes from the agent and could try to mislead the judge, so a wrong approval is possible."
+          checked={planModeAiReadCheck}
+          onChange={setPlanModeAiReadCheck}
         />
       </SettingsGroup>
 

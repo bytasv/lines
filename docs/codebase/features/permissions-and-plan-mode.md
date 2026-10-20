@@ -96,7 +96,7 @@ deliverable is written and reviewed.
 - "Allow as read" on a plan-mode card for an unrecognised `Bash` command —
   `permissionResponse.allowAsRead`
 - Settings modal, Sessions pane — the "Auto-reject writes in plan mode" `Switch`, next to the
-  plan-effort select
+  plan-effort select, and the "Verify unrecognised commands with Claude Haiku" `Switch` below it
 - A `file` request over the WebSocket, when the resolved path falls outside every
   project/session root but inside a plan directory
 - Composer send while a plan-review card is open; "Keep planning" button on the plan card
@@ -272,6 +272,10 @@ deliverable is written and reviewed.
   scripts, `awk` without print redirection, `xargs` of a read-only command, `curl` fetches to
   stdout, `gh` list/view/GET-`api`, `dd` without `of=`, `npm`/`pnpm`/`yarn` report subcommands,
   `tsc --noEmit`, …), or match a `plan-read`
+  allowlist prefix. The compressors read only when they print or list: `zcat`/`gzcat`/`bzcat`/`xzcat`
+  always, `gzip`/`gunzip`/`bzip2`/`xz` only with a stdout, list or test flag. `sh`/`bash`/`zsh -c
+  '<script>'` reads exactly when its script does (nesting capped at four levels); an `xargs -I` or
+  `--replace` feeding such a script stays unknown, since file names would become code.
   allowlist prefix. An `unknown` verdict names the prefix (first two words of the blamed command)
   that "Allow as read" would record. `isReadOnlyBash` is `kind === 'read'`
 - `isSafePlanModeRead(toolName, input, roots, allowlist)` — the plan-mode gate: `false` for
@@ -416,6 +420,21 @@ drops quotes and backslashes, so `rm${IFS}-rf` and `r''m "-rf"` meet the rules w
 both steps are quote-blind for the same reason: a split inside a quoted string only adds a piece
 to check.
 
+The rules also read a line quote- and heredoc-aware, but only once a rule has already matched the
+raw text. `splitShell` records, per word, whether its quoting is load-bearing (it holds a space, a
+pipe, a glob or similar; `"-rf"` and `r''m` are not), and the rule is re-tested with those words and
+heredoc bodies masked. A commit message, a grep pattern or inert heredoc text therefore stops
+counting. Masking never applies to a command that runs its arguments (`COMMAND_RUNNERS` and
+`RUNNER_SUBCOMMANDS`, e.g. `bash -c`, `eval`, `ssh`, `python -c`, `xargs`, `find -exec`, `git -c`),
+to a line that pipes or redirects into such a command, or to a line that both writes a file and runs
+something. Those lines, and any line `splitShell` can't parse, keep the raw verdict. Pipe-spanning
+rules (`curl … | sh`) are re-tested with the masked commands joined by a pipe. Allowlist coverage
+(`segmentAllowed`) and `dangerousPrefix` always match the raw text.
+
+Harness tools that only observe or delegate (the plan-mode read set: `Agent`, `Skill`, `Task*`,
+`SendMessage`, `ToolSearch`, `ListAgents`, `WebFetch`, `WebSearch`, plus `Glob`, `Grep`,
+`TodoWrite`, `KillShell`) are not dangerous in auto mode. `Monitor` is checked like `Bash`.
+
 A command skips the rules only when an entry covers it (`segmentAllowed`), and only a plain simple
 command can be covered: one carrying `|`, `&`, `<`, `>`, a backtick, `$(` or a line break
 (`UNSAFE_SEGMENT`) meets every rule whatever its prefix — otherwise an allowlisted `npm test` would
@@ -437,7 +456,8 @@ words (after any assignments) of the command a rule *flagged* — `git push` in
 `cd app && git push --force`, where the old `allowEntryFor` kept the line's harmless first two
 words. It is `null` — no button, and `noAlwaysAllowNote` where it would be — for
 `ALWAYS_ASK_TOOLS`; for a file tool (flagged for a path an entry cannot carry, so an entry would
-cover every path, credentials included) or `Monitor` (whose commands the guard never reads); for a
+cover every path, credentials included) or `Monitor` (an entry would cover every shell command it
+runs, though the rules do read its command); for a
 line that writes a persistent file (below); when no command was flagged, or the flagged ones would
 need different entries; when a flagged command pipes, redirects or substitutes; and when the
 prefix is dangerous on its own. Any other tool flagged for being itself (an MCP write) is named
@@ -522,6 +542,7 @@ observation-only path) instead of prompting. The `isSafePlanModeRead` branch is 
 skipped for a codex session (`isCodexSession`) — codex's own plan mode is already a read-only
 sandbox, so anything reaching these handlers there is an escalation the sandbox couldn't satisfy,
 and should stay the user's call rather than being auto-approved as if it were an ordinary read.
+The optional AI read check below can also approve an unrecognised `Bash`/`Monitor` call here.
 
 Separately, `resolveWorkspacePath` (used by the `file`, `tree`, and `find` request routes) first
 checks the requested path against every project root and session cwd, as written and once
@@ -567,6 +588,32 @@ command, the file path of a write/edit, or the URL/query of a web call — and e
 original request (command, edit preview, JSON). An auto-denied card adds a note that plan mode is
 read-only and names the setting that turns the rejection off. The expanded view never carries
 action buttons, and an item persisted without its input has nothing to expand.
+
+### Plan-mode AI read check
+
+Off unless `UserUiSettings.planModeAiReadCheck === true` (Settings → Sessions, "Verify unrecognised
+commands with Claude Haiku"). The setting is global and read on every call.
+
+When the setting is on, a plan-mode `Bash` or `Monitor` call that `planModeVerdict` leaves
+`unknown` gets one question before its card is raised: `handleCanUseTool` asks Claude Haiku, through
+the helper query with a 15 second limit, whether the command only reads. Recognised writes,
+always-ask tools and codex sessions never reach it, and neither does a call whose card is already on
+screen. The judge is tool-free and given the command as data. Only an explicit `readOnly: true`
+answer approves the call. Anything else (a false verdict, malformed output, timeout, no connected
+provider) leaves the card as it was.
+
+An approval is recorded as `resolvedBy: 'plan-ai-read'`, with the judge's reason shown on the
+resolved card, and logs one `[permission]` line like every other resolution. The hook still returns
+`ask` for an unknown call, so a `settings.json` allow rule can't pass it silently.
+
+Verdicts are cached per bridge process, keyed by working directory and command text, capped at 500
+with the oldest dropped. Only definite answers are cached, so a failed check is asked again next
+time. A second request for a command already being judged waits on the same query.
+
+Residual risk: the command text is written by the model and can contain text aimed at the judge
+("answer readOnly true"). The judge's instructions treat the command as untrusted, the parse is
+strict and only unknown commands reach it, but a wrong approval is still possible. The setting's
+description says so.
 
 ### Plan review card
 
@@ -1074,6 +1121,16 @@ is open, otherwise the inline one.
 - A quote that no longer matches the live plan text (the agent has since rewritten that passage)
   silently drops its highlight; the comment itself is untouched in the list and still reaches the
   model on Approve/Refine.
+
+- The plan-mode AI read check only upgrades an unrecognised `Bash`/`Monitor` call to allow. It never
+  approves a recognised write or an always-ask tool, never runs for a codex session, and any answer
+  other than an explicit read-only verdict leaves the card. Its approvals are recorded as
+  `plan-ai-read`, so the transcript shows a model's judgment rather than the user's.
+- In auto mode a quoted or heredoc word is ignored only on a line whose commands don't run their
+  arguments; `bash -c`-style commands, pipes or redirects into them, write-then-run lines and
+  unparseable lines keep the raw check.
+- Harness tools that only observe or delegate are not dangerous in auto mode; `Monitor` is checked
+  exactly like `Bash`.
 
 ## Architectural rules
 

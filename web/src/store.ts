@@ -116,6 +116,7 @@ const COMPACTION_LEVEL_KEY = 'lines.compactionLevel';
 const TURN_SUMMARIES_ENABLED_KEY = 'lines.turnSummariesEnabled';
 const AUTO_CONTINUE_KEY = 'lines.autoContinueInterrupted';
 const PLAN_REJECT_WRITES_KEY = 'lines.planModeRejectWrites';
+const PLAN_AI_READ_CHECK_KEY = 'lines.planModeAiReadCheck';
 const COMPRESS_RESPONSES_KEY = 'lines.compressResponses';
 const PLAN_REASONING_EFFORT_KEY = 'lines.planReasoningEffort';
 const SMART_ROUTING_KEY = 'lines.smartRouting';
@@ -227,6 +228,11 @@ function loadAutoContinueInterrupted(): boolean {
 /** Off unless explicitly turned on, matching the bridge-side default. */
 function loadPlanModeRejectWrites(): boolean {
   return localStorage.getItem(PLAN_REJECT_WRITES_KEY) === 'true';
+}
+
+/** Off unless explicitly turned on, matching the bridge-side default. */
+function loadPlanModeAiReadCheck(): boolean {
+  return localStorage.getItem(PLAN_AI_READ_CHECK_KEY) === 'true';
 }
 
 /** On unless explicitly turned off, matching the bridge-side default. */
@@ -1058,6 +1064,8 @@ interface UiState {
   autoContinueInterrupted: boolean;
   /** In plan mode, deny non-read calls instead of raising a card. Global. */
   planModeRejectWrites: boolean;
+  /** In plan mode, ask Claude Haiku about shell commands the classifier can't place. Global. */
+  planModeAiReadCheck: boolean;
   /** Append the response-compression ruleset to every session's system prompt. Global. */
   compressResponses: boolean;
   /** Dictation language: `auto` or an ISO 639-1 code. Synced with the settings. */
@@ -1192,6 +1200,7 @@ interface UiState {
   setTurnSummariesEnabled: (on: boolean) => void;
   setAutoContinueInterrupted: (on: boolean) => void;
   setPlanModeRejectWrites: (on: boolean) => void;
+  setPlanModeAiReadCheck: (on: boolean) => void;
   setCompressResponses: (on: boolean) => void;
   setVoiceLanguage: (code: string) => void;
   setVoiceTranslate: (on: boolean) => void;
@@ -1233,6 +1242,7 @@ export const useStore = create<UiState>((set, get) => {
         turnSummariesEnabled: s.turnSummariesEnabled,
         autoContinueInterrupted: s.autoContinueInterrupted,
         planModeRejectWrites: s.planModeRejectWrites,
+        planModeAiReadCheck: s.planModeAiReadCheck,
         compressResponses: s.compressResponses,
         voiceLanguage: s.voiceLanguage,
         voiceTranslate: s.voiceTranslate,
@@ -1341,6 +1351,7 @@ export const useStore = create<UiState>((set, get) => {
       turnSummariesEnabled: s.turnSummariesEnabled ?? state.turnSummariesEnabled,
       autoContinueInterrupted: s.autoContinueInterrupted ?? state.autoContinueInterrupted,
       planModeRejectWrites: s.planModeRejectWrites ?? state.planModeRejectWrites,
+      planModeAiReadCheck: s.planModeAiReadCheck ?? state.planModeAiReadCheck,
       compressResponses: s.compressResponses ?? state.compressResponses,
       voiceLanguage: s.voiceLanguage ?? state.voiceLanguage,
       voiceTranslate: s.voiceTranslate ?? state.voiceTranslate,
@@ -1357,6 +1368,7 @@ export const useStore = create<UiState>((set, get) => {
     if (s.turnSummariesEnabled != null) localStorage.setItem(TURN_SUMMARIES_ENABLED_KEY, String(s.turnSummariesEnabled));
     if (s.autoContinueInterrupted != null) localStorage.setItem(AUTO_CONTINUE_KEY, String(s.autoContinueInterrupted));
     if (s.planModeRejectWrites != null) localStorage.setItem(PLAN_REJECT_WRITES_KEY, String(s.planModeRejectWrites));
+    if (s.planModeAiReadCheck != null) localStorage.setItem(PLAN_AI_READ_CHECK_KEY, String(s.planModeAiReadCheck));
     if (s.compressResponses != null) localStorage.setItem(COMPRESS_RESPONSES_KEY, String(s.compressResponses));
     if (s.voiceLanguage) localStorage.setItem(VOICE_LANGUAGE_KEY, s.voiceLanguage);
     if (s.voiceTranslate != null) localStorage.setItem(VOICE_TRANSLATE_KEY, String(s.voiceTranslate));
@@ -1478,6 +1490,7 @@ export const useStore = create<UiState>((set, get) => {
   turnSummariesEnabled: loadTurnSummariesEnabled(),
   autoContinueInterrupted: loadAutoContinueInterrupted(),
   planModeRejectWrites: loadPlanModeRejectWrites(),
+  planModeAiReadCheck: loadPlanModeAiReadCheck(),
   compressResponses: loadCompressResponses(),
   voiceLanguage: loadVoiceLanguage(),
   voiceTranslate: localStorage.getItem(VOICE_TRANSLATE_KEY) === 'true',
@@ -1823,6 +1836,12 @@ export const useStore = create<UiState>((set, get) => {
   setPlanModeRejectWrites: (on) => {
     localStorage.setItem(PLAN_REJECT_WRITES_KEY, String(on));
     set({ planModeRejectWrites: on });
+    pushSettings();
+  },
+
+  setPlanModeAiReadCheck: (on) => {
+    localStorage.setItem(PLAN_AI_READ_CHECK_KEY, String(on));
+    set({ planModeAiReadCheck: on });
     pushSettings();
   },
 

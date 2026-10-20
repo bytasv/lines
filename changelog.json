@@ -1,6 +1,14 @@
 {
   "web": [
     {
+      "version": "0.1.27",
+      "date": "2026-10-20",
+      "items": [
+        "Plan mode asks less: reading a compressed file or running a small read-only script no longer raises a permission card. Settings → Sessions has an optional switch that lets Claude Haiku check other shell commands before you are asked.",
+        "In Assist mode, commands that only mention a word like \"kill\" or \"shutdown\" inside a commit message or a search pattern no longer ask for approval, and the agent's own helper tools no longer ask as unrecognised."
+      ]
+    },
+    {
       "version": "0.1.26",
       "date": "2026-10-20",
       "items": [
@@ -267,6 +275,7 @@
     }
   ],
   "desktopPending": [
-    "A finished session no longer restarts its last turn when the app is reopened after it was closed."
+    "A finished session no longer restarts its last turn when the app is reopened after it was closed.",
+    "Plan mode asks less: read-only shell commands and helper tools run without a card, and Assist mode stops flagging commit messages and search patterns that only mention words like kill or shutdown."
   ]
 }

@@ -72,6 +72,8 @@ export interface HelperQueryRequest {
    * absent or answers null. Omitted means "no preference" — Claude first.
    */
   prefer?: ModelProvider;
+  /** How long to wait before answering null; defaults to HELPER_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 /**
@@ -214,7 +216,7 @@ export async function runHelperQuery(
     // connection the user is trying to add.
     return await Promise.race([
       attempt(),
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), HELPER_TIMEOUT_MS).unref()),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), request.timeoutMs ?? HELPER_TIMEOUT_MS).unref()),
     ]);
   } catch (err) {
     console.warn('[helper]', err instanceof Error ? err.message : String(err));
