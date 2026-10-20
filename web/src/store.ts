@@ -100,6 +100,7 @@ import {
   compareSessions,
   SESSION_SORT_KEY,
   sessionRowMeta,
+  tracksSeen,
   type SessionSort,
 } from './lib/format';
 import type { MentionValue } from './lib/mentions';
@@ -110,6 +111,7 @@ const SIDEBAR_MODE_KEY = 'lines.sidebarMode';
 const HIDE_IGNORED_KEY = 'lines.hideIgnored';
 const OPEN_FILES_KEY = 'lines.openFiles';
 const LAST_SESSION_BY_PROJECT_KEY = 'lines.lastSessionByProject';
+const SEEN_SESSION_STATUS_KEY = 'lines.seenSessionStatus';
 const COMPACTION_LEVEL_KEY = 'lines.compactionLevel';
 const TURN_SUMMARIES_ENABLED_KEY = 'lines.turnSummariesEnabled';
 const AUTO_CONTINUE_KEY = 'lines.autoContinueInterrupted';
@@ -270,6 +272,20 @@ function readSessionSort(): SessionSort {
   } catch {
     return 'status';
   }
+}
+
+/** The persisted `seenSessionStatus` map, so a reload does not re-light every tab. */
+function readSeenSessionStatus(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(SEEN_SESSION_STATUS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSeenSessionStatus(seen: Record<string, string>) {
+  localStorage.setItem(SEEN_SESSION_STATUS_KEY, JSON.stringify(seen));
 }
 
 function writeLastSession(projectPath: string, sessionId: string) {
@@ -636,15 +652,20 @@ export function sessionsInProject(
 }
 
 /**
- * Which actionable session states the user has already seen, session id -> the
- * `sessionRowMeta` label that was acknowledged. Drives the project tab dot: a
- * tab only pulses for states missing from this map.
+ * Which tracked session states (see `tracksSeen`: actionable, or a recent finish)
+ * the user has already seen, session id -> the `sessionRowMeta` label that was
+ * acknowledged. Drives the project tab dot: a tab only lights for those states
+ * when they are missing from this map.
  *
  * Two rules make "seen" mean what it should. Opening a project acknowledges
- * everything actionable in it — the sidebar spells those out, so they are seen
- * by definition. And an entry is dropped the moment its session stops being
- * actionable, so the same session needing the user *again* later reads as new
- * rather than staying silently acknowledged.
+ * everything tracked in it — the sidebar spells those out, so they are seen
+ * by definition. And an entry is dropped the moment its session leaves a tracked
+ * state, so the same session needing the user — or finishing — *again* later
+ * reads as new rather than staying silently acknowledged.
+ *
+ * The map is persisted, so entries for sessions not in `sessions` are kept: on
+ * load the list is empty until `hello` lands, and a session on another machine
+ * is out of scope here, not gone. Only a session present here can drop its entry.
  *
  * Membership comes from `sessionsInProject` — the one sanctioned check — rather
  * than a second inline copy of the rules, so the tab dot cannot drift from what
@@ -657,13 +678,17 @@ function reconcileSeenStatus(
   activeProject: Project | null,
 ): Record<string, string> {
   const next: Record<string, string> = {};
+  for (const [id, label] of Object.entries(seen)) {
+    if (!sessions[id]) next[id] = label;
+  }
   const inActive = new Set(
     sessionsInProject(sessions, projectKeys, activeProject).map((s) => s.id),
   );
   for (const s of Object.values(sessions)) {
     if (s.archived) continue;
-    const { actionable, label } = sessionRowMeta(s);
-    if (!actionable) continue; // no entry — a later relapse counts as unseen
+    const meta = sessionRowMeta(s);
+    const { label } = meta;
+    if (!tracksSeen(meta)) continue; // no entry — a later relapse counts as unseen
     if (inActive.has(s.id) || seen[s.id] === label) next[s.id] = label;
   }
   return next;
@@ -1377,7 +1402,7 @@ export const useStore = create<UiState>((set, get) => {
   projectKeys: {},
   dismissedCheckouts: loadDismissedCheckouts(),
   activeProject: localStorage.getItem(ACTIVE_PROJECT_KEY),
-  seenSessionStatus: {},
+  seenSessionStatus: readSeenSessionStatus(),
   transcripts: {},
   transcriptLoaded: {},
   transcriptFloor: {},
@@ -2716,7 +2741,10 @@ useStore.subscribe((state, prev) => {
     projectAt(state.projects, state.activeProject),
   );
   // Bail on no-op writes: this listener would otherwise re-enter on its own set.
-  if (!sameStringMap(next, state.seenSessionStatus)) useStore.setState({ seenSessionStatus: next });
+  if (!sameStringMap(next, state.seenSessionStatus)) {
+    writeSeenSessionStatus(next);
+    useStore.setState({ seenSessionStatus: next });
+  }
 });
 
 // What `setActiveProject` returns to: recorded here, off the one field, rather

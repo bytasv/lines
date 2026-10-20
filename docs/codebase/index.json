@@ -845,7 +845,7 @@
         "Overrides are Claude-only: a non-Anthropic model or unknown effort is dropped by sanitizeStepOverrides.",
         "a parked step re-opens to running when a main-thread event proves a turn is live on it that the bridge did not start (a background-task notification turn) and parks again on that turn's result; a pre-run failure, an in-flight advance, a Stop in progress and any bridge-started turn never re-open it",
         "a closed query is final: nothing it emits afterwards reaches the session, and a workflow advance holds prompts and queue flushes until it finishes",
-        "a clean park (waiting-approval, no stepFailure) presents like done: green, non-pulsing 'step finished', actionable false — no project tab dot, not in the machine 'needs you' count, sorted above done and below anything needing the user; the stored status stays waiting-approval and approval lives on the stepper; a failed park stays a red actionable error",
+        "a clean park (waiting-approval, no stepFailure) presents like done: green, non-pulsing 'step finished', actionable false — project tab shows a steady green dot only while recent and unseen (see session-and-project-ui), not in the machine 'needs you' count, sorted above done and below anything needing the user; the stored status stays waiting-approval and approval lives on the stepper; a failed park stays a red actionable error",
         "WorkflowState.iteratedStep is set when iterateStep re-runs a clean park (free-text iterate, a queued/held follow-up drained into the step); never by a Retry of a failed turn or a background-task reopen; keyed by index so it self-invalidates once stepIndex moves on; its only effect is that later parks of that step do not alert"
       ],
       "architecturalRules": [
@@ -1129,7 +1129,7 @@
       "id": "session-and-project-ui",
       "name": "Session and project UI",
       "doc": "features/session-and-project-ui.md",
-      "purpose": "The shell around a session: persisted unsent drafts, focus on a new session, which session a project switch opens (preferring the project's remembered last-selected session before falling back to latest-created), the project tab's actionable-status dot, and the tool-aware waiting-permission badge.",
+      "purpose": "The shell around a session: persisted unsent drafts, focus on a new session, which session a project switch opens (preferring the project's remembered last-selected session before falling back to latest-created), the project tab's status dot (pulsing for actionable states, steady for live work and recent unseen finishes), and the tool-aware waiting-permission badge.",
       "covers": [
         "composer-draft-persistence",
         "composer-focus-new-session",
@@ -1202,9 +1202,15 @@
         "SESSION_SORT_RANK",
         "ARCHIVED_META",
         "lastActivityAt",
-        "compareSessions"
+        "compareSessions",
+        "tracksSeen",
+        "PROJECT_LIVE_ORDER",
+        "PROJECT_RECENT_ORDER",
+        "RECENT_FINISH_MS"
       ],
-      "tests": [],
+      "tests": [
+        "server/src/statusMeta.test.ts"
+      ],
       "businessRules": [
         "persisted text draft is the full MentionValue (text + ranges), not plain text, so restored pills/expansions stay intact",
         "staged attachments persist too, in IndexedDB rather than localStorage (base64 file data can run tens of MB)",
@@ -1220,12 +1226,15 @@
         "the sidebar session list order is user-selectable via lines.sessionSort (persisted localStorage), applied to all three groups (Sessions, Shared-with-me, Archived): Status (default) ranks running first, then the tab-dot urgency order (plan ready > needs answer > needs permission > interrupted > error), then background work, then step finished (a clean workflow park), then done, then idle, tie-broken by lastActivityAt descending; Last active sorts by lastActivityAt descending; Created sorts by createdAt descending (the sidebar's pre-existing behavior)",
         "a session status label missing from SESSION_SORT_RANK sorts last rather than being guessed at, same rule projectStatusMeta applies by skipping",
         "the archived group's sort key changed from archivedAt ?? createdAt to the same compareSessions comparator the other two groups use: Status/Last-active mode still puts the most-recently-archived session first since archiving is an upsert that bumps updatedAt, but Created mode now means creation order, not archive order",
-        "priority highest first: plan ready (violet) > needs answer (teal) > needs permission (yellow) > interrupted (yellow) > error (red); a clean workflow park (green 'step finished') is not actionable and never shows a tab dot",
+        "tab dot tiers, highest first: (1) unseen actionable — plan ready (violet) > needs answer (teal) > needs permission (yellow) > interrupted (yellow) > error (red), pulsing; (2) live work — running (blue) or background work (blue), steady, never seen-tracked; (3) unseen finish — done or step finished (green), steady, only while lastActivityAt is within the last 24h",
+        "a clean workflow park (green 'step finished') is not actionable and never pulses a tab; it shows the steady recent-finish green dot like done",
+        "running and background work show a steady blue tab dot while live, so a project working in the background is visible at a glance without opening it; idle never shows a dot",
         "running/done/idle sessions never show a dot",
         "archived sessions are excluded; completed sessions are always archived too, so no separate guard is needed",
         "the active project's tab always shows the plain folder icon, suppressed at render time",
-        "opening a project marks its actionable sessions seen; a tab stays quiet until a session reaches a status not yet seen, and a resolved-then-relapsed session counts as new again",
-        "seenSessionStatus is in-memory only, so already-seen dots can reappear once after a page reload",
+        "opening a project marks its tracked sessions seen (tracksSeen: actionable states and recent finishes, not live work); a tab stays quiet until a session reaches a tracked status not yet seen, and a resolved-then-relapsed session counts as new again",
+        "a finished session lights its tab green only while lastActivityAt is within the last 24h; there is no timer, so it clears on the next store-driven render",
+        "seenSessionStatus is persisted to localStorage (lines.seenSessionStatus), so already-seen dots stay quiet across a page reload; entries for sessions not yet in the sessions map are kept rather than pruned, since the list is empty until hello",
         "ExitPlanMode -> label 'plan ready', violet badge",
         "AskUserQuestion -> label 'needs answer', teal badge",
         "any other tool -> label 'needs permission', yellow badge (unchanged default)",

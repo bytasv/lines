@@ -23,11 +23,13 @@ and how status is surfaced in the sidebar row and the project tab.
   Also runs after the primary machine's `hello` when a cold launch restored an active project but
   no session is selected (and no create is pending). Never auto-open an
   archived session — those stay reachable only via the sidebar's "Archived (N)" group.
-- **Project tab status dot** — each project tab in the header shows the single most important
-  actionable status across that project's sessions as a colored pulsing dot in place of the
-  folder icon, so a background project working across multiple repos can signal it needs
-  attention without opening it. The open (active) project's tab always shows the plain folder
-  icon — its sessions are already listed in the sidebar.
+- **Project tab status dot** — each project tab in the header shows one dot in place of the
+  folder icon, picked from that project's sessions in three tiers: an unseen actionable status
+  (pulsing), then live work (`running` or background work, steady blue), then a recent unseen
+  finish (`done` or step finished, steady green, only within the last 24h). A background project
+  signals what needs attention or is still working without opening it. The open (active)
+  project's tab always shows the plain folder icon — its sessions are already listed in the
+  sidebar.
 - **Tool-aware waiting-permission badge** — distinguish what kind of pause a
   `waiting-permission` session is actually in (a plan awaiting approval, a question awaiting an
   answer, or a plain tool permission ask) via the sidebar badge label/color and the OS/browser
@@ -103,14 +105,19 @@ and how status is surfaced in the sidebar row and the project tab.
   keyed on `selectedSessionId`, not at each selection call site
 - `sessionsInProject(sessions, projectKeys, project)` — shared, key-aware project membership
   (by project key, falling back to exact cwd match); shared with the sidebar
-- `projectStatusMeta(sessions, seen)` — scans a project's sessions, skips archived and
-  non-actionable ones and any `(sessionId, label)` pair already in `seen`, and returns the
-  highest-priority remaining `{ color, label }`, or `null` if nothing qualifies
-- `PROJECT_STATUS_ORDER` / `PROJECT_STATUS_RANK` — cross-status priority table built from the
-  same `waitingPermissionMeta`/`STATUS_META` entries `sessionRowMeta` uses, so a tab dot can
-  never drift from the sidebar dot it points at
+- `projectStatusMeta(sessions, seen, now)` — scans a project's sessions, skips archived ones,
+  and returns the highest-priority remaining `{ color, label, pulse }`, or `null` if nothing
+  qualifies. Actionable states are skipped when `seen`; live work always qualifies; recent
+  finishes qualify only when unseen and recent
+- `tracksSeen(meta)` — whether a session state is acknowledged by opening its project: actionable
+  states and recent finishes, not live work. The store's seen reconcile uses it, so the rule has
+  one source
+- `PROJECT_STATUS_ORDER` / `PROJECT_LIVE_ORDER` / `PROJECT_RECENT_ORDER` / `RECENT_FINISH_MS` —
+  the tab-dot tiers: actionable urgency, then live work, then recent finishes, with the 24h window
+  built from the same `waitingPermissionMeta`/`STATUS_META` entries `sessionRowMeta` uses, so a tab
+  dot can never drift from the sidebar dot it points at
 - `seenSessionStatus` (store field) — session id to the `sessionRowMeta` label the user has
-  already acknowledged for that session
+  already acknowledged for that session; persisted under `lines.seenSessionStatus`
 - `reconcileSeenStatus` — recomputes `seenSessionStatus` whenever sessions, project keys, or the
   active project change
 - `SessionMeta.pendingPermissionTool` — name of the tool that triggered the current
@@ -257,12 +264,17 @@ already treats it as absent on read, and the next selection in that project over
 ### Project tab dot
 
 `ProjectTab` reads `sessions`, `projectKeys`, and `seenSessionStatus` from the store and, for
-every non-active tab, calls `projectStatusMeta(sessionsInProject(...), seenSessionStatus)` in its
-render body to decide folder icon vs. status dot. A `useStore.subscribe` listener recomputes
-`seenSessionStatus` on any relevant state change via `reconcileSeenStatus`: every actionable
-session belonging to the currently active project is marked seen; any other session's entry is
-dropped the instant it stops being actionable, so a later relapse to the same status reads as new
-again.
+every non-active tab, calls `projectStatusMeta(sessionsInProject(...), seenSessionStatus, now)` in
+its render body to decide folder icon vs. status dot. Only the actionable tier pulses. A
+`useStore.subscribe` listener recomputes `seenSessionStatus` on any relevant state change via
+`reconcileSeenStatus`: every tracked session (see `tracksSeen`) belonging to the currently active
+project is marked seen; any other session's entry is dropped the instant it leaves a tracked
+state, so a later relapse or a later finish reads as new again. The map is written to localStorage
+on change and read on startup. Entries for sessions not yet loaded are kept, since the session
+list is empty until the first `hello`.
+
+The recent-finish tier has no timer: a finish aging past 24h clears on the next store-driven
+render.
 
 ### Waiting-permission badge
 
@@ -381,9 +393,11 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   session first (archiving is an upsert, so it bumps `updatedAt`), but Created mode now means
   creation order, not archive order.
 - Project tab dot priority, highest first: plan ready (violet) > needs answer (teal) > needs
-  permission (yellow) > interrupted (yellow) > error (red).
-- `running` / `done` / `idle` and a clean workflow park ("step finished", green) never show a dot
-  (not actionable) — folder icon. See [workflow-step-lifecycle](workflow-step-lifecycle.md).
+  permission (yellow) > interrupted (yellow) > error (red) — pulsing, unseen only; then running
+  and background work (steady blue, no seen semantics); then done and step finished (steady
+  green, unseen only, `lastActivityAt` within the last 24h).
+- `idle` never shows a dot. A clean workflow park ("step finished") shows the recent-finish green
+  dot like `done`. See [workflow-step-lifecycle](workflow-step-lifecycle.md).
 - A finished workflow never surfaces on a project tab: it is not actionable, so it never reaches
   `projectStatusMeta`. Only the sidebar row shows the filled checkmark — see
   [workflow-step-lifecycle](workflow-step-lifecycle.md).
@@ -391,11 +405,14 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 - A session status not in the priority table is skipped rather than guessed at.
 - The active project's tab always shows the plain folder icon (render-time suppression, no extra
   state for this rule alone).
-- Opening a project marks every actionable session in it "seen"; its tab stays quiet after
-  leaving unless a session reaches an actionable status it hasn't already been seen in. A session
-  that resolves and later relapses to the same status counts as new again.
-- `seenSessionStatus` is in-memory only — a page reload clears it, so already-acknowledged dots
-  can reappear once after a reload.
+- Opening a project marks every tracked session in it "seen" (actionable states and recent
+  finishes); its tab stays quiet after leaving unless a session reaches a tracked status it hasn't
+  already been seen in. A session that resolves and later relapses to the same status counts as
+  new again.
+- Live work never counts as seen: a running or background-work tab stays steady blue until the
+  work ends, and then only its finish can light green.
+- `seenSessionStatus` is persisted to localStorage, so a page reload keeps acknowledged dots quiet.
+- A finished session whose last activity is older than 24h never lights its tab, even if unseen.
 - `ExitPlanMode` → label "plan ready", violet badge.
 - `AskUserQuestion` → label "needs answer", teal badge.
 - Any other tool (or no tool recorded) → label "needs permission", yellow badge (the unchanged

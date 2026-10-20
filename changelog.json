@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.26",
+      "date": "2026-10-20",
+      "items": [
+        "A project tab now shows a steady blue dot while a session there is running or has background work, and a steady green dot for a session that finished in the last 24 hours and that you haven't opened yet. Only something that needs you still pulses."
+      ]
+    },
+    {
       "version": "0.1.25",
       "date": "2026-10-13",
       "items": [

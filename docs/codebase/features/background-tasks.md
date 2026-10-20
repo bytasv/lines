@@ -207,7 +207,8 @@ already in the store, matched by `task_started` and its `tool_use_id`; when the 
 loaded yet the popover says so and shows only the description. Which rows exist always comes from
 the meta, never from that correlation. `sessionRowMeta` (`format.ts`) adds a "background work" row
 below the `waiting-permission` and interrupted checks (both outrank it — they need the user;
-background work does not) and marks it `actionable: false`, so it never lights up a project tab.
+background work does not) and marks it `actionable: false`. It is not pulsing, but a project tab
+shows it as a steady live dot (see [session-and-project-ui](session-and-project-ui.md)).
 `maybeAlert` (`alerts.ts`) returns early while `next.backgroundTasks?.length` is non-zero, so the
 finish chime doesn't fire mid-background-work; the notification turn's own eventual `result`
 settles normally once the set is empty and chimes as usual.
@@ -310,9 +311,10 @@ transcript card.
   new foreground turn concurrently with a background one, so this is correct, not a gap.
 - The composer's Send action is never blocked by a live background task, only Stop's target
   message changes (`interrupt` vs. `stopBackgroundTasks`) based on whether a turn is also live.
-- The sidebar's "background work" row is not `actionable` — a project tab must not light up for
-  it — and is checked after `waiting-permission` and the interrupted-turn state, both of which do
-  need the user's attention and outrank it.
+- The sidebar's "background work" row is not `actionable`, so it never pulses a project tab. It
+  does show the tab as a steady blue dot while the work runs, below any actionable state. It is
+  checked after `waiting-permission` and the interrupted-turn state, both of which do need the
+  user's attention and outrank it.
 - `system/init` is emitted once per turn, never clears the set, and is not a restart signal. A
   CLI child going away is covered by `closeQuery`, `resetClaudeSession`, `handleWorkerEnded` and
   the `hello` reconcile.

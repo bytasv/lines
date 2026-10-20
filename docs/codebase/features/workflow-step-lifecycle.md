@@ -497,8 +497,8 @@ installed icon, no new package). No other new dependencies.
   and its re-park does not alert; a Retry of a failed turn does not set it; after an advance the
   next step's first park alerts again.
 - `server/src/statusMeta.test.ts` — a clean park's sidebar meta (imports `web/src/lib/format.ts`):
-  non-actionable "step finished", no project tab dot, not counted by `machineActivity`, sorted
-  after needs-permission and before done.
+  non-actionable "step finished", a steady green project tab dot only while recent and unseen,
+  not counted by `machineActivity`, sorted after needs-permission and before done.
 - `server/src/sessions.compact.test.ts` — status restore around a compaction over a parked or
   failed step: settles back to the same status (not `done`), a stopped or dead-query compaction
   restores it too, and a compaction that itself fails does not overwrite it.
@@ -638,8 +638,8 @@ installed icon, no new package). No other new dependencies.
   4. `isWorkflowFinished(session)` → green **filled** `IconCircleCheckFilled`, 14px
   5. otherwise → plain `.status-dot` (a clean park lands here: green "step finished")
 - A clean park (`waiting-approval`, no `stepFailure`) presents like `done`: green, non-pulsing,
-  labelled "step finished", `actionable: false` — so it lights neither the project tab dot nor
-  the machine "needs you" count, and its badge shows only on hover/phone. Status sort puts it
+  labelled "step finished", `actionable: false` — so it never pulses the project tab, shows only a
+  steady green tab dot while recent and unseen, and is not in the machine "needs you" count, and its badge shows only on hover/phone. Status sort puts it
   above done, below anything that needs the user. The title/dock badge (`countAttention`) still
   counts it, like done. The stored status stays `waiting-approval`; approval lives on the
   `WorkflowStepper` strip and Approve button. A failed park keeps the red, actionable `error`.

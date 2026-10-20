@@ -104,6 +104,9 @@ function ProjectTab({
           project,
         ),
         seen,
+        // No timer: a finish ageing out of the recent window clears on the next
+        // store-driven render, and session traffic makes those frequent.
+        Date.now(),
       );
   const worktrees = project.worktrees ?? [];
   // The label stays the primary's basename; the tooltip is where every root fits.
@@ -173,10 +176,10 @@ function ProjectTab({
           {/* Fixed-width slot so the tab doesn't jitter as 13px icon ↔ 8px dot swap. */}
           <Center w={13} style={{ flex: '0 0 13px' }}>
             {status ? (
-              // Every dot rendered here is actionable by construction — always pulse.
+              // Only an actionable state pulses; live and recently finished work is steady.
               <span
                 className="status-dot"
-                data-pulse
+                data-pulse={status.pulse || undefined}
                 style={
                   {
                     '--status-dot-color': `var(--mantine-color-${status.color}-6)`,

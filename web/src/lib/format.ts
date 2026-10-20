@@ -45,7 +45,7 @@ export function sessionRowMeta(session: SessionMeta): {
   }
   // Below the two above on purpose: both of those need the user, and this does
   // not. Deliberately not actionable either — a background task is informational,
-  // and a project folder must not light up for it. It also beats a workflow park
+  // so a project tab shows it as a steady live dot, never a pulsing one. It also beats a workflow park
   // (`waiting-approval`, only ever set by one): the main thread ending its turn
   // while a background agent works is not a step ready for approval.
   if (
@@ -150,8 +150,36 @@ const PROJECT_STATUS_ORDER = [
   STATUS_META.error, // error            — red
 ];
 
-/** Keyed on label — all five are distinct, so a rename propagates for free. */
-const PROJECT_STATUS_RANK = new Map(PROJECT_STATUS_ORDER.map((m, i) => [m.label, i]));
+/** Live work a project tab shows as a steady dot below anything actionable. Live
+ *  state, not an event — it carries no "seen" semantics. */
+const PROJECT_LIVE_ORDER = [STATUS_META.running, BACKGROUND_WORK_META];
+
+/** Finished work a project tab shows as a steady dot, last in priority, only while
+ *  unseen and within `RECENT_FINISH_MS`. */
+const PROJECT_RECENT_ORDER = [STATUS_META.done, STATUS_META['waiting-approval']];
+
+/** How long a finished session may still light its project tab, if unseen. */
+const RECENT_FINISH_MS = 24 * 60 * 60 * 1000;
+
+const PROJECT_LIVE_LABELS = new Set(PROJECT_LIVE_ORDER.map((m) => m.label));
+const PROJECT_RECENT_LABELS = new Set(PROJECT_RECENT_ORDER.map((m) => m.label));
+
+/** Keyed on label — all are distinct, so a rename propagates for free. */
+const PROJECT_STATUS_RANK = new Map(
+  [...PROJECT_STATUS_ORDER, ...PROJECT_LIVE_ORDER, ...PROJECT_RECENT_ORDER].map((m, i) => [
+    m.label,
+    i,
+  ]),
+);
+
+/**
+ * Whether a session state is acknowledged by opening its project — the store's
+ * `seenSessionStatus` only keeps entries for these. Actionable states and recent
+ * finishes; live work is never "seen", it simply lasts as long as it runs.
+ */
+export function tracksSeen(meta: { label: string; actionable: boolean }): boolean {
+  return meta.actionable || PROJECT_RECENT_LABELS.has(meta.label);
+}
 
 /** How the sidebar orders a session list — persisted per browser. */
 export type SessionSort = 'status' | 'activity' | 'created';
@@ -205,33 +233,41 @@ export function compareSessions(mode: SessionSort): (a: SessionMeta, b: SessionM
 }
 
 /**
- * The single most urgent *unseen* actionable state across a project's sessions,
- * or `null` when nothing needs the user (caller keeps the plain folder icon).
+ * The one dot a project tab shows across its sessions, or `null` for the plain
+ * folder icon. Three tiers, in priority order:
+ *
+ * 1. An unseen actionable state — pulses, most urgent first.
+ * 2. Live work (`running`, `background work`) — steady, regardless of `seen`.
+ * 3. An unseen finish (`done`, `step finished`) whose last activity falls within
+ *    `RECENT_FINISH_MS` of `now` — steady.
  *
  * `seen` is the store's `seenSessionStatus` map — session id to the label the
- * user has already looked at. Anything matching is skipped, so visiting a
- * project quiets its tab until some session reaches a state the user hasn't
- * seen yet.
+ * user has already looked at. Matching actionable or finished states are
+ * skipped, so visiting a project quiets its tab until some session reaches a
+ * state the user hasn't seen yet.
  *
- * `running`/`done`/`idle` are already `actionable: false`, so they fall through
- * without a second check. Archived sessions are skipped; `completed` needs no
- * guard of its own because the server always sets it alongside `archived`.
- * A label missing from the rank table (a future `SessionStatus`) is skipped
- * rather than guessed at.
+ * Archived sessions are skipped; `completed` needs no guard of its own because
+ * the server always sets it alongside `archived`. `idle`, and any label missing
+ * from the rank table (a future `SessionStatus`), is skipped rather than guessed at.
  */
 export function projectStatusMeta(
   sessions: SessionMeta[],
   seen: Record<string, string>,
-): { color: string; label: string } | null {
-  let best: { color: string; label: string } | null = null;
+  now: number,
+): { color: string; label: string; pulse: boolean } | null {
+  let best: { color: string; label: string; pulse: boolean } | null = null;
   let bestRank = Infinity;
   for (const session of sessions) {
     if (session.archived) continue;
     const meta = sessionRowMeta(session);
-    if (!meta.actionable || seen[session.id] === meta.label) continue;
+    const live = PROJECT_LIVE_LABELS.has(meta.label);
+    if (!live) {
+      if (!tracksSeen(meta) || seen[session.id] === meta.label) continue;
+      if (!meta.actionable && lastActivityAt(session) < now - RECENT_FINISH_MS) continue;
+    }
     const rank = PROJECT_STATUS_RANK.get(meta.label);
     if (rank == null || rank >= bestRank) continue;
-    best = { color: meta.color, label: meta.label };
+    best = { color: meta.color, label: meta.label, pulse: meta.actionable };
     bestRank = rank;
     if (rank === 0) break;
   }
