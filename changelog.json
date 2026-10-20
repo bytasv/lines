@@ -164,6 +164,14 @@
   ],
   "desktop": [
     {
+      "version": "0.2.59",
+      "date": "2026-10-20",
+      "items": [
+        "A finished session no longer restarts its last turn when the app is reopened after it was closed.",
+        "Plan mode asks less: read-only shell commands and helper tools run without a card, and Assist mode stops flagging commit messages and search patterns that only mention words like kill or shutdown."
+      ]
+    },
+    {
       "version": "0.2.58",
       "date": "2026-10-12",
       "items": [
@@ -274,8 +282,5 @@
       ]
     }
   ],
-  "desktopPending": [
-    "A finished session no longer restarts its last turn when the app is reopened after it was closed.",
-    "Plan mode asks less: read-only shell commands and helper tools run without a card, and Assist mode stops flagging commit messages and search patterns that only mention words like kill or shutdown."
-  ]
+  "desktopPending": []
 }
