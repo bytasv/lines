@@ -1,46 +1,29 @@
 import { useEffect, useState } from 'react';
-import { Alert, Badge, Box, Button, Code, Group, Loader, Text } from '@mantine/core';
+import { Alert, Badge, Box, Button, Code, Group, Loader, Stack, Text } from '@mantine/core';
 import { useClipboard } from '@mantine/hooks';
 import { IconAlertCircle, IconCopy } from '@tabler/icons-react';
-import type { SyncLogEntry, SyncSigningInfo } from '@lines/shared';
+import type { SyncLogEntry, SyncPending, SyncSigningInfo } from '@lines/shared';
 import { formatTimestamp } from '@lines/shared';
-import { useStore } from '../store';
+import { syncIndicator, useStore } from '../store';
+import type { SyncIndicator } from '../store';
 import { fileRequest, send } from '../ws';
 import { SettingsGroup, SettingsRow } from './SettingsLayout';
 
 /**
- * Why cloud sync dropped. The bridge writes a row only for a failed storage
- * request or an availability flip, so a healthy install shows an empty list —
- * and a user seeing the amber pill has something concrete to copy into a report
- * (the bridge console isn't reachable on a desktop or VPS install).
+ * Why cloud sync dropped, and what is waiting for it. The bridge writes a log
+ * row only for a failed storage request or an availability flip, so a healthy
+ * install shows an empty list — and a user wondering about the header's sync
+ * dot has something concrete to copy into a report (the bridge console isn't
+ * reachable on a desktop or VPS install).
  */
 export function SyncSection() {
   // The live status, not the one the route returns beside the rows: it is
   // broadcast on every flip, so this pane can't go stale while it is open.
   const status = useStore((s) => s.storageStatus);
   const signing = useStore((s) => s.syncSigning);
-  const [entries, setEntries] = useState<SyncLogEntry[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { entries, error } = useSyncLog(true);
   const clipboard = useClipboard({ timeout: 1500 });
-
-  useEffect(() => {
-    let cancelled = false;
-    fileRequest('syncLog', {})
-      .then(({ status: code, body }) => {
-        if (cancelled) return;
-        if (code !== 200) {
-          setError(`The bridge answered ${code}.`);
-          return;
-        }
-        setEntries((body as { entries?: SyncLogEntry[] })?.entries ?? []);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const sync = status ? syncIndicator(status) : null;
 
   // Newest first: an outage is read from its most recent row backwards.
   const rows = entries ? [...entries].reverse() : [];
@@ -50,13 +33,26 @@ export function SyncSection() {
       <SettingsGroup>
         <SettingsRow
           label="Status"
-          description={status?.available === false ? status.reason : undefined}
+          description={
+            sync
+              ? [cloudLabel(sync), sync.cloud === 'unreachable' ? status?.reason : undefined]
+                  .filter(Boolean)
+                  .join(' — ')
+              : undefined
+          }
           control={
-            <Badge color={status?.available === false ? 'yellow' : 'green'} variant="light">
-              {status?.available === false ? `unavailable${status.kind ? ` · ${status.kind}` : ''}` : 'connected'}
+            <Badge color={sync?.cloud === 'ok' || !sync ? 'green' : 'gray'} variant="light">
+              {sync ? SYNC_STATE_LABEL[sync.state] : 'connected'}
             </Badge>
           }
         />
+        {sync?.pending && (
+          <SettingsRow label="Waiting to sync">
+            <Box mt={6}>
+              <SyncPendingList pending={sync.pending} />
+            </Box>
+          </SettingsRow>
+        )}
       </SettingsGroup>
 
       <SigningGroup info={signing} />
@@ -87,7 +83,7 @@ export function SyncSection() {
       ) : (
         <SettingsGroup
           title="Failures"
-          footer="Newest first. These are the failures behind the “cloud sync unavailable” notice."
+          footer="Newest first. These are the failures behind a paused cloud sync."
         >
           {rows.length === 0 ? (
             <Box px="md" py="sm">
@@ -180,8 +176,92 @@ const EVENT_COLOR: Record<SyncLogEntry['event'], string> = {
   up: 'green',
 };
 
+/**
+ * `sync-log.jsonl`, read through the primary machine's bridge — the one whose
+ * `storageStatus` every caller shows beside it. Fetched each time `enabled`
+ * turns on, so a popover reopened later reads fresh rows.
+ */
+export function useSyncLog(enabled: boolean): { entries: SyncLogEntry[] | null; error: string | null } {
+  const primary = useStore((s) => s.primaryDeviceId);
+  const [entries, setEntries] = useState<SyncLogEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    setError(null);
+    // `?? ''`: a direct local bridge's link is keyed by the empty id.
+    fileRequest('syncLog', {}, primary ?? '')
+      .then(({ status: code, body }) => {
+        if (cancelled) return;
+        if (code !== 200) {
+          setError(`The bridge answered ${code}.`);
+          return;
+        }
+        setEntries((body as { entries?: SyncLogEntry[] })?.entries ?? []);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, primary]);
+
+  return { entries, error };
+}
+
+export const SYNC_STATE_LABEL: Record<SyncIndicator['state'], string> = {
+  synced: 'synced',
+  syncing: 'syncing',
+  pending: 'waiting',
+  paused: 'paused',
+};
+
+/** The cloud half of the status, in words: which state, and since when. */
+export function cloudLabel(sync: SyncIndicator): string {
+  const since = sync.since ? ` since ${formatTimestamp(sync.since)}` : '';
+  if (sync.cloud === 'signedOut') return `Not signed in to Lines Cloud${since}`;
+  if (sync.cloud === 'unreachable') return `Lines Cloud out of reach${since}`;
+  return 'Connected to Lines Cloud';
+}
+
+const PENDING_LABELS: [keyof SyncPending, string][] = [
+  ['sessions', 'Sessions'],
+  ['deletes', 'Deletions'],
+  ['workflows', 'Workflows'],
+  ['steps', 'Steps'],
+  ['recipes', 'Recipes'],
+  ['settings', 'Settings'],
+  ['memory', 'Memory'],
+];
+
+/** Local writes storage has not confirmed yet, one line per kind that has any. */
+export function SyncPendingList({ pending }: { pending: SyncPending }) {
+  const rows = PENDING_LABELS.filter(([key]) => pending[key] > 0);
+  if (rows.length === 0) {
+    return (
+      <Text size="xs" c="dimmed">
+        Nothing waiting — everything here is in the cloud.
+      </Text>
+    );
+  }
+  return (
+    <Stack gap={2}>
+      {rows.map(([key, label]) => (
+        <Group key={key} justify="space-between" gap="xs" wrap="nowrap">
+          <Text size="xs">{label}</Text>
+          <Text size="xs" fw={600}>
+            {pending[key]}
+          </Text>
+        </Group>
+      ))}
+    </Stack>
+  );
+}
+
 /** One row as a line: what was tried, what came back, how long it took. */
-function syncLogDetail(entry: SyncLogEntry): string {
+export function syncLogDetail(entry: SyncLogEntry): string {
   const parts: string[] = [];
   if (entry.kind) parts.push(entry.kind);
   if (entry.method && entry.path) parts.push(`${entry.method} ${entry.path}`);

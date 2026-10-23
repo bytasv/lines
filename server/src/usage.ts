@@ -18,6 +18,9 @@ const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes, like ClaudeUsageBar
 const REFRESH_DEBOUNCE_MS = 5_000; // coalesce bursts of turn-complete refreshes
 const REFRESH_MIN_SPACING_MS = 30_000; // never hit the endpoint more than this often
 const FETCH_TIMEOUT_MS = 10_000;
+/** Refetch this long after a window's `resetsAt`, so the API has rolled it over. */
+const RESET_GRACE_MS = 30_000;
+const MAX_TIMER_MS = 2 ** 31 - 1;
 /** The plan changes on an upgrade, not per turn — an hourly re-read is plenty. */
 const PLAN_TTL_MS = 60 * 60_000;
 
@@ -55,6 +58,30 @@ export function parseExtraUsage(record: Record<string, unknown>): UsageCredits |
   if (typeof e.currency === 'string' && e.currency) credits.currency = e.currency;
   if (typeof e.disabled_reason === 'string' && e.disabled_reason) credits.disabledReason = e.disabled_reason;
   return credits;
+}
+
+/**
+ * A non-ok usage response. Carries the status and, on a 429, how long the
+ * endpoint asked us to wait — the message names both so the log says why.
+ */
+class UsageHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly retryAfterMs: number | null,
+  ) {
+    super(
+      `usage endpoint ${status}${retryAfterMs !== null ? ` (retry-after ${Math.round(retryAfterMs / 1000)})` : ''}`,
+    );
+  }
+}
+
+/** `retry-after` as milliseconds: delta-seconds or an HTTP date. Null when absent or unparsable. */
+export function parseRetryAfter(header: string | null, now = Date.now()): number | null {
+  if (!header) return null;
+  const trimmed = header.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000;
+  const at = Date.parse(trimmed);
+  return Number.isFinite(at) ? Math.max(0, at - now) : null;
 }
 
 /** Extract usage windows tolerantly, surviving additive shape drift. Throws if none parse. */
@@ -123,7 +150,15 @@ export class UsagePoller {
   private inFlight = false;
   private lastFetchAt = 0;
   private available: boolean | null = null; // for logging state transitions only
+  /** Last failure message logged, so a repeat stays quiet but a new cause shows up. */
+  private lastFailure: string | null = null;
   private debounceTimer: NodeJS.Timeout | null = null;
+  /** A 429 asked us to wait: no request before this (epoch ms). */
+  private nextAllowedAt = 0;
+  /** One-shot refetch right after the earliest window rolls over. */
+  private resetTimer: NodeJS.Timeout | null = null;
+  /** `five_hour` arriving without `resets_at` is logged once, raw, for diagnosis. */
+  private warnedNullReset = false;
   /** Last plan label read off the profile, and when — see PLAN_TTL_MS. */
   private plan: { label: string | undefined; at: number } | null = null;
 
@@ -144,12 +179,44 @@ export class UsagePoller {
   /** Request a refresh soon (after an SDK result), debounced and rate-limited. */
   refreshSoon(): void {
     if (this.debounceTimer) return;
+    if (Date.now() < this.nextAllowedAt) return; // rate-limited: a turn must not extend it
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = null;
-      if (Date.now() - this.lastFetchAt < REFRESH_MIN_SPACING_MS) return;
-      void this.fetch();
+      this.fetchSpaced();
     }, REFRESH_DEBOUNCE_MS);
     this.debounceTimer.unref();
+  }
+
+  /** `fetch()` unless the endpoint was hit within REFRESH_MIN_SPACING_MS. */
+  private fetchSpaced(): void {
+    if (Date.now() - this.lastFetchAt < REFRESH_MIN_SPACING_MS) return;
+    void this.fetch();
+  }
+
+  /**
+   * Refetch once, RESET_GRACE_MS after the earliest future `resetsAt`, so the
+   * chip moves on right after a window rolls over instead of at the next poll.
+   */
+  private scheduleResetRefetch(snapshot: UsageSnapshot): void {
+    this.clearResetTimer();
+    const now = Date.now();
+    const next = snapshot.windows
+      .map((w) => (w.resetsAt ? new Date(w.resetsAt).getTime() : NaN))
+      .filter((t) => Number.isFinite(t) && t > now)
+      .reduce((a, b) => Math.min(a, b), Infinity);
+    if (!Number.isFinite(next)) return;
+    // Capped: Node fires an over-int32 delay immediately; an early refetch just reschedules.
+    this.resetTimer = setTimeout(() => {
+      this.resetTimer = null;
+      this.fetchSpaced();
+    }, Math.min(next - now + RESET_GRACE_MS, MAX_TIMER_MS));
+    this.resetTimer.unref();
+  }
+
+  private clearResetTimer(): void {
+    if (!this.resetTimer) return;
+    clearTimeout(this.resetTimer);
+    this.resetTimer = null;
   }
 
   private async fetch(): Promise<void> {
@@ -157,6 +224,7 @@ export class UsagePoller {
     if (!this.auth.isLoggedIn()) {
       // Logged out: drop any stale snapshot so the chip disappears.
       this.plan = null;
+      this.clearResetTimer();
       if (this.snapshotValue) {
         this.snapshotValue = null;
         this.broadcast({ type: 'usage', usage: null });
@@ -164,6 +232,7 @@ export class UsagePoller {
       this.setAvailable(false, new Error('not logged in'));
       return;
     }
+    if (Date.now() < this.nextAllowedAt) return; // honouring a 429's retry-after
     this.inFlight = true;
     this.lastFetchAt = Date.now();
     try {
@@ -174,16 +243,24 @@ export class UsagePoller {
         token = await this.auth.forceRefresh();
         res = await this.hit(token);
       }
-      if (!res.ok) throw new Error(`usage endpoint ${res.status}`);
-      const snapshot = parseSnapshot(await res.json());
+      if (!res.ok) {
+        const retryAfterMs = parseRetryAfter(res.headers.get('retry-after'));
+        if (res.status === 429) this.nextAllowedAt = Date.now() + (retryAfterMs ?? POLL_INTERVAL_MS);
+        throw new UsageHttpError(res.status, retryAfterMs);
+      }
+      const body = await res.json();
+      const snapshot = parseSnapshot(body);
+      this.warnIfNoFiveHourReset(body, snapshot);
       const plan = await this.planLabel(token);
       if (plan) snapshot.plan = plan;
       this.snapshotValue = snapshot;
       this.setAvailable(true);
       this.broadcast({ type: 'usage', usage: snapshot });
+      this.scheduleResetRefetch(snapshot);
     } catch (err) {
       if (err instanceof AuthRequiredError) {
         this.plan = null;
+        this.clearResetTimer();
         this.snapshotValue = null;
         this.broadcast({ type: 'usage', usage: null });
         this.setAvailable(false, err);
@@ -223,11 +300,31 @@ export class UsagePoller {
     }
   }
 
-  /** Log only on availability transitions, so a no-creds machine stays quiet. */
+  /** The API's semantics for a null `five_hour.resets_at` are unknown; log the raw window once. */
+  private warnIfNoFiveHourReset(body: unknown, snapshot: UsageSnapshot): void {
+    if (this.warnedNullReset) return;
+    const five = snapshot.windows.find((w) => w.id === 'five_hour');
+    if (!five || five.resetsAt !== null) return;
+    this.warnedNullReset = true;
+    console.warn('[usage] five_hour without resets_at', JSON.stringify((body as Record<string, unknown>).five_hour));
+  }
+
+  /**
+   * Successes log only on the transition back to available; failures log once
+   * per distinct message, so a no-creds machine stays quiet but a 401 turning
+   * into a 429 still shows up.
+   */
   private setAvailable(ok: boolean, err?: unknown): void {
-    if (this.available === ok) return;
+    const wasAvailable = this.available;
     this.available = ok;
-    if (ok) console.log('[usage] plan usage available');
-    else console.warn('[usage] unavailable:', err instanceof Error ? err.message : String(err));
+    if (ok) {
+      this.lastFailure = null;
+      if (wasAvailable !== true) console.log('[usage] plan usage available');
+      return;
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    if (message === this.lastFailure) return;
+    this.lastFailure = message;
+    console.warn('[usage] unavailable:', message);
   }
 }

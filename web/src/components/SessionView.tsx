@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ActionIcon,
   Alert,
@@ -24,7 +24,6 @@ import {
   IconChevronDown,
   IconChevronRight,
   IconDots,
-  IconFileDiff,
   IconFolder,
   IconGitBranch,
   IconInfoCircle,
@@ -69,14 +68,6 @@ import { SHARING_ENABLED } from '../lib/shares';
 import { rememberedDeviceId } from '../lib/storage';
 import { useDevices } from '../lib/devices';
 import { presetOfCaps } from '@lines/shared';
-
-// See MonacoPreviewModal: lazy, so the review editor's Monaco is fetched when a
-// review is opened rather than sitting in the entry chunk. The module imports
-// `lib/monacoSetup` itself, which is what still orders the CDN override ahead
-// of the first mount.
-const SessionDiffModal = lazy(() =>
-  import('./SessionDiffModal').then((m) => ({ default: m.SessionDiffModal })),
-);
 
 /** Past this, the wait is worth explaining and a manual re-send is offered. */
 const SLOW_LOAD_MS = 8000;
@@ -144,12 +135,12 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   // this exists to prevent.
   const access = useStore((s) => s.access);
   const [sharing, setSharing] = useState(false);
-  const [reviewing, setReviewing] = useState(false);
   const remote = useSessionMachine(sessionId);
   // The dot in this header describes the session's *own* machine, so a shared
   // session on a dead laptop is obvious before you type into it.
   const health = useSessionMachineHealth(sessionId);
   const devices = useDevices((d) => d.devices);
+  const primaryDeviceId = useStore((s) => s.primaryDeviceId);
   const events = useStore((s) => s.transcripts[sessionId]);
   const loaded = useStore((s) => s.transcriptLoaded[sessionId]);
   // Own workflows first, then shared ones: a run of someone else's published
@@ -217,6 +208,10 @@ export function SessionView({ sessionId }: { sessionId: string }) {
   const deviceId = rememberedDeviceId();
   // Named in the modal title, so "share the whole machine" says which machine.
   const machineName = devices?.find((d) => d.id === deviceId)?.name ?? null;
+  // The bar below names the machine hosting this session as the switcher does, not
+  // its owner: one person can share several machines.
+  const hostDeviceId = remote.deviceId ?? primaryDeviceId;
+  const hostMachineName = devices?.find((d) => d.id === hostDeviceId)?.name ?? null;
 
   return (
     <Stack gap={0} h="100%">
@@ -258,7 +253,7 @@ export function SessionView({ sessionId }: { sessionId: string }) {
         </Group>
         <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
           <PresenceStack sessionId={sessionId} />
-          {/* Phone: the two icon buttons and the cost read-out do not fit beside
+          {/* Phone: the share button and the cost read-out do not fit beside
               a session name at 390px, so they fold into one menu. Same actions,
               same handlers — a second decision path here is how the two would
               drift. */}
@@ -280,9 +275,6 @@ export function SessionView({ sessionId }: { sessionId: string }) {
                     </Menu.Label>
                   )
                 )}
-                <Menu.Item leftSection={<IconFileDiff size={14} />} onClick={() => setReviewing(true)}>
-                  Review changes
-                </Menu.Item>
                 {!access && SHARING_ENABLED && (
                   <Menu.Item leftSection={<IconShare size={14} />} onClick={() => setSharing(true)}>
                     Share session
@@ -303,20 +295,6 @@ export function SessionView({ sessionId }: { sessionId: string }) {
               </Text>
             )
           )}
-          {/* Opens on click rather than prefetching a count: the diff is a `git
-              diff` per repo, and paying for one every time a session is selected
-              would be a poor trade for a badge. */}
-          <Tooltip label="Review this session’s changes" withArrow>
-            <ActionIcon
-              variant="subtle"
-              color="gray"
-              size="sm"
-              aria-label="Review this session’s changes"
-              onClick={() => setReviewing(true)}
-            >
-              <IconFileDiff size={14} />
-            </ActionIcon>
-          </Tooltip>
           {/* Owner only: sharing somebody else's session is not a grant anyone
               holds, and there is no storage to record a grant in a local install. */}
           {!access && SHARING_ENABLED && (
@@ -353,11 +331,8 @@ export function SessionView({ sessionId }: { sessionId: string }) {
             />
             <Text size="xs" c="dimmed">
               Running on{' '}
-              {remote.ownerProfile?.name ??
-                access?.ownerProfile?.name ??
-                access?.ownerProfile?.email ??
-                'another person'}
-              ’s machine
+              {hostMachineName ??
+                `${remote.ownerProfile?.name ?? access?.ownerProfile?.name ?? access?.ownerProfile?.email ?? 'another person'}’s machine`}
             </Text>
             {access && (
               <Badge size="xs" variant="light" color="gray">
@@ -455,11 +430,6 @@ export function SessionView({ sessionId }: { sessionId: string }) {
       <QueuedMessages session={session} />
       <OfflineQueuedMessages session={session} />
       {session.readOnly ? <ReadOnlySessionNotice /> : <Composer session={session} />}
-      {reviewing && (
-        <Suspense fallback={null}>
-          <SessionDiffModal opened={reviewing} onClose={() => setReviewing(false)} sessionId={sessionId} />
-        </Suspense>
-      )}
       {sharing && deviceId && (
         <ShareModal
           opened={sharing}

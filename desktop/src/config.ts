@@ -35,6 +35,14 @@ export interface DesktopConfig {
   updateFeedUrl: string;
   /** Where a user goes to download an update by hand; see `canSelfInstall`. */
   downloadUrl: string;
+  /**
+   * Hosted mode's local fallback window: when the hosted app or the relay is
+   * unreachable, the shell serves `web/dist-local` itself and points its window
+   * there, talking to this machine's bridge directly (`LINES_BRIDGE_DIRECT=token`).
+   * Off by default until its security tests have run green on a release; on
+   * with `LINES_LOCAL_FALLBACK=1` or `"localFallback": true` in config.json.
+   */
+  localFallback: boolean;
 }
 
 /** Production, i.e. what a DMG built with no extra configuration points at. */
@@ -44,6 +52,7 @@ export const DEFAULT_CONFIG: DesktopConfig = {
   webUrl: 'https://run.linesapp.cloud',
   updateFeedUrl: '',
   downloadUrl: 'https://linesapp.cloud',
+  localFallback: false,
 };
 
 /** File name inside the bundle's Resources (and beside the repo's desktop/ in dev). */
@@ -70,6 +79,7 @@ export function loadConfig(resourcesDir: string, env: NodeJS.ProcessEnv = proces
     ...(env.LINES_WEB_URL ? { webUrl: env.LINES_WEB_URL } : {}),
     ...(env.LINES_UPDATE_FEED_URL ? { updateFeedUrl: env.LINES_UPDATE_FEED_URL } : {}),
     ...(env.LINES_DOWNLOAD_URL ? { downloadUrl: env.LINES_DOWNLOAD_URL } : {}),
+    ...(env.LINES_LOCAL_FALLBACK ? { localFallback: env.LINES_LOCAL_FALLBACK === '1' } : {}),
   };
   return { ...DEFAULT_CONFIG, ...fromFile, ...fromEnv };
 }

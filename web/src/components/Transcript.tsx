@@ -277,8 +277,8 @@ function ImageThumb({ src, alt, onOpen }: { src: string; alt: string; onOpen: ()
 const USER_TEXT_CAP = 4000;
 
 /**
- * A user prompt, capped. Workflow hand-off prompts splice in the working-tree diff
- * and prior step output, and user items are fold *boundaries* — never collapsed,
+ * A user prompt, capped. Workflow hand-off prompts splice in prior step output,
+ * and user items are fold *boundaries* — never collapsed,
  * always rendered on first paint. Running ReactMarkdown + highlight over a
  * multi-megabyte prompt blocks the main thread long enough to trip the socket
  * heartbeat, and the reconnect re-downloads the transcript into the same stall.

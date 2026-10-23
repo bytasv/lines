@@ -1,5 +1,5 @@
-import { isSessionActive, resolveStepContent } from '@lines/shared';
-import type { SessionMeta, SessionStatus, StepContent, WorkflowDef } from '@lines/shared';
+import { isSessionActive, isSessionMuted, resolveStepContent } from '@lines/shared';
+import type { SessionGroup, SessionMeta, SessionStatus, StepContent, WorkflowDef } from '@lines/shared';
 
 const STATUS_META: Record<SessionStatus, { color: string; label: string }> = {
   idle: { color: 'gray', label: 'idle' },
@@ -182,7 +182,7 @@ export function tracksSeen(meta: { label: string; actionable: boolean }): boolea
 }
 
 /** How the sidebar orders a session list — persisted per browser. */
-export type SessionSort = 'status' | 'activity' | 'created';
+export type SessionSort = 'status' | 'activity' | 'created' | 'manual';
 
 /** localStorage key the sidebar's sort persists under; the store reads it too. */
 export const SESSION_SORT_KEY = 'lines.sessionSort';
@@ -222,7 +222,24 @@ function lastActivityAt(session: SessionMeta): number {
  * sorts last rather than being guessed at — the same rule `projectStatusMeta`
  * applies by skipping.
  */
-export function compareSessions(mode: SessionSort): (a: SessionMeta, b: SessionMeta) => number {
+export function compareSessions(
+  mode: SessionSort,
+  /** `manual` only: the project's hand-placed order (see `UserUiSettings.sessionOrder`). */
+  order?: readonly string[],
+): (a: SessionMeta, b: SessionMeta) => number {
+  if (mode === 'manual') {
+    // Sessions not placed yet — new since the order was last written — go on top,
+    // newest first, the way a new session lands in every other mode too.
+    const at = new Map((order ?? []).map((id, i) => [id, i]));
+    return (a, b) => {
+      const ia = at.get(a.id);
+      const ib = at.get(b.id);
+      if (ia === undefined || ib === undefined) {
+        return ia === ib ? b.createdAt - a.createdAt : ia === undefined ? -1 : 1;
+      }
+      return ia - ib;
+    };
+  }
   if (mode === 'created') return (a, b) => b.createdAt - a.createdAt;
   if (mode === 'activity') return (a, b) => lastActivityAt(b) - lastActivityAt(a);
   return (a, b) => {
@@ -246,7 +263,8 @@ export function compareSessions(mode: SessionSort): (a: SessionMeta, b: SessionM
  * skipped, so visiting a project quiets its tab until some session reaches a
  * state the user hasn't seen yet.
  *
- * Archived sessions are skipped; `completed` needs no guard of its own because
+ * Archived sessions, and sessions in a muted group (resolved in `groups`), are
+ * skipped; `completed` needs no guard of its own because
  * the server always sets it alongside `archived`. `idle`, and any label missing
  * from the rank table (a future `SessionStatus`), is skipped rather than guessed at.
  */
@@ -254,11 +272,12 @@ export function projectStatusMeta(
   sessions: SessionMeta[],
   seen: Record<string, string>,
   now: number,
+  groups?: readonly SessionGroup[],
 ): { color: string; label: string; pulse: boolean } | null {
   let best: { color: string; label: string; pulse: boolean } | null = null;
   let bestRank = Infinity;
   for (const session of sessions) {
-    if (session.archived) continue;
+    if (session.archived || isSessionMuted(session, groups)) continue;
     const meta = sessionRowMeta(session);
     const live = PROJECT_LIVE_LABELS.has(meta.label);
     if (!live) {
@@ -280,17 +299,20 @@ export function projectStatusMeta(
  *
  * Derived from the sessions the client already holds rather than reported by the
  * bridge, and counted through `sessionRowMeta` so a machine's summary and its
- * session rows can never disagree about what "actionable" means. Archived
- * sessions are skipped, exactly as `projectStatusMeta` skips them.
+ * session rows can never disagree about what "actionable" means. Archived and
+ * muted sessions are skipped, exactly as `projectStatusMeta` skips them.
  *
  * Takes a plain array: `format.ts` never imports the store, and per-machine
  * grouping belongs to the caller.
  */
-export function machineActivity(sessions: SessionMeta[]): { running: number; actionable: number } {
+export function machineActivity(
+  sessions: SessionMeta[],
+  groups?: readonly SessionGroup[],
+): { running: number; actionable: number } {
   let running = 0;
   let actionable = 0;
   for (const session of sessions) {
-    if (session.archived) continue;
+    if (session.archived || isSessionMuted(session, groups)) continue;
     if (session.status === 'running') running++;
     else if (sessionRowMeta(session).actionable) actionable++;
   }

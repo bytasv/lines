@@ -23,7 +23,11 @@ const TOKEN_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 
 // The dev page sits on localhost beside its bridge, so it connects directly and never pairs.
-export const STORAGE_URL: string | undefined = import.meta.env.DEV ? undefined : import.meta.env.VITE_STORAGE_URL;
+// So does the desktop app's local window (lib/localShell.ts), which also hides
+// every surface keyed on this: pairing, machines, sharing.
+const LOCAL_SHELL_BUILD = import.meta.env.VITE_LINES_LOCAL_SHELL === '1';
+export const STORAGE_URL: string | undefined =
+  import.meta.env.DEV || LOCAL_SHELL_BUILD ? undefined : import.meta.env.VITE_STORAGE_URL;
 export const DEVICE_PAIRING_ENABLED = Boolean(STORAGE_URL);
 
 /**
@@ -31,7 +35,9 @@ export const DEVICE_PAIRING_ENABLED = Boolean(STORAGE_URL);
  * Unset (a local build, or a deployment with no release published yet) hides the
  * download surface entirely — a button pointing at nothing is worse than none.
  */
-export const DESKTOP_DOWNLOAD_URL: string | undefined = import.meta.env.VITE_DESKTOP_DOWNLOAD_URL;
+export const DESKTOP_DOWNLOAD_URL: string | undefined = LOCAL_SHELL_BUILD
+  ? undefined
+  : import.meta.env.VITE_DESKTOP_DOWNLOAD_URL;
 export const DESKTOP_DOWNLOAD_ENABLED = Boolean(DESKTOP_DOWNLOAD_URL);
 
 /**

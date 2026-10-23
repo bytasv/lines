@@ -116,6 +116,7 @@ iOS 16.4+, the app added to the home screen, and a permission prompt granted fro
 
 ## Business rules
 
+- A session in a muted sidebar group (see session-and-project-ui) is never pushed: `PushNotifier.isMuted` is checked after the transition test, and the bridge's own status tracking still updates, so unmuting does not replay past transitions.
 - Subscriptions are **bridge-local**, stored per user in `push-subscriptions.json` and never
   synced — no storage schema change. Each bridge the user owns keeps its own list of that user's
   devices.

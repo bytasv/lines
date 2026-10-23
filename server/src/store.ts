@@ -16,6 +16,7 @@ import type {
   SpendHistoryBlob,
   StepDef,
   SyncLogEntry,
+  SyncOutbox,
   TranscriptEvent,
   UserUiSettings,
   WorkflowDef,
@@ -358,6 +359,7 @@ export function createStore(root: string, options: { sharedRoot?: string } = {})
   const MEMORY_SYNC_FILE = path.join(root, 'memory-sync.json');
   const WATERMARKS_FILE = path.join(root, 'sync-watermarks.json');
   const SYNC_LOG_FILE = path.join(root, 'sync-log.jsonl');
+  const SYNC_OUTBOX_FILE = path.join(root, 'sync-outbox.json');
 
   fs.mkdirSync(TRANSCRIPTS, { recursive: true });
   fs.mkdirSync(ATTACHMENTS, { recursive: true });
@@ -955,6 +957,20 @@ export function createStore(root: string, options: { sharedRoot?: string } = {})
 
     saveSyncWatermarks(marks: SyncWatermarks) {
       writeJson(WATERMARKS_FILE, marks);
+    },
+
+    /**
+     * Writes storage has not confirmed yet (see `SyncOutbox`). Persisted so an
+     * outage that spans a restart still flushes every queued delete and dirty
+     * kind on recovery. Undefined when there is no file; the sync client fills in
+     * the empty shape.
+     */
+    loadSyncOutbox(): SyncOutbox | undefined {
+      return readJson<SyncOutbox | undefined>(SYNC_OUTBOX_FILE, undefined);
+    },
+
+    saveSyncOutbox(outbox: SyncOutbox) {
+      writeJson(SYNC_OUTBOX_FILE, outbox);
     },
 
     /**

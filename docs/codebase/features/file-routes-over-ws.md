@@ -42,8 +42,8 @@ WebSocket multiplexer.
 ## Important symbols
 
 - `handleFileRequest(ctx, kind, params, access)` → `Promise<{ status, body }>`
-  — async since [session-change-tracking](session-change-tracking.md) added
-  two kinds that read git; every other handler still resolves synchronously
+  — async because `grep` and `sessionSearch` are; every other handler still
+  resolves synchronously
 - `fileRequest(kind, params)` — client side, promise keyed by `reqId`
 - `useAttachmentUrl(rel)` — base64 → blob URL, revoked on unmount
 - `saveFile(path, content, expectedMtimeMs?)` — the `writeFile` call; a 409 comes
@@ -77,7 +77,7 @@ root cannot point anywhere on the host; the owner's single-file routes (`file`, 
 they checked. `resolveWorkspacePath` requires the path
 inside a root both as written and once links are followed (`isRealInside`, the
 auto-mode guard's own helper), and each single-path kind — `file`, `tree`,
-`docs`, `media`, `writeFile`, `sessionDiffFile` — then touches only the resolved
+`docs`, `media`, `writeFile` — then touches only the resolved
 real path (`grantedReal`), re-gated there. Touching the path as named would follow
 its links a second time, after the check, so a link swapped in between could
 redirect the access. `attachment` does the same against the attachments root, and
@@ -125,7 +125,7 @@ fallback.
   `media` chunking, clamping, 403/404/413/415 and bad-offset 400; `writeFile`
   containment, symlink escape, 409, mode preservation and temp-file cleanup; a
   symlink that leaves its root refused for `file`, `media`, `tree`, `writeFile`,
-  `sessionDiffFile` and `attachment` (one that stays is served); a read touching
+  and `attachment` (one that stays is served); a read touching
   only the real path it checked; `grep` skipping a symlink git lists and a tracked
   file under a since-linked directory; a session-scope guest reading its own
   sessions' attachments and no others', not by `..` nor through a planted link
@@ -153,7 +153,7 @@ fallback.
 - The owner's `file`, `media` and `writeFile` reach any path on the host (`/tmp`, `~/…`, another
   project), through `resolveFilePath`: it is their own disk over their own authenticated socket,
   the same reach the agent has. A guest, machine or session scope, stays clamped to their session
-  cwds. `tree`, `docs`, `find`, `grep`, `sessionSearch`, `sessionDiffFile` and `attachment` stay
+  cwds. `tree`, `docs`, `find`, `grep`, `sessionSearch` and `attachment` stay
   root-scoped for everyone, so the sidebar never walks `/`.
 - `writeFile` is owner-only, enforced in `handleFileRequest` and the handler. The
   socket gate for every file kind is the `readFiles` capability, so without this
@@ -180,8 +180,6 @@ fallback.
 - mtime conflict detection misses same-millisecond writes on coarse-mtime
   filesystems; accepted for basic editing. Content is round-tripped as UTF-8, so a
   BOM or non-UTF-8 file can change on save.
-- A save made while a turn runs in the session's cwd falls inside that turn's git
-  snapshot window, so the session diff attributes it to the agent.
 - The browser buffers the whole file (chunks plus Blob), so the 200 MB cap bounds
   memory; video plays only after every chunk arrives.
 
@@ -218,6 +216,3 @@ fallback.
 - [permissions-and-plan-mode](permissions-and-plan-mode.md) — the plan-directory
   exception in the containment check, and `realPathOf`/`isRealInside`, the
   guard's symlink-following containment these routes reuse
-- [session-change-tracking](session-change-tracking.md) — `sessionDiff`/
-  `sessionDiffFile`, the two kinds that made dispatch async and added the
-  `sessionInReach` grant clamp on top of the `readFiles` capability

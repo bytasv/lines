@@ -31,6 +31,13 @@ import {
   IconDots,
   IconEye,
   IconEyeOff,
+  IconArrowDown,
+  IconArrowUp,
+  IconBell,
+  IconBellOff,
+  IconFolderPlus,
+  IconFolderSymlink,
+  IconPencil,
   IconGitBranch,
   IconLink,
   IconLock,
@@ -41,10 +48,24 @@ import {
   IconX,
 } from '@tabler/icons-react';
 import { useHotkeys, useLocalStorage } from '@mantine/hooks';
-import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { PermissionMode, ReasoningEffort, SessionMeta, WorkflowDef, WorkflowStepOverride } from '@lines/shared';
+import {
+  DragDropContext,
+  Draggable,
+  Droppable,
+  type DraggableProvidedDragHandleProps,
+  type DropResult,
+} from '@hello-pangea/dnd';
+import type {
+  PermissionMode,
+  ReasoningEffort,
+  SessionGroup,
+  SessionMeta,
+  WorkflowDef,
+  WorkflowStepOverride,
+} from '@lines/shared';
 import { findWorktree, hasEstimatedSpend, projectPaths, projectRoots, rootsForCwd } from '@lines/shared';
 import type { SessionSort } from '../lib/format';
 import {
@@ -58,31 +79,77 @@ import {
 } from '../lib/format';
 import { useCan, useCanOnSession, useSessionMachine } from '../lib/can';
 import { searchSessions } from '../lib/files';
-import { inlineWorkflow, sessionsOnMachine } from '../lib/machines';
+import { inlineWorkflow, sessionsOnMachine, uncoveredSharedSessions } from '../lib/machines';
 import { useIsPhone, useReveal } from '../lib/layout';
 import { MOD, newSessionHotkey } from '../lib/platform';
 import { ConfirmModal } from './ConfirmModal';
 import { SingleRunModal } from './workflow/SingleRunModal';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode, SidebarSearchScope } from '../store';
-import { projectAt, sessionsInProject, useStore } from '../store';
+import { groupKeyOf, projectAt, sessionsInProject, useStore } from '../store';
 import { send } from '../ws';
 import { FileSearchResults, FlagToggle } from './FileSearchPanel';
 import { FileTree } from './FileTree';
 import { SearchPlaceholder, SessionSearchResults } from './SessionSearchResults';
+import { GroupNamePopover, MUTE_TOOLTIP, SessionGroupSection } from './SessionGroupSection';
 
 /**
  * Archived rows rendered before the "show more" step. Uncapped, a project with a
  * few hundred finished sessions paid for every one of them on the first paint and
- * on every re-render — and `showArchived` defaults to on.
+ * on every re-render — and Archived starts expanded.
  */
 const ARCHIVED_PAGE = 20;
+
+/**
+ * Collapsed sidebar sections, per browser: project group key -> collapsed group
+ * ids. The reserved `ARCHIVED_SECTION` id stands for the Archived section, so
+ * every project keeps its own Archived state too.
+ */
+const COLLAPSED_GROUPS_KEY = 'lines.collapsedGroups';
+const ARCHIVED_SECTION = 'archived';
+/** The global Archived toggle `lines.collapsedGroups` replaced; migrated once. */
+const LEGACY_SHOW_ARCHIVED_KEY = 'lines.showArchived';
+const NO_GROUPS: SessionGroup[] = [];
+/** Session drop targets: Active, `group:<id>` per user group, and `ARCHIVED_SECTION`. */
+const ACTIVE_DROP = 'active';
+const GROUP_DROP_PREFIX = 'group:';
+
+/**
+ * A section rows can be dragged into. `label` gives an empty section something to
+ * drop on; otherwise the section's own content is the target.
+ */
+function SessionDrop({ id, label, children }: { id: string; label?: string; children: ReactNode }) {
+  return (
+    <Droppable droppableId={id} type="SESSION">
+      {(provided, snapshot) => (
+        <div
+          ref={provided.innerRef}
+          {...provided.droppableProps}
+          style={{
+            borderRadius: 8,
+            minHeight: label ? 28 : 4,
+            background: snapshot.isDraggingOver ? 'var(--mantine-color-default-hover)' : undefined,
+          }}
+        >
+          {label && (
+            <Text size="xs" c="dimmed" ta="center" py={6}>
+              {label}
+            </Text>
+          )}
+          {children}
+          {provided.placeholder}
+        </div>
+      )}
+    </Droppable>
+  );
+}
 
 /** Sidebar sort menu, in menu order. `status` is the default — see `compareSessions`. */
 const SORT_OPTIONS: { value: SessionSort; label: string }[] = [
   { value: 'status', label: 'Status' },
   { value: 'activity', label: 'Last active' },
   { value: 'created', label: 'Created' },
+  { value: 'manual', label: 'Manual' },
 ];
 
 /**
@@ -134,11 +201,17 @@ const SessionRow = memo(function SessionRow({
   session,
   selected,
   onSelect,
+  groups,
+  groupKey,
 }: {
   session: SessionMeta;
   selected: boolean;
   /** Phone only: the sidebar is a drawer there, and it covers what was picked. */
   onSelect?: () => void;
+  /** The project's sidebar groups, for "Move to group". */
+  groups?: SessionGroup[];
+  /** Where the project's groups are stored; absent hides "Move to group" (guests, shared rows). */
+  groupKey?: string | null;
 }) {
   const status = sessionRowMeta(session);
   // Settled total plus the in-flight turn's live estimate, while one runs.
@@ -192,6 +265,34 @@ const SessionRow = memo(function SessionRow({
   // mask a session that still needs the user.
   const finished = !session.completed && !status.actionable && isWorkflowFinished(session);
   const wide = session.completed || session.archived || finished;
+  // Same gating as archive: an archived row shows only under Archived, so it has
+  // no group to move between until it is unarchived.
+  const canGroup = canManage && !session.archived && !!groupKey;
+  const createGroup = useStore((s) => s.createGroup);
+  const [namingGroup, setNamingGroup] = useState(false);
+  const moveToGroup = (groupId: string | null) => {
+    setActionError(null);
+    send({ type: 'setSessionGroup', sessionId: session.id, groupId });
+  };
+  const inGroup = !!groups?.some((g) => g.id === session.groupId);
+  const groupItems = (
+    <>
+      {inGroup && (
+        <Menu.Item onClick={() => moveToGroup(null)}>Active</Menu.Item>
+      )}
+      {groups
+        ?.filter((g) => g.id !== session.groupId)
+        .map((g) => (
+          <Menu.Item key={g.id} onClick={() => moveToGroup(g.id)}>
+            {g.name}
+          </Menu.Item>
+        ))}
+      {(inGroup || !!groups?.length) && <Menu.Divider />}
+      <Menu.Item leftSection={<IconFolderPlus size={14} />} onClick={() => setNamingGroup(true)}>
+        New group…
+      </Menu.Item>
+    </>
+  );
 
   return (
     <UnstyledButton
@@ -357,95 +458,150 @@ const SessionRow = memo(function SessionRow({
             )}
           </Group>
         </Box>
-        <Group gap={2} wrap="nowrap">
-          {!canManage && !canDelete ? null : isPhone ? (
-            <Menu withinPortal position="bottom-end">
-              <Menu.Target>
-                <ActionIcon
-                  variant="subtle"
-                  color="gray"
-                  aria-label={`Actions for ${session.name}`}
-                  onClick={stop}
-                >
-                  <IconDots size={18} />
-                </ActionIcon>
-              </Menu.Target>
-              <Menu.Dropdown onClick={stop}>
-                {session.archived ? (
-                  <>
-                    {canManage && (
-                      <Menu.Item
-                        leftSection={<IconArchiveOff size={16} />}
-                        onClick={() =>
-                          send({
-                            type: 'unarchiveSession',
-                            sessionId: session.id,
-                          })
-                        }
-                      >
-                        Unarchive session
-                      </Menu.Item>
-                    )}
-                    {canDelete && (
+        <GroupNamePopover
+          opened={namingGroup}
+          onClose={() => setNamingGroup(false)}
+          submitLabel="Create"
+          onSubmit={(name) => groupKey && moveToGroup(createGroup(groupKey, name))}
+        >
+          <Group gap={2} wrap="nowrap">
+            {!isPhone && canGroup && (
+              <Menu withinPortal position="bottom-end">
+                <Menu.Target>
+                  {/* `stop` on the Tooltip, not the icon: Tooltip spreads its child's
+                      own props last, so an icon onClick would replace the toggle
+                      Menu.Target chains after this one. */}
+                  <Tooltip label="Move to group" onClick={stop}>
+                    <ActionIcon
+                      size="xs"
+                      variant="subtle"
+                      color="gray"
+                      aria-label={`Move ${session.name} to group`}
+                    >
+                      <IconFolderSymlink size={13} />
+                    </ActionIcon>
+                  </Tooltip>
+                </Menu.Target>
+                <Menu.Dropdown onClick={stop}>
+                  <Menu.Label>Move to group</Menu.Label>
+                  {groupItems}
+                </Menu.Dropdown>
+              </Menu>
+            )}
+            {!canManage && !canDelete ? null : isPhone ? (
+              <Menu withinPortal position="bottom-end">
+                <Menu.Target>
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    aria-label={`Actions for ${session.name}`}
+                    onClick={stop}
+                  >
+                    <IconDots size={18} />
+                  </ActionIcon>
+                </Menu.Target>
+                <Menu.Dropdown onClick={stop}>
+                  {canGroup && (
+                    <Menu.Sub>
+                      <Menu.Sub.Target>
+                        <Menu.Sub.Item leftSection={<IconFolderSymlink size={16} />}>Move to group</Menu.Sub.Item>
+                      </Menu.Sub.Target>
+                      <Menu.Sub.Dropdown onClick={stop}>{groupItems}</Menu.Sub.Dropdown>
+                    </Menu.Sub>
+                  )}
+                  {session.archived ? (
+                    <>
+                      {canManage && (
+                        <Menu.Item
+                          leftSection={<IconArchiveOff size={16} />}
+                          onClick={() =>
+                            send({
+                              type: 'unarchiveSession',
+                              sessionId: session.id,
+                            })
+                          }
+                        >
+                          Unarchive session
+                        </Menu.Item>
+                      )}
+                      {canDelete && (
+                        <Menu.Item
+                          color="red"
+                          disabled={deleting}
+                          leftSection={<IconTrash size={16} />}
+                          onClick={() => deleteSession({ confirmFirst: true })}
+                        >
+                          Delete session
+                        </Menu.Item>
+                      )}
+                    </>
+                  ) : isNew ? (
+                    canDelete && (
                       <Menu.Item
                         color="red"
                         disabled={deleting}
                         leftSection={<IconTrash size={16} />}
-                        onClick={() => deleteSession({ confirmFirst: true })}
+                        onClick={() => deleteSession({ confirmFirst: false })}
                       >
                         Delete session
                       </Menu.Item>
-                    )}
-                  </>
-                ) : isNew ? (
-                  canDelete && (
-                    <Menu.Item
-                      color="red"
-                      disabled={deleting}
-                      leftSection={<IconTrash size={16} />}
-                      onClick={() => deleteSession({ confirmFirst: false })}
+                    )
+                  ) : (
+                    canManage && (
+                      <>
+                        <Menu.Item
+                          leftSection={<IconCircleCheck size={16} />}
+                          onClick={() => send({ type: 'completeSession', sessionId: session.id })}
+                        >
+                          Mark completed
+                        </Menu.Item>
+                        <Menu.Item
+                          leftSection={<IconArchive size={16} />}
+                          onClick={() => send({ type: 'archiveSession', sessionId: session.id })}
+                        >
+                          Archive session
+                        </Menu.Item>
+                      </>
+                    )
+                  )}
+                </Menu.Dropdown>
+              </Menu>
+            ) : session.archived ? (
+              <>
+                {canManage && (
+                  <Tooltip label="Unarchive session">
+                    <ActionIcon
+                      size="xs"
+                      variant="subtle"
+                      color="gray"
+                      onClick={(e) => {
+                        stop(e);
+                        send({ type: 'unarchiveSession', sessionId: session.id });
+                      }}
                     >
-                      Delete session
-                    </Menu.Item>
-                  )
-                ) : (
-                  canManage && (
-                    <>
-                      <Menu.Item
-                        leftSection={<IconCircleCheck size={16} />}
-                        onClick={() => send({ type: 'completeSession', sessionId: session.id })}
-                      >
-                        Mark completed
-                      </Menu.Item>
-                      <Menu.Item
-                        leftSection={<IconArchive size={16} />}
-                        onClick={() => send({ type: 'archiveSession', sessionId: session.id })}
-                      >
-                        Archive session
-                      </Menu.Item>
-                    </>
-                  )
+                      <IconArchiveOff size={13} />
+                    </ActionIcon>
+                  </Tooltip>
                 )}
-              </Menu.Dropdown>
-            </Menu>
-          ) : session.archived ? (
-            <>
-              {canManage && (
-                <Tooltip label="Unarchive session">
-                  <ActionIcon
-                    size="xs"
-                    variant="subtle"
-                    color="gray"
-                    onClick={(e) => {
-                      stop(e);
-                      send({ type: 'unarchiveSession', sessionId: session.id });
-                    }}
-                  >
-                    <IconArchiveOff size={13} />
-                  </ActionIcon>
-                </Tooltip>
-              )}
-              {canDelete && (
+                {canDelete && (
+                  <Tooltip label={deleting ? 'Deleting…' : 'Delete session'}>
+                    <ActionIcon
+                      size="xs"
+                      variant="subtle"
+                      color="gray"
+                      loading={deleting}
+                      onClick={(e) => {
+                        stop(e);
+                        deleteSession({ confirmFirst: true });
+                      }}
+                    >
+                      <IconTrash size={13} />
+                    </ActionIcon>
+                  </Tooltip>
+                )}
+              </>
+            ) : isNew ? (
+              canDelete && (
                 <Tooltip label={deleting ? 'Deleting…' : 'Delete session'}>
                   <ActionIcon
                     size="xs"
@@ -453,66 +609,49 @@ const SessionRow = memo(function SessionRow({
                     color="gray"
                     loading={deleting}
                     onClick={(e) => {
+                      // No confirm: a session with no real prompt yet has nothing to lose.
                       stop(e);
-                      deleteSession({ confirmFirst: true });
+                      deleteSession({ confirmFirst: false });
                     }}
                   >
                     <IconTrash size={13} />
                   </ActionIcon>
                 </Tooltip>
-              )}
-            </>
-          ) : isNew ? (
-            canDelete && (
-              <Tooltip label={deleting ? 'Deleting…' : 'Delete session'}>
-                <ActionIcon
-                  size="xs"
-                  variant="subtle"
-                  color="gray"
-                  loading={deleting}
-                  onClick={(e) => {
-                    // No confirm: a session with no real prompt yet has nothing to lose.
-                    stop(e);
-                    deleteSession({ confirmFirst: false });
-                  }}
-                >
-                  <IconTrash size={13} />
-                </ActionIcon>
-              </Tooltip>
-            )
-          ) : (
-            canManage && (
-              <>
-                <Tooltip label="Mark completed">
-                  <ActionIcon
-                    size="xs"
-                    variant="subtle"
-                    color="gray"
-                    onClick={(e) => {
-                      stop(e);
-                      send({ type: 'completeSession', sessionId: session.id });
-                    }}
-                  >
-                    <IconCircleCheck size={13} />
-                  </ActionIcon>
-                </Tooltip>
-                <Tooltip label="Archive session">
-                  <ActionIcon
-                    size="xs"
-                    variant="subtle"
-                    color="gray"
-                    onClick={(e) => {
-                      stop(e);
-                      send({ type: 'archiveSession', sessionId: session.id });
-                    }}
-                  >
-                    <IconArchive size={13} />
-                  </ActionIcon>
-                </Tooltip>
-              </>
-            )
-          )}
-        </Group>
+              )
+            ) : (
+              canManage && (
+                <>
+                  <Tooltip label="Mark completed">
+                    <ActionIcon
+                      size="xs"
+                      variant="subtle"
+                      color="gray"
+                      onClick={(e) => {
+                        stop(e);
+                        send({ type: 'completeSession', sessionId: session.id });
+                      }}
+                    >
+                      <IconCircleCheck size={13} />
+                    </ActionIcon>
+                  </Tooltip>
+                  <Tooltip label="Archive session">
+                    <ActionIcon
+                      size="xs"
+                      variant="subtle"
+                      color="gray"
+                      onClick={(e) => {
+                        stop(e);
+                        send({ type: 'archiveSession', sessionId: session.id });
+                      }}
+                    >
+                      <IconArchive size={13} />
+                    </ActionIcon>
+                  </Tooltip>
+                </>
+              )
+            )}
+          </Group>
+        </GroupNamePopover>
       </Group>
       <ConfirmModal
         opened={confirmingDelete}
@@ -652,6 +791,112 @@ function UnlinkedCheckouts({ activeKey }: { activeKey: string }) {
   );
 }
 
+/**
+ * A user-made group in the sidebar: the shared section plus its ⋯ menu (rename,
+ * reorder, mute, delete). Move up/down duplicate the header drag for touch.
+ */
+function UserGroupSection({
+  group,
+  index,
+  total,
+  groupKey,
+  sessions,
+  collapsed,
+  onToggle,
+  canEdit,
+  dragHandleProps,
+  children,
+}: {
+  group: SessionGroup;
+  index: number;
+  total: number;
+  groupKey: string;
+  sessions: SessionMeta[];
+  collapsed: boolean;
+  onToggle: () => void;
+  canEdit: boolean;
+  dragHandleProps?: DraggableProvidedDragHandleProps | null;
+  children: ReactNode;
+}) {
+  const renameGroup = useStore((s) => s.renameGroup);
+  const deleteGroup = useStore((s) => s.deleteGroup);
+  const moveGroup = useStore((s) => s.moveGroup);
+  const toggleGroupMuted = useStore((s) => s.toggleGroupMuted);
+  const [renaming, setRenaming] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const count = sessions.length;
+  return (
+    <>
+      <SessionGroupSection
+        title={group.name}
+        sessions={sessions}
+        collapsed={collapsed}
+        onToggle={onToggle}
+        muted={group.muted}
+        dragHandleProps={dragHandleProps}
+        rename={{
+          opened: renaming,
+          onClose: () => setRenaming(false),
+          onSubmit: (name) => renameGroup(groupKey, group.id, name),
+        }}
+        menu={
+          canEdit && (
+            <>
+              <Menu.Item leftSection={<IconPencil size={14} />} onClick={() => setRenaming(true)}>
+                Rename
+              </Menu.Item>
+              <Menu.Item
+                leftSection={<IconArrowUp size={14} />}
+                disabled={index === 0}
+                onClick={() => moveGroup(groupKey, index, index - 1)}
+              >
+                Move up
+              </Menu.Item>
+              <Menu.Item
+                leftSection={<IconArrowDown size={14} />}
+                disabled={index === total - 1}
+                onClick={() => moveGroup(groupKey, index, index + 1)}
+              >
+                Move down
+              </Menu.Item>
+              <Tooltip label={MUTE_TOOLTIP} multiline maw={260} withArrow position="left">
+                <Menu.Item
+                  leftSection={group.muted ? <IconBell size={14} /> : <IconBellOff size={14} />}
+                  onClick={() => toggleGroupMuted(groupKey, group.id)}
+                >
+                  {group.muted ? 'Unmute' : 'Mute'}
+                </Menu.Item>
+              </Tooltip>
+              <Menu.Divider />
+              <Menu.Item color="red" leftSection={<IconTrash size={14} />} onClick={() => setConfirmingDelete(true)}>
+                Delete group
+              </Menu.Item>
+            </>
+          )
+        }
+      >
+        {children}
+      </SessionGroupSection>
+      <ConfirmModal
+        opened={confirmingDelete}
+        title="Delete group"
+        message={
+          count
+            ? `Delete group “${group.name}”? Its ${count === 1 ? 'session returns' : `${count} sessions return`} to Active.`
+            : `Delete group “${group.name}”?`
+        }
+        confirmLabel="Delete group"
+        confirmColor="red"
+        onConfirm={() => {
+          setConfirmingDelete(false);
+          deleteGroup(groupKey, group.id);
+        }}
+        onCancel={() => setConfirmingDelete(false)}
+      />
+    </>
+  );
+}
+
 export function Sidebar({
   onEditWorkflows,
   onBrowseRecipes,
@@ -670,11 +915,12 @@ export function Sidebar({
   const sharedWorkflows = useStore((s) => s.sharedWorkflows);
   const selectedSessionId = useStore((s) => s.selectedSessionId);
   const canCreate = useCan('createSessions');
+  const canManageGroups = useCan('manageSessions');
   const activeProject = useStore((s) => s.activeProject);
   const access = useStore((s) => s.access);
-  const [showArchived, setShowArchived] = useLocalStorage<boolean>({
-    key: 'lines.showArchived',
-    defaultValue: true,
+  const [collapsedGroups, setCollapsedGroups] = useLocalStorage<Record<string, string[]>>({
+    key: COLLAPSED_GROUPS_KEY,
+    defaultValue: {},
   });
   const [archivedShown, setArchivedShown] = useState(ARCHIVED_PAGE);
   // '' = raw session, otherwise workflow id.
@@ -727,7 +973,6 @@ export function Sidebar({
     key: SESSION_SORT_KEY,
     defaultValue: 'status',
   });
-  const compare = useMemo(() => compareSessions(sessionSort), [sessionSort]);
 
   // A project switch starts the archived list over: the point of the cap is that
   // the first paint of a tab is cheap.
@@ -740,6 +985,40 @@ export function Sidebar({
   const project = projectAt(projects, activeProject);
   const roots = project ? projectRoots(project) : [];
   const activeProjectKey = activeProject ? (projectKeys[activeProject] ?? null) : null;
+  // Groups are the owner's: a guest never receives settings, so their list stays flat.
+  const groupKey = activeProject && !access ? groupKeyOf(projectKeys, activeProject) : null;
+  const groups = useStore((s) => (groupKey ? s.sessionGroups[groupKey] : undefined)) ?? NO_GROUPS;
+  const createGroup = useStore((s) => s.createGroup);
+  const moveGroup = useStore((s) => s.moveGroup);
+  const manualOrder = useStore((s) => (groupKey ? s.sessionOrder[groupKey] : undefined));
+  const setSessionOrder = useStore((s) => s.setSessionOrder);
+  const compare = useMemo(() => compareSessions(sessionSort, manualOrder), [sessionSort, manualOrder]);
+  const [namingGroup, setNamingGroup] = useState(false);
+  const collapsed = new Set(groupKey ? (collapsedGroups[groupKey] ?? []) : []);
+  const toggleCollapsed = (id: string) => {
+    if (!groupKey) return;
+    setCollapsedGroups((all) => {
+      const cur = all[groupKey] ?? [];
+      const next = cur.includes(id) ? cur.filter((g) => g !== id) : [...cur, id];
+      const out = { ...all };
+      if (next.length) out[groupKey] = next;
+      else delete out[groupKey];
+      return out;
+    });
+  };
+  // The old global toggle: a hidden Archived carries over to the project open
+  // when this first runs, then the key goes.
+  useEffect(() => {
+    if (!groupKey) return;
+    const legacy = localStorage.getItem(LEGACY_SHOW_ARCHIVED_KEY);
+    if (legacy === null) return;
+    localStorage.removeItem(LEGACY_SHOW_ARCHIVED_KEY);
+    if (legacy !== 'false') return;
+    setCollapsedGroups((all) => {
+      const cur = all[groupKey] ?? [];
+      return cur.includes(ARCHIVED_SECTION) ? all : { ...all, [groupKey]: [...cur, ARCHIVED_SECTION] };
+    });
+  }, [groupKey, setCollapsedGroups]);
   /**
    * One machine's sessions, not every linked machine's.
    *
@@ -754,36 +1033,27 @@ export function Sidebar({
     [sessions, sessionMachine, primaryDeviceId],
   );
   const projectSessions = sessionsInProject(machineSessions, projectKeys, project);
-  /**
-   * Sessions shared with this user that no project tab covers.
-   *
-   * A guest's tabs are built from the shared sessions in that machine's `hello`
-   * (`guestProjects`), so this catches what arrived after it — a session shared
-   * later, in a folder no tab covers — which would otherwise be held in the
-   * store and rendered nowhere. Every tab counts, not only the active one:
-   * otherwise each other project's sessions would land here too.
-   */
-  const covered = useMemo(
-    () =>
-      access
-        ? new Set(
-            projects.flatMap((p) =>
-              sessionsInProject(machineSessions, projectKeys, p).map((s) => s.id),
-            ),
-          )
-        : new Set<string>(),
-    [access, projects, machineSessions, projectKeys],
+  // "Shared with me": session-scope guests only — see `uncoveredSharedSessions`.
+  const shared = useMemo(
+    () => uncoveredSharedSessions(machineSessions, projects, projectKeys, access?.scope).sort(compare),
+    [access?.scope, projects, machineSessions, projectKeys, compare],
   );
-  const shared = access
-    ? Object.values(machineSessions)
-        .filter((s) => !s.archived && !covered.has(s.id))
-        .sort(compare)
-    : [];
-  const list = projectSessions.filter((s) => !s.archived).sort(compare);
+  const live = projectSessions.filter((s) => !s.archived).sort(compare);
+  // A `groupId` naming no group of this project (deleted, or never synced here)
+  // reads as ungrouped, so the session falls back into Active.
+  const groupIds = new Set(groups.map((g) => g.id));
+  const list = live.filter((s) => !s.groupId || !groupIds.has(s.groupId));
+  const grouped = groups.map((group) => ({
+    group,
+    sessions: live.filter((s) => s.groupId === group.id),
+  }));
   // Same comparator as the live list rather than an `archivedAt` key of its own:
   // archiving is an upsert, so `status` and `activity` still put the most recently
   // archived first, and `created` means creation order — which is what it says.
-  const archived = projectSessions.filter((s) => s.archived).sort(compare);
+  // Archived is never hand-placed: under `manual` it keeps "recently touched first".
+  const archived = projectSessions
+    .filter((s) => s.archived)
+    .sort(sessionSort === 'manual' ? compareSessions('activity') : compare);
 
   // Model/mode come from the settings modal (header gear); compression still
   // inherits from the project's latest session.
@@ -996,7 +1266,7 @@ export function Sidebar({
     ? ''
     : searchScope === 'session'
       ? (selectedSessionId ?? '')
-      : [...shared, ...list, ...archived].map((s) => s.id).join('\n');
+      : [...shared, ...list, ...grouped.flatMap((g) => g.sessions), ...archived].map((s) => s.id).join('\n');
   // Results are shown only for the request they answered. Until a new reply
   // lands they are hidden, not left up: after a keystroke, a scope flip or a
   // reopen they describe a different search.
@@ -1056,6 +1326,94 @@ export function Sidebar({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [searching, setSidebarSearch]);
+  // Session drag: rows move between Active, the user's groups and Archived. Order
+  // inside a section stays the sort's, so only the destination section matters.
+  const [draggingSession, setDraggingSession] = useState(false);
+  const canDragSessions = !!groupKey && canManageGroups;
+  const sessionRows = (rows: SessionMeta[]) =>
+    rows.map((s, i) => (
+      <Draggable key={s.id} draggableId={s.id} index={i} isDragDisabled={!canDragSessions || !!s.readOnly}>
+        {(dragProvided) => (
+          <div ref={dragProvided.innerRef} {...dragProvided.draggableProps} {...dragProvided.dragHandleProps}>
+            <SessionRow
+              session={s}
+              selected={s.id === selectedSessionId}
+              onSelect={onNavigate}
+              groups={groups}
+              groupKey={groupKey}
+            />
+          </div>
+        )}
+      </Draggable>
+    ));
+  /** The rows a session drop target shows, in display order. */
+  const sectionRows = (droppableId: string): SessionMeta[] =>
+    droppableId === ACTIVE_DROP
+      ? list
+      : droppableId === ARCHIVED_SECTION
+        ? archived
+        : (grouped.find((g) => `${GROUP_DROP_PREFIX}${g.group.id}` === droppableId)?.sessions ?? []);
+  /**
+   * Write the manual order with the dragged session placed where it was dropped.
+   * The base is what the sidebar shows right now, so switching from an automatic
+   * sort keeps that order as the starting point. Placed ids this machine's list
+   * does not show are kept while the store still holds them (another machine's
+   * sessions in this project); the rest are dropped so the list does not grow.
+   */
+  const placeSession = (sessionId: string, droppableId: string, index: number) => {
+    if (!groupKey || droppableId === ARCHIVED_SECTION) return;
+    const shown = [...list, ...grouped.flatMap((g) => g.sessions)].map((s) => s.id);
+    const shownSet = new Set(shown);
+    const kept = (manualOrder ?? []).filter(
+      (id) => !shownSet.has(id) && sessions[id] && !sessions[id].archived,
+    );
+    const ids = shown.filter((id) => id !== sessionId);
+    const target = sectionRows(droppableId).filter((s) => s.id !== sessionId);
+    const before = target[index];
+    const after = target[target.length - 1];
+    const at = before
+      ? ids.indexOf(before.id)
+      : after
+        ? ids.indexOf(after.id) + 1
+        : ids.length;
+    ids.splice(at, 0, sessionId);
+    setSessionOrder(groupKey, [...ids, ...kept]);
+  };
+  // A same-section drop under an automatic sort asks first: the sort would put
+  // the row straight back, so the drop only means something in manual order.
+  const [pendingReorder, setPendingReorder] = useState<DropResult | null>(null);
+  const onSidebarDragEnd = (result: DropResult) => {
+    setDraggingSession(false);
+    const to = result.destination;
+    if (!to || !groupKey) return;
+    if (result.type === 'GROUP') {
+      moveGroup(groupKey, result.source.index, to.index);
+      return;
+    }
+    if (to.droppableId === result.source.droppableId) {
+      if (to.index === result.source.index || to.droppableId === ARCHIVED_SECTION) return;
+      if (sessionSort === 'manual') placeSession(result.draggableId, to.droppableId, to.index);
+      else setPendingReorder(result);
+      return;
+    }
+    const session = sessions[result.draggableId];
+    if (!session) return;
+    if (sessionSort === 'manual') placeSession(session.id, to.droppableId, to.index);
+    if (to.droppableId === ARCHIVED_SECTION) {
+      // Archiving keeps the group, so unarchiving later returns it there.
+      send({ type: 'archiveSession', sessionId: session.id });
+      return;
+    }
+    const groupId = to.droppableId.startsWith(GROUP_DROP_PREFIX)
+      ? to.droppableId.slice(GROUP_DROP_PREFIX.length)
+      : null;
+    if (session.archived) send({ type: 'unarchiveSession', sessionId: session.id });
+    // A grouped session dragged out of Archived into Active leaves its group too;
+    // one whose stored group is already the target needs no second write.
+    if ((session.groupId ?? null) !== groupId) {
+      send({ type: 'setSessionGroup', sessionId: session.id, groupId });
+    }
+  };
   const toggleSearch = () => (sidebarSearch ? setSidebarSearch(null) : openSidebarSearch());
   const searchLoading = searchScope === 'files' ? fileSearch.loading : !!sidebarSearch?.loading;
 
@@ -1120,6 +1478,20 @@ export function Sidebar({
         )}
         {sidebarMode === 'sessions' && (
           <Group gap={2}>
+            {groupKey && canManageGroups && (
+              <GroupNamePopover
+                opened={namingGroup}
+                onClose={() => setNamingGroup(false)}
+                submitLabel="Create"
+                onSubmit={(name) => createGroup(groupKey, name)}
+              >
+                <Tooltip label="New group">
+                  <ActionIcon variant="subtle" color="gray" size="sm" onClick={() => setNamingGroup(true)}>
+                    <IconFolderPlus size={15} />
+                  </ActionIcon>
+                </Tooltip>
+              </GroupNamePopover>
+            )}
             <Tooltip label="Recipes">
               <ActionIcon variant="subtle" color="gray" size="sm" onClick={onBrowseRecipes}>
                 <IconBook size={15} />
@@ -1488,70 +1860,110 @@ export function Sidebar({
                 ))}
               </>
             )}
-            {list.map((s) => (
-              <SessionRow
-                key={s.id}
-                session={s}
-                selected={s.id === selectedSessionId}
-                onSelect={onNavigate}
-              />
-            ))}
-            {list.length === 0 && archived.length === 0 && shared.length === 0 && (
-              <Text size="xs" c="dimmed" ta="center" pt="lg">
-                {access ? 'Nothing has been shared with you yet' : 'No sessions in this project yet'}
-              </Text>
-            )}
-            {archived.length > 0 && (
-              <>
-                {/* The active list above ends without a marker of its own, so the
-                    rule is what says "everything below here is finished". */}
-                <Divider mt="xs" mx="sm" />
-                <Group gap={4} justify="space-between" wrap="nowrap" px="sm" pt={4}>
-                  <Text size="xs" fw={600} c="dimmed" tt="uppercase">
-                    Archived ({archived.length})
-                  </Text>
-                  <Tooltip label={showArchived ? 'Hide archived' : 'Show archived'}>
-                    <ActionIcon
-                      size="xs"
-                      variant="subtle"
-                      color="gray"
-                      onClick={() => setShowArchived((v) => !v)}
+            <DragDropContext
+              // Before capture, not on start: the empty Active/Archived drop zones it
+              // reveals must exist before the library measures the droppables.
+              onBeforeCapture={(before) => setDraggingSession(!before.draggableId.startsWith('group:'))}
+              onDragEnd={onSidebarDragEnd}
+            >
+              <SessionDrop id={ACTIVE_DROP} label={draggingSession && list.length === 0 ? 'Active' : undefined}>
+                {sessionRows(list)}
+              </SessionDrop>
+              {groupKey && grouped.length > 0 && (
+                <Droppable droppableId="groups" type="GROUP">
+                  {(dropProvided) => (
+                    <div ref={dropProvided.innerRef} {...dropProvided.droppableProps}>
+                      {grouped.map(({ group, sessions: members }, i) => (
+                        <Draggable
+                          key={group.id}
+                          draggableId={`group:${group.id}`}
+                          index={i}
+                          isDragDisabled={!canManageGroups}
+                          // The header is a button (it toggles the section); without this the
+                          // library refuses to start a drag from it.
+                          disableInteractiveElementBlocking
+                        >
+                          {(dragProvided) => (
+                            <div ref={dragProvided.innerRef} {...dragProvided.draggableProps}>
+                              {/* The whole section is the drop target, header included,
+                                  so a collapsed group still takes a dropped session. */}
+                              <SessionDrop id={`${GROUP_DROP_PREFIX}${group.id}`}>
+                                <UserGroupSection
+                                  group={group}
+                                  index={i}
+                                  total={grouped.length}
+                                  groupKey={groupKey}
+                                  sessions={members}
+                                  collapsed={collapsed.has(group.id)}
+                                  onToggle={() => toggleCollapsed(group.id)}
+                                  canEdit={canManageGroups}
+                                  dragHandleProps={dragProvided.dragHandleProps}
+                                >
+                                  {sessionRows(members)}
+                                </UserGroupSection>
+                              </SessionDrop>
+                            </div>
+                          )}
+                        </Draggable>
+                      ))}
+                      {dropProvided.placeholder}
+                    </div>
+                  )}
+                </Droppable>
+              )}
+              {projectSessions.length === 0 && shared.length === 0 && (
+                <Text size="xs" c="dimmed" ta="center" pt="lg">
+                  {access?.scope === 'session' ? 'Nothing has been shared with you yet' : 'No sessions in this project yet'}
+                </Text>
+              )}
+              {/* Shown empty while a session is dragged, so archiving by drop works
+                  in a project with nothing archived yet. */}
+              {(archived.length > 0 || draggingSession) && (
+                <>
+                  {/* The active list above ends without a marker of its own, so the
+                      rule is what says "everything below here is finished". */}
+                  <Divider mt="xs" mx="sm" />
+                  <SessionDrop id={ARCHIVED_SECTION}>
+                    <SessionGroupSection
+                      title="Archived"
+                      sessions={archived}
+                      collapsed={collapsed.has(ARCHIVED_SECTION)}
+                      onToggle={() => toggleCollapsed(ARCHIVED_SECTION)}
                     >
-                      <IconChevronDown
-                        size={14}
-                        style={{
-                          transform: showArchived ? undefined : 'rotate(-90deg)',
-                          transition: 'transform 120ms',
-                        }}
-                      />
-                    </ActionIcon>
-                  </Tooltip>
-                </Group>
-                {showArchived && (
-                  <>
-                    {archived.slice(0, archivedShown).map((s) => (
-                      <SessionRow
-                        key={s.id}
-                        session={s}
-                        selected={s.id === selectedSessionId}
-                        onSelect={onNavigate}
-                      />
-                    ))}
-                    {archived.length > archivedShown && (
-                      <Button
-                        variant="subtle"
-                        size="compact-xs"
-                        color="gray"
-                        onClick={() => setArchivedShown((n) => n + ARCHIVED_PAGE)}
-                      >
-                        Show {Math.min(ARCHIVED_PAGE, archived.length - archivedShown)} more of{' '}
-                        {archived.length - archivedShown}
-                      </Button>
-                    )}
-                  </>
-                )}
-              </>
-            )}
+                      {sessionRows(archived.slice(0, archivedShown))}
+                      {archived.length > archivedShown && (
+                        <Button
+                          variant="subtle"
+                          size="compact-xs"
+                          color="gray"
+                          onClick={() => setArchivedShown((n) => n + ARCHIVED_PAGE)}
+                        >
+                          Show {Math.min(ARCHIVED_PAGE, archived.length - archivedShown)} more of{' '}
+                          {archived.length - archivedShown}
+                        </Button>
+                      )}
+                    </SessionGroupSection>
+                  </SessionDrop>
+                </>
+              )}
+            </DragDropContext>
+            <ConfirmModal
+              opened={pendingReorder !== null}
+              title="Switch to manual order?"
+              message={`Sessions are sorted by ${(
+                SORT_OPTIONS.find((o) => o.value === sessionSort)?.label ?? sessionSort
+              ).toLowerCase()}, which would put this one straight back. Switch to manual order and keep the drop? The current order becomes the starting point; you can switch back from the sort menu.`}
+              confirmLabel="Switch to manual"
+              onConfirm={() => {
+                const drop = pendingReorder;
+                setPendingReorder(null);
+                if (!drop?.destination) return;
+                // Placed against the rows as sorted now, before the sort flips.
+                placeSession(drop.draggableId, drop.destination.droppableId, drop.destination.index);
+                setSessionSort('manual');
+              }}
+              onCancel={() => setPendingReorder(null)}
+            />
             {activeProjectKey && <UnlinkedCheckouts activeKey={activeProjectKey} />}
           </Stack>
         )}

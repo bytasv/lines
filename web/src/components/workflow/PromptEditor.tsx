@@ -125,24 +125,13 @@ export function PromptEditor({
                 onPick={() => insert('{previous}')}
               />
               <TokenItem
-                token="{diff}"
-                hint="The git diff since the run started, cut past a size cap."
-                onPick={() => insert('{diff}')}
-              />
-              <TokenItem
-                token="{changed}"
-                hint="Every file changed since the run started, never cut."
-                onPick={() => insert('{changed}')}
-              />
-              <TokenItem
                 token="{roots}"
                 hint="The project's folders, with repo root and branch."
                 onPick={() => insert('{roots}')}
               />
               <Menu.Divider />
               <Text fz={11} c="dimmed" px="sm" py={4} lh={1.35}>
-                In a fresh start, a prompt using {'{previous}'}, {'{diff}'}, {'{changed}'} or an output gets no
-                automatic hand-off.
+                In a fresh start, a prompt using {'{previous}'} or an output gets no automatic hand-off.
               </Text>
             </Menu.Dropdown>
           </Menu>

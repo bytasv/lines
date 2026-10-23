@@ -805,7 +805,7 @@ export function Composer({ session }: { session: SessionMeta }) {
       )}
       {connectionStatus !== 'connected' && (
         <Text size="xs" c="dimmed" px={6} pb={6}>
-          Offline — messages are queued and sent on reconnect
+          Reconnecting — messages are queued and sent once connected
         </Text>
       )}
       {!canPrompt && (
@@ -823,7 +823,7 @@ export function Composer({ session }: { session: SessionMeta }) {
       {machineBlock && (
         // Named, not dimmed: this is why the send button is dead, and the
         // alternative is a prompt that looks sent and never runs. Deliberately not
-        // a banner — ConnectionBanner/WorkerBanner/StorageBanner keep their own
+        // a banner — ConnectionBanner/WorkerBanner/UpdateBanner keep their own
         // "exactly one at a time" precedence, and machine health belongs on the
         // surface you are about to type into.
         <Text size="xs" c="orange" px={6} pb={6}>
@@ -1136,7 +1136,7 @@ export function Composer({ session }: { session: SessionMeta }) {
       </Drawer>
       {/* Opened only from a model's or the mic's warning icon — the pane that carries the
           version, the floor and the install command. Rendered here, exactly as
-          StorageBanner opens its own copy at Diagnostics. */}
+          SyncIndicator opens its own copy at Diagnostics. */}
       <SettingsModal
         opened={settingsSection !== null}
         onClose={() => setSettingsSection(null)}

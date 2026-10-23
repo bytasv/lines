@@ -20,6 +20,7 @@ import {
   IconUserPlus,
   IconX,
 } from '@tabler/icons-react';
+import { allSessionGroups } from '@lines/shared';
 import { useStore } from '../store';
 import {
   claimDevice,
@@ -95,10 +96,11 @@ export function DevicesSection() {
   // granted, so a count would describe their slice while reading as the host
   // machine's total.
   const sessions = useStore((s) => s.sessions);
+  const sessionGroups = useStore((s) => s.sessionGroups);
   const guest = useIsGuest();
   const activity = guest
     ? { running: 0, actionable: 0 }
-    : machineActivity(Object.values(sessions));
+    : machineActivity(Object.values(sessions), allSessionGroups({ sessionGroups }));
 
   useEffect(() => {
     void load();

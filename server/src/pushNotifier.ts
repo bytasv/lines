@@ -111,6 +111,9 @@ export function pushPayload(session: SessionMeta): PushPayload | null {
 export class PushNotifier {
   private regs: PushRegistration[];
   private lastStatus = new Map<string, SessionStatus>();
+  /** Whether the session sits in a muted sidebar group; muted sessions never push.
+   *  Wired by the user context, which owns the settings. */
+  isMuted: (session: SessionMeta) => boolean = () => false;
 
   constructor(
     private store: Pick<Store, 'loadPushSubscriptions' | 'savePushSubscriptions'>,
@@ -161,6 +164,7 @@ export class PushNotifier {
     const prev = this.lastStatus.get(session.id);
     this.lastStatus.set(session.id, session.status);
     if (!this.regs.length || !isAlertTransition(prev, session)) return;
+    if (this.isMuted(session)) return;
     const payload = pushPayload(session);
     if (!payload) return;
     void this.pushAll(JSON.stringify(payload));

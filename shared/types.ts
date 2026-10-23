@@ -67,8 +67,6 @@ export type FileRequestKind =
   | 'docs'
   | 'attachment'
   | 'syncLog'
-  | 'sessionDiff'
-  | 'sessionDiffFile'
   | 'grep'
   | 'sessionSearch'
   | 'media'
@@ -76,7 +74,6 @@ export type FileRequestKind =
 
 export interface FileRequestParams {
   /** file/tree/docs/media/writeFile: exactly one. find/grep: one per project root.
-   *  sessionDiffFile: the repo root the file lives in.
    *  sessionSearch: the project roots whose sessions are searched when
    *  `sessionIds` is absent. */
   paths?: string[];
@@ -92,11 +89,8 @@ export interface FileRequestParams {
   wholeWord?: boolean;
   /** sessionSearch: exactly these sessions. Absent = every session under `paths`. */
   sessionIds?: string[];
-  /** attachment: path relative to the user's attachments root.
-   *  sessionDiffFile: path relative to `paths[0]`. */
+  /** attachment: path relative to the user's attachments root. */
   rel?: string;
-  /** sessionDiff / sessionDiffFile: which session's changes to read. */
-  sessionId?: string;
   /** media only: byte offset of the chunk to read. */
   offset?: number;
   /** media only: chunk length in bytes; the bridge clamps it to its chunk size. */
@@ -106,54 +100,6 @@ export interface FileRequestParams {
   /** writeFile only: the `mtimeMs` the edit was based on. A file changed since
    *  then answers 409 instead of being overwritten; absent = write unconditionally. */
   expectedMtimeMs?: number;
-}
-
-export type FileChangeStatus = 'A' | 'M' | 'D';
-
-/** One changed file in a session's review diff. */
-export interface FileChange {
-  /** Path relative to its repo root. */
-  rel: string;
-  status: FileChangeStatus;
-  added: number;
-  removed: number;
-  /** Another session was live in the same work tree while this change landed, so
-   *  it is reported rather than claimed. */
-  ambiguous?: boolean;
-}
-
-/** One commit unit's section of a session review diff. */
-export interface SessionDiffRepo {
-  /** Absolute work-tree root (`git rev-parse --show-toplevel`). */
-  repo: string;
-  branch: string | null;
-  /**
-   * Where the diff's floor came from:
-   * - 'session'   — the snapshot taken when the session was created.
-   * - 'workflow'  — a workflow's own snapshot, for a session that predates the
-   *                 session-level one.
-   * - 'synthetic' — none recorded, so this is the repo's whole uncommitted state.
-   * - 'stale'     — one was recorded but `git gc` pruned it; fell back to HEAD.
-   */
-  baseline: 'session' | 'workflow' | 'synthetic' | 'stale';
-  /** Changed by this session, as far as its turn windows and tool calls know. */
-  attributed: FileChange[];
-  /** The rest of the repo's uncommitted state — in a shared checkout this may be
-   *  another session's work, or the user's own. */
-  other: FileChange[];
-  /** Untracked files beyond the per-repo listing cap, left out of `other`. */
-  untrackedOmitted?: number;
-}
-
-export interface SessionDiffResponse {
-  repos: SessionDiffRepo[];
-  /** Session roots that aren't inside a work tree — never a commit unit. */
-  orphans: string[];
-}
-
-export interface SessionDiffFileResponse {
-  before: string;
-  after: string;
 }
 
 /** Bodies mirror the old JSON responses; `attachment` returns base64 bytes. */
@@ -761,8 +707,8 @@ export interface StepContent {
   /**
    * When true, the step runs in a fresh Claude CLI session instead of inheriting
    * the running conversation. It is seeded with a compact hand-off (the previous
-   * step's final output via `{previous}` and the working-tree `git diff` via
-   * `{diff}`) rather than the full accumulated transcript. Default false = inherit.
+   * step's final output via `{previous}`, or named outputs via `{outputs.<name>}`)
+   * rather than the full accumulated transcript. Default false = inherit.
    */
   freshStart: boolean;
   /**
@@ -1063,14 +1009,6 @@ export interface WorkflowState {
   /** Per-step accumulated active-turn duration in ms, indexed by step position.
    *  Summed across every turn a step runs (retries included); excludes idle wait. */
   stepDurationsMs?: number[];
-  /** Working-tree snapshot taken when the workflow starts, one per commit unit
-   *  (`git rev-parse --show-toplevel`), so a fresh step's {diff} shows only what
-   *  the workflow changed in each repo, not pre-existing dirty state. */
-  diffBaselines?: { repo: string; ref: string; untracked: string[] }[];
-  /** @deprecated pre-multi-root single baseline. Never written any more, still
-   *  read so a workflow already in flight across the deploy keeps a correct diff
-   *  instead of silently falling back to HEAD. */
-  diffBaseline?: { ref: string; untracked: string[] };
   /** Consolidated final output of the last-completed step; consumed as {previous}
    *  by the next fresh-start step. Falls back to lastAssistantText when absent. */
   lastStepOutput?: string;
@@ -1418,6 +1356,10 @@ export interface SessionMeta {
   /** Archived sessions move to a separate section and are hidden from the active list. */
   archived?: boolean;
   archivedAt?: number;
+  /** User-made sidebar group (`SessionGroup.id`) the session is parked in. An id
+   *  naming no group of its project reads as ungrouped, so deleting a group needs
+   *  no per-session cleanup. Kept through archive/unarchive. */
+  groupId?: string;
   /** Marked done by the user; shows a special indicator and is archived. */
   completed?: boolean;
   /**
@@ -1454,16 +1396,6 @@ export interface SessionMeta {
    * and this describes work outside it.
    */
   backgroundTasks?: BackgroundTaskInfo[];
-  /**
-   * Working-tree snapshot taken when the session was created, one per commit unit
-   * (`git rev-parse --show-toplevel`) — the floor the session review diff is taken
-   * against, so it shows this session's work rather than every uncommitted change
-   * in the repo. Same non-destructive `git stash create` snapshot the workflow
-   * path takes; a few hundred bytes per repo on this synced blob.
-   */
-  diffBaselines?: { repo: string; ref: string; untracked: string[] }[];
-  /** ms epoch the baselines above were captured. */
-  diffBaselineAt?: number;
 }
 
 /** Which vendor's agent runs a model. Absent on a `ModelOption` means 'anthropic'. */
@@ -1535,7 +1467,6 @@ export interface TranscriptEvent {
    * - 'context-compact': context compaction requested / finished
    * - 'provider-switch': the conversation was dropped to move the session to the
    *                 other provider, and the new one seeded with a summary
-   * - 'files-changed': paths a completed turn changed on disk
    */
   kind:
     | 'user'
@@ -1546,8 +1477,7 @@ export interface TranscriptEvent {
     | 'workflow'
     | 'turn-summary'
     | 'context-compact'
-    | 'provider-switch'
-    | 'files-changed';
+    | 'provider-switch';
   data: unknown;
 }
 
@@ -1584,29 +1514,6 @@ export interface TurnSummaryData {
   /** seq of the sdk 'result' event this summarizes. */
   resultSeq: number;
   summary: string;
-}
-
-/**
- * What one turn changed on disk, measured by bracketing the turn with two git
- * snapshots rather than by reading its tool calls — so a write made through the
- * shell, a script, or an MCP tool is recorded just the same.
- *
- * A transcript event, deliberately not a field on `SessionMeta`: that blob is
- * synced, and per-turn path lists would grow it without bound. Transcript events
- * are already per-session, persisted, and dropped with the session.
- */
-export interface FilesChangedData {
-  /** seq of the sdk 'result' event that closed this window. */
-  resultSeq: number;
-  repos: {
-    /** Absolute work-tree root. */
-    repo: string;
-    /** Paths relative to `repo`. */
-    rels: string[];
-    /** Another session was live in this work tree during the window, so these
-     *  paths are reported as unclear rather than attributed. */
-    ambiguous?: boolean;
-  }[];
 }
 
 export interface FileSnapshotData {
@@ -2449,6 +2356,7 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // --- the socket itself
   ping: { needs: 'connection' },
   auth: { needs: 'connection' },
+  syncNow: { needs: 'owner' },
   // --- bringing the channel up. `connection` is not a weakening: these four are
   // handled before the authz gate anyway (they are what *establishes* who this
   // is), and each carries its own proof — a pinned key, a key confirmation, or
@@ -2539,6 +2447,7 @@ export const MESSAGE_AUTHZ: Record<ClientMessage['type'], MessageAuthz> = {
   // --- the session's lifecycle. Only Full access reaches these.
   archiveSession: { needs: 'session', cap: 'manageSessions' },
   unarchiveSession: { needs: 'session', cap: 'manageSessions' },
+  setSessionGroup: { needs: 'session', cap: 'manageSessions' },
   completeSession: { needs: 'session', cap: 'manageSessions' },
   deleteSession: { needs: 'session', cap: 'deleteSessions' },
 
@@ -2755,6 +2664,7 @@ export type ClientMessage =
   | { type: 'ackSession'; sessionId: string }
   | { type: 'archiveSession'; sessionId: string }
   | { type: 'unarchiveSession'; sessionId: string }
+  | { type: 'setSessionGroup'; sessionId: string; groupId: string | null }
   | { type: 'completeSession'; sessionId: string }
   | { type: 'setModel'; sessionId: string; model: string }
   /**
@@ -2982,6 +2892,8 @@ export type ClientMessage =
   | { type: 'openaiConsumeResetCredit'; reqId: string }
   /** Fresh Clerk token relay (~50s cadence) so the bridge's per-connection token never expires. */
   | { type: 'auth'; token: string }
+  /** The sync indicator's "Sync now": flush the outbox and pull, past the pull throttle. */
+  | { type: 'syncNow' }
   | { type: 'saveSettings'; settings: UserUiSettings }
   /** Save this user's TypeSafe API key for smart routing, on this machine only.
    *  Write-only: the bridge never sends the key back. */
@@ -3174,6 +3086,45 @@ export interface StorageStatus {
   since?: number;
   /** Consecutive failed requests in this outage. */
   failures?: number;
+  /**
+   * What the cloud link is doing, for the sync indicator. `signedOut` = no token
+   * to sync with (local window, expired Clerk session) — distinct from healthy,
+   * which `available` alone cannot say. Absent on a bridge older than this field.
+   * `since` above is the epoch ms this state began, for every state but `ok`.
+   */
+  cloud?: 'ok' | 'unreachable' | 'signedOut';
+  /** Local writes storage has not confirmed yet. Absent on an older bridge. */
+  pending?: SyncPending;
+  /** Epoch ms of the last request storage accepted. */
+  lastSyncedAt?: number;
+}
+
+/** Counts of local writes still waiting for storage, by kind. */
+export interface SyncPending {
+  sessions: number;
+  deletes: number;
+  workflows: number;
+  steps: number;
+  recipes: number;
+  settings: number;
+  memory: number;
+}
+
+/** Kinds whose deletes are queued until storage confirms them. */
+export type SyncDeleteKind = 'session' | 'workflow' | 'step' | 'recipe';
+
+/** Kinds that are re-pushed whole, so "dirty" is all the outbox has to remember. */
+export type SyncDirtyKind = 'workflows' | 'steps' | 'recipes' | 'settings' | 'memory' | 'guard' | 'mcp' | 'projectKeys';
+
+/**
+ * The bridge's durable sync outbox (`sync-outbox.json`): every write storage has
+ * not confirmed, so an outage or a restart loses none of them. Deletes carry the
+ * ms epoch they were issued; whole-blob kinds only need a dirty mark, because
+ * the flush re-pushes the current local copy.
+ */
+export interface SyncOutbox {
+  deletes: Record<SyncDeleteKind, Record<string, number>>;
+  dirty: Partial<Record<SyncDirtyKind, boolean>>;
 }
 
 /**
@@ -3224,6 +3175,29 @@ export interface WorkerStatus {
 // ---------------------------------------------------------------------------
 // Server -> Client
 // ---------------------------------------------------------------------------
+
+/** A user-made sidebar group sessions can be parked in ("For future"). */
+export interface SessionGroup {
+  id: string;
+  name: string;
+  /** No alerts or pushes, no project tab dot, never auto-selected. Sessions still run. */
+  muted?: boolean;
+}
+
+/**
+ * Every group of every project, flattened. Group ids are random UUIDs, so a
+ * session's `groupId` resolves without first working out which project key its
+ * cwd maps to — a work tree or extra root with no key still finds its group.
+ */
+export function allSessionGroups(settings: Pick<UserUiSettings, 'sessionGroups'> | null | undefined): SessionGroup[] {
+  return Object.values(settings?.sessionGroups ?? {}).flat();
+}
+
+/** Whether the session sits in a muted group. `groups` is the list to resolve `groupId` in. */
+export function isSessionMuted(meta: Pick<SessionMeta, 'groupId'>, groups: readonly SessionGroup[] | undefined): boolean {
+  if (!meta.groupId || !groups) return false;
+  return groups.some((g) => g.id === meta.groupId && g.muted === true);
+}
 
 /** Per-user UI settings mirrored to the storage server; localStorage stays the offline cache. */
 export interface UserUiSettings {
@@ -3284,6 +3258,17 @@ export interface UserUiSettings {
    * claims an identity for the path, so a real key arriving later still wins.
    */
   dismissedCheckouts?: string[];
+  /**
+   * User-made sidebar groups, keyed by project key (path when the project has
+   * none). Array order is display order. Sessions join through `groupId`.
+   */
+  sessionGroups?: Record<string, SessionGroup[]>;
+  /**
+   * Hand-placed sidebar order for the `manual` sort, keyed like `sessionGroups`:
+   * session ids, first on top. One list per project spans Active and every group;
+   * each section shows its members in this relative order. Archived is not placed.
+   */
+  sessionOrder?: Record<string, string[]>;
   /** Dictation language: `auto` or an ISO 639-1 code. Absent = `auto`. Per user,
    *  not per machine — a guest dictating into a host's session uses their own. */
   voiceLanguage?: string;

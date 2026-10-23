@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ServerMessage, UsageSnapshot } from '@lines/shared';
 import { AuthRequiredError, type AuthManager } from './auth.ts';
-import { UsagePoller, parseExtraUsage, parseSnapshot, planLabelFromProfile } from './usage.ts';
+import { UsagePoller, parseExtraUsage, parseRetryAfter, parseSnapshot, planLabelFromProfile } from './usage.ts';
 
 const OK_BODY = { five_hour: { utilization: 42, resets_at: '2026-01-01T00:00:00Z' } };
 
 /** `fetch` is private on the poller; tests drive one poll at a time instead of the interval. */
 interface TestPoller {
   fetch(): Promise<void>;
+  refreshSoon(): void;
   readonly snapshot: UsageSnapshot | null;
 }
 
@@ -211,4 +212,113 @@ test('a profile failure leaves the snapshot intact, with no plan', async (t) => 
     assert.equal(sent.length, 1);
   }
   t.diagnostic('profile failures never fail the usage poll');
+});
+
+test('five_hour with a null or missing resets_at keeps the window with resetsAt null', () => {
+  for (const five_hour of [{ utilization: 25, resets_at: null }, { utilization: 25 }]) {
+    const snapshot = parseSnapshot({ five_hour });
+    assert.deepEqual(snapshot.windows, [{ id: 'five_hour', utilization: 25, resetsAt: null }]);
+  }
+});
+
+test('parseRetryAfter reads delta-seconds and HTTP dates', () => {
+  const now = Date.parse('2026-01-01T00:00:00Z');
+  assert.equal(parseRetryAfter('120', now), 120_000);
+  assert.equal(parseRetryAfter('Thu, 01 Jan 2026 00:01:00 GMT', now), 60_000);
+  assert.equal(parseRetryAfter(null, now), null);
+  assert.equal(parseRetryAfter('soon', now), null);
+});
+
+/** Let a poll's promise chain (fetch, json, profile) settle under mocked timers. */
+async function settle() {
+  for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+}
+
+/** Counts usage-endpoint hits; the profile endpoint always answers 200 with no plan. */
+function countingFetch(usage: () => Response) {
+  const calls = { usage: 0 };
+  const impl = (url: string) => {
+    if (String(url).endsWith('/profile')) return Promise.resolve(new Response('{}', { status: 200 }));
+    calls.usage++;
+    return Promise.resolve(usage());
+  };
+  return { calls, impl: impl as unknown as () => Promise<Response> };
+}
+
+test('a 429 keeps the snapshot and honours retry-after, including for refreshSoon', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.parse('2026-01-01T00:00:00Z') });
+  t.mock.method(console, 'warn', () => {});
+  let limited = false;
+  const { calls, impl } = countingFetch(() =>
+    limited
+      ? new Response('slow down', { status: 429, headers: { 'retry-after': '120' } })
+      : new Response(JSON.stringify(OK_BODY), { status: 200 }),
+  );
+  t.after(stubFetch(impl));
+  const { poller, sent } = makePoller();
+
+  await poller.fetch();
+  const good = poller.snapshot;
+  assert.ok(good);
+
+  limited = true;
+  await poller.fetch();
+  assert.equal(calls.usage, 2);
+  assert.equal(poller.snapshot, good, 'snapshot survives the 429');
+  assert.equal(sent.length, 1, 'no usage: null broadcast');
+
+  await poller.fetch();
+  poller.refreshSoon();
+  t.mock.timers.tick(60_000);
+  await settle();
+  assert.equal(calls.usage, 2, 'no request before retry-after elapses');
+
+  t.mock.timers.tick(60_001);
+  await poller.fetch();
+  assert.equal(calls.usage, 3, 'polls again once retry-after has passed');
+});
+
+test('a success schedules exactly one refetch just after the earliest reset', async (t) => {
+  const now = Date.parse('2026-01-01T00:00:00Z');
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now });
+  const resetsAt = new Date(now + 10 * 60_000).toISOString();
+  const { calls, impl } = countingFetch(
+    () => new Response(JSON.stringify({ five_hour: { utilization: 25, resets_at: resetsAt } }), { status: 200 }),
+  );
+  t.after(stubFetch(impl));
+  const { poller } = makePoller();
+
+  await poller.fetch();
+  assert.equal(calls.usage, 1);
+
+  t.mock.timers.tick(10 * 60_000 + 29_000);
+  await settle();
+  assert.equal(calls.usage, 1, 'not before reset + grace');
+
+  t.mock.timers.tick(2_000);
+  await settle();
+  assert.equal(calls.usage, 2, 'refetched right after the reset');
+
+  // The refetch still reports the now-past reset, so nothing new is scheduled.
+  t.mock.timers.tick(60 * 60_000);
+  await settle();
+  assert.equal(calls.usage, 2);
+});
+
+test('repeated failures log each distinct message once', async (t) => {
+  const warn = t.mock.method(console, 'warn', () => {});
+  let status = 503;
+  t.after(stubFetch(() => Promise.resolve(new Response('nope', { status }))));
+  const { poller } = makePoller();
+
+  await poller.fetch();
+  await poller.fetch();
+  status = 500;
+  await poller.fetch();
+  await poller.fetch();
+
+  assert.deepEqual(
+    warn.mock.calls.map((c) => c.arguments.join(' ')),
+    ['[usage] unavailable: usage endpoint 503', '[usage] unavailable: usage endpoint 500'],
+  );
 });

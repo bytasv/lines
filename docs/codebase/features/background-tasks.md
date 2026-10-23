@@ -256,6 +256,7 @@ transcript card.
 
 ## Business rules
 
+- A muted sidebar group (see session-and-project-ui) does not suppress a live task: the session keeps running its background work, and only the alert, Web Push and tab dot for it are skipped.
 - The set is live-only: never restored from a persisted `SessionMeta.backgroundTasks` on load — a
   background task belongs to a specific CLI process, and a value surviving a bridge/process
   restart in `sessions.json` describes a process nothing here has a handle on any more. The

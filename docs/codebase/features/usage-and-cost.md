@@ -108,6 +108,7 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 - `planLabelFromProfile` (`server/src/usage.ts`) — pure mapping of the OAuth profile to a plan label
 - `OpenaiUsagePoller.consumeResetCredit` (`server/src/openaiUsage.ts`) — redeems an OpenAI reset credit
 - `UsageIndicator` — renders the chip, gated on `auth.loggedIn`
+- `windowElapsed` (`web/src/components/UsageIndicator.tsx`) — true when a window's reset time has passed
 - `ModelSpend` — `{ costUsd, tokens, turns }` for one model id
 - `ModelSpendMap` — `Record<modelId, ModelSpend>`
 - `SessionMeta.costByModel` — per-session spend map, keyed by resolved model id
@@ -200,7 +201,10 @@ Every place spend is measured and shown, all fed by the same accumulate-on-`resu
 `UsagePoller.start()` fetches on an interval and after turn completion (debounced via
 `refreshSoon`), broadcasting snapshots to all clients. `hello` also carries the current snapshot
 for newly connecting clients. The store merges both into `state.usage`; `UsageIndicator` renders
-from it.
+from it. After each good reading the poller schedules one extra fetch shortly after the earliest
+future window reset, so the chip moves on as soon as a window rolls over. A 429 response pauses
+polling for its `retry-after` (or the poll interval when absent), and that pause also covers the
+per-turn refresh.
 
 Beyond the windows, a snapshot optionally carries the plan name, a pay-as-you-go block
 (`UsageCredits`), whether the limit is reached, and the number of OpenAI reset credits available.
@@ -479,6 +483,18 @@ session-level `hasEstimatedSpend` reading.
   staleness is communicated to the user via "Updated Xm ago" in the hover card, never by hiding
   the chip. The same holds when there is no snapshot at all (first fetch pending or failed,
   rejected token): the chip stays, empty.
+- Staleness is also the reason a reading must never look current past its own window. A window
+  whose reset time has passed is shown dimmed, with "Window reset — waiting for a fresh reading"
+  in place of the reset line, and it no longer drives the ring; if every window has passed, the
+  ring falls back to all of them. The poller schedules a refetch shortly after the earliest reset
+  so this state is brief. Clock skew between the browser and the reset time can shift that label.
+- A window with no reset time reported is kept and shown with the dimmed note "Reset time not
+  reported", never silently without a reset line. The bridge logs the raw `five_hour` object once
+  when this happens for the five-hour window.
+- A 429 from the usage endpoint pauses polling until its `retry-after` (or the poll interval when
+  absent). While paused, neither the interval poll nor the per-turn refresh makes a request, so
+  turns cannot extend the rate limit. Other failures are logged once per distinct message, so a
+  change in status still shows in the bridge log.
 - `hello` may arrive with `usage: null` before the poller's first fetch completes (e.g. right
   after a server restart); if the client is still logged in, the previously held snapshot is
   kept rather than cleared, so the chip does not flicker away on reconnect.

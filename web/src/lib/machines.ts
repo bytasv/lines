@@ -398,6 +398,29 @@ export function inProject(
 }
 
 /**
+ * Unarchived sessions shared with this user that no project tab covers — the
+ * sidebar's "Shared with me" group.
+ *
+ * Session scope only. A session guest's tabs are synthesized from the sessions in
+ * that machine's `hello` (`guestProjects`), so this catches one shared later, in a
+ * folder no tab covers, which would otherwise be held and rendered nowhere. A
+ * machine guest sees the host's real tabs and gets the owner's rules: a session
+ * outside every open tab is hidden, as it is for the owner. Every tab counts, not
+ * only the active one, or each other project's sessions would land here too.
+ */
+export function uncoveredSharedSessions(
+  sessions: Record<string, SessionMeta>,
+  projects: Project[],
+  projectKeys: ProjectKeyMap,
+  scope: ShareScope | null | undefined,
+): SessionMeta[] {
+  if (scope !== 'session') return [];
+  return Object.values(sessions).filter(
+    (s) => !s.archived && !projects.some((p) => inProject(s, projectKeys, p)),
+  );
+}
+
+/**
  * Where a notification click has to take the UI for this session: the machine
  * hosting it, and the project tab it belongs to on that machine.
  *

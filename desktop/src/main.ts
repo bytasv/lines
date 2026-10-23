@@ -29,6 +29,7 @@ import {
   clipboard,
   dialog,
   nativeImage,
+  net,
   powerMonitor,
   powerSaveBlocker,
   session,
@@ -121,6 +122,16 @@ const PREFS_FILE = path.join(APP_ROOT, 'desktop.json');
 const LOCAL_MODE = isLocalMode() || DEV_INSTANCE;
 const RELAY_MODE = !LOCAL_MODE;
 const config = loadConfig(ROOT);
+/** The local fallback window's bundle (web `build:local`), shipped beside the server bundles. */
+const LOCAL_UI_DIST = path.join(ROOT, 'web', 'dist-local');
+/**
+ * Hosted mode's local fallback: when the hosted app or the relay is unreachable,
+ * this window switches to `LOCAL_UI_DIST` served on loopback, talking to the
+ * bridge directly with its runtime token. Behind `config.localFallback` (see
+ * config.ts), and only when the bundle is really there — a build made without it
+ * keeps the old error page rather than serving 404s.
+ */
+const LOCAL_FALLBACK = RELAY_MODE && config.localFallback && fs.existsSync(path.join(LOCAL_UI_DIST, 'index.html'));
 
 /**
  * Squirrel.Mac verifies the code signature of the replacement app, so an
@@ -192,6 +203,20 @@ let pairingWindow: BrowserWindow | null = null;
  *  window's: the two answer different questions and can both be up at once. */
 let enrollWindow: BrowserWindow | null = null;
 let uiPort = 0;
+/**
+ * What the app window shows in hosted mode: the hosted app, or — with
+ * LOCAL_FALLBACK, while the cloud is unreachable — the local fallback page.
+ * Always 'hosted' without the fallback.
+ */
+let surface: 'hosted' | 'local' = 'hosted';
+/** The runtime token the local page was last loaded with, so a rotated one reloads it. */
+let localPageToken: string | null = null;
+/** Armed while the relay link is down; firing switches the window to the local page. */
+let relayDownTimer: NodeJS.Timeout | null = null;
+/** The local UI server's port from the last run, reused so the page keeps its origin (and its storage). */
+let savedLocalUiPort = 0;
+/** Pending background retry of a registration that failed or timed out. */
+let registerRetryTimer: NodeJS.Timeout | null = null;
 let quitting = false;
 let device: DeviceIdentity | null = null;
 /** Set while this machine is registered but unclaimed; cleared once pairing succeeds. */
@@ -293,6 +318,18 @@ let turnActive = false;
  */
 const RELAY_SETTLE_MS = 6_000;
 
+/**
+ * How long the relay may stay down before the window switches to the local
+ * page. Long enough that a relay restart or a Wi-Fi hop does not flip it.
+ */
+const RELAY_DOWN_FALLBACK_MS = 20_000;
+
+/** How long the hosted app gets to answer before a launch (or a return) gives up on it. */
+const HOSTED_PROBE_TIMEOUT_MS = 3_000;
+
+/** Between background retries of a registration that failed at boot. */
+const REGISTER_RETRY_MS = 60_000;
+
 /** Codes expire after 15 minutes; refresh just inside that so one is always valid. */
 const PAIRING_REFRESH_MS = 14 * 60_000;
 
@@ -347,7 +384,14 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     // bridge through the relay, so nothing has a reason to open a socket on the
     // bridge's port at all — and a socket there drives the agent. Local mode is
     // the other way round: the window is our loopback page and dials it directly.
-    LINES_BRIDGE_DIRECT: RELAY_MODE ? '0' : '1',
+    // With the local fallback on, the one exception: the shell's own loopback
+    // page, which must present this boot's runtime token from exactly that
+    // origin (`token`, see server/src/connectionPolicy.ts).
+    LINES_BRIDGE_DIRECT: RELAY_MODE ? (LOCAL_FALLBACK ? 'token' : '0') : '1',
+    // Exact, and replacing anything inherited: in token mode this list is the
+    // whole origin check. `uiPort` is known by now — start() serves the page
+    // before it spawns either child.
+    ...(LOCAL_FALLBACK ? { LINES_BRIDGE_ALLOWED_ORIGINS: localUiOrigin() } : {}),
     // autoGuard self-locates from `server/src` under tsx, which matches nothing
     // in a packaged build — so name the files that really back this worker.
     ...(app.isPackaged ? { LINES_WORKER_SOURCES: path.join(SERVER_DIR, 'worker.mjs') } : {}),
@@ -462,11 +506,13 @@ function loadPrefs() {
       keepAwake?: unknown;
       loginItemDefaulted?: unknown;
       moveToApplicationsDeclined?: unknown;
+      localUiPort?: unknown;
     };
     if (raw.openIn === 'browser' || raw.openIn === 'desktop') openIn = raw.openIn;
     if (typeof raw.keepAwake === 'boolean') keepAwake = raw.keepAwake;
     if (raw.loginItemDefaulted === true) loginItemDefaulted = true;
     if (raw.moveToApplicationsDeclined === true) moveToApplicationsDeclined = true;
+    if (typeof raw.localUiPort === 'number' && Number.isInteger(raw.localUiPort)) savedLocalUiPort = raw.localUiPort;
   } catch {
     /* absent or corrupt: the default stands */
   }
@@ -503,7 +549,17 @@ function savePrefs() {
     fs.mkdirSync(APP_ROOT, { recursive: true, mode: 0o700 });
     fs.writeFileSync(
       PREFS_FILE,
-      `${JSON.stringify({ openIn, keepAwake, loginItemDefaulted, moveToApplicationsDeclined }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          openIn,
+          keepAwake,
+          loginItemDefaulted,
+          moveToApplicationsDeclined,
+          ...(savedLocalUiPort ? { localUiPort: savedLocalUiPort } : {}),
+        },
+        null,
+        2,
+      )}\n`,
     );
   } catch (err) {
     shellLog(`[prefs] could not save: ${(err as Error).message}`);
@@ -1134,6 +1190,71 @@ function localModeCsp(): string {
   ].join('; ');
 }
 
+/**
+ * The local fallback page's policy. Narrower than local mode's: that bundle
+ * signs in through Clerk and syncs to storage, this one does neither, so the
+ * only thing it may connect to besides its own origin is the bridge — on the
+ * port it holds right now. A restarted bridge is on a new port, and the shell
+ * reloads the page (with the new token) when it publishes one.
+ */
+function localShellCsp(): string {
+  const port = readBridgeRuntime()?.port;
+  return [
+    "default-src 'self'",
+    "script-src 'self' blob:",
+    "worker-src 'self' blob:",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "media-src 'self' blob:",
+    "font-src 'self' data:",
+    `connect-src 'self'${port ? ` ws://127.0.0.1:${port}` : ''}`,
+    "frame-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+}
+
+/**
+ * Our own bridge's bridge.json: its port, and the per-boot runtime token the
+ * local fallback page dials with. Only while the pid is the bridge we spawned —
+ * a file a previous run left behind names a dead port and a dead token.
+ */
+function readBridgeRuntime(): { port: number; token: string | null } | null {
+  try {
+    const info = JSON.parse(fs.readFileSync(path.join(RUN_DIR, 'bridge.json'), 'utf8')) as {
+      port?: unknown;
+      pid?: unknown;
+      token?: unknown;
+    };
+    if (typeof info.port !== 'number' || (bridge?.pid !== undefined && info.pid !== bridge.pid)) return null;
+    return { port: info.port, token: typeof info.token === 'string' ? info.token : null };
+  } catch {
+    return null; // bridge still booting
+  }
+}
+
+/** The origin the UI server answers on; the bridge admits a token-gated socket from it and no other. */
+function localUiOrigin(): string {
+  return `http://127.0.0.1:${uiPort}`;
+}
+
+/**
+ * Only this machine's own names. The page is served to our window alone, and a
+ * Host naming anything else is a page that rebound its domain to 127.0.0.1 to
+ * read `/__bridge` (or drive `/__shell/`) as if same-origin.
+ */
+function loopbackHost(host: string | undefined): boolean {
+  if (!host) return false;
+  try {
+    const name = new URL(`http://${host}`).hostname.toLowerCase();
+    return name === '127.0.0.1' || name === 'localhost';
+  } catch {
+    return false;
+  }
+}
+
 /** The file viewer's HTML preview shell (web/public/html-preview.html) and its script. */
 const HTML_PREVIEW_FILES = new Set(['/html-preview.html', '/html-preview.js']);
 
@@ -1146,9 +1267,15 @@ const HTML_PREVIEW_FILES = new Set(['/html-preview.html', '/html-preview.js']);
 const HTML_PREVIEW_CSP =
   "sandbox allow-scripts allow-popups allow-forms allow-modals; default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; frame-ancestors 'self'";
 
-/** Serve the built web UI, plus the /__bridge discovery endpoint the client expects. */
+/**
+ * Serve the built web UI, plus the /__bridge discovery endpoint the client
+ * expects. In local mode that is `web/dist`; in hosted mode with the fallback on
+ * it is the local fallback bundle, plus the two `/__shell/` endpoints that page
+ * uses in place of IPC (it has none — see openWindow).
+ */
 function startUiServer(): Promise<number> {
-  const dist = path.join(ROOT, 'web', 'dist');
+  const dist = LOCAL_MODE ? path.join(ROOT, 'web', 'dist') : LOCAL_UI_DIST;
+  const csp = LOCAL_MODE ? localModeCsp : localShellCsp;
   const types: Record<string, string> = {
     '.html': 'text/html; charset=utf-8',
     '.js': 'text/javascript; charset=utf-8',
@@ -1159,7 +1286,28 @@ function startUiServer(): Promise<number> {
     '.woff2': 'font/woff2',
   };
   const server = http.createServer((req, res) => {
+    if (!loopbackHost(req.headers.host)) {
+      res.writeHead(421).end();
+      return;
+    }
     const url = (req.url ?? '/').split('?')[0];
+    if (RELAY_MODE && url === '/__shell/status') {
+      // What the page cannot see for itself: whether the cloud's relay is back.
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ relay: relay?.connected ? 'up' : 'down' }));
+      return;
+    }
+    if (RELAY_MODE && url === '/__shell/return') {
+      // POST with a custom header: a cross-site page cannot send that without a
+      // preflight this server never answers, so only our own page can ask.
+      if (req.method !== 'POST' || req.headers['x-lines-shell'] !== 'return') {
+        res.writeHead(403).end();
+        return;
+      }
+      res.writeHead(204).end();
+      void switchToHosted('the page asked');
+      return;
+    }
     if (url === '/__bridge') {
       // Same contract as the vite dev plugin, so the client needs no change:
       // only the port, never the bridge token.
@@ -1190,7 +1338,7 @@ function startUiServer(): Promise<number> {
       const preview = HTML_PREVIEW_FILES.has(rel);
       res.writeHead(200, {
         'content-type': types[path.extname(file)] ?? 'application/octet-stream',
-        'content-security-policy': preview ? HTML_PREVIEW_CSP : localModeCsp(),
+        'content-security-policy': preview ? HTML_PREVIEW_CSP : csp(),
         'x-content-type-options': 'nosniff',
         ...(preview ? {} : { 'x-frame-options': 'DENY' }),
         'referrer-policy': 'strict-origin-when-cross-origin',
@@ -1199,8 +1347,24 @@ function startUiServer(): Promise<number> {
       res.end(data);
     });
   });
+  // The fallback page keeps the port it had last run where it can: the origin is
+  // the key to its localStorage and IndexedDB, so a new port every launch would
+  // forget its drafts and preferences each time.
+  const preferred = RELAY_MODE ? savedLocalUiPort : 0;
   return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve((server.address() as { port: number }).port));
+    const listening = () => {
+      const { port } = server.address() as { port: number };
+      if (RELAY_MODE && port !== savedLocalUiPort) {
+        savedLocalUiPort = port;
+        savePrefs();
+      }
+      resolve(port);
+    };
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      if (!preferred || err.code !== 'EADDRINUSE') throw err;
+      server.listen(0, '127.0.0.1', listening);
+    });
+    server.listen(preferred, '127.0.0.1', listening);
   });
 }
 
@@ -1210,7 +1374,7 @@ function startUiServer(): Promise<number> {
  */
 function appUrl(): string {
   if (DEV_INSTANCE) return DEV_WEB_URL;
-  return LOCAL_MODE ? `http://127.0.0.1:${uiPort}/` : config.webUrl;
+  return LOCAL_MODE || surface === 'local' ? `${localUiOrigin()}/` : config.webUrl;
 }
 
 /**
@@ -1242,6 +1406,7 @@ function appUrl(): string {
  */
 function appUrlForOwnWindow(): string {
   if (DEV_INSTANCE) return DEV_WEB_URL;
+  if (surface === 'local') return localPageUrl();
   const params = new URLSearchParams();
   if (device) params.set('host', device.id);
   if (RELAY_MODE && pairingCode) params.set('pair', pairingCode);
@@ -1255,6 +1420,25 @@ function appUrlForOwnWindow(): string {
   }
   const fragment = params.toString();
   return fragment ? `${appUrl()}#${fragment}` : appUrl();
+}
+
+/**
+ * The local fallback page, with this boot's bridge token in the fragment: the
+ * page stashes and strips it on arrival and only ever sends it to the bridge, as
+ * a WebSocket subprotocol. Same reasoning as the enrollment code above — this
+ * window is the shell's own, the token is this OS user's already (bridge.json is
+ * 0600), and a fragment never reaches a server. `host=` keeps "Browse…" and the
+ * diagnostics' desktop-window tag, as in hosted mode.
+ *
+ * No token yet (the bridge is still booting) loads the page anyway; the
+ * bridge.json watch reloads it the moment one is published.
+ */
+function localPageUrl(): string {
+  localPageToken = readBridgeRuntime()?.token ?? null;
+  const params = new URLSearchParams();
+  if (localPageToken) params.set('bt', localPageToken);
+  if (device) params.set('host', device.id);
+  return `${localUiOrigin()}/#${params.toString()}`;
 }
 
 /**
@@ -1641,12 +1825,31 @@ function openWindow() {
     webPreferences: { nodeIntegration: false, contextIsolation: true, backgroundThrottling: false },
   });
   win = w;
-  void w.loadURL(appUrlForOwnWindow());
+  // With the fallback, a launch while the cloud is down goes straight to the
+  // local page after a short probe, rather than a splash that never lifts.
+  if (LOCAL_FALLBACK && surface === 'hosted') {
+    void hostedReachable().then((up) => {
+      if (w.isDestroyed()) return;
+      if (!up) {
+        surface = 'local';
+        shellLog('[window] hosted app unreachable at launch — opening the local page');
+      }
+      void w.loadURL(appUrlForOwnWindow());
+    });
+  } else {
+    void w.loadURL(appUrlForOwnWindow());
+  }
   attachNavigationGuards(w, 'app');
   w.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
     // -3 is ERR_ABORTED, which every cancelled navigation reports.
     if (!isMainFrame || code === -3) return;
     shellLog(`[window] load failed ${code} ${description} ${redactQuery(url)}`);
+    // The hosted app is down: carry on locally instead of an error page. Not
+    // for the local page itself failing, which would only loop.
+    if (LOCAL_FALLBACK && surface === 'hosted') {
+      switchToLocal(`load failed: ${description}`);
+      return;
+    }
     void w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadErrorHtml(description))}`);
     // Pairing must not depend on the hosted app: if it is unreachable, the code
     // still has to reach the user.
@@ -1662,6 +1865,106 @@ function openWindow() {
   // The accessory -> regular dock transition leaves the window behind whatever
   // was in front, so focusing after the tile exists is not redundant.
   w.focus();
+}
+
+/**
+ * Whether the hosted app answers at all, within a few seconds. Any response
+ * below 500 counts: a gateway error is the VPS up with the app behind it down,
+ * which is as unusable as no answer.
+ */
+async function hostedReachable(): Promise<boolean> {
+  try {
+    const res = await net.fetch(config.webUrl, {
+      method: 'HEAD',
+      signal: AbortSignal.timeout(HOSTED_PROBE_TIMEOUT_MS),
+    });
+    return res.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the window is on the hosted app proper — not mid-sign-in on an
+ * identity provider, which a switch would throw away. The offline error page
+ * counts as on it.
+ */
+function windowOnHostedApp(w: BrowserWindow): boolean {
+  const current = w.webContents.getURL();
+  if (!current || current.startsWith('data:')) return true;
+  try {
+    return new URL(current).origin === new URL(config.webUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Point the window at the local fallback page. Nothing tells the user they are
+ * "offline": the page is the same app on the same sessions, and its sync
+ * indicator is where the cloud's state shows.
+ */
+function switchToLocal(reason: string) {
+  if (!LOCAL_FALLBACK || surface === 'local') return;
+  surface = 'local';
+  shellLog(`[window] switching to the local page — ${reason}`);
+  if (win && !win.isDestroyed()) void win.loadURL(appUrlForOwnWindow());
+}
+
+/**
+ * Back to the hosted app, once it answers. The local page decides when (see
+ * web/src/lib/localShell.ts); the shell only checks it is really there, so a
+ * premature ask leaves the user where they were.
+ */
+async function switchToHosted(reason: string): Promise<void> {
+  if (!LOCAL_FALLBACK || surface === 'hosted') return;
+  if (!(await hostedReachable())) {
+    shellLog(`[window] staying on the local page (${reason}): hosted app unreachable`);
+    return;
+  }
+  // Re-read: another return (or a switch back) may have landed during the probe.
+  if ((surface as 'hosted' | 'local') === 'hosted') return;
+  surface = 'hosted';
+  shellLog(`[window] returning to the hosted app — ${reason}`);
+  if (win && !win.isDestroyed()) void win.loadURL(appUrlForOwnWindow());
+  // Still down (a manual return before the relay was back): the same 20s rule.
+  if (!relay?.connected) armRelayDownTimer();
+}
+
+/**
+ * Switch to the local page once the relay has been down for RELAY_DOWN_FALLBACK_MS.
+ * Not while this machine is waiting to be paired — that is the hosted app's job
+ * — nor while another bridge owns the machine, when ours is not running at all.
+ */
+function armRelayDownTimer() {
+  if (!LOCAL_FALLBACK || relayDownTimer) return;
+  relayDownTimer = setTimeout(() => {
+    relayDownTimer = null;
+    if (relay?.connected || standDown || pairingCode || surface === 'local') return;
+    if (!win || win.isDestroyed() || !windowOnHostedApp(win)) return;
+    switchToLocal(`relay down for ${RELAY_DOWN_FALLBACK_MS / 1000}s`);
+  }, RELAY_DOWN_FALLBACK_MS);
+  relayDownTimer.unref();
+}
+
+function disarmRelayDownTimer() {
+  if (relayDownTimer) clearTimeout(relayDownTimer);
+  relayDownTimer = null;
+}
+
+/**
+ * The bridge rotates its runtime token on every start, so a local page loaded
+ * with the old one can no longer dial. Reloaded with the fresh one as soon as it
+ * is published — and loaded with one at all, when the page came up first.
+ */
+function watchBridgeRuntime() {
+  fs.watchFile(path.join(RUN_DIR, 'bridge.json'), { interval: 1_000 }, () => {
+    if (surface !== 'local' || !win || win.isDestroyed()) return;
+    const token = readBridgeRuntime()?.token ?? null;
+    if (!token || token === localPageToken) return;
+    shellLog('[window] bridge restarted — reloading the local page');
+    void win.loadURL(appUrlForOwnWindow());
+  });
 }
 
 /**
@@ -1953,10 +2256,22 @@ async function refreshPairingCode(show: boolean): Promise<void> {
   try {
     pairingCode = await registerDevice(config.storageUrl, device);
     shellLog(pairingCode ? `[device] ${device.id} awaiting pairing` : `[device] ${device.id} already paired`);
+    if (registerRetryTimer) clearTimeout(registerRetryTimer);
+    registerRetryTimer = null;
   } catch (err) {
     // Not fatal: the bridge retries the relay forever, so a machine that
-    // registers late still comes up once storage is reachable again.
+    // registers late still comes up once storage is reachable again. Retried
+    // here too, in the background — boot no longer waits on it (registerDevice
+    // times out), so this is how a launch with the cloud down still ends up
+    // with a pairing code once it is back.
     shellLog(`[device] register failed: ${(err as Error).message}`);
+    if (!registerRetryTimer) {
+      registerRetryTimer = setTimeout(() => {
+        registerRetryTimer = null;
+        void refreshPairingCode(false);
+      }, REGISTER_RETRY_MS);
+      registerRetryTimer.unref();
+    }
   }
   if (pairingCode && show) openPairingWindow(pairingCode);
   schedulePairingRefresh();
@@ -1992,6 +2307,8 @@ function applyRelayStatus(status: RelayLinkStatus) {
   relay = status;
   if (relaySettleTimer) clearTimeout(relaySettleTimer);
   relaySettleTimer = null;
+  if (status.connected) disarmRelayDownTimer();
+  else armRelayDownTimer();
   if (status.connected) {
     relaySettleTimer = setTimeout(onRelayVerified, RELAY_SETTLE_MS);
     relaySettleTimer.unref();
@@ -2525,6 +2842,14 @@ async function start() {
     await refreshPairingCode(false);
   }
 
+  // Before either child: the bridge's token-gated mode is told this page's
+  // exact origin (childEnv), so the port has to be known when it spawns.
+  if (LOCAL_FALLBACK) {
+    uiPort = await startUiServer();
+    shellLog(`[ui] local fallback page on ${localUiOrigin()}`);
+    watchBridgeRuntime();
+  }
+
   const holder = foreignBridgeLock();
   if (holder) {
     // Another bridge already owns ~/.lines-app — a dev checkout under Tilt, in
@@ -2538,6 +2863,9 @@ async function start() {
     worker = spawnChild('worker', false);
     bridge = spawnChild('bridge', true);
     wireBridgeIpc();
+    // A relay that never comes up at all reports no transition to start the
+    // clock from, so it starts here.
+    armRelayDownTimer();
   }
 
   if (LOCAL_MODE && !DEV_INSTANCE) {

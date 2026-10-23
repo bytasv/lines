@@ -60,6 +60,10 @@
         "to": "whisper"
       },
       {
+        "from": "../web/dist-local",
+        "to": "web/dist-local"
+      },
+      {
         "from": "assets",
         "to": "assets",
         "filter": [

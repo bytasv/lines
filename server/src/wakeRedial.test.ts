@@ -160,34 +160,45 @@ describe('shouldReviveIdle', () => {
 
 describe('showDisconnectBanner', () => {
   const now = 100_000;
+  const local = true;
 
   test('a connected link never shows the pill, whatever downSince says', () => {
-    assert.equal(showDisconnectBanner({ status: 'connected', downSince: null, now }), false);
+    assert.equal(showDisconnectBanner({ status: 'connected', downSince: null, now, local }), false);
     assert.equal(
-      showDisconnectBanner({ status: 'connected', downSince: now - DISCONNECT_BANNER_GRACE_MS * 10, now }),
+      showDisconnectBanner({ status: 'connected', downSince: now - DISCONNECT_BANNER_GRACE_MS * 10, now, local }),
       false,
     );
   });
 
   test('reconnecting with no recorded drop yet stays hidden', () => {
-    assert.equal(showDisconnectBanner({ status: 'reconnecting', downSince: null, now }), false);
+    assert.equal(showDisconnectBanner({ status: 'reconnecting', downSince: null, now, local }), false);
   });
 
   test('a resume redial inside the grace is hidden; one that outlasts it shows', () => {
-    // The flash this exists to stop: every resumed PWA redials, and that redial
-    // used to put the red pill up for a second or two.
+    // The flash this exists to stop: every resumed window redials, and that
+    // redial used to put the red pill up for a second or two.
     assert.equal(
-      showDisconnectBanner({ status: 'reconnecting', downSince: now - (DISCONNECT_BANNER_GRACE_MS - 1), now }),
+      showDisconnectBanner({ status: 'reconnecting', downSince: now - (DISCONNECT_BANNER_GRACE_MS - 1), now, local }),
       false,
     );
     assert.equal(
-      showDisconnectBanner({ status: 'reconnecting', downSince: now - DISCONNECT_BANNER_GRACE_MS, now }),
+      showDisconnectBanner({ status: 'reconnecting', downSince: now - DISCONNECT_BANNER_GRACE_MS, now, local }),
       true,
     );
   });
 
-  test('offline shows at once — navigator.onLine is not a flap', () => {
-    assert.equal(showDisconnectBanner({ status: 'offline', downSince: now, now }), true);
-    assert.equal(showDisconnectBanner({ status: 'offline', downSince: null, now }), true);
+  test('offline waits out the grace too — the network says nothing about a loopback link', () => {
+    assert.equal(showDisconnectBanner({ status: 'offline', downSince: now, now, local }), false);
+    assert.equal(showDisconnectBanner({ status: 'offline', downSince: null, now, local }), false);
+    assert.equal(
+      showDisconnectBanner({ status: 'offline', downSince: now - DISCONNECT_BANNER_GRACE_MS, now, local }),
+      true,
+    );
+  });
+
+  test('the hosted app never shows it — a dropped cloud link is the sync indicator\'s to report', () => {
+    const long = now - DISCONNECT_BANNER_GRACE_MS * 10;
+    assert.equal(showDisconnectBanner({ status: 'reconnecting', downSince: long, now, local: false }), false);
+    assert.equal(showDisconnectBanner({ status: 'offline', downSince: long, now, local: false }), false);
   });
 });

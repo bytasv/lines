@@ -214,6 +214,18 @@ test('a malformed TypeSafe key file loads as no key', () => {
   assert.equal(store.loadTypesafeKey(), 'padded');
 });
 
+test('settings keep sidebar session groups, order and mute included', () => {
+  const { store } = tmpStore();
+  const sessionGroups = {
+    'github.com/acme/app': [
+      { id: 'g2', name: 'Later' },
+      { id: 'g1', name: 'For future', muted: true },
+    ],
+  };
+  store.saveSettings({ sessionGroups, updatedAt: 5 });
+  assert.deepEqual(store.loadSettings()?.sessionGroups, sessionGroups);
+});
+
 test('the TypeSafe key stays out of every other store file', () => {
   const { root, store } = tmpStore();
   store.saveSettings({ smartRouting: { mode: 'auto', rules: {} } } as never);

@@ -232,13 +232,18 @@ recipe versions) drops silently with a console warning only, since callers resen
 The store keeps every linked machine's sessions — `linkForMessage` routes on `sessionMachine`, and
 [session-and-project-ui](session-and-project-ui.md)'s `maybeAlert` still watches all of them so a
 session left running on a background machine still notifies (see Business rules). What changed is
-*display*: the sidebar's three groups (Sessions, Shared-with-me, Archived), and the project tab's
+*display*: the sidebar's groups (Sessions, Shared-with-me, Archived), and the project tab's
 status dot via `reconcileSeenStatus`, are fed `sessionsOnMachine(sessions, sessionMachine,
 primaryDeviceId ?? '')` rather than the raw `sessions` map, so a tab or a sidebar row can never
 belong to two computers' worth of projects at once. Switching machines is how the other machine's
 sessions come back into view — not a second group in the same list, which is the design this
 feature reverses; see [session-and-project-ui](session-and-project-ui.md) for the groups
 themselves.
+
+A machine-scope guest sees the host's per-project layout, the same as the owner: no
+Shared-with-me group, and a session outside every open tab is hidden. Shared-with-me exists only
+for session-scope grants. The session header names the machine hosting the session, using the
+switcher's name for it.
 
 ### The header switcher
 

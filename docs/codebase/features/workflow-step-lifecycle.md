@@ -54,7 +54,7 @@ reads as "done" without opening the session.
 ## Files
 
 - `shared/types.ts` (`WorkflowState.advanceOnComplete`, `WorkflowState.advanceOnCompleteStep`,
-  `WorkflowState.advancing`, `WorkflowState.lastStepOutput`, `WorkflowState.diffBaselines`,
+  `WorkflowState.advancing`, `WorkflowState.lastStepOutput`,
   `WorkflowMarkerData.event`, `ClientMessage` variants
   `workflowForceAdvance`/`workflowStartStep`)
 - `server/src/sessions.ts` (`consolidateStepOutput` and its timeout, plan-approval stamp
@@ -63,9 +63,8 @@ reads as "done" without opening the session.
   [context-window](context-window.md#compaction))
 - `server/src/workflows.ts`
 - `server/src/index.ts`
-- `server/src/git.ts` (`workingTreeDiff`/`multiRepoDiff`, `MAX_DIFF_CHARS` — see
-  [multi-repo-commits](multi-repo-commits.md), which owns the per-repo diff and the
-  `{roots}` token in detail)
+- `server/src/git.ts` (`repoBranch`, `groupByRepo` — see
+  [multi-repo-commits](multi-repo-commits.md), which owns the `{roots}` token in detail)
 - `web/src/components/Transcript.tsx` (`WorkflowMarker`)
 - `web/src/components/Composer.tsx`
 - `web/src/components/WorkflowStepper.tsx`
@@ -313,7 +312,7 @@ step?") before sending `{type: 'workflowStartStep', sessionId, stepIndex}`.
 `WorkflowEngine.startStep` re-validates all the same conditions server-side (the client's
 derived `stalled` is a hint, not authority) before calling `runStep(sessionId, undefined, true)`
 — the same normal step-entry path an advance uses, so the fresh-start reset and
-`{previous}`/`{diff}` hand-off behave exactly as they would have if the advance had completed
+`{previous}` hand-off behave exactly as they would have if the advance had completed
 normally.
 
 **`done` at the current index — resume the advance.** The stepper derives
@@ -430,11 +429,10 @@ fresh-start hand-off reads `lastStepOutput ?? lastAssistantText(...)`.
 
 Before a step's prompt is sent, `runStep` resolves the hand-off values it will need (`{task}`
 from the workflow, `{feedback}` from a retry, and — only when entering a fresh-start step that
-has predecessors — `{previous}` from `lastStepOutput ?? lastAssistantText(...)` and `{diff}`
-from `multiRepoDiff`, one per-repo section per commit unit the session's roots span — see
-[multi-repo-commits](multi-repo-commits.md)), then calls `substituteTokens` **once** on the
-raw template. That single `String.replace` fills `{task}`, `{feedback}`, `{previous}`,
-`{diff}`, `{roots}`, and every `{outputs.<name>}` from `meta.workflow.outputs` (per-session,
+has predecessors — `{previous}` from `lastStepOutput ?? lastAssistantText(...)`), then calls
+`substituteTokens` **once** on the raw template. That single `String.replace` fills `{task}`,
+`{feedback}`, `{previous}`, `{roots}` (see [multi-repo-commits](multi-repo-commits.md)), and
+every `{outputs.<name>}` from `meta.workflow.outputs` (per-session,
 never shared across sessions) in one pass, so text pulled in by one token is never rescanned
 for another. An `{outputs.<name>}` that is absent or resolves to blank/whitespace is reported
 as missing; if any are missing the step parks at `waiting-approval` via
@@ -442,8 +440,13 @@ as missing; if any are missing the step parks at `waiting-approval` via
 `WorkflowState.stepFailure = 'pre-run'`) plus a marker carrying `missingOutputs`, and the
 prompt is never sent — see [turn-recovery](turn-recovery.md). `usesHandoffTokens(template)`
 (tested against the **template**, before substitution) gates the fresh-start auto-prepend so a
-template that already references `{previous}`, `{diff}`, or any `{outputs.*}` is not also
-handed the same context a second time under a `## Context from the previous step` heading.
+template that already references `{previous}` or any `{outputs.*}` is not also handed the same
+context a second time under a `## Context from the previous step` heading. The auto-prepend
+carries only the previous step's output: there is no git-diff hand-off. Tokens `{diff}` and
+`{changed}` are not recognised; a literal occurrence stays in the prompt as plain text.
+The shipped default workflow chains its steps through named outputs (`plan`, `implementation`,
+`tests`, `refactor`) instead of relying on the auto-prepend, so each fresh step sees exactly the
+earlier outputs it needs.
 `{roots}` is deliberately **not** one of the tokens `usesHandoffTokens` looks for — it is
 static workspace shape (which folders, which git repos, which branches), not hand-off content,
 so a template using only `{roots}` still gets the normal auto-prepend, and `{roots}` itself is
@@ -556,7 +559,7 @@ installed icon, no new package). No other new dependencies.
 - One click on "Mark as completed" always ends with the workflow on the next step (or done) —
   via a normal settle, or the watchdog if the turn never settles at all.
 - Starting a stalled `pending` step runs it exactly as a normal advance would: same
-  fresh-start behavior, same `{previous}`/`{diff}` hand-off.
+  fresh-start behavior, same `{previous}` hand-off.
 - Resuming a stalled `done` step re-runs its consolidation, so the `{outputs.<name>}` entry
   the dead advance never published is filled in before the next step starts.
 - Resuming needs no confirmation dialog — the step is already done, so nothing is being
@@ -607,16 +610,10 @@ installed icon, no new package). No other new dependencies.
   it parks at `waiting-approval` with an error marker instead of silently substituting `''`
   and running blind.
 - Tokens are only honoured where the step author wrote them: a token appearing inside
-  substituted content (a step output, the diff, the task text) stays literal. Staged
-  substitution used to re-expand them, so a plan that merely discussed `{previous}`/`{diff}`
-  was pasted once per literal `{previous}` and the working-tree diff once per literal
-  `{diff}` — one step produced a 3.8 MB prompt from a 13 KB plan and a 105 KB diff, and the
-  turn failed for exceeding the context window.
-- The working-tree diff handed to a fresh-start step is capped (`MAX_DIFF_CHARS` in
-  `server/src/git.ts`) with a truncation marker, so a large dirty tree degrades the hand-off
-  instead of failing the turn; when the session's roots span more than one commit unit, that
-  one budget is shared across every repo's section rather than multiplied by the repo count
-  (see [multi-repo-commits](multi-repo-commits.md)).
+  substituted content (a step output, the task text) stays literal. Staged substitution used
+  to re-expand them, so a plan that merely discussed `{previous}` was pasted once per literal
+  `{previous}` — one step produced a 3.8 MB prompt from a 13 KB plan, and the turn failed for
+  exceeding the context window.
 - A step's deliverable during plan mode is its `ExitPlanMode` plan (inline argument or written
   plan file), not the turn's trailing chat text — the prior behavior captured the latter and
   produced near-empty outputs.
@@ -808,8 +805,8 @@ is attached to, which is not known until the run. The runner handles it with the
 - [turn-recovery](turn-recovery.md) — the failed-turn variant of this park (`stepFailure`,
   the skipped `setStatus`, `autoAdvance` no longer firing on failure), and the failure row
   and Retry the missing-`{outputs.*}` park gets via `failTurn`.
-- [multi-repo-commits](multi-repo-commits.md) — owns `{roots}`, `multiRepoDiff`, and the
-  per-repo diff split budget in detail.
+- [multi-repo-commits](multi-repo-commits.md) — owns `{roots}` and the commit-unit grouping
+  in detail.
 - [session-and-project-ui](session-and-project-ui.md) — the sidebar status badge and project
   tab dot the finished-workflow icon shares its precedence chain with.
 - [transcript-performance](transcript-performance.md) — the tail-windowed transcript the

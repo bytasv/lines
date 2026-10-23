@@ -40,7 +40,7 @@ import {
 import { verifyToken } from '@clerk/backend';
 import { WORKER_LOST_MS, WorkerClient, type WorkerRpc } from './workerClient.ts';
 import { RelayClient, type AttestedGrant, type AttestedIdentity } from './relayClient.ts';
-import { deviceIdentity } from './device.ts';
+import { clearLastOwnerId, deviceIdentity, readLastOwnerId, writeLastOwnerId } from './device.ts';
 import { bridgeIdentity } from './e2eeIdentity.ts';
 import { guardRelayChannel } from './e2eeChannel.ts';
 import {
@@ -57,6 +57,7 @@ import {
   connectionPolicy,
   hostAllowed,
   listenHost,
+  selectProtocol,
   tokenFitsContext,
   tokenRefreshAction,
   verifyClient,
@@ -101,12 +102,21 @@ import { pageTranscript } from './transcriptPage.ts';
  *  target); unset means bind :0 and publish the result to bridge.json. */
 const PORT = Number(process.env.LINES_BRIDGE_PORT ?? 0);
 
+/** Published 0600 in bridge.json. It gates `/lines-mcp`, and — only under
+ *  `LINES_BRIDGE_DIRECT=token`, the desktop app's local fallback window — a
+ *  direct socket, which presents it as a WebSocket subprotocol (see
+ *  connectionPolicy.ts). Otherwise a browser socket is guarded by the upgrade
+ *  check (`verifyClient` below: loopback origins only, by default) and, where it
+ *  is configured, the Clerk gate in handleConnection. The dev-server discovery
+ *  endpoint never exposes it. */
+const bridgeToken = newRuntimeToken();
+
 /**
  * Where the listener binds and which direct sockets it accepts — loopback and
  * this machine's own pages by default. See connectionPolicy.ts for why, and for
  * the env vars that open it to a LAN on purpose.
  */
-const CONNECTION_POLICY = connectionPolicy();
+const CONNECTION_POLICY = connectionPolicy(process.env, bridgeToken);
 {
   const { refused } = listenHost();
   if (refused) {
@@ -123,14 +133,6 @@ const CONNECTION_POLICY = connectionPolicy();
  * where the library default would let a socket hand us 100 MiB at a time.
  */
 const MAX_FRAME_BYTES = 64 * 1024 * 1024;
-
-/** Published in bridge.json for the tray app's future control channel. It is
- *  deliberately *not* enforced on browser connections: a browser cannot set
- *  headers on a WebSocket, so what guards that path is the upgrade check
- *  (`verifyClient` below: loopback origins only, by default) and, where it is
- *  configured, the Clerk gate in handleConnection. The dev-server discovery
- *  endpoint never exposes it. */
-const bridgeToken = newRuntimeToken();
 
 /**
  * Injected by the desktop bundler (esbuild `--define`), because a packaged
@@ -656,6 +658,17 @@ if (RELAY_URL) {
     // Straight through to the desktop shell: it is the only consumer, and the
     // tray is the only place a user can see that this machine is reachable.
     onStatus: (status) => {
+      // The relay drops a hub with `revoked` only once storage has said this
+      // device is no longer its owner's (a bare 1008 can also be a storage
+      // outage). The closest thing to a sign-out this process ever hears: the
+      // local window must stop opening on that account's sessions.
+      if (!status.connected && status.code === 1008 && status.reason === 'revoked') {
+        try {
+          clearLastOwnerId();
+        } catch (err) {
+          console.warn('[relay] could not forget the last owner:', (err as Error).message);
+        }
+      }
       devRelayConnected = status.connected;
       relayLink = status;
       reportRelayStatus(status);
@@ -936,6 +949,9 @@ const wss = new WebSocketServer({
   // Refused before the socket exists, so a stranger's page never gets a `hello`:
   // a direct socket is the agent's whole command surface.
   verifyClient: verifyClient(CONNECTION_POLICY, (reason) => console.warn(`[ws] refused a direct socket: ${reason}`)),
+  // A browser that offered subprotocols (the token-gated window offers `lines`
+  // beside its token) fails the handshake unless one is echoed back.
+  handleProtocols: (protocols) => selectProtocol(protocols),
 });
 // The ws library re-emits http server errors here; without a listener they crash the process.
 wss.on('error', (err) => console.warn('[wss]', (err as Error).message));
@@ -972,6 +988,15 @@ async function handleConnection(
   if (attested) {
     userId = attested.userId;
     clerkToken = attested.clerkToken;
+  } else if (CONNECTION_POLICY.tokenGated) {
+    // The desktop app's local fallback window: the upgrade check already held it
+    // to this machine, the shell's exact origin and this boot's runtime token, so
+    // it is this OS user. It has no Clerk session to say whose sessions it wants,
+    // so it gets the account that last opened an owner channel here — the same
+    // sessions the hosted window showed — and, before anyone ever has, the
+    // single-tenant context. No token comes with it: the context keeps whatever
+    // storage credential it last had.
+    userId = readLastOwnerId() ?? LOCAL_USER;
   } else if (AUTH_ENABLED) {
     // Hard gate: no valid Clerk token in the handshake query → close, no hello.
     const token = new URL(req.url ?? '/', 'http://localhost').searchParams.get('token');
@@ -1046,6 +1071,15 @@ async function handleConnection(
     console.warn('[e2ee] refused an unauthenticated owner channel');
     ws.close(1008, 'unauthorized');
     return;
+  }
+  // Past that gate an owner channel is proven, so it names whose sessions the
+  // local fallback window should open on (see the token-gated branch above).
+  if (attested && !isGuest) {
+    try {
+      writeLastOwnerId(userId);
+    } catch (err) {
+      console.warn('[ws] could not record the last owner:', (err as Error).message);
+    }
   }
 
   const connId = randomUUID();
@@ -1537,6 +1571,12 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       void ctx.sync.retryNow();
       break;
     }
+    case 'syncNow':
+      // The sync indicator's button: flush the outbox and pull now, past the pull
+      // throttle. Owner-only (MESSAGE_AUTHZ). Without a token it is a no-op, which
+      // the indicator already shows as signed out.
+      void ctx.syncNow({ force: true });
+      break;
     case 'createSession': {
       // Where a guest's session may live, checked before anything is created so a
       // refusal leaves no half state: inside one of the host's open projects, and
@@ -1676,6 +1716,9 @@ async function handleMessageImpl(ctx: UserContext, ws: BrowserLink, msg: ClientM
       break;
     case 'unarchiveSession':
       sessions.unarchiveSession(msg.sessionId);
+      break;
+    case 'setSessionGroup':
+      sessions.setSessionGroup(msg.sessionId, typeof msg.groupId === 'string' ? msg.groupId : null);
       break;
     case 'completeSession':
       sessions.completeSession(msg.sessionId);

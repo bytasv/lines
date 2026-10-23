@@ -112,30 +112,37 @@ export function bootDial(
 }
 
 /**
- * How long the link may read `reconnecting` before the red transport pill shows.
+ * How long the link may read down before the local window's transport pill shows.
  *
- * A resumed PWA almost always redials — iOS kills the sockets of suspended
- * apps — and that redial is RECONNECT_DELAY_MS (1.5s) plus a token mint and a
- * dial. Without a grace every resume flashed "Disconnected" for a second or
- * two. The probe-expired path spends its WAKE_PROBE_TIMEOUT_MS while the status
- * still reads `connected`, so that wait does not count against this.
+ * A resumed window almost always redials, and that redial is
+ * RECONNECT_DELAY_MS (1.5s) plus a dial. Without a grace every resume flashed
+ * "Disconnected" for a second or two. The probe-expired path spends its
+ * WAKE_PROBE_TIMEOUT_MS while the status still reads `connected`, so that wait
+ * does not count against this.
  */
 export const DISCONNECT_BANNER_GRACE_MS = 3000;
 
 /**
  * Whether the transport pill should be visible.
  *
+ * Only in the desktop's local window (`local`), whose link is loopback to this
+ * machine's bridge: losing it means the bridge itself is gone, and nothing can
+ * be done until it is back. In the hosted app the same link runs through the
+ * cloud, so a drop there is a cloud outage — SyncIndicator says that quietly
+ * instead. `offline` gets no exemption from the grace any more: the network
+ * being down says nothing about a loopback socket.
+ *
  * Display-only: `connectionStatus` itself is untouched, so everything else that
- * reads it still reacts at once. `offline` skips the grace — `navigator.onLine`
- * said so, which is real and actionable rather than a flap.
+ * reads it still reacts at once.
  */
 export function showDisconnectBanner(s: {
   status: 'connected' | 'reconnecting' | 'offline';
   /** When the status left `connected`, or null while it is `connected`. */
   downSince: number | null;
   now: number;
+  /** Running in the desktop's local window (LOCAL_SHELL). */
+  local: boolean;
 }): boolean {
-  if (s.status === 'connected') return false;
-  if (s.status === 'offline') return true;
+  if (!s.local || s.status === 'connected') return false;
   return s.downSince !== null && s.now - s.downSince >= DISCONNECT_BANNER_GRACE_MS;
 }

@@ -1,18 +1,23 @@
 import { Box, Text } from '@mantine/core';
 import { useEffect, useReducer, useState } from 'react';
 import { DISCONNECT_BANNER_GRACE_MS, showDisconnectBanner } from '../lib/wake';
+import { LOCAL_SHELL } from '../lib/localShell';
 import { useStore } from '../store';
 
-/** Floating pill centered in the header while the bridge link is down. `headerHeight` centers it vertically. */
+/**
+ * Floating pill centered in the header while the desktop's local window has
+ * lost its loopback link to this machine's bridge — the bridge process is gone,
+ * and nothing can be done until it is back. `headerHeight` centers it vertically.
+ *
+ * Local window only (see showDisconnectBanner). In the hosted app every link,
+ * and the relay's word on whether the machine is attached, runs through the
+ * cloud: a cloud outage is not "you're offline", and SyncIndicator says it
+ * quietly instead. `machineOffline` is never read here for the same reason —
+ * it is relay truth, and the local window has no relay.
+ */
 export function ConnectionBanner({ headerHeight }: { headerHeight: number }) {
   const status = useStore((s) => s.connectionStatus);
   const queued = useStore((s) => s.queuedPrompts.length);
-  // Relay up, machine gone. Before bootstrap the ConnectingMachine screen says this;
-  // after it, nothing did — the app rendered a healthy "connected" UI in which every
-  // action silently went nowhere.
-  const machineOffline = useStore((s) => s.machineOffline);
-  const bootstrapped = useStore((s) => s.bootstrapped);
-  const machineGone = machineOffline && bootstrapped;
   // When the link left `connected`. Keyed on up/down rather than on the status
   // itself, so a `reconnecting` <-> `offline` change inside one outage keeps the
   // original stamp; one timer re-renders once the grace has run out.
@@ -29,16 +34,9 @@ export function ConnectionBanner({ headerHeight }: { headerHeight: number }) {
     return () => clearTimeout(timer);
   }, [down]);
 
-  // machineGone is relay truth about the remote machine, not a resume redial,
-  // so it stays immediate.
-  if (!machineGone && !showDisconnectBanner({ status, downSince, now: Date.now() })) return null;
+  if (!showDisconnectBanner({ status, downSince, now: Date.now(), local: LOCAL_SHELL })) return null;
 
-  const base =
-    status === 'connected'
-      ? 'Your machine is offline — start Lines on it to reconnect.'
-      : status === 'offline'
-        ? "You're offline — waiting for network…"
-        : 'Disconnected — reconnecting…';
+  const base = 'Lost the connection to Lines on this machine — reconnecting…';
   const label = queued > 0 ? `${base} · ${queued} message${queued === 1 ? '' : 's'} queued` : base;
 
   return (

@@ -1,6 +1,6 @@
 {
   "name": "@lines/web",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "private": true,
   "license": "AGPL-3.0-only",
   "repository": {
@@ -13,6 +13,7 @@
     "dev": "vite",
     "build": "vite build",
     "build:landing": "vite build --config vite.landing.config.ts",
+    "build:local": "VITE_LINES_LOCAL_SHELL=1 VITE_CLERK_PUBLISHABLE_KEY= VITE_STORAGE_URL= VITE_BRIDGE_WS_URL= VITE_DESKTOP_DOWNLOAD_URL= vite build --outDir dist-local --emptyOutDir",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

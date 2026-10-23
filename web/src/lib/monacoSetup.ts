@@ -18,13 +18,13 @@
  * grammars in the main bundle and a language worker would be several more
  * megabytes for nothing.
  *
- * Imported for its side effects by each of the four modules that mount an editor
- * — MonacoPreviewModal, MonacoDiffModal, SessionDiffModal, FilesView — and not
+ * Imported for its side effects by each of the three modules that mount an editor
+ * — MonacoPreviewModal, MonacoDiffModal, FilesView — and not
  * by `main.tsx`, which would pull all of Monaco into the entry chunk and delay
  * the first paint of every screen that has no editor on it.
  *
  * The ordering invariant still holds, and comes from module evaluation rather
- * than from import position: each of those four is reached through
+ * than from import position: each of those three is reached through
  * `React.lazy`, so this module runs when its chunk evaluates, which is before
  * the component in that chunk can render. `loader.config` still wins the race
  * against the first mount. A module that mounts an editor without this import

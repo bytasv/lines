@@ -70,6 +70,14 @@ function formatResetIn(iso: string | null): string | null {
   return `Resets in ${h > 0 ? `${h}h ${m}m` : `${m}m`}`;
 }
 
+/** True when the window's `resetsAt` has passed: its reading predates the reset,
+ *  so it must not pass for current. False when the reset time is unknown. */
+function windowElapsed(w: { resetsAt: string | null }): boolean {
+  if (!w.resetsAt) return false;
+  const ms = new Date(w.resetsAt).getTime() - Date.now();
+  return Number.isFinite(ms) && ms <= 0;
+}
+
 /**
  * "Limit reached", and what happens next: credits take over, or the earliest
  * reset among the windows that are full.
@@ -515,8 +523,9 @@ function PlanUsageChip(props: PlanUsageChipProps) {
 function ringWindows(usage: UsageSnapshot | null) {
   if (!usage || usage.windows.length === 0) return null;
   // A soft window has been seen past 100% without stopping anything, so it never
-  // drives the ring — with OpenAI's 5-hour window soft, the weekly one does.
-  const binding = usage.windows.filter((w) => !w.soft);
+  // drives the ring — with OpenAI's 5-hour window soft, the weekly one does. An
+  // elapsed window is a pre-reset reading, so it steps aside the same way.
+  const binding = usage.windows.filter((w) => !w.soft && !windowElapsed(w));
   const windows = binding.length > 0 ? binding : usage.windows;
   const worst = windows.reduce((a, b) => (b.utilization > a.utilization ? b : a), windows[0]);
   // Anthropic's session window by name where it exists, else simply the first —
@@ -629,28 +638,35 @@ function PlanUsageDetails({
       {usage?.limitReached && <LimitReachedLine usage={usage} />}
       {usage?.windows.map((w) => {
         const resets = formatResetIn(w.resetsAt);
+        // The reading predates the window's reset: dim it until a fresh poll lands.
+        const elapsed = windowElapsed(w);
+        const dim = w.soft || elapsed;
         // Past 100% and not blocked: the window is not what limits this account.
         // OpenAI only — Claude's payload never says whether it is blocked, so an
         // absent `limitReached` there means "not told", not "allowed".
         const overButAllowed = provider === 'openai' && w.utilization >= 100 && !usage.limitReached;
-        const note = w.soft
-          ? 'Not enforced on this account — the weekly limit applies'
-          : overButAllowed && usage.credits?.enabled && !usage.credits.exhausted
-            ? 'Over the limit — continuing on credits'
-            : null;
+        const note = elapsed
+          ? 'Window reset — waiting for a fresh reading'
+          : w.soft
+            ? 'Not enforced on this account — the weekly limit applies'
+            : overButAllowed && usage.credits?.enabled && !usage.credits.exhausted
+              ? 'Over the limit — continuing on credits'
+              : w.resetsAt === null
+                ? 'Reset time not reported'
+                : null;
         return (
           <div key={w.id}>
             <Group justify="space-between" gap="xs" mb={2}>
-              <Text size="xs" c={w.soft ? 'dimmed' : undefined}>
+              <Text size="xs" c={dim ? 'dimmed' : undefined}>
                 {windowLabel(w.id, w.label)}
               </Text>
-              <Text size="xs" fw={600} c={w.soft ? 'dimmed' : undefined}>
+              <Text size="xs" fw={600} c={dim ? 'dimmed' : undefined}>
                 {Math.round(w.utilization)}%
               </Text>
             </Group>
             <Progress
               value={w.utilization}
-              color={w.soft || overButAllowed ? 'gray' : usageColor(w.utilization)}
+              color={dim || overButAllowed ? 'gray' : usageColor(w.utilization)}
               size="sm"
             />
             {note && (

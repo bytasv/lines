@@ -1,6 +1,15 @@
 {
   "web": [
     {
+      "version": "0.1.29",
+      "date": "2026-10-23",
+      "items": [
+        "Sessions can be sorted into your own collapsible groups, such as \"For future\", to park them without archiving. Drag sessions between groups, Active and Archived, or switch the list to a manual order. Muting a group silences notifications for its sessions.",
+        "The plan-usage chip no longer passes an old reading off as current: a window past its reset dims until a fresh reading arrives, and the chip refreshes shortly after each reset.",
+        "When a whole machine is shared with you, its sidebar matches the owner's: each session sits under its own project, with no \"Shared with me\" group. The session header names the machine the session runs on."
+      ]
+    },
+    {
       "version": "0.1.28",
       "date": "2026-10-23",
       "items": [
@@ -289,5 +298,7 @@
       ]
     }
   ],
-  "desktopPending": []
+  "desktopPending": [
+    "The plan-usage chip no longer passes an old reading off as current: a window past its reset dims until a fresh reading arrives, and the chip refreshes shortly after each reset."
+  ]
 }

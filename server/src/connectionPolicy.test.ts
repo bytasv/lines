@@ -7,6 +7,7 @@ import {
   connectionPolicy,
   hostAllowed,
   listenHost,
+  selectProtocol,
   upgradeVerdict,
   verifyClient,
   type ConnectionPolicy,
@@ -124,6 +125,75 @@ describe('upgradeVerdict', () => {
 });
 
 /**
+ * The desktop app's local fallback window: `LINES_BRIDGE_DIRECT=token`. Every
+ * condition is required on its own, so each row breaks exactly one of them.
+ */
+describe('upgradeVerdict, token-gated', () => {
+  const TOKEN = 'a'.repeat(64);
+  const SHELL = 'http://127.0.0.1:51234';
+  const gated = connectionPolicy(
+    { LINES_BRIDGE_DIRECT: 'token', LINES_BRIDGE_ALLOWED_ORIGINS: SHELL },
+    TOKEN,
+  );
+  const happy = {
+    host: '127.0.0.1:8787',
+    remoteAddress: '127.0.0.1',
+    origin: SHELL,
+    protocols: `lines, lines.bt.${TOKEN}`,
+  };
+  const refused = (req: Parameters<typeof upgradeVerdict>[0], status: 403 | 421 = 403) => {
+    const verdict = upgradeVerdict(req, gated);
+    assert.equal(verdict.ok, false);
+    assert.equal(!verdict.ok && verdict.status, status);
+  };
+
+  test('the policy reads the mode and keeps the token', () => {
+    assert.equal(gated.tokenGated, true);
+    assert.equal(gated.direct, true);
+    assert.equal(gated.bridgeToken, TOKEN);
+    // Outside the mode the token is not even held.
+    assert.equal(connectionPolicy({}, TOKEN).bridgeToken, null);
+  });
+
+  test('the shell’s own window with this boot’s token → allowed', () => {
+    assert.deepEqual(upgradeVerdict(happy, gated), { ok: true });
+  });
+
+  test('no token → 403', () => refused({ ...happy, protocols: undefined }));
+  test('only the plain subprotocol → 403', () => refused({ ...happy, protocols: 'lines' }));
+  test('a wrong token of the right length → 403', () => refused({ ...happy, protocols: `lines, lines.bt.${'b'.repeat(64)}` }));
+  test('a wrong token of another length → 403', () => refused({ ...happy, protocols: 'lines, lines.bt.short' }));
+  test('a token from a previous boot → 403', () => {
+    const rotated = connectionPolicy({ LINES_BRIDGE_DIRECT: 'token', LINES_BRIDGE_ALLOWED_ORIGINS: SHELL }, 'c'.repeat(64));
+    assert.equal(upgradeVerdict(happy, rotated).ok, false);
+  });
+  test('a policy with no token admits nobody', () => {
+    const tokenless = connectionPolicy({ LINES_BRIDGE_DIRECT: 'token', LINES_BRIDGE_ALLOWED_ORIGINS: SHELL });
+    assert.equal(upgradeVerdict({ ...happy, protocols: 'lines, lines.bt.' }, tokenless).ok, false);
+  });
+  test('another loopback page → 403: any loopback origin is not enough here', () =>
+    refused({ ...happy, origin: 'http://127.0.0.1:5173' }));
+  test('a website → 403', () => refused({ ...happy, origin: 'https://evil.example' }));
+  test('no origin, even from this machine with the token → 403', () => refused({ ...happy, origin: undefined }));
+  test('a rebinding Host → 421', () => refused({ ...happy, host: 'evil.example:8787' }, 421));
+  test('no Host → 421', () => refused({ ...happy, host: undefined }, 421));
+  test('a LAN Host on a wildcard bind → 421', () => {
+    const wildcard = connectionPolicy(
+      { LINES_BRIDGE_DIRECT: 'token', LINES_BRIDGE_HOST: '0.0.0.0', LINES_BRIDGE_ALLOWED_ORIGINS: SHELL },
+      TOKEN,
+    );
+    const verdict = upgradeVerdict({ ...happy, host: '192.168.1.5:8787' }, wildcard);
+    assert.equal(!verdict.ok && verdict.status, 421);
+  });
+  test('a non-loopback peer, token and all → 403', () => refused({ ...happy, remoteAddress: '192.168.1.99' }));
+
+  test('the selected subprotocol is never the token', () => {
+    assert.equal(selectProtocol(new Set(['lines', `lines.bt.${TOKEN}`])), 'lines');
+    assert.equal(selectProtocol(new Set([`lines.bt.${TOKEN}`])), false);
+  });
+});
+
+/**
  * The same check through a real listener: the glue (`verifyClient`) is what the
  * bridge runs, so a refusal here is a refusal there. Bound to 127.0.0.1 exactly
  * as the bridge is by default.
@@ -164,5 +234,51 @@ describe('a real socket', () => {
 
   test('a rebinding Host is refused with 421', async () => {
     assert.equal(await dial({ origin: 'http://evil.example:8787', host: 'evil.example:8787' }), 421);
+  });
+});
+
+/**
+ * Token-gated through a real listener: the protocol header is read by the same
+ * `verifyClient` the bridge runs, and the query string is not read at all.
+ */
+describe('a real token-gated socket', () => {
+  const TOKEN = 'd'.repeat(64);
+  const SHELL = 'http://127.0.0.1:51234';
+  const gated = connectionPolicy({ LINES_BRIDGE_DIRECT: 'token', LINES_BRIDGE_ALLOWED_ORIGINS: SHELL }, TOKEN);
+  const server = http.createServer((_req, res) => res.end('ok'));
+  const wss = new WebSocketServer({
+    server,
+    verifyClient: verifyClient(gated),
+    handleProtocols: (protocols) => selectProtocol(protocols),
+  });
+  wss.on('connection', (ws) => ws.send('hello'));
+  const listening = new Promise<number>((resolve) =>
+    server.listen(0, '127.0.0.1', () => resolve((server.address() as AddressInfo).port)),
+  );
+  after(() => {
+    wss.close();
+    server.close();
+  });
+
+  async function dial(query: string, protocols: string[]): Promise<{ status: number; protocol?: string }> {
+    const port = await listening;
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/${query}`, protocols, { headers: { origin: SHELL } });
+      ws.once('open', () => {
+        const protocol = ws.protocol;
+        ws.close();
+        resolve({ status: 101, protocol });
+      });
+      ws.once('unexpected-response', (_req, res) => resolve({ status: res.statusCode ?? 0 }));
+      ws.once('error', (err) => reject(err));
+    });
+  }
+
+  test('the token as a subprotocol gets in, and `lines` is what comes back', async () => {
+    assert.deepEqual(await dial('', ['lines', `lines.bt.${TOKEN}`]), { status: 101, protocol: 'lines' });
+  });
+
+  test('the token in the query string is ignored → 403', async () => {
+    assert.equal((await dial(`?bt=${TOKEN}&token=${TOKEN}`, ['lines'])).status, 403);
   });
 });

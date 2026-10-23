@@ -26,7 +26,7 @@ const wfDef = (stepCount: number, autoAdvance = false): WorkflowDef => ({
     model: 'claude-sonnet-5-5',
     permissionMode: 'default' as const,
     autoAdvance,
-    // No fresh start: keeps runStep off the git/diff hand-off path in a temp dir.
+    // No fresh start: keeps runStep off the hand-off path.
     freshStart: false,
   })),
 });
@@ -1001,14 +1001,13 @@ test('advancing clears on the wire when the workflow vanishes mid-advance', asyn
   assert.equal(last.workflow?.stepIndex, 1, 'and the bumped index with it');
 });
 
-test('{changed} and {diff} resolve in an inheriting (non-fresh-start) step, never blank', async () => {
-  // Regression: {diff} used to be gated on `freshStart && entry && i > 0`, so a
-  // Commit-style step that stays in the running conversation (freshStart: false)
-  // got '' silently. Both tokens must now resolve regardless of freshStart.
+test('a fresh-start step with no tokens gets only the previous output prepended', async () => {
+  // The git-diff hand-off is gone: a fresh step is seeded with the previous step's
+  // output and nothing else.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-advance-'));
   const wf: WorkflowDef = {
     id: 'wf1',
-    name: 'commit flow',
+    name: 'fresh flow',
     steps: [
       {
         name: 'Step 1',
@@ -1019,13 +1018,12 @@ test('{changed} and {diff} resolve in an inheriting (non-fresh-start) step, neve
         freshStart: false,
       },
       {
-        name: 'Commit',
-        promptTemplate: 'Stage: {changed}\nDiff: {diff}{feedback}',
+        name: 'Review',
+        promptTemplate: 'Review it.{feedback}',
         model: 'claude-sonnet-5-5',
         permissionMode: 'default',
         autoAdvance: false,
-        // Inheriting step — no fresh start — but {changed}/{diff} must still resolve.
-        freshStart: false,
+        freshStart: true,
       },
     ],
   };
@@ -1048,22 +1046,15 @@ test('{changed} and {diff} resolve in an inheriting (non-fresh-start) step, neve
     setModel: () => {},
     setPermissionMode: () => {},
   } as never);
+  sessions.consolidateStepOutput = async () => 'PLAN TEXT';
   const workflows = new WorkflowEngine(store, sessions, () => {}, 'u1');
-  // Stub the resolver instead of shelling out to git — meta.cwd is /tmp here, and
-  // an empty baseline list is exactly what a workflow with no captured snapshot
-  // resolves to, exercising the same "no files changed" / "no tracked changes"
-  // fallback text a real synthetic-baseline run would produce.
-  (sessions as unknown as { baselinesFor: () => Promise<unknown> }).baselinesFor = async () => ({
-    baselines: [],
-    source: 'workflow',
-  });
 
   workflows.approve('s1', 0);
   await settle();
 
   const text = JSON.stringify(pushed.at(-1));
-  assert.match(text, /Stage: No files changed since this workflow run started\./);
-  assert.match(text, /Diff: No tracked changes since this workflow run started\./);
+  assert.match(text, /## Context from the previous step\\n\\nPLAN TEXT\\n\\n---\\n\\nReview it\./);
+  assert.doesNotMatch(text, /git diff/);
 });
 
 test('entering a step clears a manual routing pause', async () => {

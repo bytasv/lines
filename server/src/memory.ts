@@ -160,10 +160,14 @@ export class MemorySyncer {
 
   /**
    * Files changed since the last sync (mtime/size diff vs the manifest), plus
-   * tombstones for files that vanished. Rewrites the manifest to the current disk
-   * state so unchanged files don't re-push. Returns null when nothing changed.
+   * tombstones for files that vanished. Returns null when nothing changed.
+   *
+   * The manifest is *not* rewritten here: `commit` does that, and the caller runs
+   * it only once storage has accepted `files`. Advancing it up front marked a
+   * change synced before the push had even been sent, so a push that failed (or
+   * never left, offline) was never retried.
    */
-  collectChanged(): MemoryFileMap | null {
+  collectChanged(): { files: MemoryFileMap; commit: () => void } | null {
     const manifest = this.store.loadMemoryManifest();
     const next: MemoryManifest = {};
     const changed: MemoryFileMap = {};
@@ -188,8 +192,12 @@ export class MemorySyncer {
       changed[entry.key] = { content: '', updatedAt: Date.now(), deleted: true };
     }
 
-    this.store.saveMemoryManifest(next);
-    return Object.keys(changed).length ? changed : null;
+    if (!Object.keys(changed).length) {
+      // Nothing to push, so nothing to wait for: the manifest can follow the disk now.
+      this.store.saveMemoryManifest(next);
+      return null;
+    }
+    return { files: changed, commit: () => this.store.saveMemoryManifest(next) };
   }
 
   /**

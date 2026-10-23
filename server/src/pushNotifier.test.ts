@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { alertBody, isAlertTransition } from '@lines/shared';
+import { alertBody, isAlertTransition, isSessionMuted } from '@lines/shared';
 import type { PushRegistration, SessionMeta, WorkflowState, WorkflowStepStatus } from '@lines/shared';
 import { PushNotifier, isAllowedPushEndpoint, parseRegistration, pushPayload } from './pushNotifier.ts';
 
@@ -252,6 +252,23 @@ describe('PushNotifier', () => {
     await settle();
     assert.equal(rec.calls.length, 1);
     assert.deepEqual(rec.calls[0].payload, { sessionId: 's1', title: 'Fix the build', body: 'Task complete' });
+  });
+
+  test('no push for a session in a muted group, and the status is still tracked', async () => {
+    const rec = recorder();
+    const n = new PushNotifier(memStore([reg()]), rec.send);
+    const groups = [{ id: 'g1', name: 'For future', muted: true }];
+    n.isMuted = (s) => isSessionMuted(s, groups);
+    n.onSessionUpsert(session({ status: 'running', groupId: 'g1' }));
+    n.onSessionUpsert(session({ status: 'done', groupId: 'g1' }));
+    await settle();
+    assert.equal(rec.calls.length, 0);
+    // Unmuted: the next transition pushes as usual.
+    groups[0].muted = false;
+    n.onSessionUpsert(session({ status: 'running', groupId: 'g1' }));
+    n.onSessionUpsert(session({ status: 'done', groupId: 'g1' }));
+    await settle();
+    assert.equal(rec.calls.length, 1);
   });
 
   test('the first sighting of a session does not push', async () => {

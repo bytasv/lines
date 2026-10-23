@@ -10,6 +10,7 @@ import {
   prunableDraftIds,
   sessionsOnMachine,
   shouldClaimSelection,
+  uncoveredSharedSessions,
   type MachineSlice,
   type MachineView,
 } from '../../web/src/lib/machines.ts';
@@ -395,5 +396,42 @@ describe('alertTarget', () => {
       projectKeys: {},
     });
     assert.equal(target, null);
+  });
+});
+
+describe('uncoveredSharedSessions', () => {
+  // "Shared with me" exists for session-scope guests only: a machine guest sees the
+  // host's real tabs and must get the owner's per-project layout, not a flat list.
+  const at = (id: string, cwd: string, archived = false): SessionMeta =>
+    ({ id, name: id, cwd, archived }) as SessionMeta;
+  const sessions = {
+    inTab: at('inTab', '/repo/lines'),
+    outside: at('outside', '/repo/elsewhere'),
+    gone: at('gone', '/repo/elsewhere', true),
+  };
+  const projects = [{ path: '/repo/lines' }, { path: '/repo/other' }] as never;
+
+  test('machine scope never lists a session, even one outside every tab', () => {
+    assert.deepEqual(uncoveredSharedSessions(sessions, projects, {}, 'machine'), []);
+  });
+
+  test('the owner (no grant) never lists a session', () => {
+    assert.deepEqual(uncoveredSharedSessions(sessions, projects, {}, null), []);
+    assert.deepEqual(uncoveredSharedSessions(sessions, projects, {}, undefined), []);
+  });
+
+  test('session scope lists an unarchived session no tab covers, not a covered one', () => {
+    const out = uncoveredSharedSessions(sessions, projects, {}, 'session');
+    assert.deepEqual(out.map((x) => x.id), ['outside']);
+  });
+
+  test('a tab covers a session through a shared project key', () => {
+    const out = uncoveredSharedSessions(
+      sessions,
+      projects,
+      { '/repo/elsewhere': 'github.com/me/lines', '/repo/lines': 'github.com/me/lines' },
+      'session',
+    );
+    assert.deepEqual(out, []);
   });
 });

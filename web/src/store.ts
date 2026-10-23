@@ -30,6 +30,7 @@ import type {
   ShareScope,
   StepDef,
   StorageStatus,
+  SyncPending,
   SyncSigningInfo,
   TranscriptEvent,
   ClaudeCliStatus,
@@ -39,15 +40,18 @@ import type {
   UpdateStatus,
   SpendHistoryBlob,
   UsageSnapshot,
+  SessionGroup,
   UserUiSettings,
   WorkerStatus,
   WorkflowDef,
 } from '@lines/shared';
 import {
+  allSessionGroups,
   APP_PROTOCOL_VERSION,
   DEFAULT_MODEL,
   isReasoningEffort,
   isSessionInterruptible,
+  isSessionMuted,
   normalizePlanComments,
   resolveModelId,
   worktreePaths,
@@ -121,6 +125,8 @@ const COMPRESS_RESPONSES_KEY = 'lines.compressResponses';
 const PLAN_REASONING_EFFORT_KEY = 'lines.planReasoningEffort';
 const SMART_ROUTING_KEY = 'lines.smartRouting';
 const DISMISSED_CHECKOUTS_KEY = 'lines.dismissedCheckouts';
+const SESSION_GROUPS_KEY = 'lines.sessionGroups';
+const SESSION_ORDER_KEY = 'lines.sessionOrder';
 const VOICE_LANGUAGE_KEY = 'lines.voiceLanguage';
 const VOICE_TRANSLATE_KEY = 'lines.voiceTranslate';
 const DRAFTS_KEY = 'lines.drafts';
@@ -274,7 +280,7 @@ function readLastSessions(): Record<string, string> {
 function readSessionSort(): SessionSort {
   try {
     const raw = JSON.parse(localStorage.getItem(SESSION_SORT_KEY) ?? 'null') as unknown;
-    return raw === 'status' || raw === 'activity' || raw === 'created' ? raw : 'status';
+    return raw === 'status' || raw === 'activity' || raw === 'created' || raw === 'manual' ? raw : 'status';
   } catch {
     return 'status';
   }
@@ -553,6 +559,24 @@ function loadDismissedCheckouts(): string[] {
   }
 }
 
+function loadKeyedMap<T>(key: string): Record<string, T> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) ?? '{}') as unknown;
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, T>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * The key a project's sidebar groups are stored under: its project key, so the
+ * groups follow the repo across machines, or its path when it has none yet —
+ * the same fallback `sessionsInProject` matches unkeyed checkouts by.
+ */
+export function groupKeyOf(projectKeys: ProjectKeyMap, projectPath: string): string {
+  return projectKeys[projectPath] ?? projectPath;
+}
+
 function pickActive(projects: Project[], current: string | null): string | null {
   if (current && projects.some((p) => p.path === current)) return current;
   return projects[0]?.path ?? null;
@@ -628,6 +652,49 @@ async function unregisterPushFrom(deviceIds: string[]): Promise<void> {
  */
 function isPrimary(state: { primaryDeviceId: string | null }, deviceId: string): boolean {
   return deviceId === (state.primaryDeviceId ?? '');
+}
+
+/** What the header's sync dot shows. See SyncIndicator. */
+export type SyncIndicatorState =
+  /** Cloud reachable, nothing waiting. */
+  | 'synced'
+  /** Cloud reachable and the outbox is draining. */
+  | 'syncing'
+  /** Cloud out of reach (or signed out) with local writes waiting for it. */
+  | 'pending'
+  /** Cloud out of reach (or signed out), nothing waiting. */
+  | 'paused';
+
+export interface SyncIndicator {
+  state: SyncIndicatorState;
+  cloud: NonNullable<StorageStatus['cloud']>;
+  /** When a non-ok `cloud` state began. */
+  since: number | null;
+  lastSyncedAt: number | null;
+  /** Null from a bridge older than `StorageStatus.pending`. */
+  pending: SyncPending | null;
+  pendingTotal: number;
+}
+
+/**
+ * The sync dot's reading of a `storageStatus`. An older bridge sends neither
+ * `cloud` nor `pending`, so `available` stands in for the first and the second
+ * reads as nothing waiting.
+ */
+export function syncIndicator(status: StorageStatus): SyncIndicator {
+  const cloud = status.cloud ?? (status.available === false ? 'unreachable' : 'ok');
+  const pending = status.pending ?? null;
+  const pendingTotal = pending ? Object.values(pending).reduce((sum, n) => sum + n, 0) : 0;
+  const state: SyncIndicatorState =
+    cloud === 'ok' ? (pendingTotal > 0 ? 'syncing' : 'synced') : pendingTotal > 0 ? 'pending' : 'paused';
+  return {
+    state,
+    cloud,
+    since: cloud === 'ok' ? null : status.since ?? null,
+    lastSyncedAt: status.lastSyncedAt ?? null,
+    pending,
+    pendingTotal,
+  };
 }
 
 export function projectAt(projects: Project[], path: string | null): Project | null {
@@ -717,10 +784,13 @@ function latestSessionIn(
   sessions: Record<string, SessionMeta>,
   projectKeys: ProjectKeyMap,
   project: Project,
+  groups: SessionGroup[],
+  /** The project's manual order, read only when that is the sort. */
+  order?: string[],
 ): SessionMeta | undefined {
   return sessionsInProject(sessions, projectKeys, project)
-    .filter((s) => !s.archived)
-    .sort(compareSessions(readSessionSort()))[0];
+    .filter((s) => !s.archived && !isSessionMuted(s, groups))
+    .sort(compareSessions(readSessionSort(), order))[0];
 }
 
 /**
@@ -733,10 +803,13 @@ function rememberedSessionIn(
   sessions: Record<string, SessionMeta>,
   projectKeys: ProjectKeyMap,
   project: Project,
+  groups: SessionGroup[],
 ): SessionMeta | undefined {
   const id = readLastSessions()[project.path];
   if (!id) return undefined;
-  return sessionsInProject(sessions, projectKeys, project).find((s) => s.id === id && !s.archived);
+  return sessionsInProject(sessions, projectKeys, project).find(
+    (s) => s.id === id && !s.archived && !isSessionMuted(s, groups),
+  );
 }
 
 interface UiState {
@@ -771,7 +844,7 @@ interface UiState {
    *
    * `connectionStatus`, `machineOffline`, `bootstrapped`, `workerStatus` and
    * `storageStatus` are kept as scalars *derived from the primary machine* rather
-   * than replaced: ConnectionBanner/WorkerBanner/StorageBanner have a documented
+   * than replaced: ConnectionBanner/WorkerBanner/UpdateBanner have a documented
    * "exactly one renders at a time" precedence, and making them per-machine-aware
    * wholesale would rewrite that rule mid-flight. A non-primary machine's health
    * belongs on the session row and header instead.
@@ -868,6 +941,10 @@ interface UiState {
   projectKeys: ProjectKeyMap;
   /** Unresolvable cwds the user marked as "not my project"; hidden from the link hint. */
   dismissedCheckouts: string[];
+  /** User-made sidebar groups per project (see `groupKeyOf`); synced through settings. */
+  sessionGroups: Record<string, SessionGroup[]>;
+  /** Hand-placed session order per project, for the `manual` sort; synced through settings. */
+  sessionOrder: Record<string, string[]>;
   /** Project whose sessions are shown; new sessions run here. */
   activeProject: string | null;
   /** Actionable session states the user has already looked at; see reconcileSeenStatus. */
@@ -924,7 +1001,7 @@ interface UiState {
   turnSpend: Record<string, { costUsd: number; tokens: number }>;
   /** App login state from the bridge; null until the first `hello`. */
   auth: AuthStatus | null;
-  /** Bridge->storage/Supabase link health; null until first `hello`. `available: false` shows the sync-degraded banner. */
+  /** Bridge->storage/Supabase link health; null until first `hello`. Read through `syncIndicator` for the header's sync dot. */
   storageStatus: StorageStatus | null;
   /** Bridge->worker link health; null until first `hello`, and on a bridge too
    *  old to send it. `connected: false` shows the worker banner. */
@@ -1133,6 +1210,17 @@ interface UiState {
   setNewSessionDefaults: (defaults: NewSessionDefaults) => void;
   /** Hide (or restore) an unresolvable checkout in the link hint. */
   setCheckoutDismissed: (cwd: string, dismissed: boolean) => void;
+  /** The project's groups in display order; empty when it has none. */
+  groupsFor: (groupKey: string) => SessionGroup[];
+  /** Appends a group and returns its id. */
+  createGroup: (groupKey: string, name: string) => string;
+  renameGroup: (groupKey: string, groupId: string, name: string) => void;
+  /** Member sessions keep their dangling `groupId` and read as ungrouped. */
+  deleteGroup: (groupKey: string, groupId: string) => void;
+  moveGroup: (groupKey: string, from: number, to: number) => void;
+  toggleGroupMuted: (groupKey: string, groupId: string) => void;
+  /** Replace the project's manual order (session ids, first on top). */
+  setSessionOrder: (groupKey: string, ids: string[]) => void;
   setAlertsEnabled: (on: boolean) => Promise<void>;
   setAlertSound: (sound: AlertSound) => void;
   testAlertSound: () => void;
@@ -1251,6 +1339,8 @@ export const useStore = create<UiState>((set, get) => {
         alertsEnabled: s.alertsEnabled,
         alertSound: s.alertSound,
         dismissedCheckouts: s.dismissedCheckouts,
+        sessionGroups: s.sessionGroups,
+        sessionOrder: s.sessionOrder,
         updatedAt: Date.now(),
       },
     });
@@ -1360,6 +1450,8 @@ export const useStore = create<UiState>((set, get) => {
       alertsEnabled: s.alertsEnabled ?? state.alertsEnabled,
       alertSound: (s.alertSound as AlertSound | undefined) ?? state.alertSound,
       dismissedCheckouts: s.dismissedCheckouts ?? state.dismissedCheckouts,
+      sessionGroups: s.sessionGroups ?? state.sessionGroups,
+      sessionOrder: s.sessionOrder ?? state.sessionOrder,
     }));
     // Keep the offline caches current so a cold start matches the server.
     if (s.newSessionDefaults) localStorage.setItem(NEW_SESSION_DEFAULTS_KEY, JSON.stringify(s.newSessionDefaults));
@@ -1379,6 +1471,19 @@ export const useStore = create<UiState>((set, get) => {
     if (s.dismissedCheckouts) {
       localStorage.setItem(DISMISSED_CHECKOUTS_KEY, JSON.stringify(s.dismissedCheckouts));
     }
+    if (s.sessionGroups) localStorage.setItem(SESSION_GROUPS_KEY, JSON.stringify(s.sessionGroups));
+    if (s.sessionOrder) localStorage.setItem(SESSION_ORDER_KEY, JSON.stringify(s.sessionOrder));
+  };
+
+  /** Replace one project's group list, cache it, and push the settings blob. */
+  const setGroups = (groupKey: string, update: (groups: SessionGroup[]) => SessionGroup[]) => {
+    const sessionGroups = { ...get().sessionGroups };
+    const next = update(sessionGroups[groupKey] ?? []);
+    if (next.length) sessionGroups[groupKey] = next;
+    else delete sessionGroups[groupKey];
+    localStorage.setItem(SESSION_GROUPS_KEY, JSON.stringify(sessionGroups));
+    set({ sessionGroups });
+    pushSettings();
   };
 
   return {
@@ -1413,6 +1518,8 @@ export const useStore = create<UiState>((set, get) => {
   projects: [],
   projectKeys: {},
   dismissedCheckouts: loadDismissedCheckouts(),
+  sessionGroups: loadKeyedMap<SessionGroup[]>(SESSION_GROUPS_KEY),
+  sessionOrder: loadKeyedMap<string[]>(SESSION_ORDER_KEY),
   activeProject: localStorage.getItem(ACTIVE_PROJECT_KEY),
   seenSessionStatus: readSeenSessionStatus(),
   transcripts: {},
@@ -1966,6 +2073,46 @@ export const useStore = create<UiState>((set, get) => {
     pushSettings();
   },
 
+  groupsFor: (groupKey) => get().sessionGroups[groupKey] ?? [],
+
+  createGroup: (groupKey, name) => {
+    const id = crypto.randomUUID();
+    setGroups(groupKey, (groups) => [...groups, { id, name }]);
+    return id;
+  },
+
+  renameGroup: (groupKey, groupId, name) => {
+    setGroups(groupKey, (groups) => groups.map((g) => (g.id === groupId ? { ...g, name } : g)));
+  },
+
+  deleteGroup: (groupKey, groupId) => {
+    setGroups(groupKey, (groups) => groups.filter((g) => g.id !== groupId));
+  },
+
+  moveGroup: (groupKey, from, to) => {
+    if (from === to) return;
+    setGroups(groupKey, (groups) => {
+      if (from < 0 || from >= groups.length || to < 0 || to >= groups.length) return groups;
+      const next = [...groups];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
+  },
+
+  toggleGroupMuted: (groupKey, groupId) => {
+    setGroups(groupKey, (groups) =>
+      groups.map((g) => (g.id === groupId ? { ...g, muted: g.muted ? undefined : true } : g)),
+    );
+  },
+
+  setSessionOrder: (groupKey, ids) => {
+    const sessionOrder = { ...get().sessionOrder, [groupKey]: ids };
+    localStorage.setItem(SESSION_ORDER_KEY, JSON.stringify(sessionOrder));
+    set({ sessionOrder });
+    pushSettings();
+  },
+
   setCheckoutDismissed: (cwd, dismissed) => {
     const next = get().dismissedCheckouts.filter((p) => p !== cwd);
     if (dismissed) next.push(cwd);
@@ -2031,8 +2178,14 @@ export const useStore = create<UiState>((set, get) => {
         // or on its latest active session when that one is gone or archived.
         if (!inProject) {
           selected =
-            rememberedSessionIn(state.sessions, state.projectKeys, project)?.id ??
-            latestSessionIn(state.sessions, state.projectKeys, project)?.id ??
+            rememberedSessionIn(state.sessions, state.projectKeys, project, allSessionGroups(state))?.id ??
+            latestSessionIn(
+              state.sessions,
+              state.projectKeys,
+              project,
+              allSessionGroups(state),
+              state.sessionOrder[groupKeyOf(state.projectKeys, project.path)],
+            )?.id ??
             null;
         }
       }
@@ -2412,6 +2565,7 @@ export const useStore = create<UiState>((set, get) => {
           enabled: get().alertsEnabled,
           sound: get().alertSound,
           selectedSessionId: get().selectedSessionId,
+          muted: isSessionMuted(msg.session, allSessionGroups(get())),
           onClickNotification: () => get().openSessionFromAlert(msg.session.id),
         });
         break;

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { StepContent } from '@lines/shared';
+import { DEFAULT_WORKFLOW } from './workflows.ts';
 // Imported through shared/types.ts on purpose: that re-export closes an import
 // cycle, and it only works while the re-export stays the file's last statement.
 import {
@@ -142,4 +143,9 @@ test('formatWorkflowIssues distinguishes workflow-level and step-level issues', 
     formatWorkflowIssues(issues),
     'workflow: Workflow name is required; step 1 (prompt): Prompt is required',
   );
+});
+
+test('the built-in default workflow validates, its {outputs.*} chain included', () => {
+  const steps = DEFAULT_WORKFLOW.steps.map((s) => ({ content: s as StepContent, isRef: false }));
+  assert.deepEqual(validateWorkflow(DEFAULT_WORKFLOW.name, steps, { strictModel: true }), []);
 });

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, mock, test } from 'node:test';
-import type { SessionDiffResponse, SessionMeta, SocketAccess } from '@lines/shared';
+import type { SessionMeta, SocketAccess } from '@lines/shared';
 import { OWNER_ACCESS, capsForPreset } from '@lines/shared';
 import { handleFileRequest, MAX_MEDIA_BYTES, MEDIA_CHUNK_BYTES } from './fileRoutes.ts';
 import type { UserContext } from './userContext.ts';
@@ -36,17 +36,12 @@ CLIP.writeUInt32BE(0xdeadbeef, CLIP.length - 4);
 fs.writeFileSync(path.join(root, 'clip.mp4'), CLIP);
 fs.writeFileSync(path.join(attachments, 'pic.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 
-const EMPTY_DIFF: SessionDiffResponse = { repos: [], orphans: [] };
-
 /** Only the members the routes actually read. */
 function ctx(sessions: Partial<UserContext['sessions']> = {}): UserContext {
   return {
     store: { loadProjects: () => [{ path: root }], attachmentsRoot: attachments },
     sessions: {
       list: () => [] as SessionMeta[],
-      changeSummary: async (id: string) => (id === 'known' ? EMPTY_DIFF : null),
-      baselineRefFor: async (id: string, repo: string) =>
-        id === 'known' && repo === root ? 'HEAD' : null,
       ...sessions,
     },
   } as unknown as UserContext;
@@ -263,22 +258,6 @@ test('an unknown kind is refused rather than served', async () => {
   assert.equal((await handleFileRequest(ctx(), 'nope' as never, {}, OWNER_ACCESS)).status, 400);
 });
 
-test('sessionDiff: served for the owner, 404 for a session this machine lost', async () => {
-  assert.equal((await call('sessionDiff', { sessionId: 'known' })).status, 200);
-  assert.equal((await call('sessionDiff', { sessionId: 'gone' })).status, 404);
-  // No session named at all is a client bug, not a request to serve.
-  assert.equal((await call('sessionDiff', {})).status, 403);
-});
-
-test('sessionDiff: a session-scope grant cannot read a session outside it', async () => {
-  // `readFiles` alone is not enough — this route returns contents from the
-  // host's working tree, so the grant's session list is the real gate.
-  const guest = { scope: 'session' as const, caps: OWNER_ACCESS.caps, sessionIds: ['other'] };
-  assert.equal((await handleFileRequest(ctx(), 'sessionDiff', { sessionId: 'known' }, guest)).status, 403);
-  const allowed = { ...guest, sessionIds: ['known'] };
-  assert.equal((await handleFileRequest(ctx(), 'sessionDiff', { sessionId: 'known' }, allowed)).status, 200);
-});
-
 test('grep: searches file contents, all-or-nothing on roots', async () => {
   const res = await call('grep', { paths: [root], q: 'hi there' });
   assert.equal(res.status, 200);
@@ -355,20 +334,6 @@ test('sessionSearch: a session-scope grant never reaches a session outside it', 
     guest,
   );
   assert.deepEqual(sessionIdsOf(asked), []);
-});
-
-test('sessionDiffFile: refuses a path outside the repo, and a repo outside the session', async () => {
-  assert.equal(
-    (await call('sessionDiffFile', { sessionId: 'known', paths: [root], rel: '../../etc/hosts' })).status,
-    403,
-  );
-  // The repo resolves inside the workspace but is not one of this session's
-  // commit units, so there is no baseline to diff against.
-  assert.equal(
-    (await call('sessionDiffFile', { sessionId: 'known', paths: [path.join(root, 'sub')], rel: 'x.txt' }))
-      .status,
-    404,
-  );
 });
 
 // ---------------------------------------------------------------------------
@@ -575,11 +540,7 @@ test('grep: a symlink git lists, or a tracked file whose directory became one, i
   }
 });
 
-test('sessionDiffFile and attachment: a symlink that leaves its root is refused', async () => {
-  // `after` is read off disk, so a link in the repo would hand back any file.
-  fs.symlinkSync(path.join(outside, 'leak.txt'), path.join(links, 'diff-leak.txt'));
-  const diff = await call('sessionDiffFile', { sessionId: 'known', paths: [root], rel: 'sub/links/diff-leak.txt' });
-  assert.equal(diff.status, 403);
+test('attachment: a symlink that leaves its root is refused', async () => {
   fs.symlinkSync(path.join(outside, 'leak.txt'), path.join(attachments, 'leak.txt'));
   assert.equal((await call('attachment', { rel: 'leak.txt' })).status, 403);
 });

@@ -66,7 +66,11 @@ import {
   useSplashState,
 } from './lib/splash';
 import { useStore } from './store';
+import { LOCAL_SHELL, stashBridgeTokenFromUrl, useAutoReturnToCloud } from './lib/localShell';
 
+// First of all, before anything reads or logs the URL: the desktop app's local
+// window carries the bridge's runtime token in its fragment (lib/localShell.ts).
+stashBridgeTokenFromUrl();
 noteDesktopWindow(location.hash);
 // First line of every page load: a reload, a PWA relaunch and a discarded tab
 // all look alike from inside the connect path, and this is what tells them apart.
@@ -437,7 +441,18 @@ function SignInPage() {
   );
 }
 
+/**
+ * The desktop app's local window: no Clerk, no landing page, no device gate — it
+ * is served by this machine for this machine's bridge, which it dials directly.
+ * It goes back to the hosted app by itself once the cloud is healthy again.
+ */
+function LocalShellRoot() {
+  useAutoReturnToCloud();
+  return <AppWhenReady />;
+}
+
 function Root() {
+  if (LOCAL_SHELL) return <LocalShellRoot />;
   if (!CLERK_ENABLED) return <AppWhenReady />;
   return (
     // No telemetry: Clerk would post to its own collector, which the deployed CSP

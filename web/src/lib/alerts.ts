@@ -276,6 +276,8 @@ interface AlertOpts {
   enabled: boolean;
   sound: AlertSound;
   selectedSessionId: string | null;
+  /** The session sits in a muted sidebar group: no chime, no notification. */
+  muted?: boolean;
   onClickNotification: () => void;
 }
 
@@ -291,7 +293,7 @@ export function maybeAlert(
   next: SessionMeta,
   opts: AlertOpts,
 ): void {
-  if (!opts.enabled) return;
+  if (!opts.enabled || opts.muted) return;
   // Shared with the bridge's Web Push (see `isAlertTransition`), so the chime and
   // the push fire on exactly the same transitions.
   if (!isAlertTransition(prev?.status, next)) return;

@@ -49,7 +49,7 @@ for why no test was added.
 
 - Attachments ride only the entry step (step 0, the task-description prompt). Later steps
   do not re-carry the original file: a non-fresh step inherits the image for free via the
-  live conversation; a `freshStart` step gets only the compact `{previous}`/`{diff}`
+  live conversation; a `freshStart` step gets only the compact `{previous}`
   hand-off, never the original attachment.
 - `mentions[]` are out of scope here — they are display-only and already expanded into the
   prompt text client-side (see `features/prompt-mentions.md`); nothing reaches the model

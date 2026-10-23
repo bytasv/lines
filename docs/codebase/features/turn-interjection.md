@@ -268,7 +268,7 @@ message with the streamed text.
 
 - `'interject'` is a separate `TranscriptEvent`/`TranscriptItem` kind, not a flag on `'user'`.
   Every turn-boundary scan keys on `kind === 'user'` — `withoutCompactSpans`, `collectTurns`,
-  `recordFilesChanged`, `lastPromptForRetry`, `lastAssistantText`, `summarizeTurn`, and
+  `lastPromptForRetry`, `lastAssistantText`, `summarizeTurn`, and
   `foldAgentTurns` — and all of them stay correct untouched only because an interjection is a
   different kind.
 - The push reuses `queryTokens.get(sessionId)` instead of resolving a fresh access token, because

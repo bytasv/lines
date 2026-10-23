@@ -11,7 +11,6 @@ import { ProjectTabs } from './components/ProjectTabs';
 import { ConnectionBanner } from './components/ConnectionBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { SkewBanner } from './components/SkewBanner';
-import { StorageBanner } from './components/StorageBanner';
 import { WorkerBanner } from './components/WorkerBanner';
 import { UpdateBanner } from './components/UpdateBanner';
 import { DesktopUpdateWhatsNew } from './components/WhatsNewModal';
@@ -233,7 +232,6 @@ function Shell() {
       </AppShell.Header>
       <ConnectionBanner headerHeight={HEADER_BAR} />
       <SkewBanner headerHeight={HEADER_BAR} />
-      <StorageBanner headerHeight={HEADER_BAR} />
       <WorkerBanner headerHeight={HEADER_BAR} />
       <UpdateBanner headerHeight={HEADER_BAR} />
       <AppShell.Navbar>

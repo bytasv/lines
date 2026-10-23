@@ -2,7 +2,8 @@
 /**
  * Builds everything that goes inside the app bundle.
  *
- * Four artifacts (plus the bundled whisper-cli, see build-whisper.mjs), because the shipped app is three processes plus one thing a
+ * Four artifacts (plus the bundled whisper-cli, see build-whisper.mjs, and the
+ * local fallback window's web bundle, `web/dist-local`), because the shipped app is three processes plus one thing a
  * process spawns:
  *   dist/main.cjs              — the Electron shell (CJS; Electron's main process)
  *   dist/server/bridge.mjs      — the bridge, as a single ESM file
@@ -25,6 +26,7 @@
  * a sane size.
  */
 import { build } from 'esbuild';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildWhisper } from './build-whisper.mjs';
@@ -161,6 +163,8 @@ function writeConfig() {
   ]) {
     if (process.env[env]) overrides[key] = process.env[env];
   }
+  // The local fallback window is off unless the release says otherwise.
+  if (process.env.LINES_LOCAL_FALLBACK) overrides.localFallback = process.env.LINES_LOCAL_FALLBACK === '1';
   fs.writeFileSync(path.join(DIST, 'config.json'), `${JSON.stringify(overrides, null, 2)}\n`);
 }
 
@@ -176,4 +180,8 @@ if (!shellOnly) {
   writeConfig();
   // Voice input's transcriber, so a user never needs Homebrew for it.
   buildWhisper();
+  // The local fallback window's bundle (web `build:local`): no Clerk, no storage,
+  // dials this machine's bridge directly. Served by the shell when the hosted
+  // app is unreachable; electron-builder copies it to Resources/web/dist-local.
+  execFileSync('npm', ['run', 'build:local', '-w', 'web'], { cwd: REPO, stdio: 'inherit' });
 }

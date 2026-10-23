@@ -15,6 +15,7 @@ import { refreshDevices } from './lib/devices';
 import { cryptoUnavailable, deviceIdentity, guestGrantTokens, pinKey, pinnedKey } from './lib/e2ee';
 import { WAKE_PROBE_TIMEOUT_MS, probeExpired, shouldReviveIdle, wakeAction, wakeDebounced } from './lib/wake';
 import { plaintextFrameAllowed } from './lib/plaintextFrames';
+import { bridgeTokenProtocols } from './lib/localShell';
 import {
   diag,
   diagEntries,
@@ -49,7 +50,10 @@ import { DEVICE_PAIRING_ENABLED, sendDiagnostics } from './lib/storage';
  * server's /__bridge endpoint (see web/vite.config.ts) on every connect attempt —
  * a restarted bridge comes back on a different port.
  */
-const ENV_WS_URL = import.meta.env.VITE_BRIDGE_WS_URL as string | undefined;
+const ENV_WS_URL =
+  // The desktop app's local window dials its own bridge directly, found the same
+  // way as in dev, whatever the build environment named.
+  import.meta.env.VITE_LINES_LOCAL_SHELL === '1' ? undefined : (import.meta.env.VITE_BRIDGE_WS_URL as string | undefined);
 
 /**
  * Frames the relay itself sends, about the machine rather than from it. Mirrors
@@ -942,7 +946,9 @@ async function openSocket(link: MachineLink) {
   }
   link.closing = false;
   const url = socketUrl(token, link.deviceId);
-  const socket = new WebSocket(url);
+  // The local window's runtime token rides as a subprotocol, never in the URL
+  // (see lib/localShell.ts); undefined everywhere else.
+  const socket = new WebSocket(url, bridgeTokenProtocols());
   link.socket = socket;
   link.dialedAt = Date.now();
   link.openedAt = null;

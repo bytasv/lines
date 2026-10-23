@@ -517,12 +517,11 @@ non-null verdict stamps `{ ...msg, recovering: true }` at the same `emitEvent` c
 **Deferring the settle.** When the verdict is non-null, the `result` branch does **not** run any
 of its usual settle: no `status`/`errorMessage`/`errorKind` assignment, no clearing
 `turnSource`/`turnStartedAt`, no `classifyFailure`, no `onTurnComplete`, no `maybeFlush`, no
-`summarizeTurn`/`recordFilesChanged`/`fetchContextBreakdown` (those run once the turn really
+`summarizeTurn`/`fetchContextBreakdown` (those run once the turn really
 settles, keyed off that attempt's own `resultSeq`). It **does** still run
 `accumulateResultSpend` (the failed attempt burned real tokens) and reset
 `LiveState.permissionWaitMs` (or the same wait is subtracted twice from the next attempt's
-`duration_ms`), then calls `beginRecovery` and returns. `LiveState.turnBaselines` is left open on
-purpose — closing it would drop the first attempt's file attribution.
+`duration_ms`), then calls `beginRecovery` and returns.
 
 **Re-driving.** `SessionManager.beginRecovery(sessionId, kind, resultText)` bumps a per-session
 `epoch`, increments that kind's attempt counter, closes the query (the child holds the rejected
@@ -1172,8 +1171,7 @@ message type, no new modal, no new client state, no DB migration.
   point and for the same reason as the `stopped` stamp: the transcript store only appends, so a
   verdict computed after `emitEvent` persists the event could never reach the durable record. Both
   stamps are shallow copies of `msg`, never mutations.
-- `LiveState.recovery` is live-only by design, exactly like `LiveState.compactResume` and
-  `turnBaselines` — a bridge restart mid-recovery is meant to fall through to the ordinary
+- `LiveState.recovery` is live-only by design, exactly like `LiveState.compactResume` — a bridge restart mid-recovery is meant to fall through to the ordinary
   interrupted-turn path (Continue banner), not grow its own crash-recovery mechanism.
 - `settleTurnFailed` is modeled on `handleWorkerEnded`'s error branch, not on `failTurn`:
   `failTurn` re-enters `classifyFailure` → `recoverAuthFailure`, which would attempt a second,

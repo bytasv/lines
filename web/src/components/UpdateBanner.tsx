@@ -13,8 +13,9 @@ const DISMISSED_KEY = 'lines.updateDismissed';
  * News, not an outage, which is why it is the calmest colour and its dismissal
  * outlives a reload (per version, in localStorage). All the pills render at the same fixed
  * coordinates, so exactly one may show: this ranks *below* every failure banner
- * (bridge-down, then contract skew, then worker-down, then storage-down — see
- * StorageBanner), and hides for a guest, whose machine this isn't.
+ * (bridge-down, then contract skew, then worker-down), and hides for a guest,
+ * whose machine this isn't. Cloud sync being down no longer has a pill — see
+ * SyncIndicator — so it does not hide this one.
  *
  * Two shapes. A self-installing shell downloads in the background and reports
  * 'ready': the action restarts the app on that machine into the new version,
@@ -31,7 +32,6 @@ const DISMISSED_KEY = 'lines.updateDismissed';
 export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
   const status = useStore((s) => s.updateStatus);
   const worker = useStore((s) => s.workerStatus);
-  const storage = useStore((s) => s.storageStatus);
   const connection = useStore((s) => s.connectionStatus);
   const access = useStore((s) => s.access);
   const skew = useStore((s) => s.protocolSkew);
@@ -43,7 +43,7 @@ export function UpdateBanner({ headerHeight }: { headerHeight: number }) {
 
   if (connection !== 'connected') return null;
   if (skew) return null;
-  if (worker?.connected === false || storage?.available === false) return null;
+  if (worker?.connected === false) return null;
   if (access) return null;
   const ready = status?.state === 'ready';
   if (isPhone && !ready) return null;

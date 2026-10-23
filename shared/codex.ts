@@ -5,9 +5,9 @@
  * Why normalize rather than add a transcript kind of its own: the bridge's turn
  * machinery — not just the renderer — is keyed to SDK message shapes. The
  * `msg.type === 'result'` settle pass alone drives status, token accounting,
- * spend, the queue flush, the workflow advance, the turn summary and the review
- * diff; `markTurnLive`, `collectTurns`, `scanTurnActivity`, `collectChangedPaths`
- * and the rewind anchor scan all read `assistant`/`user` content blocks. A
+ * spend, the queue flush, the workflow advance and the turn summary;
+ * `markTurnLive`, `collectTurns`, `scanTurnActivity` and the rewind anchor scan
+ * all read `assistant`/`user` content blocks. A
  * distinct kind would silently no-op every one of them.
  *
  * Streaming is the reason the `stream_event` shapes below are exact rather than

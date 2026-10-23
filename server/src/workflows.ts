@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
   Actor,
-  FileChange,
   PromptAttachment,
   ServerMessage,
   SessionMeta,
@@ -28,15 +27,7 @@ import {
 import type { Store } from './store.ts';
 import type { SessionManager } from './sessions.ts';
 import { isHeld, ItemTrust, markAfterSave, runnableDigest, settledHold, unmarked, vouchedFor } from './syncSignature.ts';
-import {
-  captureBaselines,
-  changedFiles,
-  groupByRepo,
-  multiRepoDiff,
-  repoBranch,
-  type RepoBaseline,
-  type RepoGroup,
-} from './git.ts';
+import { groupByRepo, repoBranch, type RepoGroup } from './git.ts';
 
 const stepKey = (ownerId: string, id: string, version: number) => `${ownerId}/${id}/${version}`;
 
@@ -92,29 +83,21 @@ function earliest(...values: (number | undefined)[]): number | undefined {
 }
 
 /**
- * True when a template threads the hand-off in itself — via `{previous}`/`{diff}`/
- * `{changed}` or any `{outputs.*}` — so `runStep` must not also auto-prepend it.
- * Tested against the template: after substitution the tokens are gone.
+ * True when a template threads the hand-off in itself — via `{previous}` or any
+ * `{outputs.*}` — so `runStep` must not also auto-prepend it. Tested against the
+ * template: after substitution the tokens are gone.
  *
  * `{roots}` is deliberately NOT here: it is static workspace shape, not a
  * hand-off, so a template using only `{roots}` should still get the auto-prepend.
- * `{changed}` is: it is this run's own change set, so a template carrying it must
- * not also get the `## Changes so far (git diff)` block.
  */
 export function usesHandoffTokens(template: string): boolean {
-  return /\{previous\}|\{diff\}|\{changed\}|\{outputs\./.test(template);
+  return /\{previous\}|\{outputs\./.test(template);
 }
 
-const TOKEN_RE = /\{(task|feedback|previous|diff|changed|roots|outputs\.[\w-]+)\}/g;
+const TOKEN_RE = /\{(task|feedback|previous|roots|outputs\.[\w-]+)\}/g;
 
-/** Cheap pre-checks so a template that never mentions a token costs no git calls. */
+/** Cheap pre-check so a template that never mentions `{roots}` costs no git calls. */
 const USES_ROOTS_RE = /\{roots\}/;
-const USES_DIFF_RE = /\{diff\}/;
-const USES_CHANGED_RE = /\{changed\}/;
-
-/** What a step reads when `{diff}` resolves to nothing — never a silent gap. */
-const NO_DIFF = 'No tracked changes since this workflow run started.';
-const NO_CHANGES = 'No files changed since this workflow run started.';
 
 /**
  * The workspace as a step needs to understand it: which folders are in scope,
@@ -150,68 +133,14 @@ function renderRoots(
   return lines.join('\n');
 }
 
-/** One commit unit's change set, as `renderChanged` needs it. */
-export interface ChangedRepo {
-  repo: string;
-  branch: string | null;
-  /** Where the floor came from — see `SessionManager.baselinesFor`. */
-  baseline: 'session' | 'workflow' | 'synthetic' | 'stale';
-  files: FileChange[];
-  /** New files past the per-repo listing cap, i.e. missing from `files`. */
-  untrackedOmitted: number;
-}
-
-/**
- * Every file this run changed, per commit unit — the authoritative set a commit
- * step stages from. Unlike `{diff}` this is never char-truncated: `MAX_DIFF_CHARS`
- * cuts mid-text, so a large run loses whole `diff --git` headers and the files
- * behind them disappear, path and all. A path list stays small enough not to need
- * a cap, so a file can only go missing here for a reason this text names out loud.
- *
- * Statuses are git's own `A`/`M`/`D`, and paths are repo-relative, so a line maps
- * straight onto `git -C <repo> add -- <path>`. Formatting lives here rather than in
- * git.ts, which stays pure git.
- */
-export function renderChanged(repos: ChangedRepo[]): string {
-  if (!repos.length) return NO_CHANGES;
-  // A single repo emits no `# repo:` header, mirroring multiRepoDiff.
-  const single = repos.length === 1;
-  return repos
-    .map((r) => {
-      const lines: string[] = [];
-      if (!single) lines.push(`# repo: ${r.repo}${r.branch ? ` (${r.branch})` : ''}`, '');
-      for (const f of r.files) lines.push(`${f.status} ${f.rel}`);
-      if (r.files.length) lines.push('');
-      // An empty change set is a legitimate outcome, so it gets a sentence rather
-      // than the blank a step would read as "the list failed to render".
-      lines.push(
-        r.files.length
-          ? `${r.files.length} file${r.files.length === 1 ? '' : 's'} changed since this workflow run started.`
-          : NO_CHANGES,
-      );
-      if (r.untrackedOmitted > 0) {
-        lines.push(
-          `WARNING: ${r.untrackedOmitted} further new file${r.untrackedOmitted === 1 ? ' is' : 's are'} present but past the listing cap — this list is INCOMPLETE.`,
-        );
-      }
-      if (r.baseline === 'synthetic' || r.baseline === 'stale') {
-        lines.push(
-          'WARNING: no baseline was recorded for this run, so the list above is the whole uncommitted state of the repo and may include changes made before it started.',
-        );
-      }
-      return lines.join('\n');
-    })
-    .join('\n\n');
-}
-
 /**
  * Fill every prompt token in ONE pass over the template. Single-pass is the whole
  * point: staged `replaceAll`s rescan text they just inserted, so a step output that
- * merely *mentions* `{previous}`/`{diff}` (a plan about this very feature, say) gets
- * those tokens expanded too — six literal `{previous}` in a plan meant the plan was
- * pasted seven times and the diff thirty-five, blowing a 3.8 MB prompt past the
- * context limit. `String.replace` never rescans replacement text, so substituted
- * content stays inert.
+ * merely *mentions* `{previous}` (a plan about this very feature, say) gets that
+ * token expanded too — six literal `{previous}` in a plan meant the plan was
+ * pasted seven times, blowing a 3.8 MB prompt past the context limit.
+ * `String.replace` never rescans replacement text, so substituted content stays
+ * inert.
  *
  * `{outputs.<name>}` resolving to nothing — absent, or present but blank — is
  * reported rather than collapsed to '' silently, which is how a step ends up running
@@ -223,8 +152,6 @@ export function substituteTokens(
     task: string;
     feedback: string;
     previous: string;
-    diff: string;
-    changed: string;
     roots: string;
   },
   outputs: Record<string, string>,
@@ -255,38 +182,42 @@ export const DEFAULT_WORKFLOW: WorkflowDef = {
       permissionMode: 'plan',
       autoAdvance: false,
       freshStart: false,
+      outputName: 'plan',
     },
     {
       name: 'Implement MVP',
       promptTemplate:
-        'Implement the MVP of the planned feature now. Follow the approved plan as supplied in this prompt — that text is the whole plan; never go looking for plan files under ~/.claude/plans/ (they belong to other sessions). Keep the change minimal — no extras beyond the plan.{feedback}',
+        'Implement the MVP of the planned feature now. Follow the approved plan as supplied in this prompt — that text is the whole plan; never go looking for plan files under ~/.claude/plans/ (they belong to other sessions). Keep the change minimal — no extras beyond the plan.\n\n## Plan\n\n{outputs.plan}\n\nEnd your reply with a `## Files changed` section listing every file you created, edited or deleted, one repo-relative path per line.{feedback}',
       model: 'claude-opus-5-5',
       permissionMode: 'auto',
       autoAdvance: false,
       freshStart: true,
+      outputName: 'implementation',
     },
     {
       name: 'Add tests',
       promptTemplate:
-        'Add tests covering the feature just implemented. Run them and make sure they pass.{feedback}',
+        'Add tests covering the feature just implemented. Run them and make sure they pass.\n\n## Implementation\n\n{outputs.implementation}\n\nEnd your reply with a `## Files changed` section listing every test file you created, edited or deleted, one repo-relative path per line.{feedback}',
       model: 'claude-sonnet-5-5',
       permissionMode: 'auto',
       autoAdvance: false,
       freshStart: true,
+      outputName: 'tests',
     },
     {
       name: 'Refactor',
       promptTemplate:
-        'Refactor the new code for clarity and consistency with the rest of the codebase. Keep tests green.{feedback}',
+        'Refactor the new code for clarity and consistency with the rest of the codebase. Keep tests green.\n\n## Implementation\n\n{outputs.implementation}\n\n## Tests\n\n{outputs.tests}\n\nEnd your reply with a `## Files changed` section listing every file you edited, one repo-relative path per line.{feedback}',
       model: 'claude-sonnet-5-5',
       permissionMode: 'auto',
       autoAdvance: false,
       freshStart: true,
+      outputName: 'refactor',
     },
     {
       name: 'Review',
       promptTemplate:
-        'Do a final review of everything changed in this session. Look for correctness bugs, missed edge cases, and quality issues. Report findings; do not change code.{feedback}',
+        'Do a final review of everything changed in this session. Look for correctness bugs, missed edge cases, and quality issues. Report findings; do not change code.\n\n## Implementation\n\n{outputs.implementation}\n\n## Tests\n\n{outputs.tests}\n\n## Refactor\n\n{outputs.refactor}{feedback}',
       model: 'claude-opus-5-5',
       permissionMode: 'plan',
       autoAdvance: false,
@@ -516,8 +447,6 @@ export class WorkflowEngine {
       wf.stepIndex = 0;
       wf.stepStatuses = wf.stepStatuses.map(() => 'pending');
       wf.outputs = undefined;
-      // diffBaselines is kept: it is a floor on the working tree, and the files on
-      // disk did not roll back with the transcript.
       this.sessions.setStatus(sessionId, 'idle');
       return true;
     }
@@ -1324,10 +1253,6 @@ export class WorkflowEngine {
     meta.workflow.started = true;
     meta.workflow.task = userText;
     this.sessions.maybeAutoName(sessionId, userText);
-    // Snapshot the working tree now so later steps' {diff} excludes pre-existing
-    // dirty state. Fire-and-forget: the first fresh step is at least one approval
-    // gap away, long after this resolves.
-    void this.captureDiffBaseline(sessionId);
     this.runStepSafely(sessionId, undefined, true, attachments, actor);
     return true;
   }
@@ -1335,45 +1260,6 @@ export class WorkflowEngine {
   /** Every root a session may work in — its project's, else just its cwd. */
   private rootsFor(cwd: string): string[] {
     return rootsForCwd(this.store.loadProjects(), cwd);
-  }
-
-  private async captureDiffBaseline(sessionId: string) {
-    const meta = this.sessions.get(sessionId);
-    if (!meta?.workflow) return;
-    meta.workflow.diffBaselines = await captureBaselines(this.rootsFor(meta.cwd));
-  }
-
-  /**
-   * Baselines a step's `{diff}`/`{changed}` are taken against, and where they came
-   * from. One resolver, shared with the review UI: the workflow's own snapshot wins
-   * (it is what "since this run started" means), then the session's, then a
-   * synthesized HEAD flagged `synthetic`. The fallback is the point — resolving to
-   * `[]` used to render as nothing at all, which reads to a step exactly like a
-   * clean tree.
-   */
-  private baselinesFor(
-    meta: SessionMeta,
-  ): Promise<{ baselines: RepoBaseline[]; source: 'session' | 'workflow' | 'synthetic' }> {
-    return this.sessions.baselinesFor(meta, 'workflow');
-  }
-
-  /** The `{changed}` block: every file this run touched, per commit unit. */
-  private async renderChanges(resolved: {
-    baselines: RepoBaseline[];
-    source: 'session' | 'workflow' | 'synthetic';
-  }): Promise<string> {
-    const repos: ChangedRepo[] = [];
-    for (const baseline of resolved.baselines) {
-      const { files, stale, untrackedOmitted } = await changedFiles(baseline.repo, baseline);
-      repos.push({
-        repo: baseline.repo,
-        branch: await repoBranch(baseline.repo),
-        baseline: stale ? 'stale' : resolved.source,
-        files,
-        untrackedOmitted,
-      });
-    }
-    return renderChanged(repos);
   }
 
   /** The `{roots}` block for this session: commit units, their branches, orphan roots. */
@@ -1539,31 +1425,14 @@ export class WorkflowEngine {
 
     // Fresh start: drop the accumulated conversation and seed a clean session
     // with a compact hand-off — the previous step's final output ({previous},
-    // e.g. a plan) and the working-tree diff ({diff}). Only when entering a step
-    // that actually has predecessors (i > 0); step 0 has no prior output and its
-    // "diff" would just be the repo's pre-existing dirty state. Retries stay in
-    // the fresh session already established for this step.
+    // e.g. a plan). Only when entering a step that actually has predecessors
+    // (i > 0); step 0 has no prior output. Retries stay in the fresh session
+    // already established for this step.
     const handoff = freshStart && entry && i > 0;
     const previous = handoff
       ? (meta.workflow.lastStepOutput ?? this.sessions.lastAssistantText(sessionId))
       : '';
-    // Unlike {previous}, {diff} and {changed} are resolved off their own template
-    // check, not just `handoff` — an inheriting step (freshStart: false, e.g. a
-    // Commit Agent that wants {changed} without dragging in the whole prior
-    // conversation) can ask for either directly. `handoff` still forces {diff}
-    // resolution for the auto-prepend below, and a retry (`entry` false) recomputes
-    // it, which is what a retried commit step wants.
-    const usesDiffToken = USES_DIFF_RE.test(content.promptTemplate);
-    const usesChangedToken = USES_CHANGED_RE.test(content.promptTemplate);
-    const baselines =
-      handoff || usesDiffToken || usesChangedToken ? await this.baselinesFor(meta) : null;
-    const diffRaw = handoff || usesDiffToken ? await multiRepoDiff(baselines!.baselines) : '';
-    // A template that asked for {diff} reads an explicit sentence rather than a
-    // silent '' — substituteTokens only parks a step for missing {outputs.*}, so an
-    // empty diff has to say so itself to avoid looking like a resolution failure.
-    const diff = handoff || usesDiffToken ? diffRaw || NO_DIFF : '';
-    const changed = usesChangedToken ? await this.renderChanges(baselines!) : '';
-    // Unlike {diff}, {roots} is workspace shape rather than a hand-off, so it is
+    // Unlike {previous}, {roots} is workspace shape rather than a hand-off, so it is
     // not gated on `handoff` and works in an inheriting step too. Resolved only
     // when the template asks for it — it costs a --show-toplevel plus an
     // --abbrev-ref per root, on the step-entry path the user waits through.
@@ -1577,7 +1446,7 @@ export class WorkflowEngine {
       : content.promptTemplate + '{feedback}';
     const resolved = substituteTokens(
       base,
-      { task: meta.workflow.task ?? '', feedback: feedbackText, previous, diff, changed, roots },
+      { task: meta.workflow.task ?? '', feedback: feedbackText, previous, roots },
       meta.workflow.outputs ?? {},
     );
     let prompt = resolved.prompt;
@@ -1602,13 +1471,10 @@ export class WorkflowEngine {
     }
 
     if (handoff) {
-      // A template pulling {outputs.*} (or the hand-off tokens directly) already
-      // carries its context — auto-prepending would inject the same text twice.
-      if (!usesTokens) {
-        const parts: string[] = [];
-        if (previous) parts.push(`## Context from the previous step\n\n${previous}`);
-        if (diffRaw) parts.push(`## Changes so far (git diff)\n\n\`\`\`diff\n${diffRaw}\n\`\`\``);
-        if (parts.length) prompt = `${parts.join('\n\n')}\n\n---\n\n${prompt}`;
+      // A template pulling {outputs.*} (or {previous} directly) already carries its
+      // context — auto-prepending would inject the same text twice.
+      if (!usesTokens && previous) {
+        prompt = `## Context from the previous step\n\n${previous}\n\n---\n\n${prompt}`;
       }
       this.sessions.resetClaudeSession(sessionId);
     } else if (freshStart && entry) {

@@ -1,6 +1,7 @@
 import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { Badge, Group, Menu, Text, Tooltip, UnstyledButton } from '@mantine/core';
 import { IconChevronDown, IconDeviceLaptop, IconSettings } from '@tabler/icons-react';
+import { allSessionGroups } from '@lines/shared';
 import { useStore } from '../store';
 import { useDevices } from '../lib/devices';
 import { machineActivity } from '../lib/format';
@@ -34,6 +35,7 @@ export function MachineSwitcher() {
   const load = useDevices((s) => s.refresh);
   const machines = useStore((s) => s.machines);
   const sessions = useStore((s) => s.sessions);
+  const sessionGroups = useStore((s) => s.sessionGroups);
   const sessionMachine = useStore((s) => s.sessionMachine);
   // The machine the UI is pointed at, from the store rather than storage, so the
   // control re-renders on a switch. The remembered id covers the moment before
@@ -78,7 +80,10 @@ export function MachineSwitcher() {
   const activityOf = (device: Device): { running: number; actionable: number } | null => {
     const slice = machines[device.id];
     if (!slice?.bootstrapped || slice.view.access) return null;
-    return machineActivity(Object.values(sessionsOnMachine(sessions, sessionMachine, device.id)));
+    return machineActivity(
+      Object.values(sessionsOnMachine(sessions, sessionMachine, device.id)),
+      allSessionGroups({ sessionGroups }),
+    );
   };
 
   if (!SHARING_ENABLED) return null;

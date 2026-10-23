@@ -126,8 +126,7 @@ transcript's newest `'started'`/`'retried'` workflow marker:
   hand-off falls back to `lastAssistantText` over the truncated transcript.
 - No surviving marker at all (rewound past the task description, step 0's very first prompt):
   the workflow is put back to `attach()`'s unstarted shape (`started: false`, `task` cleared,
-  every `stepStatuses` entry `'pending'`) so the next prompt starts it again. `diffBaselines` is
-  kept — the working tree did not roll back with the transcript.
+  every `stepStatuses` entry `'pending'`) so the next prompt starts it again.
 - Per-step spend (`stepCostsUsd`/`stepTokens`/`stepDurationsMs`) is **not** rewound — same rule
   as cumulative session spend (see Business rules): the turns really ran.
 

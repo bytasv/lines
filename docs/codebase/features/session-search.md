@@ -56,8 +56,7 @@ handler took it, a Mantine overlay is open, or focus is in Monaco.
 ## Dependencies
 
 - The `fileRequest` transport and `sessionInReach` — see
-  [file-routes-over-ws](file-routes-over-ws.md) and
-  [session-change-tracking](session-change-tracking.md)
+  [file-routes-over-ws](file-routes-over-ws.md)
 - [transcript-performance](transcript-performance.md) — windowed mounting, which
   is why search is server-side
 

@@ -19,6 +19,7 @@
  * the bridge up; `verifyClient` is the one piece of glue, shared by the bridge
  * and its socket test so the test exercises the code that actually runs.
  */
+import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { isLoopbackAddress } from './locality.ts';
 
@@ -39,12 +40,32 @@ export interface ConnectionPolicy {
   /**
    * False when `LINES_BRIDGE_DIRECT=0`: every browser arrives through the relay,
    * so a direct socket has no legitimate caller at all. The desktop app sets it
-   * in relay mode, where its own window is the hosted app.
+   * in relay mode, where its own window is the hosted app, unless its local
+   * fallback window is on (then `token`, below).
    */
   direct: boolean;
+  /**
+   * `LINES_BRIDGE_DIRECT=token`: the desktop app's local fallback window. A
+   * direct socket must then come from loopback, name loopback, carry exactly one
+   * of `allowedOrigins`, and present this boot's runtime token as a subprotocol
+   * — see `tokenGatedVerdict`. Nothing else gets in, a no-origin client included.
+   */
+  tokenGated: boolean;
+  /** The per-boot runtime token a token-gated socket must present. Null outside that mode. */
+  bridgeToken: string | null;
   /** Page origins besides this machine's own that may open a direct socket. */
   allowedOrigins: ReadonlySet<string>;
 }
+
+/**
+ * How a browser hands the runtime token over: as a WebSocket subprotocol,
+ * `lines.bt.<token>`, beside a plain `lines` the server selects. A page cannot
+ * set headers on a WebSocket, and a query string ends up in logs and history;
+ * the protocol header is the one place a browser sends a secret on the upgrade.
+ */
+export const BRIDGE_TOKEN_PROTOCOL_PREFIX = 'lines.bt.';
+/** The subprotocol the bridge selects, so the token is never echoed back. */
+export const LINES_SUBPROTOCOL = 'lines';
 
 /**
  * The interface to bind, and a value of `LINES_BRIDGE_HOST` that was refused.
@@ -74,18 +95,27 @@ function canonicalOrigin(origin: string): string | null {
   }
 }
 
-/** The whole policy, read once from the environment at startup. */
-export function connectionPolicy(env: NodeJS.ProcessEnv = process.env): ConnectionPolicy {
+/**
+ * The whole policy, read once from the environment at startup. `bridgeToken` is
+ * this boot's runtime token, which only the token-gated mode reads.
+ */
+export function connectionPolicy(
+  env: NodeJS.ProcessEnv = process.env,
+  bridgeToken: string | null = null,
+): ConnectionPolicy {
   const { host } = listenHost(env);
   const allowedOrigins = new Set<string>();
   for (const entry of (env.LINES_BRIDGE_ALLOWED_ORIGINS ?? '').split(',')) {
     const origin = entry.trim() ? canonicalOrigin(entry.trim()) : null;
     if (origin) allowedOrigins.add(origin);
   }
+  const tokenGated = env.LINES_BRIDGE_DIRECT === 'token';
   return {
     host,
     loopbackOnly: !WILDCARD_HOSTS.has(host),
     direct: env.LINES_BRIDGE_DIRECT !== '0',
+    tokenGated,
+    bridgeToken: tokenGated && bridgeToken ? bridgeToken : null,
     allowedOrigins,
   };
 }
@@ -123,6 +153,71 @@ export function hostAllowed(hostHeader: string | undefined, policy: ConnectionPo
 
 export type UpgradeVerdict = { ok: true } | { ok: false; status: 403 | 421; reason: string };
 
+/** What an upgrade request says about itself, as far as the policy cares. */
+export interface UpgradeRequest {
+  origin?: string;
+  host?: string;
+  remoteAddress?: string;
+  /** The raw `Sec-WebSocket-Protocol` header: comma-separated subprotocols. */
+  protocols?: string;
+}
+
+/** Whether `Sec-WebSocket-Protocol` carries `lines.bt.<expected>`, compared in constant time. */
+function presentsBridgeToken(protocols: string | undefined, expected: string): boolean {
+  const want = Buffer.from(expected);
+  let found = false;
+  for (const entry of (protocols ?? '').split(',')) {
+    const value = entry.trim();
+    if (!value.startsWith(BRIDGE_TOKEN_PROTOCOL_PREFIX)) continue;
+    const got = Buffer.from(value.slice(BRIDGE_TOKEN_PROTOCOL_PREFIX.length));
+    // timingSafeEqual throws on a length mismatch, which is itself an answer.
+    if (got.length === want.length && timingSafeEqual(got, want)) found = true;
+  }
+  return found;
+}
+
+/**
+ * The desktop app's local fallback window, and nothing else.
+ *
+ * Every condition on its own, because each stops a different stranger: the Host
+ * a rebinding page, the peer a LAN machine, the exact origin any other page on
+ * this machine (another app's localhost server included — "any loopback origin"
+ * is not enough here), and the token whoever is not this OS user, since only
+ * they can read the 0600 `bridge.json` it is published in. The token is never
+ * taken from the query string.
+ */
+function tokenGatedVerdict(req: UpgradeRequest, policy: ConnectionPolicy): UpgradeVerdict {
+  if (!policy.bridgeToken) return { ok: false, status: 403, reason: 'no runtime token to check against' };
+  let hostname: string | null = null;
+  try {
+    hostname = req.host ? new URL(`http://${req.host}`).hostname : null;
+  } catch {
+    hostname = null;
+  }
+  if (!hostname || !isLoopbackHostname(hostname)) {
+    return { ok: false, status: 421, reason: `host ${req.host ?? '(none)'} does not name this machine` };
+  }
+  if (!isLoopbackAddress(req.remoteAddress)) return { ok: false, status: 403, reason: 'not from this machine' };
+  if (req.origin === undefined) return { ok: false, status: 403, reason: 'no origin' };
+  const origin = canonicalOrigin(req.origin);
+  if (!origin || !policy.allowedOrigins.has(origin)) {
+    return { ok: false, status: 403, reason: `origin ${req.origin} is not allowed` };
+  }
+  if (!presentsBridgeToken(req.protocols, policy.bridgeToken)) {
+    return { ok: false, status: 403, reason: 'missing or wrong bridge token' };
+  }
+  return { ok: true };
+}
+
+/**
+ * The subprotocol to answer with, for `ws`'s `handleProtocols`. A browser that
+ * offered any fails the handshake unless one is echoed, and `lines` is the one
+ * picked so the token offered beside it never comes back on the response.
+ */
+export function selectProtocol(protocols: ReadonlySet<string>): string | false {
+  return protocols.has(LINES_SUBPROTOCOL) ? LINES_SUBPROTOCOL : false;
+}
+
 /**
  * May this WebSocket upgrade proceed? Decided before the socket exists, so a
  * refused page never reaches `handleConnection` — nor, therefore, a `hello`.
@@ -137,13 +232,11 @@ export type UpgradeVerdict = { ok: true } | { ok: false; status: 403 | 421; reas
  * The loopback origin is honoured only from a loopback peer: on a wildcard bind
  * a LAN machine's own `http://localhost` page would otherwise pass for ours.
  */
-export function upgradeVerdict(
-  req: { origin?: string; host?: string; remoteAddress?: string },
-  policy: ConnectionPolicy,
-): UpgradeVerdict {
+export function upgradeVerdict(req: UpgradeRequest, policy: ConnectionPolicy): UpgradeVerdict {
   if (!policy.direct) {
     return { ok: false, status: 403, reason: 'direct connections are disabled on this machine' };
   }
+  if (policy.tokenGated) return tokenGatedVerdict(req, policy);
   if (!hostAllowed(req.host, policy)) {
     return { ok: false, status: 421, reason: `host ${req.host ?? '(none)'} does not name this machine` };
   }
@@ -175,6 +268,7 @@ export function verifyClient(
         origin: info.origin || undefined,
         host: info.req.headers.host,
         remoteAddress: info.req.socket.remoteAddress,
+        protocols: info.req.headers['sec-websocket-protocol'],
       },
       policy,
     );

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { SessionMeta, SessionStatus, WorkflowState } from '@lines/shared';
+import { isAlertTransition, isSessionMuted } from '@lines/shared';
 import {
   compareSessions,
   machineActivity,
@@ -121,5 +122,53 @@ describe('project tab dot', () => {
     assert.equal(tracksSeen(meta(s('i', 'idle'))), false);
     const bg = s('bg', 'done', { backgroundTasks: [{}] as SessionMeta['backgroundTasks'] });
     assert.equal(tracksSeen(meta(bg)), false);
+  });
+});
+
+describe('muted groups', () => {
+  const groups = [
+    { id: 'quiet', name: 'For future', muted: true },
+    { id: 'loud', name: 'Later' },
+  ];
+  const perm = (over: Partial<SessionMeta> = {}) => s('p', 'waiting-permission', over);
+
+  test('a muted session never lights the tab or counts as actionable', () => {
+    assert.equal(projectStatusMeta([perm({ groupId: 'quiet' })], {}, now, groups), null);
+    assert.deepEqual(machineActivity([perm({ groupId: 'quiet' })], groups), { running: 0, actionable: 0 });
+  });
+
+  test('an unmuted group, a deleted group and no groups list all still light it', () => {
+    assert.equal(projectStatusMeta([perm({ groupId: 'loud' })], {}, now, groups)?.label, 'needs permission');
+    assert.equal(projectStatusMeta([perm({ groupId: 'gone' })], {}, now, groups)?.label, 'needs permission');
+    assert.equal(projectStatusMeta([perm({ groupId: 'quiet' })], {}, now)?.label, 'needs permission');
+    assert.deepEqual(machineActivity([perm({ groupId: 'loud' })], groups), { running: 0, actionable: 1 });
+  });
+
+  test('isSessionMuted gates an alert transition without changing it', () => {
+    const quiet = perm({ groupId: 'quiet' });
+    const loud = perm({ groupId: 'loud' });
+    assert.equal(isAlertTransition('running', quiet), true);
+    assert.equal(isAlertTransition('running', quiet) && !isSessionMuted(quiet, groups), false);
+    assert.equal(isAlertTransition('running', loud) && !isSessionMuted(loud, groups), true);
+    assert.equal(isSessionMuted(s('u', 'idle'), groups), false);
+    assert.equal(isSessionMuted(quiet, undefined), false);
+  });
+});
+
+describe('manual sort', () => {
+  test('placed sessions follow the order, unplaced ones sit on top newest first', () => {
+    const rows = [
+      s('a', 'idle', { createdAt: 1 }),
+      s('b', 'idle', { createdAt: 2 }),
+      s('new1', 'idle', { createdAt: 10 }),
+      s('new2', 'idle', { createdAt: 20 }),
+    ];
+    const ids = rows.sort(compareSessions('manual', ['b', 'a'])).map((r) => r.id);
+    assert.deepEqual(ids, ['new2', 'new1', 'b', 'a']);
+  });
+
+  test('with no order yet, manual reads as newest first', () => {
+    const rows = [s('a', 'idle', { createdAt: 1 }), s('b', 'idle', { createdAt: 2 })];
+    assert.deepEqual(rows.sort(compareSessions('manual')).map((r) => r.id), ['b', 'a']);
   });
 });

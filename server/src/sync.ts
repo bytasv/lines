@@ -1,4 +1,21 @@
-import type { GuardAllowlistBlob, McpConnectionsBlob, MemoryFileMap, ProjectKeyMap, RecipeDef, SessionMeta, StepDef, StepRef, StorageErrorKind, StorageStatus, SyncLogEntry, WorkflowDef } from '@lines/shared';
+import type {
+  GuardAllowlistBlob,
+  McpConnectionsBlob,
+  MemoryFileMap,
+  ProjectKeyMap,
+  RecipeDef,
+  SessionMeta,
+  StepDef,
+  StepRef,
+  StorageErrorKind,
+  StorageStatus,
+  SyncDeleteKind,
+  SyncDirtyKind,
+  SyncLogEntry,
+  SyncOutbox,
+  SyncPending,
+  WorkflowDef,
+} from '@lines/shared';
 import type { UntrustedMark } from '@lines/shared';
 import type { SyncWatermarks } from './store.ts';
 import {
@@ -40,6 +57,38 @@ const PROBE_INTERVAL_MS = 15_000;
 const REASON_MAX_CHARS = 300;
 /** Headroom under the storage server's 2mb JSON body limit, as memory.ts keeps for its map. */
 const SESSIONS_PUSH_MAX_BYTES = 1.5 * 1024 * 1024;
+/** Ceiling for the backoff a failed session chunk retries on. */
+const SESSIONS_RETRY_MAX_MS = 60_000;
+/** Pending counts change on every local edit; the indicator only needs them settled. */
+const STATUS_DEBOUNCE_MS = 1_000;
+
+/** Where a queued delete of each kind is sent. */
+const DELETE_PATHS: Record<SyncDeleteKind, string> = {
+  session: '/sessions',
+  workflow: '/workflows',
+  step: '/steps',
+  recipe: '/recipes',
+};
+const DELETE_KINDS = Object.keys(DELETE_PATHS) as SyncDeleteKind[];
+
+/** An outbox with nothing in it — also the shape a missing or torn `sync-outbox.json` loads as. */
+export function emptyOutbox(): SyncOutbox {
+  return { deletes: { session: {}, workflow: {}, step: {}, recipe: {} }, dirty: {} };
+}
+
+/** A loaded outbox with every kind present, whatever an older or hand-edited file left out. */
+function normalizeOutbox(raw: Partial<SyncOutbox> | undefined): SyncOutbox {
+  const out = emptyOutbox();
+  for (const kind of DELETE_KINDS) {
+    for (const [id, at] of Object.entries(raw?.deletes?.[kind] ?? {})) {
+      if (typeof at === 'number') out.deletes[kind][id] = at;
+    }
+  }
+  for (const [kind, dirty] of Object.entries(raw?.dirty ?? {})) {
+    if (dirty === true) out.dirty[kind as SyncDirtyKind] = true;
+  }
+  return out;
+}
 
 /** `pullAll` skipped this call because a pull happened less than PULL_MIN_SPACING_MS ago. */
 export const THROTTLED = Symbol('throttled');
@@ -246,7 +295,10 @@ export class StorageSyncClient {
   /** True while pulled state is being applied, so the resulting broadcasts don't push back up. */
   applying = false;
 
-  /** Fired on every availability transition, so the bridge can broadcast a storageStatus. */
+  /**
+   * Fired on every availability transition, so the bridge can broadcast a
+   * storageStatus — and, debounced, when the pending counts move.
+   */
   onStatusChange?: (status: StorageStatus) => void;
 
   private warned = false;
@@ -271,13 +323,30 @@ export class StorageSyncClient {
   private pendingRecipes: RecipeDef[] | null = null;
   private pendingSessions = new Map<string, SessionMeta>();
   /**
-   * Sessions deleted locally whose DELETE storage has not confirmed yet. Held
-   * rather than fired-and-forgotten, because a delete has three ways to be lost: it
-   * can arrive while pulled state is being applied, before there is a token to send
-   * it with, or while a push carrying that very row is already in flight.
+   * Every write storage has not confirmed yet, on disk (see `SyncOutbox`).
+   *
+   * Deletes are held rather than fired-and-forgotten, because a delete has four
+   * ways to be lost: it can arrive while pulled state is being applied, before
+   * there is a token to send it with, while a push carrying that very row is
+   * already in flight, or across a restart during an outage. Each one stays here
+   * until storage answers it.
    */
-  private pendingDeletes = new Set<string>();
+  private outbox: SyncOutbox;
+  private persistOutbox: (outbox: SyncOutbox) => void;
+  /** Fired when there is something to flush and a link to flush it over (see `recovered`). */
+  private onRecovered?: () => void;
+  /** This user's sessions that sync, so `pending()` can count the ones storage has not taken yet. */
+  private localSessions: () => SessionMeta[];
+  /** ms epoch of the last request storage accepted. */
+  private lastSyncedAt?: number;
+  /** The `cloud` state last reported, and since when, so `since` survives repeated reads. */
+  private cloud?: { state: NonNullable<StorageStatus['cloud']>; since: number };
+  /** Backoff for re-arming a failed session push; 0 while pushes succeed. */
+  private sessRetryMs = 0;
+  private statusTimer: NodeJS.Timeout | null = null;
   private pendingMemory: MemoryFileMap | null = null;
+  /** Called once the memory map now in flight has been accepted (see MemorySyncer.collectChanged). */
+  private memoryCommits: (() => void)[] = [];
   private wfTimer: NodeJS.Timeout | null = null;
   private stepTimer: NodeJS.Timeout | null = null;
   private recipeTimer: NodeJS.Timeout | null = null;
@@ -322,6 +391,13 @@ export class StorageSyncClient {
       identity?: () => Promise<SigningIdentity>;
       /** The user id this client syncs for — the bridge's `ctx.userId`. */
       account?: string;
+      /** The persisted outbox to resume from, as `marks` is. */
+      outbox?: SyncOutbox;
+      /** Injected like `persistMarks`, so this module keeps no `fs` import. */
+      persistOutbox?: (outbox: SyncOutbox) => void;
+      /** Flush everything — wired to `syncNow({ force: true })`. */
+      onRecovered?: () => void;
+      localSessions?: () => SessionMeta[];
     },
   ) {
     this.signers = opts?.signers ?? fileSignerStore;
@@ -331,16 +407,24 @@ export class StorageSyncClient {
     this.appendLog = appendLog;
     this.authGraceMs = opts?.authGraceMs ?? AUTH_GRACE_MS;
     this.probeMs = opts?.probeMs ?? PROBE_INTERVAL_MS;
+    this.outbox = normalizeOutbox(opts?.outbox);
+    this.persistOutbox = opts?.persistOutbox ?? (() => {});
+    this.onRecovered = opts?.onRecovered;
+    this.localSessions = opts?.localSessions ?? (() => []);
   }
 
   get enabled(): boolean {
     return Boolean(this.base && this.tokenFn());
   }
 
-  /** Pull everything for a context build / reconnect; null on failure, THROTTLED if too soon. */
-  async pullAll(): Promise<PulledState | typeof THROTTLED | null> {
+  /**
+   * Pull everything for a context build / reconnect; null on failure, THROTTLED if
+   * too soon. `force` skips the spacing once: a recovery flush or the user's "Sync
+   * now" is not the reconnect storm the throttle is there for.
+   */
+  async pullAll(opts?: { force?: boolean }): Promise<PulledState | typeof THROTTLED | null> {
     if (!this.enabled) return null;
-    if (Date.now() - this.lastPullAt < PULL_MIN_SPACING_MS) return THROTTLED;
+    if (!opts?.force && Date.now() - this.lastPullAt < PULL_MIN_SPACING_MS) return THROTTLED;
     this.lastPullAt = Date.now();
     try {
       const [workflows, steps, recipes, recipeStats, sessions, settings, projectKeys, memory, guardAllowlist, mcpConnections] = await Promise.all([
@@ -409,15 +493,20 @@ export class StorageSyncClient {
   }
 
   pushWorkflows(list: WorkflowDef[]): void {
-    if (!this.enabled || this.applying) return;
+    if (this.applying) return;
+    this.markDirty('workflows');
+    if (!this.enabled) return;
     this.pendingWorkflows = list;
     this.wfTimer ??= setTimeout(() => {
       this.wfTimer = null;
       const body = this.pendingWorkflows;
       this.pendingWorkflows = null;
-      void this.signForPush('/workflows', body)
-        .then((signed) => this.req('PUT', '/workflows', signed))
-        .catch((err) => this.warnOnce('push workflows', err));
+      void this.settle(
+        'workflows',
+        this.signForPush('/workflows', body).then((signed) => this.req('PUT', '/workflows', signed)),
+        () => !this.wfTimer,
+        'push workflows',
+      );
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
   }
 
@@ -506,21 +595,25 @@ export class StorageSyncClient {
   }
 
   pushSteps(list: StepDef[]): void {
-    if (!this.enabled || this.applying) return;
+    if (this.applying) return;
+    this.markDirty('steps');
+    if (!this.enabled) return;
     this.pendingSteps = list;
     this.stepTimer ??= setTimeout(() => {
       this.stepTimer = null;
       const body = this.pendingSteps;
       this.pendingSteps = null;
-      void this.signForPush('/steps', body)
-        .then((signed) => this.req('PUT', '/steps', signed))
-        .catch((err) => this.warnOnce('push steps', err));
+      void this.settle(
+        'steps',
+        this.signForPush('/steps', body).then((signed) => this.req('PUT', '/steps', signed)),
+        () => !this.stepTimer,
+        'push steps',
+      );
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
   }
 
   deleteStep(id: string): void {
-    if (!this.enabled || this.applying) return;
-    void this.req('DELETE', `/steps/${id}`).catch((err) => this.warnOnce('delete step', err));
+    this.queueDelete('step', id);
   }
 
   // ---- recipes ----
@@ -551,21 +644,25 @@ export class StorageSyncClient {
   }
 
   pushRecipes(list: RecipeDef[]): void {
-    if (!this.enabled || this.applying) return;
+    if (this.applying) return;
+    this.markDirty('recipes');
+    if (!this.enabled) return;
     this.pendingRecipes = list;
     this.recipeTimer ??= setTimeout(() => {
       this.recipeTimer = null;
       const body = this.pendingRecipes;
       this.pendingRecipes = null;
-      void this.signForPush('/recipes', body)
-        .then((signed) => this.req('PUT', '/recipes', signed))
-        .catch((err) => this.warnOnce('push recipes', err));
+      void this.settle(
+        'recipes',
+        this.signForPush('/recipes', body).then((signed) => this.req('PUT', '/recipes', signed)),
+        () => !this.recipeTimer,
+        'push recipes',
+      );
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
   }
 
   deleteRecipe(id: string): void {
-    if (!this.enabled || this.applying) return;
-    void this.req('DELETE', `/recipes/${id}`).catch((err) => this.warnOnce('delete recipe', err));
+    this.queueDelete('recipe', id);
   }
 
   /**
@@ -694,16 +791,29 @@ export class StorageSyncClient {
   }
 
   pushSession(meta: SessionMeta): void {
-    if (!this.enabled || this.applying) return;
+    // No dirty mark: a session storage has not taken is one newer than
+    // `sessionsPushed`, which is already on disk, so `pending()` counts it and the
+    // next `pushSessions` sends it.
+    if (!this.enabled || this.applying) {
+      this.notifyPending();
+      return;
+    }
     // Deleted here already; pushing it would ask storage to undo that.
-    if (this.pendingDeletes.has(meta.id)) return;
+    if (this.isPendingDelete('session', meta.id)) return;
     this.pendingSessions.set(meta.id, meta);
+    this.armSessions(PUSH_DEBOUNCE_MS);
+  }
+
+  /** Schedule the debounced session flush, unless one is already scheduled. */
+  private armSessions(delayMs: number): void {
     this.sessTimer ??= setTimeout(() => {
       this.sessTimer = null;
+      // Held for the flush on recovery rather than spent on a request that cannot go out.
+      if (!this.enabled) return;
       const batch = [...this.pendingSessions.values()];
       this.pendingSessions.clear();
       void this.flushSessions(batch);
-    }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
+    }, delayMs).unref() as unknown as NodeJS.Timeout;
   }
 
   /**
@@ -716,7 +826,7 @@ export class StorageSyncClient {
     if (!this.enabled || this.applying) return;
     // Every reconnect/sync passes through here, so it doubles as the retry point for
     // deletes that had nowhere to go when they were issued.
-    this.drainDeletes();
+    void this.drainDeletes();
     const since = Number(this.marks.sessionsPushed ?? 0);
     for (const meta of list) {
       const stamp = sessionStamp(meta);
@@ -729,7 +839,8 @@ export class StorageSyncClient {
    * sequentially so a failure doesn't strand the rest silently. The watermark
    * only advances when every chunk was accepted; a failed chunk goes back into
    * `pendingSessions` (merged, never overwriting a meta that arrived meanwhile)
-   * and rides along with the next push.
+   * and is retried on a backoff of its own — waiting for the next local change
+   * left it stranded for as long as nothing else happened to change.
    */
   private async flushSessions(batch: SessionMeta[]): Promise<void> {
     let allOk = true;
@@ -737,7 +848,7 @@ export class StorageSyncClient {
       // Re-checked per chunk rather than once up front: the batch was drained before
       // the first await, so a delete issued while an earlier chunk was in flight
       // would otherwise be undone by a later one.
-      const live = chunk.filter((meta) => !this.pendingDeletes.has(meta.id));
+      const live = chunk.filter((meta) => !this.isPendingDelete('session', meta.id));
       if (live.length === 0) continue;
       try {
         await this.req('PUT', '/sessions', live.map(sessionForSync));
@@ -748,8 +859,13 @@ export class StorageSyncClient {
       }
     }
     // A delete that raced this push has to land after it, or storage keeps the row.
-    this.drainDeletes();
-    if (!allOk) return;
+    void this.drainDeletes();
+    if (!allOk) {
+      this.sessRetryMs = Math.min(Math.max(this.sessRetryMs * 2, PUSH_DEBOUNCE_MS * 2), SESSIONS_RETRY_MAX_MS);
+      this.armSessions(this.sessRetryMs);
+      return;
+    }
+    this.sessRetryMs = 0;
     const since = Number(this.marks.sessionsPushed ?? 0);
     let newest = since;
     for (const meta of batch) newest = Math.max(newest, sessionStamp(meta) ?? 0);
@@ -757,6 +873,7 @@ export class StorageSyncClient {
       this.marks.sessionsPushed = String(newest);
       this.marksDirty = true;
       this.commitCursors();
+      this.notifyPending();
     }
   }
 
@@ -789,40 +906,73 @@ export class StorageSyncClient {
 
   deleteSession(id: string): void {
     this.pendingSessions.delete(id);
-    this.pendingDeletes.add(id);
-    // Queued, not dropped. `applying` (pulled state being written) and `!enabled` (no
-    // token yet) both used to lose the delete outright with nothing to retry it, so
-    // the row survived in storage and came back on the next pull.
-    if (!this.enabled || this.applying) return;
-    this.sendDelete(id);
-  }
-
-  /** Retry every unconfirmed delete. Storage's soft delete is idempotent. */
-  private drainDeletes(): void {
-    if (!this.enabled || this.applying) return;
-    for (const id of this.pendingDeletes) this.sendDelete(id);
-  }
-
-  private sendDelete(id: string): void {
-    void this.req('DELETE', `/sessions/${id}`)
-      .then(() => this.pendingDeletes.delete(id))
-      .catch((err) => this.warnOnce('delete session', err));
+    this.queueDelete('session', id);
   }
 
   deleteWorkflow(id: string): void {
+    this.queueDelete('workflow', id);
+  }
+
+  /**
+   * Record a delete in the outbox, then send it if there is a link to send it on.
+   * Queued, not dropped: `applying` (pulled state being written) and `!enabled` (no
+   * token, or the local window) both used to lose the delete outright with nothing
+   * to retry it, so the row survived in storage and came back on the next pull.
+   */
+  private queueDelete(kind: SyncDeleteKind, id: string): void {
+    this.outbox.deletes[kind][id] = Date.now();
+    this.saveOutbox();
     if (!this.enabled || this.applying) return;
-    void this.req('DELETE', `/workflows/${id}`).catch((err) => this.warnOnce('delete workflow', err));
+    void this.sendDelete(kind, id);
+  }
+
+  /**
+   * Whether a delete of this item is still waiting for storage. A pull must not
+   * bring such an item back: the caller skips it, so the row storage has not yet
+   * dropped cannot resurrect what the user deleted here.
+   */
+  isPendingDelete(kind: SyncDeleteKind, id: string): boolean {
+    return id in this.outbox.deletes[kind];
+  }
+
+  /** Retry every unconfirmed delete, of every kind. Storage's deletes are idempotent. */
+  drainDeletes(): Promise<void> {
+    if (!this.enabled || this.applying) return Promise.resolve();
+    const sends: Promise<void>[] = [];
+    for (const kind of DELETE_KINDS) {
+      for (const id of Object.keys(this.outbox.deletes[kind])) sends.push(this.sendDelete(kind, id));
+    }
+    return Promise.all(sends).then(() => {});
+  }
+
+  private sendDelete(kind: SyncDeleteKind, id: string): Promise<void> {
+    const issuedAt = this.outbox.deletes[kind][id];
+    // A 404 is a delete that already happened (or a row storage never had):
+    // either way there is nothing left to retry.
+    return this.req('DELETE', `${DELETE_PATHS[kind]}/${id}`, undefined, { missingOk: true }).then(
+      () => {
+        // Only the delete this request carried: one re-issued meanwhile keeps its slot.
+        if (this.outbox.deletes[kind][id] !== issuedAt) return;
+        delete this.outbox.deletes[kind][id];
+        this.saveOutbox();
+      },
+      (err) => this.warnOnce(`delete ${kind}`, err),
+    );
   }
 
   pushSettings(blob: unknown): void {
-    if (!this.enabled || this.applying) return;
-    void this.req('PUT', '/settings', blob).catch((err) => this.warnOnce('push settings', err));
+    if (this.applying) return;
+    this.markDirty('settings');
+    if (!this.enabled) return;
+    void this.settle('settings', this.req('PUT', '/settings', blob), () => true, 'push settings');
   }
 
   /** Undebounced like settings: allowlist edits are human-paced and few. */
   pushGuardAllowlist(blob: GuardAllowlistBlob): void {
-    if (!this.enabled || this.applying) return;
-    void this.req('PUT', '/guard-allowlist', blob).catch((err) => this.warnOnce('push guard allowlist', err));
+    if (this.applying) return;
+    this.markDirty('guard');
+    if (!this.enabled) return;
+    void this.settle('guard', this.req('PUT', '/guard-allowlist', blob), () => true, 'push guard allowlist');
   }
 
   /**
@@ -835,24 +985,47 @@ export class StorageSyncClient {
    * signs, so the signature still verifies after storage's own filtering.
    */
   pushMcpConnections(blob: McpConnectionsBlob): void {
-    if (!this.enabled || this.applying) return;
-    void this.req('PUT', '/mcp-connections', withoutMcpValues(blob)).catch((err) => this.warnOnce('push mcp connections', err));
+    if (this.applying) return;
+    this.markDirty('mcp');
+    if (!this.enabled) return;
+    void this.settle(
+      'mcp',
+      this.req('PUT', '/mcp-connections', withoutMcpValues(blob)),
+      () => true,
+      'push mcp connections',
+    );
   }
 
   /**
    * Debounced memory push. Pending maps are *merged* (not replaced), so quick
    * consecutive turns each contributing different files can't drop one another;
    * the server then per-file LWW-merges into the stored blob.
+   *
+   * `onPushed` runs only once storage has accepted the map — the caller's record
+   * of what is synced must not move ahead of storage, or a failed push is never
+   * retried.
    */
-  pushMemory(map: MemoryFileMap): void {
-    if (!this.enabled || this.applying) return;
+  pushMemory(map: MemoryFileMap, onPushed?: () => void): void {
+    if (this.applying) return;
     if (Object.keys(map).length === 0) return;
+    this.markDirty('memory');
+    if (!this.enabled) return;
     this.pendingMemory = Object.assign(this.pendingMemory ?? {}, map);
+    if (onPushed) this.memoryCommits.push(onPushed);
     this.memTimer ??= setTimeout(() => {
       this.memTimer = null;
       const body = this.pendingMemory;
+      const commits = this.memoryCommits;
       this.pendingMemory = null;
-      void this.req('PUT', '/memory', body).catch((err) => this.warnOnce('push memory', err));
+      this.memoryCommits = [];
+      void this.settle(
+        'memory',
+        this.req('PUT', '/memory', body).then(() => {
+          for (const commit of commits) commit();
+        }),
+        () => !this.memTimer,
+        'push memory',
+      );
     }, PUSH_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
   }
 
@@ -887,12 +1060,105 @@ export class StorageSyncClient {
 
   /** Whole-map push; the server unions it into the stored map rather than replacing. */
   pushProjectKeys(keys: ProjectKeyMap): void {
-    if (!this.enabled || this.applying) return;
+    if (this.applying) return;
     if (Object.keys(keys).length === 0) return;
-    void this.req('PUT', '/project-keys', keys).catch((err) => this.warnOnce('push project keys', err));
+    this.markDirty('projectKeys');
+    if (!this.enabled) return;
+    void this.settle('projectKeys', this.req('PUT', '/project-keys', keys), () => true, 'push project keys');
+  }
+
+  // ---- outbox ----
+
+  /**
+   * Finish one push of a whole-blob kind: its dirty mark is cleared on a 2xx
+   * only, and only when `idle` says no newer push of it is queued behind this one.
+   * A failure keeps the mark (`recordFailure` has already logged it), so the
+   * flush on recovery knows the kind still has to go.
+   */
+  private settle(kind: SyncDirtyKind, push: Promise<unknown>, idle: () => boolean, what: string): Promise<void> {
+    return push.then(
+      () => {
+        if (idle()) this.markClean(kind);
+      },
+      (err) => this.warnOnce(what, err),
+    );
+  }
+
+  private markDirty(kind: SyncDirtyKind): void {
+    if (this.outbox.dirty[kind]) return;
+    this.outbox.dirty[kind] = true;
+    this.saveOutbox();
+  }
+
+  private markClean(kind: SyncDirtyKind): void {
+    if (!this.outbox.dirty[kind]) return;
+    delete this.outbox.dirty[kind];
+    this.saveOutbox();
+  }
+
+  private saveOutbox(): void {
+    try {
+      this.persistOutbox(this.outbox);
+    } catch (err) {
+      // The in-memory outbox still flushes; only a restart in this state loses it.
+      console.warn('[sync] could not persist the outbox:', err instanceof Error ? err.message : String(err));
+    }
+    this.notifyPending();
+  }
+
+  /** Whether anything at all is waiting for storage. */
+  private hasPending(): boolean {
+    const p = this.pending();
+    return Object.values(p).some((n) => n > 0);
   }
 
   /**
+   * Local writes storage has not confirmed, by kind. Sessions are counted from
+   * the list itself against `sessionsPushed`, which is exactly what the next bulk
+   * push will send; a whole-blob kind counts 1 while it is dirty.
+   */
+  pending(): SyncPending {
+    const since = Number(this.marks.sessionsPushed ?? 0);
+    let sessions = 0;
+    for (const meta of this.localSessions()) {
+      const stamp = sessionStamp(meta);
+      if (stamp === undefined || stamp > since) sessions += 1;
+    }
+    const d = this.outbox.dirty;
+    return {
+      sessions,
+      deletes: DELETE_KINDS.reduce((n, kind) => n + Object.keys(this.outbox.deletes[kind]).length, 0),
+      workflows: d.workflows ? 1 : 0,
+      steps: d.steps ? 1 : 0,
+      recipes: d.recipes ? 1 : 0,
+      settings: d.settings || d.guard || d.mcp || d.projectKeys ? 1 : 0,
+      memory: d.memory ? 1 : 0,
+    };
+  }
+
+  /** Re-broadcast the status once the pending counts have settled. */
+  private notifyPending(): void {
+    if (!this.onStatusChange || this.statusTimer) return;
+    this.statusTimer = setTimeout(() => {
+      this.statusTimer = null;
+      this.onStatusChange?.(this.status);
+    }, STATUS_DEBOUNCE_MS).unref() as unknown as NodeJS.Timeout;
+  }
+
+  /**
+   * A token arrived where there was none (a sign-in, or the first relay after a
+   * restart). If writes piled up meanwhile, flush them now rather than waiting for
+   * the next hello; either way the indicator leaves `signedOut`.
+   */
+  tokenArrived(): void {
+    if (!this.enabled) return;
+    if (this.hasPending()) this.onRecovered?.();
+    this.notifyPending();
+  }
+
+  /**
+   * @param opts.missingOk A 404 is this request's answer, not a failure — a
+   *   DELETE of a row that is already gone.
    * @param opts.softErrors Treat an HTTP error as this request's own failure
    *   rather than a storage outage — it still throws, but the availability flag
    *   (and therefore every browser's sync-outage banner) is left alone. For
@@ -903,7 +1169,7 @@ export class StorageSyncClient {
     method: string,
     path: string,
     body?: unknown,
-    opts?: { softErrors?: boolean },
+    opts?: { softErrors?: boolean; missingOk?: boolean },
   ): Promise<unknown> {
     const token = this.tokenFn();
     if (!token) throw new Error('no token'); // disabled, not an outage — leave status untouched
@@ -947,6 +1213,10 @@ export class StorageSyncClient {
     if (res.status === 304) {
       this.recordSuccess();
       return NOT_MODIFIED;
+    }
+    if (res.status === 404 && opts?.missingOk) {
+      this.recordSuccess();
+      return null;
     }
     if (!res.ok) {
       // A 500 carries the storage server's error body (Prisma/DB message) — surface it as the reason.
@@ -1024,18 +1294,46 @@ export class StorageSyncClient {
 
   /** Current bridge->storage link health for a fresh client's hello (null before first contact). */
   get status(): StorageStatus {
-    if (this.available !== false) return { available: true };
+    const cloud = this.cloudState();
+    const extra = {
+      cloud: cloud.state,
+      pending: this.pending(),
+      ...(this.lastSyncedAt ? { lastSyncedAt: this.lastSyncedAt } : {}),
+    };
+    if (this.available !== false) {
+      return { available: true, ...(cloud.state !== 'ok' ? { since: cloud.since } : {}), ...extra };
+    }
     return {
       available: false,
       ...(this.reason ? { reason: this.reason } : {}),
       ...(this.kind ? { kind: this.kind } : {}),
       ...(this.downSince ? { since: this.downSince } : {}),
       ...(this.failures ? { failures: this.failures } : {}),
+      ...extra,
     };
+  }
+
+  /**
+   * `signedOut` when there is no token to sync with, or storage kept refusing the
+   * one there is past the auth grace (`recordFailure`) — an outage never gets
+   * there on its own. `unreachable` for any other outage. Stamped on change, so
+   * `since` is when the current state began.
+   */
+  private cloudState(): { state: NonNullable<StorageStatus['cloud']>; since: number } {
+    const state: NonNullable<StorageStatus['cloud']> = !this.base || !this.tokenFn()
+      ? 'signedOut'
+      : this.available === false
+        ? this.kind === 'auth' ? 'signedOut' : 'unreachable'
+        : 'ok';
+    if (this.cloud?.state !== state) {
+      this.cloud = { state, since: state === 'unreachable' ? (this.downSince ?? Date.now()) : Date.now() };
+    }
+    return this.cloud;
   }
 
   /** A 2xx/304: the link is up *and* the token was accepted, so the auth grace resets too. */
   private recordSuccess(): void {
+    this.lastSyncedAt = Date.now();
     this.authFailingSince = null;
     // Before the counter reset, so the `up` row can report how many requests failed.
     this.setAvailable(true);
@@ -1078,6 +1376,9 @@ export class StorageSyncClient {
       this.downSince = undefined;
       this.stopProbe();
       this.warned = false; // allow one fresh warn on the next outage
+      // Once per down->up transition: whatever piled up during the outage goes now,
+      // rather than whenever the next hello happens to carry a token.
+      if (wasDown) this.onRecovered?.();
     } else {
       this.downSince = Date.now();
       this.log({ event: 'down', kind, reason, failures: this.failures });

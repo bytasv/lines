@@ -7,12 +7,12 @@ import { useStore } from '../store';
  * unexplained Continue banner (or, on a cold-start protocol mismatch, as a
  * permanent spinner).
  *
- * More severe than StorageBanner's amber (agent turns are dead, not just cloud
- * sync), less than ConnectionBanner's red (the browser still has a bridge).
+ * Less severe than ConnectionBanner's red (the browser still has a bridge).
+ * Cloud sync being down has no pill at all — SyncIndicator in the header says it.
  * All of them render at the same fixed coordinates, so exactly one may show:
  * bridge-down wins over this, then contract skew (SkewBanner — this status was
- * read off messages the client may be misreading), and this wins over storage
- * (see StorageBanner).
+ * read off messages the client may be misreading), and this wins over an
+ * update (see UpdateBanner).
  */
 export function WorkerBanner({ headerHeight }: { headerHeight: number }) {
   const status = useStore((s) => s.workerStatus);

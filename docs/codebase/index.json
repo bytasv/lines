@@ -455,6 +455,7 @@
         "planLabelFromProfile",
         "OpenaiUsagePoller.consumeResetCredit",
         "UsageIndicator",
+        "windowElapsed",
         "ModelSpend",
         "ModelSpendMap",
         "SessionMeta.costByModel",
@@ -529,6 +530,9 @@
         "no login, no chip - enforced server-side (poller never fetches, logout nulls snapshot) and client-side (auth.loggedIn gate); logged in with no reading shows an empty chip with an explanation, never hidden",
         "{type: 'usage', usage: null} means auth is gone (logout or revoked/expired OAuth session), nothing else",
         "a stale snapshot survives transient fetch failures; staleness is shown via 'Updated Xm ago', never by hiding the chip; with no snapshot at all (usage null or zero windows while logged in) the client renders an empty chip, wire meaning unchanged",
+        "a window whose resetsAt has passed is never shown as current: dimmed, with a 'waiting for a fresh reading' note, and excluded from the ring (falling back to all windows when every one has passed); the poller refetches about 30 s after the earliest future reset to clear it",
+        "a window with resetsAt null is kept and shown with a dimmed 'Reset time not reported' note, never silently missing its reset line",
+        "a 429 from the usage endpoint pauses all polling for its retry-after (default: the poll interval) and per-turn refreshSoon calls are suppressed during the pause; other failures are logged once per distinct message",
         "hello may carry usage: null before the poller's first fetch completes (e.g. after a server restart); a logged-in client keeps its previously held snapshot instead of clearing it",
         "rows are keyed by the model that spent the money — resolveModelId of the CLI's canonicalModel or modelUsage key, falling back to meta.model without per-model counters — so subagent and CLI-internal spend sits on its own model's row",
         "helper-query spend (autoName, summarizeTurn, step-output consolidation) is excluded — the table is chat-turn spend only, not full account spend",
@@ -839,8 +843,8 @@
         "a step whose template references an {outputs.<name>} that is absent or blank parks at waiting-approval via failTurn (stepFailure: 'pre-run') with a marker naming the missing outputs, instead of running with a silently blank substitution",
         "a step deliverable captured during plan mode comes from the ExitPlanMode plan (inline argument or written plan file), not the turn's trailing chat text",
         "outputs are strictly per-session (WorkflowState.outputs); there is no cross-session write path",
-        "prompt tokens are honoured only where the step author wrote them: a token occurring inside substituted content (a step output, the diff, the task text) stays literal instead of being re-expanded",
-        "the working-tree diff handed to a fresh-start step is capped with a truncation marker (MAX_DIFF_CHARS) so a large dirty tree degrades the hand-off rather than failing the turn",
+        "prompt tokens are honoured only where the step author wrote them: a token occurring inside substituted content (a step output, the task text) stays literal instead of being re-expanded",
+        "the fresh-start auto-prepend carries only the previous step's output; the shipped default workflow chains its steps through named outputs ({outputs.<name>}) instead of relying on the auto-prepend",
         "a plan revised by Edit after the deliverable-producing Write still contributes its current on-disk text to the hand-off, via collectTurns reading the plan file (gated by isPlanPath) instead of the last captured Write content",
         "icon precedence: session.completed -> outline check, status running -> Loader, status.actionable (needs permission/answer, interrupted, error) -> pulsing dot, isWorkflowFinished -> filled check, otherwise plain dot (a clean park lands here)",
         "actionable states always win over the finished checkmark so a session needing the user is never masked as done",
@@ -1142,7 +1146,7 @@
       "id": "session-and-project-ui",
       "name": "Session and project UI",
       "doc": "features/session-and-project-ui.md",
-      "purpose": "The shell around a session: persisted unsent drafts, focus on a new session, which session a project switch opens (preferring the project's remembered last-selected session before falling back to latest-created), the project tab's status dot (pulsing for actionable states, steady for live work and recent unseen finishes), and the tool-aware waiting-permission badge.",
+      "purpose": "The shell around a session: persisted unsent drafts, focus on a new session, which session a project switch opens (preferring the project's remembered last-selected session before falling back to latest-created), the project tab's status dot (pulsing for actionable states, steady for live work and recent unseen finishes), the tool-aware waiting-permission badge, and per-project session groups (user-made sections that park sessions, with collapse, reorder, mute and a manual sort order).",
       "covers": [
         "composer-draft-persistence",
         "composer-focus-new-session",
@@ -1151,7 +1155,8 @@
         "session-status-badge",
         "session-create-auto-select",
         "hello-duplicate-inertness",
-        "session-list-sorting"
+        "session-list-sorting",
+        "session-groups"
       ],
       "entryPoints": [
         "web/src/components/Composer.tsx",
@@ -1159,7 +1164,8 @@
         "web/src/ws.ts",
         "web/src/App.tsx",
         "web/src/components/Sidebar.tsx",
-        "web/src/lib/alerts.ts"
+        "web/src/lib/alerts.ts",
+        "web/src/components/SessionGroupSection.tsx"
       ],
       "files": [
         "web/src/components/QueuedMessages.tsx",
@@ -1172,7 +1178,9 @@
         "web/src/components/ProjectTabs.tsx",
         "server/src/sessions.ts",
         "web/src/components/Sidebar.tsx",
-        "web/src/lib/alerts.ts"
+        "web/src/lib/alerts.ts",
+        "web/src/components/SessionGroupSection.tsx",
+        "server/src/pushNotifier.ts"
       ],
       "symbols": [
         "OfflineQueuedMessages",
@@ -1219,10 +1227,32 @@
         "tracksSeen",
         "PROJECT_LIVE_ORDER",
         "PROJECT_RECENT_ORDER",
-        "RECENT_FINISH_MS"
+        "RECENT_FINISH_MS",
+        "SessionGroup",
+        "sessionGroups",
+        "sessionOrder",
+        "groupId",
+        "setSessionGroup",
+        "isSessionMuted",
+        "allSessionGroups",
+        "SessionGroupSection",
+        "GroupNamePopover",
+        "lines.collapsedGroups",
+        "groupKeyOf",
+        "createGroup",
+        "renameGroup",
+        "deleteGroup",
+        "moveGroup",
+        "toggleGroupMuted",
+        "setSessionOrder",
+        "groupsFor"
       ],
       "tests": [
-        "server/src/statusMeta.test.ts"
+        "server/src/statusMeta.test.ts",
+        "server/src/sessions.groups.test.ts",
+        "server/src/pushNotifier.test.ts",
+        "server/src/sync.sessions.test.ts",
+        "server/src/store.test.ts"
       ],
       "businessRules": [
         "persisted text draft is the full MentionValue (text + ranges), not plain text, so restored pills/expansions stay intact",
@@ -1258,7 +1288,13 @@
         "a repeated hello (same session/project signature as the last one applied) is inert: sessions, transcriptLoaded and contextBreakdowns are left untouched, while every other field (usage, worker/storage health, auth) still applies as normal — an older relay replayed open (and its full hello) for every live channel on any bridge attach or takeover, and wholesale-replacing state on each one is what turned two alternating bridge snapshots into a self-sustaining flicker loop across sessions and transcript reloads",
         "send() (ws.ts) returns false when the socket is not open and the message is not a prompt (prompts alone queue for replay); the caller sets actionError so a dropped control message — e.g. a delete sent while disconnected — is visible instead of a console.warn nobody saw; automatic traffic callers resend on their own (BACKGROUND_TYPES: presence, loadTranscript, mcpServerStatus, contextBreakdown, stepVersions, recipeVersions) drops silently with a console.warn only and never sets actionError — a reconnect must not raise a banner nobody triggered",
         "deleting a session shows a loading state on its own row and leaves the row in place until the sessionDeleted echo removes it — no optimistic removal, so a delete that silently failed to send is never mistaken for one that worked",
-        "archived sessions in the sidebar render 20 at a time behind a 'Show N more' button instead of the full archived list, since lines.showArchived defaults to on and a long-lived project can accumulate hundreds of them"
+        "session groups are per project, keyed by project key (path fallback); a groupId naming no group of its project reads as ungrouped and falls back to Active, so deleting a group needs no per-session cleanup",
+        "archive keeps groupId; unarchive and prompt reactivation keep it too, so an unarchived session returns to its group",
+        "muting a group skips chime, Web Push, project tab dot and machine needs-you count, and auto-select; sessions keep running, background work and turn recovery continue; mute is not archive",
+        "guests never receive settings and therefore never see or edit groups; setSessionGroup needs manageSessions",
+        "the old global lines.showArchived is migrated once into per-project collapsed state (archived id) and removed; collapse state stays per browser",
+        "a same-section drag reorders only under the Manual sort; under an automatic sort it asks before switching, and Archived is never hand-ordered",
+        "archived sessions in the sidebar render 20 at a time behind a 'Show N more' button instead of the full archived list, since the Archived section starts expanded and a long-lived project can accumulate hundreds of them"
       ],
       "architecturalRules": [
         "text drafts use a single lines.drafts JSON map keyed by session id, following the existing store.ts convention (e.g. lines.openFiles) rather than one key per session",
@@ -2155,7 +2191,7 @@
       "id": "multi-repo-commits",
       "name": "Multi-repo commits",
       "doc": "features/multi-repo-commits.md",
-      "purpose": "Group a multi-root session's folders into git commit units by work tree (not by project), give a workflow step's {diff} a per-repo section, and add a {roots} token so a step can scope every git command with -C <repo root>, since additionalDirectories never moves the Bash shell out of the session's primary cwd.",
+      "purpose": "Group a multi-root session's folders into git commit units by work tree (not by project), and add a {roots} token so a step can scope every git command with -C <repo root>, since additionalDirectories never moves the Bash shell out of the session's primary cwd.",
       "entryPoints": [
         "server/src/workflows.ts"
       ],
@@ -2171,10 +2207,7 @@
         "repoBranch",
         "groupByRepo",
         "RepoGroup",
-        "captureBaselines",
-        "workingTreeDiff",
-        "multiRepoDiff",
-        "WorkflowState.diffBaselines",
+        "renderRoots",
         "usesHandoffTokens",
         "substituteTokens"
       ],
@@ -2183,15 +2216,11 @@
         "commit units come from git rev-parse --show-toplevel, never from resolveProjectKey, whose --show-prefix component deliberately keeps monorepo siblings apart",
         "two roots that resolve to the same work tree are one commit unit; two separate work trees are two",
         "a root that isn't inside any git work tree is never a commit unit",
-        "{roots} is not a hand-off token: a template using only {roots} with freshStart on still gets the normal {previous}/{diff} auto-prepend",
-        "a single repo produces no '# repo:' header in {diff} - existing single-root workflows see byte-identical prompts",
-        "the MAX_DIFF_CHARS budget for {diff} is shared across every commit unit, not multiplied by the repo count, with unused share redistributed to repos that overflowed theirs"
+        "{roots} is not a hand-off token: a template using only {roots} with freshStart on still gets the normal {previous} auto-prepend"
       ],
       "architecturalRules": [
-        "repo-grouping/diff logic (git.ts) stays pure git, with no prompt formatting; {roots}'s rendering lives in workflows.ts",
-        "the shared git() helper now has a timeout, since this feature multiplies git calls on the step-entry path the user waits through at every approval gap",
-        "diffBaselines is additive alongside the deprecated diffBaseline inside the synced WorkflowState; writers only ever set diffBaselines, the legacy field is read-only",
-        "MAX_UNTRACKED (new-file cap per diff) is per repo, not per workflow"
+        "repo-grouping logic (git.ts) stays pure git, with no prompt formatting; {roots}'s rendering lives in workflows.ts",
+        "the shared git() helper has a timeout, since this feature runs git calls on the step-entry path the user waits through at every approval gap"
       ],
       "relatedDecisions": [
         "multi-root-projects",
@@ -2729,14 +2758,13 @@
         "grep is all-or-nothing across roots like find; sessionSearch clamps every session id through sessionInReach",
         "media serves only browser-renderable extensions (415 otherwise), clamps each request to 1MB, returns 413 over 200MB and 400 for an offset outside the file",
         "media is pulled one chunk at a time so live frames interleave on the shared socket and relay instead of queuing behind one large frame",
-        "the owner's file, media and writeFile reach any path on the host (resolveFilePath: their own disk over their own authenticated socket, the agent's reach); a guest of either scope stays clamped to their session cwds; tree, docs, find, grep, sessionSearch, sessionDiffFile and attachment stay root-scoped for everyone",
+        "the owner's file, media and writeFile reach any path on the host (resolveFilePath: their own disk over their own authenticated socket, the agent's reach); a guest of either scope stays clamped to their session cwds; tree, docs, find, grep, sessionSearch and attachment stay root-scoped for everyone",
         "writeFile is owner-only, enforced in handleFileRequest and the handler: every file kind rides the readFiles cap, so a View or Full guest would otherwise write to the host's disk",
         "for a guest, every read, write and media request is served from where its path really lands: inside a granted root both as written and once symlinks are followed, then read or written at that resolved real path (grantedReal), gated again there; a link that can't be followed is 403. The owner's single-file routes skip the root check but still touch only the real path they checked",
         "writeFile writes only existing regular text files, and answers 413 over 2MB, 415 on a NUL byte, 400 without content",
         "an attachment is served only to a connection that reaches its session (sessionInReach): a session-scope guest reads its own sessions' attachments and no others'; the session is read off where the file really is, so a link planted in the attachments directory, or from one session's folder into another's, is refused",
         "grep never searches through a symlink that leaves its root (git lists a symlink by its own path, and its index can name a file under a directory since swapped for a link)",
-        "writeFile with a stale expectedMtimeMs answers 409 with the current mtime and writes nothing; absent expectedMtimeMs writes unconditionally",
-        "a save made during a running turn in the session cwd is attributed to the agent by the session diff"
+        "writeFile with a stale expectedMtimeMs answers 409 with the current mtime and writes nothing; absent expectedMtimeMs writes unconditionally"
       ],
       "architecturalRules": [
         "handlers are pure {status, body} functions in their own module rather than http.ServerResponse writers, so they can serve a relay channel and are testable without a socket (index.ts listens on import)",
@@ -3503,71 +3531,6 @@
         "transcript-rendering",
         "workflow-step-lifecycle",
         "session-and-project-ui"
-      ]
-    },
-    {
-      "id": "session-change-tracking",
-      "name": "Session change tracking",
-      "doc": "features/session-change-tracking.md",
-      "purpose": "A per-session git baseline captured once at creation, per-turn attribution of which changed files belong to this session (mechanism-agnostic, via git snapshot windows), and a read-only review UI that lists every changed file and diffs it on demand, without routing diff content through a model.",
-      "entryPoints": [
-        "server/src/sessions.ts",
-        "web/src/components/SessionView.tsx",
-        "web/src/components/SessionDiffModal.tsx"
-      ],
-      "files": [
-        "server/src/git.ts",
-        "server/src/sessions.ts",
-        "server/src/fileRoutes.ts",
-        "shared/types.ts",
-        "web/src/lib/sessionDiff.ts",
-        "web/src/components/SessionDiffModal.tsx",
-        "web/src/components/SessionView.tsx"
-      ],
-      "symbols": [
-        "refExists",
-        "parseNameStatus",
-        "parseNumstat",
-        "changedFiles",
-        "showFile",
-        "changedBetween",
-        "collectChangedPaths",
-        "SessionManager.captureSessionBaseline",
-        "SessionManager.baselinesFor",
-        "SessionManager.changeSummary",
-        "SessionManager.baselineRefFor",
-        "SessionManager.openTurnWindow",
-        "SessionManager.recordFilesChanged",
-        "SessionManager.sharedRepos",
-        "SessionMeta.diffBaselines",
-        "FilesChangedData"
-      ],
-      "tests": [
-        "server/src/git.sessionDiff.test.ts",
-        "server/src/sessions.changedPaths.test.ts",
-        "server/src/fileRoutes.test.ts",
-        "server/src/guestAccess.test.ts"
-      ],
-      "businessRules": [
-        "one baseline per session, captured once at creation, never recaptured or overwritten",
-        "baseline resolution order is session baseline, then workflow baseline, then a synthesized HEAD flagged synthetic",
-        "a pruned snapshot ref falls back to HEAD and is flagged stale rather than silently rendering as no changes",
-        "a path is ambiguous only when every source that saw it is an overlapped turn window; a direct tool_use claim always wins",
-        "sessionDiff/sessionDiffFile require the session itself to be inside the connection's grant, not just the readFiles capability",
-        "no MAX_DIFF_CHARS-style cap applies on this path, since nothing here reaches a model",
-        "workflow {diff} behavior is unchanged: WorkflowState.diffBaselines is still written and read exactly as before"
-      ],
-      "architecturalRules": [
-        "diff assembly (baseline resolution, attribution, bucketing) lives on SessionManager, not in fileRoutes.ts, which stays a thin permission clamp",
-        "git.ts stays pure git with no prompt formatting; parseNameStatus/parseNumstat are exported pure functions",
-        "per-turn attribution is a transcript event ('files-changed'), never a SessionMeta field, and is deliberately never rendered as a transcript card",
-        "handleFileRequest and its ROUTES map are async; every pre-existing handler still resolves synchronously"
-      ],
-      "relatedDecisions": [
-        "multi-repo-commits",
-        "file-routes-over-ws",
-        "transcript-rendering",
-        "session-collaboration"
       ]
     },
     {
@@ -4914,8 +4877,7 @@
         "find-in-files",
         "file-routes-over-ws",
         "transcript-performance",
-        "transcript-rendering",
-        "session-change-tracking"
+        "transcript-rendering"
       ]
     },
     {

@@ -1,6 +1,6 @@
 import { devRuntime } from './devRuntime.ts';
 import type { ServerMessage, SessionMeta, SocketAccess, UserUiSettings } from '@lines/shared';
-import { findWorktree, projectRoots } from '@lines/shared';
+import { allSessionGroups, findWorktree, isSessionMuted, projectRoots } from '@lines/shared';
 import { createStore, type Store } from './store.ts';
 import { AuthManager } from './auth.ts';
 import { OpenaiAuthManager } from './openaiAuth.ts';
@@ -227,12 +227,19 @@ export interface UserContext {
    */
   sockets: Map<BrowserLink, SocketAccess>;
   broadcast: (msg: ServerMessage) => void;
-  /** Freshest verified Clerk token (handshake or relay); null in local no-auth mode. */
+  /**
+   * Freshest verified Clerk token (handshake or relay); null in local no-auth mode.
+   * Setting the first one (null -> token) flushes the sync outbox if it is not empty.
+   */
   clerkToken: string | null;
   /** Storage-server sync; inert until clerkToken is set. */
   sync: StorageSyncClient;
-  /** Pull remote state and LWW-merge it in, then push local state up. Fire-and-forget. */
-  syncNow: () => Promise<void>;
+  /**
+   * Flush queued deletes, pull remote state and LWW-merge it in, then push local
+   * state up. Fire-and-forget. `force` bypasses the pull throttle once (recovery,
+   * the indicator's "Sync now").
+   */
+  syncNow: (opts?: { force?: boolean }) => Promise<void>;
   /** Re-pull other users' published workflows and broadcast if they changed. */
   refreshShared: () => Promise<void>;
   /** Re-pull the shared step library, resolve pins, and broadcast if changed. */
@@ -290,14 +297,27 @@ export function buildUserContext(
     // Why sync went down, on disk: the bridge console isn't reachable on a
     // desktop/VPS install, so the `syncLog` file request reads this back.
     (entry) => store.appendSyncLog(entry),
-    // Bound into every workflow, step and recipe it signs: one machine key signs
-    // for every account on this machine, so the signature has to say whose row it is.
-    { account: userId },
+    {
+      // Bound into every workflow, step and recipe it signs: one machine key signs
+      // for every account on this machine, so the signature has to say whose row it is.
+      account: userId,
+      // Writes storage has not confirmed, across restarts (see SyncOutbox).
+      outbox: store.loadSyncOutbox(),
+      persistOutbox: (outbox) => store.saveSyncOutbox(outbox),
+      // Storage came back (or a token did): everything queued goes now, past the
+      // pull throttle, instead of waiting for the next hello.
+      onRecovered: () => void ctx.syncNow({ force: true }),
+      // `knownSessions` is set once the SessionManager exists; before that there is nothing to count.
+      localSessions: () => (knownSessions ? sessions.list().filter((s) => !isLocalOnly(s.id)) : []),
+    },
   );
   // Storage/Supabase reachability flips → tell this user's browsers so they can
   // show the "cloud sync unavailable" notice (local persistence still works).
   sync.onStatusChange = (storage) => broadcast({ type: 'storageStatus', storage });
   const pushNotifier = new PushNotifier(store);
+  // Group ids are UUIDs, so the flattened list resolves any session's group
+  // without a cwd -> project-key lookup (see `allSessionGroups`).
+  pushNotifier.isMuted = (session) => isSessionMuted(session, allSessionGroups(store.loadSettings()));
 
   // Turns another bridge is running in a shared transcripts folder (see
   // transcriptWatch): shown as running here, never pushed to storage.
@@ -437,8 +457,9 @@ export function buildUserContext(
         openaiUsage.refreshSoon();
         // Turn end is when the agent may have written memory; the mtime-diff also
         // catches hand-edits made outside a turn for free.
+        // The manifest only advances once storage has the files (see collectChanged).
         const changed = memory.collectChanged();
-        if (changed) sync.pushMemory(changed);
+        if (changed) sync.pushMemory(changed.files, changed.commit);
       }
     },
     auth,
@@ -542,8 +563,12 @@ export function buildUserContext(
     }
   };
 
-  const syncNow = async () => {
-    const pulled = await sync.pullAll();
+  const syncNow = async (opts?: { force?: boolean }) => {
+    // Deletes before the pull: the pulled rows are filtered against the outbox
+    // anyway (below), but a delete that lands first also keeps storage from
+    // serving the row to every other machine for one more round.
+    await sync.drainDeletes();
+    const pulled = await sync.pullAll(opts);
     // A pull this recent already ran the whole routine — pushing and re-pulling
     // the shared views again would just burn egress. The browser reconnects
     // every 1.5s while a link is flapping, so this is the common path.
@@ -551,11 +576,14 @@ export function buildUserContext(
     if (pulled) {
       sync.applying = true;
       try {
-        workflows.applySyncedAll(pulled.workflows);
-        workflows.applySyncedSteps(pulled.steps);
-        recipes.applySyncedRecipes(pulled.recipes);
+        // A row whose delete storage has not confirmed yet is still in what it
+        // serves; adopting it would resurrect what the user deleted here.
+        workflows.applySyncedAll(pulled.workflows.filter((w) => !sync.isPendingDelete('workflow', w.id)));
+        workflows.applySyncedSteps(pulled.steps.filter((s) => !sync.isPendingDelete('step', s.id)));
+        recipes.applySyncedRecipes(pulled.recipes.filter((r) => !sync.isPendingDelete('recipe', r.id)));
         recipes.applyStats(pulled.recipeStats);
         for (const row of pulled.sessions) {
+          if (!row.deletedAt && sync.isPendingDelete('session', row.id)) continue;
           // A soft-deleted row is a tombstone to adopt, not a session: adopting it as
           // one is what made a delete on another machine come straight back here.
           if (row.deletedAt) sessions.applyRemoteDelete(row.id, row.deletedAt);
@@ -623,6 +651,7 @@ export function buildUserContext(
     }
   };
   let announcedSigningKey = ownSigningKey();
+  let clerkToken: string | null = null;
 
   const ctx: UserContext = {
     userId,
@@ -643,7 +672,14 @@ export function buildUserContext(
     sockets,
     presence,
     broadcast,
-    clerkToken: null,
+    get clerkToken() {
+      return clerkToken;
+    },
+    set clerkToken(token: string | null) {
+      const first = !clerkToken && !!token;
+      clerkToken = token;
+      if (first) sync.tokenArrived();
+    },
     sync,
     syncNow,
     refreshShared,

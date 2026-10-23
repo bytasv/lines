@@ -214,3 +214,14 @@ test('a local-only field never leaves the machine, and the live meta keeps it', 
   assert.equal('permissionCeiling' in row, false);
   assert.equal(live.permissionCeiling, 'default');
 });
+
+test('a sidebar group membership travels with the session row', async (t) => {
+  const sent = captureFetch(t);
+  const sync = client();
+  sync.pushSession({ ...meta('a'), groupId: 'g1' } as SessionMeta);
+  await flush(DEBOUNCE_WAIT_MS);
+
+  const [put] = sessionPuts(sent);
+  const [row] = put.body as Record<string, unknown>[];
+  assert.equal(row.groupId, 'g1');
+});

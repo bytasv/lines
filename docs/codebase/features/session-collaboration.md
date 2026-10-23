@@ -598,6 +598,8 @@ resolves a person through — so they can never disagree about who somebody is.
 - A machine-scope grant's `hello` carries the host's real `projects`/`projectKeys`, and later
   `projects`/`projectKeys` broadcasts reach it too, so the guest's project tabs track the host's
   live. A session share still gets neither — it has no folder of its own to browse.
+- A machine-scope guest's sidebar matches the owner's: each session sits under its own project tab,
+  with no Shared-with-me group. Only a session-scope guest gets Shared-with-me.
 - A machine-scope grant covers every session on the machine and outranks a session share on the
   same machine.
 - Several session shares on one machine intersect to the *narrowest* set of capabilities, never

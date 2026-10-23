@@ -3,7 +3,11 @@
  * local mode (no sign-in gate, no token on the socket) — matching a bridge
  * started without CLERK_SECRET_KEY / with BRIDGE_AUTH_DISABLED=1.
  */
-export const CLERK_PUBLISHABLE_KEY: string | undefined = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+// Never in the desktop app's local window (lib/localShell.ts), whatever the build
+// environment held: it runs with the cloud down, Clerk included. Read inline, not
+// imported, so this module stays free of the store import cycle.
+export const CLERK_PUBLISHABLE_KEY: string | undefined =
+  import.meta.env.VITE_LINES_LOCAL_SHELL === '1' ? undefined : import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 export const CLERK_ENABLED = Boolean(CLERK_PUBLISHABLE_KEY);
 
 /**

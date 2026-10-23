@@ -27,8 +27,8 @@ Two decisions shape the whole feature.
 **Codex events are normalized into Claude SDK message shapes on the bridge**, rather than given
 a transcript kind of their own. The bridge's turn machinery — not just the renderer — is keyed
 to those shapes: the `msg.type === 'result'` settle pass alone drives status, token accounting,
-spend, the queue flush, the workflow advance, the turn summary and the review diff, and
-`markTurnLive`, `collectTurns`, `scanTurnActivity`, `collectChangedPaths` and the rewind anchor
+spend, the queue flush, the workflow advance and the turn summary, and
+`markTurnLive`, `collectTurns`, `scanTurnActivity` and the rewind anchor
 scan all read `assistant`/`user` content blocks. A distinct kind would silently no-op every one
 of them. Normalization also buys streaming for free: a delta wearing the `stream_event`
 envelope is droppable under backpressure and collapsible on the client without a line of new

@@ -48,7 +48,7 @@ export function startLabel(freshStart: boolean): string {
 
 export const START_HINTS = {
   same: 'Continues the conversation the step before it ran in.',
-  fresh: "A clean session, handed the previous step's output and the diff instead of the conversation.",
+  fresh: "A clean session, handed the previous step's output instead of the conversation.",
 } as const;
 
 /** Does a step on `model`, entered after one on `previousModel`, have to start fresh? */

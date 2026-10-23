@@ -2,7 +2,8 @@
 
 Covers: `composer-draft-persistence`, `composer-focus-new-session`,
 `project-switch-session-selection`, `project-tab-status-dot`, `session-status-badge`,
-`session-create-auto-select`, `hello-duplicate-inertness`, `session-list-sorting`.
+`session-create-auto-select`, `hello-duplicate-inertness`, `session-list-sorting`,
+`session-groups`.
 
 ## Purpose
 
@@ -19,15 +20,16 @@ and how status is surfaced in the sidebar row and the project tab.
   changes (tab click, `hello`/reconnect, or a `/session/<id>` deep link): keep an already-valid
   selection, or fall back to the project's own last-selected session
   (`lines.lastSessionByProject`) when that session still exists and isn't archived, or otherwise
-  auto-select the top row of the user's sidebar sort among that project's *non-archived* sessions.
-  Also runs after the primary machine's `hello` when a cold launch restored an active project but
+  auto-select the top row of the user's sidebar sort among that project's *non-archived, unmuted*
+  sessions. Also runs after the primary machine's `hello` when a cold launch restored an active project but
   no session is selected (and no create is pending). Never auto-open an
-  archived session — those stay reachable only via the sidebar's "Archived (N)" group.
+  archived or muted session — archived ones stay reachable only via the sidebar's Archived section.
 - **Project tab status dot** — each project tab in the header shows one dot in place of the
   folder icon, picked from that project's sessions in three tiers: an unseen actionable status
   (pulsing), then live work (`running` or background work, steady blue), then a recent unseen
   finish (`done` or step finished, steady green, only within the last 24h). A background project
-  signals what needs attention or is still working without opening it. The open (active)
+  signals what needs attention or is still working without opening it. Archived and muted
+  sessions are excluded. The open (active)
   project's tab always shows the plain folder icon — its sessions are already listed in the
   sidebar.
 - **Tool-aware waiting-permission badge** — distinguish what kind of pause a
@@ -46,9 +48,17 @@ and how status is surfaced in the sidebar row and the project tab.
   fresh `hello`) on every bridge attach or takeover, so a browser that never itself reconnected
   could receive one; the guard stays for a relay that still does.
 - **Session list sorting** — a per-browser choice of sidebar session order: Status (default,
-  urgency-ranked), Last active, or Created. Applies to all three sidebar groups (Sessions,
-  Shared-with-me, Archived). Auto-selection (`latestSessionIn`) follows the same setting, so a
-  launch lands on the row the sidebar shows first.
+  urgency-ranked), Last active, Created, or Manual. Applies to all sidebar sections. Auto-selection
+  (`latestSessionIn`) follows the same setting, so a launch lands on the row the sidebar shows first.
+  Manual uses a hand-placed order synced per project (see session groups).
+- **Session groups** — user-made, per-project sidebar sections (e.g. "For future") that park
+  sessions without archiving them. Membership is `SessionMeta.groupId`; the group list, its order
+  and mute flag are synced settings (`UserUiSettings.sessionGroups`). Sections run Shared-with-me
+  (session-scope guests only), Active (ungrouped), user groups in array order, then Archived. Groups collapse per browser
+  (`lines.collapsedGroups`, reserved id `archived` for the Archived section) and are reordered by
+  dragging their header or with Move up/down. Sessions move between sections by drag, or by the
+  row's "Move to group" control. A muted group (see business rules) silences its sessions for
+  notifications, the tab dot and auto-select without stopping them.
 
 ## Entry points
 
@@ -70,17 +80,26 @@ and how status is surfaced in the sidebar row and the project tab.
   non-prompt message
 - `web/src/components/Composer.tsx`
 - `web/src/lib/mentions.ts` (`MentionValue` — the persisted text/mentions shape)
-- `shared/types.ts` — `SessionMeta.createdAt`, `SessionMeta.pendingPermissionTool`
-- `web/src/lib/format.ts` — `projectStatusMeta`,
+- `shared/types.ts` — `SessionMeta.createdAt`, `SessionMeta.pendingPermissionTool`,
+  `SessionMeta.groupId`, `SessionGroup`, `UserUiSettings.sessionGroups`/`sessionOrder`,
+  `isSessionMuted`, `allSessionGroups`, the `setSessionGroup` message
+- `server/src/sessions.ts` — `setSessionGroup` (beside `archiveSession`; leaves `groupId` alone on
+  archive, unarchive and prompt reactivation)
+- `server/src/pushNotifier.ts` — `isMuted` hook skipping pushes for muted groups
+- `web/src/lib/format.ts` — `projectStatusMeta` (takes the group list to skip muted sessions),
+  `machineActivity` (same skip),
   `PROJECT_STATUS_ORDER`/`PROJECT_STATUS_RANK`, `waitingPermissionMeta`, `sessionRowMeta` (the
   sidebar row's single presentation entry point; wraps `waitingPermissionMeta` and the plain
   per-status `STATUS_META` table, which lives here instead of in `Sidebar.tsx`); `SessionSort`,
   `SESSION_SORT_ORDER`/`SESSION_SORT_RANK`, `lastActivityAt`, `compareSessions`
 - `web/src/components/ProjectTabs.tsx` — `ProjectTab` folder/dot swap and tooltip
 - `server/src/sessions.ts` — `askPermission`, `setStatus`, `reconcileWithWorker`, `adoptSynced`
-- `web/src/components/Sidebar.tsx` — badge label/color lookup
+- `web/src/components/Sidebar.tsx` — badge label/color lookup; session groups (sections, row
+  "Move to group", drag between sections, manual order prompt)
+- `web/src/components/SessionGroupSection.tsx` — the shared collapsible section header (used for
+  user groups and Archived), its urgent-dot and mute indicator, and the name popover
 - `web/src/lib/alerts.ts` — notification body text; `maybeAlert`'s background-tasks early return
-  (see [background-tasks](background-tasks.md))
+  (see [background-tasks](background-tasks.md)) and its muted-group early return
 - `web/src/components/Composer.tsx` — Stop-button gating against `session.backgroundTasks`
 
 ## Symbols
@@ -92,20 +111,22 @@ and how status is surfaced in the sidebar row and the project tab.
   effect keyed on `focusComposerFor`
 - `setActiveProject(path)` — single entry point for changing the active project; all three entry
   points above call it
-- `latestSessionIn(sessions, projectKeys, project)` — top non-archived session in a project under
-  the user's sidebar sort (`compareSessions(readSessionSort())`), or `undefined`
+- `latestSessionIn(sessions, projectKeys, project, groups, order)` — top non-archived, unmuted
+  session in a project under the user's sidebar sort (`compareSessions(readSessionSort(), order)`),
+  or `undefined`
 - `readSessionSort()` — reads the sidebar's persisted sort from `SESSION_SORT_KEY` (`lib/format.ts`,
   shared with `Sidebar.tsx`), validated, defaulting to `status`
-- `rememberedSessionIn(sessions, projectKeys, project)` — the project's entry in
+- `rememberedSessionIn(sessions, projectKeys, project, groups)` — the project's entry in
   `readLastSessions()`, resolved against current membership; `undefined` if the id is missing,
-  archived, or no longer in the project
+  archived, muted, or no longer in the project
 - `readLastSessions()` / `writeLastSession(projectPath, sessionId)` — `lines.lastSessionByProject`,
   one JSON map (`{ [projectPath]: sessionId }`) in `localStorage`, following the same
   single-key-map convention as `lines.drafts`/`lines.openFiles`; written by a store subscription
   keyed on `selectedSessionId`, not at each selection call site
 - `sessionsInProject(sessions, projectKeys, project)` — shared, key-aware project membership
   (by project key, falling back to exact cwd match); shared with the sidebar
-- `projectStatusMeta(sessions, seen, now)` — scans a project's sessions, skips archived ones,
+- `projectStatusMeta(sessions, seen, now, groups?)` — scans a project's sessions, skips archived
+  and muted ones,
   and returns the highest-priority remaining `{ color, label, pulse }`, or `null` if nothing
   qualifies. Actionable states are skipped when `seen`; live work always qualifies; recent
   finishes qualify only when unseen and recent
@@ -124,10 +145,11 @@ and how status is surfaced in the sidebar row and the project tab.
   `waiting-permission` pause (e.g. `ExitPlanMode`, `AskUserQuestion`); undefined for any other
   status
 - `waitingPermissionMeta(tool)` — maps a pending tool name to `{ label, color }`
-- `SessionSort` — `'status' | 'activity' | 'created'`; the sidebar's persisted sort choice
+- `SessionSort` — `'status' | 'activity' | 'created' | 'manual'`; the sidebar's persisted sort choice
 - `lastActivityAt(session)` — `session.updatedAt ?? session.createdAt`; the closest thing to a
   last-activity clock, since there is no dedicated last-turn field
-- `compareSessions(mode)` — comparator for a sidebar session list: `status` ranks by
+- `compareSessions(mode, order?)` — comparator for a sidebar session list. `manual` follows the
+  project's hand-placed id order, with unplaced sessions first, newest first; `status` ranks by
   `SESSION_SORT_RANK` (urgency), tie-broken by `lastActivityAt` descending; `activity` sorts by
   `lastActivityAt` descending; `created` sorts by `createdAt` descending (today's pre-existing
   order)
@@ -147,6 +169,21 @@ and how status is surfaced in the sidebar row and the project tab.
 - `helloSignature(sessions, projects)` — a cheap string (each session's `id:updatedAt`, joined,
   plus project paths); the `hello` reducer compares it against the last one it stored and, on a
   match, skips replacing `sessions`/`transcriptLoaded`/`contextBreakdowns`
+- `SessionGroup` (`shared/types.ts`) — `{ id, name, muted? }`; array order is display order
+- `UserUiSettings.sessionGroups` — `Record<projectKey, SessionGroup[]>`; `sessionOrder` —
+  `Record<projectKey, sessionId[]>` for the manual sort. Both ride the settings sync path
+- `SessionMeta.groupId` — the group a session is parked in; a dangling id reads as ungrouped
+- `isSessionMuted(meta, groups)` / `allSessionGroups(settings)` (`shared/types.ts`) — muted check
+  and the flattened group list used to resolve a `groupId` without a project lookup
+- `setSessionGroup` — client message, `manageSessions` cap; `SessionManager.setSessionGroup`
+- `groupKeyOf(projectKeys, path)` (`store.ts`) — project key, falling back to path
+- `groupsFor`, `createGroup`, `renameGroup`, `deleteGroup`, `moveGroup`, `toggleGroupMuted`,
+  `setSessionOrder` (store actions) — each edits the settings slice and calls `pushSettings`
+- `SessionGroupSection` — collapsible header with chevron, name, count, muted icon, most urgent
+  actionable dot while collapsed (unless muted), and a ⋯ menu; used for user groups and Archived
+- `GroupNamePopover` — inline name field for create/rename
+- `lines.collapsedGroups` — localStorage `{ [groupKey]: collapsedIds[] }`, browser-only; replaces
+  the old global `lines.showArchived`, which is migrated once and removed
 - `withSeen(seen, ids)` — returns `seen` unchanged when every id is already present, so a no-op
   merge doesn't trigger a re-render
 - `pendingCreate` (store field) — true from `markSessionCreatePending()` until the matching
@@ -305,6 +342,17 @@ removes it (unaffected — see the `applyServerMessage` case). If `send()` retur
 socket isn't open — `setActionError` records a message, which the sidebar renders (and lets the
 user dismiss by clicking it) instead of the delete looking like it silently did nothing.
 
+### Session groups
+
+Groups are settings, not a new store: `setGroups` in the store edits `sessionGroups` (and
+`sessionOrder`) and calls `pushSettings`, which goes out as `saveSettings`. The bridge persists it
+and fans it out through the existing sync path and the `settings` broadcast; `applySettings` mirrors
+it back into the store and a localStorage cache. Membership travels as `SessionMeta.groupId`
+through the normal `sessionUpsert` path. A move sends `setSessionGroup`, and the bridge upserts the
+session. Drag and drop in the sidebar translates a drop into archive, unarchive, `setSessionGroup`
+or a manual-order write, depending on the sections involved. The bridge's Web Push path reads the
+same group list from its own settings to skip muted sessions.
+
 ## Dependencies
 
 - `@mention` pill data model (`MentionValue` = `{ text, ranges }`) from `web/src/lib/mentions.ts`
@@ -317,8 +365,15 @@ user dismiss by clicking it) instead of the delete looking like it silently did 
 
 ## Tests
 
-None — `web/` has no test runner. Draft persistence was verified manually via reload; the rest
-(`sessionRowMeta`, `projectStatusMeta`, the alerts status logic, the selection rules) is
+Server-side: `server/src/sessions.groups.test.ts` (set/clear and persistence of `groupId`, kept
+through archive, unarchive, prompt reactivation and `adoptSynced`), `server/src/statusMeta.test.ts`
+(muted skip in `projectStatusMeta`/`machineActivity`, `isSessionMuted` with `isAlertTransition`,
+manual comparator), `server/src/pushNotifier.test.ts` (no push for a muted group),
+`server/src/sync.sessions.test.ts` (`groupId` round-trip), `server/src/store.test.ts` (group settings
+survive save and load).
+
+Web has no test runner. Draft persistence was verified manually via reload; the rest of the web
+side (drag, collapse, menus, migration, `sessionRowMeta`, `projectStatusMeta`, the alerts status logic, the selection rules) is
 uncovered and verified by hand. This is the least-tested part of this feature and, per the
 plan that introduced `pendingCreate`/`seenSessionIds`/the `hello` short-circuit, the highest-risk:
 adding a `vitest`/`jsdom` harness with a `store.hello.test.ts` covering "duplicate hello is inert"
@@ -359,6 +414,7 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   retroactively surfaces `compactContext`/`addGuardAllow` refusals that were silent before.
 - Auto-selection (no valid current selection in the target project) always excludes archived
   sessions; `completed` needs no separate check since the server always archives alongside it.
+  It also excludes sessions in a muted group, so a launch never lands inside one.
 - A project whose sessions are all archived auto-selects nothing (empty state) rather than
   opening an archived one.
 - An explicit selection already in the target project — including an archived session opened via
@@ -368,13 +424,14 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   session in the user's sidebar sort — remains the fallback when nothing
   is remembered, the remembered session is gone, or it's now archived. Both also run on the primary
   machine's `hello` when nothing is selected.
-- All three sidebar groups (Sessions, Shared-with-me, Archived), and the project tab's status dot
+- The sidebar groups (Sessions, Shared-with-me, Archived), and the project tab's status dot
   via `reconcileSeenStatus`, describe one machine's sessions only —
   `sessionsOnMachine(sessions, sessionMachine, primaryDeviceId ?? '')` — not every machine this
   browser holds a link to. The store still holds all of them (message routing and notifications
   need to); which machine is shown is a display scope changed by the header's
   [`MachineSwitcher`](multi-machine-client.md), not a second group folded into this list.
-- Shared-with-me holds a session only when **no** project tab covers it (`sessionsInProject`
+- Shared-with-me exists only for a session-scope guest, and holds a session only when **no** project
+  tab covers it (`sessionsInProject`
   checked against every tab, not just the active one) — not merely "outside the active tab". A
   session in another open project tab stays in that tab's Sessions list and never spills into
   Shared-with-me when you switch away from it.
@@ -401,7 +458,7 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 - A finished workflow never surfaces on a project tab: it is not actionable, so it never reaches
   `projectStatusMeta`. Only the sidebar row shows the filled checkmark — see
   [workflow-step-lifecycle](workflow-step-lifecycle.md).
-- Archived sessions are excluded from the tab dot.
+- Archived sessions are excluded from the tab dot, and so are sessions in a muted group.
 - A session status not in the priority table is skipped rather than guessed at.
 - The active project's tab always shows the plain folder icon (render-time suppression, no extra
   state for this rule alone).
@@ -418,8 +475,29 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
 - Any other tool (or no tool recorded) → label "needs permission", yellow badge (the unchanged
   default).
 - Notification body mirrors the sidebar label (capitalized) for `waiting-permission` sessions.
+- Session groups are per project, keyed by project key (path when a project has none). A
+  `groupId` naming no group of its project reads as ungrouped and falls back into Active, so
+  deleting a group does not touch its sessions.
+- Archive keeps `groupId`: an archived session shows only under Archived, and unarchiving returns
+  it to its group. Prompt reactivation (sending to an archived session) also keeps it.
+- Muting a group means: no notifications (chime and Web Push), no project tab dot, no machine
+  "needs you" count, and never auto-selected. Sessions still run normally, and background work
+  and turn recovery continue. The group's header keeps its muted icon; mute is not archive.
+- Only the owner can manage groups or move sessions between them: a guest does not receive
+  `settings`, and `setSessionGroup` needs `manageSessions`. Archived and read-only rows offer no
+  move.
+- Group create, rename, delete, reorder and mute are synced settings edits (last write wins on the
+  whole settings blob). Concurrent edits from two browsers can lose one.
+- Dragging a session between sections archives, unarchives or regroups it; a same-section drag
+  reorders only under the Manual sort. Under an automatic sort it first asks to switch to Manual.
+  Archived is never hand-ordered.
+- Manual order is one synced list per project covering Active and every group. Sessions not yet
+  placed sit on top, newest first.
+- Collapse state is per browser and per project. Migration of the old global `lines.showArchived`
+  seeds `archived` as collapsed only for the project open at first read, when that old value was
+  `false`.
 - Archived sessions in the sidebar render 20 at a time behind a "Show N more" button instead
-  of the full archived list, since `lines.showArchived` defaults to on and a long-lived
+  of the full archived list, since the Archived section starts expanded and a long-lived
   project can accumulate hundreds of them.
 - A settled session that still owns a live background task (see
   [background-tasks](background-tasks.md)) shows a non-actionable "background work" sidebar row,
@@ -474,6 +552,9 @@ and "auto-select needs `pendingCreate`" is the recommended follow-up.
   identity when unchanged, which `sessionUpsert` already guarantees by only replacing the entry
   that changed. See [transcript-performance](transcript-performance.md) for the other half of
   "switching sessions feels slow."
+- Session groups reuse the settings sync path (`sessionGroups`, `sessionOrder`) and keep membership
+  on `SessionMeta.groupId`, so no store, route or migration was added. Group ids are UUIDs, so a
+  muted lookup can flatten every project's groups without resolving the session's project key.
 
 ## Related decisions
 

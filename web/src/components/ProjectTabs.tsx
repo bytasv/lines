@@ -35,7 +35,7 @@ import {
 import { useEffect, useState, type CSSProperties } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { Project, WorktreeInfo } from '@lines/shared';
-import { projectRoots } from '@lines/shared';
+import { allSessionGroups, projectRoots } from '@lines/shared';
 import { ConfirmModal } from './ConfirmModal';
 import { WorktreeModal } from './WorktreeModal';
 import { projectStatusMeta } from '../lib/format';
@@ -47,6 +47,7 @@ import { send } from '../ws';
 import { BrandMark } from './BrandMark';
 import { MachineSwitcher } from './MachineSwitcher';
 import { SettingsModal } from './SettingsModal';
+import { SyncIndicator } from './SyncIndicator';
 import { UsageIndicator } from './UsageIndicator';
 import { UserMenu, type UserMenuAction } from './UserMenu';
 import { CLERK_ENABLED } from '../lib/clerk';
@@ -82,6 +83,7 @@ function ProjectTab({
   const primaryDeviceId = useStore((s) => s.primaryDeviceId);
   const projectKeys = useStore((s) => s.projectKeys);
   const seen = useStore((s) => s.seenSessionStatus);
+  const sessionGroups = useStore((s) => s.sessionGroups);
   // "Add folder…" shells out to Finder on the host, so it exists only for a
   // browser on the host or the desktop shell's own window there. A remote
   // device widens a project from the typed path.
@@ -107,6 +109,7 @@ function ProjectTab({
         // No timer: a finish ageing out of the recent window clears on the next
         // store-driven render, and session traffic makes those frequent.
         Date.now(),
+        allSessionGroups({ sessionGroups }),
       );
   const worktrees = project.worktrees ?? [];
   // The label stays the primary's basename; the tooltip is where every root fits.
@@ -364,8 +367,8 @@ export function ProjectTabs() {
 
   return (
     <Group h="100%" px={isPhone ? 'xs' : 'sm'} gap={isPhone ? 'xs' : 'sm'} wrap="nowrap">
-      {/* Connection state lives in ConnectionBanner (a centered pill for every
-          non-connected state), so a dot here would only ever say "fine".
+      {/* Connection and cloud sync state live in SyncIndicator, on the right
+          beside usage (plus ConnectionBanner in the desktop's local window).
 
           Dropped on a phone along with its separator: it is the one thing in
           this row that does nothing, and the ~110px it costs is the difference
@@ -536,6 +539,7 @@ export function ProjectTabs() {
           </Group>
         </ScrollArea>
       )}
+      <SyncIndicator />
       <UsageIndicator />
       <HeaderActions />
       <ConfirmModal

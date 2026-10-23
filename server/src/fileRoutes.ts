@@ -34,7 +34,6 @@ import { isRealInside, realPathOf } from './autoGuard.ts';
 import { grepFilesAcross } from './contentSearch.ts';
 import { collectDocs } from './docsBundle.ts';
 import { searchFilesAcross } from './fileSearch.ts';
-import { showFile } from './git.ts';
 import { searchSession } from './sessionSearch.ts';
 import type { UserContext } from './userContext.ts';
 import { resolveFilePath, resolveWorkspacePath } from './workspacePaths.ts';
@@ -492,67 +491,13 @@ function readSyncLog(ctx: UserContext, _params: FileRequestParams, _access: Sock
 
 /**
  * Is this session inside the connection's grant? `readFiles` alone is not enough
- * for the two session-diff kinds: they return contents from the host's working
- * tree, so a session-scope guest must not read a sibling session's changes. Same
- * in-handler clamping `syncLog`'s owner check uses.
+ * for routes keyed by a session (attachments, session search): a session-scope
+ * guest must not read a sibling session's data. Same in-handler clamping
+ * `syncLog`'s owner check uses.
  */
 function sessionInReach(sessionId: string, access: SocketAccess): boolean {
   if (access.scope === 'owner' || access.scope === 'machine') return true;
   return !!access.sessionIds?.includes(sessionId);
-}
-
-/** One session's changes, file by file, per commit unit. */
-async function readSessionDiff(
-  ctx: UserContext,
-  params: FileRequestParams,
-  access: SocketAccess,
-): Promise<FileRouteResult> {
-  const sessionId = params.sessionId ?? '';
-  if (!sessionId || !sessionInReach(sessionId, access)) return { status: 403 };
-  const body = await ctx.sessions.changeSummary(sessionId);
-  return body ? { status: 200, body } : { status: 404 };
-}
-
-/**
- * The two sides of one changed file: its contents at the session's baseline, and
- * on disk now. Empty `before` means the session created it; empty `after` means
- * it deleted it.
- */
-async function readSessionDiffFile(
-  ctx: UserContext,
-  params: FileRequestParams,
-  access: SocketAccess,
-): Promise<FileRouteResult> {
-  const sessionId = params.sessionId ?? '';
-  if (!sessionId || !sessionInReach(sessionId, access)) return { status: 403 };
-  const repo = soleRoot(ctx, params, access);
-  const rel = params.rel ?? '';
-  if (!repo || !rel) return { status: 403 };
-  // Containment twice over: the repo root is inside the grant's workspace, and
-  // the file is inside the repo — and still inside the grant once a symlink is
-  // followed, since `after` is read off disk (from where it lands, grantedReal).
-  const abs = path.resolve(repo, rel);
-  if (abs !== repo && !abs.startsWith(repo + path.sep)) return { status: 403 };
-  const real = grantedReal(ctx, abs, access);
-  if (!real) return { status: 403 };
-  // Doubles as "is this repo one of the session's commit units?" — null if not.
-  const ref = await ctx.sessions.baselineRefFor(sessionId, repo);
-  if (!ref) return { status: 404 };
-
-  const before = await showFile(repo, ref, rel);
-  let after = '';
-  try {
-    const stat = fs.statSync(real);
-    if (!stat.isFile()) return { status: 404 };
-    if (stat.size > MAX_FILE_BYTES) return { status: 413 };
-    const buf = fs.readFileSync(real);
-    if (buf.subarray(0, 8192).includes(0)) return { status: 415 };
-    after = buf.toString('utf8');
-  } catch {
-    // Absent on disk is the normal shape of a deleted file, not an error.
-  }
-  if (before.length > MAX_FILE_BYTES) return { status: 413 };
-  return { status: 200, body: { before, after } };
 }
 
 const ROUTES: Record<
@@ -570,8 +515,6 @@ const ROUTES: Record<
   attachment: readAttachment,
   media: readMedia,
   syncLog: readSyncLog,
-  sessionDiff: readSessionDiff,
-  sessionDiffFile: readSessionDiffFile,
   grep: grepFiles,
   sessionSearch: searchSessionsRoute,
   writeFile,

@@ -25,7 +25,9 @@ import type { StorageStatus, WorkerStatus } from '@lines/shared';
  *
  *   ConnectionBanner (link/machine down)
  *     > SkewBanner (client and bridge disagree on the wire contract)
- *       > WorkerBanner > StorageBanner > UpdateBanner
+ *       > WorkerBanner > UpdateBanner
+ *
+ * (Cloud sync has no pill: SyncIndicator reports it, outside this order.)
  *
  * Skew sits second there because every claim under it is read off messages the
  * client may be misreading. It is deliberately absent from the verdicts below,
@@ -81,7 +83,7 @@ export function linkedMachineHealth(input: {
       block: 'This session’s machine is offline — start Lines on it to send this.',
     };
   }
-  const { worker, storage } = input;
+  const { worker } = input;
   if (worker?.connected === false) {
     return {
       state: 'degraded',
@@ -92,11 +94,8 @@ export function linkedMachineHealth(input: {
         : 'The agent worker on this session’s machine isn’t responding — nothing can run there yet.',
     };
   }
-  // Sync being down never blocks: turns still run, only cloud state lags. Same
-  // precedence the banners use, where storage sits below worker.
-  if (storage && storage.available === false) {
-    return { state: 'degraded', color: 'yellow', label: 'sync unavailable', block: null };
-  }
+  // Sync being down never blocks and never colours the machine: turns still run,
+  // only cloud state lags, and the header's sync indicator is where that shows.
   return { state: 'online', color: 'green', label: 'online', block: null };
 }
 

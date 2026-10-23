@@ -42,9 +42,52 @@ export function deviceIdentity(file = DEVICE_FILE): DeviceIdentity {
   return identity;
 }
 
+/**
+ * Who last opened an owner channel to this machine — a Clerk user id, 0600 like
+ * `device.json`.
+ *
+ * The desktop app's local fallback window has no Clerk session, so it cannot
+ * say whose sessions it wants; the bridge binds it to this user's context, so it
+ * shows exactly what the hosted window showed a moment before. Only ever written
+ * from an owner channel that authenticated end to end, never a guest's.
+ */
+export const LAST_OWNER_FILE = path.join(APP_ROOT, 'last-owner.json');
+
+/** The last owner, or null when none has connected (or the file is unreadable). */
+export function readLastOwnerId(file = LAST_OWNER_FILE): string | null {
+  try {
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8')) as { userId?: unknown };
+    return typeof saved.userId === 'string' && saved.userId ? saved.userId : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Record the owner; a no-op when it is already the one on file. */
+export function writeLastOwnerId(userId: string, file = LAST_OWNER_FILE): void {
+  if (readLastOwnerId(file) === userId) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ userId }), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
+/** Forget the owner: this machine was revoked, so its sessions are nobody's to show. */
+export function clearLastOwnerId(file = LAST_OWNER_FILE): void {
+  fs.rmSync(file, { force: true });
+}
+
 export function secretHash(secret: string): string {
   return createHash('sha256').update(secret).digest('hex');
 }
+
+/**
+ * How long registration may take. It runs before the bridge and the worker are
+ * spawned, so a storage server that accepts the connection and never answers
+ * would otherwise hold the whole app at boot — which is exactly when the cloud
+ * is down and the local window is all the user has.
+ */
+export const REGISTER_TIMEOUT_MS = 5_000;
 
 /**
  * Announce this machine to storage.
@@ -57,9 +100,11 @@ export async function registerDevice(
   storageUrl: string,
   identity: DeviceIdentity,
   name = os.hostname(),
+  timeoutMs = REGISTER_TIMEOUT_MS,
 ): Promise<string | null> {
   const res = await fetch(`${storageUrl}/v1/devices/register`, {
     method: 'POST',
+    signal: AbortSignal.timeout(timeoutMs),
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       id: identity.id,
