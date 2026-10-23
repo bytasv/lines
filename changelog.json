@@ -1,6 +1,13 @@
 {
   "web": [
     {
+      "version": "0.1.28",
+      "date": "2026-10-23",
+      "items": [
+        "Cmd/Ctrl+click on a new-session button opens a Single run window to choose the workflow or bare session, model, effort, permission mode and worktree for that one launch. Your defaults and last-used workflow stay as they are."
+      ]
+    },
+    {
       "version": "0.1.27",
       "date": "2026-10-20",
       "items": [
