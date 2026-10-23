@@ -673,10 +673,14 @@ without touching the stored (pinned) step. `WorkflowState.stepOverrides` is inde
 position (`null` = none) and holds `WorkflowStepOverride` entries: an absent field means "use the
 step's value", and `reasoningEffort: null` means Auto even when the step sets an effort.
 
-- **Where they come from.** Cmd/Ctrl+click on the sidebar's new-session button or a workflow menu
-  item opens `WorkflowRunModal` and sends the result on `createSession`; `WorkflowEngine.attach`
-  stores it and seeds step 0's model/effort on the session from the effective values. Mid-run, the
-  stepper's tune icon reopens the same modal and sends `setWorkflowStepOverrides`.
+- **Where they come from.** Cmd/Ctrl+click on any sidebar new-session entry (the primary button, a
+  workflow menu item, or the bare "New session" item) opens the "Single run" window
+  (`SingleRunModal`). It picks the workflow (or bare session), the per-step models for a workflow
+  run, and the permission mode and worktree switch. The choice goes out on `createSession` with
+  `once`, so it never sets the last-used workflow, the new-session defaults or the worktree switch.
+  `WorkflowEngine.attach` stores the overrides and seeds step 0's model/effort on the session from
+  the effective values. Mid-run, the stepper's tune icon opens `WorkflowRunModal` (the same step rows)
+  and sends `setWorkflowStepOverrides`.
 - **Where they apply.** `runStep` replaces the step's model and effort with the effective ones
   (`effectiveContent`, which also runs `resolveModelId`) before the provider check, `setModel`,
   `setReasoningEffort` and the `stepModels` stamp. Retry, force-advance and `startStep` all go

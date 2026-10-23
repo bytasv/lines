@@ -110,7 +110,8 @@
         "web/src/components/Composer.tsx",
         "web/src/components/SessionsSection.tsx",
         "web/src/components/workflow/StepLibrary.tsx",
-        "web/src/components/workflow/StepCard.tsx"
+        "web/src/components/workflow/StepCard.tsx",
+        "web/src/components/workflow/SingleRunModal.tsx"
       ],
       "files": [
         "shared/types.ts",
@@ -120,6 +121,8 @@
         "server/src/sessions.ts",
         "server/src/workflows.ts",
         "web/src/components/workflow/WorkflowRunModal.tsx",
+        "web/src/components/workflow/SingleRunModal.tsx",
+        "web/src/lib/stepOverrides.ts",
         "web/src/lib/useStepResolver.ts"
       ],
       "symbols": [
@@ -133,7 +136,8 @@
         "isKnownModel",
         "describedOptionRenderer",
         "describedOptionStyles",
-        "WorkflowRunModal"
+        "WorkflowRunModal",
+        "SingleRunModal"
       ],
       "tests": [],
       "businessRules": [
@@ -725,7 +729,8 @@
         "server/src/workflows.ts",
         "web/src/components/WorkflowStepper.tsx",
         "web/src/components/Sidebar.tsx",
-        "web/src/components/workflow/WorkflowRunModal.tsx (Cmd/Ctrl+click launch and stepper tune icon)",
+        "web/src/components/workflow/SingleRunModal.tsx (Cmd/Ctrl+click launch)",
+        "web/src/components/workflow/WorkflowRunModal.tsx (stepper tune icon)",
         "server/src/index.ts (case 'setWorkflowStepOverrides')"
       ],
       "files": [
@@ -745,7 +750,9 @@
         "web/src/lib/format.ts",
         "web/src/components/Sidebar.tsx",
         "web/src/lib/workflowReveal.ts",
+        "web/src/lib/stepOverrides.ts",
         "web/src/components/workflow/WorkflowRunModal.tsx",
+        "web/src/components/workflow/SingleRunModal.tsx",
         "web/src/lib/useStepResolver.ts",
         "web/src/lib/platform.ts",
         "shared/workflowValidation.ts",

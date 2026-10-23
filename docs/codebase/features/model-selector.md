@@ -10,7 +10,8 @@ shows the model name plus a one-line description to help users pick between mode
 - Session composer model dropdown
 - New-session defaults in the settings modal's Sessions pane
 - Workflow step editor and step library model dropdowns
-- Per-run step overrides: `WorkflowRunModal`, opened by Cmd/Ctrl+click on a new-session entry or the stepper's tune icon
+- Single run window: `SingleRunModal`, opened by Cmd/Ctrl+click on a new-session entry. A bare run picks model and effort; a workflow run picks per-step models. Applies to that one launch only.
+- Per-run step overrides mid-run: `WorkflowRunModal`, opened by the stepper's tune icon
 
 ## Important files
 
@@ -19,7 +20,9 @@ shows the model name plus a one-line description to help users pick between mode
 - `web/src/components/Composer.tsx`
 - `web/src/components/SessionsSection.tsx` — the Settings Sessions pane's new-session defaults
 - `web/src/components/workflow/StepLibrary.tsx`
-- `web/src/components/workflow/WorkflowRunModal.tsx` — per-step model/effort picker for one run
+- `web/src/components/workflow/SingleRunModal.tsx` — the Single run window: workflow or bare, model and effort for a bare run, per-step rows for a workflow run
+- `web/src/components/workflow/WorkflowRunModal.tsx` — per-step model/effort picker for one run, mid-run from the stepper; shares its step rows with `SingleRunModal`
+- `web/src/lib/stepOverrides.ts` — pure per-step override diff and effort-reset helpers used by both windows
 - `web/src/components/workflow/StepCard.tsx` — also renders the stale-model warning badge
 - `web/src/store.ts` — client `models: ModelOption[]` state; resolves a stale persisted new-session default on load
 - `server/src/index.ts` — serves `DEFAULT_MODELS` in the `hello` message

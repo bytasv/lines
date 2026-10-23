@@ -23,6 +23,8 @@ branch is created once, not adjusted later.
   per-worktree manage/remove row
 - `web/src/components/Sidebar.tsx` — the new-session dropdown's "Run in a new
   worktree" switch
+- `web/src/components/workflow/SingleRunModal.tsx` — the same switch, for one
+  Cmd/Ctrl+click launch only; it does not change the dropdown's saved setting
 
 ## Important files
 

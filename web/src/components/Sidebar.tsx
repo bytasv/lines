@@ -44,7 +44,7 @@ import { useHotkeys, useLocalStorage } from '@mantine/hooks';
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { SessionMeta, WorkflowDef, WorkflowStepOverride } from '@lines/shared';
+import type { PermissionMode, ReasoningEffort, SessionMeta, WorkflowDef, WorkflowStepOverride } from '@lines/shared';
 import { findWorktree, hasEstimatedSpend, projectPaths, projectRoots, rootsForCwd } from '@lines/shared';
 import type { SessionSort } from '../lib/format';
 import {
@@ -62,7 +62,7 @@ import { inlineWorkflow, sessionsOnMachine } from '../lib/machines';
 import { useIsPhone, useReveal } from '../lib/layout';
 import { MOD, newSessionHotkey } from '../lib/platform';
 import { ConfirmModal } from './ConfirmModal';
-import { WorkflowRunModal } from './workflow/WorkflowRunModal';
+import { SingleRunModal } from './workflow/SingleRunModal';
 import { useIdentityResolver } from '../lib/identity';
 import type { SidebarMode, SidebarSearchScope } from '../store';
 import { projectAt, sessionsInProject, useStore } from '../store';
@@ -810,8 +810,28 @@ export function Sidebar({
     // The create failed or its intent expired — nothing will take the focus over.
     primer.blur();
   }, [pendingCreate, worktreePending, focusComposerFor, actionError]);
-  const createSession = (workflowId?: string, stepOverrides?: (WorkflowStepOverride | null)[]) => {
+  /**
+   * Launch a new session. Anything left out of `opts` comes from the new-session
+   * defaults and the worktree switch. `once` is the Single run window: the launch
+   * is not remembered as the last choice, so the primary button keeps its label.
+   * `reasoningEffort` counts when present as a key, even undefined (= Auto).
+   */
+  const createSession = (
+    workflowId?: string,
+    opts?: {
+      stepOverrides?: (WorkflowStepOverride | null)[];
+      model?: string;
+      reasoningEffort?: ReasoningEffort;
+      permissionMode?: PermissionMode;
+      worktree?: boolean;
+      once?: boolean;
+    },
+  ) => {
     if (!activeProject) return;
+    const stepOverrides = opts?.stepOverrides;
+    const worktree = opts?.worktree ?? worktreeMode;
+    const reasoningEffort =
+      opts && 'reasoningEffort' in opts ? opts.reasoningEffort : newSessionDefaults.reasoningEffort;
     // The user's own workflow, on a machine whose library does not have it: it
     // travels inline, every step resolved here, since the host cannot.
     const isOwn = !!workflowId && ownWorkflows.some((w) => w.id === workflowId);
@@ -836,7 +856,7 @@ export function Sidebar({
     // `worktree add` is a multi-second git operation the server awaits before the
     // session exists, so the button has to stay busy — a second click would cut a
     // second work tree.
-    if (worktreeMode) {
+    if (worktree) {
       setSidebarActionError(null);
       setWorktreePending(true);
     }
@@ -844,35 +864,36 @@ export function Sidebar({
       type: 'createSession',
       name: 'New session',
       cwd: activeProject,
-      model: newSessionDefaults.model,
-      permissionMode: newSessionDefaults.permissionMode,
-      reasoningEffort: newSessionDefaults.reasoningEffort,
+      model: opts?.model ?? newSessionDefaults.model,
+      permissionMode: opts?.permissionMode ?? newSessionDefaults.permissionMode,
+      reasoningEffort,
       workflowId,
       ...(workflowDef ? { workflowDef } : {}),
       ...(workflowId && stepOverrides?.some(Boolean) ? { stepOverrides } : {}),
       // Empty object = let the server name the branch and the path.
-      ...(worktreeMode ? { worktree: {} } : {}),
+      ...(worktree ? { worktree: {} } : {}),
     });
-    setLastChoice(workflowId ?? '');
+    if (!opts?.once) setLastChoice(workflowId ?? '');
     // On a phone the drawer sits over the composer the user is about to type in.
     onNavigate?.();
   };
 
-  /** The workflow whose per-step models are being chosen before a launch. */
-  const [tuneWorkflow, setTuneWorkflow] = useState<WorkflowDef | null>(null);
-  /**
-   * A new-session click with a workflow. Cmd/Ctrl+click opens the per-run
-   * model/effort picker instead of launching; a plain click launches as before.
-   */
-  const createFromClick = (e: ReactMouseEvent, workflowId?: string) => {
+  /** The Single run window's starting workflow: '' = bare, null = closed. */
+  const [singleRunFor, setSingleRunFor] = useState<string | null>(null);
+  /** The def a launch of `workflowId` runs, for picking its per-step models. */
+  const resolveWorkflow = (workflowId: string): WorkflowDef | undefined => {
     // An own workflow on a shared machine is tuned in its inlined form: its refs
     // do not resolve against the host's step library.
-    const inlined = workflowId && ownWorkflows.some((w) => w.id === workflowId) ? ownInline(workflowId) : null;
-    const wf = workflowId
-      ? ((inlined?.ok ? inlined.def : null) ?? [...workflows, ...sharedWorkflows].find((w) => w.id === workflowId))
-      : undefined;
-    if (wf && (e.metaKey || e.ctrlKey)) {
-      setTuneWorkflow(wf);
+    const inlined = ownWorkflows.some((w) => w.id === workflowId) ? ownInline(workflowId) : null;
+    return (inlined?.ok ? inlined.def : null) ?? [...workflows, ...sharedWorkflows].find((w) => w.id === workflowId);
+  };
+  /**
+   * A new-session click. Cmd/Ctrl+click opens the Single run window instead of
+   * launching, bare or not; a plain click launches as before.
+   */
+  const createFromClick = (e: ReactMouseEvent, workflowId?: string) => {
+    if (e.metaKey || e.ctrlKey) {
+      setSingleRunFor(workflowId ?? '');
       return;
     }
     createSession(workflowId);
@@ -895,7 +916,7 @@ export function Sidebar({
     [], // like Cmd+F below: it has to work from the composer textarea too
     true,
   );
-  const modHint = `${MOD}-click to choose models per step`;
+  const modHint = `${MOD}-click for a single run`;
 
   // The dropdown spans the whole split button rather than a fixed 240px. Measured
   // rather than hard-coded: the sidebar is drag-resizable, and `width="target"`
@@ -1228,7 +1249,7 @@ export function Sidebar({
           )}
           <Button.Group style={{ width: '100%' }}>
             <Tooltip
-              label={`New session (${hotkey.label})${lastWorkflow ? ` · ${modHint}` : ''}`}
+              label={`New session (${hotkey.label}) · ${modHint}`}
               withArrow
               fz="xs"
               openDelay={500}
@@ -1292,7 +1313,18 @@ export function Sidebar({
                   />
                 </Box>
                 <Menu.Divider />
-                <Menu.Item onClick={() => createSession()}>New session</Menu.Item>
+                <Menu.Item
+                  onClick={(e) => createFromClick(e)}
+                  rightSection={
+                    !isPhone && (
+                      <Text size="xs" c="dimmed">
+                        {MOD}-click
+                      </Text>
+                    )
+                  }
+                >
+                  New session
+                </Menu.Item>
                 {workflows.length > 0 && (
                   <>
                     <Menu.Divider />
@@ -1376,13 +1408,17 @@ export function Sidebar({
               </Menu.Dropdown>
             </Menu>
           </Button.Group>
-          {tuneWorkflow && (
-            <WorkflowRunModal
-              opened
-              workflow={tuneWorkflow}
-              confirmLabel="Start session"
-              onConfirm={(overrides) => createSession(tuneWorkflow.id, overrides)}
-              onClose={() => setTuneWorkflow(null)}
+          {singleRunFor !== null && (
+            <SingleRunModal
+              workflows={workflows}
+              ownWorkflows={ownWorkflows}
+              foreignWorkflows={foreignWorkflows}
+              resolveWorkflow={resolveWorkflow}
+              initialWorkflowId={singleRunFor}
+              defaults={newSessionDefaults}
+              worktree={worktreeMode}
+              onConfirm={(choice) => createSession(choice.workflowId, { ...choice, once: true })}
+              onClose={() => setSingleRunFor(null)}
             />
           )}
         </Box>
