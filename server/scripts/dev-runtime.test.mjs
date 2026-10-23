@@ -7,7 +7,7 @@ import { execFileSync, execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import net from 'node:net';
 import http from 'node:http';
-import { buildGeneration, WorkerRunner, BridgeRunner, policyCommand, restartCommand, shutdownRunners } from './dev-runtime.mjs';
+import { buildGeneration, WorkerRunner, BridgeRunner, policyCommand, restartCommand, shutdownRunners, workerPidRunning } from './dev-runtime.mjs';
 
 const actualRoot = path.resolve(import.meta.dirname, '../..');
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -82,6 +82,18 @@ test('generations isolate local sources, shared imports, and MCP helper paths', 
   assert.equal((await buildGeneration(root)).id, second.id);
   const output = execFileSync(process.execPath, ['--import', path.join(actualRoot, 'node_modules/tsx/dist/loader.mjs'), path.join(first.directory, 'server/src/index.ts')], { encoding: 'utf8' });
   assert.equal(output.trim(), '1', 'the runtime must resolve the snapshotted shared package');
+});
+
+test('worker guard only trusts pids whose command line is a worker', async (t) => {
+  assert.equal(workerPidRunning(undefined), false);
+  assert.equal(workerPidRunning(process.pid), false);
+  const dead = spawn(process.execPath, ['-e', '']);
+  await new Promise((resolve) => dead.once('exit', resolve));
+  assert.equal(workerPidRunning(dead.pid), false);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lines-worker-pid-'));
+  const worker = spawn(process.execPath, ['-e', 'setInterval(()=>{},1e3)', path.join(root, 'server/src/worker.ts')], { stdio: 'ignore' });
+  t.after(() => { worker.kill('SIGKILL'); fs.rmSync(root, { recursive: true, force: true }); });
+  await until(() => workerPidRunning(worker.pid), 'spawned worker recognised');
 });
 
 test('active work blocks edits; freeze and resume keep PIDs; idle reloads the pair', async (t) => {

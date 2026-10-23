@@ -88,10 +88,19 @@ export async function buildGeneration(root) {
   return { id, directory };
 }
 
+const WORKER_COMMAND = /(?:watch )?src\/worker\.ts(?:$|\s)/;
 export function legacyRuntimeRunning(root) {
   const commands = execFileSync('ps', ['-axo', 'command'], { encoding: 'utf8' });
   const executable = path.join(root, 'node_modules/.bin/tsx');
-  return commands.split('\n').some((line) => line.includes(executable) && /(?:watch )?src\/worker\.ts(?:$|\s)/.test(line));
+  return commands.split('\n').some((line) => line.includes(executable) && WORKER_COMMAND.test(line));
+}
+
+/** A run file can outlive its worker and name a recycled pid; only a pid whose
+ *  command line is a worker counts. */
+export function workerPidRunning(pid) {
+  if (!pid || !alive(pid)) return false;
+  try { return WORKER_COMMAND.test(execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' })); }
+  catch { return false; } // ps exits 1 when pid vanished between checks
 }
 
 export class Supervisor {
@@ -422,10 +431,13 @@ export class Supervisor {
   async start() {
     if (!this.options.command) {
       const appRoot = process.env.LINES_APP_ROOT || path.join(os.homedir(), '.lines-app-dev');
-      const runtime = readJson(path.join(appRoot, 'run', process.env.LINES_INSTANCE ?? 'default', 'worker.json'));
-      if (legacyRuntimeRunning(this.root) || (runtime?.pid && alive(runtime.pid))) {
+      const runFile = path.join(appRoot, 'run', process.env.LINES_INSTANCE ?? 'default', 'worker.json');
+      const runtime = readJson(runFile);
+      if (legacyRuntimeRunning(this.root) || workerPidRunning(runtime?.pid)) {
         throw new Error('A worker is already running. Stop its stack once sessions are idle before starting the safe runtime.');
       }
+      // Stale run file (crash or recycled pid): drop it so the bridge stops trusting it too.
+      if (runtime) fs.rmSync(runFile, { force: true });
     }
     await this.startControl();
     if (this.stopping) throw new Error('Supervisor is stopping');
